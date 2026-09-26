@@ -10,6 +10,7 @@ from sqlalchemy import text
 import bfx_funding_bot.modules.accounts.tables
 import bfx_funding_bot.modules.deployments.tables
 import bfx_funding_bot.modules.execution.audit.tables
+import bfx_funding_bot.modules.execution.capital_tables
 import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.execution.safety.tables
 import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
@@ -18,7 +19,8 @@ from bfx_funding_bot.core.db import Base
 pytestmark = pytest.mark.integration
 
 GOVERNANCE_TABLES = ("trading_state", "funding_cancel_all_audit", "deployments",
-                     "trading_control_requests", "uncertainty_resolution_requests")
+                     "trading_control_requests", "uncertainty_resolution_requests",
+                     "capital_policy_requests")
 # 5b1e7c9d2a40 left these NOT VALID so rows recorded under the retired rules
 # stay as they were; the model states the rule every new row obeys.
 _NOT_VALID = {("trading_state", "ck_trading_state_state"), ("trading_state", "ck_trading_state_cause")}

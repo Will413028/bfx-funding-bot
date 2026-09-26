@@ -6,7 +6,9 @@ Lending envelope ADR 2026-09-25 D4: the web API only inserts a ``resume`` or
 re-checking the operator, and records one outcome on the row. A resume ends a
 HALTED (whoever caused it) and never starts a probation: every offer is bounded
 by the CapitalPolicy envelope instead. A kill writes HALTED and, after that
-commit, runs the venue cancel-all. Releases never touch the trading state.
+commit, runs the venue cancel-all; it rejects every request still waiting to
+resume, and every waiting currency enable (``capital_policy_requests``).
+Releases never touch the trading state.
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ from typing import Any, Protocol
 from sqlalchemy import case, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.operator_requests import (
     APPLIED,
     REJECTED,
@@ -126,6 +129,17 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
                     TradingControlRequestRow.request_id != row.request_id,
                 ).values(state=REJECTED, processed_at_ms=now, outcome_reason="superseded_by_kill")
                 .returning(TradingControlRequestRow.request_id))).scalars().all()
+            # A waiting enable would widen what trading does after the resume;
+            # the operator re-decides it. A waiting disable only narrows it and
+            # still applies.
+            superseded = [*superseded, *(await session.execute(
+                update(CapitalPolicyRequestRow).where(
+                    CapitalPolicyRequestRow.exchange_account_id == self.account_id,
+                    CapitalPolicyRequestRow.deployment_environment == self.environment,
+                    CapitalPolicyRequestRow.state == REQUESTED,
+                    CapitalPolicyRequestRow.action == "enable",
+                ).values(state=REJECTED, processed_at_ms=now, outcome_reason="superseded_by_kill")
+                .returning(CapitalPolicyRequestRow.request_id))).scalars().all()]
             if superseded:
                 log.warning("trading_control_superseded_by_kill kill=%s superseded=%s",
                             row.request_id, [str(r) for r in superseded])

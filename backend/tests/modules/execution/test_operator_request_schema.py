@@ -10,6 +10,10 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.modules.execution.capital_tables import (
+    POLICY_REQUEST_ACTIONS,
+    CapitalPolicyRequestRow,
+)
 from bfx_funding_bot.modules.execution.operator_requests import REQUEST_STATES
 from bfx_funding_bot.modules.execution.safety.tables import TradingControlRequestRow
 from bfx_funding_bot.modules.execution.uncertainty_resolution import (
@@ -28,6 +32,7 @@ _MIGRATION = "1c435a35dcb4_trading_governance.py"
 _OUTBOXES = [
     (UncertaintyResolutionRequestRow, _MIGRATION, "UNCERTAINTY_"),
     (TradingControlRequestRow, "5b1e7c9d2a40_two_state_trading_control.py", ""),
+    (CapitalPolicyRequestRow, "7d2a9c4e6b13_capital_policy_requests.py", ""),
 ]
 
 
@@ -71,3 +76,12 @@ def test_migration_checks_match_the_declared_actions_and_states() -> None:
     migration = _migration()
     assert migration.UNCERTAINTY_ACTIONS == UNCERTAINTY_RESOLUTION_ACTIONS
     assert migration.REQUEST_STATES == REQUEST_STATES
+
+
+def test_currency_toggle_actions_match_the_migration_and_the_web_api() -> None:
+    from typing import get_args
+
+    from bfx_funding_bot.modules.api.trading_control import CurrencyAction
+
+    migration = _migration("7d2a9c4e6b13_capital_policy_requests.py")
+    assert migration.ACTIONS == POLICY_REQUEST_ACTIONS == get_args(CurrencyAction)

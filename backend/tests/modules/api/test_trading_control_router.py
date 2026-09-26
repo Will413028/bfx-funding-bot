@@ -147,3 +147,112 @@ async def test_the_overview_shows_the_state_and_the_cancel_all_of_the_halt(migra
         # A lone "requested": the call's outcome was never recorded.
         assert [(c["currency"], c["phase"]) for c in data["cancel_all"]] == [
             ("BTC", "requested"), ("USD", "failed"), ("UST", "acknowledged")]
+
+
+# ------------------------------------------------------- currency enable/disable
+
+
+async def _seed_policies(factory, account):
+    from decimal import Decimal
+
+    from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+    repo = CapitalRepository(account_id=account, environment="ci", max_snapshot_age_ms=60_000)
+    envelope = OfferEnvelope(min_period_days=2, max_period_days=30, max_open_offers=6,
+                             rate_floor_ratio=Decimal("0.5"), min_rate_apr=Decimal("0.01"))
+    async with factory.begin() as session:
+        await repo.apply_policy(session, symbol="fUST", expected_revision=0, source={"t": 1},
+                                policy=CapitalPolicy(enabled=True, max_offer_amount=Decimal("200"),
+                                                     envelope=envelope))
+        await repo.apply_policy(session, symbol="fUSD", expected_revision=0, source={"t": 1},
+                                policy=CapitalPolicy(enabled=False))
+
+
+@pytest.mark.asyncio
+async def test_the_overview_lists_each_currency_policy_and_its_envelope(migrated_db, monkeypatch):
+    app, factory, account = await _app(migrated_db, monkeypatch)
+    await _seed_policies(factory, account)
+    base = f"/api/v1/exchange-accounts/{account}/trading-control"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        currencies = (await client.get(base, headers=AUTH)).json()["data"]["currencies"]
+    assert currencies == [
+        {"symbol": "fUSD", "revision": 1, "policy_error": None, "enabled": False,
+         "max_offer_amount": None, "envelope": None, "requests": []},
+        {"symbol": "fUST", "revision": 1, "policy_error": None, "enabled": True,
+         "max_offer_amount": "200",
+         "envelope": {"min_period_days": 2, "max_period_days": 30, "max_open_offers": 6,
+                      "rate_floor_ratio": "0.5", "min_rate_apr": "0.01"},
+         "requests": []},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_currency_toggle_only_queues_a_request(migrated_db, monkeypatch):
+    from bfx_funding_bot.modules.execution.capital_tables import (
+        CapitalPolicyHeadRow,
+        CapitalPolicyRequestRow,
+    )
+    app, factory, account = await _app(migrated_db, monkeypatch)
+    await _seed_policies(factory, account)
+    base = f"/api/v1/exchange-accounts/{account}/trading-control"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        disable = await client.post(f"{base}/currencies/fUST/disable", json={"reason": "maintenance"},
+                                    headers=AUTH)
+        assert disable.status_code == 202
+        body = disable.json()["data"]
+        assert (body["symbol"], body["action"], body["state"]) == ("fUST", "disable", "requested")
+        again = await client.post(f"{base}/currencies/fUST/disable", json={"reason": "x"}, headers=AUTH)
+        assert (again.status_code, again.json()["detail"]) == (409, "request_pending")
+        # Its own slot: a pending disable never blocks the opposite ask...
+        assert (await client.post(f"{base}/currencies/fUST/enable", json={"reason": "y"},
+                                  headers=AUTH)).status_code == 202
+        # ...and no toggle ever blocks a kill.
+        assert (await client.post(f"{base}/kill", json={"reason": "z"}, headers=AUTH)).status_code == 202
+        status = await client.get(f"{base}/currency-requests/{body['request_id']}", headers=AUTH)
+        assert status.json()["data"]["state"] == "requested"
+        assert (await client.get(f"{base}/currency-requests/{uuid4()}", headers=AUTH)).status_code == 404
+        overview = (await client.get(base, headers=AUTH)).json()["data"]
+        fust = next(c for c in overview["currencies"] if c["symbol"] == "fUST")
+        assert sorted((r["action"], r["state"], r["requested_by"]) for r in fust["requests"]) == [
+            ("disable", "requested", "operator"), ("enable", "requested", "operator")]
+        assert fust["enabled"] is True  # nothing applied yet
+    async with factory() as session:
+        rows = (await session.scalars(select(CapitalPolicyRequestRow))).all()
+        assert sorted(r.action for r in rows) == ["disable", "enable"]
+        head = await session.get(CapitalPolicyHeadRow, (account, "ci", "fUST"))
+        assert head.revision == 1  # the web API wrote no policy
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("path", "body", "status"), [
+    ("currencies/fBTC/disable", {"reason": "x"}, 404),       # no applied policy
+    ("currencies/fust/disable", {"reason": "x"}, 422),       # not a funding symbol
+    ("currencies/fUST/pause", {"reason": "x"}, 422),
+    ("currencies/fUST/disable", {"reason": ""}, 422),        # a reason is required
+    ("currencies/fUST/disable", {"reason": "x", "state": "applied"}, 422),
+])
+async def test_malformed_currency_requests_are_refused(migrated_db, monkeypatch, path, body, status):
+    from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
+    app, factory, account = await _app(migrated_db, monkeypatch)
+    await _seed_policies(factory, account)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        response = await client.post(f"/api/v1/exchange-accounts/{account}/trading-control/{path}",
+                                     json=body, headers=AUTH)
+    assert response.status_code == status
+    async with factory() as session:
+        assert (await session.scalars(select(CapitalPolicyRequestRow))).all() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("role", "principal"), [
+    ("viewer", None),
+    ("owner", Principal("operator", None, "user")),
+])
+async def test_only_the_operator_can_toggle_a_currency(migrated_db, monkeypatch, role, principal):
+    app, factory, account = await _app(migrated_db, monkeypatch, role=role, principal=principal)
+    await _seed_policies(factory, account)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        response = await client.post(
+            f"/api/v1/exchange-accounts/{account}/trading-control/currencies/fUST/disable",
+            json={"reason": "x"}, headers=AUTH)
+    assert response.status_code == 403

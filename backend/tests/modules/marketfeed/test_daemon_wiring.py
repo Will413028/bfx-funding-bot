@@ -320,6 +320,7 @@ async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, 
             "source_revision": deploy_env.get("BFX_SOURCE_REVISION"),
             "deployment_id": deploy_env.get("BFX_DEPLOYMENT_ID")}
         assert daemon.trading_control is not None
+        assert daemon.capital_policy_control is not None
         # Every decision's audit names the build the deploy tool injected.
         audit = daemon.periodic_reconcile._deployment._audit_context_factory
         assert (audit.service_version, audit.config_hash) == (
