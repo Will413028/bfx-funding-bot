@@ -193,7 +193,7 @@ sequenceDiagram
     BR->>BFX: GET /funding/offers + /funding/credits
     BFX-->>BR: venue snapshot
     BR->>BR: full-account REST snapshot（不套 symbol filter）
-    BR->>BR: compute_recovery_actions (orphan→QUARANTINED, missing→RELEASED, stale PENDING→UNKNOWN)
+    BR->>BR: compute_recovery_actions (foreign→alert only, missing→RELEASED, stale PENDING→UNKNOWN)
     BR->>ST: append(recovery events + VENUE_SNAPSHOT_OBSERVED) [1 txn]
     ST->>ST: upsert venue_offer/credit_state + position buckets + reconcile_observation
     BR-->>LED: derived PositionReconciled → 絕對覆寫 (reserved, realized)
@@ -389,21 +389,23 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 3. `HeartbeatGuard` — 只 watch `ws`（market-data liveness，own-loop），`age > threshold_seconds`（live 為 300s，由 `safety.live.yaml` 設定；`threshold_seconds` 為必填參數無 code default）擋。刻意**不** watch `executor`/`safety_chain`（reactive，靜市場時不跳動，誤判會造成 idle restart loop）。
 4. `AllocationCapGuard` — POST 時若 `(reserved + realized) + offer > cap` 則擋；恰好 at-cap 放行，over-cap 擋；SKIP 一律放行。
 
-5. `OfferEnvelopeGuard`（`safety/pre_trade.py`，lending envelope ADR 2026-09-25 D1）— 每筆新 offer 對 applied `CapitalPolicy` 的包絡檢查：`max_offer_amount`、天期 [min,max]、同幣別 open offer 數、利率下限 ＝ max(`min_rate_apr`/365, 即時 bid 中位數 × `rate_floor_ratio`)。policy 沒有包絡（schema 1/2）、讀不到、沒有新鮮 book 一律擋。包絡改動走 `scripts/amend_capital_policy.py`（dry run → digest → apply，新 revision）；撤單不經過它。送單節流 `CommandThrottle` 是平台設定（`pre_trade_limits.command_rate`），不在包絡裡。
+5. `OfferEnvelopeGuard`（`safety/pre_trade.py`，lending envelope ADR 2026-09-25 D1）— 每筆新 offer 對 applied `CapitalPolicy` 的包絡檢查：`max_offer_amount`、天期 [min,max]、同幣別 open 的受管 offer 數（手動單不佔名額）、利率下限 ＝ max(`min_rate_apr`/365, 即時 bid 中位數 × `rate_floor_ratio`)。policy 沒有包絡（schema 1/2）、讀不到、沒有新鮮 book 一律擋。包絡改動走 `scripts/amend_capital_policy.py`（dry run → digest → apply，新 revision）；撤單不經過它。送單節流 `CommandThrottle` 是平台設定（`pre_trade_limits.command_rate`），不在包絡裡。
 
 **NAV-drop 告警（第 4 級，不擋單）**：`NavDropMonitor` 包住 `ReconcileNavTracker`（per-symbol，NAV＝available＋offered＋lent，原生單位），24h 虧損或 drawdown 超過 `nav_alerts` 門檻時發 `nav_drop` 告警一次。放貸只會少賺、不會讓 NAV 下降；會下降的是提領、轉帳、平台分攤損失，停止放貸補救不了，所以不再有 loss／drawdown guard。
 
-**Trading state（ADR D4）**：`trading_state` 是帳戶層的停機權威，append-only，只有 `ACTIVE`／`HALTED`，cause 為 `operator`｜`auto`；DB trigger 只允許 operator 結束 HALTED（2026-09-25 前的列可能是 REDUCING／`material_deploy`，CHECK 為 NOT VALID 保留原樣，遷移時目前是 REDUCING 的 scope 已補一列 operator HALTED）。日常的單幣別停止是 policy 的 `enabled=false`：不掛新單，reconciler 撤掉該幣別的受管 offer，已成交借款照常到期。恢復只經 webapi 的 TOTP resume 請求，不帶任何限額期；static token 只有 `/admin/halt`。部署不寫 trading state，bot 不讀 change class（`BFX_CHANGE_CLASS` 只是給上一版 bfx-deploy 的過渡變數）。
+**Trading state（ADR D4）**：`trading_state` 是帳戶層的停機權威，append-only，只有 `ACTIVE`／`HALTED`，cause 為 `operator`｜`auto`；DB trigger 只允許 operator 結束 HALTED（2026-09-25 前的列可能是 REDUCING／`material_deploy`，CHECK 為 NOT VALID 保留原樣，遷移時目前是 REDUCING 的 scope 已補一列 operator HALTED）。日常的單幣別停止是 policy 的 `enabled=false`：不掛新單，reconciler 撤掉該幣別的受管 offer（見下方「受管 offer 的收斂」），已成交借款照常到期。恢復只經 webapi 的 TOTP resume 請求，不帶任何限額期；static token 只有 `/admin/halt`。部署不寫 trading state，bot 不讀 change class（`BFX_CHANGE_CLASS` 只是給上一版 bfx-deploy 的過渡變數）。
 
 **受管與外來 offer（D2）**：有 durable intent 來源（claim／attempt，`venue_offer_state.execution_decision_id`）的才是受管。沒有的是外來（手動掛單、Bitfinex auto-renew）：capital classifier 記入 `foreign`、不算受管曝險（金額本來就不在 venue available 內），bot 不撤不重定價，`foreign_exposure` 告警一次。
 
 **UNKNOWN 與金額指紋（D3a）**：funding submit 沒有 `cid`，planner 把每筆金額末 4 位小數編成同幣別唯一的指紋（`amount_fingerprint.py`，command gate 在 account lock 內再驗一次）。UNKNOWN 只隔離該幣別（第 2 級：capital read 對該 symbol 回 `execution_unknown`），不停機；settle 窗口（120s）後由 recovery 以已存的快照＋history 結案：恰好一筆同指紋、同條件、未被認領的 offer → 認領；history 完整涵蓋且沒有 → 判定未送出；其他 → 維持隔離，30 分鐘後 `unknown_quarantine_aged` 告警，之後每 6 小時一次。
 
-**自動保護（`safety/protection.py`，第 3 級）**：只有「bot 對自己的帳認知錯了」才寫 `HALTED/auto`：`unclassifiable_commitment`、`offer_amount_mismatch`、`identity_conflict`（classifier 的 provenance／attempt／evidence 衝突）、`venue_lent_above_ledger`、`command_rate_exceeded`。觸發是同步記錄，guard 立即擋新單；受監督的 task 在鎖外執行 kill switch 的 `managed` 範圍：按 venue id 經 command gate 撤受管 offer，外來 offer 不碰。自動 HALTED 不自動解除。「借出額高於帳本」只判斷被接受的 snapshot：lent 可以因借款結束而減少、因任何 offer（含外來）縮小而增加；剩下的部分先扣掉 offer history 裡「上次被接受的 snapshot 之後結束的外來 offer 已成交量」，扣完仍 >0.01 才觸發，否則只發 `foreign_lending` 告警。writer lock 遺失不是交易決策：`WriterLockWatch` 拋 `WriterLockLostError` 讓 daemon 退出、container 重啟。拒絕開機（schema 不符、policy 讀不到）寫 `HALTED/auto`（actor `boot`）並發 `venue_offers_may_remain` critical 告警，不碰 venue。
+**自動保護（`safety/protection.py`，第 3 級）**：只有「bot 對自己的帳認知錯了」才寫 `HALTED/auto`：`unclassifiable_commitment`、`offer_amount_mismatch`、`identity_conflict`（classifier 的 provenance／attempt／evidence 衝突）、`venue_lent_above_ledger`、`command_rate_exceeded`（只數被拒的 submit；被拒的 cancel 等下一個 token，從不累計成停機）。觸發是同步記錄，guard 立即擋新單；受監督的 task 在鎖外寫 HALTED，就這樣，不碰 venue。自動 HALTED 不自動解除。「借出額高於帳本」只判斷被接受的 snapshot：lent 可以因借款結束而減少、因任何 offer（含外來）縮小而增加；剩下的部分先扣掉 offer history 裡「上次被接受的 snapshot 之後結束的外來 offer 已成交量」，扣完仍 >0.01 才觸發，否則只發 `foreign_lending` 告警。writer lock 遺失不是交易決策：`WriterLockWatch` 拋 `WriterLockLostError` 讓 daemon 退出、container 重啟。拒絕開機（schema 不符、policy 讀不到）什麼都不寫、不碰 venue，只發 `venue_offers_may_remain` critical 告警後退出：停機狀態會比原因活得久，修好的下一版不該還要 resume。
+
+**受管 offer 的收斂（`DeploymentReconciler._pull_if_stopped`）**：唯一撤受管 offer 的地方，level-triggered。每個 tick、每個幣別：帳戶 `HALTED`（任何 cause）或 policy `enabled=false` 時，這個幣別不規劃任何新單，並經 command gate 按 venue id 撤掉仍開著的受管 offer（`managed_cancel.ManagedOfferSweep`，`execution_decision_id` 不為空者）；某次撤單被拒或失敗，下一個 tick 再撤。外來 offer 與已成交借款從不碰。
 
 **撤單資格**：`AccountCommandGate.cancel` 走 `SafetyGuardChain.evaluate_cancel`，只跳過 `capital_policy` 與 trading-state guard；受管 provenance、同 scope 的新 UNKNOWN／讀取失敗仍在 admission 與每次 transport 前拒絕撤單。已保留 intent 的 submit 在 transport 前走 `evaluate_transport`，仍受 trading state 約束。
 
-**Kill switch（`safety/kill_switch.py`）**：兩種範圍。`all`（operator：UI kill 請求、`POST /admin/halt`）先 commit `HALTED`（寫不進去就不呼叫 venue），再對每個幣別呼叫 `POST /v2/auth/w/funding/offer/cancel/all`，**連手動掛的 offer 一起撤**；幣別＝設定的 symbols，加上有 open uncertainty 或非終態 venue offer 的 symbols；只需 writer lock，不經 command gate；每次呼叫在 `funding_cancel_all_audit` 留 `requested` 與一筆終態；venue 失敗不回滾 HALTED，再 kill 一次即重試（`/admin/halt` 在未全數完成時回 502）。`managed`（自動保護）見上。不依賴資料庫的 break-glass 是停掉 bot container。
+**Kill switch（`safety/kill_switch.py`）**：operator 專用（UI kill 請求、`POST /admin/halt`），是唯一的 venue cancel-all。先 commit `HALTED`（寫不進去就不呼叫 venue），再對每個幣別呼叫 `POST /v2/auth/w/funding/offer/cancel/all`，**連手動掛的 offer 一起撤**；幣別＝設定的 symbols，加上有 open uncertainty 或非終態 venue offer 的 symbols；只需 writer lock，不經 command gate；每次呼叫在 `funding_cancel_all_audit` 留 `requested` 與一筆終態；venue 失敗不回滾 HALTED，再 kill 一次即重試（`/admin/halt` 在未全數完成時回 502）。不依賴資料庫的 break-glass 是停掉 bot container。
 
 **真錢 guard 不變式（`assert_live_guard_invariant`）**：`BFX_PHASE=live` 啟動時強制 trading-state/auth/heartbeat hard guards 全開，且必須有 `pre_trade_limits.command_rate`；每幣別的包絡在 DB policy，缺包絡的幣別由 `OfferEnvelopeGuard` 擋單。
 
@@ -678,10 +680,10 @@ recreate 後查健康，失敗就回到前一個 digest，每次結果寫進 app
 execution audit 的 `config_hash`／`service_version` 與狀態報告，部署永遠不改變 trading state（§6）。
 live daemon 開機時（讀憑證與任何交易之前）比對 image 內 `alembic/` 推導出的唯一 head（`core/schema_head.build_head`；多個 head 也拒絕開機）與資料庫的
 `alembic_version`：不一致代表這個 build 不屬於這個 schema（例如回滾到較新的 schema 上）。
-這和讀不到已套用的 CapitalPolicy 一樣是自動停機，走 `safety/boot_stop.py`：寫 `HALTED/auto`
-（actor `boot`）並發 critical 告警 `venue_offers_may_remain`，然後拒絕開機。它不碰 venue：自動反應
-從不撤它無法證明是自己的 offer（lending envelope D2/D3），拒絕開機的 process 沒有 command gate
-可以證明；要撤就用 operator kill。
+讀不到已套用的 CapitalPolicy 也一樣：`safety/boot_stop.py` 只發 critical 告警
+`venue_offers_may_remain`，然後拒絕開機、由 supervisor 重啟。什麼都不寫（停機狀態會比原因活得久，
+而部署從來不是交易決策，D5），也不碰 venue（拒絕開機的 process 沒有 command gate 能證明哪些 offer
+是自己的，D2/D3）；要撤就用 operator kill。
 
 **Application authority**：Overview 的 funding-status adapter 沿用 authenticated
 account proxy/MFA，webapi 只需既有 membership/account SELECT grants，向 daemon

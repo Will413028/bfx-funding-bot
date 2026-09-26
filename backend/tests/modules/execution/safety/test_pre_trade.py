@@ -226,7 +226,7 @@ async def test_floor_catches_a_taker_priced_at_an_abnormally_low_signal() -> Non
 
 class Refuse:
     def __init__(self, name: str) -> None:
-        self.name, self.is_calibrated = name, False
+        self.name = name
 
     async def evaluate(self, decision: DecisionPayload, ctx: AccountContext) -> Any:
         from bfx_funding_bot.modules.execution.protocols import GuardResult
@@ -282,7 +282,7 @@ def test_throttle_admits_a_burst_then_refills(alert_log: Any) -> None:
     assert [throttle.admit("submit") for _ in range(4)] == [True, True, True, False]
     clock.now += 2                                         # one token back
     assert throttle.admit("cancel") and not throttle.admit("cancel")
-    assert alert_log.counts == {"log_only": 2}              # each refusal is alerted
+    assert alert_log.counts == {"log_only": 1}              # a refused submit is alerted; a cancel waits
 
 
 def test_sustained_excess_trips_once_per_episode(alert_log: Any) -> None:
@@ -297,9 +297,13 @@ def test_sustained_excess_trips_once_per_episode(alert_log: Any) -> None:
     assert len(trips.calls) == 1 and trips.calls[0][0] == COMMAND_RATE_EXCEEDED
     clock.now += 400                                        # window empties: a new episode
     throttle._tokens = 0.0
+    for _ in range(5):
+        clock.now += 1
+        assert not throttle.admit("cancel")
+    assert len(trips.calls) == 1                            # pulling exposure never trips (D3)
     for _ in range(3):
         clock.now += 1
-        throttle.admit("cancel")
+        throttle.admit("submit")
     assert len(trips.calls) == 2
 
 

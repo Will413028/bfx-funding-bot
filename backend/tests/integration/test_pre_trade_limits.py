@@ -158,16 +158,19 @@ async def test_open_offers_are_counted_from_the_durable_projection(capital_db):
     ctx = AccountContext(str(account), Credentials("k", "s"), Decimal("0"))
     environment = runtime.repository.environment
 
-    async def add(offer_id: str, *, symbol: str = "fUST", terminal: bool = False) -> None:
+    async def add(offer_id: str, *, symbol: str = "fUST", terminal: bool = False,
+                  managed: bool = True) -> None:
         async with factory.begin() as session:
             session.add(VenueOfferStateRow(
                 exchange_account_id=account, deployment_environment=environment,
                 venue_offer_id=offer_id, symbol=symbol, amount_original=Decimal("200"),
                 amount_remaining=Decimal("200"), rate=Decimal("0.0002"), period_days=2,
                 status="ACTIVE", flags={}, mts_created=1, mts_updated=1, first_seen_event_seq=1,
-                last_seen_event_seq=1, is_terminal=terminal))
+                last_seen_event_seq=1, is_terminal=terminal,
+                execution_decision_id=f"d-{offer_id}" if managed else None))
 
     await add("1")
+    await add("m", managed=False)                           # a manual offer takes no slot (D2)
     await add("2", terminal=True)                           # executed/cancelled: not open
     await add("3", symbol="fUSD")                           # another symbol
     assert (await guard.evaluate(decision, ctx)).allowed
@@ -194,10 +197,12 @@ async def test_throttle_refuses_before_anything_durable_and_trips_on_sustained_e
 
     later = await second_ready(factory, account, ready)
     with pytest.raises(CommandGateBlocked, match="command_rate_limited"):
-        await gate.submit(later, ctx)
-    with pytest.raises(CommandGateBlocked, match="command_rate_limited"):
         await gate.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
                           account_id=ctx.account_id, ctx=ctx)
+    assert trips.calls == []  # a refused cancel waits for a token; it never counts toward a stop
+    for _ in range(2):
+        with pytest.raises(CommandGateBlocked, match="command_rate_limited"):
+            await gate.submit(later, ctx)
     assert venue.received == received
     async with factory() as session:
         assert len((await session.scalars(select(EventLogRow))).all()) == durable
@@ -319,15 +324,41 @@ async def test_disabling_a_currency_pulls_only_its_managed_offers(capital_db):
     canceller = Canceller()
     planner = object.__new__(DeploymentReconciler)
     planner._capital = runtime
-    planner._disabled_sweep = ManagedOfferSweep(
+    planner._managed_sweep = ManagedOfferSweep(
         session_factory=factory, account_id=account, environment=runtime.repository.environment,
         canceller=canceller, ctx=ctx)
 
-    assert await planner._pull_if_disabled("fUST") is False    # enabled: nothing happens
+    assert await planner._pull_if_stopped("fUST") is False    # enabled, ACTIVE: nothing happens
     assert canceller.cancelled == []
     report = await _amend(factory, runtime, PolicyChanges(enabled=False))
     await _amend(factory, runtime, PolicyChanges(enabled=False), digest=report["amendment_digest"])
-    assert await planner._pull_if_disabled("fUST") is True
+    assert await planner._pull_if_stopped("fUST") is True
     assert canceller.cancelled == ["101"]
     # No policy at all is not "disabled": the capital read fails closed on it instead.
-    assert await planner._pull_if_disabled("fBTC") is False
+    assert await planner._pull_if_stopped("fBTC") is False
+
+
+@pytest.mark.asyncio
+async def test_a_halt_pulls_managed_offers_every_tick_until_none_is_left(capital_db):
+    """D3 level 3 is level-triggered: an automatic HALTED writes the state alone,
+    and each planner tick cancels whatever managed offer is still open -- a
+    cancel that failed on one tick is retried on the next. Foreign offers stay."""
+    from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
+    from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
+
+    from .test_kill_switch import Canceller, _offer_rows
+    factory, account = capital_db
+    _gate, _venue, _ready, ctx, runtime, halt = await boundary(factory, account)
+    await _offer_rows(factory, account)
+    await halt.transition("HALTED", cause="auto", actor="auto:identity_conflict", reason="x")
+    canceller = Canceller(fail={"101"})
+    planner = object.__new__(DeploymentReconciler)
+    planner._capital = runtime
+    planner._managed_sweep = ManagedOfferSweep(
+        session_factory=factory, account_id=account, environment=runtime.repository.environment,
+        canceller=canceller, ctx=ctx)
+    assert await planner._pull_if_stopped("fUST") is True
+    assert canceller.cancelled == []            # 101 failed; 555 is foreign
+    canceller.fail.clear()
+    assert await planner._pull_if_stopped("fUST") is True
+    assert canceller.cancelled == ["101"]

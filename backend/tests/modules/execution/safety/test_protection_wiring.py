@@ -99,16 +99,17 @@ async def test_a_refused_boot_observation_makes_its_trips_durable_before_exit() 
     protection = AutomaticProtection()
     engaged: list[str] = []
 
-    class _Kill:
-        async def engage(self, *, cause, actor, reason, when_already_halted="retry",  # type: ignore[no-untyped-def]
-                         scope="all"):
+    class _Trading:
+        async def transition(self, state, *, cause, actor, reason, now_ms=None):  # type: ignore[no-untyped-def]
             engaged.append(actor)
-            from bfx_funding_bot.modules.execution.safety.kill_switch import KillResult
-            from bfx_funding_bot.modules.execution.safety.trading_state import TradingState
-            return KillResult(state=TradingState(1, "HALTED", cause, actor, reason, 0),
-                              state_changed=True, cancel_all=())
+            from bfx_funding_bot.modules.execution.safety.trading_state import (
+                TradingState,
+                TransitionResult,
+            )
+            return TransitionResult(state=TradingState(1, state, cause, actor, reason, 0),
+                                    changed=True)
 
-    protection.bind(_Kill())
+    protection.bind(_Trading())
 
     class _Recovery:
         async def run(self):  # type: ignore[no-untyped-def]

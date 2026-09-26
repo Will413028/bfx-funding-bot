@@ -16,11 +16,9 @@ and terminal rows with ``IS DISTINCT FROM``, which treats two NULLs as equal:
 each tool writes both rows of its own attempt the same way, so the trigger needs
 no change. Grants are unchanged (the runtime roles keep SELECT on the table).
 
-Downgrade restores the CHECK and NOT NULL. Rows the new tool wrote carry no
-class; they become ``material``, which is what the previous tool records for a
-release it cannot classify (both rows of an attempt alike, so pairs stay
-paired). That is the one write this ledger ever takes besides an append, so the
-append-only trigger is disabled for exactly that statement.
+Downgrade restores the CHECK and NOT NULL, and refuses while any row carries no
+class: inventing one would write a classification that never happened into an
+append-only ledger.
 """
 from alembic import op
 
@@ -38,9 +36,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("ALTER TABLE public.deployments DISABLE TRIGGER deployments_append_only")
-    op.execute("UPDATE public.deployments SET change_class = 'material' WHERE change_class IS NULL")
-    op.execute("ALTER TABLE public.deployments ENABLE TRIGGER deployments_append_only")
+    op.execute("""DO $$ BEGIN
+        IF EXISTS (SELECT FROM public.deployments WHERE change_class IS NULL) THEN
+          RAISE EXCEPTION 'refuse downgrade: deployments recorded without a change class';
+        END IF; END $$""")
     op.alter_column("deployments", "change_class", nullable=False)
     op.create_check_constraint("ck_deployments_change_class", "deployments",
                                "change_class IN ('standard', 'material')")

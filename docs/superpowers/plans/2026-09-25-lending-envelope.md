@@ -90,6 +90,9 @@ integration tests (Docker), `uv run mypy src/`, `uv run ruff check`,
 1. Merge after full CI; bfx-deploy runs the migration path (stop bot → backup →
    restore test → migrate → start).
 2. Amend the fUST policy with the §3 values (dry run → digest → apply).
+   Before resuming, list open `unattributed_venue_offer` uncertainties: rows
+   left from the retired orphan quarantine still hold their symbol. Resolve
+   each (`closed_at_venue` or `accepted_external_exposure`) in the UI.
 3. Check `/admin/trading-status` and `/admin/dry-evaluate`: state carried over,
    no probation fields, floor reported as `max(abs, relative)`.
 4. Place a manual offer below the venue book in the Bitfinex UI → expect a
@@ -112,3 +115,17 @@ After the first deploy by the new tool (a `deployments` row with
 removes `BFX_CHANGE_CLASS` from the compose file and drops the
 `deployments.change_class` column (the attempt-pairing trigger
 `check_deployment_attempt` must stop naming it in the same migration).
+
+## 6. Carry-over audit (design review 2026-09-26)
+
+Mechanisms kept on purpose, with the condition that reopens each:
+
+| Mechanism | Why it stays | Re-evaluate when |
+|---|---|---|
+| `max_offer_amount` is a top-level policy field, not part of `OfferEnvelope` | sizing (`allocate_capital`) caps by it independently of the envelope guard; production holds a schema-2 revision that the cutover amend turns into schema 3 | Phase 5 per-tenant settings, or a schema 4 for any other reason |
+| "Managed" is decided at two layers: the capital classifier (claims/attempts, event level) and `venue_offer_state.execution_decision_id` (projection level, used by the envelope guard and `ManagedOfferSweep`) | the projection column is derived from the same claims; the two cannot disagree except while a claim is committing (the 120 s action grace) | any change to how claims bind venue ids, or a third consumer |
+| `pathspec` dependency in `bfx_deploy.py` for four DR trigger patterns | same matcher semantics as before, pinned in `deploy/vm/ops/uv.lock` | the next edit of `DR_TRIGGER_PATTERNS`: switch to git's own `:(glob)` pathspec |
+| Reconciler legacy uncertainty fallbacks (`evaluate_before_sizing` optional, `ledger.is_uncertain`) | paper/shadow adapters without the durable hook still rely on them | paper/shadow retire, or the next reconciler refactor |
+| Python pre-check mirroring the trading-state trigger (`validate_transition`) | clearer errors than the database's, and SQLite fixtures; `test_trading_state_rule_parity` keeps them equal | the rule set grows again |
+
+Open decisions handed to Will are in the second-brain project page Pending.

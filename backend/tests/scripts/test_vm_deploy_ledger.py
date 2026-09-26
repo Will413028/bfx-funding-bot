@@ -226,18 +226,21 @@ def test_migration_is_reversible_and_leaves_no_drift(ledger_db: Any) -> None:
     url, engine, ledger = ledger_db
     _alembic(url, "upgrade", "head")
     _alembic(url, "check")
-    ledger.append(_entry(attempt_id=ATTEMPT, outcome="started", finished_at=None))
-    ledger.append(_entry(attempt_id=ATTEMPT))
-    # Back across the retirement: classless rows become material, pairs stay paired.
-    _alembic(url, "downgrade", REVISION)
-    with engine.connect() as conn:
-        assert [row[0] for row in conn.execute(text("SELECT change_class FROM deployments"))] == [
-            "material", "material"]
-    with engine.begin() as conn, pytest.raises(Exception, match="append-only"):
-        conn.exec_driver_sql("UPDATE deployments SET detail = 'x'")  # trigger re-enabled
+    # Back across the retirement: the empty ledger downgrades, all the way.
     _alembic(url, "downgrade", "a7f3c1d9e204")
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT to_regclass('public.deployments')")) is None
         assert conn.scalar(text("SELECT count(*) FROM pg_proc WHERE proname = 'reject_deployment_mutation'")) == 0
     _alembic(url, "upgrade", "head")
     assert ledger.read().last_attempt is None
+    # Classless rows: the downgrade refuses rather than invent a class that never
+    # happened in an append-only ledger.
+    ledger.append(_entry(attempt_id=ATTEMPT, outcome="started", finished_at=None))
+    ledger.append(_entry(attempt_id=ATTEMPT))
+    result = subprocess.run(["uv", "run", "alembic", "downgrade", REVISION], cwd=BACKEND,
+                            env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "recorded without a change class" in result.stdout + result.stderr
+    with engine.connect() as conn:
+        assert [row[0] for row in conn.execute(text("SELECT change_class FROM deployments"))] == [
+            None, None]

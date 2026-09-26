@@ -2,8 +2,9 @@
 
 Lending envelope ADR 2026-09-25 D3, ladder level 3: only conditions meaning the
 bot's knowledge of its own offers is wrong. Each writes ``HALTED`` with
-``cause=auto`` and cancels the *managed* offers by venue id (the kill switch's
-``managed`` scope); offers placed by hand are never touched.
+``cause=auto``; the planner then pulls the *managed* offers by venue id, every
+tick until none is left (``DeploymentReconciler._pull_if_stopped``). Offers
+placed by hand are never touched: the venue cancel-all is the operator's kill.
 
 ============================= ===============================================
 trigger                       raised where
@@ -32,11 +33,11 @@ because a cancel or expiry was caught by reconcile -- the correctness backbone
 doing its job (ADR 2026-05-29 credit-aware reconcile v2).
 
 Tripping is synchronous and never waits: it records a pending stop that the
-trading-state guard honours immediately, and queues the kill. A supervised task
-(:meth:`AutomaticProtection.run`) performs the kill outside every lock. That
-split is what keeps a trip raised while the command gate's account lock is held
-or inside a recovery transaction from deadlocking against the kill, which
-itself goes through that lock and opens its own transaction.
+trading-state guard honours immediately, and queues the durable HALTED. A
+supervised task (:meth:`AutomaticProtection.run`) writes it outside every lock.
+That split is what keeps a trip raised while the command gate's account lock is
+held or inside a recovery transaction from deadlocking against the write,
+which takes the same account lock in its own transaction.
 
 An automatic HALTED is never lifted automatically: only an operator's resume
 ends it.
@@ -54,8 +55,11 @@ from typing import Protocol
 
 from bfx_funding_bot.modules.execution.event_store.store import SymbolLedgerDelta
 from bfx_funding_bot.modules.execution.events import PositionReconciled
-from bfx_funding_bot.modules.execution.safety.kill_switch import KillResult
-from bfx_funding_bot.modules.execution.safety.trading_state import CAUSE_AUTO
+from bfx_funding_bot.modules.execution.safety.trading_state import (
+    CAUSE_AUTO,
+    HALTED,
+    TransitionResult,
+)
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
@@ -110,9 +114,9 @@ class ProtectionPort(Protocol):
     def trip(self, trigger: str, detail: str) -> None: ...
 
 
-class _KillSwitch(Protocol):
-    async def engage(self, *, cause: str, actor: str, reason: str,
-                     when_already_halted: str = "retry", scope: str = "all") -> KillResult: ...
+class _TradingState(Protocol):
+    async def transition(self, state: str, *, cause: str, actor: str, reason: str,
+                         now_ms: int | None = None) -> TransitionResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,22 +127,22 @@ class Trip:
 
 
 class AutomaticProtection:
-    """Collects trips and turns them into the kill, outside every lock."""
+    """Collects trips and turns them into a durable HALTED/auto, outside every lock."""
 
     def __init__(self, *, clock: Callable[[], int] | None = None, retry_s: float = 5.0) -> None:
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._retry_s = retry_s
         self._queue: asyncio.Queue[Trip] = asyncio.Queue()
         self._pending: Trip | None = None
-        self._kill_switch: _KillSwitch | None = None
-        # Trips that found HALTED already in force: logged, counted, no venue call.
+        self._trading: _TradingState | None = None
+        # Trips that found HALTED already in force: logged and counted.
         self.persisting = 0
 
-    def bind(self, kill_switch: _KillSwitch) -> None:
-        self._kill_switch = kill_switch
+    def bind(self, trading_state: _TradingState) -> None:
+        self._trading = trading_state
 
     def trip(self, trigger: str, detail: str) -> None:
-        """Record the stop now and queue the kill. Never blocks, never raises."""
+        """Record the stop now and queue the HALTED. Never blocks, never raises."""
         if trigger not in TRIGGERS:
             # Still stop: an unknown trigger name is a programming error, not a
             # reason to keep trading.
@@ -156,7 +160,7 @@ class AutomaticProtection:
         return None if pending is None else f"{pending.trigger}: {pending.detail}"
 
     async def run(self, stop: asyncio.Event) -> None:
-        """Engage the kill for queued trips until ``stop``; supervised by the daemon."""
+        """Write HALTED for queued trips until ``stop``; supervised by the daemon."""
         while not stop.is_set():
             first = await self._next(stop)
             if first is None:
@@ -196,30 +200,25 @@ class AutomaticProtection:
         triggers = sorted({trip.trigger for trip in batch})
         reason = "; ".join(f"{trip.trigger}: {trip.detail}" for trip in batch)[:1000]
         while True:
-            if self._kill_switch is None:
-                error: str | None = "kill switch not bound"
+            if self._trading is None:
+                error: str | None = "trading state not bound"
             else:
                 try:
-                    # Already HALTED: the condition persisting is not a new
-                    # stop. Only the transition into HALTED cancels (managed
-                    # offers only); an operator's kill reaches everything.
-                    result = await self._kill_switch.engage(
-                        cause=CAUSE_AUTO, actor=f"auto:{first.trigger}", reason=reason,
-                        when_already_halted="skip", scope="managed",
-                    )
+                    # Already HALTED: the condition persisting is not a new stop.
+                    result = await self._trading.transition(
+                        HALTED, cause=CAUSE_AUTO, actor=f"auto:{first.trigger}", reason=reason,
+                        now_ms=self._clock())
                 except Exception as exc:
                     error = repr(exc)
                 else:
                     error = None
-                    if result.state_changed:
-                        log.critical("automatic_protection_engaged triggers=%s state_id=%s "
-                                     "managed_cancels_complete=%s", triggers, result.state.id,
-                                     result.complete)
+                    if result.changed:
+                        log.critical("automatic_protection_engaged triggers=%s state_id=%s",
+                                     triggers, result.state.id)
                     else:
                         self.persisting += len(batch)
                         log.warning("automatic_protection_condition_persists triggers=%s "
-                                    "state_id=%s (already HALTED; no cancel-all)", triggers,
-                                    result.state.id)
+                                    "state_id=%s (already HALTED)", triggers, result.state.id)
             if error is None:
                 # HALTED is durable now; the guard reads it from the database.
                 if self._queue.empty():

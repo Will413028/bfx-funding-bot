@@ -57,11 +57,6 @@ async def test_manual_kill_blocks_while_a_protection_is_pending(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
-async def test_manual_kill_is_not_calibrated() -> None:
-    assert ManualKillGuard().is_calibrated is False
-
-
-@pytest.mark.asyncio
 async def test_auth_health_allows_when_executor_healthy() -> None:
     probe = HealthProbe()
     probe.update(HealthTarget.EXECUTOR, HealthStatus.HEALTHY)

@@ -167,8 +167,8 @@ bfx-deploy 自己維護主機上的工具，不再依賴手動 `install.sh`（�
 有 migration 的部署在備份前就停了 bot，失敗時維持停止（Will 2026-09-25）。
 
 **migration 之後**失敗：舊 code 可能不能在新 schema 上跑（live daemon 開機會比對
-image 內 migrations 推導出的唯一 head（`core/schema_head.build_head`）與 `alembic_version`，不一致就寫 `HALTED/auto`、
-發 `venue_offers_may_remain` 告警、拒絕開機，不碰 venue）。只能：
+image 內 migrations 推導出的唯一 head（`core/schema_head.build_head`）與 `alembic_version`，不一致就發
+`venue_offers_may_remain` 告警、拒絕開機，不寫交易狀態也不碰 venue）。只能：
 
 1. roll forward：修正後出新 release（新 commit → CI → GHCR → bfx-deploy）；或
 2. 把 migration 前的備份還原到**隔離**資料庫比對，再決定。**不要把舊備份蓋回 production**

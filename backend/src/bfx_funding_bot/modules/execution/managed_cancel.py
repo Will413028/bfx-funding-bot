@@ -1,10 +1,11 @@
 """Cancel the offers this bot placed, by venue id, through the command gate.
 
-Lending envelope ADR 2026-09-25 D2/D3/D4: an automatic stop (ladder level 3)
-and a disabled currency pull only *managed* offers -- the ones a durable intent
-traces to (``venue_offer_state.execution_decision_id``). Offers placed by hand
-or by Bitfinex auto-renew are never touched; only the operator's kill, which
-is a venue cancel-all, reaches them.
+Lending envelope ADR 2026-09-25 D2/D3/D4: while the account is HALTED or a
+currency is disabled, the planner converges that currency's *managed* offers
+-- the ones a durable intent traces to (``venue_offer_state.execution_decision_id``)
+-- to none, every tick (``DeploymentReconciler._pull_if_stopped``). Offers placed
+by hand or by Bitfinex auto-renew are never touched; only the operator's kill,
+which is a venue cancel-all, reaches them.
 
 Each cancel goes through the normal cancel path (``CancelPort``, i.e. the
 command gate): it is made durable before the venue call and refused for an

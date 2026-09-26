@@ -458,9 +458,10 @@ async def test_account_retired_after_planning_cannot_send(capital_db):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stop", ["HALTED"])
-async def test_stopped_reconcile_cancels_stale_offer_but_never_reposts(capital_db, stop):
-    """The reprice sweep may pull a stale offer while stopped; the allocation
-    that would re-post it (or place anything new) is refused."""
+async def test_stopped_reconcile_never_reposts(capital_db, stop):
+    """While HALTED the planner places nothing: the symbol is skipped before
+    sizing or reprice (lending envelope D3/D4). Pulling the managed offers is
+    the managed sweep's job (test_pre_trade_limits); none is wired here."""
     from tests.modules.execution.deployment.test_reconciler import (
         _REPRICE,
         _build,
@@ -477,10 +478,10 @@ async def test_stopped_reconcile_cancels_stale_offer_but_never_reposts(capital_d
         canceller=gate, reprice=_REPRICE)
     rec._ctx = ctx
     await rec.deploy(venue_offers=(_venue_offer("101", 0.001),))
-    assert venue.received == ["101"]
+    assert venue.received == []
     async with factory() as session:
         types = [row.event_type for row in (await session.scalars(select(EventLogRow))).all()]
-    assert types.count("CANCEL_REQUESTED") == 1
+    assert types.count("CANCEL_REQUESTED") == 0
     assert types.count("RESERVATION_INTENT") == 1  # only the offer placed while ACTIVE
 
 

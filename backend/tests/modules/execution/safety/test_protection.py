@@ -13,7 +13,6 @@ import pytest
 
 from bfx_funding_bot.modules.execution.event_store.store import SymbolLedgerDelta
 from bfx_funding_bot.modules.execution.events import PositionReconciled
-from bfx_funding_bot.modules.execution.safety.kill_switch import CancelAllOutcome, KillResult
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
 from bfx_funding_bot.modules.execution.safety.protection import (
     COMMAND_RATE_EXCEEDED,
@@ -27,28 +26,28 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     WriterLockLostError,
     WriterLockWatch,
 )
-from bfx_funding_bot.modules.execution.safety.trading_state import TradingState
+from bfx_funding_bot.modules.execution.safety.trading_state import TradingState, TransitionResult
 
 D = Decimal
 
 
 class FakeKill:
+    """The trading state an automatic protection writes HALTED/auto to."""
+
     def __init__(self, failures: int = 0) -> None:
         self.calls: list[tuple[str, str, str]] = []
         self.failures = failures
 
-    async def engage(self, *, cause: str, actor: str, reason: str,
-                     when_already_halted: str = "retry", scope: str = "all") -> KillResult:
-        assert when_already_halted == "skip"  # automatic kills never re-run a kill in force
-        assert scope == "managed"  # and never touch offers placed by hand
+    async def transition(self, state: str, *, cause: str, actor: str, reason: str,
+                         now_ms: int | None = None) -> TransitionResult:
+        assert state == "HALTED"  # a protection only ever stops; the planner then cancels
         self.calls.append((cause, actor, reason))
         if self.failures:
             self.failures -= 1
             raise RuntimeError("database unavailable")
-        state = TradingState(id=9, state="HALTED", cause=cause, actor=actor, reason=reason,
-                             created_at_ms=1)
-        return KillResult(state=state, state_changed=True,
-                          cancel_all=(CancelAllOutcome("UST", "acknowledged"),))
+        halted = TradingState(id=9, state="HALTED", cause=cause, actor=actor, reason=reason,
+                              created_at_ms=1)
+        return TransitionResult(state=halted, changed=True)
 
 
 class Recorder:
