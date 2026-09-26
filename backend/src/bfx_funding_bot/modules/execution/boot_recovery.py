@@ -81,7 +81,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     FOREIGN_LENDING,
     VENUE_LENT_ABOVE_LEDGER,
     LedgerConservation,
-    ProtectionPort,
+    ReconcileProtectionPort,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
@@ -468,7 +468,7 @@ class BootRecovery:
         clock: Callable[[], int] | None = None,
         uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
         capital_repository: CapitalRepository | None = None,
-        protection: ProtectionPort | None = None,
+        protection: ReconcileProtectionPort | None = None,
         unknown_settle_ms: int = UNKNOWN_SETTLE_MS,
         foreign_exposure: ForeignExposureMonitor | None = None,
         quarantine_age: QuarantineAgeMonitor | None = None,
@@ -527,23 +527,30 @@ class BootRecovery:
         """Level 3 trips and level 4 alerts from this observation (D3).
 
         An interrupted submit recovered as UNKNOWN is level 2: its open
-        uncertainty quarantines the symbol, and nothing is tripped here.
+        uncertainty quarantines the symbol, and nothing is tripped here. An
+        accepted snapshot that trips nothing is reported clean: that is the
+        evidence an automatic halt's condition has cleared (ADR 2026-09-26).
         """
         protection = self._protection
         if protection is None:
             return
+        tripped = False
         for stage, refusal in (("fence", fence_refusal), ("snapshot", capital_error)):
             trigger = CAPITAL_BLOCK_TRIGGERS.get(str(refusal)) if refusal is not None else None
             if trigger is not None:
+                tripped = True
                 protection.trip(trigger, f"capital classifier refused the {stage}: {refusal}")
         if self._capital_repository is not None:
             verdict = self._conservation.observe(drift.symbols, confirmed=capital_accepted,
                                                  foreign_executed=foreign_executed)
             for anomaly in verdict.anomalies:
+                tripped = True
                 protection.trip(VENUE_LENT_ABOVE_LEDGER, anomaly)
             for detail in verdict.foreign:
                 log.warning("foreign_lending %s", detail)
                 alerts.emit(FOREIGN_LENDING, detail=detail)
+            if capital_accepted and not tripped and fence_refusal is None:
+                protection.observe_clean(drift.event_seq)
 
     async def run(self) -> ReconcileResult:
         # A reconcile is one account observation.  The venue calls intentionally
