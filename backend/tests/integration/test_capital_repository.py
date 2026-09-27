@@ -12,7 +12,8 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.execution.capital_tables
-import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
+import bfx_funding_bot.modules.execution.uncertainty_tables
+import bfx_funding_bot.modules.live_validation.tables  # noqa: F401  (funding_trades)
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
@@ -53,7 +54,7 @@ def repository(account, environment="ci"):
     return CapitalRepository(account_id=account, environment=environment, max_snapshot_age_ms=10000)
 
 
-def intent(account, amount="200", cid=1, symbol="fUST"):
+def intent(account, amount="200", cid=1, symbol="fUST", cell="a30"):
     decision_id = str(uuid4())
     signal = uuid4()
     event = ReservationIntent(
@@ -68,7 +69,7 @@ def intent(account, amount="200", cid=1, symbol="fUST"):
     )
     decision = ExecutionDecisionRow(
         decision_id=decision_id, account_id=str(account), exchange_account_id=account,
-        deployment_environment="ci", reconcile_id="test", cell_id="a30", symbol=symbol,
+        deployment_environment="ci", reconcile_id="test", cell_id=cell, symbol=symbol,
         signal_correlation_id=str(signal), outcome="ready", signal_rate=Decimal("0.0001"),
         applied_rate=Decimal("0.0001"), amount_usdt=Decimal(amount), duration_days=2,
         model_evidence={}, safety_result={}, execution_policy="test", service_version="test",
@@ -101,8 +102,8 @@ async def setup_policy(factory, repo, reserve="100", fraction="1"):
         ), expected_revision=0, source={"operator": "test"})
 
 
-async def authorize(factory, repo, policy, seq, amount="200", cid=1):
-    event, decision = intent(repo.account_id, amount, cid)
+async def authorize(factory, repo, policy, seq, amount="200", cid=1, cell="a30"):
+    event, decision = intent(repo.account_id, amount, cid, cell=cell)
     async with factory.begin() as session:
         return await repo.authorize_and_append_intent(
             session, intent=event, decision=decision, expected_revision=policy.revision,
@@ -210,7 +211,7 @@ async def test_stable_observation_required_before_capital_acceptance(capital_db)
 
 
 @pytest.mark.asyncio
-async def test_u_counts_for_each_cell_but_once_in_total(capital_db):
+async def test_u_counts_once_in_total_and_in_no_cell(capital_db):
     from bfx_funding_bot.modules.execution.event_store.entities import VenueCreditObservation
     factory, account = capital_db
     repo = repository(account)
@@ -221,10 +222,268 @@ async def test_u_counts_for_each_cell_but_once_in_total(capital_db):
         for cell in ("a30", "p2"):
             view = await repo.read_capital(session, symbol="fUST", cell_id=cell, now_ms=1100)
             assert view.snapshot.total_capital == Decimal("1000")
-            assert view.snapshot.cell_exposure == Decimal("300")
-            assert view.budget.max_new_offer == Decimal("400")
+            assert view.snapshot.cell_exposure == Decimal("0")
+            assert view.budget.cell_headroom == Decimal("700")
+            assert view.budget.max_new_offer == Decimal("700")
             assert view.unattributed_credit_exposure == Decimal("300")
-            assert "every cell" in view.attribution["credit_attribution"]
+            assert "U is in T only" in view.attribution["credit_attribution"]
+            assert view.attribution["credit_cells"]["c1"]["basis"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_unattributed_credit_does_not_idle_cash_below_venue_minimum(capital_db):
+    """Production 2026-09-27: T=395.52, one unattributed 150.77 credit still lent.
+
+    Charging U to every cell left headroom 0.70*395.52-150.77=126.094, under the
+    ~150 venue minimum, so the 244.75 available sat idle until repayment. U now
+    counts in T only; the cell's own pending attempt still counts to that cell.
+    """
+    from bfx_funding_bot.modules.execution.event_store.entities import VenueCreditObservation
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo, "0", "0.70")
+    credit = VenueCreditObservation("c1", "fUST", Decimal("150.77"), Decimal("0.0001"), 2, "active")
+    seq = await snapshot(factory, repo, "244.75", credits=(credit,))
+    async with factory.begin() as session:
+        for cell in ("a30", "p2"):
+            view = await repo.read_capital(session, symbol="fUST", cell_id=cell, now_ms=1100)
+            assert view.snapshot.total_capital == Decimal("395.52")
+            assert view.snapshot.cell_exposure == Decimal("0")
+            assert view.budget.cell_limit == Decimal("276.864")
+            assert view.budget.cell_headroom == Decimal("276.864")
+            assert view.budget.spendable == Decimal("244.75")
+            assert view.budget.max_new_offer == Decimal("244.75")
+            assert view.attribution["credit_cells"]["c1"]["basis"] == "none"
+    await authorize(factory, repo, policy, seq, "200")
+    async with factory.begin() as session:
+        a30 = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+        p2 = await repo.read_capital(session, symbol="fUST", cell_id="p2", now_ms=1100)
+    assert (a30.snapshot.cell_exposure, a30.budget.cell_headroom) == (Decimal("200"), Decimal("76.864"))
+    assert (p2.snapshot.cell_exposure, p2.budget.cell_headroom) == (Decimal("0"), Decimal("276.864"))
+    # The shared cash, not the cap, bounds the two cells together.
+    assert a30.budget.max_new_offer == p2.budget.max_new_offer == Decimal("44.75")
+
+
+def _credit(credit_id, amount, mts_created=1150):
+    from bfx_funding_bot.modules.execution.event_store.entities import VenueCreditObservation
+    return VenueCreditObservation(credit_id, "fUST", Decimal(amount), Decimal("0.0001"), 2,
+                                  "active", mts_created=mts_created)
+
+
+async def _place(factory, repo, policy, seq, *, amount, cid, venue_offer_id, cell="a30"):
+    """Authorize and acknowledge one offer of ``cell`` under ``venue_offer_id``."""
+    result = await authorize(factory, repo, policy, seq, amount, cid, cell=cell)
+    async with factory.begin() as session:
+        await repo.writer.append(session, ReservationClaimed(
+            symbol="fUST", cid=cid, signal_correlation_id=result.intent.signal_correlation_id,
+            account_id=str(repo.account_id), is_simulated=True, amount=Decimal(amount),
+            venue_offer_id=venue_offer_id,
+            reservation_ref=replace(result.intent.reservation_ref, venue_offer_id=venue_offer_id),
+            occurred_at_ms=1100))
+    return VenueOfferObservation(venue_offer_id, "fUST", Decimal(amount), Decimal(amount),
+                                 Decimal("0.0001"), 2, "active", 1000, 1100)
+
+
+async def _sync_trade(factory, repo, *, trade_id, offer_id, amount, mts_create=1150):
+    from bfx_funding_bot.modules.live_validation.tables import FundingTradeRow
+    async with factory.begin() as session:
+        session.add(FundingTradeRow(exchange_account_id=repo.account_id, trade_id=trade_id,
+            deployment_environment=repo.environment, symbol="fUST", mts_create=mts_create,
+            offer_id=offer_id, amount=Decimal(amount), rate=Decimal("0.0001"), period_days=2,
+            maker=True))
+
+
+@pytest.mark.asyncio
+async def test_credit_attributed_by_funding_trade_counts_in_its_cell_only(capital_db):
+    """A credit whose funding trade names a30's offer is a30's exposure, not p2's."""
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo, "0", "0.70")
+    seq = await snapshot(factory, repo)
+    offer = await _place(factory, repo, policy, seq, amount="200", cid=1, venue_offer_id="101")
+    await snapshot(factory, repo, "800", offers=(offer,))
+    await _sync_trade(factory, repo, trade_id=1, offer_id=101, amount="200")
+    await snapshot(factory, repo, "800", credits=(_credit("c1", "200"),))
+    async with factory.begin() as session:
+        a30 = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+        p2 = await repo.read_capital(session, symbol="fUST", cell_id="p2", now_ms=1100)
+    assert a30.attribution["credit_cells"]["c1"] == {
+        "symbol": "fUST", "amount": "200", "period": 2, "opening": 1150,
+        "cells": ["a30"], "basis": "funding_trade"}
+    assert a30.snapshot.total_capital == p2.snapshot.total_capital == Decimal("1000")
+    assert a30.unattributed_credit_exposure == Decimal("0")
+    # a30: exposure 200, headroom 0.70*1000-200. ed4df67 alone gave 0 and 700.
+    assert (a30.snapshot.cell_exposure, a30.budget.cell_headroom) == (Decimal("200"), Decimal("500"))
+    assert a30.budget.max_new_offer == Decimal("500")
+    assert (p2.snapshot.cell_exposure, p2.budget.cell_headroom) == (Decimal("0"), Decimal("700"))
+    assert p2.budget.max_new_offer == Decimal("700")
+
+
+@pytest.mark.asyncio
+async def test_funding_trade_naming_a_foreign_offer_leaves_the_credit_unattributed(capital_db):
+    """The trade is exact evidence: it outranks a resembling recent fill of ours."""
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo, "0", "0.70")
+    seq = await snapshot(factory, repo)
+    offer = await _place(factory, repo, policy, seq, amount="200", cid=1, venue_offer_id="101")
+    await snapshot(factory, repo, "800", offers=(offer,))
+    await _sync_trade(factory, repo, trade_id=1, offer_id=999, amount="200")
+    await snapshot(factory, repo, "800", credits=(_credit("c1", "200"),))
+    async with factory.begin() as session:
+        view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+    assert view.attribution["credit_cells"]["c1"]["cells"] == []
+    assert view.snapshot.cell_exposure == Decimal("0")
+    assert view.unattributed_credit_exposure == Decimal("200")
+
+
+@pytest.mark.asyncio
+async def test_repeated_fills_cannot_push_a_cell_past_its_cap(capital_db):
+    """T=1000, cap 0.70 -> 700. a30 fills 300, 300, then 100: its lent money
+    stays its exposure (by trade, then by fill before the hourly trade sync, then
+    carried), so a fourth offer is refused with cell_headroom_exhausted while p2
+    keeps its own 700 of headroom. With ed4df67 alone every filled credit left
+    a30's exposure, which stayed 0 and let a30 keep lending up to the cash."""
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo, "0", "0.70")
+    seq = await snapshot(factory, repo)
+    credits: list = []
+    available = Decimal("1000")
+    for cid, amount, synced in ((1, "300", True), (2, "300", False), (3, "100", False)):
+        offer = await _place(factory, repo, policy, seq, amount=amount, cid=cid,
+                             venue_offer_id=str(100 + cid))
+        available -= Decimal(amount)
+        await snapshot(factory, repo, str(available), offers=(offer,), credits=tuple(credits))
+        if synced:
+            await _sync_trade(factory, repo, trade_id=cid, offer_id=100 + cid, amount=amount,
+                              mts_create=1150 + cid)
+        credits.append(_credit(f"c{cid}", amount, mts_created=1150 + cid))
+        seq = await snapshot(factory, repo, str(available), credits=tuple(credits))
+    # One more snapshot: no fill evidence left, the unsynced credits are carried.
+    seq = await snapshot(factory, repo, str(available), credits=tuple(credits))
+    async with factory.begin() as session:
+        a30 = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+        p2 = await repo.read_capital(session, symbol="fUST", cell_id="p2", now_ms=1100)
+    assert {k: (v["cells"], v["basis"]) for k, v in a30.attribution["credit_cells"].items()} == {
+        "c1": (["a30"], "funding_trade"), "c2": (["a30"], "recent_fill"),
+        "c3": (["a30"], "recent_fill")}
+    assert a30.snapshot.total_capital == Decimal("1000")
+    assert (a30.snapshot.cell_exposure, a30.budget.cell_headroom) == (Decimal("700"), Decimal("0"))
+    assert a30.budget.reason == "cell_headroom_exhausted"
+    assert (p2.snapshot.cell_exposure, p2.budget.max_new_offer) == (Decimal("0"), Decimal("300"))
+    with pytest.raises(CapitalBlockedError, match="cell_headroom_exhausted"):
+        await authorize(factory, repo, policy, seq, "150", cid=4)
+    await authorize(factory, repo, policy, seq, "150", cid=5, cell="p2")
+
+
+@pytest.mark.asyncio
+async def test_credits_outnumbering_their_trades_keep_every_candidate_cell(capital_db):
+    """Two identical 100 credits, one synced trade (a30's offer): the unsynced
+    one may be p2's partial fill, and which is which is unknowable, so both
+    credits count in both cells. Once p2's trade syncs the attribution is exact
+    per key -- and still cannot tell identical twins apart, so it stays on both."""
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo, "0", "0.70")
+    seq = await snapshot(factory, repo)
+    a30 = await _place(factory, repo, policy, seq, amount="100", cid=1, venue_offer_id="101")
+    p2 = await _place(factory, repo, policy, seq, amount="300", cid=2, venue_offer_id="102",
+                      cell="p2")
+    await snapshot(factory, repo, "600", offers=(a30, p2))
+    await _sync_trade(factory, repo, trade_id=1, offer_id=101, amount="100")
+    twins = (_credit("c1", "100"), _credit("c2", "100"))
+    await snapshot(factory, repo, "600", offers=(replace(p2, amount_remaining=Decimal("200")),),
+                   credits=twins)
+    async with factory.begin() as session:
+        view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+        other = await repo.read_capital(session, symbol="fUST", cell_id="p2", now_ms=1100)
+    for credit_id in ("c1", "c2"):
+        assert view.attribution["credit_cells"][credit_id]["cells"] == ["a30", "p2"]
+    assert view.snapshot.cell_exposure == Decimal("200")
+    assert other.snapshot.cell_exposure == Decimal("400")       # 200 offered + both credits
+    await _sync_trade(factory, repo, trade_id=2, offer_id=102, amount="100")
+    await snapshot(factory, repo, "600", offers=(replace(p2, amount_remaining=Decimal("200")),),
+                   credits=twins)
+    async with factory.begin() as session:
+        view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+        other = await repo.read_capital(session, symbol="fUST", cell_id="p2", now_ms=1100)
+    assert view.attribution["credit_cells"]["c1"]["basis"] == "funding_trade"
+    assert (view.snapshot.cell_exposure, other.snapshot.cell_exposure) == (
+        Decimal("200"), Decimal("400"))
+
+
+@pytest.mark.asyncio
+async def test_loan_turning_into_split_credits_stays_in_its_cells_exposure(capital_db):
+    """Live 2026-08-09: trade 429585989 (391.4117332) became loan 60709535, then
+    credits 463464628 / 463464629 (161.24782943 each) and 463464632
+    (68.91607434) with new ids and MTS_CREATE, a more precise rate, and the
+    trade's instant kept as MTS_OPENING (the intermediate loans' amounts are the
+    remainder the credits imply). Before the hourly trade sync, the only
+    evidence is the fill seen when the loan appeared; carrying by id and amount
+    lost the money from a30's exposure as soon as the loan converted."""
+    from bfx_funding_bot.modules.execution.event_store.entities import VenueCreditObservation
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo, "0", "0.70")
+    seq = await snapshot(factory, repo)
+    trade_amount = Decimal("391.4117332")
+    cash = str(Decimal("1000") - trade_amount)
+    offer = await _place(factory, repo, policy, seq, amount=str(trade_amount), cid=1,
+                         venue_offer_id="101")
+    await snapshot(factory, repo, cash, offers=(offer,))
+    opened = 1150
+
+    def lent(credit_id, amount, created, rate="0.00014000000000000001"):
+        return VenueCreditObservation(credit_id, "fUST", Decimal(amount), Decimal(rate), 2,
+                                      "active", mts_created=created, mts_opening=opened)
+
+    one, rest1 = Decimal("161.24782943"), trade_amount - Decimal("161.24782943")
+    stages = [
+        (lent("loan:60709535", trade_amount, opened, "0.00014"),),
+        (lent("463464628", one, 1160), lent("loan:60709642", rest1, 1160, "0.00014")),
+        (lent("463464628", one, 1160), lent("463464629", one, 1170),
+         lent("463464632", "68.91607434", 1180)),
+    ]
+    for credits in stages:
+        seq = await snapshot(factory, repo, cash, credits=credits)
+        async with factory.begin() as session:
+            a30 = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+            p2 = await repo.read_capital(session, symbol="fUST", cell_id="p2", now_ms=1100)
+        assert {v["cells"][0] for v in a30.attribution["credit_cells"].values()} == {"a30"}
+        assert a30.snapshot.cell_exposure == trade_amount
+        assert a30.unattributed_credit_exposure == p2.snapshot.cell_exposure == Decimal("0")
+    assert {v["basis"] for v in a30.attribution["credit_cells"].values()} == {"recent_fill"}
+    # The trade syncs with its own, shorter rate: matched by the opening instant.
+    await _sync_trade(factory, repo, trade_id=429585989, offer_id=101,
+                      amount=str(trade_amount), mts_create=opened)
+    await snapshot(factory, repo, cash, credits=stages[-1])
+    async with factory.begin() as session:
+        a30 = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+    assert a30.attribution["credit_cells"]["463464632"] == {
+        "symbol": "fUST", "amount": "68.91607434", "period": 2, "opening": opened,
+        "cells": ["a30"], "basis": "funding_trade"}
+    assert a30.snapshot.cell_exposure == trade_amount
+
+
+@pytest.mark.asyncio
+async def test_credit_older_than_our_offer_is_not_attributed_to_its_fill(capital_db):
+    """A fill of ours explains only credits created no earlier than its offer."""
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo, "0", "0.70")
+    seq = await snapshot(factory, repo)
+    offer = await _place(factory, repo, policy, seq, amount="200", cid=1, venue_offer_id="101")
+    partial = replace(offer, amount_remaining=Decimal("50"))
+    await snapshot(factory, repo, "650", offers=(partial,),
+                   credits=(_credit("old", "150", mts_created=900), _credit("new", "150")))
+    async with factory.begin() as session:
+        view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+    cells = view.attribution["credit_cells"]
+    assert (cells["old"]["cells"], cells["new"]["cells"]) == ([], ["a30"])
+    assert view.snapshot.cell_exposure == Decimal("200")        # 50 offered + 150 new
+    assert view.unattributed_credit_exposure == Decimal("150")
 
 
 @pytest.mark.asyncio
@@ -393,7 +652,11 @@ async def test_partial_fill_does_not_add_original_reservation(capital_db):
     async with factory.begin() as session:
         view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1200)
         assert view.snapshot.total_capital == Decimal("1000")
+        # The 50 still offered is the cell's, and so is the 150 credit its
+        # visible partial fill produced (no funding trade synced yet).
         assert view.snapshot.cell_exposure == Decimal("200")
+        assert view.unattributed_credit_exposure == Decimal("0")
+        assert view.attribution["credit_cells"]["c1"]["basis"] == "recent_fill"
         assert view.snapshot.unreflected_commitments == 0
 
 
@@ -583,7 +846,11 @@ async def test_terminal_history_proves_first_snapshot_reflection(capital_db):
         view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1300)
         assert view.snapshot.unreflected_commitments == 0
         assert view.budget.spendable == Decimal("700")
+        # Fully lent: the credit is in T once, and in a30's exposure because
+        # the terminal history shows a30's offer filled for it.
+        assert view.snapshot.total_capital == Decimal("1000")
         assert view.snapshot.cell_exposure == Decimal("200")
+        assert view.unattributed_credit_exposure == Decimal("0")
 
 
 @pytest.mark.asyncio
@@ -1233,7 +1500,9 @@ async def test_an_offer_that_fills_between_snapshots_is_accounted_for(capital_db
     async with factory.begin() as session:
         view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1250)
         assert view.snapshot.unreflected_commitments == 0
-        assert view.snapshot.cell_exposure == Decimal("200")   # the loan is on the books
+        assert view.snapshot.total_capital == Decimal("1000")   # the loan is on the books
+        assert view.unattributed_credit_exposure == Decimal("0")
+        assert view.snapshot.cell_exposure == Decimal("200")    # ... and a30's, by its fill
         assert view.budget.spendable == Decimal("700")          # 800 available less 100 reserve
 
 

@@ -63,6 +63,18 @@ def test_parse_reads_rate_and_period_where_the_venue_puts_them():
     assert (credit.rate, credit.period_days) == (0.000178, 2)
 
 
+def test_parse_keeps_mts_opening_apart_from_mts_create():
+    """[13] is the originating trade's instant. Loan 61621685 was opened at
+    09-22 18:08:30Z and became credit 466451710 with a later MTS_CREATE but the
+    same opening (that credit's create time here is illustrative)."""
+    converted = [466451710, *_LIVE_LOAN_ROW[1:3], 1790104110000, 1790104110000,
+                 *_LIVE_LOAN_ROW[5:]]
+    loan, credit = parse_active_funding_credits([_LIVE_LOAN_ROW, converted])
+    assert loan.mts_opening == credit.mts_opening == 1790100510000
+    assert credit.mts_created == 1790104110000
+    assert parse_active_funding_credits([_LIVE_LOAN_ROW[:13]])[0].mts_opening is None
+
+
 def test_a_row_too_short_to_hold_the_period_is_rejected():
     with pytest.raises(BitfinexShapeError):
         parse_active_funding_credits([_LIVE_LOAN_ROW[:12]])

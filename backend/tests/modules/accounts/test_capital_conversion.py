@@ -88,11 +88,16 @@ async def test_conversion_matches_canonical_runtime_exposure(capital_db, kind):
     for cell in ("fUST_a30", "fUST_p2"):
         view = await runtime.read(symbol="fUST", cell_id=cell)
         values = report["symbols"]["fUST"]["cells"][cell]
-        expected_exposure = Decimal("600") if cell == "fUST_a30" or kind == "shared_credit" else Decimal("0")
+        # An unattributed credit is in T only, so no cell carries it.
+        expected_exposure = Decimal("600") if cell == "fUST_a30" and kind != "shared_credit" else Decimal("0")
         assert Decimal(values["cell_exposure"]) == expected_exposure == view.snapshot.cell_exposure
+        assert Decimal(values["unattributed_credit_exposure"]) == view.unattributed_credit_exposure == (
+            Decimal("600") if kind == "shared_credit" else Decimal("0"))
         assert Decimal(values["new_max_new_offer"]) == view.budget.max_new_offer
         assert Decimal(values["new_cell_headroom"]) == view.budget.cell_headroom
-    assert Decimal(report["symbols"]["fUST"]["cells"]["fUST_a30"]["new_max_new_offer"]) == Decimal("100")
+    # shared_credit: cash (400) binds under the 700 cap; otherwise a30's own 600 does.
+    expected_max = Decimal("400") if kind == "shared_credit" else Decimal("100")
+    assert Decimal(report["symbols"]["fUST"]["cells"]["fUST_a30"]["new_max_new_offer"]) == expected_max
 
 
 def legacy():

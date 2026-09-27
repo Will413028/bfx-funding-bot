@@ -33,6 +33,7 @@ from bfx_funding_bot.modules.execution.capital_tables import (
     CapitalSnapshotRow,
 )
 from bfx_funding_bot.modules.execution.event_store.entities import (
+    VenueCreditObservation,
     is_terminal_offer_status,
 )
 from bfx_funding_bot.modules.execution.event_store.historical_claims import (
@@ -60,6 +61,7 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
 )
+from bfx_funding_bot.modules.live_validation.tables import FundingTradeRow
 
 ZERO = Decimal("0")
 SCHEMA_VERSION = 1
@@ -197,6 +199,8 @@ class CapitalView:
     snapshot_seq: int
     snapshot: CapitalSnapshot
     budget: CapitalBudget
+    # Diagnostic: credits with no cell provenance (U). Part of total_capital,
+    # never of snapshot.cell_exposure.
     unattributed_credit_exposure: Decimal
     attribution: Mapping[str, Any]
 
@@ -474,6 +478,8 @@ class CapitalRepository:
                   for symbol, amount in event.wallet_available.items()}
         reflected: dict[str, str] = {}
         foreign: dict[str, dict[str, str]] = {}
+        # Our active offers, carried to the next snapshot as fill evidence.
+        ours: dict[str, dict[str, Any]] = {}
         offers = {o.venue_offer_id: o for o in event.offers}
         for offer in offers.values():
             original, remaining = _amount(offer.amount_original), _amount(offer.amount_remaining)
@@ -514,19 +520,32 @@ class CapitalRepository:
             values["offered"] = str(_amount(values["offered"]) + remaining)
             cells = values["cells"]
             cells[decision.cell_id] = str(_amount(cells.get(decision.cell_id, "0")) + remaining)
-        # Credits have no genuine cell link in this schema. U is a shared upper
-        # bound charged to EVERY cell; never sum cell exposures into account T.
+            ours[offer.venue_offer_id] = {"cell": decision.cell_id, "symbol": offer.symbol,
+                                          "original": str(original), "remaining": str(remaining),
+                                          "mts_created": offer.mts_created}
+        previous = await session.scalar(select(CapitalSnapshotRow).where(
+            *self._scope(CapitalSnapshotRow)).order_by(CapitalSnapshotRow.event_seq.desc()).limit(1))
+        prior = previous.classification if previous is not None else {}
+        credit_cells = await self._attribute_credits(session, event, ours, prior)
         for credit in {c.credit_id: c for c in event.credits}.values():
             amount = _amount(credit.amount)
             if credit.status != "active" or amount <= ZERO:
                 raise CapitalBlockedError("snapshot_invalid_active_credit")
             values = totals[credit.symbol]
             values["credits"] = str(_amount(values["credits"]) + amount)
-            values["unattributed_credits"] = values["credits"]
+            owners = credit_cells[credit.credit_id]["cells"]
+            if not owners:
+                # U: counts once in T (and, through the wallet, in spendable) and
+                # in no cell -- charging it to every cell idled cash the venue
+                # minimum no longer fit under the cap.
+                values["unattributed_credits"] = str(_amount(values["unattributed_credits"]) + amount)
+            cells = values["cells"]
+            for cell in owners:
+                # Each cell the credit may belong to carries all of it. Only an
+                # ambiguous or not-yet-synced credit has more than one.
+                cells[cell] = str(_amount(cells.get(cell, "0")) + amount)
         inventory = await self._attempt_inventory(session)
-        previous = await session.scalar(select(CapitalSnapshotRow).where(
-            *self._scope(CapitalSnapshotRow)).order_by(CapitalSnapshotRow.event_seq.desc()).limit(1))
-        prior_reflected = previous.classification["reflected"] if previous is not None else {}
+        prior_reflected = prior["reflected"] if previous is not None else {}
         history = {offer.venue_offer_id: offer for offer in event.offer_history}
         # An attempt that ended without spending holds no capital, but is never
         # reflected either. Record it, so a bounded read can tell it apart from an
@@ -575,8 +594,172 @@ class CapitalRepository:
                 continue
             raise CapitalBlockedError("unclassifiable_commitment")
         return {"symbols": totals, "reflected": reflected, "settled": sorted(settled),
-                "unresolved": unresolved, "foreign": foreign,
-                "credit_attribution": "U is conservative shared exposure for every cell; counted once in T"}
+                "unresolved": unresolved, "foreign": foreign, "offers": ours,
+                "credit_cells": credit_cells,
+                "credit_attribution": ("a credit counts once in T and in the exposure of the "
+                                       "cell its fill traces to; U is in T only")}
+
+    async def _offer_cell(self, session: AsyncSession, venue_offer_id: str, symbol: str,
+                          cache: dict[str, str | None]) -> str | None:
+        """The cell whose execution decision placed this venue offer, or None.
+
+        Same provenance chain as an active offer (claim -> decision -> cell). An
+        offer no claim traces to, or a pre-decision claim, has no cell; a claim
+        whose decision contradicts it is an integrity fault, not a foreign offer.
+        """
+        if venue_offer_id in cache:
+            return cache[venue_offer_id]
+        claims = (await session.scalars(select(OfferClaimRow).where(*self._scope(OfferClaimRow),
+            OfferClaimRow.venue_offer_id == venue_offer_id))).all()
+        if len(claims) > 1:
+            raise CapitalBlockedError("credit_provenance_conflict")
+        cell: str | None = None
+        if claims and claims[0].execution_decision_id is not None:
+            claim = claims[0]
+            decision = await session.get(ExecutionDecisionRow, claim.execution_decision_id)
+            if decision is None or claim.symbol != symbol or (
+                    decision.exchange_account_id, decision.deployment_environment,
+                    decision.symbol) != (self.account_id, self.environment, symbol):
+                raise CapitalBlockedError("credit_provenance_conflict")
+            cell = decision.cell_id
+        cache[venue_offer_id] = cell
+        return cell
+
+    async def _attribute_credits(self, session: AsyncSession, event: VenueSnapshotObserved,
+                                 ours: Mapping[str, Mapping[str, Any]],
+                                 prior: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+        """Which cell(s) each active credit's lent money belongs to, from the DB only.
+
+        Decided once, here at the fence, and recorded in the classification, so
+        the authorization read stays a lookup and never asks the venue.
+
+        The unit is the group of active credits and loans sharing (symbol,
+        period, MTS_OPENING): the venue stamps every record with its trade's
+        instant as MTS_OPENING, while a loan turns into credits with new ids,
+        new MTS_CREATE, split amounts and sometimes another rate, and a credit's
+        rate carries more digits than its trade's (same key as the interest
+        report, ``credit_attribution.assign_cells``). In order:
+
+        1. ``funding_trade``: synced funding trades at the group's instant (trade
+           MTS_CREATE == MTS_OPENING, same symbol and period) name our offers
+           (OFFER_ID) -> decision -> cell, and together cover the group's amount.
+           No pairing inside a group: every record carries every cell its trades
+           name, the conservative answer for a cap. Trades naming no offer of
+           ours leave the group unattributed. When the group holds more than
+           the synced trades (a trade not synced yet), each record gets the
+           trades' cells plus what steps 2-3 give it (``funding_trade_partial``).
+        2. carried (keeps its basis): the previous accepted snapshot decided the
+           group. Neither the id nor the amount survives a loan becoming credits,
+           so the carry is by group; a fill the hourly trade sync has not reached
+           keeps the cell it got when it first appeared, although the evidence
+           that placed it (offer history) is fetched only that once. A previous
+           snapshot recorded before groups carries by id and amount.
+        3. ``recent_fill``: a record first seen now with no trade row yet goes to
+           every cell with a fill of ours in this snapshot that could have
+           produced it: same symbol, amount within the filled part, offer created
+           no later than the record's opening. Rate and period are not required
+           to match (a crossing fill takes the resting side's terms):
+           over-charging a cell until the trade arrives is the safe direction,
+           letting its lent money leave its exposure is not. Evidence: the
+           filled part of our active offers, terminal offer history, and our
+           offers of the previous snapshot now gone from the book (up to what
+           was still offered).
+        Otherwise the record is unattributed (U): in T only, in no cell.
+        """
+        credits = {c.credit_id: c for c in event.credits}
+        cache: dict[str, str | None] = {}
+
+        def opening(credit: VenueCreditObservation) -> int | None:
+            # A snapshot recorded before MTS_OPENING was kept: MTS_CREATE is the
+            # opening of any record that is not a converted loan.
+            return credit.mts_opening if credit.mts_opening is not None else credit.mts_created
+
+        group_of: dict[str, tuple[str, int, int]] = {}
+        live: dict[tuple[str, int, int], Decimal] = {}
+        for c in credits.values():
+            at = opening(c)
+            if c.period_days is not None and at is not None:
+                key = (c.symbol, int(c.period_days), int(at))
+                group_of[c.credit_id] = key
+                live[key] = live.get(key, ZERO) + _amount(c.amount)
+        traders: dict[tuple[str, int, int], set[str]] = {}
+        traded: dict[tuple[str, int, int], Decimal] = {}
+        stamps = sorted({key[2] for key in live})
+        if stamps:
+            # Rows returned are bounded by the active credits' openings; the scan
+            # is the account's trade rows (PK prefix), which grow with fills only.
+            # Add an (account, environment, mts_create) index once that is large.
+            trades = (await session.scalars(select(FundingTradeRow).where(
+                FundingTradeRow.exchange_account_id == self.account_id,
+                FundingTradeRow.deployment_environment == self.environment,
+                FundingTradeRow.mts_create.in_(stamps)))).all()
+            for trade in trades:
+                key = (trade.symbol, int(trade.period_days), int(trade.mts_create))
+                if key not in live:
+                    continue
+                traded[key] = traded.get(key, ZERO) + abs(_amount(trade.amount))
+                cells = traders.setdefault(key, set())
+                cell = await self._offer_cell(session, str(trade.offer_id), trade.symbol, cache)
+                if cell is not None:
+                    cells.add(cell)
+        # (cell, symbol, filled upper bound, offer creation) for fills of ours
+        # visible at this fence.
+        fills: list[tuple[str, str, Decimal, int | None]] = []
+        for entry in ours.values():
+            filled = _amount(entry["original"]) - _amount(entry["remaining"])
+            if filled > ZERO:
+                fills.append((entry["cell"], entry["symbol"], filled, entry["mts_created"]))
+        for offer in event.offer_history:
+            filled = _amount(offer.amount_original) - _amount(offer.amount_remaining)
+            if (filled > ZERO and is_terminal_offer_status(offer.status)
+                    and offer.status not in {"absent", "quarantined"}):
+                cell = await self._offer_cell(session, offer.venue_offer_id, offer.symbol, cache)
+                if cell is not None:
+                    fills.append((cell, offer.symbol, filled, offer.mts_created))
+        for venue_offer_id, entry in (prior.get("offers") or {}).items():
+            if venue_offer_id not in ours:
+                fills.append((entry["cell"], entry["symbol"], _amount(entry["remaining"]),
+                              entry["mts_created"]))
+        prior_cells: Mapping[str, Mapping[str, Any]] = prior.get("credit_cells") or {}
+        carried_groups: dict[tuple[str, int, int], tuple[set[str], set[str]]] = {}
+        for entry in prior_cells.values():
+            if entry.get("opening") is not None and entry.get("period") is not None:
+                owners_, bases = carried_groups.setdefault(
+                    (entry["symbol"], int(entry["period"]), int(entry["opening"])), (set(), set()))
+                owners_.update(entry["cells"])
+                bases.add(entry["basis"])
+        result: dict[str, dict[str, Any]] = {}
+        for credit_id, credit in credits.items():
+            amount = _amount(credit.amount)
+            group = group_of.get(credit_id)
+            owners: set[str]
+            if group is not None and group in traded and live[group] <= traded[group]:
+                owners, basis = set(traders[group]), "funding_trade"
+            else:
+                legacy = prior_cells.get(credit_id)
+                if group is not None and group in carried_groups:
+                    carried_owners, bases = carried_groups[group]
+                    owners = set(carried_owners)
+                    basis = next(iter(bases)) if len(bases) == 1 else "carried"
+                elif (legacy is not None and legacy.get("opening") is None
+                        and (legacy["symbol"], _amount(legacy["amount"])) == (credit.symbol, amount)):
+                    owners, basis = set(legacy["cells"]), legacy["basis"]
+                else:
+                    at = opening(credit)
+                    owners = {cell for cell, symbol, filled, created in fills
+                              if symbol == credit.symbol and amount <= filled
+                              and (created is None or at is None or created <= at)}
+                    basis = "recent_fill" if owners else "none"
+                if group is not None and group in traders:
+                    # The group holds more than its synced trades: which record
+                    # the synced ones produced is unknowable, so each carries both.
+                    owners |= traders[group]
+                    basis = "funding_trade_partial"
+            result[credit_id] = {"symbol": credit.symbol, "amount": str(amount),
+                                 "period": group[1] if group is not None else None,
+                                 "opening": group[2] if group is not None else None,
+                                 "cells": sorted(owners), "basis": basis}
+        return result
 
     async def read_capital(self, session: AsyncSession, *, symbol: str, cell_id: str,
                            now_ms: int) -> CapitalView:
@@ -702,7 +885,16 @@ class CapitalRepository:
         available = _amount(values["available"])
         offered, credits = _amount(values["offered"]), _amount(values["credits"])
         shared = _amount(values["unattributed_credits"])
-        exposure = _amount(values["cells"].get(cell_id, "0")) + shared
+        # The cell's offers and the credits attributed to it at acceptance; U is
+        # already in T via ``credits`` and in no cell.
+        exposure = _amount(values["cells"].get(cell_id, "0"))
+        if "credit_cells" not in row.classification:
+            # Accepted before credits were attributed: its ``cells`` hold offers
+            # only, so fall back to charging U to every cell until the next
+            # snapshot replaces it. Remove once every deployed scope has accepted
+            # a snapshot carrying ``credit_cells`` (the first reconcile after
+            # this ships does it).
+            exposure += shared
         return _SnapshotBasis(row, event, available, offered, credits, shared, exposure)
 
     async def _read_capital_full(self, session: AsyncSession, *, symbol: str, cell_id: str,
