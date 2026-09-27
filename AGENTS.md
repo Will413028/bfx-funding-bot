@@ -26,7 +26,7 @@ Bitfinex 自動放貸 SaaS 平台。
 | Cache | 自托 Redis 7（`bfx-redis`，volume `bfx_redisdata`；Better Auth secondaryStorage：session + rate-limit，ioredis） |
 
 - 備份／WAL archive／isolated restore 依 `docs/runbooks/offsite-dr.md`；pgBackRest backup/status、`bfx-backup-check`、每月 `bfx-restore-test`（prefix-hash 驗證）timer 定義在 `deploy/vm/systemd/`（第一次由 `deploy/vm/ops/install.sh`、之後由 bfx-deploy 依 `managed-units` 安裝，都不啟用），實際啟用與健康狀態須查目標環境。
-- 每週 attribution／G3 報告由 `bfx-weekly-report.timer` 執行 compose `weekly-report`（`--profile ops`）；操作前核對目前 unit、排程及輸出。Redis session 為 ephemeral。
+- 每週 attribution／G3 報告由 `bfx-weekly-report.timer` 觸發 `bfx-weekly-report.service`，執行主機工具裡的 `deploy/vm/ops/bfx_weekly_report.py`（步驟在 `deploy/vm/ops/docker-compose.weekly-report.yml`，隨每次部署安裝；image 用 ledger 的 backend digest；不讀 VM checkout）；操作前核對目前 unit、排程及輸出（`docs/runbooks/operations.md` §8）。Redis session 為 ephemeral。
 
 ## 指令執行目錄
 
