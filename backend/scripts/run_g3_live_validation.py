@@ -15,9 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
-from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 
@@ -31,11 +29,19 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
 _FEE_RATE = Decimal("0.15")
 
 
-def _default_capital(environ: Mapping[str, str]) -> str:
-    """--capital 預設：跟著部署 cap 走（.env.runtime 的 BFX_ALLOCATION_CAP_USDT），
-    避免 cap 調整後報告還用舊 570 分母（2026-07-06 review 發現 3000→10000 期間
-    的 stale default）。"""
-    return environ.get("BFX_ALLOCATION_CAP_USDT", "570")
+def _parse_capital(raw: str | None) -> Decimal | None:
+    """--capital: an explicit C overrides the ledger-derived one.
+
+    There is no environment default any more: BFX_ALLOCATION_CAP_USDT is 0 in
+    production since the capital policy replaced allocation caps (2026-09-27
+    weekly run died on "capital must be positive"). Without --capital, C per
+    window is the funding-wallet balance from funding_interest_payments."""
+    if raw is None:
+        return None
+    capital = Decimal(raw)
+    if capital <= 0:
+        raise SystemExit(f"--capital must be positive, got {raw}")
+    return capital
 
 
 def render_markdown(
@@ -179,15 +185,15 @@ async def _amain() -> int:
     parser.add_argument("--out", required=True, help="output .md path")
     parser.add_argument(
         "--capital",
-        default=_default_capital(os.environ),
-        help="capital budget C (default: BFX_ALLOCATION_CAP_USDT env, else 570)",
+        default=None,
+        help="capital budget C (default: per-window funding-wallet balance from the venue ledger)",
     )
     args = parser.parse_args()
 
     from scripts._g3_loaders import build_verdict_from_neon
 
     verdict, data_window, n_fills, clamp_diag, frr = await build_verdict_from_neon(
-        capital=Decimal(args.capital)
+        capital=_parse_capital(args.capital)
     )
 
     out = Path(args.out)

@@ -12,15 +12,21 @@ environment = BFX_DEPLOYMENT_ENV env-var (required; "prod" for the live canary)
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings, require_deployment_environment
-from bfx_funding_bot.modules.accounts.exchange_accounts import account_scope_clause
+from bfx_funding_bot.external.bitfinex.auth_rest import InterestPayment
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    account_id_uuid_or_none,
+    account_scope_clause,
+)
 from bfx_funding_bot.modules.backtest.oos_profitability import bootstrap_ci, paired_active_returns
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
@@ -30,7 +36,12 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
 )
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
+from bfx_funding_bot.modules.live_validation.interest_ledger import (
+    funding_currency,
+    wallet_balance_basis,
+)
 from bfx_funding_bot.modules.live_validation.live_attribution import (
+    CapitalBasis,
     ClampDiagnostic,
     CreditCloseRecord,
     FillRecord,
@@ -43,6 +54,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     attribute_active,
     attribute_idle,
     attribute_passive,
+    capital_for,
     cell_period_days,
     check_deployment_anchor,
     check_nav_anchor,
@@ -51,6 +63,10 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     frr_points_from_stats,
     open_principal_at,
     weekly_window_bounds,
+)
+from bfx_funding_bot.modules.live_validation.tables import (
+    FundingCreditHistoryRow,
+    FundingInterestPaymentRow,
 )
 
 # Event type constants — must match serialization._TYPE_BY_CLASS (UPPERCASE).
@@ -113,9 +129,71 @@ async def _load_observed_realized(
     return Decimal(str(row.realized)) if row is not None else Decimal("0")
 
 
+def merge_credit_closes(
+    history: list[CreditCloseRecord],
+    events: list[tuple[dict[str, Any], int]],
+    *,
+    symbol: str,
+) -> list[CreditCloseRecord]:
+    """Venue credit history first; a CREDIT_CLOSED event (payload, occurred_at_ms)
+    only for a credit the history does not have yet, closed at its
+    mts_last_payout when the event carries one."""
+    synced = {c.credit_id for c in history}
+    return history + [
+        CreditCloseRecord(
+            credit_id=int(payload["credit_id"]),
+            amount=Decimal(str(payload["amount"])),
+            mts_create=int(payload["mts_create"]),
+            close_ts_ms=int(payload.get("mts_last_payout") or occurred_at_ms),
+        )
+        for payload, occurred_at_ms in events
+        if payload.get("symbol") == symbol and int(payload["credit_id"]) not in synced
+    ]
+
+
+async def _load_ledger_capital(
+    session: AsyncSession, *, account_id: str, deployment_env: str, currency: str,
+) -> Callable[[int, int], Decimal] | None:
+    """C per window from the funding-wallet balance in the interest ledger."""
+    account_uuid = account_id_uuid_or_none(account_id)
+    if account_uuid is None:
+        return None
+    rows = (await session.scalars(select(FundingInterestPaymentRow).where(
+        FundingInterestPaymentRow.exchange_account_id == account_uuid,
+        FundingInterestPaymentRow.deployment_environment == deployment_env,
+        FundingInterestPaymentRow.currency == currency,
+    ))).all()
+    payments = [InterestPayment(r.ledger_id, r.currency, None, r.mts, Decimal(r.amount),
+                                Decimal(r.balance), r.description) for r in rows]
+    return wallet_balance_basis(payments, currency=currency)
+
+
+async def _load_credit_history_closes(
+    session: AsyncSession, *, account_id: str, deployment_env: str, symbol: str,
+) -> list[CreditCloseRecord]:
+    """Ended credits from the venue credit history (keyed by account UUID only;
+    synthetic legacy realms have none)."""
+    account_uuid = account_id_uuid_or_none(account_id)
+    if account_uuid is None:
+        return []
+    rows = (await session.scalars(select(FundingCreditHistoryRow).where(
+        FundingCreditHistoryRow.exchange_account_id == account_uuid,
+        FundingCreditHistoryRow.deployment_environment == deployment_env,
+        FundingCreditHistoryRow.symbol == symbol,
+        FundingCreditHistoryRow.kind == "credit",
+    ))).all()
+    return [
+        CreditCloseRecord(
+            credit_id=int(r.credit_id), amount=Decimal(r.amount), mts_create=int(r.mts_create),
+            close_ts_ms=int(r.mts_last_payout if r.mts_last_payout is not None else r.mts_update),
+        )
+        for r in rows
+    ]
+
+
 async def build_verdict_from_neon(
     *,
-    capital: Decimal,
+    capital: Decimal | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[G3Verdict, str, int, ClampDiagnostic, FrrBenchmark]:
     """Query Postgres and run G3 attribution.  Returns (verdict, data_window_str, n_fills, clamp_diag, frr_bench).
@@ -238,6 +316,26 @@ async def build_verdict_from_neon(
                 for r in frr_rows
             ]
 
+            # ── 3c. Capital budget C ──────────────────────────────────────────
+            # An explicit amount wins. Otherwise C per window is the funding
+            # wallet balance the venue ledger reports (report_interest's basis):
+            # BFX_ALLOCATION_CAP_USDT is 0 since the capital policy replaced
+            # allocation caps, and a zero C made every window raise.
+            capital_basis: CapitalBasis
+            if capital is not None:
+                capital_basis = capital
+            else:
+                ledger_basis = await _load_ledger_capital(
+                    session, account_id=account_id, deployment_env=deployment_env,
+                    currency=funding_currency(_MARKET_SYMBOL),
+                )
+                if ledger_basis is None:
+                    raise RuntimeError(
+                        "G3 needs a capital budget: pass --capital, or let the bot's "
+                        "InterestLedgerSync fill funding_interest_payments for this account"
+                    )
+                capital_basis = ledger_basis
+
             # ── 4. Fetch observed_realized from position_state snapshot ───────
             observed_realized = await _load_observed_realized(
                 session,
@@ -273,9 +371,18 @@ async def build_verdict_from_neon(
                     )
                 )
 
-            # ── 5b. Join venue credit-close truth (CREDIT_CLOSED, WS fcc) ─────
+            # ── 5b. Join venue credit-close truth ─────────────────────────────
             # Early borrower returns otherwise double-count re-lent principal in
             # open_principal_at (2026-07-19 anchor divergence root cause).
+            # Venue credit history (MTS_LAST_PAYOUT) is authoritative; a
+            # CREDIT_CLOSED event is used only for a credit not yet synced, with
+            # its mts_last_payout when present. Events written before the
+            # 2026-09-27 parser fix carry mts_update as their time, which equals
+            # mts_create for a credit repaid early.
+            history_closes = await _load_credit_history_closes(
+                session, account_id=account_id, deployment_env=deployment_env,
+                symbol=_MARKET_SYMBOL,
+            )
             close_stmt = select(EventLogRow).where(
                 account_scope_clause(
                     session,
@@ -287,16 +394,11 @@ async def build_verdict_from_neon(
                 EventLogRow.event_type == _CREDIT_CLOSE_TYPE,
             )
             close_rows = (await session.execute(close_stmt)).scalars().all()
-            closes = [
-                CreditCloseRecord(
-                    credit_id=int(r.payload["credit_id"]),
-                    amount=Decimal(str(r.payload["amount"])),
-                    mts_create=int(r.payload["mts_create"]),
-                    close_ts_ms=r.occurred_at_ms,
-                )
-                for r in close_rows
-                if r.payload.get("symbol") == _MARKET_SYMBOL
-            ]
+            closes = merge_credit_closes(
+                history_closes,
+                [(r.payload, r.occurred_at_ms) for r in close_rows],
+                symbol=_MARKET_SYMBOL,
+            )
             fills = apply_credit_closes(fills, closes)
     finally:
         if engine is not None:
@@ -306,7 +408,7 @@ async def build_verdict_from_neon(
         fills=fills,
         market_rate_points=market_rate_points,
         observed_realized=observed_realized,
-        capital=capital,
+        capital=capital_basis,
         frr_points=frr_points_from_stats(frr_stats),
     )
 
@@ -316,10 +418,13 @@ def _compute_verdict(
     fills: list[FillRecord],
     market_rate_points: list[MarketRatePoint],
     observed_realized: Decimal,
-    capital: Decimal,
+    capital: CapitalBasis,
     frr_points: list[MarketRatePoint] | None = None,
 ) -> tuple[G3Verdict, str, int, ClampDiagnostic, FrrBenchmark]:
     """Pure G3 verdict over already-built domain lists. No I/O.
+
+    ``capital`` is C, fixed or per window; whole-span figures (headline,
+    over-deploy clamp, min capital-days) use C over the whole data window.
 
     Returns (verdict, data_window_str, n_fills, clamp_diag, frr_bench).
     """
@@ -338,6 +443,7 @@ def _compute_verdict(
         max_ts = now_ms
 
     bounds = weekly_window_bounds(min_ts, max_ts)
+    span_capital = capital_for(capital, min_ts, max_ts)
 
     mean_fn = lambda xs: sum(xs, Decimal("0")) / Decimal(len(xs))  # noqa: E731
 
@@ -418,10 +524,10 @@ def _compute_verdict(
                         ci_hi=Decimal("0"), reason="no overlapping windows",
                     )
 
-        full_clamp = clamp_active_window(fills, cap=capital)
+        full_clamp = clamp_active_window(fills, cap=span_capital)
         total_capital_days = full_clamp.capital_days
         clamp_diag = ClampDiagnostic(
-            cap=capital,
+            cap=span_capital,
             peak_concurrent=full_clamp.peak_concurrent,
             raw_interest=full_clamp.raw_interest,
             clamped_interest=full_clamp.interest,
@@ -446,7 +552,7 @@ def _compute_verdict(
         attributed_deployed = Decimal("0")
         attributed_interest = Decimal("0")
         clamp_diag = ClampDiagnostic(
-            cap=capital,
+            cap=span_capital,
             peak_concurrent=Decimal("0"),
             raw_interest=Decimal("0"),
             clamped_interest=Decimal("0"),
@@ -463,7 +569,7 @@ def _compute_verdict(
         mr_alpha_available = False
 
     n_windows = len(bounds)
-    min_capital_days = capital * Decimal("7")
+    min_capital_days = span_capital * Decimal("7")
 
     deployment_anchor = check_deployment_anchor(
         attributed_deployed=attributed_deployed,
