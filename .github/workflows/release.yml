@@ -40,16 +40,28 @@ jobs:
 
       - name: Resolve image names
         id: names
+        env:
+          # Public build inputs (baked into the client bundle; not secrets) come
+          # from repository variables so the deployment's host name stays out of
+          # the source tree. A missing value fails the release instead of baking
+          # an empty URL into the image.
+          NEXT_PUBLIC_APP_NAME: ${{ vars.NEXT_PUBLIC_APP_NAME }}
+          NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
+          NEXT_PUBLIC_BETTER_AUTH_URL: ${{ vars.NEXT_PUBLIC_BETTER_AUTH_URL }}
         run: |
           prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
           echo "backend=${prefix}-backend" >> "$GITHUB_OUTPUT"
           echo "frontend=${prefix}-frontend" >> "$GITHUB_OUTPUT"
-          # Public build inputs are reviewed config, not secrets.
-          jq -e 'keys == ["NEXT_PUBLIC_APP_NAME","NEXT_PUBLIC_APP_URL","NEXT_PUBLIC_BETTER_AUTH_URL"]' \
-            deploy/vm/frontend-public.json
+          keys="NEXT_PUBLIC_APP_NAME NEXT_PUBLIC_APP_URL NEXT_PUBLIC_BETTER_AUTH_URL"
+          for key in $keys; do
+            if [ -z "${!key}" ]; then
+              echo "::error::repository variable $key is not set"
+              exit 1
+            fi
+          done
           {
             echo "frontend_args<<EOF"
-            jq -r 'to_entries[] | "\(.key)=\(.value)"' deploy/vm/frontend-public.json
+            for key in $keys; do echo "$key=${!key}"; done
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 

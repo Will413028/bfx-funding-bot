@@ -56,11 +56,11 @@ def test_notify_posts_the_message_to_the_configured_chat(tmp_path: Path) -> None
         return 200
 
     assert notify.send("deploy deployed", level="info", config_path=_config(tmp_path),
-                       transport=transport, host="oci-a1") is True
+                       transport=transport, host="vm-1") is True
     url, payload = sent[0]
     assert url == f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     assert payload["chat_id"] == "-1001234"
-    assert payload["text"] == "[bfx][INFO][oci-a1] deploy deployed"
+    assert payload["text"] == "[bfx][INFO][vm-1] deploy deployed"
 
 
 @pytest.mark.parametrize("config_text", [None, "", "TELEGRAM_CHAT_ID=1\n", "garbage line\n",

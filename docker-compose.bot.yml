@@ -32,7 +32,7 @@ services:
       - archive_command=pgbackrest --stanza=bfx archive-push %p
     # Bound to the VM's loopback ONLY — never 0.0.0.0. Reachable from a laptop
     # solely through an SSH tunnel:
-    #   ssh -N -L 5433:127.0.0.1:5432 ubuntu@oci-a1
+    #   ssh -N -L 5433:127.0.0.1:5432 <ssh-user>@<vm-host>
     # Added 2026-07-27 so local analysis can read the real database; before this
     # the local .env still pointed at the decommissioned Neon project and any
     # ad-hoc query silently ran against data frozen at 2026-06-19.
@@ -161,9 +161,9 @@ services:
       context: frontend
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://<public-host>}
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://frontend.invalid}
         NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-bfx-funding-bot}
-        NEXT_PUBLIC_BETTER_AUTH_URL: ${NEXT_PUBLIC_BETTER_AUTH_URL:-https://<public-host>}
+        NEXT_PUBLIC_BETTER_AUTH_URL: ${NEXT_PUBLIC_BETTER_AUTH_URL:-https://frontend.invalid}
     image: bfx-frontend:local
     container_name: bfx-frontend
     env_file: .env.frontend.runtime

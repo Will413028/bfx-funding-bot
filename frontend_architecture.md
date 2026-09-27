@@ -1483,7 +1483,7 @@ halt、operator containment runbook 與人工 production evidence。**
 
 ## Deployment（Current: Oracle Cloud VM）
 
-Release 0 的實際部署是 `oci-a1` 上的 Docker Compose，包含 Next.js
+Release 0 的實際部署是單台 VM 上的 Docker Compose，包含 Next.js
 standalone、Python FastAPI web-API、VM-local PostgreSQL 與 Redis。CI 在綠燈的 `main`
 commit 建 arm64 image 推到 GHCR，VM 上的 `bfx-deploy` 以 digest 部署（見
 [deploy runbook](docs/runbooks/deploy.md)）；operator bootstrap 與 non-operator containment
