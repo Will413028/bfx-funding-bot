@@ -82,7 +82,10 @@ def translate_bfx_event(
             account_id=account_id,
             is_simulated=False,
             venue_seq=bfx_event.raw_seq,
-            occurred_at_ms=bfx_event.mts_update,
+            occurred_at_ms=(bfx_event.mts_last_payout
+                            if bfx_event.mts_last_payout is not None else bfx_event.mts_update),
+            mts_opening=bfx_event.mts_opening,
+            mts_last_payout=bfx_event.mts_last_payout,
         )
         return [closed], [], []
     if isinstance(bfx_event, FcuEvent):
