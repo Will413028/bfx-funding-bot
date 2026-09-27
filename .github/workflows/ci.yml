@@ -80,6 +80,19 @@ jobs:
             > "$RUNNER_TEMP/uninterpolated.json"
           docker compose -f deploy/vm/docker-compose.app.yml config --no-env-resolution --format json \
             | python3 deploy/vm/ops/compose_policy.py --uninterpolated "$RUNNER_TEMP/uninterpolated.json"
+      # The weekly-report job ships with the host tooling (bfx_weekly_report.py supplies
+      # these variables on the VM); same hardening, checked the same way.
+      - name: Compose hardening policy (weekly report)
+        env:
+          BFX_BACKEND_IMAGE: ghcr.io/ci/backend@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          BFX_BACKEND_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+          BFX_SOURCE_REVISION: ${{ github.sha }}
+          DATABASE_URL: postgresql://ci@bfx-postgres:5432/ci
+          BFX_EXCHANGE_ACCOUNT_ID: 00000000-0000-4000-8000-000000000000
+          BFX_DEPLOYMENT_ENV: prod
+        run: |
+          docker compose -f deploy/vm/ops/docker-compose.weekly-report.yml config --format json \
+            | python3 deploy/vm/ops/compose_policy.py --kind weekly-report
 
   backend_unit:
     name: Backend (Python) — unit
