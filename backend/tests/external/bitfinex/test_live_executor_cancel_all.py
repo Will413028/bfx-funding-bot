@@ -25,6 +25,7 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
     BitfinexLiveExecutor,
     classify_cancel_all_response,
 )
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
@@ -44,7 +45,7 @@ def _executor(handler) -> tuple[BitfinexLiveExecutor, httpx.AsyncClient]:
     return BitfinexLiveExecutor(
         http=http, event_sink=_Sink(), bus=DomainEventBus(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, configured_symbols=frozenset({"fUST"}),
-        cell="fUST_a30", nonce_provider=lambda: 1_700_000_000_000_001,
+        cell="fUST_a30", auth_gate=AuthRequestGate(lambda: 1_700_000_000_000_001),
     ), http
 
 

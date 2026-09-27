@@ -13,6 +13,7 @@ import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_ws import FocEvent
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
@@ -69,7 +70,7 @@ async def test_submit_then_foc_executed_completes_orderfilled_chain(
         http=http, event_sink=_EventCapture(), bus=bus,
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUSD"}), cell="C-1",
-        nonce_provider=lambda: 1000,
+        auth_gate=AuthRequestGate(lambda: 1000),
         date_provider=lambda: date(2026, 5, 22),
     )
 

@@ -27,9 +27,11 @@ from bfx_funding_bot.core.errors import (
     ExecutorFatalError,
     ExecutorTransientError,
 )
+from bfx_funding_bot.external.bitfinex.auth_rest import log_auth_http_error
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.external.bitfinex.funding_rules import RULE, validate_amount
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
@@ -208,10 +210,10 @@ class FundingCancelAllClient:
     Standalone so the kill path does not depend on the rest of the executor.
     """
 
-    def __init__(self, *, http: httpx.AsyncClient, nonce_provider: Callable[[], int],
+    def __init__(self, *, http: httpx.AsyncClient, auth_gate: AuthRequestGate,
                  base_url: str = BITFINEX_REST_BASE) -> None:
         self._http = http
-        self._nonce_provider = nonce_provider
+        self._auth_gate = auth_gate
         self._base_url = base_url.rstrip("/")
 
     async def cancel_all_funding_offers(
@@ -231,21 +233,24 @@ class FundingCancelAllClient:
 
     async def _call(self, currency: str, ctx: AccountContext) -> Any:
         body_bytes = json.dumps({"currency": currency}).encode("utf-8")
-        headers = sign_request(
-            body=body_bytes, nonce=self._nonce_provider(),
-            api_secret=ctx.credentials.api_secret,
-            path=_OFFER_CANCEL_ALL_PATH,
-        )
-        headers["bfx-apikey"] = ctx.credentials.api_key
-        headers["Content-Type"] = "application/json"
-        try:
-            resp = await self._http.post(
-                f"{self._base_url}/{_OFFER_CANCEL_ALL_PATH}",
-                content=body_bytes, headers=headers,
+        # Gate held per attempt (retries re-enter), released with the response.
+        async with self._auth_gate.nonce() as nonce:
+            headers = sign_request(
+                body=body_bytes, nonce=nonce,
+                api_secret=ctx.credentials.api_secret,
+                path=_OFFER_CANCEL_ALL_PATH,
             )
-        except httpx.HTTPError as exc:
-            raise classify_httpx_exception(exc) from exc
+            headers["bfx-apikey"] = ctx.credentials.api_key
+            headers["Content-Type"] = "application/json"
+            try:
+                resp = await self._http.post(
+                    f"{self._base_url}/{_OFFER_CANCEL_ALL_PATH}",
+                    content=body_bytes, headers=headers,
+                )
+            except httpx.HTTPError as exc:
+                raise classify_httpx_exception(exc) from exc
         if resp.status_code >= 400:
+            log_auth_http_error(resp, path=_OFFER_CANCEL_ALL_PATH, credentials=ctx.credentials)
             raise classify_httpx_response(resp)
         return resp.json()
 
@@ -314,7 +319,7 @@ class BitfinexLiveExecutor:
         strategy: StrategyName,
         configured_symbols: frozenset[str],
         cell: str,
-        nonce_provider: Callable[[], int] | None = None,
+        auth_gate: AuthRequestGate | None = None,
         date_provider: Callable[[], date] | None = None,
         base_url: str = BITFINEX_REST_BASE,
         clock: Callable[[], int] | None = None,
@@ -326,7 +331,8 @@ class BitfinexLiveExecutor:
         self._strategy = strategy
         self._configured_symbols = configured_symbols
         self._cell = cell
-        self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
+        # The daemon passes its one per-key gate; see nonce.AuthRequestGate.
+        self._auth_gate = auth_gate or AuthRequestGate()
         self._date_provider = date_provider or (lambda: date.today())
         self._base_url = base_url.rstrip("/")
         self._clock = clock or (lambda: int(time.time() * 1000))
@@ -382,117 +388,122 @@ class BitfinexLiveExecutor:
                 outcome=SubmitNotSent("invalid_submit_payload"),
             )
 
-        try:
-            payload = build_offer_payload(
-                symbol=decision.symbol,
-                amount_usdt=amount,
-                rate=rate,
-                period_days=period,
-            )
-            body_bytes = json.dumps(payload).encode("utf-8")
-            nonce = self._nonce_provider()
-            headers = sign_request(
-                body=body_bytes, nonce=nonce,
-                api_secret=ctx.credentials.api_secret,
-                path=_OFFER_SUBMIT_PATH,
-            )
-            headers["bfx-apikey"] = ctx.credentials.api_key
-            headers["Content-Type"] = "application/json"
-        except Exception:
-            # No request has been started, so this is a durable NOT_SENT result;
-            # the command gate may safely resolve the pre-transport intent.
-            return _order_from_outcome(
-                cid=cid,
-                reference=reference,
-                outcome=SubmitNotSent("local_validation_failed"),
-            )
+        # Hold the per-key gate from taking the nonce until the response (or
+        # failure) so this request reaches the venue in nonce order. Acquired
+        # before the final predicates below, because waiting for it is an
+        # await and none may separate those checks from starting the request.
+        # A submit can therefore wait behind one in-flight signed call.
+        async with self._auth_gate.nonce() as nonce:
+            try:
+                payload = build_offer_payload(
+                    symbol=decision.symbol,
+                    amount_usdt=amount,
+                    rate=rate,
+                    period_days=period,
+                )
+                body_bytes = json.dumps(payload).encode("utf-8")
+                headers = sign_request(
+                    body=body_bytes, nonce=nonce,
+                    api_secret=ctx.credentials.api_secret,
+                    path=_OFFER_SUBMIT_PATH,
+                )
+                headers["bfx-apikey"] = ctx.credentials.api_key
+                headers["Content-Type"] = "application/json"
+            except Exception:
+                # No request has been started, so this is a durable NOT_SENT result;
+                # the command gate may safely resolve the pre-transport intent.
+                return _order_from_outcome(
+                    cid=cid,
+                    reference=reference,
+                    outcome=SubmitNotSent("local_validation_failed"),
+                )
 
-        try:
-            validate_amount(amount, ready.funding_amount_evidence,
-                            symbol=decision.symbol, now_ms=self._clock())
-        except (ValueError, ArithmeticError):
-            return _order_from_outcome(cid=cid, reference=reference,
-                outcome=SubmitNotSent("funding_rule_or_amount_invalid"))
-        # Final synchronous predicates after payload/signing work. No await may
-        # separate the bound amount/book checks from starting the request.
-        if ctx.before_submit_transport is not None and not ctx.before_submit_transport():
-            return _order_from_outcome(cid=cid, reference=reference,
-                outcome=SubmitNotSent("decision_book_invalid_or_expired"))
-        transport_started = True
-        try:
-            resp = await self._http.post(
-                f"{self._base_url}/{_OFFER_SUBMIT_PATH}",
-                content=body_bytes, headers=headers,
-            )
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            # A failed response can contain an upstream echo of credentials or
-            # other sensitive data.  Keep only its digest for correlation; the
-            # typed classifier still receives the parsed body in-process.
-            body = e.response.text[:1000] if e.response is not None else ""
-            status = e.response.status_code if e.response is not None else None
-            parsed_body: Any = None
-            if e.response is not None:
-                parsed_body, _ = _response_json_or_text(e.response)
-            # Bitfinex answers a business rejection with a 5xx and states the
-            # reason in the body, so without these two fields a refusal and an
-            # outage produce the same line -- and telling them apart afterwards
-            # costs an operator adjudication. Only the shape-checked code and a
-            # bounded message are taken, and the message is dropped whole if it
-            # echoes either credential, which is the concern that put the rest
-            # of this response behind a digest.
-            venue = venue_error(parsed_body)
-            venue_code = venue[0] if venue is not None else None
-            venue_message = venue[1] if venue is not None else None
-            if venue_message is not None and (
-                ctx.credentials.api_key in venue_message
-                or ctx.credentials.api_secret in venue_message
-            ):
-                venue_message = "<redacted:credential_echo>"
-            log.warning(
-                "bitfinex_submit_http_error status=%s symbol=%s rate=%s amount=%s "
-                "venue_error_code=%s venue_error_message=%s response_digest=%s",
-                status,
-                payload["symbol"],
-                payload["rate"],
-                payload["amount"],
-                venue_code,
-                venue_message,
-                response_digest(body),
-            )
-            outcome = classify_submit_response(
-                status,
-                parsed_body,
-                transport_started,
-            )
-            return _order_from_outcome(
-                cid=cid,
-                reference=reference,
-                outcome=outcome,
-                raw_response={
-                    "http_status": status,
-                    "response_digest": response_digest(body),
-                },
-            )
-        except asyncio.CancelledError as e:
-            outcome = classify_submit_response(
-                None, None, transport_started, e,
-            )
-            return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
-        except httpx.HTTPError as e:
-            log.warning("bitfinex_submit_network_error symbol=%s err_type=%s", decision.symbol, type(e).__name__)
-            outcome = classify_submit_response(
-                None, None, transport_started, e,
-            )
-            return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
-        except Exception as e:
-            # A response parser/shape error after the request is sent is also
-            # UNKNOWN.  Never let it fall through to the old FAILED branch.
-            log.warning("bitfinex_submit_response_error symbol=%s err_type=%s", decision.symbol, type(e).__name__)
-            outcome = classify_submit_response(
-                None, None, transport_started, e,
-            )
-            return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
+            try:
+                validate_amount(amount, ready.funding_amount_evidence,
+                                symbol=decision.symbol, now_ms=self._clock())
+            except (ValueError, ArithmeticError):
+                return _order_from_outcome(cid=cid, reference=reference,
+                    outcome=SubmitNotSent("funding_rule_or_amount_invalid"))
+            # Final synchronous predicates after payload/signing work. No await may
+            # separate the bound amount/book checks from starting the request.
+            if ctx.before_submit_transport is not None and not ctx.before_submit_transport():
+                return _order_from_outcome(cid=cid, reference=reference,
+                    outcome=SubmitNotSent("decision_book_invalid_or_expired"))
+            transport_started = True
+            try:
+                resp = await self._http.post(
+                    f"{self._base_url}/{_OFFER_SUBMIT_PATH}",
+                    content=body_bytes, headers=headers,
+                )
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                # A failed response can contain an upstream echo of credentials or
+                # other sensitive data.  Keep only its digest for correlation; the
+                # typed classifier still receives the parsed body in-process.
+                body = e.response.text[:1000] if e.response is not None else ""
+                status = e.response.status_code if e.response is not None else None
+                parsed_body: Any = None
+                if e.response is not None:
+                    parsed_body, _ = _response_json_or_text(e.response)
+                # Bitfinex answers a business rejection with a 5xx and states the
+                # reason in the body, so without these two fields a refusal and an
+                # outage produce the same line -- and telling them apart afterwards
+                # costs an operator adjudication. Only the shape-checked code and a
+                # bounded message are taken, and the message is dropped whole if it
+                # echoes either credential, which is the concern that put the rest
+                # of this response behind a digest.
+                venue = venue_error(parsed_body)
+                venue_code = venue[0] if venue is not None else None
+                venue_message = venue[1] if venue is not None else None
+                if venue_message is not None and (
+                    ctx.credentials.api_key in venue_message
+                    or ctx.credentials.api_secret in venue_message
+                ):
+                    venue_message = "<redacted:credential_echo>"
+                log.warning(
+                    "bitfinex_submit_http_error status=%s symbol=%s rate=%s amount=%s "
+                    "venue_error_code=%s venue_error_message=%s response_digest=%s",
+                    status,
+                    payload["symbol"],
+                    payload["rate"],
+                    payload["amount"],
+                    venue_code,
+                    venue_message,
+                    response_digest(body),
+                )
+                outcome = classify_submit_response(
+                    status,
+                    parsed_body,
+                    transport_started,
+                )
+                return _order_from_outcome(
+                    cid=cid,
+                    reference=reference,
+                    outcome=outcome,
+                    raw_response={
+                        "http_status": status,
+                        "response_digest": response_digest(body),
+                    },
+                )
+            except asyncio.CancelledError as e:
+                outcome = classify_submit_response(
+                    None, None, transport_started, e,
+                )
+                return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
+            except httpx.HTTPError as e:
+                log.warning("bitfinex_submit_network_error symbol=%s err_type=%s", decision.symbol, type(e).__name__)
+                outcome = classify_submit_response(
+                    None, None, transport_started, e,
+                )
+                return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
+            except Exception as e:
+                # A response parser/shape error after the request is sent is also
+                # UNKNOWN.  Never let it fall through to the old FAILED branch.
+                log.warning("bitfinex_submit_response_error symbol=%s err_type=%s", decision.symbol, type(e).__name__)
+                outcome = classify_submit_response(
+                    None, None, transport_started, e,
+                )
+                return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
 
         try:
             parsed_body = resp.json()
@@ -597,7 +608,7 @@ class BitfinexLiveExecutor:
     ) -> FundingCancelAllResult:
         """Cancel every funding offer in ``currency`` (see :class:`FundingCancelAllClient`)."""
         return await FundingCancelAllClient(
-            http=self._http, nonce_provider=self._nonce_provider, base_url=self._base_url,
+            http=self._http, auth_gate=self._auth_gate, base_url=self._base_url,
         ).cancel_all_funding_offers(currency=currency, ctx=ctx)
 
     async def _cancel_http_call(
@@ -620,21 +631,24 @@ class BitfinexLiveExecutor:
             ) from e
         body = {"id": voi_int}
         body_bytes = json.dumps(body).encode("utf-8")
-        nonce = self._nonce_provider()
-        headers = sign_request(
-            body=body_bytes, nonce=nonce,
-            api_secret=ctx.credentials.api_secret,
-            path=_OFFER_CANCEL_PATH,
-        )
-        headers["bfx-apikey"] = ctx.credentials.api_key
-        headers["Content-Type"] = "application/json"
-        try:
-            resp = await self._http.post(
-                f"{self._base_url}/{_OFFER_CANCEL_PATH}",
-                content=body_bytes, headers=headers,
+        # Gate held per attempt (transient_retry re-enters), released with the
+        # response so the retry backoff never blocks other signed calls.
+        async with self._auth_gate.nonce() as nonce:
+            headers = sign_request(
+                body=body_bytes, nonce=nonce,
+                api_secret=ctx.credentials.api_secret,
+                path=_OFFER_CANCEL_PATH,
             )
-        except httpx.HTTPError as exc:
-            raise classify_httpx_exception(exc) from exc
+            headers["bfx-apikey"] = ctx.credentials.api_key
+            headers["Content-Type"] = "application/json"
+            try:
+                resp = await self._http.post(
+                    f"{self._base_url}/{_OFFER_CANCEL_PATH}",
+                    content=body_bytes, headers=headers,
+                )
+            except httpx.HTTPError as exc:
+                raise classify_httpx_exception(exc) from exc
         if resp.status_code >= 400:
+            log_auth_http_error(resp, path=_OFFER_CANCEL_PATH, credentials=ctx.credentials)
             raise classify_httpx_response(resp)
         return resp.json()

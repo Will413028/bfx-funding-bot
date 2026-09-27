@@ -23,6 +23,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
     FundingOfferHistoryCoverage,
 )
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
@@ -375,7 +376,7 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
             strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUST"}),
             cell="fault-cell",
-            nonce_provider=lambda: 1,
+            auth_gate=AuthRequestGate(lambda: 1),
             date_provider=lambda: date(2026, 9, 3),
         )
         gate = AccountCommandGate(
@@ -467,7 +468,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
                 strategy=StrategyName.RATE_PERCENTILE,
                 configured_symbols=frozenset({"fUST"}),
                 cell="fault-cell",
-                nonce_provider=lambda: 1,
+                auth_gate=AuthRequestGate(lambda: 1),
                 date_provider=lambda: date(2026, 9, 3),
             )
         gate = AccountCommandGate(

@@ -609,7 +609,14 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     # on the one BFX_API_KEY MUST draw from ONE monotonic nonce source. A separate
     # provider at a smaller scale (the old ms WS default vs µs REST) gets rejected
     # "nonce: small" and that client can never authenticate — regression guard.
-    assert daemon.auth_ws._nonce_provider is daemon.executor._nonce_provider  # type: ignore[attr-defined]
+    # Since 2026-09-27 the shared object is a gate that also serializes signed
+    # requests, so the auth REST reads must hold the SAME gate as the executor.
+    gate = daemon.executor._auth_gate  # type: ignore[attr-defined]
+    assert daemon.auth_ws._auth_gate is gate
+    assert daemon.interest_ledger_sync is not None
+    assert daemon.credit_history_sync is not None
+    assert daemon.interest_ledger_sync._rest._auth_gate is gate  # type: ignore[attr-defined]
+    assert daemon.credit_history_sync._rest._auth_gate is gate  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

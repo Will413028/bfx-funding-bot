@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
 from bfx_funding_bot.modules.execution.events import CancelRequested
@@ -103,7 +104,7 @@ async def test_submit_rechecks_original_book_after_local_signing_work(expiring):
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         executor = BitfinexLiveExecutor(http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
             phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
-            configured_symbols=frozenset({"fUST"}), cell="C-1", nonce_provider=nonce, clock=lambda: now)
+            configured_symbols=frozenset({"fUST"}), cell="C-1", auth_gate=AuthRequestGate(nonce), clock=lambda: now)
         ready = replace(_ready(_make_decision()),
                         funding_amount_evidence=evidence(now=-27900 if expiring == "fx" else 1000))
         result = await executor.submit(ready,
@@ -130,7 +131,7 @@ async def test_submit_returns_submitted_on_success() -> None:
         http=http, event_sink=_EventCapture(), bus=bus,
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
-        nonce_provider=lambda: 1000,
+        auth_gate=AuthRequestGate(lambda: 1000),
         date_provider=lambda: date(2026, 5, 22),
     )
 
@@ -150,7 +151,7 @@ async def test_submit_returns_unknown_on_http_5xx() -> None:
         http=http, event_sink=_EventCapture(), bus=bus,
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
-        nonce_provider=lambda: 1000,
+        auth_gate=AuthRequestGate(lambda: 1000),
         date_provider=lambda: date(2026, 5, 22),
     )
     result = await executor.submit(_ready(_make_decision()), _make_ctx())
@@ -172,7 +173,7 @@ async def test_submit_returns_unbound_failure_on_http_200_error() -> None:
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
-        nonce_provider=lambda: 1000, date_provider=lambda: date(2026, 5, 22),
+        auth_gate=AuthRequestGate(lambda: 1000), date_provider=lambda: date(2026, 5, 22),
     )
 
     result = await executor.submit(_ready(_make_decision()), _make_ctx())
@@ -208,7 +209,7 @@ async def test_submit_fixed_point_rate_serialization() -> None:
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
         configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
-        nonce_provider=lambda: 1000, date_provider=lambda: date(2026, 5, 22),
+        auth_gate=AuthRequestGate(lambda: 1000), date_provider=lambda: date(2026, 5, 22),
     )
     decision = DecisionPayload(
         decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
@@ -289,7 +290,7 @@ async def test_submit_routes_by_decision_symbol_not_constructor() -> None:
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
         cell="fUST_a30", configured_symbols=frozenset({"fUST"}),
-        nonce_provider=lambda: 1000, date_provider=lambda: date(2026, 5, 22),
+        auth_gate=AuthRequestGate(lambda: 1000), date_provider=lambda: date(2026, 5, 22),
     )
     decision = _make_decision(symbol="fUST")
     result = await ex.submit(_ready(decision), _make_ctx())
@@ -307,7 +308,7 @@ async def test_submit_marks_unconfigured_symbol_not_sent() -> None:
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30",
         configured_symbols=frozenset({"fUST"}),
-        nonce_provider=lambda: 1, date_provider=lambda: date(2026, 5, 22),
+        auth_gate=AuthRequestGate(lambda: 1), date_provider=lambda: date(2026, 5, 22),
     )
     result = await ex.submit(_ready(_make_decision(symbol="fUSD")), _make_ctx())
     assert result.status == "not_sent"
@@ -323,7 +324,7 @@ async def test_submit_marks_malformed_success_response_unknown() -> None:
     ex = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30",
-        configured_symbols=frozenset({"fUST"}), nonce_provider=lambda: 1,
+        configured_symbols=frozenset({"fUST"}), auth_gate=AuthRequestGate(lambda: 1),
         date_provider=lambda: date(2026, 5, 22),
     )
 
@@ -345,7 +346,7 @@ async def test_submit_failure_keeps_only_bounded_response_evidence() -> None:
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
         configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
-        nonce_provider=lambda: 1000, date_provider=lambda: date(2026, 5, 22),
+        auth_gate=AuthRequestGate(lambda: 1000), date_provider=lambda: date(2026, 5, 22),
     )
     result = await executor.submit(_ready(_make_decision()), _make_ctx())
     assert result.status == "unknown"
@@ -379,7 +380,7 @@ async def test_cancel_publishes_cancel_requested() -> None:
         http=http, event_sink=_EventCapture(), bus=bus,
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
-        nonce_provider=lambda: 1000,
+        auth_gate=AuthRequestGate(lambda: 1000),
         date_provider=lambda: date(2026, 5, 22),
     )
 
@@ -395,3 +396,43 @@ async def test_cancel_publishes_cancel_requested() -> None:
     assert captured[0].venue_offer_id == "42"
     assert captured[0].signal_correlation_id == sig_id
     assert captured[0].requested_at_ms > 0
+
+
+@pytest.mark.asyncio
+async def test_submit_waits_for_the_shared_gate_and_rechecks_after_it() -> None:
+    """A submit queued behind another signed call on the key neither signs nor
+    sends until that call is done, and its final book predicate runs after the
+    wait -- so a book that expired while waiting still blocks the send."""
+    import asyncio
+    from dataclasses import replace
+
+    requests: list[httpx.Request] = []
+    checks: list[bool] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=SUCCESS)
+
+    def predicate() -> bool:
+        checks.append(True)
+        return True
+
+    gate = AuthRequestGate()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        executor = BitfinexLiveExecutor(
+            http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
+            phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
+            configured_symbols=frozenset({"fUST"}), cell="C-1", auth_gate=gate,
+        )
+        ctx = replace(_make_ctx(), before_submit_transport=predicate)
+        async with gate.nonce() as held_nonce:
+            task = asyncio.ensure_future(executor.submit(_ready(_make_decision()), ctx))
+            for _ in range(20):
+                await asyncio.sleep(0)
+            assert requests == []
+            assert checks == []
+        result = await asyncio.wait_for(task, 1)
+    assert checks == [True]
+    assert len(requests) == 1
+    assert int(requests[0].headers["bfx-nonce"]) > held_nonce
+    assert result.outcome_kind is not SubmitOutcomeKind.NOT_SENT

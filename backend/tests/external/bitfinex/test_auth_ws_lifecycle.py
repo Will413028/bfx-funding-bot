@@ -13,6 +13,7 @@ from bfx_funding_bot.external.bitfinex.auth_ws import (
     AuthAck,
     BitfinexAuthWSClient,
 )
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.protocols import Credentials
 
 
@@ -56,7 +57,7 @@ async def test_auth_sends_auth_payload_on_connect(fake_bfx_ws_server: Any) -> No
     creds = Credentials(api_key="k", api_secret="s")
     client = BitfinexAuthWSClient(
         creds=creds, url=url, hb_timeout_s=10.0,
-        nonce_provider=lambda: 1000,
+        auth_gate=AuthRequestGate(lambda: 1000),
     )
 
     collected: list = []
@@ -81,7 +82,7 @@ async def test_auth_sends_auth_payload_on_connect(fake_bfx_ws_server: Any) -> No
 async def test_close_terminates_iterator(fake_bfx_ws_server: Any) -> None:
     _server_state, url = fake_bfx_ws_server
     creds = Credentials(api_key="k", api_secret="s")
-    client = BitfinexAuthWSClient(creds=creds, url=url, nonce_provider=lambda: 1000)
+    client = BitfinexAuthWSClient(creds=creds, url=url, auth_gate=AuthRequestGate(lambda: 1000))
 
     async def run() -> None:
         async for _ in client.events():
@@ -132,7 +133,7 @@ async def test_auth_ok_resets_reconnect_attempts() -> None:
     async with _serve("OK") as (_state, url):
         client = BitfinexAuthWSClient(
             creds=Credentials(api_key="k", api_secret="s"),
-            url=url, nonce_provider=lambda: 1000,
+            url=url, auth_gate=AuthRequestGate(lambda: 1000),
         )
         client.reconnect_attempts = 7  # simulate cumulative-since-boot climb
 
@@ -159,7 +160,7 @@ async def test_auth_failed_logs_loud_and_drops_into_backoff(
     async with _serve("FAILED") as (_state, url):
         client = BitfinexAuthWSClient(
             creds=Credentials(api_key="k", api_secret="s"),
-            url=url, nonce_provider=lambda: 1000,
+            url=url, auth_gate=AuthRequestGate(lambda: 1000),
         )
 
         async def run() -> None:
@@ -185,7 +186,7 @@ async def test_reconnect_count_increments_on_disconnect(fake_bfx_ws_server: Any)
     creds = Credentials(api_key="k", api_secret="s")
     client = BitfinexAuthWSClient(
         creds=creds, url=url, hb_timeout_s=0.5,
-        nonce_provider=lambda: 1000,
+        auth_gate=AuthRequestGate(lambda: 1000),
     )
 
     async def collect() -> None:
@@ -210,3 +211,28 @@ async def test_reconnect_count_increments_on_disconnect(fake_bfx_ws_server: Any)
     await client.close()
     with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_auth_handshake_waits_for_in_flight_signed_rest(fake_bfx_ws_server: Any) -> None:
+    """The handshake spends a nonce on the REST key: it must not be taken while
+    a signed REST call (smaller nonce) is still in flight, or that call would
+    arrive after it and be rejected "nonce: small"."""
+    server_state, url = fake_bfx_ws_server
+    gate = AuthRequestGate()
+    client = BitfinexAuthWSClient(
+        creds=Credentials(api_key="k", api_secret="s"), url=url, auth_gate=gate,
+    )
+
+    async def first_event() -> None:
+        async for _ in client.events():
+            return
+
+    async with gate.nonce():  # a REST request holding the gate
+        task = asyncio.create_task(first_event())
+        await asyncio.sleep(0.3)
+        assert server_state.auth_received is False
+    await asyncio.wait_for(task, timeout=3.0)
+    assert server_state.auth_received is True
+    assert not gate.busy
+    await client.close()

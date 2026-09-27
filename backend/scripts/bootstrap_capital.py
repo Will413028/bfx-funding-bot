@@ -27,7 +27,6 @@ from bfx_funding_bot.core.crypto import load_kek
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
-from bfx_funding_bot.external.bitfinex.nonce import make_monotonic_us_nonce
 from bfx_funding_bot.modules.accounts.vault import load_account_credentials
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery, _AuthRestQuery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
@@ -94,7 +93,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=15, trust_env=False) as http:
         return await bootstrap_snapshot(database_url=os.environ["DATABASE_URL"],
             account_id=args.account_id, environment=args.environment,
-            venue=BitfinexAuthREST(http=http, nonce_provider=make_monotonic_us_nonce()),
+            venue=BitfinexAuthREST(http=http),
             credentials=credentials, timeout_seconds=args.timeout_seconds)
 
 

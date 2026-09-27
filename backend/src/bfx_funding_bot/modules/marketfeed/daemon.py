@@ -49,7 +49,7 @@ from bfx_funding_bot.external.bitfinex.fill_tracker import (
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
 from bfx_funding_bot.external.bitfinex.funding_rules import FundingRules
 from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
-from bfx_funding_bot.external.bitfinex.nonce import make_monotonic_us_nonce
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.external.bitfinex.ws import (
@@ -1161,11 +1161,13 @@ async def build_daemon(
     account_id = account_bootstrap.account_id
     credentials = account_bootstrap.credentials
     account_ctx = account_bootstrap.to_context()
-    # ONE monotonic µs nonce shared by every auth client on this single API key.
+    # ONE µs nonce gate shared by every auth client on this single API key.
     # Bitfinex nonces are per-key across REST *and* WS, so mixed scales /
     # independent time-based providers get "nonce: small" rejections — that is
-    # what left the auth WS flapping. See external/bitfinex/nonce.py.
-    bfx_nonce = make_monotonic_us_nonce()
+    # what left the auth WS flapping — and concurrent signed requests must also
+    # ARRIVE in nonce order, so the gate serializes them. See
+    # external/bitfinex/nonce.py.
+    bfx_auth_gate = AuthRequestGate()
 
     # Phase 4.4c / 3a: PG event-store replaces Axiom replay at boot.
     # from_snapshot reads position_state + offer_claims from Postgres (written
@@ -1272,7 +1274,7 @@ async def build_daemon(
         cell=first_cell.cell_id,
         http=bitfinex_http,
         bus=bus,
-        nonce_provider=bfx_nonce,
+        auth_gate=bfx_auth_gate,
     )
     if not spec.is_simulated and capital_runtime is None:
         raise ConfigurationError("live executor requires applied capital runtime")
@@ -1371,7 +1373,7 @@ async def build_daemon(
     interest_ledger_sync: InterestLedgerSync | None = None
     credit_history_sync: CreditHistorySync | None = None
     if not spec.is_simulated:
-        auth_rest = BitfinexAuthREST(http=bitfinex_http, nonce_provider=bfx_nonce)
+        auth_rest = BitfinexAuthREST(http=bitfinex_http, auth_gate=bfx_auth_gate)
         # Realized income truth (ledger category 28), read-only: see interest_ledger.
         interest_ledger_sync = InterestLedgerSync(
             rest=auth_rest, ctx=account_ctx, session_factory=session_factory,
@@ -1920,7 +1922,7 @@ async def build_daemon(
     if spec.ws_client_enabled:
         auth_ws = BitfinexAuthWSClient(
             creds=credentials,
-            nonce_provider=bfx_nonce,
+            auth_gate=bfx_auth_gate,
             on_resync_needed=(
                 periodic_reconcile.request_resync
                 if periodic_reconcile is not None

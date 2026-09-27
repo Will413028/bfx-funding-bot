@@ -30,6 +30,7 @@ from websockets.asyncio.client import ClientConnection
 
 from bfx_funding_bot.external.bitfinex.errors import BitfinexShapeError
 from bfx_funding_bot.external.bitfinex.funding_offer_row import parse_funding_offer_row
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.protocols import Credentials
 
 log = logging.getLogger(__name__)
@@ -383,14 +384,14 @@ class BitfinexAuthWSClient:
         creds: Credentials,
         url: str = BITFINEX_AUTH_WS_URL,
         hb_timeout_s: float = 30.0,
-        nonce_provider: Callable[[], int] | None = None,
+        auth_gate: AuthRequestGate | None = None,
         on_disconnect: Callable[[str], None] | None = None,
         on_resync_needed: Callable[[str], None] | None = None,
     ) -> None:
         self._creds = creds
         self._url = url
         self._hb_timeout_s = hb_timeout_s
-        self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1000))
+        self._auth_gate = auth_gate or AuthRequestGate(lambda: int(time.time() * 1000))
         self._on_disconnect = on_disconnect
         self._on_resync_needed = on_resync_needed
         self._ws: ClientConnection | None = None
@@ -465,12 +466,22 @@ class BitfinexAuthWSClient:
                 # A reconnect: events during the gap were lost → resync the ledger.
                 # (First connection is covered by boot reconcile, so it fires nothing.)
                 self._fire_resync("reconnect")
-            auth = build_auth_payload(
-                api_key=self._creds.api_key,
-                api_secret=self._creds.api_secret,
-                nonce_ms=self._nonce_provider(),
-            )
-            await ws.send(json.dumps(auth))
+            # The handshake spends a nonce on the same key as the REST clients.
+            # Holding the shared gate while taking it and writing the frame
+            # means no signed REST call with a smaller nonce is still in flight,
+            # and every later one is signed with a larger nonce after this frame
+            # is on the wire -- so a REST call can never lose to the handshake.
+            # Not held until the AuthAck: the stream below yields to consumers
+            # that may themselves need the gate. The residual race (a later
+            # REST call overtaking this frame) can only fail the handshake,
+            # which is logged and retried with backoff.
+            async with self._auth_gate.nonce() as nonce:
+                auth = build_auth_payload(
+                    api_key=self._creds.api_key,
+                    api_secret=self._creds.api_secret,
+                    nonce_ms=nonce,
+                )
+                await ws.send(json.dumps(auth))
             await ws.send(json.dumps({"event": "conf", "flags": SEQ_ALL_FLAG}))
 
             async for raw in ws:
