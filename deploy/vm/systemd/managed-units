@@ -1,7 +1,10 @@
 # Units that deploy/vm/ops/install.sh (first install) and bfx-deploy (after each
 # successful deploy, from that release) copy into /etc/systemd/system and reload.
 # Never enabled, started or stopped by either: enabling a timer is an operator step.
-# The other unit files in this directory are installed by hand.
+# The other unit files in this directory are installed by hand. That includes
+# bfx-weekly-report.timer on purpose: its job (bfx-weekly-report.service) is managed
+# here, but installing a unit file replaces an operator's `systemctl mask` symlink,
+# and whether the weekly schedule runs at all is the operator's call.
 bfx-alert@.service
 bfx-deploy.service
 bfx-deploy.timer
@@ -13,3 +16,4 @@ bfx-pgbackrest-backup.service
 bfx-pgbackrest-backup.timer
 bfx-pgbackrest-status.service
 bfx-pgbackrest-status.timer
+bfx-weekly-report.service

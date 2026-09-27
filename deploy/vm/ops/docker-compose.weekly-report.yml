@@ -1,0 +1,95 @@
+# Weekly measurement chain (E3 + Proposal E research re-validation), run by
+# bfx-weekly-report.service through bfx_weekly_report.py from the deployed host
+# tooling release (/usr/local/lib/bfx-ops/current/ops), so every successful deploy
+# ships the job's steps with the rest of the tooling. Never run it with bare
+# `docker compose`; start the unit instead (docs/runbooks/operations.md §8).
+#
+#   docker compose -p bfx-weekly-report -f <release>/ops/docker-compose.weekly-report.yml \
+#     run --rm weekly-report
+#
+# Image: the backend digest of the ledger's newest `deployed` row, as a complete
+# `<repository>@sha256:<digest>` reference; never a tag, never built, never pulled
+# here (bfx-deploy already pulled it and keeps it until two releases later).
+#
+# Env: no env_file. The runner passes exactly the variables the steps read --
+# DATABASE_URL and BFX_EXCHANGE_ACCOUNT_ID from /opt/bfx/runtime/bot.env (the bot's
+# restricted role, never the migration owner), BFX_DEPLOYMENT_ENV from the deployed
+# revision's live.env -- so the rest of bot.env (vault KEK, admin token, Telegram)
+# never reaches this container. Values arrive through Compose interpolation of the
+# runner's own environment, which Compose substitutes literally.
+#
+# Hardening mirrors docker-compose.app.yml (read-only rootfs, UID 1000, all
+# capabilities dropped, no-new-privileges, loader/interpreter injection blanked);
+# the only writable paths are a small /tmp and the reports bind mount. CI renders
+# this file and enforces it with compose_policy.py --kind weekly-report.
+#
+# Steps: ① funding_stats forward-fill (AlwaysFRR arm data) ② attribution rows ③
+# realized interest ④ G3 report, then the research re-validation. Step ① failing
+# never blocks the rest (|| echo; attribution/G3 are fail-soft on missing data).
+
+name: bfx-weekly-report
+
+services:
+  weekly-report:
+    image: ${BFX_BACKEND_IMAGE:?BFX_BACKEND_IMAGE must be a repository@sha256 reference}
+    pull_policy: never
+    entrypoint: []
+    user: "1000:1000"
+    working_dir: /app
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      BFX_EXCHANGE_ACCOUNT_ID: ${BFX_EXCHANGE_ACCOUNT_ID:?BFX_EXCHANGE_ACCOUNT_ID is required}
+      BFX_DEPLOYMENT_ENV: ${BFX_DEPLOYMENT_ENV:?BFX_DEPLOYMENT_ENV is required}
+      BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
+      BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ""
+      PYTHONHOME: ""
+      PYTHONUSERBASE: ""
+      LD_PRELOAD: ""
+      LD_LIBRARY_PATH: ""
+      LD_AUDIT: ""
+    volumes:
+      # Must already exist and be writable by uid 1000 (image appuser); OCI ubuntu
+      # is uid 1001 -> one-time `sudo chown 1000:1001 ~/bfx/reports && chmod 775`
+      # on the VM, else the G3 report write dies on EACCES (bit us 2026-07-19).
+      # Never created by Docker: a root-owned stand-in would fail the same way. The
+      # runner also refuses when it is missing (Compose 2.38 omits a false
+      # create_host_path when rendering; see compose_policy.reports_mount_ok).
+      - type: bind
+        source: /home/ubuntu/bfx/reports
+        target: /reports
+        bind:
+          create_host_path: false
+    command:
+      - sh
+      - -c
+      - |
+        timeout 600 python -m scripts.ingest_funding_stats --symbols fUST,fUSD || echo "WARN ingest_funding_stats failed/timed out (frr arm may be stale — non-blocking)"
+        python -m scripts.run_weekly_attribution --out "/reports/$$(date +%F)-attribution-reconciliation.md"
+        python -m scripts.report_interest --out "/reports/$$(date +%F)-realized-interest.md" || echo "WARN report_interest failed (non-blocking)"
+        python -m scripts.run_g3_live_validation --out "/reports/$$(date +%F)-g3-live-validation.md"
+        # ── research re-validation (Proposal E, 2026-09-22): runs AFTER the operational
+        # report, every step fail-soft, nothing here promotes anything. Budget: see
+        # deploy/vm/systemd/bfx-weekly-report.service TimeoutStartSec.
+        timeout 900 python -m scripts.ingest_perp_funding --skip-binance || echo "WARN ingest_perp_funding failed/timed out (non-blocking)"
+        timeout 1200 python -m scripts.ingest_liquidations || echo "WARN ingest_liquidations failed/timed out (non-blocking)"
+        timeout 600 python -m scripts.learn_book_fill_rate || echo "WARN learn_book_fill_rate failed/timed out (non-blocking)"
+        timeout 600 python -m scripts.run_period_structure_backtest --fill-model book --output "/reports/$$(date +%F)-period-structure-book.md" || echo "WARN period-structure (book) failed (non-blocking)"
+        timeout 600 python -m scripts.run_period_structure_backtest --output "/reports/$$(date +%F)-period-structure-linear.md" || echo "WARN period-structure (linear) failed (non-blocking)"
+        timeout 600 python -m scripts.run_oos_profitability --output "/reports/$$(date +%F)-oos-profitability.md" || echo "WARN run_oos_profitability failed (non-blocking)"
+        python -m scripts.diff_research_report --kind period-structure --glob "/reports/*-period-structure-book.json" --out "/reports/$$(date +%F)-weekly-research-book.md" || echo "WARN diff (book) failed (non-blocking)"
+        python -m scripts.diff_research_report --kind oos --glob "/reports/*-oos-profitability.json" --out "/reports/$$(date +%F)-weekly-research-oos.md" || echo "WARN diff (oos) failed (non-blocking)"
+    networks:
+      bfx_default: {}
+
+networks:
+  bfx_default:
+    external: true
+    name: bfx_default
