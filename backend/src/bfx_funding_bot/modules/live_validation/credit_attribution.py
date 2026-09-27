@@ -6,23 +6,35 @@ and trade records (see ``credit_history``), so a credit repaid after 14 minutes
 earns 14 minutes, not 0 days (pre-fix CREDIT_CLOSED close time) or 2 days
 (held-to-term).
 
-Matching
-  credit -> trade: same symbol, amount, rate, period and MTS_CREATE (the venue
-  stamps a credit with its trade's creation time). Several credits sharing one
-  key are indistinguishable; they are paired with the key's trades by ascending
-  venue id. That pairing is arbitrary but harmless unless the trades lead to
-  different cells *and* the credits are not interchangeable (held for different
-  times, or unequal counts on the two sides); only then are the key's credits
-  marked ambiguous (still attributed, and counted in the report).
+Matching (credits and loans alike; both are lent money)
+  credit -> trade: by (symbol, period, MTS_OPENING) against trades with
+  MTS_CREATE == that opening. Rate, amount, id and MTS_CREATE are not keys:
+  the venue stores the credit's rate at more precision than the trade's
+  (0.0001239463 vs 0.00012395), and lent money first appears as a loan that
+  turns into one or more credits with new ids, new MTS_CREATE, split amounts
+  and sometimes another rate -- all keeping the trade's instant as
+  MTS_OPENING (live account, 2026-08-09 .. 09-22). Interest still uses each
+  record's own rate: that is what the venue pays.
+  group -> cell: when every trade at the instant leads to one cell (the usual
+  case), the whole group is that cell's. When they lead to different cells,
+  the group is allocated by amount conservation: round-robin exact subset
+  sums (each trade takes, per pass, the smallest set of remaining records
+  whose amounts add up to its own; passes repeat because the same money
+  appears once per loan/credit generation), and what is left is split
+  proportionally over the trades large enough to have produced it. Such a
+  group is marked ambiguous unless every record matched a trade on its own and
+  equal-sized records are interchangeable (same rate and lifetime).
   trade -> cell: the trade's OFFER_ID is the venue id of our offer, which the
-  loader resolves to the execution decision's cell. A credit without a trade,
+  loader resolves to the execution decision's cell. A group without a trade,
   or whose offer is not ours, goes to ``unattributed``.
 
 Accrual
-  held time = [MTS_OPENING, MTS_LAST_PAYOUT) for an ended credit and
-  [opening, now) for one still open, clipped to each calendar week, so a credit
-  spanning a week boundary is split between the weeks rather than booked to the
-  week it filled. gross = amount x rate x held days; net = gross x (1 - fee).
+  held time = [max(MTS_OPENING, MTS_CREATE), MTS_LAST_PAYOUT) for an ended
+  record and [start, now) for one still open, clipped to each calendar week,
+  so a credit spanning a week boundary is split between the weeks rather than
+  booked to the week it filled. A credit converted from a loan starts at its
+  own MTS_CREATE (the loan earned until then), so the pair is not counted
+  twice. gross = amount x rate x held days; net = gross x (1 - fee).
 
 Reconciliation
   The ledger pays each UTC day's interest in one payout at ~01:30Z the next
@@ -34,8 +46,9 @@ Reconciliation
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
+from itertools import combinations
 
 from bfx_funding_bot.external.bitfinex.auth_rest import LOAN_ID_PREFIX, InterestPayment
 from bfx_funding_bot.modules.live_validation.interest_ledger import MS_PER_DAY, funding_currency
@@ -53,6 +66,7 @@ RECONCILE_REL_TOL = Decimal("0.05")
 RECONCILE_ABS_TOL = Decimal("0.01")
 _ONE_MINUS_FEE = Decimal("1") - FEE_RATE
 _MS_PER_DAY = Decimal(MS_PER_DAY)
+_MAX_SUBSET_PIECES = 16   # exact subset search is 2^n; a larger group goes proportional
 
 
 @dataclass(frozen=True)
@@ -62,14 +76,20 @@ class CreditLifetime:
     amount: Decimal
     rate: Decimal            # per day
     period_days: int
-    mts_create: int
-    opened_ms: int           # venue MTS_OPENING
+    mts_create: int          # when this record came into existence
+    opened_ms: int           # venue MTS_OPENING: the originating trade's instant
     closed_ms: int | None    # venue MTS_LAST_PAYOUT; None while the credit is open
+
+    @property
+    def start_ms(self) -> int:
+        """When this record began to earn: a credit converted from a loan keeps
+        the loan's MTS_OPENING but exists only from its own MTS_CREATE."""
+        return max(self.opened_ms, self.mts_create)
 
     def held_ms(self, lo: int, hi: int, *, now_ms: int) -> int:
         """Milliseconds this credit was lent inside [lo, hi)."""
         end = self.closed_ms if self.closed_ms is not None else now_ms
-        return max(0, min(end, hi) - max(self.opened_ms, lo))
+        return max(0, min(end, hi) - max(self.start_ms, lo))
 
     def gross_interest(self, lo: int, hi: int, *, now_ms: int) -> Decimal:
         return self.amount * self.rate * Decimal(self.held_ms(lo, hi, now_ms=now_ms)) / _MS_PER_DAY
@@ -88,10 +108,25 @@ class TradeRecord:
 
 @dataclass(frozen=True)
 class CreditCells:
-    cell_by_credit: dict[str, str]
-    without_trade: frozenset[str]    # no funding trade shares the credit's key
-    foreign_offer: frozenset[str]    # trade found, offer not resolvable to a cell
-    ambiguous: frozenset[str]        # pairing within a shared key could change the cell
+    cell_by_credit: dict[str, str]   # the cell holding the largest share
+    without_trade: frozenset[str]    # no funding trade at the credit's opening
+    foreign_offer: frozenset[str]    # (part of) its trades' offers resolve to no cell
+    ambiguous: frozenset[str]        # its group's split between cells is a choice
+    # Fraction per cell (sums to 1) of each credit split between cells; any
+    # other credit belongs wholly to ``cell_by_credit``.
+    shares: dict[str, dict[str, Decimal]] = field(default_factory=dict)
+    # Fills (trades) per (cell, opening instant), for the weekly fill count; a
+    # group without a trade is one fill of ``unattributed``.
+    fills: dict[tuple[str, int], int] = field(default_factory=dict)
+
+    def share_of(self, credit_id: str) -> Mapping[str, Decimal]:
+        split = self.shares.get(credit_id)
+        if split is not None:
+            return split
+        return {self.cell_by_credit.get(credit_id, UNATTRIBUTED): Decimal(1)}
+
+
+NO_CELLS = CreditCells({}, frozenset(), frozenset(), frozenset())
 
 
 def _id_order(credit_id: str) -> tuple[bool, int]:
@@ -99,8 +134,35 @@ def _id_order(credit_id: str) -> tuple[bool, int]:
     return is_loan, int(credit_id.removeprefix(LOAN_ID_PREFIX))
 
 
-def _key(symbol: str, amount: Decimal, rate: Decimal, period: int, mts: int) -> tuple[object, ...]:
-    return (symbol, amount, rate, period, mts)
+def _exact_subsets(
+    trades: Sequence[TradeRecord], pieces: Sequence[CreditLifetime],
+) -> tuple[dict[str, int], list[CreditLifetime]]:
+    """Round-robin exact-sum matching of records to trades.
+
+    Each pass gives every trade (ascending id) one subset of the remaining
+    records whose amounts sum exactly to the trade's -- smallest subset first,
+    then lowest ids. Passes repeat, because one trade's money appears once per
+    generation (a loan, then the credits it turned into). Returns record id ->
+    trade index, and the records left over.
+    """
+    remaining = list(pieces)
+    owner: dict[str, int] = {}
+    if len(remaining) > _MAX_SUBSET_PIECES:
+        return owner, remaining
+    progressed = True
+    while progressed and remaining:
+        progressed = False
+        for i, trade in enumerate(trades):
+            found = next((combo for size in range(1, len(remaining) + 1)
+                          for combo in combinations(remaining, size)
+                          if sum((p.amount for p in combo), Decimal(0)) == trade.amount), None)
+            if found is None:
+                continue
+            for p in found:
+                owner[p.credit_id] = i
+                remaining.remove(p)
+            progressed = True
+    return owner, remaining
 
 
 def assign_cells(
@@ -108,64 +170,101 @@ def assign_cells(
     trades: Iterable[TradeRecord],
     offer_cells: Mapping[str, str],
 ) -> CreditCells:
-    credits_by_key: dict[tuple[object, ...], list[CreditLifetime]] = {}
+    """Credits and loans -> cells, one (symbol, period, MTS_OPENING) group at a time."""
+    groups: dict[tuple[str, int, int], list[CreditLifetime]] = {}
     for c in credits:
-        credits_by_key.setdefault(
-            _key(c.symbol, c.amount, c.rate, c.period_days, c.mts_create), []).append(c)
-    trades_by_key: dict[tuple[object, ...], list[TradeRecord]] = {}
+        groups.setdefault((c.symbol, c.period_days, c.opened_ms), []).append(c)
+    trades_at: dict[tuple[str, int, int], list[TradeRecord]] = {}
     for t in trades:
-        trades_by_key.setdefault(
-            _key(t.symbol, t.amount, t.rate, t.period_days, t.mts_create), []).append(t)
+        trades_at.setdefault((t.symbol, t.period_days, t.mts_create), []).append(t)
 
     cell_by_credit: dict[str, str] = {}
+    shares: dict[str, dict[str, Decimal]] = {}
+    fills: dict[tuple[str, int], int] = {}
     without_trade: set[str] = set()
     foreign: set[str] = set()
     ambiguous: set[str] = set()
-    for key, group in credits_by_key.items():
+    for key, group in groups.items():
         group.sort(key=lambda c: _id_order(c.credit_id))
-        matched = sorted(trades_by_key.get(key, []), key=lambda t: t.trade_id)
+        ids = [c.credit_id for c in group]
+        opening = key[2]
+        matched = sorted(trades_at.get(key, []), key=lambda t: t.trade_id)
+        if not matched:
+            without_trade.update(ids)
+            cell_by_credit.update(dict.fromkeys(ids, UNATTRIBUTED))
+            fills[(UNATTRIBUTED, opening)] = fills.get((UNATTRIBUTED, opening), 0) + 1
+            continue
         cells = [offer_cells.get(t.offer_id) for t in matched]
-        for i, credit in enumerate(group):
-            if i >= len(matched):
-                without_trade.add(credit.credit_id)
-                cell_by_credit[credit.credit_id] = UNATTRIBUTED
-                continue
-            cell = cells[i]
-            if cell is None:
-                foreign.add(credit.credit_id)
-            cell_by_credit[credit.credit_id] = cell or UNATTRIBUTED
-        # Swapping partners matters only if the trades lead to different cells
-        # and the credits are not interchangeable (held differently, or a
-        # partner is missing on one side).
-        if len(matched) > 1 and len({c or UNATTRIBUTED for c in cells}) > 1 and (
-                len(group) != len(matched)
-                or len({(c.opened_ms, c.closed_ms) for c in group}) > 1):
-            ambiguous.update(c.credit_id for c in group)
+        outcome = [cell or UNATTRIBUTED for cell in cells]
+        for cell in outcome:
+            fills[(cell, opening)] = fills.get((cell, opening), 0) + 1
+        if len(set(outcome)) == 1:
+            # Every trade at this instant leads to the same place: the group is
+            # that cell's money, whatever loan/credit shape it has taken since.
+            cell_by_credit.update(dict.fromkeys(ids, outcome[0]))
+            if cells[0] is None:
+                foreign.update(ids)
+            continue
+        owner, leftovers = _exact_subsets(matched, group)
+        for c in group:
+            if c.credit_id in owner:
+                via = [owner[c.credit_id]]
+                split = {outcome[via[0]]: Decimal(1)}
+            else:
+                # Proportional over the trades large enough to have produced it.
+                via = [i for i, t in enumerate(matched) if t.amount >= c.amount] or list(
+                    range(len(matched)))
+                total = sum((matched[i].amount for i in via), Decimal(0))
+                split = {}
+                for i in via:
+                    split[outcome[i]] = split.get(outcome[i], Decimal(0)) + matched[i].amount / total
+            cell_by_credit[c.credit_id] = min(split, key=lambda cell: (-split[cell], cell))
+            if len(split) > 1:
+                shares[c.credit_id] = split
+            if any(cells[i] is None for i in via):
+                foreign.add(c.credit_id)
+        # Unambiguous only when each trade took at most one record, on its own,
+        # and records of equal amount are interchangeable (same rate and life).
+        per_trade = [sum(1 for i in owner.values() if i == n) for n in range(len(matched))]
+        alike: dict[Decimal, set[tuple[object, ...]]] = {}
+        for c in group:
+            alike.setdefault(c.amount, set()).add((c.rate, c.start_ms, c.closed_ms))
+        if leftovers or max(per_trade) > 1 or any(len(v) > 1 for v in alike.values()):
+            ambiguous.update(ids)
     return CreditCells(cell_by_credit, frozenset(without_trade), frozenset(foreign),
-                       frozenset(ambiguous))
+                       frozenset(ambiguous), shares, fills)
 
 
 def weekly_totals(
     credits: Iterable[CreditLifetime],
-    cell_by_credit: Mapping[str, str],
+    cells: CreditCells,
     *,
     now_ms: int,
 ) -> dict[str, dict[int, CellWeekTotals]]:
-    """Per cell, per calendar week: credits opened, capital-days and gross interest."""
+    """Per cell, per calendar week: fills opened, capital-days and gross interest.
+
+    A fill is counted once in the week of its opening however many loans and
+    credits it became; a credit split between cells adds its share to each."""
     acc: dict[str, dict[int, list[Decimal]]] = {}
+    counted: set[tuple[str, int]] = set()
     for c in credits:
-        weeks = acc.setdefault(cell_by_credit.get(c.credit_id, UNATTRIBUTED), {})
-        weeks.setdefault(calendar_week_start(c.opened_ms), [Decimal(0)] * 3)[0] += 1
+        opened_wk = calendar_week_start(c.opened_ms)
         end = c.closed_ms if c.closed_ms is not None else now_ms
-        wk = calendar_week_start(c.opened_ms)
-        while wk < end:
-            held = c.held_ms(wk, wk + WEEK_MS, now_ms=now_ms)
-            if held > 0:
-                slot = weeks.setdefault(wk, [Decimal(0)] * 3)
-                days = Decimal(held) / _MS_PER_DAY
-                slot[1] += c.amount * days
-                slot[2] += c.amount * c.rate * days
-            wk += WEEK_MS
+        for cell, share in cells.share_of(c.credit_id).items():
+            weeks = acc.setdefault(cell, {})
+            slot = weeks.setdefault(opened_wk, [Decimal(0)] * 3)
+            if (cell, c.opened_ms) not in counted:
+                counted.add((cell, c.opened_ms))
+                slot[0] += cells.fills.get((cell, c.opened_ms), 1)
+            wk = opened_wk
+            while wk < end:
+                held = c.held_ms(wk, wk + WEEK_MS, now_ms=now_ms)
+                if held > 0:
+                    slot = weeks.setdefault(wk, [Decimal(0)] * 3)
+                    capital = c.amount * share * Decimal(held) / _MS_PER_DAY
+                    slot[1] += capital
+                    slot[2] += capital * c.rate
+                wk += WEEK_MS
     return {
         cell: {wk: CellWeekTotals(int(v[0]), v[1], v[2]) for wk, v in weeks.items()}
         for cell, weeks in acc.items()
