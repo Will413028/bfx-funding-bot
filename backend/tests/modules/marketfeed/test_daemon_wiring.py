@@ -263,9 +263,6 @@ _DEPLOYMENT_ID = "11111111-2222-4333-8444-555555555555"
 @pytest.mark.parametrize("deploy_env", [
     {"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
      "BFX_DEPLOYMENT_ID": _DEPLOYMENT_ID},
-    # The previous bfx-deploy still injects a class; it means nothing now.
-    {"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
-     "BFX_CHANGE_CLASS": "material", "BFX_DEPLOYMENT_ID": _DEPLOYMENT_ID},
     {},  # no deploy identity: still no change to trading, audit says "unidentified"
 ])
 async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, httpx_mock, deploy_env):
@@ -283,7 +280,7 @@ async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, 
     for name in list(os.environ):
         if name.startswith("BFX_CANARY_") or name in (
             "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
-            "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_CHANGE_CLASS", "BFX_DEPLOYMENT_ID",
+            "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_DEPLOYMENT_ID",
         ):
             monkeypatch.delenv(name)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
