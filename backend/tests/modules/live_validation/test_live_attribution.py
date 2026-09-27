@@ -1,100 +1,63 @@
+"""Pure G3 attribution: arms, deployment check and the four-state verdict.
+
+The active arm reads venue credits (credit_attribution.CreditLifetime). Real
+numbers from the live account (2026-09-25..27): credit 466642176, 150.76884612
+fUST at 0.00019999/day, repaid after 842 s (14 min); expired credit 466451710
+at 0.0001482, held 2 days (09-22 18:08:30Z .. 09-24 18:08:31Z).
+"""
 from dataclasses import FrozenInstanceError
 from decimal import Decimal
 
 import pytest
 
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
+from bfx_funding_bot.modules.live_validation.credit_attribution import CreditLifetime
 from bfx_funding_bot.modules.live_validation.live_attribution import (
     FRR_ANNUALIZATION,
     MS_PER_DAY,
-    ClampDiagnostic,
-    CreditCloseRecord,
-    DeploymentAnchorResult,
-    FillRecord,
+    DeploymentCheck,
     FrrBenchmark,
     G3Verdict,
     MarketRatePoint,
-    NavAnchorResult,
     VerdictState,
-    apply_credit_closes,
     assert_market_rate_band,
     attribute_active,
     attribute_idle,
     attribute_passive,
-    cell_period_days,
-    check_deployment_anchor,
-    check_nav_anchor,
-    clamp_active_window,
+    credit_capital_days,
     decide_verdict,
-    fill_duration_days,
     frr_points_from_stats,
-    open_principal_at,
-    weekly_window_bounds,
+    peak_open_principal,
 )
 
 WEEK = 7 * 24 * 60 * 60 * 1000
+DAY = 24 * 60 * 60 * 1000
 C = Decimal("570")
 
-# ---------------------------------------------------------------------------
-# Task 1: scaffold — FillRecord / MarketRatePoint / cell_period_days
-# ---------------------------------------------------------------------------
+AMOUNT = Decimal("150.76884612")
+RATE = Decimal("0.00019999")
+CREATED = 1790350246000        # 2026-09-25 15:30:46Z
+REPAID = 1790351088000         # + 842 s
+EXPIRED_OPEN = 1790100510000   # 466451710: 2026-09-22 18:08:30Z
+EXPIRED_CLOSE = 1790273311000  # last payout 09-24 18:08:31Z (its expiry)
+EXPIRED_RATE = Decimal("0.0001482")
+MON = 1789948800000            # 2026-09-21, the calendar week both fall in
 
 
-def test_cell_period_days_p2_is_two():
-    assert cell_period_days("p2", Decimal("30")) == Decimal("2")
+def _credit(credit_id: str, opened: int, closed: int | None, *, amount: Decimal = AMOUNT,
+            rate: Decimal = RATE) -> CreditLifetime:
+    return CreditLifetime(credit_id=credit_id, symbol="fUST", amount=amount, rate=rate,
+                          period_days=2, mts_create=opened, opened_ms=opened, closed_ms=closed)
 
 
-def test_cell_period_days_a30_uses_avg_period():
-    assert cell_period_days("a30", Decimal("27.5")) == Decimal("27.5")
-
-
-def test_cell_period_days_unknown_raises():
-    with pytest.raises(ValueError, match="unknown period_agg"):
-        cell_period_days("p7", Decimal("30"))
-
-
-def test_fillrecord_is_frozen():
-    f = FillRecord(
-        venue_offer_id="1",
-        fill_ts_ms=0,
-        size_usdt=Decimal("100"),
-        rate=Decimal("0.0003"),
-        period_days=Decimal("2"),
-        release_ts_ms=None,
-    )
-    with pytest.raises(FrozenInstanceError):
-        f.size_usdt = Decimal("200")  # type: ignore[misc]
+EARLY = _credit("466642176", CREATED, REPAID)
+EXPIRED = _credit("466451710", EXPIRED_OPEN, EXPIRED_CLOSE, rate=EXPIRED_RATE)
 
 
 def test_marketratepoint_is_frozen():
     p = MarketRatePoint(mts=0, rate=Decimal("0.0002"))
     with pytest.raises(FrozenInstanceError):
         p.rate = Decimal("0.9")  # type: ignore[misc]
-
-
-# ---------------------------------------------------------------------------
-# Task 2: weekly_window_bounds
-# ---------------------------------------------------------------------------
-
-
-def test_weekly_window_bounds_exact_two_weeks():
-    bounds = weekly_window_bounds(0, 2 * WEEK)
-    assert bounds == [(0, WEEK), (WEEK, 2 * WEEK)]
-
-
-def test_weekly_window_bounds_partial_trailing_week():
-    bounds = weekly_window_bounds(0, WEEK + 100)
-    assert bounds == [(0, WEEK), (WEEK, WEEK + 100)]
-
-
-def test_weekly_window_bounds_single_short_span():
-    bounds = weekly_window_bounds(1000, 5000)
-    assert bounds == [(1000, 5000)]
-
-
-def test_weekly_window_bounds_empty_when_end_le_start():
-    assert weekly_window_bounds(5000, 5000) == []
-    assert weekly_window_bounds(5000, 4000) == []
 
 
 # ---------------------------------------------------------------------------
@@ -174,92 +137,80 @@ def test_assert_market_rate_band_just_outside_boundaries_trip():
 
 
 # ---------------------------------------------------------------------------
-# Task 4: attribute_active
+# attribute_active: venue credits × actual held time, clipped per window
 # ---------------------------------------------------------------------------
 
 
-def _fill(ts, size, rate, period, release=None):
-    return FillRecord(
-        venue_offer_id=str(ts),
-        fill_ts_ms=ts,
-        size_usdt=Decimal(size),
-        rate=Decimal(rate),
-        period_days=Decimal(period),
-        release_ts_ms=release,
-    )
-
-
-def test_attribute_active_held_to_term():
-    fills = [_fill(1000, "570", "0.0003", "2")]
-    out = attribute_active(fills, capital=C, window_bounds=[(0, WEEK)])
+def test_attribute_active_early_repaid_credit_earns_its_fourteen_minutes():
+    """Regression: the fill model booked 466642176 as 2 days held-to-term; the
+    venue says it was lent 842 s."""
+    out = attribute_active([EARLY], capital=C, window_bounds=[(MON, MON + WEEK)],
+                           now_ms=MON + 2 * WEEK)
+    fourteen_min = AMOUNT * RATE * Decimal(842_000) / MS_PER_DAY
+    assert out[0].net_monthly == fourteen_min / C * Decimal("100")
+    held_to_term = AMOUNT * RATE * Decimal("2")
+    assert out[0].net_monthly < held_to_term / C * Decimal("100") / Decimal("200")
     assert out[0].n_trades == 1
-    expected = Decimal("570") * Decimal("0.0003") * Decimal("2") / C * Decimal("100")
-    assert out[0].net_monthly == expected
-    assert out[0].fill_rate == Decimal("0.0003")
+    assert out[0].fill_rate == RATE
 
 
-def test_attribute_active_release_caps_duration():
-    one_day = 24 * 60 * 60 * 1000
-    fills = [_fill(0, "570", "0.0003", "2", release=one_day)]
-    out = attribute_active(fills, capital=C, window_bounds=[(0, WEEK)])
-    expected = Decimal("570") * Decimal("0.0003") * Decimal("1") / C * Decimal("100")
-    assert out[0].net_monthly == expected
+def test_attribute_active_expired_credit_earns_its_two_days():
+    out = attribute_active([EXPIRED], capital=C, window_bounds=[(MON, MON + WEEK)],
+                           now_ms=MON + 2 * WEEK)
+    held = Decimal(EXPIRED_CLOSE - EXPIRED_OPEN) / MS_PER_DAY   # 2 days + 1 s
+    assert out[0].net_monthly == AMOUNT * EXPIRED_RATE * held / C * Decimal("100")
 
 
-def test_attribute_active_release_longer_than_period_uses_period():
-    five_days = 5 * 24 * 60 * 60 * 1000
-    fills = [_fill(0, "570", "0.0003", "2", release=five_days)]
-    out = attribute_active(fills, capital=C, window_bounds=[(0, WEEK)])
-    expected = Decimal("570") * Decimal("0.0003") * Decimal("2") / C * Decimal("100")
-    assert out[0].net_monthly == expected
+def test_attribute_active_splits_a_credit_across_windows():
+    """A credit is booked where it was held, not whole to the window it opened in."""
+    mid = EXPIRED_OPEN + DAY
+    out = attribute_active([EXPIRED], capital=C,
+                           window_bounds=[(MON, mid), (mid, MON + WEEK)], now_ms=MON + WEEK)
+    first = AMOUNT * EXPIRED_RATE * Decimal(DAY) / MS_PER_DAY
+    second = AMOUNT * EXPIRED_RATE * Decimal(EXPIRED_CLOSE - mid) / MS_PER_DAY
+    assert [o.net_monthly for o in out] == [first / C * 100, second / C * 100]
+    assert [o.n_trades for o in out] == [1, 1]
 
 
-def test_attribute_active_multiple_fills_one_window():
-    fills = [_fill(100, "200", "0.0003", "2"), _fill(200, "300", "0.0005", "2")]
-    out = attribute_active(fills, capital=C, window_bounds=[(0, WEEK)])
-    interest = (
-        Decimal("200") * Decimal("0.0003") * Decimal("2")
-        + Decimal("300") * Decimal("0.0005") * Decimal("2")
-    )
-    assert out[0].net_monthly == interest / C * Decimal("100")
-    assert out[0].n_trades == 2
-    assert out[0].fill_rate == (Decimal("0.0003") + Decimal("0.0005")) / Decimal("2")
+def test_attribute_active_open_credit_accrues_until_now():
+    open_credit = _credit("9", CREATED, None)
+    now = CREATED + DAY // 2
+    out = attribute_active([open_credit], capital=C, window_bounds=[(MON, MON + WEEK)],
+                           now_ms=now)
+    assert out[0].net_monthly == AMOUNT * RATE * Decimal("0.5") / C * Decimal("100")
 
 
-def test_attribute_active_zero_fill_window_is_idle():
-    out = attribute_active([], capital=C, window_bounds=[(0, WEEK)])
-    assert out[0].net_monthly == Decimal("0")
-    assert out[0].n_trades == 0
-    assert out[0].fill_rate == Decimal("0")
+def test_attribute_active_fill_rate_is_capital_weighted():
+    out = attribute_active([EARLY, EXPIRED], capital=C, window_bounds=[(MON, MON + WEEK)],
+                           now_ms=MON + WEEK)
+    days = credit_capital_days([EARLY, EXPIRED], MON, MON + WEEK, now_ms=MON + WEEK)
+    interest = out[0].net_monthly * C / Decimal("100")
+    assert out[0].fill_rate == interest / days
+    assert EXPIRED_RATE < out[0].fill_rate < RATE
+
+
+def test_attribute_active_per_window_capital():
+    basis = {(0, WEEK): Decimal("100"), (WEEK, 2 * WEEK): Decimal("200")}
+    credit = _credit("1", 0, 2 * WEEK, amount=Decimal("100"), rate=Decimal("0.001"))
+    out = attribute_active([credit], capital=lambda lo, hi: basis[(lo, hi)],
+                           window_bounds=list(basis), now_ms=2 * WEEK)
+    assert out[0].net_monthly == Decimal("0.7") * 100 / 100
+    assert out[1].net_monthly == Decimal("0.7") * 100 / 200
+
+
+def test_attribute_active_no_credit_window_is_idle():
+    out = attribute_active([], capital=C, window_bounds=[(0, WEEK)], now_ms=WEEK)
+    assert (out[0].net_monthly, out[0].n_trades, out[0].fill_rate) == (0, 0, 0)
 
 
 def test_attribute_active_zero_capital_raises():
     with pytest.raises(ValueError, match="capital must be positive"):
-        attribute_active([], capital=Decimal("0"), window_bounds=[(0, WEEK)])
+        attribute_active([], capital=Decimal("0"), window_bounds=[(0, WEEK)], now_ms=WEEK)
 
 
-def test_attribute_active_routes_fill_to_correct_window():
-    f1 = _fill(100, "570", "0.0003", "2")            # window 1
-    f2 = _fill(WEEK + 100, "570", "0.0003", "2")     # window 2
-    out = attribute_active([f1, f2], capital=C, window_bounds=[(0, WEEK), (WEEK, 2 * WEEK)])
-    assert out[0].n_trades == 1
-    assert out[1].n_trades == 1
-
-
-def test_attribute_active_fill_outside_all_windows_ignored():
-    f = _fill(3 * WEEK, "570", "0.0003", "2")
-    out = attribute_active([f], capital=C, window_bounds=[(0, WEEK), (WEEK, 2 * WEEK)])
-    assert all(o.n_trades == 0 for o in out)
-
-
-def test_attribute_active_clamps_overlap_over_cap():
-    # 4 fills, 250 each = 1000 concurrent > 570 cap, same window, same span.
-    fills = [_fill(0, "250", "0.0003", "2") for _ in range(4)]
-    out = attribute_active(fills, capital=C, window_bounds=[(0, WEEK)])
-    raw = Decimal("4") * (Decimal("250") * Decimal("0.0003") * Decimal("2"))
-    clamped = raw * (C / Decimal("1000"))
-    assert out[0].net_monthly == clamped / C * Decimal("100")
-    assert out[0].n_trades == 4  # n_trades unchanged: count by fill_ts
+def test_attribute_active_credit_outside_all_windows_ignored():
+    out = attribute_active([EARLY], capital=C, window_bounds=[(0, WEEK)], now_ms=REPAID)
+    assert out[0].n_trades == 0 and out[0].net_monthly == 0
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +231,7 @@ def test_attribute_idle_aligns_with_active_month_mts():
     # bot-vs-idle relies on attribute_idle aligning 1:1 by month_mts with
     # attribute_active so paired_active_returns can subtract arm-by-arm.
     bounds = [(0, WEEK), (WEEK, 2 * WEEK)]
-    active = attribute_active([], capital=C, window_bounds=bounds)
+    active = attribute_active([], capital=C, window_bounds=bounds, now_ms=2 * WEEK)
     idle = attribute_idle(window_bounds=bounds)
     assert [o.month_mts for o in active] == [o.month_mts for o in idle]
 
@@ -290,89 +241,7 @@ def test_attribute_idle_empty_bounds():
 
 
 # ---------------------------------------------------------------------------
-# Task 5: deployment anchor
-# ---------------------------------------------------------------------------
-
-
-def test_deployment_anchor_within_tolerance():
-    r = check_deployment_anchor(
-        attributed_deployed=Decimal("300"),
-        observed_realized=Decimal("310"),
-        tol=Decimal("0.05"),
-    )
-    assert isinstance(r, DeploymentAnchorResult)
-    assert r.within_tolerance is True
-    assert r.relative_divergence == abs(Decimal("300") - Decimal("310")) / Decimal("310")
-
-
-def test_deployment_anchor_beyond_tolerance():
-    r = check_deployment_anchor(
-        attributed_deployed=Decimal("300"),
-        observed_realized=Decimal("100"),
-        tol=Decimal("0.05"),
-    )
-    assert r.within_tolerance is False
-
-
-def test_deployment_anchor_zero_observed_is_within_when_attributed_zero():
-    r = check_deployment_anchor(
-        attributed_deployed=Decimal("0"),
-        observed_realized=Decimal("0"),
-        tol=Decimal("0.05"),
-    )
-    assert r.within_tolerance is True
-    assert r.relative_divergence == Decimal("0")
-
-
-def test_deployment_anchor_zero_observed_nonzero_attributed_diverges():
-    r = check_deployment_anchor(
-        attributed_deployed=Decimal("50"),
-        observed_realized=Decimal("0"),
-        tol=Decimal("0.05"),
-    )
-    assert r.within_tolerance is False
-
-
-# ---------------------------------------------------------------------------
-# Task 6: NAV anchor
-# ---------------------------------------------------------------------------
-
-
-def test_nav_anchor_unavailable():
-    r = check_nav_anchor(
-        nav_delta=None, attributed_interest=Decimal("1.0"), tol=Decimal("0.1")
-    )
-    assert isinstance(r, NavAnchorResult)
-    assert r.available is False
-    assert r.within_tolerance is True
-
-
-def test_nav_anchor_within_tolerance():
-    r = check_nav_anchor(
-        nav_delta=Decimal("1.05"), attributed_interest=Decimal("1.0"), tol=Decimal("0.1")
-    )
-    assert r.available is True
-    assert r.within_tolerance is True
-
-
-def test_nav_anchor_beyond_tolerance():
-    r = check_nav_anchor(
-        nav_delta=Decimal("2.0"), attributed_interest=Decimal("1.0"), tol=Decimal("0.1")
-    )
-    assert r.available is True
-    assert r.within_tolerance is False
-
-
-def test_nav_anchor_zero_attributed_zero_delta_within():
-    r = check_nav_anchor(
-        nav_delta=Decimal("0"), attributed_interest=Decimal("0"), tol=Decimal("0.1")
-    )
-    assert r.available is True
-    assert r.within_tolerance is True
-
-
-# ---------------------------------------------------------------------------
-# Task 7: G3Verdict / decide_verdict
+# G3Verdict / decide_verdict
 # ---------------------------------------------------------------------------
 
 
@@ -383,14 +252,7 @@ def _kw(**over):
         "total_capital_days": Decimal("4000"),
         "ci_lo": Decimal("0.01"),
         "ci_hi": Decimal("0.10"),
-        "deployment_anchor": check_deployment_anchor(
-            attributed_deployed=Decimal("300"),
-            observed_realized=Decimal("300"),
-            tol=Decimal("0.05"),
-        ),
-        "nav_anchor": check_nav_anchor(
-            nav_delta=None, attributed_interest=Decimal("0"), tol=Decimal("0.1")
-        ),
+        "ledger_divergence": [],
         "min_windows": 8,
         "min_capital_days": Decimal("3990"),
         "mr_alpha_spread": Decimal("0.0"),
@@ -429,31 +291,14 @@ def test_verdict_insufficient_when_ci_straddles_zero():
     assert "straddles" in " ".join(v.reasons).lower()
 
 
-def test_verdict_unreliable_when_deployment_anchor_diverges():
-    bad = check_deployment_anchor(
-        attributed_deployed=Decimal("300"),
-        observed_realized=Decimal("50"),
-        tol=Decimal("0.05"),
-    )
-    v = decide_verdict(**_kw(deployment_anchor=bad))
+def test_verdict_unreliable_when_ledger_diverges():
+    v = decide_verdict(**_kw(ledger_divergence=["week 2026-09-21 credits net 1 vs ledger 2"]))
     assert v.state is VerdictState.UNRELIABLE
-
-
-def test_verdict_unreliable_when_nav_anchor_diverges():
-    bad = check_nav_anchor(
-        nav_delta=Decimal("5"), attributed_interest=Decimal("1"), tol=Decimal("0.1")
-    )
-    v = decide_verdict(**_kw(nav_anchor=bad))
-    assert v.state is VerdictState.UNRELIABLE
+    assert "week 2026-09-21" in v.reasons[0]
 
 
 def test_verdict_unreliable_takes_priority_over_insufficient():
-    bad = check_deployment_anchor(
-        attributed_deployed=Decimal("300"),
-        observed_realized=Decimal("50"),
-        tol=Decimal("0.05"),
-    )
-    v = decide_verdict(**_kw(n_windows=2, deployment_anchor=bad))
+    v = decide_verdict(**_kw(n_windows=2, ledger_divergence=["week x"]))
     assert v.state is VerdictState.UNRELIABLE
 
 
@@ -487,215 +332,35 @@ def test_verdict_mr_alpha_unavailable_flag_carried():
 
 
 # ---------------------------------------------------------------------------
-# open_principal_at: point-in-time open principal
-# ---------------------------------------------------------------------------
-
-DAY_MS = 24 * 60 * 60 * 1000
-
-
-def test_open_principal_at_fill_held_to_term_counted():
-    """Fill started before as_of with period extending past as_of → counted."""
-    # fill at t=0, period=2 days, effective_end = 2*DAY_MS
-    f = _fill(0, "300", "0.0003", "2")  # release=None
-    as_of = DAY_MS  # 1 day in — still open (end = 2*DAY_MS > as_of)
-    assert open_principal_at([f], as_of) == Decimal("300")
-
-
-def test_open_principal_at_matured_fill_not_counted():
-    """Fill whose fill_ts + period is at/before as_of (matured) → NOT counted."""
-    # fill at t=0, period=2 days, effective_end = 2*DAY_MS
-    f = _fill(0, "300", "0.0003", "2")
-    as_of = 2 * DAY_MS  # exact end — effective_end is NOT strictly after as_of
-    assert open_principal_at([f], as_of) == Decimal("0")
-
-
-def test_open_principal_at_released_fill_before_as_of_not_counted():
-    """Released fill where release_ts <= as_of → closed, NOT counted."""
-    # release at 1 day, as_of at 1.5 days
-    f = _fill(0, "200", "0.0003", "2", release=DAY_MS)
-    as_of = DAY_MS + DAY_MS // 2
-    assert open_principal_at([f], as_of) == Decimal("0")
-
-
-def test_open_principal_at_released_fill_after_as_of_counted():
-    """Released fill where release_ts > as_of → still open at as_of → counted."""
-    # release at 1.5 days, as_of at 1 day
-    f = _fill(0, "200", "0.0003", "2", release=DAY_MS + DAY_MS // 2)
-    as_of = DAY_MS
-    assert open_principal_at([f], as_of) == Decimal("200")
-
-
-def test_open_principal_at_future_fill_not_counted():
-    """Fill with fill_ts > as_of → NOT counted (not yet filled)."""
-    f = _fill(2 * DAY_MS, "500", "0.0003", "2")
-    as_of = DAY_MS
-    assert open_principal_at([f], as_of) == Decimal("0")
-
-
-def test_open_principal_at_empty_list_returns_zero():
-    """Empty list → Decimal('0')."""
-    assert open_principal_at([], 0) == Decimal("0")
-
-
-def test_open_principal_at_multiple_fills_sums_only_open():
-    """Multiple fills: only open ones contribute; matured/future ones don't."""
-    # open: fill at 0, period=3 days, as_of = 2*DAY_MS → open (end=3*DAY_MS > as_of)
-    f_open = _fill(0, "400", "0.0003", "3")
-    # matured: fill at 0, period=1 day, as_of = 2*DAY_MS → end=DAY_MS <= as_of
-    f_matured = _fill(0, "100", "0.0003", "1")
-    # future: fill at 3*DAY_MS → after as_of
-    f_future = _fill(3 * DAY_MS, "250", "0.0003", "2")
-    as_of = 2 * DAY_MS
-    result = open_principal_at([f_open, f_matured, f_future], as_of)
-    assert result == Decimal("400")
-
-
-# ---------------------------------------------------------------------------
-# clamp_active_window: concurrency-clamped interest + capital-days
-# ---------------------------------------------------------------------------
-
-DAY = 24 * 60 * 60 * 1000
-
-
-def test_clamp_single_fill_equals_legacy_formula():
-    # No overlap → bit-exact with Σ size·rate·duration.
-    f = _fill(0, "570", "0.0003", "2")
-    cw = clamp_active_window([f], cap=C)
-    assert cw.interest == Decimal("570") * Decimal("0.0003") * Decimal("2")
-    assert cw.raw_interest == cw.interest
-    assert cw.capital_days == Decimal("570") * Decimal("2")
-    assert cw.peak_concurrent == Decimal("570")
-
-
-def test_clamp_two_overlapping_under_cap_no_scaling():
-    # 200 + 300 = 500 < 570 → no clamp, full held-to-term interest each.
-    f1 = _fill(100, "200", "0.0003", "2")
-    f2 = _fill(200, "300", "0.0005", "2")
-    cw = clamp_active_window([f1, f2], cap=C)
-    expected = (
-        Decimal("200") * Decimal("0.0003") * Decimal("2")
-        + Decimal("300") * Decimal("0.0005") * Decimal("2")
-    )
-    assert cw.interest == expected
-    assert cw.raw_interest == expected
-    assert cw.peak_concurrent == Decimal("500")
-
-
-def test_clamp_overlap_over_cap_scales_proportionally():
-    # Two simultaneous fills 400 + 400 = 800 > 570, same window, identical span.
-    # While both open, scale = 570/800; interest is clamped, raw is not.
-    f1 = _fill(0, "400", "0.0003", "2")
-    f2 = _fill(0, "400", "0.0003", "2")
-    cw = clamp_active_window([f1, f2], cap=C)
-    raw = Decimal("2") * (Decimal("400") * Decimal("0.0003") * Decimal("2"))
-    assert cw.raw_interest == raw
-    # both fully overlap for the whole 2 days → uniform scale 570/800
-    assert cw.interest == raw * (C / Decimal("800"))
-    assert cw.capital_days == C * Decimal("2")  # min(800, 570) for 2 days
-    assert cw.peak_concurrent == Decimal("800")
-
-
-def test_clamp_partial_overlap_only_clamps_overlap_region():
-    # f1 [0, 2d) size 400; f2 [1d, 3d) size 400. Overlap [1d,2d): 800>570 clamp.
-    # Non-overlap regions ([0,1d) f1 only, [2d,3d) f2 only) stay full.
-    f1 = _fill(0, "400", "0.0003", "2")
-    f2 = _fill(DAY, "400", "0.0003", "2")
-    cw = clamp_active_window([f1, f2], cap=C)
-    rate = Decimal("0.0003")
-    scale = C / Decimal("800")
-    # f1: [0,1d) full 400 + [1d,2d) scaled 400*570/800
-    # f2: [1d,2d) scaled 400*570/800 + [2d,3d) full 400
-    f1_int = Decimal("400") * rate * Decimal("1") + Decimal("400") * scale * rate * Decimal("1")
-    f2_int = Decimal("400") * scale * rate * Decimal("1") + Decimal("400") * rate * Decimal("1")
-    assert cw.interest == f1_int + f2_int
-    assert cw.peak_concurrent == Decimal("800")
-
-
-def test_clamp_release_caps_duration():
-    # release at 1 day → 1-day interest, like _fill_duration_days.
-    f = _fill(0, "570", "0.0003", "2", release=DAY)
-    cw = clamp_active_window([f], cap=C)
-    assert cw.interest == Decimal("570") * Decimal("0.0003") * Decimal("1")
-    assert cw.capital_days == Decimal("570") * Decimal("1")
-
-
-def test_clamp_empty_is_zero():
-    cw = clamp_active_window([], cap=C)
-    assert cw.interest == Decimal("0")
-    assert cw.capital_days == Decimal("0")
-    assert cw.raw_interest == Decimal("0")
-    assert cw.peak_concurrent == Decimal("0")
-
-
-def test_clamp_zero_cap_raises():
-    with pytest.raises(ValueError, match="cap must be positive"):
-        clamp_active_window([_fill(0, "100", "0.0003", "2")], cap=Decimal("0"))
-
-
-def test_attribute_active_per_window_bucketing_no_cross_window_join():
-    # Per-window bucketing (by fill_ts), NOT a span-clipped sweep: a fill filled
-    # late in window 1 keeps its FULL held-to-term interest in window 1, and
-    # window 2 clamps only its own fills. The two 400-fills are concurrent in
-    # time but live in different buckets, so their 800 sum is NOT jointly clamped.
-    # This pins the implemented behavior (full-span headline + capital_days use a
-    # single bucket and ARE jointly clamped; only the per-window CI buckets split).
-    f1 = _fill(WEEK - 1, "400", "0.0003", "2")  # spans into window 2
-    f2 = _fill(WEEK + 1, "400", "0.0003", "2")
-    out = attribute_active([f1, f2], capital=C, window_bounds=[(0, WEEK), (WEEK, 2 * WEEK)])
-    full = Decimal("400") * Decimal("0.0003") * Decimal("2") / C * Decimal("100")
-    assert out[0].n_trades == 1
-    assert out[1].n_trades == 1
-    assert out[0].net_monthly == full  # un-clamped: 400 < cap alone
-    assert out[1].net_monthly == full
-
-
-# ---------------------------------------------------------------------------
-# ClampDiagnostic derived properties (over_deploy detection + report figures)
+# peak_open_principal / DeploymentCheck (replaces the over-deploy clamp)
 # ---------------------------------------------------------------------------
 
 
-def test_clamp_diagnostic_excess_return_pct_formula():
-    d = ClampDiagnostic(
-        cap=Decimal("1000"),
-        peak_concurrent=Decimal("1200"),
-        raw_interest=Decimal("100"),
-        clamped_interest=Decimal("80"),
-    )
-    # (100 - 80) / 1000 * 100 = 2.0
-    assert d.excess_return_pct == Decimal("2")
-    assert d.over_deployed is True
+def test_peak_open_principal_counts_concurrent_credits_only():
+    a = _credit("a", 0, 2 * DAY, amount=Decimal("100"))
+    b = _credit("b", DAY, 3 * DAY, amount=Decimal("50"))
+    c = _credit("c", 3 * DAY, 4 * DAY, amount=Decimal("120"))   # opens as b closes
+    assert peak_open_principal([a, b, c], now_ms=5 * DAY) == Decimal("150")
+    assert peak_open_principal([], now_ms=DAY) == 0
 
 
-def test_clamp_diagnostic_over_deploy_factor_formula():
-    d = ClampDiagnostic(
-        cap=Decimal("570"),
-        peak_concurrent=Decimal("855"),
-        raw_interest=Decimal("0.5"),
-        clamped_interest=Decimal("0.33"),
-    )
-    assert d.over_deploy_factor == Decimal("1.5")  # 855 / 570
+def test_peak_open_principal_open_credit_counts_until_now():
+    assert peak_open_principal([_credit("x", CREATED, None)], now_ms=CREATED + DAY) == AMOUNT
 
 
-def test_clamp_diagnostic_at_cap_is_not_over_deployed():
-    d = ClampDiagnostic(
-        cap=Decimal("570"),
-        peak_concurrent=Decimal("570"),
-        raw_interest=Decimal("0.2"),
-        clamped_interest=Decimal("0.2"),
-    )
-    assert d.over_deployed is False  # peak == cap is within budget (strict >)
-    assert d.excess_return_pct == Decimal("0")
+def test_re_lent_principal_is_not_double_counted():
+    """The clamp's reason (re-lent principal double counted by held-to-term) is
+    gone: 466642176 closed after 842 s, so re-lending it does not overlap."""
+    relent = _credit("466642177", REPAID, REPAID + 2 * DAY)
+    assert peak_open_principal([EARLY, relent], now_ms=REPAID + 3 * DAY) == AMOUNT
 
 
-def test_clamp_diagnostic_zero_cap_guards_are_zero():
-    d = ClampDiagnostic(
-        cap=Decimal("0"),
-        peak_concurrent=Decimal("0"),
-        raw_interest=Decimal("0"),
-        clamped_interest=Decimal("0"),
-    )
-    assert d.over_deploy_factor == Decimal("0")
-    assert d.excess_return_pct == Decimal("0")
+def test_deployment_check_flags_only_above_cap():
+    assert DeploymentCheck(Decimal("570"), Decimal("570")).over_deployed is False
+    over = DeploymentCheck(Decimal("570"), Decimal("855"))
+    assert over.over_deployed is True
+    assert over.over_deploy_factor == Decimal("1.5")
+    assert DeploymentCheck(Decimal("0"), Decimal("0")).over_deploy_factor == 0
 
 
 # ---- E3: AlwaysFRR arm 素材（import 已在檔頭，見上）----
@@ -729,75 +394,3 @@ def test_frr_benchmark_dataclass_shape():
         ci_hi=Decimal("0"), reason="funding_stats empty",
     )
     assert b.available is False and b.reason == "funding_stats empty"
-
-
-def test_fill_duration_days_public_alias():
-    # 公開版與既有語意一致：無 release = held-to-term
-    assert fill_duration_days(_fill(0, "100", "0.0002", "2")) == Decimal("2")
-    # release 提早 → 取實際存續
-    one_day_ms = 24 * 60 * 60 * 1000
-    assert fill_duration_days(
-        _fill(0, "100", "0.0002", "2", release=one_day_ms)
-    ) == Decimal("1")
-
-
-# ---------------------------------------------------------------------------
-# apply_credit_closes — venue close truth joined onto fills (fcc → CreditClosed).
-# Regression root: 2026-07-19 anchor divergence — borrower returned 1338.03
-# after 40 min, bot re-lent it; held-to-term double-counted the principal.
-# ---------------------------------------------------------------------------
-
-
-def _close(credit_id, amount, mts_create, close_ts):
-    return CreditCloseRecord(
-        credit_id=credit_id, amount=Decimal(amount),
-        mts_create=mts_create, close_ts_ms=close_ts,
-    )
-
-
-def test_apply_credit_closes_regression_1338_early_return():
-    h = 3600 * 1000
-    f1 = _fill(0, "1338.03", "0.0003", "2")            # 08:30 fill → returned early
-    f2 = _fill(1 * h, "1338.03", "0.0003", "2")        # 09:10 re-lend, still open
-    close = _close(555, "1338.03", mts_create=10, close_ts=h - 300_000)
-    out = apply_credit_closes([f1, f2], [close])
-    assert out[0].release_ts_ms == h - 300_000         # f1 closed by venue truth
-    assert out[1].release_ts_ms is None                # f2 untouched
-    # open principal at "now" no longer double-counts the returned principal
-    assert open_principal_at(out, 2 * h) == Decimal("1338.03")
-
-
-def test_apply_credit_closes_matches_nearest_preceding_fill():
-    f_old = _fill(0, "100", "0.0003", "2")
-    f_near = _fill(5_000, "100", "0.0003", "2")
-    close = _close(1, "100", mts_create=6_000, close_ts=50_000)
-    out = apply_credit_closes([f_old, f_near], [close])
-    assert out[0].release_ts_ms is None
-    assert out[1].release_ts_ms == 50_000
-
-
-def test_apply_credit_closes_ignores_amount_mismatch_and_future_fills():
-    f_future = _fill(400_000, "100", "0.0003", "2")    # beyond mts_create+slack(5m)
-    f_other = _fill(0, "99", "0.0003", "2")            # different amount
-    close = _close(1, "100", mts_create=6_000, close_ts=500_000)
-    out = apply_credit_closes([f_future, f_other], [close])
-    assert [f.release_ts_ms for f in out] == [None, None]
-
-
-def test_apply_credit_closes_keeps_earlier_existing_release():
-    f = _fill(0, "100", "0.0003", "2", release=10_000)  # RESERVATION_RELEASED earlier
-    close = _close(1, "100", mts_create=100, close_ts=50_000)
-    out = apply_credit_closes([f], [close])
-    assert out[0].release_ts_ms == 10_000
-
-
-def test_apply_credit_closes_dedupes_by_credit_id():
-    f1 = _fill(0, "100", "0.0003", "2")
-    f2 = _fill(1_000, "100", "0.0003", "2")
-    dupes = [
-        _close(7, "100", mts_create=1_500, close_ts=60_000),
-        _close(7, "100", mts_create=1_500, close_ts=70_000),  # redelivery
-    ]
-    out = apply_credit_closes([f1, f2], dupes)
-    # one credit → exactly one fill released (the nearest), not two
-    assert sorted(f.release_ts_ms is not None for f in out) == [False, True]
