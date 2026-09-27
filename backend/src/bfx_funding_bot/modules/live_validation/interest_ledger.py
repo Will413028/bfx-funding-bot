@@ -160,8 +160,44 @@ def summarize_interest(
               if p.currency == currency and start_ms <= p.mts < end_ms]
     net = sum((p.amount for p in inside), Decimal("0"))
     if not inside:
-        return InterestSummary(currency, start_ms, end_ms, 0, net, None, None)
+        # No payout is a real zero once the wallet is known to exist: carry the
+        # balance left by the latest earlier payout. Without one there is no
+        # balance information at all.
+        earlier = [p for p in payments if p.currency == currency and p.mts < start_ms]
+        if not earlier:
+            return InterestSummary(currency, start_ms, end_ms, 0, net, None, None)
+        balance = max(earlier, key=lambda p: (p.mts, p.ledger_id)).balance
+        return InterestSummary(currency, start_ms, end_ms, 0, net, balance,
+                               Decimal("0") if balance > 0 else None)
     mean_balance = sum((p.balance - p.amount for p in inside), Decimal("0")) / len(inside)
     days = Decimal(end_ms - start_ms) / MS_PER_DAY
     apr = net / mean_balance / days * 365 * 100 if mean_balance > 0 else None
     return InterestSummary(currency, start_ms, end_ms, len(inside), net, mean_balance, apr)
+
+
+def wallet_balance_basis(
+    payments: Sequence[InterestPayment], *, currency: str,
+) -> Callable[[int, int], Decimal] | None:
+    """Funding-wallet balance per window, from the ledger: the capital budget
+    that realized interest is measured against (report_interest's basis).
+
+    For [lo, hi): the mean balance before each payout inside it; without a
+    payout inside, the balance after the latest earlier payout, else the
+    balance before the first later one. None when the ledger has no payout.
+    """
+    ordered = sorted((p for p in payments if p.currency == currency),
+                     key=lambda p: (p.mts, p.ledger_id))
+    if not ordered:
+        return None
+
+    def basis(lo: int, hi: int) -> Decimal:
+        inside = [p.balance - p.amount for p in ordered if lo <= p.mts < hi]
+        if inside:
+            return sum(inside, Decimal("0")) / len(inside)
+        earlier = [p for p in ordered if p.mts < lo]
+        if earlier:
+            return earlier[-1].balance
+        first_later = ordered[0]
+        return first_later.balance - first_later.amount
+
+    return basis
