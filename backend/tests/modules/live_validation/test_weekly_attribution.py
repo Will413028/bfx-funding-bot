@@ -1,12 +1,10 @@
 from decimal import Decimal
 
-from bfx_funding_bot.modules.live_validation.live_attribution import (
-    FillRecord,
-    MarketRatePoint,
-)
+from bfx_funding_bot.modules.live_validation.live_attribution import MarketRatePoint
 from bfx_funding_bot.modules.live_validation.weekly_attribution import (
     FEE_RATE,
     WEEK_MS,
+    CellWeekTotals,
     WeeklyCellRow,
     calendar_week_start,
     compute_weekly_rows,
@@ -17,11 +15,10 @@ _MON = 1_782_691_200_000
 _DAY = 24 * 60 * 60 * 1000
 
 
-def _fill(ts: int, size: str, rate: str, period: str = "2") -> FillRecord:
-    return FillRecord(
-        venue_offer_id=str(ts), fill_ts_ms=ts, size_usdt=Decimal(size),
-        rate=Decimal(rate), period_days=Decimal(period), release_ts_ms=None,
-    )
+def _lent(size: str, rate: str, days: str = "2", n: int = 1) -> CellWeekTotals:
+    """`size` lent at `rate` for `days` inside the week."""
+    return CellWeekTotals(n_credits=n, capital_days=Decimal(size) * Decimal(days),
+                          gross_interest=Decimal(size) * Decimal(rate) * Decimal(days))
 
 
 def test_calendar_week_start_aligns_to_utc_monday():
@@ -31,10 +28,9 @@ def test_calendar_week_start_aligns_to_utc_monday():
 
 
 def test_compute_weekly_rows_fee_and_apr():
-    # 單 cell 單 fill：500 USDT × 0.0002/day × 2 天 = gross 0.2
-    fills = {"fUST_p2": [_fill(_MON + _DAY, "500", "0.0002")]}
+    # 單 cell 單 credit：500 USDT × 0.0002/day × 2 天 = gross 0.2
     rows = compute_weekly_rows(
-        fills_by_cell=fills, close_points=[], frr_points=[], utilization_points=[],
+        totals_by_cell={"fUST_p2": {_MON: _lent("500", "0.0002")}}, close_points=[], frr_points=[], utilization_points=[],
     )
     assert len(rows) == 1
     r = rows[0]
@@ -55,13 +51,13 @@ def test_compute_weekly_rows_fee_and_apr():
     assert r.baseline_frr_apr_net_pct is None
 
 
-def test_compute_weekly_rows_bins_by_fill_week():
-    fills = {"fUST_p2": [
-        _fill(_MON + _DAY, "500", "0.0002"),
-        _fill(_MON + WEEK_MS + _DAY, "300", "0.0003"),
-    ]}
+def test_compute_weekly_rows_one_row_per_accrual_week():
+    totals = {"fUST_p2": {
+        _MON: _lent("500", "0.0002"),
+        _MON + WEEK_MS: _lent("300", "0.0003"),
+    }}
     rows = compute_weekly_rows(
-        fills_by_cell=fills, close_points=[], frr_points=[], utilization_points=[],
+        totals_by_cell=totals, close_points=[], frr_points=[], utilization_points=[],
     )
     assert [(r.week_start_ms, r.n_fills) for r in rows] == [
         (_MON, 1), (_MON + WEEK_MS, 1),
@@ -70,14 +66,14 @@ def test_compute_weekly_rows_bins_by_fill_week():
 
 def test_compute_weekly_rows_baselines_use_week_mean_rate():
     # close 均值 0.0002/day → APR_net = 0.0002×365×100×0.85 = 6.205%
-    fills = {"fUST_p2": [_fill(_MON + _DAY, "500", "0.0002")]}
+    totals = {"fUST_p2": {_MON: _lent("500", "0.0002")}}
     close = [
         MarketRatePoint(mts=_MON + i * _DAY, rate=Decimal("0.0002"))
         for i in range(3)
     ]
     frr = [MarketRatePoint(mts=_MON + _DAY, rate=Decimal("0.0003"))]
     rows = compute_weekly_rows(
-        fills_by_cell=fills, close_points=close, frr_points=frr, utilization_points=[],
+        totals_by_cell=totals, close_points=close, frr_points=frr, utilization_points=[],
     )
     r = rows[0]
     expected_close = Decimal("0.0002") * Decimal("365") * Decimal("100") * Decimal("0.85")
@@ -87,10 +83,10 @@ def test_compute_weekly_rows_baselines_use_week_mean_rate():
 
 
 def test_compute_weekly_rows_baseline_weeks_without_fills_still_emitted():
-    # 有市場資料但該週無 fill 的 cell 也要出 row（三線圖的 baseline 線不能斷）
+    # 有市場資料但該週無 accrual 的 cell 也要出 row（三線圖的 baseline 線不能斷）
     close = [MarketRatePoint(mts=_MON + _DAY, rate=Decimal("0.0002"))]
     rows = compute_weekly_rows(
-        fills_by_cell={"fUST_p2": []}, close_points=close, frr_points=[],
+        totals_by_cell={"fUST_p2": {}}, close_points=close, frr_points=[],
         utilization_points=[],
     )
     assert len(rows) == 1
@@ -103,7 +99,7 @@ def test_compute_weekly_rows_baseline_weeks_without_fills_still_emitted():
 
 def test_unattributed_bucket_is_a_normal_cell_key():
     rows = compute_weekly_rows(
-        fills_by_cell={"unattributed": [_fill(_MON, "200", "0.0002")]},
+        totals_by_cell={"unattributed": {_MON: _lent("200", "0.0002")}},
         close_points=[], frr_points=[], utilization_points=[],
     )
     assert rows[0].cell == "unattributed"
@@ -118,7 +114,7 @@ class TestUtilizationAdjustedFrrBaseline:
             MarketRatePoint(mts=wk + 2000, rate=Decimal("0.6")),
         ]
         rows = compute_weekly_rows(
-            fills_by_cell={"fUST_p2": []},
+            totals_by_cell={"fUST_p2": {}},
             close_points=[],
             frr_points=frr,
             utilization_points=util,
@@ -139,7 +135,7 @@ class TestUtilizationAdjustedFrrBaseline:
             MarketRatePoint(mts=wk + 2000, rate=Decimal("0.6")),
         ]
         rows = compute_weekly_rows(
-            fills_by_cell={"fUST_p2": []},
+            totals_by_cell={"fUST_p2": {}},
             close_points=[], frr_points=frr, utilization_points=util,
         )
         row = next(r for r in rows if r.week_start_ms == wk)
@@ -151,7 +147,7 @@ class TestUtilizationAdjustedFrrBaseline:
     def test_util_baseline_none_when_no_utilization_data(self):
         wk = calendar_week_start(1_700_000_000_000)
         rows = compute_weekly_rows(
-            fills_by_cell={"fUST_p2": []},
+            totals_by_cell={"fUST_p2": {}},
             close_points=[],
             frr_points=[MarketRatePoint(mts=wk + 1000, rate=Decimal("0.0002"))],
             utilization_points=[],
