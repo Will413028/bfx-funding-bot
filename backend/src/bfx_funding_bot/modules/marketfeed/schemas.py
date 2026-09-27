@@ -1,6 +1,6 @@
 """Pydantic models for Phase 4 observability events.
 
-對應 phase4-roadmap-design.md line 92-227 lock 的 envelope + payload schema。
+對應 phase 4 design 鎖定的 envelope + payload schema。
 Schema 改動 = 必須同步更新此 module; CP3 test 會 catch 違反。
 """
 from __future__ import annotations

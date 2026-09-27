@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Policy for deploy/vm/docker-compose.app.yml, checked on what Compose renders.
+"""Policies for the VM compose files, checked on what Compose renders.
 
 CI runs (see .github/workflows/ci.yml), with placeholder digests for the deploy
 variables and BFX_RUNTIME_DIR pointing at empty stand-ins for the secret files:
@@ -22,6 +22,13 @@ changed Compose default cannot slip a property past the check. This replaces
 the per-container hardening inspection bfx-deploy used to run on the VM: on the
 VM bfx-deploy only confirms each container runs the recorded digest and identity
 (bfx_deploy.container_mismatches).
+
+`--kind weekly-report` checks deploy/vm/ops/docker-compose.weekly-report.yml
+the same way (CI renders it with placeholder values for the variables the
+runner, bfx_weekly_report.py, supplies): one one-shot service on the digest
+image with the app's hardening, the reports bind mount as its only writable
+host path, a small /tmp tmpfs, no env files (the runner passes exactly the keys
+the steps read) and no published ports.
 
 Standard library only; exits 1 and lists every violation.
 """
@@ -56,6 +63,14 @@ LOADER_INJECTION = ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT")
 PYTHON_INJECTION = ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE")
 FORBIDDEN_KEYS = ("build", "cap_add", "privileged", "volumes", "tmpfs", "devices", "pid", "ipc",
                   "userns_mode", "cgroup", "network_mode", "expose", "extra_hosts", "sysctls")
+WEEKLY_PROJECT = "bfx-weekly-report"
+WEEKLY_SERVICE = "weekly-report"
+WEEKLY_ENV = ("DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID", "BFX_DEPLOYMENT_ENV",
+              "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION")
+WEEKLY_TMPFS = ["/tmp:rw,noexec,nosuid,size=64m"]
+WEEKLY_REPORTS = {"type": "bind", "source": "/home/ubuntu/bfx/reports", "target": "/reports"}
+WEEKLY_FORBIDDEN_KEYS = (*(k for k in FORBIDDEN_KEYS if k not in ("volumes", "tmpfs")),
+                         "container_name", "env_file", "ports", "healthcheck")
 FRONTEND_PORTS = [{"mode": "ingress", "host_ip": "127.0.0.1", "target": 3000,
                    "published": "3001", "protocol": "tcp"}]
 
@@ -97,6 +112,78 @@ def service_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
     return found
 
 
+def reports_mount_ok(mount: object) -> bool:
+    """Exactly the reports dir -> /reports, a writable bind, never created by Docker.
+
+    Compose versions render `create_host_path: false` differently: v5 prints it
+    (`"bind": {"create_host_path": false}`), 2.38 omits a false value and prints
+    `"bind": {}`. An absent value therefore cannot be read as either answer, so
+    only an explicit `true` is refused here; the file itself pins `false`
+    (tests) and bfx_weekly_report.py refuses to run when the directory is
+    missing, so nothing is ever created whichever Compose runs it. Any other
+    key -- read_only true, propagation, SELinux relabel, a volume or tmpfs
+    option -- is a violation.
+    """
+    if not isinstance(mount, dict):
+        return False
+    if {k: mount.get(k) for k in WEEKLY_REPORTS} != WEEKLY_REPORTS:
+        return False
+    if set(mount) - {*WEEKLY_REPORTS, "bind", "read_only"} or mount.get("read_only", False) is not False:
+        return False
+    bind = mount.get("bind", {})
+    return isinstance(bind, dict) and not set(bind) - {"create_host_path"} \
+        and bind.get("create_host_path", False) is False
+
+
+def weekly_violations(rendered: Mapping[str, Any]) -> list[str]:
+    """The weekly-report job file (deploy/vm/ops/docker-compose.weekly-report.yml)."""
+    found = []
+    if rendered.get("name") != WEEKLY_PROJECT:
+        found.append("project_name")
+    services = rendered.get("services") or {}
+    if set(services) != {WEEKLY_SERVICE}:
+        found.append("services")
+    if rendered.get("volumes"):
+        found.append("volumes")
+    network = (rendered.get("networks") or {}).get(NETWORK) or {}
+    if set(rendered.get("networks") or {}) != {NETWORK} or network.get("external") is not True \
+            or network.get("name") != NETWORK:
+        found.append("external_network")
+    spec = services.get(WEEKLY_SERVICE)
+    if not isinstance(spec, dict):
+        return found
+    env = spec.get("environment") or {}
+
+    def need(ok: bool, name: str) -> None:
+        if not ok:
+            found.append(f"{WEEKLY_SERVICE}:{name}")
+
+    image = str(spec.get("image", ""))
+    need("@sha256:" in image and ":main" not in image, "image_digest_reference")
+    need(spec.get("pull_policy") == "never", "pull_policy_never")
+    need(spec.get("entrypoint") == [], "entrypoint_cleared")
+    command = spec.get("command")
+    need(isinstance(command, list) and len(command) == 3 and command[:2] == ["sh", "-c"],
+         "shell_command")
+    need(spec.get("user") == "1000:1000", "user")
+    need(spec.get("working_dir") == "/app", "workdir")
+    need(spec.get("read_only") is True, "read_only")
+    need(spec.get("cap_drop") == ["ALL"], "cap_drop_all")
+    need(spec.get("security_opt") == ["no-new-privileges:true"], "no_new_privileges")
+    need(spec.get("restart") == "no", "restart")
+    for key in WEEKLY_FORBIDDEN_KEYS:
+        need(not spec.get(key), f"no_{key}")
+    need(spec.get("tmpfs") == WEEKLY_TMPFS, "tmpfs")
+    volumes = spec.get("volumes") or []
+    need(len(volumes) == 1 and reports_mount_ok(volumes[0]), "reports_mount")
+    need(set(spec.get("networks") or {}) == {NETWORK}, "network")
+    need(all(env.get(key) for key in WEEKLY_ENV), "runtime_env")
+    need(all(env.get(key) == "" for key in LOADER_INJECTION), "loader_injection_blanked")
+    need(all(env.get(key) == "" for key in PYTHON_INJECTION)
+         and env.get("PYTHONDONTWRITEBYTECODE") == "1", "interpreter_injection_blanked")
+    return found
+
+
 def env_file_violations(uninterpolated: Mapping[str, Any]) -> list[str]:
     """Each service's env files, from `config --no-interpolate` (version-stable)."""
     found = []
@@ -133,18 +220,29 @@ def violations(rendered: Mapping[str, Any]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Check a rendered docker-compose.app.yml.")
-    parser.add_argument("--uninterpolated", required=True,
-                        help="JSON of `docker compose config --no-interpolate --format json`")
+    parser = argparse.ArgumentParser(description="Check a rendered VM compose file.")
+    parser.add_argument("--kind", choices=("app", "weekly-report"), default="app",
+                        help="app: deploy/vm/docker-compose.app.yml (default); weekly-report: "
+                             "deploy/vm/ops/docker-compose.weekly-report.yml")
+    parser.add_argument("--uninterpolated",
+                        help="JSON of `docker compose config --no-interpolate --format json` "
+                             "(required for --kind app)")
     args = parser.parse_args(argv)
+    if args.kind == "app" and not args.uninterpolated:
+        parser.error("--uninterpolated is required for --kind app")
     try:
         rendered = json.load(sys.stdin)
-        with open(args.uninterpolated, encoding="utf-8") as stream:
-            uninterpolated = json.load(stream)
+        uninterpolated = None
+        if args.kind == "app":
+            with open(args.uninterpolated, encoding="utf-8") as stream:
+                uninterpolated = json.load(stream)
     except (OSError, ValueError):
         print("compose-policy: input is not readable JSON", file=sys.stderr)
         return 1
-    found = violations(rendered) + env_file_violations(uninterpolated)
+    if uninterpolated is None:
+        found = weekly_violations(rendered)
+    else:
+        found = violations(rendered) + env_file_violations(uninterpolated)
     for item in found:
         print(f"compose-policy: violation {item}", file=sys.stderr)
     if not found:

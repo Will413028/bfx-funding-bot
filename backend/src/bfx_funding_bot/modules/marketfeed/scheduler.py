@@ -1,7 +1,7 @@
 """Per-cell time-driven scheduler — fires `callback(cell, mts)` at
 `mts + timeframe + buffer_s` for each cell.
 
-設計依據: phase4.1-paper-shadow-infra-design.md Q11
+設計依據: phase 4.1 paper/shadow infra design Q11
 """
 from __future__ import annotations
 

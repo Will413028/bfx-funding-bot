@@ -26,14 +26,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     VenueCreditStateRow,
 )
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
-from bfx_funding_bot.modules.live_validation.tables import (
-    AttributionWeeklyRow,
-    FundingCreditHistoryRow,
-    FundingInterestPaymentRow,
-    FundingTradeRow,
-)
-from bfx_funding_bot.modules.live_validation.weekly_attribution import WeeklyCellRow
-from scripts.run_weekly_attribution import (
+from bfx_funding_bot.modules.live_validation.attribution_loader import (
     OfferLink,
     load_and_compute,
     persist_rows,
@@ -41,6 +34,13 @@ from scripts.run_weekly_attribution import (
     render_reconciliation,
     resolve_offer_cells,
 )
+from bfx_funding_bot.modules.live_validation.tables import (
+    AttributionWeeklyRow,
+    FundingCreditHistoryRow,
+    FundingInterestPaymentRow,
+    FundingTradeRow,
+)
+from bfx_funding_bot.modules.live_validation.weekly_attribution import WeeklyCellRow
 
 _ENV = "prod"
 _UUID = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
@@ -148,6 +148,41 @@ async def test_unmatched_credit_and_open_credit_are_unattributed_and_accrue(sf):
     open_week = next(r for r in result.rows if r.week_start_ms == NOW - 7 * _DAY and r.n_fills)
     assert open_week.cell == "unattributed"
     assert open_week.gross_interest_usdt == Decimal("100") * Decimal("0.0002")   # one day so far
+
+
+async def test_loan_turned_credit_is_one_fill_of_its_trades_cell(sf):
+    """Live 2026-09-22: loan 61621685 (150.77638588, opened 18:08:30Z) became
+    credit 466451710 -- same amount and opening, new id and MTS_CREATE -- and
+    trade 432678437 is at the opening. The trade's rate is quoted with fewer
+    digits than the credit's. The conversion time (one hour in) is illustrative."""
+    opened, used, last_payout = 1_790_100_510_000, 1_790_104_110_000, 1_790_273_311_000
+    amount, rate = Decimal("150.77638588"), Decimal("0.0001482")
+
+    def row(kind: str, credit_id: int, created: int, closed: int) -> FundingCreditHistoryRow:
+        return FundingCreditHistoryRow(
+            exchange_account_id=_UUID, kind=kind, credit_id=credit_id,
+            deployment_environment=_ENV, symbol="fUST", side=1, mts_create=created,
+            mts_update=closed, amount=amount, status="CLOSED", rate=rate, period_days=2,
+            mts_opening=opened, mts_last_payout=closed)
+
+    async with sf() as s:
+        s.add_all([
+            row("loan", 61621685, opened, used), row("credit", 466451710, used, last_payout),
+            FundingTradeRow(
+                exchange_account_id=_UUID, trade_id=432678437, deployment_environment=_ENV,
+                symbol="fUST", mts_create=opened, offer_id=OFFER, amount=amount,
+                rate=Decimal("0.000148"), period_days=2, maker=None),
+            _claim(str(OFFER), "d1"), _decision("d1", "fUST_p2"),
+        ])
+        await s.commit()
+    result = await load_and_compute(sf, account_id=_ACCT, deployment_environment=_ENV, now_ms=NOW)
+    assert result.cells is not None
+    assert result.cells.cell_by_credit == {"loan:61621685": "fUST_p2", "466451710": "fUST_p2"}
+    [row_] = [r for r in result.rows if r.cell == "fUST_p2" and r.week_start_ms == _MON]
+    assert row_.n_fills == 1
+    # lent once from opening to last payout, not twice for the loan's hour
+    assert row_.capital_days == amount * Decimal(last_payout - opened) / Decimal(_DAY)
+    assert row_.gross_interest_usdt == row_.capital_days * rate
 
 
 async def test_reconciliation_compares_the_shifted_ledger_week(sf):

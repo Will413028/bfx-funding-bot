@@ -1,7 +1,7 @@
 """Retire ``deployments.change_class``: nullable, no CHECK.
 
-Revises c74d45a54e46 (deployment ledger). Plan
-docs/superpowers/plans/2026-09-25-lending-envelope.md D5/T6: change classes are
+Revises c74d45a54e46 (deployment ledger). Lending envelope ADR 2026-09-25
+D5: change classes are
 gone, and the new bfx-deploy no longer writes the column.
 
 The column is not dropped yet. This release is deployed by the previous

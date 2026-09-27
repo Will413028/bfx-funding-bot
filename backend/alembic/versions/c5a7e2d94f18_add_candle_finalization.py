@@ -4,7 +4,7 @@ Revision ID: c5a7e2d94f18
 Revises: f3b8d2c7a1e4
 Create Date: 2026-07-27
 
-ADR: wiki/projects/bfx-funding-bot/decisions/2026-07-27-candle-immutability-bitemporal.md
+ADR 2026-07-27 candle immutability (bitemporal).
 
 A candle is mutable while its period is still forming — Bitfinex keeps re-pushing
 the same mts with a moving close, and the old in-place upsert let those late

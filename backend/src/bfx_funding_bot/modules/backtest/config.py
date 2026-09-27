@@ -13,8 +13,8 @@ class BacktestConfig:
       - fill_alpha=5.0 (fill probability slope; 10% above market = 50% fill)
       - market_rate_source="candle_close" — the canonical per-day market
         funding rate (Bitfinex funding-candle close). FRR is NOT a
-        unit-convertible market-rate proxy; see
-        docs/superpowers/specs/2026-05-28-frr-market-rate-decoupling-design.md.
+        unit-convertible market-rate proxy (see the backtest engine contract
+        in backend/ARCHITECTURE.md).
     """
 
     fee_rate: Decimal = Decimal("0.15")

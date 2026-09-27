@@ -23,8 +23,10 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
   `main` tag 只用來「發現」最新 release；部署一律以 `repository@sha256:<digest>`。
 - Registry 查詢用 `docker buildx imagetools inspect`（GHCR 憑證只放在每次呼叫的暫時
   `DOCKER_CONFIG`，不留下 `docker login`）。
-- Frontend 的 `NEXT_PUBLIC_*` build 參數來自 `deploy/vm/frontend-public.json`（公開設定，
-  CI 會檢查只有三個 key）。改它就是改 image，要走一次部署。
+- Frontend 的 `NEXT_PUBLIC_*` build 參數來自 GitHub repository variables
+  `NEXT_PUBLIC_APP_NAME`／`NEXT_PUBLIC_APP_URL`／`NEXT_PUBLIC_BETTER_AUTH_URL`（公開設定、非 secret；
+  任一未設定時 release 直接失敗）。改它就是改 image：之後的下一個 `main` commit 才會帶進新 image。
+  公開入口與這些值怎麼對應見 [fresh host setup](fresh-host-setup.md#2-frontend-public-ingress)。
 - VM 從不 build image。
 
 ### bfx-deploy 一次執行做什麼
@@ -52,7 +54,7 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    等健康（bot `:8080/healthz`、webapi health、frontend `127.0.0.1:3001`），再 settle 60 秒。
    Hardening（read-only、UID、cap-drop、port、network）不在 VM 上重驗，而是 CI 對
    `docker compose config` 的輸出做 policy 檢查（`deploy/vm/ops/compose_policy.py`）。
-9. 成功：`bfx-bot:local` 重新 tag 到新 backend（weekly report 與 DR verifier 仍用這個 alias）；
+9. 成功：`bfx-bot:local` 重新 tag 到新 backend（DR verifier 仍用這個 alias；weekly report 改用 ledger 的 digest）；
     安裝 `<rev>` 的主機工具與 systemd unit（見 §4，**下一輪才生效**）；DR checkout 的 `current`
     指到 `<rev>`；刪掉目前與上一版以外的舊 digest、工具版本與 DR checkout。
 10. 寫入 ledger 的結束列（`deployed`／`rolled_back`／`failed`，與 `started` 列同一個 attempt id），
@@ -69,7 +71,7 @@ app 只加入既有的 `bfx_default` network。`docker-compose.bot.yml` 的 `leg
 （見 operations §2）。變更分級（standard／material）已退役。過渡期注意：
 `docker-compose.app.yml` 仍接受 `BFX_CHANGE_CLASS`（預設 `retired`），`deployments.change_class`
 欄位改為可為空，都只是讓上一版 bfx-deploy 還能部署這一版；新工具第一次部署成功後的下一個 release
-移除它們（計畫 `docs/superpowers/plans/2026-09-25-lending-envelope.md` §5）。
+移除它們（migration `5b9e3d7a2f41` 已移除該欄位）。
 
 ## 3. 常用指令（VM，root）
 
@@ -133,7 +135,7 @@ bfx-deploy 自己維護主機上的工具，不再依賴手動 `install.sh`（�
 |---|---|---|
 | `/usr/local/lib/bfx-ops/releases/<rev>/{ops,systemd}` | 從 `<rev>` 的 git 物件寫出，root 擁有 | release 部署成功後 |
 | `/usr/local/lib/bfx-ops/releases/<rev>/ops/.venv` | `uv sync --frozen`（`deploy/vm/ops/uv.lock`：PyYAML、pathspec） | 同上 |
-| `/usr/local/lib/bfx-ops/current` → `releases/<rev>` | wrapper `bfx-deploy`／`bfx-notify` 與 unit 都執行這裡 | 同上，**下一輪 bfx-deploy 才用新版** |
+| `/usr/local/lib/bfx-ops/current` → `releases/<rev>` | wrapper `bfx-deploy`／`bfx-notify` 與 unit 都執行這裡（含每週報告的 runner 與 `docker-compose.weekly-report.yml`） | 同上，**下一輪 bfx-deploy 才用新版** |
 | `/etc/systemd/system/<deploy/vm/systemd/managed-units>` | 複製後 `daemon-reload`，從不 enable/start/stop | 同上 |
 | `/home/ubuntu/bfx-releases/<rev>` | mirror 的乾淨 git worktree（`ubuntu` 擁有），DR 腳本與 `docker-compose.dr.yml` | 需要備份或 restore test 時先建目標版本 |
 | `/home/ubuntu/bfx-releases/current` → `<rev>` | 排程備份／status／每月 restore test 用 | release 部署成功後 |
@@ -146,6 +148,9 @@ bfx-deploy 自己維護主機上的工具，不再依賴手動 `install.sh`（�
 - 工具安裝失敗（例如 `uv sync` 連不到 PyPI）只是 warning：部署仍成功，`current` 留在舊版，
   下一次成功部署會再裝。
 - 只保留目前與上一版的工具版本和 DR checkout。
+- 每週報告（`bfx-weekly-report.service`）的步驟也屬於主機工具：部署成功後下一次執行就用新步驟，
+  image 是 ledger 的 backend digest。VM mirror 的 working tree 不再被任何排程讀取。
+  手動執行與 timer 見 [operations §8](operations.md#8-定期與背景工作)。
 
 ## 5. 失敗與回滾
 

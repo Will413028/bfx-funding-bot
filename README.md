@@ -25,7 +25,7 @@ bfx-funding-bot/
 └── strategy_specification.md  # 策略設計規範
 ```
 
-> Go 後端與 Go-era `backend_architecture.md`（SaaS 平台層藍本）已於 2026-05-29 移除（重寫為 Python 後成死碼；Python 版原名 `backend_py/`，2026-09-23 改名為 `backend/`）；歷史見 git，Phase 5+ SaaS 方向見 `ROADMAP.md`。
+> Go 後端與 Go-era `backend_architecture.md`（SaaS 平台層藍本）已於 2026-05-29 移除（重寫為 Python 後成死碼；Python 版原名 `backend_py/`，2026-09-23 改名為 `backend/`）；歷史見 git。
 
 ## 開發
 

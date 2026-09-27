@@ -587,6 +587,13 @@ def test_successful_deploy_installs_its_own_tooling_for_the_next_run(harness: Ha
                if line and not line.startswith("#")]
     assert sorted(p.name for p in harness.settings.unit_dir.iterdir()) == sorted(managed)
     assert "bfx-halt-watch.service" not in managed
+    # The weekly job ships with the tooling: its steps, runner and unit follow each deploy,
+    # its timer (an operator's schedule, possibly masked) is never overwritten.
+    for path in ("ops/docker-compose.weekly-report.yml", "ops/bfx_weekly_report.py"):
+        assert (release / path).read_text() == TOOLING[f"deploy/vm/{path}"]
+    assert (harness.settings.unit_dir / "bfx-weekly-report.service").read_text() == \
+        TOOLING["deploy/vm/systemd/bfx-weekly-report.service"]
+    assert not (harness.settings.unit_dir / "bfx-weekly-report.timer").exists()
     assert harness.host.index(UV_SYNC) < harness.host.index(_is(("systemctl", "daemon-reload")))
     dr_current = harness.settings.dr_root / "current"
     assert os.readlink(dr_current) == REV_NEW
@@ -828,7 +835,7 @@ def test_path_glob_without_patterns_matches_nothing() -> None:
     ("docker-compose.dr.yml", True),
     ("deploy/vm/docker-compose.app.yml", False),
     ("deploy/vm/ops/bfx_deploy.py", False),
-    ("docs/deploy/vm/pgbackrest/x.md", False),
+    ("examples/deploy/vm/pgbackrest/x.md", False),
 ])
 def test_dr_trigger_patterns(path: str, expected: bool) -> None:
     assert bfx.path_matches(bfx.DR_TRIGGER_PATTERNS, path) is expected

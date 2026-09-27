@@ -1,6 +1,6 @@
 """Health monitor — state-change emit + 5min heartbeat.
 
-設計依據: phase4.1-paper-shadow-infra-design.md Section "Data Flow" Flow 4
+設計依據: phase 4.1 paper/shadow infra design Section "Data Flow" Flow 4
 """
 from __future__ import annotations
 

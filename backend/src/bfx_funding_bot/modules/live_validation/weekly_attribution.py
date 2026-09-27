@@ -2,7 +2,7 @@
 
 Pure, I/O-free。與 G3 的差異：
 - 分箱 = UTC Monday 00:00 對齊的 calendar weeks（穩定的 upsert key），
-  非 weekly_window_bounds 的「資料 min_ts 起算 rolling 7 天 bins」（G3 保持原樣）。
+  （G3 自 2026-09-27 起也用同一套週，第一窗從第一筆 bot credit 起算）。
 - 有 fee：net = gross × (1 − FEE_RATE)。G3 主 headline 維持 gross（報告連續性），
   本模組是 operator 儀表，直接給扣費後數字。
 - per-cell：輸入是每 (cell, week) 的 accrual（CellWeekTotals），由
@@ -46,7 +46,7 @@ def calendar_week_start(mts: int) -> int:
 class CellWeekTotals:
     """Gross accrual of one cell within one calendar week (credits clipped to it)."""
 
-    n_credits: int              # credits opened in this week
+    n_credits: int              # fills (trades) opened in this week
     capital_days: Decimal       # Σ amount × days held inside the week
     gross_interest: Decimal     # Σ amount × rate × days held inside the week
 
@@ -100,7 +100,7 @@ def compute_weekly_rows(
 
     row 集合 = (每個 cell) × (該 cell 有 accrual 的週 ∪ 有 baseline 資料的週) —
     baseline 週沒 accrual 也出 row（前端 baseline 線不斷），accrual 週沒 baseline
-    也出 row（baseline 欄 None）。n_fills 欄 = 該週開出的 credit 數。
+    也出 row（baseline 欄 None）。n_fills 欄 = 該週開出的 fill 數（一筆 trade 算一次，不論之後變成幾筆 loan／credit）。
     """
     close_by_week = _mean_rate_by_week(close_points)
     frr_by_week = _mean_rate_by_week(frr_points)

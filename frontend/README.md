@@ -35,7 +35,8 @@ for the disposable Postgres/Redis setup.
 CI builds the frontend image (linux/arm64) from each green `main` commit and pushes
 it to GHCR; the VM deploys it by digest with `bfx-deploy` (see the
 [deploy runbook](../docs/runbooks/deploy.md)). Public build inputs
-(`NEXT_PUBLIC_*`) come from `deploy/vm/frontend-public.json`; runtime secrets from
+(`NEXT_PUBLIC_*`) come from the GitHub repository variables `NEXT_PUBLIC_APP_NAME`,
+`NEXT_PUBLIC_APP_URL` and `NEXT_PUBLIC_BETTER_AUTH_URL`; runtime secrets from
 `/opt/bfx/runtime/frontend.env` on the VM. Operator bootstrap and non-operator
 containment are one-shots described in the
 [Release 0 operator containment runbook](../docs/runbooks/release-0-operator-containment.md).

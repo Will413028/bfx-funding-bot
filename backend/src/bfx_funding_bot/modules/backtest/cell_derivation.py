@@ -6,7 +6,7 @@ the passive baseline most, among those that pass the deploy gate's
 distinguishability filter. Replaces the hand-picked middle-of-grid config.
 
 Tier 3 (deferred): plateau/robustness selection -- this picks the single best
-point. See docs/superpowers/specs/2026-05-28-tier2-deployment-safety-design.md.
+point.
 """
 from __future__ import annotations
 

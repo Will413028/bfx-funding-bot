@@ -39,7 +39,7 @@ def _valid_yaml() -> dict:
                 "reference_amount_usdt": 150.0,
             },
         ],
-        "phase3b_wfo_results_ref": "docs/research/2026-05-18-phase3b-wfo-results.md",
+        "phase3b_wfo_results_ref": "phase3b-wfo-results-2026-05-18",
     }
 
 

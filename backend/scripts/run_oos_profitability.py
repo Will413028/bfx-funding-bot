@@ -7,13 +7,10 @@ Runs the deployed canary config (MeanReversion x fUST x {a30,p2}) over rolling
 diagnostic. Writes a research doc with bootstrap CIs + a selection-bias
 deflated-Sharpe check.
 
-Spec:  docs/superpowers/specs/2026-05-28-canary-oos-profitability-validation-design.md
-Plan:  docs/superpowers/plans/2026-05-28-canary-oos-profitability.md
-
 Usage:
     cd backend
     uv run python scripts/run_oos_profitability.py \\
-        --output ../docs/research/2026-05-28-canary-oos-profitability.md
+        --output /tmp/2026-05-28-canary-oos-profitability.md
 """
 from __future__ import annotations
 
@@ -56,8 +53,8 @@ START_MTS = int(datetime(2022, 1, 1, tzinfo=UTC).timestamp() * 1000)
 DEFAULT_N_TRIALS = 38  # cumulative strategy-layer configs tried on this data: 9 (Phase 3b: 6 MR + 3 RP)
 # + 24 (AdaptivePeriod two-round sweep: 3 p_long x 8 band) + 1 (MR-FRR-floor)
 # + 4 (2026-09-22 period-structure arms: always_30d, adaptive_period period-aware, mr_a30
-# period-aware, mr_a30 legacy diagnostic). SoT = second-brain
-# wiki/projects/bfx-funding-bot/strategy-registry.md 「DSR trials」段 — verdict 落地時同步更新這裡。
+# period-aware, mr_a30 legacy diagnostic). SoT = the private
+# strategy registry「DSR trials」段 — verdict 落地時同步更新這裡。
 # Undercounting trials inflates DSR (Bailey & López de Prado); the deflated-Sharpe factor
 DEFAULT_CELLS_YAML = Path("configs/cells.live.yaml")
 RESEARCH_CONFIG = BacktestConfig(fill_model="linear-baseline")

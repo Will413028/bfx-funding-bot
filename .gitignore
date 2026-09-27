@@ -85,3 +85,14 @@ __pycache__/
 htmlcov/
 *.egg-info/
 .venv/
+
+# Private design docs, research reports and planning notes live outside this
+# public repository; keep them from being re-added by accident.
+/docs/superpowers/
+/docs/research/
+/backend/docs/research/
+/backend/docs/superpowers/
+/docs/strategy-journal.md
+/ROADMAP.md
+/docs/deploy/
+/docs/reports/
