@@ -78,7 +78,7 @@ def test_bot_appends_idempotently_and_web_api_only_reads(migrated: Any) -> None:
 def test_migration_is_reversible_and_leaves_no_drift(migrated: Any) -> None:
     url, engine = migrated
     _alembic(url, "check")
-    _alembic(url, "downgrade", "-1")
+    _alembic(url, "downgrade", "5b9e3d7a2f41")
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT to_regclass('public.funding_interest_payments')")) is None
     _alembic(url, "upgrade", "head")
