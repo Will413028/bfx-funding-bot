@@ -210,7 +210,8 @@ VM 上 `/home/ubuntu/bfx-funding-bot` 的 working tree **不再被讀取**（它
 - **Hardening**：read-only rootfs、UID 1000、cap-drop ALL、no-new-privileges，只有 `/tmp`（tmpfs）
   與 `/home/ubuntu/bfx/reports` → `/reports` 可寫；CI 以
   `compose_policy.py --kind weekly-report` 檢查。reports 目錄必須已存在且 uid 1000 可寫
-  （`sudo chown 1000:1001 ~/bfx/reports && chmod 775`），不會自動建立。
+  （`sudo chown 1000:1001 ~/bfx/reports && chmod 775`），不會自動建立：目錄不存在時 runner 以
+  `reports_dir_missing` 拒跑（Compose 2.x 與 v5 對未設定的 `create_host_path` 解讀相反，不交給 Docker 決定）。
 - Timer 不在 `managed-units`：安裝 unit 檔會覆蓋 `systemctl mask`，排程開不開由 operator 決定。
 
 手動執行（VM，root）：

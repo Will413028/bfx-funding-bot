@@ -68,8 +68,7 @@ WEEKLY_SERVICE = "weekly-report"
 WEEKLY_ENV = ("DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID", "BFX_DEPLOYMENT_ENV",
               "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION")
 WEEKLY_TMPFS = ["/tmp:rw,noexec,nosuid,size=64m"]
-WEEKLY_REPORTS = {"type": "bind", "source": "/home/ubuntu/bfx/reports", "target": "/reports",
-                  "bind": {"create_host_path": False}}
+WEEKLY_REPORTS = {"type": "bind", "source": "/home/ubuntu/bfx/reports", "target": "/reports"}
 WEEKLY_FORBIDDEN_KEYS = (*(k for k in FORBIDDEN_KEYS if k not in ("volumes", "tmpfs")),
                          "container_name", "env_file", "ports", "healthcheck")
 FRONTEND_PORTS = [{"mode": "ingress", "host_ip": "127.0.0.1", "target": 3000,
@@ -113,6 +112,29 @@ def service_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
     return found
 
 
+def reports_mount_ok(mount: object) -> bool:
+    """Exactly the reports dir -> /reports, a writable bind, never created by Docker.
+
+    Compose versions render `create_host_path: false` differently: v5 prints it
+    (`"bind": {"create_host_path": false}`), 2.38 omits a false value and prints
+    `"bind": {}`. An absent value therefore cannot be read as either answer, so
+    only an explicit `true` is refused here; the file itself pins `false`
+    (tests) and bfx_weekly_report.py refuses to run when the directory is
+    missing, so nothing is ever created whichever Compose runs it. Any other
+    key -- read_only true, propagation, SELinux relabel, a volume or tmpfs
+    option -- is a violation.
+    """
+    if not isinstance(mount, dict):
+        return False
+    if {k: mount.get(k) for k in WEEKLY_REPORTS} != WEEKLY_REPORTS:
+        return False
+    if set(mount) - {*WEEKLY_REPORTS, "bind", "read_only"} or mount.get("read_only", False) is not False:
+        return False
+    bind = mount.get("bind", {})
+    return isinstance(bind, dict) and not set(bind) - {"create_host_path"} \
+        and bind.get("create_host_path", False) is False
+
+
 def weekly_violations(rendered: Mapping[str, Any]) -> list[str]:
     """The weekly-report job file (deploy/vm/ops/docker-compose.weekly-report.yml)."""
     found = []
@@ -153,9 +175,7 @@ def weekly_violations(rendered: Mapping[str, Any]) -> list[str]:
         need(not spec.get(key), f"no_{key}")
     need(spec.get("tmpfs") == WEEKLY_TMPFS, "tmpfs")
     volumes = spec.get("volumes") or []
-    need(len(volumes) == 1 and isinstance(volumes[0], dict)
-         and {k: volumes[0].get(k) for k in WEEKLY_REPORTS} == WEEKLY_REPORTS
-         and not volumes[0].get("read_only"), "reports_mount")
+    need(len(volumes) == 1 and reports_mount_ok(volumes[0]), "reports_mount")
     need(set(spec.get("networks") or {}) == {NETWORK}, "network")
     need(all(env.get(key) for key in WEEKLY_ENV), "runtime_env")
     need(all(env.get(key) == "" for key in LOADER_INJECTION), "loader_injection_blanked")

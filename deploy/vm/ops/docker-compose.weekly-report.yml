@@ -59,7 +59,9 @@ services:
       # Must already exist and be writable by uid 1000 (image appuser); OCI ubuntu
       # is uid 1001 -> one-time `sudo chown 1000:1001 ~/bfx/reports && chmod 775`
       # on the VM, else the G3 report write dies on EACCES (bit us 2026-07-19).
-      # Never created by Docker: a root-owned stand-in would fail the same way.
+      # Never created by Docker: a root-owned stand-in would fail the same way. The
+      # runner also refuses when it is missing (Compose 2.38 omits a false
+      # create_host_path when rendering; see compose_policy.reports_mount_ok).
       - type: bind
         source: /home/ubuntu/bfx/reports
         target: /reports

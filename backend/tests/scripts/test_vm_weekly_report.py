@@ -192,13 +192,48 @@ def test_dropping_a_property_is_detected_by_name(rendered: dict[str, Any], prop:
     assert f"weekly-report:{prop}" in policy.weekly_violations(broken)
 
 
+# How each Compose version renders the file's reports mount (`bind:
+# create_host_path: false`). v5 prints the false value; 2.38.2 (GitHub's ubuntu
+# runners and the VM) omits it and leaves an empty `bind`, which failed CI on
+# PR #27 when only the v5 shape was accepted.
+REPORTS_MOUNT_V5 = {"type": "bind", "source": "/home/ubuntu/bfx/reports", "target": "/reports",
+                    "bind": {"create_host_path": False}}
+REPORTS_MOUNT_V2 = {"type": "bind", "source": "/home/ubuntu/bfx/reports", "target": "/reports",
+                    "bind": {}}
+
+
+def test_the_file_pins_create_host_path_false() -> None:
+    (mount,) = COMPOSE["services"]["weekly-report"]["volumes"]
+    assert mount == REPORTS_MOUNT_V5
+    assert Path(policy.WEEKLY_REPORTS["source"]) == weekly.REPORTS_DIR
+
+
 @needs_compose
-def test_reports_mount_must_not_be_created_or_read_only(rendered: dict[str, Any]) -> None:
-    for change in ({"bind": {"create_host_path": True}}, {"read_only": True},
-                   {"source": "/home/ubuntu"}):
-        broken = copy.deepcopy(rendered)
-        broken["services"]["weekly-report"]["volumes"][0].update(change)
-        assert "weekly-report:reports_mount" in policy.weekly_violations(broken), change
+@pytest.mark.parametrize("mount", [REPORTS_MOUNT_V5, REPORTS_MOUNT_V2],
+                         ids=["compose-v5", "compose-v2.38"])
+def test_both_compose_renderings_of_the_mount_pass(rendered: dict[str, Any], mount: dict[str, Any]) -> None:
+    shaped = copy.deepcopy(rendered)
+    shaped["services"]["weekly-report"]["volumes"] = [copy.deepcopy(mount)]
+    assert policy.weekly_violations(shaped) == []
+    without_bind = {k: v for k, v in mount.items() if k != "bind"}
+    assert policy.reports_mount_ok(without_bind)
+
+
+@needs_compose
+@pytest.mark.parametrize("change", [
+    {"bind": {"create_host_path": True}}, {"read_only": True}, {"source": "/home/ubuntu"},
+    {"target": "/app"}, {"type": "volume"}, {"bind": {"propagation": "rshared"}},
+    {"bind": {"selinux": "z"}}, {"volume": {"nocopy": True}}, {"bind": "yes"},
+])
+@pytest.mark.parametrize("base", [REPORTS_MOUNT_V5, REPORTS_MOUNT_V2], ids=["compose-v5", "compose-v2.38"])
+def test_reports_mount_must_stay_exactly_the_reports_bind(
+    rendered: dict[str, Any], base: dict[str, Any], change: dict[str, Any],
+) -> None:
+    broken = copy.deepcopy(rendered)
+    broken["services"]["weekly-report"]["volumes"] = [{**copy.deepcopy(base), **change}]
+    assert "weekly-report:reports_mount" in policy.weekly_violations(broken), change
+    broken["services"]["weekly-report"]["volumes"] = [copy.deepcopy(base), copy.deepcopy(base)]
+    assert "weekly-report:reports_mount" in policy.weekly_violations(broken)
 
 
 @needs_compose
@@ -252,17 +287,19 @@ def host(tmp_path: Path) -> dict[str, Path]:
         "DATABASE_URL=postgresql://bfx_bot:pw$x@bfx-postgres:5432/bfx\n"
         "BFX_EXCHANGE_ACCOUNT_ID=00000000-0000-4000-8000-000000000001\n"
         "BFX_VAULT_KEK=never-leaves-bot-env\nBFX_ADMIN_TOKEN=also-not\n")
+    reports = tmp_path / "reports"
+    reports.mkdir()
     state = tmp_path / "state"
     for revision in (REV, OLD_REV):
         (state / "releases" / revision).mkdir(parents=True)
         shutil.copy(ROOT / "deploy/vm/live.env", state / "releases" / revision / "live.env")
-    return {"ops": release / "ops", "runtime": runtime, "state": state}
+    return {"ops": release / "ops", "runtime": runtime, "state": state, "reports": reports}
 
 
 def _plan(host: dict[str, Path], ledger: FakeLedger, checked: list[Path] | None = None) -> Any:
     return weekly.build_plan(
         ops_dir=host["ops"], ledger=ledger, runtime_dir=host["runtime"], state_dir=host["state"],
-        backend_repository=BACKEND,
+        backend_repository=BACKEND, reports_dir=host["reports"],
         secret_check=(checked.append if checked is not None else lambda _path: None))
 
 
@@ -311,6 +348,10 @@ def test_steps_stay_with_the_installed_tooling_when_it_lags_the_deploy(
      "env_file_unreadable:live.env"),
     (lambda h, ledger: (h["ops"] / "docker-compose.weekly-report.yml").unlink(), "weekly_compose_missing"),
     (lambda h, ledger: (h["ops"].parent / ".installed").unlink(), "tooling_release_unknown"),
+    # Never let Docker create it: 2.x and v5 read an unset create_host_path differently.
+    (lambda h, ledger: h["reports"].rmdir(), "reports_dir_missing"),
+    (lambda h, ledger: (h["reports"].rmdir(), h["reports"].symlink_to(h["state"])),
+     "reports_dir_missing"),
 ])
 def test_plan_refuses_instead_of_guessing(
     host: dict[str, Path], mutate: Callable[[dict[str, Path], FakeLedger], object], code: str,
@@ -329,7 +370,8 @@ def test_an_unprotected_bot_env_stops_the_run(host: dict[str, Path]) -> None:
     with pytest.raises(bfx.DeployError, match=r"secret_file_mode_not_0600:bot\.env"):
         weekly.build_plan(ops_dir=host["ops"], ledger=FakeLedger([(REV, DIGEST, "deployed")]),
                           runtime_dir=host["runtime"], state_dir=host["state"],
-                          backend_repository=BACKEND, secret_check=refuse)
+                          backend_repository=BACKEND, reports_dir=host["reports"],
+                          secret_check=refuse)
 
 
 def test_defaults_are_the_deployers() -> None:
