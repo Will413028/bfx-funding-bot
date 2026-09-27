@@ -117,6 +117,17 @@ def test_full_account_snapshot_is_immutable_and_round_trips() -> None:
         event.wallet_available["fUST"] = Decimal("1")  # type: ignore[index]
 
 
+def test_credit_opening_round_trips_and_is_absent_from_older_snapshots() -> None:
+    event = _snapshot()
+    opened = replace(event, credits=(replace(event.credits[0], mts_opening=1_790_100_510_000),))
+    payload = serialize_event(opened)
+    assert payload["credits"][0]["mts_opening"] == 1_790_100_510_000
+    assert deserialize_event("VENUE_SNAPSHOT_OBSERVED", payload) == opened
+    del payload["credits"][0]["mts_opening"]          # recorded before the field existed
+    restored = deserialize_event("VENUE_SNAPSHOT_OBSERVED", payload)
+    assert restored.credits[0].mts_opening is None  # type: ignore[attr-defined]
+
+
 async def test_snapshot_projects_all_symbols_and_entity_identity(
     sqlite_session: AsyncSession,
 ) -> None:

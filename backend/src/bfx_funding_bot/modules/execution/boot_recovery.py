@@ -1082,6 +1082,7 @@ class BootRecovery:
             mts_created=credit.mts_created,
             mts_updated=credit.mts_updated,
             flags=_normalize_flags(credit.flags),
+            mts_opening=credit.mts_opening,
         )
 
     async def _load_history_start_ms(self) -> int | None:

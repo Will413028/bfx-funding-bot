@@ -159,6 +159,9 @@ class VenueCreditObservation:
     mts_created: int | None = None
     mts_updated: int | None = None
     flags: Mapping[str, Any] = field(default_factory=dict)
+    # The originating trade's instant; kept when a loan turns into credits with
+    # new ids and MTS_CREATE. None in snapshots recorded before 2026-09-27.
+    mts_opening: int | None = None
 
     def __post_init__(self) -> None:
         if not self.credit_id:

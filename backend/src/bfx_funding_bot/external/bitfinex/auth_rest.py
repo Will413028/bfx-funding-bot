@@ -108,6 +108,7 @@ class ActiveFundingCredit:
     mts_created: int | None = None
     mts_updated: int | None = None
     flags: dict[str, Any] | int | None = None
+    mts_opening: int | None = None   # [13]: the originating trade's instant
 
 
 _CREDIT_MIN_ROW_LEN = 13  # period is at index 12
@@ -118,7 +119,8 @@ def parse_active_funding_credits(raw: Any) -> list[ActiveFundingCredit]:
 
     Both endpoints return the same array layout (0-indexed):
       [0]=ID [1]=SYMBOL [2]=SIDE [3]=MTS_CREATE [4]=MTS_UPDATE [5]=AMOUNT
-      [6]=FLAGS [7]=STATUS [8]=RATE_TYPE [9]=_ [10]=_ [11]=RATE [12]=PERIOD ...
+      [6]=FLAGS [7]=STATUS [8]=RATE_TYPE [9]=_ [10]=_ [11]=RATE [12]=PERIOD
+      [13]=MTS_OPENING ...
 
     Rate and period were once read from [9] and [10], which the venue leaves
     null; that went unnoticed because they are audit fields, and was caught on
@@ -144,6 +146,7 @@ def parse_active_funding_credits(raw: Any) -> list[ActiveFundingCredit]:
             mts_created=int(o[3]) if o[3] is not None else None,
             mts_updated=int(o[4]) if o[4] is not None else None,
             flags=o[6] if isinstance(o[6], (dict, int)) else None,
+            mts_opening=int(o[13]) if len(o) > 13 and o[13] is not None else None,
         ))
     return out
 

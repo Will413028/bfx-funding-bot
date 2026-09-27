@@ -33,6 +33,7 @@ from bfx_funding_bot.modules.execution.capital_tables import (
     CapitalSnapshotRow,
 )
 from bfx_funding_bot.modules.execution.event_store.entities import (
+    VenueCreditObservation,
     is_terminal_offer_status,
 )
 from bfx_funding_bot.modules.execution.event_store.historical_claims import (
@@ -630,59 +631,77 @@ class CapitalRepository:
         """Which cell(s) each active credit's lent money belongs to, from the DB only.
 
         Decided once, here at the fence, and recorded in the classification, so
-        the authorization read stays a lookup and never asks the venue. In order:
+        the authorization read stays a lookup and never asks the venue.
 
-        1. ``funding_trade``: a synced funding trade with the credit's venue key
-           (symbol, amount, rate, period, MTS_CREATE -- stamped the same on both)
-           names our offer (OFFER_ID) -> decision -> cell. Same key as the
-           interest report (``credit_attribution.assign_cells``), but no 1:1
-           pairing inside a key: every credit sharing it carries every cell its
-           trades name, the conservative answer for a cap. When the key's trades name no
-           offer of ours, the credit is unattributed. When fewer trades than
-           credits share a key (the rest not synced yet), each of those credits
-           gets the trades' cells plus what steps 2-3 give it.
-        2. carried (keeps its basis): the previous accepted snapshot decided it. A
-           credit id is stable for its life, so a fill the hourly trade sync has
-           not reached keeps the cell it got when it first appeared, although the
-           evidence that placed it (offer history) is fetched only that once.
-        3. ``recent_fill``: a credit first seen now with no trade row yet goes to
+        The unit is the group of active credits and loans sharing (symbol,
+        period, MTS_OPENING): the venue stamps every record with its trade's
+        instant as MTS_OPENING, while a loan turns into credits with new ids,
+        new MTS_CREATE, split amounts and sometimes another rate, and a credit's
+        rate carries more digits than its trade's (same key as the interest
+        report, ``credit_attribution.assign_cells``). In order:
+
+        1. ``funding_trade``: synced funding trades at the group's instant (trade
+           MTS_CREATE == MTS_OPENING, same symbol and period) name our offers
+           (OFFER_ID) -> decision -> cell, and together cover the group's amount.
+           No pairing inside a group: every record carries every cell its trades
+           name, the conservative answer for a cap. Trades naming no offer of
+           ours leave the group unattributed. When the group holds more than
+           the synced trades (a trade not synced yet), each record gets the
+           trades' cells plus what steps 2-3 give it (``funding_trade_partial``).
+        2. carried (keeps its basis): the previous accepted snapshot decided the
+           group. Neither the id nor the amount survives a loan becoming credits,
+           so the carry is by group; a fill the hourly trade sync has not reached
+           keeps the cell it got when it first appeared, although the evidence
+           that placed it (offer history) is fetched only that once. A previous
+           snapshot recorded before groups carries by id and amount.
+        3. ``recent_fill``: a record first seen now with no trade row yet goes to
            every cell with a fill of ours in this snapshot that could have
            produced it: same symbol, amount within the filled part, offer created
-           no later than the credit. Rate and period are not required to match (a
-           crossing fill takes the resting side's terms): over-charging a cell
-           until the trade arrives is the safe direction, letting its lent money
-           leave its exposure is not. Evidence: the filled part of our active
-           offers, terminal offer history, and our offers of the previous
-           snapshot now gone from the book (up to what was still offered).
-        Otherwise the credit is unattributed (U): in T only, in no cell.
+           no later than the record's opening. Rate and period are not required
+           to match (a crossing fill takes the resting side's terms):
+           over-charging a cell until the trade arrives is the safe direction,
+           letting its lent money leave its exposure is not. Evidence: the
+           filled part of our active offers, terminal offer history, and our
+           offers of the previous snapshot now gone from the book (up to what
+           was still offered).
+        Otherwise the record is unattributed (U): in T only, in no cell.
         """
         credits = {c.credit_id: c for c in event.credits}
         cache: dict[str, str | None] = {}
-        keyed = {c.credit_id: (c.symbol, _amount(c.amount), c.rate, c.period_days, c.mts_created)
-                 for c in credits.values()
-                 if c.rate is not None and c.period_days is not None and c.mts_created is not None}
-        by_key: dict[tuple[Any, ...], set[str]] = {}
-        trade_count: dict[tuple[Any, ...], int] = {}
-        credit_count: dict[tuple[Any, ...], int] = {}
-        for key in keyed.values():
-            credit_count[key] = credit_count.get(key, 0) + 1
-        stamps = sorted({key[4] for key in keyed.values()})
+
+        def opening(credit: VenueCreditObservation) -> int | None:
+            # A snapshot recorded before MTS_OPENING was kept: MTS_CREATE is the
+            # opening of any record that is not a converted loan.
+            return credit.mts_opening if credit.mts_opening is not None else credit.mts_created
+
+        group_of: dict[str, tuple[str, int, int]] = {}
+        live: dict[tuple[str, int, int], Decimal] = {}
+        for c in credits.values():
+            at = opening(c)
+            if c.period_days is not None and at is not None:
+                key = (c.symbol, int(c.period_days), int(at))
+                group_of[c.credit_id] = key
+                live[key] = live.get(key, ZERO) + _amount(c.amount)
+        traders: dict[tuple[str, int, int], set[str]] = {}
+        traded: dict[tuple[str, int, int], Decimal] = {}
+        stamps = sorted({key[2] for key in live})
         if stamps:
-            # Rows returned are bounded by the active credits' stamps; the scan is
-            # the account's trade rows (PK prefix), which grow with fills only.
+            # Rows returned are bounded by the active credits' openings; the scan
+            # is the account's trade rows (PK prefix), which grow with fills only.
             # Add an (account, environment, mts_create) index once that is large.
             trades = (await session.scalars(select(FundingTradeRow).where(
                 FundingTradeRow.exchange_account_id == self.account_id,
                 FundingTradeRow.deployment_environment == self.environment,
                 FundingTradeRow.mts_create.in_(stamps)))).all()
             for trade in trades:
-                trade_key = (trade.symbol, Decimal(trade.amount), Decimal(trade.rate),
-                             trade.period_days, trade.mts_create)
-                traders = by_key.setdefault(trade_key, set())
-                trade_count[trade_key] = trade_count.get(trade_key, 0) + 1
+                key = (trade.symbol, int(trade.period_days), int(trade.mts_create))
+                if key not in live:
+                    continue
+                traded[key] = traded.get(key, ZERO) + abs(_amount(trade.amount))
+                cells = traders.setdefault(key, set())
                 cell = await self._offer_cell(session, str(trade.offer_id), trade.symbol, cache)
                 if cell is not None:
-                    traders.add(cell)
+                    cells.add(cell)
         # (cell, symbol, filled upper bound, offer creation) for fills of ours
         # visible at this fence.
         fills: list[tuple[str, str, Decimal, int | None]] = []
@@ -701,31 +720,44 @@ class CapitalRepository:
             if venue_offer_id not in ours:
                 fills.append((entry["cell"], entry["symbol"], _amount(entry["remaining"]),
                               entry["mts_created"]))
-        prior_cells = prior.get("credit_cells") or {}
+        prior_cells: Mapping[str, Mapping[str, Any]] = prior.get("credit_cells") or {}
+        carried_groups: dict[tuple[str, int, int], tuple[set[str], set[str]]] = {}
+        for entry in prior_cells.values():
+            if entry.get("opening") is not None and entry.get("period") is not None:
+                owners_, bases = carried_groups.setdefault(
+                    (entry["symbol"], int(entry["period"]), int(entry["opening"])), (set(), set()))
+                owners_.update(entry["cells"])
+                bases.add(entry["basis"])
         result: dict[str, dict[str, Any]] = {}
         for credit_id, credit in credits.items():
             amount = _amount(credit.amount)
-            carried = prior_cells.get(credit_id)
-            credit_key = keyed.get(credit_id)
+            group = group_of.get(credit_id)
             owners: set[str]
-            if credit_key is not None and credit_count[credit_key] <= trade_count.get(credit_key, 0):
-                owners, basis = set(by_key[credit_key]), "funding_trade"
+            if group is not None and group in traded and live[group] <= traded[group]:
+                owners, basis = set(traders[group]), "funding_trade"
             else:
-                if carried is not None and (carried["symbol"], _amount(carried["amount"])) == (
-                        credit.symbol, amount):
-                    owners, basis = set(carried["cells"]), carried["basis"]
+                legacy = prior_cells.get(credit_id)
+                if group is not None and group in carried_groups:
+                    carried_owners, bases = carried_groups[group]
+                    owners = set(carried_owners)
+                    basis = next(iter(bases)) if len(bases) == 1 else "carried"
+                elif (legacy is not None and legacy.get("opening") is None
+                        and (legacy["symbol"], _amount(legacy["amount"])) == (credit.symbol, amount)):
+                    owners, basis = set(legacy["cells"]), legacy["basis"]
                 else:
+                    at = opening(credit)
                     owners = {cell for cell, symbol, filled, created in fills
                               if symbol == credit.symbol and amount <= filled
-                              and (created is None or credit.mts_created is None
-                                   or created <= credit.mts_created)}
+                              and (created is None or at is None or created <= at)}
                     basis = "recent_fill" if owners else "none"
-                if credit_key is not None and credit_key in by_key:
-                    # Fewer trades than credits share the key: which credit is
-                    # the synced one is unknowable, so each carries both answers.
-                    owners |= by_key[credit_key]
+                if group is not None and group in traders:
+                    # The group holds more than its synced trades: which record
+                    # the synced ones produced is unknowable, so each carries both.
+                    owners |= traders[group]
                     basis = "funding_trade_partial"
             result[credit_id] = {"symbol": credit.symbol, "amount": str(amount),
+                                 "period": group[1] if group is not None else None,
+                                 "opening": group[2] if group is not None else None,
                                  "cells": sorted(owners), "basis": basis}
         return result
 

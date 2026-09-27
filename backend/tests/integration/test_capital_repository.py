@@ -12,7 +12,8 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.execution.capital_tables
-import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
+import bfx_funding_bot.modules.execution.uncertainty_tables
+import bfx_funding_bot.modules.live_validation.tables  # noqa: F401  (funding_trades)
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
@@ -307,7 +308,8 @@ async def test_credit_attributed_by_funding_trade_counts_in_its_cell_only(capita
         a30 = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
         p2 = await repo.read_capital(session, symbol="fUST", cell_id="p2", now_ms=1100)
     assert a30.attribution["credit_cells"]["c1"] == {
-        "symbol": "fUST", "amount": "200", "cells": ["a30"], "basis": "funding_trade"}
+        "symbol": "fUST", "amount": "200", "period": 2, "opening": 1150,
+        "cells": ["a30"], "basis": "funding_trade"}
     assert a30.snapshot.total_capital == p2.snapshot.total_capital == Decimal("1000")
     assert a30.unattributed_credit_exposure == Decimal("0")
     # a30: exposure 200, headroom 0.70*1000-200. ed4df67 alone gave 0 and 700.
@@ -410,6 +412,59 @@ async def test_credits_outnumbering_their_trades_keep_every_candidate_cell(capit
     assert view.attribution["credit_cells"]["c1"]["basis"] == "funding_trade"
     assert (view.snapshot.cell_exposure, other.snapshot.cell_exposure) == (
         Decimal("200"), Decimal("400"))
+
+
+@pytest.mark.asyncio
+async def test_loan_turning_into_split_credits_stays_in_its_cells_exposure(capital_db):
+    """Live 2026-08-09: trade 429585989 (391.4117332) became loan 60709535, then
+    credits 463464628 / 463464629 (161.24782943 each) and 463464632
+    (68.91607434) with new ids and MTS_CREATE, a more precise rate, and the
+    trade's instant kept as MTS_OPENING (the intermediate loans' amounts are the
+    remainder the credits imply). Before the hourly trade sync, the only
+    evidence is the fill seen when the loan appeared; carrying by id and amount
+    lost the money from a30's exposure as soon as the loan converted."""
+    from bfx_funding_bot.modules.execution.event_store.entities import VenueCreditObservation
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo, "0", "0.70")
+    seq = await snapshot(factory, repo)
+    trade_amount = Decimal("391.4117332")
+    cash = str(Decimal("1000") - trade_amount)
+    offer = await _place(factory, repo, policy, seq, amount=str(trade_amount), cid=1,
+                         venue_offer_id="101")
+    await snapshot(factory, repo, cash, offers=(offer,))
+    opened = 1150
+
+    def lent(credit_id, amount, created, rate="0.00014000000000000001"):
+        return VenueCreditObservation(credit_id, "fUST", Decimal(amount), Decimal(rate), 2,
+                                      "active", mts_created=created, mts_opening=opened)
+
+    one, rest1 = Decimal("161.24782943"), trade_amount - Decimal("161.24782943")
+    stages = [
+        (lent("loan:60709535", trade_amount, opened, "0.00014"),),
+        (lent("463464628", one, 1160), lent("loan:60709642", rest1, 1160, "0.00014")),
+        (lent("463464628", one, 1160), lent("463464629", one, 1170),
+         lent("463464632", "68.91607434", 1180)),
+    ]
+    for credits in stages:
+        seq = await snapshot(factory, repo, cash, credits=credits)
+        async with factory.begin() as session:
+            a30 = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+            p2 = await repo.read_capital(session, symbol="fUST", cell_id="p2", now_ms=1100)
+        assert {v["cells"][0] for v in a30.attribution["credit_cells"].values()} == {"a30"}
+        assert a30.snapshot.cell_exposure == trade_amount
+        assert a30.unattributed_credit_exposure == p2.snapshot.cell_exposure == Decimal("0")
+    assert {v["basis"] for v in a30.attribution["credit_cells"].values()} == {"recent_fill"}
+    # The trade syncs with its own, shorter rate: matched by the opening instant.
+    await _sync_trade(factory, repo, trade_id=429585989, offer_id=101,
+                      amount=str(trade_amount), mts_create=opened)
+    await snapshot(factory, repo, cash, credits=stages[-1])
+    async with factory.begin() as session:
+        a30 = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+    assert a30.attribution["credit_cells"]["463464632"] == {
+        "symbol": "fUST", "amount": "68.91607434", "period": 2, "opening": opened,
+        "cells": ["a30"], "basis": "funding_trade"}
+    assert a30.snapshot.cell_exposure == trade_amount
 
 
 @pytest.mark.asyncio
