@@ -18,6 +18,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     PositionStateRow,
 )
 from bfx_funding_bot.modules.live_validation.live_attribution import (
+    CreditCloseRecord,
     FillRecord,
     MarketRatePoint,
     VerdictState,
@@ -25,8 +26,10 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
 from scripts._g3_loaders import (
     _candles_to_market_rate_points,
     _compute_verdict,
+    _load_credit_history_closes,
     _load_observed_realized,
     build_verdict_from_neon,
+    merge_credit_closes,
 )
 
 C = Decimal("570")
@@ -370,3 +373,49 @@ async def test_build_verdict_credit_close_resolves_anchor_divergence(g3_factory)
     )
     assert n_fills == 2
     assert not any("deployment anchor diverged" in r for r in verdict.reasons)
+
+
+# Credit 466642177 (live, 2026-09-25): repaid after 842 s. Its pre-fix
+# CREDIT_CLOSED event carried occurred_at_ms == mts_create (0 days held).
+_CREATED = 1790350246000
+_REPAID = 1790351088000
+_STALE_EVENT = ({"symbol": "fUST", "credit_id": 466642177, "amount": "150.76884612",
+                 "mts_create": _CREATED}, _CREATED)
+
+
+def test_credit_history_close_wins_over_a_stale_credit_closed_event():
+    history = [CreditCloseRecord(466642177, Decimal("150.76884612"), _CREATED, _REPAID)]
+    assert merge_credit_closes(history, [_STALE_EVENT], symbol="fUST") == history
+
+
+def test_unsynced_event_uses_its_mts_last_payout_else_its_time():
+    fixed = ({**_STALE_EVENT[0], "credit_id": 1, "mts_last_payout": _REPAID}, _CREATED)
+    closes = merge_credit_closes([], [fixed, _STALE_EVENT], symbol="fUST")
+    assert [(c.credit_id, c.close_ts_ms) for c in closes] == [(1, _REPAID), (466642177, _CREATED)]
+    assert merge_credit_closes([], [_STALE_EVENT], symbol="fUSD") == []
+
+
+@pytest.mark.asyncio
+async def test_load_credit_history_closes_reads_last_payout(g3_factory):
+    from uuid import UUID
+
+    from bfx_funding_bot.modules.live_validation.tables import FundingCreditHistoryRow
+
+    account = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+    async with g3_factory() as s:
+        for kind in ("credit", "loan"):
+            s.add(FundingCreditHistoryRow(
+                exchange_account_id=account, kind=kind, credit_id=466642177,
+                deployment_environment="prod", symbol="fUST", side=1, mts_create=_CREATED,
+                mts_update=_CREATED, amount=Decimal("150.76884612"), status="CLOSED",
+                rate=Decimal("0.00019999"), period_days=2, mts_opening=_CREATED,
+                mts_last_payout=_REPAID,
+            ))
+        await s.commit()
+    async with g3_factory() as s:
+        closes = await _load_credit_history_closes(
+            s, account_id=str(account), deployment_env="prod", symbol="fUST")
+        legacy = await _load_credit_history_closes(
+            s, account_id="default", deployment_env="prod", symbol="fUST")
+    assert closes == [CreditCloseRecord(466642177, Decimal("150.76884612"), _CREATED, _REPAID)]
+    assert legacy == []

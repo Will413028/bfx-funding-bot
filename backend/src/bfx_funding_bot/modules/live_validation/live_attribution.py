@@ -24,6 +24,7 @@ unavailable — it does not affect the bot-vs-idle verdict (idle needs no market
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
@@ -348,8 +349,21 @@ def clamp_active_window(fills: list[FillRecord], *, cap: Decimal) -> ClampedWind
     )
 
 
+# The capital budget C: a fixed amount, or C per window [lo, hi) (e.g. the
+# funding-wallet balance the venue ledger reports for that window).
+CapitalBasis = Decimal | Callable[[int, int], Decimal]
+
+
+def capital_for(capital: CapitalBasis, lo: int, hi: int) -> Decimal:
+    """C for window [lo, hi); raises unless positive."""
+    c = capital(lo, hi) if callable(capital) else capital
+    if c <= 0:
+        raise ValueError(f"capital must be positive, got {c!r}")
+    return c
+
+
 def attribute_active(
-    fills: list[FillRecord], *, capital: Decimal, window_bounds: list[tuple[int, int]]
+    fills: list[FillRecord], *, capital: CapitalBasis, window_bounds: list[tuple[int, int]]
 ) -> list[WindowOutcome]:
     """Strategy arm: realized lending interest normalized to the capital budget.
 
@@ -357,13 +371,15 @@ def attribute_active(
     bucket's realized interest is concurrency-clamped to the budget
     (clamp_active_window) so the active arm cannot "deploy" more than the cap the
     passive arm is normalized to: net_monthly = clamped_interest / capital * 100.
+    With a per-window basis each window uses its own C.
     """
-    if capital <= 0:
-        raise ValueError(f"capital must be positive, got {capital!r}")
+    if not callable(capital):
+        capital_for(capital, 0, 0)
     out: list[WindowOutcome] = []
     for lo, hi in window_bounds:
         wf = [f for f in fills if lo <= f.fill_ts_ms < hi]
-        clamped = clamp_active_window(wf, cap=capital)
+        window_capital = capital_for(capital, lo, hi)
+        clamped = clamp_active_window(wf, cap=window_capital)
         rates = [f.rate for f in wf]
         # unweighted mean matched rate — diagnostic only, not used in the yield sum
         mean_rate = (
@@ -372,7 +388,7 @@ def attribute_active(
         out.append(
             WindowOutcome(
                 month_mts=lo,
-                net_monthly=clamped.interest / capital * Decimal("100"),
+                net_monthly=clamped.interest / window_capital * Decimal("100"),
                 n_trades=len(wf),
                 fill_rate=mean_rate,
             )

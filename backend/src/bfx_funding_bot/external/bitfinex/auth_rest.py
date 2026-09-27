@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal, TypeVar
 
 import httpx
 
@@ -20,6 +20,8 @@ from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.external.bitfinex.funding_offer_row import parse_funding_offer_row
 from bfx_funding_bot.modules.execution.protocols import AccountContext
+
+_Row = TypeVar("_Row")
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +255,97 @@ def parse_interest_payments(raw: Any) -> list[InterestPayment]:
     return out
 
 
+@dataclass(frozen=True, slots=True)
+class FundingCreditRecord:
+    """One ended credit from ``funding/credits/{symbol}/hist`` (or loan, from
+    ``funding/loans/{symbol}/hist``: same layout, separate id sequence).
+
+    For a closed credit ``mts_last_payout`` is the actual close: the venue pays
+    up to the moment the borrower returns the funds or the term expires
+    (verified 2026-09-27: credit 466642176 opened 15:30:46Z, repaid 15:44:48Z,
+    last payout 15:44:48Z; MTS_UPDATE equalled MTS_CREATE on that row).
+    """
+
+    credit_id: int
+    symbol: str
+    side: int | None
+    mts_create: int
+    mts_update: int
+    amount: Decimal       # absolute size
+    status: str
+    rate: Decimal         # per day
+    period_days: int
+    mts_opening: int
+    mts_last_payout: int | None
+
+
+_CREDIT_HIST_MIN_ROW_LEN = 15  # MTS_LAST_PAYOUT is at index 14
+
+
+def parse_funding_credit_history(raw: Any) -> list[FundingCreditRecord]:
+    """Credit rows: [0]ID [1]SYMBOL [2]SIDE [3]MTS_CREATE [4]MTS_UPDATE [5]AMOUNT
+    [6]FLAGS [7]STATUS [8]RATE_TYPE [9-10]_ [11]RATE [12]PERIOD [13]MTS_OPENING
+    [14]MTS_LAST_PAYOUT ..."""
+    if not isinstance(raw, list):
+        raise BitfinexShapeError(f"expected list of credit rows, got {type(raw).__name__}: {raw!r}")
+    out: list[FundingCreditRecord] = []
+    for row in raw:
+        if (not isinstance(row, list) or len(row) < _CREDIT_HIST_MIN_ROW_LEN
+                or any(row[i] is None for i in (0, 1, 3, 4, 5, 11, 12))):
+            raise BitfinexShapeError(f"credit history row malformed: {row!r}")
+        out.append(FundingCreditRecord(
+            credit_id=int(row[0]), symbol=str(row[1]),
+            side=int(row[2]) if row[2] is not None else None,
+            mts_create=int(row[3]), mts_update=int(row[4]),
+            amount=abs(Decimal(str(row[5]))), status=str(row[7]),
+            rate=Decimal(str(row[11])), period_days=int(row[12]),
+            mts_opening=int(row[13]) if row[13] is not None else int(row[3]),
+            mts_last_payout=int(row[14]) if row[14] is not None else None,
+        ))
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class FundingTrade:
+    """One funding trade (an offer of ours matched): ``funding/trades/{symbol}/hist``.
+
+    ``offer_id`` is the venue id of our submitted offer, the link from a credit
+    back to the decision (and cell) that placed it.
+    """
+
+    trade_id: int
+    symbol: str
+    mts_create: int
+    offer_id: int
+    amount: Decimal       # absolute size
+    rate: Decimal
+    period_days: int
+    maker: bool | None
+
+
+_TRADE_MIN_ROW_LEN = 7  # PERIOD at index 6
+
+
+def parse_funding_trades(raw: Any) -> list[FundingTrade]:
+    """Trade rows: [0]ID [1]SYMBOL [2]MTS_CREATE [3]OFFER_ID [4]AMOUNT [5]RATE
+    [6]PERIOD [7]MAKER."""
+    if not isinstance(raw, list):
+        raise BitfinexShapeError(f"expected list of funding trades, got {type(raw).__name__}: {raw!r}")
+    out: list[FundingTrade] = []
+    for row in raw:
+        if (not isinstance(row, list) or len(row) < _TRADE_MIN_ROW_LEN
+                or any(row[i] is None for i in range(_TRADE_MIN_ROW_LEN))):
+            raise BitfinexShapeError(f"funding trade row malformed: {row!r}")
+        maker = row[7] if len(row) > 7 else None
+        out.append(FundingTrade(
+            trade_id=int(row[0]), symbol=str(row[1]), mts_create=int(row[2]),
+            offer_id=int(row[3]), amount=abs(Decimal(str(row[4]))),
+            rate=Decimal(str(row[5])), period_days=int(row[6]),
+            maker=bool(maker) if maker is not None else None,
+        ))
+    return out
+
+
 BITFINEX_AUTH_REST_BASE = "https://api.bitfinex.com"
 _FUNDING_OFFERS_PATH = "v2/auth/r/funding/offers"  # /{symbol} appended; no leading slash (sign_request prepends /api/)
 _FUNDING_CREDITS_PATH = "v2/auth/r/funding/credits"
@@ -263,6 +356,7 @@ _FUNDING_LOANS_PATH = "v2/auth/r/funding/loans"
 # mistaken for one another by an id-keyed projection.
 LOAN_ID_PREFIX = "loan:"
 _LEDGERS_PATH = "v2/auth/r/ledgers"  # /{currency}/hist appended
+_FUNDING_TRADES_PATH = "v2/auth/r/funding/trades"  # /{symbol}/hist appended
 _WALLETS_PATH = "v2/auth/r/wallets"  # no /{symbol}; sign_request prepends /api/
 _PERMISSIONS_PATH = "v2/auth/r/permissions"  # no body args; sign_request prepends /api/
 
@@ -477,27 +571,72 @@ class BitfinexAuthREST:
     ) -> list[InterestPayment]:
         """Interest payouts in [start_ms, end_ms], oldest first.
 
-        The endpoint returns newest first; page backwards by the oldest MTS until
-        a short page. Payouts are daily, so a page of 500 covers over a year.
+        Payouts are daily, so a page of 500 covers over a year.
         """
+        payments = await self._page_hist(
+            ctx=ctx, path=f"{_LEDGERS_PATH}/{currency}/hist",
+            extra={"category": INTEREST_LEDGER_CATEGORY}, parse=parse_interest_payments,
+            mts=lambda entry: entry.mts, key=lambda entry: entry.ledger_id,
+            start_ms=start_ms, end_ms=end_ms, limit=limit, max_pages=max_pages,
+        )
+        return sorted(payments, key=lambda entry: (entry.mts, entry.ledger_id))
+
+    async def get_funding_credit_history(
+        self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
+        kind: Literal["credit", "loan"] = "credit", limit: int = 500, max_pages: int = 20,
+    ) -> list[FundingCreditRecord]:
+        """Ended credits (or, with ``kind="loan"``, loans) updated in
+        [start_ms, end_ms], oldest update first. Both share one row layout.
+
+        Paged by MTS_UPDATE. Which timestamp the venue filters on is not
+        documented; rows are deduplicated by id, so a re-read is harmless.
+        """
+        base = _FUNDING_CREDITS_PATH if kind == "credit" else _FUNDING_LOANS_PATH
+        credits = await self._page_hist(
+            ctx=ctx, path=f"{base}/{symbol}/hist", extra={},
+            parse=parse_funding_credit_history, mts=lambda c: c.mts_update,
+            key=lambda c: c.credit_id, start_ms=start_ms, end_ms=end_ms,
+            limit=limit, max_pages=max_pages,
+        )
+        return sorted(credits, key=lambda c: (c.mts_update, c.credit_id))
+
+    async def get_funding_trades(
+        self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
+        limit: int = 500, max_pages: int = 20,
+    ) -> list[FundingTrade]:
+        """Funding trades (our offers matched) in [start_ms, end_ms], oldest first."""
+        trades = await self._page_hist(
+            ctx=ctx, path=f"{_FUNDING_TRADES_PATH}/{symbol}/hist", extra={},
+            parse=parse_funding_trades, mts=lambda t: t.mts_create,
+            key=lambda t: t.trade_id, start_ms=start_ms, end_ms=end_ms,
+            limit=limit, max_pages=max_pages,
+        )
+        return sorted(trades, key=lambda t: (t.mts_create, t.trade_id))
+
+    async def _page_hist(
+        self, *, ctx: AccountContext, path: str, extra: dict[str, Any],
+        parse: Callable[[Any], list[_Row]], mts: Callable[[_Row], int],
+        key: Callable[[_Row], int], start_ms: int, end_ms: int, limit: int, max_pages: int,
+    ) -> list[_Row]:
+        """A ``/hist`` endpoint returns newest first: page backwards by the
+        oldest timestamp of each page until a short page, the window start, or
+        no progress."""
         if start_ms < 0 or end_ms < start_ms:
-            raise ValueError("invalid ledger window")
-        path = f"{_LEDGERS_PATH}/{currency}/hist"
-        by_id: dict[int, InterestPayment] = {}
+            raise ValueError(f"invalid window for {path}")
+        by_key: dict[int, _Row] = {}
         cursor_end = end_ms
         for _ in range(max_pages):
-            body = {"category": INTEREST_LEDGER_CATEGORY, "start": start_ms,
-                    "end": cursor_end, "limit": limit}
-            page = parse_interest_payments(await self._post_signed(ctx=ctx, path=path, body=body))
-            for entry in page:
-                by_id.setdefault(entry.ledger_id, entry)
+            body = {**extra, "start": start_ms, "end": cursor_end, "limit": limit}
+            page = parse(await self._post_signed(ctx=ctx, path=path, body=body))
+            for row in page:
+                by_key.setdefault(key(row), row)
             if len(page) < limit:
                 break
-            oldest = min(entry.mts for entry in page)
+            oldest = min(mts(row) for row in page)
             if oldest <= start_ms or oldest >= cursor_end:
                 break
             cursor_end = oldest - 1
-        return sorted(by_id.values(), key=lambda entry: (entry.mts, entry.ledger_id))
+        return list(by_key.values())
 
     async def _post_signed(self, *, ctx: AccountContext, path: str, body: dict[str, Any]) -> Any:
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
