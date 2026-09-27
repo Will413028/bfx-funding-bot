@@ -114,6 +114,7 @@ jobs:
       - run: uv sync --all-groups
       - run: uv run ruff check
       - run: uv run mypy --strict src
+      - run: uv run lint-imports
       - run: uv run pytest -m "not integration and not gate" -q
 
   backend_gate:
