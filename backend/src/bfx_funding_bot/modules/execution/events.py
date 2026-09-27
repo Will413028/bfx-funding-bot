@@ -712,10 +712,20 @@ class CreditClosed:
     is_simulated: bool
     venue_seq: int | None = None
     event_seq: int | None = None
-    occurred_at_ms: int | None = None  # close time (venue mts_update)
+    occurred_at_ms: int | None = None  # close time (venue mts_last_payout)
     recorded_at_ms: int | None = None
     event_id: UUID = field(default_factory=uuid4)
+    # Present only on events written after the 2026-09-27 parser fix. Without
+    # them, rate / period_days / occurred_at_ms are unreliable: rate held the
+    # period, period_days held mts_opening, and occurred_at_ms held mts_update,
+    # which may equal mts_create on the close frame.
+    mts_opening: int | None = None
+    mts_last_payout: int | None = None
     schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
+
+    @property
+    def venue_fields_reliable(self) -> bool:
+        return self.mts_last_payout is not None
 
     def __post_init__(self) -> None:
         _require_symbol(self)

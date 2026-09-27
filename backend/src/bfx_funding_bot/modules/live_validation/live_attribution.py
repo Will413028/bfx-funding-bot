@@ -177,7 +177,7 @@ class CreditCloseRecord:
     credit_id: int
     amount: Decimal
     mts_create: int   # credit creation ≈ the originating fill's timestamp
-    close_ts_ms: int  # venue mts_update on the fcc frame
+    close_ts_ms: int  # venue mts_last_payout on the fcc frame (mts_update before 2026-09-27)
 
 
 _CREDIT_MATCH_SLACK_MS = 300_000  # fill may trail credit creation by venue clock skew

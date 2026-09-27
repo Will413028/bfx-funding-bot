@@ -98,18 +98,23 @@ class FcuEvent(BfxWSEvent):
 class FccEvent(BfxWSEvent):
     """FUNDING CREDIT CLOSE — credit ended (matured or borrower returned early).
 
-    mts_update is the close time; the venue does NOT carry the originating
-    offer id, so downstream attribution joins on (symbol, amount, mts_create).
+    The close time is mts_last_payout: the venue pays out at close, while
+    mts_update can still equal mts_create on the close frame (a credit repaid
+    after 14 minutes, 2026-09-25, carried mts_update == mts_create). The venue
+    does NOT carry the originating offer id, so downstream attribution joins on
+    (symbol, amount, mts_create).
     """
     credit_id: int
     symbol: str
     mts_create: int
-    mts_update: int          # close time
+    mts_update: int
     amount: Decimal
     status: str
     rate: float
     period_days: int
     raw_seq: int | None
+    mts_opening: int | None = None
+    mts_last_payout: int | None = None  # close time
     raw: list[Any] = field(default_factory=list)
 
 
@@ -242,11 +247,20 @@ def _parse_channel_msg(msg: list[Any]) -> BfxWSEvent | None:
     return Unknown(raw=msg, raw_seq=raw_seq)
 
 
+def _optional_mts(value: Any) -> int | None:
+    # 0 is the venue's "not set", never a real time.
+    return int(value) if value else None
+
+
 def _parse_fcn(d: list[Any], raw_seq: int | None) -> FcnEvent:
-    # Bitfinex FCN array layout (0-indexed):
+    # Bitfinex funding credit array (0-indexed), same for fcn/fcu/fcc and the
+    # REST credits endpoints (auth_rest.parse_active_funding_credits):
     # 0=id, 1=symbol, 2=side, 3=mts_create, 4=mts_update, 5=amount,
-    # 6=flags, 7=status, 8-10=?, 11=rate_type, 12=rate, 13=period,
-    # 14=mts_opening, 15=?, 16=notify, 17=hidden, ...
+    # 6=flags, 7=status, 8=rate_type, 9-10=_, 11=rate, 12=period,
+    # 13=mts_opening, 14=mts_last_payout, 15=notify, 16=hidden, ...
+    # Rate and period were once read one slot late ([12], [13]): every
+    # CREDIT_CLOSED before 2026-09-27 stored the period as its rate and
+    # mts_opening as its period.
     return FcnEvent(
         credit_id=int(d[0]),
         symbol=str(d[1]),
@@ -254,15 +268,15 @@ def _parse_fcn(d: list[Any], raw_seq: int | None) -> FcnEvent:
         mts_create=int(d[3]),
         mts_update=int(d[4]),
         amount=Decimal(str(d[5])),
-        rate=float(d[12]),
-        period_days=int(d[13]),
+        rate=float(d[11]),
+        period_days=int(d[12]),
         raw_seq=raw_seq,
         raw=d,
     )
 
 
 def _parse_fcc(d: list[Any], raw_seq: int | None) -> FccEvent:
-    # Same array layout as FCN; status at index 7, mts_update (index 4) = close time
+    # Same array layout as FCN; status at index 7, mts_last_payout (index 14) = close time
     return FccEvent(
         credit_id=int(d[0]),
         symbol=str(d[1]),
@@ -270,21 +284,23 @@ def _parse_fcc(d: list[Any], raw_seq: int | None) -> FccEvent:
         mts_update=int(d[4]),
         amount=Decimal(str(d[5])),
         status=str(d[7]),
-        rate=float(d[12]),
-        period_days=int(d[13]),
+        rate=float(d[11]),
+        period_days=int(d[12]),
         raw_seq=raw_seq,
         raw=d,
+        mts_opening=_optional_mts(d[13]),
+        mts_last_payout=_optional_mts(d[14]),
     )
 
 
 def _parse_fcu(d: list[Any], raw_seq: int | None) -> FcuEvent:
-    # Same array layout as FCN; rate at index 12
+    # Same array layout as FCN; rate at index 11
     return FcuEvent(
         credit_id=int(d[0]),
         symbol=str(d[1]),
         mts_update=int(d[4]),
         amount=Decimal(str(d[5])),
-        rate=float(d[12]),
+        rate=float(d[11]),
         raw_seq=raw_seq,
         raw=d,
     )
