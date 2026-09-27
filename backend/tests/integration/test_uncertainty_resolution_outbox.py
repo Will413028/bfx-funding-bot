@@ -6,9 +6,7 @@ the production state this migration must repair. Owner-only fixtures would pass
 whether or not the web API could still write the ledger.
 """
 import asyncio
-import os
 import re
-import subprocess
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -49,6 +47,7 @@ from tests.modules.api.test_uncertainties_router import (
     _decision,
     _snapshot,
 )
+from tests.pg_templates import alembic as _alembic
 
 pytestmark = pytest.mark.integration
 
@@ -76,17 +75,8 @@ _REQUEST_COLUMNS = (
 _WORKER_COLUMNS = ("state", "processed_at_ms", "resolved_event_seq", "outcome_reason")
 
 
-def _alembic(url: str, *args: str) -> None:
-    result = subprocess.run(
-        ["uv", "run", "alembic", *args], cwd=_BACKEND,
-        env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-@pytest.fixture
-def migrated(pg_container):
-    url = pg_container.get_connection_url().replace("+psycopg2", "+psycopg")
+def _build_migrated(url: str) -> None:
+    """The hand-granted production state, then the upgrade that must repair it."""
     engine = create_engine(url)
     with engine.begin() as conn:
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
@@ -127,6 +117,14 @@ def migrated(pg_container):
     with engine.begin() as conn:
         # Re-provisioning from today's runbook must not hand any write back.
         conn.exec_driver_sql(current_6b)
+    engine.dispose()
+
+
+@pytest.fixture
+def migrated(pg_templates, pg_clone):
+    """A fresh copy of the repaired database; the upgrade runs once per session."""
+    url = pg_clone(pg_templates.template("uncertainty_outbox_migrated", _build_migrated))
+    engine = create_engine(url)
     try:
         yield url, engine
     finally:
