@@ -16,10 +16,6 @@ from urllib.parse import urlparse
 
 import psycopg
 import pytest
-from alembic.config import Config
-
-from alembic import command
-from tests.integration.test_migration_per_symbol_pk import _ALEMBIC_INI
 
 pytestmark = pytest.mark.integration
 
@@ -106,19 +102,10 @@ def isolated_redis(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
 
 
 @pytest.fixture
-def auth_database(pg_container, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    raw_url = pg_container.get_connection_url()
-    sqlalchemy_url = raw_url.replace("postgresql+psycopg2://", "postgresql+psycopg://")
-    driver_url = raw_url.replace("postgresql+psycopg2://", "postgresql://")
-    monkeypatch.setenv("DATABASE_URL", sqlalchemy_url)
-    with psycopg.connect(driver_url) as connection, connection.cursor() as cursor:
-        cursor.execute("DROP SCHEMA IF EXISTS projection_audit CASCADE")
-        cursor.execute("DROP SCHEMA IF EXISTS auth CASCADE")
-        cursor.execute("DROP SCHEMA IF EXISTS release_archive CASCADE")
-        cursor.execute("DROP SCHEMA public CASCADE")
-        cursor.execute("CREATE SCHEMA public")
-    command.upgrade(Config(str(_ALEMBIC_INI)), "head")
-    yield driver_url
+def auth_database(pg_head_url: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """A fresh copy of the database Alembic migrated from empty to head."""
+    monkeypatch.setenv("DATABASE_URL", pg_head_url)
+    yield pg_head_url.replace("postgresql+psycopg://", "postgresql://")
 
 
 def _seed_operator(database_url: str, *, other_role: str = "user") -> None:
