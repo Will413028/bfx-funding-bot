@@ -4,7 +4,7 @@ from typing import Any
 import httpx
 import pytest
 
-from bfx_funding_bot.external.bitfinex.nonce import make_monotonic_us_nonce
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.registry import (
     ExecutorConfigError,
     build_executor,
@@ -103,7 +103,7 @@ def test_bitfinex_live_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     assert spec.fill_tracker_enabled is False
 
 
-def test_bitfinex_live_forwards_shared_nonce_provider(
+def test_bitfinex_live_forwards_shared_auth_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The shared per-key nonce MUST reach the live executor — a forgotten forward
@@ -114,12 +114,12 @@ def test_bitfinex_live_forwards_shared_nonce_provider(
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
 
     from bfx_funding_bot.modules.execution.bus import DomainEventBus
-    sentinel = make_monotonic_us_nonce()
+    sentinel = AuthRequestGate()
     spec = build_executor(
         event_sink=_EventCapture(), phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         http=httpx.AsyncClient(), bus=DomainEventBus(),
-        nonce_provider=sentinel,
+        auth_gate=sentinel,
     )
-    assert spec.executor._nonce_provider is sentinel  # type: ignore[attr-defined]
+    assert spec.executor._auth_gate is sentinel  # type: ignore[attr-defined]

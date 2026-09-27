@@ -25,6 +25,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
     parse_funding_trades,
 )
 from bfx_funding_bot.external.bitfinex.errors import BitfinexShapeError
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.live_validation.credit_history import (
     CREDIT_RESYNC_MS,
     CreditHistorySync,
@@ -93,7 +94,7 @@ async def test_rest_pages_credit_and_loan_history_backwards_by_update_time() -> 
         return httpx.Response(200, json=pages[len(requests) - 1])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        rest = BitfinexAuthREST(http=http, nonce_provider=iter(range(1, 100)).__next__)
+        rest = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(iter(range(1, 100)).__next__))
         got = await rest.get_funding_credit_history(
             ctx=_Ctx(), symbol="fUST", start_ms=0, end_ms=1790500000000, limit=1,  # type: ignore[arg-type]
         )
@@ -115,7 +116,7 @@ async def test_rest_reads_funding_trades() -> None:
         return httpx.Response(200, json=[TRADE])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        rest = BitfinexAuthREST(http=http, nonce_provider=iter(range(1, 100)).__next__)
+        rest = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(iter(range(1, 100)).__next__))
         [trade] = await rest.get_funding_trades(
             ctx=_Ctx(), symbol="fUST", start_ms=0, end_ms=1790500000000,  # type: ignore[arg-type]
         )

@@ -496,6 +496,29 @@ async def test_a_submit_that_raises_mid_transport_ends_the_process() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_cancelled_before_transport_closes_intent_as_not_sent() -> None:
+    """The executor was cancelled while waiting for the per-key venue gate:
+    nothing was sent, so the intent closes as NOT_SENT (no UNKNOWN quarantine
+    for recovery to invent) and the cancellation still propagates."""
+    from bfx_funding_bot.modules.execution.submit_outcomes import SubmitCancelledNotSent
+
+    reader = _FakeUncertaintyReader(set())
+    persister = _FakePersister(reader)
+    venue = _FakeVenue()
+
+    async def cancelled_waiting(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise SubmitCancelledNotSent("cancelled_waiting_for_venue_gate")
+
+    venue.submit = cancelled_waiting  # type: ignore[method-assign]
+    with pytest.raises(asyncio.CancelledError):
+        await _gate(venue, reader, persister).submit(_ready(), _context())
+
+    assert [type(event) for event in persister.txns[1]] == [ReservationFailed]
+    assert persister.txns[1][0].reason == "local_pre_transport"
+    assert not reader.open_scopes
+
+
+@pytest.mark.asyncio
 async def test_executor_cid_mismatch_becomes_durable_unknown_and_blocks_scope() -> None:
     """Trusting a mismatched result CID would falsely claim another command's ACK."""
     reader = _FakeUncertaintyReader(set())

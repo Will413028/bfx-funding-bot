@@ -7,8 +7,9 @@ read-side recovery queries.
 """
 from __future__ import annotations
 
+import asyncio
 import json
-import time
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -19,9 +20,52 @@ import httpx
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.external.bitfinex.funding_offer_row import parse_funding_offer_row
-from bfx_funding_bot.modules.execution.protocols import AccountContext
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
+from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+from bfx_funding_bot.modules.execution.submit_outcomes import response_digest, venue_error
 
 _Row = TypeVar("_Row")
+
+log = logging.getLogger(__name__)
+
+_ERROR_BODY_LOG_MAX = 200
+
+# Total deadline for one signed read (was a 30 s per-phase httpx timeout). It
+# bounds how long an order-path request -- a kill's cancel-all -- can wait for
+# the in-flight read ahead of it at the shared gate.
+READ_DEADLINE_S = 10.0
+
+
+def log_auth_http_error(
+    resp: httpx.Response, *, path: str, credentials: Credentials,
+) -> None:
+    """Log why the venue refused a signed request, without leaking the key.
+
+    Bitfinex reports a stale nonce as HTTP 500 with ``["error", CODE, "nonce:
+    small"]``; without the body that is indistinguishable from an outage. The
+    venue's code/message is logged when the body has that shape, otherwise a
+    bounded prefix of the text. Request headers (key, signature) are never
+    touched, and a body that echoes either credential is dropped whole -- only
+    its digest remains for correlation.
+    """
+    text = resp.text
+    try:
+        parsed: Any = json.loads(text)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        parsed = None
+    venue = venue_error(parsed)
+    if credentials.api_key in text or credentials.api_secret in text:
+        venue_code: int | None = venue[0] if venue is not None else None
+        body = "<redacted:credential_echo>"
+    elif venue is not None:
+        venue_code, body = venue
+    else:
+        venue_code, body = None, text[:_ERROR_BODY_LOG_MAX]
+    log.warning(
+        "bitfinex_auth_http_error path=%s status=%s venue_error_code=%s "
+        "body=%r response_digest=%s",
+        path, resp.status_code, venue_code, body, response_digest(text[:1000]),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,37 +413,63 @@ class BitfinexAuthREST:
         *,
         http: httpx.AsyncClient,
         base_url: str = BITFINEX_AUTH_REST_BASE,
-        nonce_provider: Callable[[], int] | None = None,
+        auth_gate: AuthRequestGate | None = None,
+        read_deadline_s: float = READ_DEADLINE_S,
     ) -> None:
         self._http = http
         self._base_url = base_url.rstrip("/")
-        self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
+        self._read_deadline_s = read_deadline_s
+        # Share the daemon's one gate for the key; a private gate only orders
+        # this client's own requests.
+        self._auth_gate = auth_gate or AuthRequestGate()
 
-    async def _fetch_funding_offers_response(
-        self, *, ctx: AccountContext, symbol: str | None = None,
+    async def _signed_post(
+        self, *, ctx: AccountContext, path: str, body_bytes: bytes,
     ) -> httpx.Response:
-        path = _FUNDING_OFFERS_PATH if symbol is None else f"{_FUNDING_OFFERS_PATH}/{symbol}"
-        body_bytes = json.dumps({}).encode("utf-8")
-        nonce = self._nonce_provider()
-        headers = sign_request(
-            body=body_bytes, nonce=nonce,
-            api_secret=ctx.credentials.api_secret, path=path,
-        )
-        headers["bfx-apikey"] = ctx.credentials.api_key
-        headers["Content-Type"] = "application/json"
-        try:
-            resp = await self._http.post(
-                f"{self._base_url}/{path}", content=body_bytes, headers=headers,
-                timeout=30.0,
+        """The only way this client talks to the venue: sign + POST under the
+        shared gate, so the request arrives in nonce order. Raises
+        BitfinexAPIError on transport error or deadline (status 0) or HTTP >= 400.
+
+        Every call here is a read, so it waits behind any queued order-path
+        request and is cut at a total deadline: an order (a kill) waiting for
+        the gate waits for at most this long.
+        """
+        async with self._auth_gate.nonce("read", label=path) as nonce:
+            headers = sign_request(
+                body=body_bytes, nonce=nonce,
+                api_secret=ctx.credentials.api_secret, path=path,
             )
-        except httpx.HTTPError as e:
-            raise BitfinexAPIError(status_code=0, message=f"transport error: {e}", raw=None) from e
+            headers["bfx-apikey"] = ctx.credentials.api_key
+            headers["Content-Type"] = "application/json"
+            deadline = self._read_deadline_s
+            try:
+                async with asyncio.timeout(deadline):
+                    resp = await self._http.post(
+                        f"{self._base_url}/{path}", content=body_bytes, headers=headers,
+                        timeout=deadline,
+                    )
+            except httpx.HTTPError as e:
+                raise BitfinexAPIError(
+                    status_code=0, message=f"transport error: {e}", raw=None,
+                ) from e
+            except TimeoutError as e:
+                raise BitfinexAPIError(
+                    status_code=0, message=f"transport error: {deadline}s deadline exceeded",
+                    raw=None,
+                ) from e
         if resp.status_code >= 400:
+            log_auth_http_error(resp, path=path, credentials=ctx.credentials)
             raise BitfinexAPIError(
                 status_code=resp.status_code,
                 message=resp.reason_phrase or "http error", raw=resp.text,
             )
         return resp
+
+    async def _fetch_funding_offers_response(
+        self, *, ctx: AccountContext, symbol: str | None = None,
+    ) -> httpx.Response:
+        path = _FUNDING_OFFERS_PATH if symbol is None else f"{_FUNDING_OFFERS_PATH}/{symbol}"
+        return await self._signed_post(ctx=ctx, path=path, body_bytes=b"{}")
 
     async def fetch_funding_offers_raw(
         self, *, ctx: AccountContext, symbol: str | None = None,
@@ -468,34 +538,8 @@ class BitfinexAuthREST:
                 {"start": start_ms, "end": cursor_end, "limit": limit},
                 separators=(",", ":"),
             ).encode("utf-8")
-            nonce = self._nonce_provider()
-            headers = sign_request(
-                body=body_bytes,
-                nonce=nonce,
-                api_secret=ctx.credentials.api_secret,
-                path=path,
-            )
-            headers["bfx-apikey"] = ctx.credentials.api_key
-            headers["Content-Type"] = "application/json"
-            try:
-                resp = await self._http.post(
-                    f"{self._base_url}/{path}",
-                    content=body_bytes,
-                    headers=headers,
-                    timeout=30.0,
-                )
-            except httpx.HTTPError as exc:
-                raise BitfinexAPIError(
-                    status_code=0,
-                    message=f"transport error: {exc}",
-                    raw=None,
-                ) from exc
-            if resp.status_code >= 400:
-                raise BitfinexAPIError(
-                    status_code=resp.status_code,
-                    message=resp.reason_phrase or "http error",
-                    raw=resp.text,
-                )
+            # One gate hold per page: a trading-path call can interleave.
+            resp = await self._signed_post(ctx=ctx, path=path, body_bytes=body_bytes)
             try:
                 raw = json.loads(resp.content, parse_float=Decimal)
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -640,23 +684,7 @@ class BitfinexAuthREST:
 
     async def _post_signed(self, *, ctx: AccountContext, path: str, body: dict[str, Any]) -> Any:
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
-        headers = sign_request(
-            body=body_bytes, nonce=self._nonce_provider(),
-            api_secret=ctx.credentials.api_secret, path=path,
-        )
-        headers["bfx-apikey"] = ctx.credentials.api_key
-        headers["Content-Type"] = "application/json"
-        try:
-            resp = await self._http.post(
-                f"{self._base_url}/{path}", content=body_bytes, headers=headers, timeout=30.0,
-            )
-        except httpx.HTTPError as e:
-            raise BitfinexAPIError(status_code=0, message=f"transport error: {e}", raw=None) from e
-        if resp.status_code >= 400:
-            raise BitfinexAPIError(
-                status_code=resp.status_code,
-                message=resp.reason_phrase or "http error", raw=resp.text,
-            )
+        resp = await self._signed_post(ctx=ctx, path=path, body_bytes=body_bytes)
         try:
             return json.loads(resp.content, parse_float=Decimal)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
@@ -665,26 +693,7 @@ class BitfinexAuthREST:
     async def _post_funding_lent(
         self, *, ctx: AccountContext, path: str,
     ) -> list[ActiveFundingCredit]:
-        body_bytes = json.dumps({}).encode("utf-8")
-        nonce = self._nonce_provider()
-        headers = sign_request(
-            body=body_bytes, nonce=nonce,
-            api_secret=ctx.credentials.api_secret, path=path,
-        )
-        headers["bfx-apikey"] = ctx.credentials.api_key
-        headers["Content-Type"] = "application/json"
-        try:
-            resp = await self._http.post(
-                f"{self._base_url}/{path}", content=body_bytes, headers=headers,
-                timeout=30.0,
-            )
-        except httpx.HTTPError as e:
-            raise BitfinexAPIError(status_code=0, message=f"transport error: {e}", raw=None) from e
-        if resp.status_code >= 400:
-            raise BitfinexAPIError(
-                status_code=resp.status_code,
-                message=resp.reason_phrase or "http error", raw=resp.text,
-            )
+        resp = await self._signed_post(ctx=ctx, path=path, body_bytes=b"{}")
         try:
             raw = resp.json()
         except json.JSONDecodeError as e:
@@ -699,26 +708,7 @@ class BitfinexAuthREST:
         raises BitfinexAPIError on transport/HTTP error, BitfinexShapeError on
         invalid JSON / shape."""
         path = _WALLETS_PATH
-        body_bytes = json.dumps({}).encode("utf-8")
-        nonce = self._nonce_provider()
-        headers = sign_request(
-            body=body_bytes, nonce=nonce,
-            api_secret=ctx.credentials.api_secret, path=path,
-        )
-        headers["bfx-apikey"] = ctx.credentials.api_key
-        headers["Content-Type"] = "application/json"
-        try:
-            resp = await self._http.post(
-                f"{self._base_url}/{path}", content=body_bytes, headers=headers,
-                timeout=30.0,
-            )
-        except httpx.HTTPError as e:
-            raise BitfinexAPIError(status_code=0, message=f"transport error: {e}", raw=None) from e
-        if resp.status_code >= 400:
-            raise BitfinexAPIError(
-                status_code=resp.status_code,
-                message=resp.reason_phrase or "http error", raw=resp.text,
-            )
+        resp = await self._signed_post(ctx=ctx, path=path, body_bytes=b"{}")
         try:
             raw = resp.json()
         except json.JSONDecodeError as e:
@@ -740,26 +730,7 @@ class BitfinexAuthREST:
         infer a currency from strategy configuration.
         """
         path = _WALLETS_PATH
-        body_bytes = json.dumps({}).encode("utf-8")
-        nonce = self._nonce_provider()
-        headers = sign_request(
-            body=body_bytes, nonce=nonce,
-            api_secret=ctx.credentials.api_secret, path=path,
-        )
-        headers["bfx-apikey"] = ctx.credentials.api_key
-        headers["Content-Type"] = "application/json"
-        try:
-            resp = await self._http.post(
-                f"{self._base_url}/{path}", content=body_bytes, headers=headers,
-                timeout=30.0,
-            )
-        except httpx.HTTPError as e:
-            raise BitfinexAPIError(status_code=0, message=f"transport error: {e}", raw=None) from e
-        if resp.status_code >= 400:
-            raise BitfinexAPIError(
-                status_code=resp.status_code,
-                message=resp.reason_phrase or "http error", raw=resp.text,
-            )
+        resp = await self._signed_post(ctx=ctx, path=path, body_bytes=b"{}")
         try:
             raw = resp.json()
         except json.JSONDecodeError as e:
@@ -779,26 +750,7 @@ class BitfinexAuthREST:
         transport/HTTP error (status_code=0 for transport), BitfinexShapeError on
         invalid JSON / shape."""
         path = _PERMISSIONS_PATH
-        body_bytes = json.dumps({}).encode("utf-8")
-        nonce = self._nonce_provider()
-        headers = sign_request(
-            body=body_bytes, nonce=nonce,
-            api_secret=ctx.credentials.api_secret, path=path,
-        )
-        headers["bfx-apikey"] = ctx.credentials.api_key
-        headers["Content-Type"] = "application/json"
-        try:
-            resp = await self._http.post(
-                f"{self._base_url}/{path}", content=body_bytes, headers=headers,
-                timeout=30.0,
-            )
-        except httpx.HTTPError as e:
-            raise BitfinexAPIError(status_code=0, message=f"transport error: {e}", raw=None) from e
-        if resp.status_code >= 400:
-            raise BitfinexAPIError(
-                status_code=resp.status_code,
-                message=resp.reason_phrase or "http error", raw=resp.text,
-            )
+        resp = await self._signed_post(ctx=ctx, path=path, body_bytes=b"{}")
         try:
             raw = resp.json()
         except json.JSONDecodeError as e:

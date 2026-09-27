@@ -16,12 +16,12 @@ CC4 invariants:
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
 
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
 from bfx_funding_bot.modules.execution.protocols import ExecutorPort
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
@@ -59,7 +59,7 @@ def build_executor(
     cell: str,
     http: httpx.AsyncClient | None = None,
     bus: Any | None = None,  # DomainEventBus typed via Any to avoid circular ref
-    nonce_provider: Callable[[], int] | None = None,
+    auth_gate: AuthRequestGate | None = None,
 ) -> ExecutorSpec:
     executor_raw = os.environ.get("BFX_EXECUTOR", "paper")
     executor_kind = executor_raw.lower()
@@ -108,7 +108,7 @@ def build_executor(
                 phase=phase, strategy=strategy,
                 configured_symbols=configured_symbols or frozenset(),
                 cell=cell,
-                nonce_provider=nonce_provider,
+                auth_gate=auth_gate,
             ),
             fill_tracker_enabled=fill_tracker_enabled,
             ws_client_enabled=ws_client_enabled,

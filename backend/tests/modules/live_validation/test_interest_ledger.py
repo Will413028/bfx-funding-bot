@@ -20,6 +20,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
     parse_interest_payments,
 )
 from bfx_funding_bot.external.bitfinex.errors import BitfinexShapeError
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.event_store.serialization import deserialize_event
 from bfx_funding_bot.modules.execution.events import CreditClosed
 from bfx_funding_bot.modules.live_validation.interest_ledger import (
@@ -76,7 +77,7 @@ async def test_rest_pages_backwards_and_returns_oldest_first() -> None:
         return httpx.Response(200, json=pages[len(bodies) - 1])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        rest = BitfinexAuthREST(http=http, nonce_provider=iter(range(1, 100)).__next__)
+        rest = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(iter(range(1, 100)).__next__))
         got = await rest.get_interest_payments(
             ctx=_Ctx(), currency="UST", start_ms=0, end_ms=1790500000000, limit=2,  # type: ignore[arg-type]
         )

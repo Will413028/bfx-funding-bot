@@ -10,6 +10,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
     parse_active_funding_offers,
 )
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 
 
@@ -83,7 +84,7 @@ async def test_get_active_funding_offers_signs_and_parses():
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 111)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 111))
         offers = await client.get_active_funding_offers(ctx=_ctx(), symbol="fUSD")
 
     assert offers[0].venue_offer_id == "12345"
@@ -108,7 +109,7 @@ async def test_typed_active_offer_preserves_wire_decimal_while_raw_stays_float()
         )
     )
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=iter((1, 2)).__next__)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(iter((1, 2)).__next__))
 
         parsed = await client.get_active_funding_offers(ctx=_ctx(), symbol="fUSD")
         raw = await client.fetch_funding_offers_raw(ctx=_ctx(), symbol="fUSD")
@@ -131,7 +132,7 @@ async def test_typed_offer_history_preserves_exact_wire_rate():
     async with httpx.AsyncClient(transport=transport) as http:
         result = await BitfinexAuthREST(
             http=http,
-            nonce_provider=iter((1,)).__next__,
+            auth_gate=AuthRequestGate(iter((1,)).__next__),
         ).get_funding_offer_history(
             ctx=_ctx(),
             start_ms=1_699_999_999_000,
@@ -145,7 +146,7 @@ async def test_typed_offer_history_preserves_exact_wire_rate():
 async def test_get_active_funding_offers_raises_on_http_error():
     transport = httpx.MockTransport(lambda r: httpx.Response(500, text="boom"))
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
         with pytest.raises(BitfinexAPIError):
             await client.get_active_funding_offers(ctx=_ctx(), symbol="fUSD")
 
@@ -160,7 +161,7 @@ async def test_get_active_funding_offers_without_symbol_fetches_all_currencies()
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
         assert await client.get_active_funding_offers(ctx=_ctx()) == []
     assert captured["url"] == "https://api.bitfinex.com/v2/auth/r/funding/offers"
 
@@ -170,7 +171,7 @@ async def test_fetch_funding_offers_raw_returns_unparsed_body():
     rows = [_row(offer_id=1), _row(offer_id=2)]
     transport = httpx.MockTransport(lambda r: httpx.Response(200, json=rows))
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
         raw = await client.fetch_funding_offers_raw(ctx=_ctx(), symbol="fUSD")
     # raw is the positional-array body, NOT parsed ActiveFundingOffer objects
     assert raw == rows

@@ -19,6 +19,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
     parse_active_funding_credits,
 )
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 
 _CREDITS_PATH = "v2/auth/r/funding/credits"
@@ -142,7 +143,7 @@ async def test_get_active_funding_credits_signs_and_parses():
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 111)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 111))
         credits = await client.get_active_funding_credits(ctx=_ctx(), symbol="fUST")
 
     assert len(credits) == 1
@@ -159,7 +160,7 @@ async def test_get_active_funding_credits_signs_and_parses():
 async def test_get_active_funding_credits_raises_on_http_error():
     transport = httpx.MockTransport(lambda r: httpx.Response(500, text="boom"))
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
         with pytest.raises(BitfinexAPIError):
             await client.get_active_funding_credits(ctx=_ctx(), symbol="fUST")
 
@@ -168,7 +169,7 @@ async def test_get_active_funding_credits_raises_on_http_error():
 async def test_get_active_funding_credits_empty_response():
     transport = httpx.MockTransport(lambda r: httpx.Response(200, json=[]))
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
         credits = await client.get_active_funding_credits(ctx=_ctx(), symbol="fUST")
     assert credits == []
 
@@ -183,7 +184,7 @@ async def test_get_active_funding_credits_without_symbol_fetches_all():
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 111)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 111))
         credits = await client.get_active_funding_credits(ctx=_ctx())
 
     assert len(credits) == 1
@@ -202,7 +203,7 @@ async def test_loans_are_read_from_their_own_endpoint_and_namespaced():
         return httpx.Response(200, json=[_LIVE_LOAN_ROW])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
         loans = await client.get_active_funding_loans(ctx=_ctx(), symbol="fUST")
 
     assert captured["url"] == "https://api.bitfinex.com/v2/auth/r/funding/loans/fUST"

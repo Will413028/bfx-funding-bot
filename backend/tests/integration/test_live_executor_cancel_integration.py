@@ -19,6 +19,7 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
     BITFINEX_REST_BASE,
     BitfinexLiveExecutor,
 )
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
@@ -68,7 +69,7 @@ async def test_cancel_success_full_chain_sends_signed_post() -> None:
             strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUSD"}),
             cell="fUSD_p2",
-            nonce_provider=lambda: 1700000000_000_000,
+            auth_gate=AuthRequestGate(lambda: 1700000000_000_000),
             date_provider=lambda: date(2026, 5, 23),
         )
 

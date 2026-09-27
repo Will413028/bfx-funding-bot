@@ -235,3 +235,25 @@ sudo systemctl unmask bfx-weekly-report.timer
 sudo systemctl enable --now bfx-weekly-report.timer
 sudo systemctl disable --now bfx-weekly-report.timer   # 暫停
 ```
+
+## 9. 同一把 API key 的其他使用者（nonce 衝突）
+
+Bitfinex 對**每把 API key** 只接受遞增的 nonce，並以**抵達順序**判斷：比最後收到的還小就回
+HTTP 500（body 為 `nonce: small`）。bot 內所有簽章請求共用一個 `AuthRequestGate`
+（`external/bitfinex/nonce.py`），依序送出，下單／撤單／kill 優先於背景讀取；但這個 gate
+**只管 bot 這一個 process**。以下用同一把 key 的呼叫不經過它，可能讓 bot 的請求（包括撤單或
+kill 的 cancel-all）被拒：
+
+- webapi 的 `verify_account_key`（UI 驗證／更新帳戶 key 時呼叫 `auth/r/permissions`）
+- 一次性腳本：`scripts/bootstrap_capital.py`、`bootstrap_account_credential.py`、
+  `cutover_identity.py`、`cutover_projection.py` 等會打 Bitfinex auth 端點的工具
+- 任何在其他機器上用同一把 key 的手動測試
+
+做法：
+
+- **交易進行中不要跑這些**；需要時先停止帳戶（§3）或在沒有下單活動時執行，跑完看 bot log 有無
+  `bitfinex_auth_http_error ... nonce`。
+- 需要常態的外部讀取（驗證、報表、除錯）時，改用**另一把只有讀權限的 key**：nonce 是按 key
+  計算，不同 key 互不影響，唯讀也避免誤下單。
+- bot log 出現 `bitfinex_auth_gate_slow_wait`（等 gate 超過 2 秒，含等待者種類）表示 venue 變慢或
+  讀取堆積；背景讀取每筆最多 10 秒就會被切斷。

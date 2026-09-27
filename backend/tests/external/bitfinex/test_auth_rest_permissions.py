@@ -11,6 +11,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
     parse_key_permissions,
 )
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 
 # Bitfinex /v2/auth/r/permissions row: [scope, read(0/1), write(0/1)]
@@ -66,7 +67,7 @@ async def test_get_key_permissions_signs_and_parses():
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
         perms = await client.get_key_permissions(ctx=_ctx())
 
     assert perms.can("funding", write=True) is True
@@ -79,6 +80,6 @@ async def test_get_key_permissions_signs_and_parses():
 async def test_get_key_permissions_raises_on_http_error():
     transport = httpx.MockTransport(lambda r: httpx.Response(500, text="boom"))
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
         with pytest.raises(BitfinexAPIError):
             await client.get_key_permissions(ctx=_ctx())

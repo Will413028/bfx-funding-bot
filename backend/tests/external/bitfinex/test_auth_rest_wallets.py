@@ -16,6 +16,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
     parse_wallets,
 )
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 
 
@@ -84,7 +85,7 @@ async def test_get_funding_available_sums_funding_currency_only():
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 111)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 111))
         available = await client.get_funding_available(ctx=_ctx(), currency="UST")
 
     assert available == Decimal("147.5")
@@ -101,7 +102,7 @@ async def test_get_funding_available_zero_when_no_funding_wallet():
         lambda r: httpx.Response(200, json=[_wallet_row(wallet_type="exchange")])
     )
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
         available = await client.get_funding_available(ctx=_ctx(), currency="UST")
     assert available == Decimal("0")
 
@@ -110,7 +111,7 @@ async def test_get_funding_available_zero_when_no_funding_wallet():
 async def test_get_funding_available_raises_on_http_error():
     transport = httpx.MockTransport(lambda r: httpx.Response(500, text="boom"))
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
         with pytest.raises(BitfinexAPIError):
             await client.get_funding_available(ctx=_ctx(), currency="UST")
 
@@ -124,7 +125,7 @@ async def test_get_funding_available_all_returns_funding_symbols():
     ]
     transport = httpx.MockTransport(lambda r: httpx.Response(200, json=rows))
     async with httpx.AsyncClient(transport=transport) as http:
-        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
         available = await client.get_funding_available_all(ctx=_ctx())
 
     assert available == {"fUST": Decimal("147.5"), "fUSD": Decimal("50.0")}

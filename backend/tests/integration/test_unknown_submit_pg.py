@@ -17,6 +17,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
     parse_active_funding_offers,
 )
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
@@ -742,7 +743,7 @@ async def test_history_transport_pages_backward_and_records_complete_coverage_fe
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         result = await BitfinexAuthREST(
             http=http,
-            nonce_provider=iter((1, 2)).__next__,
+            auth_gate=AuthRequestGate(iter((1, 2)).__next__),
         ).get_funding_offer_history(
             ctx=AccountContext(
                 account_id=str(_ACCOUNT),
@@ -778,7 +779,7 @@ async def test_full_history_page_at_start_fence_remains_incomplete():
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         result = await BitfinexAuthREST(
             http=http,
-            nonce_provider=iter((1,)).__next__,
+            auth_gate=AuthRequestGate(iter((1,)).__next__),
         ).get_funding_offer_history(
             ctx=AccountContext(
                 account_id=str(_ACCOUNT),

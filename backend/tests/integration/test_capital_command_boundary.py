@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate, CommandGateBlocked
@@ -625,7 +626,7 @@ async def cancel_http_boundary(factory, account, http, *, state="ACTIVE"):
     gate._inner = BitfinexLiveExecutor(
         http=http, event_sink=_CapturingSink(), bus=DomainEventBus(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, configured_symbols=frozenset({"fUST"}),
-        cell="a30", nonce_provider=lambda: 123456789,
+        cell="a30", auth_gate=AuthRequestGate(lambda: 123456789),
     )
     return gate, ctx, runtime
 
@@ -721,7 +722,7 @@ async def test_stop_refuses_submit_before_the_http_adapter(capital_db, state):
         gate._inner = BitfinexLiveExecutor(
             http=http, event_sink=_CapturingSink(), bus=DomainEventBus(), phase=Phase.LIVE,
             strategy=StrategyName.MEAN_REVERSION, configured_symbols=frozenset({"fUST"}),
-            cell="a30", nonce_provider=lambda: 123456789,
+            cell="a30", auth_gate=AuthRequestGate(lambda: 123456789),
         )
         await halt.transition(state, cause="operator", reason="stop", actor="test")
         with pytest.raises(CommandGateBlocked, match=f"trading state {state}"):

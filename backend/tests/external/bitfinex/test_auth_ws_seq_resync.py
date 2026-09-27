@@ -13,6 +13,7 @@ from bfx_funding_bot.external.bitfinex.auth_ws import (
     SEQ_ALL_FLAG,
     BitfinexAuthWSClient,
 )
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.protocols import Credentials
 
 
@@ -51,7 +52,7 @@ async def test_conf_seq_all_sent_on_connect():
     server = _SeqServer()
     s, url = await _serve(server)
     client = BitfinexAuthWSClient(creds=Credentials(api_key="k", api_secret="s"),
-                                  url=url, nonce_provider=lambda: 1)
+                                  url=url, auth_gate=AuthRequestGate(lambda: 1))
 
     async def run():
         async for _ in client.events():
@@ -85,7 +86,7 @@ async def test_reconnect_fires_resync_but_first_connect_does_not():
     reasons: list[str] = []
     client = BitfinexAuthWSClient(
         creds=Credentials(api_key="k", api_secret="s"), url=url,
-        nonce_provider=lambda: 1, on_resync_needed=reasons.append,
+        auth_gate=AuthRequestGate(lambda: 1), on_resync_needed=reasons.append,
     )
 
     async def run():
@@ -120,7 +121,7 @@ async def test_public_seq_gap_fires_seq_gap_resync():
     reasons: list[str] = []
     client = BitfinexAuthWSClient(
         creds=Credentials(api_key="k", api_secret="s"), url=url,
-        nonce_provider=lambda: 1, on_resync_needed=reasons.append,
+        auth_gate=AuthRequestGate(lambda: 1), on_resync_needed=reasons.append,
     )
 
     async def run():
@@ -150,7 +151,7 @@ async def test_venue_reconnect_notice_reconnects_and_resyncs(code: int):
     reasons: list[str] = []
     client = BitfinexAuthWSClient(
         creds=Credentials(api_key="k", api_secret="s"), url=url,
-        nonce_provider=lambda: 1, on_resync_needed=reasons.append,
+        auth_gate=AuthRequestGate(lambda: 1), on_resync_needed=reasons.append,
     )
 
     async def run():
