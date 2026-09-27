@@ -20,7 +20,10 @@ One run:
      installed steps and says so;
   3. the secrets: DATABASE_URL and BFX_EXCHANGE_ACCOUNT_ID only, from
      /opt/bfx/runtime/bot.env (root 0600, checked as bfx-deploy checks it);
-  4. `docker compose -p bfx-weekly-report -f <that file> run --rm weekly-report`,
+  4. the reports directory must already exist (a real directory, not a
+     symlink): Compose 2.x and v5 disagree on how an unset create_host_path
+     reads, so the runner, not Docker, guarantees nothing gets created;
+  5. `docker compose -p bfx-weekly-report -f <that file> run --rm weekly-report`,
      output streamed to the journal. systemd's TimeoutStartSec bounds the run.
 
 `--dry-run` prints the resolved plan (no secret values) and runs nothing.
@@ -65,6 +68,8 @@ COMPOSE_FILE = "docker-compose.weekly-report.yml"
 # scripts/report_interest.py, Settings.database_url); nothing else of bot.env.
 SECRET_KEYS = ("DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID")
 LIVE_KEYS = ("BFX_DEPLOYMENT_ENV",)
+# The bind source in docker-compose.weekly-report.yml (compose_policy.WEEKLY_REPORTS).
+REPORTS_DIR = Path("/home/ubuntu/bfx/reports")
 
 
 def log(message: str) -> None:
@@ -121,10 +126,13 @@ def _values(path: Path, keys: Sequence[str], *, secret_check: Callable[[Path], N
 def build_plan(
     *, ops_dir: Path, ledger: Any, runtime_dir: Path, state_dir: Path,
     backend_repository: str, secret_check: Callable[[Path], None],
+    reports_dir: Path = REPORTS_DIR,
 ) -> Plan:
     compose_file = ops_dir / COMPOSE_FILE
     if not compose_file.is_file():
         raise DeployError("weekly_compose_missing")
+    if reports_dir.is_symlink() or not reports_dir.is_dir():
+        raise DeployError("reports_dir_missing")
     revision = tooling_revision(ops_dir)
     view = ledger.read()
     deployed = view.last_success if view.exists else None
