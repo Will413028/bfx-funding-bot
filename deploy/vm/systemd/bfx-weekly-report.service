@@ -1,14 +1,22 @@
 [Unit]
 Description=bfx weekly measurement chain (funding_stats ingest + attribution + G3 report + research re-validation)
+Documentation=file:///usr/local/lib/bfx-ops/current/ops/bfx_weekly_report.py
 Requires=docker.service
 After=docker.service
+OnFailure=bfx-alert@%n.service
 
 [Service]
 Type=oneshot
+# Root: reads /opt/bfx/runtime/bot.env (root 0600) and the deployments ledger, and
+# drives docker; the container itself runs as uid 1000. The job's steps and this
+# runner come from the deployed tooling release (bfx-deploy installs both after
+# each successful deploy); the image is the ledger's deployed backend digest.
+# Nothing reads the VM mirror's working tree.
+Environment=HOME=/root
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
 # 整條 chain 上限 90min：營運三步（ingest 600 + attribution + G3）之後接研究步驟
 # （perp 900 + liquidations 1200 + book learn 600 + 兩次 period-structure 600 + OOS 600 +
 # diff），每步 fail-soft；防 systemd 端無限掛住。
 TimeoutStartSec=5400
-User=ubuntu
-WorkingDirectory=/home/ubuntu/bfx-funding-bot
-ExecStart=/usr/bin/docker compose -f docker-compose.bot.yml --profile ops run --rm weekly-report
+ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_weekly_report.py

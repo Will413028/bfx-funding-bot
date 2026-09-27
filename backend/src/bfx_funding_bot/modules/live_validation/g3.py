@@ -147,11 +147,11 @@ async def build_g3_report(
                 capital_basis, capital_source = ledger_basis, "ledger"
 
             # Market series: one per bot cell's period_agg, plus funding_stats.
-            bot = _bot_credits(credits, cells)
-            start = min(c.opened_ms for c in bot) if bot else now - _MARKET_RATE_FALLBACK_MS
+            bot = _bot_slices(credits, cells)
+            start = (min(c.start_ms for _, c in bot) if bot
+                     else now - _MARKET_RATE_FALLBACK_MS)
             period_aggs = sorted({
-                agg for c in bot
-                if (agg := cell_period_agg(cells.cell_by_credit[c.credit_id])) is not None
+                agg for cell, _ in bot if (agg := cell_period_agg(cell)) is not None
             })
             market_points = {
                 agg: await load_market_points(
@@ -193,13 +193,27 @@ def calendar_window_bounds(start_ms: int, end_ms: int) -> list[tuple[int, int]]:
     return bounds
 
 
-def _bot_credits(credits: Sequence[CreditLifetime], cells: CreditCells) -> list[CreditLifetime]:
-    """SYMBOL's credits that funding_trades lead to one of our cells."""
-    return [
-        c for c in credits
-        if c.symbol == SYMBOL
-        and cells.cell_by_credit.get(c.credit_id, UNATTRIBUTED) != UNATTRIBUTED
-    ]
+def _slices(
+    credits: Sequence[CreditLifetime], cells: CreditCells,
+) -> list[tuple[str, CreditLifetime]]:
+    """SYMBOL's credits as (cell, credit) slices, using credit_attribution's
+    allocation: a credit split between cells becomes one slice per cell with
+    its amount scaled by that cell's share (interest, capital-days and open
+    principal are all linear in the amount)."""
+    out: list[tuple[str, CreditLifetime]] = []
+    for c in credits:
+        if c.symbol != SYMBOL:
+            continue
+        for cell, share in cells.share_of(c.credit_id).items():
+            out.append((cell, c if share == 1 else replace(c, amount=c.amount * share)))
+    return out
+
+
+def _bot_slices(
+    credits: Sequence[CreditLifetime], cells: CreditCells,
+) -> list[tuple[str, CreditLifetime]]:
+    """The slices that funding_trades lead to one of our cells."""
+    return [(cell, c) for cell, c in _slices(credits, cells) if cell != UNATTRIBUTED]
 
 
 def _mean(xs: list[Decimal]) -> Decimal:
@@ -216,8 +230,7 @@ def _week(ms: int) -> str:
 
 
 def _cell_alphas(
-    bot: Sequence[CreditLifetime],
-    cells: CreditCells,
+    bot_slices: Sequence[tuple[str, CreditLifetime]],
     market_points: Mapping[str, list[MarketRatePoint]],
     *,
     capital: CapitalBasis,
@@ -229,9 +242,9 @@ def _cell_alphas(
     baseline, and the share of bot capital-days that total covers."""
     lo, hi = span
     by_cell: dict[str, list[CreditLifetime]] = {}
-    for c in bot:
-        by_cell.setdefault(cells.cell_by_credit[c.credit_id], []).append(c)
-    total_days = credit_capital_days(bot, lo, hi, now_ms=now_ms)
+    for cell, c in bot_slices:
+        by_cell.setdefault(cell, []).append(c)
+    total_days = credit_capital_days([c for _, c in bot_slices], lo, hi, now_ms=now_ms)
 
     rows: list[CellMrAlpha] = []
     total_diffs = [_ZERO] * len(bounds)
@@ -293,9 +306,11 @@ def compute_g3_report(
     """
     frr_points = frr_points or []
     acks = dict(acks or {})
-    bot = _bot_credits(credits, cells)
+    slices = _slices(credits, cells)
+    bot_slices = [(cell, c) for cell, c in slices if cell != UNATTRIBUTED]
+    bot = [c for _, c in bot_slices]
 
-    all_mts = [c.opened_ms for c in bot] + [p.mts for pts in market_points.values() for p in pts]
+    all_mts = [c.start_ms for c in bot] + [p.mts for pts in market_points.values() for p in pts]
     min_ts = min(all_mts) if all_mts else now_ms
     max_ts = now_ms
     has_data = bool(all_mts)
@@ -303,12 +318,10 @@ def compute_g3_report(
     bounds = calendar_window_bounds(min_ts, max_ts)
     span_capital = capital_for(capital, min_ts, max_ts)
 
-    unattributed = [
-        c for c in credits
-        if c.symbol == SYMBOL
-        and cells.cell_by_credit.get(c.credit_id, UNATTRIBUTED) == UNATTRIBUTED
-        and c.held_ms(min_ts, max_ts, now_ms=now_ms) > 0
-    ]
+    # The symbol's other credits (or unattributed shares) lent inside the
+    # window: reported, not counted.
+    unattributed = [c for cell, c in slices
+                    if cell == UNATTRIBUTED and c.held_ms(min_ts, max_ts, now_ms=now_ms) > 0]
 
     frr_bench = FrrBenchmark(
         available=False, spread=_ZERO, ci_lo=_ZERO, ci_hi=_ZERO,
@@ -328,7 +341,7 @@ def compute_g3_report(
 
         # Secondary diagnostic: MR alpha per cell vs its own period's market rate.
         mr_cells, total_diffs, mr_coverage = _cell_alphas(
-            bot, cells, market_points, capital=capital, bounds=bounds, span=span,
+            bot_slices, market_points, capital=capital, bounds=bounds, span=span,
             now_ms=now_ms)
         mr_spread = sum((c.spread for c in mr_cells if c.available), _ZERO)
         mr_ci_lo, mr_ci_hi = _ci(total_diffs) if mr_coverage > 0 else (_ZERO, _ZERO)
@@ -394,22 +407,22 @@ def compute_g3_report(
         verdict = replace(verdict, reasons=[*caveats, *verdict.reasons])
 
     gross_by_cell: dict[str, Decimal] = {}
-    for c in bot:
-        cell = cells.cell_by_credit[c.credit_id]
+    for cell, c in bot_slices:
         gross_by_cell[cell] = gross_by_cell.get(cell, _ZERO) + c.gross_interest(
             min_ts, max_ts, now_ms=now_ms)
+    bot_ids = {c.credit_id for c in bot}
 
     return G3Report(
         verdict=verdict,
         data_window=f"{_week(min_ts)}..{_week(max_ts)}" if has_data else "n/a",
         capital_source=capital_source,
         coverage=CreditCoverage(
-            bot_credits=len(bot),
+            bot_credits=len(bot_ids),
             gross_by_cell=dict(sorted(gross_by_cell.items())),
-            unattributed_credits=len(unattributed),
+            unattributed_credits=len({c.credit_id for c in unattributed}),
             unattributed_gross=credit_gross_interest(unattributed, min_ts, max_ts,
                                                      now_ms=now_ms),
-            ambiguous_credits=sum(1 for c in bot if c.credit_id in cells.ambiguous),
+            ambiguous_credits=len(bot_ids & cells.ambiguous),
         ),
         deployment=DeploymentCheck(
             cap=span_capital, peak_open_principal=peak_open_principal(bot, now_ms=now_ms)),

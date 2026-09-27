@@ -1335,9 +1335,10 @@ class Deployer:
     def _after_success(self, view: LedgerView, target: Target) -> list[str]:
         warnings = []
         if self.settings.local_alias:
-            # Transitional: the DR verifier (docker-compose.dr.yml) and the weekly
-            # report still name bfx-bot:local; keep that alias on the running
-            # backend so neither drifts behind production. Never used to deploy.
+            # Transitional: the DR verifier (docker-compose.dr.yml) still names
+            # bfx-bot:local; keep that alias on the running backend so it never
+            # drifts behind production. Never used to deploy. (The weekly report
+            # runs the ledger's backend digest: bfx_weekly_report.py.)
             tagged = self._run(["docker", "tag", target.backend_image, self.settings.local_alias],
                                timeout=60.0)
             if tagged.returncode != 0:

@@ -52,7 +52,7 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    等健康（bot `:8080/healthz`、webapi health、frontend `127.0.0.1:3001`），再 settle 60 秒。
    Hardening（read-only、UID、cap-drop、port、network）不在 VM 上重驗，而是 CI 對
    `docker compose config` 的輸出做 policy 檢查（`deploy/vm/ops/compose_policy.py`）。
-9. 成功：`bfx-bot:local` 重新 tag 到新 backend（weekly report 與 DR verifier 仍用這個 alias）；
+9. 成功：`bfx-bot:local` 重新 tag 到新 backend（DR verifier 仍用這個 alias；weekly report 改用 ledger 的 digest）；
     安裝 `<rev>` 的主機工具與 systemd unit（見 §4，**下一輪才生效**）；DR checkout 的 `current`
     指到 `<rev>`；刪掉目前與上一版以外的舊 digest、工具版本與 DR checkout。
 10. 寫入 ledger 的結束列（`deployed`／`rolled_back`／`failed`，與 `started` 列同一個 attempt id），
@@ -133,7 +133,7 @@ bfx-deploy 自己維護主機上的工具，不再依賴手動 `install.sh`（�
 |---|---|---|
 | `/usr/local/lib/bfx-ops/releases/<rev>/{ops,systemd}` | 從 `<rev>` 的 git 物件寫出，root 擁有 | release 部署成功後 |
 | `/usr/local/lib/bfx-ops/releases/<rev>/ops/.venv` | `uv sync --frozen`（`deploy/vm/ops/uv.lock`：PyYAML、pathspec） | 同上 |
-| `/usr/local/lib/bfx-ops/current` → `releases/<rev>` | wrapper `bfx-deploy`／`bfx-notify` 與 unit 都執行這裡 | 同上，**下一輪 bfx-deploy 才用新版** |
+| `/usr/local/lib/bfx-ops/current` → `releases/<rev>` | wrapper `bfx-deploy`／`bfx-notify` 與 unit 都執行這裡（含每週報告的 runner 與 `docker-compose.weekly-report.yml`） | 同上，**下一輪 bfx-deploy 才用新版** |
 | `/etc/systemd/system/<deploy/vm/systemd/managed-units>` | 複製後 `daemon-reload`，從不 enable/start/stop | 同上 |
 | `/home/ubuntu/bfx-releases/<rev>` | mirror 的乾淨 git worktree（`ubuntu` 擁有），DR 腳本與 `docker-compose.dr.yml` | 需要備份或 restore test 時先建目標版本 |
 | `/home/ubuntu/bfx-releases/current` → `<rev>` | 排程備份／status／每月 restore test 用 | release 部署成功後 |
@@ -146,6 +146,9 @@ bfx-deploy 自己維護主機上的工具，不再依賴手動 `install.sh`（�
 - 工具安裝失敗（例如 `uv sync` 連不到 PyPI）只是 warning：部署仍成功，`current` 留在舊版，
   下一次成功部署會再裝。
 - 只保留目前與上一版的工具版本和 DR checkout。
+- 每週報告（`bfx-weekly-report.service`）的步驟也屬於主機工具：部署成功後下一次執行就用新步驟，
+  image 是 ledger 的 backend digest。VM mirror 的 working tree 不再被任何排程讀取。
+  手動執行與 timer 見 [operations §8](operations.md#8-定期與背景工作)。
 
 ## 5. 失敗與回滾
 

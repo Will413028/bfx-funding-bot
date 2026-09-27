@@ -7,11 +7,8 @@ first production append. This test runs the real migrations so the constraint is
 """
 from __future__ import annotations
 
-import os
-import subprocess
 from dataclasses import replace
 from decimal import Decimal
-from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,21 +23,9 @@ ACCOUNT = UUID("00000000-0000-0000-0000-0000000000c1")
 ENV = "ci"
 
 
-def _migrate(url: str) -> None:
-    engine = create_engine(url.replace("+psycopg2", "+psycopg"))
-    with engine.begin() as conn:
-        conn.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
-        conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
-        conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
-        conn.exec_driver_sql("DROP SCHEMA public CASCADE")
-        conn.exec_driver_sql("CREATE SCHEMA public")
-    result = subprocess.run(
-        ["uv", "run", "alembic", "upgrade", "head"],
-        cwd=Path(__file__).resolve().parents[2],
-        env=dict(os.environ, DATABASE_URL=url.replace("+psycopg2", "+psycopg")),
-        capture_output=True, text=True,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
+def _seed(url: str) -> None:
+    """``url`` is a fresh copy of the database migrated from empty to head."""
+    engine = create_engine(url)
     with engine.begin() as conn:
         # Prove the constraint this test exists for is actually installed.
         assert conn.scalar(text(
@@ -53,7 +38,7 @@ def _migrate(url: str) -> None:
     engine.dispose()
 
 
-async def test_appending_a_capital_event_never_mutates_the_ledger(pg_container) -> None:
+async def test_appending_a_capital_event_never_mutates_the_ledger(pg_head_url) -> None:
     """A capital-bearing append must not touch event_log after the insert.
 
     The chain link belongs beside the ledger. Writing it onto the row would be an
@@ -64,9 +49,9 @@ async def test_appending_a_capital_event_never_mutates_the_ledger(pg_container) 
     from bfx_funding_bot.modules.execution.event_store.tables import EventPrefixHashRow
     from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
 
-    url = pg_container.get_connection_url()
-    _migrate(url)
-    engine = create_async_engine(url.replace("+psycopg2", "+asyncpg"))
+    url = pg_head_url
+    _seed(url)
+    engine = create_async_engine(url.replace("+psycopg", "+asyncpg"))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     writer = AccountEventWriter(store=PostgresEventStore(deployment_environment=ENV))
 

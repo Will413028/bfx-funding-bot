@@ -1,51 +1,33 @@
 from __future__ import annotations
 
-import pathlib
-
 import pytest
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.modules.accounts.identity_cutover import IdentityCutover, IdentityManifest
+from tests.pg_templates import alembic
 
 pytestmark = pytest.mark.integration
 
-_BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[2]
-_ALEMBIC_INI = _BACKEND_ROOT / "alembic.ini"
-
-
-def _sync_url(pg_engine) -> str:
-    return pg_engine.url.render_as_string(hide_password=False).replace(
-        "+asyncpg", "+psycopg"
-    )
-
-
-def _reset_schema(sync_url: str) -> None:
-    engine = create_engine(sync_url)
-    try:
-        with engine.begin() as conn:
-            conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
-            conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
-            conn.exec_driver_sql("DROP SCHEMA public CASCADE")
-            conn.exec_driver_sql("CREATE SCHEMA public")
-    finally:
-        engine.dispose()
+_ADDITIVE = "8a1b2c3d4e5f"
 
 
 def _upgrade(sync_url: str, revision: str) -> None:
-    from alembic.config import Config
-
-    from alembic import command
-
-    command.upgrade(Config(str(_ALEMBIC_INI)), revision)
+    alembic(sync_url, "upgrade", revision)
 
 
-async def test_identity_revision_creates_tables_and_nullable_columns(pg_engine, monkeypatch) -> None:
+@pytest.fixture
+def additive_url(pg_templates, pg_clone) -> str:
+    """A fresh database migrated from empty to the additive identity revision."""
+    def build(url: str) -> None:
+        _upgrade(url, _ADDITIVE)
+
+    return pg_clone(pg_templates.template(f"identity_additive_{_ADDITIVE}", build))
+
+
+async def test_identity_revision_creates_tables_and_nullable_columns(additive_url) -> None:
     """Run the additive revision against a clean PostgreSQL database."""
-    sync_url = _sync_url(pg_engine)
-    monkeypatch.setenv("DATABASE_URL", sync_url)
-    _reset_schema(sync_url)
-    _upgrade(sync_url, "8a1b2c3d4e5f")
+    sync_url = additive_url
 
     verify_engine = create_engine(sync_url)
     try:
@@ -77,14 +59,9 @@ async def test_identity_revision_creates_tables_and_nullable_columns(pg_engine, 
     )
 
 
-async def test_cutover_preflight_runs_at_additive_revision_before_event_v3(
-    pg_engine, monkeypatch
-) -> None:
+async def test_cutover_preflight_runs_at_additive_revision_before_event_v3(additive_url) -> None:
     """Halt 1 must not select columns introduced only after its contract revision."""
-    sync_url = _sync_url(pg_engine)
-    monkeypatch.setenv("DATABASE_URL", sync_url)
-    _reset_schema(sync_url)
-    _upgrade(sync_url, "8a1b2c3d4e5f")
+    sync_url = additive_url
     engine = create_engine(sync_url)
     try:
         with engine.begin() as conn:
@@ -107,9 +84,13 @@ async def test_cutover_preflight_runs_at_additive_revision_before_event_v3(
             "memberships": {},
         }],
     })
-    factory = async_sessionmaker(pg_engine, expire_on_commit=False)
-    async with factory() as session:
-        report = await IdentityCutover(kek=bytes(range(32))).preflight(session, manifest)
+    async_engine = create_async_engine(sync_url.replace("+psycopg", "+asyncpg"))
+    try:
+        factory = async_sessionmaker(async_engine, expire_on_commit=False)
+        async with factory() as session:
+            report = await IdentityCutover(kek=bytes(range(32))).preflight(session, manifest)
+    finally:
+        await async_engine.dispose()
 
     assert report.event_head == 1
     assert report.unmapped_rows == ()
@@ -133,12 +114,9 @@ async def test_cutover_preflight_runs_at_additive_revision_before_event_v3(
     ],
 )
 async def test_contract_revision_refuses_incomplete_preflight(
-    pg_engine, monkeypatch, seed_sql: str, expected: str
+    additive_url, seed_sql: str, expected: str
 ) -> None:
-    sync_url = _sync_url(pg_engine)
-    monkeypatch.setenv("DATABASE_URL", sync_url)
-    _reset_schema(sync_url)
-    _upgrade(sync_url, "8a1b2c3d4e5f")
+    sync_url = additive_url
 
     engine = create_engine(sync_url)
     try:
@@ -164,13 +142,8 @@ async def test_contract_revision_refuses_incomplete_preflight(
         _upgrade(sync_url, "9b2c3d4e5f6a")
 
 
-async def test_contract_revision_enforces_uuid_scope_and_removes_empty_legacy_tables(
-    pg_engine, monkeypatch
-) -> None:
-    sync_url = _sync_url(pg_engine)
-    monkeypatch.setenv("DATABASE_URL", sync_url)
-    _reset_schema(sync_url)
-    _upgrade(sync_url, "8a1b2c3d4e5f")
+async def test_contract_revision_enforces_uuid_scope_and_removes_empty_legacy_tables(additive_url) -> None:
+    sync_url = additive_url
 
     engine = create_engine(sync_url)
     try:
