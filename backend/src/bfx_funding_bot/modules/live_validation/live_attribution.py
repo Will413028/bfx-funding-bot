@@ -1,12 +1,20 @@
 """Live bot-vs-idle attribution for the canary MeanReversion config.
 
-Pure, I/O-free. Turns live fills + market-rate series (funding_candles.close) +
-reconcile checkpoints into WindowOutcome lists for three arms — strategy
+Pure, I/O-free. Turns the bot's venue credits + market-rate series
+(funding_candles.close) into WindowOutcome lists for three arms — strategy
 (active), AlwaysIdle, AlwaysMarketRate — feeding the existing
 modules/backtest/oos_profitability metrics, plus a four-state verdict.
 
-All arms normalize to a fixed capital budget C (the canary allocation cap):
-    active_return_pct  = sum(size_i * rate_i * duration_i) / C * 100  # idle drag baked in
+Credit model (since 2026-09-27, METHODOLOGY_CHANGE_DATE). The active arm is the
+interest the venue credits actually accrued: amount x credit rate x the time
+each credit was held (MTS_OPENING..MTS_LAST_PAYOUT, or ..now while open),
+clipped to each window, for the credits that funding_trades attribute to one of
+the bot's cells (credit_attribution). It replaced ORDER_FILL size x fill rate x
+held-to-term days, which booked a credit repaid after 14 minutes as 2 days.
+
+All arms normalize to a capital budget C per window (the funding-wallet balance
+the venue ledger reports, or an explicit --capital):
+    active_return_pct  = sum(amount_i * rate_i * held_days_i in window) / C * 100
     idle_return_pct    = 0                                            # by construction
     passive_return_pct = mean(market_rate over window) * window_days * 100  # C cancels
 
@@ -21,31 +29,35 @@ matching the backtest AlwaysMarketRateStrategy. funding_stats.frr is NOT a
 market-rate proxy (it is ~1e-6, ~185x too small); see assert_market_rate_band. A
 wrong-scale or absent passive series only marks the MR-alpha diagnostic
 unavailable — it does not affect the bot-vs-idle verdict (idle needs no market data).
+
+Trust gate: the weekly ledger reconciliation (credit net interest vs the venue's
+interest payouts, credit_attribution.reconcile_week). A flagged complete week
+means the credit model disagrees with what the venue paid → UNRELIABLE.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from itertools import pairwise
+from typing import TYPE_CHECKING
 
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 
+if TYPE_CHECKING:
+    # Annotations only: credit_attribution -> weekly_attribution imports this module.
+    from bfx_funding_bot.modules.live_validation.credit_attribution import (
+        CreditLifetime,
+        WeeklyReconciliation,
+    )
+
 MS_PER_DAY = Decimal(24 * 60 * 60 * 1000)
 
-
-@dataclass(frozen=True)
-class FillRecord:
-    """One ORDER_FILL, joined with its RESERVATION_RELEASED (if any)."""
-
-    venue_offer_id: str
-    fill_ts_ms: int
-    size_usdt: Decimal
-    rate: Decimal  # daily funding rate at match (foc.rate)
-    period_days: Decimal  # resolved by caller via cell_period_days
-    release_ts_ms: int | None  # None if no release seen (assume held to term)
+# The G3 report switched from ORDER_FILL x held-to-term with a fixed allocation
+# cap as C to the venue-credit model with the ledger wallet balance as C.
+# Reports produced before this date are not comparable with later ones.
+METHODOLOGY_CHANGE_DATE = "2026-09-27"
 
 
 @dataclass(frozen=True)
@@ -84,11 +96,11 @@ def assert_market_rate_band(rates: list[Decimal]) -> None:
         )
 
 
-# ---- E3: AlwaysFRR benchmark arm（docs/research/2026-07-06-profit-design-review.md §1 E3 (c)）----
+# ---- E3: AlwaysFRR benchmark arm ----
 # funding_stats.frr 不是市場利率、也非 candle close 的單位轉換（ADR
 # 2026-05-28-frr-not-a-market-rate-proxy；5 個假設全 FAIL）。但它是 ticker FRR
 # 的 /365 表示：2026-07-06 兩 symbol 實測 frr×365 ≈ ticker FRR（per-day）誤差
-# <0.5%（plan 2026-07-06-e3-measurement-automation.md 背景段）。AlwaysFRR arm
+# <0.5%（2026-07-06 E3 量測時實測）。AlwaysFRR arm
 # 用 frr×365 當「FRR auto-renew 掛單者實得的日利率」序列；換算後仍須過
 # assert_market_rate_band（雙保險：任何未來單位漂移會炸 loader 而非產出錯報告）。
 FRR_ANNUALIZATION = Decimal("365")
@@ -118,237 +130,6 @@ class FrrBenchmark:
     reason: str | None  # unavailable 時的人話原因；available 時 None
 
 
-def cell_period_days(period_agg: str, frr_avg_period: Decimal) -> Decimal:
-    """Held-to-term duration for a cell. p2 -> 2 days; a30 -> FRR auto-period."""
-    if period_agg == "p2":
-        return Decimal("2")
-    if period_agg == "a30":
-        return frr_avg_period
-    raise ValueError(f"unknown period_agg: {period_agg!r}")
-
-
-WEEK_MS = 7 * 24 * 60 * 60 * 1000
-
-
-def weekly_window_bounds(start_ms: int, end_ms: int) -> list[tuple[int, int]]:
-    """Calendar-week [lo, hi) bins covering [start_ms, end_ms).
-
-    The trailing bin is truncated to end_ms. Empty if end_ms <= start_ms.
-    """
-    if end_ms <= start_ms:
-        return []
-    bounds: list[tuple[int, int]] = []
-    lo = start_ms
-    while lo < end_ms:
-        hi = min(lo + WEEK_MS, end_ms)
-        bounds.append((lo, hi))
-        lo = hi
-    return bounds
-
-
-def open_principal_at(fills: list[FillRecord], as_of_ms: int) -> Decimal:
-    """Total principal still lent at `as_of_ms` (held-to-term, release-aware).
-
-    A fill is open at `as_of_ms` if it was filled at/before then and its effective
-    end (release time if released, else fill_ts + period) is strictly after then.
-    This is directly comparable to a point-in-time venue realized-principal snapshot,
-    unlike a time-averaged deployed figure.
-    """
-    total = Decimal("0")
-    for f in fills:
-        if f.fill_ts_ms > as_of_ms:
-            continue
-        if f.release_ts_ms is not None:
-            effective_end = f.release_ts_ms
-        else:
-            effective_end = f.fill_ts_ms + int(f.period_days * MS_PER_DAY)
-        if effective_end > as_of_ms:
-            total += f.size_usdt
-    return total
-
-
-@dataclass(frozen=True)
-class CreditCloseRecord:
-    """One CREDIT_CLOSED event (WS `fcc`) — venue truth for a credit's end.
-
-    The venue credit object has no offer linkage, so joining onto fills is by
-    (amount exact, mts_create ≈ fill time). Callers pre-filter both sides to a
-    single symbol (FillRecord itself is symbol-less)."""
-
-    credit_id: int
-    amount: Decimal
-    mts_create: int   # credit creation ≈ the originating fill's timestamp
-    close_ts_ms: int  # venue mts_last_payout on the fcc frame (mts_update before 2026-09-27)
-
-
-_CREDIT_MATCH_SLACK_MS = 300_000  # fill may trail credit creation by venue clock skew
-
-
-def apply_credit_closes(
-    fills: list[FillRecord],
-    closes: list[CreditCloseRecord],
-    *,
-    match_slack_ms: int = _CREDIT_MATCH_SLACK_MS,
-) -> list[FillRecord]:
-    """Join venue credit-close truth onto fills → corrected release_ts_ms.
-
-    Root need (2026-07-19 anchor divergence): a borrower-returned credit whose
-    principal is re-lent within the period window double-counts in
-    open_principal_at and overstates fill_duration_days. Each close (deduped by
-    credit_id, earliest close kept) claims the nearest fill at/before
-    mts_create+slack with the exact same amount; the fill's effective end
-    becomes min(existing release, close time). Unmatched closes are ignored
-    (fill may predate event-log history); unmatched fills keep held-to-term.
-    """
-    best_close: dict[int, CreditCloseRecord] = {}
-    for c in closes:
-        prev = best_close.get(c.credit_id)
-        if prev is None or c.close_ts_ms < prev.close_ts_ms:
-            best_close[c.credit_id] = c
-
-    out = list(fills)
-    claimed: set[int] = set()  # indexes into out already matched to a credit
-    for close in sorted(best_close.values(), key=lambda c: c.mts_create):
-        best_idx: int | None = None
-        best_dist: int | None = None
-        for i, f in enumerate(out):
-            if i in claimed or f.size_usdt != close.amount:
-                continue
-            if f.fill_ts_ms > close.mts_create + match_slack_ms:
-                continue
-            dist = abs(close.mts_create - f.fill_ts_ms)
-            if best_dist is None or dist < best_dist:
-                best_idx, best_dist = i, dist
-        if best_idx is None:
-            continue
-        claimed.add(best_idx)
-        f = out[best_idx]
-        new_release = (
-            close.close_ts_ms
-            if f.release_ts_ms is None
-            else min(f.release_ts_ms, close.close_ts_ms)
-        )
-        out[best_idx] = replace(f, release_ts_ms=new_release)
-    return out
-
-
-def fill_duration_days(f: FillRecord) -> Decimal:
-    """Held-to-term, capped by actual lifetime when a release exists.
-
-    （E3 公開化：weekly_attribution 需要同一套 duration 語意。）"""
-    if f.release_ts_ms is None:
-        return f.period_days
-    actual = Decimal(f.release_ts_ms - f.fill_ts_ms) / MS_PER_DAY
-    if actual < 0:
-        actual = Decimal("0")
-    return min(f.period_days, actual)
-
-
-_fill_duration_days = fill_duration_days  # 舊名 alias（防漏改；勿新增使用）
-
-
-@dataclass(frozen=True)
-class ClampedWindow:
-    """Concurrency-clamped attribution over a set of fills (one bucket).
-
-    interest / capital_days reflect the budget ceiling: at every instant the
-    open principal is clamped to `cap` (all open fills scaled by cap/Σopen when
-    over budget). raw_interest / peak_concurrent are the un-clamped figures kept
-    for the over-deploy diagnostic. No window-end clipping — fills accrue their
-    full held-to-term lifetime, so the no-clamp case is bit-exact with the
-    legacy Σ(size·rate·duration).
-    """
-
-    interest: Decimal
-    capital_days: Decimal
-    raw_interest: Decimal
-    peak_concurrent: Decimal
-
-
-@dataclass(frozen=True)
-class ClampDiagnostic:
-    """Over-deploy transparency for the report.
-
-    cap is the budget; peak_concurrent the max instantaneous open principal; raw
-    vs clamped interest the excess the clamp removed.
-    """
-
-    cap: Decimal
-    peak_concurrent: Decimal
-    raw_interest: Decimal
-    clamped_interest: Decimal
-
-    @property
-    def over_deployed(self) -> bool:
-        return self.peak_concurrent > self.cap
-
-    @property
-    def over_deploy_factor(self) -> Decimal:
-        return self.peak_concurrent / self.cap if self.cap > 0 else Decimal("0")
-
-    @property
-    def excess_return_pct(self) -> Decimal:
-        # interest the clamp removed, as a % of budget (same unit as headline)
-        if self.cap <= 0:
-            return Decimal("0")
-        return (self.raw_interest - self.clamped_interest) / self.cap * Decimal("100")
-
-
-def clamp_active_window(fills: list[FillRecord], *, cap: Decimal) -> ClampedWindow:
-    """Sweep-line attribution with concurrent-principal clamped to `cap`.
-
-    Each fill occupies [fill_ts, fill_ts + fill_duration_days·MS_PER_DAY).
-    Per sub-interval: S = Σ open sizes; scale = min(1, cap/S). Durations are
-    accumulated per fill in integer milliseconds (scale==1) so a non-clamped
-    bucket divides by MS_PER_DAY exactly once → identical to the old formula.
-    """
-    if cap <= 0:
-        raise ValueError(f"cap must be positive, got {cap!r}")
-    intervals: list[tuple[int, int, FillRecord]] = []
-    for f in fills:
-        start = f.fill_ts_ms
-        end = start + int(fill_duration_days(f) * MS_PER_DAY)
-        if end > start:
-            intervals.append((start, end, f))
-    if not intervals:
-        return ClampedWindow(Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"))
-
-    points = sorted({p for s, e, _ in intervals for p in (s, e)})
-    scaled_ms = [Decimal("0")] * len(intervals)
-    clipped_ms = [0] * len(intervals)
-    peak = Decimal("0")
-    for a, b in pairwise(points):
-        dt = b - a
-        if dt <= 0:
-            continue
-        open_idx = [i for i, (s, e, _) in enumerate(intervals) if s <= a < e]
-        total_open = sum((intervals[i][2].size_usdt for i in open_idx), Decimal("0"))
-        if total_open > peak:
-            peak = total_open
-        if total_open <= 0:
-            continue
-        scale = cap / total_open if total_open > cap else Decimal("1")
-        for i in open_idx:
-            scaled_ms[i] += scale * dt
-            clipped_ms[i] += dt
-
-    interest = Decimal("0")
-    capital_days = Decimal("0")
-    raw_interest = Decimal("0")
-    for i, (_s, _e, f) in enumerate(intervals):
-        sm = scaled_ms[i]
-        cm = Decimal(clipped_ms[i])
-        interest += f.size_usdt * f.rate * sm / MS_PER_DAY
-        capital_days += f.size_usdt * sm / MS_PER_DAY
-        raw_interest += f.size_usdt * f.rate * cm / MS_PER_DAY
-    return ClampedWindow(
-        interest=interest,
-        capital_days=capital_days,
-        raw_interest=raw_interest,
-        peak_concurrent=peak,
-    )
-
-
 # The capital budget C: a fixed amount, or C per window [lo, hi) (e.g. the
 # funding-wallet balance the venue ledger reports for that window).
 CapitalBasis = Decimal | Callable[[int, int], Decimal]
@@ -361,39 +142,105 @@ def capital_for(capital: CapitalBasis, lo: int, hi: int) -> Decimal:
         raise ValueError(f"capital must be positive, got {c!r}")
     return c
 
+def credit_capital_days(
+    credits: Sequence[CreditLifetime], lo: int, hi: int, *, now_ms: int
+) -> Decimal:
+    """Principal x days the credits were lent inside [lo, hi)."""
+    return sum(
+        (c.amount * Decimal(c.held_ms(lo, hi, now_ms=now_ms)) / MS_PER_DAY for c in credits),
+        Decimal("0"),
+    )
+
+
+def credit_gross_interest(
+    credits: Sequence[CreditLifetime], lo: int, hi: int, *, now_ms: int
+) -> Decimal:
+    """Gross (pre-fee) interest the credits accrued inside [lo, hi)."""
+    return sum((c.gross_interest(lo, hi, now_ms=now_ms) for c in credits), Decimal("0"))
+
 
 def attribute_active(
-    fills: list[FillRecord], *, capital: CapitalBasis, window_bounds: list[tuple[int, int]]
+    credits: Sequence[CreditLifetime],
+    *,
+    capital: CapitalBasis,
+    window_bounds: list[tuple[int, int]],
+    now_ms: int,
 ) -> list[WindowOutcome]:
-    """Strategy arm: realized lending interest normalized to the capital budget.
+    """Strategy arm: interest the bot's credits accrued, on the capital budget.
 
-    A fill belongs to the window containing its fill_ts_ms. Per window the
-    bucket's realized interest is concurrency-clamped to the budget
-    (clamp_active_window) so the active arm cannot "deploy" more than the cap the
-    passive arm is normalized to: net_monthly = clamped_interest / capital * 100.
-    With a per-window basis each window uses its own C.
+    Each credit contributes amount x rate x the part of its held time that
+    falls inside the window, so a credit spanning a window boundary is split
+    rather than booked whole to the window it opened in, and one repaid early
+    earns only the time it was lent. net_monthly = gross interest / C * 100
+    (gross, like the passive arms; the report applies the fee separately).
+    n_trades counts credits held inside the window; fill_rate is their
+    capital-weighted mean rate (diagnostic only).
     """
     if not callable(capital):
         capital_for(capital, 0, 0)
     out: list[WindowOutcome] = []
     for lo, hi in window_bounds:
-        wf = [f for f in fills if lo <= f.fill_ts_ms < hi]
         window_capital = capital_for(capital, lo, hi)
-        clamped = clamp_active_window(wf, cap=window_capital)
-        rates = [f.rate for f in wf]
-        # unweighted mean matched rate — diagnostic only, not used in the yield sum
-        mean_rate = (
-            sum(rates, Decimal("0")) / Decimal(len(rates)) if rates else Decimal("0")
-        )
+        interest = credit_gross_interest(credits, lo, hi, now_ms=now_ms)
+        capital_days = credit_capital_days(credits, lo, hi, now_ms=now_ms)
         out.append(
             WindowOutcome(
                 month_mts=lo,
-                net_monthly=clamped.interest / window_capital * Decimal("100"),
-                n_trades=len(wf),
-                fill_rate=mean_rate,
+                net_monthly=interest / window_capital * Decimal("100"),
+                n_trades=sum(1 for c in credits if c.held_ms(lo, hi, now_ms=now_ms) > 0),
+                fill_rate=interest / capital_days if capital_days > 0 else Decimal("0"),
             )
         )
     return out
+
+
+def peak_open_principal(credits: Sequence[CreditLifetime], *, now_ms: int) -> Decimal:
+    """Largest total principal the credits had lent at any one instant."""
+    events: list[tuple[int, int, Decimal]] = []
+    for c in credits:
+        end = c.closed_ms if c.closed_ms is not None else now_ms
+        if end > c.start_ms:
+            # at equal timestamps a close (0) is applied before an open (1)
+            events += [(c.start_ms, 1, c.amount), (end, 0, -c.amount)]
+    peak = running = Decimal("0")
+    for _ts, _order, delta in sorted(events):
+        running += delta
+        peak = max(peak, running)
+    return peak
+
+
+@dataclass(frozen=True)
+class DeploymentCheck:
+    """Peak principal the bot's credits had open vs the whole-span budget C.
+
+    Credits are funded from the wallet whose balance is C, so with the ledger
+    basis the peak cannot exceed C by more than balance drift. Above C (an
+    explicit --capital below what was lent) the return on C is overstated as a
+    return on a C-sized budget. Reported, never clamped: the credit model has no
+    re-lent-principal double counting for a clamp to remove.
+    """
+
+    cap: Decimal
+    peak_open_principal: Decimal
+
+    @property
+    def over_deployed(self) -> bool:
+        return self.peak_open_principal > self.cap
+
+    @property
+    def over_deploy_factor(self) -> Decimal:
+        return self.peak_open_principal / self.cap if self.cap > 0 else Decimal("0")
+
+
+@dataclass(frozen=True)
+class CreditCoverage:
+    """Which of the symbol's credits the active arm counted, and what it left out."""
+
+    bot_credits: int
+    gross_by_cell: dict[str, Decimal]   # over the data window
+    unattributed_credits: int           # no trade, or an offer that is not ours
+    unattributed_gross: Decimal
+    ambiguous_credits: int              # attributed, but the pairing could change the cell
 
 
 def attribute_passive(
@@ -442,72 +289,6 @@ def attribute_idle(*, window_bounds: list[tuple[int, int]]) -> list[WindowOutcom
         for lo, _hi in window_bounds
     ]
 
-
-@dataclass(frozen=True)
-class DeploymentAnchorResult:
-    attributed_deployed: Decimal
-    observed_realized: Decimal
-    relative_divergence: Decimal
-    within_tolerance: bool
-
-
-def check_deployment_anchor(
-    *, attributed_deployed: Decimal, observed_realized: Decimal, tol: Decimal
-) -> DeploymentAnchorResult:
-    """Relative divergence of attributed vs venue-observed deployed principal.
-
-    When observed_realized == 0: divergence is 0 if attributed is also 0,
-    else treated as fully divergent (infinite -> beyond any finite tolerance).
-    """
-    if observed_realized == 0:
-        div = Decimal("0") if attributed_deployed == 0 else Decimal("Infinity")
-    else:
-        div = abs(attributed_deployed - observed_realized) / observed_realized
-    return DeploymentAnchorResult(
-        attributed_deployed=attributed_deployed,
-        observed_realized=observed_realized,
-        relative_divergence=div,
-        within_tolerance=div <= tol,
-    )
-
-
-@dataclass(frozen=True)
-class NavAnchorResult:
-    available: bool
-    nav_delta: Decimal | None
-    attributed_interest: Decimal
-    relative_divergence: Decimal | None
-    within_tolerance: bool
-
-
-def check_nav_anchor(
-    *, nav_delta: Decimal | None, attributed_interest: Decimal, tol: Decimal
-) -> NavAnchorResult:
-    """Best-effort ΔNAV vs Σ attributed interest. Unavailable -> within_tolerance True.
-
-    When attributed_interest == 0: divergence is 0 if nav_delta is also 0, else treated as fully divergent.
-    """
-    if nav_delta is None:
-        return NavAnchorResult(
-            available=False,
-            nav_delta=None,
-            attributed_interest=attributed_interest,
-            relative_divergence=None,
-            within_tolerance=True,
-        )
-    if attributed_interest == 0:
-        div = Decimal("0") if nav_delta == 0 else Decimal("Infinity")
-    else:
-        div = abs(nav_delta - attributed_interest) / abs(attributed_interest)
-    return NavAnchorResult(
-        available=True,
-        nav_delta=nav_delta,
-        attributed_interest=attributed_interest,
-        relative_divergence=div,
-        within_tolerance=div <= tol,
-    )
-
-
 class VerdictState(Enum):
     PASS = "PASS"
     INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
@@ -532,6 +313,7 @@ class G3Verdict:
     mr_alpha_available: bool
 
 
+
 def decide_verdict(
     *,
     headline_bot_vs_idle: Decimal,
@@ -539,8 +321,7 @@ def decide_verdict(
     total_capital_days: Decimal,
     ci_lo: Decimal,
     ci_hi: Decimal,
-    deployment_anchor: DeploymentAnchorResult,
-    nav_anchor: NavAnchorResult,
+    ledger_divergence: Sequence[str],
     min_windows: int,
     min_capital_days: Decimal,
     mr_alpha_spread: Decimal,
@@ -552,8 +333,9 @@ def decide_verdict(
 
     MR-alpha fields are stamped onto the result for the report but never change
     the state — the product's success criterion is absolute return vs idle, not
-    timing alpha vs AlwaysMarketRate. Anchor divergence (attribution-vs-venue
-    truth) still forces UNRELIABLE regardless of the primary metric.
+    timing alpha vs AlwaysMarketRate. ``ledger_divergence`` lists the complete
+    weeks whose credit interest disagrees with the venue ledger; any forces
+    UNRELIABLE regardless of the primary metric.
     """
     reasons: list[str] = []
 
@@ -571,17 +353,8 @@ def decide_verdict(
             mr_alpha_available=mr_alpha_available,
         )
 
-    if not deployment_anchor.within_tolerance:
-        reasons.append(
-            f"deployment anchor diverged: attributed {deployment_anchor.attributed_deployed} "
-            f"vs observed {deployment_anchor.observed_realized}"
-        )
-        return verdict(VerdictState.UNRELIABLE)
-    if not nav_anchor.within_tolerance:
-        reasons.append(
-            f"NAV anchor diverged: ΔNAV {nav_anchor.nav_delta} "
-            f"vs attributed interest {nav_anchor.attributed_interest}"
-        )
+    if ledger_divergence:
+        reasons.append("credit interest diverges from the venue ledger: " + "; ".join(ledger_divergence))
         return verdict(VerdictState.UNRELIABLE)
 
     if n_windows < min_windows:
@@ -602,3 +375,70 @@ def decide_verdict(
 
     reasons.append(f"bot-vs-idle CI [{ci_lo}, {ci_hi}] straddles 0 — inconclusive")
     return verdict(VerdictState.INSUFFICIENT_DATA)
+
+
+@dataclass(frozen=True)
+class CellMrAlpha:
+    """MR timing alpha of one bot cell against the market rate of its own period.
+
+    The baseline lends the cell's share of C (its share of the bot's
+    capital-days over the data window) at the cell's market rate, all the time.
+    Unavailable when that series has no in-band point in the window; the cell
+    then drops out of the total and ``reason`` says why.
+    """
+
+    cell: str
+    period_agg: str
+    capital_share: Decimal
+    available: bool
+    reason: str | None
+    spread: Decimal     # full-span active − baseline, % of C
+    ci_lo: Decimal
+    ci_hi: Decimal
+
+
+@dataclass(frozen=True)
+class DataThreshold:
+    """Minimum bot capital-days before the verdict may leave INSUFFICIENT_DATA."""
+
+    capital_days: Decimal       # the bot's credits over the data window
+    minimum: Decimal
+    basis: str                  # how ``minimum`` was derived, for the report
+
+
+# The reconciliation gate looks at this many most recent settled weeks.
+GATE_WEEKS = 8
+
+
+def reconciliation_status(
+    r: WeeklyReconciliation, *, gate_weeks: Sequence[int], acks: Mapping[int, str],
+) -> str:
+    """How one reconciled week bears on the verdict."""
+    if not r.complete:
+        return "incomplete"
+    if not r.flagged:
+        return "ok"
+    if r.week_start_ms not in gate_weeks:
+        return "FLAG, outside gate"
+    if r.week_start_ms in acks:
+        return f"FLAG, acknowledged: {acks[r.week_start_ms]}"
+    return "FLAG"
+
+
+@dataclass(frozen=True)
+class G3Report:
+    """Everything the G3 report renders."""
+
+    verdict: G3Verdict
+    data_window: str
+    capital_source: str                 # "ledger" or "--capital <C>"
+    coverage: CreditCoverage
+    deployment: DeploymentCheck
+    frr: FrrBenchmark
+    reconciliations: list[WeeklyReconciliation]
+    reconciliation_available: bool      # False when the ledger has no payout at all
+    mr_alpha_cells: list[CellMrAlpha]
+    mr_alpha_coverage: Decimal          # share of bot capital-days in the MR-alpha total
+    data_threshold: DataThreshold
+    gate_weeks: list[int]               # week starts the reconciliation gate considers
+    acknowledgements: dict[int, str]    # operator-acknowledged week start -> reason

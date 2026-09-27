@@ -1,6 +1,6 @@
 """Offline pipeline logic for derive_cells: freeze fixtures, patch YAML params
 + _provenance, and the drift check. No network. The Neon pull + CLI live in
-scripts/derive_cells.py. See docs/superpowers/specs/2026-05-28-tier2-deployment-safety-design.md.
+scripts/derive_cells.py.
 """
 from __future__ import annotations
 

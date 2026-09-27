@@ -1,6 +1,6 @@
 # bfx-funding-bot (Python backend)
 
-Python rewrite of the Go backend. See `../docs/superpowers/specs/2026-05-09-backend-rewrite-to-python-decision.md` for context.
+Python rewrite of the Go backend. Architecture and current rules: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Setup
 

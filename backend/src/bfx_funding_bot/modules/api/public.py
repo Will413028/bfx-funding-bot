@@ -2,13 +2,13 @@
 
 Deliberately carries NO auth dependency and NO SP5 per-user rate limiter
 (`modules/api/ratelimit.py` keys on `Principal.user_id`, which anonymous
-marketing-page/CSV visitors never have — see
-docs/superpowers/specs/2026-07-19-borrowrate-proof-page-csv.md).
+marketing-page/CSV visitors never have — see backend/ARCHITECTURE.md, public
+read model).
 
 Compliance red line (binding — 2026-05-26 productization ADR, constraint 2):
 marketing surfaces must never promise returns and must never disclose
 absolute-dollar figures (capital size, USDT interest amounts) — both a legal
-constraint (最高法院 112台上字第317號) and a privacy one (it would leak Will's
+constraint (最高法院 112台上字第317號) and a privacy one (it would leak the operator's
 personal capital scale). Every value this module serializes is percent-only.
 `gross_interest_usdt` / `net_interest_usdt` / `capital_days` are read off the
 ORM row for internal aggregation math ONLY and must never reach a response

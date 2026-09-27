@@ -8,7 +8,7 @@ Bitfinex 自動放貸 SaaS 平台。
 - `frontend/` — Next.js 16 前端
 - ~~Go 1.25 後端~~ — **已移除**（Phase 0 重寫為 Python 後封存並刪除，2026-05-29；歷史見 git）。Python 後端原名 `backend_py/`，2026-09-23 改名為 `backend/`，舊文件與 SDD 裡的 `backend_py` 指的就是現在的 `backend/`
 - `backend/ARCHITECTURE.md` — **後端架構 source of truth**（event-sourced execution、reconcile 骨幹、deployment reconciler、放貸演算法、event model、DB schema、safety、phases/部署、key invariants；含 mermaid 架構/資料流圖）
-- Phase 5+ SaaS 多租戶/API/billing 願景見 `ROADMAP.md`（原 Go-era `backend_architecture.md` 已移除，藍本見 git）
+- 維運 runbook 在 `docs/runbooks/`；設計決策紀錄（ADR）、研究報告與 roadmap 另行私下保存，不放在本 repo（`.gitignore` 擋住舊路徑）
 
 ## 部署架構
 
@@ -16,17 +16,17 @@ Bitfinex 自動放貸 SaaS 平台。
 
 - **應用程式**（bot／webapi／frontend）：compose project `bfx-app`，定義在 `deploy/vm/docker-compose.app.yml`。CI（`.github/workflows/release.yml`）在綠燈的 `main` commit 建 arm64 image 推到 GHCR；VM 的 `bfx-deploy`（`deploy/vm/ops/bfx_deploy.py`，`bfx-deploy.timer` 每 5 分鐘）只以 digest 部署（部署不改變交易狀態、沒有分級或核准）：有 migration 時先停 bot 再備份與跑 isolated restore test（用目標版本的 DR 腳本）、寫 `deployments` ledger 的 `started` 列後 recreate、健康檢查、無 migration 時失敗回滾，結束再寫一列並發 Telegram；成功後安裝該版本的主機工具（下一輪生效）。container hardening 由 CI 對 `docker compose config` 做 policy 檢查。VM 不 build image。
 - **資料服務**（Postgres／Redis）：compose project `bfx`，`docker-compose.bot.yml`；其 `legacy-app` profile 只是歷史定義，不可用來啟動應用程式。
-- Runbook：部署 `docs/runbooks/deploy.md`；交易狀態／包絡／停機／告警 `docs/runbooks/operations.md`；首次安裝參考（已執行的一次性切換紀錄）`docs/runbooks/cutover-release-governance.md`。
+- Runbook：部署 `docs/runbooks/deploy.md`；交易狀態／包絡／停機／告警 `docs/runbooks/operations.md`；新主機的 DB roles／公開入口 `docs/runbooks/fresh-host-setup.md`；首次安裝參考（已執行的一次性切換紀錄）`docs/runbooks/cutover-release-governance.md`；研究用一次性容器 `docs/runbooks/research-one-shot-jobs.md`。
 
 | 服務 | 平台 |
 |------|------|
-| Frontend | VM `bfx-frontend`（Next.js standalone，Tailscale Funnel 443→`127.0.0.1:3001`；公開 `https://<public-host>`） |
+| Frontend | VM `bfx-frontend`（Next.js standalone，公開入口 443→`127.0.0.1:3001`，目前是 Tailscale Funnel；實際公開 host 見 `AGENTS.local.md`，設定見 `docs/runbooks/fresh-host-setup.md`） |
 | Backend (bot + webapi) | VM（`bfx-bot` / `bfx-webapi`；webapi 內網限定，FE 經 docker 網路呼叫） |
 | Database | 自托 Postgres 18（`bfx-postgres`，volume `bfx_pgdata`；roles：bot owner、`bfx_webapi`、`bfx_webauth`） |
 | Cache | 自托 Redis 7（`bfx-redis`，volume `bfx_redisdata`；Better Auth secondaryStorage：session + rate-limit，ioredis） |
 
 - 備份／WAL archive／isolated restore 依 `docs/runbooks/offsite-dr.md`；pgBackRest backup/status、`bfx-backup-check`、每月 `bfx-restore-test`（prefix-hash 驗證）timer 定義在 `deploy/vm/systemd/`（第一次由 `deploy/vm/ops/install.sh`、之後由 bfx-deploy 依 `managed-units` 安裝，都不啟用），實際啟用與健康狀態須查目標環境。
-- 每週 attribution／G3 報告由 `bfx-weekly-report.timer` 執行 compose `weekly-report`（`--profile ops`）；操作前核對目前 unit、排程及輸出。Redis session 為 ephemeral。
+- 每週 attribution／G3 報告由 `bfx-weekly-report.timer` 觸發 `bfx-weekly-report.service`，執行主機工具裡的 `deploy/vm/ops/bfx_weekly_report.py`（步驟在 `deploy/vm/ops/docker-compose.weekly-report.yml`，隨每次部署安裝；image 用 ledger 的 backend digest；不讀 VM checkout）；操作前核對目前 unit、排程及輸出（`docs/runbooks/operations.md` §8）。Redis session 為 ephemeral。
 
 ## 指令執行目錄
 
@@ -52,7 +52,7 @@ Go `backend/`（atlas/sqlc/go test）已於 2026-05-29 移除，不再使用。
 
 規則：
 - 每個功能必須包含單元測試，`cd backend && uv run pytest -m "not integration"` 全過才能 commit
-- 純文件修改（ROADMAP、strategy-journal 等）不需要走完整工作流
+- 純文件修改（runbook、ARCHITECTURE.md 等）不需要走完整工作流
 
 ### 測試與品質（強制）
 

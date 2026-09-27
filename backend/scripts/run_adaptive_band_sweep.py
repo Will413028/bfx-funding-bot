@@ -4,13 +4,10 @@ Evaluates the 8 (t1,t2) bands × 4 cells over a single full-history candle
 fetch, splitting outcomes into disjoint pre-2022 / 2022+ halves post-hoc.
 Writes a research report. Characterization only (locked-but-not-armed).
 
-Spec:  docs/superpowers/specs/2026-06-04-adaptive-period-band-sweep-design.md
-Plan:  docs/superpowers/plans/2026-06-04-adaptive-period-band-sweep.md
-
 Usage:
     cd backend
     uv run python scripts/run_adaptive_band_sweep.py \\
-        --output ../docs/research/2026-06-04-adaptive-period-band-sweep.md
+        --output /tmp/2026-06-04-adaptive-period-band-sweep.md
 """
 from __future__ import annotations
 

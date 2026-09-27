@@ -4,8 +4,7 @@
 - `/strategy-research <一句話假設>` — 單一假設走完整流程
 - `/strategy-research batch` — brainstorm N 個假設 → **全部預登記後**批次跑（trials 先固定，FDR 才誠實）
 
-方法論 SoT：`~/second-brain/wiki/tech/backtesting-methodology-best-practice.md`（§5-§10 + Decision Protocol）。
-Registry SoT：`~/second-brain/wiki/projects/bfx-funding-bot/strategy-registry.md`。
+方法論 SoT 與 strategy registry SoT 是 repo 外的私有筆記；路徑寫在本機 `AGENTS.local.md`（不進 git）。找不到就先問，不要自己新建。
 
 ## 三條紅線（不可協商）
 
@@ -22,25 +21,24 @@ grep registry 全部三張表（策略/信號/執行層）比對新假設的信�
 ### 2. 預登記（registry 寫入，開跑前）
 
 registry 信號表加一行：`| <operationalization> | TESTING | <date> | mechanism: <一句話為何理論上抓得到訊號> |`。
-batch 模式：**所有假設先全部登記完**才開始跑第一個。宣告內容必含：信號構造、horizon 集合、param 空間。commit registry（`daily:` prefix，second-brain repo）。
+batch 模式：**所有假設先全部登記完**才開始跑第一個。宣告內容必含：信號構造、horizon 集合、param 空間。commit registry（在 registry 所在的私有 repo，依該 repo 的 commit 規則）。
 
 ### 3. EDA 5-gate 漏斗
 
 - 工具：`signal_eda.py`（新構造需加純函式 + unit tests，TDD；**不進 production `SIGNALS` registry**）+ `scripts/run_signal_eda.py`
 - 5-gate：FDR-sig + regime 同號 + ≥3/4 cell + |median IC| ≥ 0.03 + **economic hurdle**（quintile spread 年化 ≥ `ECONOMIC_HURDLE_APR_PP`）
 - 長 horizon（>30d）必跑 block-size 敏感度檢查（block ≳ horizon 列數；結果隨 block 放大消失＝偽顯著）
-- VM 真資料執行模式（不碰 live bot）：`~/bfx-research` clone + 一次性容器
-  `docker run --rm --label autoheal=false --network bfx_default --env-file ~/bfx-funding-bot/.env.runtime -v ~/bfx-research/backend_py/src:/app/src:ro -v ~/bfx-research/backend_py/scripts:/app/scripts:ro bfx-bot:local python -m scripts.run_signal_eda ...`
-  （勿 mount 整個 /app——會蓋掉 baked venv；勿動 `~/bfx-funding-bot` 主 checkout / canary.env / 任何 live 容器）
+- VM 真資料執行模式（不碰 live bot）：一次性容器，指令模式見 `docs/runbooks/research-one-shot-jobs.md`
+  （`-m scripts.run_signal_eda ...`；勿 mount 整個 /app——會蓋掉 baked venv；勿動任何 live 容器或 runtime env 檔）
 
 ### 4. KILL → 結案；GO → 回測
 
-- KILL：registry verdict 更新 + 報告落 `docs/research/`，stop。
+- KILL：registry verdict 更新 + 報告落私有研究筆記（不進本 repo），stop。
 - GO：建策略 class（TDD，仿 `strategies/` ABC）→ 四 arm WFO/OOS（vs MR deployed params / AlwaysMarketRate / AlwaysFRR，仿 `run_frr_floor_backtest.py`）→ **模型外假設跑雙 bound**（fill 等；兩 bound 夾 0 → 結論=「等 live 量測」，不再調參）→ DSR 用 registry「DSR trials 計數」段的累計值（本次 sweep configs 數同步累加進去 + `DEFAULT_N_TRIALS`）。
 
 ### 5. 報告 + 收尾
 
-- 報告 `docs/research/<date>-<slug>.md`（+.json），格式仿既有：四 arm 表、paired CI、honesty caveats、GO/KILL/NOT-PROMOTED 判定與理由
+- 報告 `<date>-<slug>.md`（+.json）寫到私有研究筆記（路徑見 `AGENTS.local.md`；研究報告不進本 repo），格式仿既有：四 arm 表、paired CI、honesty caveats、GO/KILL/NOT-PROMOTED 判定與理由
 - registry verdict 落地（TESTING → 最終狀態；GO 候選標 `NOT-PROMOTED-PENDING-REVIEW` + 建議的 re-open/promote 條件）
 - 呈給 Will：數字 + 候選疑慮清單（selection-effect？機械混淆？horizon 可行動性？cell 不對稱？）→ **等裁決，不自行 promote**
 - gates：`uv run pytest -m "not integration"` 全綠 + mypy 不新增 + ruff 乾淨才 commit（Conventional Commits）

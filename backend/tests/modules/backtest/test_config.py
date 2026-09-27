@@ -43,8 +43,8 @@ def test_config_rejects_zero_fill_alpha() -> None:
 def test_config_rejects_unsupported_market_rate_source() -> None:
     """candle_close is the only supported market rate. FRR is a distinct
     quantity (112-362x below candle_close, non-stationary ratio), not a
-    unit-convertible market-rate proxy — see
-    docs/superpowers/specs/2026-05-28-frr-market-rate-decoupling-design.md.
+    unit-convertible market-rate proxy (ARCHITECTURE.md, backtest engine
+    contract).
     Reject unsupported sources at construction (fail-fast)."""
     with pytest.raises(ValueError, match="market_rate_source"):
         BacktestConfig(market_rate_source="frr")  # type: ignore[arg-type]

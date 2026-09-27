@@ -3,7 +3,6 @@
 > **最後更新**：2026-03-21
 > **實作同步狀態**：本文件同時作為設計規範和實作參考。各章節標有 `⚡ 實作狀態` 的區塊說明實際程式碼與原始設計的差異。
 > **實作程式碼**：`backend/internal/lending/` — signal/, strategy/, orderbook/, worker/, execution/
-> **策略 Review**：`docs/strategy-journal.md` — 2026-03-21 全面 review 記錄
 
 ---
 
@@ -304,7 +303,7 @@
 > - `queueRatio > 0.20` → rate × 0.98（-2%）
 > - Stale 偵測：`offer.Rate > BestAsk + 2×Spread` → 取消
 >
-> 2026-03-21 review 建議改用線性/sigmoid 曲線取代兩段式跳躍（見 ROADMAP GT6）。
+> 2026-03-21 review 建議改用線性/sigmoid 曲線取代兩段式跳躍（roadmap 項 GT6）。
 
 ### 4.13 部分成交管理 (Partial Fill Management)
 
@@ -920,7 +919,7 @@ worker_snapshots (
 
 ## 11. 2026-03-21 策略 Review 新增項目
 
-> 基於全面策略 review 新增的收益優化項目。完整分析見 `docs/strategy-journal.md`。
+> 基於 2026-03-21 全面策略 review 新增的收益優化項目。
 
 ### 11.1 策略 Pipeline 接線 (G0)
 
@@ -975,7 +974,7 @@ worker_snapshots (
 
 ## 12. 2026-03-21 策略設計層面 Review — 根本性收益盲點
 
-> 以虛擬貨幣放貸專家角度審視策略設計本身（非實作差異）。完整分析見 `docs/strategy-journal.md`。
+> 以虛擬貨幣放貸專家角度審視策略設計本身（非實作差異）。
 
 ### 12.1 定價改為相對 bestAsk 偏移 (S1)
 
@@ -1110,7 +1109,7 @@ P(higher_rate | wait t hours) = Φ((μ - current_rate) / (σ × √t))
 
 ## 13. 2026-03-21 市場微觀結構 Review — 隱形收益殺手
 
-> 從 Bitfinex 放貸市場的微觀結構和手續費結構角度審視。完整分析見 `docs/strategy-journal.md`。
+> 從 Bitfinex 放貸市場的微觀結構和手續費結構角度審視。
 
 ### 13.1 Bitfinex 15% 手續費納入計算 (M1)
 

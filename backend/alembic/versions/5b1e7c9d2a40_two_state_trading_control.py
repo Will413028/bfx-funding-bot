@@ -1,7 +1,6 @@
 """Two-state trading control: retire REDUCING, probation and build approvals.
 
-Revises 1f6392809120. Lending envelope ADR 2026-09-25 D4/D5 (plan
-docs/superpowers/plans/2026-09-25-lending-envelope.md T4): the trading state
+Revises 1f6392809120. Lending envelope ADR 2026-09-25 D4/D5: the trading state
 is ACTIVE or HALTED, caused by ``operator`` or ``auto``; the everyday stop is
 the CapitalPolicy ``enabled`` flag; releases no longer need approval and no
 resume starts a probation.

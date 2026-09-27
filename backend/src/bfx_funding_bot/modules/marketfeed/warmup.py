@@ -1,6 +1,6 @@
 """Warmup orchestrator — DB read + REST gap-fill + strategy.observe sequential.
 
-Design basis: phase4.1-paper-shadow-infra-design.md Section "Data Flow" Flow 1
+Design basis: phase 4.1 paper/shadow infra design Section "Data Flow" Flow 1
 """
 from __future__ import annotations
 

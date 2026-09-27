@@ -2,11 +2,10 @@
 
 Pulls candles + funding_stats from the configured DB (read-only SELECT), aligns
 them, scores 4 candidate signals across cell x horizon x regime, applies BH-FDR,
-and writes a GO/KILL markdown + json report. See
-docs/superpowers/specs/2026-06-05-signal-eda-funnel-design.md.
+and writes a GO/KILL markdown + json report.
 
 Run:  cd backend && uv run python -m scripts.run_signal_eda \
-      --output docs/research/2026-06-06-signal-eda-funnel.md
+      --output /tmp/2026-06-06-signal-eda-funnel.md
 """
 from __future__ import annotations
 

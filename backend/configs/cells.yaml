@@ -91,7 +91,7 @@ cells:
     params: {percentile: 75, lookback_hours: 168}
     reference_amount_usdt: 150.0
 
-phase3b_wfo_results_ref: docs/research/2026-05-18-phase3b-wfo-results.md
+phase3b_wfo_results_ref: phase3b-wfo-results-2026-05-18
 _provenance:
   data_hash: 11d2236482e6646cac41249f1ac66b7353ea05e629a3a42253fcd0ff3def8e17
   derived_at: '2026-05-28T05:27:51.374458+00:00'

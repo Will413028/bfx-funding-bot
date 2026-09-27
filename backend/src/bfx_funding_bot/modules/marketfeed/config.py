@@ -22,9 +22,9 @@ from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 
 log = logging.getLogger(__name__)
 
-# Phase 3b WFO qualification result. Source of truth:
-# docs/research/2026-05-18-phase3b-wfo-results.md (Per-Cell Detail section).
-# Any edit here MUST be reconciled with that doc.
+# Phase 3b WFO qualification result (per-cell detail in the 2026-05-18 phase 3b
+# WFO research report, kept outside this repository). Any edit here MUST be
+# reconciled with that report.
 UNQUALIFIED_PAIRS = {("mean_reversion", "fUST_p30")}
 QUALIFIED_PAIRS = {
     ("rate_percentile", "fUSD_p2"), ("rate_percentile", "fUSD_p30"),
@@ -168,7 +168,7 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
             f"BFX_DEPLOYMENT_ENV must be one of {valid}, got {deployment_env_str!r}"
         ) from None
 
-    # Phase <-> realm fail-fast guard (defense in depth; deploy-koyeb.sh sets
+    # Phase <-> realm fail-fast guard (defense in depth; the deploy env sets
     # the realm explicitly per phase, but reject obviously-wrong combos in case
     # an env is set by hand). phase = rollout/real-money dimension;
     # deployment_environment = data-isolation realm (prod/shadow/ci). live is

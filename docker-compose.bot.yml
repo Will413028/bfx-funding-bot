@@ -1,11 +1,13 @@
 name: bfx
 
-# Infrastructure definition (PostgreSQL, Redis, ops jobs), NOT the application deployer.
+# Infrastructure definition (PostgreSQL, Redis), NOT the application deployer.
 # bot/webapi/frontend are deployed by bfx-deploy as compose project `bfx-app`
 # (deploy/vm/docker-compose.app.yml, docs/runbooks/deploy.md). Never broad
 # `up --build`/`down`/`--remove-orphans` here. Existing PG18, Redis, runtime env files
 # and volumes must remain unchanged. The `legacy-app` profiles below are historical/
 # simulation only: never `--profile legacy-app up` (same container names as bfx-app).
+# The weekly-report job moved to the release-managed host tooling
+# (deploy/vm/ops/docker-compose.weekly-report.yml, bfx-weekly-report.service).
 
 services:
   # Self-hosted Postgres — replaces Neon. Internal-only (no published port);
@@ -30,7 +32,7 @@ services:
       - archive_command=pgbackrest --stanza=bfx archive-push %p
     # Bound to the VM's loopback ONLY — never 0.0.0.0. Reachable from a laptop
     # solely through an SSH tunnel:
-    #   ssh -N -L 5433:127.0.0.1:5432 ubuntu@oci-a1
+    #   ssh -N -L 5433:127.0.0.1:5432 <ssh-user>@<vm-host>
     # Added 2026-07-27 so local analysis can read the real database; before this
     # the local .env still pointed at the decommissioned Neon project and any
     # ad-hoc query silently ran against data frozen at 2026-06-19.
@@ -75,50 +77,12 @@ services:
     image: bfx-bot:local
     command: ["sh", "-c", "alembic upgrade head"]
     working_dir: /app
-    # Migrations run as the operator principal; the daemon and weekly report
-    # use the restricted runtime URL from .env.runtime.
+    # Migrations run as the operator principal; the daemon uses the restricted
+    # runtime URL from .env.runtime.
     env_file:
       - .env.runtime
       - .env.migrate.runtime
     restart: "no"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  # E3 weekly measurement chain（systemd timer bfx-weekly-report.timer 觸發，
-  # profiles: ["ops"] 讓 up -d 不啟動）：① funding_stats forward-fill（AlwaysFRR
-  # arm 資料）② attribution 落表 ③ G3 報告。步驟 ① 失敗不擋 ②③（|| echo；
-  # attribution/G3 對缺資料 fail-soft）。
-  weekly-report:
-    image: bfx-bot:local
-    profiles: ["ops"]
-    working_dir: /app
-    env_file: .env.runtime
-    restart: "no"
-    volumes:
-      # Host dir must be writable by uid 1000 (image appuser); OCI ubuntu is uid
-      # 1001 → one-time `sudo chown 1000:1001 ~/bfx/reports && chmod 775` on the
-      # VM, else the G3 report write dies on EACCES (bit us 2026-07-19).
-      - ${HOME}/bfx/reports:/reports
-    command:
-      - sh
-      - -c
-      - |
-        timeout 600 python -m scripts.ingest_funding_stats --symbols fUST,fUSD || echo "WARN ingest_funding_stats failed/timed out (frr arm may be stale — non-blocking)"
-        python -m scripts.run_weekly_attribution --out "/reports/$$(date +%F)-attribution-reconciliation.md"
-        python -m scripts.report_interest --out "/reports/$$(date +%F)-realized-interest.md" || echo "WARN report_interest failed (non-blocking)"
-        python -m scripts.run_g3_live_validation --out "/reports/$$(date +%F)-g3-live-validation.md"
-        # ── research re-validation (Proposal E, 2026-09-22): runs AFTER the operational
-        # report, every step fail-soft, nothing here promotes anything. Budget: see
-        # deploy/vm/systemd/bfx-weekly-report.service TimeoutStartSec.
-        timeout 900 python -m scripts.ingest_perp_funding --skip-binance || echo "WARN ingest_perp_funding failed/timed out (non-blocking)"
-        timeout 1200 python -m scripts.ingest_liquidations || echo "WARN ingest_liquidations failed/timed out (non-blocking)"
-        timeout 600 python -m scripts.learn_book_fill_rate || echo "WARN learn_book_fill_rate failed/timed out (non-blocking)"
-        timeout 600 python -m scripts.run_period_structure_backtest --fill-model book --output "/reports/$$(date +%F)-period-structure-book.md" || echo "WARN period-structure (book) failed (non-blocking)"
-        timeout 600 python -m scripts.run_period_structure_backtest --output "/reports/$$(date +%F)-period-structure-linear.md" || echo "WARN period-structure (linear) failed (non-blocking)"
-        timeout 600 python -m scripts.run_oos_profitability --output "/reports/$$(date +%F)-oos-profitability.md" || echo "WARN run_oos_profitability failed (non-blocking)"
-        python -m scripts.diff_research_report --kind period-structure --glob "/reports/*-period-structure-book.json" --out "/reports/$$(date +%F)-weekly-research-book.md" || echo "WARN diff (book) failed (non-blocking)"
-        python -m scripts.diff_research_report --kind oos --glob "/reports/*-oos-profitability.json" --out "/reports/$$(date +%F)-weekly-research-oos.md" || echo "WARN diff (oos) failed (non-blocking)"
     depends_on:
       postgres:
         condition: service_healthy
@@ -197,9 +161,9 @@ services:
       context: frontend
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://<public-host>}
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://frontend.invalid}
         NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-bfx-funding-bot}
-        NEXT_PUBLIC_BETTER_AUTH_URL: ${NEXT_PUBLIC_BETTER_AUTH_URL:-https://<public-host>}
+        NEXT_PUBLIC_BETTER_AUTH_URL: ${NEXT_PUBLIC_BETTER_AUTH_URL:-https://frontend.invalid}
     image: bfx-frontend:local
     container_name: bfx-frontend
     env_file: .env.frontend.runtime
