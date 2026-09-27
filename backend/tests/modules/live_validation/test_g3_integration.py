@@ -1,4 +1,4 @@
-"""Integration test for _g3_loaders.build_verdict_from_neon.
+"""Integration test for _g3_loaders.build_g3_report.
 
 Requires a live Postgres connection (BFX_DEPLOYMENT_ENV + DATABASE_URL set).
 Skipped by the commit gate (pytest -m "not integration").
@@ -10,8 +10,8 @@ import pytest
 
 
 @pytest.mark.integration
-async def test_build_verdict_from_neon_returns_g3_report():
-    """build_verdict_from_neon must return without raising, regardless of data state.
+async def test_build_g3_report_returns_g3_report():
+    """build_g3_report must return without raising, regardless of data state.
 
     The canary may have no attributed credit (idle) — the loader must handle
     that gracefully and return a verdict rather than raising. It reads the
@@ -21,10 +21,10 @@ async def test_build_verdict_from_neon_returns_g3_report():
     if not os.environ.get("DATABASE_URL") or not os.environ.get("BFX_DEPLOYMENT_ENV"):
         pytest.skip("integration requires DATABASE_URL and BFX_DEPLOYMENT_ENV")
 
+    from bfx_funding_bot.modules.live_validation.g3 import build_g3_report
     from bfx_funding_bot.modules.live_validation.live_attribution import G3Report, G3Verdict
-    from scripts._g3_loaders import build_verdict_from_neon
 
-    report = await build_verdict_from_neon(capital=Decimal("570"))
+    report = await build_g3_report(capital=Decimal("570"))
 
     assert isinstance(report, G3Report)
     assert isinstance(report.verdict, G3Verdict)

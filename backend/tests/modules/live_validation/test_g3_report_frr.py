@@ -1,14 +1,15 @@
 from decimal import Decimal
 
+from bfx_funding_bot.modules.live_validation.g3_report import render_markdown, verdict_to_json
 from bfx_funding_bot.modules.live_validation.live_attribution import (
     CreditCoverage,
+    DataThreshold,
     DeploymentCheck,
     FrrBenchmark,
     G3Report,
     G3Verdict,
     VerdictState,
 )
-from scripts.run_g3_live_validation import _verdict_to_json, render_markdown
 
 
 def _verdict() -> G3Verdict:
@@ -27,6 +28,9 @@ def _report(frr: FrrBenchmark) -> G3Report:
         coverage=CreditCoverage(4, {}, 0, Decimal("0"), 0),
         deployment=DeploymentCheck(cap=Decimal("10000"), peak_open_principal=Decimal("500")),
         frr=frr, reconciliations=[], reconciliation_available=False,
+        mr_alpha_cells=[], mr_alpha_coverage=Decimal("0"),
+        data_threshold=DataThreshold(Decimal("0"), Decimal("3990"), "C × 7 days"),
+        gate_weeks=[], acknowledgements={},
     )
 
 
@@ -68,7 +72,7 @@ def test_json_includes_frr_and_fee_keys():
         available=True, spread=Decimal("0.01"),
         ci_lo=Decimal("-0.005"), ci_hi=Decimal("0.02"), reason=None,
     )
-    j = _verdict_to_json(_report(frr), fee_rate=Decimal("0.15"))
+    j = verdict_to_json(_report(frr), fee_rate=Decimal("0.15"))
     assert j["frr_benchmark"]["available"] is True
     assert j["frr_benchmark"]["spread"] == "0.01"
     assert j["fee_adjusted"]["fee_rate"] == "0.15"

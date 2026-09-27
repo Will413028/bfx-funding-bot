@@ -17,6 +17,7 @@ from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.auth_rest import InterestPayment
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
+from bfx_funding_bot.modules.live_validation.g3 import build_g3_report
 from bfx_funding_bot.modules.live_validation.interest_ledger import wallet_balance_basis
 from bfx_funding_bot.modules.live_validation.live_attribution import VerdictState
 from bfx_funding_bot.modules.live_validation.tables import (
@@ -24,7 +25,6 @@ from bfx_funding_bot.modules.live_validation.tables import (
     FundingInterestPaymentRow,
     FundingTradeRow,
 )
-from scripts._g3_loaders import build_verdict_from_neon
 from scripts.run_g3_live_validation import _parse_capital
 
 ACCOUNT = UUID("35efed2d-3004-4941-a161-ca025d9c4d53")
@@ -118,7 +118,7 @@ async def test_zero_allocation_cap_env_uses_the_ledger_balance(sf, monkeypatch):
             balance=Decimal("395.55"), description=DESC,
         ) for i in range(1, 12)])
         await s.commit()
-    report = await build_verdict_from_neon(capital=_parse_capital(None), session_factory=sf)
+    report = await build_g3_report(capital=_parse_capital(None), session_factory=sf)
     assert report.capital_source == "ledger"
     assert report.coverage.bot_credits == 2
     assert report.deployment.cap == Decimal("395.50")          # balance before each payout
@@ -134,7 +134,7 @@ async def test_without_capital_or_ledger_fails_with_a_clear_message(sf, monkeypa
         s.add(_credit(1, now - 2 * DAY, now - DAY))
         await s.commit()
     with pytest.raises(RuntimeError, match="--capital"):
-        await build_verdict_from_neon(capital=None, session_factory=sf)
-    report = await build_verdict_from_neon(capital=Decimal("570"), session_factory=sf)
+        await build_g3_report(capital=None, session_factory=sf)
+    report = await build_g3_report(capital=Decimal("570"), session_factory=sf)
     assert isinstance(report.verdict.state, VerdictState)
     assert report.capital_source == "--capital 570"

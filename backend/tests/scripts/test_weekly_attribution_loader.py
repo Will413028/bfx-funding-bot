@@ -26,14 +26,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     VenueCreditStateRow,
 )
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
-from bfx_funding_bot.modules.live_validation.tables import (
-    AttributionWeeklyRow,
-    FundingCreditHistoryRow,
-    FundingInterestPaymentRow,
-    FundingTradeRow,
-)
-from bfx_funding_bot.modules.live_validation.weekly_attribution import WeeklyCellRow
-from scripts.run_weekly_attribution import (
+from bfx_funding_bot.modules.live_validation.attribution_loader import (
     OfferLink,
     load_and_compute,
     persist_rows,
@@ -41,6 +34,13 @@ from scripts.run_weekly_attribution import (
     render_reconciliation,
     resolve_offer_cells,
 )
+from bfx_funding_bot.modules.live_validation.tables import (
+    AttributionWeeklyRow,
+    FundingCreditHistoryRow,
+    FundingInterestPaymentRow,
+    FundingTradeRow,
+)
+from bfx_funding_bot.modules.live_validation.weekly_attribution import WeeklyCellRow
 
 _ENV = "prod"
 _UUID = UUID("35efed2d-3004-4941-a161-ca025d9c4d53")
