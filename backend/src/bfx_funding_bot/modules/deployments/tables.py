@@ -8,8 +8,6 @@ a trigger rejects UPDATE, DELETE and TRUNCATE. An attempt that changes the
 containers has two rows sharing `attempt_id`: `started` (appended before the
 containers are created; `attempt_id` is the BFX_DEPLOYMENT_ID the containers
 get) and a terminal outcome; an attempt that stops earlier has only the latter.
-`change_class` is retired (change classes are gone): the current bfx-deploy
-leaves it NULL; only rows written by the previous tool carry a value.
 
 The CHECK constraints mirror the migration (PostgreSQL is the authority);
 the regex ones are created on PostgreSQL only, so SQLite fixtures still build.
@@ -56,9 +54,6 @@ class DeploymentRow(Base):
     source_revision: Mapped[str] = mapped_column(Text, nullable=False)
     backend_digest: Mapped[str] = mapped_column(Text, nullable=False)
     frontend_digest: Mapped[str] = mapped_column(Text, nullable=False)
-    # Retired; dropped in the follow-up release (kept only for the previous
-    # bfx-deploy, which still writes it while deploying the release that retired it).
-    change_class: Mapped[str | None] = mapped_column(Text, nullable=True)
     migrations_applied: Mapped[bool] = mapped_column(Boolean, nullable=False)
     outcome: Mapped[str] = mapped_column(Text, nullable=False)
     detail: Mapped[str] = mapped_column(Text, nullable=False)

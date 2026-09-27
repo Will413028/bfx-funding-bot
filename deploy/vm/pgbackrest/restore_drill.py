@@ -480,6 +480,17 @@ class RestoreDrill:
             remaining = deadline - self._clock()
             if remaining <= 0:
                 _failure("restore_command_failed")
+            # A container that has exited never becomes healthy; fail now instead of
+            # spending the rest of the health deadline polling it.
+            state = self._require_success(
+                ("docker", "inspect", "--format={{.State.Status}}", plan.container_name),
+                timeout=remaining,
+            )
+            if state.stdout.strip() in {"exited", "dead"}:
+                _failure("restore_command_failed")
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                _failure("restore_command_failed")
             self._sleep(min(1, remaining))
 
     def _elapsed_seconds(self, started: float) -> int:

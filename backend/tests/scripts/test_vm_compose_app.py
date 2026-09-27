@@ -168,31 +168,10 @@ def test_policy_and_deployer_agree_on_names_and_commands() -> None:
         deployment_id="d")) == policy.IDENTITY
 
 
-# Transitional (plan "Follow-up release"): the previous bfx-deploy injects
-# BFX_CHANGE_CLASS and checks every container carries its value, so the compose
-# file passes it through when given and defaults it otherwise. Nothing requires it.
-TRANSITIONAL_CHANGE_CLASS = "${BFX_CHANGE_CLASS:-retired}"
-
-
-def test_retired_change_class_is_optional_and_not_identity() -> None:
+def test_retired_change_class_is_gone() -> None:
     assert "BFX_CHANGE_CLASS" not in policy.IDENTITY
     for service in ("bot", "webapi", "frontend"):
-        assert COMPOSE["services"][service]["environment"]["BFX_CHANGE_CLASS"] == TRANSITIONAL_CHANGE_CLASS
-
-
-@needs_compose
-@pytest.mark.parametrize(("injected", "expected"), [(None, "retired"), ("material", "material")])
-def test_policy_accepts_the_transitional_change_class(
-    runtime_dir: Path, injected: str | None, expected: str,
-) -> None:
-    # None: the new bfx-deploy; "material": the previous one deploying this release.
-    env = {**FAKE_ENV, **({"BFX_CHANGE_CLASS": injected} if injected else {})}
-    result = _render(runtime_dir, env)
-    assert result.returncode == 0, result.stderr
-    rendered = json.loads(result.stdout)
-    assert policy.violations(rendered) == []
-    for service in ("bot", "webapi", "frontend"):
-        assert rendered["services"][service]["environment"]["BFX_CHANGE_CLASS"] == expected
+        assert "BFX_CHANGE_CLASS" not in COMPOSE["services"][service]["environment"]
 
 
 # --------------------------------------------------------------------------- rendered policy
