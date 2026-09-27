@@ -68,3 +68,29 @@ class ConfigRegimeRow(Base):
     clamp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     reprice_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     git_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class FundingInterestPaymentRow(Base):
+    """Interest actually paid by the venue: ledger category 28, one row per payout.
+
+    The account-level truth for realized income (net of the venue fee; idle
+    capital is already reflected, since ``balance`` is the whole funding
+    wallet). Written by ``InterestLedgerSync`` in the bot, idempotent on the
+    venue ledger id; a read model the venue can always refill.
+    """
+
+    __tablename__ = "funding_interest_payments"
+
+    exchange_account_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    ledger_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), primary_key=True,
+    )
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    currency: Mapped[str] = mapped_column(Text, nullable=False)
+    mts: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    balance: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_NOW,
+    )

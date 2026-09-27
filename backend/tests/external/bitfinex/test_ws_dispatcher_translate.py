@@ -178,7 +178,7 @@ def test_fcc_emits_audit_only_credit_closed() -> None:
     fcc = FccEvent(
         credit_id=555, symbol="fUST", mts_create=1000, mts_update=9000,
         amount=Decimal("1338.03"), status="CLOSED (used)", rate=0.000174,
-        period_days=2, raw_seq=11, raw=[],
+        period_days=2, raw_seq=11, raw=[], mts_opening=1000, mts_last_payout=8000,
     )
     events, mutations, diags = translate_bfx_event(
         fcc, snapshot={}, recent_cancels={}, now_ms=9500, account_id="primary",
@@ -191,7 +191,23 @@ def test_fcc_emits_audit_only_credit_closed() -> None:
     assert ev.symbol == "fUST"
     assert ev.amount == Decimal("1338.03")
     assert ev.mts_create == 1000
-    assert ev.occurred_at_ms == 9000  # close time
+    assert ev.occurred_at_ms == 8000  # close time = mts_last_payout, not mts_update
+    assert (ev.mts_opening, ev.mts_last_payout) == (1000, 8000)
+    assert ev.venue_fields_reliable
     assert ev.account_id == "primary"
     assert ev.is_simulated is False
     assert ev.venue_seq == 11
+
+
+def test_fcc_without_last_payout_falls_back_to_mts_update() -> None:
+    fcc = FccEvent(
+        credit_id=556, symbol="fUST", mts_create=1000, mts_update=9000,
+        amount=Decimal("150"), status="CLOSED (used)", rate=0.0002,
+        period_days=2, raw_seq=12, raw=[],
+    )
+    events, _, _ = translate_bfx_event(
+        fcc, snapshot={}, recent_cancels={}, now_ms=9500, account_id="primary",
+    )
+    ev = events[0]
+    assert isinstance(ev, CreditClosed)
+    assert ev.occurred_at_ms == 9000 and not ev.venue_fields_reliable

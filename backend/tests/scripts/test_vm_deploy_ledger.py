@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[3]
 BACKEND = ROOT / "backend"
 REVISION = "c74d45a54e46"          # creates the ledger
 RETIRED = "1f6392809120"           # change_class nullable, no CHECK
+DROPPED_PARENT = "8e4b2f6a1c37"    # the revision before 5b9e3d7a2f41 drops change_class
 REV = "b" * 40
 ATTEMPT = "0b8f7c5e-5d59-4a4c-9b58-6f0a1c2d3e4f"
 DIGEST_B, DIGEST_F = "sha256:" + "3" * 64, "sha256:" + "4" * 64
@@ -254,9 +255,10 @@ def test_migration_is_reversible_and_leaves_no_drift(ledger_db: Any) -> None:
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT count(*) FROM deployments")) == 2
     _alembic(url, "check")
-    # One step back re-adds the column (NULL) and the pairing check still accepts
-    # an attempt written the current way.
-    _alembic(url, "downgrade", "-1")
+    # Back across the drop re-adds the column (NULL) and the pairing check still
+    # accepts an attempt written the current way. Named, not "-1": later
+    # migrations stack on top of the drop.
+    _alembic(url, "downgrade", DROPPED_PARENT)
     ledger.append(_entry(attempt_id=ATTEMPT.replace("0b8f", "2b8f"), outcome="started", finished_at=None))
     ledger.append(_entry(attempt_id=ATTEMPT.replace("0b8f", "2b8f")))
     with engine.connect() as conn:

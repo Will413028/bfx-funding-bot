@@ -212,6 +212,47 @@ def parse_key_permissions(raw: Any) -> KeyPermissions:
     return KeyPermissions(scopes=scopes)
 
 
+@dataclass(frozen=True, slots=True)
+class InterestPayment:
+    """One funding interest payout from the account ledger (category 28).
+
+    Bitfinex pays once a day per currency (~01:30Z), net of its lending fee, as a
+    single "Margin Funding Payment on wallet funding" entry; ``balance`` is the
+    funding wallet balance after the payout. Verified against the live account
+    2026-09-27 (0.0519 UST paid on 2 x 150.77 at 0.00020504/day, ratio 0.84).
+    """
+
+    ledger_id: int
+    currency: str
+    wallet: str | None
+    mts: int
+    amount: Decimal
+    balance: Decimal
+    description: str
+
+
+INTEREST_LEDGER_CATEGORY = 28  # "margin / swap / interest payment"
+_LEDGER_MIN_ROW_LEN = 9
+
+
+def parse_interest_payments(raw: Any) -> list[InterestPayment]:
+    """Ledger rows: [0]=ID [1]=CURRENCY [2]=WALLET [3]=MTS [4]=_ [5]=AMOUNT
+    [6]=BALANCE [7]=_ [8]=DESCRIPTION."""
+    if not isinstance(raw, list):
+        raise BitfinexShapeError(f"expected list of ledger rows, got {type(raw).__name__}: {raw!r}")
+    out: list[InterestPayment] = []
+    for row in raw:
+        if not isinstance(row, list) or len(row) < _LEDGER_MIN_ROW_LEN or row[3] is None:
+            raise BitfinexShapeError(f"ledger row malformed: {row!r}")
+        out.append(InterestPayment(
+            ledger_id=int(row[0]), currency=str(row[1]),
+            wallet=str(row[2]) if row[2] is not None else None, mts=int(row[3]),
+            amount=Decimal(str(row[5])), balance=Decimal(str(row[6])),
+            description=str(row[8]),
+        ))
+    return out
+
+
 BITFINEX_AUTH_REST_BASE = "https://api.bitfinex.com"
 _FUNDING_OFFERS_PATH = "v2/auth/r/funding/offers"  # /{symbol} appended; no leading slash (sign_request prepends /api/)
 _FUNDING_CREDITS_PATH = "v2/auth/r/funding/credits"
@@ -221,6 +262,7 @@ _FUNDING_LOANS_PATH = "v2/auth/r/funding/loans"
 # Loan and credit ids are separate venue sequences; keep them from ever being
 # mistaken for one another by an id-keyed projection.
 LOAN_ID_PREFIX = "loan:"
+_LEDGERS_PATH = "v2/auth/r/ledgers"  # /{currency}/hist appended
 _WALLETS_PATH = "v2/auth/r/wallets"  # no /{symbol}; sign_request prepends /api/
 _PERMISSIONS_PATH = "v2/auth/r/permissions"  # no body args; sign_request prepends /api/
 
@@ -428,6 +470,58 @@ class BitfinexAuthREST:
             replace(loan, credit_id=LOAN_ID_PREFIX + loan.credit_id)
             for loan in await self._post_funding_lent(ctx=ctx, path=path)
         ]
+
+    async def get_interest_payments(
+        self, *, ctx: AccountContext, currency: str, start_ms: int, end_ms: int,
+        limit: int = 500, max_pages: int = 20,
+    ) -> list[InterestPayment]:
+        """Interest payouts in [start_ms, end_ms], oldest first.
+
+        The endpoint returns newest first; page backwards by the oldest MTS until
+        a short page. Payouts are daily, so a page of 500 covers over a year.
+        """
+        if start_ms < 0 or end_ms < start_ms:
+            raise ValueError("invalid ledger window")
+        path = f"{_LEDGERS_PATH}/{currency}/hist"
+        by_id: dict[int, InterestPayment] = {}
+        cursor_end = end_ms
+        for _ in range(max_pages):
+            body = {"category": INTEREST_LEDGER_CATEGORY, "start": start_ms,
+                    "end": cursor_end, "limit": limit}
+            page = parse_interest_payments(await self._post_signed(ctx=ctx, path=path, body=body))
+            for entry in page:
+                by_id.setdefault(entry.ledger_id, entry)
+            if len(page) < limit:
+                break
+            oldest = min(entry.mts for entry in page)
+            if oldest <= start_ms or oldest >= cursor_end:
+                break
+            cursor_end = oldest - 1
+        return sorted(by_id.values(), key=lambda entry: (entry.mts, entry.ledger_id))
+
+    async def _post_signed(self, *, ctx: AccountContext, path: str, body: dict[str, Any]) -> Any:
+        body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        headers = sign_request(
+            body=body_bytes, nonce=self._nonce_provider(),
+            api_secret=ctx.credentials.api_secret, path=path,
+        )
+        headers["bfx-apikey"] = ctx.credentials.api_key
+        headers["Content-Type"] = "application/json"
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/{path}", content=body_bytes, headers=headers, timeout=30.0,
+            )
+        except httpx.HTTPError as e:
+            raise BitfinexAPIError(status_code=0, message=f"transport error: {e}", raw=None) from e
+        if resp.status_code >= 400:
+            raise BitfinexAPIError(
+                status_code=resp.status_code,
+                message=resp.reason_phrase or "http error", raw=resp.text,
+            )
+        try:
+            return json.loads(resp.content, parse_float=Decimal)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise BitfinexShapeError(f"invalid JSON in {path} response: {e}") from e
 
     async def _post_funding_lent(
         self, *, ctx: AccountContext, path: str,
