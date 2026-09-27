@@ -106,6 +106,7 @@ services:
       - |
         timeout 600 python -m scripts.ingest_funding_stats --symbols fUST,fUSD || echo "WARN ingest_funding_stats failed/timed out (frr arm may be stale — non-blocking)"
         python -m scripts.run_weekly_attribution
+        python -m scripts.report_interest --out "/reports/$$(date +%F)-realized-interest.md" || echo "WARN report_interest failed (non-blocking)"
         python -m scripts.run_g3_live_validation --out "/reports/$$(date +%F)-g3-live-validation.md"
         # ── research re-validation (Proposal E, 2026-09-22): runs AFTER the operational
         # report, every step fail-soft, nothing here promotes anything. Budget: see
