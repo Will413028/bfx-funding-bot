@@ -131,8 +131,8 @@ class FakeLedger:
 
 def inspect_record(service: str, running: tuple[str, str, str, str]) -> dict[str, Any]:
     image, digest, revision, deployment_id = running
-    # BFX_CHANGE_CLASS=retired: the transitional compose default when bfx-deploy
-    # no longer injects it; the identity check must ignore it.
+    # BFX_CHANGE_CLASS=retired: containers created before the follow-up release
+    # still carry the transitional default; the identity check must ignore it.
     env = [f"BFX_IMAGE_DIGEST={digest}", f"BFX_SOURCE_REVISION={revision}",
            f"BFX_DEPLOYMENT_ID={deployment_id}", "PATH=/usr/bin", "BFX_CHANGE_CLASS=retired"]
     return {
