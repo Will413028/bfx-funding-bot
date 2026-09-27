@@ -148,6 +148,17 @@ def test_summary_without_payouts_has_no_apr() -> None:
     assert (s.payouts, s.net_interest, s.mean_balance, s.net_apr_pct) == (0, Decimal("0"), None, None)
 
 
+def test_week_without_payouts_is_zero_when_the_wallet_is_known() -> None:
+    """A later week with no payout earned 0 on a known wallet; it is not "no data"."""
+    earlier = [_payment(1, 1_000, "0.05", "400.05"), _payment(2, 2_000, "0.01", "401")]
+    s = summarize_interest(earlier, currency="UST", start_ms=7 * MS_PER_DAY, end_ms=14 * MS_PER_DAY)
+    assert (s.payouts, s.net_interest, s.mean_balance, s.net_apr_pct) == (
+        0, Decimal("0"), Decimal("401"), Decimal("0"))
+    # a payout only after the window says nothing about the wallet during it
+    later = summarize_interest(earlier, currency="UST", start_ms=0, end_ms=500)
+    assert (later.mean_balance, later.net_apr_pct) == (None, None)
+
+
 def test_funding_currency() -> None:
     assert funding_currency("fUST") == "UST"
     with pytest.raises(ValueError):

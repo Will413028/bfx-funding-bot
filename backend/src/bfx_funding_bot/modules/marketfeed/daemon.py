@@ -165,6 +165,7 @@ from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     ResolutionScope,
     UncertaintyResolutionWorker,
 )
+from bfx_funding_bot.modules.live_validation.credit_history import CreditHistorySync
 from bfx_funding_bot.modules.live_validation.interest_ledger import (
     InterestLedgerSync,
     funding_currency,
@@ -411,6 +412,7 @@ class Daemon:
     periodic_reconcile: PeriodicReconcile | None = None
     book_snapshot_writer: BookSnapshotWriter | None = None
     interest_ledger_sync: InterestLedgerSync | None = None
+    credit_history_sync: CreditHistorySync | None = None
     funding_book_service: FundingBookService | None = None
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
@@ -522,6 +524,12 @@ class Daemon:
                 tg.create_task(
                     self.interest_ledger_sync.run(self._stop_event),
                     name="interest_ledger",
+                )
+            # Per-credit truth for attribution (observe-only; fail-open inside).
+            if self.credit_history_sync is not None:
+                tg.create_task(
+                    self.credit_history_sync.run(self._stop_event),
+                    name="credit_history",
                 )
             # The live eligibility provider owns its own WS shutdown in run()'s
             # finally block. TaskGroup supervision ensures that path is used once.
@@ -1361,6 +1369,7 @@ async def build_daemon(
     periodic_reconcile: PeriodicReconcile | None = None
     book_snapshot_writer: BookSnapshotWriter | None = None
     interest_ledger_sync: InterestLedgerSync | None = None
+    credit_history_sync: CreditHistorySync | None = None
     if not spec.is_simulated:
         auth_rest = BitfinexAuthREST(http=bitfinex_http, nonce_provider=bfx_nonce)
         # Realized income truth (ledger category 28), read-only: see interest_ledger.
@@ -1369,6 +1378,13 @@ async def build_daemon(
             exchange_account_id=account_bootstrap.exchange_account_id,
             deployment_environment=env_str,
             currencies=sorted({funding_currency(s) for s in configured_symbols(config.cells)}),
+        )
+        # Per-credit truth (credit history + funding trades), read-only: see credit_history.
+        credit_history_sync = CreditHistorySync(
+            rest=auth_rest, ctx=account_ctx, session_factory=session_factory,
+            exchange_account_id=account_bootstrap.exchange_account_id,
+            deployment_environment=env_str,
+            symbols=sorted(configured_symbols(config.cells)),
         )
         # One alert per foreign offer across the boot and the runtime reconcile.
         foreign_exposure = ForeignExposureMonitor()
@@ -1972,6 +1988,7 @@ async def build_daemon(
         boot_recovery=boot_recovery,
         book_snapshot_writer=book_snapshot_writer,
         interest_ledger_sync=interest_ledger_sync,
+        credit_history_sync=credit_history_sync,
         funding_book_service=funding_book_service,
         periodic_reconcile=periodic_reconcile,
         healthz_host=healthz_host,
