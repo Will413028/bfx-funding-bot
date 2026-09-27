@@ -1,6 +1,6 @@
 """Phase 4.1 paper/shadow daemon coordinator.
 
-設計依據: phase4.1-paper-shadow-infra-design.md Section "Data Flow"
+設計依據: phase 4.1 paper/shadow infra design Section "Data Flow"
 - Startup: load config → warmup all cells → start ws + writer + scheduler + health_monitor
 - Steady state: scheduler 觸發 signal_engine.process_candle
 - Shutdown: SIGTERM → stop scheduler → drain in-flight → close ws → exit 0

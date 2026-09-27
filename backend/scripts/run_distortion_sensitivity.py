@@ -25,8 +25,7 @@ collapses spread_pct to 0, cancels the error between the decision side and the
 payoff side, and makes the experiment nearly incapable of failing — its clean
 result was an artifact, not resilience. Superseded by this version.
 
-Sample + biases: docs/research/2026-07-27-candle-distortion-sample.md
-ADR D2: wiki/projects/bfx-funding-bot/decisions/2026-07-27-candle-immutability-bitemporal.md
+Sample and biases: ADR 2026-07-27 candle immutability, D2.
 
 Usage (VM — the laptop's .env reaches the VM only through an SSH tunnel):
     cd backend

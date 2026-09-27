@@ -2,7 +2,7 @@
 
 Reuses run_phase3b_wfo_matrix.py framework + applies reindex_and_ffill before each
 WFO test window's run_backtest call. Emits GREEN/YELLOW/RED ship-gate verdict per
-(cell, strategy) pair to docs/research/<DATE>-phase4.3-locf-backtest-results.md.
+(cell, strategy) pair to the --output markdown report.
 
 Differences from run_phase3b_wfo_matrix.py:
   - Restricted to sparse cells only: fUSD_p30, fUST_p30
@@ -17,7 +17,7 @@ Usage:
     cd backend
     uv run python scripts/run_phase4_3_locf_wfo_matrix.py \\
         --budget-hours 6 12 24 \\
-        --output docs/research/$(date -u +%Y-%m-%d)-phase4.3-locf-backtest-results.md
+        --output /tmp/$(date -u +%Y-%m-%d)-phase4.3-locf-backtest-results.md
 """
 from __future__ import annotations
 
@@ -511,7 +511,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--output",
         type=Path,
-        default=Path("docs/research/phase4.3_locf_results.md"),
+        default=Path("phase4.3_locf_results.md"),
         help="Output markdown path (also writes .json alongside)",
     )
     return p.parse_args()

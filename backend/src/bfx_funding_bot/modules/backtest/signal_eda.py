@@ -2,8 +2,7 @@
 """Offline signal-screening EDA funnel.
 
 Pure functions only (no DB/I/O). Scores candidate signals for predictive power
-against forward market-rate movement. See
-docs/superpowers/specs/2026-06-05-signal-eda-funnel-design.md.
+against forward market-rate movement.
 """
 from __future__ import annotations
 

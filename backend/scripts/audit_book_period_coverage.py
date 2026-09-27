@@ -7,7 +7,7 @@ AdaptivePeriod's mid/long tiers to pass exact-period eligibility?
 
 Run from backend/ (env: DATABASE_URL):
   uv run python -m scripts.audit_book_period_coverage [--symbols fUST,fUSD]
-      [--since-ms N] [--periods 2,7,14,30,120] [--out docs/research/<date>-a0-book-period-coverage.md]
+      [--since-ms N] [--periods 2,7,14,30,120] [--out /tmp/<date>-a0-book-period-coverage.md]
 
 VM (one-shot container, research clone mounted read-only, live bot untouched —
 same pattern as /strategy-research):

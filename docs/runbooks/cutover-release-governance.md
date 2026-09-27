@@ -1,7 +1,7 @@
 # Cutover runbook：immutable release → CI/GHCR/bfx-deploy（一次性）
 
 把 production 從舊的 immutable-release 手動流程換到 [deploy runbook](deploy.md) 的
-`bfx-deploy`。依據：`docs/superpowers/plans/2026-09-25-release-governance-refactor.md` §3–§4。
+`bfx-deploy`。
 Production 在整個切換期間維持停機（halt 11），直到最後一步由 Will 以 TOTP 恢復。
 
 > **狀態（2026-09-26）**：已於 2026-09-25 執行完畢，這是當時的紀錄。之後的 lending envelope

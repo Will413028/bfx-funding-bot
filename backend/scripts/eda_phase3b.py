@@ -1,7 +1,6 @@
 """Phase 3b EDA -- per-cell statistics on train portion of post-2022 candles.
 
-Outputs JSON-ish markdown summary to stdout for review/commit to
-docs/research/2026-05-17-phase3b-eda.md.
+Outputs JSON-ish markdown summary to stdout for review.
 
 Per Phase 3b spec section "Step 0":
   - Only train portion of each cell is used (avoids data snooping)

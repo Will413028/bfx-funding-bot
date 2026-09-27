@@ -3,8 +3,6 @@
 Boot-time auto + admin endpoint share SmokeRunner core (this file). Synthetic
 events tagged account_id="smoke_test"; prod ledger filters them out via
 account_id guard (modules/execution/ledger.py).
-
-Design: docs/superpowers/specs/2026-05-22-admin-smoke-test-design.md
 """
 from __future__ import annotations
 
