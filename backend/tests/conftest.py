@@ -77,28 +77,31 @@ def pg_container():
         yield container
 
 
+def _create_all(url: str) -> None:
+    from sqlalchemy import create_engine
+
+    from bfx_funding_bot.core.db import Base
+
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            Base.metadata.create_all(conn)
+    finally:
+        engine.dispose()
+
+
 @pytest_asyncio.fixture
-async def pg_engine(pg_container) -> AsyncIterator[AsyncEngine]:
-    """Per-test async engine pointing at an isolated testcontainer schema.
+async def pg_engine(pg_container, pg_templates) -> AsyncIterator[AsyncEngine]:
+    """Per-test async engine on a fresh ``Base.metadata.create_all`` database.
 
     The container is session-scoped for startup cost, but migration tests are
-    allowed to drive the public schema all the way to the irreversible Halt 1
-    contract.  Reset application and archive schemas before each test so that a
-    migration test cannot leak NOT NULL/FK state (or rows) into a runtime
-    integration test that intentionally exercises the additive ORM fixture.
+    allowed to drive a database all the way to the irreversible Halt 1
+    contract.  The container's own database is recreated before each test from
+    a create_all template so that no test can leak NOT NULL/FK state (or rows)
+    into a runtime integration test that intentionally exercises the additive
+    ORM fixture.
     """
-    raw_url = pg_container.get_connection_url()
-    async_url = raw_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
-    engine = create_async_engine(async_url, pool_pre_ping=True, pool_recycle=600)
-
-    async with engine.begin() as conn:
-        # This engine comes only from the session-scoped synthetic container;
-        # never preserve an earlier test's immutable archive across migrations.
-        await conn.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
-        await conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
-        await conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
-        await conn.exec_driver_sql("DROP SCHEMA public CASCADE")
-        await conn.exec_driver_sql("CREATE SCHEMA public")
+    import hashlib
 
     import bfx_funding_bot.modules.accounts.tables
     import bfx_funding_bot.modules.candles.tables
@@ -108,8 +111,15 @@ async def pg_engine(pg_container) -> AsyncIterator[AsyncEngine]:
     import bfx_funding_bot.modules.funding_stats.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # create_all builds whatever tables are registered right now; a test module
+    # importing more tables later gets a template of its own.
+    tables = hashlib.sha256("\n".join(sorted(Base.metadata.tables)).encode()).hexdigest()[:16]
+    template = pg_templates.template(f"create_all_{tables}", _create_all)
+    pg_templates.recreate(pg_container.dbname, template)
+
+    raw_url = pg_container.get_connection_url()
+    async_url = raw_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
+    engine = create_async_engine(async_url, pool_pre_ping=True, pool_recycle=600)
     yield engine
     await engine.dispose()
 
@@ -117,6 +127,55 @@ async def pg_engine(pg_container) -> AsyncIterator[AsyncEngine]:
 @pytest_asyncio.fixture
 async def pg_session_factory(pg_engine: AsyncEngine):
     return async_sessionmaker(pg_engine, expire_on_commit=False)
+
+
+# ---------------------------------------------------------------------------
+# Migrated templates on the PostgreSQL 16 container (see tests/pg_templates.py).
+#
+# A test that needs a migrated database clones a template instead of replaying
+# the Alembic chain: ``pg_templates.template(name, build)`` builds once per
+# session, ``pg_clone(name)`` hands the test its own copy and drops it after.
+# ---------------------------------------------------------------------------
+
+HEAD_TEMPLATE = "head_template"
+
+
+@pytest.fixture(scope="session")
+def pg_templates(pg_container):
+    from tests.pg_templates import TemplateDatabases
+
+    return TemplateDatabases(pg_container.get_connection_url().replace("+psycopg2", "+psycopg"))
+
+
+@pytest.fixture
+def pg_clone(pg_templates):
+    """``clone(template) -> sync URL`` of a fresh copy, dropped after the test."""
+    made: list[str] = []
+
+    def clone(template: str) -> str:
+        url = pg_templates.clone(template)
+        made.append(url)
+        return url
+
+    yield clone
+    for url in made:
+        pg_templates.drop(url)
+
+
+@pytest.fixture
+def pg_head_url(pg_templates, pg_clone) -> str:
+    """Sync (psycopg) URL of a fresh database migrated from empty to head."""
+    from tests.pg_templates import upgrade_head
+
+    return pg_clone(pg_templates.template(HEAD_TEMPLATE, upgrade_head))
+
+
+@pytest_asyncio.fixture
+async def pg_head_engine(pg_head_url: str) -> AsyncIterator[AsyncEngine]:
+    """Async engine on a fresh database migrated from empty to head."""
+    engine = create_async_engine(pg_head_url.replace("+psycopg", "+asyncpg"))
+    yield engine
+    await engine.dispose()
 
 
 @pytest.fixture(autouse=True)
@@ -142,25 +201,17 @@ def _reset_rate_limits():
 _ARCHIVE_TEMPLATE = "archive_template"
 # Matches ACCOUNT in tests/integration/test_projection_cutover_archive.py.
 _ARCHIVE_ACCOUNT = "00000000-0000-0000-0000-000000000064"
-_ALEMBIC_INI = __import__("pathlib").Path(__file__).resolve().parents[1] / "alembic.ini"
-
-
-def _database_url(url: str, database: str) -> str:
-    from sqlalchemy.engine import make_url
-
-    return make_url(url).set(database=database).render_as_string(hide_password=False)
 
 
 def _build_archive_database(url: str) -> None:
     """Migrate, seed and verify one database exactly as each test used to."""
-    from alembic.config import Config
     from sqlalchemy import create_engine
 
-    from alembic import command
+    from tests.pg_templates import alembic
 
     engine = create_engine(url)
     try:
-        command.upgrade(Config(str(_ALEMBIC_INI)), "e7b1c2d3e4f5")
+        alembic(url, "upgrade", "e7b1c2d3e4f5")
         with engine.begin() as conn:
             conn.execute(
                 text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','synthetic')"),
@@ -179,13 +230,13 @@ def _build_archive_database(url: str) -> None:
                 {"s": _ARCHIVE_ACCOUNT, "id": _ARCHIVE_ACCOUNT},
             )
             before = conn.execute(text("SELECT to_jsonb(p) FROM position_state p ORDER BY symbol")).all()
-        command.upgrade(Config(str(_ALEMBIC_INI)), "head")
+        alembic(url, "upgrade", "head")
         with engine.begin() as conn:
             after = conn.execute(text("SELECT to_jsonb(p) FROM position_state p ORDER BY symbol")).all()
             assert after == before
             conn.exec_driver_sql("CREATE SCHEMA unrelated")
             conn.exec_driver_sql("CREATE TABLE unrelated.keep_me(id integer)")
-        command.check(Config(str(_ALEMBIC_INI)))
+        alembic(url, "check")
     finally:
         engine.dispose()
 
@@ -200,36 +251,26 @@ def archive_pg():
 
 
 @pytest.fixture(scope="session")
-def _archive_template(archive_pg: str) -> str:
-    from sqlalchemy import create_engine
+def archive_templates(archive_pg: str):
+    from tests.pg_templates import TemplateDatabases
 
-    admin = create_engine(_database_url(archive_pg, "postgres"), isolation_level="AUTOCOMMIT")
-    try:
-        with admin.connect() as conn:
-            conn.exec_driver_sql(f"CREATE DATABASE {_ARCHIVE_TEMPLATE}")
-    finally:
-        admin.dispose()
-    with pytest.MonkeyPatch.context() as patch:
-        template_url = _database_url(archive_pg, _ARCHIVE_TEMPLATE)
-        patch.setenv("DATABASE_URL", template_url)
-        _build_archive_database(template_url)
-    return _ARCHIVE_TEMPLATE
+    return TemplateDatabases(archive_pg)
+
+
+@pytest.fixture(scope="session")
+def _archive_template(archive_templates) -> str:
+    return archive_templates.template(_ARCHIVE_TEMPLATE, _build_archive_database)
 
 
 @pytest_asyncio.fixture
-async def archive_db(archive_pg: str, _archive_template: str, monkeypatch: pytest.MonkeyPatch):
+async def archive_db(
+    archive_pg: str, archive_templates, _archive_template: str, monkeypatch: pytest.MonkeyPatch
+):
     """A fresh copy of the migrated, seeded archive database for one test."""
     from sqlalchemy import create_engine
     from sqlalchemy.engine import make_url
 
-    database = make_url(archive_pg).database
-    admin = create_engine(_database_url(archive_pg, "postgres"), isolation_level="AUTOCOMMIT")
-    try:
-        with admin.connect() as conn:
-            conn.exec_driver_sql(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
-            conn.exec_driver_sql(f'CREATE DATABASE "{database}" TEMPLATE {_archive_template}')
-    finally:
-        admin.dispose()
+    archive_templates.recreate(make_url(archive_pg).database, _archive_template)
     monkeypatch.setenv("DATABASE_URL", archive_pg)
     engine = create_engine(archive_pg)
     async_engine = create_async_engine(archive_pg.replace("+psycopg", "+asyncpg"))
@@ -253,42 +294,21 @@ _GOVERNANCE_TEMPLATE = "governance_template"
 
 
 @pytest.fixture(scope="session")
-def _governance_template(archive_pg: str) -> str:
-    from alembic.config import Config
-    from sqlalchemy import create_engine
+def _governance_template(archive_templates) -> str:
+    from tests.pg_templates import upgrade_head
 
-    from alembic import command
-
-    admin = create_engine(_database_url(archive_pg, "postgres"), isolation_level="AUTOCOMMIT")
-    try:
-        with admin.connect() as conn:
-            conn.exec_driver_sql(f"CREATE DATABASE {_GOVERNANCE_TEMPLATE}")
-    finally:
-        admin.dispose()
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv("DATABASE_URL", _database_url(archive_pg, _GOVERNANCE_TEMPLATE))
-        command.upgrade(Config(str(_ALEMBIC_INI)), "head")
-    return _GOVERNANCE_TEMPLATE
+    return archive_templates.template(_GOVERNANCE_TEMPLATE, upgrade_head)
 
 
 @pytest_asyncio.fixture
-async def migrated_db(archive_pg: str, _governance_template: str):
+async def migrated_db(archive_templates, _governance_template: str):
     """A fresh migrated database with one exchange account: (session factory, account)."""
     from uuid import uuid4
 
-    from sqlalchemy import create_engine
-
     from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 
-    database = f"governance_{uuid4().hex[:12]}"
-    admin = create_engine(_database_url(archive_pg, "postgres"), isolation_level="AUTOCOMMIT")
-    try:
-        with admin.connect() as conn:
-            conn.exec_driver_sql(f'CREATE DATABASE "{database}" TEMPLATE {_governance_template}')
-    finally:
-        admin.dispose()
-    url = _database_url(archive_pg, database).replace("+psycopg", "+asyncpg")
-    engine = create_async_engine(url)
+    sync_url = archive_templates.clone(_governance_template, f"governance_{uuid4().hex[:12]}")
+    engine = create_async_engine(sync_url.replace("+psycopg", "+asyncpg"))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = uuid4()
     async with factory.begin() as session:
@@ -297,9 +317,4 @@ async def migrated_db(archive_pg: str, _governance_template: str):
         yield factory, account
     finally:
         await engine.dispose()
-        admin = create_engine(_database_url(archive_pg, "postgres"), isolation_level="AUTOCOMMIT")
-        try:
-            with admin.connect() as conn:
-                conn.exec_driver_sql(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
-        finally:
-            admin.dispose()
+        archive_templates.drop(sync_url)

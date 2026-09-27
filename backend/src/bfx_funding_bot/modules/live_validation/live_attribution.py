@@ -199,9 +199,9 @@ def peak_open_principal(credits: Sequence[CreditLifetime], *, now_ms: int) -> De
     events: list[tuple[int, int, Decimal]] = []
     for c in credits:
         end = c.closed_ms if c.closed_ms is not None else now_ms
-        if end > c.opened_ms:
+        if end > c.start_ms:
             # at equal timestamps a close (0) is applied before an open (1)
-            events += [(c.opened_ms, 1, c.amount), (end, 0, -c.amount)]
+            events += [(c.start_ms, 1, c.amount), (end, 0, -c.amount)]
     peak = running = Decimal("0")
     for _ts, _order, delta in sorted(events):
         running += delta

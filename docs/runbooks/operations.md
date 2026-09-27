@@ -189,7 +189,49 @@ sudo bfx-deploy --recreate
 | `bfx-pgbackrest-backup.timer` / `bfx-pgbackrest-status.timer` | 見 unit | 備份與 RPO evidence（`OnFailure=bfx-alert@`） |
 | `bfx-backup-check.timer` | 每 5 分鐘（`*:1/5`） | evidence 與 restore heartbeat 檢查，連續兩次才告警，6 小時重發 |
 | `bfx-restore-test.timer` | 每月 1 日 09:17 UTC | `bfx-restore-test@current`：用已部署 release 的 DR 腳本做 isolated restore ＋ prefix-hash 驗證（[offsite DR](offsite-dr.md#monthly-and-change-triggered-prefix-restore-test)） |
-| `bfx-weekly-report.timer` | 每週 | attribution／G3 報告（用 `bfx-bot:local`，bfx-deploy 每次成功部署後重新 tag） |
+| `bfx-weekly-report.timer` | 每週一 04:17 UTC | 每週量測鏈：attribution／realized interest／G3 報告＋研究重驗（見下方「每週報告」；`OnFailure=bfx-alert@`） |
 | `bfx-halt-watch.timer` | 見 unit | 以 `/admin/dry-evaluate` 檢查停機是否真的生效 |
 
 `systemctl list-timers 'bfx-*'` 看實際啟用狀態。
+
+### 每週報告（`bfx-weekly-report`）
+
+步驟定義在 `deploy/vm/ops/docker-compose.weekly-report.yml`，和主機工具一起由 bfx-deploy 在每次
+成功部署後安裝到 `/usr/local/lib/bfx-ops/releases/<rev>/ops`（`current` 指向它）；
+`bfx-weekly-report.service` 在 `managed-units` 裡，同時被安裝與 `daemon-reload`。
+VM 上 `/home/ubuntu/bfx-funding-bot` 的 working tree **不再被讀取**（它不會被更新）。
+
+- **Image**：ledger 最新 `deployed` 列的 backend digest（`<repository>@sha256:…`，與 production
+  跑的是同一個），不用 `bfx-bot:local`。步驟來自已安裝的工具版本；若兩者 revision 不同
+  （部署後工具安裝失敗），照跑並在 journal 印 warning。
+- **Env**：只傳三個值——`DATABASE_URL`、`BFX_EXCHANGE_ACCOUNT_ID` 取自 `/opt/bfx/runtime/bot.env`
+  （bot 的 restricted role），`BFX_DEPLOYMENT_ENV` 取自該部署 revision 的 `live.env`
+  （`/var/lib/bfx-deploy/releases/<rev>/live.env`）。`bot.env` 其餘的 secret 不會進 container。
+- **Hardening**：read-only rootfs、UID 1000、cap-drop ALL、no-new-privileges，只有 `/tmp`（tmpfs）
+  與 `/home/ubuntu/bfx/reports` → `/reports` 可寫；CI 以
+  `compose_policy.py --kind weekly-report` 檢查。reports 目錄必須已存在且 uid 1000 可寫
+  （`sudo chown 1000:1001 ~/bfx/reports && chmod 775`），不會自動建立：目錄不存在時 runner 以
+  `reports_dir_missing` 拒跑（Compose 2.x 與 v5 對未設定的 `create_host_path` 解讀相反，不交給 Docker 決定）。
+- Timer 不在 `managed-units`：安裝 unit 檔會覆蓋 `systemctl mask`，排程開不開由 operator 決定。
+- **G3 對帳 FLAG 的確認**：最近 8 個已結算週內有 FLAG，G3 判 UNRELIABLE。查清原因後若要放行，在
+  `docker-compose.weekly-report.yml` 的 `run_g3_live_validation` 那行加 `--ack-week YYYY-MM-DD="理由"`
+  （週一日期、理由必填），走 PR 合併、隨部署生效；報告的 md／JSON 會列出每個確認與它是否用上。
+  超出 8 週窗的 FLAG 不再擋判定，確認可以拿掉。
+
+手動執行（VM，root）：
+
+```bash
+sudo /usr/local/lib/bfx-ops/current/ops/.venv/bin/python \
+  /usr/local/lib/bfx-ops/current/ops/bfx_weekly_report.py --dry-run   # 印出 image、revision、argv；不執行
+sudo systemctl start --no-block bfx-weekly-report.service            # 真的跑一次（最長 90 分鐘）
+journalctl -u bfx-weekly-report.service -f
+ls -lt /home/ubuntu/bfx/reports | head
+```
+
+排程的啟停：
+
+```bash
+sudo systemctl unmask bfx-weekly-report.timer
+sudo systemctl enable --now bfx-weekly-report.timer
+sudo systemctl disable --now bfx-weekly-report.timer   # 暫停
+```

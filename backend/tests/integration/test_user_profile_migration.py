@@ -1,12 +1,10 @@
 import pytest
 
-from tests.integration.test_migration_per_symbol_pk import _ALEMBIC_INI
-
 pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
-async def test_auth_schema_and_user_profile_after_upgrade(pg_engine, monkeypatch) -> None:
+async def test_auth_schema_and_user_profile_after_upgrade(pg_head_url) -> None:
     """Drive a real alembic upgrade against testcontainer Postgres; assert the
     Better Auth ``auth`` schema, ``public.user_profiles``, and the cross-schema
     FK (user_profiles.user_id -> auth.user.id) all exist after head.
@@ -16,29 +14,10 @@ async def test_auth_schema_and_user_profile_after_upgrade(pg_engine, monkeypatch
     ``create_all`` would then try to build ``user_profiles`` (FK to ``auth.user``)
     before this migration runs, breaking every test that uses ``pg_engine``.
     """
-    sync_url = pg_engine.url.render_as_string(hide_password=False).replace(
-        "+asyncpg", "+psycopg")
-    monkeypatch.setenv("DATABASE_URL", sync_url)
+    # A fresh copy of the database Alembic migrated from empty to head.
+    sync_url = pg_head_url
 
     from sqlalchemy import create_engine, inspect
-
-    # Reset BOTH schemas: the migration creates `auth` too, and the session-scoped
-    # container is reused across migration tests — leaving `auth` behind would make
-    # the next `command.upgrade(head)` fail with `relation "auth.user" already exists`.
-    eng = create_engine(sync_url)
-    try:
-        with eng.begin() as setup_conn:
-            setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
-            setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
-            setup_conn.exec_driver_sql("DROP SCHEMA public CASCADE")
-            setup_conn.exec_driver_sql("CREATE SCHEMA public")
-    finally:
-        eng.dispose()
-
-    from alembic.config import Config
-
-    from alembic import command
-    command.upgrade(Config(str(_ALEMBIC_INI)), "head")
 
     verify_eng = create_engine(sync_url)
     try:

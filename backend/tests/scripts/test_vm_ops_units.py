@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[3]
 SYSTEMD = ROOT / "deploy/vm/systemd"
 NEW_UNITS = ("bfx-deploy.service", "bfx-deploy.timer", "bfx-alert@.service",
              "bfx-backup-check.service", "bfx-backup-check.timer",
-             "bfx-restore-test@.service", "bfx-restore-test.timer")
+             "bfx-restore-test@.service", "bfx-restore-test.timer",
+             "bfx-weekly-report.service")
 PGBACKREST_UNITS = ("bfx-pgbackrest-backup.service", "bfx-pgbackrest-backup.timer",
                     "bfx-pgbackrest-status.service", "bfx-pgbackrest-status.timer")
 OPS_PYTHON = "/usr/local/lib/bfx-ops/current/ops/.venv/bin/python"
@@ -57,6 +58,8 @@ def test_managed_units_are_exactly_the_ones_the_tooling_owns() -> None:
     for tool in ("bfx_deploy.py", "bfx_notify.py"):
         assert tool in installer and (ROOT / "deploy/vm/ops" / tool).is_file()
     assert "systemctl enable" not in installer and "systemctl start" not in installer
+    # The weekly job is managed; its timer is not (installing would undo a mask).
+    assert "bfx-weekly-report.timer" not in listed
 
 
 @pytest.mark.parametrize("name", [n for n in NEW_UNITS if n.endswith(".service")])
@@ -81,6 +84,8 @@ def test_units_run_as_the_principal_each_job_needs() -> None:
     assert "User" not in _unit("bfx-backup-check.service")["Service"]     # root-only Telegram creds
     assert "User" not in _unit("bfx-alert@.service")["Service"]
     assert _unit("bfx-restore-test@.service").one("Service", "User") == "ubuntu"  # the drill's evidence owner
+    # Root: bot.env (0600) and the ledger via docker exec; the container runs as uid 1000.
+    assert "User" not in _unit("bfx-weekly-report.service")["Service"]
 
 
 def test_deploy_timer_every_five_minutes_offset_from_status() -> None:
@@ -100,6 +105,7 @@ def test_failures_that_cannot_alert_themselves_use_the_alert_template() -> None:
     # bfx-deploy and bfx-backup-check alert on their own; an OnFailure would double-page.
     assert "OnFailure" not in _unit("bfx-deploy.service")["Unit"]
     assert "OnFailure" not in _unit("bfx-backup-check.service")["Unit"]
+    assert _unit("bfx-weekly-report.service").one("Unit", "OnFailure") == "bfx-alert@%n.service"
     alert = _unit("bfx-alert@.service").one("Service", "ExecStart")
     assert alert.startswith(f"{OPS_PYTHON} {OPS}/bfx_notify.py --level critical")
     assert "%i" in alert
@@ -136,3 +142,13 @@ def test_installer_passes_shellcheck() -> None:
     completed = subprocess.run(["shellcheck", str(ROOT / "deploy/vm/ops/install.sh")],
                                capture_output=True, text=True, check=False)
     assert completed.returncode == 0, completed.stdout
+
+
+def test_weekly_report_runs_the_deployed_tooling_never_the_vm_checkout() -> None:
+    unit = _unit("bfx-weekly-report.service")
+    assert unit.one("Service", "ExecStart") == f"{OPS_PYTHON} {OPS}/bfx_weekly_report.py"
+    assert "WorkingDirectory" not in unit["Service"]
+    assert "bfx-funding-bot" not in (SYSTEMD / "bfx-weekly-report.service").read_text()
+    assert unit.one("Service", "TimeoutStartSec") == "5400"  # the whole chain's budget
+    assert (ROOT / "deploy/vm/ops/bfx_weekly_report.py").is_file()
+    assert _unit("bfx-weekly-report.timer").one("Timer", "OnCalendar") == "Mon *-*-* 04:17:00 UTC"

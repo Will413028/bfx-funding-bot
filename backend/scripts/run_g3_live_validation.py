@@ -9,8 +9,9 @@ A FLAGged ledger reconciliation week inside the gate (the most recent 8
 settled weeks) makes the verdict UNRELIABLE. After investigating, an operator
 may acknowledge it with ``--ack-week 2026-09-21="reason"`` (repeatable); the
 acknowledgement and its reason are echoed in the report. For the weekly
-timer run, add the flag to the weekly-report command in docker-compose.bot.yml
-so the acknowledgement is recorded in git.
+timer run, add the flag to the G3 step in
+deploy/vm/ops/docker-compose.weekly-report.yml (installed with each deploy), so
+the acknowledgement is recorded in git.
 
 Run from backend/:
   uv run python -m scripts.run_g3_live_validation --out docs/research/<date>-g3-live-validation.md

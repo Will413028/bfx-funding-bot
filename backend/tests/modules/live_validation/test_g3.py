@@ -24,6 +24,8 @@ from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
 from bfx_funding_bot.modules.live_validation.credit_attribution import (
     CreditCells,
     CreditLifetime,
+    TradeRecord,
+    assign_cells,
 )
 from bfx_funding_bot.modules.live_validation.g3 import (
     build_g3_report,
@@ -176,6 +178,47 @@ def test_empty_is_insufficient_no_crash():
     assert report.data_window == "n/a"
     assert report.coverage.bot_credits == 0
     assert report.frr.available is False
+
+
+def test_a_loan_and_the_credit_it_became_are_not_counted_twice():
+    """credit_attribution's rule: a credit converted from a loan keeps the
+    loan's MTS_OPENING but earns only from its own MTS_CREATE."""
+    converted = CREATED + HOUR
+    loan = CreditLifetime(credit_id="loan:1", symbol="fUST", amount=AMOUNT, rate=RATE, period_days=2,
+                          mts_create=CREATED, opened_ms=CREATED, closed_ms=converted)
+    credit = CreditLifetime(credit_id="2", symbol="fUST", amount=AMOUNT, rate=RATE,
+                            period_days=2, mts_create=converted, opened_ms=CREATED,
+                            closed_ms=CREATED + DAY)
+    trade = TradeRecord(trade_id=1, symbol="fUST", mts_create=CREATED, offer_id="o1",
+                        amount=AMOUNT, rate=RATE, period_days=2)
+    cells = assign_cells([loan, credit], [trade], {"o1": CELL})
+    report = compute_g3_report(credits=[loan, credit], cells=cells, market_points={},
+                               capital=C, now_ms=CREATED + 2 * DAY)
+    one_day = AMOUNT * RATE * Decimal(DAY) / MS_PER_DAY
+    assert report.verdict.headline_bot_vs_idle == one_day / C * 100
+    assert report.deployment.peak_open_principal == AMOUNT     # not 2 x AMOUNT
+    assert report.data_window.startswith("2026-09-25")
+
+
+def test_a_credit_split_between_cells_counts_its_share_in_each():
+    """Two trades at one instant lead to different cells and one credit holds
+    both amounts: credit_attribution splits it by amount, G3 follows."""
+    trades = [TradeRecord(trade_id=1, symbol="fUST", mts_create=CREATED, offer_id="o1",
+                          amount=Decimal("100"), rate=RATE, period_days=2),
+              TradeRecord(trade_id=2, symbol="fUST", mts_create=CREATED, offer_id="o2",
+                          amount=Decimal("300"), rate=RATE, period_days=2)]
+    merged = _credit("5", CREATED, CREATED + DAY, amount=Decimal("400"))
+    cells = assign_cells([merged], trades, {"o1": "fUST_p2", "o2": "fUST_a30"})
+    assert cells.shares["5"] == {"fUST_p2": Decimal("0.25"), "fUST_a30": Decimal("0.75")}
+    report = compute_g3_report(credits=[merged], cells=cells, market_points={},
+                               capital=C, now_ms=CREATED + 2 * DAY)
+    whole = Decimal("400") * RATE * Decimal(DAY) / MS_PER_DAY
+    assert report.coverage.gross_by_cell == {"fUST_a30": whole * Decimal("0.75"),
+                                             "fUST_p2": whole * Decimal("0.25")}
+    assert report.coverage.bot_credits == 1
+    assert report.verdict.headline_bot_vs_idle == whole / C * 100
+    assert {c.cell: c.capital_share for c in report.mr_alpha_cells} == {
+        "fUST_a30": Decimal("0.75"), "fUST_p2": Decimal("0.25")}
 
 
 def test_capital_override_below_lent_principal_is_flagged_not_clamped():
