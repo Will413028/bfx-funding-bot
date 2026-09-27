@@ -51,6 +51,7 @@ dev = [
     "types-jsonschema",
     # deploy/vm/ops tests import the host tooling, pinned in deploy/vm/ops/uv.lock.
     "pathspec==1.1.1",
+    "import-linter==2.15",
 ]
 
 [project.scripts]
@@ -104,3 +105,149 @@ markers = [
     "benchmark: performance gates (R4.1.1 replay budget) — run manually",
     "gate: deployment sanity gate; offline but slow (reads the committed candle fixture); runs as its own CI job",
 ]
+
+[tool.importlinter]
+root_package = "bfx_funding_bot"
+
+[[tool.importlinter.contracts]]
+id = "core-is-leaf"
+name = "Core does not import venue or modules"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.core"]
+forbidden_modules = ["bfx_funding_bot.external", "bfx_funding_bot.modules"]
+ignore_imports = [
+    "bfx_funding_bot.core.writer_lock -> bfx_funding_bot.modules.accounts.exchange_accounts",
+]
+broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
+
+[[tool.importlinter.contracts]]
+id = "venue-below-modules"
+name = "Venue does not import modules"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.external"]
+forbidden_modules = ["bfx_funding_bot.modules"]
+ignore_imports = [
+    "bfx_funding_bot.external.bitfinex.auth_rest -> bfx_funding_bot.modules.execution.protocols",
+    "bfx_funding_bot.external.bitfinex.auth_rest -> bfx_funding_bot.modules.execution.submit_outcomes",
+    "bfx_funding_bot.external.bitfinex.auth_ws -> bfx_funding_bot.modules.execution.protocols",
+    "bfx_funding_bot.external.bitfinex.fill_tracker -> bfx_funding_bot.modules.execution.bus",
+    "bfx_funding_bot.external.bitfinex.fill_tracker -> bfx_funding_bot.modules.execution.event_store.persister",
+    "bfx_funding_bot.external.bitfinex.fill_tracker -> bfx_funding_bot.modules.execution.events",
+    "bfx_funding_bot.external.bitfinex.fill_tracker -> bfx_funding_bot.modules.execution.registry_offers",
+    "bfx_funding_bot.external.bitfinex.fill_tracker -> bfx_funding_bot.modules.marketfeed.health_monitor",
+    "bfx_funding_bot.external.bitfinex.fill_tracker -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.external.bitfinex.gap_fill -> bfx_funding_bot.modules.candles.repository",
+    "bfx_funding_bot.external.bitfinex.gap_fill -> bfx_funding_bot.modules.candles.schemas",
+    "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.bus",
+    "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.contracts",
+    "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.errors",
+    "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.events",
+    "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.protocols",
+    "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.retry",
+    "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.submit_outcomes",
+    "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.external.bitfinex.rest -> bfx_funding_bot.modules.candles.schemas",
+    "bfx_funding_bot.external.bitfinex.rest -> bfx_funding_bot.modules.funding_stats.schemas",
+    "bfx_funding_bot.external.bitfinex.ws_dispatcher -> bfx_funding_bot.modules.execution.event_store.persister",
+    "bfx_funding_bot.external.bitfinex.ws_dispatcher -> bfx_funding_bot.modules.execution.events",
+    "bfx_funding_bot.external.bitfinex.ws_dispatcher -> bfx_funding_bot.modules.execution.registry_offers",
+]
+broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
+
+[[tool.importlinter.contracts]]
+id = "runtime-not-research"
+name = "Runtime modules do not import backtest"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.modules.accounts",
+    "bfx_funding_bot.modules.admin",
+    "bfx_funding_bot.modules.api",
+    "bfx_funding_bot.modules.candles",
+    "bfx_funding_bot.modules.deployments",
+    "bfx_funding_bot.modules.execution",
+    "bfx_funding_bot.modules.external_signals",
+    "bfx_funding_bot.modules.funding_stats",
+    "bfx_funding_bot.modules.lending",
+    "bfx_funding_bot.modules.marketfeed",
+    "bfx_funding_bot.modules.observability",
+]
+forbidden_modules = ["bfx_funding_bot.modules.backtest"]
+ignore_imports = [
+    "bfx_funding_bot.modules.marketfeed.divergence_reporter -> bfx_funding_bot.modules.backtest.schemas",
+    "bfx_funding_bot.modules.marketfeed.strategy_registry -> bfx_funding_bot.modules.backtest.schemas",
+    "bfx_funding_bot.modules.marketfeed.strategy_registry -> bfx_funding_bot.modules.backtest.strategies.adaptive_period",
+    "bfx_funding_bot.modules.marketfeed.strategy_registry -> bfx_funding_bot.modules.backtest.strategies.mean_reversion",
+    "bfx_funding_bot.modules.marketfeed.strategy_registry -> bfx_funding_bot.modules.backtest.strategies.rate_percentile",
+]
+broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
+
+[[tool.importlinter.contracts]]
+id = "modules-acyclic"
+name = "Modules have no cycles between siblings"
+type = "acyclic_siblings"
+ancestors = ["bfx_funding_bot.modules"]
+depth = 0
+ignore_imports = [
+    "bfx_funding_bot.modules.accounts.capital_amendment -> bfx_funding_bot.modules.execution.capital_policy",
+    "bfx_funding_bot.modules.accounts.capital_amendment -> bfx_funding_bot.modules.execution.capital_repository",
+    "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.capital_policy",
+    "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.capital_repository",
+    "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.capital_tables",
+    "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.safety.hard_guards",
+    "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.marketfeed.config",
+    "bfx_funding_bot.modules.accounts.credential_bootstrap -> bfx_funding_bot.modules.execution.protocols",
+    "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.audit.tables",
+    "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.diagnostics.tables",
+    "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.event_store.tables",
+    "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.protocols",
+    "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.safety.tables",
+    "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.live_validation.tables",
+    "bfx_funding_bot.modules.accounts.vault -> bfx_funding_bot.modules.execution.protocols",
+    "bfx_funding_bot.modules.admin.smoke_runner -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.admin.trading_status -> bfx_funding_bot.modules.marketfeed.config",
+    "bfx_funding_bot.modules.admin.trading_status -> bfx_funding_bot.modules.marketfeed.readiness",
+    "bfx_funding_bot.modules.admin.trading_status -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.backtest.band_sweep -> bfx_funding_bot.modules.marketfeed.config",
+    "bfx_funding_bot.modules.backtest.cell_pipeline -> bfx_funding_bot.modules.marketfeed.config",
+    "bfx_funding_bot.modules.candles.service -> bfx_funding_bot.modules.backfill.errors",
+    "bfx_funding_bot.modules.candles.service -> bfx_funding_bot.modules.backfill.schemas",
+    "bfx_funding_bot.modules.execution.capital_repository -> bfx_funding_bot.modules.live_validation.tables",
+    "bfx_funding_bot.modules.execution.command_gate -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.contracts -> bfx_funding_bot.modules.marketfeed.funding_book",
+    "bfx_funding_bot.modules.execution.contracts -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.deployment.eligibility -> bfx_funding_bot.modules.marketfeed.funding_book",
+    "bfx_funding_bot.modules.execution.deployment.eligibility -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.deployment.period_pricing -> bfx_funding_bot.modules.marketfeed.funding_book",
+    "bfx_funding_bot.modules.execution.deployment.period_pricing -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.deployment.reconciler -> bfx_funding_bot.modules.marketfeed.config",
+    "bfx_funding_bot.modules.execution.deployment.reconciler -> bfx_funding_bot.modules.marketfeed.funding_book",
+    "bfx_funding_bot.modules.execution.deployment.reconciler -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.deployment.standing_quote -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.diagnostics.sink -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.emit -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.middleware.heartbeat -> bfx_funding_bot.modules.marketfeed.health_monitor",
+    "bfx_funding_bot.modules.execution.paper -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.periodic_reconcile -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.protocols -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.registry -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.safety.chain -> bfx_funding_bot.modules.marketfeed.health_monitor",
+    "bfx_funding_bot.modules.execution.safety.chain -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.safety.hard_guards -> bfx_funding_bot.modules.marketfeed.health_monitor",
+    "bfx_funding_bot.modules.execution.safety.hard_guards -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.execution.safety.pre_trade -> bfx_funding_bot.modules.marketfeed.funding_book",
+    "bfx_funding_bot.modules.execution.safety.pre_trade -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.funding_stats.service -> bfx_funding_bot.modules.backfill.errors",
+    "bfx_funding_bot.modules.funding_stats.service -> bfx_funding_bot.modules.backfill.schemas",
+    "bfx_funding_bot.modules.lending.tracking.book_replay -> bfx_funding_bot.modules.marketfeed.book_period_coverage",
+    "bfx_funding_bot.modules.live_validation.g3 -> bfx_funding_bot.modules.backtest.oos_profitability",
+    "bfx_funding_bot.modules.live_validation.live_attribution -> bfx_funding_bot.modules.backtest.oos_profitability",
+    "bfx_funding_bot.modules.observability.metrics -> bfx_funding_bot.modules.execution.boot_recovery",
+    "bfx_funding_bot.modules.observability.metrics -> bfx_funding_bot.modules.execution.contracts",
+    "bfx_funding_bot.modules.observability.metrics -> bfx_funding_bot.modules.execution.protocols",
+    "bfx_funding_bot.modules.observability.metrics -> bfx_funding_bot.modules.marketfeed.health_monitor",
+    "bfx_funding_bot.modules.observability.metrics -> bfx_funding_bot.modules.marketfeed.schemas",
+    "bfx_funding_bot.modules.observability.tracing -> bfx_funding_bot.modules.execution.boot_recovery",
+    "bfx_funding_bot.modules.observability.tracing -> bfx_funding_bot.modules.execution.contracts",
+    "bfx_funding_bot.modules.observability.tracing -> bfx_funding_bot.modules.execution.protocols",
+]
+broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
