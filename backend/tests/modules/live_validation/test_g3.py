@@ -25,20 +25,20 @@ from bfx_funding_bot.modules.live_validation.credit_attribution import (
     CreditCells,
     CreditLifetime,
 )
+from bfx_funding_bot.modules.live_validation.g3 import (
+    build_g3_report,
+    calendar_window_bounds,
+    compute_g3_report,
+)
 from bfx_funding_bot.modules.live_validation.live_attribution import (
     MS_PER_DAY,
     MarketRatePoint,
     VerdictState,
+    reconciliation_status,
 )
 from bfx_funding_bot.modules.live_validation.tables import (
     FundingCreditHistoryRow,
     FundingTradeRow,
-)
-from scripts._g3_loaders import (
-    _candles_to_market_rate_points,
-    _compute_verdict,
-    build_verdict_from_neon,
-    calendar_window_bounds,
 )
 
 C = Decimal("570")
@@ -79,31 +79,6 @@ def _held_interest(c: CreditLifetime) -> Decimal:
     return c.amount * c.rate * Decimal(c.closed_ms - c.opened_ms) / MS_PER_DAY
 
 
-def _candle(mts: int, close: Decimal | None) -> FundingCandle:
-    return FundingCandle(
-        symbol="fUST", timeframe="1h", period_agg="p2", mts=mts, close=close
-    )
-
-
-def test_candles_to_market_rate_points_maps_close_to_rate():
-    candles = [_candle(1000, Decimal("0.0002")), _candle(2000, Decimal("0.0003"))]
-    assert _candles_to_market_rate_points(candles) == [
-        MarketRatePoint(mts=1000, rate=Decimal("0.0002")),
-        MarketRatePoint(mts=2000, rate=Decimal("0.0003")),
-    ]
-
-
-def test_candles_to_market_rate_points_skips_none_close():
-    candles = [_candle(1000, None), _candle(2000, Decimal("0.0003"))]
-    assert _candles_to_market_rate_points(candles) == [
-        MarketRatePoint(mts=2000, rate=Decimal("0.0003"))
-    ]
-
-
-def test_candles_to_market_rate_points_empty():
-    assert _candles_to_market_rate_points([]) == []
-
-
 def test_calendar_windows_are_the_reconciliation_weeks():
     """First window from the first credit, then UTC Monday weeks, last cut at now."""
     assert calendar_window_bounds(EXPIRED_OPEN, MON + WEEK + DAY) == [
@@ -115,7 +90,7 @@ def test_calendar_windows_are_the_reconciliation_weeks():
 
 
 # ---------------------------------------------------------------------------
-# _compute_verdict: pure verdict core over venue credits
+# compute_g3_report: pure core over venue credits
 # ---------------------------------------------------------------------------
 
 
@@ -123,8 +98,8 @@ def test_headline_is_the_credits_actual_held_interest_not_held_to_term():
     """Regression for the owner's finding: 466642176 was repaid after 14 min
     but the fill model booked it as 2 days held-to-term."""
     now = REPAID + DAY
-    report = _compute_verdict(credits=[EARLY], cells=_cells(EARLY),
-                              market_rate_points=_points(CREATED, "0.0002"),
+    report = compute_g3_report(credits=[EARLY], cells=_cells(EARLY),
+                              market_points={"p2": _points(CREATED, "0.0002")},
                               capital=C, now_ms=now)
     fourteen_min = AMOUNT * RATE * Decimal(842_000) / MS_PER_DAY
     assert report.verdict.headline_bot_vs_idle == fourteen_min / C * Decimal("100")
@@ -136,16 +111,16 @@ def test_headline_is_the_credits_actual_held_interest_not_held_to_term():
 
 def test_unattributed_credits_are_reported_but_not_counted():
     now = EXPIRED_CLOSE + 3 * DAY
-    report = _compute_verdict(credits=[EARLY, EXPIRED], cells=_cells(EARLY),
-                              market_rate_points=_points(CREATED, "0.0002"),
+    report = compute_g3_report(credits=[EARLY, EXPIRED], cells=_cells(EARLY),
+                              market_points={"p2": _points(CREATED, "0.0002")},
                               capital=C, now_ms=now)
     assert report.verdict.headline_bot_vs_idle == _held_interest(EARLY) / C * Decimal("100")
     assert report.coverage.unattributed_credits == 0   # EXPIRED opened before the window
     assert report.deployment.peak_open_principal == AMOUNT
 
-    both_bot = _compute_verdict(credits=[EARLY, EXPIRED, _credit("x", CREATED, REPAID)],
+    both_bot = compute_g3_report(credits=[EARLY, EXPIRED, _credit("x", CREATED, REPAID)],
                                 cells=_cells(EARLY, EXPIRED),
-                                market_rate_points=[], capital=C, now_ms=now)
+                                market_points={}, capital=C, now_ms=now)
     assert both_bot.coverage.bot_credits == 2
     assert both_bot.coverage.unattributed_credits == 1
     assert both_bot.coverage.unattributed_gross == _held_interest(EARLY)
@@ -155,7 +130,7 @@ def test_unattributed_credits_are_reported_but_not_counted():
 
 def test_other_symbols_credits_are_not_the_canary():
     fusd = _credit("7", CREATED, REPAID, symbol="fUSD")
-    report = _compute_verdict(credits=[fusd], cells=_cells(fusd), market_rate_points=[],
+    report = compute_g3_report(credits=[fusd], cells=_cells(fusd), market_points={},
                               capital=C, now_ms=REPAID + DAY)
     assert report.coverage.bot_credits == 0
     assert report.verdict.headline_bot_vs_idle == 0
@@ -164,8 +139,8 @@ def test_other_symbols_credits_are_not_the_canary():
 def test_frr_scale_points_mark_mr_alpha_unavailable_not_unreliable():
     # bot-vs-idle (idle ≡ 0) needs no market-rate data: the band guard only
     # marks MR-alpha unavailable and leaves a caveat.
-    report = _compute_verdict(credits=[EXPIRED], cells=_cells(EXPIRED),
-                              market_rate_points=_points(EXPIRED_OPEN, "1.1e-06"),
+    report = compute_g3_report(credits=[EXPIRED], cells=_cells(EXPIRED),
+                              market_points={"p2": _points(EXPIRED_OPEN, "1.1e-06")},
                               capital=C, now_ms=EXPIRED_CLOSE)
     assert report.verdict.state is VerdictState.INSUFFICIENT_DATA
     assert report.verdict.mr_alpha_available is False
@@ -173,8 +148,8 @@ def test_frr_scale_points_mark_mr_alpha_unavailable_not_unreliable():
 
 
 def test_legit_points_mr_alpha_available():
-    report = _compute_verdict(credits=[EXPIRED], cells=_cells(EXPIRED),
-                              market_rate_points=_points(EXPIRED_OPEN, "0.0002"),
+    report = compute_g3_report(credits=[EXPIRED], cells=_cells(EXPIRED),
+                              market_points={"p2": _points(EXPIRED_OPEN, "0.0002")},
                               capital=C, now_ms=EXPIRED_CLOSE)
     assert not any("plausible per-day band" in r for r in report.verdict.reasons)
     assert report.verdict.mr_alpha_available is True
@@ -185,8 +160,8 @@ def test_no_coverage_marks_mr_alpha_unavailable_primary_unblocked():
     # Credits spanning 2 weekly windows, no market points: the active arm runs
     # (headline > 0), MR alpha is unavailable with a coverage caveat.
     later = _credit("2", EXPIRED_OPEN + WEEK, EXPIRED_CLOSE + WEEK, rate=EXPIRED_RATE)
-    report = _compute_verdict(credits=[EXPIRED, later], cells=_cells(EXPIRED, later),
-                              market_rate_points=[], capital=C,
+    report = compute_g3_report(credits=[EXPIRED, later], cells=_cells(EXPIRED, later),
+                              market_points={}, capital=C,
                               now_ms=EXPIRED_CLOSE + WEEK)
     assert report.verdict.n_windows == 2
     assert report.verdict.mr_alpha_available is False
@@ -195,7 +170,7 @@ def test_no_coverage_marks_mr_alpha_unavailable_primary_unblocked():
 
 
 def test_empty_is_insufficient_no_crash():
-    report = _compute_verdict(credits=[], cells=_cells(), market_rate_points=[],
+    report = compute_g3_report(credits=[], cells=_cells(), market_points={},
                               capital=C, now_ms=REPAID)
     assert report.verdict.state is VerdictState.INSUFFICIENT_DATA
     assert report.data_window == "n/a"
@@ -205,7 +180,7 @@ def test_empty_is_insufficient_no_crash():
 
 def test_capital_override_below_lent_principal_is_flagged_not_clamped():
     three = [_credit(str(i), CREATED, REPAID, amount=Decimal("300")) for i in range(3)]
-    report = _compute_verdict(credits=three, cells=_cells(*three), market_rate_points=[],
+    report = compute_g3_report(credits=three, cells=_cells(*three), market_points={},
                               capital=C, now_ms=REPAID + DAY, capital_source="--capital 570")
     assert report.deployment.peak_open_principal == Decimal("900")
     assert report.deployment.over_deployed is True
@@ -214,12 +189,55 @@ def test_capital_override_below_lent_principal_is_flagged_not_clamped():
 
 
 # ---------------------------------------------------------------------------
-# Ledger reconciliation: the trust gate (replaces the deployment/NAV anchors)
+# MR alpha per cell: each cell against the market rate of its own period
+# ---------------------------------------------------------------------------
+
+A30_TWIN = CreditLifetime(credit_id="9", symbol="fUST", amount=AMOUNT, rate=EXPIRED_RATE,
+                          period_days=30, mts_create=EXPIRED_OPEN, opened_ms=EXPIRED_OPEN,
+                          closed_ms=EXPIRED_CLOSE)
+TWO_CELLS = CreditCells({EXPIRED.credit_id: "fUST_p2", A30_TWIN.credit_id: "fUST_a30"},
+                        frozenset(), frozenset(), frozenset())
+SPAN_DAYS = Decimal(EXPIRED_CLOSE - EXPIRED_OPEN) / MS_PER_DAY
+
+
+def test_each_cell_is_compared_with_its_own_period_series():
+    report = compute_g3_report(
+        credits=[EXPIRED, A30_TWIN], cells=TWO_CELLS, capital=C, now_ms=EXPIRED_CLOSE,
+        market_points={"p2": _points(EXPIRED_OPEN, "0.0002"),
+                       "a30": _points(EXPIRED_OPEN, "0.0003")})
+    rows = {c.cell: c for c in report.mr_alpha_cells}
+    assert set(rows) == {"fUST_a30", "fUST_p2"}
+    active = _held_interest(EXPIRED) / C * 100          # both cells earn the same
+    half = Decimal("0.5")                                # equal capital-days
+    assert rows["fUST_p2"].capital_share == half
+    assert rows["fUST_p2"].spread == active - half * Decimal("0.0002") * SPAN_DAYS * 100
+    assert rows["fUST_a30"].spread == active - half * Decimal("0.0003") * SPAN_DAYS * 100
+    # total row = sum of the cells; covers all bot capital-days
+    assert report.verdict.mr_alpha_spread == rows["fUST_p2"].spread + rows["fUST_a30"].spread
+    assert report.mr_alpha_coverage == 1
+    assert report.verdict.mr_alpha_available is True
+
+
+def test_a_cell_without_its_series_is_unavailable_and_left_out_of_the_total():
+    report = compute_g3_report(
+        credits=[EXPIRED, A30_TWIN], cells=TWO_CELLS, capital=C, now_ms=EXPIRED_CLOSE,
+        market_points={"p2": _points(EXPIRED_OPEN, "0.0002")})
+    rows = {c.cell: c for c in report.mr_alpha_cells}
+    assert rows["fUST_a30"].available is False
+    assert "fUST/1h/a30" in (rows["fUST_a30"].reason or "")
+    assert report.mr_alpha_coverage == Decimal("0.5")
+    assert report.verdict.mr_alpha_spread == rows["fUST_p2"].spread
+    assert any(r.startswith("MR-alpha fUST_a30: no market-rate coverage")
+               for r in report.verdict.reasons)
+
+
+# ---------------------------------------------------------------------------
+# Minimum data: mean ledger wallet balance over the windows × 7 days
 # ---------------------------------------------------------------------------
 
 
-def _payout(ledger_id: int, mts: int, amount: Decimal) -> InterestPayment:
-    return InterestPayment(ledger_id, "UST", "funding", mts, amount, Decimal("395.5"),
+def _payout(ledger_id: int, mts: int, amount: Decimal, balance: str = "395.5") -> InterestPayment:
+    return InterestPayment(ledger_id, "UST", "funding", mts, amount, Decimal(balance),
                            "Margin Funding Payment on wallet funding")
 
 
@@ -228,39 +246,92 @@ EXPIRED_NET = _held_interest(EXPIRED) * Decimal("0.85")
 _PAID_AT = [MON + 2 * DAY + 5_400_000, MON + 3 * DAY + 5_400_000]
 
 
+def test_threshold_is_the_mean_ledger_balance_times_seven_even_with_explicit_capital():
+    payments = [_payout(1, _PAID_AT[0], Decimal("0.05"), balance="395.55")]
+    report = compute_g3_report(credits=[EXPIRED], cells=_cells(EXPIRED), market_points={},
+                               capital=C, now_ms=EXPIRED_CLOSE, payments=payments,
+                               capital_source="--capital 570")
+    t = report.data_threshold
+    assert t.minimum == Decimal("395.50") * 7          # not C × 7 = 3990
+    assert "mean ledger wallet balance over the 1 evaluated windows" in t.basis
+    assert t.capital_days == AMOUNT * Decimal(EXPIRED_CLOSE - EXPIRED_OPEN) / MS_PER_DAY
+
+
+def test_threshold_falls_back_to_c_without_a_ledger():
+    report = compute_g3_report(credits=[EXPIRED], cells=_cells(EXPIRED), market_points={},
+                               capital=C, now_ms=EXPIRED_CLOSE)
+    assert report.data_threshold.minimum == C * 7
+    assert "no ledger payouts" in report.data_threshold.basis
+
+
+# ---------------------------------------------------------------------------
+# Ledger reconciliation gate: the most recent 8 settled weeks, operator acks
+# ---------------------------------------------------------------------------
+
+GATE_NOW = MON + 2 * WEEK          # gate = the 8 settled weeks ending with MON's week
+LATER_NOW = MON + 10 * WEEK        # MON's week has aged out of the gate
+
+
+def _week_of(report, week_start):  # type: ignore[no-untyped-def]
+    return next(r for r in report.reconciliations if r.week_start_ms == week_start)
+
+
 def test_matching_ledger_keeps_the_verdict_data_driven():
     payments = [_payout(1, _PAID_AT[0], EXPIRED_NET / 2), _payout(2, _PAID_AT[1], EXPIRED_NET / 2)]
-    report = _compute_verdict(credits=[EXPIRED], cells=_cells(EXPIRED), market_rate_points=[],
-                              capital=C, now_ms=MON + 2 * WEEK, payments=payments)
+    report = compute_g3_report(credits=[EXPIRED], cells=_cells(EXPIRED), market_points={},
+                               capital=C, now_ms=GATE_NOW, payments=payments)
     assert report.reconciliation_available is True
-    week = report.reconciliations[0]
-    assert (week.week_start_ms, week.complete, week.flagged) == (MON, True, False)
+    assert report.gate_weeks == [MON - i * WEEK for i in reversed(range(8))]
+    week = _week_of(report, MON)
+    assert (week.complete, week.flagged) == (True, False)
     assert week.credit_net == EXPIRED_NET
     assert report.verdict.state is VerdictState.INSUFFICIENT_DATA
 
 
-def test_ledger_divergence_forces_unreliable():
-    """Credit interest the venue did not pay (or paid differently) means the
-    model is wrong: UNRELIABLE, whatever the CI says."""
+def test_recent_ledger_divergence_forces_unreliable():
+    """Credit interest the venue did not pay (or paid differently) in a recent
+    settled week means the model is wrong: UNRELIABLE, whatever the CI says."""
     payments = [_payout(1, _PAID_AT[0], Decimal("0.10"))]
-    report = _compute_verdict(credits=[EXPIRED], cells=_cells(EXPIRED), market_rate_points=[],
-                              capital=C, now_ms=MON + 2 * WEEK, payments=payments)
+    report = compute_g3_report(credits=[EXPIRED], cells=_cells(EXPIRED), market_points={},
+                               capital=C, now_ms=GATE_NOW, payments=payments)
     assert report.verdict.state is VerdictState.UNRELIABLE
     assert any("diverges from the venue ledger" in r and "2026-09-21" in r
                for r in report.verdict.reasons)
 
 
+def test_a_flag_older_than_the_gate_no_longer_blocks():
+    payments = [_payout(1, _PAID_AT[0], Decimal("0.10"))]
+    report = compute_g3_report(credits=[EXPIRED], cells=_cells(EXPIRED), market_points={},
+                               capital=C, now_ms=LATER_NOW, payments=payments)
+    assert MON not in report.gate_weeks
+    assert _week_of(report, MON).flagged is True
+    assert report.verdict.state is not VerdictState.UNRELIABLE
+    assert reconciliation_status(_week_of(report, MON), gate_weeks=report.gate_weeks,
+                                 acks={}) == "FLAG, outside gate"
+
+
+def test_an_operator_ack_clears_a_recent_flag_and_is_recorded():
+    payments = [_payout(1, _PAID_AT[0], Decimal("0.10"))]
+    acks = {MON: "venue paid a late correction; checked ledger 2026-09-30"}
+    report = compute_g3_report(credits=[EXPIRED], cells=_cells(EXPIRED), market_points={},
+                               capital=C, now_ms=GATE_NOW, payments=payments, acks=acks)
+    assert report.verdict.state is not VerdictState.UNRELIABLE
+    assert report.acknowledgements == acks
+    assert reconciliation_status(_week_of(report, MON), gate_weeks=report.gate_weeks,
+                                 acks=acks) == f"FLAG, acknowledged: {acks[MON]}"
+
+
 def test_incomplete_week_does_not_gate():
     payments = [_payout(1, _PAID_AT[0], Decimal("0.10"))]
-    report = _compute_verdict(credits=[EXPIRED], cells=_cells(EXPIRED), market_rate_points=[],
-                              capital=C, now_ms=EXPIRED_CLOSE + DAY, payments=payments)
-    assert report.reconciliations[0].complete is False
+    report = compute_g3_report(credits=[EXPIRED], cells=_cells(EXPIRED), market_points={},
+                               capital=C, now_ms=EXPIRED_CLOSE + DAY, payments=payments)
+    assert _week_of(report, MON).complete is False
     assert report.verdict.state is not VerdictState.UNRELIABLE
 
 
 def test_no_ledger_makes_reconciliation_unavailable_not_unreliable():
-    report = _compute_verdict(credits=[EXPIRED], cells=_cells(EXPIRED), market_rate_points=[],
-                              capital=C, now_ms=MON + 2 * WEEK)
+    report = compute_g3_report(credits=[EXPIRED], cells=_cells(EXPIRED), market_points={},
+                               capital=C, now_ms=GATE_NOW)
     assert report.reconciliation_available is False
     assert report.reconciliations == []
     assert report.verdict.state is VerdictState.INSUFFICIENT_DATA
@@ -268,7 +339,7 @@ def test_no_ledger_makes_reconciliation_unavailable_not_unreliable():
 
 
 # ---------------------------------------------------------------------------
-# build_verdict_from_neon wiring (seeded in-memory sqlite, session-injected).
+# build_g3_report wiring (seeded in-memory sqlite, session-injected).
 # ---------------------------------------------------------------------------
 
 
@@ -291,47 +362,6 @@ def _recent_candle(
     )
 
 
-@pytest.mark.asyncio
-async def test_build_verdict_queries_only_fust_p2_1h_cell(g3_factory):
-    """The passive arm must read ONLY fUST/p2/1h candles; decoys with another
-    symbol / period_agg / timeframe are excluded. Proven via the band guard: the
-    target cell is seeded frr-scale (~1e-6) while every decoy is legit (2e-4)."""
-    now = _real_now()  # candles are final only once in the past
-    base = now - 5 * DAY  # within the 30-day no-credits fallback window
-    target = [_recent_candle("fUST", "1h", "p2", base + i * HOUR, "1.1e-6") for i in range(12)]
-    decoys = (
-        [_recent_candle("fUST", "1h", "a30", base + i * HOUR, "0.0002") for i in range(12)]
-        + [_recent_candle("fUSD", "1h", "p2", base + i * HOUR, "0.0002") for i in range(12)]
-        + [_recent_candle("fUST", "15m", "p2", base + i * HOUR, "0.0002") for i in range(12)]
-    )
-    async with g3_factory() as s:
-        await upsert_candles(s, target + decoys)
-        await s.commit()
-
-    report = await build_verdict_from_neon(capital=C, session_factory=g3_factory, now_ms=now)
-    assert report.verdict.state is VerdictState.INSUFFICIENT_DATA
-    assert report.verdict.mr_alpha_available is False
-    assert any("plausible per-day band" in r for r in report.verdict.reasons)
-    assert report.coverage.bot_credits == 0
-    assert report.frr.available is False     # no funding_stats seeded
-
-
-@pytest.mark.asyncio
-async def test_build_verdict_legit_idle_cell_is_insufficient_not_crash(g3_factory):
-    now = _real_now()
-    candles = [_recent_candle("fUST", "1h", "p2", now - 5 * DAY + i * HOUR, "0.0002")
-               for i in range(12)]
-    async with g3_factory() as s:
-        await upsert_candles(s, candles)
-        await s.commit()
-
-    report = await build_verdict_from_neon(capital=C, session_factory=g3_factory, now_ms=now)
-    assert report.verdict.state is VerdictState.INSUFFICIENT_DATA
-    assert not any("plausible per-day band" in r for r in report.verdict.reasons)
-    assert report.verdict.mr_alpha_available is False
-    assert report.capital_source == f"--capital {C}"
-
-
 _ACCOUNT = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 
 
@@ -342,6 +372,92 @@ def _history_row(credit_id: int, opened: int, closed: int, rate: Decimal) -> Fun
         mts_update=opened, amount=AMOUNT, status="CLOSED", rate=rate, period_days=2,
         mts_opening=opened, mts_last_payout=closed,
     )
+
+
+def _ours(credit_id: int, opened: int, cell: str, rate: Decimal = RATE) -> list[object]:
+    """Trade → our offer → execution decision in `cell`, so the credit is the bot's."""
+    return [
+        FundingTradeRow(
+            exchange_account_id=_ACCOUNT, trade_id=credit_id, deployment_environment="prod",
+            symbol="fUST", mts_create=opened, offer_id=credit_id, amount=AMOUNT,
+            rate=rate, period_days=2, maker=None,
+        ),
+        OfferClaimRow(
+            cid=credit_id, account_id=str(_ACCOUNT), exchange_account_id=_ACCOUNT,
+            deployment_environment="prod", state="FILLED", venue_offer_id=str(credit_id),
+            symbol="fUST", size_usdt=AMOUNT, signal_correlation_id=f"s{credit_id}",
+            execution_decision_id=f"d{credit_id}", occurred_at_ms=opened,
+            last_updated_ms=opened, last_event_seq=1,
+        ),
+        ExecutionDecisionRow(
+            decision_id=f"d{credit_id}", account_id=str(_ACCOUNT), exchange_account_id=_ACCOUNT,
+            deployment_environment="prod", reconcile_id="r", cell_id=cell, symbol="fUST",
+            signal_correlation_id=f"s{credit_id}", outcome="submitted", signal_rate=rate,
+            amount_usdt=AMOUNT, duration_days=2, model_evidence={}, safety_result={},
+            execution_policy="p", service_version="v", config_hash="h",
+            occurred_at_ms=opened - 60_000, recorded_at_ms=opened - 60_000,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_build_reads_only_the_cells_own_fust_1h_series(g3_factory, monkeypatch):
+    """A p2 bot cell must be compared with fUST/1h/p2 candles only; decoys with
+    another symbol / period_agg / timeframe are excluded. Proven via the band
+    guard: the target series is frr-scale (~1e-6), every decoy legit (2e-4)."""
+    monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT))
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    now = _real_now()  # candles are final only once in the past
+    base = now - 5 * DAY
+    target = [_recent_candle("fUST", "1h", "p2", base + i * HOUR, "1.1e-6") for i in range(12)]
+    decoys = (
+        [_recent_candle("fUST", "1h", "a30", base + i * HOUR, "0.0002") for i in range(12)]
+        + [_recent_candle("fUSD", "1h", "p2", base + i * HOUR, "0.0002") for i in range(12)]
+        + [_recent_candle("fUST", "15m", "p2", base + i * HOUR, "0.0002") for i in range(12)]
+    )
+    async with g3_factory() as s:
+        await upsert_candles(s, target + decoys)
+        s.add_all([_history_row(1, base - HOUR, base + DAY, RATE),
+                   *_ours(1, base - HOUR, "fUST_p2")])
+        await s.commit()
+
+    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now)
+    assert [c.cell for c in report.mr_alpha_cells] == ["fUST_p2"]
+    assert report.mr_alpha_cells[0].available is False
+    assert "plausible per-day band" in (report.mr_alpha_cells[0].reason or "")
+    assert report.verdict.mr_alpha_available is False
+    assert report.verdict.state is VerdictState.INSUFFICIENT_DATA
+    assert report.frr.available is False     # no funding_stats seeded
+
+
+@pytest.mark.asyncio
+async def test_build_loads_one_series_per_bot_cell(g3_factory, monkeypatch):
+    monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT))
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    now = _real_now()
+    base = now - 5 * DAY
+    candles = ([_recent_candle("fUST", "1h", "p2", base + i * HOUR, "0.0002") for i in range(12)]
+               + [_recent_candle("fUST", "1h", "a30", base + i * HOUR, "0.0003")
+                  for i in range(12)])
+    async with g3_factory() as s:
+        await upsert_candles(s, candles)
+        s.add_all([_history_row(1, base - HOUR, base + DAY, RATE), *_ours(1, base - HOUR, "fUST_p2"),
+                   _history_row(2, base - HOUR, base + DAY, RATE), *_ours(2, base - HOUR, "fUST_a30")])
+        await s.commit()
+
+    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now)
+    assert {(c.cell, c.available) for c in report.mr_alpha_cells} == {
+        ("fUST_a30", True), ("fUST_p2", True)}
+    assert report.mr_alpha_coverage == 1
+    assert report.capital_source == f"--capital {C}"
+
+
+@pytest.mark.asyncio
+async def test_build_without_bot_credits_is_insufficient_not_crash(g3_factory):
+    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=_real_now())
+    assert report.verdict.state is VerdictState.INSUFFICIENT_DATA
+    assert report.verdict.mr_alpha_available is False
+    assert report.mr_alpha_cells == []
 
 
 @pytest.mark.asyncio
@@ -379,7 +495,7 @@ async def test_build_verdict_reads_credits_through_trade_offer_and_decision(g3_f
         ])
         await s.commit()
 
-    report = await build_verdict_from_neon(capital=C, session_factory=g3_factory, now_ms=now)
+    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now)
     fourteen_min = AMOUNT * RATE * Decimal(842_000) / MS_PER_DAY
     assert report.coverage.bot_credits == 1
     assert report.coverage.gross_by_cell == {CELL: fourteen_min}
@@ -394,4 +510,4 @@ async def test_non_uuid_account_fails_instead_of_reading_no_credits(g3_factory, 
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", "default")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     with pytest.raises(ValueError, match="must be a UUID"):
-        await build_verdict_from_neon(capital=C, session_factory=g3_factory, now_ms=REPAID)
+        await build_g3_report(capital=C, session_factory=g3_factory, now_ms=REPAID)

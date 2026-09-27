@@ -36,7 +36,7 @@ means the credit model disagrees with what the venue paid → UNRELIABLE.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -378,6 +378,54 @@ def decide_verdict(
 
 
 @dataclass(frozen=True)
+class CellMrAlpha:
+    """MR timing alpha of one bot cell against the market rate of its own period.
+
+    The baseline lends the cell's share of C (its share of the bot's
+    capital-days over the data window) at the cell's market rate, all the time.
+    Unavailable when that series has no in-band point in the window; the cell
+    then drops out of the total and ``reason`` says why.
+    """
+
+    cell: str
+    period_agg: str
+    capital_share: Decimal
+    available: bool
+    reason: str | None
+    spread: Decimal     # full-span active − baseline, % of C
+    ci_lo: Decimal
+    ci_hi: Decimal
+
+
+@dataclass(frozen=True)
+class DataThreshold:
+    """Minimum bot capital-days before the verdict may leave INSUFFICIENT_DATA."""
+
+    capital_days: Decimal       # the bot's credits over the data window
+    minimum: Decimal
+    basis: str                  # how ``minimum`` was derived, for the report
+
+
+# The reconciliation gate looks at this many most recent settled weeks.
+GATE_WEEKS = 8
+
+
+def reconciliation_status(
+    r: WeeklyReconciliation, *, gate_weeks: Sequence[int], acks: Mapping[int, str],
+) -> str:
+    """How one reconciled week bears on the verdict."""
+    if not r.complete:
+        return "incomplete"
+    if not r.flagged:
+        return "ok"
+    if r.week_start_ms not in gate_weeks:
+        return "FLAG, outside gate"
+    if r.week_start_ms in acks:
+        return f"FLAG, acknowledged: {acks[r.week_start_ms]}"
+    return "FLAG"
+
+
+@dataclass(frozen=True)
 class G3Report:
     """Everything the G3 report renders."""
 
@@ -389,3 +437,8 @@ class G3Report:
     frr: FrrBenchmark
     reconciliations: list[WeeklyReconciliation]
     reconciliation_available: bool      # False when the ledger has no payout at all
+    mr_alpha_cells: list[CellMrAlpha]
+    mr_alpha_coverage: Decimal          # share of bot capital-days in the MR-alpha total
+    data_threshold: DataThreshold
+    gate_weeks: list[int]               # week starts the reconciliation gate considers
+    acknowledgements: dict[int, str]    # operator-acknowledged week start -> reason
