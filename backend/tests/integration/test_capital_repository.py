@@ -210,7 +210,7 @@ async def test_stable_observation_required_before_capital_acceptance(capital_db)
 
 
 @pytest.mark.asyncio
-async def test_u_counts_for_each_cell_but_once_in_total(capital_db):
+async def test_u_counts_once_in_total_and_in_no_cell(capital_db):
     from bfx_funding_bot.modules.execution.event_store.entities import VenueCreditObservation
     factory, account = capital_db
     repo = repository(account)
@@ -221,10 +221,44 @@ async def test_u_counts_for_each_cell_but_once_in_total(capital_db):
         for cell in ("a30", "p2"):
             view = await repo.read_capital(session, symbol="fUST", cell_id=cell, now_ms=1100)
             assert view.snapshot.total_capital == Decimal("1000")
-            assert view.snapshot.cell_exposure == Decimal("300")
-            assert view.budget.max_new_offer == Decimal("400")
+            assert view.snapshot.cell_exposure == Decimal("0")
+            assert view.budget.cell_headroom == Decimal("700")
+            assert view.budget.max_new_offer == Decimal("700")
             assert view.unattributed_credit_exposure == Decimal("300")
-            assert "every cell" in view.attribution["credit_attribution"]
+            assert "no cell" in view.attribution["credit_attribution"]
+
+
+@pytest.mark.asyncio
+async def test_unattributed_credit_does_not_idle_cash_below_venue_minimum(capital_db):
+    """Production 2026-09-27: T=395.52, one unattributed 150.77 credit still lent.
+
+    Charging U to every cell left headroom 0.70*395.52-150.77=126.094, under the
+    ~150 venue minimum, so the 244.75 available sat idle until repayment. U now
+    counts in T only; the cell's own pending attempt still counts to that cell.
+    """
+    from bfx_funding_bot.modules.execution.event_store.entities import VenueCreditObservation
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo, "0", "0.70")
+    credit = VenueCreditObservation("c1", "fUST", Decimal("150.77"), Decimal("0.0001"), 2, "active")
+    seq = await snapshot(factory, repo, "244.75", credits=(credit,))
+    async with factory.begin() as session:
+        for cell in ("a30", "p2"):
+            view = await repo.read_capital(session, symbol="fUST", cell_id=cell, now_ms=1100)
+            assert view.snapshot.total_capital == Decimal("395.52")
+            assert view.snapshot.cell_exposure == Decimal("0")
+            assert view.budget.cell_limit == Decimal("276.864")
+            assert view.budget.cell_headroom == Decimal("276.864")
+            assert view.budget.spendable == Decimal("244.75")
+            assert view.budget.max_new_offer == Decimal("244.75")
+    await authorize(factory, repo, policy, seq, "200")
+    async with factory.begin() as session:
+        a30 = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+        p2 = await repo.read_capital(session, symbol="fUST", cell_id="p2", now_ms=1100)
+    assert (a30.snapshot.cell_exposure, a30.budget.cell_headroom) == (Decimal("200"), Decimal("76.864"))
+    assert (p2.snapshot.cell_exposure, p2.budget.cell_headroom) == (Decimal("0"), Decimal("276.864"))
+    # The shared cash, not the cap, bounds the two cells together.
+    assert a30.budget.max_new_offer == p2.budget.max_new_offer == Decimal("44.75")
 
 
 @pytest.mark.asyncio
@@ -393,7 +427,9 @@ async def test_partial_fill_does_not_add_original_reservation(capital_db):
     async with factory.begin() as session:
         view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1200)
         assert view.snapshot.total_capital == Decimal("1000")
-        assert view.snapshot.cell_exposure == Decimal("200")
+        # The 50 still offered is the cell's; the filled 150 is an unattributed credit.
+        assert view.snapshot.cell_exposure == Decimal("50")
+        assert view.unattributed_credit_exposure == Decimal("150")
         assert view.snapshot.unreflected_commitments == 0
 
 
@@ -583,7 +619,10 @@ async def test_terminal_history_proves_first_snapshot_reflection(capital_db):
         view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1300)
         assert view.snapshot.unreflected_commitments == 0
         assert view.budget.spendable == Decimal("700")
-        assert view.snapshot.cell_exposure == Decimal("200")
+        # Fully lent: the credit is in T once and in no cell's exposure.
+        assert view.snapshot.total_capital == Decimal("1000")
+        assert view.snapshot.cell_exposure == Decimal("0")
+        assert view.unattributed_credit_exposure == Decimal("200")
 
 
 @pytest.mark.asyncio
@@ -1233,7 +1272,9 @@ async def test_an_offer_that_fills_between_snapshots_is_accounted_for(capital_db
     async with factory.begin() as session:
         view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1250)
         assert view.snapshot.unreflected_commitments == 0
-        assert view.snapshot.cell_exposure == Decimal("200")   # the loan is on the books
+        assert view.snapshot.total_capital == Decimal("1000")   # the loan is on the books
+        assert view.unattributed_credit_exposure == Decimal("200")
+        assert view.snapshot.cell_exposure == Decimal("0")      # ... in T, not in the cell
         assert view.budget.spendable == Decimal("700")          # 800 available less 100 reserve
 
 

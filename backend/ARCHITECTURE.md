@@ -255,7 +255,7 @@ sequenceDiagram
 `CapitalPolicy`、完整且 fresh 的 canonical venue snapshot 與未反映 commitments；
 `CapitalRuntime`/`CapitalBudget` 共用 Decimal authority，planner、guard、command
 boundary、status 不各自重算 cap。帳戶 spendable 扣除 reserve 與 commitments；
-cell_limit 為 `max(0, total_capital - reserve) ×0.70`，cell_headroom 扣除歸屬曝險及 shared unattributed credits，單筆上限取
+cell_limit 為 `max(0, total_capital - reserve) ×0.70`，cell_headroom 只扣除該 cell 的歸屬曝險（offers 與未反映 commitments）；unattributed credits 只計入 total_capital，不計入任何 cell，單筆上限取
 spendable/headroom 的最小值。只有一個 active cell 也不放寬為100%。USD 明確
 disabled，但所有 USD wallet/offers/credits 仍納入 full-account reconciliation。
 未知/過期 snapshot、pending query、缺少 policy 全部 block，無 env/YAML fallback。
@@ -739,7 +739,7 @@ credential vault 解密。public read model 另以明確的
 
 - **I-SW 單一寫入者曝險**：`DeploymentReconciler` 是 venue 提交的唯一寫入者；訊號層只寫 StandingQuote。所有 exposure mutation 由 account event writer 序列化；snapshot 絕對設定 `offered/lent`，lifecycle event 只做有序增量。
 - **I-VTA venue 即真相**：`BootRecovery.run()` 以不帶 symbol filter 的 REST offers + credits + wallets 建立 `VENUE_SNAPSHOT_OBSERVED`；外來 offer 只記錄與告警、missing 釋放、stale PENDING 進 UNKNOWN，並以衍生 `PositionReconciled` 絕對覆寫 ledger。WS 是延遲最佳化；90s 迴圈保證收斂。
-- **I-CAP canonical capital authority**：每 account/environment/symbol 獨立計算。A=venue available，L=尚未證明反映於 snapshot 的 durable commitments，R=applied reserve，T=canonical available+offers+lent（去重），E_cell=歸屬 cell 的 offers/lent/unreflected commitments 加 shared unattributed credits。shared credits 在各 cell concentration 保守計入、在 T 只算一次；未知 attribution 不捏造 ownership。
+- **I-CAP canonical capital authority**：每 account/environment/symbol 獨立計算。A=venue available，L=尚未證明反映於 snapshot 的 durable commitments，R=applied reserve，T=canonical available+offers+lent（去重），E_cell=歸屬 cell 的 offers/lent/unreflected commitments。unattributed credits（U）只在 T 算一次、不計入任何 cell 的 concentration（2026-09-27 起；先前保守計入每個 cell，會在 U 接近 cell_limit 時把 venue 最低單額擋在 headroom 外而閒置現金）；未知 attribution 不捏造 ownership。
 - **I-SP spendable**：`spendable=max(0,A-L-R)`；每 tick 多 cells 共用此 pool。planner、command admission、status 共用 evaluator；同 account lock/transaction 內重查 policy revision、snapshot fence、guards 並建立 intent，不靠 in-memory tracker 授權。
 - **I-CC concentration**：`cell_limit=max(0,T-R)*0.70`，`cell_headroom=max(0,cell_limit-E_cell)`，`new_offer_amount≤min(spendable,cell_headroom)`；單一 active cell 也固定70%。reserve 增加或資金下降不召回貸款，只阻擋超限新單。金額向下量化並通過 adapter minimum/precision；不足 minimum 就 block，不增加金額跨越 headroom。
 - **歷史／simulation 說明**：舊 `allocate_gap`、reserved-only tracker rescale、固定 cap 與153 dust threshold 不是 live authority；`0d29fc8` 的單 active cell100% relaxation 已移除。相關歷史及 G3 未通過結果保留，不作新命令授權。

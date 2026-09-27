@@ -197,6 +197,8 @@ class CapitalView:
     snapshot_seq: int
     snapshot: CapitalSnapshot
     budget: CapitalBudget
+    # Diagnostic: credits with no cell provenance (U). Part of total_capital,
+    # never of snapshot.cell_exposure.
     unattributed_credit_exposure: Decimal
     attribution: Mapping[str, Any]
 
@@ -514,8 +516,10 @@ class CapitalRepository:
             values["offered"] = str(_amount(values["offered"]) + remaining)
             cells = values["cells"]
             cells[decision.cell_id] = str(_amount(cells.get(decision.cell_id, "0")) + remaining)
-        # Credits have no genuine cell link in this schema. U is a shared upper
-        # bound charged to EVERY cell; never sum cell exposures into account T.
+        # Credits have no genuine cell link in this schema, so every credit is
+        # unattributed (U). U counts once in account T and, through the wallet,
+        # in spendable cash -- never in any cell's exposure: charging it to every
+        # cell idled cash the venue minimum could no longer fit under the cap.
         for credit in {c.credit_id: c for c in event.credits}.values():
             amount = _amount(credit.amount)
             if credit.status != "active" or amount <= ZERO:
@@ -576,7 +580,7 @@ class CapitalRepository:
             raise CapitalBlockedError("unclassifiable_commitment")
         return {"symbols": totals, "reflected": reflected, "settled": sorted(settled),
                 "unresolved": unresolved, "foreign": foreign,
-                "credit_attribution": "U is conservative shared exposure for every cell; counted once in T"}
+                "credit_attribution": "U counts once in T only; it is in no cell exposure"}
 
     async def read_capital(self, session: AsyncSession, *, symbol: str, cell_id: str,
                            now_ms: int) -> CapitalView:
@@ -702,7 +706,8 @@ class CapitalRepository:
         available = _amount(values["available"])
         offered, credits = _amount(values["offered"]), _amount(values["credits"])
         shared = _amount(values["unattributed_credits"])
-        exposure = _amount(values["cells"].get(cell_id, "0")) + shared
+        # Only what this cell provably owns: U is already in T via ``credits``.
+        exposure = _amount(values["cells"].get(cell_id, "0"))
         return _SnapshotBasis(row, event, available, offered, credits, shared, exposure)
 
     async def _read_capital_full(self, session: AsyncSession, *, symbol: str, cell_id: str,

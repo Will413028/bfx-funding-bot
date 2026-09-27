@@ -104,8 +104,9 @@ def _simulated_capital(ledger, tracker, *, totals=None, reserves=None):
             exposure = ledger.current_exposure(symbol)
             available = min(max(D("0"), total - exposure + reserve), ledger.available_balance(symbol))
             shared = max(D("0"), exposure - ledger.reserved_exposure(symbol))
+            # Unattributed credits (shared) are in T only, never in a cell's exposure.
             snapshot = CapitalSnapshot(available, D("0"), max(total + reserve, available),
-                                       tracker.deployed(cell_id) + shared)
+                                       tracker.deployed(cell_id))
             applied = AppliedCapitalPolicy(1, "explicit-test-policy", policy, UUID(int=1))
             return CapitalView(applied, 1, snapshot, evaluate_capital(policy, snapshot), shared, {})
 
@@ -1164,8 +1165,8 @@ def _build_with_split_ledger(*, reserved, realized, quotes):
     return rec, ex, tracker, safety
 
 
-async def test_unattributed_credits_consume_every_cell_headroom():
-    """Shared U=300 conservatively consumes every cell's concentration budget."""
+async def test_unattributed_credits_do_not_consume_cell_headroom():
+    """Unattributed U=300 counts in T only; the cell keeps its own headroom."""
     # Pre-seed the tracker with the open offer we own
     rec, ex, tracker, _ = _build_with_split_ledger(
         reserved=D("100"), realized=D("300"),
@@ -1174,9 +1175,10 @@ async def test_unattributed_credits_consume_every_cell_headroom():
     # Simulate the tracker already recorded our $100 open offer
     tracker.record_deploy("fUST_a30", D("100"))
     await rec.deploy()
-    # E_cell includes owned 100 + shared U=300: 400 exceeds fixed cell limit 399.
-    assert ex.submitted == []
-    assert tracker.deployed("fUST_a30") == D("100")
+    # E_cell is only the owned 100: headroom 399-100=299, so cash (173-3=170)
+    # binds. Under the old rule 100+U=400 > 399 left the 170 idle.
+    assert len(ex.submitted) == 1
+    assert D("169.99") < ex.submitted[0].offer_amount_usdt <= D("170")
 
 
 # ---------------------------------------------------------------------------
