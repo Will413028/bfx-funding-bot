@@ -13,7 +13,7 @@ from sqlalchemy import create_engine, text
 pytestmark = pytest.mark.integration
 
 BACKEND = Path(__file__).resolve().parents[2]
-ACCOUNT = "35efed2d-3004-4941-a161-ca025d9c4d53"
+ACCOUNT = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 ROLES = ("bfx_bot", "bfx_webapi", "bfx_webauth")
 PARENT = "3c8f1e6a9d52"   # funding_interest_payments; the revision this one revises
 TABLES = ("funding_credit_history", "funding_trades")

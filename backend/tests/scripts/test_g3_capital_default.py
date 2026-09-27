@@ -21,7 +21,7 @@ from bfx_funding_bot.modules.live_validation.tables import FundingInterestPaymen
 from scripts._g3_loaders import build_verdict_from_neon
 from scripts.run_g3_live_validation import _parse_capital
 
-ACCOUNT = UUID("35efed2d-3004-4941-a161-ca025d9c4d53")
+ACCOUNT = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 DAY = 86_400_000
 DESC = "Margin Funding Payment on wallet funding"
 

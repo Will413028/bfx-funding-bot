@@ -35,7 +35,7 @@ from bfx_funding_bot.modules.live_validation.interest_ledger import (
 )
 from bfx_funding_bot.modules.live_validation.tables import FundingCreditHistoryRow, FundingTradeRow
 
-ACCOUNT = UUID("35efed2d-3004-4941-a161-ca025d9c4d53")
+ACCOUNT = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 # [ID, SYMBOL, SIDE, MTS_CREATE, MTS_UPDATE, AMOUNT, FLAGS, STATUS, RATE_TYPE, _, _,
 #  RATE, PERIOD, MTS_OPENING, MTS_LAST_PAYOUT, NOTIFY, HIDDEN, _, RENEW, _, NO_CLOSE, PAIR]
 REPAID_EARLY = [466642176, "fUST", 1, 1790350246000, 1790350246000, 150.76884612, 0,

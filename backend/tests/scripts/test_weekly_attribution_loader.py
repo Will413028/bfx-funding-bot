@@ -43,7 +43,7 @@ from scripts.run_weekly_attribution import (
 )
 
 _ENV = "prod"
-_UUID = UUID("35efed2d-3004-4941-a161-ca025d9c4d53")
+_UUID = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 _ACCT = str(_UUID)
 _LEGACY = "default"
 _MON = 1_789_948_800_000          # 2026-09-21 UTC Monday

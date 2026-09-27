@@ -401,7 +401,7 @@ async def test_load_credit_history_closes_reads_last_payout(g3_factory):
 
     from bfx_funding_bot.modules.live_validation.tables import FundingCreditHistoryRow
 
-    account = UUID("35efed2d-3004-4941-a161-ca025d9c4d53")
+    account = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
     async with g3_factory() as s:
         for kind in ("credit", "loan"):
             s.add(FundingCreditHistoryRow(

@@ -10,7 +10,7 @@ from tests.pg_templates import alembic as _alembic
 
 pytestmark = pytest.mark.integration
 
-ACCOUNT = "35efed2d-3004-4941-a161-ca025d9c4d53"
+ACCOUNT = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 ROLES = ("bfx_bot", "bfx_webapi", "bfx_webauth")
 INSERT = ("INSERT INTO funding_interest_payments (exchange_account_id, ledger_id, "
           "deployment_environment, currency, mts, amount, balance, description) VALUES "

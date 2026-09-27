@@ -30,7 +30,7 @@ from bfx_funding_bot.modules.live_validation.interest_ledger import (
 )
 from bfx_funding_bot.modules.live_validation.tables import FundingInterestPaymentRow
 
-ACCOUNT = UUID("35efed2d-3004-4941-a161-ca025d9c4d53")
+ACCOUNT = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 DESC = "Margin Funding Payment on wallet funding"
 # [ID, CURRENCY, WALLET, MTS, _, AMOUNT, BALANCE, _, DESCRIPTION], newest first.
 LIVE_ROWS = [
