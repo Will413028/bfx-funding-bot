@@ -185,8 +185,8 @@ finish() {
 # ──────────────────────────────────────────────────────────────────────────
 
 # bot vs FRR auto-renew A/B — sub-account B-arm setup.
-# ADR: second-brain wiki/projects/bfx-funding-bot/decisions/2026-09-22-frr-baseline-ab-via-sub-account.md
-# Review: backend/docs/research/2026-09-22-strategy-system-review.md §4
+# ADR 2026-09-22 FRR baseline A/B via sub-account (design decision record,
+# kept privately).
 #
 # Values land in a gitignored local env file (matches .gitignore `.env.*.local`)
 # that the read-only loader scripts/report_ab_frr.py will consume. Nothing here
@@ -288,7 +288,7 @@ note "BFX_AB_START_MS = ${BFX_AB_START_MS} — week 1 of the 8-week window start
 
 # ── 7 ────────────────────────────────────────────────────────────────────
 stage "Bookkeeping"
-say "Paste these into second-brain so the experiment is traceable:"
+say "Paste these into your experiment notes so the experiment is traceable:"
 say ""
 say "  registry (strategy-registry.md, 執行層實驗 row 'bot vs FRR auto-renew A/B'):"
 say "    TESTING → RUNNING since $(date -u +%Y-%m-%d), B arm ${BFX_AB_B_ARM_AMOUNT_UST} UST @ FRR p${BFX_AB_B_ARM_PERIOD}, A arm ${BFX_AB_A_ARM_TARGET_UST} UST"

@@ -320,8 +320,8 @@ def test_boot_refused_fatal_and_future_events_render() -> None:
         ("foreign_exposure", {"venue_offer_id": "1"}, "[WARNING]"),  # an unregistered event
     ):
         text = alerts.render(event, level=alerts.default_level(event, fields), fields=fields,
-                             context="prod", host="oci-a1")
-        assert expected in text and "[prod/oci-a1]" in text
+                             context="prod", host="vm-1")
+        assert expected in text and "[prod/vm-1]" in text
     assert "bot refused to boot" in alerts.render(alerts.BOOT_REFUSED, level="critical",
                                                   fields={}, host="h")
 

@@ -23,8 +23,10 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
   `main` tag 只用來「發現」最新 release；部署一律以 `repository@sha256:<digest>`。
 - Registry 查詢用 `docker buildx imagetools inspect`（GHCR 憑證只放在每次呼叫的暫時
   `DOCKER_CONFIG`，不留下 `docker login`）。
-- Frontend 的 `NEXT_PUBLIC_*` build 參數來自 `deploy/vm/frontend-public.json`（公開設定，
-  CI 會檢查只有三個 key）。改它就是改 image，要走一次部署。
+- Frontend 的 `NEXT_PUBLIC_*` build 參數來自 GitHub repository variables
+  `NEXT_PUBLIC_APP_NAME`／`NEXT_PUBLIC_APP_URL`／`NEXT_PUBLIC_BETTER_AUTH_URL`（公開設定、非 secret；
+  任一未設定時 release 直接失敗）。改它就是改 image：之後的下一個 `main` commit 才會帶進新 image。
+  公開入口與這些值怎麼對應見 [fresh host setup](fresh-host-setup.md#2-frontend-public-ingress)。
 - VM 從不 build image。
 
 ### bfx-deploy 一次執行做什麼
@@ -69,7 +71,7 @@ app 只加入既有的 `bfx_default` network。`docker-compose.bot.yml` 的 `leg
 （見 operations §2）。變更分級（standard／material）已退役。過渡期注意：
 `docker-compose.app.yml` 仍接受 `BFX_CHANGE_CLASS`（預設 `retired`），`deployments.change_class`
 欄位改為可為空，都只是讓上一版 bfx-deploy 還能部署這一版；新工具第一次部署成功後的下一個 release
-移除它們（計畫 `docs/superpowers/plans/2026-09-25-lending-envelope.md` §5）。
+移除它們（migration `5b9e3d7a2f41` 已移除該欄位）。
 
 ## 3. 常用指令（VM，root）
 

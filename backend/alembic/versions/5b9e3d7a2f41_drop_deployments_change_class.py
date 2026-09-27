@@ -1,7 +1,6 @@
 """Drop ``deployments.change_class``.
 
-Revises 8e4b2f6a1c37. Plan docs/superpowers/plans/2026-09-25-lending-envelope.md
-§5: the follow-up release. 1f6392809120 made the column nullable while the
+Revises 8e4b2f6a1c37. Lending envelope ADR 2026-09-25: the follow-up release. 1f6392809120 made the column nullable while the
 previous bfx-deploy still wrote it; every attempt since has been written by the
 current tool, which leaves it NULL (ledger rows 7-10 on production).
 

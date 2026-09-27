@@ -2,8 +2,7 @@
 
 Reuses the OOS engine + stats primitives; adds the two new statistics the
 shared build_cell_report does not compute (active-series DSR; paired
-band-vs-band difference CI). No engine/oos_eval changes. See
-docs/superpowers/specs/2026-06-04-adaptive-period-band-sweep-design.md.
+band-vs-band difference CI). No engine/oos_eval changes.
 """
 from __future__ import annotations
 

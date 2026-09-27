@@ -12,7 +12,7 @@ Two data modes:
   fixtures (offline, no DB — fUSD has p2/p30/a30, fUST has p2/a30; no FRR arm):
     cd backend
     uv run python -m scripts.run_period_structure_backtest --fixtures fixtures/candles \\
-        --output docs/research/2026-09-22-period-structure-fixtures.md
+        --output /tmp/2026-09-22-period-structure-fixtures.md
 
   database (VM research container; adds fUST p30 and the always_frr arm):
     uv run python -m scripts.run_period_structure_backtest \\

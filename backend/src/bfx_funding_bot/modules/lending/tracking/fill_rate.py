@@ -1,7 +1,4 @@
-"""G13 fill-rate learning: path-crossing aggregation over funding candles.
-
-See docs/superpowers/specs/2026-05-26-g13-fill-rate-learning-design.md.
-"""
+"""G13 fill-rate learning: path-crossing aggregation over funding candles."""
 from __future__ import annotations
 
 import math

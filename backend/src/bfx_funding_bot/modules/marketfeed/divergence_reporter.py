@@ -1,6 +1,6 @@
 """In-process dual-compute divergence reporter.
 
-設計依據: phase4.1-paper-shadow-infra-design.md Q4 — replay rebuilds strategy
+設計依據: phase 4.1 paper/shadow infra design Q4 — replay rebuilds strategy
 from scratch on the same DB candle source; live != replay 即觸發 divergence_detail
 warn event.
 """

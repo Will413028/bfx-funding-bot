@@ -10,7 +10,8 @@ Writes data/research/frr_hypothesis_results.json. Exit 0 if at least one
 hypothesis passes Gate 1 (R²>0.99 + slope_cv<0.05 + slope_diff<0.05 +
 median_rel_err<0.05); exit 1 if all fail.
 
-See docs/research/2026-05-10-frr-unit-investigation.md for narrative.
+Outcome (every hypothesis failed: FRR is not a unit-convertible market-rate
+proxy) is recorded in backend/ARCHITECTURE.md, backtest engine contract.
 """
 from __future__ import annotations
 

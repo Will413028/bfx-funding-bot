@@ -96,11 +96,11 @@ def assert_market_rate_band(rates: list[Decimal]) -> None:
         )
 
 
-# ---- E3: AlwaysFRR benchmark arm（docs/research/2026-07-06-profit-design-review.md §1 E3 (c)）----
+# ---- E3: AlwaysFRR benchmark arm ----
 # funding_stats.frr 不是市場利率、也非 candle close 的單位轉換（ADR
 # 2026-05-28-frr-not-a-market-rate-proxy；5 個假設全 FAIL）。但它是 ticker FRR
 # 的 /365 表示：2026-07-06 兩 symbol 實測 frr×365 ≈ ticker FRR（per-day）誤差
-# <0.5%（plan 2026-07-06-e3-measurement-automation.md 背景段）。AlwaysFRR arm
+# <0.5%（2026-07-06 E3 量測時實測）。AlwaysFRR arm
 # 用 frr×365 當「FRR auto-renew 掛單者實得的日利率」序列；換算後仍須過
 # assert_market_rate_band（雙保險：任何未來單位漂移會炸 loader 而非產出錯報告）。
 FRR_ANNUALIZATION = Decimal("365")

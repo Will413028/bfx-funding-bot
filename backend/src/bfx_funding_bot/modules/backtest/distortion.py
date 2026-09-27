@@ -10,8 +10,8 @@ so this module does the only thing left: perturb the settled series with the
 distortion distribution we managed to measure, and see whether the conclusions
 survive. That answers "are the results fragile", NOT "what would live have earned".
 
-Sample + its biases: docs/research/2026-07-27-candle-distortion-sample.md
-ADR D2: wiki/projects/bfx-funding-bot/decisions/2026-07-27-candle-immutability-bitemporal.md
+The sample and its biases are described in the design decision record, kept
+privately (ADR 2026-07-27 candle immutability, D2).
 """
 from __future__ import annotations
 

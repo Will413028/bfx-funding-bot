@@ -14,7 +14,7 @@ deploy/vm/ops/docker-compose.weekly-report.yml (installed with each deploy), so
 the acknowledgement is recorded in git.
 
 Run from backend/:
-  uv run python -m scripts.run_g3_live_validation --out docs/research/<date>-g3-live-validation.md
+  uv run python -m scripts.run_g3_live_validation --out /tmp/<date>-g3-live-validation.md
 """
 from __future__ import annotations
 

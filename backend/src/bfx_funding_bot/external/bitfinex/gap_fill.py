@@ -1,6 +1,6 @@
 """REST 缺口補齊 helper — warmup 跟 reconnect 共用.
 
-設計依據: phase4.1-paper-shadow-infra-design.md Q8 / Q10
+設計依據: phase 4.1 paper/shadow infra design Q8 / Q10
 """
 from __future__ import annotations
 

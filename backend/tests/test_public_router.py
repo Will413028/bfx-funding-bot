@@ -2,7 +2,7 @@
 
 Compliance-critical: these endpoints must never require auth and must never
 serialize absolute-$ fields (capital_days / gross_interest_usdt /
-net_interest_usdt) — see docs/superpowers/specs/2026-07-19-borrowrate-proof-page-csv.md.
+net_interest_usdt) — see the public read model in backend/ARCHITECTURE.md.
 """
 from decimal import Decimal
 from uuid import UUID
@@ -25,7 +25,7 @@ WEEK_2 = WEEK_1 + 604_800_000
 PUBLIC_ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 
 # Field names that must NEVER appear anywhere in a public response body —
-# raw dollar/capital figures leak Will's personal capital scale and would
+# raw dollar/capital figures leak the operator's personal capital scale and would
 # cross the "no guaranteed/absolute return disclosure" compliance line.
 FORBIDDEN_SUBSTRINGS = [
     "capital_days", "capitalDays",
