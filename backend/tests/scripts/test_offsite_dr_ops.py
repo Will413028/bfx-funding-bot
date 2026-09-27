@@ -1118,11 +1118,8 @@ def test_offsite_runbook_documents_same_target_baseline_and_staged_restore() -> 
     assert "no Bitfinex request" in text
 
 
-def test_architecture_and_halt1_document_staged_dr_and_fresh_evidence() -> None:
+def test_architecture_documents_staged_dr_and_fresh_evidence() -> None:
     architecture = (ROOT / "backend/ARCHITECTURE.md").read_text(encoding="utf-8")
-    halt1 = (ROOT / "docs/runbooks/halt-1-exchange-account-cutover.md").read_text(
-        encoding="utf-8"
-    )
 
     for marker in (
         "restore-data",
@@ -1135,25 +1132,6 @@ def test_architecture_and_halt1_document_staged_dr_and_fresh_evidence() -> None:
         "venue rollback",
     ):
         assert marker in architecture
-    assert "[Offsite DR operator runbook](offsite-dr.md)" in halt1
-    assert "same backup/PITR target" in halt1
-    assert "fresh measured evidence" in halt1
-
-
-def test_halt1_legacy_backup_precedes_identity_and_uuid_gate_follows_cutover() -> None:
-    halt1 = (ROOT / "docs/runbooks/halt-1-exchange-account-cutover.md").read_text()
-    step2 = halt1.split("### 2.", 1)[1].split("### 3.", 1)[0]
-    assert "legacy-schema-compatible" in step2
-    assert "canonical UUID baseline" not in step2
-    assert "cutover_identity.py" not in step2
-    assert "#post-identity-dr-gate" in step2
-    gate = halt1.split('<a id="post-identity-dr-gate"></a>', 1)[1]
-    assert halt1.index('<a id="post-identity-dr-gate"></a>') > halt1.index("### 6a.")
-    assert "canonical UUID baseline" in gate
-    assert "same backup/PITR target" in gate
-    assert "fresh measured evidence" in gate
-    assert "offsite-dr.md#6-" in gate and "offsite-dr.md#7-" in gate
-    assert "docker exec bfx-postgres psql" not in halt1
 
 
 def test_runbook_broad_runtime_contracts_match_current_consumers() -> None:

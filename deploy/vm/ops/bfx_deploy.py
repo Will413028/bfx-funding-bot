@@ -1029,7 +1029,7 @@ class Deployer:
             if name in CONTAINERS.values() and project != PROJECT:
                 # Cutover: containers left by the retired immutable-release launcher
                 # must be stopped and renamed by the operator; bfx-deploy never deletes
-                # them (docs/runbooks/cutover-release-governance.md).
+                # them (docs/runbooks/fresh-host-setup.md).
                 if self.settings.dry_run:
                     self._dry_run_blockers.append(f"foreign_container_holds_name:{name}")
                     continue

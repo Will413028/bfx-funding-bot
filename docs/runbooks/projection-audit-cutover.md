@@ -1,41 +1,32 @@
-# Projection audit cutover release handoff
+# Projection archive：驗證與 atomic apply 契約
 
-> **歷史紀錄。** 這次切換已完成。文中的 canary gate、Halt 2、手動 image／migration 步驟屬於已刪除的
-> 舊 release 流程；現行部署見 [deploy runbook](deploy.md)，停機與恢復見
-> [operations runbook](operations.md)。
+保留已完成 cutover 的 evidence 格式、archive restore 與原子性契約，供現行 DR 驗證
+和歷史資料查核。日常部署見 [deploy](deploy.md)，停機與恢復見 [operations](operations.md)。
 
-本程序交付 release evidence 與 operator approval package，不授權 production
-schema／grants／archive／apply、merge、push 或 resume trading。所有範例變數均須
-由核准的 scope 與獨立證據填入；本文件不包含 production identity 或實測數字。
-Synthetic pytest、舊 private capture 都不能冒充 fresh production snapshot。
+**`scripts/cutover_projection.py` 是已使用過的一次性工具，不能直接當成現行修復流程重跑。**
+它的 `collect_snapshot` 仍只讀 offers／credits／wallets，未納入 funding loans；
+operations probe 也沿用舊 compose topology。再次 prepare/apply 前，必須先補齊 loans
+及逐列 wire 比對、更新並驗證現行部署的 writer inventory，再以 exact source 的
+isolated rehearsal 證明完整性。本頁保留其契約，不提供舊 release 的執行清單。
 
-## Approval 與隔離前提
+## Scope、角色與停寫前提
 
-開始 production 操作前，operator 必須核准 exact account UUID、environment、DB
-target、image/config/projector、migration heads、backup label/PITR target、event
-count/head/hash、classified differences、rollback evidence 與維護時窗。
-私有 rehearsal 必須另有資料存取授權，使用 isolated restore，禁止 venue writes。
-不要因目前可用的 company tailnet 自動切換機器全域 Tailscale profile。
+Evidence 必須綁定 exact account UUID、environment、DB target、image/projector、
+migration heads、backup/PITR target 與 event count/head/hash。Synthetic pytest 與舊
+capture 不能冒充 fresh production snapshot；isolated rehearsal 不得有 venue writes。
 
-- Schema 套用只能在核准目標的 `backend/` 執行 `uv run alembic upgrade head`。
-  Archive migration 不代表 runtime role 已安全；不得順帶更改 production grants。
 - 實際 bot、webapi、frontend、weekly-report roles 必須逐一證明 archive
   INSERT/UPDATE/DELETE/TRUNCATE、column grants、ownership、schema CREATE 均不可達。
   包含 inherited／SET ROLE 路徑、PUBLIC 與 default grants；superuser、CREATEROLE、
   CREATEDB、REPLICATION、BYPASSRLS 都是 blocker。用無權限的 synthetic role 測試
   通過，不能證明真實 runtime role 已符合要求。
-- Persistent halt 不等於 quiescence。停止 bot/webapi/frontend/autoheal 與 one-off
-  migrate/weekly-report writers，restart policy 必須為 `no`；mask 並停止
-  `bfx-weekly-report.{service,timer}`、`bfx-halt-watch.{service,timer}` 與適用的
-  `bfx-l3-verify-24h.service`。檢查 sockets、paths、transient units、未知 recreate
-  sources、DB runtime sessions（含 idle）及其他 client transactions。
-  pgBackRest backup/status units 不需因此停用；維持 RPO。
-- `operations` 是 private codec file：`project=bfx`、實際 local `daemon_id`、
-  `images` 完整包含 bot/webapi/frontend/autoheal/migrate/weekly-report/postgres/redis，
-  `runtime_roles` 完整包含 bot/webapi/frontend/weekly-report。Image 值是 immutable
-  local `sha256:…` identity；bot 必須等於 `--image-digest`。
-  Probe 固定使用 Linux `/usr/bin/docker --host unix:///var/run/docker.sock` 與 systemd，
-  拒絕 remote Docker context。盤點不會阻止另一個 administrator 日後啟動 writer。
+- Persistent halt 不等於 quiescence。必須停止所有 app、migration、報告及其他 DB writers，
+  同時阻止 timer、restart policy、transient unit 或外部管理程序重啟它們；確認包含 idle
+  sessions 的 DB clients。pgBackRest backup/status 維持運作以保留 RPO。
+- 現行 app 是 `bfx-app`、資料服務是 `bfx`，而舊 `operations` codec/probe 預期
+  `project=bfx` 與 autoheal 等歷史服務。不得靠偽造 inventory 讓舊 probe 通過；更新時需
+  納入現行 `bfx-deploy.timer/service`、報告與所有 recreate sources。Immutable image、
+  local daemon identity、實際 runtime roles 與 quiescence 的綁定仍須保留。
 
 ## Local evidence 與 bounded cleanup
 
@@ -70,7 +61,7 @@ backup repository、production volume 或 `projection_audit`；不可用 broad p
 
 ## 1. Diagnose 與人工分類
 
-以下 cutover commands 都從 `backend/` 執行。`DATABASE_URL` 只取 explicit process
+以下 Python commands 都從 `backend/` 執行。`DATABASE_URL` 只取 explicit process
 environment；以核准的 secret channel 注入，不寫命令列、文件或 log。`$CUTOVER_DIR`
 為 private absolute path；每個 output 是尚不存在的新路徑。
 
@@ -96,26 +87,14 @@ before_digest/after_digest，改 classification 並加非空 reason/evidence；�
 不得遗漏、重複或插入。呼叫 `finish()`，再以 `verify_cutover_evidence` 驗證兩個
 directories 與全部 identity pins；只將 compact verified headers/counts 傳入 runtime。
 
-已知 release gate：兩輪 completed historical CID 可以 genesis replay，但若 source
+已知 apply 邊界：兩輪 completed historical CID 可以 genesis replay，但若 source
 projection head 落後，apply 的 serialized append 可能先重播舊 cycle，觸發 claim
 identity conflict。保留 halt；必須在 private rehearsal 證明該 exact source 可 apply。
 不得自行 bump head、改歷史 event 或放寬 strict append 來繞過此 gate。
 
-## 2. Prepare archive
+## 2. Prepare 與既有 archive 驗證
 
-```bash
-uv run python -m scripts.cutover_projection prepare \
-  --account-id "$ACCOUNT_ID" --environment "$CUTOVER_ENVIRONMENT" \
-  --run-id "$RUN_ID" --image-digest "$IMAGE_DIGEST" \
-  --projector-version execution-state-v1 \
-  --managed-symbols fUST \
-  --diagnostic "$CUTOVER_DIR/diagnostic" --diagnostic-digest "$DIAGNOSTIC_DIGEST" \
-  --classification "$CUTOVER_DIR/classification" --classification-digest "$CLASSIFICATION_DIGEST" \
-  --operations "$OPERATIONS_FILE" --operations-digest "$OPERATIONS_DIGEST" \
-  --output "$CUTOVER_DIR/prepared"
-```
-
-**這個 CLI 會經 UUID vault/KEK 讀 credentials，並讀 Bitfinex offers/credits/wallets。**
+**`prepare` CLI 會經 UUID vault/KEK 讀 credentials，並讀 Bitfinex offers/credits/wallets。**
 無 venue 存取授權的 isolated rehearsal 不執行它；使用 pytest 的 synthetic snapshot
 呼叫既有 `prepare_archive` API。`--dry-run` 只適用 prepare，rollback archive DB writes，
 不代表不會讀 venue。Repeat prepare 另加 `--prepared-digest "$PREPARED_DIGEST"`，
@@ -175,8 +154,9 @@ uv run python -m scripts.verify_projection_archive \
 ## 4. Fresh snapshot、atomic apply 與 repeat
 
 完成 restore 後重新取得 explicit snapshot，並以 `--managed-symbols` 宣告本輪 scope。
-本輪 recovery 使用 `--managed-symbols fUST`，因此 fUST 的 offers/credits/wallet 必須
-完整覆蓋；fUSD 保持 dark，不可把缺少 fUSD snapshot 當成零。任何 scope 外 active
+已完成的 cutover 使用 `--managed-symbols fUST`，不代表未來操作可沿用同一 scope。
+Managed symbols 的 exposure 與 wallet 必須完整覆蓋，缺少 symbol snapshot 不可當成零。
+任何 scope 外 active
 exposure 或非零 position 都要停止；若只剩所有 exposure/ledger buckets 與 `n_credits`
 皆為零的 fUSD legacy scaffold，atomic rebuild 可移除該 inert row。缺 symbol/page/status/rate、
 非 finite 數字、未知 exposure 或 uncertainty 也都要停止。Freshness 從 query start 起算，上限 300 秒，包含鎖等待與
@@ -185,22 +165,6 @@ transaction 執行時間。不能以舊 capture 更新 timestamp 偽造新鮮度
 目前沒有 snapshot CLI。核准的 collector 使用 `collect_snapshot`，以
 `encode_row(serialize_event(snapshot))` 保存 private file 與 SHA-256；isolated pytest
 只使用明確標示的 synthetic snapshot。Apply 本身不載 KEK、不做 HTTP、不 resume。
-
-```bash
-uv run python -m scripts.cutover_projection apply \
-  --account-id "$ACCOUNT_ID" --environment "$CUTOVER_ENVIRONMENT" \
-  --run-id "$RUN_ID" --image-digest "$IMAGE_DIGEST" \
-  --projector-version execution-state-v1 \
-  --managed-symbols fUST \
-  --diagnostic "$CUTOVER_DIR/diagnostic" --diagnostic-digest "$DIAGNOSTIC_DIGEST" \
-  --classification "$CUTOVER_DIR/classification" --classification-digest "$CLASSIFICATION_DIGEST" \
-  --prepared "$CUTOVER_DIR/prepared" --prepared-digest "$PREPARED_DIGEST" \
-  --receipt "$ARCHIVE_RECEIPT_FILE" --receipt-digest "$ARCHIVE_RECEIPT_DIGEST" \
-  --archive-input "$ARCHIVE_INPUT_FILE" --archive-input-digest "$ARCHIVE_INPUT_DIGEST" \
-  --snapshot "$SNAPSHOT_FILE" --snapshot-digest "$SNAPSHOT_DIGEST" \
-  --operations "$OPERATIONS_FILE" --operations-digest "$OPERATIONS_DIGEST" \
-  --output "$CUTOVER_DIR/applied"
-```
 
 CLI 在建 engine 前完成 bounded external file/evidence 驗證：prepared/archive-input/
 snapshot 各 1 MiB，receipt/operations 各 64 KiB；不在 account lock 內重讀大目錄。
@@ -244,6 +208,5 @@ Full transport 使用 schema_version=1、無 target_run_id；baseline 仍為 sch
 完整驗證所有歷史與 applied archives、原始 event prefixes、同 target 新 baseline 與
 empty-projector/active parity；prepared-only 舊 projection 差異不應偽裝成 full DR 成功。
 
-Release package 最後仍須列明未完成 gates：runtime UUID/KEK/owner 與 legacy-secret removal、
-真實 auth denial、no uncertainty、fresh exposure、RPO/RTO、bounded canary 與兩次 fresh
-reconciles。測試通過不代表其中任一 gate 已被執行或核准。
+Archive 驗證或 apply 成功都不會恢復交易；後續 reconciliation、包絡與 operator resume
+依 [operations runbook](operations.md) 執行。

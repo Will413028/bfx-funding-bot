@@ -24,7 +24,7 @@ operator bootstrap 與 non-operator containment 這兩個 one-shot，以及它�
 
 ## 0. Planned halt and preflight
 
-1. 宣布 maintenance window，交易狀態維持 `HALTED` 或 `REDUCING`（見
+1. 宣布 maintenance window，以 operator kill 維持 `HALTED/operator`（見
    [operations runbook](operations.md)）；保留 health probe。不要在停機期間進行 schema
    或 auth 手工修改。
 2. 從 `deployments` ledger 記錄目前部署的 source revision 與 frontend/backend digest

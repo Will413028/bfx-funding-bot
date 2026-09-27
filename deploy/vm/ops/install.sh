@@ -32,7 +32,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
   echo "Run as root (sudo)." >&2
   exit 1
 fi
-[[ -x "$UV" ]] || { echo "uv is required at $UV (see the cutover runbook)." >&2; exit 1; }
+[[ -x "$UV" ]] || { echo "uv is required at $UV (see docs/runbooks/fresh-host-setup.md)." >&2; exit 1; }
 docker buildx version >/dev/null 2>&1 || { echo "docker buildx is required." >&2; exit 1; }
 
 MIRROR_USER=$(stat -c %U "$ROOT")
