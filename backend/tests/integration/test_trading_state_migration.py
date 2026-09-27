@@ -13,6 +13,8 @@ from uuid import UUID
 import pytest
 from sqlalchemy import create_engine, text
 
+from tests.pg_templates import alembic
+
 pytestmark = pytest.mark.integration
 
 _BACKEND = Path(__file__).resolve().parents[2]
@@ -23,10 +25,14 @@ _C = "00000000-0000-0000-0000-0000000000c1"
 _PRODUCTION_REASON = "L4 gate: candle distortion — keep halted until probation lands (halt 11)"
 
 
-def _alembic(url: str, *args: str) -> None:
-    result = subprocess.run(["uv", "run", "alembic", *args], cwd=_BACKEND,
-                            env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
-    assert result.returncode == 0, result.stdout + result.stderr
+def _alembic(url: str, name: str, *args: str) -> None:
+    alembic(url, name, *args)
+
+
+def _alembic_cli(url: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """The operator's `alembic` CLI: a refused migration must exit non-zero, saying why."""
+    return subprocess.run(["uv", "run", "alembic", *args], cwd=_BACKEND,
+                          env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
 
 
 def _reset(engine) -> None:
@@ -65,9 +71,8 @@ def _insert(conn, account: str, state: str, cause: str, *, env: str = "prod",
                        {"a": account, "env": env, "state": state, "cause": cause, "id": explicit_id})
 
 
-@pytest.fixture
-def migrated(pg_container):
-    url = pg_container.get_connection_url().replace("+psycopg2", "+psycopg")
+def _build_migrated(url: str) -> dict[str, int]:
+    """Production's halt rows at _PREVIOUS, then the upgrade to head under test."""
     engine = create_engine(url)
     _reset(engine)
     _alembic(url, "upgrade", _PREVIOUS)
@@ -84,10 +89,20 @@ def migrated(pg_container):
         _halt(conn, _B, "prod", True, "release", "release_blocked", "worker", 500)
         ids["resumed"] = _halt(conn, _B, "prod", False, "safety", "release_promoted:x", "will", 600)
         ids["release"] = _halt(conn, _C, "prod", True, "release", "release_command_terminal", "worker", 700)
+    engine.dispose()
     _alembic(url, "upgrade", "head")
     _alembic(url, "check")
+    return ids
+
+
+@pytest.fixture
+def migrated(pg_templates, pg_clone):
+    """A fresh copy of the upgraded database; the upgrade itself runs once per session."""
+    template = pg_templates.template("trading_state_migrated", _build_migrated)
+    url = pg_clone(template)
+    engine = create_engine(url)
     try:
-        yield url, engine, ids
+        yield url, engine, dict(pg_templates.built(template))
     finally:
         engine.dispose()
 
@@ -249,8 +264,7 @@ def test_downgrade_keeps_decisions_made_after_the_migration(migrated):
     url, engine, _ = migrated
     with engine.begin() as conn:
         _insert(conn, _B, "HALTED", "operator")
-    result = subprocess.run(["uv", "run", "alembic", "downgrade", _PREVIOUS], cwd=_BACKEND,
-                            env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
+    result = _alembic_cli(url, "downgrade", _PREVIOUS)
     assert result.returncode != 0
     assert "refuse downgrade of recorded trading state decisions" in result.stdout + result.stderr
     with engine.begin() as conn:
