@@ -23,7 +23,7 @@ import pytest
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.external.bitfinex.live_executor import FundingCancelAllClient
-from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate, GateKind
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 
 _KEY = "the-api-key-value"
@@ -259,3 +259,110 @@ def test_trade_row_fixture_matches_parser() -> None:
     from bfx_funding_bot.external.bitfinex.auth_rest import parse_funding_trades
 
     assert parse_funding_trades(json.loads(json.dumps([_trade_row(1, 5)])))
+
+
+@pytest.mark.asyncio
+async def test_kill_cancel_all_jumps_queued_reads_and_nonces_stay_in_order() -> None:
+    """A kill issued while reconcile/history reads are queued goes out right
+    after the one in-flight read -- not behind the queue -- and the venue still
+    sees strictly increasing nonces."""
+    venue = _Venue()
+    venue.responses["cancel/all"] = lambda _: _CANCEL_ALL_OK
+    gate = AuthRequestGate()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(venue.handler)) as http:
+        reads = BitfinexAuthREST(http=http, auth_gate=gate)
+        writes = FundingCancelAllClient(http=http, auth_gate=gate)
+        release = venue.hold("funding/credits")
+        in_flight = asyncio.ensure_future(reads.get_active_funding_credits(ctx=_CTX))
+        await asyncio.wait_for(venue.in_flight["funding/credits"].wait(), 1)
+        queued = [
+            asyncio.ensure_future(reads.get_funding_trades(
+                ctx=_CTX, symbol="fUST", start_ms=0, end_ms=10_000)),
+            asyncio.ensure_future(reads.get_funding_available_all(ctx=_CTX)),
+            asyncio.ensure_future(reads.get_key_permissions(ctx=_CTX)),
+        ]
+        await _settle()
+        assert gate.waiting("read") == 3
+        kill = asyncio.ensure_future(writes.cancel_all_funding_offers(currency="UST", ctx=_CTX))
+        await _settle()
+        assert gate.waiting("order") == 1
+        release.set()
+        results = await asyncio.gather(in_flight, *queued, kill, return_exceptions=True)
+    # permissions parses [] into an empty map; only transport outcomes matter here.
+    assert not [r for r in results if isinstance(r, BitfinexAPIError)], results
+    assert [p.split("/v2/auth/")[1] for p in venue.accepted] == [
+        "r/funding/credits", "w/funding/offer/cancel/all",
+        "r/funding/trades/fUST/hist", "r/wallets", "r/permissions",
+    ]
+    nonces = [n for _, n in venue.arrivals]
+    assert nonces == sorted(nonces)
+    assert len(set(nonces)) == len(nonces)
+
+
+@pytest.mark.asyncio
+async def test_slow_in_flight_read_is_cut_at_its_deadline_and_the_kill_proceeds() -> None:
+    venue = _Venue()
+    venue.responses["cancel/all"] = lambda _: _CANCEL_ALL_OK
+    gate = AuthRequestGate()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(venue.handler)) as http:
+        reads = BitfinexAuthREST(http=http, auth_gate=gate, read_deadline_s=0.2)
+        writes = FundingCancelAllClient(http=http, auth_gate=gate)
+        venue.hold("funding/credits")  # never released: a hung venue
+        stuck = asyncio.ensure_future(reads.get_active_funding_credits(ctx=_CTX))
+        await asyncio.wait_for(venue.in_flight["funding/credits"].wait(), 1)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        answer = await asyncio.wait_for(
+            writes.cancel_all_funding_offers(currency="UST", ctx=_CTX), 2,
+        )
+        waited = loop.time() - started
+        with pytest.raises(BitfinexAPIError) as info:
+            await stuck
+    assert answer.outcome == "acknowledged"
+    assert 0.15 < waited < 1.0
+    assert info.value.status_code == 0
+    assert "deadline" in info.value.message
+    assert not gate.busy
+
+
+@pytest.mark.asyncio
+async def test_reads_never_overtake_a_waiting_order() -> None:
+    gate = AuthRequestGate(iter(range(1, 100)).__next__)
+    order_of_entry: list[str] = []
+
+    async def enter(kind: GateKind, name: str) -> None:
+        async with gate.nonce(kind, label=name):
+            order_of_entry.append(name)
+            await asyncio.sleep(0)
+
+    async with gate.nonce("read", label="in-flight"):
+        tasks = [asyncio.ensure_future(enter("read", "r1"))]
+        await _settle()
+        tasks.append(asyncio.ensure_future(enter("order", "o1")))
+        await _settle()
+        tasks.append(asyncio.ensure_future(enter("read", "r2")))
+        tasks.append(asyncio.ensure_future(enter("order", "o2")))
+        await _settle()
+    await asyncio.gather(*tasks)
+    assert order_of_entry == ["o1", "o2", "r1", "r2"]
+    assert not gate.busy
+
+
+@pytest.mark.asyncio
+async def test_slow_gate_wait_is_logged_with_the_waiter_kind(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gate = AuthRequestGate(slow_wait_s=0.05)
+
+    async def kill() -> None:
+        async with gate.nonce("order", label="cancel_all"):
+            pass
+
+    with caplog.at_level(logging.WARNING):
+        async with gate.nonce("read", label="held"):
+            waiter = asyncio.ensure_future(kill())
+            await asyncio.sleep(0.1)
+        await waiter
+    record = next(r for r in caplog.records if "bitfinex_auth_gate_slow_wait" in r.getMessage())
+    assert "kind=order" in record.getMessage()
+    assert "label=cancel_all" in record.getMessage()

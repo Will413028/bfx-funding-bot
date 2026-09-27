@@ -27,6 +27,7 @@ import httpx
 __all__ = [
     "SubmissionAttemptPayload",
     "SubmitAcknowledged",
+    "SubmitCancelledNotSent",
     "SubmitNotSent",
     "SubmitOutcome",
     "SubmitOutcomeKind",
@@ -337,6 +338,20 @@ def _bounded_text(value: object, *, limit: int = 256) -> str | None:
 
 
 _VENUE_ERROR_TEXT_MAX = 200
+
+
+class SubmitCancelledNotSent(asyncio.CancelledError):
+    """The submit was cancelled before anything reached the venue.
+
+    Still a ``CancelledError``, so cancellation is honoured everywhere it
+    propagates; it only adds the fact a bare cancellation cannot carry: no
+    request was sent, so the durable intent can be closed as NOT_SENT instead
+    of being left for recovery to escalate to UNKNOWN.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"submit cancelled before transport: {reason}")
+        self.outcome = SubmitNotSent(reason)
 
 
 def venue_error(body: Any) -> tuple[int, str] | None:

@@ -228,7 +228,7 @@ async def test_auth_handshake_waits_for_in_flight_signed_rest(fake_bfx_ws_server
         async for _ in client.events():
             return
 
-    async with gate.nonce():  # a REST request holding the gate
+    async with gate.nonce("read"):  # a REST request holding the gate
         task = asyncio.create_task(first_event())
         await asyncio.sleep(0.3)
         assert server_state.auth_received is False

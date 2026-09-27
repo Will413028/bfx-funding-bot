@@ -475,7 +475,7 @@ class BitfinexAuthWSClient:
             # that may themselves need the gate. The residual race (a later
             # REST call overtaking this frame) can only fail the handshake,
             # which is logged and retried with backoff.
-            async with self._auth_gate.nonce() as nonce:
+            async with self._auth_gate.nonce("read", label="ws_auth") as nonce:
                 auth = build_auth_payload(
                     api_key=self._creds.api_key,
                     api_secret=self._creds.api_secret,

@@ -399,10 +399,13 @@ async def test_cancel_publishes_cancel_requested() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_waits_for_the_shared_gate_and_rechecks_after_it() -> None:
+@pytest.mark.parametrize("book_fresh_after_wait", [True, False])
+async def test_submit_waits_for_the_shared_gate_and_rechecks_after_it(
+    book_fresh_after_wait: bool,
+) -> None:
     """A submit queued behind another signed call on the key neither signs nor
     sends until that call is done, and its final book predicate runs after the
-    wait -- so a book that expired while waiting still blocks the send."""
+    wait -- so a book that went stale while waiting still blocks the send."""
     import asyncio
     from dataclasses import replace
 
@@ -414,8 +417,8 @@ async def test_submit_waits_for_the_shared_gate_and_rechecks_after_it() -> None:
         return httpx.Response(200, json=SUCCESS)
 
     def predicate() -> bool:
-        checks.append(True)
-        return True
+        checks.append(book_fresh_after_wait)
+        return book_fresh_after_wait
 
     gate = AuthRequestGate()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
@@ -425,14 +428,54 @@ async def test_submit_waits_for_the_shared_gate_and_rechecks_after_it() -> None:
             configured_symbols=frozenset({"fUST"}), cell="C-1", auth_gate=gate,
         )
         ctx = replace(_make_ctx(), before_submit_transport=predicate)
-        async with gate.nonce() as held_nonce:
+        async with gate.nonce("read") as held_nonce:
             task = asyncio.ensure_future(executor.submit(_ready(_make_decision()), ctx))
             for _ in range(20):
                 await asyncio.sleep(0)
             assert requests == []
             assert checks == []
         result = await asyncio.wait_for(task, 1)
-    assert checks == [True]
-    assert len(requests) == 1
-    assert int(requests[0].headers["bfx-nonce"]) > held_nonce
-    assert result.outcome_kind is not SubmitOutcomeKind.NOT_SENT
+    assert checks == [book_fresh_after_wait]
+    assert not gate.busy
+    if book_fresh_after_wait:
+        assert len(requests) == 1
+        assert int(requests[0].headers["bfx-nonce"]) > held_nonce
+        assert result.outcome_kind is not SubmitOutcomeKind.NOT_SENT
+    else:
+        assert requests == []
+        assert result.outcome_kind is SubmitOutcomeKind.NOT_SENT
+
+
+@pytest.mark.asyncio
+async def test_submit_cancelled_while_waiting_for_the_gate_is_not_sent() -> None:
+    """Cancellation during the gate wait is honoured, but carries the fact that
+    nothing was sent, so the intent can close as NOT_SENT instead of UNKNOWN."""
+    import asyncio
+
+    from bfx_funding_bot.modules.execution.submit_outcomes import SubmitCancelledNotSent
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=SUCCESS)
+
+    gate = AuthRequestGate()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        executor = BitfinexLiveExecutor(
+            http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
+            phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
+            configured_symbols=frozenset({"fUST"}), cell="C-1", auth_gate=gate,
+        )
+        async with gate.nonce("read"):
+            task = asyncio.ensure_future(executor.submit(_ready(_make_decision()), _make_ctx()))
+            for _ in range(20):
+                await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(SubmitCancelledNotSent) as info:
+                await task
+        assert task.cancelled()  # still a cancellation to asyncio
+        assert info.value.outcome.reason == "cancelled_waiting_for_venue_gate"
+        assert requests == []
+        assert not gate.busy
+        assert gate.waiting("order") == 0

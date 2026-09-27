@@ -7,6 +7,7 @@ read-side recovery queries.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Callable, Mapping
@@ -28,6 +29,11 @@ _Row = TypeVar("_Row")
 log = logging.getLogger(__name__)
 
 _ERROR_BODY_LOG_MAX = 200
+
+# Total deadline for one signed read (was a 30 s per-phase httpx timeout). It
+# bounds how long an order-path request -- a kill's cancel-all -- can wait for
+# the in-flight read ahead of it at the shared gate.
+READ_DEADLINE_S = 10.0
 
 
 def log_auth_http_error(
@@ -408,9 +414,11 @@ class BitfinexAuthREST:
         http: httpx.AsyncClient,
         base_url: str = BITFINEX_AUTH_REST_BASE,
         auth_gate: AuthRequestGate | None = None,
+        read_deadline_s: float = READ_DEADLINE_S,
     ) -> None:
         self._http = http
         self._base_url = base_url.rstrip("/")
+        self._read_deadline_s = read_deadline_s
         # Share the daemon's one gate for the key; a private gate only orders
         # this client's own requests.
         self._auth_gate = auth_gate or AuthRequestGate()
@@ -420,22 +428,34 @@ class BitfinexAuthREST:
     ) -> httpx.Response:
         """The only way this client talks to the venue: sign + POST under the
         shared gate, so the request arrives in nonce order. Raises
-        BitfinexAPIError on transport error (status 0) or HTTP >= 400."""
-        async with self._auth_gate.nonce() as nonce:
+        BitfinexAPIError on transport error or deadline (status 0) or HTTP >= 400.
+
+        Every call here is a read, so it waits behind any queued order-path
+        request and is cut at a total deadline: an order (a kill) waiting for
+        the gate waits for at most this long.
+        """
+        async with self._auth_gate.nonce("read", label=path) as nonce:
             headers = sign_request(
                 body=body_bytes, nonce=nonce,
                 api_secret=ctx.credentials.api_secret, path=path,
             )
             headers["bfx-apikey"] = ctx.credentials.api_key
             headers["Content-Type"] = "application/json"
+            deadline = self._read_deadline_s
             try:
-                resp = await self._http.post(
-                    f"{self._base_url}/{path}", content=body_bytes, headers=headers,
-                    timeout=30.0,
-                )
+                async with asyncio.timeout(deadline):
+                    resp = await self._http.post(
+                        f"{self._base_url}/{path}", content=body_bytes, headers=headers,
+                        timeout=deadline,
+                    )
             except httpx.HTTPError as e:
                 raise BitfinexAPIError(
                     status_code=0, message=f"transport error: {e}", raw=None,
+                ) from e
+            except TimeoutError as e:
+                raise BitfinexAPIError(
+                    status_code=0, message=f"transport error: {deadline}s deadline exceeded",
+                    raw=None,
                 ) from e
         if resp.status_code >= 400:
             log_auth_http_error(resp, path=path, credentials=ctx.credentials)

@@ -51,6 +51,7 @@ from bfx_funding_bot.modules.execution.retry import (
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmitAcknowledged,
+    SubmitCancelledNotSent,
     SubmitNotSent,
     SubmitOutcome,
     SubmitOutcomeUnknown,
@@ -234,7 +235,7 @@ class FundingCancelAllClient:
     async def _call(self, currency: str, ctx: AccountContext) -> Any:
         body_bytes = json.dumps({"currency": currency}).encode("utf-8")
         # Gate held per attempt (retries re-enter), released with the response.
-        async with self._auth_gate.nonce() as nonce:
+        async with self._auth_gate.nonce("order", label="cancel_all") as nonce:
             headers = sign_request(
                 body=body_bytes, nonce=nonce,
                 api_secret=ctx.credentials.api_secret,
@@ -392,8 +393,14 @@ class BitfinexLiveExecutor:
         # failure) so this request reaches the venue in nonce order. Acquired
         # before the final predicates below, because waiting for it is an
         # await and none may separate those checks from starting the request.
-        # A submit can therefore wait behind one in-flight signed call.
-        async with self._auth_gate.nonce() as nonce:
+        # As an order it waits only for the in-flight call and earlier orders,
+        # never for queued reads.
+        try:
+            nonce = await self._auth_gate.acquire("order", label="submit")
+        except asyncio.CancelledError as exc:
+            # Nothing was signed or sent: say so, and keep cancelling.
+            raise SubmitCancelledNotSent("cancelled_waiting_for_venue_gate") from exc
+        try:
             try:
                 payload = build_offer_payload(
                     symbol=decision.symbol,
@@ -504,6 +511,9 @@ class BitfinexLiveExecutor:
                     None, None, transport_started, e,
                 )
                 return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
+
+        finally:
+            self._auth_gate.release()
 
         try:
             parsed_body = resp.json()
@@ -633,7 +643,7 @@ class BitfinexLiveExecutor:
         body_bytes = json.dumps(body).encode("utf-8")
         # Gate held per attempt (transient_retry re-enters), released with the
         # response so the retry backoff never blocks other signed calls.
-        async with self._auth_gate.nonce() as nonce:
+        async with self._auth_gate.nonce("order", label="cancel") as nonce:
             headers = sign_request(
                 body=body_bytes, nonce=nonce,
                 api_secret=ctx.credentials.api_secret,

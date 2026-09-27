@@ -61,6 +61,7 @@ from bfx_funding_bot.modules.execution.protocols import (
 from bfx_funding_bot.modules.execution.safety.protection import ProtectionPort
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmissionAttemptPayload,
+    SubmitCancelledNotSent,
     SubmitNotSent,
     SubmitOutcomeKind,
     SubmitOutcomeUnknown,
@@ -360,6 +361,20 @@ class AccountCommandGate:
                     )) if self._capital is not None else context,
                     cid=cid, reservation_ref=reference,
                 )
+        except SubmitCancelledNotSent as cancelled:
+            # Cancelled before anything reached the venue: close the intent as
+            # NOT_SENT so recovery need not escalate it, then keep cancelling.
+            not_sent = SubmittedOrder(cid=cid, venue_offer_id=None,
+                                      outcome=cancelled.outcome, reservation_ref=reference)
+            try:
+                await self._persist_outcome(
+                    not_sent, ready=ready, context=context, reference=reference,
+                    size=size, occurred_at_ms=self._clock(),
+                )
+            except Exception as exc:  # recovery still resolves the PENDING intent
+                log.warning("submit_not_sent_persist_failed symbol=%s err_type=%s",
+                            decision.symbol, type(exc).__name__)
+            raise
         except asyncio.CancelledError:
             raise  # shutting down: recovery turns the durable PENDING into UNKNOWN
         except BaseException as exc:
