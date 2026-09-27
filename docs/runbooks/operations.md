@@ -213,6 +213,10 @@ VM 上 `/home/ubuntu/bfx-funding-bot` 的 working tree **不再被讀取**（它
   （`sudo chown 1000:1001 ~/bfx/reports && chmod 775`），不會自動建立：目錄不存在時 runner 以
   `reports_dir_missing` 拒跑（Compose 2.x 與 v5 對未設定的 `create_host_path` 解讀相反，不交給 Docker 決定）。
 - Timer 不在 `managed-units`：安裝 unit 檔會覆蓋 `systemctl mask`，排程開不開由 operator 決定。
+- **G3 對帳 FLAG 的確認**：最近 8 個已結算週內有 FLAG，G3 判 UNRELIABLE。查清原因後若要放行，在
+  `docker-compose.weekly-report.yml` 的 `run_g3_live_validation` 那行加 `--ack-week YYYY-MM-DD="理由"`
+  （週一日期、理由必填），走 PR 合併、隨部署生效；報告的 md／JSON 會列出每個確認與它是否用上。
+  超出 8 週窗的 FLAG 不再擋判定，確認可以拿掉。
 
 手動執行（VM，root）：
 
