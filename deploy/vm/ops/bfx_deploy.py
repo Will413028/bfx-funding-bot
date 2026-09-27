@@ -446,7 +446,6 @@ SELECT json_build_object(
 SELECT 'absent';
 \\endif
 """
-# The retired change_class column is left NULL; the follow-up release drops it.
 _LEDGER_APPEND = """INSERT INTO public.deployments (
   attempt_id, started_at, finished_at, source_revision, backend_digest, frontend_digest,
   migrations_applied, outcome, detail, ci_run)

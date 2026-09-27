@@ -103,8 +103,9 @@ def test_ledger_reads_absent_before_the_migration_then_appends_and_reads_back(le
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT detail FROM deployments WHERE id = :id"), {"id": second}) == hostile
         assert conn.scalar(text("SELECT ci_run FROM deployments WHERE id = :id"), {"id": first}) is None
-        # The retired column is left NULL by this tool.
-        assert conn.scalar(text("SELECT count(*) FROM deployments WHERE change_class IS NULL")) == 2
+        # The retired column is gone.
+        assert conn.scalar(text("SELECT count(*) FROM information_schema.columns WHERE "
+                                "table_name = 'deployments' AND column_name = 'change_class'")) == 0
 
 
 def _old_tool_insert(conn: Any, attempt: str, outcome: str, klass: str) -> None:
@@ -134,6 +135,14 @@ def test_previous_tool_can_deploy_the_release_that_retires_change_class(ledger_d
     with engine.connect() as conn:
         classes = [row[0] for row in conn.execute(text("SELECT change_class FROM deployments ORDER BY id"))]
     assert classes == ["standard", "material", "material", None]
+    # The follow-up release drops the column; each class stays in its row's detail.
+    _alembic(url, "upgrade", "head")
+    ledger.append(_entry(attempt_id=ATTEMPT.replace("0b8f", "1b8f"), outcome="started", finished_at=None))
+    ledger.append(_entry(attempt_id=ATTEMPT.replace("0b8f", "1b8f")))
+    with engine.connect() as conn:
+        details = [row[0] for row in conn.execute(text("SELECT detail FROM deployments ORDER BY id"))]
+    assert [d.split("(")[0] for d in details[:3]] == ["class=standard", "class=material", "class=material"]
+    assert len(details) == 6
 
 
 @pytest.mark.parametrize("statement", [
@@ -217,9 +226,9 @@ def test_runtime_roles_can_only_read_the_ledger(ledger_db: Any) -> None:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         conn.exec_driver_sql(
             "INSERT INTO deployments (attempt_id, started_at, finished_at, source_revision, backend_digest, "
-            f"frontend_digest, change_class, migrations_applied, outcome, detail) VALUES "
+            f"frontend_digest, migrations_applied, outcome, detail) VALUES "
             f"('{ATTEMPT}', now(), now(), "
-            f"'{REV}', '{DIGEST_B}', '{DIGEST_F}', 'standard', false, 'deployed', '')")
+            f"'{REV}', '{DIGEST_B}', '{DIGEST_F}', false, 'deployed', '')")
 
 
 def test_migration_is_reversible_and_leaves_no_drift(ledger_db: Any) -> None:
@@ -241,6 +250,14 @@ def test_migration_is_reversible_and_leaves_no_drift(ledger_db: Any) -> None:
                             env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
     assert result.returncode != 0
     assert "recorded without a change class" in result.stdout + result.stderr
+    # The refused run rolls back as a whole: still at head, both rows intact.
     with engine.connect() as conn:
-        assert [row[0] for row in conn.execute(text("SELECT change_class FROM deployments"))] == [
-            None, None]
+        assert conn.scalar(text("SELECT count(*) FROM deployments")) == 2
+    _alembic(url, "check")
+    # One step back re-adds the column (NULL) and the pairing check still accepts
+    # an attempt written the current way.
+    _alembic(url, "downgrade", "-1")
+    ledger.append(_entry(attempt_id=ATTEMPT.replace("0b8f", "2b8f"), outcome="started", finished_at=None))
+    ledger.append(_entry(attempt_id=ATTEMPT.replace("0b8f", "2b8f")))
+    with engine.connect() as conn:
+        assert [row[0] for row in conn.execute(text("SELECT change_class FROM deployments"))] == [None] * 4
