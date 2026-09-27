@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import pathlib
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import func, select
 
 from bfx_funding_bot.core.schema_head import build_head
@@ -24,33 +24,30 @@ from bfx_funding_bot.modules.execution.event_store.writer import (
 )
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
 from tests.modules.execution.event_store.test_historical_claim_cycles import seal_prefix_chain
+from tests.pg_templates import alembic
 
 pytestmark = pytest.mark.integration
 
-_BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[2]
-_ALEMBIC_INI = _BACKEND_ROOT / "alembic.ini"
 # The declared head, which tests/test_schema_head.py pins to alembic's.
 _REVISION = build_head()
 _ENV = "ci"
 
 
-def _reset_and_upgrade(sync_url: str) -> None:
-    from alembic.config import Config
-    from sqlalchemy import create_engine
+@pytest_asyncio.fixture
+async def pg_engine(pg_head_engine):
+    """Every test here runs on the migrated schema, not ``create_all``: a fresh
+    copy of the database Alembic migrated from empty to head (tests/conftest.py).
+    ``pg_session_factory`` binds to this engine."""
+    return pg_head_engine
 
-    from alembic import command
 
-    engine = create_engine(sync_url)
-    try:
-        with engine.begin() as connection:
-            connection.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
-            connection.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
-            connection.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
-            connection.exec_driver_sql("DROP SCHEMA public CASCADE")
-            connection.exec_driver_sql("CREATE SCHEMA public")
-    finally:
-        engine.dispose()
-    command.upgrade(Config(str(_ALEMBIC_INI)), "head")
+@pytest.fixture
+def pg_url_at_cursor_cutover(pg_templates, pg_clone) -> str:
+    """A fresh database migrated from empty to the revision before the cursor cutover."""
+    def build(url: str) -> None:
+        alembic(url, "upgrade", "bc4d5e6f7081")
+
+    return pg_clone(pg_templates.template("serialized_projector_bc4d5e6f7081", build))
 
 
 def _claimed(account_id: UUID, *, cid: int, venue_seq: int, signal: UUID | None = None) -> ReservationClaimed:
@@ -89,7 +86,6 @@ async def test_serialized_projector_schema_contract(pg_engine, monkeypatch) -> N
         "+asyncpg", "+psycopg"
     )
     monkeypatch.setenv("DATABASE_URL", sync_url)
-    _reset_and_upgrade(sync_url)
 
     from sqlalchemy import create_engine, inspect, text
 
@@ -158,29 +154,16 @@ async def test_serialized_projector_schema_contract(pg_engine, monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_cutover_seeds_historical_projection_cursor(
-    pg_engine, pg_session_factory, monkeypatch
-) -> None:
+async def test_cutover_seeds_historical_projection_cursor(pg_url_at_cursor_cutover) -> None:
     """Historical snapshots must not be replayed a second time after cutover."""
-    sync_url = pg_engine.url.render_as_string(hide_password=False).replace(
-        "+asyncpg", "+psycopg"
-    )
-    monkeypatch.setenv("DATABASE_URL", sync_url)
-    from alembic.config import Config
     from sqlalchemy import create_engine, text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from alembic import command
-
+    sync_url = pg_url_at_cursor_cutover
     engine = create_engine(sync_url)
+    async_engine = create_async_engine(sync_url.replace("+psycopg", "+asyncpg"))
+    pg_session_factory = async_sessionmaker(async_engine, expire_on_commit=False)
     try:
-        with engine.begin() as connection:
-            connection.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
-            connection.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
-            connection.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
-            connection.exec_driver_sql("DROP SCHEMA public CASCADE")
-            connection.exec_driver_sql("CREATE SCHEMA public")
-        config = Config(str(_ALEMBIC_INI))
-        command.upgrade(config, "bc4d5e6f7081")
         account_id = uuid4()
         with engine.begin() as connection:
             connection.execute(
@@ -206,7 +189,7 @@ async def test_cutover_seeds_historical_projection_cursor(
                     store=PostgresEventStore(deployment_environment=_ENV)
                 ).append(session, _claimed(account_id, cid=98, venue_seq=98))
             await session.rollback()
-        command.upgrade(config, "head")
+        alembic(sync_url, "upgrade", "head")
         with engine.connect() as connection:
             row = connection.execute(
                 text(
@@ -221,6 +204,7 @@ async def test_cutover_seeds_historical_projection_cursor(
         assert row.last_event_seq == 1
         assert row.projector_version == "legacy-v2"
     finally:
+        await async_engine.dispose()
         engine.dispose()
 
 
@@ -232,7 +216,6 @@ async def test_same_account_transaction_lock_serializes_writers(
         "+asyncpg", "+psycopg"
     )
     monkeypatch.setenv("DATABASE_URL", sync_url)
-    _reset_and_upgrade(sync_url)
 
     account_id = uuid4()
     await _seed_accounts(pg_session_factory, account_id)
@@ -274,7 +257,6 @@ async def test_cross_account_transaction_locks_do_not_block_each_other(
         "+asyncpg", "+psycopg"
     )
     monkeypatch.setenv("DATABASE_URL", sync_url)
-    _reset_and_upgrade(sync_url)
 
     held_account = uuid4()
     independent_account = uuid4()
@@ -321,7 +303,6 @@ async def test_compatibility_append_fails_closed_for_unknown_migrated_account(
         "+asyncpg", "+psycopg"
     )
     monkeypatch.setenv("DATABASE_URL", sync_url)
-    _reset_and_upgrade(sync_url)
 
     account_id = uuid4()
     store = PostgresEventStore(deployment_environment=_ENV)
@@ -345,7 +326,6 @@ async def test_writer_replays_postgres_event_log_gap_before_new_append(
         "+asyncpg", "+psycopg"
     )
     monkeypatch.setenv("DATABASE_URL", sync_url)
-    _reset_and_upgrade(sync_url)
 
     account_id = uuid4()
     await _seed_accounts(pg_session_factory, account_id)
@@ -399,7 +379,6 @@ async def test_projection_failure_rolls_back_event_claim_and_head_in_postgres(
         "+asyncpg", "+psycopg"
     )
     monkeypatch.setenv("DATABASE_URL", sync_url)
-    _reset_and_upgrade(sync_url)
 
     account_id = uuid4()
     await _seed_accounts(pg_session_factory, account_id)
@@ -430,7 +409,6 @@ async def test_archive_revision_strict_append_and_unknown_revision_rejection(
     from sqlalchemy import text
     sync_url = pg_engine.url.render_as_string(hide_password=False).replace("+asyncpg", "+psycopg")
     monkeypatch.setenv("DATABASE_URL", sync_url)
-    _reset_and_upgrade(sync_url)
     account = uuid4()
     await _seed_accounts(pg_session_factory, account)
     writer = AccountEventWriter(store=PostgresEventStore(deployment_environment=_ENV))

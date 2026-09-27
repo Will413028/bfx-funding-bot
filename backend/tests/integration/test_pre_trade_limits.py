@@ -10,11 +10,8 @@
 """
 from __future__ import annotations
 
-import os
-import subprocess
 from dataclasses import replace
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -45,12 +42,11 @@ from bfx_funding_bot.modules.execution.safety.tables import NavWindowSampleRow
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.observability import alerts
 from tests.modules.execution.safety.test_pre_trade import Book, book
+from tests.pg_templates import alembic
 
 from .test_capital_command_boundary import boundary, second_ready, stop_chain
 from .test_capital_repository import capital_db as capital_db
 from .test_capital_repository import capital_engine as capital_engine
-
-BACKEND = Path(__file__).resolve().parents[2]
 
 
 class Trips:
@@ -293,11 +289,8 @@ def test_migration_grants_the_runtime_role_only_read_insert_and_prune(pg_contain
             conn.exec_driver_sql("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE "
                                  "rolname='bfx_bot') THEN CREATE ROLE bfx_bot; END IF; END $$")
             conn.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO bfx_bot")
-        for args in (["upgrade", "head"], ["check"]):
-            result = subprocess.run(["uv", "run", "alembic", *args], cwd=BACKEND,
-                                    env=dict(os.environ, DATABASE_URL=url),
-                                    capture_output=True, text=True)
-            assert result.returncode == 0, result.stdout + result.stderr
+        alembic(url, "upgrade", "head")
+        alembic(url, "check")
         with engine.connect() as conn:
             for privilege, expected in (("SELECT", True), ("INSERT", True), ("DELETE", True),
                                         ("UPDATE", False), ("TRUNCATE", False)):
