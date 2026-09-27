@@ -109,8 +109,8 @@ def _preflight_series_models(
 
 def _resolve_market_rate(candle: FundingCandle, source: str) -> Decimal | None:
     # candle_close is the canonical per-day market funding rate. FRR is a
-    # distinct quantity, not a unit-convertible market-rate proxy — see
-    # docs/superpowers/specs/2026-05-28-frr-market-rate-decoupling-design.md.
+    # distinct quantity, not a unit-convertible market-rate proxy (ARCHITECTURE.md,
+    # backtest engine contract).
     # The raise is defense-in-depth; BacktestConfig already rejects others.
     if source == "candle_close":
         return candle.close

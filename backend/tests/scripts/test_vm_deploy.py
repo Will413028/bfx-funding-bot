@@ -835,7 +835,7 @@ def test_path_glob_without_patterns_matches_nothing() -> None:
     ("docker-compose.dr.yml", True),
     ("deploy/vm/docker-compose.app.yml", False),
     ("deploy/vm/ops/bfx_deploy.py", False),
-    ("docs/deploy/vm/pgbackrest/x.md", False),
+    ("examples/deploy/vm/pgbackrest/x.md", False),
 ])
 def test_dr_trigger_patterns(path: str, expected: bool) -> None:
     assert bfx.path_matches(bfx.DR_TRIGGER_PATTERNS, path) is expected

@@ -8,7 +8,7 @@ reuses the oos_profitability metrics, and writes a markdown + JSON report with a
 four-state verdict.
 
 Run from backend/:
-  uv run python -m scripts.run_g3_live_validation --out docs/research/<date>-g3-live-validation.md
+  uv run python -m scripts.run_g3_live_validation --out /tmp/<date>-g3-live-validation.md
 """
 from __future__ import annotations
 

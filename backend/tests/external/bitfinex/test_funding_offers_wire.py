@@ -1,6 +1,6 @@
 """Wire-format contract tests for Bitfinex active funding offers.
 
-Two layers (see specs/2026-05-25-venue-reconcile-verify-design.md):
+Two layers:
   - test_fixture_parses: fast, runs in the default CI gate. Replays a captured
     real response fixture through the production parser; guards the
     positional-array layout against parser drift.

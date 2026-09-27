@@ -1,4 +1,4 @@
-"""Stale-offer reprice policy (E1 — docs/research/2026-07-06-profit-design-review.md §1).
+"""Stale-offer reprice policy (E1).
 
 純 policy：哪些 resting venue offer 該 cancel，讓 reserved 資金能以現行
 standing quote 重掛。執行（venue call）由 DeploymentReconciler 負責

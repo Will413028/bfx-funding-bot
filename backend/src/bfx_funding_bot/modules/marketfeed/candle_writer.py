@@ -1,6 +1,6 @@
 """WS candle queue -> funding_candles DB upsert.
 
-Design basis: phase4.1-paper-shadow-infra-design.md Section "Data Flow" Flow 2
+Design basis: phase 4.1 paper/shadow infra design Section "Data Flow" Flow 2
 """
 from __future__ import annotations
 

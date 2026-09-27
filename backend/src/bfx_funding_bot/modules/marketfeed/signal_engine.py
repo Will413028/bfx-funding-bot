@@ -1,6 +1,6 @@
 """Signal engine: observe -> emit signal -> divergence check -> emit decision.
 
-設計依據: phase4.1-paper-shadow-infra-design.md Section "Data Flow" Flow 2
+設計依據: phase 4.1 paper/shadow infra design Section "Data Flow" Flow 2
 
 Decoupling (2026-05-29): SignalEngine only records strategy *intent* as a
 StandingQuote. Safety evaluation and venue submission are handled exclusively
