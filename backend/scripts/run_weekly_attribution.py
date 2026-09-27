@@ -286,7 +286,7 @@ async def load_and_compute(
         for r in frr_rows
     ]
     rows = compute_weekly_rows(
-        totals_by_cell=weekly_totals(credits, cells.cell_by_credit, now_ms=now),
+        totals_by_cell=weekly_totals(credits, cells, now_ms=now),
         close_points=[MarketRatePoint(mts=c.mts, rate=c.close)
                       for c in candles if c.close is not None],
         frr_points=frr_points_from_stats(frr_stats),
@@ -330,8 +330,10 @@ def render_reconciliation(result: AttributionResult) -> str:
         c = result.cells
         lines += ["", f"credits: {result.credits}; without trade: {len(c.without_trade)}; "
                       f"offer not ours/unresolved: {len(c.foreign_offer)}; "
-                      f"ambiguous pairing: {len(c.ambiguous)} (all go to their paired cell, "
-                      "unmatched to 'unattributed')"]
+                      f"ambiguous cell split: {len(c.ambiguous)} (credits/loans sharing an "
+                      "opening instant whose trades lead to different cells; allocated by "
+                      f"amount, {len(c.shares)} split proportionally; no trade -> "
+                      "'unattributed')"]
     return "\n".join(lines) + "\n"
 
 

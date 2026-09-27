@@ -1,17 +1,15 @@
 """funding_interest_payments on real PostgreSQL: the grants the bot and web API run under."""
 from __future__ import annotations
 
-import os
-import subprocess
-from pathlib import Path
 from typing import Any
 
 import pytest
 from sqlalchemy import create_engine, text
 
+from tests.pg_templates import alembic as _alembic
+
 pytestmark = pytest.mark.integration
 
-BACKEND = Path(__file__).resolve().parents[2]
 ACCOUNT = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 ROLES = ("bfx_bot", "bfx_webapi", "bfx_webauth")
 INSERT = ("INSERT INTO funding_interest_payments (exchange_account_id, ledger_id, "
@@ -20,19 +18,9 @@ INSERT = ("INSERT INTO funding_interest_payments (exchange_account_id, ledger_id
           "'Margin Funding Payment on wallet funding') ON CONFLICT DO NOTHING")
 
 
-def _alembic(url: str, *args: str) -> None:
-    result = subprocess.run(["uv", "run", "alembic", *args], cwd=BACKEND,
-                            env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-@pytest.fixture
-def migrated(pg_container: Any) -> Any:
-    url = pg_container.get_connection_url().replace("+psycopg2", "+psycopg")
+def _build_migrated(url: str) -> None:
     engine = create_engine(url)
     with engine.begin() as conn:
-        for schema in ("projection_audit", "auth", "release_archive"):
-            conn.exec_driver_sql(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
         conn.exec_driver_sql("DROP SCHEMA public CASCADE")
         conn.exec_driver_sql("CREATE SCHEMA public")
         # Worst case on the VM: default privileges already hand runtime roles ALL.
@@ -41,13 +29,18 @@ def migrated(pg_container: Any) -> Any:
                                  f"rolname='{role}') THEN CREATE ROLE {role}; END IF; END $$")
             conn.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {role}")
             conn.exec_driver_sql(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {role}")
+    engine.dispose()
+    _alembic(url, "upgrade", "head")
+
+
+@pytest.fixture
+def migrated(pg_templates: Any, pg_clone: Any) -> Any:
+    """A fresh copy of the upgraded database; the upgrade runs once per session."""
+    url = pg_clone(pg_templates.template("interest_payments_migrated", _build_migrated))
+    engine = create_engine(url)
     try:
-        _alembic(url, "upgrade", "head")
         yield url, engine
     finally:
-        with engine.begin() as conn:
-            for role in ROLES:
-                conn.exec_driver_sql(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM {role}")
         engine.dispose()
 
 

@@ -1,12 +1,11 @@
 """Migration contract on an isolated PostgreSQL container, including runtime ACLs."""
 import asyncio
-import os
-import subprocess
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from tests.pg_templates import alembic
 
 pytestmark = pytest.mark.integration
 
@@ -24,12 +23,8 @@ def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_container):
         connection.exec_driver_sql("GRANT USAGE ON SCHEMA public TO bfx_bot")
         connection.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO bfx_bot")
         connection.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO bfx_bot")
-    env = dict(os.environ, DATABASE_URL=url)
-    directory = Path(__file__).resolve().parents[2]
-    for command in (["uv", "run", "alembic", "upgrade", "head"],
-                    ["uv", "run", "alembic", "check"]):
-        result = subprocess.run(command, cwd=directory, env=env, capture_output=True, text=True)
-        assert result.returncode == 0, result.stdout + result.stderr
+    alembic(url, "upgrade", "head")
+    alembic(url, "check")
     with engine.begin() as connection:
         assert "capital_snapshots" in inspect(connection).get_table_names()
         assert connection.scalar(text("SELECT count(*) FROM capital_policy_revisions")) == 0

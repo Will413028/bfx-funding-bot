@@ -21,7 +21,7 @@ from bfx_funding_bot.modules.execution.capital_repository import CapitalReposito
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
 
-from .test_trading_state_migration import _alembic, _reset
+from .test_trading_state_migration import _alembic, _alembic_cli, _reset
 
 pytestmark = pytest.mark.integration
 
@@ -33,13 +33,19 @@ _POLICY = CapitalPolicy(
                            rate_floor_ratio=Decimal("0.5"), min_rate_apr=Decimal("0.01")))
 
 
-@pytest.fixture
-def migrated(pg_container):
-    url = pg_container.get_connection_url().replace("+psycopg2", "+psycopg")
+def _build_migrated(url: str) -> None:
     engine = create_engine(url)
     _reset(engine)
+    engine.dispose()
     _alembic(url, "upgrade", "head")
     _alembic(url, "check")
+
+
+@pytest.fixture
+def migrated(pg_templates, pg_clone):
+    """A fresh copy of the upgraded database; the upgrade runs once per session."""
+    url = pg_clone(pg_templates.template("capital_policy_roles_migrated", _build_migrated))
+    engine = create_engine(url)
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO exchange_accounts(id, venue, label) VALUES (:a, 'bitfinex', 'x')"),
                      {"a": _A})
@@ -278,5 +284,6 @@ def test_downgrade_round_trip_and_refusal(migrated):
     _alembic(url, "check")
     with engine.begin() as conn:
         conn.exec_driver_sql(_request_sql())
-    with pytest.raises(AssertionError, match="refuse downgrade of recorded capital policy requests"):
-        _alembic(url, "downgrade", _BEFORE)
+    result = _alembic_cli(url, "downgrade", _BEFORE)
+    assert result.returncode != 0
+    assert "refuse downgrade of recorded capital policy requests" in result.stdout + result.stderr

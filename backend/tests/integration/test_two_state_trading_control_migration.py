@@ -5,6 +5,7 @@ probation, a material-deploy pause, an approval, approve/pause requests) are
 archived or kept as recorded, a current pause becomes an operator HALTED, and a
 downgrade puts everything back byte for byte.
 """
+import copy
 from uuid import UUID
 
 import pytest
@@ -49,9 +50,8 @@ def _snapshot(conn, schema_requests: str, schema_approvals: str) -> dict[str, li
     }
 
 
-@pytest.fixture
-def before(pg_container):
-    url = pg_container.get_connection_url().replace("+psycopg2", "+psycopg")
+def _build_before(url: str) -> tuple[dict[str, int], dict[str, list[tuple]]]:
+    """Rows recorded under the previous rules, at _BEFORE."""
     engine = create_engine(url)
     _reset(engine)
     _alembic(url, "upgrade", _BEFORE)
@@ -74,8 +74,18 @@ def before(pg_container):
             processed_at_ms, outcome_reason) VALUES (:q, :a, 'prod', 'approve', :d, 'reviewed', 'will', 6,
             'applied', 7, 'approved')"""), {"q": _REQ, "a": _A, "d": _DIG})
         recorded = _snapshot(conn, "public", "public")
+    engine.dispose()
+    return ids, recorded
+
+
+@pytest.fixture
+def before(pg_templates, pg_clone):
+    template = pg_templates.template("two_state_before", _build_before)
+    ids, recorded = pg_templates.built(template)
+    url = pg_clone(template)
+    engine = create_engine(url)
     try:
-        yield url, engine, ids, recorded
+        yield url, engine, dict(ids), copy.deepcopy(recorded)
     finally:
         engine.dispose()
 

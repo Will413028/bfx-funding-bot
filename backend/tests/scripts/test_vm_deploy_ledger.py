@@ -16,6 +16,9 @@ from typing import Any
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
+
+from tests.pg_templates import alembic
 
 pytestmark = pytest.mark.integration
 
@@ -41,10 +44,8 @@ def _load(name: str, path: Path) -> ModuleType:
 bfx = _load("vm_ops_bfx_deploy_for_ledger", ROOT / "deploy/vm/ops/bfx_deploy.py")
 
 
-def _alembic(url: str, *args: str) -> None:
-    result = subprocess.run(["uv", "run", "alembic", *args], cwd=BACKEND,
-                            env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
-    assert result.returncode == 0, result.stdout + result.stderr
+def _alembic(url: str, name: str, *args: str) -> None:
+    alembic(url, name, *args)
 
 
 def _entry(**overrides: Any) -> Any:
@@ -58,14 +59,9 @@ def _entry(**overrides: Any) -> Any:
     return bfx.LedgerEntry(**values)
 
 
-@pytest.fixture
-def ledger_db(pg_container: Any) -> Any:
-    url = pg_container.get_connection_url().replace("+psycopg2", "+psycopg")
+def _hostile_defaults(url: str) -> None:
     engine = create_engine(url)
     with engine.begin() as conn:
-        conn.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
-        conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
-        conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
         conn.exec_driver_sql("DROP SCHEMA public CASCADE")
         conn.exec_driver_sql("CREATE SCHEMA public")
         # Worst case on the VM: default privileges already hand runtime roles ALL.
@@ -74,19 +70,58 @@ def ledger_db(pg_container: Any) -> Any:
                                  f"rolname='{role}') THEN CREATE ROLE {role}; END IF; END $$")
             conn.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {role}")
             conn.exec_driver_sql(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {role}")
+    engine.dispose()
+
+
+# Each test starts from the revision it exercises. The path empty -> a7f3c1d9e204
+# -> REVISION -> head is migrated once per session, one template per stop.
+_STOPS = ("a7f3c1d9e204", REVISION, "head")
+
+
+def _ledger_template(templates: Any, revision: str) -> str:
+    base = None
+    for stop in _STOPS:
+        def build(url: str, stop: str = stop, first: bool = base is None) -> None:
+            if first:
+                _hostile_defaults(url)
+            _alembic(url, "upgrade", stop)
+
+        base = templates.template(f"ledger_{stop}", build, base=base)
+        if stop == revision:
+            return base
+    raise ValueError(revision)
+
+
+def _ledger_db(pg_container: Any, templates: Any, clone: Any, revision: str) -> Any:
+    url = clone(_ledger_template(templates, revision))
+    engine = create_engine(url)
     ledger = bfx.PsqlLedger(bfx.subprocess_runner, container=pg_container.get_wrapped_container().id,
-                            db_user=pg_container.username, db_name=pg_container.dbname)
+                            db_user=pg_container.username, db_name=make_url(url).database)
     try:
         yield url, engine, ledger
     finally:
-        with engine.begin() as conn:
-            for role in ("bfx_bot", "bfx_webapi", "bfx_webauth"):
-                conn.exec_driver_sql(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM {role}")
         engine.dispose()
 
 
-def test_ledger_reads_absent_before_the_migration_then_appends_and_reads_back(ledger_db: Any) -> None:
-    url, engine, ledger = ledger_db
+@pytest.fixture
+def ledger_db(pg_container: Any, pg_templates: Any, pg_clone: Any) -> Any:
+    yield from _ledger_db(pg_container, pg_templates, pg_clone, "head")
+
+
+@pytest.fixture
+def ledger_db_before_ledger(pg_container: Any, pg_templates: Any, pg_clone: Any) -> Any:
+    yield from _ledger_db(pg_container, pg_templates, pg_clone, "a7f3c1d9e204")
+
+
+@pytest.fixture
+def ledger_db_at_ledger(pg_container: Any, pg_templates: Any, pg_clone: Any) -> Any:
+    yield from _ledger_db(pg_container, pg_templates, pg_clone, REVISION)
+
+
+def test_ledger_reads_absent_before_the_migration_then_appends_and_reads_back(
+    ledger_db_before_ledger: Any,
+) -> None:
+    url, engine, ledger = ledger_db_before_ledger
     _alembic(url, "upgrade", "a7f3c1d9e204")
     assert ledger.read() == bfx.LedgerView(exists=False, last_attempt=None, last_success=None)
     _alembic(url, "upgrade", REVISION)
@@ -119,9 +154,9 @@ def _old_tool_insert(conn: Any, attempt: str, outcome: str, klass: str) -> None:
         f"'{klass}', true, '{outcome}', 'class={klass}(rules_unavailable)')")
 
 
-def test_previous_tool_can_deploy_the_release_that_retires_change_class(ledger_db: Any) -> None:
+def test_previous_tool_can_deploy_the_release_that_retires_change_class(ledger_db_at_ledger: Any) -> None:
     """Rollout: the old bfx-deploy migrates, then writes both rows with a class."""
-    url, engine, ledger = ledger_db
+    url, engine, ledger = ledger_db_at_ledger
     _alembic(url, "upgrade", REVISION)
     earlier = str(__import__("uuid").uuid4())
     with engine.begin() as conn:
