@@ -2,7 +2,7 @@
 
 Pure, I/O-free。與 G3 的差異：
 - 分箱 = UTC Monday 00:00 對齊的 calendar weeks（穩定的 upsert key），
-  非 weekly_window_bounds 的「資料 min_ts 起算 rolling 7 天 bins」（G3 保持原樣）。
+  （G3 自 2026-09-27 起也用同一套週，第一窗從第一筆 bot credit 起算）。
 - 有 fee：net = gross × (1 − FEE_RATE)。G3 主 headline 維持 gross（報告連續性），
   本模組是 operator 儀表，直接給扣費後數字。
 - per-cell：輸入是每 (cell, week) 的 accrual（CellWeekTotals），由

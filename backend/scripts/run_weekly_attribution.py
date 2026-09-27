@@ -162,97 +162,89 @@ def reconciliation_weeks(now_ms: int, weeks: int) -> list[int]:
     return [latest - i * WEEK_MS for i in reversed(range(weeks))]
 
 
-async def load_and_compute(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    account_id: str,
-    deployment_environment: str,
-    now_ms: int | None = None,
-    reconcile_weeks: int = 8,
-) -> AttributionResult:
-    now = now_ms if now_ms is not None else int(time.time() * 1000)
+@dataclass(frozen=True)
+class CreditInputs:
+    """The venue credit model's inputs for one account: every credit (ended
+    and open), its cell, and the ledger payouts it reconciles against."""
+
+    credits: list[CreditLifetime]
+    cells: CreditCells
+    payments: list[InterestPayment]
+    has_credit_history: bool
+
+
+async def load_credit_inputs(
+    session: AsyncSession, *, account_id: str, deployment_environment: str,
+) -> CreditInputs | None:
+    """Credits, credit -> cell and ledger payouts. None when the account has no
+    ExchangeAccount UUID (the venue read models are keyed by it only).
+    Shared by the weekly attribution and the G3 report."""
     account_uuid = account_id_uuid_or_none(account_id)
     if account_uuid is None:
-        # Venue read models are keyed by the ExchangeAccount UUID only.
-        return AttributionResult([], [], 0, None, has_credit_history=False)
+        return None
     env = deployment_environment
 
-    def scoped(session: AsyncSession, table: Any) -> Any:
+    def scoped(table: Any) -> Any:
         return account_scope_clause(
             session, account_id=account_id,
             exchange_account_column=table.exchange_account_id,
             legacy_account_column=table.account_id,
         )
 
-    async with session_factory() as session:
-        history = (await session.scalars(select(FundingCreditHistoryRow).where(
-            FundingCreditHistoryRow.exchange_account_id == account_uuid,
-            FundingCreditHistoryRow.deployment_environment == env,
-        ))).all()
-        open_rows = (await session.scalars(select(VenueCreditStateRow).where(
-            VenueCreditStateRow.exchange_account_id == account_uuid,
-            VenueCreditStateRow.deployment_environment == env,
-            VenueCreditStateRow.is_terminal.is_(False),
-        ))).all()
-        trade_rows = (await session.scalars(select(FundingTradeRow).where(
-            FundingTradeRow.exchange_account_id == account_uuid,
-            FundingTradeRow.deployment_environment == env,
-        ))).all()
-        claims = (await session.execute(select(
-            OfferClaimRow.venue_offer_id, OfferClaimRow.execution_decision_id,
-            OfferClaimRow.signal_correlation_id,
-        ).where(
-            OfferClaimRow.exchange_account_id == account_uuid,
-            OfferClaimRow.deployment_environment == env,
-            OfferClaimRow.venue_offer_id.is_not(None),
-        ))).all()
-        venue_offers = (await session.execute(select(
-            VenueOfferStateRow.venue_offer_id, VenueOfferStateRow.execution_decision_id,
-            VenueOfferStateRow.signal_correlation_id,
-        ).where(
-            VenueOfferStateRow.exchange_account_id == account_uuid,
-            VenueOfferStateRow.deployment_environment == env,
-        ))).all()
-        fills = (await session.scalars(select(EventLogRow).where(
-            EventLogRow.event_type == _FILL_TYPE, scoped(session, EventLogRow),
-            EventLogRow.deployment_environment == env,
-        ))).all()
-        decisions = (await session.execute(select(
-            ExecutionDecisionRow.decision_id, ExecutionDecisionRow.signal_correlation_id,
-            ExecutionDecisionRow.cell_id,
-        ).where(
-            scoped(session, ExecutionDecisionRow),
-            ExecutionDecisionRow.deployment_environment == env,
-        ))).all()
-        diagnostics = (await session.scalars(select(DiagnosticsRow).where(
-            DiagnosticsRow.kind == _DECISION_KIND, scoped(session, DiagnosticsRow),
-            DiagnosticsRow.deployment_environment == env,
-        ))).all()
-        ledger_rows = (await session.scalars(select(FundingInterestPaymentRow).where(
-            FundingInterestPaymentRow.exchange_account_id == account_uuid,
-            FundingInterestPaymentRow.deployment_environment == env,
-        ))).all()
+    history = (await session.scalars(select(FundingCreditHistoryRow).where(
+        FundingCreditHistoryRow.exchange_account_id == account_uuid,
+        FundingCreditHistoryRow.deployment_environment == env,
+    ))).all()
+    open_rows = (await session.scalars(select(VenueCreditStateRow).where(
+        VenueCreditStateRow.exchange_account_id == account_uuid,
+        VenueCreditStateRow.deployment_environment == env,
+        VenueCreditStateRow.is_terminal.is_(False),
+    ))).all()
+    trade_rows = (await session.scalars(select(FundingTradeRow).where(
+        FundingTradeRow.exchange_account_id == account_uuid,
+        FundingTradeRow.deployment_environment == env,
+    ))).all()
+    claims = (await session.execute(select(
+        OfferClaimRow.venue_offer_id, OfferClaimRow.execution_decision_id,
+        OfferClaimRow.signal_correlation_id,
+    ).where(
+        OfferClaimRow.exchange_account_id == account_uuid,
+        OfferClaimRow.deployment_environment == env,
+        OfferClaimRow.venue_offer_id.is_not(None),
+    ))).all()
+    venue_offers = (await session.execute(select(
+        VenueOfferStateRow.venue_offer_id, VenueOfferStateRow.execution_decision_id,
+        VenueOfferStateRow.signal_correlation_id,
+    ).where(
+        VenueOfferStateRow.exchange_account_id == account_uuid,
+        VenueOfferStateRow.deployment_environment == env,
+    ))).all()
+    fills = (await session.scalars(select(EventLogRow).where(
+        EventLogRow.event_type == _FILL_TYPE, scoped(EventLogRow),
+        EventLogRow.deployment_environment == env,
+    ))).all()
+    decisions = (await session.execute(select(
+        ExecutionDecisionRow.decision_id, ExecutionDecisionRow.signal_correlation_id,
+        ExecutionDecisionRow.cell_id,
+    ).where(
+        scoped(ExecutionDecisionRow),
+        ExecutionDecisionRow.deployment_environment == env,
+    ))).all()
+    diagnostics = (await session.scalars(select(DiagnosticsRow).where(
+        DiagnosticsRow.kind == _DECISION_KIND, scoped(DiagnosticsRow),
+        DiagnosticsRow.deployment_environment == env,
+    ))).all()
+    ledger_rows = (await session.scalars(select(FundingInterestPaymentRow).where(
+        FundingInterestPaymentRow.exchange_account_id == account_uuid,
+        FundingInterestPaymentRow.deployment_environment == env,
+    ))).all()
 
-        credits = [_credit_from_history(r) for r in history]
-        seen = {c.credit_id for c in credits}
-        for r in open_rows:
-            open_credit = _open_credit(r)
-            if open_credit is not None and open_credit.credit_id not in seen:
-                credits.append(open_credit)
-        if not credits:
-            return AttributionResult([], [], 0, None, has_credit_history=bool(history))
-
-        start = min(c.opened_ms for c in credits)
-        candles = await get_candles_in_range(
-            session, symbol=_MARKET_SYMBOL, timeframe=_MARKET_TIMEFRAME,
-            period_agg=_MARKET_PERIOD_AGG, start_mts=start, end_mts=now,
-        )
-        frr_rows = (await session.scalars(
-            select(FundingStatRow).where(
-                FundingStatRow.symbol == _MARKET_SYMBOL,
-                FundingStatRow.mts >= start, FundingStatRow.mts <= now,
-            ).order_by(FundingStatRow.mts)
-        )).all()
+    credits = [_credit_from_history(r) for r in history]
+    seen = {c.credit_id for c in credits}
+    for r in open_rows:
+        open_credit = _open_credit(r)
+        if open_credit is not None and open_credit.credit_id not in seen:
+            credits.append(open_credit)
 
     trades = [TradeRecord(
         trade_id=int(t.trade_id), symbol=t.symbol, mts_create=int(t.mts_create),
@@ -275,8 +267,45 @@ async def load_and_compute(
         links, cell_by_decision={did: cell for did, _scid, cell in decisions},
         cell_by_scid=cell_by_scid,
     )
-    cells = assign_cells(credits, trades, offer_cells)
+    payments = [InterestPayment(r.ledger_id, r.currency, None, r.mts, Decimal(r.amount),
+                                Decimal(r.balance), r.description) for r in ledger_rows]
+    return CreditInputs(credits, assign_cells(credits, trades, offer_cells), payments,
+                        has_credit_history=bool(history))
 
+
+async def load_and_compute(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    account_id: str,
+    deployment_environment: str,
+    now_ms: int | None = None,
+    reconcile_weeks: int = 8,
+) -> AttributionResult:
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    async with session_factory() as session:
+        inputs = await load_credit_inputs(
+            session, account_id=account_id, deployment_environment=deployment_environment,
+        )
+        if inputs is None:
+            return AttributionResult([], [], 0, None, has_credit_history=False)
+        credits = inputs.credits
+        if not credits:
+            return AttributionResult([], [], 0, None,
+                                     has_credit_history=inputs.has_credit_history)
+
+        start = min(c.opened_ms for c in credits)
+        candles = await get_candles_in_range(
+            session, symbol=_MARKET_SYMBOL, timeframe=_MARKET_TIMEFRAME,
+            period_agg=_MARKET_PERIOD_AGG, start_mts=start, end_mts=now,
+        )
+        frr_rows = (await session.scalars(
+            select(FundingStatRow).where(
+                FundingStatRow.symbol == _MARKET_SYMBOL,
+                FundingStatRow.mts >= start, FundingStatRow.mts <= now,
+            ).order_by(FundingStatRow.mts)
+        )).all()
+
+    cells = inputs.cells
     frr_stats = [
         FundingStat(
             symbol=r.symbol, mts=r.mts,
@@ -300,15 +329,14 @@ async def load_and_compute(
             and r.funding_amount > 0
         ],
     )
-    payments = [InterestPayment(r.ledger_id, r.currency, None, r.mts, Decimal(r.amount),
-                                Decimal(r.balance), r.description) for r in ledger_rows]
     reconciliations = [
-        reconcile_week(credits, payments, currency=currency, week_start_ms=week, now_ms=now)
+        reconcile_week(credits, inputs.payments, currency=currency, week_start_ms=week,
+                       now_ms=now)
         for currency in sorted({funding_currency(c.symbol) for c in credits})
         for week in reconciliation_weeks(now, reconcile_weeks)
     ]
     return AttributionResult(rows, reconciliations, len(credits), cells,
-                             has_credit_history=bool(history))
+                             has_credit_history=inputs.has_credit_history)
 
 
 def render_reconciliation(result: AttributionResult) -> str:

@@ -1,9 +1,9 @@
 """Postgres data loader for G3 live validation.
 
-Queries event_log (fills + releases) and funding_candles (per-day market-rate
-series, close) from Postgres, builds FillRecord / MarketRatePoint lists, and
-delegates all computation to the pure modules/live_validation/live_attribution
-module.
+Loads the venue credit model (credits, credit -> cell via funding_trades, ledger
+payouts; the same loader as the weekly attribution) and the market-rate series
+(funding_candles.close, funding_stats) from Postgres, and delegates all
+computation to the pure modules/live_validation/live_attribution module.
 
 account_id  = canonical UUID from BFX_EXCHANGE_ACCOUNT_ID (required for the
 production DB path; injected sqlite tests use a synthetic in-memory realm)
@@ -12,10 +12,9 @@ environment = BFX_DEPLOYMENT_ENV env-var (required; "prod" for the live canary)
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -23,63 +22,51 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings, require_deployment_environment
 from bfx_funding_bot.external.bitfinex.auth_rest import InterestPayment
-from bfx_funding_bot.modules.accounts.exchange_accounts import (
-    account_id_uuid_or_none,
-    account_scope_clause,
-)
 from bfx_funding_bot.modules.backtest.oos_profitability import bootstrap_ci, paired_active_returns
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.execution.event_store.tables import (
-    EventLogRow,
-    PositionStateRow,
-)
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
+from bfx_funding_bot.modules.live_validation.credit_attribution import (
+    UNATTRIBUTED,
+    CreditCells,
+    CreditLifetime,
+    WeeklyReconciliation,
+    reconcile_week,
+)
 from bfx_funding_bot.modules.live_validation.interest_ledger import (
     funding_currency,
     wallet_balance_basis,
 )
 from bfx_funding_bot.modules.live_validation.live_attribution import (
     CapitalBasis,
-    ClampDiagnostic,
-    CreditCloseRecord,
-    FillRecord,
+    CreditCoverage,
+    DeploymentCheck,
     FrrBenchmark,
+    G3Report,
     G3Verdict,
     MarketRatePoint,
-    _fill_duration_days,
-    apply_credit_closes,
     assert_market_rate_band,
     attribute_active,
     attribute_idle,
     attribute_passive,
     capital_for,
-    cell_period_days,
-    check_deployment_anchor,
-    check_nav_anchor,
-    clamp_active_window,
+    credit_capital_days,
+    credit_gross_interest,
     decide_verdict,
     frr_points_from_stats,
-    open_principal_at,
-    weekly_window_bounds,
+    peak_open_principal,
 )
-from bfx_funding_bot.modules.live_validation.tables import (
-    FundingCreditHistoryRow,
-    FundingInterestPaymentRow,
+from bfx_funding_bot.modules.live_validation.weekly_attribution import (
+    WEEK_MS,
+    calendar_week_start,
 )
-
-# Event type constants — must match serialization._TYPE_BY_CLASS (UPPERCASE).
-_FILL_TYPE = "ORDER_FILL"
-_RELEASE_TYPE = "RESERVATION_RELEASED"
-_CREDIT_CLOSE_TYPE = "CREDIT_CLOSED"
+from scripts.run_weekly_attribution import load_credit_inputs
 
 # Thresholds for decide_verdict (spec: min_windows=8, min_capital_days=capital*7)
 _MIN_WINDOWS = 8
-_DEPLOY_TOL = Decimal("0.05")
-_NAV_TOL = Decimal("0.1")
 
-# How far back to look for market-rate data when there are no fills at all.
+# How far back to look for market-rate data when the bot has no credits at all.
 _MARKET_RATE_FALLBACK_DAYS = 30
 _MARKET_RATE_FALLBACK_MS = _MARKET_RATE_FALLBACK_DAYS * 24 * 60 * 60 * 1000
 
@@ -100,111 +87,19 @@ def _candles_to_market_rate_points(candles: list[FundingCandle]) -> list[MarketR
     ]
 
 
-async def _load_observed_realized(
-    session: AsyncSession,
-    *,
-    account_id: str,
-    deployment_env: str,
-    symbol: str,
-) -> Decimal:
-    """observed_realized for ONE symbol cell. position_state is per-symbol
-    (composite PK account/env/symbol since the per-symbol refactor) — an
-    unfiltered .first() would return an arbitrary symbol's row once fUSD
-    coexists with fUST. Missing row → 0 (idle canary)."""
-    stmt = (
-        select(PositionStateRow)
-        .where(
-            account_scope_clause(
-                session,
-                account_id=account_id,
-                exchange_account_column=PositionStateRow.exchange_account_id,
-                legacy_account_column=PositionStateRow.account_id,
-            ),
-            PositionStateRow.deployment_environment == deployment_env,
-            PositionStateRow.symbol == symbol,
-        )
-        .limit(1)
-    )
-    row = (await session.execute(stmt)).scalars().first()
-    return Decimal(str(row.realized)) if row is not None else Decimal("0")
-
-
-def merge_credit_closes(
-    history: list[CreditCloseRecord],
-    events: list[tuple[dict[str, Any], int]],
-    *,
-    symbol: str,
-) -> list[CreditCloseRecord]:
-    """Venue credit history first; a CREDIT_CLOSED event (payload, occurred_at_ms)
-    only for a credit the history does not have yet, closed at its
-    mts_last_payout when the event carries one."""
-    synced = {c.credit_id for c in history}
-    return history + [
-        CreditCloseRecord(
-            credit_id=int(payload["credit_id"]),
-            amount=Decimal(str(payload["amount"])),
-            mts_create=int(payload["mts_create"]),
-            close_ts_ms=int(payload.get("mts_last_payout") or occurred_at_ms),
-        )
-        for payload, occurred_at_ms in events
-        if payload.get("symbol") == symbol and int(payload["credit_id"]) not in synced
-    ]
-
-
-async def _load_ledger_capital(
-    session: AsyncSession, *, account_id: str, deployment_env: str, currency: str,
-) -> Callable[[int, int], Decimal] | None:
-    """C per window from the funding-wallet balance in the interest ledger."""
-    account_uuid = account_id_uuid_or_none(account_id)
-    if account_uuid is None:
-        return None
-    rows = (await session.scalars(select(FundingInterestPaymentRow).where(
-        FundingInterestPaymentRow.exchange_account_id == account_uuid,
-        FundingInterestPaymentRow.deployment_environment == deployment_env,
-        FundingInterestPaymentRow.currency == currency,
-    ))).all()
-    payments = [InterestPayment(r.ledger_id, r.currency, None, r.mts, Decimal(r.amount),
-                                Decimal(r.balance), r.description) for r in rows]
-    return wallet_balance_basis(payments, currency=currency)
-
-
-async def _load_credit_history_closes(
-    session: AsyncSession, *, account_id: str, deployment_env: str, symbol: str,
-) -> list[CreditCloseRecord]:
-    """Ended credits from the venue credit history (keyed by account UUID only;
-    synthetic legacy realms have none)."""
-    account_uuid = account_id_uuid_or_none(account_id)
-    if account_uuid is None:
-        return []
-    rows = (await session.scalars(select(FundingCreditHistoryRow).where(
-        FundingCreditHistoryRow.exchange_account_id == account_uuid,
-        FundingCreditHistoryRow.deployment_environment == deployment_env,
-        FundingCreditHistoryRow.symbol == symbol,
-        FundingCreditHistoryRow.kind == "credit",
-    ))).all()
-    return [
-        CreditCloseRecord(
-            credit_id=int(r.credit_id), amount=Decimal(r.amount), mts_create=int(r.mts_create),
-            close_ts_ms=int(r.mts_last_payout if r.mts_last_payout is not None else r.mts_update),
-        )
-        for r in rows
-    ]
-
-
 async def build_verdict_from_neon(
     *,
     capital: Decimal | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
-) -> tuple[G3Verdict, str, int, ClampDiagnostic, FrrBenchmark]:
-    """Query Postgres and run G3 attribution.  Returns (verdict, data_window_str, n_fills, clamp_diag, frr_bench).
+    now_ms: int | None = None,
+) -> G3Report:
+    """Query Postgres and run G3 attribution.
 
-    I/O shell only: fetches fills/releases/candles/position_state, builds the
-    FillRecord + MarketRatePoint domain lists, then delegates to the pure
-    _compute_verdict. Pass `session_factory` to run against an injected DB
-    (used by the seeded unit test); otherwise an engine is built from env.
-    Function name `build_verdict_from_neon` is a historical holdover from the
-    pre-2026-06-23 Neon era; kept as-is (many call sites, rename is behavior-free
-    churn).
+    I/O shell only: loads the credit model and the market series, then
+    delegates to the pure _compute_verdict. Pass `session_factory` to run
+    against an injected DB (used by the seeded unit tests); otherwise an engine
+    is built from env. Function name `build_verdict_from_neon` is a historical
+    holdover from the pre-2026-06-23 Neon era.
     """
     raw_account_id = os.environ.get("BFX_EXCHANGE_ACCOUNT_ID", "").strip()
     if not raw_account_id:
@@ -220,11 +115,11 @@ async def build_verdict_from_neon(
     if session_factory is None:
         deployment_env = require_deployment_environment()
     else:
-        # The in-memory unit harness intentionally supplies synthetic legacy
-        # rows and no process environment; production always takes the branch
-        # above and requires an explicit validated value.
+        # The in-memory unit harness supplies no process environment; production
+        # always takes the branch above and requires an explicit validated value.
         deployment_env = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
 
+    now = now_ms if now_ms is not None else int(datetime.now(UTC).timestamp() * 1000)
     engine = None
     if session_factory is None:
         settings = Settings()
@@ -233,76 +128,55 @@ async def build_verdict_from_neon(
 
     try:
         async with session_scope(session_factory) as session:
-            # ── 1. Fetch ORDER_FILL rows ──────────────────────────────────────
-            fill_stmt = (
-                select(EventLogRow)
-                .where(
-                    account_scope_clause(
-                        session,
-                        account_id=account_id,
-                        exchange_account_column=EventLogRow.exchange_account_id,
-                        legacy_account_column=EventLogRow.account_id,
-                    ),
-                    EventLogRow.deployment_environment == deployment_env,
-                    EventLogRow.event_type == _FILL_TYPE,
-                )
-                .order_by(EventLogRow.occurred_at_ms.asc())
+            # ── 1. Credit model: credits, their cells, ledger payouts ─────────
+            inputs = await load_credit_inputs(
+                session, account_id=account_id, deployment_environment=deployment_env,
             )
-            fill_rows = (await session.execute(fill_stmt)).scalars().all()
+            credits = inputs.credits if inputs is not None else []
+            cells = inputs.cells if inputs is not None else CreditCells(
+                {}, frozenset(), frozenset(), frozenset())
+            payments = inputs.payments if inputs is not None else []
 
-            # ── 2. Fetch RESERVATION_RELEASED rows ───────────────────────────
-            release_stmt = (
-                select(EventLogRow)
-                .where(
-                    account_scope_clause(
-                        session,
-                        account_id=account_id,
-                        exchange_account_column=EventLogRow.exchange_account_id,
-                        legacy_account_column=EventLogRow.account_id,
-                    ),
-                    EventLogRow.deployment_environment == deployment_env,
-                    EventLogRow.event_type == _RELEASE_TYPE,
-                )
-            )
-            release_rows = (await session.execute(release_stmt)).scalars().all()
-
-            # Build venue_offer_id -> release_ts_ms map (take latest if duplicates)
-            release_map: dict[str, int] = {}
-            for r in release_rows:
-                voi = r.venue_offer_id
-                if voi is not None:
-                    existing = release_map.get(voi)
-                    if existing is None or r.occurred_at_ms > existing:
-                        release_map[voi] = r.occurred_at_ms
-
-            # ── 3. Fetch market-rate series (funding_candles.close) ───────────
-            now_ms = int(datetime.now(UTC).timestamp() * 1000)
-            if fill_rows:
-                rate_start_ms = fill_rows[0].occurred_at_ms
-                rate_end_ms = now_ms
+            # ── 2. Capital budget C ───────────────────────────────────────────
+            # An explicit amount wins. Otherwise C per window is the funding
+            # wallet balance the venue ledger reports: BFX_ALLOCATION_CAP_USDT
+            # is 0 since the capital policy replaced allocation caps.
+            capital_basis: CapitalBasis
+            if capital is not None:
+                capital_basis = capital
+                capital_source = f"--capital {capital}"
             else:
-                rate_start_ms = now_ms - _MARKET_RATE_FALLBACK_MS
-                rate_end_ms = now_ms
+                ledger_basis = wallet_balance_basis(
+                    payments, currency=funding_currency(_MARKET_SYMBOL))
+                if ledger_basis is None:
+                    raise RuntimeError(
+                        "G3 needs a capital budget: pass --capital, or let the bot's "
+                        "InterestLedgerSync fill funding_interest_payments for this account"
+                    )
+                capital_basis = ledger_basis
+                capital_source = "ledger"
 
+            # ── 3. Market-rate series (funding_candles.close, funding_stats) ──
+            bot = _bot_credits(credits, cells)
+            rate_start_ms = (min(c.opened_ms for c in bot) if bot
+                             else now - _MARKET_RATE_FALLBACK_MS)
             candles = await get_candles_in_range(
                 session,
                 symbol=_MARKET_SYMBOL,
                 timeframe=_MARKET_TIMEFRAME,
                 period_agg=_MARKET_PERIOD_AGG,
                 start_mts=rate_start_ms,
-                end_mts=rate_end_ms,
+                end_mts=now,
             )
-
-            # ── 3b. Fetch funding_stats range (AlwaysFRR arm; same window) ────
             # funding_stats is shared market data (realm-agnostic), queried over
-            # the SAME [rate_start_ms, rate_end_ms] window as the candle series.
+            # the same window as the candle series.
             frr_rows = (
                 await session.execute(
                     select(FundingStatRow)
                     .where(
                         FundingStatRow.symbol == _MARKET_SYMBOL,
                         FundingStatRow.mts >= rate_start_ms,
-                        FundingStatRow.mts <= rate_end_ms,
+                        FundingStatRow.mts <= now,
                     )
                     .order_by(FundingStatRow.mts)
                 )
@@ -315,156 +189,126 @@ async def build_verdict_from_neon(
                 )
                 for r in frr_rows
             ]
-
-            # ── 3c. Capital budget C ──────────────────────────────────────────
-            # An explicit amount wins. Otherwise C per window is the funding
-            # wallet balance the venue ledger reports (report_interest's basis):
-            # BFX_ALLOCATION_CAP_USDT is 0 since the capital policy replaced
-            # allocation caps, and a zero C made every window raise.
-            capital_basis: CapitalBasis
-            if capital is not None:
-                capital_basis = capital
-            else:
-                ledger_basis = await _load_ledger_capital(
-                    session, account_id=account_id, deployment_env=deployment_env,
-                    currency=funding_currency(_MARKET_SYMBOL),
-                )
-                if ledger_basis is None:
-                    raise RuntimeError(
-                        "G3 needs a capital budget: pass --capital, or let the bot's "
-                        "InterestLedgerSync fill funding_interest_payments for this account"
-                    )
-                capital_basis = ledger_basis
-
-            # ── 4. Fetch observed_realized from position_state snapshot ───────
-            observed_realized = await _load_observed_realized(
-                session,
-                account_id=account_id,
-                deployment_env=deployment_env,
-                symbol=_MARKET_SYMBOL,
-            )
-
-            # ── 5. Build domain lists (frozen dataclasses, session-detached) ──
-            market_rate_points = _candles_to_market_rate_points(candles)
-            # Fills carry no cell identity, so the spec mandates the conservative
-            # p2 path: held-to-term = 2 days (cell_period_days("p2", …) ignores
-            # its second arg).
-            conservative_period = cell_period_days("p2", Decimal("2"))
-            fills: list[FillRecord] = []
-            for row in fill_rows:
-                payload = row.payload
-                size_usdt = Decimal(str(payload.get("size_usdt", "0")))
-                # fill_rate is stored as float in OrderFilled; Decimal(str(float))
-                # avoids scientific-notation issues (live executor fix ae2c59d).
-                fill_rate = Decimal(str(payload.get("fill_rate", "0")))
-                venue_offer_id = str(
-                    payload.get("venue_offer_id") or row.venue_offer_id or ""
-                )
-                fills.append(
-                    FillRecord(
-                        venue_offer_id=venue_offer_id,
-                        fill_ts_ms=row.occurred_at_ms,
-                        size_usdt=size_usdt,
-                        rate=fill_rate,
-                        period_days=conservative_period,
-                        release_ts_ms=release_map.get(venue_offer_id),
-                    )
-                )
-
-            # ── 5b. Join venue credit-close truth ─────────────────────────────
-            # Early borrower returns otherwise double-count re-lent principal in
-            # open_principal_at (2026-07-19 anchor divergence root cause).
-            # Venue credit history (MTS_LAST_PAYOUT) is authoritative; a
-            # CREDIT_CLOSED event is used only for a credit not yet synced, with
-            # its mts_last_payout when present. Events written before the
-            # 2026-09-27 parser fix carry mts_update as their time, which equals
-            # mts_create for a credit repaid early.
-            history_closes = await _load_credit_history_closes(
-                session, account_id=account_id, deployment_env=deployment_env,
-                symbol=_MARKET_SYMBOL,
-            )
-            close_stmt = select(EventLogRow).where(
-                account_scope_clause(
-                    session,
-                    account_id=account_id,
-                    exchange_account_column=EventLogRow.exchange_account_id,
-                    legacy_account_column=EventLogRow.account_id,
-                ),
-                EventLogRow.deployment_environment == deployment_env,
-                EventLogRow.event_type == _CREDIT_CLOSE_TYPE,
-            )
-            close_rows = (await session.execute(close_stmt)).scalars().all()
-            closes = merge_credit_closes(
-                history_closes,
-                [(r.payload, r.occurred_at_ms) for r in close_rows],
-                symbol=_MARKET_SYMBOL,
-            )
-            fills = apply_credit_closes(fills, closes)
     finally:
         if engine is not None:
             await engine.dispose()
 
     return _compute_verdict(
-        fills=fills,
-        market_rate_points=market_rate_points,
-        observed_realized=observed_realized,
+        credits=credits,
+        cells=cells,
+        payments=payments,
+        market_rate_points=_candles_to_market_rate_points(candles),
         capital=capital_basis,
+        capital_source=capital_source,
+        now_ms=now,
         frr_points=frr_points_from_stats(frr_stats),
     )
 
 
+def calendar_window_bounds(start_ms: int, end_ms: int) -> list[tuple[int, int]]:
+    """UTC calendar-week [lo, hi) windows covering [start_ms, end_ms).
+
+    Same weeks as the ledger reconciliation and attribution_weekly, so the
+    trust gate checks exactly the weeks the CI samples. The first window starts
+    at start_ms (no pre-inception idle days), the last is truncated to end_ms.
+    """
+    bounds: list[tuple[int, int]] = []
+    lo = start_ms
+    while lo < end_ms:
+        hi = min(calendar_week_start(lo) + WEEK_MS, end_ms)
+        bounds.append((lo, hi))
+        lo = hi
+    return bounds
+
+
+def _bot_credits(credits: Sequence[CreditLifetime], cells: CreditCells) -> list[CreditLifetime]:
+    """The canary symbol's credits that funding_trades lead to one of our cells."""
+    return [
+        c for c in credits
+        if c.symbol == _MARKET_SYMBOL
+        and cells.cell_by_credit.get(c.credit_id, UNATTRIBUTED) != UNATTRIBUTED
+    ]
+
+
+def _reconcile(
+    credits: Sequence[CreditLifetime],
+    payments: Sequence[InterestPayment],
+    *,
+    start_ms: int,
+    now_ms: int,
+) -> list[WeeklyReconciliation]:
+    """Credit net interest vs ledger payouts for every calendar week from the
+    one holding `start_ms` to the current one (all of the symbol's credits:
+    the ledger pays the whole wallet, bot or not)."""
+    currency = funding_currency(_MARKET_SYMBOL)
+    same_currency = [c for c in credits if funding_currency(c.symbol) == currency]
+    out: list[WeeklyReconciliation] = []
+    week = calendar_week_start(start_ms)
+    while week < now_ms:
+        out.append(reconcile_week(same_currency, payments, currency=currency,
+                                  week_start_ms=week, now_ms=now_ms))
+        week += WEEK_MS
+    return out
+
+
+def _divergence(r: WeeklyReconciliation) -> str:
+    week = datetime.fromtimestamp(r.week_start_ms / 1000, UTC).strftime("%Y-%m-%d")
+    return f"week {week} credits net {r.credit_net:.6f} vs ledger {r.ledger_net:.6f}"
+
+
 def _compute_verdict(
     *,
-    fills: list[FillRecord],
+    credits: Sequence[CreditLifetime],
+    cells: CreditCells,
     market_rate_points: list[MarketRatePoint],
-    observed_realized: Decimal,
     capital: CapitalBasis,
+    now_ms: int,
+    payments: Sequence[InterestPayment] = (),
+    capital_source: str = "ledger",
     frr_points: list[MarketRatePoint] | None = None,
-) -> tuple[G3Verdict, str, int, ClampDiagnostic, FrrBenchmark]:
+) -> G3Report:
     """Pure G3 verdict over already-built domain lists. No I/O.
 
-    ``capital`` is C, fixed or per window; whole-span figures (headline,
-    over-deploy clamp, min capital-days) use C over the whole data window.
-
-    Returns (verdict, data_window_str, n_fills, clamp_diag, frr_bench).
+    ``credits`` are all of the account's credits; the active arm counts the
+    canary symbol's credits attributed to a bot cell. ``capital`` is C, fixed
+    or per window; whole-span figures (headline, deployment check, min
+    capital-days) use C over the whole data window.
     """
     frr_points = frr_points or []
-    n_fills = len(fills)
+    bot = _bot_credits(credits, cells)
 
-    # ── Compute windows + attribution ────────────────────────────────────────
-    if fills or market_rate_points:
-        all_mts = [f.fill_ts_ms for f in fills] + [p.mts for p in market_rate_points]
-        min_ts = min(all_mts)
-        max_ts = max(all_mts)
-    else:
-        # Truly empty — no data at all; produce a zero-data verdict.
-        now_ms = int(datetime.now(UTC).timestamp() * 1000)
-        min_ts = now_ms
-        max_ts = now_ms
+    # ── Windows: from the first bot credit (or market point) to now ─────────
+    all_mts = [c.opened_ms for c in bot] + [p.mts for p in market_rate_points]
+    min_ts = min(all_mts) if all_mts else now_ms
+    max_ts = now_ms
+    has_data = bool(all_mts)
 
-    bounds = weekly_window_bounds(min_ts, max_ts)
+    # The symbol's other credits lent inside the window: reported, not counted.
+    unattributed = [
+        c for c in credits
+        if c.symbol == _MARKET_SYMBOL
+        and cells.cell_by_credit.get(c.credit_id, UNATTRIBUTED) == UNATTRIBUTED
+        and c.held_ms(min_ts, max_ts, now_ms=now_ms) > 0
+    ]
+
+    bounds = calendar_window_bounds(min_ts, max_ts)
     span_capital = capital_for(capital, min_ts, max_ts)
 
     mean_fn = lambda xs: sum(xs, Decimal("0")) / Decimal(len(xs))  # noqa: E731
 
     # window-coverage of the passive arm decides the MR-alpha diagnostic only.
-    window_rate_points = (
-        [p for p in market_rate_points if min_ts <= p.mts < max_ts]
-        if (fills or market_rate_points)
-        else []
-    )
+    window_rate_points = [p for p in market_rate_points if min_ts <= p.mts < max_ts]
 
-    # AlwaysFRR benchmark default — MUST be defined before the fills/else split so
-    # the empty-fills else path returns a full 5-tuple (no UnboundLocalError). The
-    # fills branch overwrites it below when frr_points are present.
+    # AlwaysFRR benchmark default; the bot branch overwrites it when frr_points exist.
     frr_bench = FrrBenchmark(
         available=False, spread=Decimal("0"), ci_lo=Decimal("0"),
         ci_hi=Decimal("0"),
         reason="funding_stats empty — run backfill (E3 Task 8)",
     )
 
-    if fills and bounds:
-        strat_outcomes = attribute_active(fills, capital=capital, window_bounds=bounds)
+    if bot and bounds:
+        strat_outcomes = attribute_active(bot, capital=capital, window_bounds=bounds,
+                                          now_ms=now_ms)
         idle_outcomes = attribute_idle(window_bounds=bounds)
         base_outcomes = attribute_passive(market_rate_points, window_bounds=bounds)
 
@@ -478,8 +322,9 @@ def _compute_verdict(
             ci_lo, ci_hi = Decimal("0"), Decimal("0")
 
         # Headline: single-window absolute active return over the full span.
-        single_strat = attribute_active(fills, capital=capital, window_bounds=[(min_ts, max_ts)])
-        single_base = attribute_passive(market_rate_points, window_bounds=[(min_ts, max_ts)])  # consumed by mr_alpha_spread below
+        span = [(min_ts, max_ts)]
+        single_strat = attribute_active(bot, capital=capital, window_bounds=span, now_ms=now_ms)
+        single_base = attribute_passive(market_rate_points, window_bounds=span)
         headline_bot_vs_idle = single_strat[0].net_monthly
 
         # Secondary diagnostic: MR alpha = active − AlwaysMarketRate.
@@ -493,13 +338,8 @@ def _compute_verdict(
         # in-band series. The band check is deferred to band_reason below.
         mr_alpha_available = len(window_rate_points) > 0
 
-        # AlwaysFRR benchmark (policy bar; NOT fed into decide_verdict). Statistical
-        # handling is isomorphic to the mr_alpha block above: paired_active_returns
-        # already returns a per-window diff list (not a tuple list), bootstrap_ci
-        # takes mean_fn as its second positional stat_fn, and the headline spread is
-        # the full-span single-window diff. The band guard is the "double insurance"
-        # deferred from Task 2: an out-of-band FRR series marks the arm unavailable
-        # (reason = the ValueError) rather than crashing.
+        # AlwaysFRR benchmark (policy bar; NOT fed into decide_verdict). An
+        # out-of-band FRR series marks the arm unavailable rather than crashing.
         if frr_points:
             try:
                 assert_market_rate_band([p.rate for p in frr_points])
@@ -510,10 +350,10 @@ def _compute_verdict(
                 )
             else:
                 frr_arm = attribute_passive(frr_points, window_bounds=bounds)
-                frr_diffs = paired_active_returns(strat_outcomes, frr_arm)  # already a diff list
+                frr_diffs = paired_active_returns(strat_outcomes, frr_arm)
                 if frr_diffs:
                     lo, hi = bootstrap_ci(frr_diffs, mean_fn)
-                    single_frr = attribute_passive(frr_points, window_bounds=[(min_ts, max_ts)])
+                    single_frr = attribute_passive(frr_points, window_bounds=span)
                     spread = single_strat[0].net_monthly - single_frr[0].net_monthly
                     frr_bench = FrrBenchmark(
                         available=True, spread=spread, ci_lo=lo, ci_hi=hi, reason=None,
@@ -524,43 +364,18 @@ def _compute_verdict(
                         ci_hi=Decimal("0"), reason="no overlapping windows",
                     )
 
-        full_clamp = clamp_active_window(fills, cap=span_capital)
-        total_capital_days = full_clamp.capital_days
-        clamp_diag = ClampDiagnostic(
-            cap=span_capital,
-            peak_concurrent=full_clamp.peak_concurrent,
-            raw_interest=full_clamp.raw_interest,
-            clamped_interest=full_clamp.interest,
-        )
-
-        # attributed_deployed = open principal at the end of the data window
-        # (point-in-time, comparable to the position_state realized snapshot).
-        attributed_deployed = open_principal_at(fills, max_ts)
-        attributed_interest = sum(
-            (f.size_usdt * f.rate * _fill_duration_days(f) for f in fills), Decimal("0")
-        )
+        total_capital_days = credit_capital_days(bot, min_ts, max_ts, now_ms=now_ms)
     else:
-        # No active arm (idle canary with no fills, or a single instant → empty
-        # window bounds): no bot-vs-idle, no MR-alpha. Not reachable via the live
-        # build_verdict_from_neon (it always pulls candles to now → non-empty bounds).
+        # No active arm: the bot has no attributed credit in the window.
         ci_lo, ci_hi = Decimal("0"), Decimal("0")
         headline_bot_vs_idle = Decimal("0")
         mr_alpha_spread = Decimal("0")
         mr_alpha_ci_lo, mr_alpha_ci_hi = Decimal("0"), Decimal("0")
         mr_alpha_available = False
         total_capital_days = Decimal("0")
-        attributed_deployed = Decimal("0")
-        attributed_interest = Decimal("0")
-        clamp_diag = ClampDiagnostic(
-            cap=span_capital,
-            peak_concurrent=Decimal("0"),
-            raw_interest=Decimal("0"),
-            clamped_interest=Decimal("0"),
-        )
 
     # Band guard: a wrong-scale market series corrupts the MR-alpha diagnostic
-    # only — bot-vs-idle (idle ≡ 0) needs no market-rate data, so the primary
-    # verdict is unaffected. Mark MR-alpha unavailable and surface the message.
+    # only — bot-vs-idle (idle ≡ 0) needs no market-rate data.
     band_reason: str | None = None
     try:
         assert_market_rate_band([p.rate for p in window_rate_points])
@@ -568,46 +383,42 @@ def _compute_verdict(
         band_reason = str(exc)
         mr_alpha_available = False
 
-    n_windows = len(bounds)
-    min_capital_days = span_capital * Decimal("7")
-
-    deployment_anchor = check_deployment_anchor(
-        attributed_deployed=attributed_deployed,
-        observed_realized=observed_realized,
-        tol=_DEPLOY_TOL,
-    )
-    nav_anchor = check_nav_anchor(
-        nav_delta=None,  # NAV unavailable in v1
-        attributed_interest=attributed_interest,
-        tol=_NAV_TOL,
+    # Trust gate: complete weeks whose credit interest disagrees with the ledger.
+    currency = funding_currency(_MARKET_SYMBOL)
+    reconciliation_available = any(p.currency == currency for p in payments)
+    reconciliations = (
+        _reconcile(credits, payments, start_ms=min_ts, now_ms=now_ms)
+        if reconciliation_available and has_data else []
     )
 
     verdict = decide_verdict(
         headline_bot_vs_idle=headline_bot_vs_idle,
-        n_windows=n_windows,
+        n_windows=len(bounds),
         total_capital_days=total_capital_days,
         ci_lo=ci_lo,
         ci_hi=ci_hi,
-        deployment_anchor=deployment_anchor,
-        nav_anchor=nav_anchor,
+        ledger_divergence=[_divergence(r) for r in reconciliations if r.flagged],
         min_windows=_MIN_WINDOWS,
-        min_capital_days=min_capital_days,
+        min_capital_days=span_capital * Decimal("7"),
         mr_alpha_spread=mr_alpha_spread,
         mr_alpha_ci_lo=mr_alpha_ci_lo,
         mr_alpha_ci_hi=mr_alpha_ci_hi,
         mr_alpha_available=mr_alpha_available,
     )
 
-    # MR-alpha unavailability caveats are informational — they do NOT change the
-    # primary bot-vs-idle state (decoupled from passive-arm data quality). Prepend
-    # so the operator sees why the secondary diagnostic is missing.
+    # Informational caveats — they do NOT change the verdict state.
     caveats: list[str] = []
     if band_reason is not None:
         caveats.append(band_reason)
-    elif len(window_rate_points) == 0 and (fills or market_rate_points):
+    elif not window_rate_points and has_data:
         caveats.append(
             "MR-alpha diagnostic unavailable: no market-rate coverage in window — "
             "bot-vs-idle (idle ≡ 0) is unaffected"
+        )
+    if not reconciliation_available:
+        caveats.append(
+            f"ledger reconciliation unavailable: no {currency} interest payouts in "
+            "funding_interest_payments — the credit model is unchecked against the venue"
         )
     if caveats:
         verdict = G3Verdict(
@@ -623,12 +434,34 @@ def _compute_verdict(
             mr_alpha_available=verdict.mr_alpha_available,
         )
 
-    # Human-readable data window
-    if fills or market_rate_points:
+    gross_by_cell: dict[str, Decimal] = {}
+    for c in bot:
+        cell = cells.cell_by_credit[c.credit_id]
+        gross_by_cell[cell] = gross_by_cell.get(cell, Decimal("0")) + c.gross_interest(
+            min_ts, max_ts, now_ms=now_ms)
+    coverage = CreditCoverage(
+        bot_credits=len(bot),
+        gross_by_cell=dict(sorted(gross_by_cell.items())),
+        unattributed_credits=len(unattributed),
+        unattributed_gross=credit_gross_interest(unattributed, min_ts, max_ts, now_ms=now_ms),
+        ambiguous_credits=sum(1 for c in bot if c.credit_id in cells.ambiguous),
+    )
+
+    if has_data:
         min_dt = datetime.fromtimestamp(min_ts / 1000, UTC).strftime("%Y-%m-%d")
         max_dt = datetime.fromtimestamp(max_ts / 1000, UTC).strftime("%Y-%m-%d")
         data_window = f"{min_dt}..{max_dt}"
     else:
         data_window = "n/a"
 
-    return verdict, data_window, n_fills, clamp_diag, frr_bench
+    return G3Report(
+        verdict=verdict,
+        data_window=data_window,
+        capital_source=capital_source,
+        coverage=coverage,
+        deployment=DeploymentCheck(
+            cap=span_capital, peak_open_principal=peak_open_principal(bot, now_ms=now_ms)),
+        frr=frr_bench,
+        reconciliations=reconciliations,
+        reconciliation_available=reconciliation_available,
+    )
