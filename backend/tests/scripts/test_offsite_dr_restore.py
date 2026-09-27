@@ -1682,6 +1682,40 @@ def test_health_inspect_timeout_uses_remaining_deadline_and_writes_failure(tmp_p
     assert fake.health_timeouts and 0 < fake.health_timeouts[0] <= 600
 
 
+class _ExitedContainerRunner(_FakeRunner):
+    def __init__(self) -> None:
+        super().__init__(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+        self.health_polls = 0
+
+    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ("docker", "inspect", "--format={{.State.Health.Status}}"):
+            self.health_polls += 1
+            return subprocess.CompletedProcess(command, 0, "starting\n", "")
+        if command[:3] == ("docker", "inspect", "--format={{.State.Status}}"):
+            return subprocess.CompletedProcess(command, 0, "exited\n", "")
+        return super().__call__(command, input_text=input_text, env=env)
+
+
+def test_exited_restore_container_fails_without_waiting_for_health_deadline(tmp_path: Path) -> None:
+    clock = _Clock()
+    fake = _ExitedContainerRunner()
+    drill = _drill(tmp_path, fake, clock=clock)
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.now += seconds
+
+    drill._sleep = sleep
+
+    assert drill.run(_request(tmp_path)) == 2
+
+    report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
+    assert report["error_code"] == "restore_command_failed"
+    assert fake.health_polls == 1
+    assert sum(slept) < 5
+
+
 def test_verifier_failure_cleans_only_generated_resources_and_redacts_secrets(tmp_path: Path) -> None:
     fake = _FakeRunner(
         verifier=subprocess.CompletedProcess(
