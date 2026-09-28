@@ -14,9 +14,9 @@ from typing import Protocol
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.strategy import (
     AdaptivePeriodStrategy,
+    CellConfig,
     LendDecision,
     MeanReversionStrategy,
     RatePercentileStrategy,

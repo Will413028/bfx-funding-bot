@@ -16,6 +16,14 @@ from bfx_funding_bot.modules.strategy._internal.strategies.mean_reversion_frr_fl
 from bfx_funding_bot.modules.strategy._internal.strategies.rate_percentile import (
     RatePercentileStrategy,
 )
+from bfx_funding_bot.modules.strategy.config import (
+    AdaptivePeriodParams,
+    CellConfig,
+    MeanReversionParams,
+    RatePercentileParams,
+    canonical_cell_id,
+    configured_symbols,
+)
 from bfx_funding_bot.modules.strategy.contracts import (
     DecisionOutcome,
     DecisionPayload,
@@ -26,18 +34,24 @@ from bfx_funding_bot.modules.strategy.contracts import (
 )
 
 __all__ = [
+    "AdaptivePeriodParams",
     "AdaptivePeriodStrategy",
     "AlwaysFrrStrategy",
     "AlwaysMarketRateStrategy",
+    "CellConfig",
     "DecisionOutcome",
     "DecisionPayload",
     "LendDecision",
     "MeanReversionFrrFloorStrategy",
+    "MeanReversionParams",
     "MeanReversionStrategy",
+    "RatePercentileParams",
     "RatePercentileStrategy",
     "SignalDirection",
     "SignalPayload",
     "SkipReason",
     "Strategy",
     "StrategyName",
+    "canonical_cell_id",
+    "configured_symbols",
 ]

@@ -11,12 +11,12 @@ from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.execution.deployment.standing_quote import (
     StandingQuoteStore,
 )
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     StrategyRegistry,
     build_strategy,
 )
+from bfx_funding_bot.modules.strategy import CellConfig
 
 
 class _EventCapture:

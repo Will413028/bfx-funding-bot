@@ -13,12 +13,12 @@ from decimal import Decimal
 import pytest
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
     ExtractedSignal,
 )
 from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
+from bfx_funding_bot.modules.strategy import CellConfig
 
 
 def _make_history(n: int) -> list[FundingCandle]:

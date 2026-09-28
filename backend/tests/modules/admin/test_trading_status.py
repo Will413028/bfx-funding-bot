@@ -42,8 +42,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     restates,
     validate_transition,
 )
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
-from bfx_funding_bot.modules.strategy import StrategyName
+from bfx_funding_bot.modules.strategy import CellConfig, StrategyName
 
 D = Decimal
 

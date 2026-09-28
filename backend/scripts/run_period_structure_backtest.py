@@ -75,11 +75,12 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     FRR_ANNUALIZATION,
     assert_market_rate_band,
 )
-from bfx_funding_bot.modules.marketfeed.config import CellConfig, load_cells_only
+from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 from bfx_funding_bot.modules.strategy import (
     AdaptivePeriodStrategy,
     AlwaysFrrStrategy,
     AlwaysMarketRateStrategy,
+    CellConfig,
     MeanReversionStrategy,
     Strategy,
 )

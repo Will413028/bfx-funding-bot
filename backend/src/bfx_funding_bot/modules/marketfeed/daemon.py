@@ -93,11 +93,7 @@ from bfx_funding_bot.modules.live_validation.interest_ledger import (
 )
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
-from bfx_funding_bot.modules.marketfeed.config import (
-    CellConfig,
-    MarketfeedConfig,
-    configured_symbols,
-)
+from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
 from bfx_funding_bot.modules.marketfeed.funding_book import (
     FundingBookService,
 )
@@ -117,7 +113,7 @@ from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
 from bfx_funding_bot.modules.observability.tracing import (
     DaemonTracing,
 )
-from bfx_funding_bot.modules.strategy import DecisionPayload
+from bfx_funding_bot.modules.strategy import CellConfig, DecisionPayload, configured_symbols
 
 if TYPE_CHECKING:
     from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner

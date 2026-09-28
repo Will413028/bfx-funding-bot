@@ -6,13 +6,13 @@ import pytest
 from pydantic import ValidationError
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     StrategyRegistry,
     build_strategy,
     build_strategy_at_boundary,
 )
 from bfx_funding_bot.modules.strategy import (
+    CellConfig,
     MeanReversionStrategy,
     RatePercentileStrategy,
     StrategyName,

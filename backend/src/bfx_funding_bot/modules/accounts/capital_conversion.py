@@ -26,7 +26,7 @@ from bfx_funding_bot.modules.execution.capital_tables import (
     CapitalPolicyRevisionRow,
 )
 from bfx_funding_bot.modules.execution.safety.hard_guards import resolve_for_symbol_with_source
-from bfx_funding_bot.modules.marketfeed.config import canonical_cell_id
+from bfx_funding_bot.modules.strategy import canonical_cell_id
 
 _KEYS = {"schema_version", "caps", "default_cap", "env_fallback_cap", "buffers",
          "default_buffer", "env_fallback_buffer", "max_cell_fraction"}

@@ -41,7 +41,8 @@ from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.funding_stats.repository import get_in_range as get_stats_in_range
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
-from bfx_funding_bot.modules.marketfeed.config import CellConfig, load_cells_only
+from bfx_funding_bot.modules.marketfeed.config import load_cells_only
+from bfx_funding_bot.modules.strategy import CellConfig
 
 logger = logging.getLogger(__name__)
 START_MTS = 1_451_606_400_000  # 2016-01-01 UTC (full history)

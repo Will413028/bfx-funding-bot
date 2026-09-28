@@ -35,7 +35,7 @@ from bfx_funding_bot.modules.execution.capital_repository import CapitalReposito
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
-from bfx_funding_bot.modules.marketfeed.config import canonical_cell_id
+from bfx_funding_bot.modules.strategy import canonical_cell_id
 
 
 async def bootstrap_snapshot(*, database_url: str, account_id: UUID, environment: str,

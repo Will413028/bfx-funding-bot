@@ -1,9 +1,7 @@
 from decimal import Decimal
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.strategy import (
-    AdaptivePeriodStrategy,
-)
+from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy
 
 
 def _c(mts: int, close: str) -> FundingCandle:
@@ -236,8 +234,8 @@ def test_param_grid_for_cell_guard_deployed_candidate() -> None:
 
 
 def test_build_strategy_from_cellconfig() -> None:
-    from bfx_funding_bot.modules.marketfeed.config import CellConfig
     from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
+    from bfx_funding_bot.modules.strategy import CellConfig
 
     cell = CellConfig(
         strategy="adaptive_period", symbol="fUST", period_agg="a30",
@@ -250,8 +248,8 @@ def test_build_strategy_from_cellconfig() -> None:
 
 
 def test_build_strategy_is_deterministic() -> None:
-    from bfx_funding_bot.modules.marketfeed.config import CellConfig
     from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
+    from bfx_funding_bot.modules.strategy import CellConfig
 
     cell = CellConfig(
         strategy="adaptive_period", symbol="fUST", period_agg="a30",
