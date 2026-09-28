@@ -89,7 +89,7 @@ def test_allows_only_empty_versioned_target(tmp_path: Path, existing_subdirs: bo
     ("target", "expected"),
     [
         ("", ["--type=default"]),
-        ("2026-09-09T14:10:00Z", ["--type=time", "--target=2026-09-09T14:10:00Z", "--target-action=promote"]),
+        ("2026-09-09T14:10:00Z", ["--type=time", "--target=2026-09-09 14:10:00+00", "--target-action=promote"]),
     ],
 )
 def test_restore_argv_preserves_archive_end_or_explicit_time(target: str, expected: list[str]) -> None:
