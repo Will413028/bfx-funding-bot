@@ -58,8 +58,8 @@ venue's truth. Follow this sequence and do not skip a step:
 
 **Operator confirmation:** the named operator must sign the classification
 (matched/adopted, still UNKNOWN, orphan quarantined, or manually resolved) and
-the forward-fix evidence before the operator resumes in the UI (which starts a
-probation after an automatic stop). The halt remains effective for UNKNOWN, orphan, mismatch, incomplete coverage, or any
+the forward-fix evidence before the operator resumes in the UI under the applied
+CapitalPolicy envelope. Keep the operator halt for UNKNOWN, orphan, mismatch, incomplete coverage, or any
 nonzero exposure difference. There is no automatic retry.
 
 ## Database restore rule

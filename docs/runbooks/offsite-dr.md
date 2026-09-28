@@ -339,12 +339,11 @@ missing/empty artifact as a problem. Wrappers never print old output after persi
 
 ### 6. Capture the same-target bounded baseline.json
 
-This UUID procedure requires the additive identity schema and verified cutover.
-For Halt 1 before migration, use only the
-[legacy-schema-compatible backup/restore gate](halt-1-exchange-account-cutover.md#2-freeze-writes先做-backup--isolated-restore).
-Return here at the explicit [post-identity DR gate](halt-1-exchange-account-cutover.md#post-identity-dr-gate)
-after the identity migrations and cutover verification; pre-identity artifacts
-cannot satisfy this UUID gate.
+This procedure requires the canonical UUID account schema and verified account
+identity. A legacy-schema-compatible backup or pre-identity restore artifact
+cannot satisfy this UUID baseline. If recovering historical data that needs
+identity migration, complete and verify that migration first, then capture fresh
+evidence for the resulting schema and account scope.
 
 While writes remain halted, select the exact backup label and recovery boundary
 for the drill. Capture `baseline.json` for the same database state that restore

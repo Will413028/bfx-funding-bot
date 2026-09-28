@@ -1,14 +1,12 @@
 """ADR D4' on real PostgreSQL roles: the web API queues, the account writer appends.
 
-Everything here runs against the migrated schema with the shipped cutover grants
-(runbook 6b) plus the five grants added by hand on 2026-09-22, because that is
-the production state this migration must repair. Owner-only fixtures would pass
-whether or not the web API could still write the ledger.
+The historical fixture below reproduces the manual baseline and the five extra
+grants from 2026-09-22. Migrations must repair that state and provision today's
+permissions without manual grants. Owner-only fixtures would pass whether or not
+the web API could still write the ledger.
 """
 import asyncio
-import re
 from decimal import Decimal
-from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpx
@@ -51,8 +49,27 @@ from tests.pg_templates import alembic as _alembic
 
 pytestmark = pytest.mark.integration
 
-_BACKEND = Path(__file__).resolve().parents[2]
 _PRIOR_HEAD = "a7f3c1d9e204"
+# Fixed pre-outbox baseline from the retired Halt 1 runbook, not current policy.
+_LEGACY_WEBAPI_BASELINE = """
+GRANT USAGE ON SCHEMA public TO bfx_webapi;
+GRANT SELECT (version_num) ON TABLE public.alembic_version TO bfx_webapi;
+GRANT SELECT ON TABLE
+  public.user_profiles,
+  public.exchange_accounts,
+  public.exchange_account_memberships,
+  public.position_state,
+  public.offer_claims,
+  public.event_log,
+  public.execution_uncertainties,
+  public.submission_attempts,
+  public.attribution_weekly,
+  public.funding_candles
+TO bfx_webapi;
+GRANT INSERT ON TABLE public.user_profiles TO bfx_webapi;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.exchange_account_credentials TO bfx_webapi;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.account_config_drafts TO bfx_webapi;
+"""
 # What was granted by hand on 2026-09-22 so `mark-not-accepted` could append.
 _HAND_GRANTS = """
 GRANT INSERT ON public.event_log TO bfx_webapi;
@@ -99,14 +116,9 @@ def _build_migrated(url: str) -> None:
             "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO bfx_bot"
         )
     _alembic(url, "upgrade", _PRIOR_HEAD)
-    runbook = (_BACKEND.parent / "docs/runbooks/halt-1-exchange-account-cutover.md").read_text()
-    current_6b = runbook.split("### 6b.", 1)[1].split("```sql\n", 1)[1].split("```", 1)[0]
-    # Production applied 6b before the outbox existed; its D4' lines come later.
-    baseline = re.sub(r"-- ADR D4'.*?\n\n", "\n", current_6b, flags=re.S)
-    assert "uncertainty_resolution_requests" not in baseline
     with engine.begin() as conn:
         conn.exec_driver_sql("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM bfx_webapi")
-        conn.exec_driver_sql(baseline)
+        conn.exec_driver_sql(_LEGACY_WEBAPI_BASELINE)
         conn.exec_driver_sql(_HAND_GRANTS)
         assert conn.scalar(text(
             "SELECT has_table_privilege('bfx_webapi', 'public.event_log', 'INSERT')"
@@ -114,9 +126,6 @@ def _build_migrated(url: str) -> None:
     _alembic(url, "upgrade", "head")
     _alembic(url, "upgrade", "head")  # re-running is a no-op
     _alembic(url, "check")
-    with engine.begin() as conn:
-        # Re-provisioning from today's runbook must not hand any write back.
-        conn.exec_driver_sql(current_6b)
     engine.dispose()
 
 

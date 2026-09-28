@@ -1,4 +1,4 @@
-# Fresh host setup：DB roles 與 frontend 公開入口
+# Fresh host setup：DB roles、公開入口與主機工具
 
 新主機（或從零重建的 Postgres）才需要這份。既有 production 已完成，不要重跑。
 部署流程本身見 [deploy runbook](deploy.md)；備份與 restore 見 [offsite DR](offsite-dr.md)。
@@ -120,3 +120,91 @@ server-side proxy 經 docker 網路打 `http://webapi:8000`，JWKS 也走內網�
 驗證：先在主機上 `curl -fsS http://127.0.0.1:3001/` 確認 FE 起來，再從外部開
 `https://<public-host>` 走一次登入 → dashboard（`/api/proxy/*` 回 200）。回滾：把入口指回
 舊目標或停掉入口服務；bot 與 webapi 不受影響。
+
+## 3. 首次安裝主機工具
+
+本節安裝 `bfx-deploy`、告警與 DR units；不會建立 Postgres／Redis、runtime secrets、
+帳戶資料或 pgBackRest repository。先完成資料服務與 `bfx_default` network、上面的
+roles／連線設定，以及 [offsite DR](offsite-dr.md) 的備份與 restore 前置作業。
+部署前須有可用的 restore test；空資料庫與缺少 verifier image 的主機不能直接套用
+既有環境的部署流程。
+
+### 3a. 安裝工具與 units
+
+在 Linux VM 的乾淨 checkout `/home/ubuntu/bfx-funding-bot`，核對 HEAD 是要安裝的
+release revision；CI 與 Release images 必須已成功。主機需要 root 擁有的
+`/usr/local/bin/uv`、Docker buildx 與 Python 3.12 以上：
+
+```bash
+/usr/local/bin/uv --version
+docker buildx version
+/usr/bin/python3 --version
+sudo /home/ubuntu/bfx-funding-bot/deploy/vm/ops/install.sh
+ls -l /usr/local/lib/bfx-ops/current /home/ubuntu/bfx-releases/current
+```
+
+安裝器從 git 物件寫出 `/usr/local/lib/bfx-ops/releases/<rev>`，依 `ops/uv.lock`
+執行 `uv sync --frozen`，建立 `bfx-deploy`／`bfx-notify` wrappers 與
+`/home/ubuntu/bfx-releases/<rev>` DR checkout，再安裝 `systemd/managed-units`
+列出的 units。它不會啟用或啟動任何 timer。之後工具由成功部署的 release 自動更新。
+
+### 3b. Runtime 設定與首次驗證
+
+- `/opt/bfx/runtime/{bot,webapi,frontend,migrate,notify,ghcr}.env` 依
+  [deploy env 規則](deploy.md#env-檔規則) 準備，root 擁有且 mode `0600`。
+  bot／webapi 使用已核對的 canonical `BFX_EXCHANGE_ACCOUNT_ID` 與相同的
+  `BFX_OPERATOR_USER_ID`；不沿用舊 launcher 的 `BFX_RELEASE_*`。
+- 告警所需 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` 同時配置到 `notify.env` 與
+  `bot.env`；GHCR 憑證只需 `read:packages`。設定方式見 [operations](operations.md#6-告警)。
+- `/home/ubuntu/bfx/restore-test.json` 由 DR operator（`ubuntu`）擁有，欄位固定為：
+
+```json
+{"account_id": "<canonical UUID>", "environment": "prod", "projector_version": "execution-state-v1"}
+```
+
+Restore test 使用本機 `bfx-bot:local` verifier。先核對它對應的 image 與模組；
+缺少 image 或下列檢查失敗時，先處理 verifier 來源，不可隨意重 tag：
+
+```bash
+sudo docker run --rm --pull=never --entrypoint "" bfx-bot:local /app/.venv/bin/python -c \
+  "from bfx_funding_bot.modules.execution.event_store.canonical import rolling_prefix_hash; import scripts.verify_projection_replay; print('ok')"
+sudo systemctl start --no-block bfx-restore-test@current.service
+journalctl -fu bfx-restore-test@current.service
+```
+
+確認該 service 成功，且 `/home/ubuntu/bfx/dr-evidence/restore-heartbeat.json` 是本次
+產生的新 evidence。再執行 `sudo bfx-notify --level info "bfx setup: notify test"`，
+確認告警送達；最後執行 `sudo bfx-deploy --dry-run`，核對 revision、CI run、
+migration／restore 計畫、rollback target 與所有 blockers。
+
+若出現 `foreign_container_holds_name:bfx-*`，表示同名 container 不屬於 `bfx-app`。
+先記錄其 image、restart policy 與用途，安排停機並保留回復副本後才釋放名稱；
+bfx-deploy 不會替 operator 刪除它們。不要啟用 `legacy-app` profile。
+
+### 3c. 首次部署與排程
+
+Dry run 無 blocker 後，以 systemd 執行，避免 SSH 斷線中斷部署：
+
+```bash
+sudo systemctl start --no-block bfx-deploy.service
+journalctl -fu bfx-deploy.service
+```
+
+依 [deploy runbook](deploy.md) 核對 ledger 的 `started`／`deployed`、三個 app container
+的 `bfx-app` ownership 與 digest、health、工具與 DR checkout 的 `current` revision。
+新資料庫在 migration 後完成 §1c 的 auth grants 與 §1d 的隔離驗證；再驗證登入、TOTP、
+uncertainty／history 頁面與告警。交易狀態與包絡依 [operations](operations.md) 驗證，
+部署本身不會 resume，也沒有 build 核准或限額期。
+
+第一次部署尚無成功的 rollback target；失敗時依 deploy runbook 處理，不能假定會自動回滾。
+確認手動部署、備份與 restore 檢查成功後，才啟用排程：
+
+```bash
+sudo systemctl enable --now bfx-deploy.timer bfx-backup-check.timer bfx-restore-test.timer
+systemctl list-timers 'bfx-*'
+```
+
+pgBackRest backup／status timers 依 [offsite DR](offsite-dr.md) 分別驗證及啟用；每週報告
+排程依 [operations §8](operations.md#8-定期與背景工作)。確認各 job 自己的結論，
+不要只以 timer 已啟用判定成功。後續無 migration 的 release 可依
+[rollback drill](deploy.md#6-rollback-drill刻意走一次回滾路徑) 驗證回滾路徑。

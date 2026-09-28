@@ -1,15 +1,12 @@
-"""Exercise the shipped cutover grants, not owner-only API fixtures."""
-
-from pathlib import Path
+"""Exercise migration-provisioned grants, not owner-only API fixtures."""
 
 import httpx
 import pytest
+import pytest_asyncio
 from fastapi import FastAPI
 from sqlalchemy import create_engine, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-import bfx_funding_bot.modules.accounts.user_profile
-import bfx_funding_bot.modules.execution.safety.tables  # 6b grants name trading_state
-import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
@@ -26,36 +23,44 @@ from tests.modules.api.test_uncertainties_router import (
     _seed_account,
     _snapshot,
 )
+from tests.pg_templates import upgrade_head
 
 pytestmark = pytest.mark.integration
 
 
-async def test_cutover_grants_allow_scoped_uncertainty_reads_without_execution_writes(
-    pg_session_factory, pg_container, monkeypatch,
+def _build_read_schema(url: str) -> None:
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='bfx_webapi') THEN CREATE ROLE bfx_webapi; END IF; END $$")
+            conn.exec_driver_sql("ALTER ROLE bfx_webapi NOSUPERUSER NOCREATEROLE NOINHERIT")
+    finally:
+        engine.dispose()
+    # The role must exist before migrations run, as on a fresh host.
+    upgrade_head(url)
+
+
+@pytest_asyncio.fixture
+async def migrated_sessions(pg_templates, pg_clone):
+    url = pg_clone(pg_templates.template("uncertainty_read_grants", _build_read_schema))
+    engine = create_async_engine(url.replace("+psycopg", "+asyncpg"))
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
+
+
+async def test_migration_grants_allow_scoped_uncertainty_reads_without_execution_writes(
+    migrated_sessions, monkeypatch,
 ):
     """Missing either projection/attempt SELECT breaks actual list/detail reads."""
     from decimal import Decimal
 
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
-    factory = pg_session_factory
+    factory = migrated_sessions
     async with factory.begin() as session:
         await _seed_account(session, ACCOUNT_ID, "operator-1")
         await _seed_account(session, OTHER_ACCOUNT_ID, "other-operator")
-
-    runbook = (Path(__file__).resolve().parents[3]
-               / "docs/runbooks/halt-1-exchange-account-cutover.md").read_text()
-    grants = runbook.split("### 6b.", 1)[1].split("```sql\n", 1)[1].split("```", 1)[0]
-    engine = create_engine(pg_container.get_connection_url().replace("+psycopg2", "+psycopg"))
-    try:
-        with engine.begin() as conn:
-            conn.exec_driver_sql("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='bfx_webapi') THEN CREATE ROLE bfx_webapi; END IF; END $$")
-            conn.exec_driver_sql("ALTER ROLE bfx_webapi NOSUPERUSER NOCREATEROLE NOINHERIT")
-            conn.exec_driver_sql("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM bfx_webapi")
-            conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS alembic_version (version_num varchar(32) PRIMARY KEY)")
-            conn.exec_driver_sql(grants)
-            conn.exec_driver_sql(grants)  # Reapplying provisioning is safe.
-    finally:
-        engine.dispose()
 
     async def restricted_session():
         async with factory() as session:

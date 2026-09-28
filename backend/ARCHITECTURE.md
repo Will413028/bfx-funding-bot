@@ -610,13 +610,14 @@ verified backup/PITR + venue reconcile，不使用 downgrade）。
 
 ### Projection audit cutover release boundary
 
-操作順序與 exact CLI flags 見 [projection cutover runbook](../docs/runbooks/projection-audit-cutover.md)：
+Archive 驗證、證據格式與再次執行限制見 [projection archive 契約](../docs/runbooks/projection-audit-cutover.md)。
+已完成的 cutover 流程為：
 diagnose → immutable archive → independently verified archive-only restore → fresh
 snapshot → atomic apply → identical repeat → independent new baseline → archive+active verify。
 `cutover_projection` 只有 `diagnose/prepare/verify-archive/apply` commands；沒有
 classify、snapshot、cleanup 或 resume command。Prepare CLI 會讀 vault/venue，即使
 `--dry-run` 亦然；apply 只消費 digest-pinned serialized snapshot，不做 HTTP。
-每次 recovery 以 `--managed-symbols` 明確宣告 scope；本輪 production recovery 使用
+每次 recovery 以 `--managed-symbols` 明確宣告 scope；已完成的 production cutover 使用
 `--managed-symbols fUST`，prepared artifact 會 pin 該 scope。snapshot 必須完整覆蓋
 scope；任何 scope 外的 active offer/credit/position 都 fail closed，不能把遺漏的幣別
 默認當成零。CLI recovery default 為 fUST；library `apply_cutover` 未指定 scope 時僅
@@ -686,9 +687,9 @@ pgBackRest 2.59.1 info 的 `timestamp.start/stop` 是 strict integer epoch；
 stanza/repository `status.code` 必須為 integer 0。Smoke raw stdout/stderr 只進
 trap-cleaned private temp，輸出固定 markers。Backup refresh 先失效舊 evidence；
 atomic persistence 遇 ENOSPC 亦須 remove/truncate 舊綠燈，wrapper 失敗不得 cat 舊報告。
-Halt 1 Step 2 僅做 legacy-schema-compatible realm/count/event integrity backup/
-restore；canonical UUID baseline/staged replay 延後至 migration 與 cutover verify
-後的 [post-identity gate](../docs/runbooks/halt-1-exchange-account-cutover.md#post-identity-dr-gate)。
+Canonical UUID baseline/staged replay 要求已驗證的 account identity 與相符 schema；
+pre-identity 的 legacy-schema-compatible backup/restore evidence 不可沿用。
+Baseline 操作見 [offsite DR](../docs/runbooks/offsite-dr.md#6-capture-the-same-target-bounded-baselinejson)。
 
 每次 measured restore 都綁定同一 backup/PITR target 的 bounded baseline，逐欄
 核對 migration heads、event count/head/hash 與 account/environment/projector。

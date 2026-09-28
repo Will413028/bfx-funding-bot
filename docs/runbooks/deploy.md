@@ -2,7 +2,8 @@
 
 現行唯一的應用程式部署路徑。決策來源：ADR 2026-09-25
 `ci-registry-digest-deploy`（供應鏈）與 `lending-envelope-replaces-probation-and-account-halt`
-（D5：部署不碰交易狀態、沒有分級與核准）。交易狀態與停機操作見 [operations runbook](operations.md)。
+（D5：部署不碰交易狀態、沒有分級與核准）。交易狀態與停機操作見 [operations runbook](operations.md)，
+首次安裝主機工具見 [fresh host setup](fresh-host-setup.md#3-首次安裝主機工具)。
 
 舊的 immutable-release 流程（bundle、release session、canary permit、halt epoch、Halt 2
 收據、`/opt/bfx/releases` 手動 load）與 `scripts/deploy-vm.sh` 已刪除，不要再照舊文件操作。
@@ -68,10 +69,9 @@ app 只加入既有的 `bfx_default` network。`docker-compose.bot.yml` 的 `leg
 ## 2. 部署與交易狀態
 
 部署永遠不改變 trading state，也不需要任何核准：每筆單都由 DB 裡的 CapitalPolicy 包絡把關
-（見 operations §2）。變更分級（standard／material）已退役。過渡期注意：
-`docker-compose.app.yml` 仍接受 `BFX_CHANGE_CLASS`（預設 `retired`），`deployments.change_class`
-欄位改為可為空，都只是讓上一版 bfx-deploy 還能部署這一版；新工具第一次部署成功後的下一個 release
-移除它們（migration `5b9e3d7a2f41` 已移除該欄位）。
+（見 [operations §2](operations.md#2-幣別啟停與包絡設定)）。變更分級
+（standard／material）已退役；compose 不再注入 `BFX_CHANGE_CLASS`，migration
+`5b9e3d7a2f41` 移除 `deployments.change_class`。歷史分級保存在舊 ledger 列的 `detail`。
 
 ## 3. 常用指令（VM，root）
 
