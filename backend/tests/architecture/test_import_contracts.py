@@ -20,6 +20,7 @@ MAX_IGNORES_BY_ID = {
     "trading-shadow-no-internal-access": 0,
     "trading-shadow-wiring-is-top": 0,
     "trading-shadow-independent-loader": 0,
+    "trading-shadow-no-baseline-adapter": 0,
     "trading-is-pure": TRADING_IS_PURE_MAX_IGNORES,
     "apps-is-top": APPS_IS_TOP_MAX_IGNORES,
     "core-is-leaf": CORE_IS_LEAF_MAX_IGNORES,
