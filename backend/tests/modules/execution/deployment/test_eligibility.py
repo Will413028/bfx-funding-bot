@@ -25,8 +25,8 @@ from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelUnavailable,
 )
 from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome as PayloadOutcome
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
+from bfx_funding_bot.modules.strategy import DecisionOutcome as PayloadOutcome
+from bfx_funding_bot.modules.strategy import DecisionPayload
 
 
 class _Audit:

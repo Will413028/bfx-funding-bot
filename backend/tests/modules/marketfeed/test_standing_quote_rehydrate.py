@@ -19,12 +19,12 @@ from bfx_funding_bot.modules.marketfeed.scheduler import (
     last_candle_close_mts,
     next_candle_close_mts,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     StrategyRegistry,
     build_strategy,
 )
+from bfx_funding_bot.modules.strategy import DecisionOutcome
 from tests.modules.marketfeed.test_signal_engine import _cell, _history
 
 _HOUR = _TIMEFRAME_MS["1h"]

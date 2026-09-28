@@ -18,8 +18,8 @@ if TYPE_CHECKING:
 
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
+from bfx_funding_bot.modules.strategy import StrategyName
 
 log = logging.getLogger(__name__)
 

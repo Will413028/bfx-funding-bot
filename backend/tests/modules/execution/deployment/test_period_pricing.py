@@ -9,7 +9,7 @@ from bfx_funding_bot.modules.execution.deployment.period_pricing import (
     PriceDecision,
 )
 from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 
 def _decision(

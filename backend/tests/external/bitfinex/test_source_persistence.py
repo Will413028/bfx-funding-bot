@@ -26,7 +26,7 @@ from bfx_funding_bot.modules.execution.registry_offers import (
     OfferRegistry,
     RegistryState,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+from bfx_funding_bot.modules.strategy import StrategyName
 
 pytestmark = pytest.mark.integration
 _ENV = "ci"

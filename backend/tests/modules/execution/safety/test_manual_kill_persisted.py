@@ -21,7 +21,7 @@ import pytest
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingState
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 
 def _ctx() -> AccountContext:

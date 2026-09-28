@@ -18,11 +18,11 @@ from bfx_funding_bot.modules.candles.repository import (
 )
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     StrategyRegistry,
     build_strategy_at_boundary,
 )
+from bfx_funding_bot.modules.strategy import StrategyName
 
 log = logging.getLogger(__name__)
 

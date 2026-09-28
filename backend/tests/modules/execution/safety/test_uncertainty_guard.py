@@ -8,7 +8,7 @@ import pytest
 
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.safety.hard_guards import UncertaintyGuard
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 ACCOUNT = UUID("550e8400-e29b-41d4-a716-446655440000")
 

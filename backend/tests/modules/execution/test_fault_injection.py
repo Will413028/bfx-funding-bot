@@ -60,11 +60,7 @@ from bfx_funding_bot.modules.execution.unknown_matching import (
     UnknownSubmitAttempt,
     match_unknown_attempt,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-    StrategyName,
-)
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
 
 _ACCOUNT_ID = UUID("3f19d046-5030-494c-9a0a-9573bb890c1f")
 _ADJACENT_ACCOUNT_ID = UUID("28b31e79-83ce-4b32-a6b7-03d78043ce68")

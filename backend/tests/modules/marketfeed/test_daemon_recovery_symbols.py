@@ -1,5 +1,5 @@
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+from bfx_funding_bot.modules.strategy import StrategyName
 
 
 def _cell(symbol: str, period_agg: str) -> CellConfig:

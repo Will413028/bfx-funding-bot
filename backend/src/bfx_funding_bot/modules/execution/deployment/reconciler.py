@@ -92,11 +92,7 @@ from bfx_funding_bot.modules.marketfeed.funding_book import (
     FundingBookProvider,
     MarketSnapshot,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-    StrategyName,
-)
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
 
 log = logging.getLogger(__name__)
 

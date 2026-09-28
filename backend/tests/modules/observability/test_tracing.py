@@ -33,7 +33,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.observability.resource import (
     DeploymentEnvironment,
     EventResource,
@@ -46,6 +45,7 @@ from bfx_funding_bot.modules.observability.tracing import (
     instrument_ws_dispatcher,
     tracing_from_env,
 )
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 
 def _resource() -> EventResource:

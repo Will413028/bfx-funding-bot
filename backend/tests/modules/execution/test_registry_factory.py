@@ -10,7 +10,7 @@ from bfx_funding_bot.modules.execution.registry import (
     ExecutorConfigError,
     build_executor,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+from bfx_funding_bot.modules.strategy import StrategyName
 
 
 class _EventCapture:

@@ -21,11 +21,7 @@ from bfx_funding_bot.modules.execution.safety.chain import (
     GUARD_EVAL_WARN_FRACTION,
     SafetyGuardChain,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-    StrategyName,
-)
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
 
 
 def _ctx() -> AccountContext:

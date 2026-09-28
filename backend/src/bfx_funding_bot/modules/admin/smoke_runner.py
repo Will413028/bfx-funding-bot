@@ -21,7 +21,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
 )
 from bfx_funding_bot.modules.execution.protocols import ExecutorPort, SubmittedOrder
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+from bfx_funding_bot.modules.strategy import StrategyName
 
 log = logging.getLogger(__name__)
 

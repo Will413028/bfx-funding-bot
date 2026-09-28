@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from bfx_funding_bot.core.telemetry import EventType
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, SkipReason
+from bfx_funding_bot.modules.strategy import DecisionOutcome, SkipReason
 
 
 @pytest.mark.asyncio

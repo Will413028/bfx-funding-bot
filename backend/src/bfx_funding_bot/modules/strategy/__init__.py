@@ -16,14 +16,28 @@ from bfx_funding_bot.modules.strategy._internal.strategies.mean_reversion_frr_fl
 from bfx_funding_bot.modules.strategy._internal.strategies.rate_percentile import (
     RatePercentileStrategy,
 )
+from bfx_funding_bot.modules.strategy.contracts import (
+    DecisionOutcome,
+    DecisionPayload,
+    SignalDirection,
+    SignalPayload,
+    SkipReason,
+    StrategyName,
+)
 
 __all__ = [
     "AdaptivePeriodStrategy",
     "AlwaysFrrStrategy",
     "AlwaysMarketRateStrategy",
+    "DecisionOutcome",
+    "DecisionPayload",
     "LendDecision",
     "MeanReversionFrrFloorStrategy",
     "MeanReversionStrategy",
     "RatePercentileStrategy",
+    "SignalDirection",
+    "SignalPayload",
+    "SkipReason",
     "Strategy",
+    "StrategyName",
 ]

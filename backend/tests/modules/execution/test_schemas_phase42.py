@@ -13,8 +13,8 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     OrderStatusChangePayload,
     OrderSubmitPayload,
     SafetyTriggerPayload,
-    StrategyName,
 )
+from bfx_funding_bot.modules.strategy import StrategyName
 
 
 def test_order_submit_payload_minimal() -> None:

@@ -27,11 +27,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     HeartbeatGuard,
     ManualKillGuard,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-    StrategyName,
-)
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
 
 pytestmark = pytest.mark.integration
 

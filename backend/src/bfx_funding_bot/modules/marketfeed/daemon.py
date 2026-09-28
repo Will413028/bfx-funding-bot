@@ -108,7 +108,6 @@ from bfx_funding_bot.modules.marketfeed.scheduler import (
     Scheduler,
     now_ms_utc,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.observability.metrics import (
@@ -118,6 +117,7 @@ from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
 from bfx_funding_bot.modules.observability.tracing import (
     DaemonTracing,
 )
+from bfx_funding_bot.modules.strategy import DecisionPayload
 
 if TYPE_CHECKING:
     from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner

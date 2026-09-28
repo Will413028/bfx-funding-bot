@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from bfx_funding_bot.modules.execution.capital_repository import CapitalView
     from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
 
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
+from bfx_funding_bot.modules.strategy import DecisionPayload
 
 
 class ExecutionPolicy(StrEnum):

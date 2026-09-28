@@ -68,7 +68,7 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 ACCOUNT_ID = UUID("3f19d046-5030-494c-9a0a-9573bb890c1f")
 ENVIRONMENT = "ci"

@@ -4,7 +4,7 @@ from bfx_funding_bot.modules.execution.deployment.standing_quote import (
     StandingQuote,
     StandingQuoteStore,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome
+from bfx_funding_bot.modules.strategy import DecisionOutcome
 
 
 def _post(cell_id: str, created_at_ms: int) -> StandingQuote:

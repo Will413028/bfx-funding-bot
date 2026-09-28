@@ -27,13 +27,13 @@ from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
     ExtractedSignal,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
+from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
+from bfx_funding_bot.modules.strategy import (
     DecisionOutcome,
     DecisionPayload,
     SignalDirection,
     SkipReason,
 )
-from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 
 log = logging.getLogger(__name__)
 

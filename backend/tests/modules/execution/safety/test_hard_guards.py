@@ -21,7 +21,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     ManualKillGuard,
     WriterLockGuard,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 
 def _ctx() -> AccountContext:

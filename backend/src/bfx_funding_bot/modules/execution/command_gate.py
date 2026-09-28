@@ -68,8 +68,8 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     normalize_submit_payload,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.observability import alerts
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 log = logging.getLogger(__name__)
 

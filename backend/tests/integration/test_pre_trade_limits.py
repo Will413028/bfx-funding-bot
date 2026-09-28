@@ -39,8 +39,8 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     NavDropMonitor,
 )
 from bfx_funding_bot.modules.execution.safety.tables import NavWindowSampleRow
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.observability import alerts
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from tests.modules.execution.safety.test_pre_trade import Book, book
 from tests.pg_templates import alembic
 
