@@ -20,6 +20,7 @@ import logging
 import sys
 from datetime import UTC, datetime
 
+from bfx_funding_bot.apps.config import load_cells_only
 from bfx_funding_bot.modules.backtest.cell_derivation import DerivedCell, derive_cell_params
 from bfx_funding_bot.modules.backtest.cell_pipeline import (
     CELLS_YAML,
@@ -34,7 +35,6 @@ from bfx_funding_bot.modules.backtest.cell_pipeline import (
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
-from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 
 logger = logging.getLogger("derive_cells")
 

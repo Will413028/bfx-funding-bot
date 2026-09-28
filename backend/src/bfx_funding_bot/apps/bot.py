@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
+from bfx_funding_bot.apps.config import load_config
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
     EXIT_CODE_AUTH_FAILED,
@@ -143,7 +144,6 @@ from bfx_funding_bot.modules.live_validation.interest_ledger import (
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
-from bfx_funding_bot.modules.marketfeed.config import load_config
 from bfx_funding_bot.modules.marketfeed.daemon import (
     Daemon,
     _DaemonAuditContextFactory,

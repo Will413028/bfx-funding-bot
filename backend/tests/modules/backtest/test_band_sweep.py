@@ -2,6 +2,7 @@
 from decimal import Decimal
 from pathlib import Path
 
+from bfx_funding_bot.apps.config import load_cells_only
 from bfx_funding_bot.modules.backtest.band_sweep import (
     SPLIT_MTS,
     BandResult,
@@ -21,7 +22,6 @@ from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy
 
 

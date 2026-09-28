@@ -7,8 +7,8 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from bfx_funding_bot.apps.config import load_config
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
-from bfx_funding_bot.modules.marketfeed.config import load_config
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 from bfx_funding_bot.modules.strategy import CellConfig, StrategyName, configured_symbols
 
@@ -320,7 +320,7 @@ def test_load_config_uses_env_var_precedence(monkeypatch, tmp_path):
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_CELLS_YAML", str(fake))
 
-    from bfx_funding_bot.modules.marketfeed.config import load_config
+    from bfx_funding_bot.apps.config import load_config
     cfg = load_config()
     assert cfg.cells == []
 
@@ -337,7 +337,7 @@ def test_load_config_uses_cwd_fallback(monkeypatch, tmp_path):
     monkeypatch.delenv("BFX_CELLS_YAML", raising=False)
     monkeypatch.chdir(tmp_path)
 
-    from bfx_funding_bot.modules.marketfeed.config import load_config
+    from bfx_funding_bot.apps.config import load_config
     cfg = load_config()
     assert cfg.cells == []
 
@@ -379,7 +379,7 @@ def test_load_config_uses_importlib_resources_fallback(monkeypatch, tmp_path):
 
     monkeypatch.setattr(importlib.resources, "files", fake_files)
 
-    from bfx_funding_bot.modules.marketfeed.config import load_config
+    from bfx_funding_bot.apps.config import load_config
     cfg = load_config()
     assert cfg.cells == []
 
@@ -396,7 +396,7 @@ def test_load_config_env_var_set_but_path_missing_falls_through_to_cwd(monkeypat
     monkeypatch.setenv("BFX_CELLS_YAML", "/nonexistent/path/cells.yaml")
     monkeypatch.chdir(tmp_path)
 
-    from bfx_funding_bot.modules.marketfeed.config import load_config
+    from bfx_funding_bot.apps.config import load_config
     cfg = load_config()
     assert cfg.cells == []
 
@@ -422,7 +422,7 @@ def test_load_config_raises_with_attempted_paths(monkeypatch, tmp_path):
         return _FakeRoot()
     monkeypatch.setattr(importlib.resources, "files", fake_files)
 
-    from bfx_funding_bot.modules.marketfeed.config import load_config
+    from bfx_funding_bot.apps.config import load_config
     with pytest.raises(FileNotFoundError) as exc:
         load_config()
     msg = str(exc.value).lower()
