@@ -10,6 +10,8 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.auth_ws import FocEvent
 from bfx_funding_bot.external.bitfinex.fill_tracker import RestPollingFillTracker
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
@@ -24,8 +26,7 @@ from bfx_funding_bot.modules.execution.registry_offers import (
     OfferRegistry,
     RegistryState,
 )
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 pytestmark = pytest.mark.integration
 _ENV = "ci"

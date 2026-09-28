@@ -15,6 +15,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -26,13 +28,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingStateRepository,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-    HealthStatus,
-    HealthTarget,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 
 
 class _TradingStateReader(Protocol):

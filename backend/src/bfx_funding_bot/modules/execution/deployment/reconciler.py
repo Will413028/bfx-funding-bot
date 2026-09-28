@@ -16,6 +16,7 @@ from typing import Any, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.funding_rules import (
     FundingRuleProvider,
@@ -94,7 +95,6 @@ from bfx_funding_bot.modules.marketfeed.funding_book import (
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
-    Phase,
     StrategyName,
 )
 

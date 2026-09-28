@@ -5,22 +5,16 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.execution.diagnostics.sink import NoopDiagnosticsSink
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     Scheduler,
     next_candle_close_mts,
     now_ms_utc,
-)
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    EventType,
-    HealthStatus,
-    HealthTarget,
-    Level,
-    Phase,
 )
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (

@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.auth_rest import (
     ActiveFundingOffer,
     FundingOfferHistoryCoverage,
@@ -62,7 +63,6 @@ from bfx_funding_bot.modules.execution.unknown_matching import (
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
-    Phase,
     StrategyName,
 )
 

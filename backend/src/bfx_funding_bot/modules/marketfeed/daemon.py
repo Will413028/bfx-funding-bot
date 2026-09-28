@@ -29,6 +29,8 @@ from bfx_funding_bot.core.crypto import VaultNotConfiguredError, load_kek
 from bfx_funding_bot.core.errors import (
     ConfigurationError,
 )
+from bfx_funding_bot.core.health import HealthProbe, assess_auth_ws_health
+from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
 from bfx_funding_bot.core.writer_lock import WriterLock
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.fill_tracker import (
@@ -99,25 +101,14 @@ from bfx_funding_bot.modules.marketfeed.config import (
 from bfx_funding_bot.modules.marketfeed.funding_book import (
     FundingBookService,
 )
-from bfx_funding_bot.modules.marketfeed.health_monitor import (
-    HealthMonitor,
-    HealthProbe,
-    assess_auth_ws_health,
-)
+from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
 from bfx_funding_bot.modules.marketfeed.healthz import run_healthz_server
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     Scheduler,
     now_ms_utc,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionPayload,
-    EventType,
-    HealthStatus,
-    HealthTarget,
-    Level,
-    Phase,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.observability.metrics import (

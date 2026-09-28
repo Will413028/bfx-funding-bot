@@ -24,6 +24,8 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -33,11 +35,9 @@ from bfx_funding_bot.modules.execution.safety.chain import (
     GUARD_EVAL_TIMEOUT_SECONDS,
     SafetyGuardChain,
 )
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
-    Phase,
     StrategyName,
 )
 

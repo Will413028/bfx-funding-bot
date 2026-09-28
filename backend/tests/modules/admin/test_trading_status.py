@@ -23,6 +23,8 @@ from typing import Any
 
 import pytest
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
@@ -41,8 +43,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     validate_transition,
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 D = Decimal
 

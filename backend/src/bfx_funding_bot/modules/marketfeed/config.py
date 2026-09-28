@@ -16,8 +16,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 if TYPE_CHECKING:
     from pydantic import ValidationInfo
 
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
-from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 
 log = logging.getLogger(__name__)

@@ -82,12 +82,13 @@ async def test_planner_attaches_the_status_budget_and_revision(capital_db):
 
 @pytest.mark.asyncio
 async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(capital_db):
+    from bfx_funding_bot.core.health import HealthProbe
+    from bfx_funding_bot.core.telemetry import Phase
     from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
     from bfx_funding_bot.modules.execution.deployment.submit_attempt import SubmitAttemptRecorder
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
     from bfx_funding_bot.modules.execution.safety.hard_guards import CapitalPolicyGuard
-    from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-    from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+    from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell
     factory, account = capital_db
     gate, _, ready, ctx, runtime, halt = await boundary(factory, account)
@@ -147,12 +148,13 @@ async def test_status_with_an_envelope_serializes_to_json(capital_db):
     # in the envelope made /admin/trading-status a 500 once a policy carried one.
     import json
 
+    from bfx_funding_bot.core.health import HealthProbe
+    from bfx_funding_bot.core.telemetry import Phase
     from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
     from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
     from bfx_funding_bot.modules.execution.deployment.submit_attempt import SubmitAttemptRecorder
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-    from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-    from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+    from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell
     factory, account = capital_db
     _, _, _, ctx, runtime, halt = await boundary(factory, account)
@@ -204,9 +206,10 @@ class Venue:
 
 def stop_chain(halt, account, *guards):
     """The production chain shape: the trading-state guard, then any others."""
+    from bfx_funding_bot.core.health import HealthProbe
+    from bfx_funding_bot.core.telemetry import Phase
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-    from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-    from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+    from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink
     return SafetyGuardChain(
         guards=[ManualKillGuard(trading_state=halt), *guards],
@@ -533,14 +536,15 @@ async def test_stopped_reconcile_never_reposts(capital_db, stop):
 async def test_real_guard_chain_reuses_authorization_session_without_double_reserving(capital_db):
     import asyncio
 
+    from bfx_funding_bot.core.health import HealthProbe
+    from bfx_funding_bot.core.telemetry import Phase
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
     from bfx_funding_bot.modules.execution.safety.hard_guards import (
         CapitalPolicyGuard,
         DatabaseUncertaintyReader,
         UncertaintyGuard,
     )
-    from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-    from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+    from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink
     factory, account = capital_db
     gate, venue, ready, ctx, runtime, halt = await boundary(factory, account)
@@ -602,6 +606,8 @@ async def cancel_http_boundary(factory, account, http, *, state="ACTIVE"):
     placed while ACTIVE, then the state changes. Cancelling must behave the
     same in every state -- only uncertainty and provenance decide it.
     """
+    from bfx_funding_bot.core.health import HealthProbe
+    from bfx_funding_bot.core.telemetry import Phase
     from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
     from bfx_funding_bot.modules.execution.safety.hard_guards import (
@@ -609,8 +615,7 @@ async def cancel_http_boundary(factory, account, http, *, state="ACTIVE"):
         DatabaseUncertaintyReader,
         UncertaintyGuard,
     )
-    from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-    from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+    from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink
 
     gate, _, ready, ctx, runtime, halt = await boundary(factory, account)
@@ -706,8 +711,9 @@ async def test_stop_refuses_submit_before_the_http_adapter(capital_db, state):
     """No new offer reaches the real adapter under a stop, even one already planned."""
     import httpx
 
+    from bfx_funding_bot.core.telemetry import Phase
     from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
-    from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+    from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink
 
     factory, account = capital_db

@@ -8,16 +8,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from bfx_funding_bot.core.errors import FatalError
-from bfx_funding_bot.modules.marketfeed.health_monitor import (
-    SUB_TASK_THRESHOLDS,
-    HealthMonitor,
-    HealthProbe,
-)
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    HealthStatus,
-    HealthTarget,
-    Phase,
-)
+from bfx_funding_bot.core.health import SUB_TASK_THRESHOLDS, HealthProbe
+from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget, Phase
+from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
 
 
 async def test_state_change_emits_immediately():
@@ -393,11 +386,8 @@ class TestSubTaskThresholds:
         assert SUB_TASK_THRESHOLDS["db_keepalive"] == 7 * 60
 
     def test_periodic_reconcile_registered_as_liveness(self):
+        from bfx_funding_bot.core.health import ACTIVITY_THRESHOLDS, LIVENESS_THRESHOLDS
         from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
-        from bfx_funding_bot.modules.marketfeed.health_monitor import (
-            ACTIVITY_THRESHOLDS,
-            LIVENESS_THRESHOLDS,
-        )
         # proactive task → liveness, not activity; threshold must exceed the default
         # 90s interval so steady-state beats are never flagged stale.
         assert PeriodicReconcile.SUB_TASK in LIVENESS_THRESHOLDS

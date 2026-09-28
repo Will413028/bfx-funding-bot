@@ -9,6 +9,8 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import EventType, Phase
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import OrderFilled
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
@@ -20,12 +22,9 @@ from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
 )
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
-    EventType,
-    Phase,
     SkipReason,
     StrategyName,
 )

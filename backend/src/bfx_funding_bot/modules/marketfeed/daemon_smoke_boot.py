@@ -12,11 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    EventType,
-    HealthStatus,
-    Level,
-)
+from bfx_funding_bot.core.telemetry import EventType, HealthStatus, Level
 
 log = logging.getLogger(__name__)
 

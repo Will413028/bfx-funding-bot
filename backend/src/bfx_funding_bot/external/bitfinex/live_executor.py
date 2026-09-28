@@ -27,6 +27,7 @@ from bfx_funding_bot.core.errors import (
     ExecutorFatalError,
     ExecutorTransientError,
 )
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.auth_rest import log_auth_http_error
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
@@ -59,7 +60,7 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     response_digest,
     venue_error,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 log = logging.getLogger(__name__)
 

@@ -33,6 +33,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 from uuid import uuid4
 
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
 from bfx_funding_bot.modules.execution.capital_repository import envelope_payload
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
@@ -52,11 +53,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-    Phase,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 
 MANUAL_KILL_GUARD_NAME = "manual_kill"
 

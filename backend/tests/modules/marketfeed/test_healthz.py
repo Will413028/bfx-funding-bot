@@ -10,8 +10,8 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
+from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.modules.execution.contracts import BlockReason
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.healthz import make_app
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 

@@ -7,6 +7,8 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -19,13 +21,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     ManualKillGuard,
     WriterLockGuard,
 )
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-    HealthStatus,
-    HealthTarget,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 
 
 def _ctx() -> AccountContext:

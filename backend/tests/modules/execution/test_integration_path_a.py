@@ -11,6 +11,8 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import EventType, Phase
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
@@ -25,12 +27,9 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     HeartbeatGuard,
     ManualKillGuard,
 )
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
-    EventType,
-    Phase,
     StrategyName,
 )
 

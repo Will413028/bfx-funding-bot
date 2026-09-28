@@ -4,12 +4,13 @@ from typing import Any
 import httpx
 import pytest
 
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.registry import (
     ExecutorConfigError,
     build_executor,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 
 class _EventCapture:

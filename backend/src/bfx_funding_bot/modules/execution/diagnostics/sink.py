@@ -17,13 +17,13 @@ from typing import Any, Protocol
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import session_scope
+from bfx_funding_bot.core.telemetry import EventType
 from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_uuid_or_none
 from bfx_funding_bot.modules.execution.diagnostics.tables import DiagnosticsRow
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
     CancelRequested,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import EventType
 
 log = logging.getLogger(__name__)
 

@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
+from bfx_funding_bot.core.telemetry import EventType, Phase
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.execution.contracts import (
     BlockReason,
@@ -44,12 +45,7 @@ from bfx_funding_bot.modules.lending.tracking.artifact import (
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.funding_book import BookUnavailable, MarketSnapshot
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    EventType,
-    Phase,
-    StrategyName,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, StrategyName
 from tests.external.bitfinex.test_funding_rules import FixedRules
 
 D = Decimal

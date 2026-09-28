@@ -14,6 +14,8 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.auth_rest import (
     ActiveFundingCredit,
     ActiveFundingOffer,
@@ -32,8 +34,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
 from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 from .test_capital_command_boundary import AMOUNT, boundary, second_ready
 from .test_capital_repository import repository, setup_policy, snapshot

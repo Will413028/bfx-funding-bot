@@ -19,6 +19,8 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.execution.contracts import (
     BlockReason,
@@ -34,13 +36,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-    HealthStatus,
-    HealthTarget,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
     LogMetricsHandler,

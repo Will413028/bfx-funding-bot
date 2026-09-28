@@ -9,12 +9,9 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from bfx_funding_bot.core.telemetry import EventType, HealthTarget, Level, Phase
 from bfx_funding_bot.modules.marketfeed.schemas import (
     Envelope,
-    EventType,
-    HealthTarget,
-    Level,
-    Phase,
     ReservationClaimedPayload,
     ReservationReleasedPayload,
     StrategyName,

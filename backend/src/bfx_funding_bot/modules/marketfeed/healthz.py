@@ -34,10 +34,7 @@ import uvicorn
 from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
 
-from bfx_funding_bot.modules.marketfeed.health_monitor import (
-    LIVENESS_THRESHOLDS,
-    HealthProbe,
-)
+from bfx_funding_bot.core.health import LIVENESS_THRESHOLDS, HealthProbe
 
 if TYPE_CHECKING:
     from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner

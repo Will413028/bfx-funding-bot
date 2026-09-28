@@ -21,10 +21,11 @@ from typing import Any, Protocol
 
 import httpx
 
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
 from bfx_funding_bot.modules.execution.protocols import ExecutorPort
-from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 
 class _EventSink(Protocol):

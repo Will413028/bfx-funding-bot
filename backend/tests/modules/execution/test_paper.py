@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from bfx_funding_bot.core.telemetry import EventType, Phase
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
@@ -21,8 +22,6 @@ from bfx_funding_bot.modules.execution.protocols import (
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
-    EventType,
-    Phase,
     StrategyName,
 )
 

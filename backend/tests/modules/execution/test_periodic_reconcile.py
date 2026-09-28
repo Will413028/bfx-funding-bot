@@ -4,9 +4,9 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
-from bfx_funding_bot.modules.marketfeed.schemas import HealthStatus, HealthTarget
 
 
 class _FakeProbe:

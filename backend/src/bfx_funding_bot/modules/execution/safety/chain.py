@@ -17,17 +17,17 @@ from decimal import Decimal
 from typing import Any, Protocol
 from uuid import uuid4
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.emit import emit_safety_trigger
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     GuardResult,
     GuardRule,
 )
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
-    Phase,
     StrategyName,
 )
 

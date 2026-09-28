@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.execution.deployment.standing_quote import (
     StandingQuote,
@@ -29,11 +30,6 @@ from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
-    EventType,
-    HealthStatus,
-    HealthTarget,
-    Level,
-    Phase,
     SignalDirection,
     SkipReason,
 )

@@ -8,11 +8,11 @@ from unittest.mock import Mock
 import pytest
 
 from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.api.schemas import CreateApiKeyRequest
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
 from bfx_funding_bot.modules.marketfeed.daemon import Daemon
-from bfx_funding_bot.modules.marketfeed.schemas import Phase
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 
 DATABASE_URL = "postgresql://u:fake-db-password@h/db"
