@@ -706,6 +706,67 @@ serialized append reject reused CID cycles; prove the exact private source in
 rehearsal and keep that gate open until resolved. No automatic DB rollback is
 safe after a venue write; retain halt and follow the forward-repair policy.
 
+## Capital comparison on an isolated restore (S0-R-C)
+
+Run this manually on the VM as the DR operator after the release containing
+`bfx_funding_bot.apps.capital_comparison` is deployed. Select an explicit retained
+backup label and an exact UTC recovery target covered by its WAL. Supply every
+live `ACCOUNT_UUID:ENVIRONMENT` scope; repeat `--scope` for additional accounts
+or environments. Use the deployed backend's full repository digest reference:
+
+```bash
+cd /home/ubuntu/bfx-releases/current
+IMAGE=$(docker inspect bfx-bot --format '{{.Config.Image}}')
+deploy/vm/pgbackrest/restore-drill.sh --rehearsal \
+  --backup-label '<selected-backup-label>' \
+  --target-time '2026-09-29T00:00:00Z' \
+  --backend-image "$IMAGE" \
+  --cells /home/ubuntu/bfx-releases/current/backend/configs/cells.live.yaml \
+  --scope '<canonical-account-uuid>:prod'
+```
+
+Replace the example recovery target with the selected point; the launcher uses
+that instant as comparison `now_ms`. It refuses an image reference that differs
+from the deployed `bfx-bot` image and takes `--code-revision` from that pinned
+image's revision label. It creates a private restored database, disconnects its
+R2 egress, grants a per-run read-only comparison role on the restored copy, then
+runs the comparison in a hardened one-shot container on the internal DR network.
+No production prefix or stanza query is part of this mode. The existing monthly
+prefix test and heartbeat are separate.
+
+The process exits **0** for a complete comparison pass, **1** for differences or
+inconclusive coverage, and **3** for operational failure (including restore,
+container, evidence, or cleanup failure). Each run that passes input preflight has a fresh private directory
+under `$HOME/bfx/dr-evidence/capital-comparison-rehearsals/<run-id>/`:
+
+- `result.json` is the final launcher status after cleanup; check its `exit_code`
+  and `cleanup_complete` first. It records the digest of the exact copied cells
+  bytes (`cells_sha256`) alongside the pinned image and code revision.
+- `summary.json` is the comparison command's summary, including coverage,
+  counts, and `inconclusive`.
+- `comparison.jsonl` contains the per-scope comparison records followed by the
+  command summary. It is present only when the command produced valid output.
+
+For the most recent run, inspect the final status before the command summary:
+
+```bash
+RUN_DIR=$(ls -dt "$HOME"/bfx/dr-evidence/capital-comparison-rehearsals/* | head -n 1)
+cat "$RUN_DIR/result.json"
+cat "$RUN_DIR/summary.json"
+```
+
+The temporary 0600 DSN, manifest, cells copy, and restore Compose env file are
+removed in the same cleanup path as the container, networks, and volume. The
+rehearsal directory contains no DSN or password; keep its financial results
+private. An operator must confirm the retained backup/WAL selection, actual VM
+isolation and grants, and the comparison result there; local tests do not run
+Docker or query the VM.
+
+Later cutover (C) uses the same comparison command with `--mode cutover` against
+production **only during the S2 halt**, using a separately verified READ ONLY
+production role and cutover manifest. This launcher does not implement that
+production path.
+
 ## Monthly and change-triggered prefix restore test
 
 The baseline drill above stays the provisioning and incident acceptance path. The recurring
