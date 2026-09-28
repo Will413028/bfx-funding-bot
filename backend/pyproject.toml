@@ -151,6 +151,7 @@ forbidden_modules = [
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
     "bfx_funding_bot.modules.trading",
+    "bfx_funding_bot.modules.trading_shadow",
 ]
 ignore_imports = []
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
@@ -165,6 +166,45 @@ as_packages = true
 allow_indirect_imports = true
 ignore_imports = []
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
+
+[[tool.importlinter.contracts]]
+id = "trading-shadow-no-internal-access"
+name = "Only trading shadow imports its internals directly"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.core", "bfx_funding_bot.external", "bfx_funding_bot.apps",
+    "bfx_funding_bot.modules.accounts", "bfx_funding_bot.modules.admin",
+    "bfx_funding_bot.modules.api", "bfx_funding_bot.modules.backfill",
+    "bfx_funding_bot.modules.backtest", "bfx_funding_bot.modules.candles",
+    "bfx_funding_bot.modules.deployments", "bfx_funding_bot.modules.execution",
+    "bfx_funding_bot.modules.external_signals", "bfx_funding_bot.modules.funding_stats",
+    "bfx_funding_bot.modules.lending", "bfx_funding_bot.modules.live_validation",
+    "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.trading",
+]
+forbidden_modules = ["bfx_funding_bot.modules.trading_shadow._internal"]
+as_packages = true
+allow_indirect_imports = true
+ignore_imports = []
+
+[[tool.importlinter.contracts]]
+id = "trading-shadow-wiring-is-top"
+name = "Only composition roots may import trading shadow wiring"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.core", "bfx_funding_bot.external", "bfx_funding_bot.modules"]
+forbidden_modules = ["bfx_funding_bot.modules.trading_shadow.wiring"]
+ignore_imports = []
+
+[[tool.importlinter.contracts]]
+id = "trading-shadow-independent-loader"
+name = "Trading shadow never imports the legacy capital repository or event store"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.modules.trading_shadow"]
+forbidden_modules = [
+    "bfx_funding_bot.modules.execution.capital_repository",
+    "bfx_funding_bot.modules.execution.event_store",
+]
+ignore_imports = []
 
 [[tool.importlinter.contracts]]
 id = "apps-is-top"

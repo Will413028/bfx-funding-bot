@@ -17,6 +17,9 @@ STRATEGY_NO_INTERNAL_ACCESS_MAX_IGNORES = 0
 TRADING_IS_PURE_MAX_IGNORES = 0
 
 MAX_IGNORES_BY_ID = {
+    "trading-shadow-no-internal-access": 0,
+    "trading-shadow-wiring-is-top": 0,
+    "trading-shadow-independent-loader": 0,
     "trading-is-pure": TRADING_IS_PURE_MAX_IGNORES,
     "apps-is-top": APPS_IS_TOP_MAX_IGNORES,
     "core-is-leaf": CORE_IS_LEAF_MAX_IGNORES,
@@ -48,3 +51,8 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
         and path.name not in {"candles", "strategy"}
     }
     assert set(contracts_by_id["strategy-lower-only"]["forbidden_modules"]) == sibling_modules
+    shadow_sources = set(contracts_by_id["trading-shadow-no-internal-access"]["source_modules"])
+    assert shadow_sources == (sibling_modules | {
+        "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.candles",
+        "bfx_funding_bot.core", "bfx_funding_bot.external", "bfx_funding_bot.apps",
+    }) - {"bfx_funding_bot.modules.trading_shadow"}
