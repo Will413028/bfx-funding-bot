@@ -111,6 +111,18 @@ root_package = "bfx_funding_bot"
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
+id = "trading-is-pure"
+name = "Trading does not import I/O, runtime settings, or the event store"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.modules.trading"]
+forbidden_modules = [
+    "sqlalchemy", "httpx", "bfx_funding_bot.core.settings",
+    "bfx_funding_bot.modules.execution.event_store",
+]
+ignore_imports = []
+broken_contract_guidance = "Keep the capital contracts and fold pure; do not add ignores."
+
+[[tool.importlinter.contracts]]
 id = "strategy-is-pure"
 name = "Strategy does not import I/O or runtime settings"
 type = "forbidden"
@@ -138,6 +150,7 @@ forbidden_modules = [
     "bfx_funding_bot.modules.live_validation",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.trading",
 ]
 ignore_imports = []
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
