@@ -13,6 +13,7 @@ export default defineConfig({
 	test: {
 		include: ["src/**/*.test.{ts,tsx}"],
 		environment: "jsdom",
+		setupFiles: ["./vitest.setup.ts"],
 		// next-intl's ESM imports "next/server" without an extension, which
 		// Node's resolver rejects; let Vite resolve it instead.
 		server: { deps: { inline: ["next-intl"] } },
