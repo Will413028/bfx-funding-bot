@@ -330,7 +330,7 @@ def test_boot_refused_fatal_and_future_events_render() -> None:
 async def test_daemon_reports_a_refused_boot_before_it_exits(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from bfx_funding_bot.modules.marketfeed import daemon as daemon_module
+    from bfx_funding_bot.apps import bot as daemon_module
 
     async def refuse() -> None:
         raise ValueError("config_fatal: BFX_EXCHANGE_ACCOUNT_ID missing")

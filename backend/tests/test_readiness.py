@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import SQLAlchemyError
 
-from bfx_funding_bot.main import app
+from bfx_funding_bot.apps.webapi import app
 from bfx_funding_bot.modules.api import deps
 from bfx_funding_bot.modules.api.deps import _readiness_timeout_seconds
 

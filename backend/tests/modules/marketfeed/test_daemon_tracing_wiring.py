@@ -93,7 +93,7 @@ async def test_build_daemon_default_tracing_disabled_nothing_wrapped(
     monkeypatch.delenv("BFX_OTEL_ENABLED", raising=False)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="tracing_off.db")
 
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
     daemon = await build_daemon(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )
@@ -119,7 +119,7 @@ async def test_build_daemon_paper_tracing_enabled_wraps_submit_outermost(
     monkeypatch.setenv("BFX_OTEL_ENABLED", "true")
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="tracing_paper.db")
 
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
     daemon = await build_daemon(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )
@@ -155,7 +155,7 @@ async def test_build_daemon_live_tracing_enabled_wraps_reconcile_and_ws(
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="tracing_live.db")
     monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
 
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
     daemon = await build_daemon(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )

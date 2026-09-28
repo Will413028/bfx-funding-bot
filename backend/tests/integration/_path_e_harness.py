@@ -16,12 +16,12 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
+from bfx_funding_bot.apps import bot as daemon_mod
 from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
 )
-from bfx_funding_bot.modules.marketfeed import daemon as daemon_mod
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,

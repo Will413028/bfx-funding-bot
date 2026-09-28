@@ -43,7 +43,7 @@ pnpm dev
 cd backend
 uv run alembic upgrade head        # 套用 DB migration
 uv run pytest -m "not integration" # 單元測試
-uv run bfx-shadow                  # 跑 daemon（phase 由 BFX_PHASE 控制）
+uv run python -m bfx_funding_bot.apps.bot  # 跑 daemon（phase 由 BFX_PHASE 控制）
 ```
 
 ## 架構文件

@@ -45,8 +45,8 @@ SERVICES = ("bot", "webapi", "frontend")
 NETWORK = "bfx_default"
 CONTAINERS = {"bot": "bfx-bot", "webapi": "bfx-webapi", "frontend": "bfx-frontend"}
 COMMANDS = {
-    "bot": ["/app/.venv/bin/python", "-m", "bfx_funding_bot.modules.marketfeed.daemon"],
-    "webapi": ["/app/.venv/bin/python", "-m", "uvicorn", "bfx_funding_bot.main:app",
+    "bot": ["/app/.venv/bin/python", "-m", "bfx_funding_bot.apps.bot"],
+    "webapi": ["/app/.venv/bin/python", "-m", "uvicorn", "bfx_funding_bot.apps.webapi:app",
                "--host", "0.0.0.0", "--port", "8000"],
     "frontend": ["node", "server.js"],
 }

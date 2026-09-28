@@ -55,7 +55,7 @@ dev = [
 ]
 
 [project.scripts]
-bfx-shadow = "bfx_funding_bot.modules.marketfeed.daemon:main"
+bfx-shadow = "bfx_funding_bot.apps.bot:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -108,6 +108,15 @@ markers = [
 
 [tool.importlinter]
 root_package = "bfx_funding_bot"
+
+[[tool.importlinter.contracts]]
+id = "apps-is-top"
+name = "Core, venue, and modules do not import apps"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.core", "bfx_funding_bot.external", "bfx_funding_bot.modules"]
+forbidden_modules = ["bfx_funding_bot.apps"]
+ignore_imports = []
+broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
 
 [[tool.importlinter.contracts]]
 id = "core-is-leaf"
