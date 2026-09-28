@@ -269,7 +269,7 @@ def test_build_strategy_is_deterministic() -> None:
 def test_experimental_cells_yaml_loads_and_builds() -> None:
     from pathlib import Path
 
-    from bfx_funding_bot.modules.marketfeed.config import load_cells_only
+    from bfx_funding_bot.apps.config import load_cells_only
     from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
 
     cells = load_cells_only(Path("configs/cells.experimental.yaml"))

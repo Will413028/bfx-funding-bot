@@ -3,7 +3,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from bfx_funding_bot.modules.marketfeed.config import load_cells_only, load_config
+from bfx_funding_bot.apps.config import load_cells_only, load_config
 
 ROOT = Path(__file__).resolve().parents[4]
 

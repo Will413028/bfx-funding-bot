@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from bfx_funding_bot.apps.config import load_cells_only
 from bfx_funding_bot.modules.backtest.cell_derivation import derive_cell_params
 from bfx_funding_bot.modules.backtest.cell_pipeline import (
     check_deployed_cells,
@@ -12,7 +13,6 @@ from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.fixture_io import freeze_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
-from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 from bfx_funding_bot.modules.strategy import CellConfig
 
 _LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")

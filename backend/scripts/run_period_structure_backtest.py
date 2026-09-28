@@ -38,6 +38,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.apps.config import load_cells_only
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
@@ -75,7 +76,6 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     FRR_ANNUALIZATION,
     assert_market_rate_band,
 )
-from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 from bfx_funding_bot.modules.strategy import (
     AdaptivePeriodStrategy,
     AlwaysFrrStrategy,
