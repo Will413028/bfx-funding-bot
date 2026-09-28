@@ -42,4 +42,4 @@ ENV PATH="/app/.venv/bin:$PATH" \
     BFX_SERVICE_VERSION=${GIT_SHA}
 
 # Schema migration is an explicit owner-only operation, never runtime startup.
-CMD ["/app/.venv/bin/python", "-m", "bfx_funding_bot.modules.marketfeed.daemon"]
+CMD ["/app/.venv/bin/python", "-m", "bfx_funding_bot.apps.bot"]

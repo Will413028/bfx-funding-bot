@@ -33,11 +33,11 @@ from tests.modules.marketfeed.account_test_helpers import (
 async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mock, with_policy, schema_current):
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
     from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
     from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
     import os
@@ -176,13 +176,13 @@ async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_p
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
     from bfx_funding_bot.core.writer_lock import WriterLock
     from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
     from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
     from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
     import os
@@ -269,11 +269,11 @@ async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, 
     """Lending envelope D5: a release is not a trading decision."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
     from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
     from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
     import os
@@ -336,11 +336,11 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
     from bfx_funding_bot.core.schema_head import SchemaHeadMismatch, build_head
     from bfx_funding_bot.modules.execution.safety import boot_stop
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
@@ -458,7 +458,7 @@ async def test_build_daemon_emit_and_query_env_symmetric(
         is_optional=True,
     )
 
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
 
     daemon = await build_daemon(
         cells_yaml_path=_write_cells_yaml(tmp_path),
@@ -525,7 +525,7 @@ async def test_build_daemon_reconcile_interval_zero_raises(
         is_optional=True,
     )
 
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
 
     yaml_path = tmp_path / "cells.yaml"
     # fUST (funded canary currency) so build passes assert_caps_invariant and
@@ -554,7 +554,7 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     """Live executor + WS client: auth_ws.on_resync_needed is bound to
     periodic_reconcile.request_resync so a stream break triggers an off-interval
     reconcile."""
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
 
     safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
     monkeypatch.setenv("BFX_PHASE", "live")
@@ -626,7 +626,7 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     httpx_mock: HTTPXMock,
 ) -> None:
     """Live boot re-enables deployment only with the concrete integrity set."""
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
 
     safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
     monkeypatch.setenv("BFX_PHASE", "live")
@@ -739,7 +739,7 @@ async def test_smoke_runner_present_for_simulated_paper(
 ) -> None:
     """Paper (simulated) keeps the boot/HTTP smoke runner — guards the live-gate
     from over-disabling it."""
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
 
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
@@ -792,7 +792,7 @@ async def test_smoke_runner_gated_off_for_live_executor(
     """Canary/live executor must NOT wire the SmokeRunner: its chain self-test
     submits with placeholder creds, which against the real venue returns
     `10100 apikey: digest invalid`. Smoke is a simulated-only self-test."""
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
 
     safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
     monkeypatch.setenv("BFX_PHASE", "live")
@@ -851,7 +851,7 @@ async def test_canary_build_wires_writer_lock_and_guard(
     Postgres-only) — so this asserts wiring without touching a real lock.
     Paper/shadow leave writer_lock None (covered implicitly by the sibling
     paper test which exercises the simulated path)."""
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
 
     safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
     monkeypatch.setenv("BFX_PHASE", "live")

@@ -42,7 +42,7 @@ services:
     pull_policy: never
     container_name: bfx-bot
     entrypoint: []
-    command: ["/app/.venv/bin/python", "-m", "bfx_funding_bot.modules.marketfeed.daemon"]
+    command: ["/app/.venv/bin/python", "-m", "bfx_funding_bot.apps.bot"]
     user: "1000:1000"
     working_dir: /app
     read_only: true
@@ -73,7 +73,7 @@ services:
     pull_policy: never
     container_name: bfx-webapi
     entrypoint: []
-    command: ["/app/.venv/bin/python", "-m", "uvicorn", "bfx_funding_bot.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["/app/.venv/bin/python", "-m", "uvicorn", "bfx_funding_bot.apps.webapi:app", "--host", "0.0.0.0", "--port", "8000"]
     user: "1000:1000"
     working_dir: /app
     read_only: true

@@ -7,8 +7,8 @@ from pathlib import Path
 
 from pytest_httpx import HTTPXMock
 
+from bfx_funding_bot.apps.bot import build_daemon
 from bfx_funding_bot.modules.execution.events import PositionReconciled
-from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
 from bfx_funding_bot.modules.marketfeed.schemas import Phase
 from tests.modules.marketfeed.account_test_helpers import (
     configure_account_env,

@@ -113,7 +113,7 @@ async def test_a_nav_drop_alerts_and_never_blocks(
         is_reusable=True, is_optional=True,
     )
 
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
     daemon = await build_daemon(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )

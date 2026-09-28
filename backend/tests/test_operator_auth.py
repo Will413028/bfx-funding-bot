@@ -102,7 +102,7 @@ def test_main_import_is_db_independent() -> None:
     environment.pop("BETTER_AUTH_JWKS_URL", None)
     backend_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, "-c", "from bfx_funding_bot.main import app; print(app.title)"],
+        [sys.executable, "-c", "from bfx_funding_bot.apps.webapi import app; print(app.title)"],
         cwd=backend_root,
         env=environment,
         capture_output=True,

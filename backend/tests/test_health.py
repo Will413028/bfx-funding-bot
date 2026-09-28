@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from bfx_funding_bot.main import app
+from bfx_funding_bot.apps.webapi import app
 
 
 def test_health_returns_200() -> None:

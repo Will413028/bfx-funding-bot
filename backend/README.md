@@ -13,7 +13,7 @@ cp .env.example .env
 ## Run
 
 ```bash
-uv run uvicorn bfx_funding_bot.main:app --reload
+uv run uvicorn bfx_funding_bot.apps.webapi:app --reload
 ```
 
 ## Test

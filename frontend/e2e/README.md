@@ -34,7 +34,7 @@ verifies the Better-Auth-minted JWT against the Next app's JWKS endpoint.
 ```bash
 cd backend && \
 BETTER_AUTH_JWKS_URL=http://localhost:3000/api/auth/jwks \
-uv run uvicorn bfx_funding_bot.main:app
+uv run uvicorn bfx_funding_bot.apps.webapi:app
 ```
 
 - `BETTER_AUTH_JWKS_URL` must point at the **running Next app**'s JWKS endpoint

@@ -100,7 +100,7 @@ async def test_build_daemon_paper_wires_metrics_everywhere(
     monkeypatch.delenv("BFX_EXECUTOR", raising=False)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="metrics_paper.db")
 
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
     daemon = await build_daemon(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )
@@ -170,7 +170,7 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="metrics_live.db")
     monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
 
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
     daemon = await build_daemon(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )

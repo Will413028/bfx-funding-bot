@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 
-import bfx_funding_bot.modules.marketfeed.daemon  # noqa: F401
+import bfx_funding_bot.apps.bot  # noqa: F401
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount

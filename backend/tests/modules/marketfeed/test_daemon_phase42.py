@@ -76,7 +76,7 @@ async def test_build_daemon_wires_paper_executor_by_default(
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
     _add_bitfinex_mock(httpx_mock)
 
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
     daemon = await build_daemon(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )
@@ -108,11 +108,11 @@ async def test_build_daemon_simulated_excludes_buying_power_guard(
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
     _add_bitfinex_mock(httpx_mock)
 
+    from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.modules.execution.safety.hard_guards import (
         AllocationCapGuard,
         BuyingPowerGuard,
     )
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     daemon = await build_daemon(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )
@@ -135,7 +135,7 @@ async def test_build_daemon_invalid_executor_combo_raises(
     monkeypatch.setenv("BFX_FILL_TRACKER_ENABLED", "true")
     _add_bitfinex_mock(httpx_mock)
 
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from bfx_funding_bot.apps.bot import build_daemon
     with pytest.raises(ExecutorConfigError):
         await build_daemon(
             cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
@@ -198,13 +198,13 @@ async def test_build_daemon_filters_disabled_hard_guards(
 
     _add_bitfinex_mock(httpx_mock)
 
+    from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.modules.execution.safety.hard_guards import (
         AllocationCapGuard,
         AuthHealthGuard,
         HeartbeatGuard,
         ManualKillGuard,
     )
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     daemon = await build_daemon(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )
@@ -243,8 +243,8 @@ async def test_build_daemon_heartbeat_guard_watches_market_data_not_executor(
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_yaml))
     _add_bitfinex_mock(httpx_mock)
 
+    from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.modules.execution.safety.hard_guards import HeartbeatGuard
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     daemon = await build_daemon(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )
