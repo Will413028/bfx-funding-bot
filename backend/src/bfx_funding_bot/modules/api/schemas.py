@@ -9,8 +9,8 @@ class CreateApiKeyRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     label: str = ""
-    api_key: str = Field(alias="apiKey")
-    api_secret: str = Field(alias="apiSecret")
+    api_key: str = Field(alias="apiKey", repr=False)
+    api_secret: str = Field(alias="apiSecret", repr=False)
 
 
 class ApiKeyResponse(BaseModel):

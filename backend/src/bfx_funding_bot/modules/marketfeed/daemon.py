@@ -318,7 +318,7 @@ class Daemon:
     funding_book_service: FundingBookService | None = None
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
-    admin_token: str | None = None
+    admin_token: str | None = field(default=None, repr=False)
     # Behaviour-reporting service behind /admin/trading-status + /admin/dry-evaluate.
     trading_status: TradingStatusService | None = None
     trading_readiness: TradingReadiness | None = None

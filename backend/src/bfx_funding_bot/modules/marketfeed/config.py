@@ -113,7 +113,7 @@ class MarketfeedConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     phase: Annotated[Phase, Field(description="paper / shadow / live")]
     cells: list[CellConfig]
-    database_url: str
+    database_url: str = Field(repr=False)
     deployment_environment: DeploymentEnvironment
     execution_policy: ExecutionPolicy
     book_max_age_seconds: float | None = Field(default=None, gt=0)
@@ -121,7 +121,7 @@ class MarketfeedConfig(BaseModel):
     book_max_down_pct: float | None = Field(default=None, ge=0, le=1)
     optimizer_fee_rate: Decimal | None = Field(default=None, ge=0, le=1)
     fill_model_artifact: str | None = None
-    redis_url: str | None = None
+    redis_url: str | None = Field(default=None, repr=False)
     run_duration_hours: int | None = Field(default=None, gt=0)
     # Bug C fix (5/20): scheduler observe-after-close buffer. Was 5s
     # default — but Bitfinex p30 candles sometimes land in DB > 5s after
