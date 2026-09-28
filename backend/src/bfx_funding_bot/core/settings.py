@@ -89,7 +89,7 @@ class AuthSettings(BaseSettings):
 class Settings(AuthSettings):
     """Full application settings, including the required database URL."""
 
-    database_url: str
+    database_url: str = Field(repr=False)
     bitfinex_api_base_url: str = "https://api-pub.bitfinex.com"
     log_level: str = "INFO"
 
