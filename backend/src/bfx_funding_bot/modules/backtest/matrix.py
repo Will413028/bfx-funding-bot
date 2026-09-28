@@ -17,7 +17,7 @@ from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
-from bfx_funding_bot.modules.strategy import AlwaysMarketRateStrategy, Strategy
+from bfx_funding_bot.modules.strategy import ResearchStrategySpec
 
 FILL_FLOOR = Decimal("0.3")
 MIN_TRADES_TRAIN = 10
@@ -184,13 +184,14 @@ def evaluate_strategy_qualification(
 
 
 def run_cell_wfo(
-    strategy_class: type[Strategy],
+    strategy_spec: ResearchStrategySpec,
     candles: list[FundingCandle],
     eda_cell: dict[str, Any],
     cell_key: str,
     wfo_windows: list[WfoWindow],
     config: BacktestConfig,
     fill_model: FillRateModel | None,
+    baseline: ResearchStrategySpec,
 ) -> tuple[list[WindowOutcome], list[BacktestResult]]:
     """Run sweep + OOS eval for one (strategy, cell) across all WFO windows.
 
@@ -210,14 +211,14 @@ def run_cell_wfo(
         try:
             baseline_result = run_backtest(
                 candles,
-                AlwaysMarketRateStrategy(period_days=2),
+                baseline.create(period_days=2),
                 config,
                 record_start_mts=w.test_start_mts,
                 record_end_mts=w.test_end_mts,
                 fill_model=fill_model,
             )
             baseline_results.append(baseline_result)
-            grid = strategy_class.param_grid_for_cell(
+            grid = strategy_spec.param_grid_for_cell(
                 symbol=candles[0].symbol, period_agg=candles[0].period_agg,
                 eda=eda_cell,
             )
@@ -237,7 +238,7 @@ def run_cell_wfo(
             candidates = []
             for params in grid:
                 train_result = run_backtest(
-                    candles, strategy_class(**params), config,
+                    candles, strategy_spec.create(**params), config,
                     record_start_mts=w.train_start_mts,
                     record_end_mts=w.train_end_mts,
                     fill_model=fill_model,
@@ -260,7 +261,7 @@ def run_cell_wfo(
 
             best_params, _ = winner
             test_result = run_backtest(
-                candles, strategy_class(**best_params), config,
+                candles, strategy_spec.create(**best_params), config,
                 record_start_mts=w.test_start_mts,
                 record_end_mts=w.test_end_mts,
                 fill_model=fill_model,

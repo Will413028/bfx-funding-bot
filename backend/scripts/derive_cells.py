@@ -21,6 +21,7 @@ import sys
 from datetime import UTC, datetime
 
 from bfx_funding_bot.apps.config import load_cells_only
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.modules.backtest.cell_derivation import DerivedCell, derive_cell_params
 from bfx_funding_bot.modules.backtest.cell_pipeline import (
     CELLS_YAML,
@@ -72,6 +73,8 @@ async def _write_main() -> int:
             series[key] = candles
             d = derive_cell_params(
                 candles, config=RESEARCH_CONFIG, fill_model=UNUSED_LINEAR_MODEL,
+                strategy_spec=research_strategy("MeanReversionStrategy"),
+                baseline=research_strategy("AlwaysMarketRateStrategy"),
             )
             derived[key] = d
             logger.info(
@@ -115,6 +118,8 @@ def main() -> None:
         FIXTURES, CELLS_YAML, main_cells,
         config=RESEARCH_CONFIG,
         fill_model=UNUSED_LINEAR_MODEL,
+        strategy_spec=research_strategy("MeanReversionStrategy"),
+        baseline=research_strategy("AlwaysMarketRateStrategy"),
     )
     if can_check_deployed and DEPLOYED_YAML.exists():
         deployed_cells = tuple(load_cells_only(DEPLOYED_YAML))

@@ -13,11 +13,8 @@ from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     ExtractedSignal,
     _diff_fields,
 )
-from bfx_funding_bot.modules.marketfeed.strategy_registry import (
-    build_strategy,
-    build_strategy_at_boundary,
-)
 from bfx_funding_bot.modules.strategy import CellConfig, SignalDirection
+from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
 
 def _cell_rp() -> CellConfig:
@@ -46,7 +43,7 @@ def test_no_divergence_when_inputs_match():
         live.observe(c)
     live_signal = ExtractedSignal.extract(cell, live, history[-1])
 
-    reporter = DivergenceReporter()
+    reporter = DivergenceReporter(build_strategy_at_boundary)
     result = reporter.check(
         cell=cell, raw_history=history, boundary_candle=history[-1],
         budget_hours=cell.staleness_budget_hours or 2, live_signal=live_signal,
@@ -76,7 +73,7 @@ def test_divergence_detected_when_live_signal_differs_from_replay():
         lend_decision=None,
     )
 
-    reporter = DivergenceReporter()
+    reporter = DivergenceReporter(build_strategy_at_boundary)
     result = reporter.check(
         cell=cell, raw_history=history, boundary_candle=history[-1],
         budget_hours=cell.staleness_budget_hours or 2, live_signal=fake_live,
@@ -157,7 +154,7 @@ def test_replay_byte_equivalent_with_locf_on_sparse_input():
     # Replay path: reporter rebuilds via build_strategy_at_boundary over RAW
     # history with ref_mts=boundary.mts (=T+15h) — an independent reconstruction
     # that must produce a byte-equal window/threshold.
-    reporter = DivergenceReporter()
+    reporter = DivergenceReporter(build_strategy_at_boundary)
     divergence = reporter.check(
         cell=cell, raw_history=raw_candles, boundary_candle=gap_terminator,
         budget_hours=budget_hours, live_signal=live_signal,
@@ -196,7 +193,7 @@ def test_state_drift_detected_even_when_direction_matches():
         }.items())),
         lend_decision=None,
     )
-    reporter = DivergenceReporter()
+    reporter = DivergenceReporter(build_strategy_at_boundary)
     result = reporter.check(
         cell=cell, raw_history=history, boundary_candle=history[-1],
         budget_hours=2, live_signal=fake_live,
@@ -390,7 +387,7 @@ def test_mr_warmup_drift_no_false_divergence():
     for idx in range(200, 206):
         live_signal = ExtractedSignal.extract(cell, live, candles[idx])
 
-    reporter = DivergenceReporter()
+    reporter = DivergenceReporter(build_strategy_at_boundary)
     divergence = reporter.check(
         cell=cell, raw_history=up_to(candles[205].mts, 201),
         boundary_candle=candles[205], budget_hours=200, live_signal=live_signal,
@@ -450,7 +447,7 @@ def test_adaptive_period_state_drift_detected():
         lend_decision=None,
     )
 
-    reporter = DivergenceReporter()
+    reporter = DivergenceReporter(build_strategy_at_boundary)
     result = reporter.check(
         cell=cell, raw_history=history, boundary_candle=history[-1],
         budget_hours=2, live_signal=fake_live,
@@ -488,7 +485,9 @@ def test_adaptive_period_no_false_divergence_on_boundary_period_flip():
     has 6), which _attrs_diverge detects → check() returns a divergence dict →
     the assert-None fails → mutation is caught.
     """
-    from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy
+    from bfx_funding_bot.modules.strategy._internal.strategies.adaptive_period import (
+        AdaptivePeriodStrategy,
+    )
 
     # ema_span=24, band1=t1*ratio_sigma=0.5*0.05=0.025, band2=0.075.
     # alpha = 2/(24+1) = 2/25.
@@ -579,7 +578,7 @@ def test_adaptive_period_no_false_divergence_on_boundary_period_flip():
     )
 
     # Core assertion (a): no false divergence — reporter must return None.
-    reporter = DivergenceReporter()
+    reporter = DivergenceReporter(build_strategy_at_boundary)
     result2 = reporter.check(
         cell=cell, raw_history=raw_history, boundary_candle=boundary,
         budget_hours=30, live_signal=fake_live,
@@ -622,7 +621,7 @@ def test_adaptive_period_warmup_no_false_divergence():
         lend_decision=None,
     )
 
-    reporter = DivergenceReporter()
+    reporter = DivergenceReporter(build_strategy_at_boundary)
     result = reporter.check(
         cell=cell, raw_history=history, boundary_candle=history[-1],
         budget_hours=2, live_signal=fake_live,
@@ -669,7 +668,7 @@ def test_adaptive_period_config_drift_detected():
         lend_decision=None,
     )
 
-    reporter = DivergenceReporter()
+    reporter = DivergenceReporter(build_strategy_at_boundary)
     result = reporter.check(
         cell=cell, raw_history=history, boundary_candle=history[-1],
         budget_hours=2, live_signal=fake_live,

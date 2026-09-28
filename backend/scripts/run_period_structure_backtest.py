@@ -39,6 +39,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.apps.config import load_cells_only
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
@@ -77,11 +78,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     assert_market_rate_band,
 )
 from bfx_funding_bot.modules.strategy import (
-    AdaptivePeriodStrategy,
-    AlwaysFrrStrategy,
-    AlwaysMarketRateStrategy,
     CellConfig,
-    MeanReversionStrategy,
     Strategy,
 )
 
@@ -134,7 +131,7 @@ def _mr_factory(params: dict[str, object]) -> Callable[[], Strategy]:
     ema_span = int(str(params["ema_span"]))
     threshold_sigma = Decimal(str(params["threshold_sigma"]))
     ratio_sigma = Decimal(str(params["ratio_sigma"]))
-    return lambda: MeanReversionStrategy(
+    return lambda: research_strategy("MeanReversionStrategy").create(
         ema_span=ema_span, threshold_sigma=threshold_sigma, ratio_sigma=ratio_sigma
     )
 
@@ -150,12 +147,12 @@ def build_arms(
 ) -> tuple[list[ArmSpec], list[str]]:
     """Arms available for this symbol given the series and params on hand, plus notes."""
     arms: list[ArmSpec] = [
-        ArmSpec(ARM_ALWAYS_2D, "p2", lambda: AlwaysMarketRateStrategy(period_days=2)),
+        ArmSpec(ARM_ALWAYS_2D, "p2", lambda: research_strategy("AlwaysMarketRateStrategy").create(period_days=2)),
     ]
     notes: list[str] = []
     if "p30" in series:
         arms.append(
-            ArmSpec(ARM_ALWAYS_30D, "p30", lambda: AlwaysMarketRateStrategy(period_days=30))
+            ArmSpec(ARM_ALWAYS_30D, "p30", lambda: research_strategy("AlwaysMarketRateStrategy").create(period_days=30))
         )
     else:
         notes.append("always_30d skipped: no p30 series for this symbol in this data mode")
@@ -183,7 +180,7 @@ def build_arms(
         arms.append(
             ArmSpec(
                 ARM_ADAPTIVE, "a30",
-                lambda: AdaptivePeriodStrategy(
+                lambda: research_strategy("AdaptivePeriodStrategy").create(
                     ema_span=ap.ema_span, ratio_sigma=sigma, t1=ap.t1, t2=ap.t2,
                     p_mid=ap.p_mid, p_long=ap.p_long,
                 ),
@@ -199,7 +196,7 @@ def build_arms(
 
     if frr_at is not None:
         arms.append(
-            ArmSpec(ARM_ALWAYS_FRR, "p2", lambda: AlwaysFrrStrategy(frr_at=frr_at, period_days=2))
+            ArmSpec(ARM_ALWAYS_FRR, "p2", lambda: research_strategy("AlwaysFrrStrategy").create(frr_at=frr_at, period_days=2))
         )
     else:
         notes.append("always_frr skipped: funding_stats not available in this data mode")

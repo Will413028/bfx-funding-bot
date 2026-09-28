@@ -3,6 +3,7 @@
 Never raise a constant to make a new violation pass silently.
 """
 
+import ast
 import tomllib
 from pathlib import Path
 
@@ -72,3 +73,21 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     }
     assert wiring["forbidden_modules"] == ["bfx_funding_bot.modules.strategy.wiring"]
     assert wiring["as_packages"] is False
+
+
+def test_research_scripts_obtain_strategy_wiring_through_apps() -> None:
+    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
+    violations: list[str] = []
+    for script in scripts_dir.rglob("*.py"):
+        tree = ast.parse(script.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == (
+                "bfx_funding_bot.modules.strategy.wiring"
+            ):
+                violations.append(str(script.relative_to(scripts_dir)))
+            if isinstance(node, ast.Import) and any(
+                alias.name == "bfx_funding_bot.modules.strategy.wiring"
+                for alias in node.names
+            ):
+                violations.append(str(script.relative_to(scripts_dir)))
+    assert violations == []

@@ -6,13 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
+from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter
 from bfx_funding_bot.modules.marketfeed.schemas import Envelope
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
-from bfx_funding_bot.modules.marketfeed.strategy_registry import (
-    StrategyRegistry,
-    build_strategy,
-)
+from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.strategy import CellConfig, DecisionOutcome
+from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
 
 def _cell() -> CellConfig:
@@ -54,9 +53,10 @@ async def test_signal_engine_emits_signal_and_decision():
     engine = SignalEngine(
         phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=candles_repo,
+        reporter=DivergenceReporter(build_strategy_at_boundary),
     )
     cell = _cell()
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     strategy = build_strategy(cell)
     for c in _history(7):
         strategy.observe(c)
@@ -88,9 +88,10 @@ async def test_cp3_every_emit_passes_schema_validation():
     engine = SignalEngine(
         phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=candles_repo,
+        reporter=DivergenceReporter(build_strategy_at_boundary),
     )
     cell = _cell()
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     strategy = build_strategy(cell)
     for c in _history(7):
         strategy.observe(c)
@@ -141,7 +142,7 @@ async def test_cp3_divergence_path_also_passes_schema():
         candles_repo=candles_repo, reporter=reporter,
     )
     cell = _cell()
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     strategy = build_strategy(cell)
     for c in _history(7):
         strategy.observe(c)
@@ -271,11 +272,12 @@ async def test_process_candle_writes_standing_quote():
     engine = SignalEngine(
         phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=candles_repo,
+        reporter=DivergenceReporter(build_strategy_at_boundary),
         quote_store=store,
         clock=lambda: 5_000,
     )
 
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     strategy = build_strategy(cell)
     for c in _history(7):
         strategy.observe(c)

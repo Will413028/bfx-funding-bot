@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from bfx_funding_bot.apps.config import load_cells_only
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.modules.backtest.band_sweep import (
     SPLIT_MTS,
     BandResult,
@@ -22,7 +23,6 @@ from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy
 
 
 def _candles(closes: list[str], symbol: str = "fUST") -> list[FundingCandle]:
@@ -61,9 +61,10 @@ def test_simulate_period_path_matches_engine_trade_count() -> None:
         "t2": Decimal("1.5"), "p_mid": 7, "p_long": 14,
     }
 
-    periods = simulate_period_path(candles, **params)
+    spec = research_strategy("AdaptivePeriodStrategy")
+    periods = simulate_period_path(candles, strategy_spec=spec, **params)
 
-    strat = AdaptivePeriodStrategy(**params)
+    strat = spec.create(**params)
     rb = run_backtest(candles, strat, BacktestConfig(fill_model="linear-baseline"))
     assert len(periods) == rb.n_trades  # the cooldown loop is mirrored exactly
     assert all(p in (2, 7, 14) for p in periods)

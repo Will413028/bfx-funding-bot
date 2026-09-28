@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.strategy import (
+from bfx_funding_bot.modules.strategy._internal.strategies.rate_percentile import (
     RatePercentileStrategy,
 )
 

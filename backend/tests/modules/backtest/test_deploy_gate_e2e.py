@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from bfx_funding_bot.apps.config import load_cells_only
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.deploy_gate import GateResult, evaluate_gate
 from bfx_funding_bot.modules.backtest.fixture_io import load_candles
@@ -22,8 +23,8 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
 )
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
-from bfx_funding_bot.modules.strategy import CellConfig, MeanReversionStrategy, Strategy
+from bfx_funding_bot.modules.strategy import CellConfig, Strategy
+from bfx_funding_bot.modules.strategy.wiring import build_strategy
 
 _LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
 
@@ -57,6 +58,7 @@ def _gate_for(
     strat_out, base_out = evaluate_oos_windows(
         candles, windows, make_strategy=make_strategy,
         config=_LINEAR_CONFIG, fill_model=None,
+        baseline=research_strategy("AlwaysMarketRateStrategy"),
     )
     active = active_return_summary(strat_out, base_out)
     actives = paired_active_returns(strat_out, base_out)
@@ -80,7 +82,7 @@ def test_deployed_cell_beats_passive(cell: CellConfig) -> None:
     candles = load_candles(FIXTURES / f"{cell.symbol}_{cell.period_agg}_{cell.timeframe}.jsonl.gz")
     p = cell.params
     result = _gate_for(
-        lambda: MeanReversionStrategy(
+        lambda: research_strategy("MeanReversionStrategy").create(
             ema_span=int(p["ema_span"]),
             threshold_sigma=Decimal(str(p["threshold_sigma"])),
             ratio_sigma=Decimal(str(p["ratio_sigma"])),
@@ -94,7 +96,7 @@ def test_old_inert_config_would_fail_gate() -> None:
     # The pre-fix hand-picked params for fUST_a30: span=168, thr=1.0, ratio=0.9915.
     candles = load_candles(FIXTURES / "fUST_a30_1h.jsonl.gz")
     result = _gate_for(
-        lambda: MeanReversionStrategy(
+        lambda: research_strategy("MeanReversionStrategy").create(
             ema_span=168, threshold_sigma=Decimal("1.0"), ratio_sigma=Decimal("0.9915")
         ),
         candles,

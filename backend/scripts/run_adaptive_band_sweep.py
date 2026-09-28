@@ -23,6 +23,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.apps.config import load_cells_only
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.band_sweep import (
@@ -39,7 +40,7 @@ from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
-from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy, Strategy
+from bfx_funding_bot.modules.strategy import Strategy
 
 logger = logging.getLogger("run_adaptive_band_sweep")
 
@@ -70,7 +71,7 @@ async def _run_cell(
         }
 
         def _make(p: dict[str, object] = params) -> Strategy:  # default-bind per iteration
-            return AdaptivePeriodStrategy(**p)  # type: ignore[arg-type]
+            return research_strategy("AdaptivePeriodStrategy").create(**p)
 
         strat_outcomes, base_outcomes = evaluate_oos_windows(
             candles,
@@ -78,8 +79,12 @@ async def _run_cell(
             make_strategy=_make,
             config=BacktestConfig(fill_model="linear-baseline"),
             fill_model=None,
+            baseline=research_strategy("AlwaysMarketRateStrategy"),
         )
-        periods = simulate_period_path(candles, **params)  # type: ignore[arg-type]
+        periods = simulate_period_path(
+            candles, strategy_spec=research_strategy("AdaptivePeriodStrategy"),
+            **params,  # type: ignore[arg-type]
+        )
         results.append(build_band_result(
             t1=t1, t2=t2, strat_outcomes=strat_outcomes, base_outcomes=base_outcomes,
             periods=periods, p_long=P_LONG, n_trials=N_TRIALS,

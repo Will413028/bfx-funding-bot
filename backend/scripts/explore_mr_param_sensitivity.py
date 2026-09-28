@@ -19,6 +19,7 @@ import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
@@ -32,7 +33,6 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
 from bfx_funding_bot.modules.backtest.split import compute_train_end_mts
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
-from bfx_funding_bot.modules.strategy import AlwaysMarketRateStrategy, MeanReversionStrategy
 
 logger = logging.getLogger("explore_mr")
 
@@ -70,7 +70,7 @@ async def _amain() -> None:
             base_oc: list[WindowOutcome] = []
             for w in windows:
                 sl = [c for c in candles if w.train_start_mts <= c.mts <= w.test_end_mts]
-                rb = run_backtest(sl, AlwaysMarketRateStrategy(period_days=2), LINEAR,
+                rb = run_backtest(sl, research_strategy("AlwaysMarketRateStrategy").create(period_days=2), LINEAR,
                                   w.test_start_mts, w.test_end_mts)
                 base_oc.append(_oc(rb, w.test_start_mts))
             base_med = summarize_oos(base_oc).median_monthly
@@ -86,7 +86,9 @@ async def _amain() -> None:
                     strat_oc: list[WindowOutcome] = []
                     for w in windows:
                         sl = [c for c in candles if w.train_start_mts <= c.mts <= w.test_end_mts]
-                        s = MeanReversionStrategy(ema_span=span, threshold_sigma=thr, ratio_sigma=sigma)
+                        s = research_strategy("MeanReversionStrategy").create(
+                            ema_span=span, threshold_sigma=thr, ratio_sigma=sigma,
+                        )
                         rs = run_backtest(sl, s, LINEAR, w.test_start_mts, w.test_end_mts)
                         strat_oc.append(_oc(rs, w.test_start_mts))
                     summ = summarize_oos(strat_oc)

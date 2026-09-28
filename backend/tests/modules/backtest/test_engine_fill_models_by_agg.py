@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import (
     EMPIRICAL_SOURCES,
@@ -13,9 +14,6 @@ from bfx_funding_bot.modules.backtest.engine import (
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.artifact import FillModelArtifact
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
-from bfx_funding_bot.modules.strategy import (
-    AlwaysMarketRateStrategy,
-)
 
 _HOUR = 3_600_000
 _T0 = 1_704_067_200_000
@@ -33,6 +31,10 @@ class _Row:
     n_samples: int
     mean_ttf_ms: int | None
     artifact_hash: str | None
+
+
+def market_rate(*, period_days: int):
+    return research_strategy("AlwaysMarketRateStrategy").create(period_days=period_days)
 
 
 def _series(period_agg: str, close: str, n: int = 240) -> list[FundingCandle]:
@@ -59,7 +61,7 @@ def _model(period_agg: str, *, at_par: float, source: str = "book", symbol: str 
 def test_book_source_is_an_accepted_empirical_source() -> None:
     assert {"candle", "book"} == EMPIRICAL_SOURCES
     p2 = _series("p2", "0.0002")
-    r = run_backtest(p2, AlwaysMarketRateStrategy(period_days=2), _EMPIRICAL,
+    r = run_backtest(p2, market_rate(period_days=2), _EMPIRICAL,
                      fill_model=_model("p2", at_par=0.6))
     assert r.fill_rate == Decimal("0.6")
 
@@ -68,9 +70,9 @@ def test_each_tenor_is_scored_by_its_own_model() -> None:
     p2, p30 = _series("p2", "0.0002"), _series("p30", "0.0004")
     series = {"p2": p2, "p30": p30}
     models = {"p2": _model("p2", at_par=0.6), "p30": _model("p30", at_par=0.3)}
-    two = run_backtest(p2, AlwaysMarketRateStrategy(period_days=2), _EMPIRICAL,
+    two = run_backtest(p2, market_rate(period_days=2), _EMPIRICAL,
                        market_series_by_agg=series, fill_models_by_agg=models)
-    thirty = run_backtest(p30, AlwaysMarketRateStrategy(period_days=30), _EMPIRICAL,
+    thirty = run_backtest(p30, market_rate(period_days=30), _EMPIRICAL,
                           market_series_by_agg=series, fill_models_by_agg=models)
     assert two.fill_rate == Decimal("0.6") and thirty.fill_rate == Decimal("0.3")
     assert two.fill_models_by_series == {"p2": "book-p2-v1", "p30": "book-p30-v1"}
@@ -81,14 +83,14 @@ def test_series_without_a_model_is_incomplete_not_linear() -> None:
     series = {"p2": p2, "a30": a30}
     with pytest.raises(BacktestIncomplete, match="fill_model_missing"):
         # 14-day offers price off a30, which has no book model.
-        run_backtest(a30, AlwaysMarketRateStrategy(period_days=14), _EMPIRICAL,
+        run_backtest(a30, market_rate(period_days=14), _EMPIRICAL,
                      market_series_by_agg=series, fill_models_by_agg={"p2": _model("p2", at_par=0.6)})
 
 
 def test_model_scoped_to_another_series_is_rejected_up_front() -> None:
     p2, p30 = _series("p2", "0.0002"), _series("p30", "0.0004")
     with pytest.raises(BacktestIncomplete, match="scope_mismatch"):
-        run_backtest(p2, AlwaysMarketRateStrategy(period_days=2), _EMPIRICAL,
+        run_backtest(p2, market_rate(period_days=2), _EMPIRICAL,
                      market_series_by_agg={"p2": p2, "p30": p30},
                      fill_models_by_agg={"p2": _model("p30", at_par=0.3)})
 
@@ -96,16 +98,16 @@ def test_model_scoped_to_another_series_is_rejected_up_front() -> None:
 def test_unknown_source_is_still_rejected() -> None:
     p2 = _series("p2", "0.0002")
     with pytest.raises(BacktestIncomplete, match="scope_mismatch"):
-        run_backtest(p2, AlwaysMarketRateStrategy(period_days=2), _EMPIRICAL,
+        run_backtest(p2, market_rate(period_days=2), _EMPIRICAL,
                      fill_model=_model("p2", at_par=0.6, source="own_fill"))
 
 
 def test_argument_exclusivity() -> None:
     p2 = _series("p2", "0.0002")
     with pytest.raises(ValueError, match="not both"):
-        run_backtest(p2, AlwaysMarketRateStrategy(period_days=2), _EMPIRICAL,
+        run_backtest(p2, market_rate(period_days=2), _EMPIRICAL,
                      market_series_by_agg={"p2": p2},
                      fill_model=_model("p2", at_par=0.6), fill_models_by_agg={"p2": _model("p2", at_par=0.6)})
     with pytest.raises(ValueError, match="requires market_series_by_agg"):
-        run_backtest(p2, AlwaysMarketRateStrategy(period_days=2), _EMPIRICAL,
+        run_backtest(p2, market_rate(period_days=2), _EMPIRICAL,
                      fill_models_by_agg={"p2": _model("p2", at_par=0.6)})

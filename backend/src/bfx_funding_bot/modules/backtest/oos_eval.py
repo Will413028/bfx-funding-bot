@@ -18,7 +18,7 @@ from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
-from bfx_funding_bot.modules.strategy import AlwaysMarketRateStrategy, Strategy
+from bfx_funding_bot.modules.strategy import ResearchStrategySpec, Strategy
 
 
 def _outcome(result: BacktestResult, month_mts: int) -> WindowOutcome:
@@ -37,6 +37,7 @@ def evaluate_oos_windows(
     *,
     config: BacktestConfig,
     fill_model: FillRateModel | None,
+    baseline: ResearchStrategySpec,
     baseline_period_days: int = 2,
     market_candles: list[FundingCandle] | None = None,
 ) -> tuple[list[WindowOutcome], list[WindowOutcome]]:
@@ -78,7 +79,7 @@ def evaluate_oos_windows(
                 market_candles=sliced_market,
             )
             rb = run_backtest(
-                sliced, AlwaysMarketRateStrategy(period_days=baseline_period_days),
+                sliced, baseline.create(period_days=baseline_period_days),
                 config, w.test_start_mts, w.test_end_mts,
                 fill_model=fill_model,
                 market_candles=sliced_market,

@@ -14,17 +14,16 @@ from unittest.mock import AsyncMock, MagicMock
 
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
+from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     _TIMEFRAME_MS,
     last_candle_close_mts,
     next_candle_close_mts,
 )
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
-from bfx_funding_bot.modules.marketfeed.strategy_registry import (
-    StrategyRegistry,
-    build_strategy,
-)
+from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.strategy import DecisionOutcome
+from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 from tests.modules.marketfeed.test_signal_engine import _cell, _history
 
 _HOUR = _TIMEFRAME_MS["1h"]
@@ -66,11 +65,12 @@ def _engine(store: StandingQuoteStore, *, clock_ms: int) -> SignalEngine:
     return SignalEngine(
         phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=candles_repo, quote_store=store, clock=lambda: clock_ms,
+        reporter=DivergenceReporter(build_strategy_at_boundary),
     )
 
 
 def _warmed_registry(cell) -> StrategyRegistry:
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     strategy = build_strategy(cell)
     for candle in _history(7):
         strategy.observe(candle)

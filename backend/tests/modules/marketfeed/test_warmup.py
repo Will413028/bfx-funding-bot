@@ -9,12 +9,10 @@ from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.candles.repository import upsert_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
-from bfx_funding_bot.modules.marketfeed.strategy_registry import (
-    StrategyRegistry,
-    build_strategy,
-)
+from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
 from bfx_funding_bot.modules.strategy import CellConfig
+from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
 
 def _cell() -> CellConfig:
@@ -47,11 +45,11 @@ async def test_warmup_feeds_strategy_with_db_candles(sqlite_session: AsyncSessio
 
     bfx = AsyncMock()
     bfx.get_funding_candles = AsyncMock(return_value=[])
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     cell = _cell()
 
     result = await warmup_cell(
-        cell=cell, registry=reg,
+        cell=cell, registry=reg, boundary_builder=build_strategy_at_boundary,
         bitfinex=bfx, session=sqlite_session,
         now_mts=1747584000000 + 5 * 3600_000,
     )
@@ -101,10 +99,10 @@ async def test_warmup_locf_symmetry_for_sparse_cell(
         "staleness_budget_hours": 12,
     })
 
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     now_mts = base_mts + 10 * 3600_000  # slot 10 boundary (no candle here yet)
     await warmup_cell(
-        cell=cell, registry=reg, bitfinex=bfx,
+        cell=cell, registry=reg, boundary_builder=build_strategy_at_boundary, bitfinex=bfx,
         session=sqlite_session, now_mts=now_mts,
     )
 
@@ -155,13 +153,13 @@ async def test_warmup_locf_dense_cell_no_change(
 
     bfx = AsyncMock()
     bfx.get_funding_candles = AsyncMock(return_value=[])
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     cell = _cell()  # dense a30 cell, budget=2h
 
     # now_mts at slot 5 (no candle yet at slot 5 — matches realistic warmup
     # timing where boundary candle is the upcoming first-tick target).
     result = await warmup_cell(
-        cell=cell, registry=reg, bitfinex=bfx,
+        cell=cell, registry=reg, boundary_builder=build_strategy_at_boundary, bitfinex=bfx,
         session=sqlite_session, now_mts=base_mts + 5 * 3600_000,
     )
 

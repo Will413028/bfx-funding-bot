@@ -18,8 +18,8 @@ from bfx_funding_bot.modules.candles.repository import (
 )
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
+    BoundaryStrategyBuilder,
     StrategyRegistry,
-    build_strategy_at_boundary,
 )
 from bfx_funding_bot.modules.strategy import CellConfig, StrategyName
 
@@ -48,6 +48,7 @@ async def warmup_cell(
     *,
     cell: CellConfig,
     registry: StrategyRegistry,
+    boundary_builder: BoundaryStrategyBuilder,
     bitfinex: BitfinexREST,
     session: AsyncSession,
     now_mts: int,
@@ -92,7 +93,7 @@ async def warmup_cell(
             f"cell {cell.pair_id} staleness_budget_hours not resolved; "
             "was load_config() called?"
         )
-    result = build_strategy_at_boundary(
+    result = boundary_builder(
         cell=cell, history=history,
         ref_mts=now_mts, budget_hours=cell.staleness_budget_hours,
     )

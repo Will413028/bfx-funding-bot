@@ -32,6 +32,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
@@ -44,13 +45,16 @@ from bfx_funding_bot.modules.backtest.wfo import WfoWindow, compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
-from bfx_funding_bot.modules.strategy import MeanReversionStrategy, RatePercentileStrategy, Strategy
+from bfx_funding_bot.modules.strategy import ResearchStrategySpec
 
 logger = logging.getLogger("phase4_3_locf_wfo_matrix")
 
 # Only sparse cells targeted by Phase 4.3 LOCF validation
 P30_CELLS: list[tuple[str, str]] = [("fUSD", "p30"), ("fUST", "p30")]
-STRATEGIES: list[type[Strategy]] = [RatePercentileStrategy, MeanReversionStrategy]
+STRATEGIES: list[ResearchStrategySpec] = [
+    research_strategy("RatePercentileStrategy"), research_strategy("MeanReversionStrategy"),
+]
+BASELINE = research_strategy("AlwaysMarketRateStrategy")
 DEFAULT_BUDGET_HOURS: list[int] = [6, 12, 24]
 START_MTS = int(datetime(2022, 1, 1, tzinfo=UTC).timestamp() * 1000)
 TRAIN_MONTHS = 3
@@ -114,7 +118,7 @@ def apply_locf_and_unwrap(
 
 
 def run_cell_wfo_with_locf(
-    strategy_class: type[Strategy],
+    strategy_spec: ResearchStrategySpec,
     all_candles: list[FundingCandle],
     eda_cell: dict[str, Any],
     cell_key: str,
@@ -138,9 +142,6 @@ def run_cell_wfo_with_locf(
     """
     from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
     from bfx_funding_bot.modules.backtest.schemas import BacktestResult
-    from bfx_funding_bot.modules.strategy import (
-        AlwaysMarketRateStrategy,
-    )
 
     window_outcomes: list[WindowOutcome] = []
     baseline_results: list[BacktestResult] = []
@@ -152,7 +153,7 @@ def run_cell_wfo_with_locf(
 
         # Baseline uses LOCF-preprocessed test candles
         baseline_result = run_backtest(
-            test_locf, AlwaysMarketRateStrategy(period_days=2),
+            test_locf, BASELINE.create(period_days=2),
             config,
             record_start_mts=w.test_start_mts,
             record_end_mts=w.test_end_mts,
@@ -160,7 +161,7 @@ def run_cell_wfo_with_locf(
         baseline_results.append(baseline_result)
 
         try:
-            grid = strategy_class.param_grid_for_cell(
+            grid = strategy_spec.param_grid_for_cell(
                 symbol=all_candles[0].symbol,
                 period_agg=all_candles[0].period_agg,
                 eda=eda_cell,
@@ -182,7 +183,7 @@ def run_cell_wfo_with_locf(
             candidates = []
             for params in grid:
                 train_result = run_backtest(
-                    all_candles, strategy_class(**params), config,
+                    all_candles, strategy_spec.create(**params), config,
                     record_start_mts=w.train_start_mts,
                     record_end_mts=w.train_end_mts,
                 )
@@ -205,7 +206,7 @@ def run_cell_wfo_with_locf(
             best_params, _ = winner
             # OOS test: LOCF-preprocessed candles for this budget
             test_result = run_backtest(
-                test_locf, strategy_class(**best_params), config,
+                test_locf, strategy_spec.create(**best_params), config,
                 record_start_mts=w.test_start_mts,
                 record_end_mts=w.test_end_mts,
             )
@@ -363,16 +364,16 @@ async def _amain() -> int:
         parsed_cells.append((parts[0], parts[1]))
 
     # Parse strategies
-    strategy_map: dict[str, type[Strategy]] = {
-        "rate_percentile": RatePercentileStrategy,
-        "mean_reversion": MeanReversionStrategy,
+    strategy_map: dict[str, ResearchStrategySpec] = {
+        "rate_percentile": research_strategy("RatePercentileStrategy"),
+        "mean_reversion": research_strategy("MeanReversionStrategy"),
     }
-    strategy_classes: list[type[Strategy]] = []
+    strategy_specs: list[ResearchStrategySpec] = []
     for s in args.strategies:
         if s not in strategy_map:
             logger.error("Unknown strategy: %s (choices: %s)", s, list(strategy_map))
             return 1
-        strategy_classes.append(strategy_map[s])
+        strategy_specs.append(strategy_map[s])
 
     settings = Settings()
     engine = make_engine(settings)
@@ -415,14 +416,14 @@ async def _amain() -> int:
             # which strategies handle gracefully by using default ranges)
             eda_cell: dict[str, Any] = {}
 
-            for strategy_class in strategy_classes:
+            for strategy_spec in strategy_specs:
                 for budget_hours in args.budget_hours:
                     print(
-                        f"  Running {strategy_class.__name__} x budget={budget_hours}h ...",
+                        f"  Running {strategy_spec.name} x budget={budget_hours}h ...",
                         flush=True,
                     )
                     window_outcomes, _ = run_cell_wfo_with_locf(
-                        strategy_class=strategy_class,
+                        strategy_spec=strategy_spec,
                         all_candles=all_candles,
                         eda_cell=eda_cell,
                         cell_key=cell_key,
@@ -433,14 +434,14 @@ async def _amain() -> int:
                     verdict = evaluate_cell_qualification(window_outcomes)
                     row = _cell_verdict_to_dict(
                         cell=cell_key,
-                        strategy=strategy_class.__name__,
+                        strategy=strategy_spec.name,
                         budget_hours=budget_hours,
                         verdict=verdict,
                     )
                     row["windows"] = serialize_window_outcomes(
                         window_outcomes,
                         cell=cell_key,
-                        strategy=strategy_class.__name__,
+                        strategy=strategy_spec.name,
                         budget_hours=budget_hours,
                     )
                     results.append(row)

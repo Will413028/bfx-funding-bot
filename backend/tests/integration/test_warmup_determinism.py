@@ -16,6 +16,7 @@ from bfx_funding_bot.modules.candles.tables import (
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
 from bfx_funding_bot.modules.strategy import CellConfig
+from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
 
 def _cell() -> CellConfig:
@@ -51,16 +52,16 @@ async def test_warmup_byte_equal_state(sqlite_session: AsyncSession) -> None:
     bfx = AsyncMock()
     bfx.get_funding_candles = AsyncMock(return_value=[])
 
-    reg1 = StrategyRegistry()
-    reg2 = StrategyRegistry()
+    reg1 = StrategyRegistry(build_strategy)
+    reg2 = StrategyRegistry(build_strategy)
     cell = _cell()
 
     await warmup_cell(
-        cell=cell, registry=reg1, bitfinex=bfx,
+        cell=cell, registry=reg1, boundary_builder=build_strategy_at_boundary, bitfinex=bfx,
         session=sqlite_session, now_mts=1747584000000 + 5 * 3600_000,
     )
     await warmup_cell(
-        cell=cell, registry=reg2, bitfinex=bfx,
+        cell=cell, registry=reg2, boundary_builder=build_strategy_at_boundary, bitfinex=bfx,
         session=sqlite_session, now_mts=1747584000000 + 5 * 3600_000,
     )
 

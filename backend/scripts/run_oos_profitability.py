@@ -27,6 +27,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.apps.config import load_cells_only
+from bfx_funding_bot.apps.research import build_strategy, research_strategy
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
@@ -44,7 +45,6 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
 )
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
-from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
 from bfx_funding_bot.modules.strategy import CellConfig, Strategy
 
 logger = logging.getLogger("run_oos_profitability")
@@ -235,14 +235,12 @@ async def _run_cell(session: AsyncSession, cell: CellConfig, n_trials: int) -> C
         raise SystemExit(f"No WFO windows for {cell.cell_id}; candle series too short?")
 
     def _make_strategy() -> Strategy:
-        # build_strategy is annotated -> _Strategy (registry's Protocol); Strategy
-        # is the ABC evaluate_oos_windows expects. Concrete strategies subclass the
-        # ABC, so this is safe at runtime — the registry just keeps a looser contract.
-        return build_strategy(cell)  # type: ignore[return-value]
+        return build_strategy(cell)
 
     strat_outcomes, base_outcomes = evaluate_oos_windows(
         candles, windows, make_strategy=_make_strategy,
         config=RESEARCH_CONFIG, fill_model=None,
+        baseline=research_strategy("AlwaysMarketRateStrategy"),
     )
     logger.info("%s: %d windows", cell.cell_id, len(windows))
     return build_cell_report(cell, strat_outcomes, base_outcomes, n_trials)

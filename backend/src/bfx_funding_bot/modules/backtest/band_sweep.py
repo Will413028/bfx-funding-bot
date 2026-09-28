@@ -22,7 +22,7 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     sharpe_skew_kurt,
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy, CellConfig
+from bfx_funding_bot.modules.strategy import CellConfig, ResearchStrategySpec
 
 # ---------------------------------------------------------------------------
 # Task 1: grid enumeration
@@ -47,6 +47,7 @@ _GAP_MINUTES_DEFAULT = 30  # matches BacktestConfig.gap_minutes default
 def simulate_period_path(
     candles: list[FundingCandle],
     *,
+    strategy_spec: ResearchStrategySpec,
     ema_span: int,
     ratio_sigma: Decimal,
     t1: Decimal,
@@ -59,7 +60,7 @@ def simulate_period_path(
     observe -> cooldown-skip -> decide loop (engine.py:104-127) so the
     distribution matches the actual backtest trades. Full series, no record
     window (record window defaults to full span in the engine)."""
-    strat = AdaptivePeriodStrategy(
+    strat = strategy_spec.create(
         ema_span=ema_span, ratio_sigma=ratio_sigma, t1=t1, t2=t2,
         p_mid=p_mid, p_long=p_long,
     )

@@ -8,6 +8,7 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import (
     BacktestIncomplete,
@@ -16,14 +17,17 @@ from bfx_funding_bot.modules.backtest.engine import (
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.strategy import (
-    AlwaysMarketRateStrategy,
     LendDecision,
-    Strategy,
 )
+from bfx_funding_bot.modules.strategy._internal.strategies.base import Strategy
 
 _HOUR = 3_600_000
 _T0 = 1_704_067_200_000  # 2024-01-01T00:00Z
 _LINEAR = BacktestConfig(fill_model="linear-baseline")
+
+
+def market_rate(*, period_days: int):
+    return research_strategy("AlwaysMarketRateStrategy").create(period_days=period_days)
 
 
 def _series(period_agg: str, close: str, n: int = 240) -> list[FundingCandle]:
@@ -85,7 +89,7 @@ def test_missing_market_print_is_incomplete_not_a_fill() -> None:
     a30 = _series("a30", "0.0002")
     p2_first_hour_only = _series("p2", "0.0001")[:1]
     with pytest.raises(BacktestIncomplete, match="market_series_gap"):
-        run_backtest(a30, AlwaysMarketRateStrategy(period_days=2), _LINEAR,
+        run_backtest(a30, market_rate(period_days=2), _LINEAR,
                      market_series_by_agg={"p2": p2_first_hour_only, "a30": a30})
 
 
@@ -94,7 +98,7 @@ def test_market_print_without_close_is_incomplete() -> None:
     p2 = _series("p2", "0.0001")
     p2[0] = p2[0].model_copy(update={"close": None})
     with pytest.raises(BacktestIncomplete, match="market_series_gap"):
-        run_backtest(a30, AlwaysMarketRateStrategy(period_days=2), _LINEAR,
+        run_backtest(a30, market_rate(period_days=2), _LINEAR,
                      market_series_by_agg={"p2": p2, "a30": a30})
 
 
@@ -102,7 +106,7 @@ def test_market_candles_gap_is_incomplete_too() -> None:
     observed = _series("p2", "0.0002")
     market = _series("p2", "0.0001")[1:]  # first hour missing
     with pytest.raises(BacktestIncomplete, match="market_series_gap"):
-        run_backtest(observed, AlwaysMarketRateStrategy(period_days=2), _LINEAR, market_candles=market)
+        run_backtest(observed, market_rate(period_days=2), _LINEAR, market_candles=market)
 
 
 def test_market_candles_and_series_by_agg_are_mutually_exclusive() -> None:
@@ -125,7 +129,7 @@ def test_truncate_at_window_end_credits_only_in_window_days() -> None:
 
 def test_default_config_is_byte_stable_for_existing_callers() -> None:
     s = _series("p2", "0.0001")
-    before = run_backtest(s, AlwaysMarketRateStrategy(period_days=2), _LINEAR)
-    again = run_backtest(s, AlwaysMarketRateStrategy(period_days=2), _LINEAR)
+    before = run_backtest(s, market_rate(period_days=2), _LINEAR)
+    again = run_backtest(s, market_rate(period_days=2), _LINEAR)
     assert before == again
     assert before.pricing_series_used is None

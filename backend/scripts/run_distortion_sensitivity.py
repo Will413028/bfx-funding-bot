@@ -48,6 +48,7 @@ from typing import Any, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.apps.config import load_cells_only
+from bfx_funding_bot.apps.research import build_strategy, research_strategy
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
@@ -57,7 +58,6 @@ from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
 from bfx_funding_bot.modules.strategy import CellConfig, Strategy
 
 logger = logging.getLogger("distortion_sensitivity")
@@ -109,7 +109,7 @@ def _evaluate(
         raise SystemExit(f"No WFO windows for {cell.cell_id}; series too short?")
 
     def _make_strategy() -> Strategy:
-        return build_strategy(cell)  # type: ignore[return-value]
+        return build_strategy(cell)
 
     strat_outcomes, _ = evaluate_oos_windows(
         observed,
@@ -117,6 +117,7 @@ def _evaluate(
         make_strategy=_make_strategy,
         config=BacktestConfig(fill_model="linear-baseline"),
         fill_model=None,
+        baseline=research_strategy("AlwaysMarketRateStrategy"),
         market_candles=market,
     )
     return _summarize(strat_outcomes)

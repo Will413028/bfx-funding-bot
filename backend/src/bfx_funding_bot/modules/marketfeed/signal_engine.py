@@ -97,7 +97,7 @@ class SignalEngine:
         event_sink: _EventSink,
         diagnostics: _DiagnosticsProtocol,
         candles_repo: _CandlesRepoProtocol,
-        reporter: DivergenceReporter | None = None,
+        reporter: DivergenceReporter,
         quote_store: StandingQuoteStore | None = None,
         clock: Callable[[], int] | None = None,
     ) -> None:
@@ -105,7 +105,7 @@ class SignalEngine:
         self._events = event_sink
         self.diagnostics = diagnostics
         self.candles_repo = candles_repo
-        self.reporter = reporter or DivergenceReporter()
+        self.reporter = reporter
         self.quote_store = quote_store
         self._clock = clock or (lambda: int(time.time() * 1000))
 

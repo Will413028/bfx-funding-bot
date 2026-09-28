@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.matrix import (
     CellVerdict,
@@ -13,7 +14,6 @@ from bfx_funding_bot.modules.backtest.matrix import (
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.strategy import MeanReversionStrategy, RatePercentileStrategy
 
 _LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
 
@@ -217,13 +217,14 @@ def test_run_cell_wfo_with_rate_percentile_produces_outcomes_per_window() -> Non
 
     eda_cell = {"acf_168h_pass": False}
     outcomes, baselines = run_cell_wfo(
-        strategy_class=RatePercentileStrategy,
+        strategy_spec=research_strategy("RatePercentileStrategy"),
         candles=candles,
         eda_cell=eda_cell,
         cell_key="fUST_p2",
         wfo_windows=windows,
         config=_LINEAR_CONFIG,
         fill_model=None,
+        baseline=research_strategy("AlwaysMarketRateStrategy"),
     )
     assert len(outcomes) == len(windows)
     assert len(baselines) == len(windows)
@@ -240,13 +241,14 @@ def test_run_cell_wfo_with_mean_reversion_produces_outcomes_per_window() -> None
         "close_over_ema_sigma_168": Decimal("0.10"),
     }
     outcomes, baselines = run_cell_wfo(
-        strategy_class=MeanReversionStrategy,
+        strategy_spec=research_strategy("MeanReversionStrategy"),
         candles=candles,
         eda_cell=eda_cell,
         cell_key="fUST_p2",
         wfo_windows=windows,
         config=_LINEAR_CONFIG,
         fill_model=None,
+        baseline=research_strategy("AlwaysMarketRateStrategy"),
     )
     assert len(outcomes) == len(windows)
     assert len(baselines) == len(windows)
@@ -256,19 +258,24 @@ def test_run_cell_wfo_handles_empty_param_grid_gracefully() -> None:
     """If a strategy's param_grid_for_cell returns [] (e.g. EDA drop), all
     windows should be marked skipped:no_valid_candidate, not errored.
     """
-    class _StubEmptyGridStrategy(RatePercentileStrategy):
-        @classmethod
-        def param_grid_for_cell(cls, symbol, period_agg, eda):
+    class _StubEmptyGridSpec:
+        name = "RatePercentileStrategy"
+
+        def param_grid_for_cell(self, symbol, period_agg, eda):
             return []
+
+        def create(self, **params):
+            return research_strategy("RatePercentileStrategy").create(**params)
 
     candles = _synthetic_12_months_hourly()
     windows = compute_wfo_windows(candles, train_months=3, test_months=1, step_months=1)
     outcomes, _ = run_cell_wfo(
-        strategy_class=_StubEmptyGridStrategy,
+        strategy_spec=_StubEmptyGridSpec(),
         candles=candles, eda_cell={}, cell_key="fUST_p2",
         wfo_windows=windows,
         config=_LINEAR_CONFIG,
         fill_model=None,
+        baseline=research_strategy("AlwaysMarketRateStrategy"),
     )
     for o in outcomes:
         assert o.status == "skipped:no_valid_candidate"

@@ -6,17 +6,18 @@ import pytest
 from pydantic import ValidationError
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.marketfeed.strategy_registry import (
-    StrategyRegistry,
-    build_strategy,
-    build_strategy_at_boundary,
-)
+from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.strategy import (
     CellConfig,
-    MeanReversionStrategy,
-    RatePercentileStrategy,
     StrategyName,
 )
+from bfx_funding_bot.modules.strategy._internal.strategies.mean_reversion import (
+    MeanReversionStrategy,
+)
+from bfx_funding_bot.modules.strategy._internal.strategies.rate_percentile import (
+    RatePercentileStrategy,
+)
+from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
 
 def _cell_mr() -> CellConfig:
@@ -49,14 +50,24 @@ def test_build_strategy_rate_percentile():
 
 def test_registry_put_get():
     cell = _cell_mr()
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     s = build_strategy(cell)
     reg.put(cell, s)
     assert reg.get(cell) is s
 
 
+def test_registry_factory_returns_fresh_unregistered_instances():
+    reg = StrategyRegistry(build_strategy)
+    first = reg.make(_cell_mr())
+    second = reg.make(_cell_mr())
+    assert isinstance(first, MeanReversionStrategy)
+    assert isinstance(second, MeanReversionStrategy)
+    assert first is not second
+    assert reg.items() == []
+
+
 def test_registry_missing_raises():
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     with pytest.raises(KeyError):
         reg.get(_cell_mr())
 
