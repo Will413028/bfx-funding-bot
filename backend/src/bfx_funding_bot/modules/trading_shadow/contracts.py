@@ -5,14 +5,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from decimal import Decimal
 from hashlib import sha256
-from typing import Literal
+from typing import Literal, Protocol
 from uuid import UUID
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from bfx_funding_bot.modules.execution.capital_shadow_port import BaselineResult
 from bfx_funding_bot.modules.trading import (
     AcceptedCapitalBasis,
     AppliedPolicy,
     AttemptFact,
     CapitalReadContext,
+    CapitalResult,
     CapitalScope,
     DifferenceClassification,
     UncertaintyFact,
@@ -144,3 +148,46 @@ class NotComparable:
 
 
 type LoadResult = LoadedInputs | NotComparable
+
+
+class BaselineReader(Protocol):
+    async def __call__(
+        self, session: AsyncSession, *, scope: CapitalScope, now_ms: int,
+        max_snapshot_age_ms: int,
+    ) -> BaselineResult: ...
+
+
+class CandidateReader(Protocol):
+    async def load(
+        self, session: AsyncSession, *, scope: CapitalScope, now_ms: int,
+        max_snapshot_age_ms: int,
+    ) -> LoadResult: ...
+
+
+@dataclass(frozen=True, slots=True)
+class FieldDifference:
+    path: str
+    candidate: object
+    baseline: object
+
+
+@dataclass(frozen=True, slots=True)
+class ComparisonHeads:
+    watermark: int | None = None
+    projection_cursor: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowComparison:
+    kind: Literal["fold_comparison"]
+    status: Literal["equal", "different", "not_comparable", "error"]
+    candidate: CapitalResult | None
+    baseline: CapitalResult | None
+    differences: tuple[FieldDifference, ...]
+    classifications: tuple[DifferenceClassification, ...]
+    candidate_input_digest: str | None
+    baseline_input_digest: None
+    baseline_evidence_complete: Literal[False]
+    baseline_observation_digest: str | None
+    heads: ComparisonHeads
+    reason: str | None = None

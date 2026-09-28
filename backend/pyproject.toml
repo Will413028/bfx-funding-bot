@@ -207,6 +207,14 @@ forbidden_modules = [
 ignore_imports = []
 
 [[tool.importlinter.contracts]]
+id = "trading-shadow-no-baseline-adapter"
+name = "Trading shadow receives the baseline reader by injection"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.modules.trading_shadow"]
+forbidden_modules = ["bfx_funding_bot.modules.execution.capital_shadow_baseline"]
+ignore_imports = []
+
+[[tool.importlinter.contracts]]
 id = "apps-is-top"
 name = "Core, venue, and modules do not import apps"
 type = "forbidden"
