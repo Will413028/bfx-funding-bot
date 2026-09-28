@@ -61,8 +61,13 @@ check_postgres_access() {
 restore_backup() {
   local label="$1" target="$2"
   if [[ -n "$target" ]]; then
+    # PostgreSQL rejects the ISO "T...Z" form in recovery_target_time when it
+    # reads postgresql.auto.conf at startup (ALTER SYSTEM accepts it), so pass
+    # the validated UTC instant as "YYYY-MM-DD HH:MM:SS+00".
+    local pg_target="${target/T/ }"
+    pg_target="${pg_target%Z}+00"
     gosu postgres pgbackrest --stanza=bfx --set="$label" \
-      --type=time --target="$target" --target-action=promote restore
+      --type=time --target="$pg_target" --target-action=promote restore
   else
     # Preserve end-of-archive recovery. target-action is invalid for type
     # default; do not silently replace this with earliest-consistent recovery.
