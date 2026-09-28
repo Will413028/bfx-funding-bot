@@ -11,6 +11,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 from bfx_funding_bot.modules.execution.emit import (
@@ -21,10 +22,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    Phase,
-    StrategyName,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 
 class _EventSink(Protocol):

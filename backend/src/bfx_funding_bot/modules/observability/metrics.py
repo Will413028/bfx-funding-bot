@@ -54,12 +54,8 @@ from prometheus_client import (
 from prometheus_client.core import GaugeMetricFamily, Metric
 from prometheus_client.registry import Collector
 
-from bfx_funding_bot.modules.marketfeed.health_monitor import (
-    ACTIVITY_THRESHOLDS,
-    LIVENESS_THRESHOLDS,
-    HealthProbe,
-)
-from bfx_funding_bot.modules.marketfeed.schemas import HealthStatus
+from bfx_funding_bot.core.health import ACTIVITY_THRESHOLDS, LIVENESS_THRESHOLDS, HealthProbe
+from bfx_funding_bot.core.telemetry import HealthStatus
 
 if TYPE_CHECKING:
     from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult

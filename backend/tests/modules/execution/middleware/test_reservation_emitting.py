@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
@@ -34,7 +35,6 @@ from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnkno
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
-    Phase,
     StrategyName,
 )
 

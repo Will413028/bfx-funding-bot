@@ -4,14 +4,8 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionPayload,
-    Envelope,
-    EventType,
-    HealthCheckPayload,
-    Phase,
-    SignalPayload,
-)
+from bfx_funding_bot.core.telemetry import EventType, HealthCheckPayload, Phase
+from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload, Envelope, SignalPayload
 
 
 def _envelope_dict(**overrides):
@@ -178,11 +172,7 @@ def test_health_check_payload_accepts_reason_taxonomy() -> None:
     Reasons in scope: stale_exceeded (SIGNAL_PIPELINE), connection_lost
     (BITFINEX_WS/REST), db_unavailable (DB), task_hung (any task).
     """
-    from bfx_funding_bot.modules.marketfeed.schemas import (
-        HealthCheckPayload,
-        HealthStatus,
-        HealthTarget,
-    )
+    from bfx_funding_bot.core.telemetry import HealthCheckPayload, HealthStatus, HealthTarget
 
     # New shape: SIGNAL_PIPELINE stale_exceeded (degraded requires error_message)
     p1 = HealthCheckPayload(

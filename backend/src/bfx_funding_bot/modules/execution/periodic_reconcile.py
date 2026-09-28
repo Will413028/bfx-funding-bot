@@ -22,9 +22,9 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Protocol
 
+from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
-from bfx_funding_bot.modules.marketfeed.schemas import HealthStatus, HealthTarget
 
 log = logging.getLogger(__name__)
 

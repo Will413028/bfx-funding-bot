@@ -6,6 +6,8 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
@@ -13,12 +15,8 @@ from bfx_funding_bot.modules.execution.middleware import (
     ReservationEmittingMiddleware,
 )
 from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.healthz import make_app
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    Phase,
-    StrategyName,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 
 class _FakeEventSink:

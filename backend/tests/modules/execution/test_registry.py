@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import pytest
 
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
 from bfx_funding_bot.modules.execution.registry import (
     ExecutorConfigError,
     build_executor,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 
 class _EventCapture:

@@ -13,11 +13,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.external.bitfinex.ws import CandleMessage
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow  # noqa: F401
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 
 
 @pytest.mark.integration

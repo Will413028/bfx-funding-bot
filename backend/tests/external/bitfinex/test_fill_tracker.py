@@ -12,6 +12,8 @@ import httpx
 import jsonschema
 import pytest
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import EventType, HealthTarget, Phase
 from bfx_funding_bot.external.bitfinex.fill_tracker import (
     CONSECUTIVE_FAIL_THRESHOLD,
     InvariantError,
@@ -21,13 +23,7 @@ from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import ReservationClaimed, ReservationReleased
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    EventType,
-    HealthTarget,
-    Phase,
-    StrategyName,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 _SCHEMA = json.loads(
     (Path(__file__).parent.parent.parent / "contracts" / "bitfinex_funding_api_schema.json")

@@ -20,13 +20,13 @@ from tenacity import (
 )
 
 from bfx_funding_bot.core.errors import FatalError
+from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.external.bitfinex.ws import CandleMessage
 from bfx_funding_bot.modules.candles.repository import (
     mark_candles_final,
     upsert_candles,
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 
 log = logging.getLogger(__name__)
 

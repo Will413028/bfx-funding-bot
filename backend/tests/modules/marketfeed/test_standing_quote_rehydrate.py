@@ -12,13 +12,14 @@ the scheduler skips, dated to the boundary it speaks for rather than to boot.
 """
 from unittest.mock import AsyncMock, MagicMock
 
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     _TIMEFRAME_MS,
     last_candle_close_mts,
     next_candle_close_mts,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, Phase
+from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     StrategyRegistry,

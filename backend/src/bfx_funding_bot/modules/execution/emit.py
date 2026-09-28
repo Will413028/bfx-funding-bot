@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
+from bfx_funding_bot.core.telemetry import EventType, Level, Phase
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -18,11 +19,8 @@ from bfx_funding_bot.modules.execution.protocols import (
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionPayload,
     Envelope,
-    EventType,
-    Level,
     OrderFillPayload,
     OrderSubmitPayload,
-    Phase,
     SafetyTriggerPayload,
     StrategyName,
 )

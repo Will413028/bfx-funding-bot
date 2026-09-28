@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import select
 
+from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
@@ -36,7 +37,6 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
-from bfx_funding_bot.modules.marketfeed.schemas import HealthStatus, HealthTarget
 
 pytestmark = pytest.mark.integration
 

@@ -13,6 +13,7 @@ import respx
 from httpx import Response
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.live_executor import (
     BITFINEX_REST_BASE,
     BitfinexLiveExecutor,
@@ -28,7 +29,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 from tests.integration.test_capital_repository import capital_db as capital_db
 from tests.integration.test_capital_repository import capital_engine as capital_engine
 

@@ -20,6 +20,7 @@ from bfx_funding_bot.core.errors import (
     ExecutorFatalError,
     ExecutorTransientError,
 )
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.live_executor import (
     BITFINEX_REST_BASE,
     BitfinexLiveExecutor,
@@ -29,7 +30,7 @@ from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
-from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 _PATH = "v2/auth/w/funding/offer/cancel/all"
 _OK = [1_700_000_000_000, "foc_all-req", None, None, None, None, "SUCCESS", "Cancelled all"]

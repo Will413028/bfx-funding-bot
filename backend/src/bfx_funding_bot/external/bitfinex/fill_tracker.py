@@ -35,6 +35,8 @@ from uuid import uuid4
 
 import httpx
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.event_store.persister import (
     EventPersister,
@@ -45,15 +47,7 @@ from bfx_funding_bot.modules.execution.registry_offers import (
     OfferRegistry,
     RegistryState,
 )
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    EventType,
-    HealthStatus,
-    HealthTarget,
-    Level,
-    Phase,
-    StrategyName,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 log = logging.getLogger(__name__)
 

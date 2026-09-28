@@ -26,7 +26,9 @@ from bfx_funding_bot.core.errors import (
     ExecutorAuthError,
     WriterLockUnacquired,
 )
+from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.schema_head import assert_schema_head
+from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
@@ -160,22 +162,12 @@ from bfx_funding_bot.modules.marketfeed.funding_book import (
     FundingBookService,
     FundingBookStore,
 )
-from bfx_funding_bot.modules.marketfeed.health_monitor import (
-    HealthMonitor,
-    HealthProbe,
-)
+from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     Scheduler,
     last_candle_close_mts,
     now_ms_utc,
-)
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    EventType,
-    HealthStatus,
-    HealthTarget,
-    Level,
-    Phase,
 )
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry

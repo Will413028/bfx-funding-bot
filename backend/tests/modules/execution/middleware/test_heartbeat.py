@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
+from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
@@ -18,7 +19,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,

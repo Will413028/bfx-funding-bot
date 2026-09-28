@@ -14,16 +14,14 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal, Protocol
 
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
 )
 from bfx_funding_bot.modules.execution.protocols import ExecutorPort, SubmittedOrder
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    Phase,
-    StrategyName,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
 log = logging.getLogger(__name__)
 

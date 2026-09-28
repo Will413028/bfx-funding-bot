@@ -4,8 +4,8 @@ Catches the 2026-07 nonce bug's signature — connected but never authenticated 
 which no disconnect callback can see (it's an ABSENCE of success). Pure function;
 the daemon poll loop is thin glue over it.
 """
-from bfx_funding_bot.modules.marketfeed.health_monitor import assess_auth_ws_health
-from bfx_funding_bot.modules.marketfeed.schemas import HealthStatus
+from bfx_funding_bot.core.health import assess_auth_ws_health
+from bfx_funding_bot.core.telemetry import HealthStatus
 
 
 def test_boot_grace_not_yet_connected_is_healthy():

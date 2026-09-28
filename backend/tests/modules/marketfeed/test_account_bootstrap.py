@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
 from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 from bfx_funding_bot.core.errors import ConfigurationError
+from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.accounts.tables import (
     AccountConfigDraft,
     ExchangeAccount,
@@ -25,7 +26,6 @@ from bfx_funding_bot.modules.marketfeed.daemon import (
     _require_env,
     load_account_bootstrap,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import Phase
 
 _ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 _KEK = bytes(range(32))

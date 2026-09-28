@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import logging
 
+from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     ExecutorPort,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 
 log = logging.getLogger(__name__)
 

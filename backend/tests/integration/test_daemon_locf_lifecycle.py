@@ -18,20 +18,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
 from bfx_funding_bot.modules.candles.repository import get_up_to, upsert_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.execution.diagnostics.sink import NoopDiagnosticsSink
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.scheduler import _TIMEFRAME_MS
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    EventType,
-    HealthStatus,
-    HealthTarget,
-    Level,
-    Phase,
-)
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     StrategyRegistry,
@@ -115,7 +109,7 @@ async def _make_tick_fn(
     from datetime import UTC, datetime
     from uuid import uuid4
 
-    from bfx_funding_bot.modules.marketfeed.schemas import HealthTarget, Level
+    from bfx_funding_bot.core.telemetry import HealthTarget, Level
 
     if probe is None:
         probe = HealthProbe()
