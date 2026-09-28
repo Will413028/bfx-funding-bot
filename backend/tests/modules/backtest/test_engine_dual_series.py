@@ -9,10 +9,10 @@ from decimal import Decimal
 
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import run_backtest
-from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.strategy import (
     AlwaysMarketRateStrategy,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 _HOUR = 3_600_000
 _LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")

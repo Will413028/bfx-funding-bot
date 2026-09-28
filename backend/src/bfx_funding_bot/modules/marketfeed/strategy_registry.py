@@ -12,20 +12,16 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol
 
-from bfx_funding_bot.modules.backtest.schemas import LendDecision
-from bfx_funding_bot.modules.backtest.strategies.adaptive_period import (
-    AdaptivePeriodStrategy,
-)
-from bfx_funding_bot.modules.backtest.strategies.mean_reversion import (
-    MeanReversionStrategy,
-)
-from bfx_funding_bot.modules.backtest.strategies.rate_percentile import (
-    RatePercentileStrategy,
-)
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+from bfx_funding_bot.modules.strategy import (
+    AdaptivePeriodStrategy,
+    LendDecision,
+    MeanReversionStrategy,
+    RatePercentileStrategy,
+)
 
 
 class _Strategy(Protocol):

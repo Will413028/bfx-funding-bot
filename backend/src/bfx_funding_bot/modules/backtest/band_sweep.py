@@ -22,9 +22,9 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     percentile,
     sharpe_skew_kurt,
 )
-from bfx_funding_bot.modules.backtest.strategies.adaptive_period import AdaptivePeriodStrategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.marketfeed.config import load_cells_only
+from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy
 
 # ---------------------------------------------------------------------------
 # Task 1: grid enumeration

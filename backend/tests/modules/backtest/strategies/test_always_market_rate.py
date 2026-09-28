@@ -1,9 +1,9 @@
 from decimal import Decimal
 
-from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.strategy import (
     AlwaysMarketRateStrategy,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 def _candle(close: str | None) -> FundingCandle:

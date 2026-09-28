@@ -1,9 +1,9 @@
 from decimal import Decimal
 
-from bfx_funding_bot.modules.backtest.strategies.adaptive_period import (
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.strategy import (
     AdaptivePeriodStrategy,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 def _c(mts: int, close: str) -> FundingCandle:

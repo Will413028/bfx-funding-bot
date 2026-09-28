@@ -2,9 +2,8 @@ from decimal import Decimal
 
 import pytest
 
-from bfx_funding_bot.modules.backtest.schemas import LendDecision
-from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.strategy import LendDecision, Strategy
 
 
 class _StubStrategy(Strategy):

@@ -14,12 +14,12 @@ from bfx_funding_bot.modules.backtest.engine import (
     resolve_market_series_key,
     run_backtest,
 )
-from bfx_funding_bot.modules.backtest.schemas import LendDecision
-from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
-    AlwaysMarketRateStrategy,
-)
-from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.strategy import (
+    AlwaysMarketRateStrategy,
+    LendDecision,
+    Strategy,
+)
 
 _HOUR = 3_600_000
 _T0 = 1_704_067_200_000  # 2024-01-01T00:00Z

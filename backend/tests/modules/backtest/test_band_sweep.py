@@ -20,8 +20,8 @@ from bfx_funding_bot.modules.backtest.band_sweep import (
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
-from bfx_funding_bot.modules.backtest.strategies.adaptive_period import AdaptivePeriodStrategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy
 
 
 def _candles(closes: list[str], symbol: str = "fUST") -> list[FundingCandle]:

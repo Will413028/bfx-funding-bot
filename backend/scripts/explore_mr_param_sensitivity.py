@@ -30,10 +30,9 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     summarize_oos,
 )
 from bfx_funding_bot.modules.backtest.split import compute_train_end_mts
-from bfx_funding_bot.modules.backtest.strategies.always_market_rate import AlwaysMarketRateStrategy
-from bfx_funding_bot.modules.backtest.strategies.mean_reversion import MeanReversionStrategy
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
+from bfx_funding_bot.modules.strategy import AlwaysMarketRateStrategy, MeanReversionStrategy
 
 logger = logging.getLogger("explore_mr")
 

@@ -489,7 +489,7 @@ def test_adaptive_period_no_false_divergence_on_boundary_period_flip():
     has 6), which _attrs_diverge detects → check() returns a divergence dict →
     the assert-None fails → mutation is caught.
     """
-    from bfx_funding_bot.modules.backtest.strategies.adaptive_period import (
+    from bfx_funding_bot.modules.strategy import (
         AdaptivePeriodStrategy,
     )
 

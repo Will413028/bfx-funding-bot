@@ -37,11 +37,11 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     paired_active_returns,
     summarize_oos,
 )
-from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
+from bfx_funding_bot.modules.strategy import Strategy
 
 _MS_PER_HOUR = 3_600_000
 

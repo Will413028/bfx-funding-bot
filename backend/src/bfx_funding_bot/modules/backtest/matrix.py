@@ -14,11 +14,10 @@ from typing import Any, Literal
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
-from bfx_funding_bot.modules.backtest.strategies.always_market_rate import AlwaysMarketRateStrategy
-from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
+from bfx_funding_bot.modules.strategy import AlwaysMarketRateStrategy, Strategy
 
 FILL_FLOOR = Decimal("0.3")
 MIN_TRADES_TRAIN = 10

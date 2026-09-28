@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
-from bfx_funding_bot.modules.backtest.schemas import LendDecision
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.strategy._internal.lend_decision import LendDecision
 
 
 class Strategy(ABC):

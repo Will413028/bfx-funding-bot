@@ -50,17 +50,6 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     paired_active_returns,
     summarize_oos,
 )
-from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFrrStrategy
-from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
-    AlwaysMarketRateStrategy,
-)
-from bfx_funding_bot.modules.backtest.strategies.base import Strategy
-from bfx_funding_bot.modules.backtest.strategies.mean_reversion import (
-    MeanReversionStrategy,
-)
-from bfx_funding_bot.modules.backtest.strategies.mean_reversion_frr_floor import (
-    MeanReversionFrrFloorStrategy,
-)
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow, compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
@@ -70,6 +59,13 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     assert_market_rate_band,
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, load_cells_only
+from bfx_funding_bot.modules.strategy import (
+    AlwaysFrrStrategy,
+    AlwaysMarketRateStrategy,
+    MeanReversionFrrFloorStrategy,
+    MeanReversionStrategy,
+    Strategy,
+)
 
 logger = logging.getLogger("run_frr_floor_backtest")
 

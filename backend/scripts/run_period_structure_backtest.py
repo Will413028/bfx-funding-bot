@@ -61,15 +61,6 @@ from bfx_funding_bot.modules.backtest.period_structure import (
     report_to_json,
     to_hourly_grid,
 )
-from bfx_funding_bot.modules.backtest.strategies.adaptive_period import (
-    AdaptivePeriodStrategy,
-)
-from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFrrStrategy
-from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
-    AlwaysMarketRateStrategy,
-)
-from bfx_funding_bot.modules.backtest.strategies.base import Strategy
-from bfx_funding_bot.modules.backtest.strategies.mean_reversion import MeanReversionStrategy
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
@@ -85,6 +76,13 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     assert_market_rate_band,
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, load_cells_only
+from bfx_funding_bot.modules.strategy import (
+    AdaptivePeriodStrategy,
+    AlwaysFrrStrategy,
+    AlwaysMarketRateStrategy,
+    MeanReversionStrategy,
+    Strategy,
+)
 
 logger = logging.getLogger("run_period_structure_backtest")
 
