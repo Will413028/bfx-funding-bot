@@ -191,3 +191,11 @@ class ShadowComparison:
     baseline_observation_digest: str | None
     heads: ComparisonHeads
     reason: str | None = None
+    evidence: tuple[tuple[str, str], ...] = ()
+
+
+class CapitalComparator(Protocol):
+    async def __call__(
+        self, session: AsyncSession, *, scope: CapitalScope, now_ms: int,
+        max_snapshot_age_ms: int,
+    ) -> ShadowComparison: ...
