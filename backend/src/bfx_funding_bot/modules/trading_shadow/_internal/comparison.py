@@ -113,10 +113,11 @@ async def compare_capital(
         status: Literal["equal", "different", "not_comparable", "error"], *,
         differences: tuple[FieldDifference, ...] = (),
         classifications: tuple[DifferenceClassification, ...] = (), reason: str | None = None,
+        evidence: tuple[tuple[str, str], ...] = (),
     ) -> ShadowComparison:
         return ShadowComparison(
             "fold_comparison", status, candidate, baseline, differences, classifications,
-            candidate_digest, None, False, observation_digest, heads, reason,
+            candidate_digest, None, False, observation_digest, heads, reason, evidence,
         )
 
     try:
@@ -124,7 +125,10 @@ async def compare_capital(
             session, scope=scope, now_ms=now_ms, max_snapshot_age_ms=max_snapshot_age_ms,
         )
         if not isinstance(loaded, LoadedInputs):
-            return result("not_comparable", classifications=(loaded.classification,), reason=loaded.reason)
+            return result(
+                "not_comparable", classifications=(loaded.classification,),
+                reason=loaded.reason, evidence=loaded.evidence,
+            )
         candidate_digest = loaded.candidate_input_digest
         candidate = derive_capital(
             scope=scope, policy=loaded.inputs.policy, accepted=loaded.inputs.accepted,

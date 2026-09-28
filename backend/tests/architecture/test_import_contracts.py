@@ -18,6 +18,7 @@ STRATEGY_NO_INTERNAL_ACCESS_MAX_IGNORES = 0
 TRADING_IS_PURE_MAX_IGNORES = 0
 
 MAX_IGNORES_BY_ID = {
+    "capital-comparison-no-settings": 0,
     "strategy-wiring-is-top": 0,
     "trading-shadow-no-internal-access": 0,
     "trading-shadow-wiring-is-top": 0,

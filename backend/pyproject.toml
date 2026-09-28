@@ -349,6 +349,18 @@ ignore_imports = [
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
 
 [[tool.importlinter.contracts]]
+id = "capital-comparison-no-settings"
+name = "Capital comparison never imports runtime settings directly"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.apps.capital_comparison",
+    "bfx_funding_bot.apps.capital_comparison_guard",
+]
+forbidden_modules = ["bfx_funding_bot.core.settings"]
+allow_indirect_imports = true
+ignore_imports = []
+
+[[tool.importlinter.contracts]]
 id = "strategy-wiring-is-top"
 name = "Only composition roots may import strategy wiring"
 type = "forbidden"
