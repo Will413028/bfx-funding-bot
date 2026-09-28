@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
+from bfx_funding_bot.modules.candles.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.modules.candles.repository import (
     get_candles_in_range,
     seal_closed_periods,

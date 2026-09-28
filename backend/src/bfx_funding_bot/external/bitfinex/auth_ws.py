@@ -28,10 +28,10 @@ from typing import Any, Literal
 import websockets
 from websockets.asyncio.client import ClientConnection
 
+from bfx_funding_bot.external.bitfinex.credentials import Credentials
 from bfx_funding_bot.external.bitfinex.errors import BitfinexShapeError
 from bfx_funding_bot.external.bitfinex.funding_offer_row import parse_funding_offer_row
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
-from bfx_funding_bot.modules.execution.protocols import Credentials
 
 log = logging.getLogger(__name__)
 

@@ -19,6 +19,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.external.bitfinex.credentials import Credentials
 from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
     ReadyToSubmit,
@@ -51,13 +52,6 @@ __all__ = [
     "SubmittedOrder",
     "WriterLockHandle",
 ]
-
-
-@dataclass(frozen=True, slots=True)
-class Credentials:
-    """Runtime Bitfinex credential decrypted from the account vault at boot."""
-    api_key: str
-    api_secret: str
 
 
 @dataclass(frozen=True, slots=True)

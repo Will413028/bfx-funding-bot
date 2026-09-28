@@ -34,7 +34,6 @@ from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.fill_tracker import (
     RestPollingFillTracker,
 )
-from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.external.bitfinex.ws import (
     BitfinexWSClient,
@@ -56,6 +55,7 @@ from bfx_funding_bot.modules.accounts.vault import (
     load_account_credentials,
 )
 from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
+from bfx_funding_bot.modules.candles.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.audit import AuditContext
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery

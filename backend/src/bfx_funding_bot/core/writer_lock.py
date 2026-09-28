@@ -15,9 +15,9 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
+from bfx_funding_bot.core.account_identity import account_id_canonical
 from bfx_funding_bot.core.db import _prepare_engine_kwargs
 from bfx_funding_bot.core.errors import WriterLockUnacquired
-from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_canonical
 
 log = logging.getLogger(__name__)
 
