@@ -9,6 +9,7 @@ import numpy as np
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.strategy._internal.lend_decision import LendDecision
 from bfx_funding_bot.modules.strategy._internal.strategies.base import Strategy
+from bfx_funding_bot.modules.strategy.contracts import RatePercentileDiagnostics
 
 
 class RatePercentileStrategy(Strategy):
@@ -72,3 +73,10 @@ class RatePercentileStrategy(Strategy):
             {"percentile": p, "lookback_hours": n}
             for p in (25, 50, 75) for n in looks
         ]
+
+    def diagnostics(self) -> RatePercentileDiagnostics:
+        return RatePercentileDiagnostics(
+            last_threshold=self.last_threshold,
+            window_filled=self.window_filled,
+            window_values=self.window_values,
+        )

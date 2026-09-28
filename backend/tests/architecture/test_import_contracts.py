@@ -17,6 +17,7 @@ STRATEGY_NO_INTERNAL_ACCESS_MAX_IGNORES = 0
 TRADING_IS_PURE_MAX_IGNORES = 0
 
 MAX_IGNORES_BY_ID = {
+    "strategy-wiring-is-top": 0,
     "trading-shadow-no-internal-access": 0,
     "trading-shadow-wiring-is-top": 0,
     "trading-shadow-independent-loader": 0,
@@ -57,3 +58,17 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
         "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.candles",
         "bfx_funding_bot.core", "bfx_funding_bot.external", "bfx_funding_bot.apps",
     }) - {"bfx_funding_bot.modules.trading_shadow"}
+
+    strategy_sources = set(contracts_by_id["strategy-no-internal-access"]["source_modules"])
+    assert strategy_sources == sibling_modules | {
+        "bfx_funding_bot.modules.candles", "bfx_funding_bot.core",
+        "bfx_funding_bot.external", "bfx_funding_bot.apps",
+    }
+    wiring = contracts_by_id["strategy-wiring-is-top"]
+    assert set(wiring["source_modules"]) == {
+        "bfx_funding_bot.core", "bfx_funding_bot.core.**",
+        "bfx_funding_bot.external", "bfx_funding_bot.external.**",
+        "bfx_funding_bot.modules", "bfx_funding_bot.modules.**",
+    }
+    assert wiring["forbidden_modules"] == ["bfx_funding_bot.modules.strategy.wiring"]
+    assert wiring["as_packages"] is False

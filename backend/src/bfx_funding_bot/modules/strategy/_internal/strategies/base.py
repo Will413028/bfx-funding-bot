@@ -3,6 +3,7 @@ from typing import Any
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.strategy._internal.lend_decision import LendDecision
+from bfx_funding_bot.modules.strategy.contracts import NoStrategyDiagnostics, StrategyDiagnostics
 
 
 class Strategy(ABC):
@@ -44,3 +45,6 @@ class Strategy(ABC):
         raise NotImplementedError(
             f"{cls.__name__} does not implement param_grid_for_cell"
         )
+
+    def diagnostics(self) -> StrategyDiagnostics:
+        return NoStrategyDiagnostics()

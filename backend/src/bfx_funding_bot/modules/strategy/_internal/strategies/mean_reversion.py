@@ -6,6 +6,7 @@ from typing import Any
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.strategy._internal.lend_decision import LendDecision
 from bfx_funding_bot.modules.strategy._internal.strategies.base import Strategy
+from bfx_funding_bot.modules.strategy.contracts import MeanReversionDiagnostics
 
 
 class MeanReversionStrategy(Strategy):
@@ -81,3 +82,9 @@ class MeanReversionStrategy(Strategy):
             for span, sigma in spans
             for ts in (Decimal("0.5"), Decimal("1.0"), Decimal("1.5"))
         ]
+
+    def diagnostics(self) -> MeanReversionDiagnostics:
+        return MeanReversionDiagnostics(
+            ema_current=self.ema_current,
+            last_deviation=self.last_deviation,
+        )
