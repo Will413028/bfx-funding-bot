@@ -169,7 +169,6 @@ type = "forbidden"
 source_modules = ["bfx_funding_bot.core"]
 forbidden_modules = ["bfx_funding_bot.external", "bfx_funding_bot.modules"]
 ignore_imports = [
-    "bfx_funding_bot.core.writer_lock -> bfx_funding_bot.modules.accounts.exchange_accounts",
 ]
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
 
@@ -181,16 +180,12 @@ source_modules = ["bfx_funding_bot.external"]
 forbidden_modules = ["bfx_funding_bot.modules"]
 ignore_imports = [
     "bfx_funding_bot.external.bitfinex.auth_rest -> bfx_funding_bot.modules.execution.protocols",
-    "bfx_funding_bot.external.bitfinex.auth_rest -> bfx_funding_bot.modules.execution.submit_outcomes",
-    "bfx_funding_bot.external.bitfinex.auth_ws -> bfx_funding_bot.modules.execution.protocols",
     "bfx_funding_bot.external.bitfinex.fill_tracker -> bfx_funding_bot.modules.execution.bus",
     "bfx_funding_bot.external.bitfinex.fill_tracker -> bfx_funding_bot.modules.execution.event_store.persister",
     "bfx_funding_bot.external.bitfinex.fill_tracker -> bfx_funding_bot.modules.execution.events",
     "bfx_funding_bot.external.bitfinex.fill_tracker -> bfx_funding_bot.modules.execution.registry_offers",
     "bfx_funding_bot.external.bitfinex.fill_tracker -> bfx_funding_bot.modules.marketfeed.health_monitor",
     "bfx_funding_bot.external.bitfinex.fill_tracker -> bfx_funding_bot.modules.marketfeed.schemas",
-    "bfx_funding_bot.external.bitfinex.gap_fill -> bfx_funding_bot.modules.candles.repository",
-    "bfx_funding_bot.external.bitfinex.gap_fill -> bfx_funding_bot.modules.candles.schemas",
     "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.bus",
     "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.contracts",
     "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.errors",

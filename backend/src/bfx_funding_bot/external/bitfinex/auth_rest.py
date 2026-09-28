@@ -18,11 +18,12 @@ from typing import Any, Literal, TypeVar
 import httpx
 
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
+from bfx_funding_bot.external.bitfinex.credentials import Credentials
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.external.bitfinex.funding_offer_row import parse_funding_offer_row
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
-from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
-from bfx_funding_bot.modules.execution.submit_outcomes import response_digest, venue_error
+from bfx_funding_bot.external.bitfinex.submit_wire import response_digest, venue_error
+from bfx_funding_bot.modules.execution.protocols import AccountContext
 
 _Row = TypeVar("_Row")
 
