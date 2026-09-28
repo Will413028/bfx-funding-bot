@@ -21,6 +21,7 @@ from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy
 
 
@@ -225,7 +226,7 @@ def test_render_cell_section_has_columns_and_caveats() -> None:
 
 
 def test_load_cell_ratio_sigmas_matches_p14_config() -> None:
-    sigmas = load_cell_ratio_sigmas(Path("configs/cells.experimental-p14.yaml"))
+    sigmas = load_cell_ratio_sigmas(tuple(load_cells_only(Path("configs/cells.experimental-p14.yaml"))))
     # 4 cells, sigma is strategy-independent EDA — the single source of truth (R5)
     assert set(sigmas) == {"fUST_a30", "fUST_p2", "fUSD_a30", "fUSD_p2"}
     assert sigmas["fUST_a30"] == Decimal("0.42049266874194213")

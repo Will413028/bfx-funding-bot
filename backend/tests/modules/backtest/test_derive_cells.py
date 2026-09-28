@@ -4,13 +4,16 @@ from pathlib import Path
 
 from bfx_funding_bot.modules.backtest.cell_derivation import derive_cell_params
 from bfx_funding_bot.modules.backtest.cell_pipeline import (
-    check_against_fixture,
+    check_deployed_cells,
+    check_main_against_fixture,
     write_outputs,
 )
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.fixture_io import freeze_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
+from bfx_funding_bot.modules.marketfeed.config import load_cells_only
+from bfx_funding_bot.modules.strategy import CellConfig
 
 _LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
 _UNUSED_LINEAR_MODEL = FillRateModel.from_rows([], artifact=None)
@@ -55,9 +58,13 @@ def _setup(tmp_path: Path) -> tuple[Path, Path]:
     return fixtures, cells_yaml
 
 
+def _loaded(path: Path) -> tuple[CellConfig, ...]:
+    return tuple(load_cells_only(path))
+
+
 def test_check_passes_on_freshly_written(tmp_path: Path) -> None:
     fixtures, cells_yaml = _setup(tmp_path)
-    assert check_against_fixture(fixtures, [cells_yaml], deployed_path=None, config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL) == []
+    assert check_main_against_fixture(fixtures, cells_yaml, _loaded(cells_yaml), config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL)[0] == []
 
 
 def test_check_fails_on_param_drift(tmp_path: Path) -> None:
@@ -70,7 +77,7 @@ def test_check_fails_on_param_drift(tmp_path: Path) -> None:
     doc["cells"][0]["params"]["threshold_sigma"] = 9.9
     with cells_yaml.open("w") as fh:
         ruamel.dump(doc, fh)
-    problems = check_against_fixture(fixtures, [cells_yaml], deployed_path=None, config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL)
+    problems = check_main_against_fixture(fixtures, cells_yaml, _loaded(cells_yaml), config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL)[0]
     assert any("threshold_sigma" in p for p in problems)
 
 
@@ -92,7 +99,7 @@ def test_check_fails_on_fixture_hash_mismatch(tmp_path: Path) -> None:
         },
         fixtures,
     )
-    problems = check_against_fixture(fixtures, [cells_yaml], deployed_path=None, config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL)
+    problems = check_main_against_fixture(fixtures, cells_yaml, _loaded(cells_yaml), config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL)[0]
     assert any("data_hash" in p for p in problems)
 
 
@@ -107,8 +114,10 @@ def test_check_fails_on_deployed_param_drift(tmp_path: Path) -> None:
     doc["cells"][0]["params"]["threshold_sigma"] = 9.9
     with deployed_yaml.open("w") as fh:
         ruamel.dump(doc, fh)
-    problems = check_against_fixture(
-        fixtures, [cells_yaml, deployed_yaml], deployed_path=deployed_yaml,
+    problems, can_check_deployed = check_main_against_fixture(
+        fixtures, cells_yaml, _loaded(cells_yaml),
         config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL,
     )
+    assert can_check_deployed
+    problems += check_deployed_cells(_loaded(cells_yaml), _loaded(deployed_yaml), cells_yaml.name)
     assert any("deployed" in p and "threshold_sigma" in p for p in problems)

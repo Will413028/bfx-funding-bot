@@ -20,7 +20,7 @@ from bfx_funding_bot.modules.backtest.fixture_io import (
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
-from bfx_funding_bot.modules.marketfeed.config import load_cells_only
+from bfx_funding_bot.modules.strategy import CellConfig
 
 CONFIGS = Path("configs")
 CELLS_YAML = CONFIGS / "cells.yaml"
@@ -40,10 +40,10 @@ MR_CELLS: list[tuple[str, str, str]] = [
 CellKey = tuple[str, str, str]  # (strategy, symbol, period_agg)
 
 
-def _mr_cells_in(path: Path) -> dict[CellKey, dict[str, Any]]:
-    """Map (strategy, symbol, period_agg) -> params dict for MR cells in a YAML."""
+def _mr_cells_in(cells: tuple[CellConfig, ...]) -> dict[CellKey, dict[str, Any]]:
+    """Map (strategy, symbol, period_agg) -> params dict for MR cells."""
     out: dict[CellKey, dict[str, Any]] = {}
-    for c in load_cells_only(path):
+    for c in cells:
         if c.strategy.value == "mean_reversion":
             key: CellKey = (c.strategy.value, c.symbol, c.period_agg)
             out[key] = dict(c.params)
@@ -115,23 +115,17 @@ def write_outputs(
             ruamel.dump(doc, fh)
 
 
-def check_against_fixture(
+def check_main_against_fixture(
     fixtures_dir: Path,
-    yaml_paths: list[Path],
+    main: Path,
+    main_cells: tuple[CellConfig, ...],
     *,
-    deployed_path: Path | None,
     config: BacktestConfig,
     fill_model: FillRateModel,
-) -> list[str]:
-    """Offline drift check. Returns a list of human-readable problems ([] = OK)."""
+) -> tuple[list[str], bool]:
+    """Check the main YAML and fixtures; bool says whether deployed comparison follows."""
     problems: list[str] = []
-
-    # Identify the main (non-deployed-subset) YAML file.
-    main = next(
-        (p for p in yaml_paths if deployed_path is None or p != deployed_path),
-        yaml_paths[0],
-    )
-    committed = _mr_cells_in(main)
+    committed = _mr_cells_in(main_cells)
 
     # 1. _provenance.data_hash must match the on-disk fixtures (checked first so
     #    a corrupted/mutated fixture is caught before re-derivation attempts).
@@ -145,7 +139,7 @@ def check_against_fixture(
         )
         # Hash mismatch means fixture and provenance are inconsistent; skip
         # re-derivation which would operate on untrusted data.
-        return problems
+        return problems, False
 
     # 2. Re-derive from the frozen fixtures (only MR cells whose fixture exists).
     derived: dict[CellKey, DerivedCell] = {}
@@ -175,19 +169,28 @@ def check_against_fixture(
                     f"{key[1]}_{key[2]} {field}: committed {got!r} != derived {want!r}"
                 )
 
-    # 4. Deployed-subset params must match the main file for shared MR cells.
-    if deployed_path is not None and deployed_path.exists():
-        deployed = _mr_cells_in(deployed_path)
-        for key, cparams in deployed.items():
-            mparams = committed.get(key)
-            if mparams is None:
-                problems.append(f"deployed cell {key} not in {main.name}")
-                continue
-            for field in ("ema_span", "threshold_sigma", "ratio_sigma"):
-                cgot = cparams.get(field)
-                mgot = mparams.get(field)
-                if cgot is None or mgot is None or abs(float(cgot) - float(mgot)) > 1e-9:
-                    problems.append(
-                        f"deployed {key[1]}_{key[2]} {field} != {main.name}"
-                    )
+    return problems, True
+
+
+def check_deployed_cells(
+    main_cells: tuple[CellConfig, ...],
+    deployed_cells: tuple[CellConfig, ...],
+    main_name: str,
+) -> list[str]:
+    """Compare deployed MR params with the already checked main cells."""
+    problems: list[str] = []
+    committed = _mr_cells_in(main_cells)
+    deployed = _mr_cells_in(deployed_cells)
+    for key, cparams in deployed.items():
+        mparams = committed.get(key)
+        if mparams is None:
+            problems.append(f"deployed cell {key} not in {main_name}")
+            continue
+        for field in ("ema_span", "threshold_sigma", "ratio_sigma"):
+            cgot = cparams.get(field)
+            mgot = mparams.get(field)
+            if cgot is None or mgot is None or abs(float(cgot) - float(mgot)) > 1e-9:
+                problems.append(
+                    f"deployed {key[1]}_{key[2]} {field} != {main_name}"
+                )
     return problems

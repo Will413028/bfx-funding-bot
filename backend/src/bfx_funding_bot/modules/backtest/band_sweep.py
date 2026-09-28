@@ -11,7 +11,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 
 from bfx_funding_bot.modules.backtest.oos_profitability import (
     WindowOutcome,
@@ -23,8 +22,7 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     sharpe_skew_kurt,
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.marketfeed.config import load_cells_only
-from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy
+from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy, CellConfig
 
 # ---------------------------------------------------------------------------
 # Task 1: grid enumeration
@@ -324,10 +322,10 @@ def render_report(sections: dict[str, list[BandResult]], *, data_window: str) ->
 # ---------------------------------------------------------------------------
 
 
-def load_cell_ratio_sigmas(p14_yaml: Path) -> dict[str, Decimal]:
+def load_cell_ratio_sigmas(cells: tuple[CellConfig, ...]) -> dict[str, Decimal]:
     """Per-cell ratio_sigma from the p14 experimental config — the single
     source of truth (strategy-independent EDA). Keyed by cell_id."""
     return {
         cell.cell_id: Decimal(str(cell.params["ratio_sigma"]))
-        for cell in load_cells_only(p14_yaml)
+        for cell in cells
     }

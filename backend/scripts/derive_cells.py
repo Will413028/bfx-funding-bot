@@ -2,7 +2,7 @@
 
 --write  (manual, needs Neon): pull candles -> cell_pipeline.write_outputs
          (freeze fixtures + patch params/_provenance into the YAML files).
---check  (CI, offline): cell_pipeline.check_against_fixture — re-derive from the
+--check  (CI, offline): cell_pipeline checks — re-derive from the
          committed fixtures and assert the committed YAML matches. Non-zero on drift.
 
 Usage:
@@ -27,12 +27,14 @@ from bfx_funding_bot.modules.backtest.cell_pipeline import (
     FIXTURES,
     MR_CELLS,
     CellKey,
-    check_against_fixture,
+    check_deployed_cells,
+    check_main_against_fixture,
     write_outputs,
 )
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
+from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 
 logger = logging.getLogger("derive_cells")
 
@@ -108,13 +110,15 @@ def main() -> None:
 
     if args.write:
         sys.exit(asyncio.run(_write_main()))
-    problems = check_against_fixture(
-        FIXTURES,
-        [CELLS_YAML, DEPLOYED_YAML],
-        deployed_path=DEPLOYED_YAML,
+    main_cells = tuple(load_cells_only(CELLS_YAML))
+    problems, can_check_deployed = check_main_against_fixture(
+        FIXTURES, CELLS_YAML, main_cells,
         config=RESEARCH_CONFIG,
         fill_model=UNUSED_LINEAR_MODEL,
     )
+    if can_check_deployed and DEPLOYED_YAML.exists():
+        deployed_cells = tuple(load_cells_only(DEPLOYED_YAML))
+        problems.extend(check_deployed_cells(main_cells, deployed_cells, CELLS_YAML.name))
     if problems:
         for p in problems:
             logger.error("DRIFT: %s", p)
