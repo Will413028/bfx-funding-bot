@@ -17,8 +17,8 @@ from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
     ExtractedSignal,
 )
-from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
 from bfx_funding_bot.modules.strategy import CellConfig
+from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
 
 def _make_history(n: int) -> list[FundingCandle]:
@@ -46,7 +46,7 @@ def test_replay_under_500ms_for_11_cells_168_candles(strategy_name: str, params:
         "staleness_budget_hours": 2,
     })
     history = _make_history(168)
-    reporter = DivergenceReporter()
+    reporter = DivergenceReporter(build_strategy_at_boundary)
 
     live = build_strategy(cell)
     for c in history[:-1]:

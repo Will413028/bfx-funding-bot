@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import (
     BacktestIncomplete,
@@ -12,7 +13,8 @@ from bfx_funding_bot.modules.backtest.engine import (
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.artifact import FillModelArtifact
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
-from bfx_funding_bot.modules.strategy import AlwaysMarketRateStrategy, LendDecision, Strategy
+from bfx_funding_bot.modules.strategy import LendDecision
+from bfx_funding_bot.modules.strategy._internal.strategies.base import Strategy
 
 
 @dataclass
@@ -26,6 +28,10 @@ class _Row:
     n_samples: int
     mean_ttf_ms: int | None
     artifact_hash: str | None
+
+
+def market_rate(*, period_days: int):
+    return research_strategy("AlwaysMarketRateStrategy").create(period_days=period_days)
 
 
 def _candle(*, symbol: str = "fUSD", period_agg: str = "p2") -> FundingCandle:
@@ -75,7 +81,7 @@ def test_empirical_uses_learned_fill_prob():
 def test_empirical_backtest_does_not_use_linear_when_model_is_missing():
     cfg = BacktestConfig(fill_model="empirical", fill_horizon_h=4)
     with pytest.raises(Exception, match="fill_model_missing") as exc_info:
-        run_backtest([_candle()], AlwaysMarketRateStrategy(period_days=2), cfg, fill_model=None)
+        run_backtest([_candle()], market_rate(period_days=2), cfg, fill_model=None)
     assert type(exc_info.value).__name__ == "BacktestIncomplete"
 
 
@@ -83,7 +89,7 @@ def test_empirical_backtest_rejects_empty_candles_without_model():
     cfg = BacktestConfig(fill_model="empirical", fill_horizon_h=4)
 
     with pytest.raises(BacktestIncomplete, match="fill_model_missing"):
-        run_backtest([], AlwaysMarketRateStrategy(period_days=2), cfg, fill_model=None)
+        run_backtest([], market_rate(period_days=2), cfg, fill_model=None)
 
 
 def test_empirical_backtest_rejects_zero_decision_without_model():
@@ -99,7 +105,7 @@ def test_empirical_backtest_rejects_artifact_symbol_scope_mismatch():
     with pytest.raises(BacktestIncomplete, match="fill_model_scope_mismatch"):
         run_backtest(
             [_candle(symbol="fUST")],
-            AlwaysMarketRateStrategy(period_days=2),
+            market_rate(period_days=2),
             cfg,
             fill_model=_model(),
         )
@@ -113,7 +119,7 @@ def test_empirical_backtest_rejects_unknown_artifact_source():
     with pytest.raises(BacktestIncomplete, match="fill_model_scope_mismatch"):
         run_backtest(
             [_candle()],
-            AlwaysMarketRateStrategy(period_days=2),
+            market_rate(period_days=2),
             cfg,
             fill_model=_model(source="own_fill"),
         )
@@ -124,7 +130,7 @@ def test_empirical_backtest_rejects_artifact_only_model_on_empty_candles():
     model = FillRateModel.from_rows([], artifact=_artifact())
 
     with pytest.raises(BacktestIncomplete, match="fill_model_missing"):
-        run_backtest([], AlwaysMarketRateStrategy(period_days=2), cfg, fill_model=model)
+        run_backtest([], market_rate(period_days=2), cfg, fill_model=model)
 
 
 def test_empirical_backtest_rejects_unversioned_model_on_zero_decision():
@@ -170,7 +176,7 @@ def test_empirical_backtest_rejects_horizon_scope_mismatch_on_empty_candles():
     cfg = BacktestConfig(fill_model="empirical", fill_horizon_h=6)
 
     with pytest.raises(BacktestIncomplete, match="fill_model_scope_mismatch"):
-        run_backtest([], AlwaysMarketRateStrategy(period_days=2), cfg, fill_model=_model())
+        run_backtest([], market_rate(period_days=2), cfg, fill_model=_model())
 
 
 def test_empirical_backtest_preflights_period_before_record_window_decision():

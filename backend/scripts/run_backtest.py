@@ -23,12 +23,12 @@ import logging
 import sys
 import time
 
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
-from bfx_funding_bot.modules.strategy import AlwaysMarketRateStrategy
 
 logger = logging.getLogger("run_backtest")
 
@@ -75,7 +75,7 @@ async def _amain() -> int:
             )
             return 1
 
-        strategy = AlwaysMarketRateStrategy(period_days=args.period_days)
+        strategy = research_strategy("AlwaysMarketRateStrategy").create(period_days=args.period_days)
         result = run_backtest(
             candles, strategy, BacktestConfig(fill_model="linear-baseline")
         )

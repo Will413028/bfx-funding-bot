@@ -10,17 +10,16 @@ from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.execution.diagnostics.sink import NoopDiagnosticsSink
+from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     Scheduler,
     next_candle_close_mts,
     now_ms_utc,
 )
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
-from bfx_funding_bot.modules.marketfeed.strategy_registry import (
-    StrategyRegistry,
-    build_strategy,
-)
+from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.strategy import CellConfig
+from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
 # ── base reference time (aligned to 1h boundary) ──────────────────────────────
 _REF_MTS = 1747584000000  # 2025-05-18 12:00:00 UTC
@@ -59,11 +58,12 @@ def _make_signal_engine(axiom: MagicMock, cell: CellConfig) -> SignalEngine:
     return SignalEngine(
         phase=Phase.PAPER, event_sink=axiom, diagnostics=NoopDiagnosticsSink(),
         candles_repo=candles_repo,
+        reporter=DivergenceReporter(build_strategy_at_boundary),
     )
 
 
 def _make_registry(cell: CellConfig) -> StrategyRegistry:
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     strategy = build_strategy(cell)
     # Pre-warm with enough history so signal can be extracted
     for i in range(6):

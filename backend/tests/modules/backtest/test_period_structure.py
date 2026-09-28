@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.period_structure import (
     ArmSpec,
@@ -17,13 +18,14 @@ from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.artifact import FillModelArtifact
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
-from bfx_funding_bot.modules.strategy import (
-    AlwaysMarketRateStrategy,
-)
 
 _HOUR = 3_600_000
 _T0 = 1_704_067_200_000  # 2024-01-01T00:00Z
 _CONFIG = BacktestConfig(fill_model="linear-baseline", truncate_at_window_end=True)
+
+
+def market_rate(*, period_days: int):
+    return research_strategy("AlwaysMarketRateStrategy").create(period_days=period_days)
 
 
 def _series(period_agg: str, close: str, n: int, *, every: int = 1, start: int = _T0) -> list[FundingCandle]:
@@ -72,10 +74,10 @@ def test_evaluate_period_arms_prices_by_tenor_and_aligns_windows() -> None:
     series = _five_months()
     windows = compute_wfo_windows(series["p2"])
     arms = [
-        ArmSpec("always_2d", "p2", lambda: AlwaysMarketRateStrategy(period_days=2)),
-        ArmSpec("always_30d", "p30", lambda: AlwaysMarketRateStrategy(period_days=30)),
-        ArmSpec("a30_posts_2d", "a30", lambda: AlwaysMarketRateStrategy(period_days=2)),
-        ArmSpec("a30_legacy", "a30", lambda: AlwaysMarketRateStrategy(period_days=2), period_aware=False),
+        ArmSpec("always_2d", "p2", lambda: market_rate(period_days=2)),
+        ArmSpec("always_30d", "p30", lambda: market_rate(period_days=30)),
+        ArmSpec("a30_posts_2d", "a30", lambda: market_rate(period_days=2)),
+        ArmSpec("a30_legacy", "a30", lambda: market_rate(period_days=2), period_aware=False),
     ]
     runs = evaluate_period_arms(series, windows, arms, _CONFIG)
     assert {len(r.outcomes) for r in runs.values()} == {len(windows)}
@@ -96,8 +98,8 @@ def test_build_report_pairs_only_arms_that_ran_and_renders() -> None:
     series = _five_months()
     windows = compute_wfo_windows(series["p2"])
     arms = [
-        ArmSpec("always_2d", "p2", lambda: AlwaysMarketRateStrategy(period_days=2)),
-        ArmSpec("always_30d", "p30", lambda: AlwaysMarketRateStrategy(period_days=30)),
+        ArmSpec("always_2d", "p2", lambda: market_rate(period_days=2)),
+        ArmSpec("always_30d", "p30", lambda: market_rate(period_days=30)),
     ]
     runs = evaluate_period_arms(series, windows, arms, _CONFIG)
     report = build_report(symbol="fUST", runs=runs, data_window="x..y", notes=("always_frr skipped",))
@@ -144,10 +146,10 @@ def test_book_models_score_each_tenor_and_leave_unmodelled_arms_unscored() -> No
     series = _five_months()
     windows = compute_wfo_windows(series["p2"])
     arms = [
-        ArmSpec("always_2d", "p2", lambda: AlwaysMarketRateStrategy(period_days=2)),
-        ArmSpec("always_30d", "p30", lambda: AlwaysMarketRateStrategy(period_days=30)),
-        ArmSpec("fourteen_on_a30", "a30", lambda: AlwaysMarketRateStrategy(period_days=14)),
-        ArmSpec("a30_legacy", "a30", lambda: AlwaysMarketRateStrategy(period_days=2), period_aware=False),
+        ArmSpec("always_2d", "p2", lambda: market_rate(period_days=2)),
+        ArmSpec("always_30d", "p30", lambda: market_rate(period_days=30)),
+        ArmSpec("fourteen_on_a30", "a30", lambda: market_rate(period_days=14)),
+        ArmSpec("a30_legacy", "a30", lambda: market_rate(period_days=2), period_aware=False),
     ]
     models = {"p2": _book_model("p2", 0.6), "p30": _book_model("p30", 0.3)}
     runs = evaluate_period_arms(

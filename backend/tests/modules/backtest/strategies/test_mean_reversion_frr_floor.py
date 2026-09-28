@@ -1,9 +1,11 @@
 from decimal import Decimal
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.strategy import (
-    MeanReversionFrrFloorStrategy,
+from bfx_funding_bot.modules.strategy._internal.strategies.mean_reversion import (
     MeanReversionStrategy,
+)
+from bfx_funding_bot.modules.strategy._internal.strategies.mean_reversion_frr_floor import (
+    MeanReversionFrrFloorStrategy,
 )
 
 FRR = Decimal("0.0002")  # per-day parking rate the lookup returns

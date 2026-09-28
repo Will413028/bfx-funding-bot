@@ -23,7 +23,7 @@ from bfx_funding_bot.modules.backtest.split import compute_train_end_mts
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
-from bfx_funding_bot.modules.strategy import MeanReversionStrategy
+from bfx_funding_bot.modules.strategy import ResearchStrategySpec, Strategy
 
 # A scored combo: (params, mean_active, information_ratio, pct_months_outperform)
 ScoredCombo = tuple[dict[str, Any], Decimal, Decimal, Decimal]
@@ -80,6 +80,8 @@ def derive_cell_params(
     *,
     config: BacktestConfig,
     fill_model: FillRateModel,
+    strategy_spec: ResearchStrategySpec,
+    baseline: ResearchStrategySpec,
 ) -> DerivedCell:
     """Derive the deployed MeanReversion params for one cell from its candles.
 
@@ -105,7 +107,7 @@ def derive_cell_params(
         "close_over_ema_sigma_168": close_over_ema_sigma(train, ema_span=168),
     }
 
-    grid = MeanReversionStrategy.param_grid_for_cell(
+    grid = strategy_spec.param_grid_for_cell(
         symbol=symbol, period_agg=period_agg, eda=eda
     )
     windows = compute_wfo_windows(candles)
@@ -114,8 +116,8 @@ def derive_cell_params(
             f"derive_cell_params: no WFO windows for {symbol}_{period_agg}"
         )
 
-    def _make_strategy(p: dict[str, Any]) -> MeanReversionStrategy:
-        return MeanReversionStrategy(
+    def _make_strategy(p: dict[str, Any]) -> Strategy:
+        return strategy_spec.create(
             ema_span=int(p["ema_span"]),
             threshold_sigma=p["threshold_sigma"],
             ratio_sigma=p["ratio_sigma"],
@@ -129,6 +131,7 @@ def derive_cell_params(
             make_strategy=functools.partial(_make_strategy, params),
             config=config,
             fill_model=fill_model,
+            baseline=baseline,
         )
         active = active_return_summary(strat_out, base_out)
         scored.append((

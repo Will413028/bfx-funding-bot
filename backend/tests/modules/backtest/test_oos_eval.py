@@ -2,13 +2,19 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.strategy import AlwaysMarketRateStrategy, LendDecision, Strategy
+from bfx_funding_bot.modules.strategy import LendDecision
+from bfx_funding_bot.modules.strategy._internal.strategies.base import Strategy
 
 _LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
+
+
+def market_rate(*, period_days: int):
+    return research_strategy("AlwaysMarketRateStrategy").create(period_days=period_days)
 
 
 def _candles(start_mts: int, n: int, close: str, step_ms: int = 3_600_000) -> list[FundingCandle]:
@@ -46,8 +52,8 @@ def test_evaluate_oos_windows_pairs_outcomes_per_window() -> None:
                   test_start_mts=500_000_000, test_end_mts=900_000_000),
     ]
     strat_out, base_out = evaluate_oos_windows(
-        candles, windows, make_strategy=lambda: AlwaysMarketRateStrategy(period_days=2),
-        config=_LINEAR_CONFIG, fill_model=None,
+        candles, windows, make_strategy=lambda: market_rate(period_days=2),
+        config=_LINEAR_CONFIG, fill_model=None, baseline=research_strategy("AlwaysMarketRateStrategy"),
     )
     assert len(strat_out) == len(base_out) == 1
     assert strat_out[0].month_mts == base_out[0].month_mts == 500_000_000
@@ -58,7 +64,7 @@ def test_evaluate_oos_windows_candidate_differs_from_baseline() -> None:
     """Candidate arm and baseline arm run independently and can differ.
 
     The candidate is _NeverLendsStrategy (always returns None -> zero trades
-    -> net_monthly == 0). The baseline is AlwaysMarketRateStrategy(period_days=2)
+    -> net_monthly == 0). The baseline is market_rate(period_days=2)
     which lends at every non-cooldown candle -> n_trades > 0 -> net_monthly > 0.
 
     Mechanism: the engine only accumulates equity when decide() returns a
@@ -82,7 +88,7 @@ def test_evaluate_oos_windows_candidate_differs_from_baseline() -> None:
     ]
     strat_out, base_out = evaluate_oos_windows(
         candles, windows, make_strategy=_NeverLendsStrategy,
-        config=_LINEAR_CONFIG, fill_model=None,
+        config=_LINEAR_CONFIG, fill_model=None, baseline=research_strategy("AlwaysMarketRateStrategy"),
     )
 
     # Both lists must have one outcome per window, in window order.
@@ -122,5 +128,5 @@ def test_evaluate_oos_windows_requires_explicit_config() -> None:
         evaluate_oos_windows(
             candles,
             windows,
-            make_strategy=lambda: AlwaysMarketRateStrategy(period_days=2),
+            make_strategy=lambda: market_rate(period_days=2),
         )

@@ -20,7 +20,7 @@ from bfx_funding_bot.modules.backtest.fixture_io import (
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
-from bfx_funding_bot.modules.strategy import CellConfig
+from bfx_funding_bot.modules.strategy import CellConfig, ResearchStrategySpec
 
 CONFIGS = Path("configs")
 CELLS_YAML = CONFIGS / "cells.yaml"
@@ -122,6 +122,8 @@ def check_main_against_fixture(
     *,
     config: BacktestConfig,
     fill_model: FillRateModel,
+    strategy_spec: ResearchStrategySpec,
+    baseline: ResearchStrategySpec,
 ) -> tuple[list[str], bool]:
     """Check the main YAML and fixtures; bool says whether deployed comparison follows."""
     problems: list[str] = []
@@ -148,7 +150,8 @@ def check_main_against_fixture(
         if not fpath.exists():
             continue
         derived[("mean_reversion", symbol, period_agg)] = derive_cell_params(
-            load_candles(fpath), config=config, fill_model=fill_model
+            load_candles(fpath), config=config, fill_model=fill_model,
+            strategy_spec=strategy_spec, baseline=baseline,
         )
 
     # 3. Committed params must equal the re-derivation.

@@ -154,6 +154,7 @@ from bfx_funding_bot.modules.marketfeed.daemon import (
     load_account_bootstrap,
     log,
 )
+from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter
 from bfx_funding_bot.modules.marketfeed.funding_book import (
     FundingBookService,
     FundingBookStore,
@@ -185,6 +186,7 @@ from bfx_funding_bot.modules.observability.tracing import (
     tracing_from_env,
 )
 from bfx_funding_bot.modules.strategy import CellConfig, configured_symbols
+from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
 _BITFINEX_REST_BASE_URL = "https://api-pub.bitfinex.com"
 
@@ -295,7 +297,7 @@ async def build_daemon(
             symbols=sorted(configured_symbols(config.cells)),
             reconcile_interval_seconds=config.book_reconcile_interval_seconds,
         )
-    registry = StrategyRegistry()
+    registry = StrategyRegistry(build_strategy)
     monitor = HealthMonitor(phase=config.phase, event_sink=stdout_sink, probe=probe)
     candle_q: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
 
@@ -306,6 +308,7 @@ async def build_daemon(
                 await warmup_cell(
                     cell=cell,
                     registry=registry,
+                    boundary_builder=build_strategy_at_boundary,
                     bitfinex=bitfinex,
                     session=session,
                     now_mts=now_mts,
@@ -861,6 +864,7 @@ async def build_daemon(
         event_sink=stdout_sink,
         diagnostics=diagnostics,
         candles_repo=_CandlesRepoBridge(),
+        reporter=DivergenceReporter(build_strategy_at_boundary),
         quote_store=quote_store,
         clock=lambda: int(time.time() * 1000),
     )

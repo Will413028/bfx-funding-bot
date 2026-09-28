@@ -24,13 +24,12 @@ from bfx_funding_bot.modules.candles.repository import get_up_to, upsert_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.execution.diagnostics.sink import NoopDiagnosticsSink
+from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter
 from bfx_funding_bot.modules.marketfeed.scheduler import _TIMEFRAME_MS
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
-from bfx_funding_bot.modules.marketfeed.strategy_registry import (
-    StrategyRegistry,
-    build_strategy,
-)
+from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.strategy import CellConfig
+from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
 pytestmark = pytest.mark.integration
 
@@ -138,11 +137,12 @@ async def _make_tick_fn(
     engine = SignalEngine(
         phase=Phase.PAPER, event_sink=event_sink, diagnostics=NoopDiagnosticsSink(),
         candles_repo=_RepoBridge(),
+        reporter=DivergenceReporter(build_strategy_at_boundary),
     )
 
     # Pre-warm registry with enough history so signal computation doesn't crash.
     # lookback_hours=5 → strategy needs at least 5 candles.
-    registry = StrategyRegistry()
+    registry = StrategyRegistry(build_strategy)
     strategy = build_strategy(cell)
     for i in range(6):
         strategy.observe(_candle(candle_mts - (6 - i) * _1H_MS))

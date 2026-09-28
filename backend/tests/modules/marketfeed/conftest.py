@@ -11,12 +11,11 @@ from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.execution.deployment.standing_quote import (
     StandingQuoteStore,
 )
+from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
-from bfx_funding_bot.modules.marketfeed.strategy_registry import (
-    StrategyRegistry,
-    build_strategy,
-)
+from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.strategy import CellConfig
+from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
 
 class _EventCapture:
@@ -72,7 +71,7 @@ def _candle() -> FundingCandle:
 
 def _make_registry(cell: CellConfig) -> StrategyRegistry:
     """Build a registry with the strategy pre-warmed on history[:-1]."""
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     strategy = build_strategy(cell)
     for c in _history(7):
         strategy.observe(c)
@@ -91,6 +90,7 @@ def capture_engine() -> tuple:
     engine = SignalEngine(
         phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=_StubCandlesRepo(),
+        reporter=DivergenceReporter(build_strategy_at_boundary),
         quote_store=store,
         clock=lambda: 5_000,
     )
@@ -118,13 +118,14 @@ def capture_engine_blocked() -> tuple:
     engine = SignalEngine(
         phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=_StubCandlesRepo(),
+        reporter=DivergenceReporter(build_strategy_at_boundary),
         quote_store=store,
         clock=lambda: 5_000,
     )
     # Build a registry where the strategy window is filled with HIGH rates so
     # the 75th-percentile threshold is high, then the boundary candle has a LOW
     # rate that is clearly below threshold → strategy emits None → SKIP/below_threshold.
-    reg = StrategyRegistry()
+    reg = StrategyRegistry(build_strategy)
     strategy = build_strategy(cell)
     # 7 warm-up candles at high rate (last 5 fill the lookback_hours=5 window
     # with 0.0009); boundary candle at 0.0001 → close(0.0001) < threshold(0.0009)

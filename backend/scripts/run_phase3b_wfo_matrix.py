@@ -26,6 +26,7 @@ from itertools import product
 from pathlib import Path
 from typing import Any
 
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
@@ -37,14 +38,17 @@ from bfx_funding_bot.modules.backtest.matrix import (
 )
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
-from bfx_funding_bot.modules.strategy import MeanReversionStrategy, RatePercentileStrategy, Strategy
+from bfx_funding_bot.modules.strategy import ResearchStrategySpec
 
 logger = logging.getLogger("phase3b_wfo_matrix")
 
 SYMBOLS = ["fUSD", "fUST"]
 PERIOD_AGGS = ["p2", "p30", "a30"]
 START_MTS = int(datetime(2022, 1, 1, tzinfo=UTC).timestamp() * 1000)
-STRATEGIES: list[type[Strategy]] = [RatePercentileStrategy, MeanReversionStrategy]
+STRATEGIES: list[ResearchStrategySpec] = [
+    research_strategy("RatePercentileStrategy"), research_strategy("MeanReversionStrategy"),
+]
+BASELINE = research_strategy("AlwaysMarketRateStrategy")
 TRAIN_MONTHS = 3
 TEST_MONTHS = 1
 STEP_MONTHS = 1
@@ -116,22 +120,23 @@ async def _amain() -> int:
 
             eda_cell = _eda_for_cell(eda_blob, cell_key)
 
-            for strategy_class in STRATEGIES:
+            for strategy_spec in STRATEGIES:
                 outcomes, _baselines = run_cell_wfo(
-                    strategy_class=strategy_class,
+                    strategy_spec=strategy_spec,
                     candles=candles,
                     eda_cell=eda_cell,
                     cell_key=cell_key,
                     wfo_windows=windows,
                     config=RESEARCH_CONFIG,
                     fill_model=None,
+                    baseline=BASELINE,
                 )
                 verdict = evaluate_cell_qualification(outcomes)
-                per_strategy_cells[strategy_class.__name__].append(verdict)
+                per_strategy_cells[strategy_spec.name].append(verdict)
                 model = _baselines[0] if _baselines else None
 
                 print(
-                    f"- {strategy_class.__name__}: "
+                    f"- {strategy_spec.name}: "
                     f"eligible={verdict.windows_eligible}, "
                     f"wins={verdict.windows_strategy_beats_baseline} "
                     f"({verdict.pct_windows_won:.2%}), "
@@ -150,11 +155,11 @@ async def _amain() -> int:
                 )
 
         print("\n## Strategy-level verdicts\n")
-        for strategy_class in STRATEGIES:
-            cells = per_strategy_cells[strategy_class.__name__]
+        for strategy_spec in STRATEGIES:
+            cells = per_strategy_cells[strategy_spec.name]
             sverdict = evaluate_strategy_qualification(cells)
             print(
-                f"- {strategy_class.__name__}: "
+                f"- {strategy_spec.name}: "
                 f"{sverdict.cells_qualifying}/{sverdict.cells_played} cells qualify, "
                 f"incomplete_cells={sverdict.incomplete_cells}, "
                 f"Phase 4 candidate = {sverdict.qualifies}"

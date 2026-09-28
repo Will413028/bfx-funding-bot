@@ -37,6 +37,7 @@ from statistics import median
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.apps.config import load_cells_only
+from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
@@ -60,11 +61,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     assert_market_rate_band,
 )
 from bfx_funding_bot.modules.strategy import (
-    AlwaysFrrStrategy,
-    AlwaysMarketRateStrategy,
     CellConfig,
-    MeanReversionFrrFloorStrategy,
-    MeanReversionStrategy,
     Strategy,
 )
 
@@ -178,15 +175,15 @@ def arm_factories(
 ) -> dict[str, Callable[[], Strategy]]:
     """Fresh-per-window strategy factories for the four arms."""
     return {
-        ARM_MR: lambda: MeanReversionStrategy(
+        ARM_MR: lambda: research_strategy("MeanReversionStrategy").create(
             ema_span=ema_span, threshold_sigma=threshold_sigma, ratio_sigma=ratio_sigma
         ),
-        ARM_FLOOR: lambda: MeanReversionFrrFloorStrategy(
+        ARM_FLOOR: lambda: research_strategy("MeanReversionFrrFloorStrategy").create(
             ema_span=ema_span, threshold_sigma=threshold_sigma,
             ratio_sigma=ratio_sigma, frr_at=frr_at,
         ),
-        ARM_AMR: lambda: AlwaysMarketRateStrategy(period_days=2),
-        ARM_FRR: lambda: AlwaysFrrStrategy(frr_at=frr_at, period_days=2),
+        ARM_AMR: lambda: research_strategy("AlwaysMarketRateStrategy").create(period_days=2),
+        ARM_FRR: lambda: research_strategy("AlwaysFrrStrategy").create(frr_at=frr_at, period_days=2),
     }
 
 

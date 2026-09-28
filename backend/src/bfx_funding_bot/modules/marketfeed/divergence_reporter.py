@@ -13,9 +13,19 @@ from typing import Any
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
-    build_strategy_at_boundary,
+    BoundaryStrategyBuilder,
 )
-from bfx_funding_bot.modules.strategy import CellConfig, LendDecision, SignalDirection, StrategyName
+from bfx_funding_bot.modules.strategy import (
+    AdaptivePeriodDiagnostics,
+    CellConfig,
+    LendDecision,
+    MeanReversionDiagnostics,
+    RatePercentileDiagnostics,
+    SignalDirection,
+    Strategy,
+    StrategyDiagnostics,
+    StrategyName,
+)
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +41,7 @@ class ExtractedSignal:
 
     @classmethod
     def extract(
-        cls, cell: CellConfig, strategy: Any, candle: FundingCandle
+        cls, cell: CellConfig, strategy: Strategy, candle: FundingCandle
     ) -> ExtractedSignal:
         """Observe + decide on candle, returning normalized signal.
 
@@ -43,9 +53,10 @@ class ExtractedSignal:
         """
         strategy.observe(candle)
         ld = strategy.decide(candle)
+        diagnostics = strategy.diagnostics()
         direction = SignalDirection.POST if ld is not None else SignalDirection.SKIP
-        attrs = _strategy_attributes(cell, strategy, candle, ld)
-        score = _normalize_signal_score(cell, strategy, candle, ld)
+        attrs = _strategy_attributes(cell, diagnostics, candle, ld)
+        score = _normalize_signal_score(cell, diagnostics, candle, ld)
         return cls(
             signal_score=score,
             signal_direction=direction,
@@ -55,7 +66,8 @@ class ExtractedSignal:
 
 
 def _strategy_attributes(
-    cell: CellConfig, strategy: Any, candle: FundingCandle, ld: LendDecision | None,
+    cell: CellConfig, diagnostics: StrategyDiagnostics,
+    candle: FundingCandle, ld: LendDecision | None,
 ) -> dict[str, Any]:
     """Per-strategy attribute extraction for divergence comparison.
 
@@ -67,20 +79,23 @@ def _strategy_attributes(
     are kept un-cast — a float cast would mask sub-Decimal drift.
     """
     if cell.strategy == StrategyName.RATE_PERCENTILE:
+        assert isinstance(diagnostics, RatePercentileDiagnostics)
         return {
             "percentile": float(cell.params["percentile"]),
             "last_close": float(candle.close) if candle.close is not None else 0.0,
-            "last_threshold": strategy.last_threshold,
-            "window_filled": strategy.window_filled,
+            "last_threshold": diagnostics.last_threshold,
+            "window_filled": diagnostics.window_filled,
         }
     if cell.strategy == StrategyName.MEAN_REVERSION:
+        assert isinstance(diagnostics, MeanReversionDiagnostics)
         return {
             "rate": float(candle.close) if candle.close is not None else 0.0,
             "threshold_sigma": float(cell.params["threshold_sigma"]),
-            "ema_current": strategy.ema_current,
-            "last_deviation": strategy.last_deviation,
+            "ema_current": diagnostics.ema_current,
+            "last_deviation": diagnostics.last_deviation,
         }
     if cell.strategy == StrategyName.ADAPTIVE_PERIOD:
+        assert isinstance(diagnostics, AdaptivePeriodDiagnostics)
         # period_days is a deterministic step fn of (ema, close, config); comparing
         # the derived period would only manufacture false divergences at the band
         # tier boundaries. Compare its INPUTS instead: ema_current (rel-tol via
@@ -91,14 +106,15 @@ def _strategy_attributes(
             "t1": float(cell.params["t1"]),
             "t2": float(cell.params["t2"]),
             "ratio_sigma": float(cell.params["ratio_sigma"]),
-            "ema_current": strategy.ema_current,
-            "window_filled": strategy.window_filled,
+            "ema_current": diagnostics.ema_current,
+            "window_filled": diagnostics.window_filled,
         }
     return {}
 
 
 def _normalize_signal_score(
-    cell: CellConfig, strategy: Any, candle: FundingCandle, ld: LendDecision | None,
+    cell: CellConfig, diagnostics: StrategyDiagnostics,
+    candle: FundingCandle, ld: LendDecision | None,
 ) -> float:
     """Continuous, strategy-specific signal-strength score (replaces the old
     direction-only ±1.0 placeholder). Same-strategy live vs replay must be equal.
@@ -111,18 +127,21 @@ def _normalize_signal_score(
     """
     del ld  # score derives from cached state, not the decision object
     if cell.strategy == StrategyName.MEAN_REVERSION:
-        dev = strategy.last_deviation
+        assert isinstance(diagnostics, MeanReversionDiagnostics)
+        dev = diagnostics.last_deviation
         return float(dev) if dev is not None else 0.0
     if cell.strategy == StrategyName.RATE_PERCENTILE:
-        if candle.close is None or not strategy.window_filled:
+        assert isinstance(diagnostics, RatePercentileDiagnostics)
+        if candle.close is None or not diagnostics.window_filled:
             return 0.0
-        window = strategy.window_values  # read-only snapshot, post-observe
+        window = diagnostics.window_values  # read-only snapshot, post-observe
         if not window:
             return 0.0
         close = candle.close
         return 100.0 * sum(1 for w in window if w <= close) / len(window)
     if cell.strategy == StrategyName.ADAPTIVE_PERIOD:
-        ema = strategy.ema_current
+        assert isinstance(diagnostics, AdaptivePeriodDiagnostics)
+        ema = diagnostics.ema_current
         if ema is None or ema == 0 or candle.close is None:
             return 0.0
         return float((candle.close - ema) / ema)
@@ -130,6 +149,9 @@ def _normalize_signal_score(
 
 
 class DivergenceReporter:
+    def __init__(self, boundary_builder: BoundaryStrategyBuilder) -> None:
+        self._boundary_builder = boundary_builder
+
     def check(
         self,
         *,
@@ -157,7 +179,7 @@ class DivergenceReporter:
         """
         if len(raw_history) < 2:
             return None
-        result = build_strategy_at_boundary(
+        result = self._boundary_builder(
             cell=cell, history=raw_history,
             ref_mts=boundary_candle.mts, budget_hours=budget_hours,
         )
