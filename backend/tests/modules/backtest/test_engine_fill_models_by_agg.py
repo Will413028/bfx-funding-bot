@@ -10,12 +10,12 @@ from bfx_funding_bot.modules.backtest.engine import (
     BacktestIncomplete,
     run_backtest,
 )
-from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
-    AlwaysMarketRateStrategy,
-)
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.artifact import FillModelArtifact
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
+from bfx_funding_bot.modules.strategy import (
+    AlwaysMarketRateStrategy,
+)
 
 _HOUR = 3_600_000
 _T0 = 1_704_067_200_000

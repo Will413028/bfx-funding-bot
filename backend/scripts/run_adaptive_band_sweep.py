@@ -36,10 +36,9 @@ from bfx_funding_bot.modules.backtest.band_sweep import (
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
-from bfx_funding_bot.modules.backtest.strategies.adaptive_period import AdaptivePeriodStrategy
-from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
+from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy, Strategy
 
 logger = logging.getLogger("run_adaptive_band_sweep")
 

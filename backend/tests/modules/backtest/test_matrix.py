@@ -11,10 +11,9 @@ from bfx_funding_bot.modules.backtest.matrix import (
     run_cell_wfo,
 )
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
-from bfx_funding_bot.modules.backtest.strategies.mean_reversion import MeanReversionStrategy
-from bfx_funding_bot.modules.backtest.strategies.rate_percentile import RatePercentileStrategy
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.strategy import MeanReversionStrategy, RatePercentileStrategy
 
 _LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
 

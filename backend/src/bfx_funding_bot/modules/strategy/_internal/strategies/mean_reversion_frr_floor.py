@@ -13,11 +13,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from decimal import Decimal
 
-from bfx_funding_bot.modules.backtest.schemas import LendDecision
-from bfx_funding_bot.modules.backtest.strategies.mean_reversion import (
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.strategy._internal.lend_decision import LendDecision
+from bfx_funding_bot.modules.strategy._internal.strategies.mean_reversion import (
     MeanReversionStrategy,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 class MeanReversionFrrFloorStrategy(MeanReversionStrategy):

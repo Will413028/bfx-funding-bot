@@ -3,9 +3,9 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from bfx_funding_bot.modules.backtest.schemas import LendDecision
-from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.strategy._internal.lend_decision import LendDecision
+from bfx_funding_bot.modules.strategy._internal.strategies.base import Strategy
 
 _PERIOD_FLOOR = 2       # Bitfinex funding offer minimum period (days)
 _PERIOD_MAX = 120       # Bitfinex funding offer maximum period (days)

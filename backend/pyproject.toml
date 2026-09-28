@@ -19,7 +19,7 @@ dependencies = [
     "websockets>=14.0",
     "tenacity>=9.0",
     "pyyaml>=6.0",
-    # Runtime deps for backtest.strategies (imported by marketfeed.signal_engine
+    # Runtime deps for modules.strategy (imported by marketfeed.signal_engine
     # via strategy_registry); pandas used by backtest.eda which is in the wheel
     # tree even though not on daemon hot path. Moved from dev-group at Phase 4.1
     # deploy time after container ModuleNotFoundError.
@@ -108,6 +108,50 @@ markers = [
 
 [tool.importlinter]
 root_package = "bfx_funding_bot"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+id = "strategy-is-pure"
+name = "Strategy does not import I/O or runtime settings"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.modules.strategy"]
+forbidden_modules = ["sqlalchemy", "httpx", "bfx_funding_bot.core.settings"]
+ignore_imports = []
+broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
+
+[[tool.importlinter.contracts]]
+id = "strategy-lower-only"
+name = "Strategy imports no sibling modules except candles"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.modules.strategy"]
+forbidden_modules = [
+    "bfx_funding_bot.modules.accounts",
+    "bfx_funding_bot.modules.admin",
+    "bfx_funding_bot.modules.api",
+    "bfx_funding_bot.modules.backfill",
+    "bfx_funding_bot.modules.backtest",
+    "bfx_funding_bot.modules.deployments",
+    "bfx_funding_bot.modules.execution",
+    "bfx_funding_bot.modules.external_signals",
+    "bfx_funding_bot.modules.funding_stats",
+    "bfx_funding_bot.modules.lending",
+    "bfx_funding_bot.modules.live_validation",
+    "bfx_funding_bot.modules.marketfeed",
+    "bfx_funding_bot.modules.observability",
+]
+ignore_imports = []
+broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
+
+[[tool.importlinter.contracts]]
+id = "strategy-no-internal-access"
+name = "Only strategy imports strategy internals directly"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.**"]
+forbidden_modules = ["bfx_funding_bot.modules.strategy._internal"]
+as_packages = true
+allow_indirect_imports = true
+ignore_imports = []
+broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
 
 [[tool.importlinter.contracts]]
 id = "apps-is-top"
@@ -181,13 +225,7 @@ source_modules = [
     "bfx_funding_bot.modules.observability",
 ]
 forbidden_modules = ["bfx_funding_bot.modules.backtest"]
-ignore_imports = [
-    "bfx_funding_bot.modules.marketfeed.divergence_reporter -> bfx_funding_bot.modules.backtest.schemas",
-    "bfx_funding_bot.modules.marketfeed.strategy_registry -> bfx_funding_bot.modules.backtest.schemas",
-    "bfx_funding_bot.modules.marketfeed.strategy_registry -> bfx_funding_bot.modules.backtest.strategies.adaptive_period",
-    "bfx_funding_bot.modules.marketfeed.strategy_registry -> bfx_funding_bot.modules.backtest.strategies.mean_reversion",
-    "bfx_funding_bot.modules.marketfeed.strategy_registry -> bfx_funding_bot.modules.backtest.strategies.rate_percentile",
-]
+ignore_imports = []
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
 
 [[tool.importlinter.contracts]]

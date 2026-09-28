@@ -35,11 +35,9 @@ from bfx_funding_bot.modules.backtest.matrix import (
     evaluate_strategy_qualification,
     run_cell_wfo,
 )
-from bfx_funding_bot.modules.backtest.strategies.base import Strategy
-from bfx_funding_bot.modules.backtest.strategies.mean_reversion import MeanReversionStrategy
-from bfx_funding_bot.modules.backtest.strategies.rate_percentile import RatePercentileStrategy
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
+from bfx_funding_bot.modules.strategy import MeanReversionStrategy, RatePercentileStrategy, Strategy
 
 logger = logging.getLogger("phase3b_wfo_matrix")
 

@@ -40,13 +40,11 @@ from bfx_funding_bot.modules.backtest.matrix import (
     evaluate_cell_qualification,
     pick_sweep_winner,
 )
-from bfx_funding_bot.modules.backtest.strategies.base import Strategy
-from bfx_funding_bot.modules.backtest.strategies.mean_reversion import MeanReversionStrategy
-from bfx_funding_bot.modules.backtest.strategies.rate_percentile import RatePercentileStrategy
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow, compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
+from bfx_funding_bot.modules.strategy import MeanReversionStrategy, RatePercentileStrategy, Strategy
 
 logger = logging.getLogger("phase4_3_locf_wfo_matrix")
 
@@ -140,7 +138,7 @@ def run_cell_wfo_with_locf(
     """
     from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
     from bfx_funding_bot.modules.backtest.schemas import BacktestResult
-    from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
+    from bfx_funding_bot.modules.strategy import (
         AlwaysMarketRateStrategy,
     )
 

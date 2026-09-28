@@ -1,7 +1,7 @@
 from decimal import Decimal
 
-from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFrrStrategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.strategy import AlwaysFrrStrategy
 
 FRR = Decimal("0.0003")
 

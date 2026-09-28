@@ -1,6 +1,7 @@
 from decimal import Decimal
 
-from bfx_funding_bot.modules.backtest.schemas import BacktestResult, LendDecision
+from bfx_funding_bot.modules.backtest.schemas import BacktestResult
+from bfx_funding_bot.modules.strategy import LendDecision
 
 
 def test_backtest_result_construction() -> None:

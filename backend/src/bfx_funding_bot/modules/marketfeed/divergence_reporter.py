@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from bfx_funding_bot.modules.backtest.schemas import LendDecision
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.schemas import (
@@ -21,6 +20,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     build_strategy_at_boundary,
 )
+from bfx_funding_bot.modules.strategy import LendDecision
 
 log = logging.getLogger(__name__)
 

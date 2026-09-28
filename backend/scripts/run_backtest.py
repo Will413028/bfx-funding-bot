@@ -27,8 +27,8 @@ from bfx_funding_bot.core.db import make_engine, make_session_factory, session_s
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import run_backtest
-from bfx_funding_bot.modules.backtest.strategies.always_market_rate import AlwaysMarketRateStrategy
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
+from bfx_funding_bot.modules.strategy import AlwaysMarketRateStrategy
 
 logger = logging.getLogger("run_backtest")
 

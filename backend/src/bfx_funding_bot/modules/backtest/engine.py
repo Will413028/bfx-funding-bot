@@ -4,16 +4,16 @@ from decimal import Decimal
 from typing import Literal, NoReturn
 
 from bfx_funding_bot.modules.backtest.config import BacktestConfig, compute_fill_prob
-from bfx_funding_bot.modules.backtest.schemas import BacktestResult, LendDecision
+from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.backtest.sortino import (
     compute_sortino,
     month_end_timestamps_within,
     monthly_returns_from_equity_curve,
 )
-from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.artifact import FillModelUnavailable
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
+from bfx_funding_bot.modules.strategy import LendDecision, Strategy
 
 BacktestIncompleteReason = Literal[
     "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch",
