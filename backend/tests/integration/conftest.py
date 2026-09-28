@@ -14,3 +14,4 @@ from .phase4_4a.conftest import (  # noqa: F401
     event_sink_stub,
     make_reservation_ref,
 )
+from .test_trading_shadow_candidate import candidate_db  # noqa: F401
