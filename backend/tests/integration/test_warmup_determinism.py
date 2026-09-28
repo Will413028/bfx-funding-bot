@@ -13,9 +13,9 @@ from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.tables import (
     FundingCandleRow,  # noqa: F401 — registers table with Base.metadata
 )
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
+from bfx_funding_bot.modules.strategy import CellConfig
 
 
 def _cell() -> CellConfig:

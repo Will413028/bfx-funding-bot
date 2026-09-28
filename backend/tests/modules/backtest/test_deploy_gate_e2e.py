@@ -21,9 +21,9 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
 )
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.marketfeed.config import CellConfig, load_cells_only
+from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
-from bfx_funding_bot.modules.strategy import MeanReversionStrategy, Strategy
+from bfx_funding_bot.modules.strategy import CellConfig, MeanReversionStrategy, Strategy
 
 _LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
 

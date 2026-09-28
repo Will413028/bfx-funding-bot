@@ -7,11 +7,11 @@ import pytest
 
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.safety.config import _AllocationCapCfg, load_safety_config
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.daemon import (
     assert_caps_invariant,
     assert_live_guard_invariant,
 )
+from bfx_funding_bot.modules.strategy import CellConfig
 
 
 def _safety_yaml(*, disable: str | None = None) -> str:

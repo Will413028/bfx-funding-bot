@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from bfx_funding_bot.core.health import HealthProbe
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
+from bfx_funding_bot.modules.strategy import CellConfig
 
 log = logging.getLogger(__name__)
 

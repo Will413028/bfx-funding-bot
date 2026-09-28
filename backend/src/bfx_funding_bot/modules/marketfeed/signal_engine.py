@@ -22,13 +22,13 @@ from bfx_funding_bot.modules.execution.deployment.standing_quote import (
     StandingQuote,
     StandingQuoteStore,
 )
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
     ExtractedSignal,
 )
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.strategy import (
+    CellConfig,
     DecisionOutcome,
     DecisionPayload,
     SignalDirection,

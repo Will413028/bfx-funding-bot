@@ -31,11 +31,12 @@ from bfx_funding_bot.core.db import make_engine, make_session_factory, session_s
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range, get_up_to
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.marketfeed.config import CellConfig, load_cells_only
+from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import ExtractedSignal
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     build_strategy_at_boundary,
 )
+from bfx_funding_bot.modules.strategy import CellConfig
 
 logger = logging.getLogger("parity")
 

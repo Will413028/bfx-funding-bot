@@ -51,9 +51,13 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingState,
     TransitionResult,
 )
-from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
-from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.strategy import (
+    CellConfig,
+    DecisionOutcome,
+    DecisionPayload,
+    configured_symbols,
+)
 
 MANUAL_KILL_GUARD_NAME = "manual_kill"
 

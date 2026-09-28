@@ -8,9 +8,9 @@ import yaml
 from pydantic import ValidationError
 
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
-from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols, load_config
+from bfx_funding_bot.modules.marketfeed.config import load_config
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
-from bfx_funding_bot.modules.strategy import StrategyName
+from bfx_funding_bot.modules.strategy import CellConfig, StrategyName, configured_symbols
 
 
 def _write_yaml(tmp_path: Path, content: dict) -> Path:

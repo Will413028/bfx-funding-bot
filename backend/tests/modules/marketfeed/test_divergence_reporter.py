@@ -8,7 +8,6 @@ from hypothesis import strategies as st
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
     ExtractedSignal,
@@ -18,7 +17,7 @@ from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     build_strategy,
     build_strategy_at_boundary,
 )
-from bfx_funding_bot.modules.strategy import SignalDirection
+from bfx_funding_bot.modules.strategy import CellConfig, SignalDirection
 
 
 def _cell_rp() -> CellConfig:
@@ -489,9 +488,7 @@ def test_adaptive_period_no_false_divergence_on_boundary_period_flip():
     has 6), which _attrs_diverge detects → check() returns a divergence dict →
     the assert-None fails → mutation is caught.
     """
-    from bfx_funding_bot.modules.strategy import (
-        AdaptivePeriodStrategy,
-    )
+    from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy
 
     # ema_span=24, band1=t1*ratio_sigma=0.5*0.05=0.025, band2=0.075.
     # alpha = 2/(24+1) = 2/25.

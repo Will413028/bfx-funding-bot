@@ -127,7 +127,7 @@ id = "strategy-is-pure"
 name = "Strategy does not import I/O or runtime settings"
 type = "forbidden"
 source_modules = ["bfx_funding_bot.modules.strategy"]
-forbidden_modules = ["sqlalchemy", "httpx", "bfx_funding_bot.core.settings"]
+forbidden_modules = ["sqlalchemy", "httpx", "yaml", "bfx_funding_bot.core.settings"]
 ignore_imports = []
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
 
@@ -248,7 +248,6 @@ ignore_imports = [
     "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.capital_repository",
     "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.capital_tables",
     "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.safety.hard_guards",
-    "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.marketfeed.config",
     "bfx_funding_bot.modules.accounts.credential_bootstrap -> bfx_funding_bot.modules.execution.protocols",
     "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.audit.tables",
     "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.diagnostics.tables",
@@ -257,7 +256,6 @@ ignore_imports = [
     "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.safety.tables",
     "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.live_validation.tables",
     "bfx_funding_bot.modules.accounts.vault -> bfx_funding_bot.modules.execution.protocols",
-    "bfx_funding_bot.modules.admin.trading_status -> bfx_funding_bot.modules.marketfeed.config",
     "bfx_funding_bot.modules.admin.trading_status -> bfx_funding_bot.modules.marketfeed.readiness",
     "bfx_funding_bot.modules.backtest.band_sweep -> bfx_funding_bot.modules.marketfeed.config",
     "bfx_funding_bot.modules.backtest.cell_pipeline -> bfx_funding_bot.modules.marketfeed.config",
@@ -267,7 +265,6 @@ ignore_imports = [
     "bfx_funding_bot.modules.execution.contracts -> bfx_funding_bot.modules.marketfeed.funding_book",
     "bfx_funding_bot.modules.execution.deployment.eligibility -> bfx_funding_bot.modules.marketfeed.funding_book",
     "bfx_funding_bot.modules.execution.deployment.period_pricing -> bfx_funding_bot.modules.marketfeed.funding_book",
-    "bfx_funding_bot.modules.execution.deployment.reconciler -> bfx_funding_bot.modules.marketfeed.config",
     "bfx_funding_bot.modules.execution.deployment.reconciler -> bfx_funding_bot.modules.marketfeed.funding_book",
     "bfx_funding_bot.modules.execution.emit -> bfx_funding_bot.modules.marketfeed.schemas",
     "bfx_funding_bot.modules.execution.safety.pre_trade -> bfx_funding_bot.modules.marketfeed.funding_book",

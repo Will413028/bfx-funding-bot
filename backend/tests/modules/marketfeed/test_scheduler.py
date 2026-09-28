@@ -10,7 +10,6 @@ from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.execution.diagnostics.sink import NoopDiagnosticsSink
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     Scheduler,
     next_candle_close_mts,
@@ -21,6 +20,7 @@ from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     StrategyRegistry,
     build_strategy,
 )
+from bfx_funding_bot.modules.strategy import CellConfig
 
 # ── base reference time (aligned to 1h boundary) ──────────────────────────────
 _REF_MTS = 1747584000000  # 2025-05-18 12:00:00 UTC

@@ -86,13 +86,18 @@ from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
     FillModelUnavailable,
 )
-from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols
 from bfx_funding_bot.modules.marketfeed.funding_book import (
     BookUnavailable,
     FundingBookProvider,
     MarketSnapshot,
 )
-from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
+from bfx_funding_bot.modules.strategy import (
+    CellConfig,
+    DecisionOutcome,
+    DecisionPayload,
+    StrategyName,
+    configured_symbols,
+)
 
 log = logging.getLogger(__name__)
 

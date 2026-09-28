@@ -56,9 +56,9 @@ from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.marketfeed.config import CellConfig, load_cells_only
+from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
-from bfx_funding_bot.modules.strategy import Strategy
+from bfx_funding_bot.modules.strategy import CellConfig, Strategy
 
 logger = logging.getLogger("distortion_sensitivity")
 
