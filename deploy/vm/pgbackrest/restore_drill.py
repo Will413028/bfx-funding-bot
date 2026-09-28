@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
@@ -29,6 +30,7 @@ DEFAULT_SECRET_DIR = Path.home() / "bfx/pgbackrest/conf.d"
 DEFAULT_OUTPUT_PATH = Path.home() / "bfx/dr-evidence/restore.json"
 # Prefix mode writes its own receipt so Halt 2 consumers of restore.json never see it.
 DEFAULT_PREFIX_OUTPUT_PATH = Path.home() / "bfx/dr-evidence/restore-prefix.json"
+DEFAULT_REHEARSAL_EVIDENCE_ROOT = Path.home() / "bfx/dr-evidence/capital-comparison-rehearsals"
 PREFIX_SCRIPT_PATH = SCRIPT_DIR / "prefix_verify.py"
 _PREFIX_CHAIN_ERRORS = frozenset({"prefix_chain_empty", "prefix_chain_mismatch", "prefix_chain_incomplete"})
 _CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
@@ -54,7 +56,9 @@ _secret_validation = _load_module(
     "_bfx_secret_validation", SCRIPT_DIR / "secret_validation.py"
 )
 RestoreInputError = _commands.RestoreInputError
+RestoreResources = _commands.RestoreResources
 RestorePlan = _commands.RestorePlan
+build_restore_resources = _commands.build_restore_resources
 build_restore_plan = _commands.build_restore_plan
 EvidenceError = _evidence.EvidenceError
 render_failure_evidence = _evidence.render_failure_evidence
@@ -98,6 +102,24 @@ class DrillRequest:
     production_container: str = "bfx-postgres"
 
 
+@dataclass(frozen=True, slots=True)
+class RehearsalRequest:
+    backup_label: str
+    target_time: str
+    database_name: str
+    image: str
+    cells_path: Path
+    scopes: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class _CreatedResources:
+    network: bool = False
+    egress_network: bool = False
+    volume: bool = False
+    container: bool = False
+
+
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -132,7 +154,7 @@ def _generated_resource(name: str) -> bool:
     return re.fullmatch(r"bfx-dr-[a-z0-9-]+", name) is not None
 
 
-def _validate_plan_resources(plan: RestorePlan) -> None:
+def _validate_plan_resources(plan: RestoreResources) -> None:
     if not all(
         _generated_resource(name)
         for name in (
@@ -205,6 +227,34 @@ def _write_json(path: Path, report: dict[str, object]) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
+            suffix=".tmp", delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            os.chmod(temporary, 0o600)
+            for record in records:
+                json.dump(record, handle, sort_keys=True, separators=(",", ":"))
+                handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _write_private_file(path: Path, contents: bytes) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(contents)
 
 
 def _write_timing_json(path: Path, report: dict[str, object]) -> None:
@@ -311,6 +361,7 @@ class RestoreDrill:
         config_path: Path = CONFIG_PATH,
         secret_dir: Path = DEFAULT_SECRET_DIR,
         output_path: Path = DEFAULT_OUTPUT_PATH,
+        rehearsal_evidence_root: Path = DEFAULT_REHEARSAL_EVIDENCE_ROOT,
         run_id_factory: Callable[[], str] = _new_run_id,
         password_factory: Callable[[], str] = _new_password,
         clock: Callable[[], float] = time.monotonic,
@@ -322,6 +373,7 @@ class RestoreDrill:
         self._config_path = config_path
         self._secret_dir = secret_dir
         self._output_path = output_path
+        self._rehearsal_evidence_root = rehearsal_evidence_root
         self._run_id_factory = run_id_factory
         self._password_factory = password_factory
         self._clock = clock
@@ -394,7 +446,7 @@ class RestoreDrill:
             _failure("restore_output_invalid")
         return plan
 
-    def _write_env_file(self, plan: RestorePlan, password: str) -> Path:
+    def _write_env_file(self, plan: RestoreResources, password: str) -> Path:
         database_url = (
             f"postgresql+asyncpg://{plan.verify_role}:{password}"
             f"@{plan.container_name}:5432/{plan.database_name}"
@@ -408,23 +460,29 @@ class RestoreDrill:
             "DR_SQL_ADMIN_ROLE": plan.sql_admin_role,
             "DR_DATABASE_NAME": plan.database_name,
             "DATABASE_URL": database_url,
-            "BFX_DEPLOYMENT_ENV": plan.environment,
-            "DR_ACCOUNT_ID": plan.account_id,
-            "DR_PROJECTOR_VERSION": plan.projector_version,
+            "BFX_DEPLOYMENT_ENV": plan.environment if isinstance(plan, RestorePlan) else "",
+            "DR_ACCOUNT_ID": plan.account_id if isinstance(plan, RestorePlan) else "",
+            "DR_PROJECTOR_VERSION": plan.projector_version if isinstance(plan, RestorePlan) else "",
             "DR_TARGET_BACKUP_LABEL": plan.backup_label,
             "DR_TARGET_TIME": plan.target_time or "",
             "DR_PGBACKREST_SECRET_DIR": str(self._secret_dir),
         }
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", prefix="bfx-dr-", suffix=".env", delete=False,
-        ) as handle:
-            path = Path(handle.name)
-            os.chmod(path, 0o600)
-            for key, value in values.items():
-                handle.write(f"{key}={value}\n")
-        return path
+        path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", prefix="bfx-dr-", suffix=".env", delete=False,
+            ) as handle:
+                path = Path(handle.name)
+                os.chmod(path, 0o600)
+                for key, value in values.items():
+                    handle.write(f"{key}={value}\n")
+            return path
+        except BaseException:
+            if path is not None:
+                path.unlink(missing_ok=True)
+            raise
 
-    def _require_internal_network(self, plan: RestorePlan) -> None:
+    def _require_internal_network(self, plan: RestoreResources) -> None:
         completed = self._require_success(
             ("docker", "network", "inspect", "--format={{.Internal}}", plan.network_name)
         )
@@ -437,7 +495,7 @@ class RestoreDrill:
             _failure("network_not_internal")
 
     def _require_egress_absent(
-        self, command: tuple[str, ...], plan: RestorePlan
+        self, command: tuple[str, ...], plan: RestoreResources
     ) -> None:
         completed = self._require_success(command)
         try:
@@ -447,7 +505,29 @@ class RestoreDrill:
         if not isinstance(networks, dict) or set(networks) != {plan.network_name}:
             _failure("restore_output_invalid")
 
-    def _wait_for_recovery(self, plan: RestorePlan) -> None:
+    def _create_resources(self, plan: RestoreResources, created: _CreatedResources) -> None:
+        self._require_success(plan.create_commands[0])
+        created.network = True
+        self._require_internal_network(plan)
+        self._require_success(plan.create_commands[1])
+        created.egress_network = True
+        self._require_success(plan.create_commands[2])
+        created.volume = True
+
+    def _recover_restore(
+        self, plan: RestoreResources, env_path: Path, created: _CreatedResources,
+    ) -> None:
+        created.container = True
+        self._require_success(_compose_with_env(plan.run_commands[0], env_path))
+        self._wait_for_health(plan)
+        self._wait_for_recovery(plan)
+
+    def _isolate_restore(self, plan: RestoreResources) -> None:
+        self._require_external_egress(plan.run_commands[1])
+        self._require_success(plan.run_commands[2])
+        self._require_egress_absent(plan.run_commands[3], plan)
+
+    def _wait_for_recovery(self, plan: RestoreResources) -> None:
         while True:
             completed = self._require_success(
                 (
@@ -465,7 +545,7 @@ class RestoreDrill:
                 _failure("restore_output_invalid")
             self._sleep(min(1, self._remaining()))
 
-    def _wait_for_health(self, plan: RestorePlan) -> None:
+    def _wait_for_health(self, plan: RestoreResources) -> None:
         deadline = self._clock() + min(600, self._remaining())
         while True:
             remaining = deadline - self._clock()
@@ -517,7 +597,9 @@ class RestoreDrill:
         )
         return completed.stdout
 
-    def _bootstrap_role(self, plan: RestorePlan, password: str, *, prefix: bool = False) -> None:
+    def _bootstrap_role(
+        self, plan: RestoreResources, password: str, *, prefix: bool = False, rehearsal: bool = False,
+    ) -> None:
         # Connecting to the baseline database validates it exists before any SQL.
         # Send separate statements via psql stdin, with logging disabled before
         # the password-bearing statement is parsed/executed (including on error).
@@ -525,7 +607,12 @@ class RestoreDrill:
             "event_log", "offer_claims", "position_state", "venue_offer_state",
             "venue_credit_state", "projection_heads", "reconcile_observation",
             "submission_attempts", "execution_uncertainties", "alembic_version",
-        ) + (("event_prefix_hashes",) if prefix else ())
+        ) + (("event_prefix_hashes",) if prefix or rehearsal else ())
+        if rehearsal:
+            tables += (
+                "capital_policy_heads", "capital_policy_revisions", "capital_snapshots",
+                "capital_snapshot_queries", "execution_decisions",
+            )
         role = f'"{plan.verify_role}"'
         table_list = ", ".join(f'public."{table}"' for table in tables)
         sql = (
@@ -585,7 +672,7 @@ class RestoreDrill:
             _failure("projection_replay_mismatch")
         return lines[0]
 
-    def _image_metadata(self, plan: RestorePlan) -> tuple[str, dict[str, str]]:
+    def _image_metadata(self, plan: RestoreResources) -> tuple[str, dict[str, str]]:
         completed = self._require_success(
             ("docker", "inspect", "--format={{.Image}}", plan.container_name)
         )
@@ -599,7 +686,7 @@ class RestoreDrill:
 
     def _cleanup(
         self,
-        plan: RestorePlan,
+        plan: RestoreResources,
         env_path: Path | None,
         *,
         container_started: bool,
@@ -608,6 +695,7 @@ class RestoreDrill:
         egress_network_created: bool,
         network_created: bool,
         archive_path: Path | None = None,
+        private_dir: Path | None = None,
     ) -> bool:
         # Cleanup is independent of the restore budget, including after timeout.
         self._deadline = self._clock() + 30
@@ -628,6 +716,17 @@ class RestoreDrill:
                         failed = True
                 self._remaining()
             except DrillFailureError:
+                failed = True
+        if private_dir is not None:
+            for name in ("dsn", "manifest.json", "cells.yaml"):
+                try:
+                    _unlink_env_file(private_dir / name, timeout=self._remaining())
+                    self._remaining()
+                except (OSError, subprocess.SubprocessError, DrillFailureError):
+                    failed = True
+            try:
+                private_dir.rmdir()
+            except OSError:
                 failed = True
         # Compose needs the env file. Reserve a second for unlink, then spend
         # the rest of this same cleanup budget on the known-created resources.
@@ -754,6 +853,158 @@ class RestoreDrill:
             _failure("production_read_failed")
         return completed.stdout
 
+    def _rehearsal_plan(self, request: RehearsalRequest) -> tuple[RestoreResources, int]:
+        if not request.scopes or not request.target_time or not request.cells_path.is_absolute():
+            _failure("restore_output_invalid")
+        if request.cells_path.is_symlink() or not request.cells_path.is_file():
+            _failure("restore_output_invalid")
+        try:
+            _commands.validate_rehearsal_image(request.image)
+            _commands.validate_rehearsal_scopes(request.scopes)
+            plan = build_restore_resources(
+                backup_label=request.backup_label, target_time=request.target_time,
+                run_id=self._run_id_factory(), database_name=request.database_name,
+            )
+            recovery_target = datetime.strptime(request.target_time, "%Y-%m-%dT%H:%M:%SZ")
+        except (RestoreInputError, ValueError, TypeError):
+            _failure("restore_output_invalid")
+        _validate_plan_resources(plan)
+        if not _config_is_clean_tracked(self._config_path) or not COMPOSE_PATH.is_file():
+            _failure("restore_output_invalid")
+        try:
+            validate_secret_dir(
+                self._secret_dir, postgres_uid=self._postgres_uid,
+                postgres_gid=self._postgres_gid,
+            )
+        except SecretConfigError:
+            _failure("restore_output_invalid")
+        now_ms = int(recovery_target.replace(tzinfo=timezone.utc).timestamp() * 1000)
+        return plan, now_ms
+
+    def _rehearsal_evidence_dir(self, plan: RestoreResources) -> Path:
+        root = self._rehearsal_evidence_root
+        if not root.is_absolute() or root.is_symlink():
+            _failure("restore_output_invalid")
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        run_dir = root / plan.project_name.removeprefix("bfx-dr-")
+        run_dir.mkdir(mode=0o700)
+        return run_dir
+
+    def _deployed_backend_revision(self, image: str) -> str:
+        deployed = self._require_success(
+            ("docker", "inspect", "--format={{.Config.Image}}", "bfx-bot")
+        ).stdout.strip()
+        if deployed != image:
+            _failure("rehearsal_image_mismatch")
+        revision = self._require_success((
+            "docker", "image", "inspect",
+            '--format={{index .Config.Labels "org.opencontainers.image.revision"}}', image,
+        )).stdout.strip()
+        if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            _failure("restore_output_invalid")
+        return revision
+
+    def _comparison_records(
+        self, completed: subprocess.CompletedProcess[str], password: str,
+    ) -> list[dict[str, object]]:
+        if (type(completed.returncode) is not int or completed.returncode not in {0, 1, 3}
+                or not isinstance(completed.stdout, str) or len(completed.stdout) > 16_000_000
+                or password in completed.stdout):
+            _failure("comparison_output_invalid")
+        try:
+            records = [json.loads(line) for line in completed.stdout.splitlines()]
+        except (ValueError, TypeError):
+            _failure("comparison_output_invalid")
+        if (not records or any(not isinstance(record, dict) for record in records)
+                or any(record.get("kind") == "summary" for record in records[:-1])
+                or records[-1].get("kind") != "summary"
+                or type(records[-1].get("exit_code")) is not int
+                or records[-1]["exit_code"] != completed.returncode):
+            _failure("comparison_output_invalid")
+        return records
+
+    def run_rehearsal(self, request: RehearsalRequest) -> int:
+        """Compare on one isolated PITR copy; keep its result outside DR receipts."""
+        plan: RestoreResources | None = None
+        run_dir: Path | None = None
+        private_dir: Path | None = None
+        env_path: Path | None = None
+        code_revision: str | None = None
+        cells_digest: str | None = None
+        created = _CreatedResources()
+        comparison_started = False
+        result_code = 3
+        failure_code: str | None = None
+        cleanup_failed = False
+        try:
+            plan, now_ms = self._rehearsal_plan(request)
+            run_dir = self._rehearsal_evidence_dir(plan)
+            private_dir = Path(tempfile.mkdtemp(prefix="bfx-rehearsal-"))
+            password = self._password_factory()
+            if not isinstance(password, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", password) is None:
+                _failure("restore_output_invalid")
+            env_path = self._write_env_file(plan, password)
+            run_id = plan.project_name.removeprefix("bfx-dr-")
+            dsn = (f"postgresql+asyncpg://{plan.verify_role}:{password}"
+                   f"@{plan.container_name}:5432/{plan.database_name}\n")
+            manifest = {
+                "mode": "rehearsal", "host": plan.container_name, "port": 5432,
+                "database": plan.database_name, "user": plan.verify_role,
+                "run_id": run_id, "now_ms": now_ms,
+            }
+            _write_private_file(private_dir / "dsn", dsn.encode("utf-8"))
+            _write_private_file(private_dir / "manifest.json", json.dumps(manifest).encode("utf-8"))
+            cells_bytes = request.cells_path.read_bytes()
+            cells_digest = hashlib.sha256(cells_bytes).hexdigest()
+            _write_private_file(private_dir / "cells.yaml", cells_bytes)
+            self._deadline = self._clock() + _MAX_RTO_SECONDS
+            code_revision = self._deployed_backend_revision(request.image)
+            command = _commands.rehearsal_command(
+                plan, image=request.image, code_revision=code_revision,
+                dsn_path=private_dir / "dsn", manifest_path=private_dir / "manifest.json",
+                cells_path=private_dir / "cells.yaml", scopes=request.scopes,
+            )
+            self._create_resources(plan, created)
+            self._recover_restore(plan, env_path, created)
+            self._isolate_restore(plan)
+            self._bootstrap_role(plan, password, rehearsal=True)
+            comparison_started = True
+            completed = self._call(command)
+            self._remaining()
+            records = self._comparison_records(completed, password)
+            _write_jsonl(run_dir / "comparison.jsonl", records)
+            _write_json(run_dir / "summary.json", records[-1])
+            result_code = completed.returncode
+        except DrillFailureError as exc:
+            failure_code = str(exc)
+        except (OSError, ValueError, TypeError):
+            failure_code = "restore_output_invalid"
+        finally:
+            if plan is not None:
+                cleanup_failed = self._cleanup(
+                    plan, env_path, container_started=created.container,
+                    verifier_started=comparison_started, volume_created=created.volume,
+                    egress_network_created=created.egress_network, network_created=created.network,
+                    private_dir=private_dir,
+                )
+            if cleanup_failed:
+                failure_code = "cleanup_failed"
+            if failure_code is not None:
+                result_code = 3
+            if run_dir is not None and plan is not None:
+                try:
+                    _write_json(run_dir / "result.json", {
+                        "kind": "capital_comparison_rehearsal", "run_id": plan.project_name.removeprefix("bfx-dr-"),
+                        "backup_label": plan.backup_label, "target_time": plan.target_time,
+                        "image": request.image, "code_revision": code_revision,
+                        "cells_sha256": cells_digest,
+                        "exit_code": result_code, "error_code": failure_code,
+                        "cleanup_complete": not cleanup_failed,
+                    })
+                except OSError:
+                    result_code = 3
+        return result_code
+
     def run(self, request: DrillRequest) -> int:
         plan: RestorePlan | None = None
         env_path: Path | None = None
@@ -764,10 +1015,7 @@ class RestoreDrill:
         timing = StageTiming(clock=self._clock)
         timing_stage: str | None = None
         timing_usable = True
-        network_created = False
-        egress_network_created = False
-        volume_created = False
-        container_cleanup_eligible = False
+        created = _CreatedResources()
         verifier_cleanup_eligible = False
         rto_started: float | None = None
         failure_code: str | None = None
@@ -825,24 +1073,13 @@ class RestoreDrill:
                 )).stdout.strip()
                 if not _evidence._archive.image_digest(verifier_image):
                     _failure("restore_output_invalid")
-                self._require_success(plan.create_commands[0])
-                network_created = True
-                self._require_internal_network(plan)
-                self._require_success(plan.create_commands[1])
-                egress_network_created = True
-                self._require_success(plan.create_commands[2])
-                volume_created = True
+                self._create_resources(plan, created)
                 end_timing("resource_setup")
                 begin_timing("physical_and_wal_recovery")
-                container_cleanup_eligible = True
-                self._require_success(_compose_with_env(plan.run_commands[0], env_path))
-                self._wait_for_health(plan)
-                self._wait_for_recovery(plan)
+                self._recover_restore(plan, env_path, created)
                 end_timing("physical_and_wal_recovery")
                 begin_timing("isolation_bootstrap")
-                self._require_external_egress(plan.run_commands[1])
-                self._require_success(plan.run_commands[2])
-                self._require_egress_absent(plan.run_commands[3], plan)
+                self._isolate_restore(plan)
                 self._bootstrap_role(plan, password, prefix=True)
                 schema_tsv = self._schema_tsv(plan)
                 end_timing("isolation_bootstrap")
@@ -906,24 +1143,13 @@ class RestoreDrill:
                     baseline.verifier_image_digest is not None and baseline.verifier_image_digest != verifier_image
                 ):
                     _failure("restore_output_invalid")
-                self._require_success(plan.create_commands[0])
-                network_created = True
-                self._require_internal_network(plan)
-                self._require_success(plan.create_commands[1])
-                egress_network_created = True
-                self._require_success(plan.create_commands[2])
-                volume_created = True
+                self._create_resources(plan, created)
                 end_timing("resource_setup")
                 begin_timing("physical_and_wal_recovery")
-                container_cleanup_eligible = True
-                self._require_success(_compose_with_env(plan.run_commands[0], env_path))
-                self._wait_for_health(plan)
-                self._wait_for_recovery(plan)
+                self._recover_restore(plan, env_path, created)
                 end_timing("physical_and_wal_recovery")
                 begin_timing("isolation_bootstrap")
-                self._require_external_egress(plan.run_commands[1])
-                self._require_success(plan.run_commands[2])
-                self._require_egress_absent(plan.run_commands[3], plan)
+                self._isolate_restore(plan)
                 self._bootstrap_role(plan, password)
                 schema_tsv = self._schema_tsv(plan)
                 end_timing("isolation_bootstrap")
@@ -983,11 +1209,11 @@ class RestoreDrill:
             if plan is not None:
                 begin_timing("cleanup")
                 cleanup_failed = self._cleanup(
-                    plan, env_path, container_started=container_cleanup_eligible,
+                    plan, env_path, container_started=created.container,
                     verifier_started=verifier_cleanup_eligible,
-                    volume_created=volume_created,
-                    egress_network_created=egress_network_created,
-                    network_created=network_created,
+                    volume_created=created.volume,
+                    egress_network_created=created.egress_network,
+                    network_created=created.network,
                     archive_path=archive_path,
                 )
                 end_timing("cleanup")
@@ -1072,9 +1298,9 @@ class RestoreDrill:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--account-id", required=True)
-    parser.add_argument("--environment", required=True)
-    parser.add_argument("--projector-version", required=True)
+    parser.add_argument("--account-id")
+    parser.add_argument("--environment")
+    parser.add_argument("--projector-version")
     parser.add_argument("--backup-label")
     parser.add_argument("--target-time")
     parser.add_argument("--baseline", type=Path)
@@ -1085,14 +1311,35 @@ def _parser() -> argparse.ArgumentParser:
         help="baseline-free mode: restore the newest backup to the end of the archive and "
              "compare its newest event_prefix_hashes link with production's (restore-prefix.json)",
     )
-    parser.add_argument("--database-name", default="bfx", help="prefix mode only")
-    parser.add_argument("--production-container", default="bfx-postgres", help="prefix mode only")
+    parser.add_argument("--rehearsal", action="store_true",
+                        help="isolated capital comparison at an explicit backup and recovery target")
+    parser.add_argument("--backend-image", help="deployed repository@sha256 digest reference")
+    parser.add_argument("--cells", type=Path, help="absolute live cells YAML path")
+    parser.add_argument("--scope", action="append", help="canonical ACCOUNT_UUID:ENVIRONMENT; repeatable")
+    parser.add_argument("--database-name", default="bfx", help="prefix or rehearsal mode")
+    parser.add_argument("--production-container", help="prefix mode only")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.rehearsal:
+        if (args.prefix or args.baseline is not None or args.archive_only or args.target_run_id is not None
+                or args.production_container is not None
+                or any(value is not None for value in (args.account_id, args.environment, args.projector_version))
+                or any(value is None for value in (args.backup_label, args.target_time, args.backend_image,
+                                                   args.cells, args.scope))):
+            parser.error("--rehearsal requires backup, recovery time, backend image, cells and scopes only")
+        return RestoreDrill().run_rehearsal(RehearsalRequest(
+            backup_label=args.backup_label, target_time=args.target_time,
+            database_name=args.database_name, image=args.backend_image,
+            cells_path=args.cells, scopes=tuple(args.scope),
+        ))
+    if args.account_id is None or args.environment is None or args.projector_version is None:
+        parser.error("--account-id, --environment and --projector-version are required")
+    if any(value is not None for value in (args.backend_image, args.cells, args.scope)):
+        parser.error("--backend-image, --cells and --scope require --rehearsal")
     if args.prefix:
         if any(value is not None for value in (args.backup_label, args.target_time, args.baseline,
                                                args.target_run_id)) or args.archive_only:
@@ -1107,7 +1354,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 baseline_path=None,
                 prefix=True,
                 database_name=args.database_name,
-                production_container=args.production_container,
+                production_container=args.production_container or "bfx-postgres",
             )
         )
     if args.backup_label is None or args.baseline is None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from uuid import UUID
 
@@ -18,6 +18,8 @@ _GENERATED_NAME = re.compile(r"bfx-dr-[a-z0-9-]+")
 _VERIFY_ROLE = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 _DATABASE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
 _EVENT_HASH = re.compile(r"[0-9a-f]{64}")
+_BACKEND_IMAGE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
+_REVISION = re.compile(r"[0-9a-f]{40}")
 
 
 class RestoreInputError(ValueError):
@@ -25,7 +27,7 @@ class RestoreInputError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class RestorePlan:
+class RestoreResources:
     project_name: str
     volume_name: str
     network_name: str
@@ -35,16 +37,22 @@ class RestorePlan:
     sql_admin_role: str
     verify_role: str
     database_name: str
-    account_id: str
-    environment: str
-    projector_version: str
     backup_label: str
     target_time: str | None
-    # None only in prefix mode (restore_drill.py --prefix), which has no baseline hash.
-    expected_event_hash: str | None
     create_commands: tuple[tuple[str, ...], ...]
     run_commands: tuple[tuple[str, ...], ...]
     cleanup_commands: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RestorePlan(RestoreResources):
+    """A scoped archive/prefix verifier layered on the restore resources."""
+
+    account_id: str
+    environment: str
+    projector_version: str
+    # None only in prefix mode, which has no baseline hash.
+    expected_event_hash: str | None
 
 
 def _invalid() -> None:
@@ -92,6 +100,56 @@ def prefix_verifier_command(plan: RestorePlan, *, image: str, env_path: Path) ->
             "--projector-version", plan.projector_version)
 
 
+def rehearsal_command(
+    plan: RestoreResources, *, image: str, code_revision: str, dsn_path: Path,
+    manifest_path: Path, cells_path: Path, scopes: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Run the fixed comparison command with only three read-only input files."""
+    validate_rehearsal_image(image)
+    if _REVISION.fullmatch(code_revision) is None:
+        _invalid()
+    validate_rehearsal_scopes(scopes)
+    for path in (dsn_path, manifest_path, cells_path):
+        if not path.is_absolute() or any(character in str(path) for character in ":\n\r"):
+            _invalid()
+    run_id = plan.project_name.removeprefix("bfx-dr-")
+    return (
+        "docker", "run", "--rm", "--pull", "never", "--name", plan.verifier_container_name,
+        "--label", "autoheal=false", "--user", f"{os.getuid()}:{os.getgid()}",
+        "--network", plan.network_name, "--read-only",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m", "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges:true", "--pids-limit", "256",
+        "--volume", f"{dsn_path}:/run/bfx-comparison/dsn:ro",
+        "--volume", f"{manifest_path}:/run/bfx-comparison/manifest.json:ro",
+        "--volume", f"{cells_path}:/run/bfx-comparison/cells.yaml:ro",
+        "--workdir", "/app", "--entrypoint", "python", image,
+        "-m", "bfx_funding_bot.apps.capital_comparison", "--mode", "rehearsal",
+        "--dsn-file", "/run/bfx-comparison/dsn", "--manifest", "/run/bfx-comparison/manifest.json",
+        "--run-id", run_id, "--code-revision", code_revision,
+        "--cells", "/run/bfx-comparison/cells.yaml",
+        *(part for scope in scopes for part in ("--scope", scope)),
+    )
+
+
+def validate_rehearsal_image(image: str) -> None:
+    if not isinstance(image, str) or _BACKEND_IMAGE.fullmatch(image) is None:
+        _invalid()
+
+
+def validate_rehearsal_scopes(scopes: tuple[str, ...]) -> None:
+    if not scopes:
+        _invalid()
+    for scope in scopes:
+        if not isinstance(scope, str):
+            _invalid()
+        try:
+            account, environment = scope.split(":")
+        except ValueError:
+            _invalid()
+        if _canonical_account_id(account) != account or environment not in _ENVIRONMENTS:
+            _invalid()
+
+
 def _canonical_account_id(account_id: str) -> str:
     try:
         canonical = str(UUID(account_id))
@@ -114,38 +172,19 @@ def _verify_role(value: str) -> str:
     return value
 
 
-def build_restore_plan(
-    *,
-    account_id: str,
-    environment: str,
-    projector_version: str,
-    backup_label: str,
-    target_time: str | None,
-    run_id: str,
-    database_name: str,
-    expected_event_hash: str | None,
-) -> RestorePlan:
-    """Validate operator strings and return argv-safe Docker commands.
-
-    expected_event_hash is required for the baseline drill; None selects the
-    baseline-free prefix mode, whose verifier never receives an expected hash.
-    """
-    canonical_account_id = _canonical_account_id(account_id)
+def build_restore_resources(
+    *, backup_label: str, target_time: str | None, run_id: str, database_name: str,
+) -> RestoreResources:
+    """Build generated resources without assuming a verification scope."""
     if not isinstance(database_name, str) or _DATABASE_NAME.fullmatch(database_name) is None:
         _invalid()
-    if expected_event_hash is not None and (
-        not isinstance(expected_event_hash, str) or _EVENT_HASH.fullmatch(expected_event_hash) is None
+    if not isinstance(backup_label, str) or _BACKUP_LABEL.fullmatch(backup_label) is None:
+        _invalid()
+    if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None:
+        _invalid()
+    if target_time is not None and (
+        not isinstance(target_time, str) or _TARGET_TIME.fullmatch(target_time) is None
     ):
-        _invalid()
-    if environment not in _ENVIRONMENTS:
-        _invalid()
-    if _PROJECTOR_VERSION.fullmatch(projector_version) is None:
-        _invalid()
-    if _BACKUP_LABEL.fullmatch(backup_label) is None:
-        _invalid()
-    if _RUN_ID.fullmatch(run_id) is None:
-        _invalid()
-    if target_time is not None and _TARGET_TIME.fullmatch(target_time) is None:
         _invalid()
 
     resource_id = run_id.lower()
@@ -164,7 +203,7 @@ def build_restore_plan(
         "--file",
         str(COMPOSE_PATH),
     )
-    return RestorePlan(
+    return RestoreResources(
         project_name=project_name,
         volume_name=volume_name,
         network_name=network_name,
@@ -174,10 +213,6 @@ def build_restore_plan(
         sql_admin_role="bfx",
         verify_role=verify_role,
         database_name=database_name,
-        expected_event_hash=expected_event_hash,
-        account_id=canonical_account_id,
-        environment=environment,
-        projector_version=projector_version,
         backup_label=backup_label,
         target_time=target_time,
         create_commands=(
@@ -207,24 +242,6 @@ def build_restore_plan(
                 "--format={{json .NetworkSettings.Networks}}",
                 container_name,
             ),
-            (
-                *compose_prefix,
-                "run",
-                "--rm",
-                "--no-deps",
-                "--name",
-                verifier_container_name,
-                "verifier",
-                "replay",
-                "--account-id",
-                canonical_account_id,
-                "--environment",
-                environment,
-                "--projector-version",
-                projector_version,
-                *(("--expected-event-hash", expected_event_hash)
-                  if expected_event_hash is not None else ()),
-            ),
         ),
         cleanup_commands=(
             (*compose_prefix, "rm", "-sf", "restore-db"),
@@ -233,4 +250,48 @@ def build_restore_plan(
             ("docker", "network", "rm", network_name),
             ("docker", "container", "rm", "--force", verifier_container_name),
         ),
+    )
+
+
+def build_restore_plan(
+    *,
+    account_id: str,
+    environment: str,
+    projector_version: str,
+    backup_label: str,
+    target_time: str | None,
+    run_id: str,
+    database_name: str,
+    expected_event_hash: str | None,
+) -> RestorePlan:
+    """Layer the legacy single-scope verifier on generated restore resources."""
+    canonical_account_id = _canonical_account_id(account_id)
+    if environment not in _ENVIRONMENTS or not isinstance(projector_version, str) \
+            or _PROJECTOR_VERSION.fullmatch(projector_version) is None:
+        _invalid()
+    if expected_event_hash is not None and (
+        not isinstance(expected_event_hash, str) or _EVENT_HASH.fullmatch(expected_event_hash) is None
+    ):
+        _invalid()
+    resources = build_restore_resources(
+        backup_label=backup_label, target_time=target_time,
+        run_id=run_id, database_name=database_name,
+    )
+    compose_prefix = (
+        "docker", "compose", "--project-name", resources.project_name,
+        "--file", str(COMPOSE_PATH),
+    )
+    verifier_run = (
+        *compose_prefix, "run", "--rm", "--no-deps", "--name",
+        resources.verifier_container_name, "verifier", "replay",
+        "--account-id", canonical_account_id, "--environment", environment,
+        "--projector-version", projector_version,
+        *(("--expected-event-hash", expected_event_hash)
+          if expected_event_hash is not None else ()),
+    )
+    values = {field.name: getattr(resources, field.name) for field in fields(RestoreResources)}
+    values["run_commands"] = (*resources.run_commands, verifier_run)
+    return RestorePlan(
+        **values, account_id=canonical_account_id, environment=environment,
+        projector_version=projector_version, expected_event_hash=expected_event_hash,
     )
