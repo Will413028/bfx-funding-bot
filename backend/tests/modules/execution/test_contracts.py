@@ -7,8 +7,8 @@ from uuid import uuid4
 
 import pytest
 
+import bfx_funding_bot.modules.strategy as schemas
 from bfx_funding_bot.modules.execution import contracts, protocols
-from bfx_funding_bot.modules.marketfeed import schemas
 
 
 def _decision() -> schemas.DecisionPayload:

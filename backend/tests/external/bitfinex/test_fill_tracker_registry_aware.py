@@ -15,7 +15,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationReleased,
 )
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+from bfx_funding_bot.modules.strategy import StrategyName
 
 
 def _ref(cid: int, scid, voi: str = "42") -> ReservationRef:

@@ -30,7 +30,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+from bfx_funding_bot.modules.strategy import StrategyName
 
 pytestmark = pytest.mark.integration
 

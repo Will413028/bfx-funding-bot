@@ -8,7 +8,7 @@ from enum import StrEnum
 
 from bfx_funding_bot.modules.execution.contracts import BlockedExecution, BlockReason
 from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
+from bfx_funding_bot.modules.strategy import DecisionPayload
 
 
 class PriceBranch(StrEnum):

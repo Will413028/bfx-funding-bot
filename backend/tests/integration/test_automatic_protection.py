@@ -34,7 +34,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
 from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+from bfx_funding_bot.modules.strategy import StrategyName
 
 from .test_capital_command_boundary import AMOUNT, boundary, second_ready
 from .test_capital_repository import repository, setup_policy, snapshot

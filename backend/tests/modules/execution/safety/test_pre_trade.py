@@ -43,13 +43,13 @@ from bfx_funding_bot.modules.execution.safety.pre_trade import (
 )
 from bfx_funding_bot.modules.execution.safety.protection import COMMAND_RATE_EXCEEDED
 from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
-from bfx_funding_bot.modules.marketfeed.schemas import (
+from bfx_funding_bot.modules.observability import alerts
+from bfx_funding_bot.modules.strategy import (
     DecisionOutcome,
     DecisionPayload,
     SkipReason,
     StrategyName,
 )
-from bfx_funding_bot.modules.observability import alerts
 
 CONFIGS = Path(__file__).resolve().parents[4] / "configs"
 CTX = AccountContext(str(uuid4()), Credentials("k", "s"), Decimal("0"))

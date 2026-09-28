@@ -28,7 +28,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingStateRepository,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 
 class _TradingStateReader(Protocol):

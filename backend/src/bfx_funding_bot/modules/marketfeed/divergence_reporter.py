@@ -13,14 +13,10 @@ from typing import Any
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    SignalDirection,
-    StrategyName,
-)
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     build_strategy_at_boundary,
 )
-from bfx_funding_bot.modules.strategy import LendDecision
+from bfx_funding_bot.modules.strategy import LendDecision, SignalDirection, StrategyName
 
 log = logging.getLogger(__name__)
 

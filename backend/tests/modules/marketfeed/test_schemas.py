@@ -5,7 +5,8 @@ import pytest
 from pydantic import ValidationError
 
 from bfx_funding_bot.core.telemetry import EventType, HealthCheckPayload, Phase
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload, Envelope, SignalPayload
+from bfx_funding_bot.modules.marketfeed.schemas import Envelope
+from bfx_funding_bot.modules.strategy import DecisionPayload, SignalPayload
 
 
 def _envelope_dict(**overrides):
@@ -140,7 +141,7 @@ def test_signal_event_payload_accepts_staleness_metadata() -> None:
     budget_seconds is required: every signal carries its cell's budget.
     Backward compat: existing payload with strategy_attributes still parses with budget_seconds.
     """
-    from bfx_funding_bot.modules.marketfeed.schemas import SignalPayload
+    from bfx_funding_bot.modules.strategy import SignalPayload
 
     # Backward compat: parse existing shape, only budget_seconds added as required
     payload_old = SignalPayload(

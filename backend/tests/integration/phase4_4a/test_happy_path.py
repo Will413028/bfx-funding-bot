@@ -26,11 +26,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-    StrategyName,
-)
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
 
 from .conftest import ScriptedWSClient, make_reservation_ref
 

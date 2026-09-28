@@ -22,7 +22,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+from bfx_funding_bot.modules.strategy import StrategyName
 
 
 class _EventSink(Protocol):

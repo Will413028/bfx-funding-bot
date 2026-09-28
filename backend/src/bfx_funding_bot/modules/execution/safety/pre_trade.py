@@ -42,8 +42,8 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     ProtectionPort,
 )
 from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookProvider
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.observability import alerts
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 log = logging.getLogger(__name__)
 

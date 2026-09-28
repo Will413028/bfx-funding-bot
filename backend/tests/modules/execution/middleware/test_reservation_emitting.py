@@ -32,11 +32,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-    StrategyName,
-)
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
 
 
 def _decision(symbol: str = "fUST") -> DecisionPayload:

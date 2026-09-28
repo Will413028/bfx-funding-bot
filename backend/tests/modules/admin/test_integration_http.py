@@ -16,7 +16,7 @@ from bfx_funding_bot.modules.execution.middleware import (
 )
 from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
 from bfx_funding_bot.modules.marketfeed.healthz import make_app
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+from bfx_funding_bot.modules.strategy import StrategyName
 
 
 class _FakeEventSink:

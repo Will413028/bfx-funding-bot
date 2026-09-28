@@ -22,10 +22,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-)
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 _orig_build_daemon = daemon_mod.build_daemon
 

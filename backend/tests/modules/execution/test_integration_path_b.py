@@ -22,7 +22,7 @@ from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
+from bfx_funding_bot.modules.strategy import (
     DecisionOutcome,
     DecisionPayload,
     SkipReason,

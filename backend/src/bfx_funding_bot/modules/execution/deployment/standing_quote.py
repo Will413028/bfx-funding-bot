@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from uuid import UUID
 
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome
+from bfx_funding_bot.modules.strategy import DecisionOutcome
 
 
 @dataclass(frozen=True, slots=True)

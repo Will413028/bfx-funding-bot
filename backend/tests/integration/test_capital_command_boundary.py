@@ -18,7 +18,7 @@ from bfx_funding_bot.modules.execution.protocols import AccountContext, Credenti
 from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitAcknowledged
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 from .test_capital_repository import (
     capital_db as capital_db,
@@ -88,7 +88,7 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(cap
     from bfx_funding_bot.modules.execution.deployment.submit_attempt import SubmitAttemptRecorder
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
     from bfx_funding_bot.modules.execution.safety.hard_guards import CapitalPolicyGuard
-    from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+    from bfx_funding_bot.modules.strategy import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell
     factory, account = capital_db
     gate, _, ready, ctx, runtime, halt = await boundary(factory, account)
@@ -154,7 +154,7 @@ async def test_status_with_an_envelope_serializes_to_json(capital_db):
     from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
     from bfx_funding_bot.modules.execution.deployment.submit_attempt import SubmitAttemptRecorder
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-    from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+    from bfx_funding_bot.modules.strategy import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell
     factory, account = capital_db
     _, _, _, ctx, runtime, halt = await boundary(factory, account)
@@ -209,7 +209,7 @@ def stop_chain(halt, account, *guards):
     from bfx_funding_bot.core.health import HealthProbe
     from bfx_funding_bot.core.telemetry import Phase
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-    from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+    from bfx_funding_bot.modules.strategy import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink
     return SafetyGuardChain(
         guards=[ManualKillGuard(trading_state=halt), *guards],
@@ -544,7 +544,7 @@ async def test_real_guard_chain_reuses_authorization_session_without_double_rese
         DatabaseUncertaintyReader,
         UncertaintyGuard,
     )
-    from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+    from bfx_funding_bot.modules.strategy import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink
     factory, account = capital_db
     gate, venue, ready, ctx, runtime, halt = await boundary(factory, account)
@@ -615,7 +615,7 @@ async def cancel_http_boundary(factory, account, http, *, state="ACTIVE"):
         DatabaseUncertaintyReader,
         UncertaintyGuard,
     )
-    from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+    from bfx_funding_bot.modules.strategy import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink
 
     gate, _, ready, ctx, runtime, halt = await boundary(factory, account)
@@ -713,7 +713,7 @@ async def test_stop_refuses_submit_before_the_http_adapter(capital_db, state):
 
     from bfx_funding_bot.core.telemetry import Phase
     from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
-    from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+    from bfx_funding_bot.modules.strategy import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink
 
     factory, account = capital_db

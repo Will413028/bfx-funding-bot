@@ -19,10 +19,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-)
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from tests.modules.marketfeed.account_test_helpers import (
     configure_account_env,
     seed_exchange_account,

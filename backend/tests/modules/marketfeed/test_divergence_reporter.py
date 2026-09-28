@@ -14,11 +14,11 @@ from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     ExtractedSignal,
     _diff_fields,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import SignalDirection
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     build_strategy,
     build_strategy_at_boundary,
 )
+from bfx_funding_bot.modules.strategy import SignalDirection
 
 
 def _cell_rp() -> CellConfig:
@@ -61,7 +61,7 @@ def test_divergence_detected_when_live_signal_differs_from_replay():
     Validates the detection branch (dict shape, diff_fields enumeration) which the
     in-test natural-mismatch path can't reliably hit at the percentile boundary.
     """
-    from bfx_funding_bot.modules.marketfeed.schemas import SignalDirection
+    from bfx_funding_bot.modules.strategy import SignalDirection
 
     cell = _cell_rp()
     history = [_candle(1747584000000 + i * 3600_000, Decimal("0.0001"))
@@ -173,7 +173,7 @@ def test_state_drift_detected_even_when_direction_matches():
     """The headline G2 invariant: live and replay agree on direction (POST) but
     the MR ema accumulator silently drifted → must surface as strategy_attributes
     divergence. The old direction-only reporter missed this."""
-    from bfx_funding_bot.modules.marketfeed.schemas import SignalDirection
+    from bfx_funding_bot.modules.strategy import SignalDirection
 
     cell = CellConfig.model_validate({
         "strategy": "mean_reversion", "symbol": "fUSD", "period_agg": "a30",

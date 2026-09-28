@@ -24,7 +24,7 @@ from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.fill_tracker import RestPollingFillTracker
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+from bfx_funding_bot.modules.strategy import StrategyName
 
 from .conftest import make_reservation_ref
 

@@ -60,7 +60,7 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     response_digest,
     venue_error,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+from bfx_funding_bot.modules.strategy import StrategyName
 
 log = logging.getLogger(__name__)
 

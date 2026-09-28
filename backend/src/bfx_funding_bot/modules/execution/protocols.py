@@ -34,7 +34,7 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmitRejected,
     response_digest,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
+from bfx_funding_bot.modules.strategy import DecisionPayload
 
 __all__ = [
     "AccountContext",

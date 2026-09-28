@@ -14,8 +14,8 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     Envelope,
     ReservationClaimedPayload,
     ReservationReleasedPayload,
-    StrategyName,
 )
+from bfx_funding_bot.modules.strategy import StrategyName
 
 
 def test_event_type_has_reservation_claimed() -> None:

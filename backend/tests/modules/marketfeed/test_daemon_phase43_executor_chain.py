@@ -34,10 +34,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-)
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 
 class _FailingSubscriber:
