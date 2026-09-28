@@ -65,6 +65,22 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # workflow_run events can complete out of order (e.g. after an Actions
+      # backlog). Only the current head of main may move the `main` discovery
+      # tag; an older revision still gets its immutable sha tag.
+      - name: Check whether this revision is still the head of main
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)
+          if [ "$head" = "$REVISION" ]; then
+            echo "main_tag=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "main_tag=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${REVISION} is no longer the head of main (${head}); publishing sha tags only"
+          fi
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -86,7 +102,7 @@ jobs:
             bfx.ci-run-url=${{ github.event.workflow_run.html_url }}
           tags: |
             ${{ steps.names.outputs.backend }}:sha-${{ env.REVISION }}
-            ${{ steps.names.outputs.backend }}:main
+            ${{ steps.head.outputs.main_tag == 'true' && format('{0}:main', steps.names.outputs.backend) || '' }}
           cache-from: type=gha,scope=backend
           cache-to: type=gha,scope=backend,mode=max
 
@@ -103,14 +119,14 @@ jobs:
             bfx.ci-run-url=${{ github.event.workflow_run.html_url }}
           tags: |
             ${{ steps.names.outputs.frontend }}:sha-${{ env.REVISION }}
-            ${{ steps.names.outputs.frontend }}:main
+            ${{ steps.head.outputs.main_tag == 'true' && format('{0}:main', steps.names.outputs.frontend) || '' }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,scope=frontend,mode=max
 
       - name: Record release
         run: |
           {
-            echo "### Release ${REVISION}"
+            echo "### Release ${REVISION} (main tag: ${{ steps.head.outputs.main_tag }})"
             echo ""
             echo "| image | digest |"
             echo "|---|---|"

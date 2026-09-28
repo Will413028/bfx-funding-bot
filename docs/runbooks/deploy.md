@@ -15,7 +15,8 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
               含 compose hardening policy（docker compose config → compose_policy.py）
           ──► Release images (.github/workflows/release.yml)
                 arm64 backend/frontend image → GHCR
-                tags: sha-<40 位 revision>、main
+                tags: sha-<40 位 revision>；main 只在該 revision 仍是 main 的 head 時才推
+                （workflow_run 可能亂序完成，舊 revision 不得把 main tag 拉回去）
                 labels: org.opencontainers.image.revision、bfx.ci-run-url（通過的 CI run）
           ──► VM bfx-deploy.timer（每 5 分鐘，*:2/5）→ bfx-deploy
 ```
