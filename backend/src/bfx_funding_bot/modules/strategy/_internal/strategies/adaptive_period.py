@@ -6,6 +6,7 @@ from typing import Any
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.strategy._internal.lend_decision import LendDecision
 from bfx_funding_bot.modules.strategy._internal.strategies.base import Strategy
+from bfx_funding_bot.modules.strategy.contracts import AdaptivePeriodDiagnostics
 
 _PERIOD_FLOOR = 2       # Bitfinex funding offer minimum period (days)
 _PERIOD_MAX = 120       # Bitfinex funding offer maximum period (days)
@@ -125,3 +126,9 @@ class AdaptivePeriodStrategy(Strategy):
                 "p_mid": 7, "p_long": 14,
             }
         ]
+
+    def diagnostics(self) -> AdaptivePeriodDiagnostics:
+        return AdaptivePeriodDiagnostics(
+            ema_current=self.ema_current,
+            window_filled=self.window_filled,
+        )
