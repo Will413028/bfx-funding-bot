@@ -297,8 +297,6 @@ ignore_imports = [
     "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.live_validation.tables",
     "bfx_funding_bot.modules.accounts.vault -> bfx_funding_bot.modules.execution.protocols",
     "bfx_funding_bot.modules.admin.trading_status -> bfx_funding_bot.modules.marketfeed.readiness",
-    "bfx_funding_bot.modules.backtest.band_sweep -> bfx_funding_bot.modules.marketfeed.config",
-    "bfx_funding_bot.modules.backtest.cell_pipeline -> bfx_funding_bot.modules.marketfeed.config",
     "bfx_funding_bot.modules.candles.service -> bfx_funding_bot.modules.backfill.errors",
     "bfx_funding_bot.modules.candles.service -> bfx_funding_bot.modules.backfill.schemas",
     "bfx_funding_bot.modules.execution.capital_repository -> bfx_funding_bot.modules.live_validation.tables",

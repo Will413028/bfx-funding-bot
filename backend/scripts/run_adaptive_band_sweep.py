@@ -38,6 +38,7 @@ from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
+from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 from bfx_funding_bot.modules.strategy import AdaptivePeriodStrategy, Strategy
 
 logger = logging.getLogger("run_adaptive_band_sweep")
@@ -111,7 +112,7 @@ async def _amain() -> int:
                         help="candle fetch start (default 2016-01-01)")
     args = parser.parse_args()
 
-    sigmas = load_cell_ratio_sigmas(P14_CONFIG)
+    sigmas = load_cell_ratio_sigmas(tuple(load_cells_only(P14_CONFIG)))
     settings = Settings()
     engine = make_engine(settings)
     session_factory = make_session_factory(engine)
