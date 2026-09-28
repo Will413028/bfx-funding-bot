@@ -160,7 +160,27 @@ broken_contract_guidance = "Do not add ignores to fix a violation; move the offe
 id = "strategy-no-internal-access"
 name = "Only strategy imports strategy internals directly"
 type = "forbidden"
-source_modules = ["bfx_funding_bot.**"]
+source_modules = [
+    "bfx_funding_bot.core",
+    "bfx_funding_bot.external",
+    "bfx_funding_bot.apps",
+    "bfx_funding_bot.modules.accounts",
+    "bfx_funding_bot.modules.admin",
+    "bfx_funding_bot.modules.api",
+    "bfx_funding_bot.modules.backfill",
+    "bfx_funding_bot.modules.backtest",
+    "bfx_funding_bot.modules.candles",
+    "bfx_funding_bot.modules.deployments",
+    "bfx_funding_bot.modules.execution",
+    "bfx_funding_bot.modules.external_signals",
+    "bfx_funding_bot.modules.funding_stats",
+    "bfx_funding_bot.modules.lending",
+    "bfx_funding_bot.modules.live_validation",
+    "bfx_funding_bot.modules.marketfeed",
+    "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.trading",
+    "bfx_funding_bot.modules.trading_shadow",
+]
 forbidden_modules = ["bfx_funding_bot.modules.strategy._internal"]
 as_packages = true
 allow_indirect_imports = true
@@ -339,3 +359,19 @@ source_modules = [
 forbidden_modules = ["bfx_funding_bot.core.settings"]
 allow_indirect_imports = true
 ignore_imports = []
+
+[[tool.importlinter.contracts]]
+id = "strategy-wiring-is-top"
+name = "Only composition roots may import strategy wiring"
+type = "forbidden"
+# Expand packages explicitly: import-linter skips overlapping package pairs
+# (modules contains strategy.wiring), which would otherwise leave a blind spot.
+source_modules = [
+    "bfx_funding_bot.core", "bfx_funding_bot.core.**",
+    "bfx_funding_bot.external", "bfx_funding_bot.external.**",
+    "bfx_funding_bot.modules", "bfx_funding_bot.modules.**",
+]
+as_packages = false
+forbidden_modules = ["bfx_funding_bot.modules.strategy.wiring"]
+ignore_imports = []
+broken_contract_guidance = "Inject strategy ports from apps; do not add ignores or re-export wiring."

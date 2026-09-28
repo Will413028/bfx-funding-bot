@@ -1,12 +1,19 @@
 """Pure strategy vocabulary and decision contracts."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.strategy._internal.lend_decision import LendDecision
+
+if TYPE_CHECKING:
+    from bfx_funding_bot.modules.strategy.config import CellConfig
 
 
 class StrategyName(StrEnum):
@@ -88,3 +95,72 @@ class DecisionPayload(BaseModel):
             raise ValueError("skip decision requires skip_reason")
         return self
 
+
+
+class Strategy(Protocol):
+    """Instance-only strategy port; research construction is a separate contract."""
+
+    @property
+    def name(self) -> str: ...
+    def observe(self, candle: FundingCandle) -> None: ...
+    def decide(self, candle: FundingCandle) -> LendDecision | None: ...
+
+
+class CellStrategyFactory(Protocol):
+    def __call__(self, cell: CellConfig) -> Strategy: ...
+
+
+@dataclass(frozen=True)
+class StrategyBuildResult:
+    strategy: Strategy
+    observed_count: int
+
+
+class ResearchStrategySpec(Protocol):
+    """Research construction and sweeps, independent of live CellConfig.
+
+    name is the legacy class-name report key (not an instance's live name).
+    create forwards constructor kwargs unchanged, including the required
+    frr_at: Callable[[int], Decimal | None] for the two FRR strategies.
+    """
+
+    @property
+    def name(self) -> str: ...
+    def param_grid_for_cell(
+        self, symbol: str, period_agg: str, eda: dict[str, Any]
+    ) -> list[dict[str, Any]]: ...
+    def create(self, **params: Any) -> Strategy: ...
+
+
+@dataclass(frozen=True)
+class MeanReversionDiagnostics:
+    ema_current: Decimal | None
+    last_deviation: Decimal | None
+
+
+@dataclass(frozen=True)
+class RatePercentileDiagnostics:
+    last_threshold: Decimal | None
+    window_filled: bool
+    window_values: tuple[Decimal, ...]
+
+
+@dataclass(frozen=True)
+class AdaptivePeriodDiagnostics:
+    ema_current: Decimal | None
+    window_filled: bool
+
+
+@dataclass(frozen=True)
+class NoStrategyDiagnostics:
+    """Stateless baselines expose no reporter state."""
+
+
+StrategyDiagnostics = (
+    MeanReversionDiagnostics | RatePercentileDiagnostics
+    | AdaptivePeriodDiagnostics | NoStrategyDiagnostics
+)
+
+
+class StrategyDiagnosticPort(Protocol):
+    def diagnostics(self) -> StrategyDiagnostics: ...
