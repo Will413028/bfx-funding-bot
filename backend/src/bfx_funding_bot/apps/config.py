@@ -16,6 +16,10 @@ from bfx_funding_bot.modules.strategy import CellConfig
 
 log = logging.getLogger(__name__)
 
+# Capital snapshots older than this block authorization. The bot and the
+# capital comparison command must use the same value.
+CAPITAL_MAX_SNAPSHOT_AGE_MS = 300_000
+
 # Phase 3b WFO qualification result (per-cell detail in the 2026-05-18 phase 3b
 # WFO research report, kept outside this repository). Any edit here MUST be
 # reconciled with that report.

@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
-from bfx_funding_bot.apps.config import load_config
+from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
     EXIT_CODE_AUTH_FAILED,
@@ -230,7 +230,7 @@ async def build_daemon(
     if live_executor:
         capital_runtime = CapitalRuntime(
             repository=CapitalRepository(account_id=account_bootstrap.exchange_account_id,
-                environment=config.deployment_environment.value, max_snapshot_age_ms=300_000),
+                environment=config.deployment_environment.value, max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS),
             session_factory=session_factory, clock=now_ms_utc,
         )
         try:

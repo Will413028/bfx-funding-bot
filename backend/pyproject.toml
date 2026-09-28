@@ -327,3 +327,15 @@ ignore_imports = [
     "bfx_funding_bot.modules.observability.tracing -> bfx_funding_bot.modules.execution.protocols",
 ]
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
+
+[[tool.importlinter.contracts]]
+id = "capital-comparison-no-settings"
+name = "Capital comparison never imports runtime settings directly"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.apps.capital_comparison",
+    "bfx_funding_bot.apps.capital_comparison_guard",
+]
+forbidden_modules = ["bfx_funding_bot.core.settings"]
+allow_indirect_imports = true
+ignore_imports = []
