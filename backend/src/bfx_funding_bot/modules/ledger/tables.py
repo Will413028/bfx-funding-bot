@@ -49,17 +49,48 @@ class CapitalCommandClockRow(Base):
     __table_args__ = (CheckConstraint("revision >= 0", name="ck_capital_command_clock_revision"),)
 
 
+class LedgerObservationQueryRow(Base):
+    __tablename__ = "ledger_observation_query"
+    query_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    exchange_account_id: Mapped[UUID] = _account()
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    query_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    started_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    start_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    __table_args__ = (
+        UniqueConstraint(
+            "exchange_account_id",
+            "deployment_environment",
+            "query_revision",
+            name="uq_ledger_observation_query_scope_revision",
+        ),
+        CheckConstraint(
+            "query_revision > 0 AND started_at_ms >= 0 AND start_revision >= 0",
+            name="ck_ledger_observation_query_nonnegative",
+        ),
+        Index(
+            "ix_ledger_observation_query_scope_revision",
+            "exchange_account_id",
+            "deployment_environment",
+            text("query_revision DESC"),
+        ),
+    )
+
+
 class LedgerObservationRow(Base):
     __tablename__ = "ledger_observation"
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
-    query_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False, unique=True)
+    query_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("ledger_observation_query.query_id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
     exchange_account_id: Mapped[UUID] = _account()
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    query_started_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     query_finished_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     confirmation_finished_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    start_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     accept_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     wallets_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
     offers_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -67,6 +98,8 @@ class LedgerObservationRow(Base):
     loans_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
     offer_history_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
     credit_history_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    offer_history_pages: Mapped[int | None] = mapped_column(Integer)
+    credit_history_pages: Mapped[int | None] = mapped_column(Integer)
     history_requested_start_ms: Mapped[int | None] = mapped_column(BigInteger)
     history_requested_end_ms: Mapped[int | None] = mapped_column(BigInteger)
     history_oldest_mts_created: Mapped[int | None] = mapped_column(BigInteger)
@@ -78,13 +111,12 @@ class LedgerObservationRow(Base):
     __table_args__ = (
         UniqueConstraint("id", "accepted", name="uq_ledger_observation_accepted"),
         CheckConstraint(
-            "schema_version >= 1 AND query_started_at_ms >= 0 AND query_finished_at_ms >= "
-            "query_started_at_ms AND confirmation_finished_at_ms >= query_finished_at_ms "
-            "AND start_revision >= 0 AND accept_revision >= 0",
+            "schema_version >= 1 AND query_finished_at_ms >= 0 AND "
+            "confirmation_finished_at_ms >= query_finished_at_ms AND accept_revision >= 0",
             name="ck_ledger_observation_order",
         ),
         CheckConstraint(
-            "NOT accepted OR (start_revision = accept_revision AND wallets_complete AND "
+            "NOT accepted OR (wallets_complete AND "
             "offers_complete AND credits_complete AND loans_complete AND "
             "offer_history_complete AND credit_history_complete)",
             name="ck_ledger_observation_acceptance",
@@ -101,11 +133,16 @@ class LedgerObservationRow(Base):
         CheckConstraint(
             "first_digest = confirmation_digest", name="ck_ledger_observation_matching_digest"
         ),
+        CheckConstraint(
+            "(offer_history_pages IS NULL OR offer_history_pages >= 0) AND "
+            "(credit_history_pages IS NULL OR credit_history_pages >= 0)",
+            name="ck_ledger_observation_history_pages",
+        ),
         Index(
-            "ix_ledger_observation_scope_started",
+            "ix_ledger_observation_scope_finished",
             "exchange_account_id",
             "deployment_environment",
-            text("query_started_at_ms DESC"),
+            text("query_finished_at_ms DESC"),
             "id",
         ),
     )
@@ -225,6 +262,7 @@ class LedgerObservationOfferHistoryRow(Base):
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     raw: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
     __table_args__ = (
+        Index("ix_ledger_observation_offer_history_observation", "observation_id"),
         CheckConstraint(
             "amount_remaining >= 0 AND (amount_original IS NULL OR amount_original >= 0) "
             "AND (rate IS NULL OR rate >= 0) AND (period_days IS NULL OR period_days > 0) "
@@ -258,6 +296,7 @@ class LedgerObservationCreditHistoryRow(Base):
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     raw: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
     __table_args__ = (
+        Index("ix_ledger_observation_credit_history_observation", "observation_id"),
         CheckConstraint("source_kind IN ('credit','loan')", name="ck_ledger_credit_history_source"),
         CheckConstraint(
             "amount >= 0 AND (rate IS NULL OR rate >= 0) AND (period_days IS NULL OR "
@@ -551,9 +590,7 @@ class AcceptedCapitalBasisRow(Base):
     exchange_account_id: Mapped[UUID] = _account()
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     observation_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False, unique=True)
-    query_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False, unique=True)
     accepted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    start_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     accept_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     policy_revision_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -573,9 +610,14 @@ class AcceptedCapitalBasisRow(Base):
             name="fk_accepted_basis_observation",
         ),
         CheckConstraint(
-            "accepted AND start_revision >= 0 AND accept_revision = start_revision AND "
-            "schema_version >= 1 AND accepted_at_ms >= 0",
+            "accepted AND accept_revision >= 0 AND schema_version >= 1 AND accepted_at_ms >= 0",
             name="ck_accepted_basis_acceptance",
+        ),
+        Index(
+            "ix_accepted_capital_basis_scope_accepted",
+            "exchange_account_id",
+            "deployment_environment",
+            text("accepted_at_ms DESC"),
         ),
     )
 
@@ -653,6 +695,7 @@ class AcceptedCapitalBasisQuarantineRow(Base):
 
 LEDGER_TABLES = (
     CapitalCommandClockRow.__table__,
+    LedgerObservationQueryRow.__table__,
     LedgerObservationRow.__table__,
     LedgerObservationWalletRow.__table__,
     LedgerObservationOfferRow.__table__,

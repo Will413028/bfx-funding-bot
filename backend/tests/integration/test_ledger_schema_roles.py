@@ -12,6 +12,8 @@ clone):
 * Skip ``guard_ledger_scope_insert`` creation when
   ``name == 'submission_attempt_journal'``. The mismatched decision INSERT
   succeeds (its FK still points to a real decision).
+* Drop ``guard_ledger_observation_accept_insert``. Stale and revision-mismatched
+  accepted observations succeed.
 """
 
 from __future__ import annotations
@@ -68,21 +70,21 @@ def _observation_sql(
     accepted: bool,
     first: str = "digest",
     confirmation: str = "digest",
-    revision: int = 0,
     accept_revision: int | None = None,
     complete: bool = True,
+    finished_at_ms: int = 2,
 ) -> str:
     state = str(accepted).lower()
     coverage = str(complete).lower()
-    accepted_revision = revision if accept_revision is None else accept_revision
+    accepted_revision = 0 if accept_revision is None else accept_revision
     return f"""INSERT INTO ledger_observation (
       id, query_id, exchange_account_id, deployment_environment, schema_version,
-      query_started_at_ms, query_finished_at_ms, confirmation_finished_at_ms,
-      start_revision, accept_revision, wallets_complete, offers_complete,
+      query_finished_at_ms, confirmation_finished_at_ms,
+      accept_revision, wallets_complete, offers_complete,
       credits_complete, loans_complete, offer_history_complete, credit_history_complete,
       first_digest, confirmation_digest, accepted, evidence)
       VALUES ('{observation_id}', '{query_id}', '{_A}', 'ci', 1,
-      1, 2, 3, {revision}, {accepted_revision}, {coverage}, {coverage},
+      {finished_at_ms}, {finished_at_ms + 1}, {accepted_revision}, {coverage}, {coverage},
       {coverage}, {coverage}, {coverage}, {coverage},
       '{first}', '{confirmation}', {state}, '{{}}')"""
 
@@ -95,13 +97,30 @@ def _offer_sql(offer_id: str, venue_id: str, symbol: str) -> str:
       1, 1, true, 'ACTIVE', 1, '{{}}')"""
 
 
-def _basis_sql(basis_id: str, observation_id: str, query_id: str, revision: int = 0) -> str:
+def _query_sql(
+    query_id: str,
+    query_revision: int,
+    start_revision: int = 0,
+    *,
+    environment: str = "ci",
+    started_at_ms: int = 1,
+) -> str:
+    return f"""INSERT INTO ledger_observation_query (
+      query_id, exchange_account_id, deployment_environment, query_revision,
+      started_at_ms, start_revision)
+      VALUES ('{query_id}', '{_A}', '{environment}', {query_revision},
+              {started_at_ms}, {start_revision})"""
+
+
+def _basis_sql(
+    basis_id: str, observation_id: str, revision: int = 0, *, environment: str = "ci"
+) -> str:
     return f"""INSERT INTO accepted_capital_basis (
-      id, exchange_account_id, deployment_environment, observation_id, query_id,
-      accepted, start_revision, accept_revision, policy_revision_id,
+      id, exchange_account_id, deployment_environment, observation_id,
+      accepted, accept_revision, policy_revision_id,
       credit_cells_present, schema_version, digest, accepted_at_ms)
-      VALUES ('{basis_id}', '{_A}', 'ci', '{observation_id}', '{query_id}',
-      true, {revision}, {revision}, '{_P}', true, 1, 'basis-digest', 3)"""
+      VALUES ('{basis_id}', '{_A}', '{environment}', '{observation_id}',
+      true, {revision}, '{_P}', true, 1, 'basis-digest', 3)"""
 
 
 @pytest.fixture
@@ -136,13 +155,14 @@ def _seed(conn) -> None:
       '{{}}',
       'p',
       '{{}}')""",
-        _observation_sql(_O, _QID, accepted=True),
         f"""INSERT INTO capital_command_clock(exchange_account_id,
       deployment_environment,
       revision)
       VALUES ('{_A}',
       'ci',
       0)""",
+        _query_sql(_QID, 1),
+        _observation_sql(_O, _QID, accepted=True),
         f"""INSERT INTO ledger_observation_wallet(observation_id,
       wallet_type,
       currency,
@@ -254,7 +274,7 @@ def _seed(conn) -> None:
       'ACTIVE',
       '{_O}',
       true)""",
-        _basis_sql(_B, _O, _QID),
+        _basis_sql(_B, _O),
         f"""INSERT INTO accepted_capital_basis_symbol(basis_id,
       symbol,
       available,
@@ -678,9 +698,10 @@ def test_observation_pair_and_accepted_basis_are_enforced(seeded) -> None:
     other = str(uuid4())
     other_query = str(uuid4())
     with seeded.begin() as conn:
-        conn.exec_driver_sql(_observation_sql(other, other_query, accepted=False, revision=1))
+        conn.exec_driver_sql(_query_sql(other_query, 2))
+        conn.exec_driver_sql(_observation_sql(other, other_query, accepted=False))
     with seeded.begin() as conn, pytest.raises(Exception, match="fk_accepted_basis_observation"):
-        conn.exec_driver_sql(_basis_sql(str(uuid4()), other, other_query, revision=1))
+        conn.exec_driver_sql(_basis_sql(str(uuid4()), other))
     with (
         seeded.begin() as conn,
         pytest.raises(Exception, match="ledger offer mirror scope mismatch"),
@@ -689,26 +710,91 @@ def test_observation_pair_and_accepted_basis_are_enforced(seeded) -> None:
             f"UPDATE venue_offer_mirror SET last_accepted_observation_id='{other}'"
         )
     with seeded.begin() as conn, pytest.raises(Exception, match="ledger basis scope mismatch"):
-        conn.exec_driver_sql(_basis_sql(str(uuid4()), _O, str(uuid4())))
+        conn.exec_driver_sql(_basis_sql(str(uuid4()), _O, environment="wrong"))
+    with seeded.begin() as conn, pytest.raises(Exception, match="ledger basis scope mismatch"):
+        conn.exec_driver_sql(_basis_sql(str(uuid4()), _O, revision=1))
+    query_ids = [str(uuid4()) for _ in range(3)]
+    with seeded.begin() as conn:
+        for revision, query_id in enumerate(query_ids, start=3):
+            conn.exec_driver_sql(_query_sql(query_id, revision))
     with (
         seeded.begin() as conn,
         pytest.raises(Exception, match="ck_ledger_observation_matching_digest"),
     ):
         conn.exec_driver_sql(
             _observation_sql(
-                str(uuid4()), str(uuid4()), accepted=False, first="x", confirmation="y"
+                str(uuid4()), query_ids[0], accepted=False, first="x", confirmation="y"
             )
         )
     with seeded.begin() as conn, pytest.raises(Exception, match="ck_ledger_observation_acceptance"):
         conn.exec_driver_sql(
-            _observation_sql(str(uuid4()), str(uuid4()), accepted=True, complete=False)
+            _observation_sql(str(uuid4()), query_ids[2], accepted=True, complete=False)
         )
-    with seeded.begin() as conn, pytest.raises(Exception, match="ck_ledger_observation_acceptance"):
+    with seeded.begin() as conn, pytest.raises(Exception, match="ledger observation accept fence"):
         conn.exec_driver_sql(
-            _observation_sql(str(uuid4()), str(uuid4()), accepted=True, accept_revision=1)
+            _observation_sql(str(uuid4()), query_ids[2], accepted=True, accept_revision=1)
         )
     with seeded.begin() as conn, pytest.raises(Exception, match="duplicate key"):
         conn.exec_driver_sql(_observation_sql(str(uuid4()), _QID, accepted=False))
+
+
+def test_stale_query_and_interleaved_acceptance_fail(seeded) -> None:
+    older_query = str(uuid4())
+    newer_query = str(uuid4())
+    with seeded.begin() as conn:
+        conn.exec_driver_sql(_query_sql(older_query, 2))
+        conn.exec_driver_sql(_query_sql(newer_query, 3, started_at_ms=2))
+    # The first REST call may finish after the second query has already started.
+    with seeded.begin() as conn, pytest.raises(Exception, match="ledger observation accept fence"):
+        conn.exec_driver_sql(
+            _observation_sql(str(uuid4()), older_query, accepted=True, finished_at_ms=5)
+        )
+    with seeded.begin() as conn:
+        conn.exec_driver_sql(_observation_sql(str(uuid4()), newer_query, accepted=True))
+    with seeded.begin() as conn, pytest.raises(Exception, match="ledger observation accept fence"):
+        conn.exec_driver_sql(
+            _observation_sql(str(uuid4()), older_query, accepted=True, finished_at_ms=5)
+        )
+
+
+def test_accept_revision_must_match_query_start_and_current_clock(seeded) -> None:
+    query_id = str(uuid4())
+    with seeded.begin() as conn:
+        conn.exec_driver_sql(_query_sql(query_id, 2))
+    with seeded.begin() as conn, pytest.raises(Exception, match="ledger observation accept fence"):
+        conn.exec_driver_sql(
+            _observation_sql(str(uuid4()), query_id, accepted=True, accept_revision=1)
+        )
+    with seeded.begin() as conn:
+        conn.exec_driver_sql("UPDATE capital_command_clock SET revision=1")
+    with seeded.begin() as conn, pytest.raises(Exception, match="ledger observation accept fence"):
+        conn.exec_driver_sql(_observation_sql(str(uuid4()), query_id, accepted=True))
+    # A command committed after the query started: the clock moved, so matching
+    # the current clock alone must not accept an observation of the older query.
+    with seeded.begin() as conn, pytest.raises(Exception, match="ledger observation accept fence"):
+        conn.exec_driver_sql(
+            _observation_sql(str(uuid4()), query_id, accepted=True, accept_revision=1)
+        )
+    started_at_one = str(uuid4())
+    with seeded.begin() as conn:
+        conn.exec_driver_sql(_query_sql(started_at_one, 3, start_revision=1))
+    with seeded.begin() as conn, pytest.raises(Exception, match="ledger observation accept fence"):
+        conn.exec_driver_sql(_observation_sql(str(uuid4()), started_at_one, accepted=True))
+    with seeded.begin() as conn:
+        conn.exec_driver_sql(
+            _observation_sql(str(uuid4()), started_at_one, accepted=True, accept_revision=1)
+        )
+
+
+def test_observation_query_scope_mismatch_fails(seeded) -> None:
+    query_id = str(uuid4())
+    with seeded.begin() as conn:
+        conn.exec_driver_sql(_query_sql(query_id, 1, environment="wrong"))
+    with (
+        seeded.begin() as conn,
+        pytest.raises(Exception, match="ledger observation query scope mismatch"),
+    ):
+        conn.exec_driver_sql(_observation_sql(str(uuid4()), query_id, accepted=False))
 
 
 def test_roles_are_read_only_or_exact_writer(seeded) -> None:
@@ -743,8 +829,10 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
                 text("SELECT has_table_privilege('bfx_bot',:t,'INSERT')"), {"t": name}
             )
         for table, column in (
+            ("ledger_observation_query", "start_revision"),
             ("ledger_observation", "query_id"),
-            ("ledger_observation", "start_revision"),
+            ("ledger_observation", "offer_history_pages"),
+            ("ledger_observation", "credit_history_pages"),
             ("ledger_observation_offer", "amount_original"),
             ("ledger_observation_offer", "rate_observed"),
             ("accepted_capital_basis", "digest"),
@@ -812,7 +900,12 @@ def test_downgrade_removes_only_its_objects(ledger_db) -> None:
     alembic(url, "downgrade", "9a4d6e2c7b18")
     with create_engine(url).connect() as conn:
         assert not ({table.name for table in LEDGER_TABLES} & set(inspect(conn).get_table_names()))
-        for function in ("reject_ledger_mutation", "guard_ledger_mirror", "guard_ledger_scope"):
+        for function in (
+            "reject_ledger_mutation",
+            "guard_ledger_mirror",
+            "guard_ledger_scope",
+            "guard_ledger_observation_accept",
+        ):
             assert not conn.scalar(
                 text("SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname=:n)"), {"n": function}
             )

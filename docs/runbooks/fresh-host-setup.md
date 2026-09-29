@@ -100,6 +100,12 @@ SELECT n.nspname, p.proname, p.prosecdef,
 ```
 
 群組的 table grants 應為空；column grants 應與 migration 的 `_READER_COLUMNS` 清單完全一致。
+其中 `ledger_observation_query` 可讀 `query_id`、`exchange_account_id`、
+`deployment_environment`、`query_revision`、
+`started_at_ms`、`start_revision`；`ledger_observation` 可讀 `query_id`、
+`accept_revision`、`offer_history_pages`、`credit_history_pages`，不再有
+`query_started_at_ms` 或 `start_revision`；`accepted_capital_basis` 可讀
+`observation_id`、`accept_revision`，不再有 `query_id` 或 `start_revision`。
 檢查 `SECURITY DEFINER` 函式清單，確認 LOGIN 沒有可藉以寫入 ledger 的 EXECUTE 權限。
 接著以 LOGIN 連線，在 **read-write transaction** 執行以下拒絕檢查；每個預期失敗的
 statement 都各自開新 transaction，避免前一個錯誤使後續 statement 自動失敗：
@@ -108,6 +114,8 @@ statement 都各自開新 transaction，避免前一個錯誤使後續 statement
 BEGIN READ WRITE;
 SET LOCAL ROLE bfx_cutover_reader;
 SELECT id, accepted FROM public.ledger_observation LIMIT 1; -- succeeds
+SELECT query_id, query_revision, started_at_ms, start_revision
+  FROM public.ledger_observation_query LIMIT 1; -- succeeds
 ROLLBACK;
 
 BEGIN READ WRITE;

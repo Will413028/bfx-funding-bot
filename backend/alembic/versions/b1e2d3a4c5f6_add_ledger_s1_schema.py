@@ -19,16 +19,22 @@ ledger_contract = "preserved"
 
 _TABLE_COLUMNS = {
     "capital_command_clock": ("exchange_account_id", "deployment_environment", "revision"),
+    "ledger_observation_query": (
+        "query_id",
+        "exchange_account_id",
+        "deployment_environment",
+        "query_revision",
+        "started_at_ms",
+        "start_revision",
+    ),
     "ledger_observation": (
         "id",
         "query_id",
         "exchange_account_id",
         "deployment_environment",
         "schema_version",
-        "query_started_at_ms",
         "query_finished_at_ms",
         "confirmation_finished_at_ms",
-        "start_revision",
         "accept_revision",
         "wallets_complete",
         "offers_complete",
@@ -36,6 +42,8 @@ _TABLE_COLUMNS = {
         "loans_complete",
         "offer_history_complete",
         "credit_history_complete",
+        "offer_history_pages",
+        "credit_history_pages",
         "history_requested_start_ms",
         "history_requested_end_ms",
         "history_oldest_mts_created",
@@ -166,9 +174,7 @@ _TABLE_COLUMNS = {
         "exchange_account_id",
         "deployment_environment",
         "observation_id",
-        "query_id",
         "accepted",
-        "start_revision",
         "accept_revision",
         "policy_revision_id",
         "authorization_block",
@@ -250,22 +256,29 @@ _FUNCTIONS = (
     "reject_ledger_mutation",
     "guard_ledger_mirror",
     "guard_ledger_scope",
+    "guard_ledger_observation_accept",
 )
 
 # The cutover reader gets only the columns needed to attest and compare facts.
 # Raw venue payloads and authorization evidence stay private.
 _READER_COLUMNS = {
     "capital_command_clock": ("exchange_account_id", "deployment_environment", "revision"),
+    "ledger_observation_query": (
+        "query_id",
+        "exchange_account_id",
+        "deployment_environment",
+        "query_revision",
+        "started_at_ms",
+        "start_revision",
+    ),
     "ledger_observation": (
         "id",
         "query_id",
         "exchange_account_id",
         "deployment_environment",
         "schema_version",
-        "query_started_at_ms",
         "query_finished_at_ms",
         "confirmation_finished_at_ms",
-        "start_revision",
         "accept_revision",
         "wallets_complete",
         "offers_complete",
@@ -273,6 +286,8 @@ _READER_COLUMNS = {
         "loans_complete",
         "offer_history_complete",
         "credit_history_complete",
+        "offer_history_pages",
+        "credit_history_pages",
         "history_requested_start_ms",
         "history_requested_end_ms",
         "history_oldest_mts_created",
@@ -398,9 +413,7 @@ _READER_COLUMNS = {
         "exchange_account_id",
         "deployment_environment",
         "observation_id",
-        "query_id",
         "accepted",
-        "start_revision",
         "accept_revision",
         "policy_revision_id",
         "authorization_block",
@@ -490,6 +503,7 @@ def _revoke_defaults(role: str) -> None:
 
 
 def upgrade() -> None:
+    # BEGIN AUTOGEN-DDL-UPGRADE
     op.create_table(
         "capital_command_clock",
         sa.Column("exchange_account_id", sa.UUID(), nullable=False),
@@ -502,66 +516,32 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("exchange_account_id", "deployment_environment"),
     )
     op.create_table(
-        "ledger_observation",
-        sa.Column("id", sa.UUID(), nullable=False),
+        "ledger_observation_query",
         sa.Column("query_id", sa.UUID(), nullable=False),
         sa.Column("exchange_account_id", sa.UUID(), nullable=False),
         sa.Column("deployment_environment", sa.Text(), nullable=False),
-        sa.Column("schema_version", sa.Integer(), nullable=False),
-        sa.Column("query_started_at_ms", sa.BigInteger(), nullable=False),
-        sa.Column("query_finished_at_ms", sa.BigInteger(), nullable=False),
-        sa.Column("confirmation_finished_at_ms", sa.BigInteger(), nullable=False),
+        sa.Column("query_revision", sa.BigInteger(), nullable=False),
+        sa.Column("started_at_ms", sa.BigInteger(), nullable=False),
         sa.Column("start_revision", sa.BigInteger(), nullable=False),
-        sa.Column("accept_revision", sa.BigInteger(), nullable=False),
-        sa.Column("wallets_complete", sa.Boolean(), nullable=False),
-        sa.Column("offers_complete", sa.Boolean(), nullable=False),
-        sa.Column("credits_complete", sa.Boolean(), nullable=False),
-        sa.Column("loans_complete", sa.Boolean(), nullable=False),
-        sa.Column("offer_history_complete", sa.Boolean(), nullable=False),
-        sa.Column("credit_history_complete", sa.Boolean(), nullable=False),
-        sa.Column("history_requested_start_ms", sa.BigInteger(), nullable=True),
-        sa.Column("history_requested_end_ms", sa.BigInteger(), nullable=True),
-        sa.Column("history_oldest_mts_created", sa.BigInteger(), nullable=True),
-        sa.Column("history_newest_mts_created", sa.BigInteger(), nullable=True),
-        sa.Column("first_digest", sa.Text(), nullable=False),
-        sa.Column("confirmation_digest", sa.Text(), nullable=False),
-        sa.Column("accepted", sa.Boolean(), nullable=False),
-        sa.Column(
-            "evidence",
-            sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"),
-            nullable=False,
-        ),
         sa.CheckConstraint(
-            "(history_requested_start_ms IS NULL) = (history_requested_end_ms IS NULL) AND (history_requested_start_ms IS NULL OR (history_requested_start_ms >= 0 AND history_requested_end_ms >= history_requested_start_ms)) AND (history_oldest_mts_created IS NULL) = (history_newest_mts_created IS NULL) AND (history_oldest_mts_created IS NULL OR (history_oldest_mts_created >= 0 AND history_newest_mts_created >= history_oldest_mts_created))",
-            name="ck_ledger_observation_history_range",
-        ),
-        sa.CheckConstraint(
-            "NOT accepted OR (start_revision = accept_revision AND wallets_complete AND offers_complete AND credits_complete AND loans_complete AND offer_history_complete AND credit_history_complete)",
-            name="ck_ledger_observation_acceptance",
-        ),
-        sa.CheckConstraint(
-            "first_digest = confirmation_digest", name="ck_ledger_observation_matching_digest"
-        ),
-        sa.CheckConstraint(
-            "schema_version >= 1 AND query_started_at_ms >= 0 AND query_finished_at_ms >= query_started_at_ms AND confirmation_finished_at_ms >= query_finished_at_ms AND start_revision >= 0 AND accept_revision >= 0",
-            name="ck_ledger_observation_order",
+            "query_revision > 0 AND started_at_ms >= 0 AND start_revision >= 0",
+            name="ck_ledger_observation_query_nonnegative",
         ),
         sa.ForeignKeyConstraint(
             ["exchange_account_id"], ["exchange_accounts.id"], ondelete="RESTRICT"
         ),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("id", "accepted", name="uq_ledger_observation_accepted"),
-        sa.UniqueConstraint("query_id"),
-    )
-    op.create_index(
-        "ix_ledger_observation_scope_started",
-        "ledger_observation",
-        [
+        sa.PrimaryKeyConstraint("query_id"),
+        sa.UniqueConstraint(
             "exchange_account_id",
             "deployment_environment",
-            sa.literal_column("query_started_at_ms DESC"),
-            "id",
-        ],
+            "query_revision",
+            name="uq_ledger_observation_query_scope_revision",
+        ),
+    )
+    op.create_index(
+        "ix_ledger_observation_query_scope_revision",
+        "ledger_observation_query",
+        ["exchange_account_id", "deployment_environment", sa.literal_column("query_revision DESC")],
         unique=False,
     )
     op.create_table(
@@ -588,14 +568,82 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("quarantine_id"),
     )
     op.create_table(
+        "ledger_observation",
+        sa.Column("id", sa.UUID(), nullable=False),
+        sa.Column("query_id", sa.UUID(), nullable=False),
+        sa.Column("exchange_account_id", sa.UUID(), nullable=False),
+        sa.Column("deployment_environment", sa.Text(), nullable=False),
+        sa.Column("schema_version", sa.Integer(), nullable=False),
+        sa.Column("query_finished_at_ms", sa.BigInteger(), nullable=False),
+        sa.Column("confirmation_finished_at_ms", sa.BigInteger(), nullable=False),
+        sa.Column("accept_revision", sa.BigInteger(), nullable=False),
+        sa.Column("wallets_complete", sa.Boolean(), nullable=False),
+        sa.Column("offers_complete", sa.Boolean(), nullable=False),
+        sa.Column("credits_complete", sa.Boolean(), nullable=False),
+        sa.Column("loans_complete", sa.Boolean(), nullable=False),
+        sa.Column("offer_history_complete", sa.Boolean(), nullable=False),
+        sa.Column("credit_history_complete", sa.Boolean(), nullable=False),
+        sa.Column("offer_history_pages", sa.Integer(), nullable=True),
+        sa.Column("credit_history_pages", sa.Integer(), nullable=True),
+        sa.Column("history_requested_start_ms", sa.BigInteger(), nullable=True),
+        sa.Column("history_requested_end_ms", sa.BigInteger(), nullable=True),
+        sa.Column("history_oldest_mts_created", sa.BigInteger(), nullable=True),
+        sa.Column("history_newest_mts_created", sa.BigInteger(), nullable=True),
+        sa.Column("first_digest", sa.Text(), nullable=False),
+        sa.Column("confirmation_digest", sa.Text(), nullable=False),
+        sa.Column("accepted", sa.Boolean(), nullable=False),
+        sa.Column(
+            "evidence",
+            sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "(history_requested_start_ms IS NULL) = (history_requested_end_ms IS NULL) AND (history_requested_start_ms IS NULL OR (history_requested_start_ms >= 0 AND history_requested_end_ms >= history_requested_start_ms)) AND (history_oldest_mts_created IS NULL) = (history_newest_mts_created IS NULL) AND (history_oldest_mts_created IS NULL OR (history_oldest_mts_created >= 0 AND history_newest_mts_created >= history_oldest_mts_created))",
+            name="ck_ledger_observation_history_range",
+        ),
+        sa.CheckConstraint(
+            "(offer_history_pages IS NULL OR offer_history_pages >= 0) AND (credit_history_pages IS NULL OR credit_history_pages >= 0)",
+            name="ck_ledger_observation_history_pages",
+        ),
+        sa.CheckConstraint(
+            "NOT accepted OR (wallets_complete AND offers_complete AND credits_complete AND loans_complete AND offer_history_complete AND credit_history_complete)",
+            name="ck_ledger_observation_acceptance",
+        ),
+        sa.CheckConstraint(
+            "first_digest = confirmation_digest", name="ck_ledger_observation_matching_digest"
+        ),
+        sa.CheckConstraint(
+            "schema_version >= 1 AND query_finished_at_ms >= 0 AND confirmation_finished_at_ms >= query_finished_at_ms AND accept_revision >= 0",
+            name="ck_ledger_observation_order",
+        ),
+        sa.ForeignKeyConstraint(
+            ["exchange_account_id"], ["exchange_accounts.id"], ondelete="RESTRICT"
+        ),
+        sa.ForeignKeyConstraint(
+            ["query_id"], ["ledger_observation_query.query_id"], ondelete="RESTRICT"
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("id", "accepted", name="uq_ledger_observation_accepted"),
+        sa.UniqueConstraint("query_id"),
+    )
+    op.create_index(
+        "ix_ledger_observation_scope_finished",
+        "ledger_observation",
+        [
+            "exchange_account_id",
+            "deployment_environment",
+            sa.literal_column("query_finished_at_ms DESC"),
+            "id",
+        ],
+        unique=False,
+    )
+    op.create_table(
         "accepted_capital_basis",
         sa.Column("id", sa.UUID(), nullable=False),
         sa.Column("exchange_account_id", sa.UUID(), nullable=False),
         sa.Column("deployment_environment", sa.Text(), nullable=False),
         sa.Column("observation_id", sa.UUID(), nullable=False),
-        sa.Column("query_id", sa.UUID(), nullable=False),
         sa.Column("accepted", sa.Boolean(), server_default=sa.text("true"), nullable=False),
-        sa.Column("start_revision", sa.BigInteger(), nullable=False),
         sa.Column("accept_revision", sa.BigInteger(), nullable=False),
         sa.Column("policy_revision_id", sa.UUID(), nullable=False),
         sa.Column(
@@ -608,7 +656,7 @@ def upgrade() -> None:
         sa.Column("digest", sa.Text(), nullable=False),
         sa.Column("accepted_at_ms", sa.BigInteger(), nullable=False),
         sa.CheckConstraint(
-            "accepted AND start_revision >= 0 AND accept_revision = start_revision AND schema_version >= 1 AND accepted_at_ms >= 0",
+            "accepted AND accept_revision >= 0 AND schema_version >= 1 AND accepted_at_ms >= 0",
             name="ck_accepted_basis_acceptance",
         ),
         sa.ForeignKeyConstraint(
@@ -625,7 +673,12 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("observation_id"),
-        sa.UniqueConstraint("query_id"),
+    )
+    op.create_index(
+        "ix_accepted_capital_basis_scope_accepted",
+        "accepted_capital_basis",
+        ["exchange_account_id", "deployment_environment", sa.literal_column("accepted_at_ms DESC")],
+        unique=False,
     )
     op.create_table(
         "ledger_observation_credit",
@@ -703,6 +756,12 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["observation_id"], ["ledger_observation.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
     )
+    op.create_index(
+        "ix_ledger_observation_credit_history_observation",
+        "ledger_observation_credit_history",
+        ["observation_id"],
+        unique=False,
+    )
     op.create_table(
         "ledger_observation_offer",
         sa.Column("id", sa.UUID(), nullable=False),
@@ -771,6 +830,12 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(["observation_id"], ["ledger_observation.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index(
+        "ix_ledger_observation_offer_history_observation",
+        "ledger_observation_offer_history",
+        ["observation_id"],
+        unique=False,
     )
     op.create_table(
         "ledger_observation_wallet",
@@ -1102,7 +1167,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("attempt_id"),
     )
-    # Reviewer splices the PG autogenerate result before running this revision.
+    # END AUTOGEN-DDL-UPGRADE
 
     op.execute("""CREATE FUNCTION public.reject_ledger_mutation() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog AS $$
@@ -1177,7 +1242,7 @@ def upgrade() -> None:
             IF NOT EXISTS (SELECT 1 FROM public.ledger_observation o WHERE o.id = NEW.observation_id
               AND (o.exchange_account_id, o.deployment_environment)
                 = (NEW.exchange_account_id, NEW.deployment_environment)
-              AND o.query_id = NEW.query_id) THEN
+              AND o.accept_revision = NEW.accept_revision) THEN
               RAISE EXCEPTION 'ledger basis scope mismatch';
             END IF;
           ELSIF TG_TABLE_NAME = 'venue_offer_mirror' THEN
@@ -1212,6 +1277,38 @@ def upgrade() -> None:
           END IF;
           RETURN NEW;
         END $$""")
+    op.execute("""CREATE FUNCTION public.guard_ledger_observation_accept() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+        DECLARE query_row record;
+        BEGIN
+          SELECT exchange_account_id, deployment_environment, query_revision,
+                 started_at_ms, start_revision INTO query_row
+            FROM public.ledger_observation_query WHERE query_id = NEW.query_id;
+          IF NOT FOUND OR
+             (query_row.exchange_account_id, query_row.deployment_environment)
+               IS DISTINCT FROM (NEW.exchange_account_id, NEW.deployment_environment)
+             OR NEW.query_finished_at_ms < query_row.started_at_ms THEN
+            RAISE EXCEPTION 'ledger observation query scope mismatch';
+          END IF;
+          IF NEW.accepted AND (
+             NEW.accept_revision IS DISTINCT FROM query_row.start_revision
+             OR NOT EXISTS (
+               SELECT 1 FROM public.capital_command_clock c
+               WHERE (c.exchange_account_id, c.deployment_environment, c.revision)
+                 = (NEW.exchange_account_id, NEW.deployment_environment, NEW.accept_revision))
+             OR query_row.query_revision IS DISTINCT FROM (
+               SELECT max(q.query_revision) FROM public.ledger_observation_query q
+               WHERE (q.exchange_account_id, q.deployment_environment)
+                 = (NEW.exchange_account_id, NEW.deployment_environment))) THEN
+            RAISE EXCEPTION 'ledger observation accept fence';
+          END IF;
+          RETURN NEW;
+        END $$""")
+    op.execute(
+        "CREATE TRIGGER guard_ledger_observation_accept_insert BEFORE INSERT "
+        "ON public.ledger_observation FOR EACH ROW "
+        "EXECUTE FUNCTION public.guard_ledger_observation_accept()"
+    )
     for name in _IMMUTABLE:
         op.execute(
             f"CREATE TRIGGER immutable_ledger_write BEFORE UPDATE OR DELETE ON public.{name} "
@@ -1282,6 +1379,7 @@ def downgrade() -> None:
     for name in _TABLES:
         if op.get_bind().execute(text(f"SELECT EXISTS (SELECT 1 FROM public.{name})")).scalar():
             raise RuntimeError("refuse downgrade of populated ledger: " + name)
+    # BEGIN AUTOGEN-DDL-DOWNGRADE
     op.drop_table("transport_outcome_journal")
     op.drop_index(
         "uq_execution_resolution_quarantine",
@@ -1313,15 +1411,29 @@ def downgrade() -> None:
     op.drop_table("accepted_capital_basis_cell")
     op.drop_table("quarantine_member")
     op.drop_table("ledger_observation_wallet")
+    op.drop_index(
+        "ix_ledger_observation_offer_history_observation",
+        table_name="ledger_observation_offer_history",
+    )
     op.drop_table("ledger_observation_offer_history")
     op.drop_table("ledger_observation_offer")
+    op.drop_index(
+        "ix_ledger_observation_credit_history_observation",
+        table_name="ledger_observation_credit_history",
+    )
     op.drop_table("ledger_observation_credit_history")
     op.drop_table("ledger_observation_credit")
+    op.drop_index("ix_accepted_capital_basis_scope_accepted", table_name="accepted_capital_basis")
     op.drop_table("accepted_capital_basis")
-    op.drop_table("quarantine_opening")
-    op.drop_index("ix_ledger_observation_scope_started", table_name="ledger_observation")
+    op.drop_index("ix_ledger_observation_scope_finished", table_name="ledger_observation")
     op.drop_table("ledger_observation")
+    op.drop_table("quarantine_opening")
+    op.drop_index(
+        "ix_ledger_observation_query_scope_revision", table_name="ledger_observation_query"
+    )
+    op.drop_table("ledger_observation_query")
     op.drop_table("capital_command_clock")
+    # END AUTOGEN-DDL-DOWNGRADE
     # in reverse FK-dependency order.
     for function in _FUNCTIONS:
         op.execute(f"DROP FUNCTION public.{function}()")
