@@ -9,6 +9,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Index,
     Integer,
     Numeric,
     Text,
@@ -169,4 +170,11 @@ class FundingTradeRow(Base):
     maker: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_NOW,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_funding_trades_scope_symbol_created",
+            "exchange_account_id", "deployment_environment", "symbol", "mts_create",
+        ),
     )

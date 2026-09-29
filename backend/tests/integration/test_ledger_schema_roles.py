@@ -14,6 +14,8 @@ clone):
   succeeds (its FK still points to a real decision).
 * Drop ``guard_ledger_observation_accept_insert``. Stale and revision-mismatched
   accepted observations succeed.
+* Drop the credit branch from ``guard_ledger_scope``. The credit member acceptance fails.
+* Skip ``immutable_ledger_write`` on ``accepted_capital_basis_credit``. Its UPDATE succeeds.
 """
 
 from __future__ import annotations
@@ -123,6 +125,12 @@ def _basis_sql(
       true, {revision}, '{_P}', true, 1, 'basis-digest', 3)"""
 
 
+def _member_sql(kind: str, venue_id: str, observation_id: str = _O) -> str:
+    return f"""INSERT INTO quarantine_member
+      (quarantine_id, source_kind, venue_object_id, observation_id, amount_at_join)
+      VALUES ('{_Q}', '{kind}', '{venue_id}', '{observation_id}', 1)"""
+
+
 @pytest.fixture
 def ledger_db(pg_templates, pg_clone):
     url = pg_clone(pg_templates.template("ledger_s1_roles", _build))
@@ -133,7 +141,7 @@ def ledger_db(pg_templates, pg_clone):
         engine.dispose()
 
 
-def _seed(conn) -> None:
+def _seed(conn, *, old_member: bool = False) -> None:
     """Owner inserts one valid row per ledger table so row triggers are exercised."""
     statements = (
         f"INSERT INTO exchange_accounts(id,venue,label) VALUES ('{_A}','bitfinex','ledger')",
@@ -297,6 +305,12 @@ def _seed(conn) -> None:
       'fUST',
       'cell',
       10)""",
+        f"""INSERT INTO accepted_capital_basis_credit
+      (basis_id, source_kind, venue_credit_id, symbol, amount, attribution_basis)
+      VALUES ('{_B}', 'credit', 'credit-1', 'fUST', 1, 'trade')""",
+        f"""INSERT INTO accepted_capital_basis_credit_cell
+      (basis_id, source_kind, venue_credit_id, cell_id)
+      VALUES ('{_B}', 'credit', 'credit-1', 'cell')""",
         f"""INSERT INTO execution_decisions(decision_id,
       account_id,
       exchange_account_id,
@@ -421,14 +435,21 @@ def _seed(conn) -> None:
       1,
       4,
       '{{}}')""",
-        f"""INSERT INTO quarantine_member(quarantine_id,
-      venue_offer_id,
+        (
+            f"""INSERT INTO quarantine_member(quarantine_id, venue_offer_id, observation_id,
+      amount_at_join) VALUES ('{_Q}', 'offer-1', '{_O}', 1)"""
+            if old_member
+            else f"""INSERT INTO quarantine_member(quarantine_id,
+      source_kind,
+      venue_object_id,
       observation_id,
       amount_at_join)
       VALUES ('{_Q}',
+      'offer',
       'offer-1',
       '{_O}',
-      1)""",
+      1)"""
+        ),
         f"""INSERT INTO execution_resolution_journal(id,
       quarantine_id,
       exchange_account_id,
@@ -469,6 +490,8 @@ def _seed(conn) -> None:
       '{_Q}')""",
     )
     for statement in statements:
+        if old_member and "accepted_capital_basis_credit" in statement:
+            continue
         conn.exec_driver_sql(statement)
 
 
@@ -614,10 +637,12 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
         ),
         (
             f"""INSERT INTO quarantine_member(quarantine_id,
-      venue_offer_id,
+      source_kind,
+      venue_object_id,
       observation_id,
       amount_at_join)
       VALUES ('{_Q}',
+      'offer',
       'offer-1',
       '{_O}',
       2)""",
@@ -625,10 +650,12 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
         ),
         (
             f"""INSERT INTO quarantine_member(quarantine_id,
-      venue_offer_id,
+      source_kind,
+      venue_object_id,
       observation_id,
       amount_at_join)
       VALUES ('{_Q}',
+      'offer',
       'offer-other',
       '{_O}',
       1)""",
@@ -690,6 +717,77 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
         ),
     )
     for statement, message in cases:
+        with seeded.begin() as conn, pytest.raises(Exception, match=message):
+            conn.exec_driver_sql(statement)
+
+
+def test_credit_and_loan_members_match_detail_or_history_and_scope(seeded) -> None:
+    with seeded.begin() as conn:
+        conn.exec_driver_sql(_member_sql("credit", "credit-1"))
+        for kind, venue_id, table in (
+            ("credit", "credit-history-only", "ledger_observation_credit_history"),
+            ("loan", "loan-detail", "ledger_observation_credit"),
+            ("loan", "loan-history-only", "ledger_observation_credit_history"),
+        ):
+            extra = ", terminal_kind, occurred_at_ms" if table.endswith("history") else ""
+            tail = ", 'closed', 3" if extra else ""
+            conn.exec_driver_sql(
+                f"INSERT INTO {table} "
+                f"(id, observation_id, venue_credit_id, source_kind, symbol, amount, status, raw{extra}) "
+                f"VALUES ('{uuid4()}', '{_O}', '{venue_id}', '{kind}', 'fUST', 1, 'CLOSED', '{{}}'{tail})"
+            )
+            conn.exec_driver_sql(_member_sql(kind, venue_id))
+
+    for kind, venue_id in (
+        ("loan", "credit-1"),
+        ("offer", "credit-1"),
+        ("credit", "loan-detail"),
+        ("credit", "absent"),
+    ):
+        with seeded.begin() as conn, pytest.raises(Exception, match="ledger member scope mismatch"):
+            conn.exec_driver_sql(_member_sql(kind, venue_id))
+
+    with seeded.begin() as conn:
+        for symbol, environment, venue_id in (
+            ("fEUR", "ci", "wrong-symbol"),
+            ("fUST", "other", "wrong-scope"),
+        ):
+            query_id, observation_id = str(uuid4()), str(uuid4())
+            conn.exec_driver_sql(
+                _query_sql(query_id, 2 if environment == "ci" else 1, environment=environment)
+            )
+            observation_sql = _observation_sql(observation_id, query_id, accepted=False)
+            conn.exec_driver_sql(
+                observation_sql.replace(f"'{_A}', 'ci', 1,", f"'{_A}', '{environment}', 1,")
+            )
+            conn.exec_driver_sql(
+                "INSERT INTO ledger_observation_credit "
+                "(id, observation_id, venue_credit_id, source_kind, symbol, amount, status, raw) "
+                f"VALUES ('{uuid4()}', '{observation_id}', '{venue_id}', 'credit', "
+                f"'{symbol}', 1, 'ACTIVE', '{{}}')"
+            )
+            with (
+                pytest.raises(Exception, match="ledger member scope mismatch"),
+                conn.begin_nested(),
+            ):
+                conn.exec_driver_sql(_member_sql("credit", venue_id, observation_id))
+
+
+def test_basis_credit_constraints_and_foreign_key(seeded) -> None:
+    for statement, message in (
+        (
+            f"INSERT INTO accepted_capital_basis_credit "
+            f"(basis_id, source_kind, venue_credit_id, symbol, amount, attribution_basis) "
+            f"VALUES ('{_B}', 'loan', 'bad-attribution', 'fUST', 1, 'unknown')",
+            "ck_accepted_basis_credit_attribution",
+        ),
+        (
+            f"INSERT INTO accepted_capital_basis_credit_cell "
+            f"(basis_id, source_kind, venue_credit_id, cell_id) "
+            f"VALUES ('{_B}', 'loan', 'missing', 'cell')",
+            "fk_accepted_basis_credit_cell_credit",
+        ),
+    ):
         with seeded.begin() as conn, pytest.raises(Exception, match=message):
             conn.exec_driver_sql(statement)
 
@@ -838,11 +936,29 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
             ("accepted_capital_basis", "digest"),
             ("accepted_capital_basis_symbol", "offered"),
             ("accepted_capital_basis_attempt", "classification"),
+            ("quarantine_member", "source_kind"),
+            ("quarantine_member", "venue_object_id"),
         ):
             assert conn.scalar(
                 text("SELECT has_column_privilege('bfx_cutover_reader',:t,:c,'SELECT')"),
                 {"t": table, "c": column},
             )
+        for table in ("accepted_capital_basis_credit", "accepted_capital_basis_credit_cell"):
+            for column in inspect(conn).get_columns(table):
+                assert conn.scalar(
+                    text("SELECT has_column_privilege('bfx_cutover_reader',:t,:c,'SELECT')"),
+                    {"t": table, "c": column["name"]},
+                )
+            for privilege in ("SELECT", "INSERT"):
+                assert conn.scalar(
+                    text("SELECT has_table_privilege('bfx_bot',:t,:p)"),
+                    {"t": table, "p": privilege},
+                )
+            for privilege in ("UPDATE", "DELETE", "TRUNCATE"):
+                assert not conn.scalar(
+                    text("SELECT has_table_privilege('bfx_bot',:t,:p)"),
+                    {"t": table, "p": privilege},
+                )
         for table, column in (
             ("ledger_observation", "evidence"),
             ("ledger_observation_offer", "raw"),
@@ -880,6 +996,16 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
         conn.exec_driver_sql("UPDATE capital_command_clock SET revision=1")
         conn.exec_driver_sql("UPDATE venue_offer_mirror SET amount_remaining=2")
         conn.exec_driver_sql("UPDATE venue_credit_mirror SET amount=2")
+        conn.exec_driver_sql(
+            f"INSERT INTO accepted_capital_basis_credit "
+            f"(basis_id, source_kind, venue_credit_id, symbol, amount, attribution_basis) "
+            f"VALUES ('{_B}', 'loan', 'loan-role', 'fUST', 1, 'carry')"
+        )
+        conn.exec_driver_sql(
+            f"INSERT INTO accepted_capital_basis_credit_cell "
+            f"(basis_id, source_kind, venue_credit_id, cell_id) "
+            f"VALUES ('{_B}', 'loan', 'loan-role', 'cell')"
+        )
     for table in ("capital_command_clock", "venue_offer_mirror", "venue_credit_mirror"):
         for statement in (f"DELETE FROM {table}", f"TRUNCATE {table} CASCADE"):
             with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
@@ -920,3 +1046,18 @@ def test_populated_ledger_refuses_downgrade(seeded) -> None:
     seeded.dispose()
     with pytest.raises(Exception, match="refuse downgrade of populated ledger"):
         alembic(url, "downgrade", "9a4d6e2c7b18")
+
+
+def test_corrective_downgrade_restores_offer_member_guard(ledger_db) -> None:
+    url = ledger_db.url.render_as_string(hide_password=False)
+    ledger_db.dispose()
+    alembic(url, "downgrade", "b1e2d3a4c5f6")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            assert "NEW.venue_offer_id" in conn.scalar(
+                text("SELECT pg_get_functiondef('public.guard_ledger_scope()'::regprocedure)")
+            )
+            _seed(conn, old_member=True)
+    finally:
+        engine.dispose()

@@ -99,12 +99,14 @@ SELECT n.nspname, p.proname, p.prosecdef,
   WHERE n.nspname = 'public' AND p.prosecdef ORDER BY p.proname;
 ```
 
-群組的 table grants 應為空；column grants 應與 migration 的 `_READER_COLUMNS` 清單完全一致。
+群組的 table grants 應為空；column grants 應與 ledger migrations 的 `_READER_COLUMNS` 清單合併後完全一致。
 其中 `ledger_observation_query` 可讀 `query_id`、`exchange_account_id`、
 `deployment_environment`、`query_revision`、
 `started_at_ms`、`start_revision`；`ledger_observation` 可讀 `query_id`、
 `accept_revision`、`offer_history_pages`、`credit_history_pages`；
-`accepted_capital_basis` 可讀 `observation_id`、`accept_revision`。
+`accepted_capital_basis` 可讀 `observation_id`、`accept_revision`；
+`quarantine_member` 可讀 `source_kind`、`venue_object_id`，
+`accepted_capital_basis_credit` 與 `accepted_capital_basis_credit_cell` 的所有欄位可讀。
 檢查 `SECURITY DEFINER` 函式清單，確認 LOGIN 沒有可藉以寫入 ledger 的 EXECUTE 權限。
 接著以 LOGIN 連線，在 **read-write transaction** 執行以下拒絕檢查；每個預期失敗的
 statement 都各自開新 transaction，避免前一個錯誤使後續 statement 自動失敗：

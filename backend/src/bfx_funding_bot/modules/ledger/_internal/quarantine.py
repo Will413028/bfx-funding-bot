@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal, cast
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import (
@@ -44,12 +46,15 @@ async def add_quarantine_member(
         scope.deployment_environment,
     ):
         raise ValueError("quarantine scope mismatch")
-    existing = await session.get(QuarantineMemberRow, (member.quarantine_id, member.venue_offer_id))
+    existing = await session.get(
+        QuarantineMemberRow, (member.quarantine_id, member.source_kind, member.venue_object_id)
+    )
     if existing is not None:
         raise QuarantineMemberConflict(
             QuarantineMember(
                 existing.quarantine_id,
-                existing.venue_offer_id,
+                cast(Literal["offer", "credit", "loan"], existing.source_kind),
+                existing.venue_object_id,
                 existing.observation_id,
                 existing.amount_at_join,
             )
@@ -57,7 +62,8 @@ async def add_quarantine_member(
     session.add(
         QuarantineMemberRow(
             quarantine_id=member.quarantine_id,
-            venue_offer_id=member.venue_offer_id,
+            source_kind=member.source_kind,
+            venue_object_id=member.venue_object_id,
             observation_id=member.observation_id,
             amount_at_join=member.amount_at_join,
         )

@@ -217,7 +217,7 @@ async def test_journal_writes_and_first_write_errors(seeded_fixture) -> None:  #
     attempt = _attempt()
     outcome = Outcome(attempt.attempt_id, "unknown", None, None, 2, {})
     quarantine = Quarantine(uuid4(), "fUST", Decimal("1"), 0, {})
-    member = QuarantineMember(quarantine.quarantine_id, "offer-1", UUID(_O), Decimal("1"))
+    member = QuarantineMember(quarantine.quarantine_id, "offer", "offer-1", UUID(_O), Decimal("1"))
     try:
         async with factory.begin() as session:
             recorded = await JOURNAL.record_attempt(session, SCOPE, attempt)
