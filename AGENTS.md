@@ -54,6 +54,12 @@ Go `backend/`（atlas/sqlc/go test）已於 2026-05-29 移除，不再使用。
 - 每個功能必須包含單元測試，`cd backend && uv run pytest -m "not integration"` 全過才能 commit
 - 純文件修改（runbook、ARCHITECTURE.md 等）不需要走完整工作流
 
+### 營運原則：放貸全自動
+
+- 目標是全自動放貸：掛單、續借、halt 後恢復、幣種切換（cutover）與 canary 都由系統完成。設計、計畫與 runbook 不得把手動 Bitfinex 掛單、手動 Kill／TOTP 之類的人工步驟當成正常流程的一環。
+- 做不到自動化時，說明卡在哪裡，並提出自動化的替代方案；不要改成請 operator 手動補上。operator kill（cancel-all）只是緊急控制，不屬於正常流程。
+- watcher／monitor 的結束條件要先對照真實狀態驗證再依賴，例如剛 push 完 CI job 可能還不存在，這時「沒有執行中的 job」不代表已完成。
+
 ### 測試與品質（強制）
 
 - **行為變更補對應的回歸測試**；純文件改動核對指令、路徑與規格即可，不為文件或格式改動新增機械測試
