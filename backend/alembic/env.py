@@ -29,6 +29,7 @@ import bfx_funding_bot.modules.execution.safety.tables
 import bfx_funding_bot.modules.execution.uncertainty_tables
 import bfx_funding_bot.modules.external_signals.tables
 import bfx_funding_bot.modules.funding_stats.tables
+import bfx_funding_bot.modules.ledger.tables
 import bfx_funding_bot.modules.lending.tracking.tables
 import bfx_funding_bot.modules.live_validation.tables
 import bfx_funding_bot.modules.marketfeed.tables

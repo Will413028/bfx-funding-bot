@@ -147,6 +147,7 @@ forbidden_modules = [
     "bfx_funding_bot.modules.external_signals",
     "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.lending",
+    "bfx_funding_bot.modules.ledger",
     "bfx_funding_bot.modules.live_validation",
     "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed",
@@ -176,6 +177,7 @@ source_modules = [
     "bfx_funding_bot.modules.external_signals",
     "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.lending",
+    "bfx_funding_bot.modules.ledger",
     "bfx_funding_bot.modules.live_validation",
     "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed",
@@ -201,6 +203,7 @@ source_modules = [
     "bfx_funding_bot.modules.deployments", "bfx_funding_bot.modules.execution",
     "bfx_funding_bot.modules.external_signals", "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.lending", "bfx_funding_bot.modules.live_validation",
+    "bfx_funding_bot.modules.ledger",
     "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability",
     "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.trading",
@@ -299,6 +302,7 @@ source_modules = [
     "bfx_funding_bot.modules.external_signals",
     "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.lending",
+    "bfx_funding_bot.modules.ledger",
     "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
@@ -425,7 +429,9 @@ forbidden_modules = [
     "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.funding_stats.**",
     "bfx_funding_bot.modules.lending",
+    "bfx_funding_bot.modules.ledger",
     "bfx_funding_bot.modules.lending.**",
+    "bfx_funding_bot.modules.ledger.**",
     "bfx_funding_bot.modules.live_validation",
     "bfx_funding_bot.modules.live_validation.**",
     "bfx_funding_bot.modules.marketfeed",
@@ -462,6 +468,7 @@ source_modules = [
     "bfx_funding_bot.modules.external_signals",
     "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.lending",
+    "bfx_funding_bot.modules.ledger",
     "bfx_funding_bot.modules.live_validation",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
@@ -475,3 +482,21 @@ forbidden_modules = [
 allow_indirect_imports = true
 ignore_imports = []
 broken_contract_guidance = "Import market contracts from bfx_funding_bot.modules.market; do not add ignores."
+
+[[tool.importlinter.contracts]]
+id = "ledger-not-legacy"
+name = "Ledger does not import legacy execution or trading shadow"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.modules.ledger"]
+forbidden_modules = ["bfx_funding_bot.modules.execution", "bfx_funding_bot.modules.trading_shadow"]
+ignore_imports = []
+broken_contract_guidance = "Keep ledger independent; move the code or ask, do not add ignores."
+
+[[tool.importlinter.contracts]]
+id = "trading-not-ledger"
+name = "Pure trading does not import ledger storage"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.modules.trading"]
+forbidden_modules = ["bfx_funding_bot.modules.ledger"]
+ignore_imports = []
+broken_contract_guidance = "Inject ledger data into trading; do not add ignores."

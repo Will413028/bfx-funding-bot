@@ -67,6 +67,68 @@ ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA auth
 `public.user_profiles` 對 `auth.user` 的 FK 檢查由 Postgres 內部執行，webapi 不需要
 `auth` 的權限。
 
+### 1c-1. Ledger cutover reader（S1-1 migration 部署後，operator 執行）
+
+Migration 建立 `bfx_cutover_reader NOLOGIN`，只授權新 ledger 表的指定欄位。待部署完成並獲得
+operator 授權，另建專用 LOGIN（名稱範例 `bfx_cutover_attest`）並加入群組；密碼用 psql 的
+`\password` 互動輸入（不寫進 SQL、shell 歷史或 log），值另存為獨立 secret：
+
+```sql
+CREATE ROLE bfx_cutover_attest LOGIN NOINHERIT;
+GRANT bfx_cutover_reader TO bfx_cutover_attest;
+\password bfx_cutover_attest
+```
+
+以 `<owner>` 留存下列查詢結果；`bfx_cutover_attest` 與 `bfx_cutover_reader` 的
+`rolsuper`、`rolcreaterole`、`rolcreatedb`、`rolbypassrls` 都須為 false；群組
+`rolcanlogin=false`，LOGIN `rolinherit=false`：
+
+```sql
+SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls
+  FROM pg_roles WHERE rolname IN ('bfx_cutover_attest', 'bfx_cutover_reader');
+SELECT pg_has_role('bfx_cutover_attest', 'bfx_cutover_reader', 'MEMBER') AS member;
+SELECT table_name, privilege_type FROM information_schema.role_table_grants
+  WHERE grantee = 'bfx_cutover_reader' AND table_schema = 'public' ORDER BY table_name, privilege_type;
+SELECT table_name, column_name, privilege_type FROM information_schema.role_column_grants
+  WHERE grantee = 'bfx_cutover_reader' AND table_schema = 'public'
+  ORDER BY table_name, column_name, privilege_type;
+SELECT n.nspname, p.proname, p.prosecdef,
+       has_function_privilege('bfx_cutover_attest', p.oid, 'EXECUTE') AS login_can_execute
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname = 'public' AND p.prosecdef ORDER BY p.proname;
+```
+
+群組的 table grants 應為空；column grants 應與 migration 的 `_READER_COLUMNS` 清單完全一致。
+檢查 `SECURITY DEFINER` 函式清單，確認 LOGIN 沒有可藉以寫入 ledger 的 EXECUTE 權限。
+接著以 LOGIN 連線，在 **read-write transaction** 執行以下拒絕檢查；每個預期失敗的
+statement 都各自開新 transaction，避免前一個錯誤使後續 statement 自動失敗：
+
+```sql
+BEGIN READ WRITE;
+SET LOCAL ROLE bfx_cutover_reader;
+SELECT id, accepted FROM public.ledger_observation LIMIT 1; -- succeeds
+ROLLBACK;
+
+BEGIN READ WRITE;
+SET LOCAL ROLE bfx_cutover_reader;
+SELECT evidence FROM public.ledger_observation LIMIT 1; -- permission denied
+ROLLBACK;
+
+BEGIN READ WRITE;
+SET LOCAL ROLE bfx_cutover_reader;
+DELETE FROM public.ledger_observation WHERE false; -- permission denied
+ROLLBACK;
+
+BEGIN READ WRITE;
+SET LOCAL ROLE bfx_cutover_reader;
+SELECT nextval('public.trading_state_id_seq'); -- permission denied (or sequence absent)
+ROLLBACK;
+```
+
+再用 LOGIN 本身（未 `SET ROLE`）確認不能讀 ledger；它只因成員資格能明確 `SET ROLE`
+為 reader。此 role 只供 cutover／rehearsal reader 使用，不放進 bot 或 webapi 的連線設定。
+
 ### 1d. 驗證隔離（留輸出當 evidence）
 
 ```sql
