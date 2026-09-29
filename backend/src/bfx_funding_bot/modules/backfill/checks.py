@@ -10,11 +10,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
-from bfx_funding_bot.modules.backfill.schemas import SeriesSpec
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.funding_stats.repository import get_in_range
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
+from bfx_funding_bot.modules.market import SeriesSpec
 
 ROUND_TRIP_TOLERANCE = Decimal("1e-15")
 # Round-trip sample shift: Bitfinex actively updates the latest (still-forming)

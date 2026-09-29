@@ -11,13 +11,13 @@ from bfx_funding_bot.modules.backfill.checks import (
     check_round_trip,
     check_row_counts,
 )
-from bfx_funding_bot.modules.backfill.schemas import (
-    SeriesSpec,
-)
 from bfx_funding_bot.modules.candles.repository import upsert_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.funding_stats.repository import upsert_funding_stats
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
+from bfx_funding_bot.modules.market import (
+    SeriesSpec,
+)
 
 
 @pytest.fixture

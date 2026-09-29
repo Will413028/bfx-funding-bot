@@ -25,7 +25,6 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.backfill.errors import BackfillCursorStuck
 from bfx_funding_bot.modules.external_signals.repository import (
     get_liq_max_mts,
     get_liq_min_mts,
@@ -38,6 +37,7 @@ from bfx_funding_bot.modules.external_signals.schemas import (
     LiquidationRecord,
     PerpFundingRecord,
 )
+from bfx_funding_bot.modules.market import BackfillCursorStuck
 
 _BITFINEX = "bitfinex"
 _BINANCE = "binance-usdm"

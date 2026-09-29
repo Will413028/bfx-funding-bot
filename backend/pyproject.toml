@@ -148,6 +148,7 @@ forbidden_modules = [
     "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.lending",
     "bfx_funding_bot.modules.live_validation",
+    "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
     "bfx_funding_bot.modules.trading",
@@ -176,6 +177,7 @@ source_modules = [
     "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.lending",
     "bfx_funding_bot.modules.live_validation",
+    "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
     "bfx_funding_bot.modules.trading",
@@ -199,6 +201,7 @@ source_modules = [
     "bfx_funding_bot.modules.deployments", "bfx_funding_bot.modules.execution",
     "bfx_funding_bot.modules.external_signals", "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.lending", "bfx_funding_bot.modules.live_validation",
+    "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability",
     "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.trading",
 ]
@@ -296,6 +299,7 @@ source_modules = [
     "bfx_funding_bot.modules.external_signals",
     "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.lending",
+    "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
 ]
@@ -325,8 +329,6 @@ ignore_imports = [
     "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.live_validation.tables",
     "bfx_funding_bot.modules.accounts.vault -> bfx_funding_bot.modules.execution.protocols",
     "bfx_funding_bot.modules.admin.trading_status -> bfx_funding_bot.modules.marketfeed.readiness",
-    "bfx_funding_bot.modules.candles.service -> bfx_funding_bot.modules.backfill.errors",
-    "bfx_funding_bot.modules.candles.service -> bfx_funding_bot.modules.backfill.schemas",
     "bfx_funding_bot.modules.execution.capital_repository -> bfx_funding_bot.modules.live_validation.tables",
     "bfx_funding_bot.modules.execution.contracts -> bfx_funding_bot.modules.marketfeed.funding_book",
     "bfx_funding_bot.modules.execution.deployment.eligibility -> bfx_funding_bot.modules.marketfeed.funding_book",
@@ -334,8 +336,6 @@ ignore_imports = [
     "bfx_funding_bot.modules.execution.deployment.reconciler -> bfx_funding_bot.modules.marketfeed.funding_book",
     "bfx_funding_bot.modules.execution.emit -> bfx_funding_bot.modules.marketfeed.schemas",
     "bfx_funding_bot.modules.execution.safety.pre_trade -> bfx_funding_bot.modules.marketfeed.funding_book",
-    "bfx_funding_bot.modules.funding_stats.service -> bfx_funding_bot.modules.backfill.errors",
-    "bfx_funding_bot.modules.funding_stats.service -> bfx_funding_bot.modules.backfill.schemas",
     "bfx_funding_bot.modules.lending.tracking.book_replay -> bfx_funding_bot.modules.marketfeed.book_period_coverage",
     "bfx_funding_bot.modules.live_validation.g3 -> bfx_funding_bot.modules.backtest.oos_profitability",
     "bfx_funding_bot.modules.live_validation.live_attribution -> bfx_funding_bot.modules.backtest.oos_profitability",
@@ -375,3 +375,103 @@ as_packages = false
 forbidden_modules = ["bfx_funding_bot.modules.strategy.wiring"]
 ignore_imports = []
 broken_contract_guidance = "Inject strategy ports from apps; do not add ignores or re-export wiring."
+
+[[tool.importlinter.contracts]]
+id = "market-contracts-are-pure"
+name = "market-contracts-are-pure"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.modules.market",
+    "bfx_funding_bot.modules.market.contracts",
+]
+forbidden_modules = [
+    "sqlalchemy",
+    "httpx",
+    "asyncpg",
+    "yaml",
+    "bfx_funding_bot.core.settings",
+]
+as_packages = false
+ignore_imports = []
+broken_contract_guidance = "market contracts stay pure; put I/O in market._internal, do not add ignores."
+
+[[tool.importlinter.contracts]]
+id = "market-contracts-no-sibling-dependencies"
+name = "market-contracts-no-sibling-dependencies"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.modules.market",
+    "bfx_funding_bot.modules.market.contracts",
+]
+forbidden_modules = [
+    "bfx_funding_bot.modules.accounts",
+    "bfx_funding_bot.modules.accounts.**",
+    "bfx_funding_bot.modules.admin",
+    "bfx_funding_bot.modules.admin.**",
+    "bfx_funding_bot.modules.api",
+    "bfx_funding_bot.modules.api.**",
+    "bfx_funding_bot.modules.backfill",
+    "bfx_funding_bot.modules.backfill.**",
+    "bfx_funding_bot.modules.backtest",
+    "bfx_funding_bot.modules.backtest.**",
+    "bfx_funding_bot.modules.candles",
+    "bfx_funding_bot.modules.candles.**",
+    "bfx_funding_bot.modules.deployments",
+    "bfx_funding_bot.modules.deployments.**",
+    "bfx_funding_bot.modules.execution",
+    "bfx_funding_bot.modules.execution.**",
+    "bfx_funding_bot.modules.external_signals",
+    "bfx_funding_bot.modules.external_signals.**",
+    "bfx_funding_bot.modules.funding_stats",
+    "bfx_funding_bot.modules.funding_stats.**",
+    "bfx_funding_bot.modules.lending",
+    "bfx_funding_bot.modules.lending.**",
+    "bfx_funding_bot.modules.live_validation",
+    "bfx_funding_bot.modules.live_validation.**",
+    "bfx_funding_bot.modules.marketfeed",
+    "bfx_funding_bot.modules.marketfeed.**",
+    "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.observability.**",
+    "bfx_funding_bot.modules.strategy",
+    "bfx_funding_bot.modules.strategy.**",
+    "bfx_funding_bot.modules.trading",
+    "bfx_funding_bot.modules.trading.**",
+    "bfx_funding_bot.modules.trading_shadow",
+    "bfx_funding_bot.modules.trading_shadow.**",
+]
+as_packages = false
+ignore_imports = []
+broken_contract_guidance = "market contracts must not depend on sibling modules; move the type into market or ask, do not add ignores."
+
+[[tool.importlinter.contracts]]
+id = "market-contracts-via-facade"
+name = "market-contracts-via-facade"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.core",
+    "bfx_funding_bot.external",
+    "bfx_funding_bot.apps",
+    "bfx_funding_bot.modules.accounts",
+    "bfx_funding_bot.modules.admin",
+    "bfx_funding_bot.modules.api",
+    "bfx_funding_bot.modules.backfill",
+    "bfx_funding_bot.modules.backtest",
+    "bfx_funding_bot.modules.candles",
+    "bfx_funding_bot.modules.deployments",
+    "bfx_funding_bot.modules.execution",
+    "bfx_funding_bot.modules.external_signals",
+    "bfx_funding_bot.modules.funding_stats",
+    "bfx_funding_bot.modules.lending",
+    "bfx_funding_bot.modules.live_validation",
+    "bfx_funding_bot.modules.marketfeed",
+    "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.strategy",
+    "bfx_funding_bot.modules.trading",
+    "bfx_funding_bot.modules.trading_shadow",
+]
+forbidden_modules = [
+    "bfx_funding_bot.modules.market.contracts",
+]
+allow_indirect_imports = true
+ignore_imports = []
+broken_contract_guidance = "Import market contracts from bfx_funding_bot.modules.market; do not add ignores."
