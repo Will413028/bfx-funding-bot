@@ -493,6 +493,44 @@ ignore_imports = []
 broken_contract_guidance = "Keep ledger independent; move the code or ask, do not add ignores."
 
 [[tool.importlinter.contracts]]
+id = "ledger-no-internal-access"
+name = "Ledger internals are private to ledger"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.core", "bfx_funding_bot.core.**",
+    "bfx_funding_bot.external", "bfx_funding_bot.external.**",
+    "bfx_funding_bot.apps", "bfx_funding_bot.apps.**",
+    "bfx_funding_bot.modules.accounts", "bfx_funding_bot.modules.admin",
+    "bfx_funding_bot.modules.api", "bfx_funding_bot.modules.backfill",
+    "bfx_funding_bot.modules.backtest", "bfx_funding_bot.modules.candles",
+    "bfx_funding_bot.modules.deployments", "bfx_funding_bot.modules.execution",
+    "bfx_funding_bot.modules.external_signals", "bfx_funding_bot.modules.funding_stats",
+    "bfx_funding_bot.modules.lending", "bfx_funding_bot.modules.live_validation",
+    "bfx_funding_bot.modules.market", "bfx_funding_bot.modules.marketfeed",
+    "bfx_funding_bot.modules.observability", "bfx_funding_bot.modules.strategy",
+    "bfx_funding_bot.modules.trading", "bfx_funding_bot.modules.trading_shadow",
+]
+forbidden_modules = ["bfx_funding_bot.modules.ledger._internal"]
+as_packages = true
+allow_indirect_imports = true
+ignore_imports = []
+broken_contract_guidance = "Import ledger facade or construct its port from apps."
+
+[[tool.importlinter.contracts]]
+id = "ledger-wiring-is-top"
+name = "Only composition roots may import ledger wiring"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.core", "bfx_funding_bot.core.**",
+    "bfx_funding_bot.external", "bfx_funding_bot.external.**",
+    "bfx_funding_bot.modules", "bfx_funding_bot.modules.**",
+]
+as_packages = false
+forbidden_modules = ["bfx_funding_bot.modules.ledger.wiring"]
+ignore_imports = []
+broken_contract_guidance = "Construct ledger ports in apps; do not re-export wiring."
+
+[[tool.importlinter.contracts]]
 id = "trading-not-ledger"
 name = "Pure trading does not import ledger storage"
 type = "forbidden"
