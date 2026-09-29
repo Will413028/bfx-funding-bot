@@ -9,10 +9,12 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
-from bfx_funding_bot.modules.ledger import QueryHandle, Scope
+from bfx_funding_bot.modules.ledger import QueryAdmissionRefused, QueryHandle, Scope
 from bfx_funding_bot.modules.ledger.tables import (
     CapitalCommandClockRow,
     LedgerObservationQueryRow,
+    SubmissionAttemptJournalRow,
+    TransportOutcomeJournalRow,
 )
 
 
@@ -54,6 +56,21 @@ async def bump_clock(session: AsyncSession, scope: Scope) -> int:
 
 async def begin_query(session: AsyncSession, scope: Scope, started_at_ms: int) -> QueryHandle:
     await lock_scope(session, scope)
+    pending = await session.scalar(
+        select(SubmissionAttemptJournalRow.attempt_id)
+        .outerjoin(
+            TransportOutcomeJournalRow,
+            TransportOutcomeJournalRow.attempt_id == SubmissionAttemptJournalRow.attempt_id,
+        )
+        .where(
+            SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
+            SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
+            TransportOutcomeJournalRow.attempt_id.is_(None),
+        )
+        .limit(1)
+    )
+    if pending is not None:
+        raise QueryAdmissionRefused("an attempt in this scope has no outcome")
     latest = await session.scalar(
         select(func.max(LedgerObservationQueryRow.query_revision)).where(
             LedgerObservationQueryRow.exchange_account_id == scope.exchange_account_id,

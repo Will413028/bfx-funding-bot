@@ -32,6 +32,7 @@ from bfx_funding_bot.modules.ledger import (
     Quarantine,
     QuarantineMember,
     QuarantineMemberConflict,
+    QueryAdmissionRefused,
     Resolution,
     ResolutionAlreadyRecorded,
     ResolutionRejected,
@@ -130,6 +131,27 @@ async def test_clock_transaction_and_scope_queries(ledger_db_fixture) -> None:  
             async with session.begin():
                 other = await JOURNAL.begin_query(session, Scope(UUID(_A), "other"), 12)
                 assert (other.query_revision, other.start_revision) == (1, 0)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_begin_query_refuses_pending_attempt(seeded_fixture) -> None:  # noqa: F811
+    engine = _engine(seeded_fixture)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    attempt = _attempt()
+    try:
+        async with factory.begin() as session:
+            await JOURNAL.record_attempt(session, SCOPE, attempt)
+        async with factory.begin() as session:
+            with pytest.raises(QueryAdmissionRefused):
+                await JOURNAL.begin_query(session, SCOPE, 10)
+            assert await JOURNAL.begin_query(session, Scope(SCOPE.exchange_account_id, "other"), 10)
+        async with factory.begin() as session:
+            await JOURNAL.record_outcome(
+                session, SCOPE, Outcome(attempt.attempt_id, "unknown", None, None, 11, {})
+            )
+            assert await JOURNAL.begin_query(session, SCOPE, 12)
     finally:
         await engine.dispose()
 

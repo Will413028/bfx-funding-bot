@@ -117,6 +117,10 @@ class ResolutionRejected(ValueError):  # noqa: N818 - named by journal contract
     """Structural subject or observation precondition failed."""
 
 
+class QueryAdmissionRefused(ValueError):  # noqa: N818 - named by query contract
+    """An in-flight command makes a pre-I/O fence unsafe."""
+
+
 class LedgerJournal(Protocol):
     async def bump_clock(self, session: AsyncSession, scope: Scope) -> int: ...
     async def begin_query(
@@ -152,6 +156,7 @@ __all__ = [
     "Quarantine",
     "QuarantineMember",
     "QuarantineMemberConflict",
+    "QueryAdmissionRefused",
     "QueryHandle",
     "RecordedAttempt",
     "Resolution",
