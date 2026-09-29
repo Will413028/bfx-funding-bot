@@ -18,6 +18,8 @@ STRATEGY_NO_INTERNAL_ACCESS_MAX_IGNORES = 0
 TRADING_IS_PURE_MAX_IGNORES = 0
 
 MAX_IGNORES_BY_ID = {
+    "ledger-no-internal-access": 0,
+    "ledger-wiring-is-top": 0,
     "ledger-not-legacy": 0,
     "trading-not-ledger": 0,
     "market-contracts-are-pure": 0,
@@ -127,6 +129,20 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     }
     assert wiring["forbidden_modules"] == ["bfx_funding_bot.modules.strategy.wiring"]
     assert wiring["as_packages"] is False
+    ledger_wiring = contracts_by_id["ledger-wiring-is-top"]
+    assert ledger_wiring["source_modules"] == wiring["source_modules"]
+    assert ledger_wiring["forbidden_modules"] == ["bfx_funding_bot.modules.ledger.wiring"]
+    assert ledger_wiring["as_packages"] is False
+    ledger_internal = contracts_by_id["ledger-no-internal-access"]
+    assert set(ledger_internal["source_modules"]) == (sibling_modules | {
+        "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.candles",
+        "bfx_funding_bot.core", "bfx_funding_bot.core.**",
+        "bfx_funding_bot.external", "bfx_funding_bot.external.**",
+        "bfx_funding_bot.apps", "bfx_funding_bot.apps.**",
+    }) - {"bfx_funding_bot.modules.ledger"}
+    assert ledger_internal["forbidden_modules"] == ["bfx_funding_bot.modules.ledger._internal"]
+    assert ledger_internal["as_packages"] is True
+    assert ledger_internal["allow_indirect_imports"] is True
 
 
 def test_research_scripts_obtain_strategy_wiring_through_apps() -> None:
