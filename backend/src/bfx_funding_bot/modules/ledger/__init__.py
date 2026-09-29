@@ -89,7 +89,8 @@ class Quarantine:
 @dataclass(frozen=True, slots=True)
 class QuarantineMember:
     quarantine_id: UUID
-    venue_offer_id: str
+    source_kind: Literal["offer", "credit", "loan"]
+    venue_object_id: str
     observation_id: UUID
     amount_at_join: Decimal
 

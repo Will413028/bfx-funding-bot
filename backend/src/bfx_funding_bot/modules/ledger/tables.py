@@ -512,14 +512,20 @@ class QuarantineMemberRow(Base):
         ForeignKey("quarantine_opening.quarantine_id", ondelete="RESTRICT"),
         primary_key=True,
     )
-    venue_offer_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    source_kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    venue_object_id: Mapped[str] = mapped_column(Text, primary_key=True)
     observation_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("ledger_observation.id", ondelete="RESTRICT"),
         nullable=False,
     )
     amount_at_join: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
-    __table_args__ = (CheckConstraint("amount_at_join >= 0", name="ck_quarantine_member_amount"),)
+    __table_args__ = (
+        CheckConstraint(
+            "source_kind IN ('offer','credit','loan')", name="ck_quarantine_member_kind"
+        ),
+        CheckConstraint("amount_at_join >= 0", name="ck_quarantine_member_amount"),
+    )
 
 
 class ExecutionResolutionJournalRow(Base):
@@ -657,6 +663,57 @@ class AcceptedCapitalBasisCellRow(Base):
     __table_args__ = (CheckConstraint("amount >= 0", name="ck_accepted_basis_cell_amount"),)
 
 
+class AcceptedCapitalBasisCreditRow(Base):
+    __tablename__ = "accepted_capital_basis_credit"
+    basis_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("accepted_capital_basis.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    source_kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    venue_credit_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    period_days: Mapped[int | None] = mapped_column(Integer)
+    mts_opening: Mapped[int | None] = mapped_column(BigInteger)
+    attribution_basis: Mapped[str] = mapped_column(Text, nullable=False)
+    __table_args__ = (
+        CheckConstraint("source_kind IN ('credit','loan')", name="ck_accepted_basis_credit_kind"),
+        CheckConstraint("amount >= 0", name="ck_accepted_basis_credit_amount"),
+        CheckConstraint(
+            "attribution_basis IN ('trade','carry','recent_fill','unattributed')",
+            name="ck_accepted_basis_credit_attribution",
+        ),
+        Index(
+            "ix_accepted_basis_credit_cell_lookup",
+            "basis_id",
+            "symbol",
+            "period_days",
+            "mts_opening",
+        ),
+    )
+
+
+class AcceptedCapitalBasisCreditCellRow(Base):
+    __tablename__ = "accepted_capital_basis_credit_cell"
+    basis_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    source_kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    venue_credit_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    cell_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["basis_id", "source_kind", "venue_credit_id"],
+            [
+                "accepted_capital_basis_credit.basis_id",
+                "accepted_capital_basis_credit.source_kind",
+                "accepted_capital_basis_credit.venue_credit_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_accepted_basis_credit_cell_credit",
+        ),
+    )
+
+
 class AcceptedCapitalBasisAttemptRow(Base):
     __tablename__ = "accepted_capital_basis_attempt"
     basis_id: Mapped[UUID] = mapped_column(
@@ -712,6 +769,8 @@ LEDGER_TABLES = (
     AcceptedCapitalBasisRow.__table__,
     AcceptedCapitalBasisSymbolRow.__table__,
     AcceptedCapitalBasisCellRow.__table__,
+    AcceptedCapitalBasisCreditRow.__table__,
+    AcceptedCapitalBasisCreditCellRow.__table__,
     AcceptedCapitalBasisAttemptRow.__table__,
     AcceptedCapitalBasisQuarantineRow.__table__,
 )
