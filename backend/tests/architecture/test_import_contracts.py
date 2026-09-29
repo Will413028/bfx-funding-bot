@@ -18,6 +18,8 @@ STRATEGY_NO_INTERNAL_ACCESS_MAX_IGNORES = 0
 TRADING_IS_PURE_MAX_IGNORES = 0
 
 MAX_IGNORES_BY_ID = {
+    "ledger-not-legacy": 0,
+    "trading-not-ledger": 0,
     "market-contracts-are-pure": 0,
     "market-contracts-no-sibling-dependencies": 0,
     "market-contracts-via-facade": 0,
