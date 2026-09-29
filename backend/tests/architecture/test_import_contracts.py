@@ -10,7 +10,7 @@ from pathlib import Path
 CORE_IS_LEAF_MAX_IGNORES = 0
 VENUE_BELOW_MODULES_MAX_IGNORES = 19
 RUNTIME_NOT_RESEARCH_MAX_IGNORES = 0
-MODULES_ACYCLIC_MAX_IGNORES = 35
+MODULES_ACYCLIC_MAX_IGNORES = 31
 APPS_IS_TOP_MAX_IGNORES = 0
 STRATEGY_IS_PURE_MAX_IGNORES = 0
 STRATEGY_LOWER_ONLY_MAX_IGNORES = 0
@@ -18,6 +18,9 @@ STRATEGY_NO_INTERNAL_ACCESS_MAX_IGNORES = 0
 TRADING_IS_PURE_MAX_IGNORES = 0
 
 MAX_IGNORES_BY_ID = {
+    "market-contracts-are-pure": 0,
+    "market-contracts-no-sibling-dependencies": 0,
+    "market-contracts-via-facade": 0,
     "capital-comparison-no-settings": 0,
     "strategy-wiring-is-top": 0,
     "trading-shadow-no-internal-access": 0,
@@ -65,6 +68,54 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     assert strategy_sources == sibling_modules | {
         "bfx_funding_bot.modules.candles", "bfx_funding_bot.core",
         "bfx_funding_bot.external", "bfx_funding_bot.apps",
+    }
+    market_siblings = (
+        sibling_modules
+        | {
+            "bfx_funding_bot.modules.candles",
+            "bfx_funding_bot.modules.strategy",
+        }
+    ) - {"bfx_funding_bot.modules.market"}
+    market_sources = {
+        "bfx_funding_bot.modules.market",
+        "bfx_funding_bot.modules.market.contracts",
+    }
+    for contract_id in (
+        "market-contracts-are-pure",
+        "market-contracts-no-sibling-dependencies",
+    ):
+        assert set(contracts_by_id[contract_id]["source_modules"]) == market_sources
+        assert contracts_by_id[contract_id]["as_packages"] is False
+    assert set(contracts_by_id["market-contracts-are-pure"]["forbidden_modules"]) == {
+        "sqlalchemy",
+        "httpx",
+        "asyncpg",
+        "yaml",
+        "bfx_funding_bot.core.settings",
+    }
+    assert set(
+        contracts_by_id["market-contracts-no-sibling-dependencies"]["forbidden_modules"]
+    ) == market_siblings | {f"{module}.**" for module in market_siblings}
+    facade = contracts_by_id["market-contracts-via-facade"]
+    assert set(facade["source_modules"]) == market_siblings | {
+        "bfx_funding_bot.core",
+        "bfx_funding_bot.external",
+        "bfx_funding_bot.apps",
+    }
+    assert facade["forbidden_modules"] == ["bfx_funding_bot.modules.market.contracts"]
+    assert facade["allow_indirect_imports"] is True
+    assert set(contracts_by_id["runtime-not-research"]["source_modules"]) == (
+        market_siblings | {"bfx_funding_bot.modules.market"}
+    ) - {
+        f"bfx_funding_bot.modules.{name}"
+        for name in (
+            "backfill",
+            "backtest",
+            "live_validation",
+            "strategy",
+            "trading",
+            "trading_shadow",
+        )
     }
     wiring = contracts_by_id["strategy-wiring-is-top"]
     assert set(wiring["source_modules"]) == {

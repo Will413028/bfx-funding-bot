@@ -42,14 +42,14 @@ from bfx_funding_bot.modules.backfill.checks import (
     check_round_trip,
     check_row_counts,
 )
-from bfx_funding_bot.modules.backfill.schemas import (
-    BackfillError,
-    BackfillStats,
-    SeriesSpec,
-)
 from bfx_funding_bot.modules.candles.service import backfill_candles_to_earliest
 from bfx_funding_bot.modules.funding_stats.service import (
     backfill_funding_stats_to_earliest,
+)
+from bfx_funding_bot.modules.market import (
+    BackfillError,
+    BackfillStats,
+    SeriesSpec,
 )
 
 logger = logging.getLogger("backfill_phase2")

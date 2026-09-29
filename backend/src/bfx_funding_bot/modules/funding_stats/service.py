@@ -3,13 +3,12 @@ import time
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
-from bfx_funding_bot.modules.backfill.errors import BackfillCursorStuck
-from bfx_funding_bot.modules.backfill.schemas import BackfillStats, SeriesSpec
 from bfx_funding_bot.modules.funding_stats.repository import (
     get_max_mts,
     get_min_mts,
     upsert_funding_stats,
 )
+from bfx_funding_bot.modules.market import BackfillCursorStuck, BackfillStats, SeriesSpec
 
 
 async def backfill_funding_stats_to_earliest(
