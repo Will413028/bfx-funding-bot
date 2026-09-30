@@ -15,6 +15,8 @@ from math import isfinite
 from typing import Any, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
@@ -27,11 +29,6 @@ from bfx_funding_bot.modules.execution.amount_fingerprint import (
     fingerprint_of,
 )
 from bfx_funding_bot.modules.execution.audit import AuditContext
-from bfx_funding_bot.modules.execution.capital_repository import (
-    CapitalBlockedError,
-    read_policy_unlocked,
-)
-from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.contracts import (
     BlockedExecution,
     BlockReason,
@@ -77,11 +74,19 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.safety.protection import (
-    CAPITAL_BLOCK_TRIGGERS,
     ProtectionPort,
+    capital_block_trigger,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import HALTED, read_current
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
+from bfx_funding_bot.modules.ledger import (
+    CapitalAuthority,
+    CapitalAvailable,
+    CapitalBlocked,
+    ManagedOfferReader,
+    Scope,
+    UncertaintyReader,
+)
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
     FillModelUnavailable,
@@ -98,6 +103,7 @@ from bfx_funding_bot.modules.strategy import (
     StrategyName,
     configured_symbols,
 )
+from bfx_funding_bot.modules.trading import CapitalScope
 
 log = logging.getLogger(__name__)
 
@@ -116,7 +122,14 @@ class _LedgerProtocol(Protocol):
     def current_exposure(self, symbol: str) -> Decimal: ...
     def reserved_exposure(self, symbol: str) -> Decimal: ...
     def available_balance(self, symbol: str) -> Decimal: ...
-    def is_uncertain(self, symbol: str) -> bool: ...
+
+
+class _CapitalReadBlocked(Exception):  # noqa: N818 - message is the authority's reason code
+    """A capital read refused; its reason is the authority's code."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class _SafetyChainProtocol(Protocol):
@@ -157,7 +170,11 @@ class DeploymentReconciler:
         safety_chain: _SafetyChainProtocol,
         executor: ExecutorPort,
         account_ctx: AccountContext,
-        capital_runtime: CapitalRuntime,
+        capital: CapitalAuthority,
+        offers: ManagedOfferReader,
+        uncertainty: UncertaintyReader,
+        scope: Scope,
+        session_factory: async_sessionmaker[AsyncSession],
         cells: list[CellConfig],
         funding_rules: FundingRuleProvider | None,
         clock: Callable[[], int],
@@ -191,9 +208,13 @@ class DeploymentReconciler:
         self._ctx = account_ctx
         self._cells = cells
         self._funding_rules = funding_rules
-        if capital_runtime is None:
-            raise ValueError("deployment requires explicit applied capital runtime")
-        self._capital = capital_runtime
+        if capital is None:
+            raise ValueError("deployment requires explicit applied capital authority")
+        self._capital = capital
+        self._offers = offers
+        self._uncertainty = uncertainty
+        self._scope = scope
+        self._session_factory = session_factory
         self._clock = clock
         self._event_sink = event_sink
         self._phase = phase
@@ -247,22 +268,33 @@ class DeploymentReconciler:
         "stopped": the capital read below fails closed on it instead.
         """
         try:
-            repository = self._capital.repository
-            async with self._capital.session_factory() as session:
-                policy = await read_policy_unlocked(
-                    session, account_id=repository.account_id,
-                    environment=repository.environment, symbol=symbol)
-                state = await read_current(session, account_id=repository.account_id,
-                                           environment=repository.environment)
+            scope = self._scope
+            async with self._session_factory() as session:
+                applied = await self._capital.read_policy(session, scope, symbol)
+                if isinstance(applied, CapitalBlocked):
+                    return False
+                state = await read_current(session, account_id=scope.exchange_account_id,
+                                           environment=scope.deployment_environment)
         except Exception:
             return False
         halted = state is not None and state.state == HALTED
-        if policy.enabled and not halted:
+        if applied.policy.enabled and not halted:
             return False
         if self._managed_sweep is not None:
             why = "account HALTED" if halted else "disabled by policy"
             await self._managed_sweep.cancel([symbol], reason=f"{symbol} {why}")
         return True
+
+    async def _fallback_uncertain(self, symbol: str) -> bool:
+        """The durable uncertainty read for chains without a pre-sizing hook.
+
+        An unreadable projection counts as uncertain (fail closed).
+        """
+        try:
+            return await self._uncertainty.has_open(None, self._scope, symbol)
+        except Exception:
+            log.exception("deployment_uncertainty_unreadable symbol=%s", symbol)
+            return True
 
     async def deploy(self, *, venue_offers: tuple[ActiveFundingOffer, ...] = ()) -> None:
         ctx = self._ctx
@@ -288,7 +320,7 @@ class DeploymentReconciler:
             # per-offer safety check.  The chain's explicit pre-sizing hook is
             # optional for compatibility with small test adapters and older
             # paper implementations.  When present it is the durable authority;
-            # the process-local ledger remains the fallback for legacy adapters.
+            # otherwise the uncertainty reader is read directly.
             evaluate_before_sizing = getattr(
                 self._safety, "evaluate_before_sizing", None,
             )
@@ -319,9 +351,9 @@ class DeploymentReconciler:
             # A post-transport UNKNOWN is an account/symbol-wide command gate:
             # even if the residual cap gap is positive, submitting another
             # offer could duplicate the request that may already exist at the
-            # venue.  Legacy adapters without the database pre-sizing hook use
-            # the local ledger as their fail-closed authority.
-            if not authoritative_uncertainty_guard and self._ledger.is_uncertain(symbol):
+            # venue.  Chains without the database pre-sizing hook use the
+            # uncertainty reader as their fail-closed authority.
+            if not authoritative_uncertainty_guard and await self._fallback_uncertain(symbol):
                 log.error(
                     "deployment_symbol_blocked_uncertain account=%s symbol=%s",
                     self._ctx.account_id, symbol,
@@ -336,21 +368,28 @@ class DeploymentReconciler:
                     raise ValueError("funding_rule_unavailable")
                 amount_evidence = await self._funding_rules.observe(symbol)
                 # One account lock and transaction for the whole symbol's plan.
-                async with self._capital.session_factory() as session:
-                    views = {cell: await self._capital.read(
-                        symbol=symbol, cell_id=cell, session=session,
-                    ) for cell in active}
+                async with self._session_factory() as session:
+                    views: dict[str, CapitalAvailable] = {}
+                    for cell in active:
+                        read = await self._capital.read(
+                            CapitalScope(self._scope.exchange_account_id,
+                                         self._scope.deployment_environment, symbol, cell),
+                            now_ms=self._clock(), session=session,
+                        )
+                        if isinstance(read, CapitalBlocked):
+                            raise _CapitalReadBlocked(read.reason)
+                        views[cell] = read
                     # D3a: the amount fingerprints this symbol's live commitments
                     # already hold, read in the same session as the budget.
-                    held = set(await self._capital.fingerprints_in_use(
-                        symbol=symbol, session=session,
+                    held = set(await self._offers.fingerprints_in_use(
+                        session, self._scope, symbol,
                     ))
                 min_fill = submit_amount(amount_evidence, symbol=symbol, now_ms=self._clock())
                 fills = allocate_capital(views=views, min_fill=min_fill)
             except Exception as exc:
                 log.warning("deployment_capital_unavailable symbol=%s reason=%s", symbol, exc)
-                trigger = (CAPITAL_BLOCK_TRIGGERS.get(str(exc))
-                           if isinstance(exc, CapitalBlockedError) else None)
+                trigger = (capital_block_trigger(exc.reason)
+                           if isinstance(exc, _CapitalReadBlocked) else None)
                 if trigger is not None and self._protection is not None:
                     self._protection.trip(trigger, f"planner capital read for {symbol}: {exc}")
                 continue
@@ -372,12 +411,12 @@ class DeploymentReconciler:
 
             for cell_id, amount in fills.items():
                 now = self._clock()
-                # Legacy adapters re-check their local gate.  DB-backed chains
+                # Chains without the hook re-check the reader.  DB-backed chains
                 # instead re-evaluate their uncertainty guard below for each
                 # offer, which catches an UNKNOWN opened by the prior submit.
                 if (
                     not authoritative_uncertainty_guard
-                    and self._ledger.is_uncertain(symbol)
+                    and await self._fallback_uncertain(symbol)
                 ):
                     log.error(
                         "deployment_symbol_blocked_uncertain_after_submit "

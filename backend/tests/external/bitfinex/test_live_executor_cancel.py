@@ -47,7 +47,7 @@ async def test_cancel_retry_checks_current_scoped_uncertainty(capital_db, monkey
 
     from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
     from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-    from bfx_funding_bot.modules.execution.safety.hard_guards import DatabaseUncertaintyReader
+    from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
     from tests.integration.test_capital_command_boundary import (
         append_cancel_race_unknown,
         cancel_http_boundary,
@@ -65,7 +65,7 @@ async def test_cancel_retry_checks_current_scoped_uncertainty(capital_db, monkey
             if scope == "unreadable":
                 async def unavailable(*args, **kwargs):
                     raise RuntimeError("synthetic uncertainty read failure")
-                monkeypatch.setattr(DatabaseUncertaintyReader, "list_open", unavailable)
+                monkeypatch.setattr(LegacyUncertaintyReader, "list_open", unavailable)
             elif scope != "clear":
                 await append_cancel_race_unknown(factory,
                     uuid4() if scope == "other_account" else account,

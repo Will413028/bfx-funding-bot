@@ -99,8 +99,9 @@ class Guard(OfferEnvelopeGuard):
 
     def __init__(self, *, policy: CapitalPolicy | Exception = POLICY, open_offers: int = 0,
                  market: MarketSnapshot | None = MARKET) -> None:
-        super().__init__(runtime=SimpleNamespace(), book=Book(market),  # type: ignore[arg-type]
-                         clock=lambda: 1_000)
+        super().__init__(authority=SimpleNamespace(), offers=SimpleNamespace(),  # type: ignore[arg-type]
+                         scope=SimpleNamespace(), session_factory=SimpleNamespace(),  # type: ignore[arg-type]
+                         book=Book(market), clock=lambda: 1_000)
         self.policy, self.open_offers = policy, open_offers
 
     async def _policy_and_open(self, session: Any, symbol: str) -> tuple[CapitalPolicy, int]:
@@ -109,6 +110,9 @@ class Guard(OfferEnvelopeGuard):
         return self.policy, self.open_offers
 
 
+# Placeholders: these tests never reach the policy or managed-offer reads.
+PORTS: Any = {"authority": SimpleNamespace(), "offers": SimpleNamespace(),
+              "scope": SimpleNamespace(), "session_factory": SimpleNamespace()}
 SESSION_CTX = replace(CTX, command_session=object())  # type: ignore[arg-type]
 
 
@@ -334,10 +338,8 @@ def test_live_config_carries_the_throttle_and_the_live_writer_requires_it() -> N
         require_pre_trade_limits(None)
     assert isinstance(missing.value, ConfigurationError)
     with pytest.raises(PreTradeConfigurationError, match="funding book"):
-        build_pre_trade_guards(runtime=SimpleNamespace(), book=None,  # type: ignore[arg-type]
-                               clock=lambda: 1)
-    guards = build_pre_trade_guards(runtime=SimpleNamespace(),  # type: ignore[arg-type]
-                                    book=Book(None), clock=lambda: 1)
+        build_pre_trade_guards(**PORTS, book=None, clock=lambda: 1)
+    guards = build_pre_trade_guards(**PORTS, book=Book(None), clock=lambda: 1)
     assert [guard.name for guard in guards] == ["offer_envelope"]
 
 
@@ -435,7 +437,7 @@ def test_an_envelope_requires_the_amount_ceiling() -> None:
 
 def _view(policy: CapitalPolicy, max_new_offer: str) -> Any:
     budget = SimpleNamespace(spendable=Decimal("1000"), max_new_offer=Decimal(max_new_offer))
-    return SimpleNamespace(applied=SimpleNamespace(policy=policy), snapshot_seq=1, budget=budget,
+    return SimpleNamespace(applied=SimpleNamespace(policy=policy), basis_token="1", budget=budget,
                            snapshot=SimpleNamespace(cell_exposure=Decimal("0")))
 
 

@@ -18,6 +18,8 @@ STRATEGY_NO_INTERNAL_ACCESS_MAX_IGNORES = 0
 TRADING_IS_PURE_MAX_IGNORES = 0
 
 MAX_IGNORES_BY_ID = {
+    "capital-consumers-via-ports": 0,
+    "planner-via-ports": 0,
     "ledger-no-internal-access": 0,
     "ledger-wiring-is-top": 0,
     "ledger-not-legacy": 0,
@@ -143,6 +145,30 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     assert ledger_internal["forbidden_modules"] == ["bfx_funding_bot.modules.ledger._internal"]
     assert ledger_internal["as_packages"] is True
     assert ledger_internal["allow_indirect_imports"] is True
+    legacy_authority = {
+        f"bfx_funding_bot.modules.execution.{name}"
+        for name in ("capital_repository", "capital_runtime", "event_store.tables",
+                     "uncertainty_tables")
+    }
+    consumers = contracts_by_id["capital-consumers-via-ports"]
+    assert set(consumers["source_modules"]) == {
+        "bfx_funding_bot.modules.admin.trading_status",
+        "bfx_funding_bot.modules.execution.contracts",
+        "bfx_funding_bot.modules.execution.deployment.sizing",
+        "bfx_funding_bot.modules.execution.managed_cancel",
+        "bfx_funding_bot.modules.execution.safety.hard_guards",
+        "bfx_funding_bot.modules.execution.safety.kill_switch",
+        "bfx_funding_bot.modules.execution.safety.pre_trade",
+    }
+    assert set(consumers["forbidden_modules"]) == legacy_authority | {
+        "bfx_funding_bot.modules.execution.amount_fingerprint",
+    }
+    planner = contracts_by_id["planner-via-ports"]
+    assert planner["source_modules"] == ["bfx_funding_bot.modules.execution.deployment.reconciler"]
+    assert set(planner["forbidden_modules"]) == legacy_authority
+    for contract in (consumers, planner):
+        assert contract["type"] == "forbidden"
+        assert contract["allow_indirect_imports"] is True
 
 
 def test_research_scripts_obtain_strategy_wiring_through_apps() -> None:

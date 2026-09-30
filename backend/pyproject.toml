@@ -535,3 +535,45 @@ source_modules = ["bfx_funding_bot.modules.trading"]
 forbidden_modules = ["bfx_funding_bot.modules.ledger"]
 ignore_imports = []
 broken_contract_guidance = "Inject ledger data into trading; do not add ignores."
+
+[[tool.importlinter.contracts]]
+id = "capital-consumers-via-ports"
+name = "Migrated capital consumers read the legacy authority only through the ledger ports"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.modules.admin.trading_status",
+    "bfx_funding_bot.modules.execution.contracts",
+    "bfx_funding_bot.modules.execution.deployment.sizing",
+    "bfx_funding_bot.modules.execution.managed_cancel",
+    "bfx_funding_bot.modules.execution.safety.hard_guards",
+    "bfx_funding_bot.modules.execution.safety.kill_switch",
+    "bfx_funding_bot.modules.execution.safety.pre_trade",
+]
+forbidden_modules = [
+    "bfx_funding_bot.modules.execution.amount_fingerprint",
+    "bfx_funding_bot.modules.execution.capital_repository",
+    "bfx_funding_bot.modules.execution.capital_runtime",
+    "bfx_funding_bot.modules.execution.event_store.tables",
+    "bfx_funding_bot.modules.execution.uncertainty_tables",
+]
+allow_indirect_imports = true
+ignore_imports = []
+broken_contract_guidance = "Read through the ledger facade's ports (apps injects the adapters); do not add ignores."
+
+[[tool.importlinter.contracts]]
+id = "planner-via-ports"
+name = "The deployment planner reads the legacy authority only through the ledger ports"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.modules.execution.deployment.reconciler"]
+# amount_fingerprint stays importable here only for its pure amount codec
+# (fingerprint_of / choose_fingerprinted_amount); fingerprints in use come from
+# ManagedOfferReader.
+forbidden_modules = [
+    "bfx_funding_bot.modules.execution.capital_repository",
+    "bfx_funding_bot.modules.execution.capital_runtime",
+    "bfx_funding_bot.modules.execution.event_store.tables",
+    "bfx_funding_bot.modules.execution.uncertainty_tables",
+]
+allow_indirect_imports = true
+ignore_imports = []
+broken_contract_guidance = "Read through the ledger facade's ports (apps injects the adapters); do not add ignores."

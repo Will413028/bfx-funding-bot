@@ -27,18 +27,20 @@ from collections import deque
 from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.errors import ConfigurationError
-from bfx_funding_bot.modules.execution.capital_repository import read_policy_unlocked
-from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
-from bfx_funding_bot.modules.execution.event_store.tables import VenueOfferStateRow
 from bfx_funding_bot.modules.execution.protocols import AccountContext, GuardResult
 from bfx_funding_bot.modules.execution.safety.config import PreTradeLimitsCfg
 from bfx_funding_bot.modules.execution.safety.protection import (
     COMMAND_RATE_EXCEEDED,
     ProtectionPort,
+)
+from bfx_funding_bot.modules.ledger import (
+    CapitalAuthority,
+    CapitalBlocked,
+    ManagedOfferReader,
+    Scope,
 )
 from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookProvider
 from bfx_funding_bot.modules.observability import alerts
@@ -80,6 +82,10 @@ def reference_bid_rate(bids: tuple[object, ...], *, period_days: int) -> Decimal
     return statistics.median(pool) if pool else None
 
 
+class _PolicyRefused(Exception):  # noqa: N818 - message is the authority's reason code
+    """The authority refused the policy read; its reason becomes the block text."""
+
+
 class OfferEnvelopeGuard:
     """One new offer against the applied policy's envelope; anything unknown refuses.
 
@@ -89,27 +95,24 @@ class OfferEnvelopeGuard:
     """
     name = OFFER_ENVELOPE
 
-    def __init__(self, *, runtime: CapitalRuntime, book: FundingBookProvider,
+    def __init__(self, *, authority: CapitalAuthority, offers: ManagedOfferReader, scope: Scope,
+                 session_factory: async_sessionmaker[AsyncSession], book: FundingBookProvider,
                  clock: Callable[[], int]) -> None:
-        self._runtime = runtime
+        self._authority = authority
+        self._offers = offers
+        self._scope = scope
+        self._session_factory = session_factory
         self._book = book
         self._clock = clock
 
     async def _policy_and_open(self, session: AsyncSession,
                                symbol: str) -> tuple[CapitalPolicy, int]:
-        repository = self._runtime.repository
-        policy = await read_policy_unlocked(
-            session, account_id=repository.account_id,
-            environment=repository.environment, symbol=symbol)
-        count = await session.scalar(select(func.count()).select_from(VenueOfferStateRow).where(
-            VenueOfferStateRow.exchange_account_id == repository.account_id,
-            VenueOfferStateRow.deployment_environment == repository.environment,
-            VenueOfferStateRow.symbol == symbol,
-            VenueOfferStateRow.is_terminal.is_(False),
-            # Managed offers only (D2): a manual offer never takes a slot.
-            VenueOfferStateRow.execution_decision_id.is_not(None),
-        ))
-        return policy, int(count or 0)
+        applied = await self._authority.read_policy(session, self._scope, symbol)
+        if isinstance(applied, CapitalBlocked):
+            raise _PolicyRefused(applied.reason)
+        # Managed offers only (D2): a manual offer never takes a slot.
+        count = await self._offers.count_live(session, self._scope, symbol)
+        return applied.policy, count
 
     def _block(self, reason: str) -> GuardResult:
         return GuardResult(False, self.name, reason)
@@ -128,7 +131,7 @@ class OfferEnvelopeGuard:
                 policy, open_offers = await self._policy_and_open(
                     ctx.command_session, decision.symbol)
             else:
-                async with self._runtime.session_factory() as session:
+                async with self._session_factory() as session:
                     policy, open_offers = await self._policy_and_open(session, decision.symbol)
         except Exception as exc:
             return self._block(f"policy_unavailable: {exc}")
@@ -230,12 +233,15 @@ def require_pre_trade_limits(cfg: PreTradeLimitsCfg | None) -> PreTradeLimitsCfg
     return cfg
 
 
-def build_pre_trade_guards(*, runtime: CapitalRuntime, book: FundingBookProvider | None,
+def build_pre_trade_guards(*, authority: CapitalAuthority, offers: ManagedOfferReader,
+                           scope: Scope, session_factory: async_sessionmaker[AsyncSession],
+                           book: FundingBookProvider | None,
                            clock: Callable[[], int]) -> list[OfferEnvelopeGuard]:
     """The envelope guard; a live writer needs a book for the rate floor."""
     if book is None:
         raise PreTradeConfigurationError("offer_envelope needs the live funding book")
-    return [OfferEnvelopeGuard(runtime=runtime, book=book, clock=clock)]
+    return [OfferEnvelopeGuard(authority=authority, offers=offers, scope=scope,
+                               session_factory=session_factory, book=book, clock=clock)]
 
 
 def build_command_throttle(cfg: PreTradeLimitsCfg, *, protection: ProtectionPort | None,

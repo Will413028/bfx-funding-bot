@@ -303,6 +303,38 @@ def test_transient_observation_states_are_not_protections(reason: str) -> None:
     assert reason not in CAPITAL_BLOCK_TRIGGERS
 
 
+def test_capital_block_trigger_keeps_every_legacy_reason_and_maps_the_ledger_ones() -> None:
+    """G11: one pure reason -> trigger mapping for both authorities. Legacy codes
+    keep their triggers exactly; the ledger's integrity codes halt as their
+    legacy analogues do; its unbounded tail is transient (retry, never halt)."""
+    from bfx_funding_bot.modules.execution.safety.protection import (
+        CAPITAL_BLOCK_TRANSIENT,
+        CAPITAL_BLOCK_TRIGGERS,
+        capital_block_trigger,
+    )
+    legacy = {
+        "unclassifiable_commitment": "unclassifiable_commitment",
+        "offer_amount_conflict": "offer_amount_mismatch",
+        **dict.fromkeys((
+            "offer_provenance_conflict", "offer_attempt_conflict", "attempt_decision_conflict",
+            "attempt_amount_conflict", "attempt_projection_conflict", "attempt_intent_conflict",
+            "attempt_intent_scope_conflict", "attempt_outcome_evidence_conflict",
+            "attempt_outcome_evidence_identity", "attempt_outcome_evidence_scope",
+            "duplicate_attempt_intent", "execution_unknown_resolution_conflict",
+            "snapshot_conflicting_identity",
+        ), "identity_conflict"),
+    }
+    ledger = {"attempt_evidence_conflict": "identity_conflict",
+              "uncertainty_scope_conflict": "identity_conflict"}
+    assert legacy | ledger == CAPITAL_BLOCK_TRIGGERS
+    for reason, trigger in (legacy | ledger).items():
+        assert capital_block_trigger(reason) == trigger
+    assert {"attempt_tail_unbounded"} == CAPITAL_BLOCK_TRANSIENT
+    for reason in (*CAPITAL_BLOCK_TRANSIENT, "snapshot_stale", "not_a_reason"):
+        assert capital_block_trigger(reason) is None
+    assert set(CAPITAL_BLOCK_TRIGGERS.values()) <= TRIGGERS
+
+
 # ------------------------------------------- automatic resume (ADR 2026-09-26)
 
 MIN_HALT = 15 * 60 * 1000

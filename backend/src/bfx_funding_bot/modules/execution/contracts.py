@@ -14,7 +14,7 @@ from uuid import UUID
 from bfx_funding_bot.external.bitfinex.funding_rules import FundingAmountEvidence
 
 if TYPE_CHECKING:
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalView
+    from bfx_funding_bot.modules.ledger import CapitalAvailable
     from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
 
 from bfx_funding_bot.modules.strategy import DecisionPayload
@@ -102,7 +102,7 @@ class ReadyToSubmit:
     model_version: str | None
     evidence: Mapping[str, object]
     safety: GuardResult
-    capital_view: CapitalView | None = None
+    capital_view: CapitalAvailable | None = None
     market_snapshot: MarketSnapshot | None = None
     funding_amount_evidence: FundingAmountEvidence | None = None
 

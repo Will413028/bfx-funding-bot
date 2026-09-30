@@ -5,10 +5,14 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 
+from bfx_funding_bot.modules.accounts.capital_conversion import (
+    convert_capital_policy as _convert_capital_policy,
+)
 from bfx_funding_bot.modules.accounts.tables import AccountConfigDraft
 from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnapshotObserved
+from bfx_funding_bot.modules.execution.legacy_ports import LegacyScopeLock
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow
 from tests.integration.test_capital_repository import (
@@ -20,6 +24,12 @@ from tests.integration.test_capital_repository import (
 
 # Re-export real DB fixtures; PG variants retain the integration marker.
 __all__ = ["capital_db", "capital_engine"]
+
+
+async def convert_capital_policy(session, *, repository, **kwargs):  # type: ignore[no-untyped-def]
+    """The operator conversion, locked as the script locks it (legacy scope lock)."""
+    return await _convert_capital_policy(session, repository=repository,
+                                         scope_lock=LegacyScopeLock(repository), **kwargs)
 
 
 async def currency_snapshot(factory, repo, **overrides):
@@ -45,13 +55,13 @@ async def currency_snapshot(factory, repo, **overrides):
 async def test_conversion_matches_canonical_runtime_exposure(capital_db, kind):
     from dataclasses import replace
 
-    from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
     from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
     from bfx_funding_bot.modules.execution.event_store.entities import (
         VenueCreditObservation,
         VenueOfferObservation,
     )
     from bfx_funding_bot.modules.execution.events import ReservationClaimed
+    from tests.integration.test_capital_command_boundary import read_capital
     from tests.integration.test_capital_repository import intent, setup_policy, simulated_guard
 
     factory, account = capital_db
@@ -84,7 +94,7 @@ async def test_conversion_matches_canonical_runtime_exposure(capital_db, kind):
         report = await convert_capital_policy(session, repository=repo, legacy=legacy(),
                                               now_ms=1100, apply_digest=None)
     for cell in ("fUST_a30", "fUST_p2"):
-        view = await runtime.read(symbol="fUST", cell_id=cell)
+        view = await read_capital(runtime, cell)
         values = report["symbols"]["fUST"]["cells"][cell]
         # An unattributed credit is in T only, so no cell carries it.
         expected_exposure = Decimal("600") if cell == "fUST_a30" and kind != "shared_credit" else Decimal("0")
@@ -108,7 +118,6 @@ def legacy():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("usd_balance", [None, "0", "250"], ids=["ust_only", "usd_zero", "usd_balance"])
 async def test_preview_apply_preserves_draft_and_history_and_never_resumes(capital_db, usd_balance):
-    from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
     factory, account = capital_db
     repo = repository(account)
     wallets = {"fUST": Decimal("1000")}
@@ -177,7 +186,6 @@ async def _open_unknown(factory, repo, account, symbol):
 async def test_an_unknown_on_the_disabled_currency_withholds_only_that_currency(capital_db):
     """Ladder level 2 is per symbol (lending envelope T2): an UNKNOWN fUSD
     submit says nothing about fUST's wallet, so fUST is still evaluated."""
-    from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
 
     factory, account = capital_db
     repo = repository(account)
@@ -198,7 +206,6 @@ async def test_an_unknown_on_the_disabled_currency_withholds_only_that_currency(
     ("unknown_ust", "execution_unknown"),
 ])
 async def test_disabled_currency_does_not_bypass_enabled_or_account_guards(capital_db, fault, reason):
-    from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
     from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
 
     factory, account = capital_db
@@ -230,7 +237,6 @@ async def test_disabled_currency_does_not_bypass_enabled_or_account_guards(capit
 @pytest.mark.asyncio
 @pytest.mark.parametrize("changed", ["snapshot", "legacy", "policy"])
 async def test_ust_only_conversion_digest_binds_enabled_evidence_and_sources(capital_db, changed):
-    from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
     from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
     from bfx_funding_bot.modules.trading import CapitalPolicy
 
@@ -260,7 +266,6 @@ async def test_ust_only_conversion_digest_binds_enabled_evidence_and_sources(cap
 
 @pytest.mark.asyncio
 async def test_invalid_legacy_and_stale_draft_do_not_apply(capital_db):
-    from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
     from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
     factory, account = capital_db
     repo = repository(account)

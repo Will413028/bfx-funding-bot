@@ -36,6 +36,7 @@ from bfx_funding_bot.modules.execution.capital_repository import (
     CapitalBlockedError,
     CapitalRepository,
 )
+from bfx_funding_bot.modules.execution.legacy_ports import LegacyScopeLock
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -45,7 +46,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                                  max_snapshot_age_ms=60_000)
         async with make_session_factory(engine)() as session:
             report = await amend_capital_policy(
-                session, repository=repo, symbol=args.symbol,
+                session, repository=repo, scope_lock=LegacyScopeLock(repo), symbol=args.symbol,
                 changes=_changes(args), apply_digest=args.apply_digest)
             if report["status"] == "applied":
                 await session.commit()

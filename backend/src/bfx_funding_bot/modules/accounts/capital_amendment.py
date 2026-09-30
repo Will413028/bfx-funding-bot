@@ -27,6 +27,7 @@ from bfx_funding_bot.modules.execution.capital_repository import (
     CapitalBlockedError,
     CapitalRepository,
 )
+from bfx_funding_bot.modules.ledger import Scope, ScopeLock
 from bfx_funding_bot.modules.trading import (
     CapitalPolicy,
     OfferEnvelope,
@@ -83,8 +84,8 @@ def _amended(policy: CapitalPolicy, changes: PolicyChanges) -> CapitalPolicy:
 
 
 async def amend_capital_policy(
-    session: AsyncSession, *, repository: CapitalRepository, symbol: str,
-    changes: PolicyChanges, apply_digest: str | None,
+    session: AsyncSession, *, repository: CapitalRepository, scope_lock: ScopeLock,
+    symbol: str, changes: PolicyChanges, apply_digest: str | None,
     origin: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Return the dry-run report, or apply exactly that report. The caller commits.
@@ -94,7 +95,7 @@ async def amend_capital_policy(
     """
     if not changes.as_dict():
         raise CapitalBlockedError("no_changes_requested")
-    await repository.writer.prepare_locked(session, account_id=repository.account_id)
+    await scope_lock.lock(session, Scope(repository.account_id, repository.environment))
     applied = await repository.read_applied(session, symbol=symbol)
     amended = _amended(applied.policy, changes)
     report: dict[str, Any] = {

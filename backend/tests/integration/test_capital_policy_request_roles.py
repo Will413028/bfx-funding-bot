@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
+from bfx_funding_bot.modules.execution.legacy_ports import LegacyScopeLock
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
 
@@ -198,8 +199,11 @@ def test_the_bot_applies_a_web_api_request_as_a_new_revision(migrated):
             async def allow(session, *, account_id, user) -> bool:
                 return user == "operator"
 
-            worker = CapitalPolicyRequestWorker(session_factory=bot, account_id=_A, environment="ci",
-                                                authority=allow, clock=lambda: 6)
+            worker = CapitalPolicyRequestWorker(
+                session_factory=bot, account_id=_A, environment="ci", authority=allow,
+                scope_lock=LegacyScopeLock(CapitalRepository(
+                    account_id=_A, environment="ci", max_snapshot_age_ms=60_000)),
+                clock=lambda: 6)
             assert await worker.tick() is True
             async with bot() as session:
                 row = await session.get(CapitalPolicyRequestRow, request_id)

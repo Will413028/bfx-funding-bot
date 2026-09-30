@@ -1,10 +1,14 @@
-"""Shared applied capital reader for planning, diagnostics and command guards."""
+"""The live legacy capital authority's handles, for the legacy command boundary.
+
+Reads go through the ledger facade's ports (``execution.legacy_ports`` builds
+the legacy ones from this); the command gate still binds intents through the
+repository here until its journal port lands (S1-3c2).
+"""
 from collections.abc import Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprints_in_use
-from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository, CapitalView
+from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 
 
 class CapitalRuntime:
@@ -13,19 +17,3 @@ class CapitalRuntime:
         self.repository = repository
         self.session_factory = session_factory
         self.clock = clock
-
-    async def read(self, *, symbol: str, cell_id: str,
-                   session: AsyncSession | None = None) -> CapitalView:
-        if session is not None:
-            return await self.repository.read_capital(
-                session, symbol=symbol, cell_id=cell_id, now_ms=self.clock(),
-            )
-        # Advisory-lock replay can update projections. A preview rolls those
-        # updates back; only the command/snapshot owner may commit them.
-        async with self.session_factory() as owned:
-            return await self.read(symbol=symbol, cell_id=cell_id, session=owned)
-
-    async def fingerprints_in_use(self, *, symbol: str, session: AsyncSession) -> frozenset[int]:
-        """Amount fingerprints the planner must not reuse for ``symbol`` (D3a)."""
-        return await fingerprints_in_use(session, account_id=self.repository.account_id,
-                                         environment=self.repository.environment, symbol=symbol)

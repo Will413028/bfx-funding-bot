@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.execution.capital_repository import (
     CapitalRepository,
 )
 from bfx_funding_bot.modules.execution.safety.hard_guards import resolve_for_symbol_with_source
+from bfx_funding_bot.modules.ledger import Scope, ScopeLock
 from bfx_funding_bot.modules.ledger.tables import CapitalPolicyHeadRow, CapitalPolicyRevisionRow
 from bfx_funding_bot.modules.strategy import canonical_cell_id
 from bfx_funding_bot.modules.trading import CapitalPolicy, policy_payload
@@ -72,8 +73,8 @@ def _legacy_values(raw: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
 
 
 async def convert_capital_policy(
-    session: AsyncSession, *, repository: CapitalRepository, legacy: dict[str, Any],
-    now_ms: int, apply_digest: str | None,
+    session: AsyncSession, *, repository: CapitalRepository, scope_lock: ScopeLock,
+    legacy: dict[str, Any], now_ms: int, apply_digest: str | None,
 ) -> dict[str, Any]:
     """Return reviewable dry-run, or apply that exact report in the same txn.
 
@@ -81,7 +82,7 @@ async def convert_capital_policy(
     silently recalculating a different conversion. An exact repeated apply is
     idempotent; later policy or draft changes invalidate it.
     """
-    await repository.writer.prepare_locked(session, account_id=repository.account_id)
+    await scope_lock.lock(session, Scope(repository.account_id, repository.environment))
     source, invalid = _legacy_values(legacy)
     if invalid:
         if apply_digest is not None:

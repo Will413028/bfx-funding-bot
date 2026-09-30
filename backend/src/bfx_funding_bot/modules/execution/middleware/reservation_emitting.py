@@ -52,6 +52,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
+from bfx_funding_bot.modules.ledger import ManagedOfferReader
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ class ReservationEmittingMiddleware:
         uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
         safety_evaluator: AuthoritativeSafetyEvaluator | None = None,
         capital_runtime: CapitalRuntime | None = None,
+        managed_offers: ManagedOfferReader | None = None,
     ) -> None:
         if not is_simulated and uncertainty_handler is None:
             raise ValueError(
@@ -109,6 +111,7 @@ class ReservationEmittingMiddleware:
                 date_provider=self._date_provider,
                 uncertainty_handler=uncertainty_handler,
                 capital_runtime=capital_runtime,
+                managed_offers=managed_offers,
             )
 
     @property

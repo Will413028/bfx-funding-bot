@@ -19,11 +19,10 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.modules.execution.event_store.tables import VenueOfferStateRow
 from bfx_funding_bot.modules.execution.protocols import AccountContext, CancelPort
+from bfx_funding_bot.modules.ledger import LiveManagedOffer, ManagedOfferReader, Scope
 
 log = logging.getLogger(__name__)
 
@@ -36,24 +35,19 @@ class SweepResult:
 
 class ManagedOfferSweep:
     def __init__(self, *, session_factory: async_sessionmaker[AsyncSession], account_id: UUID,
-                 environment: str, canceller: CancelPort, ctx: AccountContext) -> None:
+                 environment: str, canceller: CancelPort, ctx: AccountContext,
+                 offers: ManagedOfferReader) -> None:
         self._sf = session_factory
-        self._account_id = account_id
-        self._environment = environment
+        self._scope = Scope(account_id, environment)
         self._canceller = canceller
         self._ctx = ctx
+        self._offers = offers
 
-    async def managed_open(self, symbols: Collection[str] | None = None) -> list[VenueOfferStateRow]:
+    async def managed_open(
+        self, symbols: Collection[str] | None = None,
+    ) -> tuple[LiveManagedOffer, ...]:
         async with self._sf() as session:
-            query = select(VenueOfferStateRow).where(
-                VenueOfferStateRow.exchange_account_id == self._account_id,
-                VenueOfferStateRow.deployment_environment == self._environment,
-                VenueOfferStateRow.is_terminal.is_(False),
-                VenueOfferStateRow.execution_decision_id.is_not(None),
-            )
-            if symbols is not None:
-                query = query.where(VenueOfferStateRow.symbol.in_(list(symbols)))
-            return list((await session.scalars(query.order_by(VenueOfferStateRow.venue_offer_id))).all())
+            return await self._offers.live(session, self._scope, symbols)
 
     async def cancel(self, symbols: Collection[str] | None = None, *, reason: str) -> SweepResult:
         """Cancel every open managed offer (of ``symbols``, or all of them)."""

@@ -14,6 +14,7 @@ from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardRe
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+from bfx_funding_bot.modules.execution.legacy_ports import LegacyManagedOffers
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials, SubmittedOrder
 from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
@@ -38,20 +39,68 @@ from .test_capital_repository import (
 AMOUNT = "499.99990500"
 
 
+def capital_scope(runtime):
+    from bfx_funding_bot.modules.ledger import Scope
+    return Scope(runtime.repository.account_id, runtime.repository.environment)
+
+
+def policy_guard(runtime):
+    """The production capital guard over the legacy authority (apps wiring)."""
+    from bfx_funding_bot.modules.execution.legacy_ports import LegacyCapitalAuthority
+    from bfx_funding_bot.modules.execution.safety.hard_guards import CapitalPolicyGuard
+    return CapitalPolicyGuard(authority=LegacyCapitalAuthority(runtime),
+                              scope=capital_scope(runtime), clock=runtime.clock)
+
+
+async def read_capital(runtime, cell_id, symbol="fUST"):
+    """What the planner reads for one cell (the legacy authority's port answer)."""
+    from bfx_funding_bot.modules.execution.legacy_ports import LegacyCapitalAuthority
+    from bfx_funding_bot.modules.ledger import CapitalAvailable
+    from bfx_funding_bot.modules.trading import CapitalScope
+    scope = capital_scope(runtime)
+    view = await LegacyCapitalAuthority(runtime).read(
+        CapitalScope(scope.exchange_account_id, scope.deployment_environment, symbol, cell_id),
+        now_ms=runtime.clock())
+    assert isinstance(view, CapitalAvailable), view
+    return view
+
+
+def status_reads(runtime):
+    from bfx_funding_bot.modules.admin.trading_status import CapitalStatusReads
+    from bfx_funding_bot.modules.execution.legacy_ports import (
+        LegacyCapitalAuthority,
+        LegacyScopeLock,
+    )
+    return CapitalStatusReads(authority=LegacyCapitalAuthority(runtime),
+                              lock=LegacyScopeLock(runtime.repository),
+                              scope=capital_scope(runtime),
+                              session_factory=runtime.session_factory, clock=runtime.clock)
+
+
+def planner_ports(runtime):
+    from bfx_funding_bot.modules.execution.legacy_ports import (
+        LegacyCapitalAuthority,
+        LegacyManagedOffers,
+        LegacyUncertaintyReader,
+    )
+    return {"capital": LegacyCapitalAuthority(runtime), "offers": LegacyManagedOffers(),
+            "uncertainty": LegacyUncertaintyReader(runtime.session_factory),
+            "scope": capital_scope(runtime), "session_factory": runtime.session_factory}
+
+
 @pytest.mark.asyncio
 async def test_policy_guard_and_planner_use_total_capital_cell_limit(capital_db):
     from bfx_funding_bot.modules.execution.deployment.sizing import allocate_capital
-    from bfx_funding_bot.modules.execution.safety.hard_guards import CapitalPolicyGuard
     factory, account = capital_db
     _, _, ready, ctx, runtime, _ = await boundary(factory, account)
-    guard = CapitalPolicyGuard(runtime=runtime)
+    guard = policy_guard(runtime)
     ctx = replace(ctx, capital_cell_id="a30")
     too_large = ready.decision.model_copy(update={"offer_amount_usdt": Decimal("701")})
     assert not (await guard.evaluate(too_large, ctx)).allowed
-    view = await runtime.read(symbol="fUST", cell_id="a30")
+    view = await read_capital(runtime, "a30")
     assert allocate_capital(views={"a30": view}, min_fill=Decimal("153")) == {"a30": Decimal("700")}
     # Both normal cells can consume the cash, without relaxing the single-cell limit.
-    other = await runtime.read(symbol="fUST", cell_id="p2")
+    other = await read_capital(runtime, "p2")
     assert allocate_capital(views={"a30": view, "p2": other}, min_fill=Decimal("153")) == {
         "a30": Decimal("700"), "p2": Decimal("300"),
     }
@@ -68,7 +117,9 @@ async def test_planner_attaches_the_status_budget_and_revision(capital_db):
     factory, account = capital_db
     _, _, _, _, runtime, _ = await boundary(factory, account)
     rec, ex, *_ = _build(exposure=Decimal("0"), quotes=[_post_quote("fUST_a30")],
-                         capital_runtime=runtime)
+                         capital_ports=planner_ports(runtime))
+    # The planner reads capital at its own clock (the daemon injects one clock).
+    rec._clock = runtime.clock
     await rec.deploy()
     planned = ex.ready_submissions[0]
     # The 700 budget, fingerprinted (D3a): below it by less than 0.0001.
@@ -87,18 +138,17 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(cap
     from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
     from bfx_funding_bot.modules.execution.deployment.submit_attempt import SubmitAttemptRecorder
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-    from bfx_funding_bot.modules.execution.safety.hard_guards import CapitalPolicyGuard
     from bfx_funding_bot.modules.strategy import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell
     factory, account = capital_db
     gate, _, ready, ctx, runtime, halt = await boundary(factory, account)
-    chain = SafetyGuardChain(guards=[ManualKillGuard(trading_state=halt), CapitalPolicyGuard(runtime=runtime)],
+    chain = SafetyGuardChain(guards=[ManualKillGuard(trading_state=halt), policy_guard(runtime)],
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30", account_id=str(account))
     service = TradingStatusService(chain=chain, ledger=None, account_ctx=ctx,
         cells=[_cell("fUST", "a30"), _cell("fUST", "p2")], caps={}, default_cap=Decimal("0"),
         env_fallback_cap=None, buffers={}, default_buffer=Decimal("0"), env_fallback_buffer=None,
-        phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), trading_state=halt, capital_runtime=runtime)
+        phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), trading_state=halt, capital=status_reads(runtime))
     snapshot = await service.snapshot()
     assert snapshot["account_id"] == str(account)
     assert snapshot["deployment_environment"] == "ci"
@@ -174,7 +224,7 @@ async def test_status_with_an_envelope_serializes_to_json(capital_db):
     service = TradingStatusService(chain=chain, ledger=None, account_ctx=ctx,
         cells=[_cell("fUST", "a30")], caps={}, default_cap=Decimal("0"),
         env_fallback_cap=None, buffers={}, default_buffer=Decimal("0"), env_fallback_buffer=None,
-        phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), trading_state=halt, capital_runtime=runtime)
+        phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), trading_state=halt, capital=status_reads(runtime))
     symbols = json.loads(json.dumps(await service.snapshot()))["symbols"]
     for symbol in ("fUST", "fUSD"):
         assert symbols[symbol]["policy"]["envelope"] == {
@@ -224,7 +274,7 @@ async def boundary(factory, account):
     await setup_policy(factory, repo, reserve="0", fraction="0.70")
     await snapshot(factory, repo)
     runtime = CapitalRuntime(repository=repo, session_factory=factory, clock=lambda: 1100)
-    view = await runtime.read(symbol="fUST", cell_id="a30")
+    view = await read_capital(runtime, "a30")
     event, row = intent(account, AMOUNT, 10)
     from tests.external.bitfinex.test_funding_rules import evidence
     from tests.modules.execution.deployment.test_reconciler import _valid_snapshot
@@ -249,7 +299,8 @@ async def boundary(factory, account):
                                      session_factory=factory),
         uncertainty_reader=DatabaseOpenUncertaintyReader(factory),
         safety_evaluator=stop_chain(halt, account), deployment_environment="ci",
-        capital_runtime=runtime, clock=lambda: 1100, is_simulated=False)
+        capital_runtime=runtime, managed_offers=LegacyManagedOffers(), clock=lambda: 1100,
+        is_simulated=False)
     ctx = AccountContext(str(account), Credentials("mock", "mock"), Decimal("0"))
     return gate, venue, ready, ctx, runtime, halt
 
@@ -316,7 +367,7 @@ async def test_stop_blocks_submit_but_cancel_stays_durable_before_io(capital_db,
             EventLogRow.event_type == "RESERVATION_INTENT"))).all()
     assert len(intents) == 1
     # A cancel ACK never releases capital inside this boundary.
-    view = await runtime.read(symbol="fUST", cell_id="a30")
+    view = await read_capital(runtime, "a30")
     assert view.budget.spendable == Decimal("1000") - Decimal(AMOUNT)
 
 
@@ -436,7 +487,8 @@ async def test_independent_command_gates_cannot_spend_same_budget(pg_session_fac
     competitor = AccountCommandGate(venue, bus=DomainEventBus(), persister=gate._persister,
         uncertainty_reader=DatabaseOpenUncertaintyReader(factory),
         safety_evaluator=ManualKillGuard(trading_state=halt), deployment_environment="ci",
-        capital_runtime=runtime, clock=lambda: 1100, is_simulated=False)
+        capital_runtime=runtime, managed_offers=LegacyManagedOffers(), clock=lambda: 1100,
+        is_simulated=False)
     results = await asyncio.gather(gate.submit(first, ctx), competitor.submit(second, ctx),
                                    return_exceptions=True)
     assert sum(isinstance(r, SubmittedOrder) for r in results) == 1
@@ -521,7 +573,7 @@ async def test_stopped_reconcile_never_reposts(capital_db, stop):
     venue.received.clear()
     await halt.transition(stop, cause="operator", reason="retained startup halt", actor="test")
     rec, _, _, _ = _build(exposure=Decimal("0"), quotes=[_post_quote("fUST_a30")],
-        executor=gate, safety=stop_chain(halt, account), capital_runtime=runtime,
+        executor=gate, safety=stop_chain(halt, account), capital_ports=planner_ports(runtime),
         canceller=gate, reprice=_REPRICE)
     rec._ctx = ctx
     await rec.deploy(venue_offers=(_venue_offer("101", 0.001),))
@@ -538,20 +590,17 @@ async def test_real_guard_chain_reuses_authorization_session_without_double_rese
 
     from bfx_funding_bot.core.health import HealthProbe
     from bfx_funding_bot.core.telemetry import Phase
+    from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-    from bfx_funding_bot.modules.execution.safety.hard_guards import (
-        CapitalPolicyGuard,
-        DatabaseUncertaintyReader,
-        UncertaintyGuard,
-    )
+    from bfx_funding_bot.modules.execution.safety.hard_guards import UncertaintyGuard
     from bfx_funding_bot.modules.strategy import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink
     factory, account = capital_db
     gate, venue, ready, ctx, runtime, halt = await boundary(factory, account)
     gate._safety_evaluator = SafetyGuardChain(
         guards=[ManualKillGuard(trading_state=halt), UncertaintyGuard(
-            reader=DatabaseUncertaintyReader(factory), deployment_environment="ci"),
-            CapitalPolicyGuard(runtime=runtime)],
+            reader=LegacyUncertaintyReader(factory), deployment_environment="ci"),
+            policy_guard(runtime)],
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=str(account))
     result = await asyncio.wait_for(gate.submit(ready, ctx), timeout=5)
@@ -587,13 +636,12 @@ async def test_cancel_fault_rolls_back_evidence_and_never_calls_transport(capita
 @pytest.mark.asyncio
 async def test_capital_probe_does_not_commit_projection_replay(capital_db):
     from bfx_funding_bot.modules.execution.event_store.tables import ProjectionHeadRow
-    from bfx_funding_bot.modules.execution.safety.hard_guards import CapitalPolicyGuard
     factory, account = capital_db
     _, _, ready, ctx, runtime, _ = await boundary(factory, account)
     async with factory.begin() as session:
         cursor = await session.scalar(select(ProjectionHeadRow))
         cursor.last_event_seq = 0
-    result = await CapitalPolicyGuard(runtime=runtime).evaluate(ready.decision, replace(ctx, capital_cell_id="a30"))
+    result = await policy_guard(runtime).evaluate(ready.decision, replace(ctx, capital_cell_id="a30"))
     assert result.allowed
     async with factory() as session:
         assert (await session.scalar(select(ProjectionHeadRow))).last_event_seq == 0
@@ -609,12 +657,9 @@ async def cancel_http_boundary(factory, account, http, *, state="ACTIVE"):
     from bfx_funding_bot.core.health import HealthProbe
     from bfx_funding_bot.core.telemetry import Phase
     from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
+    from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-    from bfx_funding_bot.modules.execution.safety.hard_guards import (
-        CapitalPolicyGuard,
-        DatabaseUncertaintyReader,
-        UncertaintyGuard,
-    )
+    from bfx_funding_bot.modules.execution.safety.hard_guards import UncertaintyGuard
     from bfx_funding_bot.modules.strategy import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink
 
@@ -624,8 +669,8 @@ async def cancel_http_boundary(factory, account, http, *, state="ACTIVE"):
         await halt.transition(state, cause="operator", reason="stopped during cancel", actor="test")
     gate._safety_evaluator = SafetyGuardChain(
         guards=[ManualKillGuard(trading_state=halt), UncertaintyGuard(
-            reader=DatabaseUncertaintyReader(factory), deployment_environment="ci"),
-            CapitalPolicyGuard(runtime=runtime)],
+            reader=LegacyUncertaintyReader(factory), deployment_environment="ci"),
+            policy_guard(runtime)],
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=str(account))
     gate._inner = BitfinexLiveExecutor(
@@ -668,7 +713,7 @@ async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(cap
 
     import httpx
 
-    from bfx_funding_bot.modules.execution.safety.hard_guards import DatabaseUncertaintyReader
+    from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
 
     factory, account = capital_db
     requests = []
@@ -694,7 +739,7 @@ async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(cap
                 else:
                     async def unavailable(*args, **kwargs):
                         raise RuntimeError("synthetic uncertainty read failure")
-                    monkeypatch.setattr(DatabaseUncertaintyReader, "list_open", unavailable)
+                    monkeypatch.setattr(LegacyUncertaintyReader, "list_open", unavailable)
             # Scheduling hook only: never fake a guard verdict.
             return await original_guard(decision, context, **kwargs)
 

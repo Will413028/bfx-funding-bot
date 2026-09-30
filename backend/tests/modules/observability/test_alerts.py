@@ -24,6 +24,10 @@ import bfx_funding_bot.modules.execution.safety.tables
 import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
+from bfx_funding_bot.modules.execution.legacy_ports import (
+    LegacyManagedOffers,
+    LegacyUncertaintyReader,
+)
 from bfx_funding_bot.modules.execution.protocols import FundingCancelAllResult
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
@@ -303,6 +307,7 @@ async def test_kill_switch_alerts_its_cancel_all_result(
     result = await KillSwitch(
         trading_state=repo, session_factory=factory, ctx=ctx,  # type: ignore[arg-type]
         configured_symbols={"fUST", "fUSD"}, venue=Venue(failing), writer_lock=Lock(),
+        uncertainty=LegacyUncertaintyReader(factory), offers=LegacyManagedOffers(),
         clock=lambda: 5000,
     ).engage(cause="operator", actor="will", reason="stop everything")
     await _drain(sink)
