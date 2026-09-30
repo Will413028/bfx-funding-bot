@@ -15,7 +15,7 @@ from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPr
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
 from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookStore
-from tests.integration.test_capital_command_boundary import AMOUNT, boundary
+from tests.integration.test_capital_command_boundary import AMOUNT, boundary, planner_ports
 from tests.integration.test_capital_repository import capital_db as capital_db
 from tests.integration.test_capital_repository import capital_engine as capital_engine
 from tests.modules.execution.deployment.test_reconciler import _Readiness, _valid_snapshot
@@ -116,7 +116,7 @@ async def test_second_cell_uses_current_clock_for_its_book(capital_db):
     now = 1100
     rec, venue, *_ = _build(exposure=Decimal("0"),
         quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
-        capital_runtime=runtime, book_provider=book_store())
+        capital_ports=planner_ports(runtime), book_provider=book_store())
     rec._clock = lambda: now
     submit = venue.submit
     async def delayed_submit(*args, **kwargs):

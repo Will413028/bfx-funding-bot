@@ -39,10 +39,8 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.modules.execution.event_store.tables import VenueOfferStateRow
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     FundingCancelAllPort,
@@ -56,7 +54,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingState,
     TradingStateRepository,
 )
-from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
+from bfx_funding_bot.modules.ledger import ManagedOfferReader, Scope, UncertaintyReader
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
@@ -117,11 +115,15 @@ class KillSwitch:
         configured_symbols: Iterable[str],
         venue: FundingCancelAllPort | None,
         writer_lock: WriterLockHandle | None,
+        uncertainty: UncertaintyReader,
+        offers: ManagedOfferReader,
         quiesce: Quiesce | None = None,
         clock: Callable[[], int] | None = None,
     ) -> None:
         self._trading = trading_state
         self._sf = session_factory
+        self._uncertainty = uncertainty
+        self._offers = offers
         self._ctx = ctx
         self._configured = frozenset(configured_symbols)
         self._venue = venue
@@ -211,21 +213,11 @@ class KillSwitch:
         symbols = set(self._configured)
         error = None
         try:
+            scope = Scope(self._trading.account_id, self._trading.environment)
             async with self._sf() as session:
-                symbols.update(await session.scalars(
-                    select(ExecutionUncertaintyRow.symbol).where(
-                        ExecutionUncertaintyRow.exchange_account_id == self._trading.account_id,
-                        ExecutionUncertaintyRow.deployment_environment == self._trading.environment,
-                        ExecutionUncertaintyRow.state == "open",
-                    ).distinct()
-                ))
-                symbols.update(await session.scalars(
-                    select(VenueOfferStateRow.symbol).where(
-                        VenueOfferStateRow.exchange_account_id == self._trading.account_id,
-                        VenueOfferStateRow.deployment_environment == self._trading.environment,
-                        VenueOfferStateRow.is_terminal.is_(False),
-                    ).distinct()
-                ))
+                symbols.update(record.symbol for record in
+                               await self._uncertainty.list_open(session, scope))
+                symbols.update(await self._offers.live_symbols(session, scope))
         except Exception as exc:
             error = f"scope_unreadable: {type(exc).__name__}"
         currencies = {currency for currency in map(funding_currency, symbols) if currency}

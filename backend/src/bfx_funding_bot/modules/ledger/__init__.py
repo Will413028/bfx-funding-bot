@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal, Protocol
@@ -10,7 +10,13 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.trading import CapitalResult, CapitalScope
+from bfx_funding_bot.modules.trading import (
+    AppliedPolicy,
+    CapitalBudget,
+    CapitalResult,
+    CapitalScope,
+    CapitalSnapshot,
+)
 
 type JsonObject = dict[str, object]
 type OutcomeKind = Literal["ack", "rejected", "not_sent", "unknown"]
@@ -451,6 +457,142 @@ class LedgerManagedOffers(Protocol):
         ...
 
 
+# ---------------------------------------------------------------------------
+# Consumer read ports (S1-3c1). Runtime consumers depend on these Protocols
+# only; apps injects an implementation (the legacy adapters today). Every
+# method is bound to an explicit scope; a session argument joins the caller's
+# transaction.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CapitalAvailable:
+    """A spendable capital answer for one symbol/cell.
+
+    ``basis_token`` identifies the capital basis the answer was derived from.
+    It is opaque: consumers compare tokens for equality or pass one back to the
+    authority that issued it, and never parse it. User-visible output renders it
+    with ``basis_token_value``.
+    """
+
+    applied: AppliedPolicy
+    snapshot: CapitalSnapshot
+    budget: CapitalBudget
+    # Diagnostic: credits with no cell provenance. Part of total_capital, never
+    # of snapshot.cell_exposure.
+    unattributed_credit_exposure: Decimal
+    basis_token: str
+    attribution: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CapitalBlocked:
+    """No capital answer: nothing may be spent. ``reason`` is the authority's code."""
+
+    reason: str
+    evidence: tuple[tuple[str, str], ...] = ()
+
+
+type CapitalRead = CapitalAvailable | CapitalBlocked
+
+
+def basis_token_value(token: str) -> int | str:
+    """How a basis token appears in user-visible output (status, digests).
+
+    A plain decimal token is rendered as the JSON number those outputs have
+    always carried; any other token as its text. Presentation only: never use
+    the result to decide anything.
+    """
+    if token.isascii() and token.isdigit() and (token == "0" or not token.startswith("0")):
+        return int(token)
+    return token
+
+
+class CapitalAuthority(Protocol):
+    async def read(
+        self, scope: CapitalScope, *, now_ms: int, session: AsyncSession | None = None
+    ) -> CapitalRead:
+        """Capital for ``scope`` at ``now_ms`` (the caller's local clock).
+
+        With ``session`` the read joins the caller's transaction; without one
+        the authority reads in its own short, uncommitted session. Infrastructure
+        failures raise; every authority refusal is a ``CapitalBlocked``.
+        """
+        ...
+
+    async def read_policy(
+        self, session: AsyncSession, scope: Scope, symbol: str
+    ) -> AppliedPolicy | CapitalBlocked:
+        """The applied policy the scope's head points at, without taking any lock.
+
+        Read-only guards and the planner's stop check use this; the command
+        boundary re-binds the revision under the scope lock before any intent.
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class UncertaintyRecord:
+    """One open uncertainty. ``kind`` is the authority's code; unknown kinds block."""
+
+    exchange_account_id: UUID
+    deployment_environment: str
+    symbol: str
+    kind: str
+
+
+class UncertaintyReader(Protocol):
+    """Open uncertainty for one exact account/environment (and symbol).
+
+    ``session=None`` reads in the reader's own short session.
+    """
+
+    async def list_open(
+        self, session: AsyncSession | None, scope: Scope, symbol: str | None = None
+    ) -> tuple[UncertaintyRecord, ...]: ...
+
+    async def has_open(self, session: AsyncSession | None, scope: Scope, symbol: str) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LiveManagedOffer:
+    """A live offer this scope placed (traced to an execution decision)."""
+
+    venue_offer_id: str
+    symbol: str
+    signal_correlation_id: str | None
+
+
+class ManagedOfferReader(Protocol):
+    """Live-offer reads on the caller's session."""
+
+    async def live(
+        self, session: AsyncSession, scope: Scope, symbols: Collection[str] | None = None
+    ) -> tuple[LiveManagedOffer, ...]:
+        """Live managed offers (of ``symbols``, or all), ordered by venue offer id."""
+        ...
+
+    async def count_live(self, session: AsyncSession, scope: Scope, symbol: str) -> int:
+        """How many live managed offers ``symbol`` has; manual offers never count."""
+        ...
+
+    async def live_symbols(self, session: AsyncSession, scope: Scope) -> frozenset[str]:
+        """Symbols with any live offer, managed or not (the kill's cancel-all scope)."""
+        ...
+
+    async def fingerprints_in_use(
+        self, session: AsyncSession, scope: Scope, symbol: str
+    ) -> frozenset[int]:
+        """Amount fingerprints ``symbol``'s unresolved commitments still hold (D3a)."""
+        ...
+
+
+class ScopeLock(Protocol):
+    async def lock(self, session: AsyncSession, scope: Scope) -> None:
+        """Take the scope's transaction lock on ``session``; held until it ends."""
+        ...
+
+
 __all__ = [
     "CREDIT_STATUSES",
     "CREDIT_TERMINAL_KINDS",
@@ -460,6 +602,10 @@ __all__ = [
     "AcceptanceDecision",
     "Attempt",
     "CancelProvenance",
+    "CapitalAuthority",
+    "CapitalAvailable",
+    "CapitalBlocked",
+    "CapitalRead",
     "CapitalReadRefused",
     "Coverage",
     "Credit",
@@ -475,7 +621,9 @@ __all__ = [
     "LedgerObservations",
     "LedgerReadUnbounded",
     "LedgerUncertainties",
+    "LiveManagedOffer",
     "ManagedOffer",
+    "ManagedOfferReader",
     "ManagedOffers",
     "Observation",
     "Offer",
@@ -498,6 +646,10 @@ __all__ = [
     "ResolutionAlreadyRecorded",
     "ResolutionRejected",
     "Scope",
+    "ScopeLock",
     "Trade",
+    "UncertaintyReader",
+    "UncertaintyRecord",
     "Wallet",
+    "basis_token_value",
 ]

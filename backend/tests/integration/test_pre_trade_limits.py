@@ -26,6 +26,11 @@ from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedE
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, VenueOfferStateRow
 from bfx_funding_bot.modules.execution.events import PositionReconciled
+from bfx_funding_bot.modules.execution.legacy_ports import (
+    LegacyCapitalAuthority,
+    LegacyManagedOffers,
+    LegacyScopeLock,
+)
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
 from bfx_funding_bot.modules.execution.safety.nav_window_store import NavWindowStore
@@ -44,7 +49,14 @@ from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from tests.modules.execution.safety.test_pre_trade import Book, book
 from tests.pg_templates import alembic
 
-from .test_capital_command_boundary import boundary, second_ready, stop_chain
+from .test_capital_command_boundary import (
+    boundary,
+    capital_scope,
+    planner_ports,
+    read_capital,
+    second_ready,
+    stop_chain,
+)
 from .test_capital_repository import capital_db as capital_db
 from .test_capital_repository import capital_engine as capital_engine
 
@@ -77,11 +89,19 @@ FULL = PolicyChanges(max_offer_amount=Decimal("200"), min_period_days=2, max_per
 MARKET = Book(book((0.0003, 2), (0.0001, 2), (0.0002, 2)))  # relative floor 0.0001
 
 
+def _envelope_guard(runtime) -> OfferEnvelopeGuard:
+    return OfferEnvelopeGuard(authority=LegacyCapitalAuthority(runtime),
+                              offers=LegacyManagedOffers(), scope=capital_scope(runtime),
+                              session_factory=runtime.session_factory, book=MARKET,
+                              clock=lambda: 1_000)
+
+
 async def _amend(factory, runtime, changes: PolicyChanges, *,
                  digest: str | None = None) -> dict[str, Any]:
     async with factory() as session:
-        report = await amend_capital_policy(session, repository=runtime.repository, symbol="fUST",
-                                            changes=changes, apply_digest=digest)
+        report = await amend_capital_policy(session, repository=runtime.repository,
+                                            scope_lock=LegacyScopeLock(runtime.repository),
+                                            symbol="fUST", changes=changes, apply_digest=digest)
         if report["status"] == "applied":
             await session.commit()
         else:
@@ -93,7 +113,7 @@ async def _amend(factory, runtime, changes: PolicyChanges, *,
 async def test_policy_without_an_envelope_refuses_and_the_amendment_bounds_each_offer(capital_db):
     factory, account = capital_db
     gate, venue, ready, ctx, runtime, halt = await boundary(factory, account)
-    guard = OfferEnvelopeGuard(runtime=runtime, book=MARKET, clock=lambda: 1_000)
+    guard = _envelope_guard(runtime)
     gate._safety_evaluator = stop_chain(halt, account, guard)
 
     # Schema 1 (no envelope): refused inside the locked boundary, nothing durable.
@@ -115,7 +135,7 @@ async def test_policy_without_an_envelope_refuses_and_the_amendment_bounds_each_
     assert (applied["status"], applied["new_revision"]) == ("applied", 2)
     assert (await _amend(factory, runtime, FULL))["status"] == "unchanged"
 
-    view = await runtime.read(symbol="fUST", cell_id="a30")
+    view = await read_capital(runtime, "a30")
     with pytest.raises(CommandGateBlocked, match=r"offer_amount 499\.99990500 > max_offer_amount 200"):
         await gate.submit(replace(ready, capital_view=view), ctx)
     assert venue.received == [] and await _intents(factory) == 0
@@ -137,7 +157,7 @@ async def test_disabling_through_the_amendment_zeroes_the_budget(capital_db):
     report = await _amend(factory, runtime, PolicyChanges(enabled=False))
     await _amend(factory, runtime, PolicyChanges(enabled=False),
                  digest=report["amendment_digest"])
-    view = await runtime.read(symbol="fUST", cell_id="a30")
+    view = await read_capital(runtime, "a30")
     assert (view.budget.max_new_offer, view.budget.reason) == (Decimal("0"), "policy_disabled")
 
 
@@ -147,7 +167,7 @@ async def test_open_offers_are_counted_from_the_durable_projection(capital_db):
     _gate, _venue, _ready, ctx, runtime, _halt = await boundary(factory, account)
     report = await _amend(factory, runtime, FULL)
     await _amend(factory, runtime, FULL, digest=report["amendment_digest"])
-    guard = OfferEnvelopeGuard(runtime=runtime, book=MARKET, clock=lambda: 1_000)
+    guard = _envelope_guard(runtime)
     decision = DecisionPayload(decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
                                offer_rate=0.0002, offer_amount_usdt=200, offer_duration_days=2,
                                symbol="fUST")
@@ -316,10 +336,11 @@ async def test_disabling_a_currency_pulls_only_its_managed_offers(capital_db):
     await _offer_rows(factory, account)   # managed 101 (fUST), 102 (fUSD); foreign 555 (fUST)
     canceller = Canceller()
     planner = object.__new__(DeploymentReconciler)
-    planner._capital = runtime
+    for name, port in planner_ports(runtime).items():
+        setattr(planner, f"_{name}", port)
     planner._managed_sweep = ManagedOfferSweep(
         session_factory=factory, account_id=account, environment=runtime.repository.environment,
-        canceller=canceller, ctx=ctx)
+        canceller=canceller, ctx=ctx, offers=LegacyManagedOffers())
 
     assert await planner._pull_if_stopped("fUST") is False    # enabled, ACTIVE: nothing happens
     assert canceller.cancelled == []
@@ -346,10 +367,11 @@ async def test_a_halt_pulls_managed_offers_every_tick_until_none_is_left(capital
     await halt.transition("HALTED", cause="auto", actor="auto:identity_conflict", reason="x")
     canceller = Canceller(fail={"101"})
     planner = object.__new__(DeploymentReconciler)
-    planner._capital = runtime
+    for name, port in planner_ports(runtime).items():
+        setattr(planner, f"_{name}", port)
     planner._managed_sweep = ManagedOfferSweep(
         session_factory=factory, account_id=account, environment=runtime.repository.environment,
-        canceller=canceller, ctx=ctx)
+        canceller=canceller, ctx=ctx, offers=LegacyManagedOffers())
     assert await planner._pull_if_stopped("fUST") is True
     assert canceller.cancelled == []            # 101 failed; 555 is foreign
     canceller.fail.clear()

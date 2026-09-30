@@ -18,10 +18,11 @@ refuses its offers until one is set).
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.modules.accounts.capital_amendment import (
     PolicyChanges,
@@ -35,11 +36,13 @@ from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyReques
 from bfx_funding_bot.modules.execution.operator_requests import (
     APPLIED,
     REJECTED,
+    OperatorAuthority,
     OperatorRequestWorker,
     Outcome,
     RejectionKind,
     RequestRejected,
 )
+from bfx_funding_bot.modules.ledger import ScopeLock
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
@@ -64,6 +67,23 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
     model = CapitalPolicyRequestRow
     name = "capital_policy_request"
 
+    def __init__(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        account_id: UUID,
+        environment: str,
+        authority: OperatorAuthority,
+        scope_lock: ScopeLock,
+        clock: Callable[[], int] | None = None,
+        ownership: Callable[[], Awaitable[bool]] | None = None,
+        poll_interval_s: float = 2.0,
+    ) -> None:
+        super().__init__(session_factory=session_factory, account_id=account_id,
+                         environment=environment, authority=authority, clock=clock,
+                         ownership=ownership, poll_interval_s=poll_interval_s)
+        self.scope_lock = scope_lock
+
     def _repository(self) -> CapitalRepository:
         # Only the policy is read and written here; the snapshot age is unused.
         return CapitalRepository(account_id=self.account_id, environment=self.environment,
@@ -75,14 +95,16 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
         enabled = row.action == "enable"
         changes = PolicyChanges(enabled=enabled)
         try:
-            report = await amend_capital_policy(session, repository=repository, symbol=row.symbol,
+            report = await amend_capital_policy(session, repository=repository,
+                                                scope_lock=self.scope_lock, symbol=row.symbol,
                                                 changes=changes, apply_digest=None)
             if report["status"] == "unchanged":
                 current = await repository.read_applied(session, symbol=row.symbol)
                 return Outcome(APPLIED, f"unchanged: already {'enabled' if enabled else 'disabled'}",
                                columns={"policy_revision_id": current.revision_id})
             written = await amend_capital_policy(
-                session, repository=repository, symbol=row.symbol, changes=changes,
+                session, repository=repository, scope_lock=self.scope_lock, symbol=row.symbol,
+                changes=changes,
                 apply_digest=report["amendment_digest"],
                 origin={"request_id": str(row.request_id), "requested_by": row.requested_by,
                         "reason": row.reason})

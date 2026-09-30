@@ -28,10 +28,7 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
     format_venue_decimal,
 )
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-from bfx_funding_bot.modules.execution.amount_fingerprint import (
-    fingerprint_of,
-    fingerprints_in_use,
-)
+from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprint_of
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
@@ -52,6 +49,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationIntent,
     ReservationUnknown,
 )
+from bfx_funding_bot.modules.execution.legacy_ports import legacy_snapshot_seq
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     CancelPort,
@@ -68,6 +66,7 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     normalize_submit_payload,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
+from bfx_funding_bot.modules.ledger import ManagedOfferReader, Scope
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
@@ -159,6 +158,7 @@ class AccountCommandGate:
         date_provider: Callable[[], date] | None = None,
         uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
         capital_runtime: CapitalRuntime | None = None,
+        managed_offers: ManagedOfferReader | None = None,
     ) -> None:
         if not deployment_environment.strip():
             raise ValueError("deployment_environment must be non-empty")
@@ -175,6 +175,9 @@ class AccountCommandGate:
         if not is_simulated and capital_runtime is None:
             raise ValueError("live command gate requires applied capital runtime")
         self._capital = capital_runtime
+        if capital_runtime is not None and managed_offers is None:
+            raise ValueError("live command gate requires managed offer reads")
+        self._offers = managed_offers
         # Automatic protections. ``trip`` only records and queues, so it is safe
         # to call here while this gate's account lock is held; the kill it
         # leads to waits for that lock from another task.
@@ -320,9 +323,10 @@ class AccountCommandGate:
                         fingerprint = fingerprint_of(size)
                         if not fingerprint:
                             raise CommandGateBlocked("amount_fingerprint_missing")
-                        if fingerprint in await fingerprints_in_use(
-                            locked, account_id=account_id,
-                            environment=self._deployment_environment, symbol=decision.symbol,
+                        assert self._offers is not None  # required with capital_runtime
+                        if fingerprint in await self._offers.fingerprints_in_use(
+                            locked, Scope(account_id, self._deployment_environment),
+                            decision.symbol,
                         ):
                             raise CommandGateBlocked("amount_fingerprint_collision")
                         await self._guard(decision, replace(
@@ -332,7 +336,8 @@ class AccountCommandGate:
                     await runtime.repository.authorize_and_append_intent(
                         session, intent=intent, decision=row,
                         expected_revision=view.applied.revision, expected_digest=view.applied.digest,
-                        expected_snapshot_seq=view.snapshot_seq, now_ms=self._clock(),
+                        expected_snapshot_seq=legacy_snapshot_seq(view.basis_token),
+                        now_ms=self._clock(),
                         locked_guard=locked_guard,
                     )
             except CapitalBlockedError as exc:

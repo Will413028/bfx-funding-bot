@@ -20,7 +20,7 @@ Two design rules follow, and both are load-bearing:
    logic changes, this report changes with it; it cannot describe a rule the
    money path does not follow.
 2. **Report applied authority.** Live amounts and per-cell budgets come from
-   the canonical CapitalRuntime with applied revision/digest and snapshot fence.
+   the canonical capital authority with applied revision/digest and basis.
    The tier resolver below is retained only for simulation diagnostics.
 
 Read-only throughout: no emit, no state mutation, and the executor is not
@@ -28,13 +28,15 @@ reachable from here.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 from typing import Any, Protocol
 from uuid import uuid4
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from bfx_funding_bot.core.telemetry import Phase
-from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
@@ -49,6 +51,14 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingState,
     TransitionResult,
 )
+from bfx_funding_bot.modules.ledger import (
+    CapitalAuthority,
+    CapitalAvailable,
+    CapitalBlocked,
+    Scope,
+    ScopeLock,
+    basis_token_value,
+)
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from bfx_funding_bot.modules.strategy import (
     CellConfig,
@@ -56,7 +66,7 @@ from bfx_funding_bot.modules.strategy import (
     DecisionPayload,
     configured_symbols,
 )
-from bfx_funding_bot.modules.trading import CapitalPolicy, envelope_payload
+from bfx_funding_bot.modules.trading import CapitalPolicy, CapitalScope, envelope_payload
 
 MANUAL_KILL_GUARD_NAME = "manual_kill"
 
@@ -86,6 +96,17 @@ class _TradingStateProtocol(Protocol):
 
 class _KillSwitchProtocol(Protocol):
     async def engage(self, *, cause: str, actor: str, reason: str) -> KillResult: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CapitalStatusReads:
+    """The applied capital authority the live status reports, for one scope."""
+
+    authority: CapitalAuthority
+    lock: ScopeLock
+    scope: Scope
+    session_factory: async_sessionmaker[AsyncSession]
+    clock: Callable[[], int]
 
 
 def _decimal_text(value: Decimal | None) -> str | None:
@@ -134,12 +155,12 @@ class TradingStatusService:
         kill_switch: _KillSwitchProtocol | None = None,
         deployment: dict[str, Any] | None = None,
         readiness: TradingReadiness | None = None,
-        capital_runtime: CapitalRuntime | None = None,
+        capital: CapitalStatusReads | None = None,
     ) -> None:
         self._chain = chain
-        if phase is Phase.LIVE and capital_runtime is None:
+        if phase is Phase.LIVE and capital is None:
             raise ValueError("live status requires applied capital runtime")
-        self._capital = capital_runtime
+        self._capital = capital
         self._ledger = ledger
         self._ctx = account_ctx
         self._cells = cells
@@ -164,12 +185,12 @@ class TradingStatusService:
     # ---------------------------------------------------------------- status
 
     def _authority_scope(self) -> dict[str, str | None]:
-        # Bind diagnostics to the repository actually supplying capital, not an
+        # Bind diagnostics to the scope actually supplying capital, not an
         # ambient env value or phase label. Legacy simulations have no live realm.
-        repository = self._capital.repository if self._capital else None
+        scope = self._capital.scope if self._capital else None
         return {
-            "account_id": str(repository.account_id) if repository else self._ctx.account_id,
-            "deployment_environment": repository.environment if repository else None,
+            "account_id": str(scope.exchange_account_id) if scope else self._ctx.account_id,
+            "deployment_environment": scope.deployment_environment if scope else None,
         }
 
     async def snapshot(self) -> dict[str, Any]:
@@ -318,24 +339,38 @@ class TradingStatusService:
         }
 
     async def _capital_status(self, symbol: str) -> dict[str, Any]:
-        assert self._capital is not None
+        reads = self._capital
+        assert reads is not None
+        scope = reads.scope
         try:
-            async with self._capital.session_factory() as session:
+            async with reads.session_factory() as session:
                 if not any(cell.symbol == symbol for cell in self._cells):
-                    applied = await self._capital.repository.read_applied(session, symbol=symbol)
+                    await reads.lock.lock(session, scope)
+                    applied = await reads.authority.read_policy(session, scope, symbol)
+                    if isinstance(applied, CapitalBlocked):
+                        return {"capital_available": False, "reason": applied.reason}
                     return {"capital_available": False,
                         "reason": "policy_disabled" if not applied.policy.enabled else "no_configured_cells",
                         "policy_revision": applied.revision, "policy_digest": applied.digest,
                         "policy": _policy_status(applied.policy)}
-                views = {cell.cell_id: await self._capital.read(
-                    symbol=symbol, cell_id=cell.cell_id, session=session,
-                ) for cell in self._cells if cell.symbol == symbol}
+                views: dict[str, CapitalAvailable] = {}
+                for cell in self._cells:
+                    if cell.symbol != symbol:
+                        continue
+                    read = await reads.authority.read(
+                        CapitalScope(scope.exchange_account_id, scope.deployment_environment,
+                                     symbol, cell.cell_id),
+                        now_ms=reads.clock(), session=session,
+                    )
+                    if isinstance(read, CapitalBlocked):
+                        return {"capital_available": False, "reason": read.reason}
+                    views[cell.cell_id] = read
             first = next(iter(views.values()))
             return {
                 "capital_available": True,
                 "policy_revision": first.applied.revision,
                 "policy_digest": first.applied.digest,
-                "snapshot_seq": first.snapshot_seq,
+                "snapshot_seq": basis_token_value(first.basis_token),
                 "policy": _policy_status(first.applied.policy),
                 "available_balance": str(first.snapshot.available_amount),
                 "unreflected_commitments": str(first.snapshot.unreflected_commitments),

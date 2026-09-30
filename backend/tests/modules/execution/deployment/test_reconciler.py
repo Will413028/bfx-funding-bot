@@ -71,12 +71,14 @@ async def test_planner_requires_current_adapter_amount_evidence(fault):
 
 
 def _simulated_capital(ledger, tracker, *, totals=None, reserves=None):
-    """Explicit simulated policies/snapshots; never installed by application code."""
-    from bfx_funding_bot.modules.execution.capital_repository import (
-        AppliedCapitalPolicy,
-        CapitalView,
-    )
+    """Explicit simulated policies/snapshots; never installed by application code.
+
+    One object answers the planner's capital, managed-offer and uncertainty
+    reads (``_capital_ports``); uncertainty is the fake ledger's.
+    """
+    from bfx_funding_bot.modules.ledger import CapitalAvailable
     from bfx_funding_bot.modules.trading import (
+        AppliedPolicy,
         CapitalPolicy,
         CapitalSnapshot,
         evaluate_capital,
@@ -91,7 +93,8 @@ def _simulated_capital(ledger, tracker, *, totals=None, reserves=None):
     class SimulatedCapital:
         session_factory = staticmethod(transaction)
 
-        async def read(self, *, symbol, cell_id, session=None):
+        async def read(self, scope, *, now_ms, session=None):
+            symbol, cell_id = scope.symbol, scope.cell_id
             total = totals[symbol]
             reserve = reserves.get(symbol, D("0"))
             policy = CapitalPolicy(enabled=total > 0, reserve_amount=reserve,
@@ -102,13 +105,31 @@ def _simulated_capital(ledger, tracker, *, totals=None, reserves=None):
             # Unattributed credits (shared) are in T only, never in a cell's exposure.
             snapshot = CapitalSnapshot(available, D("0"), max(total + reserve, available),
                                        tracker.deployed(cell_id))
-            applied = AppliedCapitalPolicy(1, "explicit-test-policy", policy, UUID(int=1))
-            return CapitalView(applied, 1, snapshot, evaluate_capital(policy, snapshot), shared, {})
+            applied = AppliedPolicy(scope.account_id, scope.environment, symbol, 1,
+                                    "explicit-test-policy", UUID(int=1), policy)
+            return CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot), shared,
+                                    "1", {})
 
-        async def fingerprints_in_use(self, *, symbol, session):
+        async def fingerprints_in_use(self, session, scope, symbol):
             return frozenset()
 
+        async def has_open(self, session, scope, symbol):
+            return ledger.is_uncertain(symbol)
+
     return SimulatedCapital()
+
+
+def _capital_ports(capital, *, offers=None, uncertainty=None, scope=None, session_factory=None):
+    """The reconciler's read ports; one simulated object answers all of them."""
+    from bfx_funding_bot.modules.ledger import Scope
+    return {
+        "capital": capital,
+        "offers": offers if offers is not None else capital,
+        "uncertainty": uncertainty if uncertainty is not None else capital,
+        "scope": scope if scope is not None else Scope(UUID(int=7), "test"),
+        "session_factory": (session_factory if session_factory is not None
+                            else capital.session_factory),
+    }
 
 
 def _planned(sent, planned: str) -> bool:
@@ -453,7 +474,7 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
            optimizer_horizon_h: int | None = None,
            rate_optimizer: RateOptimizer | None = None,
            uncertain_symbols: set[str] | None = None,
-           ledger: _FakeLedger | None = None, capital_runtime=None):
+           ledger: _FakeLedger | None = None, capital_ports=None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -476,8 +497,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         exposure, available=available, uncertain_symbols=uncertain_symbols,
     )
     rec = DeploymentReconciler(
-        capital_runtime=capital_runtime or _simulated_capital(
-            fixture_ledger, tracker, totals={"fUST": cap if cap is not None else D("570")}),
+        **(capital_ports or _capital_ports(_simulated_capital(
+            fixture_ledger, tracker, totals={"fUST": cap if cap is not None else D("570")}))),
         store=store, tracker=tracker,
         ledger=fixture_ledger,
         safety_chain=safety, executor=ex, account_ctx=ctx, cells=cells,
@@ -1122,7 +1143,7 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=_FakeSafety(allowed=True), executor=_FakeExecutor(),
-        capital_runtime=_simulated_capital(ledger, tracker, totals={"fUST": D("10000")}),
+        **_capital_ports(_simulated_capital(ledger, tracker, totals={"fUST": D("10000")})),
         account_ctx=ctx, cells=cells, funding_rules=FixedRules(),
         clock=lambda: 1_000,
         event_sink=_CapturingSink(), phase=Phase.LIVE,
@@ -1153,7 +1174,7 @@ def _build_with_split_ledger(*, reserved, realized, quotes):
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
         funding_rules=FixedRules(),
         clock=lambda: 1_000,
-        capital_runtime=_simulated_capital(ledger, tracker),
+        **_capital_ports(_simulated_capital(ledger, tracker)),
         event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
@@ -1209,7 +1230,7 @@ async def test_headroom_uses_cell_symbol_available():
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=_ctx(),
-        capital_runtime=_simulated_capital(ledger, tracker),
+        **_capital_ports(_simulated_capital(ledger, tracker)),
         cells=cells, funding_rules=FixedRules(),
         clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
@@ -1245,7 +1266,7 @@ def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
         funding_rules=FixedRules(),
-        capital_runtime=_simulated_capital(ledger, tracker, totals=caps, reserves=buffers),
+        **_capital_ports(_simulated_capital(ledger, tracker, totals=caps, reserves=buffers)),
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
         phase=Phase.LIVE,
@@ -1416,7 +1437,7 @@ async def test_tracker_is_diagnostic_and_cannot_relax_canonical_cell_limit():
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=ctx,
-        capital_runtime=_simulated_capital(ledger, tracker, totals={"fUST": D("10000")}),
+        **_capital_ports(_simulated_capital(ledger, tracker, totals={"fUST": D("10000")})),
         cells=cells, funding_rules=FixedRules(),
         clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
@@ -1615,11 +1636,11 @@ async def test_book_reference_without_a_book_never_cancels():
 
 
 def _fingerprinting(rec, held):
-    async def fingerprints_in_use(*, symbol, session):
+    async def fingerprints_in_use(session, scope, symbol):
         assert symbol == "fUST"
         return frozenset(held)
 
-    rec._capital.fingerprints_in_use = fingerprints_in_use
+    rec._offers.fingerprints_in_use = fingerprints_in_use
 
 
 async def test_planner_fingerprints_the_amount_the_guards_audit_and_executor_all_see():

@@ -5,15 +5,18 @@ import asyncio
 import contextlib
 from decimal import Decimal
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
 from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+from bfx_funding_bot.modules.execution.legacy_ports import LegacyCapitalAuthority
 from bfx_funding_bot.modules.execution.safety.protection import (
     AutomaticProtection,
     WriterLockLostError,
     WriterLockWatch,
 )
+from bfx_funding_bot.modules.ledger import Scope
 
 
 class Recorder:
@@ -25,30 +28,53 @@ class Recorder:
 
 
 class _RaisingCapital:
-    """A capital runtime whose read meets an unclassifiable commitment."""
+    """A legacy capital runtime whose read meets an authority refusal."""
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
         self.session_factory = self._session
+        self.repository = self
+        self.account_id = SCOPE.exchange_account_id
+        self.environment = SCOPE.deployment_environment
 
     @contextlib.asynccontextmanager
     async def _session(self):  # type: ignore[no-untyped-def]
         yield None
 
-    async def read(self, **kwargs):  # type: ignore[no-untyped-def]
+    async def read_capital(self, session, **kwargs):  # type: ignore[no-untyped-def]
         raise CapitalBlockedError(self.reason)
+
+
+SCOPE = Scope(UUID(int=7), "test")
+
+
+class _NoUncertainty:
+    async def has_open(self, session, scope, symbol) -> bool:  # type: ignore[no-untyped-def]
+        return False
+
+
+def _legacy_ports(reason: str) -> dict[str, object]:
+    """The planner's ports as apps builds them, over a refusing legacy authority."""
+    from tests.modules.execution.deployment.test_reconciler import _capital_ports
+    runtime = _RaisingCapital(reason)
+    capital = LegacyCapitalAuthority(runtime)  # type: ignore[arg-type]
+    return _capital_ports(capital, offers=SimpleNamespace(), uncertainty=_NoUncertainty(),
+                          scope=SCOPE, session_factory=runtime.session_factory)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("reason", "expected"), [
     ("unclassifiable_commitment", ["unclassifiable_commitment"]),
     ("snapshot_query_pending", []),  # a transient observation state blocks, never halts
+    # Ledger codes (S1-2c): an integrity conflict halts; an unbounded tail retries.
+    ("attempt_evidence_conflict", ["identity_conflict"]),
+    ("attempt_tail_unbounded", []),
 ])
 async def test_planner_capital_read_trips_only_on_protection_reasons(reason, expected) -> None:
     from tests.modules.execution.deployment.test_reconciler import _build, _post_quote
     recorder = Recorder()
     rec, executor, *_ = _build(exposure=Decimal("0"), quotes=[_post_quote("fUST_a30")],
-                               capital_runtime=_RaisingCapital(reason))
+                               capital_ports=_legacy_ports(reason))
     rec._protection = recorder
     await rec.deploy()
     assert [trigger for trigger, _ in recorder.trips] == expected

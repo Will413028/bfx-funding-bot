@@ -51,7 +51,7 @@ from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispat
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     account_id_uuid_or_none,
 )
-from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
+from bfx_funding_bot.modules.admin.trading_status import CapitalStatusReads, TradingStatusService
 from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_periods
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
@@ -86,6 +86,12 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationReleased,
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
+from bfx_funding_bot.modules.execution.legacy_ports import (
+    LegacyCapitalAuthority,
+    LegacyManagedOffers,
+    LegacyScopeLock,
+    LegacyUncertaintyReader,
+)
 from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
@@ -109,7 +115,6 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     AuthHealthGuard,
     CapitalPolicyGuard,
-    DatabaseUncertaintyReader,
     HeartbeatGuard,
     ManualKillGuard,
     UncertaintyGuard,
@@ -137,6 +142,7 @@ from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     ResolutionScope,
     UncertaintyResolutionWorker,
 )
+from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.live_validation.credit_history import CreditHistorySync
 from bfx_funding_bot.modules.live_validation.interest_ledger import (
     InterestLedgerSync,
@@ -232,12 +238,22 @@ async def build_daemon(
             phase=config.phase,
         )
     capital_runtime: CapitalRuntime | None = None
+    # Read ports (S1-3c1): the capital epoch is legacy, so every consumer reads
+    # through the legacy adapters; nothing here selects a ledger implementation.
+    capital_scope = Scope(account_bootstrap.exchange_account_id,
+                          config.deployment_environment.value)
+    uncertainty_reader = LegacyUncertaintyReader(session_factory)
+    managed_offers = LegacyManagedOffers()
+    capital_authority: LegacyCapitalAuthority | None = None
+    scope_lock: LegacyScopeLock | None = None
     if live_executor:
         capital_runtime = CapitalRuntime(
             repository=CapitalRepository(account_id=account_bootstrap.exchange_account_id,
                 environment=config.deployment_environment.value, max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS),
             session_factory=session_factory, clock=now_ms_utc,
         )
+        capital_authority = LegacyCapitalAuthority(capital_runtime)
+        scope_lock = LegacyScopeLock(capital_runtime.repository)
         try:
             # Before anything can trade: every configured currency has an
             # applied capital policy.
@@ -497,7 +513,7 @@ async def build_daemon(
     # configurable off in canary/live because an unreadable projection fails
     # closed inside the guard.
     guards.append(UncertaintyGuard(
-        reader=DatabaseUncertaintyReader(session_factory),
+        reader=uncertainty_reader,
         deployment_environment=env_str,
     ))
     if hg.auth_health.enabled:
@@ -514,13 +530,15 @@ async def build_daemon(
             # quiet markets via _ws_heartbeat_poll_loop (Bitfinex hb ~15s).
             watched_sub_tasks=["ws"],
         ))
-    if capital_runtime is not None:
-        guards.append(CapitalPolicyGuard(runtime=capital_runtime))
+    if capital_authority is not None:
+        guards.append(CapitalPolicyGuard(authority=capital_authority, scope=capital_scope,
+                                         clock=now_ms_utc))
         # Always-on offer envelope (fail-closed); the command throttle config is
         # required for a live writer too.
         require_pre_trade_limits(safety_cfg.pre_trade_limits)
         guards.extend(build_pre_trade_guards(
-            runtime=capital_runtime, book=funding_book_service, clock=now_ms_utc))
+            authority=capital_authority, offers=managed_offers, scope=capital_scope,
+            session_factory=session_factory, book=funding_book_service, clock=now_ms_utc))
     elif hg.allocation_cap.enabled:
         guards.append(AllocationCapGuard(
             ledger=ledger,
@@ -688,6 +706,7 @@ async def build_daemon(
         ),
         safety_evaluator=safety_chain,
         capital_runtime=capital_runtime,
+        managed_offers=managed_offers if capital_runtime is not None else None,
     )
     reservation_executor: ExecutorPort = reservation_middleware
 
@@ -720,6 +739,7 @@ async def build_daemon(
                 "live execution requires a FundingBookService for the configured policy",
             )
         assert capital_runtime is not None  # validated immediately after executor construction
+        assert capital_authority is not None and scope_lock is not None  # built with the runtime
         reprice_policy = policy_from_env(os.environ)
         ladder_policy = ladder_policy_from_env(os.environ)
         execution_gate = ExecutionGate(
@@ -737,11 +757,16 @@ async def build_daemon(
         )
         capital_policy_control = CapitalPolicyRequestWorker(
             session_factory=session_factory, account_id=UUID(account_id),
-            environment=env_str, authority=operator_authorized, clock=now_ms_utc,
+            environment=env_str, authority=operator_authorized, scope_lock=scope_lock,
+            clock=now_ms_utc,
             ownership=writer_lock.verify_held if writer_lock is not None else None,
         )
         deployment_reconciler = DeploymentReconciler(
-            capital_runtime=capital_runtime,
+            capital=capital_authority,
+            offers=managed_offers,
+            uncertainty=uncertainty_reader,
+            scope=capital_scope,
+            session_factory=session_factory,
             store=quote_store,
             tracker=CellDeploymentTracker(),
             ledger=ledger,
@@ -776,7 +801,8 @@ async def build_daemon(
             protection=protection,
             managed_sweep=(ManagedOfferSweep(
                 session_factory=session_factory, account_id=UUID(account_id),
-                environment=env_str, canceller=reservation_middleware, ctx=account_ctx)
+                environment=env_str, canceller=reservation_middleware, ctx=account_ctx,
+                offers=managed_offers)
                 if isinstance(executor, CancelPort) else None),
         )
         assert writer_lock is not None
@@ -1055,6 +1081,8 @@ async def build_daemon(
         venue=(executor if not spec.is_simulated and isinstance(executor, FundingCancelAllPort)
                else None),
         writer_lock=writer_lock,
+        uncertainty=uncertainty_reader,
+        offers=managed_offers,
         quiesce=(
             (lambda: command_gate.quiesced(account_id, timeout_s=QUIESCE_TIMEOUT_S))
             if command_gate is not None else None
@@ -1096,7 +1124,10 @@ async def build_daemon(
                               if deployment_identity.deployment_id else None),
         }),
         readiness=trading_readiness,
-        capital_runtime=capital_runtime,
+        capital=(CapitalStatusReads(authority=capital_authority, lock=scope_lock,
+                                    scope=capital_scope, session_factory=session_factory,
+                                    clock=now_ms_utc)
+                 if capital_authority is not None and scope_lock is not None else None),
     )
 
     healthz_port_env = os.environ.get("BFX_HEALTHZ_PORT", "").strip()

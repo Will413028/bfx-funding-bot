@@ -114,8 +114,22 @@ CAPITAL_BLOCK_TRIGGERS: dict[str, str] = {
         "duplicate_attempt_intent",
         "execution_unknown_resolution_conflict",
         "snapshot_conflicting_identity",
+        # Ledger authority (S1-2c): an attempt in the tail whose outcome or
+        # resolution contradicts its own record, and an uncertainty fact from
+        # another scope -- the same integrity class as the legacy codes above.
+        "attempt_evidence_conflict",
+        "uncertainty_scope_conflict",
     ), IDENTITY_CONFLICT),
 }
+# Ledger refusals that deliberately stay transient: more attempts since the
+# latest accepted basis than one read folds. The read already refuses to spend,
+# and the next accepted basis bounds the tail again, so it retries, not halts.
+CAPITAL_BLOCK_TRANSIENT: frozenset[str] = frozenset({"attempt_tail_unbounded"})
+
+
+def capital_block_trigger(reason: str) -> str | None:
+    """The protection trigger a capital authority refusal trips, or None (transient)."""
+    return CAPITAL_BLOCK_TRIGGERS.get(reason)
 
 # Consecutive accepted snapshots without a trip that show a halt's condition cleared.
 AUTO_RESUME_CLEAN_SNAPSHOTS = 3
@@ -475,6 +489,7 @@ class WriterLockWatch:
 __all__ = [
     "AUTO_RESUME_ACTOR",
     "AUTO_RESUME_CLEAN_SNAPSHOTS",
+    "CAPITAL_BLOCK_TRANSIENT",
     "CAPITAL_BLOCK_TRIGGERS",
     "COMMAND_RATE_EXCEEDED",
     "FOREIGN_LENDING",
@@ -495,4 +510,5 @@ __all__ = [
     "Trip",
     "WriterLockLostError",
     "WriterLockWatch",
+    "capital_block_trigger",
 ]

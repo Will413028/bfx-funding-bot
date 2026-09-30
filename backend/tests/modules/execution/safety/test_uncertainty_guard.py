@@ -37,7 +37,7 @@ class _Reader:
         self.rows = rows or []
         self.error = error
 
-    async def list_open(self, **_kwargs):
+    async def list_open(self, *_args, **_kwargs):
         if self.error:
             raise self.error
         return self.rows

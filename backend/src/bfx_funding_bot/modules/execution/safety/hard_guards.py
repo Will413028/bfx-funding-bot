@@ -9,15 +9,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal, Protocol
+from typing import Literal, Protocol
 from uuid import UUID
-
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
-from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     GuardResult,
@@ -27,8 +23,14 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingState,
     TradingStateRepository,
 )
-from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
+from bfx_funding_bot.modules.ledger import (
+    CapitalAuthority,
+    CapitalBlocked,
+    Scope,
+    UncertaintyReader,
+)
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.trading import CapitalScope
 
 
 class _TradingStateReader(Protocol):
@@ -39,17 +41,25 @@ class CapitalPolicyGuard:
     """The applied-policy evaluator is the sole live money authority."""
     name = "capital_policy"
 
-    def __init__(self, *, runtime: CapitalRuntime) -> None:
-        self.runtime = runtime
+    def __init__(self, *, authority: CapitalAuthority, scope: Scope,
+                 clock: Callable[[], int]) -> None:
+        self.authority = authority
+        self.scope = scope
+        self.clock = clock
 
     async def evaluate(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:
         if decision.decision_outcome != DecisionOutcome.POST:
             return GuardResult(True, self.name)
         try:
-            if ctx.account_id != str(self.runtime.repository.account_id) or not ctx.capital_cell_id:
+            scope = self.scope
+            if ctx.account_id != str(scope.exchange_account_id) or not ctx.capital_cell_id:
                 raise ValueError("capital_scope_missing")
-            view = await self.runtime.read(symbol=decision.symbol, cell_id=ctx.capital_cell_id,
-                                           session=ctx.command_session)
+            view = await self.authority.read(
+                CapitalScope(scope.exchange_account_id, scope.deployment_environment,
+                             decision.symbol, ctx.capital_cell_id),
+                now_ms=self.clock(), session=ctx.command_session)
+            if isinstance(view, CapitalBlocked):
+                return GuardResult(False, self.name, f"capital_unavailable: {view.reason}")
             amount = decision.offer_amount_usdt
             if amount is None:
                 raise ValueError("offer_amount_missing")
@@ -191,44 +201,6 @@ class HeartbeatGuard:
         return GuardResult(allowed=True, guard_name=self.name)
 
 
-class UncertaintyReader(Protocol):
-    """Read open uncertainty rows for one exact account/environment/symbol."""
-
-    async def list_open(
-        self,
-        *,
-        exchange_account_id: UUID,
-        deployment_environment: str,
-        symbol: str,
-    ) -> Sequence[object]: ...
-
-
-class DatabaseUncertaintyReader:
-    """Database adapter used by the hard guard and pre-sizing boundary."""
-
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self._session_factory = session_factory
-
-    async def list_open(
-        self,
-        *,
-        exchange_account_id: UUID,
-        deployment_environment: str,
-        symbol: str,
-    ) -> Sequence[object]:
-        async with self._session_factory() as session:
-            return (
-                await session.execute(
-                    select(ExecutionUncertaintyRow).where(
-                        ExecutionUncertaintyRow.exchange_account_id == exchange_account_id,
-                        ExecutionUncertaintyRow.deployment_environment == deployment_environment,
-                        ExecutionUncertaintyRow.symbol == symbol,
-                        ExecutionUncertaintyRow.state == "open",
-                    )
-                )
-            ).scalars().all()
-
-
 class UncertaintyGuard:
     """Fail-closed hard guard for one exact account/environment/symbol scope.
 
@@ -247,7 +219,7 @@ class UncertaintyGuard:
     def __init__(
         self,
         *,
-        reader: UncertaintyReader | Any,
+        reader: UncertaintyReader,
         deployment_environment: str,
     ) -> None:
         if not deployment_environment.strip():
@@ -269,34 +241,11 @@ class UncertaintyGuard:
                 reason="account identity is not canonical — uncertainty guard blocked",
             )
         try:
-            list_open = getattr(self._reader, "list_open", None)
-            rows: Sequence[object]
-            if ctx.command_session is not None:
-                rows = (await ctx.command_session.scalars(
-                    select(ExecutionUncertaintyRow).where(
-                        ExecutionUncertaintyRow.exchange_account_id == account_id,
-                        ExecutionUncertaintyRow.deployment_environment == self._deployment_environment,
-                        ExecutionUncertaintyRow.symbol == decision.symbol,
-                        ExecutionUncertaintyRow.state == "open",
-                    )
-                )).all()
-            elif list_open is not None:
-                rows = await list_open(
-                    exchange_account_id=account_id,
-                    deployment_environment=self._deployment_environment,
-                    symbol=decision.symbol,
-                )
-            else:
-                # Compatibility with the command-gate reader used by older
-                # adapters; a true result still blocks the exact scope.
-                legacy_reader: Any = self._reader
-                has_open = legacy_reader.has_open
-                is_open = await has_open(
-                    exchange_account_id=account_id,
-                    deployment_environment=self._deployment_environment,
-                    symbol=decision.symbol,
-                )
-                rows = ({"kind": "submit_outcome_unknown"},) if is_open else ()
+            rows: Sequence[object] = await self._reader.list_open(
+                ctx.command_session,
+                Scope(account_id, self._deployment_environment),
+                decision.symbol,
+            )
         except Exception as exc:
             return GuardResult(
                 allowed=False,

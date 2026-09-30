@@ -21,6 +21,10 @@ from bfx_funding_bot.modules.execution.events import (
     VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
+from bfx_funding_bot.modules.execution.legacy_ports import (
+    LegacyManagedOffers,
+    LegacyUncertaintyReader,
+)
 from bfx_funding_bot.modules.execution.protocols import FundingCancelAllResult
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.tables import (
@@ -102,7 +106,9 @@ async def exposed_account(factory, account):
 def kill_switch(factory, trading, ctx, venue, lock=None, **kwargs):
     return KillSwitch(trading_state=trading, session_factory=factory, ctx=ctx,
                       configured_symbols={"fUST"}, venue=venue,
-                      writer_lock=lock if lock is not None else Lock(), clock=lambda: 5000, **kwargs)
+                      writer_lock=lock if lock is not None else Lock(),
+                      uncertainty=LegacyUncertaintyReader(factory), offers=LegacyManagedOffers(),
+                      clock=lambda: 5000, **kwargs)
 
 
 async def audit(factory):
