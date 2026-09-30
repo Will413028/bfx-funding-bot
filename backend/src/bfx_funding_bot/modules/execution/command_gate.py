@@ -19,7 +19,7 @@ from typing import NoReturn, Protocol
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.external.bitfinex.funding_rules import validate_amount
@@ -31,7 +31,6 @@ from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprint_of
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
@@ -39,17 +38,14 @@ from bfx_funding_bot.modules.execution.contracts import (
     ReservationRef,
 )
 from bfx_funding_bot.modules.execution.event_store.persister import EventPersister
-from bfx_funding_bot.modules.execution.event_store.serialization import deserialize_stored_event
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, OfferClaimRow
 from bfx_funding_bot.modules.execution.events import (
-    CancelRequested,
     OrderFilled,
     ReservationClaimed,
     ReservationFailed,
     ReservationIntent,
     ReservationUnknown,
 )
-from bfx_funding_bot.modules.execution.legacy_ports import legacy_snapshot_seq
+from bfx_funding_bot.modules.execution.legacy_command_journal import LegacyCommandJournal
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     CancelPort,
@@ -65,8 +61,17 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmitOutcomeUnknown,
     normalize_submit_payload,
 )
-from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
-from bfx_funding_bot.modules.ledger import ManagedOfferReader, Scope
+from bfx_funding_bot.modules.ledger import (
+    CancelAdmitted,
+    CommandAttempt,
+    CommandJournal,
+    CommandOutcome,
+    CommandRefused,
+    ManagedOfferReader,
+    OutcomeKind,
+    Scope,
+    UncertaintyReader,
+)
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
@@ -89,16 +94,6 @@ class _OutcomeIdentityMismatchError(RuntimeError):
     """A venue result cannot safely be attributed to the intended command."""
 
 
-class OpenUncertaintyReader(Protocol):
-    async def has_open(
-        self,
-        *,
-        exchange_account_id: UUID,
-        deployment_environment: str,
-        symbol: str,
-    ) -> bool: ...
-
-
 class CommandRateLimiter(Protocol):
     """Admits or refuses one venue write; never blocks (safety/pre_trade.CommandThrottle)."""
 
@@ -115,32 +110,6 @@ class AuthoritativeSafetyEvaluator(Protocol):
     ) -> GuardResult: ...
 
 
-class DatabaseOpenUncertaintyReader:
-    """Read the exact account/environment/symbol block from its projection."""
-
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self._session_factory = session_factory
-
-    async def has_open(
-        self,
-        *,
-        exchange_account_id: UUID,
-        deployment_environment: str,
-        symbol: str,
-    ) -> bool:
-        async with self._session_factory() as session:
-            row = await session.scalar(
-                select(ExecutionUncertaintyRow.uncertainty_id).where(
-                    ExecutionUncertaintyRow.exchange_account_id == exchange_account_id,
-                    ExecutionUncertaintyRow.deployment_environment
-                    == deployment_environment,
-                    ExecutionUncertaintyRow.symbol == symbol,
-                    ExecutionUncertaintyRow.state == "open",
-                ).limit(1)
-            )
-        return row is not None
-
-
 class AccountCommandGate:
     """Serialize one account's submits and make ambiguous outcomes fail closed."""
 
@@ -150,7 +119,7 @@ class AccountCommandGate:
         *,
         bus: DomainEventBus,
         persister: EventPersister,
-        uncertainty_reader: OpenUncertaintyReader,
+        uncertainty_reader: UncertaintyReader,
         safety_evaluator: AuthoritativeSafetyEvaluator,
         deployment_environment: str,
         is_simulated: bool = True,
@@ -159,6 +128,7 @@ class AccountCommandGate:
         uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
         capital_runtime: CapitalRuntime | None = None,
         managed_offers: ManagedOfferReader | None = None,
+        command_journal: CommandJournal | None = None,
     ) -> None:
         if not deployment_environment.strip():
             raise ValueError("deployment_environment must be non-empty")
@@ -178,6 +148,10 @@ class AccountCommandGate:
         if capital_runtime is not None and managed_offers is None:
             raise ValueError("live command gate requires managed offer reads")
         self._offers = managed_offers
+        self._journal = command_journal or (LegacyCommandJournal(
+            capital_runtime, date_provider=self._date_provider, clock=self._clock,
+            uncertainty_reader=self._uncertainty_reader,
+        ) if capital_runtime is not None else None)
         # Automatic protections. ``trip`` only records and queues, so it is safe
         # to call here while this gate's account lock is held; the kill it
         # leads to waits for that lock from another task.
@@ -219,9 +193,7 @@ class AccountCommandGate:
         account_id = _canonical_account_id(context.account_id)
         try:
             is_open = await self._uncertainty_reader.has_open(
-                exchange_account_id=account_id,
-                deployment_environment=self._deployment_environment,
-                symbol=payload.symbol,
+                None, Scope(account_id, self._deployment_environment), payload.symbol,
             )
         except Exception as exc:
             raise CommandGateBlocked("uncertainty guard unavailable") from exc
@@ -262,7 +234,8 @@ class AccountCommandGate:
         decision = ready.decision
         account_id = _canonical_account_id(context.account_id)
         canonical_account = str(account_id)
-        cid = generate_cid(decision.signal_correlation_id, self._date_provider())
+        command_date = self._date_provider()
+        cid = generate_cid(decision.signal_correlation_id, command_date)
         reference = reservation_ref or ReservationRef(
             execution_decision_id=ready.decision_id,
             cid=cid,
@@ -281,6 +254,7 @@ class AccountCommandGate:
             normalized_payload=_normalized_venue_payload(decision),
             started_at_ms=intent_ms,
         )
+        assert isinstance(attempt.attempt_id, UUID)
         intent = ReservationIntent(
             cid=cid,
             size_usdt=size,
@@ -306,44 +280,49 @@ class AccountCommandGate:
                 canonical_account, self._deployment_environment,
             ):
                 raise CommandGateBlocked("capital_scope_conflict")
-            try:
-                async with runtime.session_factory.begin() as session:
-                    row = await session.get(ExecutionDecisionRow, ready.decision_id)
-                    if row is None or row.outcome != "ready" or (
-                        row.applied_rate != decision.offer_rate
-                        or row.duration_days != decision.offer_duration_days
+            async with runtime.session_factory.begin() as session:
+                row = await session.get(ExecutionDecisionRow, ready.decision_id)
+                if row is None or row.outcome != "ready" or (
+                    row.applied_rate != decision.offer_rate
+                    or row.duration_days != decision.offer_duration_days
+                ):
+                    raise CommandGateBlocked("execution_audit_conflict")
+
+                async def locked_guard(locked: AsyncSession) -> None:
+                    # D3a: the fingerprint is this submit's only identity at
+                    # the venue. Checked under the account lock, in the
+                    # transaction that writes the intent, so no two
+                    # unresolved submits of a symbol can ever share one.
+                    fingerprint = fingerprint_of(size)
+                    if not fingerprint:
+                        raise CommandGateBlocked("amount_fingerprint_missing")
+                    assert self._offers is not None  # required with capital_runtime
+                    if fingerprint in await self._offers.fingerprints_in_use(
+                        locked, Scope(account_id, self._deployment_environment),
+                        decision.symbol,
                     ):
-                        raise CommandGateBlocked("execution_audit_conflict")
+                        raise CommandGateBlocked("amount_fingerprint_collision")
+                    await self._guard(decision, replace(
+                        context, command_session=locked, capital_cell_id=row.cell_id,
+                    ))
 
-                    async def locked_guard(locked: AsyncSession) -> None:
-                        # D3a: the fingerprint is this submit's only identity at
-                        # the venue. Checked under the account lock, in the
-                        # transaction that writes the intent, so no two
-                        # unresolved submits of a symbol can ever share one.
-                        fingerprint = fingerprint_of(size)
-                        if not fingerprint:
-                            raise CommandGateBlocked("amount_fingerprint_missing")
-                        assert self._offers is not None  # required with capital_runtime
-                        if fingerprint in await self._offers.fingerprints_in_use(
-                            locked, Scope(account_id, self._deployment_environment),
-                            decision.symbol,
-                        ):
-                            raise CommandGateBlocked("amount_fingerprint_collision")
-                        await self._guard(decision, replace(
-                            context, command_session=locked, capital_cell_id=row.cell_id,
-                        ))
-
-                    await runtime.repository.authorize_and_append_intent(
-                        session, intent=intent, decision=row,
-                        expected_revision=view.applied.revision, expected_digest=view.applied.digest,
-                        expected_snapshot_seq=legacy_snapshot_seq(view.basis_token),
-                        now_ms=self._clock(),
-                        locked_guard=locked_guard,
-                    )
-            except CapitalBlockedError as exc:
-                reason = {"revision_changed": "capital_policy_revision_changed",
-                          "snapshot_changed": "capital_snapshot_changed"}.get(str(exc), str(exc))
-                raise CommandGateBlocked(reason) from exc
+                assert self._journal is not None
+                admission = await self._journal.authorize(
+                    session, Scope(account_id, self._deployment_environment),
+                    CommandAttempt(
+                        attempt.attempt_id, ready.decision_id, decision.symbol,
+                        dict(attempt.normalized_payload), size, intent_ms, view.applied.revision,
+                        view.applied.digest, view.applied.revision_id,
+                        command_date=command_date,
+                        event_id=intent.event_id,
+                        cell_id=row.cell_id,
+                    ), view.basis_token, now_ms=self._clock(), locked_guard=locked_guard,
+                )
+                if isinstance(admission, CommandRefused):
+                    reason = {"revision_changed": "capital_policy_revision_changed",
+                              "snapshot_changed": "capital_snapshot_changed"}.get(
+                                  admission.reason, admission.reason)
+                    raise CommandGateBlocked(reason)
         try:
             # Recheck ownership/halt after commit; never charge the reserved amount twice.
             try:
@@ -374,6 +353,7 @@ class AccountCommandGate:
             try:
                 await self._persist_outcome(
                     not_sent, ready=ready, context=context, reference=reference,
+                    attempt_id=attempt.attempt_id,
                     size=size, occurred_at_ms=self._clock(),
                 )
             except Exception as exc:  # recovery still resolves the PENDING intent
@@ -403,6 +383,7 @@ class AccountCommandGate:
         try:
             await self._persist_outcome(
                 result,
+                attempt_id=attempt.attempt_id,
                 ready=ready,
                 context=context,
                 reference=result.reservation_ref or reference,
@@ -464,59 +445,28 @@ class AccountCommandGate:
         lock = self._account_locks.setdefault((account_id, self._deployment_environment), asyncio.Lock())
         async with lock:
             self._admit("cancel")
-            async with runtime.session_factory.begin() as session:
-                await runtime.repository.writer.prepare_locked(session, account_id=runtime.repository.account_id)
-                claim = await session.scalar(select(OfferClaimRow).where(
-                    OfferClaimRow.exchange_account_id == runtime.repository.account_id,
-                    OfferClaimRow.deployment_environment == self._deployment_environment,
-                    OfferClaimRow.venue_offer_id == venue_offer_id,
-                ))
-                if claim is None:
-                    raise CommandGateBlocked("cancel_provenance_missing")
-                evidence = await session.scalar(select(EventLogRow).where(
-                    EventLogRow.exchange_account_id == runtime.repository.account_id,
-                    EventLogRow.deployment_environment == self._deployment_environment,
-                    EventLogRow.venue_offer_id == venue_offer_id,
-                    EventLogRow.cid == claim.cid,
-                    EventLogRow.event_type.in_(("RESERVATION_CLAIMED", "SUBMIT_MATCHED_TO_VENUE_OFFER")),
-                ).order_by(EventLogRow.event_seq.desc()).limit(1))
-                decision_row = await session.get(ExecutionDecisionRow, claim.execution_decision_id) if claim.execution_decision_id else None
-                managed = deserialize_stored_event(evidence) if evidence is not None else None
-                reference = getattr(managed, "reservation_ref", None)
-                if (claim.state not in {"claimed", "released"} or reference is None
-                    or decision_row is None
-                    or decision_row.applied_rate is None or decision_row.duration_days is None
-                    or (reference.execution_decision_id, reference.cid, reference.venue_offer_id,
-                        str(reference.signal_correlation_id), getattr(managed, "symbol", None),
-                        decision_row.exchange_account_id, decision_row.deployment_environment,
-                        decision_row.symbol, decision_row.signal_correlation_id)
-                    != (claim.execution_decision_id, claim.cid, venue_offer_id,
-                        claim.signal_correlation_id, claim.symbol, runtime.repository.account_id,
-                        self._deployment_environment, claim.symbol, claim.signal_correlation_id)):
-                    raise CommandGateBlocked("cancel_provenance_conflict")
-                uncertain = await session.scalar(select(ExecutionUncertaintyRow.uncertainty_id).where(
-                    ExecutionUncertaintyRow.exchange_account_id == runtime.repository.account_id,
-                    ExecutionUncertaintyRow.deployment_environment == self._deployment_environment,
-                    ExecutionUncertaintyRow.symbol == claim.symbol,
-                    ExecutionUncertaintyRow.state == "open",
-                ).limit(1))
-                if uncertain is not None:
-                    raise CommandGateBlocked("cancel_provenance_uncertain")
-                # Bind the durable cancel to the managed offer, not the current quote.
-                signal_correlation_id = reference.signal_correlation_id
-                # A cancel is a venue write, not a SKIP. Probe the managed
-                # order's identity; explicitly omit only capital spending checks.
+            scope = Scope(runtime.repository.account_id, self._deployment_environment)
+            probe: DecisionPayload | None = None
+
+            async def locked_guard(locked: AsyncSession, admission: CancelAdmitted) -> None:
+                nonlocal probe
+                provenance = admission.provenance
                 probe = DecisionPayload(decision_outcome=DecisionOutcome.POST,
-                    signal_correlation_id=signal_correlation_id, symbol=claim.symbol,
-                    offer_amount_usdt=claim.size_usdt,
-                    offer_rate=decision_row.applied_rate,
-                    offer_duration_days=decision_row.duration_days)
-                await self._guard(probe, replace(ctx, command_session=session), cancel=True)
-                await runtime.repository.writer.append(session, CancelRequested(
-                    venue_offer_id=venue_offer_id, requested_at_ms=self._clock(),
-                    signal_correlation_id=signal_correlation_id, account_id=account_id,
-                    occurred_at_ms=self._clock(),
-                ))
+                    signal_correlation_id=UUID(provenance.signal_correlation_id), symbol=provenance.symbol,
+                    offer_amount_usdt=admission.amount, offer_rate=admission.rate,
+                    offer_duration_days=admission.period_days)
+                await self._guard(probe, replace(ctx, command_session=locked), cancel=True)
+
+            async with runtime.session_factory.begin() as session:
+                assert self._journal is not None
+                admission = await self._journal.admit_cancel(
+                    session, scope, venue_offer_id, now_ms=self._clock(), locked_guard=locked_guard,
+                )
+                if isinstance(admission, CommandRefused):
+                    raise CommandGateBlocked(admission.reason)
+                signal_correlation_id = UUID(admission.provenance.signal_correlation_id)
+            assert probe is not None
+
             async def before_transport() -> None:
                 # Fresh scoped uncertainty check after commit AND before
                 # every idempotent retry. Read errors fail closed, outside txn.
@@ -532,6 +482,7 @@ class AccountCommandGate:
         self,
         result: SubmittedOrder,
         *,
+        attempt_id: UUID,
         ready: ReadyToSubmit,
         context: AccountContext,
         reference: ReservationRef,
@@ -559,14 +510,14 @@ class AccountCommandGate:
                     ),
                 ),
             )
-            await self._persister.persist(unknown_event)
+            await self._record_terminal(unknown_event, attempt_id)
             # Lending envelope D3 level 2: the open uncertainty quarantines this
             # symbol until a snapshot resolves it; nothing is halted.
             if self._uncertainty_handler is not None:
                 await self._uncertainty_handler(unknown_event)
             return
         if result.outcome_kind is SubmitOutcomeKind.NOT_SENT:
-            await self._persister.persist(
+            await self._record_terminal(
                 ReservationFailed(
                     cid=reference.cid,
                     size_usdt=size,
@@ -577,11 +528,11 @@ class AccountCommandGate:
                     symbol=decision.symbol,
                     reservation_ref=reference,
                     reason="local_pre_transport",
-                )
+                ), attempt_id,
             )
             return
         if result.outcome_kind is SubmitOutcomeKind.REJECTED:
-            await self._persister.persist(
+            await self._record_terminal(
                 ReservationFailed(
                     cid=reference.cid,
                     size_usdt=size,
@@ -599,7 +550,7 @@ class AccountCommandGate:
                             context.credentials.api_secret,
                         ),
                     ),
-                )
+                ), attempt_id,
             )
             return
 
@@ -630,10 +581,31 @@ class AccountCommandGate:
                 fill_rate=float(decision.offer_rate or 0),  # paper fill event field
             )
         events: tuple[object, ...] = (claimed, filled) if filled is not None else (claimed,)
-        await self._persister.persist(*events)
+        if self._journal is None:
+            await self._persister.persist(*events)
+        else:
+            await self._record_terminal(claimed, attempt_id)
+            if filled is not None:
+                await self._persister.persist(filled)
         await self._safe_publish(claimed)
         if filled is not None:
             await self._safe_publish(filled)
+
+    async def _record_terminal(
+        self, event: ReservationClaimed | ReservationFailed | ReservationUnknown, attempt_id: UUID,
+    ) -> None:
+        if self._journal is None:
+            await self._persister.persist(event)
+            return
+        kind: OutcomeKind = ("ack" if isinstance(event, ReservationClaimed) else
+                "unknown" if isinstance(event, ReservationUnknown) else
+                "not_sent" if event.reason == "local_pre_transport" else "rejected")
+        await self._journal.record_outcome(
+            Scope(_canonical_account_id(event.account_id), self._deployment_environment), attempt_id,
+            CommandOutcome(kind, getattr(event, "venue_offer_id", None),
+                           getattr(event, "reason", None), event.occurred_at_ms or 0, {},
+                           event_id=event.event_id),
+        )
 
     def _admit(self, kind: str) -> None:
         """Rate-limit venue writes before anything durable is written."""

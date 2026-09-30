@@ -196,7 +196,9 @@ async def test_ack_provenance_joins_attempt_and_decision(ledger) -> None:
     decision = await _decision(ledger, attempt, "corr-1")
     # Acked but not in an accepted snapshot yet: not live.
     assert await _managed(ledger) == ManagedOffers((), ())
-    assert await _cancel(ledger, "offer-1") is None
+    assert await _cancel(ledger, "offer-1") == CancelProvenance(
+        "offer-1", "fUST", attempt, decision, "a30", "corr-1"
+    )
     await ledger.accept(_live(_offer("offer-1", "200", "150")))
     offer = ManagedOffer("offer-1", "fUST", Decimal("150"), attempt, decision, "a30", "corr-1")
     assert await _managed(ledger) == ManagedOffers((offer,), ())
@@ -210,6 +212,9 @@ async def test_bound_provenance(ledger) -> None:
     unknown = await ledger.attempt("200", outcome="unknown", cell="b7")
     await ledger.resolve("bound_to_venue", attempt_id=unknown, venue_offer_id="offer-2")
     decision = await _decision(ledger, unknown, "corr-2")
+    # Bound but not yet in an accepted snapshot: still cancellable (legacy claims it).
+    early = await _cancel(ledger, "offer-2")
+    assert early is not None and early.attempt_id == unknown
     await ledger.accept(_live(_offer("offer-2", "200")))
     assert await _managed(ledger) == ManagedOffers(
         (ManagedOffer("offer-2", "fUST", Decimal("200"), unknown, decision, "b7", "corr-2"),), ()
@@ -237,7 +242,7 @@ async def test_absent_and_terminal_offers_are_not_live(ledger) -> None:
         _live(available="1000", history=(OfferHistory(_offer("done", "100"), "canceled", 1500),))
     )
     assert await _managed(ledger) == ManagedOffers((), ())
-    assert await _cancel(ledger, "gone") is None
+    assert (await _cancel(ledger, "gone")).attempt_id == gone
     assert await _cancel(ledger, "done") is None
     async with ledger.factory.begin() as session:
         terminal = await session.scalar(
@@ -450,7 +455,8 @@ async def test_read_plans_use_the_bounding_indexes(ledger) -> None:
             plans[statement] = "\n".join(line for (line,) in rows.all())
     mirror = [plan for sql, plan in plans.items() if "FROM venue_offer_mirror" in sql]
     basis = [plan for sql, plan in plans.items() if "accepted_capital_basis.id" in sql]
-    assert len(mirror) == 3 and len(basis) == 1
+    # Cancel provenance adds one PK read of the offer's terminal evidence.
+    assert len(mirror) == 4 and len(basis) == 1
     # The live index, or (one offer) the PK including venue_offer_id.
     assert all(
         "ix_venue_offer_mirror_live" in plan

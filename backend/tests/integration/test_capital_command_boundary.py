@@ -269,7 +269,7 @@ def stop_chain(halt, account, *guards):
 
 async def boundary(factory, account):
     from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
-    from bfx_funding_bot.modules.execution.command_gate import DatabaseOpenUncertaintyReader
+    from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
     repo = repository(account)
     await setup_policy(factory, repo, reserve="0", fraction="0.70")
     await snapshot(factory, repo)
@@ -297,7 +297,7 @@ async def boundary(factory, account):
     gate = AccountCommandGate(venue, bus=DomainEventBus(),
         persister=EventStorePersister(store=PostgresEventStore(deployment_environment="ci"),
                                      session_factory=factory),
-        uncertainty_reader=DatabaseOpenUncertaintyReader(factory),
+        uncertainty_reader=LegacyUncertaintyReader(factory),
         safety_evaluator=stop_chain(halt, account), deployment_environment="ci",
         capital_runtime=runtime, managed_offers=LegacyManagedOffers(), clock=lambda: 1100,
         is_simulated=False)
@@ -471,7 +471,7 @@ async def test_independent_command_gates_cannot_spend_same_budget(pg_session_fac
     import asyncio
 
     from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-    from bfx_funding_bot.modules.execution.command_gate import DatabaseOpenUncertaintyReader
+    from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
     factory = pg_session_factory
     account = uuid4()
     async with factory.begin() as session:
@@ -485,7 +485,7 @@ async def test_independent_command_gates_cannot_spend_same_budget(pg_session_fac
         update={"signal_correlation_id": event.signal_correlation_id,
                 "offer_amount_usdt": Decimal("499.99990501")}))
     competitor = AccountCommandGate(venue, bus=DomainEventBus(), persister=gate._persister,
-        uncertainty_reader=DatabaseOpenUncertaintyReader(factory),
+        uncertainty_reader=LegacyUncertaintyReader(factory),
         safety_evaluator=ManualKillGuard(trading_state=halt), deployment_environment="ci",
         capital_runtime=runtime, managed_offers=LegacyManagedOffers(), clock=lambda: 1100,
         is_simulated=False)

@@ -6,24 +6,32 @@ from collections.abc import Collection
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.modules.ledger import (
     Acceptance,
     Attempt,
     Authorized,
     AuthorizeRefused,
+    CancelAdmitted,
     CancelProvenance,
+    CommandAttempt,
+    CommandJournal,
+    CommandOutcome,
+    CommandRefused,
     LedgerCapitalRead,
     LedgerCapitalReader,
     LedgerJournal,
     LedgerManagedOffers,
     LedgerObservations,
     LedgerUncertainties,
+    LockedCancelGuard,
+    LockedCommandGuard,
     ManagedOffers,
     Observation,
     OpenUncertainty,
     Outcome,
+    OutcomeAlreadyRecorded,
     Quarantine,
     QuarantineMember,
     QueryHandle,
@@ -38,7 +46,63 @@ from bfx_funding_bot.modules.ledger._internal import (
     quarantine,
     reads,
 )
+from bfx_funding_bot.modules.ledger.tables import SubmissionAttemptJournalRow
 from bfx_funding_bot.modules.trading import CapitalScope
+
+
+class _SqlCommandJournal:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def authorize(
+        self, session: AsyncSession, scope: Scope, attempt: CommandAttempt,
+        basis_token: str, *, now_ms: int, locked_guard: LockedCommandGuard,
+    ) -> Authorized | CommandRefused:
+        return await journal.authorize_command(
+            session, scope, attempt, basis_token, now_ms=now_ms, locked_guard=locked_guard,
+        )
+
+    async def admit_cancel(
+        self, session: AsyncSession, scope: Scope, venue_offer_id: str,
+        *, now_ms: int, locked_guard: LockedCancelGuard,
+    ) -> CancelAdmitted | CommandRefused:
+        return await journal.admit_cancel(
+            session, scope, venue_offer_id, now_ms=now_ms, locked_guard=locked_guard,
+        )
+
+    @staticmethod
+    def _command_outcome(stored: Outcome) -> CommandOutcome:
+        return CommandOutcome(stored.kind, stored.venue_offer_id, stored.reason,
+                              stored.completed_at_ms, stored.evidence)
+
+    async def record_outcome(self, scope: Scope, attempt_id: UUID, outcome: CommandOutcome) -> None:
+        async with self._session_factory.begin() as session:
+            try:
+                await journal.record_outcome(session, scope, Outcome(
+                    attempt_id, outcome.kind, outcome.venue_offer_id, outcome.reason,
+                    outcome.completed_at_ms, outcome.evidence,
+                ))
+            except OutcomeAlreadyRecorded as exc:
+                assert isinstance(exc.stored, Outcome)
+                raise OutcomeAlreadyRecorded(self._command_outcome(exc.stored)) from exc
+
+    async def read_back_outcome(self, scope: Scope, attempt_id: UUID) -> CommandOutcome | None:
+        async with self._session_factory() as session:
+            attempt = await session.get(SubmissionAttemptJournalRow, attempt_id)
+            if attempt is None:
+                raise ValueError("attempt does not exist")
+            if (attempt.exchange_account_id, attempt.deployment_environment) != (
+                scope.exchange_account_id, scope.deployment_environment,
+            ):
+                raise ValueError("attempt scope mismatch")
+            stored = await journal.read_back_outcome(session, attempt_id)
+            if stored is not None and stored.attempt_id != attempt_id:
+                raise ValueError("outcome identity mismatch")
+            return None if stored is None else self._command_outcome(stored)
+
+
+def build_command_journal(session_factory: async_sessionmaker[AsyncSession]) -> CommandJournal:
+    return _SqlCommandJournal(session_factory)
 
 
 class _SqlLedgerJournal:

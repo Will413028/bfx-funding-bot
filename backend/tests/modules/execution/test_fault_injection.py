@@ -60,6 +60,7 @@ from bfx_funding_bot.modules.execution.unknown_matching import (
     UnknownSubmitAttempt,
     match_unknown_attempt,
 )
+from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
 
 _ACCOUNT_ID = UUID("3f19d046-5030-494c-9a0a-9573bb890c1f")
@@ -203,9 +204,13 @@ class _UncertaintyReader:
         self._open_scopes = open_scopes
         self.calls: list[tuple[UUID, str, str]] = []
 
-    async def has_open(self, *, exchange_account_id: UUID, deployment_environment: str, symbol: str) -> bool:
-        self.calls.append((exchange_account_id, deployment_environment, symbol))
-        return (exchange_account_id, deployment_environment, symbol) in self._open_scopes
+    async def has_open(self, session: object, scope: Scope, symbol: str) -> bool:
+        key = (scope.exchange_account_id, scope.deployment_environment, symbol)
+        self.calls.append(key)
+        return key in self._open_scopes
+
+    async def list_open(self, session: object, scope: Scope, symbol: str | None = None) -> tuple[()]:
+        return ()
 
 
 class _SafetyEvaluator:

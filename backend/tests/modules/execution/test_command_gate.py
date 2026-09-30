@@ -22,7 +22,6 @@ from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     CommandGateBlocked,
-    DatabaseOpenUncertaintyReader,
     SubmitOutcomeLostError,
 )
 from bfx_funding_bot.modules.execution.contracts import (
@@ -48,6 +47,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationIntent,
     ReservationUnknown,
 )
+from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
 from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
     ReservationEmittingMiddleware,
 )
@@ -68,6 +68,7 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
 )
+from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 ACCOUNT_ID = UUID("3f19d046-5030-494c-9a0a-9573bb890c1f")
@@ -107,16 +108,13 @@ class _FakeUncertaintyReader:
     open_scopes: set[tuple[UUID, str, str]]
     error: Exception | None = None
 
-    async def has_open(
-        self,
-        *,
-        exchange_account_id: UUID,
-        deployment_environment: str,
-        symbol: str,
-    ) -> bool:
+    async def has_open(self, session: object, scope: Scope, symbol: str) -> bool:
         if self.error is not None:
             raise self.error
-        return (exchange_account_id, deployment_environment, symbol) in self.open_scopes
+        return (scope.exchange_account_id, scope.deployment_environment, symbol) in self.open_scopes
+
+    async def list_open(self, session: object, scope: Scope, symbol: str | None = None) -> tuple[()]:
+        return ()
 
 
 class _FakePersister:
@@ -596,7 +594,7 @@ async def test_serialized_writer_commits_unknown_attempt_event_and_block_atomica
         _FakeVenue(SubmitOutcomeUnknown("transport_timeout", True)),
         bus=DomainEventBus(),
         persister=EventStorePersister(store=store, session_factory=session_factory),
-        uncertainty_reader=DatabaseOpenUncertaintyReader(session_factory),
+        uncertainty_reader=LegacyUncertaintyReader(session_factory),
         safety_evaluator=_FakeSafetyEvaluator(
             [GuardResult(allowed=True, guard_name="<chain>")]
         ),
@@ -670,7 +668,7 @@ async def test_full_rebuild_replays_attempt_and_uncertainty_with_stable_identity
         _FakeVenue(SubmitOutcomeUnknown("transport_timeout", True)),
         bus=DomainEventBus(),
         persister=EventStorePersister(store=store, session_factory=session_factory),
-        uncertainty_reader=DatabaseOpenUncertaintyReader(session_factory),
+        uncertainty_reader=LegacyUncertaintyReader(session_factory),
         safety_evaluator=_FakeSafetyEvaluator(
             [GuardResult(allowed=True, guard_name="<chain>")]
         ),
@@ -771,7 +769,7 @@ async def test_persisted_crash_recovery_closes_pending_attempt_as_unknown(
         crashing_venue,
         bus=DomainEventBus(),
         persister=persister,
-        uncertainty_reader=DatabaseOpenUncertaintyReader(session_factory),
+        uncertainty_reader=LegacyUncertaintyReader(session_factory),
         safety_evaluator=_FakeSafetyEvaluator(
             [GuardResult(allowed=True, guard_name="<chain>")]
         ),
@@ -829,7 +827,7 @@ async def test_persisted_crash_recovery_closes_pending_attempt_as_unknown(
         fresh_venue,
         bus=DomainEventBus(),
         persister=persister,
-        uncertainty_reader=DatabaseOpenUncertaintyReader(session_factory),
+        uncertainty_reader=LegacyUncertaintyReader(session_factory),
         safety_evaluator=_FakeSafetyEvaluator(
             [GuardResult(allowed=True, guard_name="<chain>")]
         ),

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Collection, Mapping
+from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from typing import Literal, Protocol
 from uuid import UUID
@@ -291,7 +292,7 @@ class QuarantineMember:
 
 
 class OutcomeAlreadyRecorded(ValueError):  # noqa: N818 - named by journal contract
-    def __init__(self, stored: Outcome) -> None:
+    def __init__(self, stored: Outcome | CommandOutcome) -> None:
         self.stored = stored
         super().__init__("outcome already recorded")
 
@@ -457,7 +458,7 @@ class ManagedOffers:
 class CancelProvenance:
     venue_offer_id: str
     symbol: str
-    attempt_id: UUID
+    attempt_id: UUID | None
     decision_id: str
     cell_id: str
     signal_correlation_id: str
@@ -484,7 +485,7 @@ class LedgerManagedOffers(Protocol):
     async def cancel_provenance(
         self, session: AsyncSession, scope: Scope, venue_offer_id: str
     ) -> CancelProvenance | None:
-        """The live managed offer's provenance; None when absent, terminal or foreign.
+        """Live managed or ack-only provenance; None when missing, terminal or foreign.
 
         Raises ``ProvenanceConflict`` on contradictory provenance.
         """
@@ -633,6 +634,79 @@ class ScopeLock(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class CommandAttempt:
+    """Consumer submit identity; legacy CID belongs exclusively to its adapter."""
+
+    attempt_id: UUID
+    execution_decision_id: str
+    symbol: str
+    normalized_payload: JsonObject
+    amount: Decimal
+    started_at_ms: int
+    policy_revision: int
+    policy_digest: str
+    policy_revision_id: UUID
+    command_date: date | None = None  # freeze the legacy identity day across midnight
+    basis_id: UUID | None = None
+    authorization_evidence: JsonObject | None = None
+    event_id: UUID | None = None
+    cell_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CommandOutcome:
+    kind: OutcomeKind
+    venue_offer_id: str | None
+    reason: str | None
+    completed_at_ms: int
+    evidence: JsonObject
+    event_id: UUID | None = field(default=None, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class CommandRefused:
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class CancelAdmitted:
+    provenance: CancelProvenance
+    amount: Decimal
+    rate: Decimal
+    period_days: int
+
+
+type LockedCommandGuard = Callable[[AsyncSession], Awaitable[None]]
+type LockedCancelGuard = Callable[[AsyncSession, CancelAdmitted], Awaitable[None]]
+
+
+class CommandJournal(Protocol):
+    """Admission on the caller's txn; outcomes on an owned short transaction.
+
+    The port locks the scope, validates, runs the guard, then writes. Transport
+    starts only after the caller has committed. No CID crosses this boundary.
+    """
+
+    async def authorize(
+        self, session: AsyncSession, scope: Scope, attempt: CommandAttempt,
+        basis_token: str, *, now_ms: int, locked_guard: LockedCommandGuard,
+    ) -> Authorized | CommandRefused: ...
+
+    async def record_outcome(
+        self, scope: Scope, attempt_id: UUID, outcome: CommandOutcome,
+    ) -> None: ...
+
+    async def read_back_outcome(
+        self, scope: Scope, attempt_id: UUID,
+    ) -> CommandOutcome | None: ...
+
+    async def admit_cancel(
+        self, session: AsyncSession, scope: Scope, venue_offer_id: str,
+        *, now_ms: int, locked_guard: LockedCancelGuard,
+    ) -> CancelAdmitted | CommandRefused: ...
+
+
 __all__ = [
     "CREDIT_STATUSES",
     "CREDIT_TERMINAL_KINDS",
@@ -643,12 +717,17 @@ __all__ = [
     "Attempt",
     "AuthorizeRefused",
     "Authorized",
+    "CancelAdmitted",
     "CancelProvenance",
     "CapitalAuthority",
     "CapitalAvailable",
     "CapitalBlocked",
     "CapitalRead",
     "CapitalReadRefused",
+    "CommandAttempt",
+    "CommandJournal",
+    "CommandOutcome",
+    "CommandRefused",
     "Coverage",
     "Credit",
     "CreditHistory",
@@ -664,6 +743,8 @@ __all__ = [
     "LedgerReadUnbounded",
     "LedgerUncertainties",
     "LiveManagedOffer",
+    "LockedCancelGuard",
+    "LockedCommandGuard",
     "ManagedOffer",
     "ManagedOfferReader",
     "ManagedOffers",
