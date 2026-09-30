@@ -163,6 +163,9 @@ def _seed(conn, *, old_member: bool = False) -> None:
     # ``old_member``: the pre-d4e5f6a7b8c9 shape (no attempt cell, no trade evidence).
     cell_column = "" if old_member else "\n      cell_id,"
     cell_value = "" if old_member else "\n      'cell',"
+    # ``opened_revision`` arrived with e5f6a7b8c9d0 (after the old-member shape).
+    revision_column = "" if old_member else "\n      opened_revision,"
+    revision_value = "" if old_member else "\n      1,"
     statements = (
         f"INSERT INTO exchange_accounts(id,venue,label) VALUES ('{_A}','bitfinex','ledger')",
         f"""INSERT INTO capital_policy_revisions(id,
@@ -449,14 +452,14 @@ def _seed(conn, *, old_member: bool = False) -> None:
       deployment_environment,
       symbol,
       intended_amount,
-      opened_at_ms,
+      opened_at_ms,{revision_column}
       evidence)
       VALUES ('{_Q}',
       '{_A}',
       'ci',
       'fUST',
       1,
-      4,
+      4,{revision_value}
       '{{}}')""",
         (
             f"""INSERT INTO quarantine_member(quarantine_id, venue_offer_id, observation_id,
@@ -978,6 +981,7 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
             ("accepted_capital_basis_attempt", "classification"),
             ("quarantine_member", "source_kind"),
             ("quarantine_member", "venue_object_id"),
+            ("quarantine_opening", "opened_revision"),
         ):
             assert conn.scalar(
                 text("SELECT has_column_privilege('bfx_cutover_reader',:t,:c,'SELECT')"),

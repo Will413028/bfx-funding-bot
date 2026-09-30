@@ -20,16 +20,16 @@ from bfx_funding_bot.modules.ledger import (
     QueryHandle,
     Scope,
 )
-from bfx_funding_bot.modules.ledger._internal.basis import write_basis
+from bfx_funding_bot.modules.ledger._internal.basis import previous_basis, write_basis
 from bfx_funding_bot.modules.ledger._internal.clock import lock_scope
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
 from bfx_funding_bot.modules.ledger._internal.quarantine import (
     add_quarantine_member,
     open_quarantine,
+    unresolved_quarantines,
 )
 from bfx_funding_bot.modules.ledger.tables import (
     CapitalCommandClockRow,
-    ExecutionResolutionJournalRow,
     LedgerObservationCreditHistoryRow,
     LedgerObservationCreditRow,
     LedgerObservationOfferHistoryRow,
@@ -39,7 +39,6 @@ from bfx_funding_bot.modules.ledger.tables import (
     LedgerObservationTradeRow,
     LedgerObservationWalletRow,
     QuarantineMemberRow,
-    QuarantineOpeningRow,
     VenueCreditMirrorRow,
     VenueOfferMirrorRow,
 )
@@ -674,21 +673,12 @@ async def _quarantine_reappearance(
     quarantine is left alone, and a new identity joins the symbol's unresolved
     quarantine as a member instead of opening one per acceptance.
     """
-    unresolved = (
-        select(QuarantineOpeningRow.quarantine_id)
-        .where(
-            QuarantineOpeningRow.exchange_account_id == scope.exchange_account_id,
-            QuarantineOpeningRow.deployment_environment == scope.deployment_environment,
-            QuarantineOpeningRow.symbol == symbol,
-            ~select(ExecutionResolutionJournalRow.id)
-            .where(
-                ExecutionResolutionJournalRow.quarantine_id == QuarantineOpeningRow.quarantine_id
-            )
-            .exists(),
-        )
-        .order_by(QuarantineOpeningRow.opened_at_ms, QuarantineOpeningRow.quarantine_id)
-    )
-    open_ids = (await session.scalars(unresolved)).all()
+    # The basis being accepted is not written yet: bound by the previous one.
+    previous = await previous_basis(session, scope)
+    open_ids = [
+        row.quarantine_id
+        for row in await unresolved_quarantines(session, scope, previous, symbol=symbol)
+    ]
     if open_ids:
         already = await session.scalar(
             select(QuarantineMemberRow.quarantine_id)

@@ -1,4 +1,4 @@
-"""Dormant, transaction-scoped ledger journal contracts."""
+"""Dormant, transaction-scoped ledger journal and capital-read contracts."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from bfx_funding_bot.modules.trading import CapitalResult, CapitalScope
 
 type JsonObject = dict[str, object]
 type OutcomeKind = Literal["ack", "rejected", "not_sent", "unknown"]
@@ -147,9 +149,42 @@ class LedgerJournal(Protocol):
     ) -> None: ...
 
 
+class CapitalReadRefused(ValueError):  # noqa: N818 - named by reader contract
+    """The caller's transaction is not REPEATABLE READ READ ONLY."""
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerCapitalRead:
+    """``trading.derive_capital``'s result and the basis it folded (None if none)."""
+
+    result: CapitalResult
+    basis_id: UUID | None
+
+
+class LedgerCapitalReader(Protocol):
+    """Read one symbol/cell's capital from the latest accepted basis and its tail.
+
+    The caller opens and holds one REPEATABLE READ READ ONLY transaction on
+    ``session`` (anything else raises ``CapitalReadRefused``); ``now_ms`` is
+    the caller's local clock, compared with the query's local start time.
+    """
+
+    async def read_capital(
+        self,
+        session: AsyncSession,
+        scope: CapitalScope,
+        *,
+        now_ms: int,
+        max_snapshot_age_ms: int,
+    ) -> LedgerCapitalRead: ...
+
+
 __all__ = [
     "Attempt",
+    "CapitalReadRefused",
     "JsonObject",
+    "LedgerCapitalRead",
+    "LedgerCapitalReader",
     "LedgerJournal",
     "Outcome",
     "OutcomeAlreadyRecorded",

@@ -26,8 +26,10 @@ from uuid import UUID, uuid4
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.core.venue_time import VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.modules.ledger import JsonObject, Scope
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
+from bfx_funding_bot.modules.ledger._internal.quarantine import unresolved_quarantines
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisCellRow,
@@ -44,7 +46,6 @@ from bfx_funding_bot.modules.ledger.tables import (
     LedgerObservationRow,
     LedgerObservationTradeRow,
     LedgerObservationWalletRow,
-    QuarantineOpeningRow,
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
 )
@@ -196,7 +197,7 @@ class _Classifier:
         return attempt.cell_id if attempt is not None else None
 
 
-async def _previous_basis(session: AsyncSession, scope: Scope) -> AcceptedCapitalBasisRow | None:
+async def previous_basis(session: AsyncSession, scope: Scope) -> AcceptedCapitalBasisRow | None:
     """The latest accepted basis of the scope (by its query revision)."""
     row: AcceptedCapitalBasisRow | None = await session.scalar(
         select(AcceptedCapitalBasisRow)
@@ -222,7 +223,7 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
     observation = await session.get(LedgerObservationRow, observation_id)
     if observation is None or not observation.accepted:
         raise ValueError("basis requires an accepted observation")
-    previous = await _previous_basis(session, scope)
+    previous = await previous_basis(session, scope)
 
     wallets = (
         await session.scalars(
@@ -524,20 +525,7 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
     new_high_water = max([high_water, *(a.attempt_seq for a in considered)])
 
     quarantines = sorted(
-        (
-            await session.scalars(
-                select(QuarantineOpeningRow.quarantine_id).where(
-                    QuarantineOpeningRow.exchange_account_id == scope.exchange_account_id,
-                    QuarantineOpeningRow.deployment_environment == scope.deployment_environment,
-                    ~select(ExecutionResolutionJournalRow.id)
-                    .where(
-                        ExecutionResolutionJournalRow.quarantine_id
-                        == QuarantineOpeningRow.quarantine_id
-                    )
-                    .exists(),
-                )
-            )
-        ).all()
+        row.quarantine_id for row in await unresolved_quarantines(session, scope, previous)
     )
 
     scope_block = _block_json(c.scope_reasons)
@@ -668,12 +656,13 @@ def _reflected(
         and observation.offer_history_complete
         and start is not None
         and end is not None
-        and start <= attempt.started_at_ms
-        and terminal.occurred_at_ms <= end
+        and start <= attempt.started_at_ms  # both local: requested range, attempt start
+        # A venue stamp against the locally requested end: allow venue clock skew.
+        and terminal.occurred_at_ms <= end + VENUE_CLOCK_TOLERANCE_MS
         and terminal.symbol == attempt.symbol
         and terminal.amount_original is not None
         and terminal.amount_original == _payload_amount(attempt.normalized_payload)
     )
 
 
-__all__ = ["write_basis"]
+__all__ = ["previous_basis", "write_basis"]
