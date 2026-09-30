@@ -7,10 +7,14 @@ from uuid import UUID
 
 import pytest
 
-from bfx_funding_bot.external.bitfinex.auth_rest import FundingOfferHistoryCoverage
+from bfx_funding_bot.external.bitfinex.auth_rest import (
+    ActiveFundingOffer,
+    FundingOfferHistoryCoverage,
+)
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.unknown_matching import (
     UnknownSubmitAttempt,
+    amount_seen_since_start,
     match_attempt_to_snapshot,
     match_unknown_attempt,
 )
@@ -117,3 +121,41 @@ def test_complete_history_with_zero_pages_is_incomplete() -> None:
     )
 
     assert result.kind == "incomplete"
+
+
+def _venue_offer(mts_created: int) -> ActiveFundingOffer:
+    return ActiveFundingOffer(
+        venue_offer_id="venue-1", symbol="fUST", amount=Decimal("100"),
+        amount_original=Decimal("100"), rate=0.001, rate_decimal=Decimal("0.001"),
+        period_days=2, mts_created=mts_created, mts_updated=mts_created,
+        status="ACTIVE", offer_type="LIMIT", flags=0,
+    )
+
+
+# 2026-09-29: the venue stamps offers to the whole second on its own clock, so
+# an offer accepted for an attempt started at 1_000 can read mts_created 0.
+def test_offer_stamped_before_the_attempt_by_venue_granularity_still_matches() -> None:
+    offer = _venue_offer(mts_created=0)
+    coverage = replace(_coverage(), requested_start_ms=0,
+                       oldest_mts_created=0, newest_mts_created=0)
+
+    result = match_unknown_attempt(_attempt(), (offer,), (), coverage)
+
+    assert result.kind == "exact_match"
+    assert result.offer == offer
+
+
+def test_offer_stamped_before_the_attempt_blocks_an_automatic_not_sent() -> None:
+    # Were the amount not seen, a zero_match would resolve the attempt as never
+    # sent while its offer is live at the venue.
+    payload = {"offers": [{"symbol": "fUST", "amount_original": "100", "mts_created": 0}]}
+
+    assert amount_seen_since_start(_attempt(), payload)
+
+
+def test_offer_well_before_the_attempt_is_not_its_evidence() -> None:
+    offer = _venue_offer(mts_created=-60_000)
+    coverage = replace(_coverage(), requested_start_ms=-60_000,
+                       oldest_mts_created=-60_000, newest_mts_created=-60_000)
+
+    assert match_unknown_attempt(_attempt(), (offer,), (), coverage).kind == "zero_match"

@@ -18,7 +18,10 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
     FundingOfferHistoryCoverage,
 )
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
-from bfx_funding_bot.modules.execution.submit_outcomes import fingerprint_submit_payload
+from bfx_funding_bot.modules.execution.submit_outcomes import (
+    VENUE_CLOCK_TOLERANCE_MS,
+    fingerprint_submit_payload,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +68,8 @@ def offer_matches_attempt_identity(
         and offer.rate_decimal is not None
         and offer.rate_decimal == attempt.rate
         and offer.period_days == attempt.period_days
-        and attempt.started_at_ms <= offer.mts_created <= observed_end_ms
+        and attempt.started_at_ms - VENUE_CLOCK_TOLERANCE_MS
+        <= offer.mts_created <= observed_end_ms
         and offer.offer_type is not None
         and offer.offer_type == attempt.offer_type
         and offer.flags is not None
@@ -382,7 +386,8 @@ def amount_seen_since_start(attempt: UnknownSubmitAttempt, payload: Mapping[str,
             except ArithmeticError:
                 return True  # unreadable same-symbol amount: cannot rule it out
             if original == attempt.amount and (
-                    not isinstance(created, int) or created >= attempt.started_at_ms):
+                    not isinstance(created, int)
+                    or created >= attempt.started_at_ms - VENUE_CLOCK_TOLERANCE_MS):
                 return True
     return False
 

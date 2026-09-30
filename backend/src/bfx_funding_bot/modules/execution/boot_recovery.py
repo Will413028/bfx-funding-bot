@@ -113,6 +113,13 @@ RecoveryAction = (
 # answers. Before this an absent offer proves nothing, and a coincidental
 # foreign offer could be the only candidate while ours is still in flight.
 UNKNOWN_SETTLE_MS = 120_000
+# How far before the oldest attempt to explain the offer-history query starts.
+# The venue stamps offers to the whole second on its own clock, so an offer we
+# submitted at .175 can carry an mts_created before the attempt started; a
+# window starting exactly there then reads incomplete and the fill is
+# unclassifiable. Only the query widens: coverage still starts at or before
+# every attempt it must explain.
+HISTORY_QUERY_MARGIN_MS = 60_000
 # Operator id recorded on resolutions this process derives from evidence alone.
 SYSTEM_RESOLVER = "system:reconcile"
 
@@ -578,7 +585,8 @@ class BootRecovery:
         all_credits = await self._fetch_credits(None)
         wallet_available = await self._fetch_available_all()
         history = await self._fetch_history(
-            start_ms=history_start_ms,
+            start_ms=(None if history_start_ms is None
+                      else max(0, history_start_ms - HISTORY_QUERY_MARGIN_MS)),
             end_ms=query_started_at_ms,
         )
         query_finished_at_ms = self._clock()
