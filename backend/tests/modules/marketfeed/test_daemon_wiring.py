@@ -374,6 +374,65 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("epoch", "match"), [
+    ("drop", "authority_missing table"),
+    ("empty", "authority_missing row"),
+    ("ledger", "authority_unsupported value=ledger"),
+])
+async def test_live_boot_on_an_unsupported_authority_stops_trading_and_refuses(
+        monkeypatch, tmp_path, httpx_mock, epoch, match):
+    """Right after the schema head, the capital authority is read once through the
+    same refusal: an epoch this build does not support (a switched database) or
+    cannot read refuses the boot, writes nothing and reaches no venue."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from bfx_funding_bot.apps.bot import build_daemon
+    from bfx_funding_bot.core.authority import AuthorityMismatch
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    from bfx_funding_bot.modules.execution.safety import boot_stop
+    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
+    configure_account_env(monkeypatch)
+    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+        "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_HEALTHZ_PORT": "0",
+        "BFX_BOOK_MAX_AGE_SECONDS": "30", "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
+        "BFX_BOOK_MAX_DOWN_PCT": "0.15",
+        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
+        "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'authority.db'}"}
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    engine = make_async_engine_from_url(values["DATABASE_URL"])
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(engine)
+    async with engine.begin() as conn:
+        if epoch == "drop":
+            await conn.execute(text("DROP TABLE capital_authority_epoch"))
+        elif epoch == "empty":
+            await conn.execute(text("DELETE FROM capital_authority_epoch"))
+        else:
+            await conn.execute(text(
+                "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
+                "VALUES (2, 'ledger', 1, 'test', 'switched')"))
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
+    await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
+    sent: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(boot_stop.alerts, "emit",
+                        lambda event, *, level=None, **fields: sent.append((event, level)))
+    try:
+        with pytest.raises(AuthorityMismatch, match=match):
+            await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
+        state = await trading.current()
+        assert (state.state, state.reason) == ("ACTIVE", "trading before the deploy")
+        assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
+        assert ("venue_offers_may_remain", "critical") in sent
+    finally:
+        await engine.dispose()
+
+
 def _write_cells_yaml(tmp_path: Path) -> Path:
     yaml_path = tmp_path / "cells.yaml"
     # fUST: the funded canary currency (caps {fUSD: 0, fUST: 3000}). Several

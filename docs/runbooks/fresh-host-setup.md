@@ -106,7 +106,7 @@ SELECT n.nspname, p.proname, p.prosecdef,
 `accept_revision`、`offer_history_pages`、`credit_history_pages`；
 `accepted_capital_basis` 可讀 `observation_id`、`accept_revision`、`attempt_seq_high_water`、`scope_block`（不再有 `policy_revision_id`、`authorization_block`、`credit_cells_present`）；`accepted_capital_basis_symbol` 可讀 `block`；`submission_attempt_journal` 可讀 `cell_id`；`ledger_observation` 可讀 `trades_complete` 與 trade 請求範圍；`ledger_observation_wallet` 可讀 `symbol`；
 `quarantine_member` 可讀 `source_kind`、`venue_object_id`；`quarantine_opening` 可讀 `opened_revision`，
-`accepted_capital_basis_credit`、`accepted_capital_basis_credit_cell` 與 `ledger_observation_trade` 的所有欄位可讀。
+`accepted_capital_basis_credit`、`accepted_capital_basis_credit_cell`、`ledger_observation_trade` 與 `capital_authority_epoch` 的所有欄位可讀。
 檢查 `SECURITY DEFINER` 函式清單，確認 LOGIN 沒有可藉以寫入 ledger 的 EXECUTE 權限。
 接著以 LOGIN 連線，在 **read-write transaction** 執行以下拒絕檢查；每個預期失敗的
 statement 都各自開新 transaction，避免前一個錯誤使後續 statement 自動失敗：

@@ -73,6 +73,27 @@ class CapitalPolicyHeadRow(Base):
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class CapitalAuthorityEpochRow(Base):
+    """Which capital authority the runtime runs under; insert-only, latest row wins.
+
+    Only the owner appends (the S1-7 switch); every build reads the latest row
+    once at boot and refuses to run on a value it does not support.
+    """
+
+    __tablename__ = "capital_authority_epoch"
+    epoch_seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    authority: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(_JSON, nullable=True)
+    __table_args__ = (
+        CheckConstraint(
+            "authority IN ('legacy', 'ledger')", name="ck_capital_authority_epoch_authority"
+        ),
+    )
+
+
 class CapitalCommandClockRow(Base):
     __tablename__ = "capital_command_clock"
     exchange_account_id: Mapped[UUID] = mapped_column(

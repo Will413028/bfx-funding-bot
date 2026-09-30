@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
+from bfx_funding_bot.core.authority import read_authority
 from bfx_funding_bot.core.db import make_engine, make_session_factory
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
@@ -31,6 +32,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logging.exception("Startup failed; /health remains available")
         app.state.engine = None
         app.state.session_factory = None
+    factory = app.state.session_factory
+    if factory is not None:
+        # Read once: an authority this build does not support (or cannot read)
+        # refuses to start, so /health never reports a build on the wrong one.
+        try:
+            async with factory() as session:
+                await read_authority(session)
+        except Exception:
+            logging.critical("Startup refused: capital authority unreadable or unsupported")
+            await app.state.engine.dispose()
+            raise
     try:
         yield
     finally:

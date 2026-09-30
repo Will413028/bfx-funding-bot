@@ -18,6 +18,13 @@ UNKNOWN 與金額指紋、自動保護、Kill switch）。決策來源：ADR 202
 超過次數上限才要人（DB trigger 與程式碼雙重把關）。
 部署永遠不改變交易狀態，也不需要任何核准。
 
+**資金權威（`capital_authority_epoch`）**：只增不改的表，最新一列（`epoch_seq` 最大）決定資金事實由誰負責。
+`legacy`＝沿用舊的 event/projection 路徑，新 ledger 表休眠：非 owner（`bfx_bot`）對 ledger 事實表的
+INSERT（以及 clock／mirror 的 UPDATE）一律被 DB trigger 拒絕；`ledger`＝ledger 成為權威、bot 才可寫入。
+migration 種下 `legacy` 一列；之後只有 S1-7 的切換（以 `<owner>` 執行）會追加一列，不要手動改。
+bot（live）與 webapi 開機時各讀一次：表或列缺失、值不認得、或本版不支援（目前只支援 `legacy`）就拒絕開機
+（bot 走 schema head 同一條 `boot_blocked` 告警路徑）。
+
 ## 2. 幣別啟停與包絡設定
 
 所有每幣別設定都是 DB 裡有版本的 CapitalPolicy，每次改動產生一個新 revision（舊的保留）。
