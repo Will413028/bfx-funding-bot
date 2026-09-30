@@ -8,6 +8,7 @@ Per spec §6.2 dispatch table:
   FocEvent CANCELED + recent_cancel ≤5s → user_cancel
   FocEvent CANCELED otherwise → venue_cancel
   FocEvent EXPIRED → expired
+  FocEvent with no claim → warn only (foreign offer; reconcile converges)
   FcnEvent → informational no-op (credit events carry no offer id)
   any event on RELEASED → idempotent no-op
 """
@@ -103,8 +104,11 @@ def _translate_foc(
     claim = snapshot.get(voi)
 
     if claim is None:
+        # No claim: a foreign offer (manual, auto-renew; ARCHITECTURE I-FO)
+        # closing, or ours before the registry saw it. Periodic reconcile is
+        # authoritative for both, so this must not stop the dispatcher.
         return [], [], [DiagnosticLog(
-            "error",
+            "warn",
             f"unmatched foc correlation voi={voi} status={foc.status}",
             voi,
         )]

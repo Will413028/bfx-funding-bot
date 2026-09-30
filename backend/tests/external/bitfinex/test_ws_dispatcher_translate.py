@@ -112,14 +112,17 @@ def test_foc_executed_on_claimed_emits_orderfilled() -> None:
     assert mutations[0].new_state == RegistryState.RELEASED
 
 
-def test_unmatched_foc_is_correlation_error() -> None:
-    events, mutations, diags = translate_bfx_event(
-        _foc("unknown", status="EXECUTED"), {}, {}, now_ms=2500,
-    )
+def test_unmatched_foc_is_a_warning_not_a_correlation_error() -> None:
+    # A foc with no claim is a foreign offer (manual, auto-renew) closing, or
+    # one of ours the registry has not seen; periodic reconcile owns both.
+    for status in ("EXECUTED @ 0.0005 (100.0)", "CANCELED"):
+        events, mutations, diags = translate_bfx_event(
+            _foc("unknown", status=status), {}, {}, now_ms=2500,
+        )
 
-    assert events == [] and mutations == []
-    assert diags[0].level == "error"
-    assert "unmatched" in diags[0].message
+        assert events == [] and mutations == []
+        assert [d.level for d in diags] == ["warn"]
+        assert "unmatched" in diags[0].message
 
 
 def test_any_event_on_released_state_is_idempotent_no_op() -> None:
