@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select
 
+from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 from bfx_funding_bot.modules.execution.events import UncertaintyMarkedNotAccepted
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.trading import Available, Blocked
@@ -111,10 +112,14 @@ async def test_two_consecutive_unknown_not_accepted_cycles(candidate_db):  # noq
 
         # 3. A fresh query, confirmation and acceptance release the commitment.
         seq = await snapshot(factory, repo)
+        async with factory() as session:
+            accepted_row = await session.get(CapitalSnapshotRow, seq)
+            assert accepted_row is not None
+            accepted_query = accepted_row.query_id
         accepted = await comparison(factory, repo)
         assert accepted.status == "equal", accepted
         for arm in (accepted.candidate, accepted.baseline):
             assert isinstance(arm, Available)
-            assert arm.view.snapshot_seq == seq
+            assert arm.view.query_id == accepted_query
             assert arm.view.snapshot.unreflected_commitments == Decimal("0")
         assert accepted.classifications == ()

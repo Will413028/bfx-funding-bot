@@ -294,6 +294,22 @@ async def test_mvcc_hides_concurrent_outcome_query_and_policy(candidate_db):
     assert after.candidate_input_digest != before.candidate_input_digest
 
 
+async def test_another_symbols_policy_never_selects_or_blocks_this_one(candidate_db):
+    factory, repo, policy, _ = candidate_db
+    async with factory.begin() as writer:
+        await repo.apply_policy(
+            writer,
+            symbol="fUSD",
+            policy=replace(policy.policy, enabled=False),
+            expected_revision=0,
+            source={"operator": "test"},
+        )
+    loaded = await load(factory, repo)
+    assert isinstance(loaded, LoadedInputs), loaded
+    assert (loaded.inputs.policy.symbol, loaded.inputs.policy.digest) == ("fUST", policy.digest)
+    assert isinstance(fold(loaded), Available)
+
+
 @pytest.mark.parametrize("fault", ["policy", "classification", "prefix", "decision"])
 async def test_missing_or_corrupt_evidence_is_not_comparable(candidate_db, fault):
     factory, repo, policy, seq = candidate_db
@@ -410,8 +426,10 @@ async def test_snapshot_history_over_cap_uses_only_accepted_payload(candidate_db
     folded = fold(loaded)
     assert isinstance(folded, Blocked)
     assert folded.reason == "snapshot_superseded_by_unfenced_observation"
-    assert loaded.inputs.accepted.snapshot_seq == accepted_seq
-    assert loaded.inputs.read_context.latest_observation_seq > accepted_seq
+    heads = json.loads(loaded.manifest.heads_json)
+    assert heads["accepted_seq"] == accepted_seq
+    assert heads["latest_observation_seq"] > accepted_seq
+    assert loaded.inputs.read_context.integrity_block == folded
     work = json.loads(loaded.manifest.work_json)
     assert work["uncertainty_rows"] == work["tail_rows"] == 0
     assert work["point_lookups"] == 1

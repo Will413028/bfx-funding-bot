@@ -246,6 +246,18 @@ def full_coverage(payload: Row) -> bool:
     )
 
 
+def _cells(
+    scope: CapitalScope, symbol: str, values: Row, *, credit_cells_present: bool
+) -> tuple[tuple[str, Decimal], ...]:
+    cells = {cell: amount(value) for cell, value in values["cells"].items()}
+    if not credit_cells_present and symbol == scope.symbol:
+        # capital_repository.py:891-897: a classification accepted before credits
+        # were attributed charges U to every cell; fold it into the read cell.
+        unattributed = amount(values["unattributed_credits"])
+        cells[scope.cell_id] = cells.get(scope.cell_id, Decimal("0")) + unattributed
+    return tuple(sorted(cells.items()))
+
+
 def decode_basis(
     scope: CapitalScope, row: Row, query: Row, event: Event, prefix: str | None, watermark: int
 ) -> tuple[AcceptedCapitalBasis, Blocked | None]:
@@ -292,7 +304,8 @@ def decode_basis(
             amount(values["credits"]),
             amount(values["unattributed_credits"]),
             amount(values["foreign"]),
-            tuple(sorted((cell, amount(value)) for cell, value in values["cells"].items())),
+            _cells(scope, symbol, values, credit_cells_present="credit_cells" in c),
+            None,
         )
         for symbol, values in sorted(c["symbols"].items())
     )
@@ -307,19 +320,23 @@ def decode_basis(
     ids = (*reflected, *settled, *(key for key, _ in unresolved))
     require(len(ids) == len(set(ids)), "snapshot_evidence_conflict")
     authorization = row["authorization_blocked_reason"]
+    # The accepted event's durable identity is the observation; the legacy
+    # command fence is the high water of intents this acceptance classified.
+    # Legacy quarantines never outlive their resolution (capital_repository.py
+    # :833), so the legacy classification names no basis-unresolved quarantine.
     accepted = AcceptedCapitalBasis(
         scope.account_id,
         scope.environment,
-        row["event_seq"],
-        row["command_fence"],
+        event.event_id,
         row["query_id"],
+        row["command_fence"],
         p["query_started_at_ms"],
         p["query_finished_at_ms"],
         symbols,
         frozenset(reflected),
         frozenset(settled),
         unresolved,
-        "credit_cells" in c,
+        (),
         Blocked(authorization, ()) if authorization is not None else None,
     )
     failure = None
@@ -333,3 +350,27 @@ def decode_basis(
         elif not full_coverage(p):
             failure = Blocked("snapshot_incomplete", ())
     return accepted, failure
+
+
+def integrity_block(
+    confirmation: Blocked | None,
+    *,
+    superseded: bool,
+    query_pending: bool,
+    authorization: Blocked | None,
+) -> Blocked | None:
+    """First legacy-only failure in legacy order, unless the legacy read stops earlier.
+
+    capital_repository.py:836-877: query head, then authorization, then
+    confirmation, then no newer unfenced observation, then coverage. Query head
+    and authorization are shared contract checks that follow integrity there,
+    so a failure they mask is not reported. Prefix, evidence identity and
+    watermark bounds are raised by ``decode_basis``/``decode_event`` instead.
+    """
+    if query_pending or authorization is not None:
+        return None
+    if confirmation is not None and confirmation.reason != "snapshot_incomplete":
+        return confirmation
+    if superseded:
+        return Blocked("snapshot_superseded_by_unfenced_observation", ())
+    return confirmation

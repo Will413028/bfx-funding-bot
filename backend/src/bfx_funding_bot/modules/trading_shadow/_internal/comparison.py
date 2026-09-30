@@ -40,7 +40,9 @@ def _result_fields(result: CapitalResult) -> dict[str, object]:
     for name in ("account_id", "environment", "symbol", "revision", "digest", "revision_id"):
         result_fields[f"applied.{name}"] = getattr(view.applied, name)
     result_fields["applied.policy"] = view.applied.policy
-    result_fields["snapshot_seq"] = view.snapshot_seq
+    # capital_snapshots.query_id is unique: the query identifies the accepted
+    # snapshot on both arms. The legacy arm has no observation identity.
+    result_fields["query_id"] = view.query_id
     for name in ("available_amount", "unreflected_commitments", "total_capital", "cell_exposure"):
         result_fields[f"snapshot.{name}"] = getattr(view.snapshot, name)
     for name in ("spendable", "cell_limit", "cell_headroom", "max_new_offer", "reason"):
@@ -75,7 +77,10 @@ def _classifications(
                 for u in loaded.inputs.uncertainties
             ):
                 labels.add("unknown_open")
-            elif any(symbol == loaded.inputs.scope.symbol for _, symbol in accepted.unresolved_attempts):
+            elif any(
+                symbol == loaded.inputs.scope.symbol
+                for _, symbol in (*accepted.unresolved_attempts, *accepted.unresolved_quarantines)
+            ):
                 labels.add("resolved_waiting_snapshot")
     # Both arms read one snapshot, so a value difference is never an expected
     # transient; it stays unclassified for evidence review instead of being
@@ -90,11 +95,13 @@ def _mapped_baseline(value: BaselineAvailable | BaselineBlocked, loaded: LoadedI
         value.account_id, value.environment, value.symbol, value.revision,
         value.digest, value.revision_id, value.policy,
     )
-    # The legacy view exposes raw classification JSON. Its common acceptance
-    # identity is compared separately below; this field is only a typed carrier.
+    # The legacy view exposes raw classification JSON and no observation
+    # identity. Its common acceptance identity is the query (compared in the
+    # result) and the fence (compared below); the observation and attribution
+    # fields are only typed carriers and are never compared.
     return Available(CapitalView(
-        applied, value.snapshot_seq, value.snapshot, value.budget,
-        value.unattributed_credit_exposure, loaded.inputs.accepted,
+        applied, value.query_id, loaded.inputs.accepted.observation_id, value.snapshot,
+        value.budget, value.unattributed_credit_exposure, loaded.inputs.accepted,
     ))
 
 
@@ -163,16 +170,14 @@ async def compare_capital(
         })).hexdigest()
         differences = _compare(candidate, baseline)
         if isinstance(observed, BaselineAvailable) and isinstance(candidate, Available):
-            accepted = loaded.inputs.accepted
-            for path, left, right in (
-                ("attribution.command_fence", accepted.command_fence, observed.command_fence),
-                ("attribution.query_id", accepted.query_id, observed.query_id),
-            ):
-                if left != right:
-                    differences += (FieldDifference(
-                        path, json.loads(canonical_bytes(left)),
-                        json.loads(canonical_bytes(right)),
-                    ),)
+            # The query is compared in the result; the S0 high water is the
+            # legacy command fence it was mapped from.
+            left, right = loaded.inputs.accepted.attempt_seq_high_water, observed.command_fence
+            if left != right:
+                differences += (FieldDifference(
+                    "attribution.command_fence", json.loads(canonical_bytes(left)),
+                    json.loads(canonical_bytes(right)),
+                ),)
         return result(
             "different" if differences else "equal", differences=differences,
             classifications=_classifications(candidate, loaded, differences),

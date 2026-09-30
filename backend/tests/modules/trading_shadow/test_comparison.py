@@ -36,7 +36,7 @@ def baseline_for(candidate):
     return BaselineAvailable(
         SCOPE.account_id, SCOPE.environment, SCOPE.symbol,
         POLICY.revision, POLICY.digest, POLICY.revision_id, POLICY.policy,
-        BASIS.snapshot_seq, BASIS.command_fence, BASIS.query_id,
+        20, BASIS.attempt_seq_high_water, BASIS.query_id,
         view.snapshot, view.budget, view.unattributed_credit_exposure, 30, 30,
     )
 
@@ -123,6 +123,14 @@ async def test_acceptance_identity_and_blocked_reason():
     assert blocked.status == "different"
     assert any(d.path == "kind" for d in blocked.differences)
     assert isinstance(blocked.baseline, Blocked)
+
+
+@pytest.mark.asyncio
+async def test_accepted_query_identity_is_compared():
+    base = baseline_for(fold())
+    changed = await compare(loaded(), replace(base, query_id=POLICY.revision_id))
+    assert changed.status == "different"
+    assert {d.path for d in changed.differences} == {"query_id"}
 
 
 @pytest.mark.asyncio
