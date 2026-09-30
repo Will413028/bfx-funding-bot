@@ -75,20 +75,25 @@ def _observation_sql(
     accept_revision: int | None = None,
     complete: bool = True,
     finished_at_ms: int = 2,
+    trades_complete: bool | None = None,
+    legacy: bool = False,
 ) -> str:
     state = str(accepted).lower()
     coverage = str(complete).lower()
+    trades = coverage if trades_complete is None else str(trades_complete).lower()
     accepted_revision = 0 if accept_revision is None else accept_revision
+    # ``legacy``: before d4e5f6a7b8c9 the header had no trade coverage.
+    trade_column, trade_value = ("", "") if legacy else ("trades_complete, ", f"{trades}, ")
     return f"""INSERT INTO ledger_observation (
       id, query_id, exchange_account_id, deployment_environment, schema_version,
       query_finished_at_ms, confirmation_finished_at_ms,
       accept_revision, wallets_complete, offers_complete,
       credits_complete, loans_complete, offer_history_complete, credit_history_complete,
-      first_digest, confirmation_digest, accepted, evidence)
+      {trade_column}first_digest, confirmation_digest, accepted, evidence)
       VALUES ('{observation_id}', '{query_id}', '{_A}', 'ci', 1,
       {finished_at_ms}, {finished_at_ms + 1}, {accepted_revision}, {coverage}, {coverage},
       {coverage}, {coverage}, {coverage}, {coverage},
-      '{first}', '{confirmation}', {state}, '{{}}')"""
+      {trade_value}'{first}', '{confirmation}', {state}, '{{}}')"""
 
 
 def _offer_sql(offer_id: str, venue_id: str, symbol: str) -> str:
@@ -115,14 +120,26 @@ def _query_sql(
 
 
 def _basis_sql(
-    basis_id: str, observation_id: str, revision: int = 0, *, environment: str = "ci"
+    basis_id: str,
+    observation_id: str,
+    revision: int = 0,
+    *,
+    environment: str = "ci",
+    high_water: int = 0,
+    legacy: bool = False,
 ) -> str:
+    # ``legacy``: the pre-d4e5f6a7b8c9 shape, which bound one policy revision.
+    columns, values = (
+        ("policy_revision_id, credit_cells_present", f"'{_P}', true")
+        if legacy
+        else ("attempt_seq_high_water", str(high_water))
+    )
     return f"""INSERT INTO accepted_capital_basis (
       id, exchange_account_id, deployment_environment, observation_id,
-      accepted, accept_revision, policy_revision_id,
-      credit_cells_present, schema_version, digest, accepted_at_ms)
+      accepted, accept_revision, {columns},
+      schema_version, digest, accepted_at_ms)
       VALUES ('{basis_id}', '{_A}', '{environment}', '{observation_id}',
-      true, {revision}, '{_P}', true, 1, 'basis-digest', 3)"""
+      true, {revision}, {values}, 1, 'basis-digest', 3)"""
 
 
 def _member_sql(kind: str, venue_id: str, observation_id: str = _O) -> str:
@@ -143,6 +160,9 @@ def ledger_db(pg_templates, pg_clone):
 
 def _seed(conn, *, old_member: bool = False) -> None:
     """Owner inserts one valid row per ledger table so row triggers are exercised."""
+    # ``old_member``: the pre-d4e5f6a7b8c9 shape (no attempt cell, no trade evidence).
+    cell_column = "" if old_member else "\n      cell_id,"
+    cell_value = "" if old_member else "\n      'cell',"
     statements = (
         f"INSERT INTO exchange_accounts(id,venue,label) VALUES ('{_A}','bitfinex','ledger')",
         f"""INSERT INTO capital_policy_revisions(id,
@@ -170,7 +190,7 @@ def _seed(conn, *, old_member: bool = False) -> None:
       'ci',
       0)""",
         _query_sql(_QID, 1),
-        _observation_sql(_O, _QID, accepted=True),
+        _observation_sql(_O, _QID, accepted=True, legacy=old_member),
         f"""INSERT INTO ledger_observation_wallet(observation_id,
       wallet_type,
       currency,
@@ -182,6 +202,9 @@ def _seed(conn, *, old_member: bool = False) -> None:
       10,
       10)""",
         _offer_sql(_H, "offer-1", "fUST"),
+        f"""INSERT INTO ledger_observation_trade(observation_id, trade_id, symbol,
+      venue_offer_id, amount, rate, period_days, mts_create)
+      VALUES ('{_O}', 1, 'fUST', 'offer-1', 1, 0.0001, 2, 1)""",
         f"""INSERT INTO ledger_observation_credit(id,
       observation_id,
       venue_credit_id,
@@ -282,7 +305,7 @@ def _seed(conn, *, old_member: bool = False) -> None:
       'ACTIVE',
       '{_O}',
       true)""",
-        _basis_sql(_B, _O),
+        _basis_sql(_B, _O, legacy=old_member),
         f"""INSERT INTO accepted_capital_basis_symbol(basis_id,
       symbol,
       available,
@@ -391,7 +414,7 @@ def _seed(conn, *, old_member: bool = False) -> None:
       execution_decision_id,
       exchange_account_id,
       deployment_environment,
-      symbol,
+      symbol,{cell_column}
       attempt_seq,
       normalized_payload,
       payload_sha256,
@@ -403,7 +426,7 @@ def _seed(conn, *, old_member: bool = False) -> None:
       '{_D}',
       '{_A}',
       'ci',
-      'fUST',
+      'fUST',{cell_value}
       1,
       '{{}}',
       'hash',
@@ -490,7 +513,9 @@ def _seed(conn, *, old_member: bool = False) -> None:
       '{_Q}')""",
     )
     for statement in statements:
-        if old_member and "accepted_capital_basis_credit" in statement:
+        if old_member and (
+            "accepted_capital_basis_credit" in statement or "ledger_observation_trade" in statement
+        ):
             continue
         conn.exec_driver_sql(statement)
 
@@ -667,6 +692,7 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
       exchange_account_id,
       deployment_environment,
       symbol,
+      cell_id,
       attempt_seq,
       normalized_payload,
       payload_sha256,
@@ -679,6 +705,7 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
       '{_A}',
       'wrong',
       'fUST',
+      'cell',
       2,
       '{{}}',
       'hash',
@@ -811,6 +838,8 @@ def test_observation_pair_and_accepted_basis_are_enforced(seeded) -> None:
         conn.exec_driver_sql(_basis_sql(str(uuid4()), _O, environment="wrong"))
     with seeded.begin() as conn, pytest.raises(Exception, match="ledger basis scope mismatch"):
         conn.exec_driver_sql(_basis_sql(str(uuid4()), _O, revision=1))
+    with seeded.begin() as conn, pytest.raises(Exception, match="ck_accepted_basis_high_water"):
+        conn.exec_driver_sql(_basis_sql(str(uuid4()), _O, high_water=-1))
     query_ids = [str(uuid4()) for _ in range(3)]
     with seeded.begin() as conn:
         for revision, query_id in enumerate(query_ids, start=3):
@@ -827,6 +856,10 @@ def test_observation_pair_and_accepted_basis_are_enforced(seeded) -> None:
     with seeded.begin() as conn, pytest.raises(Exception, match="ck_ledger_observation_acceptance"):
         conn.exec_driver_sql(
             _observation_sql(str(uuid4()), query_ids[2], accepted=True, complete=False)
+        )
+    with seeded.begin() as conn, pytest.raises(Exception, match="ck_ledger_observation_acceptance"):
+        conn.exec_driver_sql(
+            _observation_sql(str(uuid4()), query_ids[2], accepted=True, trades_complete=False)
         )
     with seeded.begin() as conn, pytest.raises(Exception, match="ledger observation accept fence"):
         conn.exec_driver_sql(
@@ -934,6 +967,13 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
             ("ledger_observation_offer", "amount_original"),
             ("ledger_observation_offer", "rate_observed"),
             ("accepted_capital_basis", "digest"),
+            ("accepted_capital_basis", "attempt_seq_high_water"),
+            ("accepted_capital_basis", "scope_block"),
+            ("accepted_capital_basis_symbol", "block"),
+            ("ledger_observation", "trades_complete"),
+            ("ledger_observation", "trades_requested_start_ms"),
+            ("ledger_observation_wallet", "symbol"),
+            ("submission_attempt_journal", "cell_id"),
             ("accepted_capital_basis_symbol", "offered"),
             ("accepted_capital_basis_attempt", "classification"),
             ("quarantine_member", "source_kind"),
@@ -943,7 +983,11 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
                 text("SELECT has_column_privilege('bfx_cutover_reader',:t,:c,'SELECT')"),
                 {"t": table, "c": column},
             )
-        for table in ("accepted_capital_basis_credit", "accepted_capital_basis_credit_cell"):
+        for table in (
+            "accepted_capital_basis_credit",
+            "accepted_capital_basis_credit_cell",
+            "ledger_observation_trade",
+        ):
             for column in inspect(conn).get_columns(table):
                 assert conn.scalar(
                     text("SELECT has_column_privilege('bfx_cutover_reader',:t,:c,'SELECT')"),
@@ -1058,6 +1102,38 @@ def test_corrective_downgrade_restores_offer_member_guard(ledger_db) -> None:
             assert "NEW.venue_offer_id" in conn.scalar(
                 text("SELECT pg_get_functiondef('public.guard_ledger_scope()'::regprocedure)")
             )
+            for column in ("policy_revision_id", "authorization_block", "credit_cells_present"):
+                assert conn.scalar(
+                    text(
+                        "SELECT has_column_privilege('bfx_cutover_reader',"
+                        "'accepted_capital_basis',:c,'SELECT')"
+                    ),
+                    {"c": column},
+                )
             _seed(conn, old_member=True)
     finally:
         engine.dispose()
+
+
+def test_attempt_cell_must_equal_its_decision_cell(seeded) -> None:
+    statement = f"""INSERT INTO submission_attempt_journal(attempt_id, execution_decision_id,
+      exchange_account_id, deployment_environment, symbol, cell_id, attempt_seq,
+      normalized_payload, payload_sha256, basis_id, policy_revision_id,
+      authorization_evidence, started_at_ms)
+      VALUES ('{uuid4()}', '{_D2}', '{_A}', 'ci', 'fUST', '{{cell}}', 2, '{{{{}}}}', 'hash',
+      '{_B}', '{_P}', '{{{{}}}}', 4)"""
+    with seeded.begin() as conn, pytest.raises(Exception, match="ledger decision scope mismatch"):
+        conn.exec_driver_sql(statement.format(cell="other-cell"))
+    with seeded.begin() as conn:
+        conn.exec_driver_sql(statement.format(cell="cell"))
+
+
+def test_manual_resolution_is_for_quarantines_only(seeded) -> None:
+    with seeded.begin() as conn, pytest.raises(Exception, match="ck_execution_resolution_manual"):
+        conn.exec_driver_sql(
+            f"""INSERT INTO execution_resolution_journal(id, attempt_id, exchange_account_id,
+      deployment_environment, symbol, action, observation_id, actor_kind, actor_id,
+      resolved_at_ms, reason, evidence)
+      VALUES ('{uuid4()}', '{_T}', '{_A}', 'ci', 'fUST', 'manual', '{_O}', 'operator',
+      'test', 5, 'test', '{{}}')"""
+        )

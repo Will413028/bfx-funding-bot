@@ -66,7 +66,21 @@ def _engine(sync_engine):
 
 
 def _coverage(*, complete: bool = True) -> Coverage:
-    return Coverage(complete, complete, complete, complete, complete, complete, 1, 1, 1, 1, 1, 1)
+    return Coverage(
+        complete,
+        complete,
+        complete,
+        complete,
+        complete,
+        complete,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        trades_complete=complete,
+    )
 
 
 def _offer(venue_id: str = "o1", *, symbol: str = "fUST") -> Offer:
@@ -80,7 +94,7 @@ def _offer(venue_id: str = "o1", *, symbol: str = "fUST") -> Offer:
         2,
         None,
         None,
-        "ACTIVE",
+        "active",
         1,
         None,
         {},
@@ -96,11 +110,11 @@ def _credit(source_kind: str = "credit", venue_id: str = "c1") -> Credit:
         Decimal("1"),
         None,
         None,
-        "ACTIVE",
+        "active",
         None,
         None,
         None,
-        None,
+        1,
         {},
     )  # type: ignore[arg-type]
 
@@ -115,7 +129,7 @@ def _observation(
     finished: int = 2,
 ) -> Observation:
     return Observation(
-        (Wallet("funding", "UST", Decimal("3"), Decimal("9")),),
+        (Wallet("funding", "UST", Decimal("3"), Decimal("9"), "fUST"),),
         offers,
         credits,
         coverage or _coverage(),
@@ -249,6 +263,7 @@ async def test_committed_command_fences_observation(seeded_fixture) -> None:  # 
                     uuid4(),
                     _D2,
                     "fUST",
+                    "cell",
                     {},
                     UUID(_B),
                     UUID(_P),
@@ -292,8 +307,8 @@ async def test_absence_and_same_identity_terminal(observation_factory) -> None:
     await _accept(
         observation_factory,
         _observation(
-            offer_history=(OfferHistory(_offer("wrong"), "CLOSED", 5),),
-            credit_history=(CreditHistory(_credit("loan"), "CLOSED", 5),),
+            offer_history=(OfferHistory(_offer("wrong"), "canceled", 5),),
+            credit_history=(CreditHistory(_credit("loan"), "closed", 5),),
         ),
     )
     async with observation_factory.begin() as session:
@@ -302,8 +317,8 @@ async def test_absence_and_same_identity_terminal(observation_factory) -> None:
         assert offer is not None and offer.terminal_evidence_id is None
         assert credit is not None and credit.terminal_evidence_id is None
     terminal = _observation(
-        offer_history=(OfferHistory(_offer(), "CLOSED", 6),),
-        credit_history=(CreditHistory(_credit(), "CLOSED", 6),),
+        offer_history=(OfferHistory(_offer(), "canceled", 6),),
+        credit_history=(CreditHistory(_credit(), "closed", 6),),
     )
     await _accept(observation_factory, terminal)
     async with observation_factory.begin() as session:
@@ -319,8 +334,8 @@ async def test_absence_and_same_identity_terminal(observation_factory) -> None:
         )
         offer = await session.scalar(select(VenueOfferMirrorRow))
         credit = await session.scalar(select(VenueCreditMirrorRow))
-        assert offer is not None and offer.terminal_kind == "CLOSED"
-        assert credit is not None and credit.terminal_kind == "CLOSED"
+        assert offer is not None and offer.terminal_kind == "canceled"
+        assert credit is not None and credit.terminal_kind == "closed"
 
 
 @pytest.mark.asyncio
@@ -332,10 +347,10 @@ async def test_terminal_reappearance(observation_factory) -> None:
     await _accept(
         observation_factory,
         _observation(
-            offer_history=(OfferHistory(_offer(), "CLOSED", 5),),
+            offer_history=(OfferHistory(_offer(), "canceled", 5),),
             credit_history=(
-                CreditHistory(_credit(), "CLOSED", 5),
-                CreditHistory(_credit("loan", "l1"), "CLOSED", 5),
+                CreditHistory(_credit(), "closed", 5),
+                CreditHistory(_credit("loan", "l1"), "closed", 5),
             ),
         ),
     )
@@ -368,7 +383,7 @@ async def test_mirror_load_is_bounded(observation_factory) -> None:
     await _accept(observation_factory, _observation(offers=historic))
     await _accept(
         observation_factory,
-        _observation(offer_history=tuple(OfferHistory(offer, "CLOSED", 5) for offer in historic)),
+        _observation(offer_history=tuple(OfferHistory(offer, "canceled", 5) for offer in historic)),
     )
     async with observation_factory.begin() as session:
         assert (
@@ -391,3 +406,34 @@ async def test_mirror_load_is_bounded(observation_factory) -> None:
     finally:
         event.remove(VenueOfferMirrorRow, "load", loaded)
     assert loads <= 1
+
+
+@pytest.mark.asyncio
+async def test_trade_coverage_is_required_for_acceptance(observation_factory) -> None:
+    first = _observation(coverage=replace(_coverage(), trades_complete=False))
+    result = await _accept(observation_factory, first, replace(first, finished_at_ms=4))
+    assert result.decision == "incomplete_or_unequal"
+    async with observation_factory.begin() as session:
+        assert await session.scalar(select(func.count()).select_from(LedgerObservationRow)) == 0
+
+
+@pytest.mark.asyncio
+async def test_unknown_status_is_rejected_at_the_boundary(observation_factory) -> None:
+    for bad in (
+        _observation(offers=(replace(_offer(), status="ACTIVE"),)),  # type: ignore[arg-type]
+        _observation(credits=(replace(_credit(), status="ACTIVE"),)),  # type: ignore[arg-type]
+        _observation(credits=(replace(_credit(), mts_opening=None),)),  # type: ignore[arg-type]
+        _observation(offer_history=(OfferHistory(_offer(), "CLOSED", 5),)),  # type: ignore[arg-type]
+    ):
+        with pytest.raises(ValueError, match="invalid"):
+            await _accept(observation_factory, bad)
+
+
+@pytest.mark.asyncio
+async def test_funding_wallet_without_symbol_is_rejected(observation_factory) -> None:
+    bad = replace(
+        _observation(),
+        wallets=(Wallet("funding", "UST", Decimal("3"), Decimal("9"), None),),
+    )
+    with pytest.raises(ValueError, match="funding wallet without symbol"):
+        await _accept(observation_factory, bad)

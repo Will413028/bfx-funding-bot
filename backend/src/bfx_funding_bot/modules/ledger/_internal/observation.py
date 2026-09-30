@@ -1,4 +1,4 @@
-"""Dormant two-read observation acceptance; no capital basis is exposed here."""
+"""Dormant two-read observation acceptance; an accepted one writes its capital basis."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Callable, Hashable
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from hashlib import sha256
-from typing import Literal, Protocol
+from typing import Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select
@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.ledger import (
     QueryHandle,
     Scope,
 )
+from bfx_funding_bot.modules.ledger._internal.basis import write_basis
 from bfx_funding_bot.modules.ledger._internal.clock import lock_scope
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
 from bfx_funding_bot.modules.ledger._internal.quarantine import (
@@ -35,6 +36,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     LedgerObservationOfferRow,
     LedgerObservationQueryRow,
     LedgerObservationRow,
+    LedgerObservationTradeRow,
     LedgerObservationWalletRow,
     QuarantineMemberRow,
     QuarantineOpeningRow,
@@ -45,6 +47,23 @@ from bfx_funding_bot.modules.ledger.tables import (
 type CreditKind = Literal["credit", "loan"]
 type Decision = Literal["accepted", "fenced", "incomplete_or_unequal"]
 
+# Closed status vocabularies. The port normalizes Bitfinex strings into these;
+# ledger never parses venue text.
+#   offer status       "ACTIVE" -> active; "PARTIALLY FILLED ..." -> partially_filled
+#                      (a history row keeps the last of these it had)
+#   offer terminal     "EXECUTED at r% (a)" -> executed;
+#                      "CANCELED", "PARTIALLY FILLED at r% (a), CANCELED" -> canceled
+#   credit/loan status "ACTIVE" -> active
+#   credit terminal    "CLOSED (expired)", "CLOSED (closed)", "CLOSED (reduced)" -> closed
+type OfferStatus = Literal["active", "partially_filled"]
+type CreditStatus = Literal["active"]
+type OfferTerminalKind = Literal["executed", "canceled"]
+type CreditTerminalKind = Literal["closed"]
+OFFER_STATUSES: frozenset[str] = frozenset(("active", "partially_filled"))
+CREDIT_STATUSES: frozenset[str] = frozenset(("active",))
+OFFER_TERMINAL_KINDS: frozenset[str] = frozenset(("executed", "canceled"))
+CREDIT_TERMINAL_KINDS: frozenset[str] = frozenset(("closed",))
+
 
 @dataclass(frozen=True, slots=True)
 class Wallet:
@@ -52,6 +71,9 @@ class Wallet:
     currency: str
     available: Decimal
     balance: Decimal
+    # Funding symbol assigned by the port (e.g. fUST); None only for non-funding
+    # wallets. No default: a funding wallet without a symbol would drop silently.
+    symbol: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +87,7 @@ class Offer:
     period_days: int | None
     offer_type: str | None
     flags: JsonObject | int | None
-    status: str
+    status: OfferStatus
     mts_created: int
     mts_updated: int | None
     raw: JsonObject
@@ -79,26 +101,40 @@ class Credit:
     amount: Decimal
     rate: Decimal | None
     period_days: int | None
-    status: str
+    status: CreditStatus
     flags: JsonObject | int | None
     mts_created: int | None
     mts_updated: int | None
-    mts_opening: int | None
+    mts_opening: int  # the venue's trade instant; required (carry key)
     raw: JsonObject
 
 
 @dataclass(frozen=True, slots=True)
 class OfferHistory:
     offer: Offer
-    terminal_kind: str
+    terminal_kind: OfferTerminalKind
     occurred_at_ms: int
 
 
 @dataclass(frozen=True, slots=True)
 class CreditHistory:
     credit: Credit
-    terminal_kind: str
+    terminal_kind: CreditTerminalKind
     occurred_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class Trade:
+    """A funding trade (one of the account's offers matched); amount is absolute."""
+
+    trade_id: int
+    symbol: str
+    venue_offer_id: str
+    amount: Decimal
+    rate: Decimal
+    period_days: int
+    mts_create: int
+    maker: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +155,9 @@ class Coverage:
     history_requested_end_ms: int | None = None
     history_oldest_mts_created: int | None = None
     history_newest_mts_created: int | None = None
+    trades_complete: bool = False
+    trades_requested_start_ms: int | None = None
+    trades_requested_end_ms: int | None = None
 
     @property
     def active_complete(self) -> bool:
@@ -138,6 +177,7 @@ class Coverage:
                 self.active_complete,
                 self.offer_history_complete,
                 self.credit_history_complete,
+                self.trades_complete,
             )
         )
 
@@ -151,6 +191,7 @@ class Observation:
     finished_at_ms: int
     offer_history: tuple[OfferHistory, ...] = ()
     credit_history: tuple[CreditHistory, ...] = ()
+    trades: tuple[Trade, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,17 +200,6 @@ class Acceptance:
     observation_id: UUID | None
     first_digest: str | None
     confirmation_digest: str | None
-
-
-class BasisWriter(Protocol):
-    async def write_basis(
-        self, session: AsyncSession, scope: Scope, observation_id: UUID
-    ) -> None: ...
-
-
-class UnimplementedBasisWriter:
-    async def write_basis(self, session: AsyncSession, scope: Scope, observation_id: UUID) -> None:
-        raise NotImplementedError("classification and basis belong to S1-2b-2")
 
 
 def _unique[K: Hashable, T](values: tuple[T, ...], key: Callable[[T], K]) -> dict[K, T]:
@@ -244,6 +274,7 @@ def _validate(observation: Observation) -> None:
     for start, end in (
         (coverage.history_requested_start_ms, coverage.history_requested_end_ms),
         (coverage.history_oldest_mts_created, coverage.history_newest_mts_created),
+        (coverage.trades_requested_start_ms, coverage.trades_requested_end_ms),
     ):
         if (start is None) != (end is None) or (
             start is not None and (start < 0 or end is None or end < start)
@@ -256,9 +287,15 @@ def _validate(observation: Observation) -> None:
         if (
             not wallet.wallet_type
             or not wallet.currency
+            or wallet.symbol == ""
             or not all(_nonnegative(value) for value in (wallet.available, wallet.balance))
         ):
             raise ValueError("negative wallet amount")
+        if wallet.wallet_type == "funding" and wallet.symbol is None:
+            raise ValueError("funding wallet without symbol")
+    symbols = [wallet.symbol for wallet in observation.wallets if wallet.symbol is not None]
+    if len(symbols) != len(set(symbols)):
+        raise ValueError("wallet symbol assigned twice")
     for offer in (*observation.offers, *(item.offer for item in observation.offer_history)):
         if (
             not offer.venue_offer_id
@@ -268,6 +305,7 @@ def _validate(observation: Observation) -> None:
                 for value in (offer.amount_remaining, offer.amount_original, offer.rate)
             )
             or (offer.period_days is not None and offer.period_days <= 0)
+            or offer.status not in OFFER_STATUSES
             or offer.mts_created < 0
             or (offer.mts_updated is not None and offer.mts_updated < 0)
         ):
@@ -277,6 +315,8 @@ def _validate(observation: Observation) -> None:
             credit.source_kind not in ("credit", "loan")
             or not credit.venue_credit_id
             or credit.venue_credit_id.startswith("loan:")
+            or credit.status not in CREDIT_STATUSES
+            or credit.mts_opening is None
             or not credit.symbol
             or not all(_nonnegative(value) for value in (credit.amount, credit.rate))
             or (credit.period_days is not None and credit.period_days <= 0)
@@ -287,11 +327,25 @@ def _validate(observation: Observation) -> None:
         ):
             raise ValueError("invalid credit or loan")
     if any(
-        item.occurred_at_ms < 0 or not item.terminal_kind for item in observation.offer_history
+        item.occurred_at_ms < 0 or item.terminal_kind not in OFFER_TERMINAL_KINDS
+        for item in observation.offer_history
     ) or any(
-        item.occurred_at_ms < 0 or not item.terminal_kind for item in observation.credit_history
+        item.occurred_at_ms < 0 or item.terminal_kind not in CREDIT_TERMINAL_KINDS
+        for item in observation.credit_history
     ):
         raise ValueError("invalid terminal history")
+    _unique(observation.trades, lambda x: x.trade_id)
+    for trade in observation.trades:
+        if (
+            trade.trade_id < 0
+            or not trade.symbol
+            or not trade.venue_offer_id
+            or not (trade.amount.is_finite() and trade.amount > 0)
+            or not _nonnegative(trade.rate)
+            or trade.period_days <= 0
+            or trade.mts_create < 0
+        ):
+            raise ValueError("invalid funding trade")
     digest_bytes(observation)
 
 
@@ -303,10 +357,10 @@ async def accept_observation(
     confirmation: Observation,
     confirmation_started_at_ms: int,
 ) -> Acceptance:
-    """Store matched full observations; return a storage decision, never a basis."""
+    """Store matched full observations; an accepted one also gets its capital basis."""
     _validate(first)
     _validate(confirmation)
-    if confirmation.offer_history or confirmation.credit_history:
+    if confirmation.offer_history or confirmation.credit_history or confirmation.trades:
         raise ValueError("confirmation must contain active state only")
     if not (
         handle.started_at_ms
@@ -377,6 +431,9 @@ async def accept_observation(
             loans_complete=coverage.loans_complete,
             offer_history_complete=coverage.offer_history_complete,
             credit_history_complete=coverage.credit_history_complete,
+            trades_complete=coverage.trades_complete,
+            trades_requested_start_ms=coverage.trades_requested_start_ms,
+            trades_requested_end_ms=coverage.trades_requested_end_ms,
             offer_history_pages=coverage.offer_history_pages,
             credit_history_pages=coverage.credit_history_pages,
             history_requested_start_ms=coverage.history_requested_start_ms,
@@ -414,6 +471,8 @@ async def accept_observation(
         session.add(
             LedgerObservationCreditRow(id=uuid4(), observation_id=observation_id, **asdict(credit))
         )
+    for trade in _unique(first.trades, lambda x: x.trade_id).values():
+        session.add(LedgerObservationTradeRow(observation_id=observation_id, **asdict(trade)))
     offer_history: dict[str, tuple[UUID, OfferHistory]] = {}
     credit_history: dict[tuple[str, str], tuple[UUID, CreditHistory]] = {}
     for item in first.offer_history:
@@ -452,6 +511,7 @@ async def accept_observation(
     if accepted:
         await _mirror_offers(session, scope, observation_id, first, offer_history)
         await _mirror_credits(session, scope, observation_id, first, credit_history)
+        await write_basis(session, scope, observation_id)
     return Acceptance(
         "accepted" if accepted else "fenced", observation_id, first_digest, confirmation_digest
     )

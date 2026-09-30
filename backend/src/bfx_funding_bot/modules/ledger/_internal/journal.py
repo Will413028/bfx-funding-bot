@@ -62,6 +62,7 @@ async def record_attempt(session: AsyncSession, scope: Scope, attempt: Attempt) 
             exchange_account_id=scope.exchange_account_id,
             deployment_environment=scope.deployment_environment,
             symbol=attempt.symbol,
+            cell_id=attempt.cell_id,
             attempt_seq=sequence,
             normalized_payload=json.loads(payload),
             payload_sha256=digest,
@@ -143,6 +144,9 @@ async def record_resolution(session: AsyncSession, scope: Scope, resolution: Res
     await lock_scope(session, scope)
     if (resolution.attempt_id is None) == (resolution.quarantine_id is None):
         raise ResolutionRejected("exactly one subject is required")
+    if resolution.attempt_id is not None and resolution.action == "manual":
+        # An attempt is either bound to its venue offer or proven not accepted.
+        raise ResolutionRejected("manual resolution applies to quarantines only")
     subject: SubmissionAttemptJournalRow | QuarantineOpeningRow | None
     if resolution.attempt_id is not None:
         subject = await session.get(SubmissionAttemptJournalRow, resolution.attempt_id)
@@ -189,6 +193,7 @@ async def record_resolution(session: AsyncSession, scope: Scope, resolution: Res
                 observation.loans_complete,
                 observation.offer_history_complete,
                 observation.credit_history_complete,
+                observation.trades_complete,
             )
         )
         or observation.first_digest != observation.confirmation_digest

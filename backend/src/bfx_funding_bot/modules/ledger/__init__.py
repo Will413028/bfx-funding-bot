@@ -33,6 +33,7 @@ class Attempt:
     attempt_id: UUID
     execution_decision_id: str
     symbol: str
+    cell_id: str  # must equal the decision's cell (enforced by the scope trigger)
     normalized_payload: JsonObject
     basis_id: UUID
     policy_revision_id: UUID
