@@ -28,7 +28,9 @@ from bfx_funding_bot.modules.execution.events import (
 )
 from bfx_funding_bot.modules.trading import (
     Available,
+    Blocked,
     CapitalPolicy,
+    CapitalReadContext,
     CapitalScope,
     derive_capital,
     policy_payload,
@@ -46,6 +48,7 @@ from bfx_funding_bot.modules.trading_shadow._internal.evidence import (
     decode_basis,
     decode_event,
     decode_policy,
+    integrity_block,
     legacy_digest,
 )
 from bfx_funding_bot.modules.trading_shadow._internal.facts import decode_facts
@@ -240,6 +243,111 @@ def test_confirmation_requires_valid_serialized_snapshot(fault):
         decode_basis(SCOPE, accepted, query, decode_event(row, SCOPE, 1), "prefix", 1)
 
 
+def test_basis_maps_legacy_acceptance_into_the_generic_contract():
+    _, _, accepted, query, row = base_rows()
+    accepted["authorization_blocked_reason"] = "unclassifiable_commitment"
+    event = decode_event(row, SCOPE, 1)
+    basis, confirmation = decode_basis(SCOPE, accepted, query, event, "prefix", 1)
+    assert confirmation is None
+    assert basis.observation_id == event.event_id
+    assert basis.query_id == accepted["query_id"]
+    assert basis.attempt_seq_high_water == accepted["command_fence"]
+    assert basis.scope_block == Blocked("unclassifiable_commitment", ())
+    assert basis.unresolved_quarantines == ()
+    assert all(values.block is None for values in basis.symbols)
+
+
+@pytest.mark.parametrize("fault", ["watermark", "fence"])
+def test_basis_watermark_bounds_are_proven(fault):
+    # Formerly derive_capital's read_watermark check: F <= accepted seq <= watermark.
+    _, _, accepted, query, row = base_rows()
+    watermark = 1
+    if fault == "watermark":
+        watermark = 0
+        event = decode_event(row, SCOPE, 1)
+    else:
+        accepted["command_fence"] = query["command_fence"] = 1
+        row["payload"]["capital_command_fence"] = 1
+        event = decode_event(row, SCOPE, 1)
+    with pytest.raises(EvidenceError, match="snapshot_evidence_conflict"):
+        decode_basis(SCOPE, accepted, query, event, "prefix", watermark)
+
+
+def test_intent_after_the_read_watermark_is_rejected():
+    # Formerly derive_capital's attempt_seq > read_watermark check.
+    opening, _ = intent(ACCOUNT)
+    with pytest.raises(EvidenceError, match="attempt_intent_scope_conflict"):
+        decode_event(event_row(opening, 3), SCOPE, 2)
+
+
+@pytest.mark.parametrize("credit_cells", [True, False])
+def test_legacy_classification_without_credit_cells_folds_u_into_the_read_cell(credit_cells):
+    # capital_repository.py:891-897 charges U to every cell of such a classification.
+    head, policy, accepted, query, row = base_rows()
+    classification = accepted["classification"]
+    classification["symbols"]["fUSD"] = {
+        "available": "10",
+        "offered": "5",
+        "credits": "30",
+        "unattributed_credits": "30",
+        "foreign": "0",
+        "cells": {"cell-1": "5"},
+    }
+    if not credit_cells:
+        del classification["credit_cells"]
+    row["payload"]["capital_classification_digest"] = legacy_digest(classification)
+    event = decode_event(row, SCOPE, 1)
+    applied = decode_policy(SCOPE, head, policy)
+    for scope, fust_cells in (
+        (SCOPE, {"cell-1": Decimal("50" if credit_cells else "200")}),
+        (
+            replace(SCOPE, cell_id="cell-2"),
+            {"cell-1": Decimal("50")} | ({} if credit_cells else {"cell-2": Decimal("150")}),
+        ),
+    ):
+        basis, _ = decode_basis(scope, accepted, query, event, "prefix", 1)
+        by_symbol = {values.symbol: dict(values.cells) for values in basis.symbols}
+        assert by_symbol == {"fUST": fust_cells, "fUSD": {"cell-1": Decimal("5")}}
+        result = derive_capital(
+            scope=scope,
+            policy=applied,
+            accepted=basis,
+            attempts=(),
+            uncertainties=(),
+            read_context=CapitalReadContext(1100, 10000, basis.query_id, None),
+        )
+        assert isinstance(result, Available)
+        assert result.view.snapshot.total_capital == 1000  # U stays in C only once.
+        assert result.view.snapshot.cell_exposure == fust_cells.get(scope.cell_id, 0)
+
+
+@pytest.mark.parametrize(
+    ("confirmation", "superseded", "query_pending", "authorization", "expected"),
+    [
+        (None, False, False, False, None),
+        ("snapshot_confirmation_missing", True, False, False, "snapshot_confirmation_missing"),
+        ("snapshot_confirmation_conflict", True, False, False, "snapshot_confirmation_conflict"),
+        ("snapshot_incomplete", True, False, False, "snapshot_superseded_by_unfenced_observation"),
+        (None, True, False, False, "snapshot_superseded_by_unfenced_observation"),
+        ("snapshot_incomplete", False, False, False, "snapshot_incomplete"),
+        # Legacy reads stop at the query head and the authorization first.
+        ("snapshot_confirmation_missing", True, True, False, None),
+        ("snapshot_confirmation_missing", True, False, True, None),
+        (None, True, True, True, None),
+    ],
+)
+def test_integrity_block_keeps_legacy_order_and_masking(
+    confirmation, superseded, query_pending, authorization, expected
+):
+    result = integrity_block(
+        Blocked(confirmation, ()) if confirmation is not None else None,
+        superseded=superseded,
+        query_pending=query_pending,
+        authorization=Blocked("unclassifiable_commitment", ()) if authorization else None,
+    )
+    assert result == (Blocked(expected, ()) if expected is not None else None)
+
+
 @pytest.mark.parametrize("fault", ["scope", "realm", "watermark", "schema", "identity"])
 def test_event_scope_and_watermark_are_proven(fault):
     *_, row = base_rows()
@@ -289,7 +397,7 @@ def test_attempt_mapping_and_decision_identity(outcome):
     decisions = {decision.decision_id: decision_row(decision)}
     attempts, uncertainties, _ = decode_facts(SCOPE, tuple(history), decisions, 1, 10)
     assert attempts[0].outcome == outcome
-    assert attempts[0].intent_seq == 2
+    assert attempts[0].attempt_seq == 2
     assert bool(uncertainties) == (outcome == "unknown")
     with pytest.raises(EvidenceError, match="attempt_decision_conflict"):
         decode_facts(SCOPE, tuple(history), {}, 1, 10)
@@ -316,7 +424,7 @@ def test_reused_cid_never_links_the_wrong_decision():
         1,
         10,
     )
-    assert [(a.intent_seq, a.outcome) for a in attempts] == [(2, "not_sent"), (4, "pending")]
+    assert [(a.attempt_seq, a.outcome) for a in attempts] == [(2, "not_sent"), (4, "pending")]
 
 
 def test_post_fence_legacy_intent_is_not_zero_commitment():

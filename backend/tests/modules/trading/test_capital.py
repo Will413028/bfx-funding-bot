@@ -1,8 +1,9 @@
 """Synthetic acceptance facts: tests of the fold, not of venue classification."""
 
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
-from typing import get_args
+from typing import Any, get_args
 from uuid import UUID
 
 import pytest
@@ -33,14 +34,14 @@ D = Decimal
 ACCOUNT = UUID(int=1)
 SCOPE = CapitalScope(ACCOUNT, "test", "fUSD", "alpha")
 VALUES = SymbolCapital("fUSD", D("1000"), D("200"), D("300"), D("50"), D("90"),
-                       (("alpha", D("350")), ("beta", D("150"))))
+                       (("alpha", D("350")), ("beta", D("150"))), None)
 BASIS = AcceptedCapitalBasis(
-    ACCOUNT, "test", 20, 10, UUID(int=2), 1000, 1100, (VALUES,),
-    frozenset(), frozenset(), (), True, None,
+    ACCOUNT, "test", UUID(int=20), UUID(int=2), 10, 1000, 1100, (VALUES,),
+    frozenset(), frozenset(), (), (), None,
 )
 POLICY = AppliedPolicy(ACCOUNT, "test", "fUSD", 7, "policy-digest", UUID(int=3),
                        CapitalPolicy(True, reserve_amount=D("100"), max_cell_fraction=D("0.5")))
-CONTEXT = CapitalReadContext(1200, 500, 30, BASIS.query_id, BASIS.snapshot_seq, None, None)
+CONTEXT = CapitalReadContext(1200, 500, BASIS.query_id, None)
 
 
 def attempt(number: int, amount: str, outcome: AttemptOutcome = "pending", *,
@@ -53,9 +54,10 @@ def uncertainty(*, symbol: str = "fUSD", is_open: bool = True) -> UncertaintyFac
     return UncertaintyFact(UUID(int=500), ACCOUNT, "test", symbol, is_open)
 
 
-def fold(*, scope: CapitalScope = SCOPE, basis: AcceptedCapitalBasis = BASIS,
+def fold(*, scope: CapitalScope = SCOPE, basis: AcceptedCapitalBasis | None = BASIS,
          attempts: tuple[AttemptFact, ...] = (),
-         uncertainties: tuple[UncertaintyFact, ...] = (), policy: AppliedPolicy = POLICY,
+         uncertainties: tuple[UncertaintyFact, ...] = (),
+         policy: AppliedPolicy | Blocked = POLICY,
          context: CapitalReadContext = CONTEXT) -> CapitalResult:
     return derive_capital(scope=scope, accepted=basis, attempts=attempts,
                           uncertainties=uncertainties, policy=policy, read_context=context)
@@ -79,7 +81,8 @@ def test_post_fence_commitments_and_multicell_headroom() -> None:
     assert beta.view.budget.max_new_offer == D("347.9998")
     assert beta.view.budget.spendable == result.view.budget.spendable
     assert result.view.applied is POLICY
-    assert result.view.snapshot_seq == BASIS.snapshot_seq
+    assert result.view.query_id == BASIS.query_id
+    assert result.view.observation_id == BASIS.observation_id
     assert result.view.attribution is BASIS
 
 
@@ -98,7 +101,7 @@ def test_unknown_attempt_is_blocked_even_without_uncertainty_projection() -> Non
     assert result == Blocked("execution_unknown", (("attempt", str(UUID(int=101))),))
 
 
-@pytest.mark.parametrize("source", ["current", "accepted", "tail"])
+@pytest.mark.parametrize("source", ["current", "accepted", "accepted_quarantine", "tail"])
 def test_unknown_blocks_its_symbol_only(source: str) -> None:
     basis = BASIS
     facts: tuple[AttemptFact, ...] = ()
@@ -107,6 +110,8 @@ def test_unknown_blocks_its_symbol_only(source: str) -> None:
         uncertainties = (uncertainty(symbol="fUST"),)
     elif source == "accepted":
         basis = replace(BASIS, unresolved_attempts=((UUID(int=101), "fUST"),))
+    elif source == "accepted_quarantine":
+        basis = replace(BASIS, unresolved_quarantines=((UUID(int=500), "fUST"),))
     else:
         facts = (attempt(1, "999", "unknown", symbol="fUST"),)
     result = fold(basis=basis, attempts=facts, uncertainties=uncertainties)
@@ -125,12 +130,31 @@ def test_resolution_waits_for_new_accepted_snapshot() -> None:
     basis = replace(BASIS, unresolved_attempts=((fact.attempt_id, "fUSD"),))
     result = fold(basis=basis, attempts=(fact,), uncertainties=(uncertainty(is_open=False),))
     assert result == Blocked("execution_unknown", (("basis", "unresolved"),))
-    next_basis = replace(basis, snapshot_seq=25, command_fence=24, unresolved_attempts=(),
+    next_basis = replace(basis, observation_id=UUID(int=25), query_id=UUID(int=26),
+                         attempt_seq_high_water=24, unresolved_attempts=(),
                          settled_attempts=frozenset({fact.attempt_id}))
     available = fold(basis=next_basis, attempts=(fact,),
-                     context=replace(CONTEXT, latest_observation_seq=25))
+                     context=replace(CONTEXT, latest_query_id=UUID(int=26)))
     assert isinstance(available, Available)
     assert available.view.snapshot.unreflected_commitments == D("0")
+
+
+def test_basis_unresolved_quarantine_blocks_after_resolution_until_new_basis() -> None:
+    quarantine = UUID(int=500)
+    basis = replace(BASIS, unresolved_quarantines=((quarantine, "fUSD"),))
+    resolved = (uncertainty(is_open=False),)
+    result = fold(basis=basis, uncertainties=resolved)
+    assert result == Blocked("execution_unknown", (("basis_quarantine", str(quarantine)),))
+    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), D("0"), (), None)
+    fust = fold(scope=replace(SCOPE, symbol="fUST"), policy=replace(POLICY, symbol="fUST"),
+                basis=replace(basis, symbols=(VALUES, other)), uncertainties=resolved)
+    assert isinstance(fust, Available)
+    next_basis = replace(basis, observation_id=UUID(int=25), query_id=UUID(int=26),
+                         unresolved_quarantines=())
+    available = fold(basis=next_basis, uncertainties=resolved,
+                     context=replace(CONTEXT, latest_query_id=UUID(int=26)))
+    assert isinstance(available, Available)
+    assert available.view.observation_id == UUID(int=25)
 
 
 def test_post_fence_proven_not_accepted_resolution_keeps_original_unknown() -> None:
@@ -154,7 +178,7 @@ def test_matched_unknown_retains_transport_outcome_and_counts_commitment() -> No
 def test_partial_fill_counts_remaining_and_credit_without_original_commitment() -> None:
     original = attempt(1, "500", "acknowledged", seq=5)
     values = SymbolCapital("fUSD", D("500"), D("200"), D("300"), D("0"), D("0"),
-                           (("alpha", D("500")),))
+                           (("alpha", D("500")),), None)
     basis = replace(BASIS, symbols=(values,), reflected_attempts=frozenset({original.attempt_id}))
     result = fold(basis=basis, attempts=(original,))
     assert isinstance(result, Available)
@@ -193,13 +217,6 @@ def test_ambiguous_credit_counts_once_in_total_and_fully_in_each_candidate_cell(
         assert result.view.snapshot.cell_exposure == D("300")
 
 
-def test_old_classification_without_credit_cells_charges_u_to_each_cell() -> None:
-    result = fold(basis=replace(BASIS, credit_cells_present=False))
-    assert isinstance(result, Available)
-    assert result.view.snapshot.cell_exposure == D("400")
-    assert result.view.snapshot.total_capital == D("1500")
-
-
 @pytest.mark.parametrize(("enabled", "reserve", "pending", "expected"), [
     (False, "100", "0", CapitalBudget(D("0"), D("0"), D("0"), D("0"), "policy_disabled")),
     (True, "2000", "0", CapitalBudget(D("0"), D("0"), D("0"), D("0"),
@@ -234,15 +251,13 @@ def test_freshness_uses_start_and_inclusive_bounds(start: int, finish: int, now:
         assert result == Blocked("snapshot_stale", ())
 
 
-@pytest.mark.parametrize(("context", "reason"), [
-    (replace(CONTEXT, latest_query_id=UUID(int=99)), "snapshot_query_pending"),
-    (replace(CONTEXT, latest_observation_seq=21), "snapshot_superseded_by_unfenced_observation"),
-    (replace(CONTEXT, read_watermark=19), "snapshot_evidence_conflict"),
-])
-def test_read_heads(context: CapitalReadContext, reason: str) -> None:
-    result = fold(context=context)
-    assert isinstance(result, Blocked)
-    assert result.reason == reason
+def test_query_head() -> None:
+    result = fold(context=replace(CONTEXT, latest_query_id=UUID(int=99)))
+    assert result == Blocked("snapshot_query_pending", (("query", str(BASIS.query_id)),))
+
+
+def test_missing_basis_does_not_mean_zero_capital() -> None:
+    assert fold(basis=None) == Blocked("snapshot_unavailable", ())
 
 
 def test_missing_symbol_does_not_mean_zero_capital() -> None:
@@ -276,20 +291,54 @@ def test_wrong_policy_symbol_is_blocked() -> None:
                                      "attempt_outcome_evidence_conflict"])
 def test_loader_integrity_failure_preserves_reason_and_evidence(reason: str) -> None:
     failure = Blocked(reason, (("event", "20"),))
-    assert fold(context=replace(CONTEXT, evidence_block=failure)) is failure
+    assert fold(context=replace(CONTEXT, integrity_block=failure)) is failure
 
 
 def test_acceptance_block_is_not_overridden_by_valid_amounts() -> None:
     failure = Blocked("unclassifiable_commitment", (("intent", "5"),))
-    assert fold(basis=replace(BASIS, authorization_block=failure)) is failure
+    assert fold(basis=replace(BASIS, scope_block=failure)) is failure
 
 
-@pytest.mark.parametrize("seq", [5, 10, 31])
-def test_unaccounted_prefence_or_future_intent_is_not_silently_dropped(seq: int) -> None:
+def test_scope_block_blocks_every_symbol() -> None:
+    failure = Blocked("observation_inconsistent", ())
+    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), D("0"), (), None)
+    basis = replace(BASIS, symbols=(VALUES, other), scope_block=failure)
+    assert fold(basis=basis) is failure
+    assert fold(scope=replace(SCOPE, symbol="fUST"), policy=replace(POLICY, symbol="fUST"),
+                basis=basis) is failure
+
+
+def test_symbol_block_blocks_only_its_symbol() -> None:
+    failure = Blocked("unclassifiable_commitment", (("symbol", "fUSD"),))
+    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), D("0"), (), None)
+    basis = replace(BASIS, symbols=(replace(VALUES, block=failure), other))
+    assert fold(basis=basis) is failure
+    fust = fold(scope=replace(SCOPE, symbol="fUST"), policy=replace(POLICY, symbol="fUST"),
+                basis=basis)
+    assert isinstance(fust, Available)
+    assert fust.view.snapshot.available_amount == D("10")
+
+
+def test_policy_block_for_one_symbol_leaves_another_available() -> None:
+    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), D("0"), (), None)
+    basis = replace(BASIS, symbols=(VALUES, other))
+    failure = Blocked("policy_unavailable", (("symbol", "fUSD"),))
+    assert fold(basis=basis, policy=failure) is failure
+    fust = fold(scope=replace(SCOPE, symbol="fUST"), policy=replace(POLICY, symbol="fUST"),
+                basis=basis)
+    assert isinstance(fust, Available)
+
+
+@pytest.mark.parametrize("seq", [5, 10])
+def test_unaccounted_intent_at_or_below_high_water_is_not_silently_dropped(seq: int) -> None:
     result = fold(attempts=(attempt(1, "100", seq=seq),))
-    assert isinstance(result, Blocked)
-    assert result.reason == ("unclassifiable_commitment" if seq <= 10
-                             else "attempt_intent_scope_conflict")
+    assert result == Blocked("unclassifiable_commitment", (("attempt", str(UUID(int=101))),))
+
+
+def test_attempt_above_high_water_is_the_tail() -> None:
+    result = fold(attempts=(attempt(1, "100", seq=11),))
+    assert isinstance(result, Available)
+    assert result.view.snapshot.unreflected_commitments == D("100")
 
 
 def test_duplicate_intent_is_integrity_failure() -> None:
@@ -303,10 +352,10 @@ def test_frozen_contracts_and_repeatable_fold() -> None:
     first = fold(attempts=facts)
     assert first == fold(attempts=facts)
     with pytest.raises(FrozenInstanceError):
-        BASIS.snapshot_seq = 99
+        BASIS.attempt_seq_high_water = 99
     with pytest.raises(FrozenInstanceError):
         facts[0].amount = D("0")
-    assert BASIS.snapshot_seq == 20
+    assert BASIS.attempt_seq_high_water == 10
     assert facts[0].amount == D("123.456789")
 
 
@@ -330,40 +379,57 @@ def test_comparison_vocabulary_keeps_input_gaps_out_of_equal_by_name() -> None:
     }
 
 
-def test_open_uncertainty_precedes_evidence_failure() -> None:
+def test_open_uncertainty_precedes_integrity_failure() -> None:
     failure = Blocked("snapshot_prefix_diverged", (("event", "20"),))
     result = fold(uncertainties=(uncertainty(),),
-                  context=replace(CONTEXT, evidence_block=failure))
+                  context=replace(CONTEXT, integrity_block=failure))
     assert result == Blocked("execution_unknown", (("uncertainty", str(UUID(int=500))),))
 
 
 def test_policy_failure_precedes_open_uncertainty() -> None:
     failure = Blocked("inconsistent_policy_pointer", (("revision", "7"),))
-    result = fold(uncertainties=(uncertainty(),),
-                  context=replace(CONTEXT, policy_block=failure))
+    result = fold(uncertainties=(uncertainty(),), policy=failure)
     assert result is failure
 
 
-@pytest.mark.parametrize(("failure_reason", "query_pending", "authorization", "stale", "expected"), [
-    ("snapshot_unavailable", True, False, False, "snapshot_unavailable"),
-    ("snapshot_prefix_diverged", True, False, False, "snapshot_query_pending"),
-    ("snapshot_prefix_diverged", False, True, False, "snapshot_prefix_diverged"),
-    ("snapshot_confirmation_missing", False, True, False, "unclassifiable_commitment"),
-    ("snapshot_confirmation_missing", False, False, True, "snapshot_confirmation_missing"),
-    ("snapshot_incomplete", False, False, True, "snapshot_incomplete"),
-    ("snapshot_conflicting_identity", False, False, True, "snapshot_stale"),
-    ("attempt_projection_missing", False, False, True, "snapshot_stale"),
-    ("unclassifiable_commitment", False, False, True, "snapshot_stale"),
-])
-def test_evidence_checks_preserve_authority_order(
-    failure_reason: str, query_pending: bool, authorization: bool, stale: bool, expected: str,
-) -> None:
-    context = replace(CONTEXT, evidence_block=Blocked(failure_reason, ()),
-                      latest_query_id=UUID(int=99) if query_pending else BASIS.query_id,
-                      now_ms=2000 if stale else CONTEXT.now_ms)
-    basis = replace(BASIS, authorization_block=(
-        Blocked("unclassifiable_commitment", ()) if authorization else None
-    ))
-    result = fold(basis=basis, context=context)
-    assert isinstance(result, Blocked)
-    assert result.reason == expected
+def test_check_order() -> None:
+    """Every check fails at once; fixing the reported one reveals the next."""
+    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), D("0"), (), None)
+    full = replace(BASIS, symbols=(replace(VALUES, block=Blocked("symbol_block", ())), other),
+                   scope_block=Blocked("scope_block", ()),
+                   unresolved_attempts=((UUID(int=102), "fUSD"),),
+                   unresolved_quarantines=((UUID(int=600), "fUSD"),))
+    kwargs: dict[str, Any] = {
+        "policy": Blocked("policy_block", ()),
+        "uncertainties": (uncertainty(),),
+        "context": replace(CONTEXT, integrity_block=Blocked("integrity_block", ()),
+                           latest_query_id=UUID(int=99), now_ms=2000),
+        "basis": None,
+        "attempts": (attempt(1, "100", seq=5),),
+    }
+    ladder: list[tuple[Blocked, Callable[[dict[str, Any]], dict[str, Any]]]] = [
+        (Blocked("policy_block", ()), lambda k: {"policy": POLICY}),
+        (Blocked("execution_unknown", (("uncertainty", str(UUID(int=500))),)),
+         lambda k: {"uncertainties": (uncertainty(is_open=False),)}),
+        (Blocked("integrity_block", ()),
+         lambda k: {"context": replace(k["context"], integrity_block=None)}),
+        (Blocked("snapshot_unavailable", ()), lambda k: {"basis": full}),
+        (Blocked("snapshot_query_pending", (("query", str(BASIS.query_id)),)),
+         lambda k: {"context": replace(k["context"], latest_query_id=BASIS.query_id)}),
+        (Blocked("scope_block", ()), lambda k: {"basis": replace(k["basis"], scope_block=None)}),
+        (Blocked("symbol_block", ()), lambda k: {"basis": replace(k["basis"], symbols=(other,))}),
+        (Blocked("snapshot_stale", ()),
+         lambda k: {"context": replace(k["context"], now_ms=CONTEXT.now_ms)}),
+        (Blocked("snapshot_symbol_missing", (("symbol", "fUSD"),)),
+         lambda k: {"basis": replace(k["basis"], symbols=(VALUES, other))}),
+        (Blocked("execution_unknown", (("basis", "unresolved"),)),
+         lambda k: {"basis": replace(k["basis"], unresolved_attempts=())}),
+        (Blocked("execution_unknown", (("basis_quarantine", str(UUID(int=600))),)),
+         lambda k: {"basis": replace(k["basis"], unresolved_quarantines=())}),
+        (Blocked("unclassifiable_commitment", (("attempt", str(UUID(int=101))),)),
+         lambda k: {"attempts": ()}),
+    ]
+    for expected, fix in ladder:
+        assert fold(**kwargs) == expected
+        kwargs.update(fix(kwargs))
+    assert isinstance(fold(**kwargs), Available)

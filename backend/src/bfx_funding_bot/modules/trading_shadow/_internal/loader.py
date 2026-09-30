@@ -17,6 +17,7 @@ from bfx_funding_bot.modules.trading_shadow._internal.evidence import (
     decode_basis,
     decode_event,
     decode_policy,
+    integrity_block,
     require,
 )
 from bfx_funding_bot.modules.trading_shadow._internal.facts import decode_facts
@@ -293,7 +294,7 @@ class CandidateLoader:
         )
         assert accepted_event_row is not None
         accepted_event = decode_event(accepted_event_row, scope, watermark)
-        accepted, evidence_block = decode_basis(
+        accepted, confirmation_block = decode_basis(
             scope,
             accepted_row,
             query,
@@ -409,7 +410,7 @@ class CandidateLoader:
             scope,
             events,
             decisions,
-            accepted.command_fence,
+            accepted.attempt_seq_high_water,
             self.limits.max_reference_lookups,
             latest_reconcile_by_resolution,
         )
@@ -422,11 +423,13 @@ class CandidateLoader:
             CapitalReadContext(
                 now_ms,
                 max_snapshot_age_ms,
-                watermark,
                 latest_query["id"],
-                latest_observation,
-                None,
-                evidence_block,
+                integrity_block(
+                    confirmation_block,
+                    superseded=latest_observation != accepted_row["event_seq"],
+                    query_pending=latest_query["id"] != accepted.query_id,
+                    authorization=accepted.scope_block,
+                ),
             ),
         )
         evidence = {
@@ -479,8 +482,8 @@ class CandidateLoader:
                 {
                     "watermark": watermark,
                     "watermark_prefix_hash": prefix_by_seq[watermark],
-                    "accepted_seq": accepted.snapshot_seq,
-                    "command_fence": accepted.command_fence,
+                    "accepted_seq": accepted_row["event_seq"],
+                    "command_fence": accepted.attempt_seq_high_water,
                     "accepted_query_id": accepted.query_id,
                     "covered_prefix_hash": accepted_row["covered_prefix_hash"],
                     "latest_query_id": latest_query["id"],
@@ -496,7 +499,7 @@ class CandidateLoader:
                 {
                     "uncertainty_from_exclusive": 0,
                     "history_to_inclusive": watermark,
-                    "commitment_from_exclusive": accepted.command_fence,
+                    "commitment_from_exclusive": accepted.attempt_seq_high_water,
                     "uncertainty_rows": len(uncertainty_rows),
                     "tail_rows": len(tail_rows),
                     "point_lookups": reference_lookups,

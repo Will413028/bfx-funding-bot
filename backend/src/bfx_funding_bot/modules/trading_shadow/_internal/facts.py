@@ -104,7 +104,7 @@ def _intent(scope: CapitalScope, event: Event, decisions: dict[str, Row]) -> _At
         AttemptFact(
             UUID(str(payload.attempt_id)),
             CapitalScope(scope.account_id, scope.environment, p["symbol"], decision["cell_id"]),
-            event.seq,
+            event.seq,  # attempt_seq: the intent's per-scope event_seq, never synthetic.
             intended,
             "pending",
         ),
@@ -129,7 +129,7 @@ def _linked(event: Event, attempts: dict[str, _Attempt]) -> tuple[str | None, _A
         # store.py:573-599 and capital_repository.py:1063-1099: a CID can be reused.
         # Decision ID selects a cycle; its immutable intent seq must precede this row.
         require(
-            attempt.fact.intent_seq < event.seq
+            attempt.fact.attempt_seq < event.seq
             and attempt.payload.cid == p["cid"]
             and attempt.fact.scope.symbol == p["symbol"]
             and attempt.signal == p["signal_correlation_id"],
@@ -303,8 +303,8 @@ def decode_facts(
     return (
         tuple(
             sorted(
-                (a.fact for a in attempts.values() if a.fact.intent_seq > fence),
-                key=lambda fact: fact.intent_seq,
+                (a.fact for a in attempts.values() if a.fact.attempt_seq > fence),
+                key=lambda fact: fact.attempt_seq,
             )
         ),
         tuple(
