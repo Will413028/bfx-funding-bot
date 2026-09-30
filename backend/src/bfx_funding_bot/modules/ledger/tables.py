@@ -573,6 +573,9 @@ class QuarantineOpeningRow(Base):
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     intended_amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     opened_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # The command-clock revision the opening bumped to: quarantines opened after a
+    # basis are exactly those with ``opened_revision > basis.accept_revision``.
+    opened_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
     legacy_reconcile_event_seq: Mapped[int | None] = mapped_column(BigInteger)
     __table_args__ = (
@@ -580,6 +583,13 @@ class QuarantineOpeningRow(Base):
             "intended_amount >= 0 AND opened_at_ms >= 0 AND (legacy_reconcile_event_seq "
             "IS NULL OR legacy_reconcile_event_seq >= 0)",
             name="ck_quarantine_opening_nonnegative",
+        ),
+        CheckConstraint("opened_revision > 0", name="ck_quarantine_opening_revision"),
+        Index(
+            "ix_quarantine_opening_scope_revision",
+            "exchange_account_id",
+            "deployment_environment",
+            "opened_revision",
         ),
     )
 

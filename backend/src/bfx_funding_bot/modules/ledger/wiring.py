@@ -1,4 +1,4 @@
-"""Construct the dormant ledger journal port; apps select it in S1-3."""
+"""Construct the dormant ledger ports; apps select them in S1-3."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import (
     Attempt,
+    LedgerCapitalRead,
+    LedgerCapitalReader,
     LedgerJournal,
     Outcome,
     Quarantine,
@@ -17,7 +19,8 @@ from bfx_funding_bot.modules.ledger import (
     Resolution,
     Scope,
 )
-from bfx_funding_bot.modules.ledger._internal import clock, journal, quarantine
+from bfx_funding_bot.modules.ledger._internal import capital_reader, clock, journal, quarantine
+from bfx_funding_bot.modules.trading import CapitalScope
 
 
 class _SqlLedgerJournal:
@@ -58,3 +61,21 @@ class _SqlLedgerJournal:
 
 def build_ledger_journal() -> LedgerJournal:
     return _SqlLedgerJournal()
+
+
+class _SqlLedgerCapitalReader:
+    async def read_capital(
+        self,
+        session: AsyncSession,
+        scope: CapitalScope,
+        *,
+        now_ms: int,
+        max_snapshot_age_ms: int,
+    ) -> LedgerCapitalRead:
+        return await capital_reader.read_capital(
+            session, scope, now_ms=now_ms, max_snapshot_age_ms=max_snapshot_age_ms
+        )
+
+
+def build_ledger_capital_reader() -> LedgerCapitalReader:
+    return _SqlLedgerCapitalReader()

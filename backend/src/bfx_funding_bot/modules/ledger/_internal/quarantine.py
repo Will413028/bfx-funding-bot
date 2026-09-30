@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from typing import Literal, cast
+from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import (
@@ -13,11 +15,23 @@ from bfx_funding_bot.modules.ledger import (
     Scope,
 )
 from bfx_funding_bot.modules.ledger._internal.clock import bump_locked, lock_scope
-from bfx_funding_bot.modules.ledger.tables import QuarantineMemberRow, QuarantineOpeningRow
+from bfx_funding_bot.modules.ledger.tables import (
+    AcceptedCapitalBasisQuarantineRow,
+    AcceptedCapitalBasisRow,
+    ExecutionResolutionJournalRow,
+    QuarantineMemberRow,
+    QuarantineOpeningRow,
+)
 
 
 async def open_quarantine(session: AsyncSession, scope: Scope, quarantine: Quarantine) -> None:
+    """Bump the clock first so the opening carries the revision it created.
+
+    ``opened_revision > basis.accept_revision`` then names exactly the
+    quarantines a basis has not seen (readers need no scope-wide anti-join).
+    """
     await lock_scope(session, scope)
+    revision = await bump_locked(session, scope)
     session.add(
         QuarantineOpeningRow(
             quarantine_id=quarantine.quarantine_id,
@@ -26,12 +40,12 @@ async def open_quarantine(session: AsyncSession, scope: Scope, quarantine: Quara
             symbol=quarantine.symbol,
             intended_amount=quarantine.intended_amount,
             opened_at_ms=quarantine.opened_at_ms,
+            opened_revision=revision,
             evidence=quarantine.evidence,
             legacy_reconcile_event_seq=quarantine.legacy_reconcile_event_seq,
         )
     )
     await session.flush()
-    await bump_locked(session, scope)
 
 
 async def add_quarantine_member(
@@ -70,3 +84,56 @@ async def add_quarantine_member(
     )
     await session.flush()
     await bump_locked(session, scope)
+
+
+async def unresolved_quarantines(
+    session: AsyncSession,
+    scope: Scope,
+    basis: AcceptedCapitalBasisRow | None,
+    *,
+    symbol: str | None = None,
+) -> list[QuarantineOpeningRow]:
+    """Quarantines of the scope without a resolution, ordered by opening.
+
+    Bounded by ``basis`` (the latest accepted one): an opening at or before its
+    ``accept_revision`` that it did not list was resolved by then, and a
+    resolution is permanent. So the candidates are the basis's listed
+    quarantines plus openings with ``opened_revision > accept_revision``;
+    without a basis, every opening of the scope.
+    """
+    accept_revision = basis.accept_revision if basis is not None else 0
+    since = select(QuarantineOpeningRow).where(
+        QuarantineOpeningRow.exchange_account_id == scope.exchange_account_id,
+        QuarantineOpeningRow.deployment_environment == scope.deployment_environment,
+        QuarantineOpeningRow.opened_revision > accept_revision,
+    )
+    if symbol is not None:
+        since = since.where(QuarantineOpeningRow.symbol == symbol)
+    candidates = {row.quarantine_id: row for row in await session.scalars(since)}
+    if basis is not None:
+        listed = (
+            select(QuarantineOpeningRow)
+            .join(
+                AcceptedCapitalBasisQuarantineRow,
+                AcceptedCapitalBasisQuarantineRow.quarantine_id
+                == QuarantineOpeningRow.quarantine_id,
+            )
+            .where(AcceptedCapitalBasisQuarantineRow.basis_id == basis.id)
+        )
+        if symbol is not None:
+            listed = listed.where(QuarantineOpeningRow.symbol == symbol)
+        for row in await session.scalars(listed):
+            candidates[row.quarantine_id] = row
+    if not candidates:
+        return []
+    resolved: set[UUID | None] = set(
+        await session.scalars(
+            select(ExecutionResolutionJournalRow.quarantine_id).where(
+                ExecutionResolutionJournalRow.quarantine_id.in_(sorted(candidates))
+            )
+        )
+    )
+    return sorted(
+        (row for quarantine_id, row in candidates.items() if quarantine_id not in resolved),
+        key=lambda row: (row.opened_at_ms, row.quarantine_id),
+    )
