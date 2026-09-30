@@ -7,12 +7,6 @@ from uuid import UUID
 
 import pytest
 
-from bfx_funding_bot.modules.execution.capital_policy import (
-    CapitalBudget,
-    CapitalPolicy,
-    CapitalSnapshot,
-    evaluate_capital,
-)
 from bfx_funding_bot.modules.trading import (
     AcceptedCapitalBasis,
     AppliedPolicy,
@@ -20,15 +14,19 @@ from bfx_funding_bot.modules.trading import (
     AttemptOutcome,
     Available,
     Blocked,
+    CapitalBudget,
+    CapitalPolicy,
     CapitalReadContext,
     CapitalResult,
     CapitalScope,
+    CapitalSnapshot,
     ComparisonKind,
     ComparisonStatus,
     DifferenceClassification,
     SymbolCapital,
     UncertaintyFact,
     derive_capital,
+    evaluate_capital,
 )
 
 D = Decimal

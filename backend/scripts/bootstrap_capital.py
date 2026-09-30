@@ -30,12 +30,12 @@ from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.modules.accounts.vault import load_account_credentials
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery, _AuthRestQuery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from bfx_funding_bot.modules.strategy import canonical_cell_id
+from bfx_funding_bot.modules.trading import CapitalPolicy
 
 
 async def bootstrap_snapshot(*, database_url: str, account_id: UUID, environment: str,

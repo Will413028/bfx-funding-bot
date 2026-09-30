@@ -6,13 +6,11 @@ import pytest
 from sqlalchemy import func, select
 
 from bfx_funding_bot.modules.accounts.tables import AccountConfigDraft
-from bfx_funding_bot.modules.execution.capital_tables import (
-    CapitalPolicyRevisionRow,
-    CapitalSnapshotRow,
-)
+from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnapshotObserved
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow
 from tests.integration.test_capital_repository import (
     capital_db,
     capital_engine,
@@ -233,8 +231,8 @@ async def test_disabled_currency_does_not_bypass_enabled_or_account_guards(capit
 @pytest.mark.parametrize("changed", ["snapshot", "legacy", "policy"])
 async def test_ust_only_conversion_digest_binds_enabled_evidence_and_sources(capital_db, changed):
     from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
-    from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
     from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.trading import CapitalPolicy
 
     factory, account = capital_db
     repo = repository(account)

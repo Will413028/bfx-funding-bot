@@ -8,6 +8,7 @@ from bfx_funding_bot.modules.execution.capital_repository import (
     CapitalBlockedError,
     CapitalRepository,
     policy_from_row,
+    read_policy_row,
 )
 from bfx_funding_bot.modules.execution.capital_shadow_port import (
     BaselineAvailable,
@@ -16,11 +17,7 @@ from bfx_funding_bot.modules.execution.capital_shadow_port import (
     BaselineResult,
     CapitalScopeLike,
 )
-from bfx_funding_bot.modules.execution.capital_tables import (
-    CapitalPolicyHeadRow,
-    CapitalPolicyRevisionRow,
-    CapitalSnapshotRow,
-)
+from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, ProjectionHeadRow
 
 
@@ -51,21 +48,10 @@ async def read_baseline(
                 else "projection_integrity", cursor, watermark,
             )
         try:
-            policy_head = await session.get(
-                CapitalPolicyHeadRow, (scope.account_id, scope.environment, scope.symbol),
-                populate_existing=True,
+            row = await read_policy_row(
+                session, account_id=scope.account_id, environment=scope.environment,
+                symbol=scope.symbol,
             )
-            if policy_head is None:
-                raise CapitalBlockedError("policy_unavailable")
-            row = await session.get(
-                CapitalPolicyRevisionRow, policy_head.revision_id, populate_existing=True,
-            )
-            if row is None or (
-                row.exchange_account_id, row.deployment_environment, row.symbol, row.revision
-            ) != (
-                scope.account_id, scope.environment, scope.symbol, policy_head.revision
-            ):
-                raise CapitalBlockedError("inconsistent_policy_pointer")
             applied = AppliedCapitalPolicy(row.revision, row.digest, policy_from_row(row), row.id)
             view = await repo._read_capital(
                 session, symbol=scope.symbol, cell_id=scope.cell_id, now_ms=now_ms,

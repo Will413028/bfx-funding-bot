@@ -79,8 +79,8 @@ async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool =
             )
         )
     if capital_policies:
-        from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
         from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+        from bfx_funding_bot.modules.trading import CapitalPolicy
         for environment in ("ci", "prod", "shadow"):
             repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID,
                                      environment=environment, max_snapshot_age_ms=10000)

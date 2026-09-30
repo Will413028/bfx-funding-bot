@@ -1,14 +1,21 @@
 from dataclasses import FrozenInstanceError
 from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
-from bfx_funding_bot.modules.execution.capital_policy import (
+from bfx_funding_bot.modules.trading import (
+    Blocked,
     CapitalBudget,
     CapitalPolicy,
     CapitalSnapshot,
+    PolicyRejectedError,
+    check_pointer,
     evaluate_capital,
+    parse_policy,
+    policy_digest,
+    policy_payload,
 )
 
 
@@ -228,3 +235,63 @@ def test_evaluator_rejects_absent_or_unvalidated_policy(policy: Any) -> None:
 def test_evaluator_rejects_absent_or_unvalidated_snapshot_even_when_disabled(snapshot: Any) -> None:
     with pytest.raises(ValueError, match="snapshot"):
         evaluate_capital(CapitalPolicy(enabled=False), snapshot)
+
+
+_ACCOUNT, _REVISION_ID = uuid4(), uuid4()
+_REVISION = (_REVISION_ID, _ACCOUNT, "prod", "fUST", 3)
+
+
+def test_check_pointer_accepts_only_the_scope_s_own_head_revision() -> None:
+    assert check_pointer(_ACCOUNT, "prod", "fUST", (_REVISION_ID, 3), _REVISION) is None
+    assert check_pointer(_ACCOUNT, "prod", "fUST", None, None) == Blocked("policy_unavailable", ())
+    assert check_pointer(_ACCOUNT, "prod", "fUST", None, _REVISION) == Blocked(
+        "policy_unavailable", ()
+    )
+    inconsistent = Blocked("inconsistent_policy_pointer", ())
+    assert check_pointer(_ACCOUNT, "prod", "fUST", (_REVISION_ID, 3), None) == inconsistent
+
+
+@pytest.mark.parametrize("field", range(5))
+def test_check_pointer_refuses_any_mismatched_identity_field(field: int) -> None:
+    wrong: list[Any] = list(_REVISION)
+    wrong[field] = {0: uuid4(), 1: uuid4(), 2: "paper", 3: "fUSD", 4: 4}[field]
+    assert check_pointer(_ACCOUNT, "prod", "fUST", (_REVISION_ID, 3), tuple(wrong)) == Blocked(
+        "inconsistent_policy_pointer", ()
+    )
+
+
+def _stored() -> dict[str, Any]:
+    return policy_payload(CapitalPolicy(True, Decimal("100"), max_cell_fraction=Decimal("1")))
+
+
+def test_parse_policy_round_trips_a_valid_revision() -> None:
+    raw = _stored()
+    assert parse_policy(1, raw, policy_digest(raw)) == CapitalPolicy(
+        True, Decimal("100"), max_cell_fraction=Decimal("1")
+    )
+
+
+@pytest.mark.parametrize(
+    ("schema", "mutate", "digest_ok", "reason"),
+    [
+        (1, None, False, "invalid_policy_schema_or_digest"),
+        (999, None, True, "invalid_policy_schema_or_digest"),
+        # Schema/digest is proven before keys and amounts.
+        (1, "extra", False, "invalid_policy_schema_or_digest"),
+        (1, "extra", True, "invalid_policy"),
+        (2, None, True, "invalid_policy"),
+        # A bad amount is an invalid policy, not a bare amount failure.
+        (1, "nan", True, "invalid_policy"),
+    ],
+)
+def test_parse_policy_refuses_in_authority_order(
+    schema: int, mutate: str | None, digest_ok: bool, reason: str
+) -> None:
+    raw = _stored()
+    if mutate == "extra":
+        raw["extra"] = None
+    elif mutate == "nan":
+        raw["reserve_amount"] = "NaN"
+    with pytest.raises(PolicyRejectedError) as exc:
+        parse_policy(schema, raw, policy_digest(raw) if digest_ok else "bad")
+    assert exc.value.reason == reason

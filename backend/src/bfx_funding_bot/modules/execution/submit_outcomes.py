@@ -32,7 +32,6 @@ from bfx_funding_bot.external.bitfinex.submit_wire import (
 from bfx_funding_bot.external.bitfinex.submit_wire import venue_error as venue_error
 
 __all__ = [
-    "VENUE_CLOCK_TOLERANCE_MS",
     "SubmissionAttemptPayload",
     "SubmitAcknowledged",
     "SubmitCancelledNotSent",
@@ -49,11 +48,6 @@ __all__ = [
 ]
 
 _ATTEMPT_ID_NAMESPACE = UUID("a49b16e1-e2e8-5d7e-bc91-a8cdf80a5783")
-# The venue stamps offers to the whole second on its own clock, so the offer an
-# attempt placed can carry an mts_created up to a second (plus clock skew)
-# before the attempt started. Evidence that an attempt's offer exists looks
-# this much earlier (live UNKNOWN matching and the shadow resolver alike).
-VENUE_CLOCK_TOLERANCE_MS = 5_000
 
 
 class SubmitOutcomeKind(StrEnum):

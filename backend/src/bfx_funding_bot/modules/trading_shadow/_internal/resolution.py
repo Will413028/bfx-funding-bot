@@ -3,10 +3,8 @@
 from collections.abc import Mapping
 from typing import Any
 
-from bfx_funding_bot.modules.execution.submit_outcomes import (
-    VENUE_CLOCK_TOLERANCE_MS,
-    SubmissionAttemptPayload,
-)
+from bfx_funding_bot.core.venue_time import VENUE_CLOCK_TOLERANCE_MS
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
 from bfx_funding_bot.modules.trading_shadow._internal.evidence import (
     Event,
     Row,

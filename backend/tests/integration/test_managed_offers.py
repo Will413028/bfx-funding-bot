@@ -15,6 +15,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 
+from bfx_funding_bot.core.venue_time import VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.external.bitfinex.auth_rest import (
     FundingOfferHistory,
     FundingOfferHistoryCoverage,
@@ -30,7 +31,6 @@ from bfx_funding_bot.modules.execution.boot_recovery import (
     BootRecovery,
 )
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
 from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
 from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
@@ -42,7 +42,6 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials, SubmittedOrder
 from bfx_funding_bot.modules.execution.submit_outcomes import (
-    VENUE_CLOCK_TOLERANCE_MS,
     SubmitAcknowledged,
     SubmitOutcomeUnknown,
 )
@@ -51,6 +50,7 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     SubmissionAttemptRow,
 )
 from bfx_funding_bot.modules.observability import alerts
+from bfx_funding_bot.modules.trading import CapitalPolicy
 
 from .test_automatic_protection import FakeAuth, Recorder, _offer
 from .test_capital_command_boundary import AMOUNT, boundary, second_ready

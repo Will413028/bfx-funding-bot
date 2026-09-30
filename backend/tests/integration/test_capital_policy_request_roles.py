@@ -15,11 +15,11 @@ import pytest
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
+from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
 
 from .test_trading_state_migration import _alembic, _alembic_cli, _reset
 

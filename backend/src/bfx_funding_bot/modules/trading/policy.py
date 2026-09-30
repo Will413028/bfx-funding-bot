@@ -3,11 +3,17 @@
 Callers supply one canonical snapshot with deduplicated exposures/commitments.
 Scope, freshness, revision fencing and venue eligibility belong to the caller;
 this evaluator neither quantizes amounts nor authorizes a financial operation.
+
+Persisted policy revisions are parsed here too (schema, digest, exact keys), so
+every reader refuses a stored policy with the same reason codes in the same order.
 """
 
+import json
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Literal
+from decimal import Decimal, InvalidOperation
+from hashlib import sha256
+from typing import Any, Literal
+from uuid import UUID
 
 CapitalBlockedReason = Literal[
     "policy_disabled", "insufficient_deployable_funds", "cell_headroom_exhausted"
@@ -172,3 +178,128 @@ def evaluate_capital(policy: CapitalPolicy, snapshot: CapitalSnapshot) -> Capita
     elif cell_headroom == _ZERO:
         reason = "cell_headroom_exhausted"
     return CapitalBudget(spendable, cell_limit, cell_headroom, max_new_offer, reason)
+
+
+class PolicyRejectedError(ValueError):
+    """A stored policy revision is unusable; ``reason`` is the authority's code."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class Blocked:
+    """Unavailable evidence, distinct from a valid view with a zero budget.
+
+    Reasons preserve authority failure codes, including loader integrity faults
+    (capital_repository.py:263-274,302-350,826-883,943-1006). Evidence is an
+    immutable tuple of diagnostic key/value pairs, never mutable ORM/JSON data.
+    """
+
+    reason: str
+    evidence: tuple[tuple[str, str], ...]
+
+
+# The original policy JSON schema (see POLICY_KEYS).
+SCHEMA_VERSION = 1
+
+
+# Policy JSON schemas: 1 = the original four keys; 2 adds max_offer_amount (T9);
+# 3 adds the offer envelope (lending envelope D1). Older schemas stay readable
+# with the missing parts None, which the offer-envelope guard refuses.
+_BASE_KEYS = frozenset({"enabled", "reserve_amount", "allocation_mode", "max_cell_fraction"})
+ENVELOPE_KEYS = frozenset({"min_period_days", "max_period_days", "max_open_offers",
+                           "rate_floor_ratio", "min_rate_apr"})
+POLICY_KEYS = {1: _BASE_KEYS,
+               2: _BASE_KEYS | {"max_offer_amount"},
+               3: _BASE_KEYS | {"max_offer_amount", "envelope"}}
+
+
+def policy_schema_version(policy: CapitalPolicy) -> int:
+    if policy.envelope is not None:
+        return 3
+    return 2 if policy.max_offer_amount is not None else SCHEMA_VERSION
+
+
+def envelope_payload(envelope: OfferEnvelope) -> dict[str, Any]:
+    return {"min_period_days": envelope.min_period_days,
+            "max_period_days": envelope.max_period_days,
+            "max_open_offers": envelope.max_open_offers,
+            "rate_floor_ratio": str(envelope.rate_floor_ratio),
+            "min_rate_apr": str(envelope.min_rate_apr)}
+
+
+def policy_payload(policy: CapitalPolicy) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "enabled": policy.enabled, "reserve_amount": str(policy.reserve_amount),
+        "allocation_mode": policy.allocation_mode,
+        "max_cell_fraction": str(policy.max_cell_fraction)}
+    if policy.max_offer_amount is not None:
+        payload["max_offer_amount"] = str(policy.max_offer_amount)
+    if policy.envelope is not None:
+        payload["envelope"] = envelope_payload(policy.envelope)
+    return payload
+
+
+def _envelope(raw: object) -> OfferEnvelope:
+    if not isinstance(raw, dict) or set(raw) != ENVELOPE_KEYS:
+        raise ValueError("envelope keys")
+    return OfferEnvelope(min_period_days=raw["min_period_days"],
+                         max_period_days=raw["max_period_days"],
+                         max_open_offers=raw["max_open_offers"],
+                         rate_floor_ratio=_amount(raw["rate_floor_ratio"]),
+                         min_rate_apr=_amount(raw["min_rate_apr"]))
+
+
+def parse_policy(schema_version: int, raw: Any, digest: str) -> CapitalPolicy:
+    """Validate one stored policy revision (schema, digest, exact keys) or refuse."""
+    keys = POLICY_KEYS.get(schema_version)
+    if keys is None or digest != policy_digest(raw):
+        raise PolicyRejectedError("invalid_policy_schema_or_digest")
+    try:
+        if set(raw) != keys:
+            raise ValueError
+        return CapitalPolicy(enabled=raw["enabled"],
+            reserve_amount=_amount(raw["reserve_amount"]),
+            allocation_mode=raw["allocation_mode"],
+            max_cell_fraction=_amount(raw["max_cell_fraction"]),
+            max_offer_amount=(_amount(raw["max_offer_amount"])
+                              if "max_offer_amount" in keys else None),
+            envelope=_envelope(raw["envelope"]) if "envelope" in keys else None)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise PolicyRejectedError("invalid_policy") from exc
+
+
+# A policy head as (revision_id, revision); a stored revision as
+# (id, account_id, environment, symbol, revision).
+type PolicyHead = tuple[UUID, int]
+type PolicyRevisionKey = tuple[UUID, UUID, str, str, int]
+
+
+def check_pointer(
+    account_id: UUID, environment: str, symbol: str,
+    head: PolicyHead | None, revision: PolicyRevisionKey | None,
+) -> Blocked | None:
+    """Prove the scope's head points at its own revision, in the authority's order."""
+    if head is None:
+        return Blocked("policy_unavailable", ())
+    if revision is None or revision != (head[0], account_id, environment, symbol, head[1]):
+        return Blocked("inconsistent_policy_pointer", ())
+    return None
+
+
+def policy_digest(value: object) -> str:
+    return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _amount(value: object) -> Decimal:
+    try:
+        if not isinstance(value, (str, Decimal)):
+            raise ValueError
+        result = Decimal(value)
+        if not result.is_finite() or result < _ZERO:
+            raise ValueError
+        return result
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise PolicyRejectedError("invalid_capital_amount") from exc

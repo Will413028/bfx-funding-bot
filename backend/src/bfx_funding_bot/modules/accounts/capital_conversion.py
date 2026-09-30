@@ -15,18 +15,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.accounts.tables import AccountConfigDraft
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
 from bfx_funding_bot.modules.execution.capital_repository import (
     CapitalBlockedError,
     CapitalRepository,
-    policy_payload,
-)
-from bfx_funding_bot.modules.execution.capital_tables import (
-    CapitalPolicyHeadRow,
-    CapitalPolicyRevisionRow,
 )
 from bfx_funding_bot.modules.execution.safety.hard_guards import resolve_for_symbol_with_source
+from bfx_funding_bot.modules.ledger.tables import CapitalPolicyHeadRow, CapitalPolicyRevisionRow
 from bfx_funding_bot.modules.strategy import canonical_cell_id
+from bfx_funding_bot.modules.trading import CapitalPolicy, policy_payload
 
 _KEYS = {"schema_version", "caps", "default_cap", "env_fallback_cap", "buffers",
          "default_buffer", "env_fallback_buffer", "max_cell_fraction"}

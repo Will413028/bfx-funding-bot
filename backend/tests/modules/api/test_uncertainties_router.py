@@ -24,6 +24,7 @@ import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.venue_time import VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.api.deps import get_session
@@ -39,10 +40,7 @@ from bfx_funding_bot.modules.execution.events import (
     VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
-from bfx_funding_bot.modules.execution.submit_outcomes import (
-    VENUE_CLOCK_TOLERANCE_MS,
-    SubmissionAttemptPayload,
-)
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 
 ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")

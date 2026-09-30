@@ -117,7 +117,7 @@ type = "forbidden"
 source_modules = ["bfx_funding_bot.modules.trading"]
 forbidden_modules = [
     "sqlalchemy", "httpx", "bfx_funding_bot.core.settings",
-    "bfx_funding_bot.modules.execution.event_store",
+    "bfx_funding_bot.modules.execution.event_store", "bfx_funding_bot.modules.execution",
 ]
 ignore_imports = []
 broken_contract_guidance = "Keep the capital contracts and fold pure; do not add ignores."
@@ -318,11 +318,8 @@ type = "acyclic_siblings"
 ancestors = ["bfx_funding_bot.modules"]
 depth = 0
 ignore_imports = [
-    "bfx_funding_bot.modules.accounts.capital_amendment -> bfx_funding_bot.modules.execution.capital_policy",
     "bfx_funding_bot.modules.accounts.capital_amendment -> bfx_funding_bot.modules.execution.capital_repository",
-    "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.capital_policy",
     "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.capital_repository",
-    "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.capital_tables",
     "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.safety.hard_guards",
     "bfx_funding_bot.modules.accounts.credential_bootstrap -> bfx_funding_bot.modules.execution.protocols",
     "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.audit.tables",

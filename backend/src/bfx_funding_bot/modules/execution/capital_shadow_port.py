@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Literal, Protocol
 from uuid import UUID
 
-from bfx_funding_bot.modules.execution.capital_policy import (
+from bfx_funding_bot.modules.trading import (
     CapitalBudget,
     CapitalPolicy,
     CapitalSnapshot,

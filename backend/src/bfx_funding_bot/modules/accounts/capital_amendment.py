@@ -23,10 +23,13 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
 from bfx_funding_bot.modules.execution.capital_repository import (
     CapitalBlockedError,
     CapitalRepository,
+)
+from bfx_funding_bot.modules.trading import (
+    CapitalPolicy,
+    OfferEnvelope,
     policy_payload,
     policy_schema_version,
 )

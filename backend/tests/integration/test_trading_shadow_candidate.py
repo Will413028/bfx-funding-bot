@@ -13,10 +13,7 @@ from sqlalchemy import event as sa_event
 
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
-from bfx_funding_bot.modules.execution.capital_tables import (
-    CapitalPolicyRevisionRow,
-    CapitalSnapshotRow,
-)
+from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 from bfx_funding_bot.modules.execution.event_store.entities import (
     VenueCreditObservation,
     VenueOfferObservation,
@@ -35,6 +32,7 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
 )
+from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow
 from bfx_funding_bot.modules.trading import Available, Blocked, CapitalScope, derive_capital
 from bfx_funding_bot.modules.trading_shadow import LoadedInputs, NotComparable, ScanLimits
 from bfx_funding_bot.modules.trading_shadow._internal import loader as loader_module

@@ -155,8 +155,8 @@ async def test_the_overview_shows_the_state_and_the_cancel_all_of_the_halt(migra
 async def _seed_policies(factory, account):
     from decimal import Decimal
 
-    from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
     from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+    from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
     repo = CapitalRepository(account_id=account, environment="ci", max_snapshot_age_ms=60_000)
     envelope = OfferEnvelope(min_period_days=2, max_period_days=30, max_open_offers=6,
                              rate_floor_ratio=Decimal("0.5"), min_rate_apr=Decimal("0.01"))
@@ -188,10 +188,8 @@ async def test_the_overview_lists_each_currency_policy_and_its_envelope(migrated
 
 @pytest.mark.asyncio
 async def test_a_currency_toggle_only_queues_a_request(migrated_db, monkeypatch):
-    from bfx_funding_bot.modules.execution.capital_tables import (
-        CapitalPolicyHeadRow,
-        CapitalPolicyRequestRow,
-    )
+    from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
+    from bfx_funding_bot.modules.ledger.tables import CapitalPolicyHeadRow
     app, factory, account = await _app(migrated_db, monkeypatch)
     await _seed_policies(factory, account)
     base = f"/api/v1/exchange-accounts/{account}/trading-control"
