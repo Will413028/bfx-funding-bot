@@ -37,6 +37,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import session_scope
+from bfx_funding_bot.core.venue_time import HISTORY_QUERY_MARGIN_MS
 from bfx_funding_bot.external.bitfinex.auth_rest import (
     ActiveFundingCredit,
     ActiveFundingOffer,
@@ -113,13 +114,6 @@ RecoveryAction = (
 # answers. Before this an absent offer proves nothing, and a coincidental
 # foreign offer could be the only candidate while ours is still in flight.
 UNKNOWN_SETTLE_MS = 120_000
-# How far before the oldest attempt to explain the offer-history query starts.
-# The venue stamps offers to the whole second on its own clock, so an offer we
-# submitted at .175 can carry an mts_created before the attempt started; a
-# window starting exactly there then reads incomplete and the fill is
-# unclassifiable. Only the query widens: coverage still starts at or before
-# every attempt it must explain.
-HISTORY_QUERY_MARGIN_MS = 60_000
 # Operator id recorded on resolutions this process derives from evidence alone.
 SYSTEM_RESOLVER = "system:reconcile"
 

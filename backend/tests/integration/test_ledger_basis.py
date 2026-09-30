@@ -50,6 +50,7 @@ from bfx_funding_bot.modules.ledger import (
     Trade,
     Wallet,
 )
+from bfx_funding_bot.modules.ledger._internal.journal import record_attempt
 from bfx_funding_bot.modules.ledger.tables import (
     LEDGER_TABLES,
     AcceptedCapitalBasisAttemptRow,
@@ -194,9 +195,10 @@ class Ledger:
         self.factory = factory
         self.basis_id: UUID | None = None
 
-    async def accept(self, observation: Observation) -> Basis:
+    async def accept(self, observation: Observation, *, started_at_ms: int = 1) -> Basis:
         async with self.factory.begin() as session:
-            handle = await JOURNAL.begin_query(session, SCOPE, 1)
+            handle = await JOURNAL.begin_query(session, SCOPE, started_at_ms)
+        observation = replace(observation, finished_at_ms=started_at_ms + 1)
         async with self.factory.begin() as session:
             result = await OBSERVATIONS.accept(
                 session,
@@ -205,12 +207,12 @@ class Ledger:
                 observation,
                 replace(
                     observation,
-                    finished_at_ms=4,
+                    finished_at_ms=started_at_ms + 3,
                     offer_history=(),
                     credit_history=(),
                     trades=(),
                 ),
-                3,
+                started_at_ms + 2,
             )
         assert result.decision == "accepted"
         basis = await self.read(result.observation_id)
@@ -274,6 +276,7 @@ class Ledger:
         symbol: str = "fUST",
         outcome: str = "ack",
         venue_offer_id: str | None = None,
+        started_at_ms: int = 0,
     ) -> UUID:
         assert self.basis_id is not None, "an attempt is authorized against a basis"
         decision_id = f"decision-{next(_IDS)}"
@@ -291,7 +294,7 @@ class Ledger:
                 ),
                 {"d": decision_id, "a": _A, "cell": cell, "symbol": symbol, "amount": amount},
             )
-            await JOURNAL.record_attempt(
+            await record_attempt(
                 session,
                 SCOPE,
                 Attempt(
@@ -303,7 +306,7 @@ class Ledger:
                     self.basis_id,
                     UUID(_P),
                     {},
-                    0,
+                    started_at_ms,
                 ),
             )
         async with self.factory.begin() as session:

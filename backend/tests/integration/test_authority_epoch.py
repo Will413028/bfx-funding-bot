@@ -273,7 +273,7 @@ def test_downgrade_round_trip_restores_the_prior_state(ledger_db) -> None:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         conn.exec_driver_sql(_ATTEMPT.format(attempt=uuid4()))
     ledger_db.dispose()
-    alembic(url, "upgrade", _REVISION)
+    alembic(url, "upgrade", "head")
     alembic(url, "check")
     with ledger_db.connect() as conn:
         assert _guard_state(conn) == at_head

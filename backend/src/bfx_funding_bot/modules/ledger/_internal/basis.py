@@ -26,11 +26,14 @@ from uuid import UUID, uuid4
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.core.venue_time import VENUE_CLOCK_TOLERANCE_MS
-from bfx_funding_bot.modules.ledger import JsonObject, Scope
+from bfx_funding_bot.core.venue_time import HISTORY_QUERY_MARGIN_MS, VENUE_CLOCK_TOLERANCE_MS
+from bfx_funding_bot.modules.ledger import JsonObject, Quarantine, Scope
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
 from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance, sole_owner
-from bfx_funding_bot.modules.ledger._internal.quarantine import unresolved_quarantines
+from bfx_funding_bot.modules.ledger._internal.quarantine import (
+    open_quarantine,
+    unresolved_quarantines,
+)
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisCellRow,
@@ -47,6 +50,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     LedgerObservationRow,
     LedgerObservationTradeRow,
     LedgerObservationWalletRow,
+    QuarantineOpeningRow,
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
 )
@@ -278,11 +282,13 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             group_of[(credit.source_kind, credit.venue_credit_id)] = key
             live[key] = live.get(key, ZERO) + credit.amount
     trades: list[tuple[Group, Decimal, str]] = []
+    traded_offer_ids: set[str] = set()
     for trade in await session.scalars(
         select(LedgerObservationTradeRow).where(
             LedgerObservationTradeRow.observation_id == observation_id
         )
     ):
+        traded_offer_ids.add(trade.venue_offer_id)
         key = (trade.symbol, trade.period_days, trade.mts_create)
         if key in live:
             trades.append((key, trade.amount, trade.venue_offer_id))
@@ -458,6 +464,18 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
 
     # Attempts since the previous basis (and its unresolved ones).
     classified: dict[UUID, tuple[str, str]] = {}
+    converted = (
+        {
+            row.source_attempt_id: row
+            for row in await session.scalars(
+                select(QuarantineOpeningRow).where(
+                    QuarantineOpeningRow.source_attempt_id.in_(considered_ids)
+                )
+            )
+        }
+        if considered_ids
+        else {}
+    )
     for attempt in considered:
         outcome = outcomes.get(attempt.attempt_id)
         resolution = resolutions.get(attempt.attempt_id)
@@ -484,6 +502,46 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             attempt, venue_id, reflected_by_offer, terminal.get(venue_id), observation
         ):
             classified[attempt.attempt_id] = (attempt.symbol, "reflected")
+            continue
+        intended_amount = _payload_amount(attempt.normalized_payload)
+        source = converted.get(attempt.attempt_id)
+        source_matches = source is None or (
+            source.exchange_account_id,
+            source.deployment_environment,
+            source.symbol,
+        ) == (scope.exchange_account_id, scope.deployment_environment, attempt.symbol)
+        if (
+            venue_id is not None
+            and source_matches
+            and intended_amount is not None
+            and intended_amount >= ZERO
+            and _can_quarantine(
+                attempt.started_at_ms,
+                venue_id,
+                current_ids,
+                terminal.keys(),
+                traded_offer_ids,
+                observation,
+            )
+        ):
+            if source is None:
+                await open_quarantine(
+                    session,
+                    scope,
+                    Quarantine(
+                        uuid4(),
+                        attempt.symbol,
+                        intended_amount,
+                        observation.confirmation_finished_at_ms,
+                        {
+                            "reason": "ack_unreflected",
+                            "venue_offer_id": venue_id,
+                            "observation_id": str(observation_id),
+                        },
+                        source_attempt_id=attempt.attempt_id,
+                    ),
+                )
+            classified[attempt.attempt_id] = (attempt.symbol, "quarantined")
             continue
         # Unaccounted commitment: its symbol stays unresolved and blocks.
         c.block(attempt.symbol, "unclassifiable_commitment", attempt_id=attempt.attempt_id)
@@ -604,6 +662,29 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             )
     await session.flush()
     return basis_id
+
+
+def _can_quarantine(
+    started_at_ms: int,
+    venue_id: str,
+    active_ids: Iterable[str],
+    terminal_ids: Iterable[str],
+    trade_ids: Iterable[str],
+    observation: LedgerObservationRow,
+) -> bool:
+    """R6 absence is proven only by complete evidence spanning the local start."""
+    start, end = observation.history_requested_start_ms, observation.history_requested_end_ms
+    return (
+        observation.offer_history_complete
+        and observation.trades_complete
+        and start is not None
+        and end is not None
+        and start <= started_at_ms - HISTORY_QUERY_MARGIN_MS
+        and end >= started_at_ms
+        and venue_id not in active_ids
+        and venue_id not in terminal_ids
+        and venue_id not in trade_ids
+    )
 
 
 def _reflected(

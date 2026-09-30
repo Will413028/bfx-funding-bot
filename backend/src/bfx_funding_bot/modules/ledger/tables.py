@@ -599,6 +599,14 @@ class QuarantineOpeningRow(Base):
     opened_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
     legacy_reconcile_event_seq: Mapped[int | None] = mapped_column(BigInteger)
+    source_attempt_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "submission_attempt_journal.attempt_id", ondelete="RESTRICT",
+            name="fk_quarantine_opening_source_attempt",
+        ),
+        nullable=True,
+    )
     __table_args__ = (
         CheckConstraint(
             "intended_amount >= 0 AND opened_at_ms >= 0 AND (legacy_reconcile_event_seq "
@@ -606,6 +614,10 @@ class QuarantineOpeningRow(Base):
             name="ck_quarantine_opening_nonnegative",
         ),
         CheckConstraint("opened_revision > 0", name="ck_quarantine_opening_revision"),
+        Index(
+            "uq_quarantine_opening_source_attempt", "source_attempt_id", unique=True,
+            postgresql_where=text("source_attempt_id IS NOT NULL"),
+        ),
         Index(
             "ix_quarantine_opening_scope_revision",
             "exchange_account_id",
@@ -846,7 +858,7 @@ class AcceptedCapitalBasisAttemptRow(Base):
     classification: Mapped[str] = mapped_column(Text, nullable=False)
     __table_args__ = (
         CheckConstraint(
-            "classification IN ('reflected','settled','unresolved')",
+            "classification IN ('reflected','settled','unresolved','quarantined')",
             name="ck_accepted_basis_attempt_classification",
         ),
     )

@@ -197,6 +197,19 @@ def test_reflected_terminal_offer_never_resurrects_original_amount() -> None:
     assert result.view.snapshot == CapitalSnapshot(D("1000"), D("0"), D("1000"), D("0"))
 
 
+def test_quarantined_attempt_is_accounted_after_quarantine_resolution() -> None:
+    original = attempt(1, "500", "acknowledged", seq=5)
+    basis = replace(BASIS, quarantined_attempts=frozenset({original.attempt_id}))
+    result = fold(basis=basis, attempts=(original,))
+    assert isinstance(result, Available)
+    assert result.view.snapshot.unreflected_commitments == D("0")
+    blocked = fold(
+        basis=replace(basis, unresolved_quarantines=((UUID(int=500), "fUSD"),)),
+        attempts=(original,),
+    )
+    assert blocked == Blocked("execution_unknown", (("basis_quarantine", str(UUID(int=500))),))
+
+
 def test_foreign_offers_and_unattributed_credit_are_not_cell_exposure() -> None:
     values = replace(VALUES, cells=(), credits=D("300"), unattributed_credits=D("300"),
                      offered=D("0"), foreign_offers=D("9999"))

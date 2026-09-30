@@ -5,6 +5,7 @@ import inspect
 import bfx_funding_bot.modules.ledger as ledger
 from bfx_funding_bot.modules.ledger._internal import observation
 from bfx_funding_bot.modules.ledger.wiring import (
+    build_ledger_journal,
     build_ledger_managed_offers,
     build_ledger_observations,
     build_ledger_uncertainties,
@@ -41,6 +42,11 @@ _READS = {
     "CancelProvenance",
     "ProvenanceConflict",
     "LedgerReadUnbounded",
+    "Authorized",
+    "AuthorizeRefused",
+    "LedgerCapitalRead",
+    "encode_basis_token",
+    "parse_basis_token",
 }
 
 
@@ -71,6 +77,18 @@ def test_internal_acceptance_uses_the_facade_types() -> None:
 
 
 def test_ports_expose_their_methods() -> None:
+    assert _methods(ledger.LedgerJournal) == {
+        "bump_clock",
+        "begin_query",
+        "authorize_attempt",
+        "close_dangling",
+        "record_outcome",
+        "read_back_outcome",
+        "record_resolution",
+        "open_quarantine",
+        "add_quarantine_member",
+    }
+    assert not hasattr(build_ledger_journal(), "record_attempt")
     assert _methods(ledger.LedgerObservations) == {"begin_query", "accept"}
     assert _methods(ledger.LedgerUncertainties) == {"open_uncertainties"}
     assert _methods(ledger.LedgerManagedOffers) == {
@@ -79,6 +97,7 @@ def test_ports_expose_their_methods() -> None:
         "fingerprints_in_use",
     }
     for port, protocol in (
+        (build_ledger_journal(), ledger.LedgerJournal),
         (build_ledger_observations(), ledger.LedgerObservations),
         (build_ledger_uncertainties(), ledger.LedgerUncertainties),
         (build_ledger_managed_offers(), ledger.LedgerManagedOffers),
@@ -96,3 +115,16 @@ def test_accept_signature_matches_the_implementation() -> None:
     port = inspect.signature(build_ledger_observations().accept)
     implementation = inspect.signature(observation.accept_observation)
     assert list(port.parameters) == list(implementation.parameters)
+
+
+def test_journal_signatures_match_the_implementation() -> None:
+    from bfx_funding_bot.modules.ledger._internal import journal
+
+    for name in ("authorize_attempt", "close_dangling"):
+        port = inspect.signature(getattr(build_ledger_journal(), name))
+        implementation = inspect.signature(getattr(journal, name))
+        assert port == implementation
+    assert (
+        inspect.signature(ledger.LedgerJournal.authorize_attempt).parameters["now_ms"].kind
+        == inspect.Parameter.KEYWORD_ONLY
+    )
