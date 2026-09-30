@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -152,14 +153,45 @@ async def test_dispatcher_cancel_requested_subscriber_tracks_recent_cancels() ->
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_fails_closed_on_unmatched_venue_event() -> None:
+async def test_dispatcher_survives_a_foreign_offer_closing() -> None:
+    # Regression: cancelling a foreign offer (no claim) raised out of the
+    # TaskGroup and stopped the bot. It is logged and left to periodic reconcile.
+    bus = DomainEventBus()
+    published: list[object] = []
+
+    async def capture(event: object) -> None:
+        published.append(event)
+
+    for event_type in (OrderFilled, ReservationReleased):
+        bus.subscribe(event_type, capture)
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=_FakeWSClient([]), registry=OfferRegistry(clock=lambda: 0),
+        bus=bus, event_sink=_EventCapture(), clock=lambda: 5000,
+    )
+    canceled = FocEvent(
+        venue_offer_id="foreign", symbol="fUST", mts_create=1000, mts_update=2000,
+        amount=Decimal("152"), status="CANCELED", rate=0.00082, period_days=2,
+        raw_seq=8, raw=[],
+    )
+
+    await dispatcher._process(canceled)
+    await dispatcher._process(_foc_executed("foreign"))
+
+    assert published == []
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_fails_closed_on_uncorrelated_legacy_claim() -> None:
+    registry = _registry_with_claim("legacy")
+    registry._snapshot["legacy"] = replace(
+        registry._snapshot["legacy"], reservation_ref=None)
+    dispatcher = BitfinexLiveWSDispatcher(
+        ws_client=_FakeWSClient([]), registry=registry,
         bus=DomainEventBus(), event_sink=_EventCapture(), clock=lambda: 5000,
     )
 
-    with pytest.raises(ReservationCorrelationError, match="unmatched"):
-        await dispatcher._process(_foc_executed("missing"))
+    with pytest.raises(ReservationCorrelationError, match="uncorrelated legacy claim"):
+        await dispatcher._process(_foc_executed("legacy"))
 
 
 # ---------------------------------------------------------------------------
