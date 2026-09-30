@@ -3,7 +3,10 @@
 from collections.abc import Mapping
 from typing import Any
 
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
+from bfx_funding_bot.modules.execution.submit_outcomes import (
+    VENUE_CLOCK_TOLERANCE_MS,
+    SubmissionAttemptPayload,
+)
 from bfx_funding_bot.modules.trading_shadow._internal.evidence import (
     Event,
     Row,
@@ -80,7 +83,7 @@ def _candidates(attempt: SubmissionAttemptPayload, snapshot: Row) -> list[Row]:
         offer
         for offer, history, identity in by_id.values()
         if identity[:4] == wanted
-        and attempt.started_at_ms <= offer["mts_created"] <= end
+        and attempt.started_at_ms - VENUE_CLOCK_TOLERANCE_MS <= offer["mts_created"] <= end
         and identity[5:] == (wire["type"], _flags(wire["flags"]))
         and (
             not history

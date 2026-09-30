@@ -20,7 +20,10 @@ from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexS
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
-from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
+from bfx_funding_bot.modules.execution.boot_recovery import (
+    HISTORY_QUERY_MARGIN_MS,
+    BootRecovery,
+)
 from bfx_funding_bot.modules.execution.event_store.entities import VenueOfferObservation
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
@@ -299,7 +302,8 @@ async def test_pending_restart_emits_unknown_then_exact_match_and_resolves(pg_se
     assert result.n_unknown == 0
     assert result.n_matched == 1
     assert {"fUST", "fUSD", "fXYZ"} <= symbols
-    assert any(call.startswith("history:1000:5000") for call in auth.calls)
+    history_start = max(0, 1_000 - HISTORY_QUERY_MARGIN_MS)
+    assert any(call.startswith(f"history:{history_start}:5000") for call in auth.calls)
 
     async with pg_session_factory() as session:
         await PostgresEventStore(deployment_environment=_ENV).rebuild_snapshot_from_log(
@@ -764,6 +768,34 @@ async def test_history_transport_pages_backward_and_records_complete_coverage_fe
     assert result.coverage.oldest_mts_created == 1_000
     assert result.coverage.newest_mts_created == 3_000
     assert result.coverage.pages == 2
+
+
+@pytest.mark.asyncio
+async def test_history_row_stamped_before_the_fence_keeps_a_short_page_complete():
+    """2026-09-29: the venue stamps offers to the whole second, so a window
+    starting at .175 returns an offer created at .000. Marking that incomplete
+    made the fill unclassifiable and halted trading."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[_wire_offer(1, 1_000)])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await BitfinexAuthREST(
+            http=http,
+            auth_gate=AuthRequestGate(iter((1,)).__next__),
+        ).get_funding_offer_history(
+            ctx=AccountContext(
+                account_id=str(_ACCOUNT),
+                credentials=Credentials(api_key="key", api_secret="secret"),
+                allocation_cap_usdt=Decimal("1000"),
+            ),
+            start_ms=1_175,
+            end_ms=5_000,
+            limit=2,
+        )
+
+    assert result.coverage.complete is True
+    assert result.coverage.oldest_mts_created == 1_000
 
 
 @pytest.mark.asyncio

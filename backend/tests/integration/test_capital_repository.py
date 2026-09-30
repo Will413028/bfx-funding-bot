@@ -1425,7 +1425,15 @@ async def test_bounded_read_agrees_with_full_rederivation(capital_db, with_histo
 
 
 @pytest.mark.asyncio
-async def test_an_offer_that_fills_between_snapshots_is_accounted_for(capital_db):
+@pytest.mark.parametrize("venue_mts_created", [
+    1150,
+    # 2026-09-29: the venue stamps offers to the whole second, so an offer
+    # acknowledged at .100 carries an mts_created before the attempt started.
+    # A history window starting exactly at the attempt then reads incomplete,
+    # and every snapshot after the fill halted as unclassifiable_commitment.
+    1000,
+])
+async def test_an_offer_that_fills_between_snapshots_is_accounted_for(capital_db, venue_mts_created):
     """The first live fill, 2026-09-23, reproduced with the venue's own shapes.
 
     The canary was acknowledged at 02:08:25 and filled on the spot, so by the
@@ -1479,12 +1487,16 @@ async def test_an_offer_that_fills_between_snapshots_is_accounted_for(capital_db
             return FundingOfferHistory(
                 offers=(ActiveFundingOffer(
                     venue_offer_id="offer-1", symbol="fUST", amount=Decimal("0"),
-                    rate=0.0001, period_days=2, mts_created=1150,
+                    rate=0.0001, period_days=2, mts_created=venue_mts_created,
                     status="EXECUTED at 0.0100% (200.0)",   # the venue's own wording
                     amount_original=Decimal("200"), mts_updated=1150, offer_type="LIMIT"),),
                 coverage=FundingOfferHistoryCoverage(
                     requested_start_ms=start_ms, requested_end_ms=end_ms,
-                    oldest_mts_created=1150, newest_mts_created=1150, pages=1, complete=True))
+                    oldest_mts_created=venue_mts_created, newest_mts_created=venue_mts_created,
+                    pages=1,
+                    # AuthRest's rule: a row outside the requested window
+                    # means the page cannot be proven complete.
+                    complete=start_ms <= venue_mts_created <= end_ms))
 
     class Bus:
         async def publish(self, event):

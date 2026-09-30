@@ -42,6 +42,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials, SubmittedOrder
 from bfx_funding_bot.modules.execution.submit_outcomes import (
+    VENUE_CLOCK_TOLERANCE_MS,
     SubmitAcknowledged,
     SubmitOutcomeUnknown,
 )
@@ -305,11 +306,14 @@ async def test_unknown_without_decisive_evidence_stays_open_and_holds_only_its_s
 
 @pytest.mark.asyncio
 async def test_an_older_offer_with_the_same_amount_is_not_the_unknowns(capital_db):
-    """Created before the submit started, it cannot be its offer: complete
-    history over the attempt's own window has nothing, so it was not sent."""
+    """Created before the submit started -- by more than the venue's
+    whole-second stamping and clock skew explain -- it cannot be its offer:
+    complete history over the attempt's own window has nothing, so it was not
+    sent. (One ms earlier is not enough: the venue stamps our own offers up to
+    a second before the attempt's local start.)"""
     factory, account = capital_db
     await _unknown_submit(factory, account)
-    older = _ours(created=ATTEMPT_START - 1)
+    older = _ours(created=ATTEMPT_START - VENUE_CLOCK_TOLERANCE_MS - 1)
     auth = FakeAuth(offers=[older], wallets={"fUST": D("1000") - D(AMOUNT), "fUSD": D("0")})
     result = await recovery(factory, account, auth, Recorder(), start=SETTLED).run()
     assert (result.n_matched, result.n_not_sent) == (0, 1)

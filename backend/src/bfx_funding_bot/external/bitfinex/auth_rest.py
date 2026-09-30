@@ -572,9 +572,10 @@ class BitfinexAuthREST:
 
         offers = tuple(sorted(by_id.values(), key=lambda offer: offer.mts_created))
         timestamps = [offer.mts_created for offer in offers]
-        if timestamps and (
-            min(timestamps) < start_ms or max(timestamps) > end_ms
-        ):
+        # Rows older than the fence are extra, not missing: the venue stamps
+        # offers to the whole second and its filter field is undocumented, so
+        # they appear routinely and prove nothing about the window's coverage.
+        if timestamps and max(timestamps) > end_ms:
             complete = False
         return FundingOfferHistory(
             offers=offers,

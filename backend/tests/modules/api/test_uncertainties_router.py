@@ -39,7 +39,10 @@ from bfx_funding_bot.modules.execution.events import (
     VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
+from bfx_funding_bot.modules.execution.submit_outcomes import (
+    VENUE_CLOCK_TOLERANCE_MS,
+    SubmissionAttemptPayload,
+)
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 
 ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
@@ -668,7 +671,9 @@ def test_bind_to_venue_appends_resolution_event(uncertainty_app) -> None:
         ("period_days", 30),
         ("offer_type", "FRRDELTA"),
         ("flags", {"raw": 1}),
-        ("mts_created", 999),
+        # Created before the attempt by more than the venue's whole-second
+        # stamping and clock skew can explain.
+        ("mts_created", 1_000 - VENUE_CLOCK_TOLERANCE_MS - 1),
     ],
 )
 def test_bind_requires_full_immutable_attempt_identity(
