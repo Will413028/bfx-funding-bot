@@ -17,39 +17,15 @@ pnpm test:e2e     # Playwright E2E
 
 ```
 src/
-  app/
-    layout.tsx                      # Root layout（metadata）
-    [locale]/                       # i18n 路由區段
-      layout.tsx                    # Locale + providers
-      (marketing)/                  # 公開頁面（landing, pricing）
-      (auth)/                       # 登入/雙因素驗證
-        actions.ts                  # Server Actions（login, logout）
-      (dashboard)/                  # 受保護的 dashboard
-        overview/, api-keys/, strategy/, history/, settings/
-    api/auth/[...all]/route.ts      # Better Auth（JWT HTTP endpoints blocked）
-    api/proxy/[...path]/route.ts    # BFF → Python web-API
-  components/
-    ui/                             # shadcn/ui（自動產生，不要手改樣式邏輯）
-    layout/                         # Sidebar, Topbar, LocaleSwitcher
-    shared/                         # 共用元件
-  features/                         # 依功能分模組
-    auth/components/                # LoginForm, TwoFactorForm
-    api-keys/{components,hooks}/    # ApiKeyCard, useApiKeys
-    dashboard/{components,hooks}/   # StatsGrid, OffersTable, Charts, useDashboard
-    history/{components,hooks}/     # ExecutionTable, BillingTable
-    strategy/{components,hooks}/    # StrategyForm, useConfig
-    settings/{components,hooks}/    # ChangePasswordForm, useUser
-  lib/
-    api-client.ts                   # HTTP client（自動解包 { data: T }）
-    query-keys.ts                   # TanStack Query key factory
-    env.ts                          # Zod 環境變數驗證
-    validations.ts                  # 表單 schema（Zod）
-    format.ts                       # 格式化工具（APR, USD, period）
-  providers/query-provider.tsx      # TanStack Query + Devtools
-  types/index.ts                    # 所有 TypeScript 型別
-  i18n/                             # next-intl 設定
-messages/                           # i18n JSON（en.json, zh-TW.json）
-e2e/                                # Playwright 測試
+  app/[locale]/                     # i18n 路由；(marketing) 公開、(auth) 登入與雙因素、(dashboard) 受保護
+  app/api/auth/[...all]/route.ts    # Better Auth（JWT HTTP endpoints blocked）
+  app/api/proxy/[...path]/route.ts  # BFF → Python web-API
+  components/ui/                    # shadcn/ui（自動產生，不要手改樣式邏輯）
+  components/{layout,shared}/
+  features/<feature>/{components,hooks}/  # 一個功能一個模組；現有模組以目錄為準
+  lib/                              # api-client、query-keys、env（Zod）、validations、format
+messages/                           # i18n JSON（en、zh-TW）
+e2e/                                # Playwright
 middleware.ts                       # Auth guard + i18n + security headers
 ```
 
@@ -123,25 +99,8 @@ export function useApiKeys() {
 
 ## 環境變數
 
-```bash
-# Public（瀏覽器可見，需 NEXT_PUBLIC_ 前綴）
-NEXT_PUBLIC_APP_URL          # 前端 URL
-NEXT_PUBLIC_APP_NAME         # App 名稱
-NEXT_PUBLIC_BETTER_AUTH_URL  # Better Auth base URL（client SDK 用）
-NEXT_PUBLIC_SENTRY_DSN       # Sentry（optional）
-
-# Server-only
-API_URL                    # Python web-API URL（proxy + server actions 用）
-BETTER_AUTH_URL            # Better Auth base URL（server，baseURL / trustedOrigins / passkey origin）
-BETTER_AUTH_SECRET         # Better Auth 加密金鑰（≥ 32 chars）
-DATABASE_URL               # VM-local Postgres（Better Auth `auth` schema，bfx_webauth，direct 無 -pooler）
-REDIS_URL                  # VM-local Redis（session / rate-limit secondaryStorage，ioredis）
-PASSKEY_RP_ID              # Passkey relying-party ID（domain）
-BFX_OPERATOR_USER_ID       # Better Auth user ID；前後端必須完全一致
-BFX_OPERATOR_ROLE          # Release 0 固定為 admin
-```
-
-驗證邏輯在 `lib/env.ts`（Zod schema）。
+變數清單與驗證在 `lib/env.ts`（Zod schema），範本見 `.env.example`。`NEXT_PUBLIC_` 前綴的會進瀏覽器，secret 不可加此前綴。
+`BFX_OPERATOR_USER_ID` 前後端必須完全一致；Release 0 preflight 會拒絕缺值、非 admin role、或前後端 operator ID 不一致。
 
 ## 監控
 
@@ -149,7 +108,4 @@ BFX_OPERATOR_ROLE          # Release 0 固定為 admin
 
 ## 部署
 
-- 平台：Oracle Cloud VM（Docker Compose；Frontend、Python web-API、Postgres、Redis）
-- Config：`deploy/vm/docker-compose.app.yml`；CI 建 image，VM 以 digest 部署（`deploy/vm/ops/bfx_deploy.py`）
-- Release 0 preflight 會拒絕缺值、非 admin role、或 frontend/backend operator ID 不一致
-- React Compiler 已啟用（自動 memoization）
+見根目錄 `AGENTS.md`「部署架構」與 `docs/runbooks/deploy.md`。
