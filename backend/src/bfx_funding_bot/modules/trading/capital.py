@@ -16,7 +16,8 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from bfx_funding_bot.modules.execution.capital_policy import (
+from bfx_funding_bot.modules.trading.policy import (
+    Blocked,
     CapitalBudget,
     CapitalPolicy,
     CapitalSnapshot,
@@ -43,19 +44,6 @@ class CapitalScope:
     environment: str
     symbol: str
     cell_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class Blocked:
-    """Unavailable evidence, distinct from a valid view with a zero budget.
-
-    Reasons preserve authority failure codes, including loader integrity faults
-    (capital_repository.py:263-274,302-350,826-883,943-1006). Evidence is an
-    immutable tuple of diagnostic key/value pairs, never mutable ORM/JSON data.
-    """
-
-    reason: str
-    evidence: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True, slots=True)

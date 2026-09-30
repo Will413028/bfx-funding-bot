@@ -37,13 +37,9 @@ from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.deployments.tables import DeploymentRow
 from bfx_funding_bot.modules.execution.capital_repository import (
     CapitalBlockedError,
-    envelope_payload,
     read_policy_unlocked,
 )
-from bfx_funding_bot.modules.execution.capital_tables import (
-    CapitalPolicyHeadRow,
-    CapitalPolicyRequestRow,
-)
+from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.execution.safety.tables import (
     FundingCancelAllAuditRow,
@@ -51,6 +47,8 @@ from bfx_funding_bot.modules.execution.safety.tables import (
     TradingStateRow,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import to_state
+from bfx_funding_bot.modules.ledger.tables import CapitalPolicyHeadRow
+from bfx_funding_bot.modules.trading import envelope_payload
 
 _DIGEST = r"^sha256:[0-9a-f]{64}$"
 Action = Literal["resume", "kill"]

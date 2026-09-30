@@ -17,7 +17,6 @@ import bfx_funding_bot.modules.live_validation.tables  # noqa: F401  (funding_tr
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
 from bfx_funding_bot.modules.execution.event_store.entities import VenueOfferObservation
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.events import (
@@ -27,6 +26,7 @@ from bfx_funding_bot.modules.execution.events import (
     VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
+from bfx_funding_bot.modules.trading import CapitalPolicy
 from tests.modules.execution.event_store.test_historical_claim_cycles import (
     seal_prefix_chain,
 )
@@ -879,7 +879,7 @@ async def test_historical_terminal_intent_is_not_a_permanent_block(capital_db):
 @pytest.mark.asyncio
 async def test_unknown_schema_stale_snapshot_and_other_account_are_blocked(capital_db):
     from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
-    from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRevisionRow
+    from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow
     factory, account = capital_db
     repo = repository(account)
     policy = await setup_policy(factory, repo)

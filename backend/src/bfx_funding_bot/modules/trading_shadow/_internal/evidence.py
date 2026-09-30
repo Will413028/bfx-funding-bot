@@ -8,13 +8,15 @@ from hashlib import sha256
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
 from bfx_funding_bot.modules.trading import (
     AcceptedCapitalBasis,
     AppliedPolicy,
     Blocked,
     CapitalScope,
+    PolicyRejectedError,
     SymbolCapital,
+    check_pointer,
+    parse_policy,
 )
 
 type Row = Mapping[str, Any]
@@ -49,64 +51,25 @@ def legacy_digest(value: object) -> str:
 
 
 def decode_policy(scope: CapitalScope, head: Row, row: Row) -> AppliedPolicy:
-    require(
+    blocked = check_pointer(
+        scope.account_id,
+        scope.environment,
+        scope.symbol,
+        (head["revision_id"], head["revision"]),
         (
+            row["id"],
             row["exchange_account_id"],
             row["deployment_environment"],
             row["symbol"],
             row["revision"],
-            row["id"],
-        )
-        == (
-            scope.account_id,
-            scope.environment,
-            scope.symbol,
-            head["revision"],
-            head["revision_id"],
         ),
-        "inconsistent_policy_pointer",
     )
-    raw = row["policy"]
-    keys = {"enabled", "reserve_amount", "allocation_mode", "max_cell_fraction"}
-    version = row["schema_version"]
-    require(
-        version in {1, 2, 3} and row["digest"] == legacy_digest(raw),
-        "invalid_policy_schema_or_digest",
-    )
-    if version >= 2:
-        keys.add("max_offer_amount")
-    if version == 3:
-        keys.add("envelope")
-    require(set(raw) == keys, "invalid_policy")
-    envelope = None
-    if version == 3:
-        e = raw["envelope"]
-        require(
-            set(e)
-            == {
-                "min_period_days",
-                "max_period_days",
-                "max_open_offers",
-                "rate_floor_ratio",
-                "min_rate_apr",
-            },
-            "invalid_policy",
-        )
-        envelope = OfferEnvelope(
-            e["min_period_days"],
-            e["max_period_days"],
-            e["max_open_offers"],
-            amount(e["rate_floor_ratio"]),
-            amount(e["min_rate_apr"]),
-        )
-    policy = CapitalPolicy(
-        enabled=raw["enabled"],
-        reserve_amount=amount(raw["reserve_amount"]),
-        allocation_mode=raw["allocation_mode"],
-        max_cell_fraction=amount(raw["max_cell_fraction"]),
-        max_offer_amount=amount(raw["max_offer_amount"]) if version >= 2 else None,
-        envelope=envelope,
-    )
+    if blocked is not None:
+        raise EvidenceError(blocked.reason)
+    try:
+        policy = parse_policy(row["schema_version"], row["policy"], row["digest"])
+    except PolicyRejectedError as exc:
+        raise EvidenceError(exc.reason) from exc
     return AppliedPolicy(
         scope.account_id,
         scope.environment,

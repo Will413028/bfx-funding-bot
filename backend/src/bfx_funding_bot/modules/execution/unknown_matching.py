@@ -13,15 +13,13 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import UUID
 
+from bfx_funding_bot.core.venue_time import VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.external.bitfinex.auth_rest import (
     ActiveFundingOffer,
     FundingOfferHistoryCoverage,
 )
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
-from bfx_funding_bot.modules.execution.submit_outcomes import (
-    VENUE_CLOCK_TOLERANCE_MS,
-    fingerprint_submit_payload,
-)
+from bfx_funding_bot.modules.execution.submit_outcomes import fingerprint_submit_payload
 
 
 @dataclass(frozen=True, slots=True)

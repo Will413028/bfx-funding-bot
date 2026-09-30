@@ -12,13 +12,11 @@ from bfx_funding_bot.modules.execution.capital_repository import (
     CapitalBlockedError,
     CapitalRepository,
 )
-from bfx_funding_bot.modules.execution.capital_tables import (
-    CapitalPolicyRevisionRow,
-    CapitalSnapshotRow,
-)
+from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.protocols import Credentials
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow
 from tests.modules.accounts.test_capital_conversion import legacy
 
 

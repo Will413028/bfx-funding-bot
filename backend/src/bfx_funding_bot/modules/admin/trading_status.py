@@ -34,8 +34,6 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from bfx_funding_bot.core.telemetry import Phase
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
-from bfx_funding_bot.modules.execution.capital_repository import envelope_payload
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
@@ -58,6 +56,7 @@ from bfx_funding_bot.modules.strategy import (
     DecisionPayload,
     configured_symbols,
 )
+from bfx_funding_bot.modules.trading import CapitalPolicy, envelope_payload
 
 MANUAL_KILL_GUARD_NAME = "manual_kill"
 

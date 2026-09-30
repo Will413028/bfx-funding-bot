@@ -31,7 +31,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.errors import ConfigurationError
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
 from bfx_funding_bot.modules.execution.capital_repository import read_policy_unlocked
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.event_store.tables import VenueOfferStateRow
@@ -44,6 +43,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
 from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookProvider
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.trading import CapitalPolicy
 
 log = logging.getLogger(__name__)
 

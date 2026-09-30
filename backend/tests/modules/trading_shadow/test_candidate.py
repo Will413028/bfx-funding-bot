@@ -9,8 +9,6 @@ from uuid import UUID, uuid4, uuid5
 
 import pytest
 
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
-from bfx_funding_bot.modules.execution.capital_repository import policy_payload
 from bfx_funding_bot.modules.execution.event_store.projector import derive_v2_event_id
 from bfx_funding_bot.modules.execution.event_store.serialization import (
     event_type_of,
@@ -28,7 +26,13 @@ from bfx_funding_bot.modules.execution.events import (
     VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
-from bfx_funding_bot.modules.trading import Available, CapitalScope, derive_capital
+from bfx_funding_bot.modules.trading import (
+    Available,
+    CapitalPolicy,
+    CapitalScope,
+    derive_capital,
+    policy_payload,
+)
 from bfx_funding_bot.modules.trading_shadow import (
     LoadedInputs,
     NotComparable,

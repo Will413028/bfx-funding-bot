@@ -19,16 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
-from bfx_funding_bot.modules.execution.capital_policy import (
-    CapitalBudget,
-    CapitalPolicy,
-    CapitalSnapshot,
-    OfferEnvelope,
-    evaluate_capital,
-)
 from bfx_funding_bot.modules.execution.capital_tables import (
-    CapitalPolicyHeadRow,
-    CapitalPolicyRevisionRow,
     CapitalQueryRow,
     CapitalSnapshotRow,
 )
@@ -61,7 +52,20 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
 )
+from bfx_funding_bot.modules.ledger.tables import CapitalPolicyHeadRow, CapitalPolicyRevisionRow
 from bfx_funding_bot.modules.live_validation.tables import FundingTradeRow
+from bfx_funding_bot.modules.trading import (
+    CapitalBudget,
+    CapitalPolicy,
+    CapitalSnapshot,
+    PolicyRejectedError,
+    check_pointer,
+    evaluate_capital,
+    parse_policy,
+    policy_digest,
+    policy_payload,
+    policy_schema_version,
+)
 
 ZERO = Decimal("0")
 SCHEMA_VERSION = 1
@@ -84,70 +88,30 @@ class CapitalBlockedError(ValueError):
     """No authorization was issued; caller must not submit."""
 
 
-# Policy JSON schemas: 1 = the original four keys; 2 adds max_offer_amount (T9);
-# 3 adds the offer envelope (lending envelope D1). Older schemas stay readable
-# with the missing parts None, which the offer-envelope guard refuses.
-_BASE_KEYS = frozenset({"enabled", "reserve_amount", "allocation_mode", "max_cell_fraction"})
-ENVELOPE_KEYS = frozenset({"min_period_days", "max_period_days", "max_open_offers",
-                           "rate_floor_ratio", "min_rate_apr"})
-POLICY_KEYS = {1: _BASE_KEYS,
-               2: _BASE_KEYS | {"max_offer_amount"},
-               3: _BASE_KEYS | {"max_offer_amount", "envelope"}}
-
-
-def policy_schema_version(policy: CapitalPolicy) -> int:
-    if policy.envelope is not None:
-        return 3
-    return 2 if policy.max_offer_amount is not None else SCHEMA_VERSION
-
-
-def envelope_payload(envelope: OfferEnvelope) -> dict[str, Any]:
-    return {"min_period_days": envelope.min_period_days,
-            "max_period_days": envelope.max_period_days,
-            "max_open_offers": envelope.max_open_offers,
-            "rate_floor_ratio": str(envelope.rate_floor_ratio),
-            "min_rate_apr": str(envelope.min_rate_apr)}
-
-
-def policy_payload(policy: CapitalPolicy) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "enabled": policy.enabled, "reserve_amount": str(policy.reserve_amount),
-        "allocation_mode": policy.allocation_mode,
-        "max_cell_fraction": str(policy.max_cell_fraction)}
-    if policy.max_offer_amount is not None:
-        payload["max_offer_amount"] = str(policy.max_offer_amount)
-    if policy.envelope is not None:
-        payload["envelope"] = envelope_payload(policy.envelope)
-    return payload
-
-
-def _envelope(raw: object) -> OfferEnvelope:
-    if not isinstance(raw, dict) or set(raw) != ENVELOPE_KEYS:
-        raise ValueError("envelope keys")
-    return OfferEnvelope(min_period_days=raw["min_period_days"],
-                         max_period_days=raw["max_period_days"],
-                         max_open_offers=raw["max_open_offers"],
-                         rate_floor_ratio=_amount(raw["rate_floor_ratio"]),
-                         min_rate_apr=_amount(raw["min_rate_apr"]))
-
-
 def policy_from_row(row: CapitalPolicyRevisionRow) -> CapitalPolicy:
     """Validate one stored policy revision (schema, digest, exact keys) or refuse."""
-    keys = POLICY_KEYS.get(row.schema_version)
-    if keys is None or row.digest != _digest(row.policy):
-        raise CapitalBlockedError("invalid_policy_schema_or_digest")
     try:
-        if set(row.policy) != keys:
-            raise ValueError
-        return CapitalPolicy(enabled=row.policy["enabled"],
-            reserve_amount=_amount(row.policy["reserve_amount"]),
-            allocation_mode=row.policy["allocation_mode"],
-            max_cell_fraction=_amount(row.policy["max_cell_fraction"]),
-            max_offer_amount=(_amount(row.policy["max_offer_amount"])
-                              if "max_offer_amount" in keys else None),
-            envelope=_envelope(row.policy["envelope"]) if "envelope" in keys else None)
-    except (ValueError, TypeError, KeyError) as exc:
-        raise CapitalBlockedError("invalid_policy") from exc
+        return parse_policy(row.schema_version, row.policy, row.digest)
+    except PolicyRejectedError as exc:
+        raise CapitalBlockedError(exc.reason) from exc
+
+
+async def read_policy_row(session: AsyncSession, *, account_id: UUID, environment: str,
+                          symbol: str) -> CapitalPolicyRevisionRow:
+    """The revision the scope's policy head points at, or refuse."""
+    head = await session.get(CapitalPolicyHeadRow, (account_id, environment, symbol),
+                             populate_existing=True)
+    row = None if head is None else await session.get(
+        CapitalPolicyRevisionRow, head.revision_id, populate_existing=True)
+    blocked = check_pointer(
+        account_id, environment, symbol,
+        None if head is None else (head.revision_id, head.revision),
+        None if row is None else (row.id, row.exchange_account_id, row.deployment_environment,
+                                  row.symbol, row.revision))
+    if blocked is not None:
+        raise CapitalBlockedError(blocked.reason)
+    assert row is not None
+    return row
 
 
 async def read_policy_unlocked(session: AsyncSession, *, account_id: UUID, environment: str,
@@ -158,14 +122,8 @@ async def read_policy_unlocked(session: AsyncSession, *, account_id: UUID, envir
     before any intent is written, so a guard reading a pointer that moves an
     instant later cannot authorise anything by itself.
     """
-    head = await session.get(CapitalPolicyHeadRow, (account_id, environment, symbol),
-                             populate_existing=True)
-    if head is None:
-        raise CapitalBlockedError("policy_unavailable")
-    row = await session.get(CapitalPolicyRevisionRow, head.revision_id, populate_existing=True)
-    if row is None or (row.exchange_account_id, row.deployment_environment, row.symbol,
-                       row.revision) != (account_id, environment, symbol, head.revision):
-        raise CapitalBlockedError("inconsistent_policy_pointer")
+    row = await read_policy_row(session, account_id=account_id, environment=environment,
+                                symbol=symbol)
     return policy_from_row(row)
 
 
@@ -247,7 +205,7 @@ class CapitalRepository:
             id=uuid4(), exchange_account_id=self.account_id, deployment_environment=self.environment,
             symbol=symbol, revision=version + 1, schema_version=policy_schema_version(policy),
             policy=payload,
-            digest=_digest(payload), source=source,
+            digest=policy_digest(payload), source=source,
         )
         session.add(row)
         await session.flush()
@@ -262,14 +220,8 @@ class CapitalRepository:
 
     async def read_applied(self, session: AsyncSession, *, symbol: str) -> AppliedCapitalPolicy:
         await self._prepare(session)
-        head = await session.get(CapitalPolicyHeadRow, (self.account_id, self.environment, symbol),
-                                 populate_existing=True)
-        if head is None:
-            raise CapitalBlockedError("policy_unavailable")
-        row = await session.get(CapitalPolicyRevisionRow, head.revision_id, populate_existing=True)
-        if row is None or (row.exchange_account_id, row.deployment_environment, row.symbol,
-                           row.revision) != (self.account_id, self.environment, symbol, head.revision):
-            raise CapitalBlockedError("inconsistent_policy_pointer")
+        row = await read_policy_row(session, account_id=self.account_id,
+                                    environment=self.environment, symbol=symbol)
         policy = policy_from_row(row)
         return AppliedCapitalPolicy(row.revision, row.digest, policy, row.id)
 
@@ -772,7 +724,7 @@ class CapitalRepository:
         """Conversion diagnostic only: synthetic revision 0 cannot authorize intents."""
         await self._prepare(session)
         return await self._read_capital(session, symbol=symbol, cell_id=cell_id, now_ms=now_ms,
-            applied=AppliedCapitalPolicy(0, _digest(policy_payload(policy)), policy, UUID(int=0)))
+            applied=AppliedCapitalPolicy(0, policy_digest(policy_payload(policy)), policy, UUID(int=0)))
 
     async def _read_capital(self, session: AsyncSession, *, symbol: str, cell_id: str,
                             now_ms: int, applied: AppliedCapitalPolicy) -> CapitalView:

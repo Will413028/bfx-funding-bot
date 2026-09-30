@@ -72,14 +72,14 @@ async def test_planner_requires_current_adapter_amount_evidence(fault):
 
 def _simulated_capital(ledger, tracker, *, totals=None, reserves=None):
     """Explicit simulated policies/snapshots; never installed by application code."""
-    from bfx_funding_bot.modules.execution.capital_policy import (
-        CapitalPolicy,
-        CapitalSnapshot,
-        evaluate_capital,
-    )
     from bfx_funding_bot.modules.execution.capital_repository import (
         AppliedCapitalPolicy,
         CapitalView,
+    )
+    from bfx_funding_bot.modules.trading import (
+        CapitalPolicy,
+        CapitalSnapshot,
+        evaluate_capital,
     )
     totals = totals or {"fUST": D("570")}
     reserves = reserves or {"fUST": D("3")}

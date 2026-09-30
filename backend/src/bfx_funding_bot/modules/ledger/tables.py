@@ -23,6 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, MappedColumn, mapped_column
+from sqlalchemy.types import Uuid
 
 from bfx_funding_bot.core.db import Base
 
@@ -35,6 +36,41 @@ def _account() -> MappedColumn[UUID]:
         ForeignKey("exchange_accounts.id", ondelete="RESTRICT"),
         nullable=False,
     )
+
+
+class CapitalPolicyRevisionRow(Base):
+    __tablename__ = "capital_policy_revisions"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("exchange_accounts.id", ondelete="RESTRICT"), nullable=False,
+    )
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    policy: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
+
+    __table_args__ = (UniqueConstraint(
+        "exchange_account_id", "deployment_environment", "symbol", "revision",
+        name="uq_capital_policy_revision_scope",
+    ),)
+
+
+class CapitalPolicyHeadRow(Base):
+    __tablename__ = "capital_policy_heads"
+
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("exchange_accounts.id", ondelete="RESTRICT"), primary_key=True,
+    )
+    deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
+    symbol: Mapped[str] = mapped_column(Text, primary_key=True)
+    revision_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("capital_policy_revisions.id", ondelete="RESTRICT"), nullable=False,
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class CapitalCommandClockRow(Base):

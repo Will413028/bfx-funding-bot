@@ -20,14 +20,10 @@ from bfx_funding_bot.core.errors import ConfigurationError
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
 from bfx_funding_bot.modules.execution.capital_repository import (
     CapitalBlockedError,
     policy_from_row,
-    policy_payload,
-    policy_schema_version,
 )
-from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRevisionRow
 from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPricer, PriceBranch
 from bfx_funding_bot.modules.execution.deployment.sizing import allocate_capital
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
@@ -42,6 +38,7 @@ from bfx_funding_bot.modules.execution.safety.pre_trade import (
     require_pre_trade_limits,
 )
 from bfx_funding_bot.modules.execution.safety.protection import COMMAND_RATE_EXCEEDED
+from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow
 from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.strategy import (
@@ -49,6 +46,12 @@ from bfx_funding_bot.modules.strategy import (
     DecisionPayload,
     SkipReason,
     StrategyName,
+)
+from bfx_funding_bot.modules.trading import (
+    CapitalPolicy,
+    OfferEnvelope,
+    policy_payload,
+    policy_schema_version,
 )
 
 CONFIGS = Path(__file__).resolve().parents[4] / "configs"

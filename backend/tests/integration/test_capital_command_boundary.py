@@ -105,7 +105,7 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(cap
     status = snapshot["symbols"]["fUST"]
     missing = (await service.snapshot())["symbols"]["fUSD"]
     assert missing == {"capital_available": False, "reason": "policy_unavailable"}
-    from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
+    from bfx_funding_bot.modules.trading import CapitalPolicy
     async with factory.begin() as session:
         await runtime.repository.apply_policy(session, symbol="fUSD", policy=CapitalPolicy(enabled=False),
             expected_revision=0, source={"operator": "test"})
@@ -151,10 +151,10 @@ async def test_status_with_an_envelope_serializes_to_json(capital_db):
     from bfx_funding_bot.core.health import HealthProbe
     from bfx_funding_bot.core.telemetry import Phase
     from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
-    from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
     from bfx_funding_bot.modules.execution.deployment.submit_attempt import SubmitAttemptRecorder
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
     from bfx_funding_bot.modules.strategy import StrategyName
+    from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell
     factory, account = capital_db
     _, _, _, ctx, runtime, halt = await boundary(factory, account)

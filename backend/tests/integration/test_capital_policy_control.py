@@ -13,20 +13,18 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import insert, select
 
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
-from bfx_funding_bot.modules.execution.capital_tables import (
-    CapitalPolicyRequestRow,
-    CapitalPolicyRevisionRow,
-)
+from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.safety.tables import (
     TradingControlRequestRow,
     TradingStateRow,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
+from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow
 from bfx_funding_bot.modules.observability import alerts
+from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
 
 pytestmark = pytest.mark.integration
 
