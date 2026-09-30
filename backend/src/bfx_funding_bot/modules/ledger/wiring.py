@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import (
+    Acceptance,
     Attempt,
+    CancelProvenance,
     LedgerCapitalRead,
     LedgerCapitalReader,
     LedgerJournal,
+    LedgerManagedOffers,
+    LedgerObservations,
+    LedgerUncertainties,
+    ManagedOffers,
+    Observation,
+    OpenUncertainty,
     Outcome,
     Quarantine,
     QuarantineMember,
@@ -19,7 +29,14 @@ from bfx_funding_bot.modules.ledger import (
     Resolution,
     Scope,
 )
-from bfx_funding_bot.modules.ledger._internal import capital_reader, clock, journal, quarantine
+from bfx_funding_bot.modules.ledger._internal import (
+    capital_reader,
+    clock,
+    journal,
+    observation,
+    quarantine,
+    reads,
+)
 from bfx_funding_bot.modules.trading import CapitalScope
 
 
@@ -79,3 +96,59 @@ class _SqlLedgerCapitalReader:
 
 def build_ledger_capital_reader() -> LedgerCapitalReader:
     return _SqlLedgerCapitalReader()
+
+
+class _SqlLedgerObservations:
+    async def begin_query(
+        self, session: AsyncSession, scope: Scope, started_at_ms: int
+    ) -> QueryHandle:
+        return await clock.begin_query(session, scope, started_at_ms)
+
+    async def accept(
+        self,
+        session: AsyncSession,
+        scope: Scope,
+        handle: QueryHandle,
+        first: Observation,
+        confirmation: Observation,
+        confirmation_started_at_ms: int,
+    ) -> Acceptance:
+        return await observation.accept_observation(
+            session, scope, handle, first, confirmation, confirmation_started_at_ms
+        )
+
+
+def build_ledger_observations() -> LedgerObservations:
+    return _SqlLedgerObservations()
+
+
+class _SqlLedgerUncertainties:
+    async def open_uncertainties(
+        self, session: AsyncSession, scope: Scope, symbol: str | None = None
+    ) -> tuple[OpenUncertainty, ...]:
+        return await reads.open_uncertainties(session, scope, symbol)
+
+
+def build_ledger_uncertainties() -> LedgerUncertainties:
+    return _SqlLedgerUncertainties()
+
+
+class _SqlLedgerManagedOffers:
+    async def managed_live_offers(
+        self, session: AsyncSession, scope: Scope, symbols: Collection[str] | None = None
+    ) -> ManagedOffers:
+        return await reads.managed_live_offers(session, scope, symbols)
+
+    async def cancel_provenance(
+        self, session: AsyncSession, scope: Scope, venue_offer_id: str
+    ) -> CancelProvenance | None:
+        return await reads.cancel_provenance(session, scope, venue_offer_id)
+
+    async def fingerprints_in_use(
+        self, session: AsyncSession, scope: Scope, symbol: str
+    ) -> frozenset[Decimal]:
+        return await reads.fingerprints_in_use(session, scope, symbol)
+
+
+def build_ledger_managed_offers() -> LedgerManagedOffers:
+    return _SqlLedgerManagedOffers()

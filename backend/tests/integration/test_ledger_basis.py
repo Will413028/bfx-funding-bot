@@ -37,16 +37,18 @@ import pytest_asyncio
 from sqlalchemy import event, func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from bfx_funding_bot.modules.ledger import Attempt, Outcome, Resolution, Scope
-from bfx_funding_bot.modules.ledger._internal.observation import (
+from bfx_funding_bot.modules.ledger import (
+    Attempt,
     Coverage,
     Credit,
     Observation,
     Offer,
     OfferHistory,
+    Outcome,
+    Resolution,
+    Scope,
     Trade,
     Wallet,
-    accept_observation,
 )
 from bfx_funding_bot.modules.ledger.tables import (
     LEDGER_TABLES,
@@ -57,13 +59,14 @@ from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisRow,
     AcceptedCapitalBasisSymbolRow,
 )
-from bfx_funding_bot.modules.ledger.wiring import build_ledger_journal
+from bfx_funding_bot.modules.ledger.wiring import build_ledger_journal, build_ledger_observations
 
 from .test_ledger_schema_roles import _A, _P, ledger_db  # noqa: F401 - fixture re-export
 
 pytestmark = pytest.mark.integration
 SCOPE = Scope(UUID(_A), "ci")
 JOURNAL = build_ledger_journal()
+OBSERVATIONS = build_ledger_observations()
 _IDS = count(1)
 
 
@@ -195,7 +198,7 @@ class Ledger:
         async with self.factory.begin() as session:
             handle = await JOURNAL.begin_query(session, SCOPE, 1)
         async with self.factory.begin() as session:
-            result = await accept_observation(
+            result = await OBSERVATIONS.accept(
                 session,
                 SCOPE,
                 handle,

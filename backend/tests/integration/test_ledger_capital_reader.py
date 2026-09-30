@@ -42,7 +42,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from bfx_funding_bot.modules.ledger import (
     Attempt,
     CapitalReadRefused,
+    Credit,
     LedgerCapitalRead,
+    Observation,
+    OfferHistory,
     Outcome,
     Quarantine,
     QueryHandle,
@@ -50,12 +53,6 @@ from bfx_funding_bot.modules.ledger import (
     Scope,
 )
 from bfx_funding_bot.modules.ledger._internal import capital_reader
-from bfx_funding_bot.modules.ledger._internal.observation import (
-    Credit,
-    Observation,
-    OfferHistory,
-    accept_observation,
-)
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisRow,
     CapitalPolicyRevisionRow,
@@ -63,6 +60,7 @@ from bfx_funding_bot.modules.ledger.tables import (
 from bfx_funding_bot.modules.ledger.wiring import (
     build_ledger_capital_reader,
     build_ledger_journal,
+    build_ledger_observations,
 )
 from bfx_funding_bot.modules.trading import (
     Available,
@@ -88,6 +86,7 @@ pytestmark = pytest.mark.integration
 SCOPE = Scope(UUID(_A), "ci")
 JOURNAL = build_ledger_journal()
 READER = build_ledger_capital_reader()
+OBSERVATIONS = build_ledger_observations()
 _ATTEMPT_POLICY = "00000000-0000-0000-0000-00000000b001"
 
 
@@ -122,7 +121,7 @@ class Book:
             first, finished_at_ms=confirmed, offer_history=(), credit_history=(), trades=()
         )
         async with self.factory.begin() as session:
-            result = await accept_observation(
+            result = await OBSERVATIONS.accept(
                 session, self.scope, handle, first, confirmation, finished
             )
         if result.decision == "accepted":
