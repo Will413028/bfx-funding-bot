@@ -215,6 +215,34 @@ class RecordedAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class Authorized(RecordedAttempt):
+    """The CAS passed and the attempt was journaled in the caller's transaction."""
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizeRefused:
+    reason: Literal["capital_snapshot_changed", "capital_policy_revision_changed", "query_pending"]
+
+
+def encode_basis_token(query_id: UUID, clock_revision: int) -> str:
+    """Ledger-only token; consumers carry it opaquely back to authorization."""
+    if clock_revision < 0:
+        raise ValueError("clock revision must be nonnegative")
+    return f"ledger:v1:{query_id}:{clock_revision}"
+
+
+def parse_basis_token(token: str) -> tuple[UUID, int]:
+    """Reject malformed, noncanonical and legacy tokens."""
+    parts = token.split(":")
+    if len(parts) != 4 or parts[:2] != ["ledger", "v1"]:
+        raise ValueError("invalid ledger basis token")
+    query_id, revision = UUID(parts[2]), int(parts[3])
+    if encode_basis_token(query_id, revision) != token:
+        raise ValueError("invalid ledger basis token")
+    return query_id, revision
+
+
+@dataclass(frozen=True, slots=True)
 class Outcome:
     attempt_id: UUID
     kind: OutcomeKind
@@ -250,6 +278,7 @@ class Quarantine:
     opened_at_ms: int
     evidence: JsonObject
     legacy_reconcile_event_seq: int | None = None
+    source_attempt_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,9 +321,18 @@ class LedgerJournal(Protocol):
     async def begin_query(
         self, session: AsyncSession, scope: Scope, started_at_ms: int
     ) -> QueryHandle: ...
-    async def record_attempt(
-        self, session: AsyncSession, scope: Scope, attempt: Attempt
-    ) -> RecordedAttempt: ...
+    async def authorize_attempt(
+        self,
+        session: AsyncSession,
+        scope: Scope,
+        attempt: Attempt,
+        basis_token: str,
+        *,
+        now_ms: int,
+    ) -> Authorized | AuthorizeRefused: ...
+    async def close_dangling(
+        self, session: AsyncSession, scope: Scope, *, now_ms: int, grace_ms: int = 120_000
+    ) -> tuple[UUID, ...]: ...
     async def record_outcome(
         self, session: AsyncSession, scope: Scope, outcome: Outcome
     ) -> None: ...
@@ -305,7 +343,7 @@ class LedgerJournal(Protocol):
         self, session: AsyncSession, scope: Scope, resolution: Resolution
     ) -> None: ...
     async def open_quarantine(
-        self, session: AsyncSession, scope: Scope, quarantine: Quarantine
+        self, session: AsyncSession, scope: Scope, opening: Quarantine
     ) -> None: ...
     async def add_quarantine_member(
         self, session: AsyncSession, scope: Scope, member: QuarantineMember
@@ -322,6 +360,8 @@ class LedgerCapitalRead:
 
     result: CapitalResult
     basis_id: UUID | None
+    query_id: UUID | None
+    clock_revision: int | None
 
 
 class LedgerCapitalReader(Protocol):
@@ -601,6 +641,8 @@ __all__ = [
     "Acceptance",
     "AcceptanceDecision",
     "Attempt",
+    "AuthorizeRefused",
+    "Authorized",
     "CancelProvenance",
     "CapitalAuthority",
     "CapitalAvailable",
@@ -652,4 +694,6 @@ __all__ = [
     "UncertaintyRecord",
     "Wallet",
     "basis_token_value",
+    "encode_basis_token",
+    "parse_basis_token",
 ]

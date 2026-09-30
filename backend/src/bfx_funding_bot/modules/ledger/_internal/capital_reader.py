@@ -197,6 +197,12 @@ async def read_capital(
             select(LedgerObservationRow).where(LedgerObservationRow.query_id == query.query_id),
         )
     basis: AcceptedCapitalBasisRow | None = None
+    clock = await session.scalar(
+        select(CapitalCommandClockRow.revision).where(
+            CapitalCommandClockRow.exchange_account_id == account,
+            CapitalCommandClockRow.deployment_environment == environment,
+        )
+    )
     if observation is not None and observation.accepted:
         basis = await _one(
             session,
@@ -227,15 +233,9 @@ async def read_capital(
             policy=policy,
             read_context=_context(now_ms, max_snapshot_age_ms, query, pending),
         )
-        return LedgerCapitalRead(result, None)
+        return LedgerCapitalRead(result, None, None if query is None else query.query_id, clock)
 
     integrity: list[Blocked] = []
-    clock = await session.scalar(
-        select(CapitalCommandClockRow.revision).where(
-            CapitalCommandClockRow.exchange_account_id == account,
-            CapitalCommandClockRow.deployment_environment == environment,
-        )
-    )
     if clock is None or basis.accept_revision > clock:
         integrity.append(
             Blocked(
@@ -363,6 +363,7 @@ async def read_capital(
         tuple(sorted((row.attempt_id, row.symbol) for row in unresolved)),
         tuple(sorted((row.quarantine_id, row.symbol) for row in listed)),
         _blocked(basis.scope_block),
+        quarantined_attempts=_ids(classified, "quarantined"),
     )
     result = derive_capital(
         scope=scope,
@@ -374,7 +375,7 @@ async def read_capital(
             now_ms, max_snapshot_age_ms, query, integrity[0] if integrity else None
         ),
     )
-    return LedgerCapitalRead(result, basis.id)
+    return LedgerCapitalRead(result, basis.id, query.query_id, clock)
 
 
 def _ids(rows: list[AcceptedCapitalBasisAttemptRow], classification: str) -> frozenset[UUID]:

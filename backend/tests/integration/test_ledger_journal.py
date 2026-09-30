@@ -39,6 +39,7 @@ from bfx_funding_bot.modules.ledger import (
     ResolutionRejected,
     Scope,
 )
+from bfx_funding_bot.modules.ledger._internal.journal import record_attempt
 from bfx_funding_bot.modules.ledger.tables import CapitalCommandClockRow
 from bfx_funding_bot.modules.ledger.wiring import build_ledger_journal
 
@@ -145,7 +146,7 @@ async def test_begin_query_refuses_pending_attempt(seeded_fixture) -> None:  # n
     attempt = _attempt()
     try:
         async with factory.begin() as session:
-            await JOURNAL.record_attempt(session, SCOPE, attempt)
+            await record_attempt(session, SCOPE, attempt)
         async with factory.begin() as session:
             with pytest.raises(QueryAdmissionRefused):
                 await JOURNAL.begin_query(session, SCOPE, 10)
@@ -245,7 +246,7 @@ async def test_journal_writes_and_first_write_errors(seeded_fixture) -> None:  #
     member = QuarantineMember(quarantine.quarantine_id, "offer", "offer-1", UUID(_O), Decimal("1"))
     try:
         async with factory.begin() as session:
-            recorded = await JOURNAL.record_attempt(session, SCOPE, attempt)
+            recorded = await record_attempt(session, SCOPE, attempt)
             assert recorded.attempt_seq == 2
             assert await JOURNAL.read_back_outcome(session, attempt.attempt_id) is None
             await JOURNAL.record_outcome(session, SCOPE, outcome)
@@ -286,7 +287,7 @@ async def test_resolution_structural_rejections(seeded_fixture) -> None:  # noqa
     attempt = _attempt(started_at_ms=2)
     try:
         async with factory.begin() as session:
-            await JOURNAL.record_attempt(session, SCOPE, attempt)
+            await record_attempt(session, SCOPE, attempt)
             await JOURNAL.record_outcome(
                 session, SCOPE, Outcome(attempt.attempt_id, "ack", "offer", None, 3, {})
             )

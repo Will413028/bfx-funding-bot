@@ -100,7 +100,7 @@ class AcceptedCapitalBasis:
 
     ``observation_id`` and ``query_id`` identify the accepted observation;
     attempts with ``attempt_seq <= attempt_seq_high_water`` were classified by
-    this acceptance. Reflected, settled and unresolved identities are accounted
+    this acceptance. Reflected, settled, unresolved and quarantined identities are accounted
     at acceptance (capital_repository.py:547-599,797-804). A resolution recorded
     after acceptance cannot clear this basis's unresolved attempts (880-883) or
     quarantines; only a new acceptance does. ``scope_block`` is an
@@ -120,6 +120,7 @@ class AcceptedCapitalBasis:
     unresolved_attempts: tuple[tuple[UUID, str], ...]
     unresolved_quarantines: tuple[tuple[UUID, str], ...]
     scope_block: Blocked | None
+    quarantined_attempts: frozenset[UUID] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,7 +270,7 @@ def derive_capital(
             return Blocked("execution_unknown", (("basis_quarantine", str(quarantine_id)),))
     exposure = dict(values.cells).get(scope.cell_id, _ZERO)
     accounted = (
-        accepted.reflected_attempts | accepted.settled_attempts
+        accepted.reflected_attempts | accepted.settled_attempts | accepted.quarantined_attempts
         | frozenset(attempt_id for attempt_id, _ in accepted.unresolved_attempts)
     )
     pending = _ZERO

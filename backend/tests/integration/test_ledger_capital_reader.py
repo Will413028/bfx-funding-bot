@@ -51,8 +51,11 @@ from bfx_funding_bot.modules.ledger import (
     QueryHandle,
     Resolution,
     Scope,
+    encode_basis_token,
+    parse_basis_token,
 )
 from bfx_funding_bot.modules.ledger._internal import capital_reader
+from bfx_funding_bot.modules.ledger._internal.journal import record_attempt
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisRow,
     CapitalPolicyRevisionRow,
@@ -88,6 +91,37 @@ JOURNAL = build_ledger_journal()
 READER = build_ledger_capital_reader()
 OBSERVATIONS = build_ledger_observations()
 _ATTEMPT_POLICY = "00000000-0000-0000-0000-00000000b001"
+
+
+@pytest.mark.asyncio
+async def test_reader_token_tracks_query_and_current_clock_including_tail(book) -> None:
+    await book.policy("fUST")
+    assert await book.accept() == "accepted"
+    before = await book.read()
+    assert before.basis_id == book.basis_id
+    assert before.query_id is not None and before.clock_revision == 0
+    token = encode_basis_token(before.query_id, before.clock_revision)
+    assert parse_basis_token(token) == (before.query_id, 0)
+    await book.attempt("200", outcome="ack", venue_offer_id="gone")
+    after = await book.read()
+    assert after.basis_id == before.basis_id and after.query_id == before.query_id
+    assert after.clock_revision == 2
+    assert _view(after).snapshot.unreflected_commitments == Decimal("200")
+    assert encode_basis_token(after.query_id, after.clock_revision) != token
+    query = await book.begin()
+    pending = await book.read()
+    assert pending.query_id == query.query_id and pending.basis_id is None
+    assert pending.clock_revision == 2
+    assert _reason(pending) == "snapshot_query_pending"
+
+
+@pytest.mark.asyncio
+async def test_reader_without_basis_reports_available_identity(book) -> None:
+    read = await book.read()
+    assert read.basis_id is None and read.query_id is None and read.clock_revision is None
+    query = await book.begin()
+    read = await book.read()
+    assert read.query_id == query.query_id and read.clock_revision is None
 
 
 class Book:
@@ -167,7 +201,7 @@ class Book:
                     "amount": amount,
                 },
             )
-            await JOURNAL.record_attempt(
+            await record_attempt(
                 session,
                 self.scope,
                 Attempt(

@@ -36,6 +36,7 @@ from bfx_funding_bot.modules.ledger import (
     Scope,
     Wallet,
 )
+from bfx_funding_bot.modules.ledger._internal.journal import record_attempt
 from bfx_funding_bot.modules.ledger.tables import (
     LedgerObservationCreditHistoryRow,
     LedgerObservationCreditRow,
@@ -257,7 +258,7 @@ async def test_committed_command_fences_observation(seeded_fixture) -> None:  # 
     try:
         handle = await _begin(factory)
         async with factory.begin() as session:
-            await JOURNAL.record_attempt(
+            await record_attempt(
                 session,
                 SCOPE,
                 Attempt(

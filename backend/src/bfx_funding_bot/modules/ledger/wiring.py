@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.modules.ledger import (
     Acceptance,
     Attempt,
+    Authorized,
+    AuthorizeRefused,
     CancelProvenance,
     LedgerCapitalRead,
     LedgerCapitalReader,
@@ -25,7 +27,6 @@ from bfx_funding_bot.modules.ledger import (
     Quarantine,
     QuarantineMember,
     QueryHandle,
-    RecordedAttempt,
     Resolution,
     Scope,
 )
@@ -49,10 +50,21 @@ class _SqlLedgerJournal:
     ) -> QueryHandle:
         return await clock.begin_query(session, scope, started_at_ms)
 
-    async def record_attempt(
-        self, session: AsyncSession, scope: Scope, attempt: Attempt
-    ) -> RecordedAttempt:
-        return await journal.record_attempt(session, scope, attempt)
+    async def authorize_attempt(
+        self,
+        session: AsyncSession,
+        scope: Scope,
+        attempt: Attempt,
+        basis_token: str,
+        *,
+        now_ms: int,
+    ) -> Authorized | AuthorizeRefused:
+        return await journal.authorize_attempt(session, scope, attempt, basis_token, now_ms=now_ms)
+
+    async def close_dangling(
+        self, session: AsyncSession, scope: Scope, *, now_ms: int, grace_ms: int = 120_000
+    ) -> tuple[UUID, ...]:
+        return await journal.close_dangling(session, scope, now_ms=now_ms, grace_ms=grace_ms)
 
     async def record_outcome(self, session: AsyncSession, scope: Scope, outcome: Outcome) -> None:
         await journal.record_outcome(session, scope, outcome)

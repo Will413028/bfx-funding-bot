@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import (
     Attempt,
+    Authorized,
+    AuthorizeRefused,
     Outcome,
     OutcomeAlreadyRecorded,
     OutcomeKind,
@@ -21,9 +23,13 @@ from bfx_funding_bot.modules.ledger import (
     ResolutionAlreadyRecorded,
     ResolutionRejected,
     Scope,
+    parse_basis_token,
 )
 from bfx_funding_bot.modules.ledger._internal.clock import bump_locked, lock_scope
 from bfx_funding_bot.modules.ledger.tables import (
+    AcceptedCapitalBasisRow,
+    CapitalCommandClockRow,
+    CapitalPolicyHeadRow,
     ExecutionResolutionJournalRow,
     LedgerObservationQueryRow,
     LedgerObservationRow,
@@ -31,6 +37,96 @@ from bfx_funding_bot.modules.ledger.tables import (
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
 )
+
+
+async def authorize_attempt(
+    session: AsyncSession, scope: Scope, attempt: Attempt, basis_token: str, *, now_ms: int
+) -> Authorized | AuthorizeRefused:
+    """CAS the read's query, clock and policy before inserting any intent.
+
+    Capital eligibility/freshness and live guards belong to the command port;
+    ``now_ms`` is its local clock, not an extra ledger freshness policy.
+    """
+    await lock_scope(session, scope)
+    try:
+        query_id, revision = parse_basis_token(basis_token)
+    except ValueError:
+        return AuthorizeRefused("capital_snapshot_changed")
+    latest = await session.scalar(
+        select(LedgerObservationQueryRow.query_id)
+        .where(
+            LedgerObservationQueryRow.exchange_account_id == scope.exchange_account_id,
+            LedgerObservationQueryRow.deployment_environment == scope.deployment_environment,
+        )
+        .order_by(LedgerObservationQueryRow.query_revision.desc())
+        .limit(1)
+    )
+    if latest != query_id:
+        return AuthorizeRefused("capital_snapshot_changed")
+    basis_id = await session.scalar(
+        select(AcceptedCapitalBasisRow.id)
+        .join(
+            LedgerObservationRow, LedgerObservationRow.id == AcceptedCapitalBasisRow.observation_id
+        )
+        .where(
+            LedgerObservationRow.query_id == query_id,
+            LedgerObservationRow.accepted.is_(True),
+            AcceptedCapitalBasisRow.accepted.is_(True),
+            AcceptedCapitalBasisRow.exchange_account_id == scope.exchange_account_id,
+            AcceptedCapitalBasisRow.deployment_environment == scope.deployment_environment,
+        )
+    )
+    if basis_id is None:
+        return AuthorizeRefused("query_pending")
+    clock = await session.scalar(
+        select(CapitalCommandClockRow.revision).where(
+            CapitalCommandClockRow.exchange_account_id == scope.exchange_account_id,
+            CapitalCommandClockRow.deployment_environment == scope.deployment_environment,
+        )
+    )
+    if clock != revision or attempt.basis_id != basis_id:
+        return AuthorizeRefused("capital_snapshot_changed")
+    policy = await session.scalar(
+        select(CapitalPolicyHeadRow.revision_id).where(
+            CapitalPolicyHeadRow.exchange_account_id == scope.exchange_account_id,
+            CapitalPolicyHeadRow.deployment_environment == scope.deployment_environment,
+            CapitalPolicyHeadRow.symbol == attempt.symbol,
+        )
+    )
+    if policy != attempt.policy_revision_id:
+        return AuthorizeRefused("capital_policy_revision_changed")
+    recorded = await record_attempt(session, scope, attempt)
+    return Authorized(recorded.attempt_id, recorded.attempt_seq, recorded.payload_sha256)
+
+
+async def close_dangling(
+    session: AsyncSession, scope: Scope, *, now_ms: int, grace_ms: int = 120_000
+) -> tuple[UUID, ...]:
+    """Crash-mid-flight has no durable rejection evidence: append UNKNOWN."""
+    if grace_ms < 0:
+        raise ValueError("grace must be nonnegative")
+    await lock_scope(session, scope)
+    dangling = list(
+        await session.scalars(
+            select(SubmissionAttemptJournalRow.attempt_id)
+            .outerjoin(
+                TransportOutcomeJournalRow,
+                TransportOutcomeJournalRow.attempt_id == SubmissionAttemptJournalRow.attempt_id,
+            )
+            .where(
+                SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
+                SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
+                SubmissionAttemptJournalRow.started_at_ms <= now_ms - grace_ms,
+                TransportOutcomeJournalRow.attempt_id.is_(None),
+            )
+            .order_by(SubmissionAttemptJournalRow.attempt_seq)
+        )
+    )
+    for attempt_id in dangling:
+        await record_outcome(
+            session, scope, Outcome(attempt_id, "unknown", None, "unresolved_at_boot", now_ms, {})
+        )
+    return tuple(dangling)
 
 
 def canonical_payload(payload: dict[str, object]) -> bytes:
@@ -45,6 +141,7 @@ def canonical_payload(payload: dict[str, object]) -> bytes:
 
 
 async def record_attempt(session: AsyncSession, scope: Scope, attempt: Attempt) -> RecordedAttempt:
+    """Private unchecked insertion for cutover seeds/tests; runtime uses authorize_attempt."""
     await lock_scope(session, scope)
     latest = await session.scalar(
         select(func.max(SubmissionAttemptJournalRow.attempt_seq)).where(

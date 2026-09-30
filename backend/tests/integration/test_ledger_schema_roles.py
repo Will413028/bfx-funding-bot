@@ -530,6 +530,116 @@ def seeded(ledger_db):
     return ledger_db
 
 
+def test_r6_source_attempt_unique_fk_and_nulls(seeded) -> None:
+    statement = (
+        "INSERT INTO quarantine_opening(quarantine_id, exchange_account_id, "
+        "deployment_environment, symbol, intended_amount, opened_at_ms, "
+        "opened_revision, evidence, source_attempt_id) "
+        "VALUES (:id, :a, 'ci', 'fUST', 1, 5, 1, '{}', :source)"
+    )
+    with seeded.begin() as conn:
+        conn.execute(text(statement), {"id": uuid4(), "a": _A, "source": _T})
+        for _ in range(2):
+            conn.execute(text(statement), {"id": uuid4(), "a": _A, "source": None})
+    with (
+        seeded.begin() as conn,
+        pytest.raises(Exception, match="uq_quarantine_opening_source_attempt"),
+    ):
+        conn.execute(text(statement), {"id": uuid4(), "a": _A, "source": _T})
+    with (
+        seeded.begin() as conn,
+        pytest.raises(Exception, match="fk_quarantine_opening_source_attempt"),
+    ):
+        conn.execute(text(statement), {"id": uuid4(), "a": _A, "source": uuid4()})
+    with seeded.connect() as conn:
+        for privilege in ("SELECT", "INSERT"):
+            assert conn.scalar(
+                text(
+                    "SELECT has_column_privilege('bfx_bot','quarantine_opening',"
+                    "'source_attempt_id',:p)"
+                ),
+                {"p": privilege},
+            )
+        assert conn.scalar(
+            text(
+                "SELECT has_column_privilege('bfx_cutover_reader','quarantine_opening',"
+                "'source_attempt_id','SELECT')"
+            )
+        )
+
+
+@pytest.mark.parametrize("field", ["account", "environment", "symbol"])
+def test_r6_source_opening_cannot_cross_scope_or_symbol(seeded, field: str) -> None:
+    other = str(uuid4())
+    with seeded.begin() as conn:
+        conn.execute(
+            text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
+            {"id": other},
+        )
+    with (
+        seeded.begin() as conn,
+        pytest.raises(Exception, match="ledger quarantine source scope mismatch"),
+    ):
+        conn.execute(
+            text(
+                "INSERT INTO quarantine_opening(quarantine_id, exchange_account_id, "
+                "deployment_environment, symbol, intended_amount, opened_at_ms, "
+                "opened_revision, evidence, source_attempt_id) "
+                "VALUES (:id, :a, :env, :symbol, 1, 5, 1, '{}', :source)"
+            ),
+            {
+                "id": uuid4(),
+                "a": other if field == "account" else _A,
+                "env": "other" if field == "environment" else "ci",
+                "symbol": "fUSD" if field == "symbol" else "fUST",
+                "source": _T,
+            },
+        )
+
+
+def test_r6_migration_round_trip(ledger_db) -> None:
+    url = ledger_db.url.render_as_string(hide_password=False)
+    alembic(url, "downgrade", "f6a7b8c9d0e1")
+    with ledger_db.connect() as conn:
+        assert "source_attempt_id" not in {
+            column["name"] for column in inspect(conn).get_columns("quarantine_opening")
+        }
+        constraint = next(
+            c
+            for c in inspect(conn).get_check_constraints("accepted_capital_basis_attempt")
+            if c["name"] == "ck_accepted_basis_attempt_classification"
+        )
+        assert "quarantined" not in constraint["sqltext"]
+    alembic(url, "upgrade", "head")
+    alembic(url, "check")
+    with ledger_db.connect() as conn:
+        assert "source_attempt_id" in {
+            column["name"] for column in inspect(conn).get_columns("quarantine_opening")
+        }
+        index = next(
+            i
+            for i in inspect(conn).get_indexes("quarantine_opening")
+            if i["name"] == "uq_quarantine_opening_source_attempt"
+        )
+        assert index["unique"]
+        assert "IS NOT NULL" in str(index["dialect_options"]["postgresql_where"])
+
+
+def test_r6_populated_downgrade_preserves_facts(seeded) -> None:
+    with seeded.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO quarantine_opening(quarantine_id, exchange_account_id, "
+                "deployment_environment, symbol, intended_amount, opened_at_ms, "
+                "opened_revision, evidence, source_attempt_id) "
+                "VALUES (:id, :a, 'ci', 'fUST', 1, 5, 1, '{}', :source)"
+            ),
+            {"id": uuid4(), "a": _A, "source": _T},
+        )
+    with pytest.raises(Exception, match="refuse downgrade with R6 quarantine facts"):
+        alembic(seeded.url.render_as_string(hide_password=False), "downgrade", "f6a7b8c9d0e1")
+
+
 def test_immutable_rows_reject_update_delete_truncate(seeded) -> None:
     for table in LEDGER_TABLES:
         name = table.name
@@ -982,6 +1092,7 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
             ("quarantine_member", "source_kind"),
             ("quarantine_member", "venue_object_id"),
             ("quarantine_opening", "opened_revision"),
+            ("quarantine_opening", "source_attempt_id"),
         ):
             assert conn.scalar(
                 text("SELECT has_column_privilege('bfx_cutover_reader',:t,:c,'SELECT')"),

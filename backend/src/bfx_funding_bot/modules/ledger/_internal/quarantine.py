@@ -21,6 +21,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     ExecutionResolutionJournalRow,
     QuarantineMemberRow,
     QuarantineOpeningRow,
+    SubmissionAttemptJournalRow,
 )
 
 
@@ -31,6 +32,14 @@ async def open_quarantine(session: AsyncSession, scope: Scope, quarantine: Quara
     quarantines a basis has not seen (readers need no scope-wide anti-join).
     """
     await lock_scope(session, scope)
+    if quarantine.source_attempt_id is not None:
+        source = await session.get(SubmissionAttemptJournalRow, quarantine.source_attempt_id)
+        if source is None or (
+            source.exchange_account_id,
+            source.deployment_environment,
+            source.symbol,
+        ) != (scope.exchange_account_id, scope.deployment_environment, quarantine.symbol):
+            raise ValueError("quarantine source attempt scope mismatch")
     revision = await bump_locked(session, scope)
     session.add(
         QuarantineOpeningRow(
@@ -43,6 +52,7 @@ async def open_quarantine(session: AsyncSession, scope: Scope, quarantine: Quara
             opened_revision=revision,
             evidence=quarantine.evidence,
             legacy_reconcile_event_seq=quarantine.legacy_reconcile_event_seq,
+            source_attempt_id=quarantine.source_attempt_id,
         )
     )
     await session.flush()
