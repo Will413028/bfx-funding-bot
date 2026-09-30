@@ -20,8 +20,9 @@ TEST_VAULT_KEK_B64 = base64.b64encode(TEST_VAULT_KEK).decode()
 
 
 async def stamp_schema_head(engine: AsyncEngine) -> None:
-    """Record this build's schema head, as ``alembic upgrade`` would on Postgres."""
-    from sqlalchemy import text
+    """Record this build's schema head and the seeded ``legacy`` capital authority,
+    as ``alembic upgrade`` would on Postgres."""
+    from sqlalchemy import inspect, text
 
     from bfx_funding_bot.core.schema_head import build_head
     async with engine.begin() as conn:
@@ -29,6 +30,11 @@ async def stamp_schema_head(engine: AsyncEngine) -> None:
         await conn.execute(text("DELETE FROM alembic_version"))
         await conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:head)"),
                            {"head": build_head()})
+        if await conn.run_sync(lambda sync: inspect(sync).has_table("capital_authority_epoch")):
+            await conn.execute(text(
+                "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
+                "SELECT 1, 'legacy', 0, 'test', 'initial authority' "
+                "WHERE NOT EXISTS (SELECT 1 FROM capital_authority_epoch)"))
 
 
 def configure_account_env(monkeypatch: pytest.MonkeyPatch) -> None:

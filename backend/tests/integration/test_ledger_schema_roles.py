@@ -1039,6 +1039,12 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
         for table in LEDGER_TABLES:
             column = next(iter(table.primary_key.columns)).name
             conn.exec_driver_sql(f"SELECT {column} FROM {table.name} LIMIT 1")
+    # The grants hold as written once the ledger is the authority (f6a7b8c9d0e1).
+    with seeded.begin() as conn:
+        conn.exec_driver_sql(
+            "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
+            "VALUES (2, 'ledger', 2, 'test', 'role grants')"
+        )
     with seeded.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         conn.exec_driver_sql("UPDATE capital_command_clock SET revision=1")

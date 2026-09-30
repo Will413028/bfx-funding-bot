@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
+from bfx_funding_bot.core.authority import read_authority
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
     EXIT_CODE_AUTH_FAILED,
@@ -213,10 +214,12 @@ async def build_daemon(
     if live_executor:
         # Before the credential vault or anything else is read: a database at
         # another schema means this is the wrong build for it (for instance a
-        # rollback onto a newer schema).
+        # rollback onto a newer schema). The capital authority is read once,
+        # right after: an authority this build does not support refuses too.
         try:
             async with session_factory() as schema_session:
                 await assert_schema_head(schema_session)
+                await read_authority(schema_session)
         except Exception as exc:
             await _refuse_live_boot(exc, config=config, session_factory=session_factory)
             await db_engine.dispose()
