@@ -98,6 +98,9 @@ class LedgerObservationRow(Base):
     loans_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
     offer_history_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
     credit_history_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    trades_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    trades_requested_start_ms: Mapped[int | None] = mapped_column(BigInteger)
+    trades_requested_end_ms: Mapped[int | None] = mapped_column(BigInteger)
     offer_history_pages: Mapped[int | None] = mapped_column(Integer)
     credit_history_pages: Mapped[int | None] = mapped_column(Integer)
     history_requested_start_ms: Mapped[int | None] = mapped_column(BigInteger)
@@ -118,8 +121,14 @@ class LedgerObservationRow(Base):
         CheckConstraint(
             "NOT accepted OR (wallets_complete AND "
             "offers_complete AND credits_complete AND loans_complete AND "
-            "offer_history_complete AND credit_history_complete)",
+            "offer_history_complete AND credit_history_complete AND trades_complete)",
             name="ck_ledger_observation_acceptance",
+        ),
+        CheckConstraint(
+            "(trades_requested_start_ms IS NULL) = (trades_requested_end_ms IS NULL) AND "
+            "(trades_requested_start_ms IS NULL OR (trades_requested_start_ms >= 0 AND "
+            "trades_requested_end_ms >= trades_requested_start_ms))",
+            name="ck_ledger_observation_trade_range",
         ),
         CheckConstraint(
             "(history_requested_start_ms IS NULL) = (history_requested_end_ms IS NULL) "
@@ -159,8 +168,11 @@ class LedgerObservationWalletRow(Base):
     currency: Mapped[str] = mapped_column(Text, primary_key=True)
     available: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     balance: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    # Funding symbol the port assigns to a funding wallet; NULL for other wallets.
+    symbol: Mapped[str | None] = mapped_column(Text)
     __table_args__ = (
         CheckConstraint("available >= 0 AND balance >= 0", name="ck_ledger_wallet_amount"),
+        UniqueConstraint("observation_id", "symbol", name="uq_ledger_observation_wallet_symbol"),
     )
 
 
@@ -308,6 +320,31 @@ class LedgerObservationCreditHistoryRow(Base):
     )
 
 
+class LedgerObservationTradeRow(Base):
+    """Funding trades fetched with the first observation (evidence, not in the digest)."""
+
+    __tablename__ = "ledger_observation_trade"
+    observation_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("ledger_observation.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    trade_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    venue_offer_id: Mapped[str] = mapped_column(Text, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    rate: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    period_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    mts_create: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    maker: Mapped[bool | None] = mapped_column(Boolean)
+    __table_args__ = (
+        CheckConstraint(
+            "trade_id >= 0 AND amount > 0 AND rate >= 0 AND period_days > 0 AND mts_create >= 0",
+            name="ck_ledger_observation_trade_amount",
+        ),
+    )
+
+
 class VenueOfferMirrorRow(Base):
     __tablename__ = "venue_offer_mirror"
     exchange_account_id: Mapped[UUID] = mapped_column(
@@ -427,6 +464,7 @@ class SubmissionAttemptJournalRow(Base):
     exchange_account_id: Mapped[UUID] = _account()
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    cell_id: Mapped[str] = mapped_column(Text, nullable=False)
     attempt_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
     normalized_payload: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
     payload_sha256: Mapped[str] = mapped_column(Text, nullable=False)
@@ -483,6 +521,11 @@ class TransportOutcomeJournalRow(Base):
             "(kind = 'ack') = (venue_offer_id IS NOT NULL)", name="ck_transport_outcome_ack"
         ),
         CheckConstraint("completed_at_ms >= 0", name="ck_transport_outcome_time"),
+        Index(
+            "ix_transport_outcome_venue_offer",
+            "venue_offer_id",
+            postgresql_where=text("venue_offer_id IS NOT NULL"),
+        ),
     )
 
 
@@ -572,6 +615,10 @@ class ExecutionResolutionJournalRow(Base):
             name="ck_execution_resolution_bound",
         ),
         CheckConstraint(
+            "action <> 'manual' OR quarantine_id IS NOT NULL",
+            name="ck_execution_resolution_manual",
+        ),
+        CheckConstraint(
             "resolved_at_ms >= 0 AND (candidate_count IS NULL OR candidate_count >= 0)",
             name="ck_execution_resolution_time",
         ),
@@ -587,6 +634,11 @@ class ExecutionResolutionJournalRow(Base):
             unique=True,
             postgresql_where=text("quarantine_id IS NOT NULL"),
         ),
+        Index(
+            "ix_execution_resolution_venue_offer",
+            "venue_offer_id",
+            postgresql_where=text("venue_offer_id IS NOT NULL"),
+        ),
     )
 
 
@@ -598,13 +650,8 @@ class AcceptedCapitalBasisRow(Base):
     observation_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False, unique=True)
     accepted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     accept_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    policy_revision_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("capital_policy_revisions.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    authorization_block: Mapped[dict[str, Any] | None] = mapped_column(_JSON)
-    credit_cells_present: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    attempt_seq_high_water: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    scope_block: Mapped[dict[str, Any] | None] = mapped_column(_JSON)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     digest: Mapped[str] = mapped_column(Text, nullable=False)
     accepted_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -619,6 +666,7 @@ class AcceptedCapitalBasisRow(Base):
             "accepted AND accept_revision >= 0 AND schema_version >= 1 AND accepted_at_ms >= 0",
             name="ck_accepted_basis_acceptance",
         ),
+        CheckConstraint("attempt_seq_high_water >= 0", name="ck_accepted_basis_high_water"),
         Index(
             "ix_accepted_capital_basis_scope_accepted",
             "exchange_account_id",
@@ -641,6 +689,7 @@ class AcceptedCapitalBasisSymbolRow(Base):
     credits: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     unattributed_credits: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     foreign_offers: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    block: Mapped[dict[str, Any] | None] = mapped_column(_JSON)
     __table_args__ = (
         CheckConstraint(
             "available >= 0 AND offered >= 0 AND credits >= 0 AND unattributed_credits >= "
@@ -759,6 +808,7 @@ LEDGER_TABLES = (
     LedgerObservationCreditRow.__table__,
     LedgerObservationOfferHistoryRow.__table__,
     LedgerObservationCreditHistoryRow.__table__,
+    LedgerObservationTradeRow.__table__,
     VenueOfferMirrorRow.__table__,
     VenueCreditMirrorRow.__table__,
     SubmissionAttemptJournalRow.__table__,

@@ -34,6 +34,7 @@ from bfx_funding_bot.modules.ledger import (
     QuarantineMemberConflict,
     QueryAdmissionRefused,
     Resolution,
+    ResolutionAction,
     ResolutionAlreadyRecorded,
     ResolutionRejected,
     Scope,
@@ -75,6 +76,7 @@ def _attempt(*, started_at_ms: int = 0) -> Attempt:
         uuid4(),
         _D2,
         "fUST",
+        "cell",
         {"z": 1, "a": "值"},
         UUID(_B),
         UUID(_P),
@@ -89,11 +91,12 @@ def _resolution(
     quarantine_id: UUID | None = None,
     observation_id: UUID = OBSERVATION_ID,
     symbol: str = "fUST",
+    action: ResolutionAction = "not_accepted",
 ) -> Resolution:
     return Resolution(
         uuid4(),
         symbol,
-        "not_accepted",
+        action,
         None,
         observation_id,
         "operator",
@@ -290,6 +293,10 @@ async def test_resolution_structural_rejections(seeded_fixture) -> None:  # noqa
             with pytest.raises(ResolutionRejected, match="UNKNOWN"):
                 await JOURNAL.record_resolution(
                     session, SCOPE, _resolution(attempt_id=attempt.attempt_id)
+                )
+            with pytest.raises(ResolutionRejected, match="quarantines only"):
+                await JOURNAL.record_resolution(
+                    session, SCOPE, _resolution(attempt_id=attempt.attempt_id, action="manual")
                 )
             quarantine = Quarantine(uuid4(), "fUST", Decimal("1"), 0, {})
             await JOURNAL.open_quarantine(session, SCOPE, quarantine)

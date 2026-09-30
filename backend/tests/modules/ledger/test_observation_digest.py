@@ -45,7 +45,7 @@ def _credit(kind: str = "loan") -> Credit:
 
 def test_digest_bytes_are_versioned_sorted_and_include_loans() -> None:
     first = Observation(
-        (Wallet("funding", "UST", Decimal("3"), Decimal("9")),),
+        (Wallet("funding", "UST", Decimal("3"), Decimal("9"), "fUST"),),
         (_offer("o2"), _offer("o1")),
         (_credit("loan"), _credit("credit")),
         _coverage(),
