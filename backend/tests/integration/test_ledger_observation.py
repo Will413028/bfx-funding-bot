@@ -25,16 +25,16 @@ import pytest_asyncio
 from sqlalchemy import event, func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from bfx_funding_bot.modules.ledger import Attempt, Scope
-from bfx_funding_bot.modules.ledger._internal.observation import (
+from bfx_funding_bot.modules.ledger import (
+    Attempt,
     Coverage,
     Credit,
     CreditHistory,
     Observation,
     Offer,
     OfferHistory,
+    Scope,
     Wallet,
-    accept_observation,
 )
 from bfx_funding_bot.modules.ledger.tables import (
     LedgerObservationCreditHistoryRow,
@@ -49,7 +49,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     VenueCreditMirrorRow,
     VenueOfferMirrorRow,
 )
-from bfx_funding_bot.modules.ledger.wiring import build_ledger_journal
+from bfx_funding_bot.modules.ledger.wiring import build_ledger_journal, build_ledger_observations
 
 from .test_ledger_schema_roles import _A, _B, _D2, _P, ledger_db  # noqa: F401 - fixture re-export
 from .test_ledger_schema_roles import seeded as seeded_fixture  # noqa: F401 - fixture re-export
@@ -57,6 +57,7 @@ from .test_ledger_schema_roles import seeded as seeded_fixture  # noqa: F401 - f
 pytestmark = pytest.mark.integration
 SCOPE = Scope(UUID(_A), "ci")
 JOURNAL = build_ledger_journal()
+OBSERVATIONS = build_ledger_observations()
 
 
 def _engine(sync_engine):
@@ -147,7 +148,7 @@ async def _begin(factory, started: int = 1):
 async def _accept(factory, first: Observation, confirmation: Observation | None = None):
     handle = await _begin(factory)
     async with factory.begin() as session:
-        return await accept_observation(
+        return await OBSERVATIONS.accept(
             session,
             SCOPE,
             handle,
@@ -224,7 +225,7 @@ async def test_incomplete_mismatch_and_fences(observation_factory) -> None:
     old = await _begin(observation_factory)
     await _begin(observation_factory)
     async with observation_factory.begin() as session:
-        result = await accept_observation(
+        result = await OBSERVATIONS.accept(
             session, SCOPE, old, first, replace(first, finished_at_ms=4), 3
         )
         assert result.decision == "fenced"
@@ -232,7 +233,7 @@ async def test_incomplete_mismatch_and_fences(observation_factory) -> None:
     async with observation_factory.begin() as session:
         await JOURNAL.bump_clock(session, SCOPE)
     async with observation_factory.begin() as session:
-        result = await accept_observation(
+        result = await OBSERVATIONS.accept(
             session, SCOPE, command_fenced, first, replace(first, finished_at_ms=4), 3
         )
         assert result.decision == "fenced"
@@ -274,7 +275,7 @@ async def test_committed_command_fences_observation(seeded_fixture) -> None:  # 
         first = _observation()
         async with factory.begin() as session:
             before = await session.scalar(select(func.count()).select_from(VenueOfferMirrorRow))
-            result = await accept_observation(
+            result = await OBSERVATIONS.accept(
                 session,
                 SCOPE,
                 handle,

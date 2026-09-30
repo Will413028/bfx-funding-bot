@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from decimal import Decimal
 from hashlib import sha256
 from typing import Literal
@@ -14,11 +14,20 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import (
+    CREDIT_STATUSES,
+    CREDIT_TERMINAL_KINDS,
+    OFFER_STATUSES,
+    OFFER_TERMINAL_KINDS,
+    Acceptance,
+    CreditHistory,
     JsonObject,
+    Observation,
+    OfferHistory,
     Quarantine,
     QuarantineMember,
     QueryHandle,
     Scope,
+    Wallet,
 )
 from bfx_funding_bot.modules.ledger._internal.basis import previous_basis, write_basis
 from bfx_funding_bot.modules.ledger._internal.clock import lock_scope
@@ -42,163 +51,6 @@ from bfx_funding_bot.modules.ledger.tables import (
     VenueCreditMirrorRow,
     VenueOfferMirrorRow,
 )
-
-type CreditKind = Literal["credit", "loan"]
-type Decision = Literal["accepted", "fenced", "incomplete_or_unequal"]
-
-# Closed status vocabularies. The port normalizes Bitfinex strings into these;
-# ledger never parses venue text.
-#   offer status       "ACTIVE" -> active; "PARTIALLY FILLED ..." -> partially_filled
-#                      (a history row keeps the last of these it had)
-#   offer terminal     "EXECUTED at r% (a)" -> executed;
-#                      "CANCELED", "PARTIALLY FILLED at r% (a), CANCELED" -> canceled
-#   credit/loan status "ACTIVE" -> active
-#   credit terminal    "CLOSED (expired)", "CLOSED (closed)", "CLOSED (reduced)" -> closed
-type OfferStatus = Literal["active", "partially_filled"]
-type CreditStatus = Literal["active"]
-type OfferTerminalKind = Literal["executed", "canceled"]
-type CreditTerminalKind = Literal["closed"]
-OFFER_STATUSES: frozenset[str] = frozenset(("active", "partially_filled"))
-CREDIT_STATUSES: frozenset[str] = frozenset(("active",))
-OFFER_TERMINAL_KINDS: frozenset[str] = frozenset(("executed", "canceled"))
-CREDIT_TERMINAL_KINDS: frozenset[str] = frozenset(("closed",))
-
-
-@dataclass(frozen=True, slots=True)
-class Wallet:
-    wallet_type: str
-    currency: str
-    available: Decimal
-    balance: Decimal
-    # Funding symbol assigned by the port (e.g. fUST); None only for non-funding
-    # wallets. No default: a funding wallet without a symbol would drop silently.
-    symbol: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class Offer:
-    venue_offer_id: str
-    symbol: str
-    amount_original: Decimal | None
-    amount_remaining: Decimal
-    rate: Decimal | None
-    rate_observed: bool
-    period_days: int | None
-    offer_type: str | None
-    flags: JsonObject | int | None
-    status: OfferStatus
-    mts_created: int
-    mts_updated: int | None
-    raw: JsonObject
-
-
-@dataclass(frozen=True, slots=True)
-class Credit:
-    source_kind: CreditKind
-    venue_credit_id: str
-    symbol: str
-    amount: Decimal
-    rate: Decimal | None
-    period_days: int | None
-    status: CreditStatus
-    flags: JsonObject | int | None
-    mts_created: int | None
-    mts_updated: int | None
-    mts_opening: int  # the venue's trade instant; required (carry key)
-    raw: JsonObject
-
-
-@dataclass(frozen=True, slots=True)
-class OfferHistory:
-    offer: Offer
-    terminal_kind: OfferTerminalKind
-    occurred_at_ms: int
-
-
-@dataclass(frozen=True, slots=True)
-class CreditHistory:
-    credit: Credit
-    terminal_kind: CreditTerminalKind
-    occurred_at_ms: int
-
-
-@dataclass(frozen=True, slots=True)
-class Trade:
-    """A funding trade (one of the account's offers matched); amount is absolute."""
-
-    trade_id: int
-    symbol: str
-    venue_offer_id: str
-    amount: Decimal
-    rate: Decimal
-    period_days: int
-    mts_create: int
-    maker: bool | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class Coverage:
-    wallets_complete: bool
-    offers_complete: bool
-    credits_complete: bool
-    loans_complete: bool
-    offer_history_complete: bool
-    credit_history_complete: bool
-    wallet_pages: int
-    offer_pages: int
-    credit_pages: int
-    loan_pages: int
-    offer_history_pages: int
-    credit_history_pages: int
-    history_requested_start_ms: int | None = None
-    history_requested_end_ms: int | None = None
-    history_oldest_mts_created: int | None = None
-    history_newest_mts_created: int | None = None
-    trades_complete: bool = False
-    trades_requested_start_ms: int | None = None
-    trades_requested_end_ms: int | None = None
-
-    @property
-    def active_complete(self) -> bool:
-        return all(
-            (
-                self.wallets_complete,
-                self.offers_complete,
-                self.credits_complete,
-                self.loans_complete,
-            )
-        )
-
-    @property
-    def complete(self) -> bool:
-        return all(
-            (
-                self.active_complete,
-                self.offer_history_complete,
-                self.credit_history_complete,
-                self.trades_complete,
-            )
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class Observation:
-    wallets: tuple[Wallet, ...]
-    offers: tuple[Offer, ...]
-    credits: tuple[Credit, ...]
-    coverage: Coverage
-    finished_at_ms: int
-    offer_history: tuple[OfferHistory, ...] = ()
-    credit_history: tuple[CreditHistory, ...] = ()
-    trades: tuple[Trade, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class Acceptance:
-    decision: Decision
-    observation_id: UUID | None
-    first_digest: str | None
-    confirmation_digest: str | None
 
 
 def _unique[K: Hashable, T](values: tuple[T, ...], key: Callable[[T], K]) -> dict[K, T]:
@@ -530,7 +382,7 @@ async def _mirror_offers(
                 VenueOfferMirrorRow.exchange_account_id == scope.exchange_account_id,
                 VenueOfferMirrorRow.deployment_environment == scope.deployment_environment,
                 or_(
-                    VenueOfferMirrorRow.present_in_latest_accepted_snapshot.is_(True),
+                    VenueOfferMirrorRow.present_in_latest_accepted_snapshot,
                     VenueOfferMirrorRow.venue_offer_id.in_((*observed, *history)),
                 ),
             )
@@ -601,7 +453,7 @@ async def _mirror_credits(
                 VenueCreditMirrorRow.exchange_account_id == scope.exchange_account_id,
                 VenueCreditMirrorRow.deployment_environment == scope.deployment_environment,
                 or_(
-                    VenueCreditMirrorRow.present_in_latest_accepted_snapshot.is_(True),
+                    VenueCreditMirrorRow.present_in_latest_accepted_snapshot,
                     VenueCreditMirrorRow.venue_credit_id.in_(ids),
                 ),
             )

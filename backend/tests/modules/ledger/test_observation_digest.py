@@ -5,15 +5,8 @@ from decimal import Decimal
 
 import pytest
 
-from bfx_funding_bot.modules.ledger._internal.observation import (
-    Coverage,
-    Credit,
-    Observation,
-    Offer,
-    Wallet,
-    _validate,
-    digest_bytes,
-)
+from bfx_funding_bot.modules.ledger import Coverage, Credit, Observation, Offer, Wallet
+from bfx_funding_bot.modules.ledger._internal.observation import _validate, digest_bytes
 
 
 def _coverage() -> Coverage:

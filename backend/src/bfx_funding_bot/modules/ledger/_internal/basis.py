@@ -6,10 +6,10 @@ symbol when the basis is read. Every query is bounded by the current
 observation, the previous basis, or the attempts recorded after the previous
 basis's ``attempt_seq_high_water``.
 
-Provenance of a venue offer: a transport ``ack`` outcome or a ``bound_to_venue``
-resolution names it -> the attempt, whose ``cell_id`` the scope trigger proved
-equal to its decision's. No provenance means the offer is foreign; more than one
-story is a fact-level block, never a reason to call it foreign.
+Provenance of a venue offer (``_internal.provenance``): a transport ``ack``
+outcome or a ``bound_to_venue`` resolution names it -> the attempt. No
+provenance means the offer is foreign; more than one story is a fact-level
+block, never a reason to call it foreign.
 
 Blocks are per symbol (``accepted_capital_basis_symbol.block``); a fact that
 cannot be tied to a symbol row of this basis goes to ``scope_block``.
@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.core.venue_time import VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.modules.ledger import JsonObject, Scope
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
+from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance, sole_owner
 from bfx_funding_bot.modules.ledger._internal.quarantine import unresolved_quarantines
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
@@ -125,40 +126,9 @@ class _Classifier:
     async def load_provenance(self, venue_ids: Iterable[str]) -> None:
         """One batch: every attempt of this scope naming any of ``venue_ids``."""
         ids = sorted(set(venue_ids) - set(self.provenance))
-        for venue_id in ids:
-            self.provenance[venue_id] = set()
         if not ids:
             return
-        acked = await self.session.scalars(
-            select(TransportOutcomeJournalRow)
-            .join(
-                SubmissionAttemptJournalRow,
-                SubmissionAttemptJournalRow.attempt_id == TransportOutcomeJournalRow.attempt_id,
-            )
-            .where(
-                TransportOutcomeJournalRow.kind == "ack",
-                TransportOutcomeJournalRow.venue_offer_id.in_(ids),
-                SubmissionAttemptJournalRow.exchange_account_id == self.scope.exchange_account_id,
-                SubmissionAttemptJournalRow.deployment_environment
-                == self.scope.deployment_environment,
-            )
-        )
-        for outcome in acked:
-            assert outcome.venue_offer_id is not None
-            self.provenance[outcome.venue_offer_id].add(outcome.attempt_id)
-        bound = await self.session.scalars(
-            select(ExecutionResolutionJournalRow).where(
-                ExecutionResolutionJournalRow.action == "bound_to_venue",
-                ExecutionResolutionJournalRow.venue_offer_id.in_(ids),
-                ExecutionResolutionJournalRow.attempt_id.is_not(None),
-                ExecutionResolutionJournalRow.exchange_account_id == self.scope.exchange_account_id,
-                ExecutionResolutionJournalRow.deployment_environment
-                == self.scope.deployment_environment,
-            )
-        )
-        for resolution in bound:
-            assert resolution.venue_offer_id is not None and resolution.attempt_id is not None
-            self.provenance[resolution.venue_offer_id].add(resolution.attempt_id)
+        self.provenance.update(await offer_provenance(self.session, self.scope, ids))
         missing = sorted({a for venue in ids for a in self.provenance[venue]} - set(self.attempts))
         if missing:
             for attempt in await self.session.scalars(
@@ -173,19 +143,7 @@ class _Classifier:
 
         Raises ``LookupError`` on contradictory provenance.
         """
-        attempt_ids = self.provenance.get(venue_id, set())
-        if not attempt_ids:
-            return None
-        if len(attempt_ids) != 1:
-            raise LookupError("provenance_conflict")
-        attempt = self.attempts.get(next(iter(attempt_ids)))
-        if attempt is None or (
-            attempt.exchange_account_id,
-            attempt.deployment_environment,
-            attempt.symbol,
-        ) != (self.scope.exchange_account_id, self.scope.deployment_environment, symbol):
-            raise LookupError("provenance_conflict")
-        return attempt
+        return sole_owner(self.provenance.get(venue_id, set()), self.attempts, self.scope, symbol)
 
     def cell_of(self, venue_id: str, symbol: str) -> str | None:
         """The owning cell for fill evidence; None when foreign or contradictory."""
@@ -198,7 +156,13 @@ class _Classifier:
 
 
 async def previous_basis(session: AsyncSession, scope: Scope) -> AcceptedCapitalBasisRow | None:
-    """The latest accepted basis of the scope (by its query revision)."""
+    """The latest accepted basis of the scope (by its query revision).
+
+    The query's own scope columns are repeated (the basis and observation insert
+    triggers already make them equal to the basis's) so the planner can walk
+    ``ix_ledger_observation_query_scope_revision`` newest-first and stop at the
+    first query with a basis, instead of sorting every basis of the scope.
+    """
     row: AcceptedCapitalBasisRow | None = await session.scalar(
         select(AcceptedCapitalBasisRow)
         .join(
@@ -209,6 +173,8 @@ async def previous_basis(session: AsyncSession, scope: Scope) -> AcceptedCapital
             LedgerObservationQueryRow.query_id == LedgerObservationRow.query_id,
         )
         .where(
+            LedgerObservationQueryRow.exchange_account_id == scope.exchange_account_id,
+            LedgerObservationQueryRow.deployment_environment == scope.deployment_environment,
             AcceptedCapitalBasisRow.exchange_account_id == scope.exchange_account_id,
             AcceptedCapitalBasisRow.deployment_environment == scope.deployment_environment,
         )

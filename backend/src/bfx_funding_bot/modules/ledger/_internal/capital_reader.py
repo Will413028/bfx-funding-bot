@@ -28,16 +28,21 @@ applied where the basis compares venue stamps).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy import Select, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import load_only
 
 from bfx_funding_bot.modules.ledger import CapitalReadRefused, LedgerCapitalRead
+from bfx_funding_bot.modules.ledger._internal.attempts import (
+    MAX_TAIL_ATTEMPTS,
+    attempt_evidence,
+    open_unknowns,
+    tail_attempts,
+)
+from bfx_funding_bot.modules.ledger._internal.attempts import fresh_all as _all
+from bfx_funding_bot.modules.ledger._internal.attempts import payload_amount as _amount
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisCellRow,
@@ -47,12 +52,9 @@ from bfx_funding_bot.modules.ledger.tables import (
     CapitalCommandClockRow,
     CapitalPolicyHeadRow,
     CapitalPolicyRevisionRow,
-    ExecutionResolutionJournalRow,
     LedgerObservationQueryRow,
     LedgerObservationRow,
     QuarantineOpeningRow,
-    SubmissionAttemptJournalRow,
-    TransportOutcomeJournalRow,
 )
 from bfx_funding_bot.modules.trading import (
     AcceptedCapitalBasis,
@@ -70,9 +72,6 @@ from bfx_funding_bot.modules.trading import (
     parse_policy,
 )
 
-# Attempts recorded after the latest basis; a longer tail means acceptance has
-# stalled, and the read refuses rather than growing with it.
-MAX_TAIL_ATTEMPTS = 256
 _NO_QUERY = UUID(int=0)
 _OUTCOMES: dict[str, AttemptOutcome] = {
     "ack": "acknowledged",
@@ -101,11 +100,6 @@ async def _require_snapshot_transaction(session: AsyncSession) -> None:
         )
 
 
-async def _all[T](session: AsyncSession, statement: Select[tuple[T]]) -> list[T]:
-    # Fresh column values even if the caller's session already holds the rows.
-    return list((await session.scalars(statement.execution_options(populate_existing=True))).all())
-
-
 async def _one[T](session: AsyncSession, statement: Select[tuple[T]]) -> T | None:
     rows = await _all(session, statement.limit(1))
     return rows[0] if rows else None
@@ -126,14 +120,6 @@ def _blocked(value: Any) -> Blocked | None:
         return Blocked("snapshot_evidence_conflict", (("block", "malformed"),))
     evidence = tuple((str(k), str(v)) for item in reasons for k, v in sorted(item.items()))
     return Blocked(reasons[0]["reason"], evidence)
-
-
-def _amount(payload: object) -> Decimal | None:
-    try:
-        amount = Decimal(str(payload["amount"]))  # type: ignore[index]
-    except (KeyError, TypeError, InvalidOperation):
-        return None
-    return amount if amount.is_finite() and amount >= 0 else None
 
 
 async def _policy(session: AsyncSession, scope: CapitalScope) -> AppliedPolicy | Blocked:
@@ -295,27 +281,8 @@ async def read_capital(
             QuarantineOpeningRow.opened_revision > basis.accept_revision,
         ),
     )
-    tail = await _all(
-        session,
-        select(SubmissionAttemptJournalRow)
-        .options(
-            load_only(
-                SubmissionAttemptJournalRow.attempt_id,
-                SubmissionAttemptJournalRow.exchange_account_id,
-                SubmissionAttemptJournalRow.deployment_environment,
-                SubmissionAttemptJournalRow.symbol,
-                SubmissionAttemptJournalRow.cell_id,
-                SubmissionAttemptJournalRow.attempt_seq,
-                SubmissionAttemptJournalRow.normalized_payload,
-            )
-        )
-        .where(
-            SubmissionAttemptJournalRow.exchange_account_id == account,
-            SubmissionAttemptJournalRow.deployment_environment == environment,
-            SubmissionAttemptJournalRow.attempt_seq > basis.attempt_seq_high_water,
-        )
-        .order_by(SubmissionAttemptJournalRow.attempt_seq)
-        .limit(MAX_TAIL_ATTEMPTS + 1),
+    tail = await tail_attempts(
+        session, account, environment, basis.attempt_seq_high_water, limit=MAX_TAIL_ATTEMPTS + 1
     )
     if len(tail) > MAX_TAIL_ATTEMPTS:
         integrity.append(
@@ -325,38 +292,13 @@ async def read_capital(
 
     unresolved = [row for row in classified if row.classification == "unresolved"]
     watched = [row.attempt_id for row in unresolved] + [row.attempt_id for row in tail]
-    outcomes: dict[UUID, str] = {}
-    resolutions: dict[UUID, str] = {}
-    if watched:
-        for outcome in await _all(
-            session,
-            select(TransportOutcomeJournalRow)
-            .options(
-                load_only(TransportOutcomeJournalRow.attempt_id, TransportOutcomeJournalRow.kind)
-            )
-            .where(TransportOutcomeJournalRow.attempt_id.in_(watched)),
-        ):
-            outcomes[outcome.attempt_id] = outcome.kind
-        for resolution in await _all(
-            session,
-            select(ExecutionResolutionJournalRow)
-            .options(
-                load_only(
-                    ExecutionResolutionJournalRow.id,
-                    ExecutionResolutionJournalRow.attempt_id,
-                    ExecutionResolutionJournalRow.action,
-                )
-            )
-            .where(ExecutionResolutionJournalRow.attempt_id.in_(watched)),
-        ):
-            assert resolution.attempt_id is not None
-            resolutions[resolution.attempt_id] = resolution.action
+    outcomes, resolutions = await attempt_evidence(session, watched)
 
     # Current open uncertainty: an UNKNOWN without resolution, or any quarantine
     # the basis has not seen (it keeps blocking until a new basis lists it).
     uncertainties: list[UncertaintyFact] = [
         UncertaintyFact(attempt_id, account, environment, symbol, True)
-        for attempt_id, symbol in _open_unknowns(
+        for attempt_id, symbol in open_unknowns(
             [(row.attempt_id, row.symbol) for row in unresolved]
             + [(row.attempt_id, row.symbol) for row in tail],
             outcomes,
@@ -437,16 +379,6 @@ async def read_capital(
 
 def _ids(rows: list[AcceptedCapitalBasisAttemptRow], classification: str) -> frozenset[UUID]:
     return frozenset(row.attempt_id for row in rows if row.classification == classification)
-
-
-def _open_unknowns(
-    attempts: Iterable[tuple[UUID, str]], outcomes: dict[UUID, str], resolutions: dict[UUID, str]
-) -> list[tuple[UUID, str]]:
-    return [
-        (attempt_id, symbol)
-        for attempt_id, symbol in attempts
-        if outcomes.get(attempt_id) == "unknown" and attempt_id not in resolutions
-    ]
 
 
 __all__ = ["MAX_TAIL_ATTEMPTS", "read_capital"]
