@@ -1,10 +1,12 @@
 """Pin the ledger facade: observation DTOs, acceptance port and read contracts are public."""
 
 import inspect
+from dataclasses import fields
 
 import bfx_funding_bot.modules.ledger as ledger
 from bfx_funding_bot.modules.ledger._internal import observation
 from bfx_funding_bot.modules.ledger.wiring import (
+    build_command_journal,
     build_ledger_journal,
     build_ledger_managed_offers,
     build_ledger_observations,
@@ -34,6 +36,11 @@ _PROMOTED = {
     "LedgerObservations",
 }
 _READS = {
+    "CommandJournal",
+    "CommandAttempt",
+    "CommandOutcome",
+    "CommandRefused",
+    "CancelAdmitted",
     "LedgerUncertainties",
     "LedgerManagedOffers",
     "OpenUncertainty",
@@ -77,6 +84,8 @@ def test_internal_acceptance_uses_the_facade_types() -> None:
 
 
 def test_ports_expose_their_methods() -> None:
+    assert _methods(ledger.CommandJournal) == {"authorize", "record_outcome", "read_back_outcome", "admit_cancel"}
+    assert "cid" not in {field.name for field in fields(ledger.CommandAttempt)}
     assert _methods(ledger.LedgerJournal) == {
         "bump_clock",
         "begin_query",
@@ -97,6 +106,7 @@ def test_ports_expose_their_methods() -> None:
         "fingerprints_in_use",
     }
     for port, protocol in (
+        (build_command_journal(None), ledger.CommandJournal),
         (build_ledger_journal(), ledger.LedgerJournal),
         (build_ledger_observations(), ledger.LedgerObservations),
         (build_ledger_uncertainties(), ledger.LedgerUncertainties),

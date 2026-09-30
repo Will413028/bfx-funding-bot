@@ -32,7 +32,6 @@ from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     AuthoritativeSafetyEvaluator,
-    DatabaseOpenUncertaintyReader,
 )
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 from bfx_funding_bot.modules.execution.event_store.persister import (
@@ -46,6 +45,8 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationIntent,
     ReservationUnknown,
 )
+from bfx_funding_bot.modules.execution.legacy_command_journal import LegacyCommandJournal
+from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     ExecutorPort,
@@ -101,7 +102,7 @@ class ReservationEmittingMiddleware:
                 inner,
                 bus=bus,
                 persister=persister,
-                uncertainty_reader=DatabaseOpenUncertaintyReader(
+                uncertainty_reader=LegacyUncertaintyReader(
                     capability.session_factory
                 ),
                 safety_evaluator=safety_evaluator,
@@ -112,6 +113,9 @@ class ReservationEmittingMiddleware:
                 uncertainty_handler=uncertainty_handler,
                 capital_runtime=capital_runtime,
                 managed_offers=managed_offers,
+                command_journal=LegacyCommandJournal(
+                    capital_runtime, date_provider=self._date_provider, clock=self._clock,
+                ) if capital_runtime is not None else None,
             )
 
     @property

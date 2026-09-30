@@ -62,6 +62,7 @@ from bfx_funding_bot.modules.ledger._internal.quarantine import unresolved_quara
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisRow,
+    ExecutionResolutionJournalRow,
     SubmissionAttemptJournalRow,
     VenueOfferMirrorRow,
 )
@@ -247,6 +248,11 @@ async def managed_live_offers(
 async def cancel_provenance(
     session: AsyncSession, scope: Scope, venue_offer_id: str
 ) -> CancelProvenance | None:
+    mirror = await session.get(VenueOfferMirrorRow, (
+        scope.exchange_account_id, scope.deployment_environment, venue_offer_id,
+    ), populate_existing=True)
+    if mirror is not None and mirror.terminal_evidence_id is not None:
+        return None
     live = await _live(
         session,
         scope,
@@ -254,12 +260,38 @@ async def cancel_provenance(
     )
     if live.conflicts:
         raise ProvenanceConflict(venue_offer_id)
-    if not live.managed:
-        return None
-    ((mirror, attempt, correlation),) = live.managed
+    if live.managed:
+        ((mirror, attempt, correlation),) = live.managed
+    else:
+        # Not yet in an accepted snapshot: ours only through an ack or a bound
+        # resolution naming it -- exactly what offer_provenance returns (legacy
+        # claims the offer at either).
+        provenance = await offer_provenance(session, scope, [venue_offer_id])
+        ids = provenance[venue_offer_id]
+        if not ids:
+            return None
+        if len(ids) != 1:
+            raise ProvenanceConflict(venue_offer_id)
+        attempt = (await attempts_by_id(session, sorted(ids)))[0]
+        if mirror is not None and mirror.symbol != attempt.symbol:
+            raise ProvenanceConflict(venue_offer_id)
+        correlations = await _correlations(session, [attempt.execution_decision_id])
+        correlation = correlations.get(attempt.execution_decision_id, "")
+        if not correlation:
+            raise ProvenanceConflict(venue_offer_id)
+    resolution = await session.scalar(select(ExecutionResolutionJournalRow).where(
+        ExecutionResolutionJournalRow.attempt_id == attempt.attempt_id,
+    ))
+    if resolution is not None and (
+        resolution.action != "bound_to_venue" or resolution.venue_offer_id != venue_offer_id
+        or resolution.symbol != attempt.symbol
+        or resolution.exchange_account_id != scope.exchange_account_id
+        or resolution.deployment_environment != scope.deployment_environment
+    ):
+        raise ProvenanceConflict(venue_offer_id)
     return CancelProvenance(
-        mirror.venue_offer_id,
-        mirror.symbol,
+        venue_offer_id,
+        attempt.symbol,
         attempt.attempt_id,
         attempt.execution_decision_id,
         attempt.cell_id,

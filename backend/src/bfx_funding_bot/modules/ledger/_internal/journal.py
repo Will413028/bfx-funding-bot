@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from typing import cast
 from uuid import UUID
@@ -14,9 +15,15 @@ from bfx_funding_bot.modules.ledger import (
     Attempt,
     Authorized,
     AuthorizeRefused,
+    CancelAdmitted,
+    CommandAttempt,
+    CommandRefused,
+    LockedCancelGuard,
+    LockedCommandGuard,
     Outcome,
     OutcomeAlreadyRecorded,
     OutcomeKind,
+    ProvenanceConflict,
     RecordedAttempt,
     Resolution,
     ResolutionAction,
@@ -41,6 +48,13 @@ from bfx_funding_bot.modules.ledger.tables import (
 
 async def authorize_attempt(
     session: AsyncSession, scope: Scope, attempt: Attempt, basis_token: str, *, now_ms: int
+) -> Authorized | AuthorizeRefused:
+    return await _authorize_attempt(session, scope, attempt, basis_token, now_ms=now_ms)
+
+
+async def _authorize_attempt(
+    session: AsyncSession, scope: Scope, attempt: Attempt, basis_token: str, *, now_ms: int,
+    locked_guard: LockedCommandGuard | None = None,
 ) -> Authorized | AuthorizeRefused:
     """CAS the read's query, clock and policy before inserting any intent.
 
@@ -95,8 +109,68 @@ async def authorize_attempt(
     )
     if policy != attempt.policy_revision_id:
         return AuthorizeRefused("capital_policy_revision_changed")
+    if locked_guard is not None:
+        await locked_guard(session)
     recorded = await record_attempt(session, scope, attempt)
     return Authorized(recorded.attempt_id, recorded.attempt_seq, recorded.payload_sha256)
+
+
+async def authorize_command(
+    session: AsyncSession, scope: Scope, attempt: CommandAttempt, basis_token: str, *,
+    now_ms: int, locked_guard: LockedCommandGuard,
+) -> Authorized | CommandRefused:
+    """Dormant CAS wrapper; capital re-read/retry belongs to S1-3e."""
+    if attempt.basis_id is None:
+        return CommandRefused("query_pending")
+    if attempt.cell_id is None:
+        return CommandRefused("execution_audit_conflict")
+    recorded = await _authorize_attempt(
+        session, scope, Attempt(
+            attempt.attempt_id, attempt.execution_decision_id, attempt.symbol, attempt.cell_id,
+            attempt.normalized_payload, attempt.basis_id, attempt.policy_revision_id,
+            attempt.authorization_evidence or {}, attempt.started_at_ms,
+        ), basis_token, now_ms=now_ms, locked_guard=locked_guard,
+    )
+    return CommandRefused(recorded.reason) if isinstance(recorded, AuthorizeRefused) else recorded
+
+
+async def admit_cancel(
+    session: AsyncSession, scope: Scope, venue_offer_id: str, *, now_ms: int,
+    locked_guard: LockedCancelGuard,
+) -> CancelAdmitted | CommandRefused:
+    """Scope lock -> provenance -> uncertainty -> guard -> fence; no cancel row."""
+    from bfx_funding_bot.modules.ledger._internal.reads import cancel_provenance, open_uncertainties
+
+    await lock_scope(session, scope)
+    try:
+        provenance = await cancel_provenance(session, scope, venue_offer_id)
+    except ProvenanceConflict:
+        return CommandRefused("cancel_provenance_conflict")
+    if provenance is None:
+        return CommandRefused("cancel_provenance_missing")
+    if await open_uncertainties(session, scope, provenance.symbol):
+        return CommandRefused("cancel_provenance_uncertain")
+    # Terms come from the attempt's normalized venue payload (what was sent),
+    # not from execution's decision table.
+    attempt = await session.get(SubmissionAttemptJournalRow, provenance.attempt_id)
+    terms = _offer_terms(attempt.normalized_payload) if attempt is not None else None
+    if terms is None:
+        return CommandRefused("cancel_provenance_conflict")
+    admission = CancelAdmitted(provenance, *terms)
+    await locked_guard(session, admission)
+    await bump_locked(session, scope)
+    return admission
+
+
+def _offer_terms(payload: dict[str, object]) -> tuple[Decimal, Decimal, int] | None:
+    try:
+        amount, rate = Decimal(str(payload["amount"])), Decimal(str(payload["rate"]))
+        period = payload["period"]
+    except (KeyError, InvalidOperation):
+        return None
+    if not (amount.is_finite() and rate.is_finite()) or not isinstance(period, int):
+        return None
+    return amount, rate, period
 
 
 async def close_dangling(
