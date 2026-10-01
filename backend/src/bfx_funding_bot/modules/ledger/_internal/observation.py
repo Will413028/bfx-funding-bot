@@ -522,14 +522,16 @@ async def _quarantine_reappearance(
     """Quarantine an identity seen active after confirmed terminal evidence.
 
     Merge like legacy quarantines: an identity already in an unresolved
-    quarantine is left alone, and a new identity joins the symbol's unresolved
-    quarantine as a member instead of opening one per acceptance.
+    plain quarantine is left alone, and a new identity joins the symbol's
+    unresolved plain quarantine as a member (never an R6 source quarantine)
+    instead of opening one per acceptance.
     """
     # The basis being accepted is not written yet: bound by the previous one.
     previous = await previous_basis(session, scope)
     open_ids = [
         row.quarantine_id
         for row in await unresolved_quarantines(session, scope, previous, symbol=symbol)
+        if row.source_attempt_id is None
     ]
     if open_ids:
         already = await session.scalar(

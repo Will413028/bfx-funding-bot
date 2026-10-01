@@ -400,3 +400,20 @@ def test_shutdown_flushes_and_is_idempotent() -> None:
     t.shutdown()
     t.shutdown()  # second call must not raise
     assert len(exporter.get_finished_spans()) == 1
+
+
+@pytest.mark.asyncio
+async def test_cycle_wrapper_passes_scope_and_result_identity():
+    from unittest.mock import AsyncMock
+
+    from bfx_funding_bot.modules.ledger import CycleResult, Scope
+
+    scope = Scope(uuid4(), "ci")
+    result = CycleResult("fenced")
+    sink = AsyncMock()
+    sink.run.return_value = result
+    tracing = _enabled_tracing(InMemorySpanExporter())
+    wrapper = TracedReconcileRecovery(sink, tracing=tracing)
+    assert await wrapper.run(scope) is result
+    sink.run.assert_awaited_once_with(scope)
+    tracing.shutdown()

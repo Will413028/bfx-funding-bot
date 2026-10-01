@@ -34,9 +34,11 @@ from bfx_funding_bot.modules.execution.events import (
     VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
+from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
+from bfx_funding_bot.modules.ledger import Scope
 
 pytestmark = pytest.mark.integration
 
@@ -318,8 +320,9 @@ async def test_unchanged_foreign_offer_only_degrades_first_periodic_run(pg_sessi
         _Auth([_offer("known", "fUST", "40"), _offer("orphan", "fXYZ", "7")]),
     )
     probe = _Probe()
+    scope = Scope(_ACCOUNT, _ENV)
     periodic = PeriodicReconcile(
-        recovery=recovery,
+        recovery=LegacyObservationSink(recovery, scope), scope=scope,
         probe=probe,
         interval_s=90,
     )

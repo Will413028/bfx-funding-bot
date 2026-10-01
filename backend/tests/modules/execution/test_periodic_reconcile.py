@@ -1,12 +1,22 @@
 import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
+from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
+from bfx_funding_bot.modules.ledger import Scope
+
+
+def _make_periodic(*, recovery, scope=None, **kwargs):
+    if scope is None:
+        scope = Scope(uuid4(), "ci")
+        recovery = LegacyObservationSink(recovery, scope)
+    return PeriodicReconcile(recovery=recovery, scope=scope, **kwargs)
 
 
 class _FakeProbe:
@@ -38,7 +48,7 @@ class _FakeRecovery:
 async def test_loop_runs_reconcile_each_interval_and_heartbeats():
     probe = _FakeProbe()
     recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=0.01, max_consecutive_failures=3,
     )
     stop = asyncio.Event()
@@ -56,7 +66,7 @@ async def test_loop_runs_reconcile_each_interval_and_heartbeats():
 async def test_divergence_on_periodic_release_sets_degraded():
     probe = _FakeProbe()
     recovery = _FakeRecovery(results=[ReconcileResult(0, 2, 0)])
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=0.01, max_consecutive_failures=3,
     )
     stop = asyncio.Event()
@@ -78,7 +88,7 @@ async def test_divergence_clears_on_clean_tick():
     probe = _FakeProbe()
     # tick 1: drift (n_claimed=2), tick 2+: clean (all zeros)
     recovery = _FakeRecovery(results=[ReconcileResult(0, 2, 0), ReconcileResult(0, 0, 0)])
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=0.005, max_consecutive_failures=3,
     )
     stop = asyncio.Event()
@@ -99,7 +109,7 @@ async def test_divergence_clears_on_clean_tick():
 async def test_consecutive_fetch_failures_trip_executor_down_failsafe():
     probe = _FakeProbe()
     recovery = _FakeRecovery(results=[RuntimeError("venue unreachable")])
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=0.005, max_consecutive_failures=3,
     )
     stop = asyncio.Event()
@@ -121,7 +131,7 @@ async def test_recovery_after_failure_clears_failsafe():
     recovery = _FakeRecovery(results=[
         RuntimeError("x"), RuntimeError("x"), RuntimeError("x"), ReconcileResult(0, 0, 0),
     ])
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=0.005, max_consecutive_failures=3,
     )
     stop = asyncio.Event()
@@ -140,7 +150,7 @@ async def test_request_resync_wakes_loop_before_interval():
     """A resync request triggers an off-interval tick well before interval_s."""
     probe = _FakeProbe()
     recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=10.0,  # long: only a trigger can cause tick 2
         max_consecutive_failures=3, min_resync_interval_s=0.0,
     )
@@ -161,7 +171,7 @@ async def test_repeated_requests_dedup_into_bounded_ticks():
     """Many request_resync calls before a wake collapse into exactly one extra tick."""
     probe = _FakeProbe()
     recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=10.0,
         max_consecutive_failures=3, min_resync_interval_s=0.05,
     )
@@ -184,7 +194,7 @@ async def test_stop_during_debounce_exits_promptly():
     """Stopping while a resync is in its debounce wait exits without hanging."""
     probe = _FakeProbe()
     recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=10.0,
         max_consecutive_failures=3, min_resync_interval_s=100.0,  # long debounce
     )
@@ -206,7 +216,7 @@ async def test_resync_requested_before_loop_start_is_honored():
     """A resync set synchronously before run_loop still produces an early tick."""
     probe = _FakeProbe()
     recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=10.0,
         max_consecutive_failures=3, min_resync_interval_s=0.0,
     )
@@ -234,7 +244,7 @@ async def test_deployment_called_after_clean_reconcile():
     probe = _FakeProbe()
     recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
     deployment = _FakeDeployment()
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=0.02,
         max_consecutive_failures=3, deployment=deployment,
     )
@@ -253,7 +263,7 @@ async def test_deployment_not_called_on_reconcile_failure():
     probe = _FakeProbe()
     recovery = _FakeRecovery(results=[RuntimeError("venue down")])
     deployment = _FakeDeployment()
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=0.02,
         max_consecutive_failures=3, deployment=deployment,
     )
@@ -280,7 +290,7 @@ async def test_deployment_exception_does_not_crash_loop():
     probe = _FakeProbe()
     recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
     deployment = _BoomDeployment()
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=0.02,
         max_consecutive_failures=3, deployment=deployment,
     )
@@ -301,7 +311,7 @@ async def test_realized_drift_sets_degraded_even_without_offer_actions():
     recovery = _FakeRecovery(results=[
         ReconcileResult(0, 0, 0, realized_drift_usdt=Decimal("150")),
     ])
-    pr = PeriodicReconcile(recovery=recovery, probe=probe, interval_s=0.01,
+    pr = _make_periodic(recovery=recovery, probe=probe, interval_s=0.01,
                            max_consecutive_failures=3)
     stop = asyncio.Event()
 
@@ -341,7 +351,7 @@ async def test_loop_drives_aggregate_recovery_and_flags_drift():
         reserved_drift_usdt=Decimal("0"), realized_drift_usdt=Decimal("5"),
     )
     recovery = _MultiSymbolRecovery(agg)
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=recovery, probe=probe, interval_s=0.01, max_consecutive_failures=3,
     )
     stop = asyncio.Event()
@@ -384,7 +394,7 @@ async def test_deploy_receives_venue_offers_from_reconcile():
             self.received.append(venue_offers)
 
     dep = _CapturingDeployment()
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=_OfferRecovery(), probe=_FakeProbe(), interval_s=90,
         deployment=dep,
     )
@@ -423,8 +433,45 @@ async def test_deploy_never_sees_an_unmanaged_offer():
             self.received.append(venue_offers)
 
     dep = _CapturingDeployment()
-    pr = PeriodicReconcile(
+    pr = _make_periodic(
         recovery=_MixedRecovery(), probe=_FakeProbe(), interval_s=90, deployment=dep,
     )
     await pr._tick()
     assert dep.received == [(managed,)]
+
+
+@pytest.mark.asyncio
+async def test_periodic_legacy_port_preserves_fences_and_divergence():
+    from uuid import uuid4
+
+    from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
+    from bfx_funding_bot.modules.ledger import Scope
+
+    scope = Scope(uuid4(), "ci")
+    probe = _FakeProbe()
+    original = _FakeRecovery([ReconcileResult(0, 2, 0, snapshot_event_seq=42)])
+    periodic = _make_periodic(
+        recovery=LegacyObservationSink(original, scope), scope=scope,
+        probe=probe, interval_s=90,
+    )
+    await periodic._tick()
+    assert original._i == 1
+    assert periodic.recent_fences[0][0] == 42
+    assert periodic._divergence_flagged
+
+
+@pytest.mark.asyncio
+async def test_periodic_expected_refusal_is_not_transport_failure():
+    from unittest.mock import AsyncMock
+    from uuid import uuid4
+
+    from bfx_funding_bot.modules.ledger import CycleResult, Scope
+
+    recovery = AsyncMock()
+    recovery.run.return_value = CycleResult("fenced")
+    periodic = _make_periodic(
+        recovery=recovery, scope=Scope(uuid4(), "ci"), probe=_FakeProbe(), interval_s=90,
+    )
+    await periodic._tick()
+    assert periodic._consecutive_failures == 0
+    assert periodic.recent_fences == ()

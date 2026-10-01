@@ -34,7 +34,6 @@ from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
     from bfx_funding_bot.modules.execution.protocols import (
         AccountContext,
         ExecutorPort,
@@ -256,13 +255,11 @@ class TracingSubmitMiddleware:
             return order
 
 
-class _RecoveryRunner(Protocol):
-    """Structural match for BootRecovery / TimedReconcileRecovery."""
-
-    async def run(self) -> ReconcileResult: ...
+class _RecoveryRunner[**P, R](Protocol):
+    async def run(self, *args: P.args, **kwargs: P.kwargs) -> R: ...
 
 
-class TracedReconcileRecovery:
+class TracedReconcileRecovery[**P, R]:
     """Transparent span wrapper around the reconcile backbone's recovery.run().
 
     Stacked outside TimedReconcileRecovery at wiring time (enabled only) so
@@ -270,13 +267,13 @@ class TracedReconcileRecovery:
     measures. Result and exceptions pass through unchanged.
     """
 
-    def __init__(self, inner: _RecoveryRunner, *, tracing: DaemonTracing) -> None:
+    def __init__(self, inner: _RecoveryRunner[P, R], *, tracing: DaemonTracing) -> None:
         self._inner = inner
         self._tracing = tracing
 
-    async def run(self) -> ReconcileResult:
+    async def run(self, *args: P.args, **kwargs: P.kwargs) -> R:
         with self._tracing.span("reconcile.tick") as span:
-            result = await self._inner.run()
+            result = await self._inner.run(*args, **kwargs)
             span.set_attribute("bfx.reconcile.result", "ok")
             return result
 

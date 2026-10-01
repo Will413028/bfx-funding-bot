@@ -190,6 +190,18 @@ class Scope:
 
 
 @dataclass(frozen=True, slots=True)
+class CycleResult:
+    """Cycle disposition; venue/legacy accounting details stay adapter-specific."""
+
+    decision: Literal["accepted", "query_admission_refused", "fenced", "incomplete_or_unequal"]
+    observation_id: UUID | None = None
+
+
+class ObservationSink(Protocol):
+    async def run(self, scope: Scope) -> CycleResult: ...
+
+
+@dataclass(frozen=True, slots=True)
 class OfferCloseHint:
     """Untrusted venue facts, never reservation authority or CID correlation."""
 
@@ -266,8 +278,9 @@ class ObservationWindow:
     """Local anchors for the next observation's history request.
 
     The attempt anchor covers the high-water tail, basis-unresolved attempts
-    and open UNKNOWNs. history_start_ms is the earlier anchor minus the
-    history margin, or None when neither exists (the very first observation).
+    and open UNKNOWNs, plus source attempts of unresolved R6 quarantines.
+    history_start_ms is the earlier anchor minus the history margin, or None
+    when neither exists (the very first observation).
     Without an accepted basis, use the earliest attempt; with no attempts
     there is no history anchor. The caller owns that first-observation case.
     """
@@ -834,6 +847,7 @@ __all__ = [
     "CreditKind",
     "CreditStatus",
     "CreditTerminalKind",
+    "CycleResult",
     "JsonObject",
     "LedgerCapitalRead",
     "LedgerCapitalReader",
@@ -849,6 +863,7 @@ __all__ = [
     "ManagedOfferReader",
     "ManagedOffers",
     "Observation",
+    "ObservationSink",
     "ObservationWindow",
     "Offer",
     "OfferCloseHint",

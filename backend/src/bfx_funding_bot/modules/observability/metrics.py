@@ -58,7 +58,6 @@ from bfx_funding_bot.core.health import ACTIVITY_THRESHOLDS, LIVENESS_THRESHOLDS
 from bfx_funding_bot.core.telemetry import HealthStatus
 
 if TYPE_CHECKING:
-    from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
     from bfx_funding_bot.modules.execution.protocols import (
         AccountContext,
         ExecutorPort,
@@ -497,13 +496,11 @@ class MetricsSubmitMiddleware:
         return order
 
 
-class _RecoveryRunner(Protocol):
-    """Structural match for BootRecovery / PeriodicReconcile._Recovery."""
-
-    async def run(self) -> ReconcileResult: ...
+class _RecoveryRunner[**P, R](Protocol):
+    async def run(self, *args: P.args, **kwargs: P.kwargs) -> R: ...
 
 
-class TimedReconcileRecovery:
+class TimedReconcileRecovery[**P, R]:
     """Transparent timing wrapper around the reconcile backbone's recovery.run().
 
     Injected between PeriodicReconcile and BootRecovery at wiring time so the
@@ -512,7 +509,7 @@ class TimedReconcileRecovery:
     raw recovery would have produced.
     """
 
-    def __init__(self, inner: _RecoveryRunner, *, metrics: DaemonMetrics) -> None:
+    def __init__(self, inner: _RecoveryRunner[P, R], *, metrics: DaemonMetrics) -> None:
         self._inner = inner
         self._metrics = metrics
 
@@ -524,10 +521,10 @@ class TimedReconcileRecovery:
         except Exception:
             log.debug("metrics_reconcile_observe_failed", exc_info=True)
 
-    async def run(self) -> ReconcileResult:
+    async def run(self, *args: P.args, **kwargs: P.kwargs) -> R:
         start = time.perf_counter()
         try:
-            result = await self._inner.run()
+            result = await self._inner.run(*args, **kwargs)
         except BaseException:
             self._safe_observe("error", start)
             raise

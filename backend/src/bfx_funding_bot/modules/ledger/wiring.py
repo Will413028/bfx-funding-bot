@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.ledger import (
     CommandJournal,
     CommandOutcome,
     CommandRefused,
+    CycleResult,
     LedgerCapitalRead,
     LedgerCapitalReader,
     LedgerJournal,
@@ -30,17 +31,20 @@ from bfx_funding_bot.modules.ledger import (
     LockedCommandGuard,
     ManagedOffers,
     Observation,
+    ObservationSink,
     ObservationWindow,
     OpenUncertainty,
     Outcome,
     OutcomeAlreadyRecorded,
     Quarantine,
     QuarantineMember,
+    QueryAdmissionRefused,
     QueryHandle,
     Resolution,
     Scope,
     VenueHintPublisher,
     VenueHintSink,
+    VenueObservation,
 )
 from bfx_funding_bot.modules.ledger._internal import (
     capital_reader,
@@ -248,3 +252,57 @@ class _SqlLedgerManagedOffers:
 
 def build_ledger_managed_offers() -> LedgerManagedOffers:
     return _SqlLedgerManagedOffers()
+
+
+class _LedgerObservationCycle:
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession], venue: VenueObservation,
+        *, journal_port: LedgerJournal, observations: LedgerObservations,
+        now_ms: Callable[[], int], grace_ms: int,
+    ) -> None:
+        self._factory = session_factory
+        self._venue = venue
+        self._journal = journal_port
+        self._observations = observations
+        self._now_ms = now_ms
+        self._grace_ms = grace_ms
+
+    async def run(self, scope: Scope) -> CycleResult:
+        async with self._factory.begin() as session:
+            await clock.lock_scope(session, scope)
+            started = self._now_ms()
+            await self._journal.close_dangling(
+                session, scope, now_ms=started, grace_ms=self._grace_ms,
+            )
+            window = await self._observations.observation_window(session, scope)
+            try:
+                query = await self._observations.begin_query(session, scope, started)
+            except QueryAdmissionRefused:
+                # Commit dangling closures even when younger attempts refuse admission.
+                return CycleResult("query_admission_refused")
+        first, confirmation, confirmation_started = await self._venue.observe(
+            scope, query.started_at_ms, window,
+        )
+        async with self._factory.begin() as session:
+            await clock.lock_scope(session, scope)
+            accepted = await self._observations.accept(
+                session, scope, query, first, confirmation, confirmation_started,
+            )
+            # resolver_after_accept seam (S1-3c3c): after acceptance, inside this same locked txn.
+            # No resolution is attempted until the R6 evidence gate is decided.
+        return CycleResult(accepted.decision, accepted.observation_id)
+
+
+def build_observation_sink(
+    session_factory: async_sessionmaker[AsyncSession], venue: VenueObservation,
+    *, journal_port: LedgerJournal | None = None,
+    observations: LedgerObservations | None = None,
+    now_ms: Callable[[], int] = lambda: time.time_ns() // 1_000_000,
+    grace_ms: int = 120_000,
+) -> ObservationSink:
+    """Dormant cycle; app selection is deferred to S1-3e."""
+    return _LedgerObservationCycle(
+        session_factory, venue, journal_port=journal_port or build_ledger_journal(),
+        observations=observations or build_ledger_observations(), now_ms=now_ms,
+        grace_ms=grace_ms,
+    )
