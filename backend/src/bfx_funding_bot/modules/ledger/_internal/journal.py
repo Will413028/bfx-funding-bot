@@ -33,6 +33,7 @@ from bfx_funding_bot.modules.ledger import (
     parse_basis_token,
 )
 from bfx_funding_bot.modules.ledger._internal.clock import bump_locked, lock_scope
+from bfx_funding_bot.modules.ledger._internal.operator_evidence import latest_accepted
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisRow,
     CapitalCommandClockRow,
@@ -370,6 +371,10 @@ async def record_resolution(session: AsyncSession, scope: Scope, resolution: Res
         or observation.first_digest != observation.confirmation_digest
     ):
         raise ResolutionRejected("observation is stale, incomplete, or out of scope")
+    # P3 (S1-3c4): only the scope's latest accepted observation may resolve.
+    latest = await latest_accepted(session, scope)
+    if not observation.accepted or latest is None or latest.id != observation.id:
+        raise ResolutionRejected("observation is not the latest accepted observation")
     session.add(
         ExecutionResolutionJournalRow(
             id=resolution.id,

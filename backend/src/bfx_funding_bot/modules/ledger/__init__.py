@@ -408,6 +408,55 @@ class QuarantineMemberConflict(ValueError):  # noqa: N818 - named by journal con
 class ResolutionRejected(ValueError):  # noqa: N818 - named by journal contract
     """Structural subject or observation precondition failed."""
 
+    def __init__(self, code: str, *, kind: Literal["conflict", "invalid", "not_found"] = "conflict") -> None:
+        super().__init__(code)
+        self.code = code
+        self.kind = kind
+
+
+@dataclass(frozen=True, slots=True)
+class ResolutionSubject:
+    """Storage-neutral subject identity; venue correlation belongs to adapters."""
+
+    uncertainty_id: UUID
+    symbol: str
+    attempt_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolutionEvidence:
+    evidence_ref: str | None = None
+    query_started_at_ms: int | None = None
+    query_finished_at_ms: int | None = None
+    candidate_venue_offer_ids: tuple[str, ...] = ()
+    candidate_count: int | None = None
+    unavailable_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedEvidence:
+    evidence_ref: str
+    query_started_at_ms: int
+    query_finished_at_ms: int
+    candidate_venue_offer_ids: tuple[str, ...] = ()
+    candidate_count: int | None = None
+    match_kind: str | None = None
+    venue_offer_id: str | None = None
+    venue_status: str | None = None
+
+
+class OperatorEvidence(Protocol):
+    async def resolution_context(
+        self, session: AsyncSession, scope: Scope, subject: ResolutionSubject,
+    ) -> ResolutionEvidence: ...
+
+    async def verify(
+        self, session: AsyncSession, scope: Scope, subject: ResolutionSubject,
+        evidence_ref: str, *, require_history: bool,
+    ) -> VerifiedEvidence:
+        """Re-derive the fence or raise ResolutionRejected with a bounded code."""
+        ...
+
 
 class QueryAdmissionRefused(ValueError):  # noqa: N818 - named by query contract
     """An in-flight command makes a pre-I/O fence unsafe."""
@@ -871,6 +920,7 @@ __all__ = [
     "OfferStatus",
     "OfferTerminalKind",
     "OpenUncertainty",
+    "OperatorEvidence",
     "Outcome",
     "OutcomeAlreadyRecorded",
     "OutcomeKind",
@@ -884,7 +934,9 @@ __all__ = [
     "Resolution",
     "ResolutionAction",
     "ResolutionAlreadyRecorded",
+    "ResolutionEvidence",
     "ResolutionRejected",
+    "ResolutionSubject",
     "Scope",
     "ScopeLock",
     "Trade",
@@ -894,6 +946,7 @@ __all__ = [
     "VenueHintPublisher",
     "VenueHintSink",
     "VenueObservation",
+    "VerifiedEvidence",
     "Wallet",
     "basis_token_value",
     "encode_basis_token",

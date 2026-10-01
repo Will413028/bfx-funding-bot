@@ -29,26 +29,23 @@ from bfx_funding_bot.modules.api.account_scope import (
 )
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+from bfx_funding_bot.modules.execution.operator_evidence import (
+    LegacyOperatorEvidence,
+    legacy_evidence_seq,
+)
 from bfx_funding_bot.modules.execution.uncertainty_resolution import (
-    RECONCILE_EVENT_TYPE,
     ResolutionAction,
     ResolutionIntent,
     ResolutionRejected,
     ResolutionScope,
     UncertaintyResolutionRequests,
-    fresh_reconcile,
-    load_attempt,
     load_scoped_uncertainty,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     UncertaintyResolutionRequestRow,
 )
-from bfx_funding_bot.modules.execution.unknown_matching import (
-    attempt_from_row,
-    match_attempt_to_snapshot,
-)
+from bfx_funding_bot.modules.ledger import OperatorEvidence, ResolutionSubject, Scope
 
 _MAX_LIMIT = 100
 _MAX_REASON_LENGTH = 512
@@ -321,130 +318,27 @@ def _request_response(row: UncertaintyResolutionRequestRow) -> dict[str, object]
     return _request_model(row).model_dump(by_alias=True)
 
 
-def _optional_int(value: object) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    return None
-
-
-def _unavailable_context(
-    *,
-    reconcile_event_seq: int | None = None,
-    payload: Mapping[str, Any] | None = None,
-    reason: str,
-    candidate_count: int | None = None,
-    candidate_venue_offer_ids: list[str] | None = None,
-) -> UncertaintyResolutionContext:
-    return UncertaintyResolutionContext(
-        reconcile_event_seq=reconcile_event_seq,
-        query_started_at_ms=_optional_int(
-            payload.get("query_started_at_ms") if payload is not None else None
-        ),
-        query_finished_at_ms=_optional_int(
-            payload.get("query_finished_at_ms") if payload is not None else None
-        ),
-        candidate_count=candidate_count,
-        candidate_venue_offer_ids=candidate_venue_offer_ids or [],
-        unavailable_reason=reason[:256],
-    )
-
-
 def _scope(context: ExchangeAccountContext) -> ResolutionScope:
-    return ResolutionScope(
-        account_id=context.exchange_account_id,
-        environment=context.deployment_environment,
-    )
+    return ResolutionScope(context.exchange_account_id, context.deployment_environment)
 
 
 async def _resolution_context(
-    session: AsyncSession,
-    *,
-    context: ExchangeAccountContext,
-    row: ExecutionUncertaintyRow,
+    session: AsyncSession, *, context: ExchangeAccountContext, row: ExecutionUncertaintyRow,
+    evidence: OperatorEvidence | None = None,
 ) -> UncertaintyResolutionContext:
-    """Describe only actions provable from the latest authoritative snapshot."""
-    if row.state != "open":
-        return _unavailable_context(reason="uncertainty_not_open")
-    latest = await session.scalar(
-        select(EventLogRow)
-        .where(
-            EventLogRow.exchange_account_id == context.exchange_account_id,
-            EventLogRow.deployment_environment == context.deployment_environment,
-            EventLogRow.event_type == RECONCILE_EVENT_TYPE,
-        )
-        .order_by(EventLogRow.event_seq.desc())
-        .limit(1)
+    port = evidence if evidence is not None else LegacyOperatorEvidence()
+    result = await port.resolution_context(
+        session, Scope(context.exchange_account_id, context.deployment_environment),
+        ResolutionSubject(row.uncertainty_id, row.symbol, row.attempt_id),
     )
-    if latest is None or not isinstance(latest.payload, dict):
-        return _unavailable_context(reason="fresh_reconcile_required")
-
-    latest_payload = latest.payload
-    scope = _scope(context)
-    try:
-        payload = await fresh_reconcile(
-            session,
-            scope,
-            row,
-            reconcile_event_seq=latest.event_seq,
-            require_history=row.kind == "submit_outcome_unknown",
-        )
-    except ResolutionRejected as exc:
-        return _unavailable_context(
-            reconcile_event_seq=latest.event_seq,
-            payload=latest_payload,
-            reason=exc.code,
-        )
-
-    base = {
-        "reconcile_event_seq": latest.event_seq,
-        "query_started_at_ms": _optional_int(payload.get("query_started_at_ms")),
-        "query_finished_at_ms": _optional_int(payload.get("query_finished_at_ms")),
-    }
-    if row.kind in {"unattributed_venue_offer", "unsupported_venue_exposure"}:
-        return UncertaintyResolutionContext(**base)
-    if row.kind != "submit_outcome_unknown":
-        return _unavailable_context(
-            reconcile_event_seq=latest.event_seq,
-            payload=payload,
-            reason="unsupported_uncertainty_kind",
-        )
-
-    try:
-        attempt_row = await load_attempt(session, scope, row)
-    except ResolutionRejected as exc:
-        return _unavailable_context(
-            reconcile_event_seq=latest.event_seq,
-            payload=payload,
-            reason=exc.code,
-        )
-    attempt = attempt_from_row(attempt_row)
-    if attempt is None:
-        return _unavailable_context(
-            reconcile_event_seq=latest.event_seq,
-            payload=payload,
-            reason="submission_attempt_not_resolvable",
-        )
-    match = match_attempt_to_snapshot(attempt, payload)
-    candidate_ids = sorted({offer.venue_offer_id for offer in match.candidates})
-    bounded_candidate_ids = candidate_ids[:_MAX_CANDIDATE_VENUE_OFFER_IDS]
-    if match.kind == "incomplete":
-        return _unavailable_context(
-            reconcile_event_seq=latest.event_seq,
-            payload=payload,
-            reason="incomplete_match_evidence",
-        )
-    if match.kind == "multiple_match":
-        return _unavailable_context(
-            reconcile_event_seq=latest.event_seq,
-            payload=payload,
-            reason="multiple_exact_candidates",
-            candidate_count=len(candidate_ids),
-            candidate_venue_offer_ids=bounded_candidate_ids,
-        )
     return UncertaintyResolutionContext(
-        **base,
-        candidate_count=len(candidate_ids),
-        candidate_venue_offer_ids=bounded_candidate_ids,
+        reconcile_event_seq=legacy_evidence_seq(result.evidence_ref)
+        if result.evidence_ref is not None else None,
+        query_started_at_ms=result.query_started_at_ms,
+        query_finished_at_ms=result.query_finished_at_ms,
+        candidate_count=result.candidate_count,
+        candidate_venue_offer_ids=list(result.candidate_venue_offer_ids),
+        unavailable_reason=result.unavailable_reason,
     )
 
 
@@ -492,6 +386,7 @@ async def _queue(
     body: UncertaintyResolutionRequest,
     venue_offer_id: str | None = None,
     decision: str | None = None,
+    operator_evidence: OperatorEvidence | None = None,
 ) -> dict[str, object]:
     intent = ResolutionIntent(
         uncertainty_id=uncertainty_id,
@@ -503,7 +398,7 @@ async def _queue(
         decision=decision,
     )
     try:
-        row = await UncertaintyResolutionRequests(_scope(context)).request(
+        row = await UncertaintyResolutionRequests(_scope(context), operator_evidence).request(
             session, intent, now_ms=int(time.time() * 1000)
         )
     except ResolutionRejected as exc:
@@ -511,7 +406,8 @@ async def _queue(
     return {"data": _request_response(row)}
 
 
-def build_uncertainties_router() -> APIRouter:
+def build_uncertainties_router(*, operator_evidence: OperatorEvidence | None = None) -> APIRouter:
+    port = operator_evidence if operator_evidence is not None else LegacyOperatorEvidence()
     router = APIRouter(
         prefix="/api/v1",
         tags=["uncertainties"],
@@ -548,6 +444,7 @@ def build_uncertainties_router() -> APIRouter:
                         session,
                         context=context,
                         row=row,
+                        evidence=port,
                     ),
                     latest_request=latest.get(row.uncertainty_id),
                 )
@@ -574,6 +471,7 @@ def build_uncertainties_router() -> APIRouter:
                 session,
                 context=context,
                 row=row,
+                evidence=port,
             )
             latest = await UncertaintyResolutionRequests(_scope(context)).latest_for(
                 session, [row.uncertainty_id]
@@ -625,6 +523,7 @@ def build_uncertainties_router() -> APIRouter:
             uncertainty_id=uncertainty_id,
             action="bind_to_venue",
             body=body,
+            operator_evidence=port,
             venue_offer_id=body.venue_offer_id,
         )
 
@@ -649,6 +548,7 @@ def build_uncertainties_router() -> APIRouter:
             uncertainty_id=uncertainty_id,
             action="mark_not_accepted",
             body=body,
+            operator_evidence=port,
         )
 
     @router.post(
@@ -669,6 +569,7 @@ def build_uncertainties_router() -> APIRouter:
             uncertainty_id=uncertainty_id,
             action="manual_resolution",
             body=body,
+            operator_evidence=port,
             decision=_manual_decision(evidence),
         )
 
