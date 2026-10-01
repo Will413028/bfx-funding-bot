@@ -114,7 +114,9 @@ def normalize_credit(row: CreditObservation) -> Credit:
 
 
 def normalize_credit_history(row: CreditObservation) -> CreditHistory:
-    if row.status not in {"CLOSED (used)", "CLOSED (expired)", "CLOSED (reduced)"}:
+    # Any close reason ends the credit; production history holds "CLOSED" and
+    # "CLOSED (no more position)" besides used/expired/reduced.
+    if not _variant(row.status, "CLOSED"):
         raise ValueError(f"unknown {row.source_kind} history status: {row.status}")
     return CreditHistory(_credit(row), "closed", row.mts_updated)
 

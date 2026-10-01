@@ -84,7 +84,11 @@ def test_offer_history_status_table(status: str, kind: str, prior: str) -> None:
 
 
 @pytest.mark.parametrize("source_kind", ["credit", "loan"])
-@pytest.mark.parametrize("status", ["CLOSED (used)", "CLOSED (expired)", "CLOSED (reduced)"])
+@pytest.mark.parametrize("status", [
+    "CLOSED (used)", "CLOSED (expired)", "CLOSED (reduced)",
+    # Seen in production funding_credit_history (2026-10-01 replay).
+    "CLOSED (no more position)", "CLOSED",
+])
 def test_credit_history_closed_status_table(status: str, source_kind: Any) -> None:
     row = parse_credit_observations([credit_row(status)], source_kind=source_kind)[0]
     result = normalize_credit_history(row)
@@ -377,3 +381,11 @@ async def test_only_funding_wallets_enter_the_observation() -> None:
     first, confirmation, _ = await observe(venue)
     assert {w.wallet_type for w in first.wallets} == {"funding"}
     assert {w.wallet_type for w in confirmation.wallets} == {"funding"}
+
+
+@pytest.mark.parametrize("status", ["CLOSEDISH", "ACTIVE", "EXPIRED"])
+def test_credit_history_rejects_non_closed_status(status: str) -> None:
+    row = parse_credit_observations([credit_row(status)], source_kind="credit")[0]
+    with pytest.raises(ValueError, match="history status"):
+        normalize_credit_history(row)
+

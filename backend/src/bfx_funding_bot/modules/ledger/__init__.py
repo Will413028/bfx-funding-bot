@@ -31,7 +31,7 @@ type AcceptanceDecision = Literal["accepted", "fenced", "incomplete_or_unequal"]
 #   offer terminal     "EXECUTED ..." -> executed; "CANCELED ..." -> canceled;
 #                      offer "EXPIRED" -> canceled (ended unfilled)
 #   credit/loan status "ACTIVE" -> active
-#   credit terminal    "CLOSED (used|expired|reduced)" -> closed
+#   credit terminal    "CLOSED" and every "CLOSED (<reason>)" -> closed
 #   history row status "was: PARTIALLY FILLED" -> partially_filled, otherwise active;
 #                      occurred_at_ms = mts_update
 # Unknown status: active stream raises (no observation); history stream is
