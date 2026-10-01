@@ -402,6 +402,19 @@ class LedgerCapitalReader(Protocol):
     ) -> LedgerCapitalRead: ...
 
 
+class VenueObservation(Protocol):
+    """Read venue evidence after the caller has committed ``begin_query``.
+
+    Returns exactly the evidence arguments to ``LedgerObservations.accept``:
+    first read, active-only confirmation, and confirmation start time. No DB
+    session or acceptance decision crosses this I/O boundary.
+    """
+
+    async def observe(
+        self, scope: Scope, query_started_at_ms: int, window: ObservationWindow
+    ) -> tuple[Observation, Observation, int]: ...
+
+
 class LedgerObservations(Protocol):
     """Commit a query fence, then accept its two reads (an accepted one writes the basis).
 
@@ -796,6 +809,7 @@ __all__ = [
     "Trade",
     "UncertaintyReader",
     "UncertaintyRecord",
+    "VenueObservation",
     "Wallet",
     "basis_token_value",
     "encode_basis_token",
