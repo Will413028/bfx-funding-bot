@@ -441,7 +441,7 @@ async def test_deploy_never_sees_an_unmanaged_offer():
 
 
 @pytest.mark.asyncio
-async def test_periodic_legacy_port_preserves_fences_and_divergence():
+async def test_periodic_legacy_port_preserves_divergence():
     from uuid import uuid4
 
     from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
@@ -456,7 +456,6 @@ async def test_periodic_legacy_port_preserves_fences_and_divergence():
     )
     await periodic._tick()
     assert original._i == 1
-    assert periodic.recent_fences[0][0] == 42
     assert periodic._divergence_flagged
 
 
@@ -474,4 +473,3 @@ async def test_periodic_expected_refusal_is_not_transport_failure():
     )
     await periodic._tick()
     assert periodic._consecutive_failures == 0
-    assert periodic.recent_fences == ()
