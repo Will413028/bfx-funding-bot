@@ -13,19 +13,19 @@ from sqlalchemy import func, select
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.auth_ws import FocEvent
-from bfx_funding_bot.external.bitfinex.fill_tracker import RestPollingFillTracker
-from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, PositionStateRow
 from bfx_funding_bot.modules.execution.events import ReservationClaimed, ReservationIntent
+from bfx_funding_bot.modules.execution.fill_tracker import RestPollingFillTracker
 from bfx_funding_bot.modules.execution.registry_offers import (
     ClaimRecord,
     OfferRegistry,
     RegistryState,
 )
+from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.strategy import StrategyName
 
 pytestmark = pytest.mark.integration

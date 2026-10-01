@@ -2,7 +2,6 @@ from decimal import Decimal
 from uuid import uuid4
 
 from bfx_funding_bot.external.bitfinex.auth_ws import FccEvent, FcnEvent, FcuEvent, FocEvent
-from bfx_funding_bot.external.bitfinex.ws_dispatcher import translate_bfx_event
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     CreditClosed,
@@ -13,6 +12,7 @@ from bfx_funding_bot.modules.execution.registry_offers import (
     ClaimRecord,
     RegistryState,
 )
+from bfx_funding_bot.modules.execution.ws_dispatcher import translate_bfx_event
 
 
 def _claim_record(voi: str = "v1", state: RegistryState = RegistryState.CLAIMED) -> ClaimRecord:

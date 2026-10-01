@@ -42,11 +42,16 @@ from bfx_funding_bot.modules.execution.event_store.persister import (
     EventPersister,
     NoopEventPersister,
 )
-from bfx_funding_bot.modules.execution.events import ReservationReleased
+from bfx_funding_bot.modules.execution.legacy_venue_hints import (
+    InvariantError as InvariantError,
+)
+from bfx_funding_bot.modules.execution.legacy_venue_hints import (
+    LegacyVenueHintSink,
+)
 from bfx_funding_bot.modules.execution.registry_offers import (
     OfferRegistry,
-    RegistryState,
 )
+from bfx_funding_bot.modules.ledger import VenueHintSink
 from bfx_funding_bot.modules.strategy import StrategyName
 
 log = logging.getLogger(__name__)
@@ -58,11 +63,6 @@ _CREDITS_ENDPOINT = "/v2/auth/r/funding/credits"
 
 class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
-
-
-class InvariantError(RuntimeError):
-    """fill_tracker observed a paper_ prefixed venue_offer_id — env config
-    mismatch (CC4 defense-in-depth; registry should have caught this at startup)."""
 
 
 class RestPollingFillTracker:
@@ -80,18 +80,20 @@ class RestPollingFillTracker:
         registry: OfferRegistry,
         poll_interval_s: float = 30.0,
         persister: EventPersister | None = None,
+        venue_hint_sink: VenueHintSink | None = None,
     ) -> None:
         self.http = http
         self._events = event_sink
         self.probe = probe
-        self._bus = bus
         self.phase = phase
         self.strategy = strategy
         self.cell = cell
         self.account_id = account_id
-        self._registry = registry
         self.poll_interval_s = poll_interval_s
-        self._persister = persister or NoopEventPersister()
+        self._venue_hints = venue_hint_sink if venue_hint_sink is not None else LegacyVenueHintSink(
+            registry=registry, bus=bus, persister=persister or NoopEventPersister(),
+            account_id=account_id,
+        )
         # venue_offer_id (str) → {cid: int, status: str, size: float}
         self._last_state: dict[str, dict[str, Any]] = {}
         self._consecutive_failures = 0
@@ -173,7 +175,6 @@ class RestPollingFillTracker:
         - If registry state == CLAIMED: emit with registry's correlation_id (G3 fix).
         """
         failed: set[str] = set()
-        snapshot = self._registry.snapshot()
         for venue_offer_id, _prev in self._last_state.items():
             if venue_offer_id in current:
                 continue
@@ -184,49 +185,10 @@ class RestPollingFillTracker:
                     f"{venue_offer_id} — registry CC4 should have prevented this; "
                     "check BFX_EXECUTOR / BFX_FILL_TRACKER_ENABLED wiring."
                 )
-            claim = snapshot.get(venue_offer_id)
-            if claim is None:
-                log.warning(
-                    "fill_tracker_venue_gone_unknown voi=%s"
-                    " — not in registry (boot-before-claim or already cleaned)",
-                    venue_offer_id,
-                )
-                continue
-            if claim.state == RegistryState.RELEASED:
-                log.debug(
-                    "fill_tracker_dedup voi=%s — registry RELEASED",
-                    venue_offer_id,
-                )
-                continue
-            if claim.reservation_ref is None:
-                raise InvariantError(
-                    f"fill_tracker cannot release uncorrelated legacy claim "
-                    f"voi={venue_offer_id}"
-                )
-            # CLAIMED: emit with registry-sourced fields (G3 deterministic correlation_id)
-            release = ReservationReleased(
-                cid=claim.cid,
-                venue_offer_id=venue_offer_id,
-                size_usdt=claim.size_usdt,
-                reason="missing_from_venue",
-                signal_correlation_id=claim.signal_correlation_id,
-                account_id=self.account_id,
-                is_simulated=False,
-                occurred_at_ms=int(time.time() * 1000),
-                symbol=claim.symbol,
-                reservation_ref=claim.reservation_ref,
-            )
-            try:
-                await self._persister.persist(release)
-            except Exception as e:
-                log.critical(
-                    "fill_tracker_persist_failed err=%r voi=%s — SoT write lost; "
-                    "retrying next poll (boot recovery is backstop)",
-                    e, venue_offer_id,
-                )
+            if not await self._venue_hints.offer_gone(
+                venue_offer_id, occurred_at_ms=int(time.time() * 1000),
+            ):
                 failed.add(venue_offer_id)
-                continue
-            await self._bus.publish(release)
         return failed
 
     async def _emit_degraded(self, reason: str) -> None:

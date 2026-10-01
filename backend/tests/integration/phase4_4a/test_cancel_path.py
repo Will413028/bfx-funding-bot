@@ -16,11 +16,11 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_ws import FocEvent
-from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.events import (
     CancelRequested,
     ReservationClaimed,
 )
+from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 
 from .conftest import ScriptedWSClient, make_reservation_ref
 

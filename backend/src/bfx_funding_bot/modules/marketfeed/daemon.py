@@ -33,9 +33,6 @@ from bfx_funding_bot.core.health import HealthProbe, assess_auth_ws_health
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
 from bfx_funding_bot.core.writer_lock import WriterLock
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
-from bfx_funding_bot.external.bitfinex.fill_tracker import (
-    RestPollingFillTracker,
-)
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.external.bitfinex.ws import (
     BitfinexWSClient,
@@ -43,7 +40,6 @@ from bfx_funding_bot.external.bitfinex.ws import (
     ChannelSpec,
     compute_backoff_secs,
 )
-from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.accounts.config_service import load_account_config_draft
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     AccountNotFound,
@@ -65,6 +61,9 @@ from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
+from bfx_funding_bot.modules.execution.fill_tracker import (
+    RestPollingFillTracker,
+)
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
@@ -87,6 +86,7 @@ from bfx_funding_bot.modules.execution.trading_control import TradingControlWork
 from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     UncertaintyResolutionWorker,
 )
+from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.live_validation.credit_history import CreditHistorySync
 from bfx_funding_bot.modules.live_validation.interest_ledger import (
     InterestLedgerSync,

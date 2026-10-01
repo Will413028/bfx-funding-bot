@@ -190,6 +190,70 @@ class Scope:
 
 
 @dataclass(frozen=True, slots=True)
+class OfferCloseHint:
+    """Untrusted venue facts, never reservation authority or CID correlation."""
+
+    venue_offer_id: str
+    symbol: str
+    kind: str  # original status text; legacy keeps its substring precedence
+    rate: float
+    occurred_at_ms: int
+    venue_seq: int | None
+    received_at_ms: int
+    cancel_requested_at_ms: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CreditCloseHint:
+    credit_id: int
+    symbol: str
+    amount: Decimal
+    rate: float
+    period_days: int
+    mts_create: int
+    occurred_at_ms: int
+    venue_seq: int | None
+    mts_opening: int | None = None
+    mts_last_payout: int | None = None
+
+
+class VenueHintSink(Protocol):
+    """Scope is bound at construction, like the legacy registry/account.
+
+    Legacy persists authority before publishing. Ledger requests reconciliation
+    and publishes only non-authoritative notifications, without any DB writes.
+    offer_gone returns False only when the caller should retry next poll.
+    """
+
+    async def offer_closed(self, hint: OfferCloseHint) -> None: ...
+
+    async def credit_closed(self, hint: CreditCloseHint) -> None: ...
+
+    async def offer_gone(self, venue_offer_id: str, *, occurred_at_ms: int) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class VenueHintNotification:
+    """Non-authoritative wake-up evidence; never consumed as capital truth.
+
+    Credit-close frames have no offer linkage: credit_id is their only venue
+    key. No new provenance read is introduced here, so attempt_id is omitted.
+    """
+
+    scope: Scope
+    kind: Literal["offer_closed", "credit_closed", "offer_gone"]
+    occurred_at_ms: int
+    venue_seq: int | None = None
+    venue_offer_id: str | None = None
+    credit_id: int | None = None
+    status: str | None = None
+
+
+class VenueHintPublisher(Protocol):
+    async def publish(self, event: VenueHintNotification) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
 class QueryHandle:
     query_id: UUID
     query_revision: int
@@ -765,6 +829,7 @@ __all__ = [
     "CommandRefused",
     "Coverage",
     "Credit",
+    "CreditCloseHint",
     "CreditHistory",
     "CreditKind",
     "CreditStatus",
@@ -786,6 +851,7 @@ __all__ = [
     "Observation",
     "ObservationWindow",
     "Offer",
+    "OfferCloseHint",
     "OfferHistory",
     "OfferStatus",
     "OfferTerminalKind",
@@ -809,6 +875,9 @@ __all__ = [
     "Trade",
     "UncertaintyReader",
     "UncertaintyRecord",
+    "VenueHintNotification",
+    "VenueHintPublisher",
+    "VenueHintSink",
     "VenueObservation",
     "Wallet",
     "basis_token_value",

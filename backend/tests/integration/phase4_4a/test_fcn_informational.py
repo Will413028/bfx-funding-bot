@@ -13,8 +13,8 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_ws import FcnEvent
-from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.events import OrderFilled, ReservationClaimed
+from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 
 from .conftest import ScriptedWSClient, make_reservation_ref
 
