@@ -516,6 +516,45 @@ def test_uncertainty_read_fails_closed_when_latest_snapshot_is_not_authoritative
     }
 
 
+@pytest.mark.parametrize("applied", [False, True])
+def test_uncertainty_and_request_responses_omit_event_seq_fields(
+    uncertainty_app, applied: bool,
+) -> None:
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+    queued = _mark_not_accepted(client, reconcile_seq)
+    assert queued.status_code == 202, queued.text
+    request_id = queued.json()["data"]["requestId"]
+    if applied:
+        assert _apply_queued(factory) is True
+
+    base = f"/api/v1/exchange-accounts/{ACCOUNT_ID}"
+    detail = client.get(f"{base}/uncertainties/{client.uncertainty_id}")  # type: ignore[attr-defined]
+    listed = client.get(f"{base}/uncertainties", params={"state": "resolved" if applied else "open"})
+    outcome = client.get(f"{base}/uncertainty-resolution-requests/{request_id}")
+    assert detail.status_code == listed.status_code == outcome.status_code == 200
+    detail_data = detail.json()["data"]
+    assert detail_data["state"] == ("resolved" if applied else "open")
+    assert len(listed.json()["data"]) == 1
+    request_data = outcome.json()["data"]
+    assert request_data["state"] == ("applied" if applied else "requested")
+    assert request_data["evidenceRef"] == str(reconcile_seq)
+    forbidden = {
+        "openedEventSeq", "reconcileEventSeq", "resolvedEventSeq", "lastEventSeq",
+        "opened_event_seq", "reconcile_event_seq", "resolved_event_seq", "last_event_seq",
+    }
+    for data in [queued.json()["data"], request_data, detail_data, *listed.json()["data"]]:
+        assert forbidden.isdisjoint(data)
+        if "resolutionContext" in data:
+            assert forbidden.isdisjoint(data["resolutionContext"])
+            assert data["resolutionContext"]["evidenceRef"] == (
+                None if applied else str(reconcile_seq)
+            )
+        if "resolutionRequest" in data:
+            assert forbidden.isdisjoint(data["resolutionRequest"])
+            assert data["resolutionRequest"] == request_data
+
+
 def test_mark_not_accepted_appends_resolution_event(uncertainty_app) -> None:
     client, factory = uncertainty_app
     reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
@@ -545,7 +584,7 @@ def test_mark_not_accepted_appends_resolution_event(uncertainty_app) -> None:
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}"  # type: ignore[attr-defined]
     )
     assert resolved.json()["data"]["state"] == "resolved"
-    assert resolved.json()["data"]["resolvedEventSeq"] == outcome.json()["data"]["resolvedEventSeq"]
+    assert resolved.json()["data"]["resolutionRequest"] == outcome.json()["data"]
     stored = asyncio.run(_latest_resolution_payload(factory))
     assert stored["resolution_evidence"] == {
         "reconcile_event_seq": reconcile_seq,
@@ -1016,7 +1055,7 @@ def test_worker_records_why_an_accepted_request_no_longer_applies(
     outcome = _request_outcome(client, queued.json()["data"]["requestId"])
     assert outcome["state"] == "rejected"
     assert outcome["outcomeReason"] == "stale_reconcile_fence"
-    assert outcome["resolvedEventSeq"] is None
+    assert "resolvedEventSeq" not in outcome
     assert "UNCERTAINTY_MARKED_NOT_ACCEPTED" not in asyncio.run(_event_types(factory))
     detail = client.get(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}"  # type: ignore[attr-defined]
@@ -1158,7 +1197,7 @@ def test_a_request_whose_outcome_cannot_be_written_does_not_block_the_queue(
     first = _request_outcome(client, poison)
     assert first["state"] == "failed"
     assert str(first["outcomeReason"]).startswith("outcome_write_failed:")
-    assert first["resolvedEventSeq"] is None
+    assert "resolvedEventSeq" not in first
 
     assert _apply_queued(factory) is True
     assert _request_outcome(client, str(later))["state"] == "rejected"
@@ -1236,7 +1275,7 @@ def test_revoked_operator_request_is_rejected_without_an_event(uncertainty_app) 
     outcome = _request_outcome(client, queued.json()["data"]["requestId"])
     assert outcome["state"] == "rejected"
     assert outcome["outcomeReason"] == "operator_not_authorized"
-    assert outcome["resolvedEventSeq"] is None
+    assert "resolvedEventSeq" not in outcome
     assert "UNCERTAINTY_MARKED_NOT_ACCEPTED" not in asyncio.run(_event_types(factory))
     detail = client.get(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}"  # type: ignore[attr-defined]

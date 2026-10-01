@@ -151,7 +151,6 @@ class PositionResponse(BaseModel):
     last_reconciled_at: int | None = Field(
         default=None, serialization_alias="lastReconciledAtMs"
     )
-    last_event_seq: int = Field(serialization_alias="lastEventSeq")
 
 
 class OfferClaimResponse(BaseModel):

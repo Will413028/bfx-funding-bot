@@ -47,9 +47,6 @@ const BLOCKED: Uncertainty = {
   symbol: "fUST",
   intendedAmount: "100",
   state: "open",
-  openedEventSeq: 7,
-  reconcileEventSeq: null,
-  resolvedEventSeq: null,
   evidenceSummary: {
     outcomeReason: "connection_reset",
     observedAtMs: 1_790_000_000_000,
@@ -74,7 +71,6 @@ function request(
     evidenceRef: "12",
     createdAtMs: 1,
     processedAtMs: state === "requested" ? null : 2,
-    resolvedEventSeq: state === "applied" ? 13 : null,
     outcomeReason,
   };
 }

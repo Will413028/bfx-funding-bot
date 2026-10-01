@@ -296,7 +296,6 @@ export interface Position {
   lastUpdatedMs: number;
   /** Epoch ms of the last reconcile checkpoint; null if never reconciled. */
   lastReconciledAtMs: number | null;
-  lastEventSeq: number;
 }
 
 /** GET /offers — cid-keyed offer claim (default: pending/claimed only). */
@@ -384,9 +383,6 @@ export interface Uncertainty {
   /** Decimal string (venue-native intended amount). */
   intendedAmount: string;
   state: UncertaintyState;
-  openedEventSeq: number;
-  reconcileEventSeq: number | null;
-  resolvedEventSeq: number | null;
   evidenceSummary: UncertaintyEvidenceSummary;
   blockedScope: UncertaintyBlockedScope;
   resolutionContext: UncertaintyResolutionContext | null;
@@ -417,7 +413,6 @@ export interface UncertaintyResolutionRequest {
   evidenceRef: string;
   createdAtMs: number;
   processedAtMs: number | null;
-  resolvedEventSeq: number | null;
   /** Bounded code, e.g. `stale_reconcile_fence`; set when rejected or failed. */
   outcomeReason: string | null;
 }
