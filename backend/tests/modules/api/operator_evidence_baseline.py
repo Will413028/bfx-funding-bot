@@ -10,7 +10,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.api.account_scope import ExchangeAccountContext
-from bfx_funding_bot.modules.api.uncertainties import _MAX_CANDIDATE_VENUE_OFFER_IDS
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, PositionStateRow
 from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     ResolutionRejected,
