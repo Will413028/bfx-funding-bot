@@ -8,7 +8,10 @@ pre-commit:
     frontend-check:
       root: "frontend/"
       glob: "*.{js,ts,jsx,tsx,json,css}"
-      run: npx @biomejs/biome check --write --staged {staged_files}
+      # lefthook passes only staged files matching the glob, relative to root.
+      # No biome --staged: inside a linked worktree git exports GIT_DIR to hooks
+      # and biome then resolves repo-relative paths against frontend/.
+      run: npx @biomejs/biome check --write {staged_files}
 
 commit-msg:
   commands:
