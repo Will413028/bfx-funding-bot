@@ -22,6 +22,18 @@ from bfx_funding_bot.external.bitfinex.credentials import Credentials
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.external.bitfinex.funding_offer_row import parse_funding_offer_row
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
+from bfx_funding_bot.external.bitfinex.observations import (
+    CoveredHistory,
+    CreditObservation,
+    ObservationRequestBudget,
+    ObservationRequestCapError,
+    OfferObservation,
+    TradeObservation,
+    WalletObservation,
+    parse_credit_observations,
+    parse_offer_observations,
+    parse_wallet_observations,
+)
 from bfx_funding_bot.external.bitfinex.submit_wire import response_digest, venue_error
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 
@@ -426,6 +438,167 @@ class BitfinexAuthREST:
         # Share the daemon's one gate for the key; a private gate only orders
         # this client's own requests.
         self._auth_gate = auth_gate or AuthRequestGate()
+
+    async def _fetch_observation_rows(
+        self, *, ctx: AccountContext, path: str,
+        parse: Callable[[Any], list[_Row]], budget: ObservationRequestBudget | None,
+    ) -> list[_Row]:
+        if budget is not None:
+            budget.consume()
+        return parse(await self._post_signed(ctx=ctx, path=path, body={}))
+
+    async def fetch_wallet_observations(
+        self, *, ctx: AccountContext, budget: ObservationRequestBudget | None = None,
+    ) -> list[WalletObservation]:
+        """All wallet types, exact balances, and the full venue rows."""
+        return await self._fetch_observation_rows(
+            ctx=ctx, path=_WALLETS_PATH, parse=parse_wallet_observations, budget=budget,
+        )
+
+    async def fetch_active_offer_observations(
+        self, *, ctx: AccountContext, symbol: str | None = None,
+        budget: ObservationRequestBudget | None = None,
+    ) -> list[OfferObservation]:
+        path = _FUNDING_OFFERS_PATH if symbol is None else f"{_FUNDING_OFFERS_PATH}/{symbol}"
+        return await self._fetch_observation_rows(
+            ctx=ctx, path=path, parse=parse_offer_observations, budget=budget,
+        )
+
+    async def fetch_active_credit_observations(
+        self, *, ctx: AccountContext, symbol: str | None = None,
+        budget: ObservationRequestBudget | None = None,
+    ) -> list[CreditObservation]:
+        path = _FUNDING_CREDITS_PATH if symbol is None else f"{_FUNDING_CREDITS_PATH}/{symbol}"
+        return await self._fetch_observation_rows(
+            ctx=ctx, path=path,
+            parse=lambda raw: parse_credit_observations(raw, source_kind="credit"), budget=budget,
+        )
+
+    async def fetch_active_loan_observations(
+        self, *, ctx: AccountContext, symbol: str | None = None,
+        budget: ObservationRequestBudget | None = None,
+    ) -> list[CreditObservation]:
+        path = _FUNDING_LOANS_PATH if symbol is None else f"{_FUNDING_LOANS_PATH}/{symbol}"
+        return await self._fetch_observation_rows(
+            ctx=ctx, path=path,
+            parse=lambda raw: parse_credit_observations(raw, source_kind="loan"), budget=budget,
+        )
+
+    async def fetch_offer_history_observations(
+        self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
+        limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
+    ) -> CoveredHistory[OfferObservation]:
+        """Per-symbol history by MTS_CREATE; retain MTS_UPDATE for normalization."""
+        return await self._page_covered_history(
+            ctx=ctx, endpoint=_FUNDING_OFFERS_PATH, symbol=symbol,
+            parse=parse_offer_observations, mts=lambda row: row.mts_created,
+            key=lambda row: row.venue_offer_id, start_ms=start_ms, end_ms=end_ms,
+            limit=limit, max_pages=max_pages, budget=budget,
+        )
+
+    async def fetch_credit_history_observations(
+        self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
+        limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
+    ) -> CoveredHistory[CreditObservation]:
+        """Per-symbol ended credits, paged and filtered by MTS_UPDATE."""
+        return await self._page_covered_history(
+            ctx=ctx, endpoint=_FUNDING_CREDITS_PATH, symbol=symbol,
+            parse=lambda raw: parse_credit_observations(raw, source_kind="credit"),
+            mts=lambda row: row.mts_updated, key=lambda row: row.credit_id,
+            start_ms=start_ms, end_ms=end_ms, limit=limit, max_pages=max_pages, budget=budget,
+        )
+
+    async def fetch_loan_history_observations(
+        self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
+        limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
+    ) -> CoveredHistory[CreditObservation]:
+        """Per-symbol ended loans, with unprefixed ids and explicit source_kind."""
+        return await self._page_covered_history(
+            ctx=ctx, endpoint=_FUNDING_LOANS_PATH, symbol=symbol,
+            parse=lambda raw: parse_credit_observations(raw, source_kind="loan"),
+            mts=lambda row: row.mts_updated, key=lambda row: row.credit_id,
+            start_ms=start_ms, end_ms=end_ms, limit=limit, max_pages=max_pages, budget=budget,
+        )
+
+    async def fetch_trade_observations(
+        self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
+        limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
+    ) -> CoveredHistory[TradeObservation]:
+        """Per-symbol funding trades, paged and filtered by MTS_CREATE."""
+        def parse(raw: Any) -> list[TradeObservation]:
+            return [TradeObservation(
+                trade_id=row.trade_id, symbol=row.symbol, mts_create=row.mts_create,
+                offer_id=row.offer_id, amount=Decimal(str(raw_row[4])).copy_abs(), rate=row.rate,
+                period_days=row.period_days, maker=row.maker, raw=tuple(raw_row),
+            ) for row, raw_row in zip(parse_funding_trades(raw), raw, strict=True)]
+
+        return await self._page_covered_history(
+            ctx=ctx, endpoint=_FUNDING_TRADES_PATH, symbol=symbol,
+            parse=parse, mts=lambda row: row.mts_create, key=lambda row: row.trade_id,
+            start_ms=start_ms, end_ms=end_ms, limit=limit, max_pages=max_pages, budget=budget,
+        )
+
+    async def _page_covered_history(
+        self, *, ctx: AccountContext, endpoint: str, symbol: str | None,
+        parse: Callable[[Any], list[_Row]], mts: Callable[[_Row], int],
+        key: Callable[[_Row], str | int], start_ms: int, end_ms: int,
+        limit: int, max_pages: int, budget: ObservationRequestBudget | None = None,
+    ) -> CoveredHistory[_Row]:
+        """Walk newest to oldest, keeping the oldest millisecond inclusive.
+
+        Only a short/empty response to a request still inside the window proves
+        exhaustion. Full boundary pages, caps and stalled nonempty pages fail closed.
+        New ids at the same millisecond are progress. Count the wire page size
+        before range filtering or deduplication, so neither can manufacture a
+        short page.
+        """
+        if start_ms < 0 or end_ms < start_ms:
+            raise ValueError("invalid covered history window")
+        if not 1 <= limit <= 500:
+            raise ValueError("covered history limit must be between 1 and 500")
+        if max_pages < 1:
+            raise ValueError("covered history max_pages must be positive")
+        path = f"{endpoint}/hist" if symbol is None else f"{endpoint}/{symbol}/hist"
+        cursor_end = end_ms
+        pages = 0
+        complete = False
+        by_id: dict[str | int, _Row] = {}
+        for _ in range(max_pages):
+            if budget is not None:
+                try:
+                    budget.consume()
+                except ObservationRequestCapError:
+                    break
+            page = parse(await self._post_signed(
+                ctx=ctx, path=path,
+                body={"start": start_ms, "end": cursor_end, "limit": limit, "sort": -1},
+            ))
+            pages += 1
+            if not page:
+                complete = True
+                break
+            previous_count = len(by_id)
+            for row in page:
+                by_id.setdefault(key(row), row)
+            # A short page proves exhaustion even if it only re-reads the
+            # inclusive boundary millisecond; only a full page must make progress.
+            if len(page) < limit:
+                complete = True
+                break
+            if len(by_id) == previous_count:
+                break
+            oldest = min(mts(row) for row in page)
+            if oldest <= start_ms:
+                break
+            cursor_end = min(cursor_end, oldest)
+        return CoveredHistory(
+            rows=tuple(sorted(
+                (row for row in by_id.values() if start_ms <= mts(row) <= end_ms),
+                key=lambda row: (mts(row), key(row)),
+            )),
+            complete=complete, pages=pages,
+            requested_start_ms=start_ms, requested_end_ms=end_ms,
+        )
 
     async def _signed_post(
         self, *, ctx: AccountContext, path: str, body_bytes: bytes,
