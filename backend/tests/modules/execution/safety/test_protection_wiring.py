@@ -138,11 +138,12 @@ async def test_a_refused_boot_observation_makes_its_trips_durable_before_exit() 
     protection.bind(_Trading())
 
     class _Recovery:
-        async def run(self):  # type: ignore[no-untyped-def]
+        async def run(self, scope):  # type: ignore[no-untyped-def]
             protection.trip("identity_conflict", "conflict at boot")
             raise CapitalBlockedError("offer_provenance_conflict")
 
-    fake = SimpleNamespace(boot_recovery=_Recovery(), protection=protection)
+    fake = SimpleNamespace(boot_recovery=_Recovery(), protection=protection,
+                           observation_scope=object())
     with pytest.raises(CapitalBlockedError):
         await Daemon._run_boot_recovery(fake)  # type: ignore[arg-type]
     assert engaged == ["auto:identity_conflict"]

@@ -590,3 +590,19 @@ def test_two_instances_are_isolated() -> None:
     assert b.registry.get_sample_value(
         "bfx_operational_events_total", {"event_type": "signal", "level": "info"},
     ) is None
+
+
+@pytest.mark.asyncio
+async def test_cycle_wrapper_passes_scope_and_result_identity():
+    from unittest.mock import AsyncMock
+
+    from bfx_funding_bot.modules.ledger import CycleResult, Scope
+
+    scope = Scope(uuid4(), "ci")
+    result = CycleResult("fenced")
+    sink = AsyncMock()
+    sink.run.return_value = result
+    metrics = DaemonMetrics()
+    wrapper = TimedReconcileRecovery(sink, metrics=metrics)
+    assert await wrapper.run(scope) is result
+    sink.run.assert_awaited_once_with(scope)

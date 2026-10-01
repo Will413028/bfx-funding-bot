@@ -14,9 +14,11 @@ import pytest
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery, ReconcileResult
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
+from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
+from bfx_funding_bot.modules.ledger import Scope
 
 # Reuse the stub session/store/auth-rest shapes from the WS-dead integration test.
 from tests.integration.test_reconcile_converges_without_ws import (
@@ -92,8 +94,9 @@ async def test_resync_request_reconciles_off_interval(
     recovery = _CountingRecovery(inner)
 
     # Huge interval: only an off-interval resync can produce a second reconcile.
+    scope = Scope(uuid4(), _ENV)
     pr = PeriodicReconcile(
-        recovery=recovery, probe=_FakeProbe(), interval_s=3600.0,
+        recovery=LegacyObservationSink(recovery, scope), scope=scope, probe=_FakeProbe(), interval_s=3600.0,
         max_consecutive_failures=3, min_resync_interval_s=0.0,
     )
     stop = asyncio.Event()

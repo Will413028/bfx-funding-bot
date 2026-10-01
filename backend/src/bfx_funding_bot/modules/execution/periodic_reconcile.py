@@ -24,15 +24,14 @@ from typing import Protocol
 
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
-from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
+from bfx_funding_bot.modules.execution.observation_sink import (
+    LegacyCycleResult,
+)
+from bfx_funding_bot.modules.ledger import ObservationSink, Scope
 
 log = logging.getLogger(__name__)
 
 _DRIFT_EPSILON = Decimal("0.01")
-
-
-class _Recovery(Protocol):
-    async def run(self) -> ReconcileResult: ...
 
 
 class _Probe(Protocol):
@@ -52,7 +51,8 @@ class PeriodicReconcile:
     def __init__(
         self,
         *,
-        recovery: _Recovery,
+        recovery: ObservationSink,
+        scope: Scope,
         probe: _Probe,
         interval_s: float,
         max_consecutive_failures: int = 3,
@@ -61,6 +61,7 @@ class PeriodicReconcile:
         deployment: _Deployment | None = None,
     ) -> None:
         self._recovery = recovery
+        self._scope = scope
         self._probe = probe
         self._interval_s = interval_s
         self._max_failures = max_consecutive_failures
@@ -130,7 +131,11 @@ class PeriodicReconcile:
 
     async def _tick(self) -> None:
         try:
-            result = await self._recovery.run()
+            cycle = await self._recovery.run(self._scope)
+            if cycle.decision != "accepted":
+                log.info("periodic_reconcile_refused decision=%s", cycle.decision)
+                return
+            result = cycle.legacy if isinstance(cycle, LegacyCycleResult) else None
         except Exception as exc:  # never let the backbone crash the daemon
             self._consecutive_failures += 1
             log.warning(
@@ -146,7 +151,7 @@ class PeriodicReconcile:
             return
 
         self._consecutive_failures = 0
-        if result.snapshot_event_seq is not None:
+        if result is not None and result.snapshot_event_seq is not None:
             self._recent_fences = (
                 *self._recent_fences[-1:],
                 (result.snapshot_event_seq, int(time.time() * 1000)),
@@ -157,6 +162,8 @@ class PeriodicReconcile:
                 HealthTarget.EXECUTOR, HealthStatus.HEALTHY,
                 error_message="venue reconcile recovered",
             )
+        if result is None:
+            return
         drifted = (
             result.realized_drift_usdt > _DRIFT_EPSILON
             or result.reserved_drift_usdt > _DRIFT_EPSILON

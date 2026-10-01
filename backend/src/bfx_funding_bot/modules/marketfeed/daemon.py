@@ -56,7 +56,6 @@ from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
 from bfx_funding_bot.modules.candles.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.audit import AuditContext
-from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate
@@ -87,6 +86,7 @@ from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     UncertaintyResolutionWorker,
 )
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
+from bfx_funding_bot.modules.ledger import ObservationSink, Scope
 from bfx_funding_bot.modules.live_validation.credit_history import CreditHistorySync
 from bfx_funding_bot.modules.live_validation.interest_ledger import (
     InterestLedgerSync,
@@ -297,7 +297,8 @@ class Daemon:
     offer_registry: OfferRegistry | None = None
     auth_ws: BitfinexAuthWSClient | None = None
     ws_dispatcher: BitfinexLiveWSDispatcher | None = None
-    boot_recovery: BootRecovery | None = None
+    boot_recovery: ObservationSink | None = None
+    observation_scope: Scope | None = None
     periodic_reconcile: PeriodicReconcile | None = None
     book_snapshot_writer: BookSnapshotWriter | None = None
     interest_ledger_sync: InterestLedgerSync | None = None
@@ -334,7 +335,11 @@ class Daemon:
         if self.boot_recovery is None:
             return
         try:
-            await self.boot_recovery.run()
+            if self.observation_scope is None:
+                raise ValueError("boot observation scope is required")
+            # Refusal is signalled by raising (legacy). How a dormant ledger
+            # cycle's non-accepted decision gates boot is decided in S1-3e.
+            await self.boot_recovery.run(self.observation_scope)
         except BaseException:
             # A protection tripped by the refused boot observation must be
             # durable before the daemon exits, or the next boot starts without

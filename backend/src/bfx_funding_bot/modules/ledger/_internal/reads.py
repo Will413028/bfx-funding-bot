@@ -173,6 +173,14 @@ async def observation_window(session: AsyncSession, scope: Scope) -> Observation
             )
             .where(LedgerObservationRow.id == candidates.basis.observation_id)
         )
+    # R6 attempts are classified quarantined, so are no longer candidates.
+    # Read only source attempts of the bounded unresolved-quarantine set.
+    sources = await attempts_by_id(session, [
+        row.source_attempt_id
+        for row in await unresolved_quarantines(session, scope, candidates.basis)
+        if row.source_attempt_id is not None
+    ])
+    attempts = (*attempts, *sources)
     return _window_from_anchors(
         min((attempt.started_at_ms for attempt in attempts), default=None), previous_start
     )

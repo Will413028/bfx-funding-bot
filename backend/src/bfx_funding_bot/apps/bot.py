@@ -96,6 +96,7 @@ from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
     ReservationEmittingMiddleware,
 )
+from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
 from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
@@ -143,7 +144,7 @@ from bfx_funding_bot.modules.execution.uncertainty_resolution import (
 )
 from bfx_funding_bot.modules.execution.venue_normalization_shadow import VenueNormalizationShadow
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
-from bfx_funding_bot.modules.ledger import Scope
+from bfx_funding_bot.modules.ledger import ObservationSink, Scope
 from bfx_funding_bot.modules.live_validation.credit_history import CreditHistorySync
 from bfx_funding_bot.modules.live_validation.interest_ledger import (
     InterestLedgerSync,
@@ -575,7 +576,7 @@ async def build_daemon(
     # 3a-recovery: live-only venue reconciliation. Paper/shadow have no real
     # venue offers (BFX_FILL_TRACKER/WS gated off) -> boot_recovery stays None
     # and Daemon.run() skips it.
-    boot_recovery: BootRecovery | None = None
+    boot_recovery: ObservationSink | None = None
     periodic_reconcile: PeriodicReconcile | None = None
     book_snapshot_writer: BookSnapshotWriter | None = None
     interest_ledger_sync: InterestLedgerSync | None = None
@@ -601,7 +602,8 @@ async def build_daemon(
         )
         # One alert per foreign offer across the boot and the runtime reconcile.
         foreign_exposure = ForeignExposureMonitor()
-        boot_recovery = BootRecovery(
+        observation_scope = Scope(account_bootstrap.exchange_account_id, env_str)
+        boot_recovery = LegacyObservationSink(BootRecovery(
             store=event_store,
             session_factory=session_factory,
             auth_rest=auth_rest,
@@ -615,7 +617,7 @@ async def build_daemon(
             capital_repository=capital_runtime.repository if capital_runtime else None,
             protection=protection,
             foreign_exposure=foreign_exposure,
-        )
+        ), observation_scope)
         reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
         if reconcile_interval_s <= 0:
             raise ValueError(
@@ -626,7 +628,7 @@ async def build_daemon(
             raise ValueError(
                 f"BFX_RESYNC_MIN_INTERVAL_S must be >= 0, got {resync_min_interval_s}"
             )
-        runtime_recovery = BootRecovery(
+        runtime_recovery = LegacyObservationSink(BootRecovery(
             store=event_store,
             session_factory=session_factory,
             auth_rest=auth_rest,
@@ -641,7 +643,7 @@ async def build_daemon(
             capital_repository=capital_runtime.repository if capital_runtime else None,
             protection=protection,
             foreign_exposure=foreign_exposure,
-        )
+        ), observation_scope)
 
     fill_tracker: RestPollingFillTracker | None = None
     if spec.fill_tracker_enabled:
@@ -835,13 +837,14 @@ async def build_daemon(
         # sees exactly what the raw recovery would produce. When tracing is
         # enabled, the "reconcile.tick" span wrapper stacks OUTSIDE the timer
         # (same window as the histogram); both are observe-only pass-throughs.
-        recovery_runner: TimedReconcileRecovery | TracedReconcileRecovery = (
+        recovery_runner: ObservationSink = (
             TimedReconcileRecovery(runtime_recovery, metrics=metrics)
         )
         if tracing.enabled:
             recovery_runner = TracedReconcileRecovery(recovery_runner, tracing=tracing)
         periodic_reconcile = PeriodicReconcile(
             recovery=recovery_runner,
+            scope=observation_scope,
             probe=probe,
             interval_s=reconcile_interval_s,
             min_resync_interval_s=resync_min_interval_s,
@@ -1213,6 +1216,10 @@ async def build_daemon(
         auth_ws=auth_ws,
         ws_dispatcher=ws_dispatcher,
         boot_recovery=boot_recovery,
+        observation_scope=(
+            Scope(account_bootstrap.exchange_account_id, env_str)
+            if boot_recovery is not None else None
+        ),
         book_snapshot_writer=book_snapshot_writer,
         interest_ledger_sync=interest_ledger_sync,
         credit_history_sync=credit_history_sync,

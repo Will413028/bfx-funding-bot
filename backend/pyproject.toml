@@ -332,10 +332,8 @@ ignore_imports = [
     "bfx_funding_bot.modules.lending.tracking.book_replay -> bfx_funding_bot.modules.marketfeed.book_period_coverage",
     "bfx_funding_bot.modules.live_validation.g3 -> bfx_funding_bot.modules.backtest.oos_profitability",
     "bfx_funding_bot.modules.live_validation.live_attribution -> bfx_funding_bot.modules.backtest.oos_profitability",
-    "bfx_funding_bot.modules.observability.metrics -> bfx_funding_bot.modules.execution.boot_recovery",
     "bfx_funding_bot.modules.observability.metrics -> bfx_funding_bot.modules.execution.contracts",
     "bfx_funding_bot.modules.observability.metrics -> bfx_funding_bot.modules.execution.protocols",
-    "bfx_funding_bot.modules.observability.tracing -> bfx_funding_bot.modules.execution.boot_recovery",
     "bfx_funding_bot.modules.observability.tracing -> bfx_funding_bot.modules.execution.contracts",
     "bfx_funding_bot.modules.observability.tracing -> bfx_funding_bot.modules.execution.protocols",
 ]

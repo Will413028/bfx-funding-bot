@@ -125,7 +125,7 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
         previous_seq = 0
         for recovery in (daemon.boot_recovery, daemon.periodic_reconcile._recovery,
                          daemon.periodic_reconcile._recovery):
-            await recovery.run()
+            await recovery.run(daemon.observation_scope)
             async with factory.begin() as session:
                 capital = await repo.read_capital(
                     session, symbol="fUST", cell_id="fUST_a30", now_ms=time_ns() // 1_000_000,
@@ -152,7 +152,7 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
             method="POST", json=[["funding", "UST", 1000, 0, 1000]],
         )
         with pytest.raises(CapitalBlockedError, match="snapshot_unstable"):
-            await daemon.periodic_reconcile._recovery.run()
+            await daemon.periodic_reconcile._recovery.run(daemon.observation_scope)
         async with factory.begin() as session:
             with pytest.raises(CapitalBlockedError, match="snapshot_query_pending"):
                 await repo.read_capital(

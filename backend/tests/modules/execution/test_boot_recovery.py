@@ -890,3 +890,16 @@ async def test_from_snapshot_loads_symbol(sqlite_session: AsyncSession) -> None:
     reg = await OfferRegistry.from_snapshot(
         sqlite_session, account_id="acct", deployment_environment="ci")
     assert reg._snapshot["v42"].symbol == "fUST"
+
+
+@pytest.mark.asyncio
+async def test_boot_recovery_through_observation_port():
+    from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
+    from bfx_funding_bot.modules.ledger import Scope
+
+    rec = _full_boot_recovery(_StubAuthRest([]), _StubStore(), _StubSessionFactory(), _StubBus())
+    scope = Scope(uuid4(), "ci")
+    result = await LegacyObservationSink(rec, scope).run(scope)
+    assert result.decision == "accepted"
+    assert isinstance(result.legacy, ReconcileResult)
+    assert (result.legacy.n_claimed, result.legacy.n_released, result.legacy.n_failed) == (0, 0, 0)
