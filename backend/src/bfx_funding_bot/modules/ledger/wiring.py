@@ -29,6 +29,7 @@ from bfx_funding_bot.modules.ledger import (
     LockedCommandGuard,
     ManagedOffers,
     Observation,
+    ObservationWindow,
     OpenUncertainty,
     Outcome,
     OutcomeAlreadyRecorded,
@@ -175,6 +176,11 @@ def build_ledger_capital_reader() -> LedgerCapitalReader:
 
 
 class _SqlLedgerObservations:
+    async def observation_window(
+        self, session: AsyncSession, scope: Scope
+    ) -> ObservationWindow:
+        return await reads.observation_window(session, scope)
+
     async def begin_query(
         self, session: AsyncSession, scope: Scope, started_at_ms: int
     ) -> QueryHandle:

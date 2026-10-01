@@ -38,11 +38,13 @@ from sqlalchemy import Select, Text, column, select, table
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
+from bfx_funding_bot.core.venue_time import HISTORY_QUERY_MARGIN_MS
 from bfx_funding_bot.modules.ledger import (
     CancelProvenance,
     LedgerReadUnbounded,
     ManagedOffer,
     ManagedOffers,
+    ObservationWindow,
     OpenUncertainty,
     ProvenanceConflict,
     Scope,
@@ -63,6 +65,8 @@ from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisRow,
     ExecutionResolutionJournalRow,
+    LedgerObservationQueryRow,
+    LedgerObservationRow,
     SubmissionAttemptJournalRow,
     VenueOfferMirrorRow,
 )
@@ -119,6 +123,59 @@ async def _candidates(session: AsyncSession, scope: Scope) -> _Candidates:
     attempts = tuple(sorted((*unresolved, *tail), key=lambda row: row.attempt_seq))
     outcomes, resolutions = await attempt_evidence(session, [row.attempt_id for row in attempts])
     return _Candidates(basis, attempts, outcomes, resolutions)
+
+
+def _window_from_anchors(
+    earliest_attempt_started_at_ms: int | None, previous_query_started_at_ms: int | None
+) -> ObservationWindow:
+    anchors = [
+        anchor
+        for anchor in (earliest_attempt_started_at_ms, previous_query_started_at_ms)
+        if anchor is not None
+    ]
+    return ObservationWindow(
+        earliest_attempt_started_at_ms,
+        previous_query_started_at_ms,
+        min(anchors) - HISTORY_QUERY_MARGIN_MS if anchors else None,
+    )
+
+
+async def observation_window(session: AsyncSession, scope: Scope) -> ObservationWindow:
+    """Read only the latest basis, its unresolved set and the capped attempt tail.
+
+    Open UNKNOWNs without resolution are contained in unresolved ∪ tail: basis
+    classification never settles an UNKNOWN without a resolution. Thus their
+    union needs no historical UNKNOWN scan (there is no index for such a scan).
+    Query start is fetched by the latest basis's observation/query unique keys;
+    newer pending, fenced or incomplete queries cannot replace this anchor.
+    """
+    candidates = await _candidates(session, scope)
+    previous_start: int | None = None
+    attempts = candidates.attempts
+    if candidates.basis is None:
+        # Also defines the no-basis case without relying on today's attempt FK.
+        tail = await tail_attempts(
+            session,
+            scope.exchange_account_id,
+            scope.deployment_environment,
+            0,
+            limit=MAX_TAIL_ATTEMPTS + 1,
+        )
+        if len(tail) > MAX_TAIL_ATTEMPTS:
+            raise LedgerReadUnbounded(f"more than {MAX_TAIL_ATTEMPTS} attempts without a basis")
+        attempts = tuple(tail)
+    else:
+        previous_start = await session.scalar(
+            select(LedgerObservationQueryRow.started_at_ms)
+            .join(
+                LedgerObservationRow,
+                LedgerObservationRow.query_id == LedgerObservationQueryRow.query_id,
+            )
+            .where(LedgerObservationRow.id == candidates.basis.observation_id)
+        )
+    return _window_from_anchors(
+        min((attempt.started_at_ms for attempt in attempts), default=None), previous_start
+    )
 
 
 async def open_uncertainties(
@@ -339,5 +396,6 @@ __all__ = [
     "cancel_provenance",
     "fingerprints_in_use",
     "managed_live_offers",
+    "observation_window",
     "open_uncertainties",
 ]

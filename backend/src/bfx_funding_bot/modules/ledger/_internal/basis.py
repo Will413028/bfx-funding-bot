@@ -410,13 +410,25 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             )
     attributed: list[_Credit] = []
     for credit in credits:
+        group = group_of.get((credit.source_kind, credit.venue_credit_id))
+        # A group carried from the previous basis is already attributed; only a
+        # new opening needs trades evidence covering it (else old credits would
+        # demand trades back to their opening on every observation).
+        if (group is None or group not in carried) and (
+            credit.mts_opening is None or not _trades_cover(credit.mts_opening, observation)
+        ):
+            c.block(
+                credit.symbol,
+                "trades_range_uncovered",
+                venue_credit_id=credit.venue_credit_id,
+                source_kind=credit.source_kind,
+            )
         amount = credit.amount
         values = symbols.get(credit.symbol)
         if values is None:
             c.block(credit.symbol, "missing_wallet")
         elif amount <= ZERO:
             c.block(credit.symbol, "invalid_active_credit", venue_credit_id=credit.venue_credit_id)
-        group = group_of.get((credit.source_kind, credit.venue_credit_id))
         owners_now: set[str]
         if group is not None and group in traded and live[group] <= traded[group]:
             owners_now, basis = set(traders[group]), "trade"
@@ -664,6 +676,18 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
     return basis_id
 
 
+def _trades_cover(anchor_ms: int, observation: LedgerObservationRow) -> bool:
+    """Requested trades range, not row timestamps, must cover the anchor and margin."""
+    start, end = observation.trades_requested_start_ms, observation.trades_requested_end_ms
+    return (
+        observation.trades_complete
+        and start is not None
+        and end is not None
+        and start <= anchor_ms - HISTORY_QUERY_MARGIN_MS
+        and end >= anchor_ms
+    )
+
+
 def _can_quarantine(
     started_at_ms: int,
     venue_id: str,
@@ -676,7 +700,7 @@ def _can_quarantine(
     start, end = observation.history_requested_start_ms, observation.history_requested_end_ms
     return (
         observation.offer_history_complete
-        and observation.trades_complete
+        and _trades_cover(started_at_ms, observation)
         and start is not None
         and end is not None
         and start <= started_at_ms - HISTORY_QUERY_MARGIN_MS
