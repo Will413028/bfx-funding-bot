@@ -424,7 +424,7 @@ async def test_reflected_commitment_is_not_charged_twice(book) -> None:
 async def test_u_counts_once_in_total_and_in_no_cell(book) -> None:
     """Legacy 214-232."""
     await book.policy("fUST", reserve="0", fraction="0.70")
-    await book.accept(_observation("700", credits=(_credit("c1", "300", opening=1100),)))
+    await book.accept(_observation("700", credits=(_credit("c1", "300", opening=101_100),)))
     for cell in ("a30", "p2"):
         view = _view(await book.read(cell=cell))
         assert view.snapshot.total_capital == Decimal("1000")
@@ -443,7 +443,7 @@ async def test_trade_attributed_credit_is_its_cells_exposure(book) -> None:
     await book.accept(_observation("800", offers=(_offer("101", "200"),)))
     await book.accept(
         _observation(
-            "800", credits=(_credit("c1", "200", opening=1150),), trades=(_trade("101", "200"),)
+            "800", credits=(_credit("c1", "200", opening=101_150),), trades=(_trade("101", "200"),)
         )
     )
     a30, p2 = _view(await book.read()), _view(await book.read(cell="p2"))
@@ -462,7 +462,7 @@ async def test_loan_turning_into_split_credits_stays_in_its_cells_exposure(book)
     await book.policy("fUST", reserve="0", fraction="0.70")
     trade = Decimal("391.4117332")
     cash = str(Decimal("1000") - trade)
-    opened = 1150
+    opened = 101_150
     await book.accept()
     await book.attempt(str(trade), venue_offer_id="101")
     await book.accept(_observation(cash, offers=(_offer("101", str(trade)),)))
@@ -473,11 +473,11 @@ async def test_loan_turning_into_split_credits_stays_in_its_cells_exposure(book)
 
     stages = [
         (lent("60709535", trade, opened, "loan"),),
-        (lent("463464628", one, 1160), lent("60709642", trade - one, 1160, "loan")),
+        (lent("463464628", one, 101_160), lent("60709642", trade - one, 101_160, "loan")),
         (
-            lent("463464628", one, 1160),
-            lent("463464629", one, 1170),
-            lent("463464632", "68.91607434", 1180),
+            lent("463464628", one, 101_160),
+            lent("463464629", one, 101_170),
+            lent("463464632", "68.91607434", 101_180),
         ),
     ]
     for credits in stages:
@@ -593,7 +593,7 @@ async def test_partial_fill_does_not_add_original_reservation(book) -> None:
         _observation(
             "800",
             offers=(_offer("offer-1", "200", "50"),),
-            credits=(_credit("c1", "150", opening=1100),),
+            credits=(_credit("c1", "150", opening=101_100),),
         )
     )
     view = _view(await book.read())
@@ -796,11 +796,11 @@ async def test_terminal_history_allows_venue_clock_tolerance(book, occurred, ref
     await book.policy("fUST")
     await book.accept()
     await book.attempt("200", venue_offer_id="offer-1")
-    executed = _offer("offer-1", "200", "0", created=1150)
+    executed = _offer("offer-1", "200", "0", created=101_150)
     await book.accept(
         _observation(
             "800",
-            credits=(_credit("61621685", "200", kind="loan", opening=1150),),
+            credits=(_credit("61621685", "200", kind="loan", opening=101_150),),
             history=(OfferHistory(executed, "executed", occurred),),
         )
     )

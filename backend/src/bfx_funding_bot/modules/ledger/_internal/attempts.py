@@ -34,6 +34,7 @@ _ATTEMPT_COLUMNS = (
     SubmissionAttemptJournalRow.symbol,
     SubmissionAttemptJournalRow.cell_id,
     SubmissionAttemptJournalRow.attempt_seq,
+    SubmissionAttemptJournalRow.started_at_ms,
     SubmissionAttemptJournalRow.normalized_payload,
 )
 

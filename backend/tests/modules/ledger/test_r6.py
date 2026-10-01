@@ -32,6 +32,8 @@ def test_r6_requires_complete_evidence_and_exact_margin(
     observation = LedgerObservationRow(
         offer_history_complete=history,
         trades_complete=trades,
+        trades_requested_start_ms=40_000,
+        trades_requested_end_ms=100_000,
         history_requested_start_ms=start,
         history_requested_end_ms=end,
     )
@@ -46,3 +48,27 @@ def test_r6_requires_complete_evidence_and_exact_margin(
         )
         is expected
     )
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "expected"),
+    [
+        (40_000, 100_000, True),
+        (39_999, 100_001, True),
+        (40_001, 100_000, False),
+        (100_000, 100_000, False),
+        (40_000, 99_999, False),
+        (None, 100_000, False),
+        (40_000, None, False),
+    ],
+)
+def test_r6_requires_trades_requested_range(start, end, expected: bool) -> None:
+    observation = LedgerObservationRow(
+        offer_history_complete=True,
+        trades_complete=True,
+        history_requested_start_ms=40_000,
+        history_requested_end_ms=100_000,
+        trades_requested_start_ms=start,
+        trades_requested_end_ms=end,
+    )
+    assert _can_quarantine(100_000, "gone", (), (), (), observation) is expected

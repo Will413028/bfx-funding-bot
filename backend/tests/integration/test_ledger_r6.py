@@ -44,6 +44,8 @@ def _evidence(*, start: int = 40_000, end: int = 100_000, **kwargs):
             observation.coverage,
             history_requested_start_ms=start,
             history_requested_end_ms=end,
+            trades_requested_start_ms=40_000,
+            trades_requested_end_ms=100_000,
         ),
     )
 
@@ -95,6 +97,37 @@ async def test_r6_margin_and_end_boundaries(
     else:
         assert basis.reasons() == ["unclassifiable_commitment"]
         assert openings == []
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "expected"),
+    [
+        (40_000, 100_000, "quarantined"),
+        (40_001, 100_000, "unresolved"),
+        (100_000, 100_000, "unresolved"),
+        (40_000, 99_999, "unresolved"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_r6_trades_range_boundaries(ledger_fixture, start, end, expected) -> None:  # noqa: F811
+    await ledger_fixture.accept(_observation())
+    attempt = await ledger_fixture.attempt(
+        amount="200", venue_offer_id="gone", started_at_ms=100_000
+    )
+    evidence = _evidence()
+    evidence = replace(
+        evidence,
+        coverage=replace(
+            evidence.coverage,
+            trades_requested_start_ms=start,
+            trades_requested_end_ms=end,
+        ),
+    )
+    basis = await ledger_fixture.accept(evidence, started_at_ms=200_000)
+    assert basis.attempts[attempt] == ("fUST", expected)
+    assert len(await _openings(ledger_fixture)) == (1 if expected == "quarantined" else 0)
+    if expected == "unresolved":
+        assert basis.reasons() == ["unclassifiable_commitment"]
 
 
 @pytest.mark.parametrize("source", ["ack", "bound"])

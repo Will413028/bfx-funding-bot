@@ -28,11 +28,14 @@ type AcceptanceDecision = Literal["accepted", "fenced", "incomplete_or_unequal"]
 # Closed status vocabularies. The port normalizes Bitfinex strings into these;
 # ledger never parses venue text.
 #   offer status       "ACTIVE" -> active; "PARTIALLY FILLED ..." -> partially_filled
-#                      (a history row keeps the last of these it had)
-#   offer terminal     "EXECUTED at r% (a)" -> executed;
-#                      "CANCELED", "PARTIALLY FILLED at r% (a), CANCELED" -> canceled
+#   offer terminal     "EXECUTED ..." -> executed; "CANCELED ..." -> canceled;
+#                      offer "EXPIRED" -> canceled (ended unfilled)
 #   credit/loan status "ACTIVE" -> active
-#   credit terminal    "CLOSED (expired)", "CLOSED (closed)", "CLOSED (reduced)" -> closed
+#   credit terminal    "CLOSED (used|expired|reduced)" -> closed
+#   history row status "was: PARTIALLY FILLED" -> partially_filled, otherwise active;
+#                      occurred_at_ms = mts_update
+# Unknown status: active stream raises (no observation); history stream is
+# incomplete and alerts. These are normalizer rules, not ledger text parsing.
 type OfferStatus = Literal["active", "partially_filled"]
 type CreditStatus = Literal["active"]
 type OfferTerminalKind = Literal["executed", "canceled"]
@@ -192,6 +195,22 @@ class QueryHandle:
     query_revision: int
     start_revision: int
     started_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationWindow:
+    """Local anchors for the next observation's history request.
+
+    The attempt anchor covers the high-water tail, basis-unresolved attempts
+    and open UNKNOWNs. history_start_ms is the earlier anchor minus the
+    history margin, or None when neither exists (the very first observation).
+    Without an accepted basis, use the earliest attempt; with no attempts
+    there is no history anchor. The caller owns that first-observation case.
+    """
+
+    earliest_attempt_started_at_ms: int | None
+    previous_query_started_at_ms: int | None
+    history_start_ms: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +412,9 @@ class LedgerObservations(Protocol):
     async def begin_query(
         self, session: AsyncSession, scope: Scope, started_at_ms: int
     ) -> QueryHandle: ...
+    async def observation_window(
+        self, session: AsyncSession, scope: Scope
+    ) -> ObservationWindow: ...
     async def accept(
         self,
         session: AsyncSession,
@@ -749,6 +771,7 @@ __all__ = [
     "ManagedOfferReader",
     "ManagedOffers",
     "Observation",
+    "ObservationWindow",
     "Offer",
     "OfferHistory",
     "OfferStatus",

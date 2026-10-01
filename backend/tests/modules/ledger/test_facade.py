@@ -22,6 +22,7 @@ _PROMOTED = {
     "Trade",
     "Coverage",
     "Observation",
+    "ObservationWindow",
     "Acceptance",
     "AcceptanceDecision",
     "CreditKind",
@@ -98,7 +99,7 @@ def test_ports_expose_their_methods() -> None:
         "add_quarantine_member",
     }
     assert not hasattr(build_ledger_journal(), "record_attempt")
-    assert _methods(ledger.LedgerObservations) == {"begin_query", "accept"}
+    assert _methods(ledger.LedgerObservations) == {"begin_query", "accept", "observation_window"}
     assert _methods(ledger.LedgerUncertainties) == {"open_uncertainties"}
     assert _methods(ledger.LedgerManagedOffers) == {
         "managed_live_offers",

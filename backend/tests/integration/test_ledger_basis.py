@@ -97,7 +97,7 @@ def _coverage() -> Coverage:
         None,
         trades_complete=True,
         trades_requested_start_ms=0,
-        trades_requested_end_ms=5000,
+        trades_requested_end_ms=105_000,
     )
 
 
@@ -106,7 +106,7 @@ def _offer(
     original: str,
     remaining: str | None = None,
     *,
-    created: int = 1000,
+    created: int = 101_000,
     symbol: str = "fUST",
 ) -> Offer:
     left = Decimal(remaining if remaining is not None else original)
@@ -152,7 +152,7 @@ def _credit(
     )
 
 
-def _trade(offer_id: str, amount: str, *, mts_create: int = 1150) -> Trade:
+def _trade(offer_id: str, amount: str, *, mts_create: int = 101_150) -> Trade:
     return Trade(next(_IDS), "fUST", offer_id, Decimal(amount), Decimal("0.0001"), 2, mts_create)
 
 
@@ -395,8 +395,8 @@ async def test_u_counts_once_in_total_and_in_no_cell(ledger) -> None:
     basis = await ledger.accept(
         _observation(
             "600",
-            offers=(_offer("101", "100", created=1200),),
-            credits=(_credit("c1", "300", opening=1100),),
+            offers=(_offer("101", "100", created=101_200),),
+            credits=(_credit("c1", "300", opening=101_100),),
         )
     )
     fust = basis.symbols["fUST"]
@@ -414,7 +414,7 @@ async def test_credit_attributed_by_funding_trade_counts_in_its_cell_only(ledger
     basis = await ledger.accept(
         _observation(
             "800",
-            credits=(_credit("c1", "200", opening=1150),),
+            credits=(_credit("c1", "200", opening=101_150),),
             trades=(_trade("101", "200"),),
         )
     )
@@ -432,7 +432,7 @@ async def test_funding_trade_naming_a_foreign_offer_leaves_the_credit_unattribut
     basis = await ledger.accept(
         _observation(
             "800",
-            credits=(_credit("c1", "200", opening=1150),),
+            credits=(_credit("c1", "200", opening=101_150),),
             trades=(_trade("999", "200"),),
         )
     )
@@ -453,11 +453,11 @@ async def test_only_observed_trades_attribute_credits(ledger) -> None:
             text(
                 "INSERT INTO funding_trades(exchange_account_id, trade_id, "
                 "deployment_environment, symbol, mts_create, offer_id, amount, rate, period) "
-                "VALUES (:a, 1, 'ci', 'fUST', 1150, 101, 200, 0.0001, 2)"
+                "VALUES (:a, 1, 'ci', 'fUST', 101150, 101, 200, 0.0001, 2)"
             ),
             {"a": _A},
         )
-    lent = (_credit("c1", "200", opening=1150),)
+    lent = (_credit("c1", "200", opening=101_150),)
     basis = await ledger.accept(_observation("800", credits=lent))
     assert basis.credits == {"c1": ("unattributed", [])}
     basis = await ledger.accept(_observation("800", credits=lent, trades=(_trade("101", "200"),)))
@@ -471,7 +471,7 @@ async def test_credits_outnumbering_their_trades_keep_every_candidate_cell(ledge
     await ledger.attempt(amount="300", cell="p2", venue_offer_id="102")
     p2 = _offer("102", "300")
     await ledger.accept(_observation("600", offers=(_offer("101", "100"), p2)))
-    twins = (_credit("c1", "100", opening=1150), _credit("c2", "100", opening=1150))
+    twins = (_credit("c1", "100", opening=101_150), _credit("c2", "100", opening=101_150))
     partial = _observation(
         "600", offers=(_offer("102", "300", "200"),), credits=twins, trades=(_trade("101", "100"),)
     )
@@ -492,7 +492,7 @@ async def test_loan_turning_into_split_credits_stays_in_its_cell(ledger) -> None
     opening), since neither id nor amount survives the conversion."""
     trade = Decimal("391.4117332")
     cash = str(Decimal("1000") - trade)
-    opened = 1150
+    opened = 101_150
     await ledger.accept(_observation())
     await ledger.attempt(amount=str(trade), venue_offer_id="101")
     await ledger.accept(_observation(cash, offers=(_offer("101", str(trade)),)))
@@ -503,11 +503,11 @@ async def test_loan_turning_into_split_credits_stays_in_its_cell(ledger) -> None
 
     stages = [
         (lent("60709535", trade, opened, "loan"),),
-        (lent("463464628", one, 1160), lent("60709642", trade - one, 1160, "loan")),
+        (lent("463464628", one, 101_160), lent("60709642", trade - one, 101_160, "loan")),
         (
-            lent("463464628", one, 1160),
-            lent("463464629", one, 1170),
-            lent("463464632", "68.91607434", 1180),
+            lent("463464628", one, 101_160),
+            lent("463464629", one, 101_170),
+            lent("463464632", "68.91607434", 101_180),
         ),
     ]
     expected = ["recent_fill", "carry", "carry"]
@@ -533,8 +533,11 @@ async def test_credit_older_than_our_offer_is_not_attributed_to_its_fill(ledger)
     basis = await ledger.accept(
         _observation(
             "650",
-            offers=(_offer("101", "200", "50", created=1000),),
-            credits=(_credit("old", "150", opening=900), _credit("new", "150", opening=1100)),
+            offers=(_offer("101", "200", "50", created=101_000),),
+            credits=(
+                _credit("old", "150", opening=100_900),
+                _credit("new", "150", opening=101_100),
+            ),
         )
     )
     assert basis.credits == {"old": ("unattributed", []), "new": ("recent_fill", ["a30"])}
@@ -550,7 +553,7 @@ async def test_partial_fill_charges_remaining_offer_plus_lent_amount(ledger) -> 
         _observation(
             "800",
             offers=(_offer("offer-1", "200", "50"),),
-            credits=(_credit("c1", "150", opening=1100),),
+            credits=(_credit("c1", "150", opening=101_100),),
         )
     )
     fust = basis.symbols["fUST"]
@@ -569,11 +572,11 @@ async def test_an_offer_that_fills_between_snapshots_is_accounted_for(ledger) ->
     """First live fill (2026-09-23): gone from the book, in terminal history, lent as a loan."""
     await ledger.accept(_observation())
     attempt_id = await ledger.attempt(amount="200", venue_offer_id="offer-1")
-    executed = _offer("offer-1", "200", "0", created=1150)
+    executed = _offer("offer-1", "200", "0", created=101_150)
     basis = await ledger.accept(
         _observation(
             "800",
-            credits=(_credit("61621685", "200", kind="loan", opening=1150),),
+            credits=(_credit("61621685", "200", kind="loan", opening=101_150),),
             history=(OfferHistory(executed, "executed", 1150),),
         )
     )
