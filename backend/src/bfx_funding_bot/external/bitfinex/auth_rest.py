@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Literal, TypeVar
@@ -431,7 +432,9 @@ class BitfinexAuthREST:
         base_url: str = BITFINEX_AUTH_REST_BASE,
         auth_gate: AuthRequestGate | None = None,
         read_deadline_s: float = READ_DEADLINE_S,
+        response_observer: Callable[[str, bytes], None] | None = None,
     ) -> None:
+        self._response_observer = response_observer
         self._http = http
         self._base_url = base_url.rstrip("/")
         self._read_deadline_s = read_deadline_s
@@ -640,6 +643,12 @@ class BitfinexAuthREST:
                 status_code=resp.status_code,
                 message=resp.reason_phrase or "http error", raw=resp.text,
             )
+        if self._response_observer is not None:
+            try:
+                self._response_observer(path, resp.content)
+            except Exception:
+                with suppress(Exception):
+                    log.warning("bitfinex_response_observer_failed path=%s", path)
         return resp
 
     async def _fetch_funding_offers_response(
