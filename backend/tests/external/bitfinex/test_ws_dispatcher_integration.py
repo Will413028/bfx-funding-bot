@@ -8,7 +8,6 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_ws import BfxWSEvent, FocEvent
-from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
@@ -23,6 +22,7 @@ from bfx_funding_bot.modules.execution.registry_offers import (
     RegistryState,
     ReservationCorrelationError,
 )
+from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 
 
 class _FakeWSClient:

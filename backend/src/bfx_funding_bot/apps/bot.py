@@ -34,9 +34,6 @@ from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
-from bfx_funding_bot.external.bitfinex.fill_tracker import (
-    RestPollingFillTracker,
-)
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
 from bfx_funding_bot.external.bitfinex.funding_rules import FundingRules
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
@@ -47,7 +44,6 @@ from bfx_funding_bot.external.bitfinex.ws import (
     CandleMessage,
     ChannelSpec,
 )
-from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     account_id_uuid_or_none,
 )
@@ -84,6 +80,9 @@ from bfx_funding_bot.modules.execution.events import (
     PositionReconciled,
     ReservationClaimed,
     ReservationReleased,
+)
+from bfx_funding_bot.modules.execution.fill_tracker import (
+    RestPollingFillTracker,
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.legacy_ports import (
@@ -143,6 +142,7 @@ from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     UncertaintyResolutionWorker,
 )
 from bfx_funding_bot.modules.execution.venue_normalization_shadow import VenueNormalizationShadow
+from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.live_validation.credit_history import CreditHistorySync
 from bfx_funding_bot.modules.live_validation.interest_ledger import (

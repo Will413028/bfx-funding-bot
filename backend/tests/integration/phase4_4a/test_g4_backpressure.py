@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_ws import BfxWSEvent, FcnEvent
-from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
+from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 
 
 class _FloodingWSClient:

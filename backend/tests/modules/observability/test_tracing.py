@@ -21,7 +21,6 @@ import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
-from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
@@ -33,6 +32,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.observability.resource import (
     DeploymentEnvironment,
     EventResource,
@@ -365,13 +365,20 @@ async def test_ws_dispatcher_instrumented_process_spans() -> None:
 
 
 async def test_ws_dispatcher_instrumented_process_exception_passthrough() -> None:
+    from bfx_funding_bot.external.bitfinex.auth_ws import FocEvent
+
     exporter = InMemorySpanExporter()
     t = _enabled_tracing(exporter)
     boom = RuntimeError("registry broken")
     dispatcher = _dispatcher(registry=_StubRegistry(exc=boom))
     instrument_ws_dispatcher(dispatcher, tracing=t)
     with pytest.raises(RuntimeError) as exc_info:
-        await dispatcher._process(object())
+        # Only lifecycle hints consult the legacy registry after port extraction.
+        await dispatcher._process(FocEvent(
+            venue_offer_id="42", symbol="fUST", mts_create=1000, mts_update=2000,
+            amount=Decimal("100"), status="EXECUTED", rate=0.0005,
+            period_days=2, raw_seq=17,
+        ))
     assert exc_info.value is boom
     t.shutdown()
 

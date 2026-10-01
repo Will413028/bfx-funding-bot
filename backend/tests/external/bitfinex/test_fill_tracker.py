@@ -14,14 +14,14 @@ import pytest
 
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import EventType, HealthTarget, Phase
-from bfx_funding_bot.external.bitfinex.fill_tracker import (
+from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
+from bfx_funding_bot.modules.execution.events import ReservationClaimed, ReservationReleased
+from bfx_funding_bot.modules.execution.fill_tracker import (
     CONSECUTIVE_FAIL_THRESHOLD,
     InvariantError,
     RestPollingFillTracker,
 )
-from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.contracts import ReservationRef
-from bfx_funding_bot.modules.execution.events import ReservationClaimed, ReservationReleased
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 from bfx_funding_bot.modules.strategy import StrategyName
 

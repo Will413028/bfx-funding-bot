@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+import time
+from collections.abc import Callable, Collection
 from decimal import Decimal
 from uuid import UUID
 
@@ -38,6 +39,8 @@ from bfx_funding_bot.modules.ledger import (
     QueryHandle,
     Resolution,
     Scope,
+    VenueHintPublisher,
+    VenueHintSink,
 )
 from bfx_funding_bot.modules.ledger._internal import (
     capital_reader,
@@ -47,8 +50,19 @@ from bfx_funding_bot.modules.ledger._internal import (
     quarantine,
     reads,
 )
+from bfx_funding_bot.modules.ledger._internal.venue_hints import LedgerVenueHintSink
 from bfx_funding_bot.modules.ledger.tables import SubmissionAttemptJournalRow
 from bfx_funding_bot.modules.trading import CapitalScope
+
+
+def build_venue_hint_sink(
+    *, scope: Scope, request_resync: Callable[[str], None], bus: VenueHintPublisher,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> VenueHintSink:
+    """Construct only; app selection remains deferred to S1-3e."""
+    return LedgerVenueHintSink(
+        scope=scope, request_resync=request_resync, bus=bus, monotonic=monotonic,
+    )
 
 
 class _SqlCommandJournal:
