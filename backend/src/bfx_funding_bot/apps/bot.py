@@ -142,6 +142,7 @@ from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     ResolutionScope,
     UncertaintyResolutionWorker,
 )
+from bfx_funding_bot.modules.execution.venue_normalization_shadow import VenueNormalizationShadow
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.live_validation.credit_history import CreditHistorySync
 from bfx_funding_bot.modules.live_validation.interest_ledger import (
@@ -580,7 +581,10 @@ async def build_daemon(
     interest_ledger_sync: InterestLedgerSync | None = None
     credit_history_sync: CreditHistorySync | None = None
     if not spec.is_simulated:
-        auth_rest = BitfinexAuthREST(http=bitfinex_http, auth_gate=bfx_auth_gate)
+        auth_rest = BitfinexAuthREST(
+            http=bitfinex_http, auth_gate=bfx_auth_gate,
+            response_observer=VenueNormalizationShadow(),
+        )
         # Realized income truth (ledger category 28), read-only: see interest_ledger.
         interest_ledger_sync = InterestLedgerSync(
             rest=auth_rest, ctx=account_ctx, session_factory=session_factory,

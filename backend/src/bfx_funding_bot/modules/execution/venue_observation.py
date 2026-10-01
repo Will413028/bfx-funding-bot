@@ -51,6 +51,11 @@ def _variant(status: str, word: str) -> bool:
     return status == word or status.startswith(word + " ")
 
 
+def is_funding_wallet(wallet_type: str) -> bool:
+    """Only funding wallets belong to the lending capital scope."""
+    return wallet_type == "funding"
+
+
 def normalize_wallet(row: WalletObservation) -> Wallet:
     # Null is not zero: the venue has not calculated the available balance.
     if row.available is None:
@@ -155,7 +160,7 @@ class BitfinexVenueObservation:
         # the active digest, failing acceptance for no capital reason.
         wallets = tuple(normalize_wallet(row) for row in
                         await self._rest.fetch_wallet_observations(ctx=self._ctx, budget=budget)
-                        if row.wallet_type == "funding")
+                        if is_funding_wallet(row.wallet_type))
         offers = tuple(normalize_offer(row) for row in
                        await self._rest.fetch_active_offer_observations(ctx=self._ctx, budget=budget))
         credits = tuple(normalize_credit(row) for row in
