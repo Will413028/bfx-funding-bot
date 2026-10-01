@@ -57,7 +57,6 @@ from bfx_funding_bot.modules.ledger import (
     CapitalBlocked,
     Scope,
     ScopeLock,
-    basis_token_value,
 )
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from bfx_funding_bot.modules.strategy import (
@@ -370,7 +369,7 @@ class TradingStatusService:
                 "capital_available": True,
                 "policy_revision": first.applied.revision,
                 "policy_digest": first.applied.digest,
-                "snapshot_seq": basis_token_value(first.basis_token),
+                "basis_token": first.basis_token,
                 "policy": _policy_status(first.applied.policy),
                 "available_balance": str(first.snapshot.available_amount),
                 "unreflected_commitments": str(first.snapshot.unreflected_commitments),

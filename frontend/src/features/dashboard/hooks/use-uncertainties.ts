@@ -16,7 +16,7 @@ export type UncertaintyResolutionAction =
 export interface ResolveUncertaintyInput {
   uncertaintyId: string;
   action: UncertaintyResolutionAction;
-  reconcileEventSeq: number;
+  evidenceRef: string;
   venueOfferId?: string;
   operatorUuid?: string;
   reason?: string;
@@ -120,7 +120,7 @@ export function useResolveUncertainty(exchangeAccountId?: string) {
     mutationFn: async (input: ResolveUncertaintyInput) => {
       if (!exchangeAccountId) throw new Error("exchangeAccountNotSelected");
       const body = {
-        reconcileEventSeq: input.reconcileEventSeq,
+        evidenceRef: input.evidenceRef,
         ...(input.venueOfferId !== undefined
           ? { venueOfferId: input.venueOfferId }
           : {}),

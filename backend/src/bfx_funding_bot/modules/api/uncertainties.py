@@ -60,14 +60,11 @@ _REJECTION_STATUS = {
 
 
 class UncertaintyResolutionRequest(BaseModel):
-    """Common fresh-reconcile fence and optional operator identity."""
+    """Common opaque evidence reference and optional operator identity."""
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
-    reconcile_event_seq: int = Field(
-        alias="reconcileEventSeq",
-        ge=0,
-    )
+    evidence_ref: str = Field(alias="evidenceRef")
     operator_uuid: str | None = Field(
         default=None,
         alias="operatorUuid",
@@ -100,10 +97,7 @@ class UncertaintyResolutionContext(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    reconcile_event_seq: int | None = Field(
-        default=None,
-        serialization_alias="reconcileEventSeq",
-    )
+    evidence_ref: str | None = Field(default=None, serialization_alias="evidenceRef")
     query_started_at_ms: int | None = Field(
         default=None,
         serialization_alias="queryStartedAtMs",
@@ -136,7 +130,7 @@ class ResolutionRequestResponse(BaseModel):
     uncertainty_id: str = Field(serialization_alias="uncertaintyId")
     action: str
     state: Literal["requested", "applied", "rejected", "failed"]
-    reconcile_event_seq: int = Field(serialization_alias="reconcileEventSeq")
+    evidence_ref: str = Field(serialization_alias="evidenceRef")
     created_at_ms: int = Field(serialization_alias="createdAtMs")
     processed_at_ms: int | None = Field(default=None, serialization_alias="processedAtMs")
     resolved_event_seq: int | None = Field(default=None, serialization_alias="resolvedEventSeq")
@@ -306,7 +300,7 @@ def _request_model(row: UncertaintyResolutionRequestRow) -> ResolutionRequestRes
         uncertainty_id=str(row.uncertainty_id),
         action=row.action,
         state=row.state,
-        reconcile_event_seq=row.reconcile_event_seq,
+        evidence_ref=str(row.reconcile_event_seq),
         created_at_ms=row.created_at_ms,
         processed_at_ms=row.processed_at_ms,
         resolved_event_seq=row.resolved_event_seq,
@@ -332,8 +326,7 @@ async def _resolution_context(
         ResolutionSubject(row.uncertainty_id, row.symbol, row.attempt_id),
     )
     return UncertaintyResolutionContext(
-        reconcile_event_seq=legacy_evidence_seq(result.evidence_ref)
-        if result.evidence_ref is not None else None,
+        evidence_ref=result.evidence_ref,
         query_started_at_ms=result.query_started_at_ms,
         query_finished_at_ms=result.query_finished_at_ms,
         candidate_count=result.candidate_count,
@@ -388,10 +381,14 @@ async def _queue(
     decision: str | None = None,
     operator_evidence: OperatorEvidence | None = None,
 ) -> dict[str, object]:
+    try:
+        reconcile_event_seq = legacy_evidence_seq(body.evidence_ref)
+    except ResolutionRejected as exc:
+        raise _rejected(exc) from exc
     intent = ResolutionIntent(
         uncertainty_id=uncertainty_id,
         action=action,
-        reconcile_event_seq=body.reconcile_event_seq,
+        reconcile_event_seq=reconcile_event_seq,
         operator_id=_operator_id(context, body.operator_uuid),
         reason=body.reason,
         venue_offer_id=venue_offer_id,

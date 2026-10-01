@@ -24,7 +24,6 @@ from bfx_funding_bot.modules.ledger import (
     CapitalBlocked,
     LiveManagedOffer,
     Scope,
-    basis_token_value,
 )
 from bfx_funding_bot.modules.trading import CapitalScope
 from tests.integration.test_capital_command_boundary import (
@@ -104,7 +103,7 @@ async def test_infrastructure_failures_still_raise_and_scope_is_checked() -> Non
 @pytest.mark.asyncio
 async def test_basis_token_is_the_snapshot_seq_and_status_renders_it_unchanged(capital_db) -> None:
     """The token is opaque to consumers; the legacy one is the decimal snapshot_seq,
-    so the status report's ``snapshot_seq`` stays the same JSON number."""
+    so the status report preserves its decimal string."""
     from sqlalchemy import func, select
 
     from bfx_funding_bot.core.health import HealthProbe
@@ -151,14 +150,8 @@ async def test_basis_token_is_the_snapshot_seq_and_status_renders_it_unchanged(c
         capital=status_reads(runtime),
     )
     status = (await service.snapshot())["symbols"]["fUST"]
-    assert status["snapshot_seq"] == seq and type(status["snapshot_seq"]) is int
-
-
-def test_basis_token_value_renders_decimal_tokens_as_numbers_only() -> None:
-    assert basis_token_value("42") == 42
-    assert basis_token_value("0") == 0
-    for token in ("042", "-1", "4 2", "٤٢", "b1f0c1de-0000-4000-8000-000000000000", ""):
-        assert basis_token_value(token) == token
+    assert status["basis_token"] == str(seq)
+    assert "snapshot_seq" not in status
 
 
 @pytest.mark.parametrize("token", ["042", "-1", "1.0", "", "x", "٤٢"])
@@ -276,3 +269,12 @@ async def test_scope_lock_refuses_another_scope(capital_db) -> None:
         await lock.lock(session, Scope(account, "ci"))
         with pytest.raises(ValueError, match="capital_scope_conflict"):
             await lock.lock(session, Scope(account, "shadow"))
+
+
+@pytest.mark.parametrize("token", ["042", " 42"])
+def test_legacy_evidence_parser_rejects_noncanonical_decimal(token: str) -> None:
+    from bfx_funding_bot.modules.execution.operator_evidence import legacy_evidence_seq
+    from bfx_funding_bot.modules.ledger import ResolutionRejected
+
+    with pytest.raises(ResolutionRejected, match="stale_reconcile_fence"):
+        legacy_evidence_seq(token)

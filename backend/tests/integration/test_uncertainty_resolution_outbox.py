@@ -383,7 +383,7 @@ def test_web_api_queues_and_only_the_account_writer_appends(migrated, monkeypatc
             base = f"/api/v1/exchange-accounts/{ACCOUNT_ID}"
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                body = {"reconcileEventSeq": reconcile_seq, "operatorUuid": "operator-1",
+                body = {"evidenceRef": str(reconcile_seq), "operatorUuid": "operator-1",
                         "reason": "zero exact candidates", "evidence": {"candidateCount": 0}}
                 first, repeat = await asyncio.gather(
                     client.post(f"{base}/uncertainties/{uncertainty_id}/mark-not-accepted", json=body),
@@ -477,7 +477,7 @@ def test_queueing_a_request_never_waits_for_or_holds_the_account_writer_lock(
                     response = await asyncio.wait_for(client.post(
                         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/"
                         f"{uncertainty_id}/mark-not-accepted",
-                        json={"reconcileEventSeq": reconcile_seq, "operatorUuid": "operator-1",
+                        json={"evidenceRef": str(reconcile_seq), "operatorUuid": "operator-1",
                               "evidence": {"candidateCount": 0}},
                     ), timeout=5)
                 assert response.status_code == 202, response.text

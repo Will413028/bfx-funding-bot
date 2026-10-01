@@ -100,7 +100,7 @@ async def test_migration_grants_allow_scoped_uncertainty_reads_without_execution
         assert len(rows) == 1
         assert rows[0]["kind"] == "submit_outcome_unknown"
         assert rows[0]["resolutionContext"] == {
-            "reconcileEventSeq": reconcile_seq,
+            "evidenceRef": str(reconcile_seq),
             "queryStartedAtMs": 1990,
             "queryFinishedAtMs": 2000,
             "candidateCount": 0,

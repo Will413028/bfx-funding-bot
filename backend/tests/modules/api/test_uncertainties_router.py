@@ -349,7 +349,7 @@ def test_stale_reconcile_fence_is_rejected(uncertainty_app) -> None:
     client, _factory = uncertainty_app
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",  # type: ignore[attr-defined]
-        json={"reconcileEventSeq": 1, "evidence": {"candidateCount": 0}},
+        json={"evidenceRef": "1", "evidence": {"candidateCount": 0}},
     )
     assert response.status_code == 409
 
@@ -379,7 +379,7 @@ def test_uncertainty_read_exposes_exact_server_derived_resolution_context(
 
     assert response.status_code == 200, response.text
     assert response.json()["data"]["resolutionContext"] == {
-        "reconcileEventSeq": reconcile_seq,
+        "evidenceRef": str(reconcile_seq),
         "queryStartedAtMs": 1_990,
         "queryFinishedAtMs": 2_000,
         "candidateCount": 1,
@@ -401,7 +401,7 @@ def test_uncertainty_list_exposes_zero_match_context_for_explicit_confirmation(
 
     assert response.status_code == 200, response.text
     assert response.json()["data"][0]["resolutionContext"] == {
-        "reconcileEventSeq": reconcile_seq,
+        "evidenceRef": str(reconcile_seq),
         "queryStartedAtMs": 1_990,
         "queryFinishedAtMs": 2_000,
         "candidateCount": 0,
@@ -444,7 +444,7 @@ def test_uncertainty_read_exposes_all_server_derived_ambiguous_candidates(
 
     assert response.status_code == 200, response.text
     assert response.json()["data"]["resolutionContext"] == {
-        "reconcileEventSeq": reconcile_seq,
+        "evidenceRef": str(reconcile_seq),
         "queryStartedAtMs": 1_990,
         "queryFinishedAtMs": 2_000,
         "candidateCount": 2,
@@ -507,7 +507,7 @@ def test_uncertainty_read_fails_closed_when_latest_snapshot_is_not_authoritative
 
     assert response.status_code == 200, response.text
     assert response.json()["data"]["resolutionContext"] == {
-        "reconcileEventSeq": delayed_seq,
+        "evidenceRef": str(delayed_seq),
         "queryStartedAtMs": 1_990,
         "queryFinishedAtMs": 2_000,
         "candidateCount": None,
@@ -522,7 +522,7 @@ def test_mark_not_accepted_appends_resolution_event(uncertainty_app) -> None:
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",  # type: ignore[attr-defined]
         json={
-            "reconcileEventSeq": reconcile_seq,
+            "evidenceRef": str(reconcile_seq),
             "operatorUuid": "operator-1",
             "reason": "complete history had zero exact candidates",
             "evidence": {"candidateCount": 999},
@@ -583,7 +583,7 @@ def test_mark_not_accepted_recomputes_candidates_instead_of_trusting_request(
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",  # type: ignore[attr-defined]
         json={
-            "reconcileEventSeq": reconcile_seq,
+            "evidenceRef": str(reconcile_seq),
             "operatorUuid": "operator-1",
             "reason": "forged zero",
             "evidence": {"candidateCount": 0},
@@ -617,7 +617,7 @@ def test_mark_not_accepted_fails_closed_for_legacy_offer_missing_type(
 
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",  # type: ignore[attr-defined]
-        json={"reconcileEventSeq": reconcile_seq, "evidence": {"candidateCount": 0}},
+        json={"evidenceRef": str(reconcile_seq), "evidence": {"candidateCount": 0}},
     )
 
     assert response.status_code == 409
@@ -643,7 +643,7 @@ def test_bind_to_venue_appends_resolution_event(uncertainty_app) -> None:
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/bind-to-venue",  # type: ignore[attr-defined]
         json={
-            "reconcileEventSeq": reconcile_seq,
+            "evidenceRef": str(reconcile_seq),
             "venueOfferId": "venue-7",
             "operatorUuid": "operator-1",
             "reason": "exact venue offer confirmed",
@@ -702,7 +702,7 @@ def test_bind_requires_full_immutable_attempt_identity(
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/bind-to-venue",  # type: ignore[attr-defined]
         json={
-            "reconcileEventSeq": reconcile_seq,
+            "evidenceRef": str(reconcile_seq),
             "venueOfferId": "venue-same-id",
             "operatorUuid": "operator-1",
             "evidence": {"candidateCount": 1},
@@ -743,7 +743,7 @@ def test_bind_rejects_multiple_exact_candidates_even_when_requested_id_exists(
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/bind-to-venue",  # type: ignore[attr-defined]
         json={
-            "reconcileEventSeq": reconcile_seq,
+            "evidenceRef": str(reconcile_seq),
             "venueOfferId": "venue-requested",
             "operatorUuid": "operator-1",
         },
@@ -761,7 +761,7 @@ def test_submit_unknown_cannot_use_manual_resolution_escape_hatch(
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/manual-resolution",  # type: ignore[attr-defined]
         json={
-            "reconcileEventSeq": reconcile_seq,
+            "evidenceRef": str(reconcile_seq),
             "operatorUuid": "operator-1",
             "reason": "operator confirmed the venue request was not accepted",
             "evidence": {"decision": "not_accepted"},
@@ -796,7 +796,7 @@ def test_manual_resolution_rejects_non_allowlisted_decision(
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{uncertainty_id}/manual-resolution",
         json={
-            "reconcileEventSeq": reconcile_seq,
+            "evidenceRef": str(reconcile_seq),
             "operatorUuid": "operator-1",
             "reason": "invalid client decision",
             "evidence": {"decision": "accept"},
@@ -828,7 +828,7 @@ def test_manual_resolution_allows_unattributed_venue_offer(uncertainty_app) -> N
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{orphan_uncertainty_id}/manual-resolution",
         json={
-            "reconcileEventSeq": reconcile_seq,
+            "evidenceRef": str(reconcile_seq),
             "operatorUuid": "operator-1",
             "reason": "operator accepted the manual venue offer",
             "evidence": {"decision": "accepted_external_exposure"},
@@ -861,7 +861,7 @@ def test_resolution_rejects_snapshot_whose_query_overlaps_opening_event(
 
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",  # type: ignore[attr-defined]
-        json={"reconcileEventSeq": reconcile_seq, "evidence": {"candidateCount": 0}},
+        json={"evidenceRef": str(reconcile_seq), "evidence": {"candidateCount": 0}},
     )
 
     assert response.status_code == 409
@@ -877,7 +877,7 @@ def test_resolution_rejects_latest_appended_snapshot_older_than_projected_author
 
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",  # type: ignore[attr-defined]
-        json={"reconcileEventSeq": delayed_seq, "evidence": {"candidateCount": 0}},
+        json={"evidenceRef": str(delayed_seq), "evidence": {"candidateCount": 0}},
     )
 
     assert response.status_code == 409
@@ -893,7 +893,7 @@ def test_resolution_evidence_rejects_unknown_secret_like_fields(
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",  # type: ignore[attr-defined]
         json={
-            "reconcileEventSeq": reconcile_seq,
+            "evidenceRef": str(reconcile_seq),
             "evidence": {"candidateCount": 0, "apiSecret": "must-not-persist"},
         },
     )
@@ -905,7 +905,7 @@ def test_manual_resolution_requires_reason_and_operator_uuid(uncertainty_app) ->
     client, _factory = uncertainty_app
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{uuid4()}/manual-resolution",
-        json={"reconcileEventSeq": 2, "operatorUuid": "operator-1"},
+        json={"evidenceRef": "2", "operatorUuid": "operator-1"},
     )
     assert response.status_code == 422
 
@@ -940,7 +940,7 @@ def _mark_not_accepted(client, reconcile_seq: int, *, reason: str = "zero candid
     return client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",
         json={
-            "reconcileEventSeq": reconcile_seq,
+            "evidenceRef": str(reconcile_seq),
             "operatorUuid": "operator-1",
             "reason": reason,
             "evidence": {"candidateCount": 0},
@@ -1299,3 +1299,39 @@ def test_shared_operator_authority_defers_to_the_database_verdict(monkeypatch) -
         ) is verdict
         _statement, params = session.scalar.call_args.args
         assert params == {"account": ACCOUNT_ID, "actor": "operator-1"}
+
+
+@pytest.mark.parametrize("field", ["reconcile_event_seq", "reconcileEventSeq"])
+def test_old_resolution_body_field_is_rejected(uncertainty_app, field) -> None:
+    client, _ = uncertainty_app
+    response = client.post(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",
+        json={field: 42},
+    )
+    assert response.status_code == 422
+    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
+
+
+@pytest.mark.parametrize("evidence_ref", ["042", " 42"])
+def test_noncanonical_legacy_evidence_ref_is_rejected(uncertainty_app, evidence_ref) -> None:
+    client, _ = uncertainty_app
+    response = client.post(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",
+        json={"evidenceRef": evidence_ref},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "stale_reconcile_fence"
+
+
+def test_request_response_echoes_stored_ref_after_context_advances(uncertainty_app) -> None:
+    client, factory = uncertainty_app
+    seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+    queued = _mark_not_accepted(client, seq).json()["data"]
+    assert queued["evidenceRef"] == str(seq)
+    next_seq = asyncio.run(_append_snapshot(factory, finished_at=3_000))
+    detail = client.get(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}"
+    ).json()["data"]
+    assert detail["resolutionContext"]["evidenceRef"] == str(next_seq)
+    assert detail["resolutionRequest"]["evidenceRef"] == str(seq)
+    assert _request_outcome(client, queued["requestId"])["evidenceRef"] == str(seq)
