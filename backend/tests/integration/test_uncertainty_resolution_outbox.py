@@ -37,7 +37,10 @@ from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     ResolutionScope,
     UncertaintyResolutionWorker,
 )
-from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
+from bfx_funding_bot.modules.execution.uncertainty_tables import (
+    ExecutionUncertaintyRow,
+    UncertaintyResolutionRequestRow,
+)
 from tests.modules.api.test_uncertainties_router import (
     ACCOUNT_ID,
     SCID,
@@ -416,15 +419,26 @@ def test_web_api_queues_and_only_the_account_writer_appends(migrated, monkeypatc
                 assert outcome["state"] == "applied", outcome
                 detail = (await client.get(f"{base}/uncertainties/{uncertainty_id}")).json()["data"]
                 assert detail["state"] == "resolved"
-                assert detail["resolvedEventSeq"] == outcome["resolvedEventSeq"]
+                assert detail["resolutionRequest"] == outcome
                 assert detail["resolutionRequest"]["state"] == "applied"
             async with owner() as session:
+                resolved_event_seq = await session.scalar(
+                    select(UncertaintyResolutionRequestRow.resolved_event_seq).where(
+                        UncertaintyResolutionRequestRow.request_id == UUID(request_id)
+                    )
+                )
+                assert resolved_event_seq is not None
+                assert await session.scalar(
+                    select(ExecutionUncertaintyRow.resolved_event_seq).where(
+                        ExecutionUncertaintyRow.uncertainty_id == uncertainty_id
+                    )
+                ) == resolved_event_seq
                 resolutions = list(await session.scalars(
                     select(EventLogRow.event_seq).where(
                         EventLogRow.event_type == "UNCERTAINTY_MARKED_NOT_ACCEPTED"
                     )
                 ))
-            assert resolutions == [outcome["resolvedEventSeq"]]
+            assert resolutions == [resolved_event_seq]
         finally:
             for engine in (owner_engine, webapi_engine, bot_engine):
                 await engine.dispose()

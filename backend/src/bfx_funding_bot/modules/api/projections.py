@@ -53,7 +53,6 @@ def build_projections_router() -> APIRouter:
                     n_credits=row.n_credits,
                     last_updated_ms=row.last_updated_ms,
                     last_reconciled_at=row.last_reconciled_at,
-                    last_event_seq=row.last_event_seq,
                 ).model_dump(by_alias=True)
                 for row in rows
             ]

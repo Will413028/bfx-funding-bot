@@ -101,9 +101,6 @@ function row(
     symbol: "fUST",
     intendedAmount: "100",
     state: "open",
-    openedEventSeq: 7,
-    reconcileEventSeq: null,
-    resolvedEventSeq: null,
     evidenceSummary: {},
     blockedScope: {
       exchangeAccountId: ACCOUNT_ID,
@@ -122,7 +119,6 @@ function row(
             evidenceRef: "12",
             createdAtMs: 1,
             processedAtMs: null,
-            resolvedEventSeq: null,
             outcomeReason: null,
           },
   };

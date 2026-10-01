@@ -147,7 +147,16 @@ def test_positions_realm_scoped_camel_case(app_client):
     assert fust["nCredits"] == 3
     assert fust["lastReconciledAtMs"] == 2000  # *Ms suffix (contract v2 rename)
     assert "lastReconciledAt" not in fust
-    assert fust["lastEventSeq"] == 7
+
+
+def test_position_responses_omit_event_seq_fields(app_client):
+    response = app_client.get(_POSITIONS_PATH)
+    assert response.status_code == 200
+    positions = response.json()["data"]
+    assert positions
+    for position in positions:
+        assert "lastEventSeq" not in position
+        assert "last_event_seq" not in position
 
 
 def test_offers_default_active_only_desc(app_client):

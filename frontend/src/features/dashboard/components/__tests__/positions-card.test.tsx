@@ -12,7 +12,6 @@ const POSITION: Position = {
   nCredits: 4,
   lastUpdatedMs: NOW - 60_000,
   lastReconciledAtMs: NOW - 120_000,
-  lastEventSeq: 981,
 };
 
 describe("PositionsCard", () => {

@@ -133,7 +133,6 @@ class ResolutionRequestResponse(BaseModel):
     evidence_ref: str = Field(serialization_alias="evidenceRef")
     created_at_ms: int = Field(serialization_alias="createdAtMs")
     processed_at_ms: int | None = Field(default=None, serialization_alias="processedAtMs")
-    resolved_event_seq: int | None = Field(default=None, serialization_alias="resolvedEventSeq")
     outcome_reason: str | None = Field(default=None, serialization_alias="outcomeReason")
 
 
@@ -147,15 +146,6 @@ class UncertaintyResponse(BaseModel):
     symbol: str
     intended_amount: str = Field(serialization_alias="intendedAmount")
     state: Literal["open", "resolved"]
-    opened_event_seq: int = Field(serialization_alias="openedEventSeq")
-    reconcile_event_seq: int | None = Field(
-        default=None,
-        serialization_alias="reconcileEventSeq",
-    )
-    resolved_event_seq: int | None = Field(
-        default=None,
-        serialization_alias="resolvedEventSeq",
-    )
     evidence_summary: dict[str, _EvidenceValue] = Field(
         default_factory=dict,
         serialization_alias="evidenceSummary",
@@ -276,9 +266,6 @@ def _response(
         symbol=row.symbol,
         intended_amount=str(Decimal(str(row.intended_amount))),
         state=state,
-        opened_event_seq=row.opened_event_seq,
-        reconcile_event_seq=row.reconcile_event_seq,
-        resolved_event_seq=row.resolved_event_seq,
         evidence_summary=_evidence_summary(row.evidence),
         blocked_scope={
             "exchangeAccountId": str(row.exchange_account_id),
@@ -303,7 +290,6 @@ def _request_model(row: UncertaintyResolutionRequestRow) -> ResolutionRequestRes
         evidence_ref=str(row.reconcile_event_seq),
         created_at_ms=row.created_at_ms,
         processed_at_ms=row.processed_at_ms,
-        resolved_event_seq=row.resolved_event_seq,
         outcome_reason=row.outcome_reason,
     )
 

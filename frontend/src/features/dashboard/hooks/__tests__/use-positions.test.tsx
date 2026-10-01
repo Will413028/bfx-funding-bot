@@ -20,7 +20,6 @@ const POSITIONS: Position[] = [
     nCredits: 2,
     lastUpdatedMs: 1_790_000_000_000,
     lastReconciledAtMs: 1_790_000_000_000,
-    lastEventSeq: 42,
   },
 ];
 
