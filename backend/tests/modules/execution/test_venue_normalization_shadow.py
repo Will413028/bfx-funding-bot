@@ -209,3 +209,111 @@ async def test_failed_requests_never_observed(error):
                 ctx=CTX)
     assert exc.value.status_code == (403 if error == "http" else 0)
     observer.assert_not_called()
+
+
+def residual_shadow(now, symbols=("UST",)):
+    shadow = VenueNormalizationShadow(clock=lambda: now[0])
+    for stream, factory in (("offers", offer), ("credits", credit), ("loans", credit)):
+        rows = []
+        for symbol in symbols:
+            row = factory()
+            row[1] = "f" + symbol
+            row[4 if stream == "offers" else 5] = "2" if stream == "offers" else "3"
+            rows.append(row)
+        observe(shadow, "funding/" + stream, rows)
+    return shadow
+
+
+def test_wallet_residual_zero_and_hourly_summary(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    now = [0.0]
+    shadow = residual_shadow(now)
+    observe(shadow, "wallets", [["funding", "UST", "10", None, "2"]])
+    assert not warnings(caplog)
+    assert shadow._residuals["UST"].samples == 1
+    now[0] = 3600
+    observe(shadow, "wallets", [])
+    summaries = [r.message for r in caplog.records if "wallet_residual_summary" in r.message]
+    assert len(summaries) == 1
+    assert "samples=1 max_abs=0 last=0 above_tolerance=0 stale=0" in summaries[0]
+    observe(shadow, "wallets", [])
+    assert len([r for r in caplog.records if "wallet_residual_summary" in r.message]) == 1
+
+
+def test_wallet_residual_warning_dedup(caplog):
+    shadow = residual_shadow([0.0])
+    for _ in range(3):
+        observe(shadow, "wallets", [["funding", "UST", "11", None, "2"]])
+    assert len(warnings(caplog)) == 1
+    assert warnings(caplog)[0].message == "venue_wallet_residual currency=UST residual=1"
+    stats = shadow._residuals["UST"]
+    assert (stats.samples, stats.max_abs, stats.last, stats.above_tolerance) == (3, 1, 1, 3)
+
+
+@pytest.mark.parametrize("stream", ["offers", "credits", "loans"])
+def test_wallet_residual_stale_snapshot_skipped(stream, caplog):
+    now = [0.0]
+    shadow = residual_shadow(now)
+    now[0] = 30
+    observe(shadow, "wallets", [["funding", "UST", "10", None, "2"]])
+    now[0] = 31
+    for fresh in {"offers", "credits", "loans"} - {stream}:
+        observe(shadow, "funding/" + fresh, [])
+    observe(shadow, "wallets", [["funding", "UST", "99", None, "2"]])
+    stats = shadow._residuals["UST"]
+    assert (stats.samples, stats.stale, stats.last) == (1, 1, 0)
+    assert not warnings(caplog)
+
+
+def test_wallet_residual_multiple_currencies_and_exchange_ignored(caplog):
+    shadow = residual_shadow([0.0], ("UST", "USD"))
+    observe(shadow, "wallets", [
+        ["funding", "UST", "10", None, "2"],
+        ["funding", "USD", "12", None, "2"],
+        ["exchange", "BTC", "100", None, "0"],
+    ])
+    assert set(shadow._residuals) == {"UST", "USD"}
+    assert shadow._residuals["UST"].last == 0
+    assert shadow._residuals["USD"].last == 2
+    assert len(warnings(caplog)) == 1
+
+
+def test_wallet_residual_parse_failure_skips_row_and_history_keeps_snapshot(caplog):
+    shadow = residual_shadow([0.0])
+    observe(shadow, "funding/loans", [[99], credit()])
+    observe(shadow, "funding/offers/fUST/hist", [offer("EXECUTED")])
+    observe(shadow, "wallets", [["funding", "UST", "13.00000000000000004", None, "2"]])
+    assert shadow._residuals["UST"].last == 0
+    assert len(warnings(caplog)) == 1
+    assert "parse_error" in warnings(caplog)[0].message
+
+
+def test_wallet_residual_missing_snapshot_skipped():
+    shadow = VenueNormalizationShadow()
+    observe(shadow, "wallets", [["funding", "UST", "10", None, "2"]])
+    assert shadow._residuals["UST"].stale == 1
+    assert shadow._residuals["UST"].samples == 0
+
+
+def test_wallet_residual_tolerance_negative_and_empty_snapshot_replaces(caplog):
+    shadow = residual_shadow([0.0])
+    observe(shadow, "wallets", [["funding", "UST", "10.00000001", None, "2"]])
+    assert not warnings(caplog)
+    observe(shadow, "wallets", [["funding", "UST", "9.99999998", None, "2"]])
+    assert len(warnings(caplog)) == 1
+    observe(shadow, "funding/offers", [])
+    observe(shadow, "wallets", [["funding", "UST", "8", None, "2"]])
+    stats = shadow._residuals["UST"]
+    assert stats.samples == 3
+    assert stats.max_abs == Decimal("0.00000002")
+    assert stats.last == 0
+    assert stats.above_tolerance == 1
+
+
+def test_wallet_residual_per_symbol_read_does_not_replace_snapshot(caplog):
+    """A per-symbol offers read is partial; only all-symbol reads are snapshots."""
+    shadow = residual_shadow([0.0], symbols=("UST", "USD"))
+    observe(shadow, "funding/offers/fUSD", [])
+    observe(shadow, "wallets", [["funding", "UST", "10", None, "2"]])
+    assert not warnings(caplog)
+    assert shadow._residuals["UST"].samples == 1
