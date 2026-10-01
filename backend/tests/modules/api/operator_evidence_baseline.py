@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.api.account_scope import ExchangeAccountContext
-from bfx_funding_bot.modules.api.uncertainties import UncertaintyResolutionContext
+from bfx_funding_bot.modules.api.uncertainties import _MAX_CANDIDATE_VENUE_OFFER_IDS
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, PositionStateRow
 from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     ResolutionRejected,
@@ -27,6 +28,38 @@ from bfx_funding_bot.modules.execution.unknown_matching import (
 RECONCILE_EVENT_TYPE = "VENUE_SNAPSHOT_OBSERVED"
 _MAX_CANDIDATE_VENUE_OFFER_IDS = 16
 
+
+
+class UncertaintyResolutionContext(BaseModel):
+    """Frozen pre-S1-3c4b wire model (integer fence) for the baseline."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    reconcile_event_seq: int | None = Field(
+        default=None,
+        serialization_alias="reconcileEventSeq",
+    )
+    query_started_at_ms: int | None = Field(
+        default=None,
+        serialization_alias="queryStartedAtMs",
+    )
+    query_finished_at_ms: int | None = Field(
+        default=None,
+        serialization_alias="queryFinishedAtMs",
+    )
+    candidate_count: int | None = Field(
+        default=None,
+        serialization_alias="candidateCount",
+    )
+    candidate_venue_offer_ids: list[str] = Field(
+        default_factory=list,
+        serialization_alias="candidateVenueOfferIds",
+        max_length=_MAX_CANDIDATE_VENUE_OFFER_IDS,
+    )
+    unavailable_reason: str | None = Field(
+        default=None,
+        serialization_alias="unavailableReason",
+    )
 
 def _optional_int(value: object) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool):

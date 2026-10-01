@@ -35,37 +35,40 @@ function setup() {
 describe("useResolveUncertainty", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("sends the audited resolution once without inventing client evidence", async () => {
-    const { wrapper } = setup();
-    vi.mocked(apiClient.post).mockResolvedValueOnce({
-      requestId: "request-1",
-      state: "requested",
-    });
-    const { result } = renderHook(() => useResolveUncertainty(ACCOUNT_ID), {
-      wrapper,
-    });
+  it.each(["42", "ledger:v1:obs:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"])(
+    "sends the audited resolution once without inventing client evidence (%s)",
+    async (evidenceRef) => {
+      const { wrapper } = setup();
+      vi.mocked(apiClient.post).mockResolvedValueOnce({
+        requestId: "request-1",
+        state: "requested",
+      });
+      const { result } = renderHook(() => useResolveUncertainty(ACCOUNT_ID), {
+        wrapper,
+      });
 
-    await act(() =>
-      result.current.mutateAsync({
-        uncertaintyId: "uncertainty-1",
-        action: "bind-to-venue",
-        reconcileEventSeq: 42,
-        venueOfferId: "venue-42",
-        operatorUuid: "operator-1",
-      }),
-    );
+      await act(() =>
+        result.current.mutateAsync({
+          uncertaintyId: "uncertainty-1",
+          action: "bind-to-venue",
+          evidenceRef,
+          venueOfferId: "venue-42",
+          operatorUuid: "operator-1",
+        }),
+      );
 
-    expect(apiClient.post).toHaveBeenCalledTimes(1);
-    expect(apiClient.post).toHaveBeenCalledWith(
-      `/exchange-accounts/${ACCOUNT_ID}/uncertainties/uncertainty-1/bind-to-venue`,
-      {
-        reconcileEventSeq: 42,
-        venueOfferId: "venue-42",
-        operatorUuid: "operator-1",
-        evidence: {},
-      },
-    );
-  });
+      expect(apiClient.post).toHaveBeenCalledTimes(1);
+      expect(apiClient.post).toHaveBeenCalledWith(
+        `/exchange-accounts/${ACCOUNT_ID}/uncertainties/uncertainty-1/bind-to-venue`,
+        {
+          evidenceRef,
+          venueOfferId: "venue-42",
+          operatorUuid: "operator-1",
+          evidence: {},
+        },
+      );
+    },
+  );
 
   it("does not retry a rejected financial-state write", async () => {
     const { wrapper } = setup();
@@ -78,7 +81,7 @@ describe("useResolveUncertainty", () => {
       result.current.mutate({
         uncertaintyId: "uncertainty-1",
         action: "mark-not-accepted",
-        reconcileEventSeq: 42,
+        evidenceRef: "42",
         operatorUuid: "operator-1",
       });
     });
@@ -116,7 +119,7 @@ function row(
             uncertaintyId,
             action: "mark_not_accepted",
             state: requestState,
-            reconcileEventSeq: 12,
+            evidenceRef: "12",
             createdAtMs: 1,
             processedAtMs: null,
             resolvedEventSeq: null,

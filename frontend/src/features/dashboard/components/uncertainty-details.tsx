@@ -43,12 +43,13 @@ export function UncertaintyDetails({ uncertainty }: UncertaintyDetailsProps) {
   const action = actionKey(uncertainty.kind);
   const context = uncertainty.resolutionContext;
   const operatorUuid = user.data?.id;
-  const reconcileEventSeq = context?.reconcileEventSeq;
+  const evidenceRef = context?.evidenceRef;
   const hasFreshContext =
     context !== null &&
     context !== undefined &&
     context.unavailableReason === null &&
-    typeof reconcileEventSeq === "number";
+    typeof evidenceRef === "string" &&
+    evidenceRef.length > 0;
   const canSubmit =
     hasFreshContext && Boolean(operatorUuid) && !isAwaitingDaemon;
   const isSubmitUnknown = uncertainty.kind === "submit_outcome_unknown";
@@ -57,10 +58,15 @@ export function UncertaintyDetails({ uncertainty }: UncertaintyDetailsProps) {
     uncertainty.kind === "unsupported_venue_exposure";
 
   function commonInput() {
-    if (!operatorUuid || typeof reconcileEventSeq !== "number") return null;
+    if (
+      !operatorUuid ||
+      typeof evidenceRef !== "string" ||
+      evidenceRef.length === 0
+    )
+      return null;
     return {
       uncertaintyId: uncertainty.uncertaintyId,
-      reconcileEventSeq,
+      evidenceRef,
       operatorUuid,
     };
   }

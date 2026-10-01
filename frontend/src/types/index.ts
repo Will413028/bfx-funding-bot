@@ -138,7 +138,7 @@ export type CapitalStatus =
       capital_available: true;
       policy_revision: number;
       policy_digest: string;
-      snapshot_seq: number;
+      basis_token: string;
       policy: CapitalPolicy;
       available_balance: string;
       unreflected_commitments: string;
@@ -368,7 +368,7 @@ export interface UncertaintyBlockedScope {
 
 /** Latest server-derived evidence that can authorize an operator resolution. */
 export interface UncertaintyResolutionContext {
-  reconcileEventSeq: number | null;
+  evidenceRef: string | null;
   queryStartedAtMs: number | null;
   queryFinishedAtMs: number | null;
   candidateCount: number | null;
@@ -414,7 +414,7 @@ export interface UncertaintyResolutionRequest {
   uncertaintyId: string;
   action: "bind_to_venue" | "mark_not_accepted" | "manual_resolution";
   state: UncertaintyResolutionRequestState;
-  reconcileEventSeq: number;
+  evidenceRef: string;
   createdAtMs: number;
   processedAtMs: number | null;
   resolvedEventSeq: number | null;

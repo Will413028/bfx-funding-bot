@@ -86,9 +86,12 @@ async def test_legacy_context_differential(uncertainty_app, scene, count, ids, r
         assert (await baseline_context(session, context=context, row=row)).model_dump(
             by_alias=True
         ) == expected
+        # S1-3c4b wire: the same fence as an opaque decimal string.
+        renamed = {k: v for k, v in expected.items() if k != "reconcileEventSeq"}
+        renamed["evidenceRef"] = None if seq is None else str(seq)
         assert (await _resolution_context(session, context=context, row=row)).model_dump(
             by_alias=True
-        ) == expected
+        ) == renamed
 
 
 @pytest.mark.parametrize(
@@ -194,20 +197,21 @@ async def test_worker_reverifies_injected_port_under_account_lock(uncertainty_ap
 
 
 @pytest.mark.asyncio
-async def test_api_converts_injected_opaque_evidence_to_unchanged_integer_wire():
+@pytest.mark.parametrize("ref", ["42", "ledger:v1:obs:00000000-0000-0000-0000-0000000000aa"])
+async def test_api_passes_opaque_evidence_ref_through_unchanged(ref):
     from unittest.mock import AsyncMock
     from uuid import uuid4
 
     from bfx_funding_bot.modules.ledger import ResolutionEvidence, ResolutionSubject, Scope
 
     port = AsyncMock()
-    port.resolution_context.return_value = ResolutionEvidence("42", 100, 110, ("offer",), 1)
+    port.resolution_context.return_value = ResolutionEvidence(ref, 100, 110, ("offer",), 1)
     context = SimpleNamespace(exchange_account_id=ACCOUNT_ID, deployment_environment="ci")
     row = SimpleNamespace(uncertainty_id=uuid4(), symbol="fUST", attempt_id=uuid4())
     session = AsyncMock()
     result = await _resolution_context(session, context=context, row=row, evidence=port)
     assert result.model_dump(by_alias=True) == {
-        "reconcileEventSeq": 42,
+        "evidenceRef": ref,
         "queryStartedAtMs": 100,
         "queryFinishedAtMs": 110,
         "candidateVenueOfferIds": ["offer"],

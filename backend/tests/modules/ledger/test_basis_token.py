@@ -4,7 +4,7 @@ from uuid import UUID
 
 import pytest
 
-from bfx_funding_bot.modules.ledger import basis_token_value, encode_basis_token, parse_basis_token
+from bfx_funding_bot.modules.ledger import encode_basis_token, parse_basis_token
 
 QUERY = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 
@@ -13,8 +13,6 @@ QUERY = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 def test_token_round_trip(revision: int) -> None:
     token = encode_basis_token(QUERY, revision)
     assert parse_basis_token(token) == (QUERY, revision)
-    assert basis_token_value(token) == token
-    assert basis_token_value("123") == 123
 
 
 @pytest.mark.parametrize(

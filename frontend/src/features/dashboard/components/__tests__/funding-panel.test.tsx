@@ -21,7 +21,7 @@ const status = {
       capital_available: true,
       policy_revision: 7,
       policy_digest: "verified",
-      snapshot_seq: 80,
+      basis_token: "80",
       policy: {
         enabled: true,
         reserve_amount: "0.000000001",

@@ -673,8 +673,8 @@ class CapitalAvailable:
 
     ``basis_token`` identifies the capital basis the answer was derived from.
     It is opaque: consumers compare tokens for equality or pass one back to the
-    authority that issued it, and never parse it. User-visible output renders it
-    with ``basis_token_value``.
+    authority that issued it, and never parse it. User-visible output preserves
+    the string unchanged.
     """
 
     applied: AppliedPolicy
@@ -696,18 +696,6 @@ class CapitalBlocked:
 
 
 type CapitalRead = CapitalAvailable | CapitalBlocked
-
-
-def basis_token_value(token: str) -> int | str:
-    """How a basis token appears in user-visible output (status, digests).
-
-    A plain decimal token is rendered as the JSON number those outputs have
-    always carried; any other token as its text. Presentation only: never use
-    the result to decide anything.
-    """
-    if token.isascii() and token.isdigit() and (token == "0" or not token.startswith("0")):
-        return int(token)
-    return token
 
 
 class CapitalAuthority(Protocol):
@@ -948,7 +936,6 @@ __all__ = [
     "VenueObservation",
     "VerifiedEvidence",
     "Wallet",
-    "basis_token_value",
     "encode_basis_token",
     "parse_basis_token",
 ]

@@ -33,7 +33,7 @@ vi.mock("@/features/settings/hooks/use-user", () => ({
 }));
 
 const RESOLUTION_CONTEXT: UncertaintyResolutionContext = {
-  reconcileEventSeq: 12,
+  evidenceRef: "12",
   queryStartedAtMs: 1_790_000_001_000,
   queryFinishedAtMs: 1_790_000_002_000,
   candidateCount: 1,
@@ -71,7 +71,7 @@ function request(
     uncertaintyId: "u-1",
     action: "bind_to_venue",
     state,
-    reconcileEventSeq: 12,
+    evidenceRef: "12",
     createdAtMs: 1,
     processedAtMs: state === "requested" ? null : 2,
     resolvedEventSeq: state === "applied" ? 13 : null,
@@ -205,6 +205,29 @@ describe("uncertainty contract", () => {
     ).toBeDefined();
   });
 
+  it("enables submission and echoes a ledger evidence ref byte-for-byte", () => {
+    const evidenceRef = "ledger:v1:obs:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    render(
+      createElement(UncertaintyBanner, {
+        uncertainties: [
+          {
+            ...BLOCKED,
+            resolutionContext: { ...RESOLUTION_CONTEXT, evidenceRef },
+          },
+        ],
+      }),
+    );
+    expect((bindButton() as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(bindButton());
+    expect(resolve).toHaveBeenCalledWith({
+      uncertaintyId: "u-1",
+      action: "bind-to-venue",
+      evidenceRef,
+      venueOfferId: "venue-12",
+      operatorUuid: "operator-1",
+    });
+  });
+
   it("binds only the exact server-derived venue candidate", () => {
     render(
       createElement(UncertaintyBanner, {
@@ -221,7 +244,7 @@ describe("uncertainty contract", () => {
     expect(resolve).toHaveBeenCalledWith({
       uncertaintyId: "u-1",
       action: "bind-to-venue",
-      reconcileEventSeq: 12,
+      evidenceRef: "12",
       venueOfferId: "venue-12",
       operatorUuid: "operator-1",
     });
@@ -250,7 +273,7 @@ describe("uncertainty contract", () => {
     expect(resolve).toHaveBeenCalledWith({
       uncertaintyId: "u-1",
       action: "mark-not-accepted",
-      reconcileEventSeq: 12,
+      evidenceRef: "12",
       operatorUuid: "operator-1",
     });
   });
@@ -310,7 +333,7 @@ describe("uncertainty contract", () => {
     expect(resolve).toHaveBeenCalledWith({
       uncertaintyId: "u-orphan",
       action: "manual-resolution",
-      reconcileEventSeq: 12,
+      evidenceRef: "12",
       operatorUuid: "operator-1",
       reason: "Verified directly in Bitfinex history",
       evidence: { decision: "closed_at_venue" },
