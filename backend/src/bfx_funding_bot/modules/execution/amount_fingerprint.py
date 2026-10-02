@@ -19,7 +19,7 @@ fingerprint in the space is usable.
 from __future__ import annotations
 
 from collections.abc import Collection
-from decimal import ROUND_DOWN, Decimal, InvalidOperation
+from decimal import ROUND_DOWN, Decimal
 from hashlib import sha256
 from uuid import UUID
 
@@ -32,25 +32,14 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
 )
+from bfx_funding_bot.modules.trading import AMOUNT_QUANTUM, fingerprint_of
 
-AMOUNT_QUANTUM = Decimal("0.00000001")
 FINGERPRINT_STEP = Decimal("0.0001")
 FINGERPRINT_SPACE = 9999  # values 1..9999; 0 means "no fingerprint"
 
 # An UNKNOWN claim stays UNKNOWN for audit after its attempt is resolved as not
 # sent; while it is unresolved its attempt holds the fingerprint (below).
 _OPEN_CLAIM_STATES = (RegistryState.PENDING.value, RegistryState.CLAIMED.value)
-
-
-def fingerprint_of(amount: object) -> int | None:
-    """The fingerprint an amount carries, or None when it is not a valid wire amount."""
-    try:
-        value = amount if isinstance(amount, Decimal) else Decimal(str(amount))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
-    if not value.is_finite() or value <= 0 or value != value.quantize(AMOUNT_QUANTUM):
-        return None
-    return int(value.scaleb(8)) % 10_000
 
 
 def fingerprint_seed(key: str) -> int:
@@ -128,10 +117,8 @@ async def fingerprints_in_use(session: AsyncSession, *, account_id: UUID, enviro
 
 
 __all__ = [
-    "AMOUNT_QUANTUM",
     "FINGERPRINT_SPACE",
     "choose_fingerprinted_amount",
-    "fingerprint_of",
     "fingerprint_seed",
     "fingerprinted",
     "fingerprints_in_use",

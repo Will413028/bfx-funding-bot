@@ -28,7 +28,6 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
     format_venue_decimal,
 )
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprint_of
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
@@ -74,6 +73,7 @@ from bfx_funding_bot.modules.ledger import (
 )
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.trading import fingerprint_of
 
 log = logging.getLogger(__name__)
 

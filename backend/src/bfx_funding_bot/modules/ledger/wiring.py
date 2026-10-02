@@ -16,6 +16,7 @@ from bfx_funding_bot.modules.ledger import (
     AuthorizeRefused,
     CancelAdmitted,
     CancelProvenance,
+    CapitalAuthority,
     CommandAttempt,
     CommandJournal,
     CommandOutcome,
@@ -29,6 +30,7 @@ from bfx_funding_bot.modules.ledger import (
     LedgerUncertainties,
     LockedCancelGuard,
     LockedCommandGuard,
+    ManagedOfferReader,
     ManagedOffers,
     Observation,
     ObservationSink,
@@ -44,6 +46,8 @@ from bfx_funding_bot.modules.ledger import (
     QueryHandle,
     Resolution,
     Scope,
+    ScopeLock,
+    UncertaintyReader,
     VenueHintPublisher,
     VenueHintSink,
     VenueObservation,
@@ -55,6 +59,7 @@ from bfx_funding_bot.modules.ledger._internal import (
     observation,
     operator_evidence,
     operator_reads,
+    ports,
     quarantine,
     reads,
 )
@@ -320,3 +325,22 @@ def build_operator_evidence() -> OperatorEvidence:
 def build_operator_reads() -> OperatorReads:
     """The ledger operator read model; apps select it by authority epoch."""
     return operator_reads.LedgerOperatorReads()
+
+
+def build_capital_authority(
+    session_factory: async_sessionmaker[AsyncSession], *, max_snapshot_age_ms: int
+) -> CapitalAuthority:
+    """The ledger capital authority; pass the one freshness bound the legacy repository uses."""
+    return ports.LedgerCapitalAuthority(session_factory, max_snapshot_age_ms=max_snapshot_age_ms)
+
+
+def build_uncertainty_reader(session_factory: async_sessionmaker[AsyncSession]) -> UncertaintyReader:
+    return ports.LedgerUncertaintyReader(session_factory)
+
+
+def build_managed_offer_reader() -> ManagedOfferReader:
+    return ports.LedgerManagedOfferReader()
+
+
+def build_scope_lock() -> ScopeLock:
+    return ports.LedgerScopeLock()

@@ -24,10 +24,7 @@ from bfx_funding_bot.external.bitfinex.funding_rules import (
     FundingRuleProvider,
     submit_amount,
 )
-from bfx_funding_bot.modules.execution.amount_fingerprint import (
-    choose_fingerprinted_amount,
-    fingerprint_of,
-)
+from bfx_funding_bot.modules.execution.amount_fingerprint import choose_fingerprinted_amount
 from bfx_funding_bot.modules.execution.audit import AuditContext
 from bfx_funding_bot.modules.execution.contracts import (
     BlockedExecution,
@@ -103,7 +100,7 @@ from bfx_funding_bot.modules.strategy import (
     StrategyName,
     configured_symbols,
 )
-from bfx_funding_bot.modules.trading import CapitalScope
+from bfx_funding_bot.modules.trading import CapitalScope, fingerprint_of
 
 log = logging.getLogger(__name__)
 

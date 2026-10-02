@@ -123,7 +123,7 @@ async def test_planner_attaches_the_status_budget_and_revision(capital_db):
     await rec.deploy()
     planned = ex.ready_submissions[0]
     # The 700 budget, fingerprinted (D3a): below it by less than 0.0001.
-    from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprint_of
+    from bfx_funding_bot.modules.trading import fingerprint_of
     sent = planned.decision.offer_amount_usdt
     assert isinstance(sent, Decimal)
     assert Decimal("699.9999") < sent < Decimal("700") and fingerprint_of(sent)

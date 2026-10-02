@@ -34,7 +34,7 @@ from uuid import UUID
 from sqlalchemy import Select, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.ledger import CapitalReadRefused, LedgerCapitalRead
+from bfx_funding_bot.modules.ledger import CapitalReadRefused, LedgerCapitalRead, Scope
 from bfx_funding_bot.modules.ledger._internal.attempts import (
     MAX_TAIL_ATTEMPTS,
     attempt_evidence,
@@ -43,6 +43,7 @@ from bfx_funding_bot.modules.ledger._internal.attempts import (
 )
 from bfx_funding_bot.modules.ledger._internal.attempts import fresh_all as _all
 from bfx_funding_bot.modules.ledger._internal.attempts import payload_amount as _amount
+from bfx_funding_bot.modules.ledger._internal.clock import holds_scope_lock
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisCellRow,
@@ -100,6 +101,15 @@ async def _require_snapshot_transaction(session: AsyncSession) -> None:
         )
 
 
+async def _require_locked_transaction(session: AsyncSession, scope: Scope) -> None:
+    """READ COMMITTED under the scope lock: every ledger writer locks, so the view is consistent."""
+    isolation = await session.scalar(text("SELECT current_setting('transaction_isolation')"))
+    if isolation != "read committed":
+        raise CapitalReadRefused(f"locked capital read needs READ COMMITTED, got {isolation}")
+    if not await holds_scope_lock(session, scope):
+        raise CapitalReadRefused("locked capital read needs the scope's advisory lock")
+
+
 async def _one[T](session: AsyncSession, statement: Select[tuple[T]]) -> T | None:
     rows = await _all(session, statement.limit(1))
     return rows[0] if rows else None
@@ -122,14 +132,16 @@ def _blocked(value: Any) -> Blocked | None:
     return Blocked(reasons[0]["reason"], evidence)
 
 
-async def _policy(session: AsyncSession, scope: CapitalScope) -> AppliedPolicy | Blocked:
+async def _policy(
+    session: AsyncSession, account: UUID, environment: str, symbol: str
+) -> AppliedPolicy | Blocked:
     """The symbol's head -> its revision, proven and parsed (legacy read_policy_row order)."""
     head = (
         await session.execute(
             select(CapitalPolicyHeadRow.revision_id, CapitalPolicyHeadRow.revision).where(
-                CapitalPolicyHeadRow.exchange_account_id == scope.account_id,
-                CapitalPolicyHeadRow.deployment_environment == scope.environment,
-                CapitalPolicyHeadRow.symbol == scope.symbol,
+                CapitalPolicyHeadRow.exchange_account_id == account,
+                CapitalPolicyHeadRow.deployment_environment == environment,
+                CapitalPolicyHeadRow.symbol == symbol,
             )
         )
     ).one_or_none()
@@ -140,9 +152,9 @@ async def _policy(session: AsyncSession, scope: CapitalScope) -> AppliedPolicy |
             select(CapitalPolicyRevisionRow).where(CapitalPolicyRevisionRow.id == head[0]),
         )
     blocked = check_pointer(
-        scope.account_id,
-        scope.environment,
-        scope.symbol,
+        account,
+        environment,
+        symbol,
         None if head is None else (head[0], head[1]),
         None
         if row is None
@@ -161,9 +173,12 @@ async def _policy(session: AsyncSession, scope: CapitalScope) -> AppliedPolicy |
         policy = parse_policy(row.schema_version, row.policy, row.digest)
     except PolicyRejectedError as exc:
         return Blocked(exc.reason, (("revision", str(row.id)),))
-    return AppliedPolicy(
-        scope.account_id, scope.environment, scope.symbol, row.revision, row.digest, row.id, policy
-    )
+    return AppliedPolicy(account, environment, symbol, row.revision, row.digest, row.id, policy)
+
+
+async def read_policy(session: AsyncSession, scope: Scope, symbol: str) -> AppliedPolicy | Blocked:
+    """The symbol's applied policy; no snapshot transaction and no lock (policy rows only)."""
+    return await _policy(session, scope.exchange_account_id, scope.deployment_environment, symbol)
 
 
 def _context(
@@ -178,8 +193,28 @@ async def read_capital(
     session: AsyncSession, scope: CapitalScope, *, now_ms: int, max_snapshot_age_ms: int
 ) -> LedgerCapitalRead:
     await _require_snapshot_transaction(session)
+    return await _read(session, scope, now_ms=now_ms, max_snapshot_age_ms=max_snapshot_age_ms)
+
+
+async def read_capital_locked(
+    session: AsyncSession, scope: CapitalScope, *, now_ms: int, max_snapshot_age_ms: int
+) -> LedgerCapitalRead:
+    """The same read on a caller's READ COMMITTED session that holds the scope lock.
+
+    For read-write sessions (command boundary, reconciler, status) that cannot
+    be a REPEATABLE READ snapshot. A writer of this scope waits for the lock, so
+    the statements below see one committed state; a caller that never took the
+    lock, or runs REPEATABLE READ (its snapshot may predate the lock), is refused.
+    """
+    await _require_locked_transaction(session, Scope(scope.account_id, scope.environment))
+    return await _read(session, scope, now_ms=now_ms, max_snapshot_age_ms=max_snapshot_age_ms)
+
+
+async def _read(
+    session: AsyncSession, scope: CapitalScope, *, now_ms: int, max_snapshot_age_ms: int
+) -> LedgerCapitalRead:
     account, environment = scope.account_id, scope.environment
-    policy = await _policy(session, scope)
+    policy = await _policy(session, account, environment, scope.symbol)
 
     query = await _one(
         session,
@@ -382,4 +417,4 @@ def _ids(rows: list[AcceptedCapitalBasisAttemptRow], classification: str) -> fro
     return frozenset(row.attempt_id for row in rows if row.classification == classification)
 
 
-__all__ = ["MAX_TAIL_ATTEMPTS", "read_capital"]
+__all__ = ["MAX_TAIL_ATTEMPTS", "read_capital", "read_capital_locked", "read_policy"]
