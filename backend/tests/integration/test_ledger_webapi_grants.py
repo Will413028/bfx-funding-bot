@@ -222,6 +222,24 @@ def test_a_negative_or_nonfinite_amount_is_refused_by_the_check(ledger_db, paylo
         _attempt_with_payload(conn, "bad", payload, sequence=10)
 
 
+@pytest.mark.parametrize("payload", ['{}', '{"amount": null}', '{"symbol": "fUST"}'])
+def test_an_attempt_without_an_amount_is_refused_at_write(ledger_db, payload) -> None:  # noqa: F811
+    with ledger_db.begin() as conn:
+        _seed(conn)
+    with ledger_db.begin() as conn, pytest.raises(Exception, match="intended_amount"):
+        _attempt_with_payload(conn, "missing", payload, sequence=10)
+
+
+def test_the_generated_amount_column_is_not_null(ledger_db) -> None:  # noqa: F811
+    with ledger_db.connect() as conn:
+        assert conn.scalar(
+            text(
+                "SELECT is_nullable FROM information_schema.columns WHERE "
+                "table_name='submission_attempt_journal' AND column_name='intended_amount'"
+            )
+        ) == "NO"
+
+
 def test_the_generated_amount_is_not_writable(ledger_db) -> None:  # noqa: F811
     with ledger_db.begin() as conn:
         _seed(conn)

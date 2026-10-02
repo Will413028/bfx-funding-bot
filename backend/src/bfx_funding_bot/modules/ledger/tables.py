@@ -558,7 +558,7 @@ class SubmissionAttemptJournalRow(Base):
     started_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # Readable by the web API without granting ``normalized_payload``; never written.
     intended_amount: Mapped[Decimal] = mapped_column(
-        Numeric, Computed(_INTENDED_AMOUNT_SQL, persisted=True)
+        Numeric, Computed(_INTENDED_AMOUNT_SQL, persisted=True), nullable=False
     )
     __table_args__ = (
         UniqueConstraint(

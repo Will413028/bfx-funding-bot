@@ -78,7 +78,7 @@ def _attempt(*, started_at_ms: int = 0) -> Attempt:
         _D2,
         "fUST",
         "cell",
-        {"z": 1, "a": "值"},
+        {"z": 1, "a": "值", "amount": "1"},
         UUID(_B),
         UUID(_P),
         {"authorized": True},

@@ -36,7 +36,7 @@ _ATTEMPT = f"""INSERT INTO submission_attempt_journal(attempt_id, execution_deci
   exchange_account_id, deployment_environment, symbol, cell_id, attempt_seq,
   normalized_payload, payload_sha256, basis_id, policy_revision_id,
   authorization_evidence, started_at_ms)
-  VALUES ('{{attempt}}', '{_D2}', '{_A}', 'ci', 'fUST', 'cell', 2, '{{{{}}}}', 'hash',
+  VALUES ('{{attempt}}', '{_D2}', '{_A}', 'ci', 'fUST', 'cell', 2, '{{{{"amount": "1"}}}}', 'hash',
   '{_B}', '{_P}', '{{{{}}}}', 4)"""
 
 

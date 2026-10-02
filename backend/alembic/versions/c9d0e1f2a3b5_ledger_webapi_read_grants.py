@@ -99,7 +99,7 @@ def upgrade() -> None:
         )
     op.execute(
         f"ALTER TABLE public.{_ATTEMPT} ADD COLUMN intended_amount numeric "
-        "GENERATED ALWAYS AS ((normalized_payload->>'amount')::numeric) STORED"
+        "GENERATED ALWAYS AS ((normalized_payload->>'amount')::numeric) STORED NOT NULL"
     )
     op.execute(
         f"ALTER TABLE public.{_ATTEMPT} ADD CONSTRAINT {_AMOUNT_CHECK} "

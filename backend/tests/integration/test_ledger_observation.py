@@ -266,7 +266,7 @@ async def test_committed_command_fences_observation(seeded_fixture) -> None:  # 
                     _D2,
                     "fUST",
                     "cell",
-                    {},
+                    {"amount": "1"},
                     UUID(_B),
                     UUID(_P),
                     {},

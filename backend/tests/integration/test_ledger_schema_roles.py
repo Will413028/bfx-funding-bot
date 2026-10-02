@@ -431,7 +431,7 @@ def _seed(conn, *, old_member: bool = False) -> None:
       'ci',
       'fUST',{cell_value}
       1,
-      '{{}}',
+      '{{"amount": "1"}}',
       'hash',
       '{_B}',
       '{_P}',
@@ -820,7 +820,7 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
       'fUST',
       'cell',
       2,
-      '{{}}',
+      '{{"amount": "1"}}',
       'hash',
       '{_B}',
       '{_P}',
@@ -1247,7 +1247,7 @@ def test_attempt_cell_must_equal_its_decision_cell(seeded) -> None:
       exchange_account_id, deployment_environment, symbol, cell_id, attempt_seq,
       normalized_payload, payload_sha256, basis_id, policy_revision_id,
       authorization_evidence, started_at_ms)
-      VALUES ('{uuid4()}', '{_D2}', '{_A}', 'ci', 'fUST', '{{cell}}', 2, '{{{{}}}}', 'hash',
+      VALUES ('{uuid4()}', '{_D2}', '{_A}', 'ci', 'fUST', '{{cell}}', 2, '{{{{"amount": "1"}}}}', 'hash',
       '{_B}', '{_P}', '{{{{}}}}', 4)"""
     with seeded.begin() as conn, pytest.raises(Exception, match="ledger decision scope mismatch"):
         conn.exec_driver_sql(statement.format(cell="other-cell"))
