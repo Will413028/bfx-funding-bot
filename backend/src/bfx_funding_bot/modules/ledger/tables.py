@@ -32,9 +32,14 @@ from bfx_funding_bot.core.db import Base
 _JSON = JSON().with_variant(JSONB, "postgresql")
 
 
+_INTENDED_AMOUNT_SQL = "(normalized_payload->>'amount')::numeric"
+
+
 @compiles(Computed, "sqlite")
 def _sqlite_generated_amount(element: Computed, compiler: Any, **kw: Any) -> str:
     """sqlite stand-in for the one PostgreSQL generated column (unit-test schema only)."""
+    if str(element.sqltext) != _INTENDED_AMOUNT_SQL:
+        raise NotImplementedError(f"no sqlite stand-in for generated column {element.sqltext}")
     return (
         "GENERATED ALWAYS AS (CAST(json_extract(normalized_payload, '$.amount') AS NUMERIC))"
         + (" STORED" if element.persisted else " VIRTUAL")
@@ -553,7 +558,7 @@ class SubmissionAttemptJournalRow(Base):
     started_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # Readable by the web API without granting ``normalized_payload``; never written.
     intended_amount: Mapped[Decimal] = mapped_column(
-        Numeric, Computed("(normalized_payload->>'amount')::numeric", persisted=True)
+        Numeric, Computed(_INTENDED_AMOUNT_SQL, persisted=True)
     )
     __table_args__ = (
         UniqueConstraint(
