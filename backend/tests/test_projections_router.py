@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.core.auth import Principal, require_operator, require_user
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
@@ -34,11 +35,15 @@ _OFFERS_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/offers"
 _EXECUTIONS_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/executions"
 
 
-def _position(symbol: str, realized: str, account: str = _ACC, env: str = _ENV) -> PositionStateRow:
+def _position(symbol: str, lent: str, account: str = _ACC, env: str = _ENV) -> PositionStateRow:
+    # ``reserved``/``realized`` hold deliberately different numbers: the wire reads the
+    # canonical buckets only.
     return PositionStateRow(
         account_id=account, deployment_environment=env, symbol=symbol,
         exchange_account_id=_ACCOUNT_ID,
-        reserved=Decimal("0"), realized=Decimal(realized),
+        available_amount=Decimal("11.5"), offered_amount=Decimal("22.25"),
+        lent_amount=Decimal(lent),
+        reserved=Decimal("777"), realized=Decimal("888"),
         last_updated_ms=1000, last_event_seq=7, last_reconciled_at=2000, n_credits=3,
     )
 
@@ -105,6 +110,7 @@ async def app_client(factory, monkeypatch):
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     app = FastAPI()
     app.include_router(build_projections_router())
+    app.state.read_models = select_read_models("legacy")
 
     async def _fake_operator():
         return Principal(user_id="user_abc", email="will@example.com", role="operator")
@@ -128,6 +134,7 @@ async def anon_client(factory):
     """No require_operator override — the real dependency must reject."""
     app = FastAPI()
     app.include_router(build_projections_router())
+    app.state.read_models = select_read_models("legacy")
 
     async def _override_session():
         async with factory() as s:
@@ -143,7 +150,10 @@ def test_positions_realm_scoped_camel_case(app_client):
     data = resp.json()["data"]
     assert [p["symbol"] for p in data] == ["fUSD", "fUST"]  # symbol asc, no canary leak
     fust = data[1]
-    assert fust["realized"] == "2314.03"
+    # Disjoint components straight from the canonical buckets; no reserved/realized.
+    assert (fust["available"], fust["offered"], fust["lent"]) == ("11.5", "22.25", "2314.03")
+    assert fust["unattributedLent"] is None  # legacy has no such fact
+    assert "reserved" not in fust and "realized" not in fust
     assert fust["nCredits"] == 3
     assert fust["lastReconciledAtMs"] == 2000  # *Ms suffix (contract v2 rename)
     assert "lastReconciledAt" not in fust
@@ -163,8 +173,9 @@ def test_offers_default_active_only_desc(app_client):
     resp = app_client.get(_OFFERS_PATH)
     assert resp.status_code == 200
     data = resp.json()["data"]
-    assert [o["cid"] for o in data] == [2, 1]  # last_updated_ms desc; released + canary excluded
+    assert [o["offerKey"] for o in data] == ["2", "1"]  # last_updated_ms desc; released + canary excluded
     assert data[0]["state"] == "pending"
+    assert all("cid" not in o for o in data)
     assert data[1]["venueOfferId"] == "v1"
     assert data[1]["sizeUsdt"] == "100"
 
@@ -172,7 +183,7 @@ def test_offers_default_active_only_desc(app_client):
 def test_offers_state_filter(app_client):
     resp = app_client.get(_OFFERS_PATH, params={"state": "released"})
     assert resp.status_code == 200
-    assert [o["cid"] for o in resp.json()["data"]] == [3]
+    assert [o["offerKey"] for o in resp.json()["data"]] == ["3"]
 
 
 def test_executions_desc_with_limit_and_cursor(app_client):

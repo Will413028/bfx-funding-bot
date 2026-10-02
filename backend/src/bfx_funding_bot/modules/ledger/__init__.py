@@ -774,11 +774,42 @@ class UncertaintyView:
     resolution_reason: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PositionView:
+    """One symbol's capital split into disjoint components, in the symbol's own units.
+
+    ``available + offered + lent`` is the symbol's total. ``unattributed_lent`` is a
+    SUBSET of ``lent`` (credits no managed attempt owns), never an addend; None when
+    the authority has no such fact.
+    """
+
+    symbol: str
+    available: Decimal
+    offered: Decimal
+    lent: Decimal
+    unattributed_lent: Decimal | None
+    n_credits: int | None
+    last_updated_ms: int
+    last_reconciled_at_ms: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class OfferView:
+    """One managed offer. ``offer_key`` is opaque and stable for the offer's life."""
+
+    offer_key: str
+    venue_offer_id: str | None
+    state: str
+    symbol: str
+    size_usdt: Decimal
+    occurred_at_ms: int
+    last_updated_ms: int
+
+
 class OperatorReads(Protocol):
     """Operator-console reads of one account scope on the caller's session.
 
     The authority epoch picks the implementation at boot; callers never learn which.
-    Further reads (positions, offers) join this port as methods.
     """
 
     async def list_uncertainties(
@@ -796,6 +827,18 @@ class OperatorReads(Protocol):
         self, session: AsyncSession, scope: Scope, uncertainty_id: UUID
     ) -> UncertaintyView | None:
         """None when absent or of another scope (the two are indistinguishable)."""
+        ...
+
+    async def list_positions(
+        self, session: AsyncSession, scope: Scope
+    ) -> tuple[PositionView, ...]:
+        """One view per symbol, ordered by symbol."""
+        ...
+
+    async def list_offers(
+        self, session: AsyncSession, scope: Scope, *, states: Collection[str]
+    ) -> tuple[OfferView, ...]:
+        """Offers whose state is in ``states``, newest update first."""
         ...
 
 
@@ -963,12 +1006,14 @@ __all__ = [
     "OfferHistory",
     "OfferStatus",
     "OfferTerminalKind",
+    "OfferView",
     "OpenUncertainty",
     "OperatorEvidence",
     "OperatorReads",
     "Outcome",
     "OutcomeAlreadyRecorded",
     "OutcomeKind",
+    "PositionView",
     "ProvenanceConflict",
     "Quarantine",
     "QuarantineMember",

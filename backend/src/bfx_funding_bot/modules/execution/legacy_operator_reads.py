@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow, PositionStateRow
 from bfx_funding_bot.modules.execution.operator_evidence import ResolutionRejected
 from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     ResolutionScope,
     load_scoped_uncertainty,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
-from bfx_funding_bot.modules.ledger import Scope, UncertaintyView
+from bfx_funding_bot.modules.ledger import OfferView, PositionView, Scope, UncertaintyView
 
 
 def _view(row: ExecutionUncertaintyRow) -> UncertaintyView:
@@ -69,3 +71,57 @@ class LegacyOperatorReads:
         except ResolutionRejected:
             return None
         return _view(row)
+
+    async def list_positions(
+        self, session: AsyncSession, scope: Scope
+    ) -> tuple[PositionView, ...]:
+        rows = (
+            await session.execute(
+                select(PositionStateRow)
+                .where(
+                    PositionStateRow.exchange_account_id == scope.exchange_account_id,
+                    PositionStateRow.deployment_environment == scope.deployment_environment,
+                )
+                .order_by(PositionStateRow.symbol)
+            )
+        ).scalars().all()
+        return tuple(
+            PositionView(
+                symbol=row.symbol,
+                available=row.available_amount,
+                offered=row.offered_amount,
+                lent=row.lent_amount,
+                unattributed_lent=None,  # the legacy projection has no such fact
+                n_credits=row.n_credits,
+                last_updated_ms=row.last_updated_ms,
+                last_reconciled_at_ms=row.last_reconciled_at,
+            )
+            for row in rows
+        )
+
+    async def list_offers(
+        self, session: AsyncSession, scope: Scope, *, states: Collection[str]
+    ) -> tuple[OfferView, ...]:
+        rows = (
+            await session.execute(
+                select(OfferClaimRow)
+                .where(
+                    OfferClaimRow.exchange_account_id == scope.exchange_account_id,
+                    OfferClaimRow.deployment_environment == scope.deployment_environment,
+                    OfferClaimRow.state.in_(sorted(states)),
+                )
+                .order_by(OfferClaimRow.last_updated_ms.desc())
+            )
+        ).scalars().all()
+        return tuple(
+            OfferView(
+                offer_key=str(row.cid),
+                venue_offer_id=row.venue_offer_id,
+                state=row.state,
+                symbol=row.symbol,
+                size_usdt=row.size_usdt,
+                occurred_at_ms=row.occurred_at_ms,
+                last_updated_ms=row.last_updated_ms,
+            )
+            for row in rows
+        )

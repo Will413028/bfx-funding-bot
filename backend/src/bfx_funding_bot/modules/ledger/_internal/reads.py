@@ -130,6 +130,11 @@ async def _candidates(
     return _Candidates(basis, attempts, outcomes, resolutions)
 
 
+async def candidate_attempts(session: AsyncSession, scope: Scope) -> _Candidates:
+    """The attempts that can still be open, without payloads (the web API's grant)."""
+    return await _candidates(session, scope, with_payload=False)
+
+
 def _window_from_anchors(
     earliest_attempt_started_at_ms: int | None, previous_query_started_at_ms: int | None
 ) -> ObservationWindow:

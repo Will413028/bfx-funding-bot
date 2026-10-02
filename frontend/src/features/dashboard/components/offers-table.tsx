@@ -10,6 +10,7 @@ import type { OfferClaim } from "@/types";
 // terminal-ok = zinc, terminal-error = rose.
 const stateStyles: Record<string, string> = {
   pending: "text-amber-500 border-amber-500/30",
+  unknown: "text-orange-400 border-orange-400/30",
   claimed: "text-emerald-400 border-emerald-400/30",
   released: "text-zinc-400 border-zinc-400/30",
   failed: "text-rose-500 border-rose-500/30",
@@ -43,7 +44,7 @@ export function OffersTable({ offers }: OffersTableProps) {
             </div>
             {offers.map((offer) => (
               <div
-                key={offer.cid}
+                key={offer.offerKey}
                 className="grid grid-cols-[90px_70px_1fr_1fr_1fr] items-center gap-2 border-b border-white/[0.03] py-2.5 text-sm last:border-0"
               >
                 <Badge

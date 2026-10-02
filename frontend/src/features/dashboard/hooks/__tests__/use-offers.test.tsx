@@ -14,7 +14,7 @@ vi.mock("@/lib/api-client", () => ({
 
 const OFFERS: OfferClaim[] = [
   {
-    cid: 17123,
+    offerKey: "7b1f0c9e-1111-4222-8333-444455556666",
     venueOfferId: "3456789",
     state: "claimed",
     symbol: "fUST",

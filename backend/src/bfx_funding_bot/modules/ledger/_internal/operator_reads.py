@@ -10,21 +10,30 @@ resolved set is the scope's resolution journal, newest first
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
-from bfx_funding_bot.modules.ledger import Scope, UncertaintyView
+from bfx_funding_bot.modules.ledger import OfferView, PositionView, Scope, UncertaintyView
 from bfx_funding_bot.modules.ledger._internal import reads
+from bfx_funding_bot.modules.ledger._internal.attempts import attempts_by_id, fresh_all
+from bfx_funding_bot.modules.ledger._internal.basis import previous_basis
+from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance, sole_owner
 from bfx_funding_bot.modules.ledger.tables import (
+    AcceptedCapitalBasisCreditRow,
+    AcceptedCapitalBasisRow,
+    AcceptedCapitalBasisSymbolRow,
     ExecutionResolutionJournalRow,
     QuarantineOpeningRow,
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
+    VenueOfferMirrorRow,
 )
 
 _ATTEMPT_KIND = "submit_outcome_unknown"
@@ -171,6 +180,89 @@ _RESOLUTION_COLUMNS = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _OfferAttempt:
+    attempt_id: UUID
+    symbol: str
+    started_at_ms: int
+    intended_amount: Decimal
+    outcome_kind: str | None
+    outcome_venue_offer_id: str | None
+    outcome_completed_at_ms: int | None
+
+
+async def _offer_attempts(session: AsyncSession, ids: set[UUID]) -> dict[UUID, _OfferAttempt]:
+    """Attempts with their transport outcome, by key; granted columns only."""
+    if not ids:
+        return {}
+    rows = await session.execute(
+        select(
+            SubmissionAttemptJournalRow.attempt_id,
+            SubmissionAttemptJournalRow.symbol,
+            SubmissionAttemptJournalRow.started_at_ms,
+            SubmissionAttemptJournalRow.intended_amount,
+            TransportOutcomeJournalRow.kind,
+            TransportOutcomeJournalRow.venue_offer_id,
+            TransportOutcomeJournalRow.completed_at_ms,
+        )
+        .outerjoin(
+            TransportOutcomeJournalRow,
+            TransportOutcomeJournalRow.attempt_id == SubmissionAttemptJournalRow.attempt_id,
+        )
+        .where(SubmissionAttemptJournalRow.attempt_id.in_(sorted(ids)))
+    )
+    return {row[0]: _OfferAttempt(*row) for row in rows}
+
+
+async def _live_owned_offers(
+    session: AsyncSession, scope: Scope
+) -> tuple[dict[UUID, VenueOfferMirrorRow], set[str]]:
+    """Live mirror rows owned by exactly one attempt (by attempt), and every live venue id.
+
+    The bot's ``reads.managed_live_offers`` also reads ``execution_decisions`` for the
+    signal correlation, which the web API has no grant on; an offer needs none here.
+    Foreign rows (no provenance) and conflicted ones (contradictory provenance) are
+    never owned, but their venue ids still count as reflected.
+    """
+    mirrors = sorted(
+        await fresh_all(
+            session,
+            select(VenueOfferMirrorRow)
+            .options(
+                load_only(
+                    VenueOfferMirrorRow.symbol,
+                    VenueOfferMirrorRow.amount_remaining,
+                    VenueOfferMirrorRow.mts_updated,
+                )
+            )
+            .where(
+                VenueOfferMirrorRow.exchange_account_id == scope.exchange_account_id,
+                VenueOfferMirrorRow.deployment_environment == scope.deployment_environment,
+                VenueOfferMirrorRow.present_in_latest_accepted_snapshot,
+            ),
+        ),
+        key=lambda row: row.venue_offer_id,
+    )
+    provenance = await offer_provenance(session, scope, [row.venue_offer_id for row in mirrors])
+    owners = {
+        row.attempt_id: row
+        for row in await attempts_by_id(
+            session,
+            [attempt_id for ids in provenance.values() for attempt_id in ids],
+            with_payload=False,
+        )
+    }
+    owned: dict[UUID, VenueOfferMirrorRow] = {}
+    for mirror in mirrors:
+        try:
+            owner = sole_owner(provenance[mirror.venue_offer_id], owners, scope, mirror.symbol)
+        except LookupError:
+            continue
+        if owner is not None:
+            owned.setdefault(owner.attempt_id, mirror)
+    return owned, {row.venue_offer_id for row in mirrors}
+
+
 class LedgerOperatorReads:
     async def list_uncertainties(
         self,
@@ -274,3 +366,108 @@ class LedgerOperatorReads:
             await session.execute(select(*_RESOLUTION_COLUMNS).where(subject))
         ).one_or_none()
         return _Resolution(*row) if row is not None else None
+
+
+    async def list_positions(
+        self, session: AsyncSession, scope: Scope
+    ) -> tuple[PositionView, ...]:
+        basis = await previous_basis(session, scope)
+        if basis is None:
+            return ()
+        # ``previous_basis`` loads only the identity columns; the stamp is read by key.
+        accepted_at_ms = await session.scalar(
+            select(AcceptedCapitalBasisRow.accepted_at_ms).where(
+                AcceptedCapitalBasisRow.id == basis.id
+            )
+        )
+        assert accepted_at_ms is not None
+        counted = await session.execute(
+            select(AcceptedCapitalBasisCreditRow.symbol, func.count())
+            .where(AcceptedCapitalBasisCreditRow.basis_id == basis.id)
+            .group_by(AcceptedCapitalBasisCreditRow.symbol)
+        )
+        counts = dict(counted.tuples().all())
+        rows = await session.execute(
+            select(
+                AcceptedCapitalBasisSymbolRow.symbol,
+                AcceptedCapitalBasisSymbolRow.available,
+                AcceptedCapitalBasisSymbolRow.offered,
+                AcceptedCapitalBasisSymbolRow.credits,
+                AcceptedCapitalBasisSymbolRow.unattributed_credits,
+            )
+            .where(AcceptedCapitalBasisSymbolRow.basis_id == basis.id)
+            .order_by(AcceptedCapitalBasisSymbolRow.symbol)
+        )
+        return tuple(
+            PositionView(
+                symbol=symbol,
+                available=available,
+                offered=offered,
+                lent=credits,
+                unattributed_lent=unattributed,
+                n_credits=counts.get(symbol, 0),
+                last_updated_ms=accepted_at_ms,
+                last_reconciled_at_ms=accepted_at_ms,
+            )
+            for symbol, available, offered, credits, unattributed in rows.tuples()
+        )
+
+    async def list_offers(
+        self, session: AsyncSession, scope: Scope, *, states: Collection[str]
+    ) -> tuple[OfferView, ...]:
+        """Managed offers only: pending, open UNKNOWN, claimed. History is not read here."""
+        if not set(states) & {"pending", "unknown", "claimed"}:
+            return ()
+        candidates = await reads.candidate_attempts(session, scope)
+        owned, live_ids = await _live_owned_offers(session, scope)
+        attempts = await _offer_attempts(
+            session, {row.attempt_id for row in candidates.attempts} | set(owned)
+        )
+        views: list[OfferView] = []
+
+        def add(
+            attempt: _OfferAttempt, state: str, venue_offer_id: str | None, updated_ms: int
+        ) -> None:
+            if state in states:
+                views.append(
+                    OfferView(
+                        offer_key=str(attempt.attempt_id),
+                        venue_offer_id=venue_offer_id,
+                        state=state,
+                        symbol=attempt.symbol,
+                        size_usdt=attempt.intended_amount,
+                        occurred_at_ms=attempt.started_at_ms,
+                        last_updated_ms=updated_ms,
+                    )
+                )
+
+        for attempt_id, mirror in owned.items():
+            attempt = attempts[attempt_id]
+            updated = mirror.mts_updated
+            if updated is None:
+                updated = attempt.outcome_completed_at_ms
+            if updated is None:
+                updated = attempt.started_at_ms
+            add(attempt, "claimed", mirror.venue_offer_id, updated)
+        for row in candidates.attempts:
+            if row.attempt_id in owned:
+                continue
+            attempt = attempts[row.attempt_id]
+            kind = attempt.outcome_kind
+            # The outcome's own stamp; 0 is a real time, so test for None.
+            completed = (
+                attempt.outcome_completed_at_ms
+                if attempt.outcome_completed_at_ms is not None
+                else attempt.started_at_ms
+            )
+            if kind is None:
+                add(attempt, "pending", None, attempt.started_at_ms)
+            elif kind == "unknown":
+                if row.attempt_id not in candidates.resolutions:
+                    add(attempt, "unknown", None, completed)
+            elif kind == "ack" and attempt.outcome_venue_offer_id not in live_ids:
+                # Acknowledged but not yet in an accepted snapshot. A live row that is
+                # foreign or conflicted is excluded above, not shown as unreflected.
+                add(attempt, "claimed", attempt.outcome_venue_offer_id, completed)
+        views.sort(key=lambda view: (view.last_updated_ms, view.offer_key), reverse=True)
+        return tuple(views)

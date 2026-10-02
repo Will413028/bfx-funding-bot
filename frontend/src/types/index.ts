@@ -271,7 +271,12 @@ export interface CurrencyPolicy {
 // ── SP4 Projections (operator console read models) ──
 
 /** offer_claims FSM states (backend RegistryState). */
-export type OfferClaimState = "pending" | "claimed" | "released" | "failed";
+export type OfferClaimState =
+  | "pending"
+  | "unknown"
+  | "claimed"
+  | "released"
+  | "failed";
 
 /** event_log event types (backend serialization registry). */
 export type ExecutionEventType =
@@ -285,22 +290,35 @@ export type ExecutionEventType =
   | "UNCERTAINTY_MARKED_NOT_ACCEPTED"
   | "UNCERTAINTY_MANUALLY_RESOLVED";
 
-/** GET /positions — per-symbol position_state ledger projection. */
+/**
+ * GET /positions — per-symbol capital as disjoint components, in the symbol's
+ * own units. `available + offered + lent` is the symbol's total.
+ */
 export interface Position {
   symbol: string;
-  /** Decimal string (USDT). */
-  reserved: string;
-  /** Decimal string (USDT). */
-  realized: string;
+  /** Decimal string. */
+  available: string;
+  /** Decimal string. */
+  offered: string;
+  /** Decimal string. */
+  lent: string;
+  /**
+   * Decimal string: the part of `lent` no managed offer owns (a SUBSET of
+   * `lent`, never an addend); null when the backend has no such fact.
+   */
+  unattributedLent: string | null;
   nCredits: number | null;
   lastUpdatedMs: number;
   /** Epoch ms of the last reconcile checkpoint; null if never reconciled. */
   lastReconciledAtMs: number | null;
 }
 
-/** GET /offers — cid-keyed offer claim (default: pending/claimed only). */
+/**
+ * GET /offers — managed offer (default: pending/unknown/claimed only).
+ * `offerKey` is opaque and stable for the offer's life.
+ */
 export interface OfferClaim {
-  cid: number;
+  offerKey: string;
   venueOfferId: string | null;
   state: OfferClaimState;
   symbol: string;
