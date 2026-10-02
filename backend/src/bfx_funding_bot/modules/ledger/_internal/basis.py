@@ -25,6 +25,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from bfx_funding_bot.core.venue_time import HISTORY_QUERY_MARGIN_MS, VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.modules.ledger import JsonObject, Quarantine, Scope
@@ -184,6 +185,14 @@ async def previous_basis(session: AsyncSession, scope: Scope) -> AcceptedCapital
         )
         .order_by(LedgerObservationQueryRow.query_revision.desc())
         .limit(1)
+        .options(
+            load_only(
+                AcceptedCapitalBasisRow.id,
+                AcceptedCapitalBasisRow.observation_id,
+                AcceptedCapitalBasisRow.accept_revision,
+                AcceptedCapitalBasisRow.attempt_seq_high_water,
+            )
+        )
     )
     return row
 

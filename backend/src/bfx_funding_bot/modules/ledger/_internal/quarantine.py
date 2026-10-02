@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from bfx_funding_bot.modules.ledger import (
     Quarantine,
@@ -112,7 +113,16 @@ async def unresolved_quarantines(
     without a basis, every opening of the scope.
     """
     accept_revision = basis.accept_revision if basis is not None else 0
-    since = select(QuarantineOpeningRow).where(
+    # Explicit columns: the web API reads this table under a column allowlist
+    # that excludes ``evidence``. Callers use only these.
+    columns = load_only(
+        QuarantineOpeningRow.quarantine_id,
+        QuarantineOpeningRow.symbol,
+        QuarantineOpeningRow.intended_amount,
+        QuarantineOpeningRow.opened_at_ms,
+        QuarantineOpeningRow.source_attempt_id,
+    )
+    since = select(QuarantineOpeningRow).options(columns).where(
         QuarantineOpeningRow.exchange_account_id == scope.exchange_account_id,
         QuarantineOpeningRow.deployment_environment == scope.deployment_environment,
         QuarantineOpeningRow.opened_revision > accept_revision,
@@ -123,6 +133,7 @@ async def unresolved_quarantines(
     if basis is not None:
         listed = (
             select(QuarantineOpeningRow)
+            .options(columns)
             .join(
                 AcceptedCapitalBasisQuarantineRow,
                 AcceptedCapitalBasisQuarantineRow.quarantine_id

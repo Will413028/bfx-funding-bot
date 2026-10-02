@@ -6,8 +6,10 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from bfx_funding_bot.modules.ledger import (
+    OBSERVATION_REF_PREFIX,
     ResolutionEvidence,
     ResolutionRejected,
     ResolutionSubject,
@@ -21,13 +23,11 @@ from bfx_funding_bot.modules.ledger.tables import (
     SubmissionAttemptJournalRow,
 )
 
-_PREFIX = "ledger:v1:obs:"
-
 
 def observation_id(token: str) -> UUID:
-    if not token.startswith(_PREFIX):
+    if not token.startswith(OBSERVATION_REF_PREFIX):
         raise ResolutionRejected("stale_reconcile_fence")
-    suffix = token[len(_PREFIX) :]
+    suffix = token[len(OBSERVATION_REF_PREFIX) :]
     try:
         value = UUID(suffix)
     except ValueError as exc:
@@ -38,10 +38,17 @@ def observation_id(token: str) -> UUID:
 
 
 async def latest_accepted(session: AsyncSession, scope: Scope) -> LedgerObservationRow | None:
-    # Query revision is the durable order in which queries began, even if their
-    # replies complete out of order. Failed/unaccepted queries are not evidence.
-    result = await session.scalar(
+    """The scope's latest accepted observation, with only its ``id`` loaded.
+
+    Query revision is the durable order in which queries began, even if their
+    replies complete out of order. Failed/unaccepted queries are not evidence.
+    Explicit columns: the web API reads under a column allowlist that excludes
+    ``evidence``. Callers use ``id`` only, and (no ``populate_existing``) a row
+    the session already holds keeps its other columns loaded.
+    """
+    latest: LedgerObservationRow | None = await session.scalar(
         select(LedgerObservationRow)
+        .options(load_only(LedgerObservationRow.id))
         .join(
             LedgerObservationQueryRow,
             LedgerObservationQueryRow.query_id == LedgerObservationRow.query_id,
@@ -53,9 +60,8 @@ async def latest_accepted(session: AsyncSession, scope: Scope) -> LedgerObservat
         )
         .order_by(LedgerObservationQueryRow.query_revision.desc())
         .limit(1)
-        .execution_options(populate_existing=True)
     )
-    return result
+    return latest
 
 
 class LedgerOperatorEvidence:
@@ -69,7 +75,27 @@ class LedgerOperatorEvidence:
         require_history: bool,
     ) -> VerifiedEvidence:
         identifier = observation_id(evidence_ref)
-        observation = await session.get(LedgerObservationRow, identifier, populate_existing=True)
+        # Explicit columns throughout: the web API holds a column allowlist.
+        observation = (
+            await session.execute(
+                select(
+                    LedgerObservationRow.accepted,
+                    LedgerObservationRow.exchange_account_id,
+                    LedgerObservationRow.deployment_environment,
+                    LedgerObservationRow.query_id,
+                    LedgerObservationRow.query_finished_at_ms,
+                    LedgerObservationRow.first_digest,
+                    LedgerObservationRow.confirmation_digest,
+                    LedgerObservationRow.wallets_complete,
+                    LedgerObservationRow.offers_complete,
+                    LedgerObservationRow.credits_complete,
+                    LedgerObservationRow.loans_complete,
+                    LedgerObservationRow.offer_history_complete,
+                    LedgerObservationRow.credit_history_complete,
+                    LedgerObservationRow.trades_complete,
+                ).where(LedgerObservationRow.id == identifier)
+            )
+        ).one_or_none()
         latest = await latest_accepted(session, scope)
         if (
             observation is None
@@ -80,17 +106,28 @@ class LedgerOperatorEvidence:
             or observation.deployment_environment != scope.deployment_environment
         ):
             raise ResolutionRejected("stale_reconcile_fence")
-        opening: SubmissionAttemptJournalRow | QuarantineOpeningRow | None
         if subject.attempt_id is not None:
-            opening = await session.get(
-                SubmissionAttemptJournalRow, subject.attempt_id, populate_existing=True
-            )
-            opened_at = opening.started_at_ms if opening is not None else None
+            opening = (
+                await session.execute(
+                    select(
+                        SubmissionAttemptJournalRow.exchange_account_id,
+                        SubmissionAttemptJournalRow.deployment_environment,
+                        SubmissionAttemptJournalRow.symbol,
+                        SubmissionAttemptJournalRow.started_at_ms.label("opened_at_ms"),
+                    ).where(SubmissionAttemptJournalRow.attempt_id == subject.attempt_id)
+                )
+            ).one_or_none()
         else:
-            opening = await session.get(
-                QuarantineOpeningRow, subject.uncertainty_id, populate_existing=True
-            )
-            opened_at = opening.opened_at_ms if opening is not None else None
+            opening = (
+                await session.execute(
+                    select(
+                        QuarantineOpeningRow.exchange_account_id,
+                        QuarantineOpeningRow.deployment_environment,
+                        QuarantineOpeningRow.symbol,
+                        QuarantineOpeningRow.opened_at_ms,
+                    ).where(QuarantineOpeningRow.quarantine_id == subject.uncertainty_id)
+                )
+            ).one_or_none()
         if (
             opening is None
             or opening.exchange_account_id != scope.exchange_account_id
@@ -98,9 +135,16 @@ class LedgerOperatorEvidence:
             or opening.symbol != subject.symbol
         ):
             raise ResolutionRejected("not_found", kind="not_found")
-        query = await session.get(
-            LedgerObservationQueryRow, observation.query_id, populate_existing=True
-        )
+        opened_at = opening.opened_at_ms
+        query = (
+            await session.execute(
+                select(
+                    LedgerObservationQueryRow.started_at_ms,
+                    LedgerObservationQueryRow.exchange_account_id,
+                    LedgerObservationQueryRow.deployment_environment,
+                ).where(LedgerObservationQueryRow.query_id == observation.query_id)
+            )
+        ).one_or_none()
         if (
             query is None
             or opened_at is None

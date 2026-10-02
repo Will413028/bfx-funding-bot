@@ -315,9 +315,12 @@ async def uncertainty_app(sqlite_engine, monkeypatch):
         )
 
     app = FastAPI()
+    from bfx_funding_bot.apps.read_models import select_read_models
     from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
 
     app.include_router(build_uncertainties_router())
+
+    app.state.read_models = select_read_models("legacy")
 
     async def _operator() -> Principal:
         return Principal(user_id="operator-1", email="operator@example.com", role="admin")

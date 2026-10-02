@@ -15,6 +15,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger.tables import (
@@ -33,6 +34,9 @@ async def offer_provenance(
         return provenance
     acked = await session.scalars(
         select(TransportOutcomeJournalRow)
+        .options(
+            load_only(TransportOutcomeJournalRow.attempt_id, TransportOutcomeJournalRow.venue_offer_id)
+        )
         .join(
             SubmissionAttemptJournalRow,
             SubmissionAttemptJournalRow.attempt_id == TransportOutcomeJournalRow.attempt_id,
@@ -48,7 +52,14 @@ async def offer_provenance(
         assert outcome.venue_offer_id is not None
         provenance[outcome.venue_offer_id].add(outcome.attempt_id)
     bound = await session.scalars(
-        select(ExecutionResolutionJournalRow).where(
+        select(ExecutionResolutionJournalRow)
+        .options(
+            load_only(
+                ExecutionResolutionJournalRow.attempt_id,
+                ExecutionResolutionJournalRow.venue_offer_id,
+            )
+        )
+        .where(
             ExecutionResolutionJournalRow.action == "bound_to_venue",
             ExecutionResolutionJournalRow.venue_offer_id.in_(venue_ids),
             ExecutionResolutionJournalRow.attempt_id.is_not(None),

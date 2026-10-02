@@ -15,7 +15,7 @@ from uuid import UUID
 
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import load_only
+from sqlalchemy.orm import InstrumentedAttribute, load_only
 
 from bfx_funding_bot.modules.ledger.tables import (
     ExecutionResolutionJournalRow,
@@ -35,8 +35,18 @@ _ATTEMPT_COLUMNS = (
     SubmissionAttemptJournalRow.cell_id,
     SubmissionAttemptJournalRow.attempt_seq,
     SubmissionAttemptJournalRow.started_at_ms,
-    SubmissionAttemptJournalRow.normalized_payload,
 )
+
+
+def _columns(with_payload: bool) -> tuple[InstrumentedAttribute[object], ...]:
+    """The bot's reads need the payload; the web API's column grant excludes it and
+    reads the generated ``intended_amount`` instead."""
+    return (
+        *_ATTEMPT_COLUMNS,
+        SubmissionAttemptJournalRow.normalized_payload
+        if with_payload
+        else SubmissionAttemptJournalRow.intended_amount,
+    )
 
 
 async def fresh_all[T](session: AsyncSession, statement: Select[tuple[T]]) -> list[T]:
@@ -51,12 +61,13 @@ async def tail_attempts(
     high_water: int,
     *,
     limit: int,
+    with_payload: bool = True,
 ) -> list[SubmissionAttemptJournalRow]:
     """Up to ``limit`` attempts with ``attempt_seq > high_water``, in sequence order."""
     return await fresh_all(
         session,
         select(SubmissionAttemptJournalRow)
-        .options(load_only(*_ATTEMPT_COLUMNS))
+        .options(load_only(*_columns(with_payload)))
         .where(
             SubmissionAttemptJournalRow.exchange_account_id == account,
             SubmissionAttemptJournalRow.deployment_environment == environment,
@@ -68,14 +79,16 @@ async def tail_attempts(
 
 
 async def attempts_by_id(
-    session: AsyncSession, attempt_ids: Sequence[UUID]
+    session: AsyncSession, attempt_ids: Sequence[UUID], *, with_payload: bool = True
 ) -> list[SubmissionAttemptJournalRow]:
     if not attempt_ids:
         return []
     return await fresh_all(
         session,
         select(SubmissionAttemptJournalRow)
-        .options(load_only(*_ATTEMPT_COLUMNS, SubmissionAttemptJournalRow.execution_decision_id))
+        .options(
+            load_only(*_columns(with_payload), SubmissionAttemptJournalRow.execution_decision_id)
+        )
         .where(SubmissionAttemptJournalRow.attempt_id.in_(sorted(set(attempt_ids)))),
     )
 

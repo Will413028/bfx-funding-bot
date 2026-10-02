@@ -321,6 +321,14 @@ class AuthorizeRefused:
     reason: Literal["capital_snapshot_changed", "capital_policy_revision_changed", "query_pending"]
 
 
+OBSERVATION_REF_PREFIX = "ledger:v1:obs:"
+
+
+def observation_evidence_ref(observation_id: UUID) -> str:
+    """The opaque evidence reference naming one ledger observation."""
+    return f"{OBSERVATION_REF_PREFIX}{observation_id}"
+
+
 def encode_basis_token(query_id: UUID, clock_revision: int) -> str:
     """Ledger-only token; consumers carry it opaquely back to authorization."""
     if clock_revision < 0:
@@ -745,6 +753,53 @@ class UncertaintyReader(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class UncertaintyView:
+    """One operator-visible uncertainty, open or resolved, in the authority's own terms.
+
+    ``kind`` is the authority's code; ``evidence`` is its raw evidence mapping, which
+    the API boundary filters before any caller sees it. ``attempt_id`` names the
+    submission attempt of an attempt-sourced uncertainty (None for a quarantine).
+    """
+
+    uncertainty_id: UUID
+    kind: str
+    symbol: str
+    state: str
+    intended_amount: Decimal
+    evidence: Mapping[str, object]
+    attempt_id: UUID | None = None
+    opened_at_ms: int | None = None
+    resolved_at_ms: int | None = None
+    resolved_by_operator_id: str | None = None
+    resolution_reason: str | None = None
+
+
+class OperatorReads(Protocol):
+    """Operator-console reads of one account scope on the caller's session.
+
+    The authority epoch picks the implementation at boot; callers never learn which.
+    Further reads (positions, offers) join this port as methods.
+    """
+
+    async def list_uncertainties(
+        self,
+        session: AsyncSession,
+        scope: Scope,
+        *,
+        state: Literal["open", "resolved"] | None,
+        limit: int,
+    ) -> tuple[UncertaintyView, ...]:
+        """Newest first (open by opening, resolved by resolution), at most ``limit``."""
+        ...
+
+    async def get_uncertainty(
+        self, session: AsyncSession, scope: Scope, uncertainty_id: UUID
+    ) -> UncertaintyView | None:
+        """None when absent or of another scope (the two are indistinguishable)."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
 class LiveManagedOffer:
     """A live offer this scope placed (traced to an execution decision)."""
 
@@ -859,6 +914,7 @@ class CommandJournal(Protocol):
 __all__ = [
     "CREDIT_STATUSES",
     "CREDIT_TERMINAL_KINDS",
+    "OBSERVATION_REF_PREFIX",
     "OFFER_STATUSES",
     "OFFER_TERMINAL_KINDS",
     "Acceptance",
@@ -909,6 +965,7 @@ __all__ = [
     "OfferTerminalKind",
     "OpenUncertainty",
     "OperatorEvidence",
+    "OperatorReads",
     "Outcome",
     "OutcomeAlreadyRecorded",
     "OutcomeKind",
@@ -930,6 +987,7 @@ __all__ = [
     "Trade",
     "UncertaintyReader",
     "UncertaintyRecord",
+    "UncertaintyView",
     "VenueHintNotification",
     "VenueHintPublisher",
     "VenueHintSink",
@@ -937,5 +995,6 @@ __all__ = [
     "VerifiedEvidence",
     "Wallet",
     "encode_basis_token",
+    "observation_evidence_ref",
     "parse_basis_token",
 ]

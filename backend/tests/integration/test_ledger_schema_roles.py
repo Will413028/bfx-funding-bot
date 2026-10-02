@@ -1179,10 +1179,16 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
     with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
         conn.exec_driver_sql("SET LOCAL ROLE bfx_cutover_reader")
         conn.exec_driver_sql("SELECT evidence FROM ledger_observation")
-    for role in ("bfx_webapi", "bfx_webauth"):
-        with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
-            conn.exec_driver_sql(f"SET LOCAL ROLE {role}")
-            conn.exec_driver_sql("SELECT id FROM ledger_observation")
+    # The web API reads an allowlisted column set (c9d0e1f2a3b5); evidence stays denied.
+    with seeded.begin() as conn:
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+        conn.exec_driver_sql("SELECT id FROM ledger_observation")
+    with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+        conn.exec_driver_sql("SELECT evidence FROM ledger_observation")
+    with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_webauth")
+        conn.exec_driver_sql("SELECT id FROM ledger_observation")
 
 
 def test_downgrade_removes_only_its_objects(ledger_db) -> None:

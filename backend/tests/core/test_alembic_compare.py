@@ -171,3 +171,20 @@ def test_identity_column_is_only_ignored_after_reflection() -> None:
     # The final PostgreSQL NOT NULL/FK shape is migration-owned, so its
     # reflected nullable metadata is intentionally excluded from drift checks.
     assert not include_object(column, "exchange_account_id", "column", True, None)
+
+
+def test_a_matched_generated_column_is_skipped_but_a_missing_one_is_not() -> None:
+    from sqlalchemy import Column, Computed, Integer, MetaData, Numeric, Table
+
+    from bfx_funding_bot.core.alembic_compare import include_object
+
+    table = Table(
+        "t", MetaData(), Column("a", Integer), Column("b", Numeric, Computed("a + 1"))
+    )
+    plain = table.c.a
+    generated = table.c.b
+    # Alembic cannot compare a Computed server default; a matched pair is skipped.
+    assert include_object(generated, "b", "column", False, object()) is False
+    # Missing from the database (no counterpart): still reported as drift.
+    assert include_object(generated, "b", "column", False, None) is True
+    assert include_object(plain, "a", "column", False, object()) is True

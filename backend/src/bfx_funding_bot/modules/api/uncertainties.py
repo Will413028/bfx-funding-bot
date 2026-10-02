@@ -19,7 +19,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.api.account_scope import (
@@ -27,25 +26,24 @@ from bfx_funding_bot.modules.api.account_scope import (
     require_account_member,
     require_account_write,
 )
-from bfx_funding_bot.modules.api.deps import get_session
+from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models, get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
-from bfx_funding_bot.modules.execution.operator_evidence import (
-    LegacyOperatorEvidence,
-    legacy_evidence_seq,
-)
+from bfx_funding_bot.modules.execution.operator_evidence import legacy_evidence_seq
 from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     ResolutionAction,
     ResolutionIntent,
     ResolutionRejected,
     ResolutionScope,
     UncertaintyResolutionRequests,
-    load_scoped_uncertainty,
 )
-from bfx_funding_bot.modules.execution.uncertainty_tables import (
-    ExecutionUncertaintyRow,
-    UncertaintyResolutionRequestRow,
+from bfx_funding_bot.modules.execution.uncertainty_tables import UncertaintyResolutionRequestRow
+from bfx_funding_bot.modules.ledger import (
+    OperatorEvidence,
+    ResolutionSubject,
+    Scope,
+    UncertaintyView,
+    observation_evidence_ref,
 )
-from bfx_funding_bot.modules.ledger import OperatorEvidence, ResolutionSubject, Scope
 
 _MAX_LIMIT = 100
 _MAX_REASON_LENGTH = 512
@@ -250,7 +248,8 @@ def _evidence_summary(value: Mapping[str, Any] | None) -> dict[str, _EvidenceVal
 
 
 def _response(
-    row: ExecutionUncertaintyRow,
+    row: UncertaintyView,
+    scope: Scope,
     *,
     resolution_context: UncertaintyResolutionContext | None = None,
     latest_request: UncertaintyResolutionRequestRow | None = None,
@@ -268,8 +267,8 @@ def _response(
         state=state,
         evidence_summary=_evidence_summary(row.evidence),
         blocked_scope={
-            "exchangeAccountId": str(row.exchange_account_id),
-            "environment": row.deployment_environment,
+            "exchangeAccountId": str(scope.exchange_account_id),
+            "environment": scope.deployment_environment,
             "symbol": row.symbol,
         },
         resolved_by_operator_id=row.resolved_by_operator_id,
@@ -287,7 +286,11 @@ def _request_model(row: UncertaintyResolutionRequestRow) -> ResolutionRequestRes
         uncertainty_id=str(row.uncertainty_id),
         action=row.action,
         state=row.state,
-        evidence_ref=str(row.reconcile_event_seq),
+        evidence_ref=(
+            observation_evidence_ref(row.observation_id)
+            if row.observation_id is not None
+            else str(row.reconcile_event_seq)
+        ),
         created_at_ms=row.created_at_ms,
         processed_at_ms=row.processed_at_ms,
         outcome_reason=row.outcome_reason,
@@ -302,13 +305,16 @@ def _scope(context: ExchangeAccountContext) -> ResolutionScope:
     return ResolutionScope(context.exchange_account_id, context.deployment_environment)
 
 
+def _read_scope(context: ExchangeAccountContext) -> Scope:
+    return Scope(context.exchange_account_id, context.deployment_environment)
+
+
 async def _resolution_context(
-    session: AsyncSession, *, context: ExchangeAccountContext, row: ExecutionUncertaintyRow,
-    evidence: OperatorEvidence | None = None,
+    session: AsyncSession, *, context: ExchangeAccountContext, row: UncertaintyView,
+    evidence: OperatorEvidence,
 ) -> UncertaintyResolutionContext:
-    port = evidence if evidence is not None else LegacyOperatorEvidence()
-    result = await port.resolution_context(
-        session, Scope(context.exchange_account_id, context.deployment_environment),
+    result = await evidence.resolution_context(
+        session, _read_scope(context),
         ResolutionSubject(row.uncertainty_id, row.symbol, row.attempt_id),
     )
     return UncertaintyResolutionContext(
@@ -365,7 +371,7 @@ async def _queue(
     body: UncertaintyResolutionRequest,
     venue_offer_id: str | None = None,
     decision: str | None = None,
-    operator_evidence: OperatorEvidence | None = None,
+    operator_evidence: OperatorEvidence,
 ) -> dict[str, object]:
     try:
         reconcile_event_seq = legacy_evidence_seq(body.evidence_ref)
@@ -389,8 +395,7 @@ async def _queue(
     return {"data": _request_response(row)}
 
 
-def build_uncertainties_router(*, operator_evidence: OperatorEvidence | None = None) -> APIRouter:
-    port = operator_evidence if operator_evidence is not None else LegacyOperatorEvidence()
+def build_uncertainties_router() -> APIRouter:
     router = APIRouter(
         prefix="/api/v1",
         tags=["uncertainties"],
@@ -403,31 +408,25 @@ def build_uncertainties_router(*, operator_evidence: OperatorEvidence | None = N
         limit: int = Query(default=50, ge=1, le=_MAX_LIMIT),
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
+        models: ReadModels = Depends(get_read_models),  # noqa: B008
     ) -> dict[str, object]:
-        stmt = (
-            select(ExecutionUncertaintyRow)
-            .where(
-                ExecutionUncertaintyRow.exchange_account_id == context.exchange_account_id,
-                ExecutionUncertaintyRow.deployment_environment == context.deployment_environment,
-            )
-            .order_by(ExecutionUncertaintyRow.opened_event_seq.desc())
-            .limit(limit)
-        )
-        if state is not None:
-            stmt = stmt.where(ExecutionUncertaintyRow.state == state)
+        scope = _read_scope(context)
         try:
-            rows = (await session.execute(stmt)).scalars().all()
+            rows = await models.operator_reads.list_uncertainties(
+                session, scope, state=state, limit=limit
+            )
             latest = await UncertaintyResolutionRequests(_scope(context)).latest_for(
                 session, [row.uncertainty_id for row in rows]
             )
             responses = [
                 _response(
                     row,
+                    scope,
                     resolution_context=await _resolution_context(
                         session,
                         context=context,
                         row=row,
-                        evidence=port,
+                        evidence=models.operator_evidence,
                     ),
                     latest_request=latest.get(row.uncertainty_id),
                 )
@@ -444,17 +443,18 @@ def build_uncertainties_router(*, operator_evidence: OperatorEvidence | None = N
         uncertainty_id: UUID,
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
+        models: ReadModels = Depends(get_read_models),  # noqa: B008
     ) -> dict[str, object]:
-        try:
-            row = await load_scoped_uncertainty(session, _scope(context), uncertainty_id)
-        except ResolutionRejected as exc:
-            raise _rejected(exc) from exc
+        scope = _read_scope(context)
+        row = await models.operator_reads.get_uncertainty(session, scope, uncertainty_id)
+        if row is None:
+            raise _rejected(ResolutionRejected("not_found", kind="not_found"))
         try:
             resolution_context = await _resolution_context(
                 session,
                 context=context,
                 row=row,
-                evidence=port,
+                evidence=models.operator_evidence,
             )
             latest = await UncertaintyResolutionRequests(_scope(context)).latest_for(
                 session, [row.uncertainty_id]
@@ -466,6 +466,7 @@ def build_uncertainties_router(*, operator_evidence: OperatorEvidence | None = N
         return {
             "data": _response(
                 row,
+                scope,
                 resolution_context=resolution_context,
                 latest_request=latest.get(row.uncertainty_id),
             ),
@@ -494,6 +495,7 @@ def build_uncertainties_router(*, operator_evidence: OperatorEvidence | None = N
         body: BindToVenueRequest,
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
+        models: ReadModels = Depends(get_read_models),  # noqa: B008
     ) -> dict[str, object]:
         require_account_write(context)
         _validate_request_evidence(
@@ -506,7 +508,7 @@ def build_uncertainties_router(*, operator_evidence: OperatorEvidence | None = N
             uncertainty_id=uncertainty_id,
             action="bind_to_venue",
             body=body,
-            operator_evidence=port,
+            operator_evidence=models.operator_evidence,
             venue_offer_id=body.venue_offer_id,
         )
 
@@ -519,6 +521,7 @@ def build_uncertainties_router(*, operator_evidence: OperatorEvidence | None = N
         body: MarkNotAcceptedRequest,
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
+        models: ReadModels = Depends(get_read_models),  # noqa: B008
     ) -> dict[str, object]:
         require_account_write(context)
         _validate_request_evidence(
@@ -531,7 +534,7 @@ def build_uncertainties_router(*, operator_evidence: OperatorEvidence | None = N
             uncertainty_id=uncertainty_id,
             action="mark_not_accepted",
             body=body,
-            operator_evidence=port,
+            operator_evidence=models.operator_evidence,
         )
 
     @router.post(
@@ -543,6 +546,7 @@ def build_uncertainties_router(*, operator_evidence: OperatorEvidence | None = N
         body: ManualResolutionRequest,
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
+        models: ReadModels = Depends(get_read_models),  # noqa: B008
     ) -> dict[str, object]:
         require_account_write(context)
         evidence = _validate_request_evidence(body.evidence, allowed=frozenset({"decision"}))
@@ -552,7 +556,7 @@ def build_uncertainties_router(*, operator_evidence: OperatorEvidence | None = N
             uncertainty_id=uncertainty_id,
             action="manual_resolution",
             body=body,
-            operator_evidence=port,
+            operator_evidence=models.operator_evidence,
             decision=_manual_decision(evidence),
         )
 
