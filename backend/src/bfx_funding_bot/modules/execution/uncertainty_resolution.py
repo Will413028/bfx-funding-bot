@@ -107,6 +107,9 @@ class ResolutionIntent:
 
     @classmethod
     def from_request(cls, row: UncertaintyResolutionRequestRow) -> ResolutionIntent:
+        # Only legacy requests reach this reader; ledger-evidence rows carry no seq.
+        if row.reconcile_event_seq is None:
+            raise ValueError("request has no reconcile_event_seq")
         return cls(
             uncertainty_id=row.uncertainty_id,
             action=row.action,  # type: ignore[arg-type]  # CHECK constraint bounds it
@@ -405,6 +408,7 @@ def request_values(
         "uncertainty_id": intent.uncertainty_id,
         "action": intent.action,
         "reconcile_event_seq": intent.reconcile_event_seq,
+        "observation_id": None,
         "venue_offer_id": intent.venue_offer_id,
         "decision": intent.decision,
         "reason": intent.reason,

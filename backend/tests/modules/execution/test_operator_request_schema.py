@@ -28,9 +28,10 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
 
 _VERSIONS = Path(__file__).resolve().parents[3] / "alembic/versions"
 _MIGRATION = "1c435a35dcb4_trading_governance.py"
+_UNCERTAINTY_MIGRATION = "b8c9d0e1f2a4_uncertainty_request_observation_evidence.py"
 # The migration that last (re)created each outbox, and its constants' prefix.
 _OUTBOXES = [
-    (UncertaintyResolutionRequestRow, _MIGRATION, "UNCERTAINTY_"),
+    (UncertaintyResolutionRequestRow, _UNCERTAINTY_MIGRATION, "UNCERTAINTY_"),
     (TradingControlRequestRow, "5b1e7c9d2a40_two_state_trading_control.py", ""),
     (CapitalPolicyRequestRow, "7d2a9c4e6b13_capital_policy_requests.py", ""),
 ]

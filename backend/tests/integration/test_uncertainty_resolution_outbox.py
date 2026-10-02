@@ -89,8 +89,8 @@ _LEDGER_AND_PROJECTIONS = (
 )
 _REQUEST_COLUMNS = (
     "request_id", "exchange_account_id", "deployment_environment", "uncertainty_id", "action",
-    "reconcile_event_seq", "venue_offer_id", "decision", "reason", "requested_by",
-    "created_at_ms",
+    "reconcile_event_seq", "observation_id", "venue_offer_id", "decision", "reason",
+    "requested_by", "created_at_ms",
 )
 _WORKER_COLUMNS = ("state", "processed_at_ms", "resolved_event_seq", "outcome_reason")
 
