@@ -42,8 +42,12 @@ def _reset(engine) -> None:
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
         conn.exec_driver_sql("DROP SCHEMA public CASCADE")
         conn.exec_driver_sql("CREATE SCHEMA public")
-        # Production's default privileges hand new tables to the runtime roles;
-        # the migration must take back what it does not mean to grant.
+        # Worst case, deliberately broader than production: default privileges hand every new
+        # table and sequence to both runtime roles, so each migration must take back what it
+        # does not mean to grant. Production has them only for bfx_bot (fresh-host-setup §1a);
+        # bfx_webapi has none there. At head that difference is gone: d0e1f2a3b4c6 revokes
+        # everything the web API holds in public and grants back its exact allowlist
+        # (test_webapi_privilege_allowlist.py checks both builds equal it).
         for role in ("bfx_bot", "bfx_webapi"):
             conn.exec_driver_sql(f"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='{role}') "
                                  f"THEN CREATE ROLE {role}; END IF; END $$")
@@ -470,7 +474,10 @@ def test_the_web_api_baseline_is_granted_by_migration_not_by_hand(pg_container):
                 conn.exec_driver_sql(f"REVOKE ALL ON SCHEMA public FROM {role}")
         _alembic(url, "upgrade", "head")
         expected = {
-            "user_profiles": {"SELECT", "INSERT"},
+            # d0e1f2a3b4c6 owns what the psql runbook steps used to grant.
+            "user_profiles": {"SELECT", "INSERT", "UPDATE"},
+            "api_keys": {"SELECT", "INSERT", "UPDATE", "DELETE"},
+            "user_configs": {"SELECT", "INSERT", "UPDATE", "DELETE"},
             "exchange_accounts": {"SELECT"}, "exchange_account_memberships": {"SELECT"},
             "position_state": {"SELECT"}, "offer_claims": {"SELECT"}, "event_log": {"SELECT"},
             "execution_uncertainties": {"SELECT"}, "submission_attempts": {"SELECT"},

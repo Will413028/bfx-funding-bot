@@ -42,7 +42,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public
 
 `bfx_webapi` 與 `bfx_webauth` 在 public schema 不給任何 default privileges：webapi 的讀取
 清單與 outbox 欄位級 INSERT 全部由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand`），
-webauth 在 public 什麼都沒有。
+webauth 在 public 什麼都沒有。`bfx_webapi` 在 public 的權限是 migration `d0e1f2a3b4c6` 擁有的精確 allowlist（先 revoke 全部再 grant 回清單，含 `api_keys`、`user_configs` 與 `user_profiles` 的 UPDATE，不再需要手動 grant）；之後新增 webapi 權限的 migration 必須同步更新 `test_webapi_privilege_allowlist.py`。
 
 ### 1b. 跑 migration
 
