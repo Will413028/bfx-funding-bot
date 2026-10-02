@@ -7,6 +7,7 @@ import asyncio
 import math
 import os
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
+from bfx_funding_bot.modules.ledger import OperatorEvidence, OperatorReads
 
 MAX_READINESS_TIMEOUT_SECONDS = 10.0
 
@@ -56,6 +58,23 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
             raise
 
 
+@dataclass(frozen=True, slots=True)
+class ReadModels:
+    """The read-side ports of the capital authority this process booted under."""
+
+    operator_reads: OperatorReads
+    operator_evidence: OperatorEvidence
+
+
+async def get_read_models(request: Request) -> ReadModels:
+    models: ReadModels | None = getattr(request.app.state, "read_models", None)
+    if models is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="db_not_configured"
+        )
+    return models
+
+
 def _readiness_timeout_seconds() -> float:
     """Return a finite, positive, bounded readiness timeout from configuration."""
     try:
@@ -84,6 +103,18 @@ async def database_is_ready(request: Request) -> bool:
                 expected_heads = _expected_alembic_heads()
                 if not expected_heads or versions != expected_heads:
                     return False
+                # The authority is read once at boot: a database that has since
+                # switched epoch must not keep serving the old read models.
+                booted = getattr(request.app.state, "authority", None)
+                if booted is not None:
+                    latest = await session.execute(
+                        text(
+                            "SELECT authority FROM capital_authority_epoch "
+                            "ORDER BY epoch_seq DESC LIMIT 1"
+                        )
+                    )
+                    if latest.scalars().all() != [booted]:
+                        return False
     # Readiness is a fail-closed gate.  This also covers malformed driver
     # results and an unreadable migration graph without turning /ready into a
     # 500 that a deployment health check could mistake for an app crash.

@@ -11,6 +11,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -22,12 +23,27 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Mapped, MappedColumn, mapped_column
 from sqlalchemy.types import Uuid
 
 from bfx_funding_bot.core.db import Base
 
 _JSON = JSON().with_variant(JSONB, "postgresql")
+
+
+_INTENDED_AMOUNT_SQL = "(normalized_payload->>'amount')::numeric"
+
+
+@compiles(Computed, "sqlite")
+def _sqlite_generated_amount(element: Computed, compiler: Any, **kw: Any) -> str:
+    """sqlite stand-in for the one PostgreSQL generated column (unit-test schema only)."""
+    if str(element.sqltext) != _INTENDED_AMOUNT_SQL:
+        raise NotImplementedError(f"no sqlite stand-in for generated column {element.sqltext}")
+    return (
+        "GENERATED ALWAYS AS (CAST(json_extract(normalized_payload, '$.amount') AS NUMERIC))"
+        + (" STORED" if element.persisted else " VIRTUAL")
+    )
 
 
 def _account() -> MappedColumn[UUID]:
@@ -540,6 +556,10 @@ class SubmissionAttemptJournalRow(Base):
     authorization_evidence: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
     seed_provenance: Mapped[dict[str, Any] | None] = mapped_column(_JSON)
     started_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Readable by the web API without granting ``normalized_payload``; never written.
+    intended_amount: Mapped[Decimal] = mapped_column(
+        Numeric, Computed(_INTENDED_AMOUNT_SQL, persisted=True), nullable=False
+    )
     __table_args__ = (
         UniqueConstraint(
             "exchange_account_id",
@@ -551,6 +571,10 @@ class SubmissionAttemptJournalRow(Base):
             "attempt_seq >= 0 AND started_at_ms >= 0",
             name="ck_submission_attempt_nonnegative",
         ),
+        CheckConstraint(
+            "intended_amount >= 0 AND intended_amount < 'Infinity'::numeric",
+            name="ck_submission_attempt_intended_amount",
+        ).ddl_if(dialect="postgresql"),
     )
 
 
@@ -718,6 +742,13 @@ class ExecutionResolutionJournalRow(Base):
             "operator_request_id",
             unique=True,
             postgresql_where=text("operator_request_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_execution_resolution_scope_resolved",
+            "exchange_account_id",
+            "deployment_environment",
+            text("resolved_at_ms DESC"),
+            text("id DESC"),
         ),
         Index(
             "ix_execution_resolution_venue_offer",

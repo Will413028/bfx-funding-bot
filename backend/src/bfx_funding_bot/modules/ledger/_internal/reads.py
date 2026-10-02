@@ -98,7 +98,9 @@ class _Live:
     conflicts: tuple[VenueOfferMirrorRow, ...]
 
 
-async def _candidates(session: AsyncSession, scope: Scope) -> _Candidates:
+async def _candidates(
+    session: AsyncSession, scope: Scope, *, with_payload: bool = True
+) -> _Candidates:
     basis = await previous_basis(session, scope)
     if basis is None:
         # Every attempt names a basis (FK), so a scope without one has none.
@@ -116,10 +118,13 @@ async def _candidates(session: AsyncSession, scope: Scope) -> _Candidates:
         scope.deployment_environment,
         basis.attempt_seq_high_water,
         limit=MAX_TAIL_ATTEMPTS + 1,
+        with_payload=with_payload,
     )
     if len(tail) > MAX_TAIL_ATTEMPTS:
         raise LedgerReadUnbounded(f"more than {MAX_TAIL_ATTEMPTS} attempts after basis {basis.id}")
-    unresolved = await attempts_by_id(session, [row.attempt_id for row in listed])
+    unresolved = await attempts_by_id(
+        session, [row.attempt_id for row in listed], with_payload=with_payload
+    )
     attempts = tuple(sorted((*unresolved, *tail), key=lambda row: row.attempt_seq))
     outcomes, resolutions = await attempt_evidence(session, [row.attempt_id for row in attempts])
     return _Candidates(basis, attempts, outcomes, resolutions)
@@ -190,14 +195,15 @@ async def open_uncertainties(
     session: AsyncSession, scope: Scope, symbol: str | None = None
 ) -> tuple[OpenUncertainty, ...]:
     """UNKNOWN attempts without resolution (by attempt order), then unresolved quarantines."""
-    candidates = await _candidates(session, scope)
+    # No payload: this read also serves the web API, whose grant excludes it.
+    candidates = await _candidates(session, scope, with_payload=False)
     by_id = {row.attempt_id: row for row in candidates.attempts}
     found = [
         OpenUncertainty(
             "attempt",
             attempt_id,
             attempt_symbol,
-            payload_amount(by_id[attempt_id].normalized_payload),
+            by_id[attempt_id].intended_amount,
         )
         for attempt_id, attempt_symbol in open_unknowns(
             ((row.attempt_id, row.symbol) for row in candidates.attempts),

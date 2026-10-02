@@ -35,6 +35,7 @@ from bfx_funding_bot.modules.ledger import (
     ObservationWindow,
     OpenUncertainty,
     OperatorEvidence,
+    OperatorReads,
     Outcome,
     OutcomeAlreadyRecorded,
     Quarantine,
@@ -53,6 +54,7 @@ from bfx_funding_bot.modules.ledger._internal import (
     journal,
     observation,
     operator_evidence,
+    operator_reads,
     quarantine,
     reads,
 )
@@ -313,3 +315,8 @@ def build_observation_sink(
 def build_operator_evidence() -> OperatorEvidence:
     """Construct the ledger implementation without selecting it in apps."""
     return operator_evidence.LedgerOperatorEvidence()
+
+
+def build_operator_reads() -> OperatorReads:
+    """The ledger operator read model; apps select it by authority epoch."""
+    return operator_reads.LedgerOperatorReads()

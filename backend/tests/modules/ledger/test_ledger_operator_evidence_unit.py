@@ -1,7 +1,7 @@
 """Guard mutations must fail the correspondingly named test in this module."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -44,7 +44,10 @@ def evidence_session():
         exchange_account_id=SCOPE.exchange_account_id, deployment_environment="ci", started_at_ms=20
     )
     session = AsyncMock()
-    session.get.side_effect = [observation, opening, query]
+    # ``verify`` selects explicit columns (one row each): observation, opening, query.
+    session.execute.side_effect = [
+        MagicMock(one_or_none=MagicMock(return_value=row)) for row in (observation, opening, query)
+    ]
     session.scalar.return_value = observation
     return session, observation, opening, query
 
@@ -60,7 +63,8 @@ async def test_ledger_verifies_complete_latest_accepted_evidence():
         20,
         30,
     )
-    assert session.get.call_args_list[0].kwargs["populate_existing"] is True
+    # Column-grant safe: no whole-row ``session.get`` (it names every column).
+    session.get.assert_not_called()
 
 
 @pytest.mark.asyncio

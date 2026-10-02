@@ -109,6 +109,12 @@ def include_object(
         if compare_to is not None:
             return False
         return not reflected
+    # Alembic cannot compare a generated column (its server-default comparison
+    # reads ``.arg.text`` from the reflected ``Computed``). A matched pair is
+    # skipped; a missing or extra generated column still shows as drift, and
+    # test_generated_columns_match_the_model compares the skipped shape.
+    if type_ == "column" and compare_to is not None and getattr(object_, "computed", None):
+        return False
     if type_ == "index" and getattr(object_, "info", {}).get("identity_legacy_fixture"):
         return False
     # These scaffold models remain importable by the pre-cutover application

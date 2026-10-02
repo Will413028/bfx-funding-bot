@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import bfx_funding_bot.modules.execution.audit.tables
 import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
@@ -381,6 +382,7 @@ def test_web_api_queues_and_only_the_account_writer_appends(migrated, monkeypatc
 
             app = FastAPI()
             app.include_router(build_uncertainties_router())
+            app.state.read_models = select_read_models("legacy")
             app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
             app.dependency_overrides[get_session] = restricted_session
             base = f"/api/v1/exchange-accounts/{ACCOUNT_ID}"
@@ -478,6 +480,7 @@ def test_queueing_a_request_never_waits_for_or_holds_the_account_writer_lock(
 
             app = FastAPI()
             app.include_router(build_uncertainties_router())
+            app.state.read_models = select_read_models("legacy")
             app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
             app.dependency_overrides[get_session] = restricted_session
             key = derive_transaction_lock_key(account_id_canonical(str(ACCOUNT_ID)), "ci")

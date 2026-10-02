@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
@@ -70,6 +71,7 @@ async def test_migration_grants_allow_scoped_uncertainty_reads_without_execution
 
     app = FastAPI()
     app.include_router(build_uncertainties_router())
+    app.state.read_models = select_read_models("legacy")
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
     app.dependency_overrides[get_session] = restricted_session
     path = f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties"
