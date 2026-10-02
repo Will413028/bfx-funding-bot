@@ -278,8 +278,8 @@ class UncertaintyResolutionRequestRow(Base):
     # column-scoped INSERT grant, and the daemon's UPDATE grant.
     REQUEST_COLUMNS: ClassVar[tuple[str, ...]] = (
         "request_id", "exchange_account_id", "deployment_environment", "uncertainty_id",
-        "action", "reconcile_event_seq", "venue_offer_id", "decision", "reason",
-        "requested_by", "created_at_ms",
+        "action", "reconcile_event_seq", "observation_id", "venue_offer_id", "decision",
+        "reason", "requested_by", "created_at_ms",
     )
     WORKER_COLUMNS: ClassVar[tuple[str, ...]] = (
         "state", "processed_at_ms", "resolved_event_seq", "outcome_reason",
@@ -298,7 +298,18 @@ class UncertaintyResolutionRequestRow(Base):
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     uncertainty_id: Mapped[UUID] = mapped_column(_UUID, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
-    reconcile_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Exactly one evidence column is set (ck_..._evidence): the legacy reconcile
+    # event, or the ledger observation.
+    reconcile_event_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    observation_id: Mapped[UUID | None] = mapped_column(
+        _UUID,
+        ForeignKey(
+            "ledger_observation.id",
+            ondelete="RESTRICT",
+            name="fk_uncertainty_resolution_requests_observation",
+        ),
+        nullable=True,
+    )
     venue_offer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     decision: Mapped[str | None] = mapped_column(Text, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -339,11 +350,16 @@ class UncertaintyResolutionRequestRow(Base):
         CheckConstraint(
             "(state = 'requested' AND processed_at_ms IS NULL AND resolved_event_seq IS NULL "
             "AND outcome_reason IS NULL) OR "
-            "(state = 'applied' AND processed_at_ms IS NOT NULL AND resolved_event_seq IS NOT NULL "
+            "(state = 'applied' AND processed_at_ms IS NOT NULL "
+            "AND (reconcile_event_seq IS NOT NULL) = (resolved_event_seq IS NOT NULL) "
             "AND outcome_reason IS NULL) OR "
             "(state IN ('rejected', 'failed') AND processed_at_ms IS NOT NULL "
             "AND resolved_event_seq IS NULL AND outcome_reason IS NOT NULL)",
             name="ck_uncertainty_resolution_requests_outcome_shape",
+        ),
+        CheckConstraint(
+            "(reconcile_event_seq IS NULL) <> (observation_id IS NULL)",
+            name="ck_uncertainty_resolution_requests_evidence",
         ),
         Index(
             "uq_uncertainty_resolution_requests_pending",

@@ -714,6 +714,12 @@ class ExecutionResolutionJournalRow(Base):
             postgresql_where=text("quarantine_id IS NOT NULL"),
         ),
         Index(
+            "uq_execution_resolution_operator_request",
+            "operator_request_id",
+            unique=True,
+            postgresql_where=text("operator_request_id IS NOT NULL"),
+        ),
+        Index(
             "ix_execution_resolution_venue_offer",
             "venue_offer_id",
             postgresql_where=text("venue_offer_id IS NOT NULL"),
