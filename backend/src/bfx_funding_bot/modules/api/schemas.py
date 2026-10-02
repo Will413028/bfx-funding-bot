@@ -141,11 +141,17 @@ class PublicProofSummaryResponse(BaseModel):
 
 
 class PositionResponse(BaseModel):
-    """SP4: one position_state row (per-symbol ledger projection)."""
+    """One symbol's capital as disjoint components, in the symbol's own units.
+
+    ``available + offered + lent`` is the symbol's total. ``unattributedLent`` is a
+    subset of ``lent`` (never an addend); null when the authority has no such fact.
+    """
 
     symbol: str
-    reserved: str
-    realized: str
+    available: str
+    offered: str
+    lent: str
+    unattributed_lent: str | None = Field(default=None, serialization_alias="unattributedLent")
     n_credits: int | None = Field(default=None, serialization_alias="nCredits")
     last_updated_ms: int = Field(serialization_alias="lastUpdatedMs")
     last_reconciled_at: int | None = Field(
@@ -154,9 +160,9 @@ class PositionResponse(BaseModel):
 
 
 class OfferClaimResponse(BaseModel):
-    """SP4: one offer_claims row (cid-keyed offer FSM projection)."""
+    """One managed offer. ``offerKey`` is opaque and stable for the offer's life."""
 
-    cid: int
+    offer_key: str = Field(serialization_alias="offerKey")
     venue_offer_id: str | None = Field(default=None, serialization_alias="venueOfferId")
     state: str
     symbol: str

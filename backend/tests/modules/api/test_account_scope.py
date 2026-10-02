@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import bfx_funding_bot.modules.accounts.tables
 import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
+from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.core.auth import Principal
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
@@ -188,7 +189,7 @@ async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
                 deployment_environment="prod",
                 symbol="fUST",
                 reserved=Decimal("0"),
-                realized=Decimal("2"),
+                lent_amount=Decimal("2"),
                 last_updated_ms=1,
                 last_event_seq=1,
             )
@@ -200,7 +201,7 @@ async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
                 deployment_environment="prod",
                 symbol="fUSD",
                 reserved=Decimal("0"),
-                realized=Decimal("9"),
+                lent_amount=Decimal("9"),
                 last_updated_ms=1,
                 last_event_seq=1,
             )
@@ -213,6 +214,7 @@ async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
     app.include_router(build_config_router())
     app.include_router(build_projections_router())
     app.include_router(build_attribution_router())
+    app.state.read_models = select_read_models("legacy")
     current_user = {"value": "operator-1"}
 
     async def _operator() -> Principal:
@@ -246,7 +248,7 @@ def test_bootstrap_and_projection_are_account_scoped(scoped_app: TestClient) -> 
     positions = scoped_app.get(f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/positions")
     assert positions.status_code == 200
     assert positions.json()["data"][0]["symbol"] == "fUST"
-    assert positions.json()["data"][0]["realized"] == "2"
+    assert positions.json()["data"][0]["lent"] == "2"
 
 
 def test_nonmember_account_path_is_404(scoped_app: TestClient) -> None:

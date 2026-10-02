@@ -7,7 +7,7 @@ const NOW = Date.now();
 
 const OFFERS: OfferClaim[] = [
   {
-    cid: 17123,
+    offerKey: "7b1f0c9e-1111-4222-8333-444455556666",
     venueOfferId: "3456789",
     state: "claimed",
     symbol: "fUST",
@@ -16,7 +16,7 @@ const OFFERS: OfferClaim[] = [
     lastUpdatedMs: NOW - 60_000,
   },
   {
-    cid: 17124,
+    offerKey: "7b1f0c9e-2222-4222-8333-444455556666",
     venueOfferId: null,
     state: "pending",
     symbol: "fUST",

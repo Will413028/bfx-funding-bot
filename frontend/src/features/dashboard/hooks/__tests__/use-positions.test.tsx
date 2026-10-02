@@ -15,8 +15,10 @@ vi.mock("@/lib/api-client", () => ({
 const POSITIONS: Position[] = [
   {
     symbol: "fUST",
-    reserved: "100",
-    realized: "1.5",
+    available: "50",
+    offered: "100",
+    lent: "1.5",
+    unattributedLent: null,
     nCredits: 2,
     lastUpdatedMs: 1_790_000_000_000,
     lastReconciledAtMs: 1_790_000_000_000,

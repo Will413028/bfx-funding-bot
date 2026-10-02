@@ -75,14 +75,23 @@ export function PositionsCard({ positions }: PositionsCardProps) {
                       : `${t("reconciled")} ${formatRelativeTime(p.lastReconciledAtMs, locale)}`}
                   </span>
                 </div>
-                <dl className="grid grid-cols-3 gap-2">
+                <dl className="grid grid-cols-4 gap-2">
                   <div>
-                    <dt className="text-xs text-zinc-500">{t("reserved")}</dt>
+                    <dt className="text-xs text-zinc-500">{t("available")}</dt>
                     <dd className="mt-0.5 font-medium">
                       <DecimalAmount
-                        value={p.reserved}
+                        value={p.available}
+                        className="text-zinc-200"
+                      />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-zinc-500">{t("offered")}</dt>
+                    <dd className="mt-0.5 font-medium">
+                      <DecimalAmount
+                        value={p.offered}
                         className={
-                          Number(p.reserved) > 0
+                          Number(p.offered) > 0
                             ? "text-amber-500"
                             : "text-zinc-400"
                         }
@@ -90,13 +99,23 @@ export function PositionsCard({ positions }: PositionsCardProps) {
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-xs text-zinc-500">{t("realized")}</dt>
+                    <dt className="text-xs text-zinc-500">{t("lent")}</dt>
                     <dd className="mt-0.5 font-medium">
                       <DecimalAmount
-                        value={p.realized}
+                        value={p.lent}
                         className="text-emerald-400"
                       />
                     </dd>
+                    {p.unattributedLent != null &&
+                      Number(p.unattributedLent) > 0 && (
+                        <dd
+                          className="mt-0.5 text-xs text-zinc-500"
+                          data-testid="unattributed-lent"
+                        >
+                          {t("unattributedLent")}{" "}
+                          <DecimalAmount value={p.unattributedLent} />
+                        </dd>
+                      )}
                   </div>
                   <div>
                     <dt className="text-xs text-zinc-500">{t("credits")}</dt>
