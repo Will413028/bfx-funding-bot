@@ -49,6 +49,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Boot state belongs to this lifespan: a later run on the same app object
+        # (tests, reload) must not inherit an authority it did not read.
+        app.state.authority = None
+        app.state.read_models = None
         existing_engine = getattr(app.state, "engine", None)
         if existing_engine is not None:
             await existing_engine.dispose()
