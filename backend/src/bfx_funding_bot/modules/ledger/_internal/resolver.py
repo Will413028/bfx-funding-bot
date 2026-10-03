@@ -13,10 +13,10 @@ import logging
 from collections import Counter
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
-from typing import cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import Row, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import (
@@ -64,11 +64,19 @@ SYSTEM_RESOLVER = "system:reconcile"
 RESOLUTION_REJECTED_ALERT = "ledger_unknown_resolution_rejected"
 
 
-def _offer(row: LedgerObservationOfferRow | LedgerObservationOfferHistoryRow) -> Offer:
+# Exactly the columns the web API's role is granted on the observed offers (no ``raw``): the
+# matcher reads none of the venue payload, so the evidence is loaded without it.
+_OFFER_COLUMNS = (
+    "venue_offer_id", "symbol", "amount_original", "amount_remaining", "rate", "rate_observed",
+    "period_days", "offer_type", "flags", "status", "mts_created", "mts_updated",
+)
+
+
+def _offer(row: Row[Any]) -> Offer:
     return Offer(
         row.venue_offer_id, row.symbol, row.amount_original, row.amount_remaining, row.rate,
         row.rate_observed, row.period_days, row.offer_type, row.flags,
-        cast(OfferStatus, row.status), row.mts_created, row.mts_updated, row.raw,
+        cast(OfferStatus, row.status), row.mts_created, row.mts_updated,
     )
 
 
@@ -78,14 +86,48 @@ def _page_count(counts: object, key: str) -> int:
 
 
 async def load_match_evidence(session: AsyncSession, observation_id: UUID) -> MatchEvidence | None:
-    """The stored observation as matching evidence; None when it does not exist."""
-    row = await session.get(LedgerObservationRow, observation_id, populate_existing=True)
+    """The stored observation as matching evidence; None when it does not exist.
+
+    Reads granted columns only (the generated ``history_symbols`` / ``first_page_counts``
+    instead of ``evidence``, no offer ``raw``), so the web API's role can run it too.
+    """
+    row = (
+        await session.execute(
+            select(
+                LedgerObservationRow.query_id,
+                LedgerObservationRow.query_finished_at_ms,
+                LedgerObservationRow.wallets_complete,
+                LedgerObservationRow.offers_complete,
+                LedgerObservationRow.credits_complete,
+                LedgerObservationRow.loans_complete,
+                LedgerObservationRow.offer_history_complete,
+                LedgerObservationRow.credit_history_complete,
+                LedgerObservationRow.trades_complete,
+                LedgerObservationRow.offer_history_pages,
+                LedgerObservationRow.credit_history_pages,
+                LedgerObservationRow.history_requested_start_ms,
+                LedgerObservationRow.history_requested_end_ms,
+                LedgerObservationRow.history_oldest_mts_created,
+                LedgerObservationRow.history_newest_mts_created,
+                LedgerObservationRow.trades_requested_start_ms,
+                LedgerObservationRow.trades_requested_end_ms,
+                LedgerObservationRow.history_symbols,
+                LedgerObservationRow.first_page_counts,
+            )
+            .where(LedgerObservationRow.id == observation_id)
+            .execution_options(populate_existing=True)
+        )
+    ).one_or_none()
     if row is None:
         return None
-    query = await session.get(LedgerObservationQueryRow, row.query_id)
-    if query is None:
+    started_at_ms = await session.scalar(
+        select(LedgerObservationQueryRow.started_at_ms).where(
+            LedgerObservationQueryRow.query_id == row.query_id
+        )
+    )
+    if started_at_ms is None:
         return None
-    first = row.evidence.get("first_page_counts")
+    first = row.first_page_counts
     coverage = Coverage(
         wallets_complete=row.wallets_complete,
         offers_complete=row.offers_complete,
@@ -106,15 +148,19 @@ async def load_match_evidence(session: AsyncSession, observation_id: UUID) -> Ma
         trades_complete=row.trades_complete,
         trades_requested_start_ms=row.trades_requested_start_ms,
         trades_requested_end_ms=row.trades_requested_end_ms,
-        history_symbols=history_symbols.decode(row.evidence),
+        history_symbols=history_symbols.decode({history_symbols.KEY: row.history_symbols}),
     )
-    offers = await session.scalars(
-        select(LedgerObservationOfferRow)
+    offers = await session.execute(
+        select(*(getattr(LedgerObservationOfferRow, name) for name in _OFFER_COLUMNS))
         .where(LedgerObservationOfferRow.observation_id == observation_id)
         .order_by(LedgerObservationOfferRow.venue_offer_id)
     )
-    history = await session.scalars(
-        select(LedgerObservationOfferHistoryRow)
+    history = await session.execute(
+        select(
+            *(getattr(LedgerObservationOfferHistoryRow, name) for name in _OFFER_COLUMNS),
+            LedgerObservationOfferHistoryRow.terminal_kind,
+            LedgerObservationOfferHistoryRow.occurred_at_ms,
+        )
         .where(LedgerObservationOfferHistoryRow.observation_id == observation_id)
         .order_by(
             LedgerObservationOfferHistoryRow.venue_offer_id,
@@ -123,7 +169,7 @@ async def load_match_evidence(session: AsyncSession, observation_id: UUID) -> Ma
     )
     return MatchEvidence(
         observation_id,
-        query.started_at_ms,
+        started_at_ms,
         row.query_finished_at_ms,
         coverage,
         tuple(_offer(item) for item in offers),
@@ -136,29 +182,13 @@ async def load_match_evidence(session: AsyncSession, observation_id: UUID) -> Ma
     )
 
 
-def _terms(
-    attempt_id: UUID, symbol: str, payload: object, digest: str, started_at_ms: int,
-    unknown_recorded_at_ms: int,
+def _build_terms(
+    attempt_id: UUID, symbol: str, amount: Decimal, rate: Decimal, period: object,
+    offer_type: object, flags: object, started_at_ms: int, unknown_recorded_at_ms: int,
 ) -> UnknownTerms | None:
-    """The attempt's terms, or None when the journal row cannot be trusted as a subject.
-
-    The payload digest is rechecked so a forged projection cannot change the
-    identity matched; a payload without type/flags (a seeded legacy partial) is
-    never matched: it stays open for an operator.
-    """
-    if not isinstance(payload, dict) or sha256(canonical_payload(payload)).hexdigest() != digest:
-        return None
-    try:
-        amount = Decimal(str(payload["amount"]))
-        rate = Decimal(str(payload["rate"]))
-        period = payload["period"]
-        offer_type = payload["type"]
-        flags = payload["flags"]
-    except (KeyError, InvalidOperation):
-        return None
+    """The shared admission rule of an attempt's terms (None: not a matchable subject)."""
     if (
-        payload.get("symbol") != symbol
-        or not isinstance(period, int)
+        not isinstance(period, int)
         or isinstance(period, bool)
         or period <= 0
         or not isinstance(offer_type, str)
@@ -172,6 +202,52 @@ def _terms(
     ):
         return None
     return UnknownTerms(
+        attempt_id, symbol, amount, rate, period, offer_type, flags, started_at_ms,
+        unknown_recorded_at_ms,
+    )
+
+
+def _terms(
+    attempt_id: UUID, symbol: str, payload: object, digest: str, started_at_ms: int,
+    unknown_recorded_at_ms: int,
+) -> UnknownTerms | None:
+    """The attempt's terms from its payload, or None when the row cannot be trusted as a subject.
+
+    The payload digest is rechecked so a forged projection cannot change the
+    identity matched; a payload without type/flags (a seeded legacy partial) is
+    never matched: it stays open for an operator. The worker's path (the web API's
+    role cannot read the payload).
+    """
+    if not isinstance(payload, dict) or sha256(canonical_payload(payload)).hexdigest() != digest:
+        return None
+    try:
+        amount = Decimal(str(payload["amount"]))
+        rate = Decimal(str(payload["rate"]))
+        period = payload["period"]
+        offer_type = payload["type"]
+        flags = payload["flags"]
+    except (KeyError, InvalidOperation):
+        return None
+    if payload.get("symbol") != symbol:
+        return None
+    return _build_terms(
+        attempt_id, symbol, amount, rate, period, offer_type, flags, started_at_ms,
+        unknown_recorded_at_ms,
+    )
+
+
+def preview_terms(
+    attempt_id: UUID, symbol: str, amount: Decimal, rate: Decimal | None, period: int | None,
+    offer_type: str | None, flags: object, started_at_ms: int, unknown_recorded_at_ms: int,
+) -> UnknownTerms | None:
+    """The attempt's terms from the generated match columns: no payload, hence no digest recheck.
+
+    Advisory only (the web API's preview and queue-time check); the worker re-judges every
+    request from the payload through ``_terms``. A NULL column is an absent payload key.
+    """
+    if rate is None or period is None or offer_type is None or flags is None:
+        return None
+    return _build_terms(
         attempt_id, symbol, amount, rate, period, offer_type, flags, started_at_ms,
         unknown_recorded_at_ms,
     )
@@ -320,4 +396,4 @@ async def resolve_unknowns(
     return tuple(resolved)
 
 
-__all__ = ["SYSTEM_RESOLVER", "load_match_evidence", "resolve_unknowns"]
+__all__ = ["SYSTEM_RESOLVER", "load_match_evidence", "preview_terms", "resolve_unknowns"]

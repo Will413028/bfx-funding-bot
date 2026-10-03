@@ -324,11 +324,12 @@ async def test_the_router_serves_the_ledger_read_model_as_the_web_api_role(
         assert attempt["kind"] == "submit_outcome_unknown"
         assert attempt["intendedAmount"] == "200"
         assert attempt["evidenceSummary"] == {"outcomeReason": "test", "observedAtMs": 0}
-        # The web API's role cannot read the observed offers: it cites the observation and
-        # says the match is not derivable there (the worker matches authoritatively).
+        # The web API's role derives the match preview from granted columns; this scenario's
+        # attempt carries a seeded partial payload (no rate/period/type/flags), which is not
+        # a matchable subject, as under legacy.
         context = attempt["resolutionContext"]
         assert context["evidenceRef"].startswith("ledger:v1:obs:")
-        assert context["unavailableReason"] == "match_evidence_unavailable"
+        assert context["unavailableReason"] == "submission_attempt_not_resolvable"
         assert rows[str(scenario.r6)]["evidenceSummary"] == {
             "outcomeReason": "acked_offer_unobserved"
         }

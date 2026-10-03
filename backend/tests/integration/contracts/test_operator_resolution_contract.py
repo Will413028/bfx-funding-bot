@@ -5,9 +5,11 @@ Declared divergences (each asserted where it shows):
 * request columns: legacy ``reconcile_event_seq``, ledger ``observation_id``;
 * the applied record: legacy appends an event_log event and sets ``resolved_event_seq``,
   the ledger writes one journal row (citing the request) and never the event log;
-* the web API's role cannot read the observed offers, so a bind naming the wrong
-  offer is refused when the request is queued under legacy and by the worker under
-  the ledger: the request never resolves anything either way.
+* the cited reference of the context (an event sequence vs an observation ref).
+
+A bind naming the wrong offer and a not-accepted over a non-zero match are refused when
+the request is queued, under both authorities (S1-3e4b: the web API previews the match
+from granted columns); the worker re-judges every request regardless.
 """
 
 from __future__ import annotations
@@ -40,15 +42,10 @@ async def journal(driver: Driver) -> list[ExecutionResolutionJournalRow]:
 
 
 async def refusal(driver: Driver, item) -> str:
-    """The code that stops this request from resolving anything, wherever the authority says it."""
-    try:
-        row = await driver.request(item)
-    except ResolutionRejected as exc:
-        return exc.code
-    settled = await driver.settle(row.request_id)
-    assert settled.state == "rejected", (settled.state, settled.outcome_reason)
-    assert settled.outcome_reason is not None
-    return settled.outcome_reason
+    """The code that refuses this request at queue time (the same under both authorities)."""
+    with pytest.raises(ResolutionRejected) as refused:
+        await driver.request(item)
+    return refused.value.code
 
 
 @pytest.mark.asyncio
@@ -176,3 +173,24 @@ async def test_malformed_foreign_and_unknown_requests(driver) -> None:
         await driver.request(driver.intent(uuid4(), ref))
     assert missing.value.kind == "not_found"
     assert (await driver.view(uncertainty)).state == "open"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("offers", "count", "ids", "reason"),
+    [
+        ((), 0, (), None),
+        (("V1",), 1, ("V1",), None),
+        (("V1", "V2"), 2, ("V1", "V2"), "multiple_exact_candidates"),
+    ],
+)
+async def test_the_resolution_context_carries_the_same_candidates(
+    driver, offers, count, ids, reason
+) -> None:
+    """The preview's candidate fields (count, offer ids, reason) are legacy's for one scenario."""
+    uncertainty = await driver.open_unknown()
+    ref = await driver.observe(offers)
+    context = await driver.context(uncertainty)
+    assert context.evidence_ref == ref
+    assert (context.candidate_count, context.candidate_venue_offer_ids, context.unavailable_reason) == (
+        count, ids, reason)

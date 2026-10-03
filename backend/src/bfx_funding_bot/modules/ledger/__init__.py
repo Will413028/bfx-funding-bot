@@ -83,7 +83,8 @@ class Offer:
     status: OfferStatus
     mts_created: int
     mts_updated: int | None
-    raw: JsonObject
+    # The venue payload; empty when the offer was loaded for matching, which never reads it.
+    raw: JsonObject = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

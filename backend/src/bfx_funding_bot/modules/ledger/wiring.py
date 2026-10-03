@@ -340,12 +340,11 @@ def build_observation_sink(
     )
 
 
-def build_operator_evidence(*, match: bool = False) -> OperatorEvidence:
-    """``match``: also derive an attempt's candidates, which needs a role that reads the
-    observed offers and the attempt payload (the web API's column grants exclude both)."""
+def build_operator_evidence() -> OperatorEvidence:
+    """Operator evidence with the attempt match preview, which reads granted columns only
+    (any role may run it); the worker's authority is ``build_operator_resolution().apply``."""
     return operator_evidence.LedgerOperatorEvidence(
-        operator_reads.LedgerOperatorReads(),
-        operator_resolution.attempt_match if match else None,
+        operator_reads.LedgerOperatorReads(), operator_resolution.preview_match
     )
 
 

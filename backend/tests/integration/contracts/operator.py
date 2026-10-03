@@ -24,6 +24,7 @@ from bfx_funding_bot.modules.execution.events import (
     VenueOfferObservation,
 )
 from bfx_funding_bot.modules.execution.legacy_operator_reads import LegacyOperatorReads
+from bfx_funding_bot.modules.execution.operator_evidence import LegacyOperatorEvidence
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
 from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     LegacyOperatorResolution,
@@ -36,12 +37,19 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     UncertaintyResolutionRequestRow,
 )
 from bfx_funding_bot.modules.ledger import (
+    OperatorEvidence,
     OperatorReads,
     OperatorResolution,
+    ResolutionEvidence,
     ResolutionIntent,
+    ResolutionSubject,
     observation_evidence_ref,
 )
-from bfx_funding_bot.modules.ledger.wiring import build_operator_reads, build_operator_resolution
+from bfx_funding_bot.modules.ledger.wiring import (
+    build_operator_evidence,
+    build_operator_reads,
+    build_operator_resolution,
+)
 
 from ..test_ledger_unknown_resolver_pg import (
     Clock,
@@ -69,6 +77,7 @@ class Driver:
     name: str
     resolution: OperatorResolution
     reads: OperatorReads
+    evidence: OperatorEvidence
 
     def __init__(self, stack: Stack) -> None:
         self.stack = stack
@@ -123,6 +132,13 @@ class Driver:
         async with self.factory() as session:
             return await self.reads.get_uncertainty(session, SCOPE, uncertainty)
 
+    async def context(self, uncertainty: UUID) -> ResolutionEvidence:
+        """What the operator may cite for this subject now (the cited ref differs by authority)."""
+        view = await self.view(uncertainty)
+        subject = ResolutionSubject(view.uncertainty_id, view.symbol, view.attempt_id)
+        async with self.factory() as session:
+            return await self.evidence.resolution_context(session, SCOPE, subject)
+
 
 class LedgerDriver(Driver):
     name = "ledger"
@@ -131,6 +147,7 @@ class LedgerDriver(Driver):
         super().__init__(stack)
         self.resolution = build_operator_resolution()
         self.reads = build_operator_reads()
+        self.evidence = build_operator_evidence()
         self.book = stack.builders.book
         self.at = 1_100_000  # after the UNKNOWN (1_050_000), inside the settle window
 
@@ -158,7 +175,8 @@ class LegacyDriver(Driver):
 
     def __init__(self, stack: Stack) -> None:
         super().__init__(stack)
-        self.resolution = LegacyOperatorResolution()
+        self.evidence = LegacyOperatorEvidence()
+        self.resolution = LegacyOperatorResolution(self.evidence)
         self.reads = LegacyOperatorReads()
         self.at = 2_000
 
