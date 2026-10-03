@@ -211,30 +211,39 @@ async def test_manual_resolution_of_a_quarantine(book) -> None:  # noqa: F811
     assert (await state_of(book.factory, quarantine)).state == "resolved"
 
 
-# --- the venue match is the worker's, with operator parity ------------------------------------------
+# --- the venue match: refused at queue time like legacy, re-judged by the worker -----------------------
+
+
+async def apply_directly(book_: Any, item: ResolutionIntent, ref: str) -> None:
+    """The worker's ``apply`` on a request that got past (or around) the queue-time check."""
+    async with book_.factory.begin() as session:
+        await RESOLUTION.apply(
+            session, SCOPE, QueuedResolution(uuid4(), item, RESOLUTION.columns(ref)),
+            now_ms=WORKER_NOW,
+        )
 
 
 @pytest.mark.asyncio
-async def test_a_bind_naming_another_offer_is_refused_by_the_worker(book) -> None:  # noqa: F811
+async def test_a_bind_naming_another_offer_is_refused_when_queued_and_by_the_worker(book) -> None:  # noqa: F811
     attempt, ref = await open_unknown(book, offers=(venue_offer("V1"),))
-    # The web API's role cannot read the offers: the wrong id is queued, then refused.
-    request_id = await queue(
-        book.factory, intent(attempt, ref, "bind_to_venue", venue_offer_id="V9"))
-    assert await settle(book.factory, request_id) == "rejected"
-    row = await request_row(book.factory, request_id)
-    assert row.outcome_reason == "venue_offer_match_not_exact"
+    wrong = intent(attempt, ref, "bind_to_venue", venue_offer_id="V9")
+    with pytest.raises(RequestRefused, match="venue_offer_match_not_exact"):
+        await queue(book.factory, wrong)
+    # The worker does not trust the queue: the same request applied directly is refused too.
+    with pytest.raises(ResolutionRejected, match="venue_offer_match_not_exact"):
+        await apply_directly(book, wrong, ref)
     assert await resolutions(book) == []
 
 
 @pytest.mark.asyncio
 async def test_bind_refuses_multiple_matches(book) -> None:  # noqa: F811
-    """Mutation 7: an operator bind accepting ``multiple_match``."""
+    """Mutation 7 (original) / 5 (3e4b): an operator bind accepting ``multiple_match``."""
     attempt, ref = await open_unknown(book, offers=(venue_offer("V1"), venue_offer("V2")))
-    request_id = await queue(
-        book.factory, intent(attempt, ref, "bind_to_venue", venue_offer_id="V1"))
-    assert await settle(book.factory, request_id) == "rejected"
-    assert (await request_row(book.factory, request_id)).outcome_reason == (
-        "venue_offer_match_not_exact")
+    bind = intent(attempt, ref, "bind_to_venue", venue_offer_id="V1")
+    with pytest.raises(RequestRefused, match="venue_offer_match_not_exact"):
+        await queue(book.factory, bind)
+    with pytest.raises(ResolutionRejected, match="venue_offer_match_not_exact"):
+        await apply_directly(book, bind, ref)
     assert await resolutions(book) == []
 
 
@@ -242,20 +251,53 @@ async def test_bind_refuses_multiple_matches(book) -> None:  # noqa: F811
 async def test_mark_not_accepted_refuses_when_an_offer_matches(book) -> None:  # noqa: F811
     """not_accepted needs a ``zero_match``: an exact candidate is not absence."""
     attempt, ref = await open_unknown(book, offers=(venue_offer("V1"),))
-    request_id = await queue(book.factory, intent(attempt, ref))
-    assert await settle(book.factory, request_id) == "rejected"
-    assert (await request_row(book.factory, request_id)).outcome_reason == (
-        "venue_offer_match_not_zero")
+    with pytest.raises(RequestRefused, match="venue_offer_match_not_zero"):
+        await queue(book.factory, intent(attempt, ref))
+    with pytest.raises(ResolutionRejected, match="venue_offer_match_not_zero"):
+        await apply_directly(book, intent(attempt, ref), ref)
 
 
 @pytest.mark.asyncio
 async def test_mark_not_accepted_refuses_incomplete_evidence(book) -> None:  # noqa: F811
     """Mutation 8: the same verdict when the history was never fetched for the symbol."""
     attempt, ref = await open_unknown(book, symbols=frozenset({"fUSD"}))
-    request_id = await queue(book.factory, intent(attempt, ref))
+    with pytest.raises(RequestRefused, match="venue_offer_match_not_zero"):
+        await queue(book.factory, intent(attempt, ref))
+    with pytest.raises(ResolutionRejected, match="venue_offer_match_not_zero"):
+        await apply_directly(book, intent(attempt, ref), ref)
+    assert await resolutions(book) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["mark_not_accepted", "bind_to_venue"])
+async def test_the_worker_checks_the_payload_digest_the_preview_cannot(book, action) -> None:  # noqa: F811
+    """Mutation 7 (3e4b): ``apply`` skipping the digest recheck.
+
+    A payload whose digest no longer matches passes the web API's preview (generated
+    columns, no digest) and is queued; the worker, which reads the payload, refuses it.
+    """
+    attempt, ref = await open_unknown(book, offers=(venue_offer("V1"),))
+    item = intent(attempt, ref, action, venue_offer_id="V1" if action == "bind_to_venue" else None)
+    if action == "mark_not_accepted":
+        # No offer is wanted for the zero verdict: forge it so the preview alone says zero.
+        async with book.factory.begin() as session:
+            await session.execute(text("ALTER TABLE submission_attempt_journal DISABLE TRIGGER USER"))
+            await session.execute(text(
+                "UPDATE submission_attempt_journal SET normalized_payload = jsonb_set("
+                "normalized_payload, '{rate}', '\"0.9\"')"))
+            await session.execute(text("ALTER TABLE submission_attempt_journal ENABLE TRIGGER USER"))
+        request_id = await queue(book.factory, item)  # preview: the (forged) rate matches no offer
+        code = "venue_offer_match_not_zero"
+    else:
+        async with book.factory.begin() as session:
+            await session.execute(text("ALTER TABLE submission_attempt_journal DISABLE TRIGGER USER"))
+            await session.execute(text(
+                "UPDATE submission_attempt_journal SET payload_sha256 = repeat('0', 64)"))
+            await session.execute(text("ALTER TABLE submission_attempt_journal ENABLE TRIGGER USER"))
+        request_id = await queue(book.factory, item)  # preview: terms unchanged, so V1 is exact
+        code = "venue_offer_match_not_exact"
     assert await settle(book.factory, request_id) == "rejected"
-    assert (await request_row(book.factory, request_id)).outcome_reason == (
-        "venue_offer_match_not_zero")
+    assert (await request_row(book.factory, request_id)).outcome_reason == code
     assert await resolutions(book) == []
 
 
@@ -429,7 +471,7 @@ async def test_verify_opens_an_attempt_at_its_unknown_not_at_its_submit(book) ->
 async def test_resolution_context_cites_the_latest_accepted_observation(book) -> None:  # noqa: F811
     """Mutation 9: a non-latest observation; plus the legacy-shaped match fields."""
     attempt, first = await open_unknown(book, offers=(venue_offer("V1"),))
-    evidence = build_operator_evidence(match=True)
+    evidence = build_operator_evidence()
     subject = ResolutionSubject(attempt, "fUST", attempt)
     async with book.factory() as session:
         context = await evidence.resolution_context(session, SCOPE, subject)
@@ -455,22 +497,19 @@ async def test_resolution_context_reasons(book) -> None:  # noqa: F811
     attempt, _ref = await open_unknown(book, symbols=frozenset({"fUSD"}))
     subject = ResolutionSubject(attempt, "fUST", attempt)
     async with book.factory() as session:
-        full = await build_operator_evidence(match=True).resolution_context(session, SCOPE, subject)
-        # The web API's role derives no candidates: it says so instead of guessing.
-        web = await build_operator_evidence().resolution_context(session, SCOPE, subject)
-    assert full.unavailable_reason == "incomplete_match_evidence" and full.candidate_count is None
-    assert web.unavailable_reason == "match_evidence_unavailable"
-    assert web.evidence_ref == full.evidence_ref and web.evidence_ref is not None
+        context = await build_operator_evidence().resolution_context(session, SCOPE, subject)
+    # The symbol's history was never fetched: incomplete, as under legacy.
+    assert context.unavailable_reason == "incomplete_match_evidence" and context.candidate_count is None
+    assert context.evidence_ref is not None
 
-    request_id = await queue(book.factory, intent(attempt, web.evidence_ref))
-    assert await settle(book.factory, request_id) == "rejected"  # no zero match to cite
+    with pytest.raises(RequestRefused, match="venue_offer_match_not_zero"):
+        await queue(book.factory, intent(attempt, context.evidence_ref))  # no zero match to cite
     async with book.factory.begin() as session:
         await JOURNAL.record_resolution(session, SCOPE, Resolution(
-            uuid4(), "fUST", "not_accepted", None, UUID(web.evidence_ref.rsplit(":", 1)[1]), "system",
-            "system:reconcile", WORKER_NOW, "r", {}, attempt_id=attempt))
+            uuid4(), "fUST", "not_accepted", None, UUID(context.evidence_ref.rsplit(":", 1)[1]),
+            "system", "system:reconcile", WORKER_NOW, "r", {}, attempt_id=attempt))
     async with book.factory() as session:
-        resolved = await build_operator_evidence(match=True).resolution_context(
-            session, SCOPE, subject)
+        resolved = await build_operator_evidence().resolution_context(session, SCOPE, subject)
     assert resolved.unavailable_reason == "uncertainty_not_open"
 
 
@@ -480,7 +519,7 @@ async def test_resolution_context_without_an_accepted_observation_or_with_a_quar
     async with book.factory.begin() as session:
         await JOURNAL.open_quarantine(
             session, SCOPE, Quarantine(quarantine, "fUST", Decimal("10"), 0, {}))
-    evidence = build_operator_evidence(match=True)
+    evidence = build_operator_evidence()
     subject = ResolutionSubject(quarantine, "fUST")
     async with book.factory() as session:
         none_yet = await evidence.resolution_context(session, SCOPE, subject)
@@ -610,3 +649,68 @@ async def test_the_web_api_role_queues_and_the_bot_role_applies(book, ledger_db)
     finally:
         await web.dispose()
         await bot.dispose()
+
+
+async def _web_context(factory: Any, attempt: UUID) -> Any:
+    async with factory() as session:
+        return await build_operator_evidence().resolution_context(
+            session, SCOPE, ResolutionSubject(attempt, "fUST", attempt))
+
+
+@pytest.mark.asyncio
+async def test_the_web_api_role_builds_the_context_and_never_reads_the_payloads(book, ledger_db) -> None:  # noqa: F811
+    """3e4b: ``bfx_webapi`` derives the candidates from granted columns (matching the owner's
+    view of the same scenario) and is denied ``raw``, ``normalized_payload`` and ``evidence``."""
+    attempt, ref = await open_unknown(book, offers=(venue_offer("V1"), venue_offer("V2")))
+    web, web_factory = _role_factory(ledger_db, "bfx_webapi")
+    try:
+        as_web = await _web_context(web_factory, attempt)
+        as_owner = await _web_context(book.factory, attempt)
+        assert as_web == as_owner
+        assert (as_web.evidence_ref, as_web.candidate_count, as_web.candidate_venue_offer_ids,
+                as_web.unavailable_reason) == (ref, 2, ("V1", "V2"), "multiple_exact_candidates")
+        for statement in (
+            "SELECT raw FROM ledger_observation_offer",
+            "SELECT raw FROM ledger_observation_offer_history",
+            "SELECT normalized_payload FROM submission_attempt_journal",
+            "SELECT evidence FROM ledger_observation",
+            "SELECT payload_sha256 FROM submission_attempt_journal",
+        ):
+            with pytest.raises(Exception, match="permission denied"):
+                async with web_factory.begin() as session:
+                    await session.execute(text(statement))
+    finally:
+        await web.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_web_api_role_sees_the_history_symbol_check(book, ledger_db) -> None:  # noqa: F811
+    """3e4b mutation 4: a symbol the port never fetched stays ``incomplete`` under the web role."""
+    attempt, _ref = await open_unknown(book, symbols=frozenset({"fUSD"}))
+    web, web_factory = _role_factory(ledger_db, "bfx_webapi")
+    try:
+        context = await _web_context(web_factory, attempt)
+    finally:
+        await web.dispose()
+    assert context.unavailable_reason == "incomplete_match_evidence"
+    assert (context.candidate_count, context.candidate_venue_offer_ids) == (None, ())
+
+
+@pytest.mark.asyncio
+async def test_the_web_api_role_refuses_a_wrong_bind_when_queueing(book, ledger_db) -> None:  # noqa: F811
+    """3e4b: the queue-time operator rule runs on granted columns only (and a good bind queues)."""
+    attempt, ref = await open_unknown(book, offers=(venue_offer("V1"), venue_offer("V2")))
+    web, web_factory = _role_factory(ledger_db, "bfx_webapi")
+    try:
+        with ledger_db.begin() as conn:
+            conn.exec_driver_sql(
+                "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
+                "VALUES (2, 'ledger', 2, 'test', 'switch')")
+        # Two exact candidates: neither bind nor not-accepted may be queued.
+        with pytest.raises(RequestRefused, match="venue_offer_match_not_exact"):
+            await queue(web_factory, intent(attempt, ref, "bind_to_venue", venue_offer_id="V1"))
+        with pytest.raises(RequestRefused, match="venue_offer_match_not_zero"):
+            await queue(web_factory, intent(attempt, ref))
+        assert await events(book.factory) == 0
+    finally:
+        await web.dispose()

@@ -33,17 +33,60 @@ _JSON = JSON().with_variant(JSONB, "postgresql")
 
 
 _INTENDED_AMOUNT_SQL = "(normalized_payload->>'amount')::numeric"
+# The match terms of an attempt (S1-3e4b): what ``match_unknown`` reads of the payload, as
+# stored generated columns so the web API reads them without being granted the payload.
+# A key that is absent (a seeded partial) is NULL; a present rate/period that cannot be cast
+# is refused at write, like the amount.
+_MATCH_RATE_SQL = "(normalized_payload->>'rate')::numeric"
+_MATCH_PERIOD_SQL = "(normalized_payload->>'period')::integer"
+_MATCH_TYPE_SQL = (
+    "CASE WHEN jsonb_typeof(normalized_payload->'type') = 'string' "
+    "THEN normalized_payload->>'type' END"
+)
+_MATCH_FLAGS_SQL = (
+    "CASE WHEN jsonb_typeof(normalized_payload->'flags') IN ('object', 'number') "
+    "THEN normalized_payload->'flags' END"
+)
+# What the loader reads of ``ledger_observation.evidence``; the evidence itself stays ungranted.
+_HISTORY_SYMBOLS_SQL = (
+    "CASE WHEN jsonb_typeof(evidence->'history_symbols') = 'array' "
+    "THEN evidence->'history_symbols' END"
+)
+_FIRST_PAGE_COUNTS_SQL = (
+    "CASE WHEN jsonb_typeof(evidence->'first_page_counts') = 'object' "
+    "THEN evidence->'first_page_counts' END"
+)
+
+_SQLITE_GENERATED: dict[str, str] = {
+    _INTENDED_AMOUNT_SQL: "CAST(json_extract(normalized_payload, '$.amount') AS NUMERIC)",
+    _MATCH_RATE_SQL: "CAST(json_extract(normalized_payload, '$.rate') AS NUMERIC)",
+    _MATCH_PERIOD_SQL: "CAST(json_extract(normalized_payload, '$.period') AS INTEGER)",
+    _MATCH_TYPE_SQL: (
+        "CASE WHEN json_type(normalized_payload, '$.type') = 'text' "
+        "THEN json_extract(normalized_payload, '$.type') END"
+    ),
+    _MATCH_FLAGS_SQL: (
+        "CASE WHEN json_type(normalized_payload, '$.flags') IN ('object', 'integer', 'real') "
+        "THEN json_extract(normalized_payload, '$.flags') END"
+    ),
+    _HISTORY_SYMBOLS_SQL: (
+        "CASE WHEN json_type(evidence, '$.history_symbols') = 'array' "
+        "THEN json_extract(evidence, '$.history_symbols') END"
+    ),
+    _FIRST_PAGE_COUNTS_SQL: (
+        "CASE WHEN json_type(evidence, '$.first_page_counts') = 'object' "
+        "THEN json_extract(evidence, '$.first_page_counts') END"
+    ),
+}
 
 
 @compiles(Computed, "sqlite")
-def _sqlite_generated_amount(element: Computed, compiler: Any, **kw: Any) -> str:
-    """sqlite stand-in for the one PostgreSQL generated column (unit-test schema only)."""
-    if str(element.sqltext) != _INTENDED_AMOUNT_SQL:
+def _sqlite_generated(element: Computed, compiler: Any, **kw: Any) -> str:
+    """sqlite stand-ins for the PostgreSQL generated columns (unit-test schema only)."""
+    stand_in = _SQLITE_GENERATED.get(str(element.sqltext))
+    if stand_in is None:
         raise NotImplementedError(f"no sqlite stand-in for generated column {element.sqltext}")
-    return (
-        "GENERATED ALWAYS AS (CAST(json_extract(normalized_payload, '$.amount') AS NUMERIC))"
-        + (" STORED" if element.persisted else " VIRTUAL")
-    )
+    return f"GENERATED ALWAYS AS ({stand_in})" + (" STORED" if element.persisted else " VIRTUAL")
 
 
 def _account() -> MappedColumn[UUID]:
@@ -184,6 +227,13 @@ class LedgerObservationRow(Base):
     confirmation_digest: Mapped[str] = mapped_column(Text, nullable=False)
     accepted: Mapped[bool] = mapped_column(Boolean, nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
+    # Readable by the web API without granting ``evidence``; never written.
+    history_symbols: Mapped[list[Any] | None] = mapped_column(
+        _JSON, Computed(_HISTORY_SYMBOLS_SQL, persisted=True)
+    )
+    first_page_counts: Mapped[dict[str, Any] | None] = mapped_column(
+        _JSON, Computed(_FIRST_PAGE_COUNTS_SQL, persisted=True)
+    )
     __table_args__ = (
         UniqueConstraint("id", "accepted", name="uq_ledger_observation_accepted"),
         CheckConstraint(
@@ -560,6 +610,20 @@ class SubmissionAttemptJournalRow(Base):
     intended_amount: Mapped[Decimal] = mapped_column(
         Numeric, Computed(_INTENDED_AMOUNT_SQL, persisted=True), nullable=False
     )
+    # The match terms (S1-3e4b), likewise readable without the payload; NULL when the payload
+    # lacks the key (a seeded partial), which the matcher reads as "not a subject".
+    match_rate: Mapped[Decimal | None] = mapped_column(
+        Numeric, Computed(_MATCH_RATE_SQL, persisted=True)
+    )
+    match_period_days: Mapped[int | None] = mapped_column(
+        Integer, Computed(_MATCH_PERIOD_SQL, persisted=True)
+    )
+    match_offer_type: Mapped[str | None] = mapped_column(
+        Text, Computed(_MATCH_TYPE_SQL, persisted=True)
+    )
+    match_flags: Mapped[dict[str, Any] | int | None] = mapped_column(
+        _JSON, Computed(_MATCH_FLAGS_SQL, persisted=True)
+    )
     __table_args__ = (
         UniqueConstraint(
             "exchange_account_id",
@@ -574,6 +638,10 @@ class SubmissionAttemptJournalRow(Base):
         CheckConstraint(
             "intended_amount >= 0 AND intended_amount < 'Infinity'::numeric",
             name="ck_submission_attempt_intended_amount",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "match_rate IS NULL OR match_rate < 'Infinity'::numeric",
+            name="ck_submission_attempt_match_rate",
         ).ddl_if(dialect="postgresql"),
     )
 

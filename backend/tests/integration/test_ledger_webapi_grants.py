@@ -27,6 +27,12 @@ _FLAGS = (
     "offer_history_complete", "credit_history_complete", "trades_complete",
 )
 # Written out here, not imported from the migration: the test is the second opinion.
+# At head: e1f2a3b4c5d7 added the match columns (``test_webapi_match_columns.py``); the
+# ones it added are marked below.
+_OBSERVED_OFFER = {
+    "observation_id", "venue_offer_id", "symbol", "amount_original", "amount_remaining", "rate",
+    "rate_observed", "period_days", "offer_type", "flags", "status", "mts_created", "mts_updated",
+}
 ALLOWED: dict[str, set[str]] = {
     "ledger_observation_query": {
         "query_id", "exchange_account_id", "deployment_environment", "query_revision",
@@ -35,7 +41,14 @@ ALLOWED: dict[str, set[str]] = {
     "ledger_observation": {
         "id", "query_id", "exchange_account_id", "deployment_environment", "accepted",
         "query_finished_at_ms", "first_digest", "confirmation_digest", *_FLAGS,
+        # e1f2a3b4c5d7
+        "history_requested_start_ms", "history_requested_end_ms", "history_oldest_mts_created",
+        "history_newest_mts_created", "offer_history_pages", "credit_history_pages",
+        "trades_requested_start_ms", "trades_requested_end_ms", "history_symbols",
+        "first_page_counts",
     },
+    "ledger_observation_offer": _OBSERVED_OFFER,
+    "ledger_observation_offer_history": {*_OBSERVED_OFFER, "terminal_kind", "occurred_at_ms"},
     "accepted_capital_basis": {
         "id", "exchange_account_id", "deployment_environment", "observation_id",
         "accept_revision", "attempt_seq_high_water", "accepted_at_ms",
@@ -49,6 +62,8 @@ ALLOWED: dict[str, set[str]] = {
     "submission_attempt_journal": {
         "attempt_id", "execution_decision_id", "exchange_account_id", "deployment_environment",
         "symbol", "cell_id", "attempt_seq", "started_at_ms", "intended_amount",
+        # e1f2a3b4c5d7
+        "match_rate", "match_period_days", "match_offer_type", "match_flags",
     },
     "transport_outcome_journal": {
         "attempt_id", "kind", "venue_offer_id", "reason", "completed_at_ms",
@@ -70,14 +85,18 @@ ALLOWED: dict[str, set[str]] = {
 }
 # Ledger tables the web API must not read at all.
 UNGRANTED = (
-    "ledger_observation_wallet", "ledger_observation_offer", "ledger_observation_credit",
-    "ledger_observation_offer_history", "ledger_observation_credit_history",
+    "ledger_observation_wallet", "ledger_observation_credit",
+    "ledger_observation_credit_history",
     "ledger_observation_trade", "venue_credit_mirror", "quarantine_member",
     "accepted_capital_basis_cell", "accepted_capital_basis_credit_cell",
 )
 # Evidence-bearing columns that stay denied whatever else is granted.
 DENIED = (
     ("ledger_observation", "evidence"),
+    ("ledger_observation_offer", "raw"),
+    ("ledger_observation_offer", "id"),
+    ("ledger_observation_offer_history", "raw"),
+    ("ledger_observation_offer_history", "id"),
     ("accepted_capital_basis", "scope_block"),
     ("accepted_capital_basis", "digest"),
     ("accepted_capital_basis_symbol", "block"),

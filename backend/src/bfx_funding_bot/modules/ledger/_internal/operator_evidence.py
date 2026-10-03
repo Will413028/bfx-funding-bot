@@ -74,8 +74,8 @@ type AttemptMatcher = Callable[[AsyncSession, Scope, UUID, UUID], Awaitable[Unkn
 
 
 class LedgerOperatorEvidence:
-    """``match`` reads the observed offers and the attempt payload, which the web API's role
-    is not granted: without it an attempt's context is unavailable rather than guessed."""
+    """``match`` derives an attempt's candidates for the context (the preview, from granted
+    columns); without one an attempt's context is unavailable rather than guessed."""
 
     def __init__(self, reads: OperatorReads, match: AttemptMatcher | None = None) -> None:
         self.reads = reads
@@ -201,8 +201,8 @@ class LedgerOperatorEvidence:
     async def resolution_context(
         self, session: AsyncSession, scope: Scope, subject: ResolutionSubject
     ) -> ResolutionEvidence:
-        """What an operator may cite now: the latest accepted observation and, when this
-        role can read the offers, what the attempt matches against it (legacy shape)."""
+        """What an operator may cite now: the latest accepted observation and what the attempt
+        matches against it (legacy shape; advisory, the worker re-judges the request)."""
         view = await self.reads.get_uncertainty(session, scope, subject.uncertainty_id)
         if view is None or view.attempt_id != subject.attempt_id:
             raise ResolutionRejected("not_found", kind="not_found")
