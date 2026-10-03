@@ -125,7 +125,7 @@ def parse_offer_response(raw: Any) -> SubmittedOrder:
     """Parse Bitfinex /funding/offer/submit response → SubmittedOrder.
 
     Response shape per docs:
-      [MTS, TYPE, MESSAGE_ID, _, OFFER_ARRAY, CODE, STATUS, _, TEXT]
+      [MTS, TYPE, MESSAGE_ID, _, OFFER_ARRAY, CODE, STATUS, TEXT]
     OFFER_ARRAY[0] = OFFER_ID (used as venue_offer_id).
     STATUS = "SUCCESS" / "ERROR" / "FAILURE".
 
@@ -149,8 +149,8 @@ def parse_offer_response(raw: Any) -> SubmittedOrder:
     bounded_response = getattr(outcome, "raw_response", None)
     if bounded_response is None:
         bounded_response = {"response_digest": response_digest(raw)}
-        if isinstance(raw, list) and len(raw) > 8 and isinstance(raw[8], str):
-            bounded_response["error_text"] = raw[8][:256]
+        if isinstance(raw, list) and len(raw) > 7 and isinstance(raw[7], str):
+            bounded_response["error_text"] = raw[7][:256]
     return SubmittedOrder(
         cid=0,
         venue_offer_id=venue_offer_id,
@@ -163,6 +163,9 @@ def classify_cancel_response(
     raw: Any,
 ) -> tuple[Literal["success", "already_terminal", "other"], str | None]:
     """Classify Bitfinex cancel REST response → (rest_status, text).
+
+    Response shape per docs ("Cancel Funding Offer"):
+      [MTS, TYPE, MESSAGE_ID, _, OFFER_ARRAY, CODE, STATUS, TEXT]  (TEXT is [7])
 
     rest_status:
       - "success": real cancel (raw[6] == "SUCCESS")
@@ -178,7 +181,7 @@ def classify_cancel_response(
             f"unexpected Bitfinex cancel response shape: type={type(raw).__name__}",
         )
     status_field = raw[6]
-    text = raw[8] if len(raw) > 8 else None
+    text = raw[7] if len(raw) > 7 else None
     if status_field == "SUCCESS":
         return "success", text
     if status_field == "ERROR" and isinstance(text, str):

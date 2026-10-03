@@ -742,7 +742,7 @@ async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(cap
 
     async def transport(request):
         requests.append(request)
-        return httpx.Response(200, json=[0, "foc-req", None, None, None, 0, "SUCCESS", None, "ok"])
+        return httpx.Response(200, json=[0, "foc-req", None, None, None, 0, "SUCCESS", "ok"])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
         gate, ctx, _ = await cancel_http_boundary(factory, account, http, state=state)

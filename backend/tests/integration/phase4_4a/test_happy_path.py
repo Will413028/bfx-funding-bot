@@ -38,7 +38,7 @@ def _success_response(venue_offer_id: str = "42") -> list[Any]:
         1716383500000, "fon-req", None, None,
         [int(venue_offer_id), "fUSD", 0, 0, 150.0, 0, "REQ", None, None,
          0, "ACTIVE", None, None, None, 0.0005, 2, 0, 0, None, 0, None, None, None, 12345],
-        None, "SUCCESS", None, "Submitting",
+        None, "SUCCESS", "Submitting",
     ]
 
 

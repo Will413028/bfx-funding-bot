@@ -115,7 +115,7 @@ async def test_submit_returns_submitted_on_success() -> None:
         1716383500000, "fon-req", None, None,
         [42, "fUSD", 0, 0, 150.0, 0, "REQ", None, None, 0, "ACTIVE",
          None, None, None, 0.0005, 2, 0, 0, None, 0, None, None, None, 12345],
-        None, "SUCCESS", None, "Submitting",
+        None, "SUCCESS", "Submitting",
     ]
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -160,7 +160,7 @@ async def test_submit_returns_unknown_on_http_5xx() -> None:
 async def test_submit_returns_unbound_failure_on_http_200_error() -> None:
     venue_error = [
         1716383500000, "fon-req", None, None,
-        None, None, "ERROR", None, "Funds insufficient",
+        None, None, "ERROR", "Funds insufficient",
     ]
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(200, json=venue_error),
@@ -185,7 +185,7 @@ SUCCESS = [
     1716383500000, "fon-req", None, None,
     [42, "fUST", 0, 0, 150.0, 0, "REQ", None, None, 0, "ACTIVE",
      None, None, None, 5.531e-05, 2, 0, 0, None, 0, None, None, None, 1],
-    None, "SUCCESS", None, "Submitting",
+    None, "SUCCESS", "Submitting",
 ]
 
 
@@ -360,7 +360,7 @@ async def test_cancel_publishes_cancel_requested() -> None:
     cancel_success_resp = [
         1700000000000, "foc-req", None, None,
         ["42", "fUSD", "rate", "amount"],
-        "0", "SUCCESS", None, "Submitting cancel request",
+        "0", "SUCCESS", "Submitting cancel request",
     ]
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=cancel_success_resp)

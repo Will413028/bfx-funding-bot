@@ -286,7 +286,6 @@ def _success_response() -> list[object]:
         [42, "fUST", 0, 0, 150.0, 0, "REQ", None, None, 0, "ACTIVE", None, None, None, 0.0001, 2],
         None,
         "SUCCESS",
-        None,
         "Submitting",
     ]
 

@@ -97,7 +97,7 @@ def test_parse_offer_response_submitted() -> None:
             100.0, 0, "REQ", None, None, 0, "ACTIVE", None, None, None,
             0.0005, 2, 0, 0, None, 0, None, None, None, 12345,
         ],
-        None, "SUCCESS", None, "Submitting offer #42",
+        None, "SUCCESS", "Submitting offer #42",
     ]
     result = parse_offer_response(raw)
     assert isinstance(result, SubmittedOrder)
@@ -108,7 +108,7 @@ def test_parse_offer_response_submitted() -> None:
 def test_parse_offer_response_failed() -> None:
     raw = [
         1716383500000, "fon-req", None, None,
-        None, None, "ERROR", None, "Funds insufficient",
+        None, None, "ERROR", "Funds insufficient",
     ]
     result = parse_offer_response(raw)
     assert result.status == "failed"
@@ -120,3 +120,30 @@ def test_parse_offer_response_malformed_is_unknown() -> None:
     result = parse_offer_response({"not": "expected"})  # type: ignore[arg-type]
     assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
     assert result.status == "unknown"
+
+
+# Verbatim from docs.bitfinex.com "Submit Funding Offer" / "Cancel Funding Offer"
+# (TEXT is index 7 of an 8-element notification).
+DOC_SUBMIT_RESPONSE = [
+    1568713496510, "fon-req", None, None,
+    [604366339, "fUSD", 1568713496502, 1568713496502, 50, 50, "LIMIT", None,
+     None, None, "ACTIVE", None, None, None, 0.00002, 2, False, None, None,
+     False, None],
+    None, "SUCCESS",
+    "Submitting funding offer of 50.0 USD at 0.002000 for 2 days.",
+]
+
+
+def test_parse_offer_response_documented_submit_ack_parses_offer_id() -> None:
+    result = parse_offer_response(DOC_SUBMIT_RESPONSE)
+    assert result.outcome_kind is SubmitOutcomeKind.ACKNOWLEDGED
+    assert result.venue_offer_id == "604366339"
+
+
+def test_parse_offer_response_documented_error_keeps_text() -> None:
+    raw = [*DOC_SUBMIT_RESPONSE[:4], None, None, "ERROR", "Funds insufficient"]
+    assert len(raw) == 8
+    result = parse_offer_response(raw)
+    assert result.outcome_kind is SubmitOutcomeKind.REJECTED
+    assert result.venue_offer_id is None
+    assert "Funds insufficient" in str(result.raw_response)

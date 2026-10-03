@@ -72,7 +72,7 @@ async def test_cancel_retry_checks_current_scoped_uncertainty(capital_db, monkey
                     symbol="fUSD" if scope == "other_symbol" else "fUST",
                     environment="shadow" if scope == "other_environment" else "ci")
             return Response(503)
-        return Response(200, json=[0, "foc-req", None, None, None, 0, "SUCCESS", None, "ok"])
+        return Response(200, json=[0, "foc-req", None, None, None, 0, "SUCCESS", "ok"])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
         gate, ctx, _ = await cancel_http_boundary(factory, account, http, state=state)
@@ -116,7 +116,6 @@ def test_classify_success() -> None:
         ["123", "fUSD", "rate", "amount"],  # offer_array placeholder
         "0",
         "SUCCESS",
-        None,
         "Submitting cancel request",
     ]
     status, text = classify_cancel_response(raw)
@@ -124,11 +123,31 @@ def test_classify_success() -> None:
     assert text == "Submitting cancel request"
 
 
+# Verbatim from docs.bitfinex.com "Cancel Funding Offer" (TEXT is index 7).
+DOC_CANCEL_SUCCESS = [
+    1568716652310, "foc-req", None, None,
+    [604393839, "fUSD", 1568716545000, 1568716545000, 50, 50, "LIMIT", None,
+     None, None, "ACTIVE", None, None, None, 0.06, 2, False, None, None,
+     False, None],
+    None, "SUCCESS", None,
+]
+
+
+def test_classify_documented_cancel_success_has_null_text() -> None:
+    assert len(DOC_CANCEL_SUCCESS) == 8
+    assert classify_cancel_response(DOC_CANCEL_SUCCESS) == ("success", None)
+
+
+def test_classify_documented_cancel_error_offer_not_found_is_already_terminal() -> None:
+    raw = [*DOC_CANCEL_SUCCESS[:4], None, None, "ERROR", "Offer not found"]
+    assert len(raw) == 8
+    assert classify_cancel_response(raw) == ("already_terminal", "Offer not found")
+
+
 def test_classify_already_terminal_not_found() -> None:
     raw = [
         1700000000000, "foc-req", None, None, None,
-        "0", "ERROR", None,
-        "Offer not found.",
+        "0", "ERROR", "Offer not found.",
     ]
     status, text = classify_cancel_response(raw)
     assert status == "already_terminal"
@@ -138,8 +157,7 @@ def test_classify_already_terminal_not_found() -> None:
 def test_classify_already_terminal_not_active() -> None:
     raw = [
         1700000000000, "foc-req", None, None, None,
-        "0", "ERROR", None,
-        "Offer is not active.",
+        "0", "ERROR", "Offer is not active.",
     ]
     status, _text = classify_cancel_response(raw)
     assert status == "already_terminal"
@@ -148,8 +166,7 @@ def test_classify_already_terminal_not_active() -> None:
 def test_classify_other_error() -> None:
     raw = [
         1700000000000, "foc-req", None, None, None,
-        "0", "ERROR", None,
-        "Internal error.",
+        "0", "ERROR", "Internal error.",
     ]
     status, text = classify_cancel_response(raw)
     assert status == "other"
@@ -159,8 +176,7 @@ def test_classify_other_error() -> None:
 def test_classify_failure_status_treated_as_other() -> None:
     raw = [
         1700000000000, "foc-req", None, None, None,
-        "0", "FAILURE", None,
-        "Unknown failure",
+        "0", "FAILURE", "Unknown failure",
     ]
     status, _text = classify_cancel_response(raw)
     assert status == "other"
@@ -242,7 +258,7 @@ async def test_cancel_success_publishes_requested_then_acknowledged() -> None:
     success_resp = [
         1700000000000, "foc-req", None, None,
         ["123", "fUSD", "rate", "amount"],
-        "0", "SUCCESS", None, "Submitting cancel request",
+        "0", "SUCCESS", "Submitting cancel request",
     ]
     async with httpx.AsyncClient() as http:
         executor = _make_executor(bus, http)
@@ -273,7 +289,7 @@ async def test_cancel_already_terminal_still_publishes_acknowledged() -> None:
 
     error_resp = [
         1700000000000, "foc-req", None, None, None,
-        "0", "ERROR", None, "Offer not found.",
+        "0", "ERROR", "Offer not found.",
     ]
     async with httpx.AsyncClient() as http:
         executor = _make_executor(bus, http)
@@ -357,7 +373,7 @@ async def test_cancel_base_url_with_trailing_slash_joins_single_slash() -> None:
     success_resp = [
         1700000000000, "foc-req", None, None,
         ["123", "fUSD", "rate", "amount"],
-        "0", "SUCCESS", None, "Submitting cancel request",
+        "0", "SUCCESS", "Submitting cancel request",
     ]
     async with httpx.AsyncClient() as http:
         executor = _make_executor(bus, http, base_url="https://api.bitfinex.com/")
@@ -384,7 +400,7 @@ async def test_cancel_other_error_logs_no_acknowledged() -> None:
 
     error_resp = [
         1700000000000, "foc-req", None, None, None,
-        "0", "ERROR", None, "Internal error.",
+        "0", "ERROR", "Internal error.",
     ]
     async with httpx.AsyncClient() as http:
         executor = _make_executor(bus, http)
