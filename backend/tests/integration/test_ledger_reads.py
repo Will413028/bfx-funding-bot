@@ -200,7 +200,10 @@ async def test_ack_provenance_joins_attempt_and_decision(ledger) -> None:
         "offer-1", "fUST", attempt, decision, "a30", "corr-1"
     )
     await ledger.accept(_live(_offer("offer-1", "200", "150")))
-    offer = ManagedOffer("offer-1", "fUST", Decimal("150"), attempt, decision, "a30", "corr-1")
+    offer = ManagedOffer(
+        "offer-1", "fUST", Decimal("150"), attempt, decision, "a30", "corr-1",
+        Decimal("0.0001"), True, 2, 101_000, Decimal("200"), "partially_filled",
+    )
     assert await _managed(ledger) == ManagedOffers((offer,), ())
     assert await _cancel(ledger, "offer-1") == CancelProvenance(
         "offer-1", "fUST", attempt, decision, "a30", "corr-1"
@@ -217,7 +220,13 @@ async def test_bound_provenance(ledger) -> None:
     assert early is not None and early.attempt_id == unknown
     await ledger.accept(_live(_offer("offer-2", "200")))
     assert await _managed(ledger) == ManagedOffers(
-        (ManagedOffer("offer-2", "fUST", Decimal("200"), unknown, decision, "b7", "corr-2"),), ()
+        (
+            ManagedOffer(
+                "offer-2", "fUST", Decimal("200"), unknown, decision, "b7", "corr-2",
+                Decimal("0.0001"), True, 2, 101_000, Decimal("200"), "active",
+            ),
+        ),
+        (),
     )
     cancel = await _cancel(ledger, "offer-2")
     assert cancel is not None and cancel.attempt_id == unknown

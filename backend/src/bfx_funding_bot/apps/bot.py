@@ -70,6 +70,7 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
 from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
+from bfx_funding_bot.modules.execution.deployment_input import LegacyDeploymentInput
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
@@ -860,6 +861,7 @@ async def build_daemon(
             interval_s=reconcile_interval_s,
             min_resync_interval_s=resync_min_interval_s,
             deployment=deployment_reconciler,
+            deployment_input=LegacyDeploymentInput(),
         )
 
     # ---- Phase 4.4 prework: SmokeRunner ----

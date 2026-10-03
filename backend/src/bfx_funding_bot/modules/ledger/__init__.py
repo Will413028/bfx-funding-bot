@@ -699,6 +699,14 @@ class ManagedOffer:
     decision_id: str
     cell_id: str
     signal_correlation_id: str
+    # The venue terms of the mirror row (what a reprice reads); ``rate`` and
+    # ``period_days`` are None when the venue did not report them.
+    rate: Decimal | None
+    rate_observed: bool
+    period_days: int | None
+    mts_created: int
+    amount_original: Decimal | None
+    status: str
 
 
 @dataclass(frozen=True, slots=True)

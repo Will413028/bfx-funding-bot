@@ -275,6 +275,11 @@ def _live_mirror(scope: Scope) -> Select[tuple[VenueOfferMirrorRow]]:
                 VenueOfferMirrorRow.symbol,
                 VenueOfferMirrorRow.amount_original,
                 VenueOfferMirrorRow.amount_remaining,
+                VenueOfferMirrorRow.rate,
+                VenueOfferMirrorRow.rate_observed,
+                VenueOfferMirrorRow.period_days,
+                VenueOfferMirrorRow.mts_created,
+                VenueOfferMirrorRow.status,
             )
         )
         .where(
@@ -365,6 +370,12 @@ def _managed_offer(
         attempt.execution_decision_id,
         attempt.cell_id,
         correlation,
+        mirror.rate,
+        mirror.rate_observed,
+        mirror.period_days,
+        mirror.mts_created,
+        mirror.amount_original,
+        mirror.status,
     )
 
 

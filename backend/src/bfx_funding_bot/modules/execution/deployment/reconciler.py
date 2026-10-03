@@ -81,6 +81,7 @@ from bfx_funding_bot.modules.ledger import (
     CapitalAvailable,
     CapitalBlocked,
     ManagedOfferReader,
+    ProvenanceConflict,
     Scope,
     UncertaintyReader,
 )
@@ -93,6 +94,7 @@ from bfx_funding_bot.modules.marketfeed.funding_book import (
     FundingBookProvider,
     MarketSnapshot,
 )
+from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.strategy import (
     CellConfig,
     DecisionOutcome,
@@ -248,6 +250,8 @@ class DeploymentReconciler:
         # so the per-symbol guards (allocation cap / buying power) can read it, and
         # used for the per-symbol balance clamp.
         self._cell_symbol: dict[str, str] = {c.cell_id: c.symbol for c in cells}
+        # (symbol, offer id) pairs whose provenance conflict was already alerted.
+        self._conflict_alerted: set[tuple[str, str]] = set()
         self._cell_period_agg: dict[str, str] = {
             c.cell_id: c.period_agg for c in cells
         }
@@ -279,8 +283,29 @@ class DeploymentReconciler:
             return False
         if self._managed_sweep is not None:
             why = "account HALTED" if halted else "disabled by policy"
-            await self._managed_sweep.cancel([symbol], reason=f"{symbol} {why}")
+            try:
+                await self._managed_sweep.cancel([symbol], reason=f"{symbol} {why}")
+            except ProvenanceConflict as exc:
+                # One contradictory offer must not stop the other currencies: the
+                # sweep cannot tell which offers of this symbol are ours, so this
+                # symbol places nothing and the next tick reads it again.
+                self._report_provenance_conflict(symbol, exc.venue_offer_id)
+            else:
+                self._conflict_alerted.difference_update(
+                    {key for key in self._conflict_alerted if key[0] == symbol}
+                )
         return True
+
+    def _report_provenance_conflict(self, symbol: str, venue_offer_id: str) -> None:
+        key = (symbol, venue_offer_id)
+        if key in self._conflict_alerted:
+            return
+        self._conflict_alerted.add(key)
+        log.error(
+            "deployment_symbol_provenance_conflict symbol=%s venue_offer_id=%s",
+            symbol, venue_offer_id,
+        )
+        alerts.emit(alerts.PROVENANCE_CONFLICT, symbol=symbol, venue_offer_id=venue_offer_id)
 
     async def _fallback_uncertain(self, symbol: str) -> bool:
         """The durable uncertainty read for chains without a pre-sizing hook.

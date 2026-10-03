@@ -336,6 +336,7 @@ async def test_disabling_a_currency_pulls_only_its_managed_offers(capital_db):
     await _offer_rows(factory, account)   # managed 101 (fUST), 102 (fUSD); foreign 555 (fUST)
     canceller = Canceller()
     planner = object.__new__(DeploymentReconciler)
+    planner._conflict_alerted = set()
     for name, port in planner_ports(runtime).items():
         setattr(planner, f"_{name}", port)
     planner._managed_sweep = ManagedOfferSweep(
@@ -367,6 +368,7 @@ async def test_a_halt_pulls_managed_offers_every_tick_until_none_is_left(capital
     await halt.transition("HALTED", cause="auto", actor="auto:identity_conflict", reason="x")
     canceller = Canceller(fail={"101"})
     planner = object.__new__(DeploymentReconciler)
+    planner._conflict_alerted = set()
     for name, port in planner_ports(runtime).items():
         setattr(planner, f"_{name}", port)
     planner._managed_sweep = ManagedOfferSweep(
