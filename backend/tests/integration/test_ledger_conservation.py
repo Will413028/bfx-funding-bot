@@ -48,7 +48,8 @@ D = Decimal
 async def accept(ledger: Any, observation: Any = None, *, at: int) -> None:
     """Accept an observation whose query started at ``at`` (local ms)."""
     assert (
-        await ledger.accept(observation, started=at, finished=at + 1, confirmed=at + 3) == "accepted"
+        await ledger.accept(observation, started=at, finished=at + 1, confirmed=at + 3)
+        == "accepted"
     )
 
 
@@ -151,9 +152,7 @@ async def test_foreign_execution_that_covers_only_part_is_unexplained(book) -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("occurred", "counted"), [(999, False), (1000, False), (1001, True)]
-)
+@pytest.mark.parametrize(("occurred", "counted"), [(999, False), (1000, False), (1001, True)])
 async def test_foreign_offer_ended_before_the_previous_query_is_not_counted(
     book,  # noqa: F811
     occurred,
@@ -247,7 +246,9 @@ async def test_quarantine_member_is_not_called_foreign(book) -> None:  # noqa: F
     # known to be foreign, so the 100 that lent after it is unexplained.
     await accept(
         book,
-        _observation("800", credits=(credit, _credit("c2", "100", opening=101_200)), history=(ghost,)),
+        _observation(
+            "800", credits=(credit, _credit("c2", "100", opening=101_200)), history=(ghost,)
+        ),
         at=2000,
     )
     expect(await verdict(book), "unexplained_lending", "100", "0")
@@ -285,3 +286,166 @@ async def test_unexplained_lending_leads_a_fact_level_block(book) -> None:  # no
     blocked = (await book.read(now=1100)).result
     assert isinstance(blocked, Blocked) and blocked.reason == "venue_lent_above_ledger"
     assert ("also", "trades_range_uncovered") in blocked.evidence
+
+
+# --- owner x state x present-in-previous matrix -------------------------------------------------
+# Each case runs to a second accepted basis (query at 1000) and names the verdict it must store:
+# (verdict, lent_unexplained, foreign_executed). Mutations: drop the foreign-new term in
+# ``basis.write_basis`` (``placements.append`` of a live foreign offer); count a foreign offer
+# present in the previous observation as new (``if venue_id not in seen`` -> ``if True``); count an ended foreign offer present in the previous
+# observation in foreign_executed (drop ``and venue_id not in seen`` in the history loop);
+# count an ended foreign offer in both placed and foreign_executed (add the history rows of
+# ``terminal`` to ``placements``): the ``foreign_*`` cases below.
+_LOAN = _credit("c1", "60", opening=101_100)
+
+
+async def _foreign_active_new_partial(ledger: Any) -> None:
+    await accept(ledger, _observation("1000"), at=10)
+    await accept(
+        ledger, _observation("900", offers=(_offer("web", "100", "40"),), credits=(_LOAN,)), at=1000
+    )
+
+
+async def _foreign_active_new_untouched(ledger: Any) -> None:
+    await accept(ledger, _observation("1000"), at=10)
+    await accept(ledger, _observation("900", offers=(_offer("web", "100"),)), at=1000)
+
+
+async def _foreign_active_in_previous(ledger: Any) -> None:
+    await accept(ledger, _observation("900", offers=(_offer("web", "100"),)), at=10)
+    await accept(
+        ledger, _observation("900", offers=(_offer("web", "100", "40"),), credits=(_LOAN,)), at=1000
+    )
+
+
+async def _foreign_active_in_previous_extra_lending(ledger: Any) -> None:
+    await accept(ledger, _observation("900", offers=(_offer("web", "100"),)), at=10)
+    loan = _credit("c1", "160", opening=101_100)
+    await accept(
+        ledger, _observation("800", offers=(_offer("web", "100", "40"),), credits=(loan,)), at=1000
+    )
+
+
+async def _foreign_ended_new(ledger: Any) -> None:
+    await accept(ledger, _observation("1000"), at=10)
+    ended = history("web", "100", "0", occurred=1500)
+    await accept(
+        ledger,
+        _observation("900", credits=(_credit("c1", "100", opening=101_100),), history=(ended,)),
+        at=1000,
+    )
+
+
+async def _foreign_ended_in_previous_extra_lending(ledger: Any) -> None:
+    await accept(ledger, _observation("900", offers=(_offer("web", "100"),)), at=10)
+    ended = history("web", "100", "0", occurred=1500)
+    loan = _credit("c1", "180", opening=101_100)
+    await accept(ledger, _observation("820", credits=(loan,), history=(ended,)), at=1000)
+
+
+async def _foreign_ended_in_previous(ledger: Any) -> None:
+    await accept(ledger, _observation("900", offers=(_offer("web", "100"),)), at=10)
+    ended = history("web", "100", "0", occurred=1500)
+    await accept(
+        ledger,
+        _observation("900", credits=(_credit("c1", "100", opening=101_100),), history=(ended,)),
+        at=1000,
+    )
+
+
+async def _own_active_new(ledger: Any) -> None:
+    await accept(ledger, _observation("1000"), at=10)
+    await ledger.attempt("100", venue_offer_id="mine")
+    await accept(
+        ledger,
+        _observation("900", offers=(_offer("mine", "100", "40"),), credits=(_LOAN,)),
+        at=1000,
+    )
+
+
+async def _own_active_in_previous(ledger: Any) -> None:
+    await accept(ledger, _observation("1000"), at=10)
+    await ledger.attempt("100", venue_offer_id="mine")
+    await accept(ledger, _observation("900", offers=(_offer("mine", "100"),)), at=500)
+    await accept(
+        ledger,
+        _observation("900", offers=(_offer("mine", "100", "40"),), credits=(_LOAN,)),
+        at=1000,
+    )
+
+
+async def _own_ended_new(ledger: Any) -> None:
+    await accept(ledger, _observation("1000"), at=10)
+    await ledger.attempt("100", venue_offer_id="mine")
+    ended = history("mine", "100", "0", occurred=1500)
+    await accept(
+        ledger,
+        _observation("900", credits=(_credit("c1", "100", opening=101_100),), history=(ended,)),
+        at=1000,
+    )
+
+
+async def _own_ended_in_previous(ledger: Any) -> None:
+    await accept(ledger, _observation("1000"), at=10)
+    await ledger.attempt("100", venue_offer_id="mine")
+    await accept(ledger, _observation("900", offers=(_offer("mine", "100"),)), at=500)
+    ended = history("mine", "100", "0", occurred=1500)
+    await accept(
+        ledger,
+        _observation("900", credits=(_credit("c1", "100", opening=101_100),), history=(ended,)),
+        at=1000,
+    )
+
+
+async def _no_offer_movement(ledger: Any) -> None:
+    await accept(ledger, _observation("1000"), at=10)
+    await accept(ledger, _observation("940", credits=(_LOAN,)), at=1000)
+
+
+async def _no_offer_movement_with_foreign_offer_resting(ledger: Any) -> None:
+    await accept(ledger, _observation("900", offers=(_offer("web", "100"),)), at=10)
+    await accept(
+        ledger, _observation("840", offers=(_offer("web", "100"),), credits=(_LOAN,)), at=1000
+    )
+
+
+MATRIX = {
+    "foreign_active_new_partially_filled": (_foreign_active_new_partial, "conserved", "0", "0"),
+    "foreign_active_new_untouched": (_foreign_active_new_untouched, "conserved", "0", "0"),
+    "foreign_active_in_previous": (_foreign_active_in_previous, "conserved", "0", "0"),
+    # Present in the previous observation: not new, so its 100 is not added again (160 - 60 = 100).
+    "foreign_active_in_previous_extra_lending": (
+        _foreign_active_in_previous_extra_lending,
+        "unexplained_lending",
+        "100",
+        "0",
+    ),
+    "foreign_ended_new": (_foreign_ended_new, "foreign_lending", "100", "100"),
+    # Its previous remaining leaving offered explains it: not also foreign_executed.
+    "foreign_ended_in_previous": (_foreign_ended_in_previous, "conserved", "0", "0"),
+    "foreign_ended_in_previous_with_extra_lending": (
+        _foreign_ended_in_previous_extra_lending,
+        "unexplained_lending",
+        "80",
+        "0",
+    ),
+    "own_active_new": (_own_active_new, "conserved", "0", "0"),
+    "own_active_in_previous": (_own_active_in_previous, "conserved", "0", "0"),
+    "own_ended_new": (_own_ended_new, "conserved", "0", "0"),
+    "own_ended_in_previous": (_own_ended_in_previous, "conserved", "0", "0"),
+    "lent_rise_with_no_offer_movement": (_no_offer_movement, "unexplained_lending", "60", "0"),
+    "lent_rise_with_a_resting_foreign_offer": (
+        _no_offer_movement_with_foreign_offer_resting,
+        "unexplained_lending",
+        "60",
+        "0",
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", MATRIX)
+async def test_owner_state_presence_matrix(book, name) -> None:  # noqa: F811
+    run, expected, unexplained, foreign = MATRIX[name]
+    await run(book)
+    expect(await verdict(book), expected, unexplained, foreign)

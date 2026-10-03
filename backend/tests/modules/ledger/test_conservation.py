@@ -11,6 +11,14 @@ Mutations (apply one at a time in ``modules/ledger/conservation.py``, run this f
 9. a foreign-covered remainder classified ``unexplained_lending``:
    ``test_verdict_table`` (``foreign_covers``), ``test_matches_legacy_on_a_grid``.
 
+Declared divergence from legacy (outside this pure layer, so no case here is weakened): legacy
+``BootRecovery._foreign_executed`` counts every foreign offer that ended after the last accepted
+query began, including one that was already in the prior ledger; the ledger counts only those
+absent from the previous accepted observation, because a previous offer's remaining leaving
+``offered`` already explains its later fills (``test_owner_state_presence_matrix`` in
+``tests/integration/test_ledger_conservation.py``). The function and its inputs' meaning are
+otherwise identical, which the grid below pins.
+
 The acceptance-side mutations (2, 3, 5, 7, 8) are in ``tests/integration/test_ledger_conservation.py``
 and ``tests/modules/execution/safety/test_protection.py``.
 """

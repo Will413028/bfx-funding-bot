@@ -361,6 +361,9 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         ]
     )
 
+    # Offers placed since the previous basis (symbol, venue offer, original amount), de-duplicated
+    # against the previous observation's offers in ``_conservation``.
+    placements: list[tuple[str, str, Decimal]] = []
     # Active offers: managed ones count their remaining amount in offered and cell.
     cells: dict[tuple[str, str], Decimal] = {}
     fills: list[_Fill] = []
@@ -381,6 +384,8 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             continue
         if managed is None:
             values.foreign += remaining
+            if original is not None:
+                placements.append((offer.symbol, offer.venue_offer_id, original))
             continue
         if original is None or _payload_amount(managed.normalized_payload) != original:
             c.block(offer.symbol, "offer_amount_conflict", venue_offer_id=offer.venue_offer_id)
@@ -494,7 +499,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
 
     # Attempts since the previous basis (and its unresolved ones).
     classified: dict[UUID, tuple[str, str]] = {}
-    placements: list[tuple[str, str, Decimal]] = []
     converted = (
         {
             row.source_attempt_id: row
@@ -725,9 +729,13 @@ async def _conservation(
     baseline. Foreign executed: offers of this observation's terminal history
     with no provenance and no membership of an unresolved quarantine (neither
     is called foreign), that ended after the previous accepted query began.
-    Placed: this bot's offers placed since the previous basis (attempts it
-    classified ``reflected``) that were not already among the previous basis's
-    offers; legacy's ledger held them from the submit, a basis does not.
+    Placed: offers placed since the previous basis that were not already among
+    the previous observation's offers -- this bot's (attempts it classified
+    ``reflected``, active or ended) and every live foreign one (legacy's ledger
+    held both from the submit / the WS event, a basis does not). Ended foreign
+    offers are never placed: they are ``foreign_executed`` only, and only when
+    they were not in the previous observation (their previous remaining leaving
+    offered already explains their fills).
     """
     if previous is None:
         return {
@@ -754,11 +762,13 @@ async def _conservation(
             await session.scalars(
                 select(LedgerObservationOfferRow.venue_offer_id).where(
                     LedgerObservationOfferRow.observation_id == previous.observation_id,
-                    LedgerObservationOfferRow.venue_offer_id.in_([p[1] for p in placements]),
+                    LedgerObservationOfferRow.venue_offer_id.in_(
+                        [*(p[1] for p in placements), *terminal]
+                    ),
                 )
             )
         )
-        if placements
+        if placements or terminal
         else set()
     )
     placed: dict[str, Decimal] = {}
@@ -786,6 +796,7 @@ async def _conservation(
             and row.occurred_at_ms > started_at_ms
             and not c.provenance.get(venue_id)
             and venue_id not in held
+            and venue_id not in seen
         ):
             foreign_executed[row.symbol] = foreign_executed.get(row.symbol, ZERO) + filled
     return {

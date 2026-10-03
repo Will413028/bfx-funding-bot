@@ -7,7 +7,9 @@ accounts for. Lending envelope D2: the account may also carry foreign offers,
 and one can be placed and filled between two accepted bases without ever being
 seen; the offer history shows it executed. So the remainder is first set
 against ``foreign_executed`` (the symbol's unattributed offers that ended after
-the previous accepted query began): fully covered is foreign lending (an
+the previous accepted query began and were not in the previous observation: those
+are already explained by their remaining leaving the offered amount; legacy counted
+them twice): fully covered is foreign lending (an
 alert), anything beyond is unexplained lending (a protection trigger).
 
 The rule is the legacy ``execution.safety.protection.LedgerConservation``; the
