@@ -44,6 +44,13 @@ _PRIO_TRADE, _PRIO_DRAW, _PRIO_EXPIRY, _PRIO_PAYOUT = 0, 1, 2, 3
 
 
 @dataclass(frozen=True, slots=True)
+class NoMarketData:
+    """The simulator lacks a usable book. Not a venue answer: an input gap of ours."""
+
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class Refusal:
     """The venue refuses a command; nothing is recorded."""
 
@@ -59,7 +66,7 @@ def fund_wallet(currency: str, amount: Decimal, now_ms: int) -> list[VenueEvent]
 def decide_submit(
     state: VenueState, config: SimulatedVenueConfig, *, now_ms: int, symbol: str,
     amount: Decimal, rate: Decimal, period: int, book: BookSnapshot | None,
-) -> list[VenueEvent] | Refusal:
+) -> list[VenueEvent] | Refusal | NoMarketData:
     if symbol not in config.symbols:
         return Refusal(f"symbol: invalid ({symbol})")
     if not config.min_period_days <= period <= config.max_period_days:
@@ -73,7 +80,11 @@ def decide_submit(
         return Refusal("amount: insufficient balance")
     if book is None:
         # Never place on an assumed-empty queue: that is a silent optimistic fill.
-        return Refusal("simulated venue has no book snapshot for queue position")
+        return NoMarketData("no book snapshot for the queue position")
+    if now_ms - book.captured_at_ms > config.max_book_age_ms:
+        return NoMarketData(
+            f"book snapshot is {now_ms - book.captured_at_ms} ms old "
+            f"(max {config.max_book_age_ms})")
     stamp = now_ms - now_ms % 1000 if config.whole_second_offer_mts else now_ms
     return [
         BookObserved(symbol, book.captured_at_ms, book.asks, now_ms),
@@ -157,6 +168,32 @@ def _fills_for_tick(
     return out
 
 
+type _Candidate = tuple[int, int, int, str, object]
+
+
+def _candidates(
+    work: VenueState, config: SimulatedVenueConfig, ticks: list[tuple[int, str, TradeTick]],
+    cursor: int, now_ms: int,
+) -> list[_Candidate]:
+    """Scheduled items due by `now_ms`: (mts, priority, id, label, payload)."""
+    out: list[_Candidate] = []
+    if cursor < len(ticks):
+        mts, symbol, tick = ticks[cursor]
+        out.append((mts, _PRIO_TRADE, 0, symbol, tick))
+    for lend in work.lendings.values():
+        if not lend.active:
+            continue
+        if lend.kind == "loan" and config.draw_after_ms is not None:
+            draw_at = min(lend.opening + config.draw_after_ms, lend.expires_at)
+            out.append((draw_at, _PRIO_DRAW, lend.lending_id, "loan", lend))
+        out.append((lend.expires_at, _PRIO_EXPIRY, lend.lending_id, lend.kind, lend))
+    for currency in sorted(work.wallets):
+        due = _due_payout(work, config, currency)
+        if due is not None:
+            out.append((due, _PRIO_PAYOUT, 0, currency, None))
+    return [c for c in out if c[0] <= now_ms]
+
+
 def catch_up(
     state: VenueState, config: SimulatedVenueConfig, *, now_ms: int,
     trades: Mapping[str, Sequence[PublicTrade]],
@@ -180,25 +217,12 @@ def catch_up(
             ticks.extend((t.mts, symbol, t) for t in kept)
     ticks.sort(key=lambda item: (item[0], item[1]))
 
+    if not ticks and not _candidates(state, config, ticks, 0, now_ms):
+        return events  # nothing is due: no copy of the (growing) state per request
     work = copy.deepcopy(state)
     cursor = 0
     while True:
-        candidates: list[tuple[int, int, int, str, object]] = []
-        if cursor < len(ticks):
-            mts, symbol, tick = ticks[cursor]
-            candidates.append((mts, _PRIO_TRADE, 0, symbol, tick))
-        for lend in work.lendings.values():
-            if not lend.active:
-                continue
-            if lend.kind == "loan" and config.draw_after_ms is not None:
-                draw_at = min(lend.opening + config.draw_after_ms, lend.expires_at)
-                candidates.append((draw_at, _PRIO_DRAW, lend.lending_id, "loan", lend))
-            candidates.append((lend.expires_at, _PRIO_EXPIRY, lend.lending_id, lend.kind, lend))
-        for currency in sorted(work.wallets):
-            due = _due_payout(work, config, currency)
-            if due is not None:
-                candidates.append((due, _PRIO_PAYOUT, 0, currency, None))
-        candidates = [c for c in candidates if c[0] <= now_ms]
+        candidates = _candidates(work, config, ticks, cursor, now_ms)
         if not candidates:
             break
         mts, prio, _, label, payload = min(candidates, key=lambda c: c[:4])

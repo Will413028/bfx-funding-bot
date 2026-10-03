@@ -5,12 +5,14 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.core.errors import ExecutorTransientError
 from bfx_funding_bot.external.bitfinex.live_executor import (
     FundingCancelAllClient,
     classify_cancel_response,
     parse_offer_response,
 )
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
+from bfx_funding_bot.modules.execution.retry import classify_httpx_response
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmitAcknowledged,
     SubmitOutcomeUnknown,
@@ -25,7 +27,15 @@ from bfx_funding_bot.modules.execution.venue_observation import (
     normalize_trade,
     normalize_wallet,
 )
-from tests.modules.simulated_venue.helpers import CTX, DAY, HOUR, T0, make_world, trade
+from tests.modules.simulated_venue.helpers import (
+    CTX,
+    DAY,
+    HOUR,
+    T0,
+    config,
+    make_world,
+    trade,
+)
 
 D = Decimal
 
@@ -131,7 +141,6 @@ async def test_business_rejection_defaults_to_5xx_error_which_the_client_reads_a
 
 
 async def test_documented_200_error_rejection_form_is_a_clean_rejection() -> None:
-    from tests.modules.simulated_venue.helpers import config
     w = await make_world(funds={"UST": "1000"}, cfg=config(business_rejection="200"))
     response = await w.submit(amount="5000")
     body = response.json()
@@ -140,16 +149,36 @@ async def test_documented_200_error_rejection_form_is_a_clean_rejection() -> Non
     assert isinstance(outcome, SubmitRejected) and outcome.reason.startswith("venue_rejected")
 
 
-async def test_cancel_success_and_unknown_offer_shapes() -> None:
+async def test_cancel_success_shape() -> None:
     w = await make_world(funds={"UST": "1000"})
     oid = await w.submit_ok(amount="150")
     ok = (await w.cancel(oid)).json()
     assert ok[1] == "foc-req" and ok[6] == "SUCCESS" and ok[4][0] == oid
     assert "CANCELED" in ok[4][10] and ok[7] == "Funding offer cancelled."
     assert classify_cancel_response(ok)[0] == "success"
-    gone = (await w.cancel(oid)).json()  # no longer active
-    assert gone[6] == "ERROR" and "not" in gone[7].lower()
-    assert len(gone) == 8
+
+
+async def test_cancel_of_an_inactive_offer_defaults_to_the_documented_5xx_error_shape() -> None:
+    w = await make_world(funds={"UST": "1000"})
+    oid = await w.submit_ok(amount="150")
+    await w.cancel(oid)
+    again = await w.cancel(oid)
+    body = again.json()
+    assert again.status_code == 500 and body[0] == "error" and isinstance(body[1], int)
+    assert isinstance(body[2], str) and len(body) == 3
+    # the real client reads a 5xx as transient (and retries it), never as already_terminal
+    assert isinstance(classify_httpx_response(again), ExecutorTransientError)
+
+
+async def test_cancel_rejection_can_use_the_200_notification_error_variant() -> None:
+    w = await make_world(funds={"UST": "1000"}, cfg=config(cancel_rejection="200"))
+    oid = await w.submit_ok(amount="150")
+    await w.cancel(oid)
+    again = await w.cancel(oid)
+    body = again.json()
+    assert again.status_code == 200 and len(body) == 8 and body[1] == "foc-req"
+    assert body[6] == "ERROR" and "not" in body[7].lower()  # TEXT at index 7
+    assert classify_cancel_response(body)[0] == "other"  # see the strict xfail below
 
 
 @pytest.mark.xfail(strict=True, reason=(
@@ -157,7 +186,7 @@ async def test_cancel_success_and_unknown_offer_shapes() -> None:
     "[MTS, TYPE, MESSAGE_ID, null, DATA, CODE, STATUS, TEXT] with TEXT at 7, so "
     "already_terminal is never detected (fix PR fix/bitfinex-notification-text-index)"))
 async def test_client_detects_already_terminal_cancel_from_the_documented_shape() -> None:
-    w = await make_world(funds={"UST": "1000"})
+    w = await make_world(funds={"UST": "1000"}, cfg=config(cancel_rejection="200"))
     oid = await w.submit_ok(amount="150")
     await w.cancel(oid)
     status, text = classify_cancel_response((await w.cancel(oid)).json())
@@ -168,7 +197,6 @@ async def test_client_detects_already_terminal_cancel_from_the_documented_shape(
     "finding: _structured_rejection_reason reads TEXT at index 8, so the venue's rejection "
     "text is dropped from the 200 ERROR form (same fix PR as above)"))
 async def test_client_keeps_the_venue_rejection_text_from_the_documented_shape() -> None:
-    from tests.modules.simulated_venue.helpers import config
     w = await make_world(funds={"UST": "1000"}, cfg=config(business_rejection="200"))
     response = await w.submit(amount="5000")
     outcome = classify_submit_response(200, response.json(), True)
@@ -202,6 +230,7 @@ async def test_unknown_path_host_and_method_answer_404_and_are_recorded() -> Non
     assert len(w.venue.unexpected) == 3
     ok = await w.post("v2/auth/r/wallets", {})
     assert ok.status_code == 200 and len(w.venue.unexpected) == 3
+    w.venue.unexpected.clear()  # provoked on purpose; teardown asserts it is empty
 
 
 async def test_funding_wallet_rows_carry_the_documented_columns() -> None:

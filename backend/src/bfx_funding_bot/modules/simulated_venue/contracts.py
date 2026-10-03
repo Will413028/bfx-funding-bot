@@ -6,7 +6,7 @@ the venue is an independent counterparty and the ledger is only its test oracle.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
@@ -26,8 +26,38 @@ class RealmRefusedError(ValueError):
     """The simulated venue refuses to exist in this realm or authority epoch."""
 
 
-class ConcurrentAppendError(RuntimeError):
+class VenueStoreError(RuntimeError):
+    """The store could not append: nothing was recorded (the venue answers 5xx, caller unsure)."""
+
+
+class ConcurrentAppendError(VenueStoreError):
     """Another writer appended to the same account scope first."""
+
+
+class SimulatedVenueInternalError(RuntimeError):
+    """The simulator itself failed. Never an HTTP answer: a venue fault it is not."""
+
+    kind = "bug"
+
+
+class NoMarketDataError(SimulatedVenueInternalError):
+    """No usable book (missing or stale) to freeze a queue position from."""
+
+    kind = "no_market_data"
+
+
+class FeedFailureError(SimulatedVenueInternalError):
+    """The market feed raised, or was too slow (it may not do I/O inside the venue lock)."""
+
+    kind = "feed"
+
+
+@dataclass(frozen=True, slots=True)
+class InternalFailure:
+    """One simulator-internal failure; soak and CI count these separately from venue faults."""
+
+    kind: str  # "no_market_data" | "feed" | "store" | "bug"
+    detail: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +97,20 @@ class BookSnapshot:
 
 
 class MarketFeed(Protocol):
-    """The venue's own market input. P1a has fixtures only; the live feed is P2."""
+    """The venue's own market input. P1a has fixtures only; the live feed is P2.
+
+    Contract for every implementation:
+
+    - Both methods are non-blocking reads of data already held locally. They run
+      inside the venue's request lock, so they must not do network I/O: a live feed
+      polls public data on its own task and only fills an in-memory buffer. The
+      venue enforces this with `SimulatedVenueConfig.feed_deadline_s`; a call that
+      exceeds it is an internal failure, not a venue answer.
+    - `book` returns the latest valid snapshot at or before `at_ms`. A snapshot
+      older than `SimulatedVenueConfig.max_book_age_ms` is not usable: a submit then
+      ends in the explicit "no market data" outcome instead of freezing a queue
+      position from a stale book.
+    """
 
     async def trades(
         self, symbol: str, *, after_ms: int, through_ms: int,
@@ -125,10 +168,16 @@ class SimulatedVenueConfig:
     history_lag_ms: int = 0
     history_filter: HistoryFilter = field(default_factory=HistoryFilter)
     history_max_limit: int = 500
-    whole_second_offer_mts: bool = False
+    # Bitfinex stamps offers to the whole second (observed by the client).
+    whole_second_offer_mts: bool = True
     # "5xx": Bitfinex's real business rejection (5xx + ["error", ...]) which a
     # client must read as UNKNOWN. "200": the documented ERROR notification.
     business_rejection: Literal["5xx", "200"] = "5xx"
+    # Same two shapes for "cancel of an offer that is not active". The real shape is
+    # unconfirmed; default is Bitfinex's documented error shape (5xx + error array).
+    cancel_rejection: Literal["5xx", "200"] = "5xx"
+    max_book_age_ms: int = 120_000  # older snapshots give "no market data" on submit
+    feed_deadline_s: float = 0.5  # a feed read slower than this is an internal failure
     # None: fills stay in loans until expiry. Otherwise a borrower draws the
     # loan into a credit after this delay (the row moves, opening is kept).
     draw_after_ms: int | None = None
@@ -149,6 +198,8 @@ class SimulatedVenueConfig:
             raise ValueError("history_max_limit must be in [1, 500]")
         if self.draw_after_ms is not None and self.draw_after_ms < 0:
             raise ValueError("draw_after_ms must be non-negative")
+        if self.max_book_age_ms <= 0 or self.feed_deadline_s <= 0:
+            raise ValueError("max_book_age_ms and feed_deadline_s must be positive")
 
 
 class FaultTarget(StrEnum):
@@ -156,6 +207,7 @@ class FaultTarget(StrEnum):
     CANCEL = "cancel"
     CANCEL_ALL = "cancel_all"
     HISTORY = "history"
+    ANY_REQUEST = "any_request"  # counts every request the transport receives
 
 
 class FaultKind(StrEnum):
@@ -171,6 +223,10 @@ class FaultKind(StrEnum):
     HISTORY_OMIT_NEWEST = "history_omit_newest"
     # History read answers HTTP 503 (the client certifies nothing: coverage incomplete).
     HISTORY_ERROR = "history_error"
+    # After the n-th request: run the rule's hook (tests push market data or move the
+    # injected clock there), then let the venue catch up. The world moves between two
+    # requests of one caller, as on a real venue.
+    TICK_AFTER = "tick_after"
 
 
 _HISTORY_KINDS = {FaultKind.HISTORY_OMIT_NEWEST, FaultKind.HISTORY_ERROR}
@@ -184,10 +240,16 @@ class FaultRule:
     kind: FaultKind
     ordinals: frozenset[int] = frozenset()
     probability: float = 0.0
+    # Only for TICK_AFTER; excluded from equality so a plan stays comparable data.
+    hook: Callable[[], None] | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if (self.target is FaultTarget.HISTORY) != (self.kind in _HISTORY_KINDS):
             raise ValueError(f"fault {self.kind} cannot target {self.target}")
+        if (self.target is FaultTarget.ANY_REQUEST) != (self.kind is FaultKind.TICK_AFTER):
+            raise ValueError("TICK_AFTER, and only it, targets ANY_REQUEST")
+        if self.hook is not None and self.kind is not FaultKind.TICK_AFTER:
+            raise ValueError("only TICK_AFTER takes a hook")
         if not 0.0 <= self.probability <= 1.0 or any(n < 1 for n in self.ordinals):
             raise ValueError("fault ordinals are 1-based and probability is in [0, 1]")
         if not self.ordinals and self.probability == 0.0:

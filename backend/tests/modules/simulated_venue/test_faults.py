@@ -144,7 +144,23 @@ def test_probabilistic_rules_are_seeded_and_reproducible() -> None:
     lambda: FaultRule(FaultTarget.SUBMIT, FaultKind.REJECTED),
     lambda: FaultRule(FaultTarget.SUBMIT, FaultKind.REJECTED, ordinals=frozenset({0})),
     lambda: FaultRule(FaultTarget.SUBMIT, FaultKind.REJECTED, probability=1.5),
+    lambda: FaultRule(FaultTarget.SUBMIT, FaultKind.TICK_AFTER, ordinals=frozenset({1})),
+    lambda: FaultRule(FaultTarget.ANY_REQUEST, FaultKind.REJECTED, ordinals=frozenset({1})),
+    lambda: FaultRule(FaultTarget.SUBMIT, FaultKind.REJECTED, ordinals=frozenset({1}),
+                      hook=lambda: None),
 ])
 def test_invalid_fault_rules_are_refused(make) -> None:  # type: ignore[no-untyped-def]
     with pytest.raises(ValueError):
         make()
+
+
+def test_tick_rules_are_part_of_the_one_plan_and_count_every_request() -> None:
+    fired: list[int] = []
+    rule = FaultRule(FaultTarget.ANY_REQUEST, FaultKind.TICK_AFTER,
+                     ordinals=frozenset({2, 4}), hook=lambda: fired.append(1))
+    plan = FaultPlan(rules=(rule,))
+    inj = FaultInjector(plan)
+    assert inj.enabled
+    assert [bool(inj.ticks_after(n)) for n in range(1, 6)] == [False, True, False, True, False]
+    assert plan == FaultPlan(rules=(FaultRule(
+        FaultTarget.ANY_REQUEST, FaultKind.TICK_AFTER, ordinals=frozenset({2, 4})),))  # hook ignored

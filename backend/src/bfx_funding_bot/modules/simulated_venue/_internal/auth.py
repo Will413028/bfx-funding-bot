@@ -16,16 +16,21 @@ ERR_NONCE_SMALL = (10114, "nonce: small")
 ERR_APIKEY_INVALID = (10100, "apikey: invalid")
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class RequestAuthenticator:
+    """Stateless: the nonce high-water is durable venue state (`VenueState.last_nonce`)."""
+
     api_key: str
     api_secret: str
-    last_nonce: int = 0
 
     def check(
-        self, *, path: str, body: bytes, headers: Mapping[str, str],
-    ) -> tuple[int, str] | None:
-        """None when the request is acceptable, else the venue error to answer with."""
+        self, *, path: str, body: bytes, headers: Mapping[str, str], last_nonce: int,
+    ) -> int | tuple[int, str]:
+        """The accepted nonce, or the venue error `(code, message)` to answer with.
+
+        Accepting does not record anything: the caller commits the nonce before it
+        answers, like every other state change.
+        """
         if headers.get("bfx-apikey") != self.api_key:
             return ERR_APIKEY_INVALID
         raw_nonce = headers.get("bfx-nonce", "")
@@ -36,7 +41,6 @@ class RequestAuthenticator:
         ).hexdigest()
         if not hmac.compare_digest(expected, signature):
             return ERR_APIKEY_INVALID
-        if not raw_nonce.isdigit() or int(raw_nonce) <= self.last_nonce:
+        if not raw_nonce.isdigit() or int(raw_nonce) <= last_nonce:
             return ERR_NONCE_SMALL
-        self.last_nonce = int(raw_nonce)
-        return None
+        return int(raw_nonce)

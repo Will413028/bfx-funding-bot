@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from decimal import Decimal
 from uuid import UUID
@@ -19,10 +19,14 @@ from bfx_funding_bot.modules.simulated_venue import (
     FaultPlan,
     FaultRule,
     FaultTarget,
+    FeedFailureError,
+    FixtureMarketFeed,
     InMemoryVenueEventStore,
+    NoMarketDataError,
     RealmRefusedError,
     SimAccount,
     SimulatedVenueConfig,
+    SimulatedVenueInternalError,
 )
 from bfx_funding_bot.modules.simulated_venue.events import VenueEvent
 from bfx_funding_bot.modules.simulated_venue.wiring import build_simulated_venue
@@ -143,6 +147,8 @@ async def test_the_response_is_never_produced_before_the_append_is_durable() -> 
     store.fail_next = True
     response = await w.submit(amount="150")
     assert response.status_code == 500 and response.json()[0] == "error"  # UNKNOWN to the client
+    assert [f.kind for f in w.venue.internal_failures] == ["store"]  # counted apart from faults
+    w.venue.internal_failures.clear()
     assert not w.venue.state.offers  # no phantom offer in memory ...
     reborn = await make_world(store=store, feed=w.feed, clock=w.clock)
     assert not reborn.venue.state.offers  # ... and none after a restart
@@ -164,8 +170,14 @@ async def test_a_second_writer_on_the_same_scope_fails_instead_of_overwriting() 
     other = await make_world(store=w.store, feed=w.feed, clock=w.clock)  # stale view of the log
     await w.submit_ok(amount="150")
     losing = await other.submit(amount="150")
-    assert losing.status_code == 500  # ConcurrentAppendError surfaces as a venue failure
-    assert len(await w.store.load(ACCOUNT)) == 3  # funded, book, offer: not overwritten
+    assert losing.status_code == 500  # the write was not recorded: caller unsure
+    assert [f.kind for f in other.venue.internal_failures] == ["store"]
+    other.venue.internal_failures.clear()
+    log = await w.store.load(ACCOUNT)
+    assert len(log) == 3 + len([e for e in log if type(e).__name__ == "NonceAdvanced"])
+    # the loser reloaded the durable log, so it converges instead of staying stale forever
+    assert other.venue.state == w.venue.state
+    assert await other.submit_ok(amount="150")
 
 
 async def test_memory_store_enforces_expected_seq_and_isolates_scopes() -> None:
@@ -204,20 +216,89 @@ async def test_a_clock_that_steps_back_never_moves_venue_time_back() -> None:
     assert created[oid2] >= T0 + DAY
 
 
-async def test_whole_second_offer_timestamps_knob() -> None:
-    w = await make_world(funds={"UST": "1000"}, cfg=config(whole_second_offer_mts=True))
+async def test_whole_second_offer_timestamps_are_the_default_and_the_knob_turns_them_off() -> None:
+    assert config().whole_second_offer_mts is True
+    w = await make_world(funds={"UST": "1000"}, cfg=config(whole_second_offer_mts=False))
     w.clock.now = T0 + 1234
-    oid = await w.submit_ok(amount="150")
+    await w.submit_ok(amount="150")
     (row,) = (await w.post("v2/auth/r/funding/offers", {})).json()
-    assert row[0] == oid and row[2] == T0 + 1000
+    assert row[2] == T0 + 1234
 
 
-async def test_submit_without_any_book_is_refused_by_the_venue() -> None:
+async def test_submit_without_any_book_is_no_market_data_not_a_venue_answer() -> None:
     w = await make_world(funds={"UST": "1000"}, seed_book=False)
-    response = await w.submit(amount="150")
-    assert response.status_code == 500 and "book" in response.json()[2]
+    with pytest.raises(NoMarketDataError):
+        await _raw_submit(w)  # an exception, not a 5xx and not a rejection
+    assert [f.kind for f in w.venue.internal_failures] == ["no_market_data"]
+    w.venue.internal_failures.clear()
+    assert not w.venue.state.offers
     w.feed.add_book(book("fUST", T0))
     assert await w.submit_ok(amount="150")
+
+
+async def test_a_book_older_than_max_book_age_is_no_market_data_through_the_transport() -> None:
+    w = await make_world(funds={"UST": "1000"}, cfg=config(max_book_age_ms=60_000),
+                         seed_book=False)
+    w.feed.add_book(book("fUST", T0))
+    w.clock.advance(60_001)
+    with pytest.raises(NoMarketDataError):
+        await _raw_submit(w)
+    assert [f.kind for f in w.venue.internal_failures] == ["no_market_data"]
+    w.venue.internal_failures.clear()
+
+
+async def _raw_submit(w: World) -> object:
+    body = {"type": "LIMIT", "symbol": "fUST", "amount": "150", "rate": "0.0002",
+            "period": 2, "flags": 0}
+    return await w.post("v2/auth/w/funding/offer/submit", body)  # no book refresh
+
+
+class SlowFeed(FixtureMarketFeed):
+    async def book(self, symbol: str, *, at_ms: int):  # type: ignore[no-untyped-def]
+        await asyncio.sleep(1)  # stands in for network I/O inside the venue lock
+        return await super().book(symbol, at_ms=at_ms)
+
+
+class BrokenFeed(FixtureMarketFeed):
+    async def trades(self, symbol: str, *, after_ms: int, through_ms: int):  # type: ignore[no-untyped-def]
+        raise RuntimeError("feed down")
+
+
+async def test_a_feed_that_blocks_inside_the_lock_is_an_internal_failure() -> None:
+    feed = SlowFeed()
+    feed.add_book(book("fUST", T0))
+    w = await make_world(funds={"UST": "1000"}, feed=feed, cfg=config(feed_deadline_s=0.05),
+                         seed_book=False)
+    with pytest.raises(FeedFailureError, match="network I/O"):
+        await _raw_submit(w)
+    assert [f.kind for f in w.venue.internal_failures] == ["feed"]
+    w.venue.internal_failures.clear()
+
+
+async def test_a_failing_feed_is_an_internal_failure_never_a_venue_5xx() -> None:
+    w = await make_world(funds={"UST": "1000"}, feed=BrokenFeed())
+    await w.submit_ok(amount="150")  # resting offer: the next request pulls trades
+    with pytest.raises(FeedFailureError):
+        await w.rest.fetch_wallet_observations(ctx=CTX)
+    assert {f.kind for f in w.venue.internal_failures} == {"feed"}
+    w.venue.internal_failures.clear()
+
+
+async def test_a_simulator_bug_is_recorded_and_raised_not_answered_as_a_venue_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bfx_funding_bot.modules.simulated_venue._internal import decide as decide_module
+
+    w = await make_world(funds={"UST": "1000"})
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise KeyError("fold bug")
+
+    monkeypatch.setattr(decide_module, "decide_submit", boom)
+    with pytest.raises(SimulatedVenueInternalError, match="simulator bug"):
+        await w.submit(amount="150")
+    assert [f.kind for f in w.venue.internal_failures] == ["bug"]
+    w.venue.internal_failures.clear()
 
 
 # -- the world moves between two requests -----------------------------------------
@@ -228,17 +309,24 @@ def _observer(w: World) -> BitfinexVenueObservation:
     return BitfinexVenueObservation(rest=w.rest, ctx=ctx, scope=scope, clock_ms=w.clock)
 
 
+def _tick_plan(n: int, hook: Callable[[], None]) -> FaultPlan:
+    return FaultPlan(rules=(FaultRule(
+        FaultTarget.ANY_REQUEST, FaultKind.TICK_AFTER, ordinals=frozenset({n}), hook=hook),))
+
+
 async def test_a_fill_between_the_first_and_confirmation_reads_makes_them_differ() -> None:
-    w = await make_world(funds={"UST": "1000"})
+    holder: list[World] = []
+    # Requests: 1 = the submit; then one observation = wallets (2), offers (3), credits (4),
+    # loans (5), history..., and the four confirming active reads. Tick after the offers read.
+    plan = _tick_plan(3, lambda: holder[0].clock.advance(HOUR))
+    w = await make_world(funds={"UST": "1000"}, faults=plan)
+    holder.append(w)
     await w.submit_ok(amount="150")
     w.feed.add_trades("fUST", [trade(T0 + HOUR, "150")])
     observer = _observer(w)
     scope = Scope(UUID(ACCOUNT_ID), "ci")
     window = ObservationWindow(None, None, None)
 
-    # Request order of one observation: wallets, offers, credits, loans, history..., then
-    # the four active reads again. The tick lands right after the offers read.
-    w.venue.tick_after_request(w.venue.requests + 2, lambda: w.clock.advance(HOUR))
     first, confirmation, _ = await observer.observe(scope, w.clock.now, window)
     assert first.offers != confirmation.offers  # first saw the offer resting
     assert len(first.offers) == 1 and confirmation.offers == ()
@@ -249,22 +337,24 @@ async def test_a_fill_between_the_first_and_confirmation_reads_makes_them_differ
         again_confirmation.wallets, again_confirmation.offers, again_confirmation.credits)
 
 
-async def test_the_tick_hook_runs_once_after_the_nth_request_and_catches_up() -> None:
-    w = await make_world(funds={"UST": "1000"})
-    await w.submit_ok(amount="150")
-    w.feed.add_trades("fUST", [trade(T0 + HOUR, "150")])
+async def test_the_tick_rule_runs_once_after_the_nth_request_and_catches_up() -> None:
     calls: list[int] = []
-    def hook() -> None:
-        calls.append(w.venue.requests)
-        w.clock.advance(HOUR)
+    holder: list[World] = []
 
-    w.venue.tick_after_request(w.venue.requests + 1, hook)
-    await w.rest.fetch_wallet_observations(ctx=CTX)
-    assert calls == [w.venue.requests]
+    def hook() -> None:
+        calls.append(holder[0].venue.requests)
+        holder[0].clock.advance(HOUR)
+
+    w = await make_world(funds={"UST": "1000"}, faults=_tick_plan(2, hook))
+    holder.append(w)
+    await w.submit_ok(amount="150")  # request 1
+    w.feed.add_trades("fUST", [trade(T0 + HOUR, "150")])
+    await w.rest.fetch_wallet_observations(ctx=CTX)  # request 2: the rule fires after it
+    assert calls == [2]
     # the venue caught up by itself, without another request
-    assert w.venue.state.offers[next(iter(w.venue.state.offers))].status == "EXECUTED"
+    assert next(iter(w.venue.state.offers.values())).status == "EXECUTED"
     await w.rest.fetch_wallet_observations(ctx=CTX)
-    assert calls == [w.venue.requests - 1]  # not called again
+    assert calls == [2]  # not again
 
 
 async def test_concurrent_requests_are_serialized_and_see_consistent_state() -> None:

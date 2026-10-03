@@ -7,6 +7,7 @@ from collections import Counter
 from bfx_funding_bot.modules.simulated_venue.contracts import (
     FaultKind,
     FaultPlan,
+    FaultRule,
     FaultTarget,
 )
 
@@ -20,17 +21,25 @@ class FaultInjector:
     def enabled(self) -> bool:
         return bool(self._plan.rules)
 
-    def next_fault(self, target: FaultTarget) -> FaultKind | None:
-        """Count one request of `target` and return the fault to inject, if any."""
-        self._seen[target] += 1
-        n = self._seen[target]
+    def _fires(self, target: FaultTarget, n: int) -> list[FaultRule]:
+        out = []
         for index, rule in enumerate(self._plan.rules):
             if rule.target is not target:
                 continue
             if n in rule.ordinals:
-                return rule.kind
-            if rule.probability > 0.0:
+                out.append(rule)
+            elif rule.probability > 0.0:
                 draw = random.Random(f"{self._plan.seed}:{index}:{target.value}:{n}").random()
                 if draw < rule.probability:
-                    return rule.kind
-        return None
+                    out.append(rule)
+        return out
+
+    def next_fault(self, target: FaultTarget) -> FaultKind | None:
+        """Count one request of `target` and return the fault to inject, if any."""
+        self._seen[target] += 1
+        fired = self._fires(target, self._seen[target])
+        return fired[0].kind if fired else None
+
+    def ticks_after(self, request_number: int) -> list[FaultRule]:
+        """TICK_AFTER rules due after the `request_number`-th request received."""
+        return self._fires(FaultTarget.ANY_REQUEST, request_number)

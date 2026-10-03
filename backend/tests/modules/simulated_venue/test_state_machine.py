@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 
 from bfx_funding_bot.modules.simulated_venue._internal.decide import (
+    NoMarketData,
     Refusal,
     catch_up,
     decide_cancel,
@@ -88,11 +89,22 @@ def test_submit_validation_refuses_without_recording(kwargs: dict[str, str | int
     assert isinstance(result, Refusal) and why in result.reason
 
 
-def test_submit_without_a_book_is_refused_not_placed_on_an_empty_queue() -> None:
+def test_submit_without_a_book_is_an_explicit_no_market_data_outcome_not_a_refusal() -> None:
     m = Machine()
     result = decide_submit(m.state, m.cfg, now_ms=T0, symbol="fUST", amount=D("150"),
                            rate=D("0.0002"), period=2, book=None)
-    assert isinstance(result, Refusal) and "book" in result.reason
+    assert isinstance(result, NoMarketData) and "book" in result.reason
+    assert not isinstance(result, Refusal)
+
+
+def test_a_book_older_than_the_configured_age_is_no_market_data() -> None:
+    m = Machine(config(max_book_age_ms=60_000))
+    fresh = book("fUST", T0 - 60_000)  # exactly at the limit is still usable
+    stale = book("fUST", T0 - 60_001)
+    args = {"now_ms": T0, "symbol": "fUST", "amount": D("150"), "rate": D("0.0002"), "period": 2}
+    assert isinstance(decide_submit(m.state, m.cfg, book=fresh, **args), list)
+    result = decide_submit(m.state, m.cfg, book=stale, **args)
+    assert isinstance(result, NoMarketData) and "old" in result.reason
 
 
 def test_partial_then_full_fill_creates_trade_and_loan_with_opening_at_fill_time() -> None:

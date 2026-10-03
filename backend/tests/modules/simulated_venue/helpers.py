@@ -60,6 +60,9 @@ def trade(mts: int, amount: str, period: int = 2, rate: str = "0.0002") -> Publi
     return PublicTrade(mts, Decimal(amount), Decimal(rate), period)
 
 
+WORLDS: list[World] = []  # every world built this test; conftest checks them at teardown
+
+
 @dataclass
 class World:
     venue: SimulatedVenue
@@ -68,6 +71,7 @@ class World:
     store: InMemoryVenueEventStore
     gate: AuthRequestGate = field(default_factory=AuthRequestGate)
     cfg: SimulatedVenueConfig = field(default_factory=config)
+    asks: list[tuple[str, int, str]] | None = None
 
     @property
     def rest(self) -> BitfinexAuthREST:
@@ -88,6 +92,10 @@ class World:
 
     async def submit(self, amount: str = "150", rate: str = "0.0002", period: int = 2,
                      symbol: str = "fUST") -> httpx.Response:
+        # The venue refuses stale books; keep the fixture feed's book current, as a live
+        # feed would.
+        for sym in ("fUST", "fUSD"):
+            self.feed.add_book(book(sym, self.clock.now, self.asks))
         return await self.post("v2/auth/w/funding/offer/submit", {
             "type": "LIMIT", "symbol": symbol, "amount": amount, "rate": rate,
             "period": period, "flags": 0,
@@ -125,4 +133,6 @@ async def make_world(
     if funds is not None:
         for currency, amount in funds.items():
             await venue.fund_wallet(currency, Decimal(amount))
-    return World(venue, feed, clock, store, cfg=cfg)
+    world = World(venue, feed, clock, store, cfg=cfg, asks=asks)
+    WORLDS.append(world)
+    return world

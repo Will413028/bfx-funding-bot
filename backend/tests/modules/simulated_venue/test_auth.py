@@ -69,3 +69,24 @@ async def test_a_rejected_request_does_not_burn_the_nonce_or_touch_state() -> No
     path = "v2/auth/w/funding/offer/submit"
     refused = await post(w, signed(600, path=path, body=body, secret="other"), path=path, body=body)
     assert refused.status_code == 500 and not w.venue.state.offers
+
+
+async def test_the_nonce_high_water_survives_a_restart_of_the_venue() -> None:
+    w = await make_world(funds={"UST": "1000"})
+    assert (await post(w, signed(1000))).status_code == 200
+    assert (await post(w, signed(2000))).status_code == 200
+    reborn = await make_world(store=w.store, feed=w.feed, clock=w.clock)  # rebuilt from the log
+    assert reborn.venue.state.last_nonce == 2000
+    for replayed in (2000, 1999, 1000, 1):
+        response = await post(reborn, signed(replayed))
+        assert response.status_code == 500
+        assert response.json() == ["error", 10114, "nonce: small"]
+    assert (await post(reborn, signed(2001))).status_code == 200
+
+
+async def test_a_nonce_is_recorded_only_for_authenticated_requests() -> None:
+    w = await make_world(funds={"UST": "1000"})
+    assert (await post(w, signed(5000, secret="other"))).status_code == 500
+    assert w.venue.state.last_nonce == 0
+    assert (await post(w, signed(5000))).status_code == 200
+    assert w.venue.state.last_nonce == 5000

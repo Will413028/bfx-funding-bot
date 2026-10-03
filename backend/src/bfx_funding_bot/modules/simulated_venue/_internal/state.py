@@ -11,6 +11,7 @@ from bfx_funding_bot.modules.simulated_venue.events import (
     CreditClosed,
     InterestPaid,
     LoanDrawn,
+    NonceAdvanced,
     OfferCanceled,
     OfferFilled,
     OfferPlaced,
@@ -20,6 +21,10 @@ from bfx_funding_bot.modules.simulated_venue.events import (
 )
 
 DAY_MS = 86_400_000
+# One disjoint id range per entity kind (`id_base + slot * ID_STRIDE`), so an id of one
+# kind can never equal an id of another and a join on the wrong kind cannot pass by luck.
+ID_STRIDE = 10_000_000
+ID_SLOT = {"offer": 0, "trade": 1, "loan": 2, "credit": 3, "ledger": 4}
 ZERO = Decimal("0")
 
 OfferStatus = Literal["ACTIVE", "PARTIAL", "EXECUTED", "CANCELED"]
@@ -122,9 +127,14 @@ class VenueState:
     counters: dict[str, int] = field(default_factory=dict)
     high_water_ms: int = 0
     deposits: dict[str, Decimal] = field(default_factory=dict)
+    last_nonce: int = 0
 
-    def next_id(self, kind: str, base: int) -> int:
-        return max(self.counters.get(kind, base), base) + 1
+    def next_id(self, kind: str, id_base: int) -> int:
+        floor = id_base + ID_SLOT[kind] * ID_STRIDE
+        issued = max(self.counters.get(kind, floor), floor) + 1
+        if issued >= floor + ID_STRIDE:
+            raise OverflowError(f"{kind} id space exhausted")
+        return issued
 
     def resting_offers(self, symbol: str, period: int | None = None) -> list[Offer]:
         return sorted(
@@ -165,6 +175,8 @@ def apply(state: VenueState, event: VenueEvent) -> None:
             else:
                 wallet.balance += event.amount
             state.deposits[event.currency] = state.deposits.get(event.currency, ZERO) + event.amount
+        case NonceAdvanced():
+            state.last_nonce = max(state.last_nonce, event.nonce)
         case BookObserved():
             state.books[event.symbol] = BookSnapshot(event.symbol, event.captured_at_ms, event.asks)
         case OfferPlaced():
@@ -205,8 +217,10 @@ def _place(state: VenueState, event: OfferPlaced) -> None:
         ahead_ids=tuple(o.offer_id for o in ahead),
         ahead_filled_mark=sum((o.filled for o in ahead), ZERO),
     )
+    # The offer may carry a whole-second stamp slightly in the past; consumption of public
+    # volume starts at the real placement instant, which the book event just recorded.
     state.market_through[event.symbol] = max(
-        state.market_through.get(event.symbol, 0), event.mts,
+        state.market_through.get(event.symbol, 0), state.high_water_ms,
     )
     _bump(state, "offer", event.offer_id)
 

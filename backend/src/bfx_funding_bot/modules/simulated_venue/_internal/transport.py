@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Sequence
+import logging
+from collections.abc import Awaitable, Callable, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -20,16 +21,24 @@ from bfx_funding_bot.modules.simulated_venue._internal.auth import RequestAuthen
 from bfx_funding_bot.modules.simulated_venue._internal.faults import FaultInjector
 from bfx_funding_bot.modules.simulated_venue._internal.state import VenueState, apply
 from bfx_funding_bot.modules.simulated_venue.contracts import (
+    ConcurrentAppendError,
     FaultKind,
     FaultPlan,
     FaultTarget,
+    FeedFailureError,
+    InternalFailure,
     MarketFeed,
+    NoMarketDataError,
     PublicTrade,
     SimAccount,
     SimulatedVenueConfig,
+    SimulatedVenueInternalError,
     VenueEventStore,
+    VenueStoreError,
 )
-from bfx_funding_bot.modules.simulated_venue.events import VenueEvent
+from bfx_funding_bot.modules.simulated_venue.events import NonceAdvanced, VenueEvent
+
+log = logging.getLogger(__name__)
 
 HOST = "api.bitfinex.com"
 _ERR_GENERIC = 10001
@@ -78,9 +87,11 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         self._state = state
         self._seq = seq
         self._lock = asyncio.Lock()
-        self._ticks: dict[int, Callable[[], None] | None] = {}
         self.requests = 0
         self.unexpected: list[tuple[str, str]] = []
+        # Simulator-internal failures (never venue answers). CI asserts this is empty at
+        # teardown and the soak report counts it apart from injected venue faults.
+        self.internal_failures: list[InternalFailure] = []
 
     @classmethod
     async def open(
@@ -105,11 +116,6 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=self)
 
-    def tick_after_request(self, n: int, hook: Callable[[], None] | None = None) -> None:
-        """After the n-th request this transport receives (1-based): run `hook`, then
-        let the venue catch up, so the world moves between two requests of a caller."""
-        self._ticks[n] = hook
-
     async def fund_wallet(self, currency: str, amount: Decimal) -> None:
         async with self._lock:
             await self._commit(decide.fund_wallet(currency, amount, self._now()))
@@ -130,32 +136,73 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
     def _now(self) -> int:
         return max(self._clock_ms(), self._state.high_water_ms)
 
+    def _record_internal(self, kind: str, detail: str) -> None:
+        self.internal_failures.append(InternalFailure(kind, detail))
+        log.critical("simulated venue internal failure kind=%s detail=%s", kind, detail)
+
     async def _after_request(self) -> None:
-        if self.requests not in self._ticks:
-            return
-        hook = self._ticks.pop(self.requests)
-        if hook is not None:
-            hook()
-        await self._sync(self._now())
+        """TICK_AFTER rules: the world moves between two requests of one caller."""
+        try:
+            due = self._faults.ticks_after(self.requests)
+            for rule in due:
+                if rule.hook is not None:
+                    rule.hook()
+            if due:
+                await self._sync(self._now())
+        except SimulatedVenueInternalError as exc:
+            self._record_internal(exc.kind, str(exc))
+        except VenueStoreError as exc:
+            self._record_internal("store", repr(exc))
+        except Exception as exc:
+            self._record_internal("bug", repr(exc))
+
+    async def _reload(self) -> None:
+        """Rebuild state from the durable log (after losing an append race)."""
+        state = VenueState()
+        events = await self._store.load(self._account)
+        for event in events:
+            apply(state, event)
+        self._state, self._seq = state, len(events)
 
     async def _commit(self, events: Sequence[VenueEvent]) -> None:
         if not events:
             return
-        await self._store.append(self._account, self._seq, events)
+        try:
+            await self._store.append(self._account, self._seq, events)
+        except ConcurrentAppendError:
+            await self._reload()
+            raise
+        except VenueStoreError:
+            raise
+        except Exception as exc:
+            raise VenueStoreError(f"append failed: {exc!r}") from exc
         for event in events:
             apply(self._state, event)
         self._seq += len(events)
 
-    async def _sync(self, now_ms: int) -> None:
+    async def _feed_call[T](self, what: str, call: Awaitable[T]) -> T:
+        """Feed reads run inside the venue lock, so they must be local and fast."""
+        try:
+            async with asyncio.timeout(self._config.feed_deadline_s):
+                return await call
+        except TimeoutError as exc:
+            raise FeedFailureError(
+                f"feed {what} exceeded {self._config.feed_deadline_s}s: a MarketFeed must "
+                "not do network I/O inside the venue lock") from exc
+        except Exception as exc:
+            raise FeedFailureError(f"feed {what} failed: {exc!r}") from exc
+
+    async def _sync(self, now_ms: int, nonce: int | None = None) -> None:
+        """Record the accepted nonce, then every scheduled change due by `now_ms`."""
         trades: dict[str, Sequence[PublicTrade]] = {}
         for symbol in sorted({o.symbol for o in self._state.offers.values() if o.resting}):
-            trades[symbol] = await self._feed.trades(
+            trades[symbol] = await self._feed_call("trades", self._feed.trades(
                 symbol, after_ms=self._state.market_through.get(symbol, now_ms),
                 through_ms=now_ms,
-            )
-        await self._commit(decide.catch_up(
-            self._state, self._config, now_ms=now_ms, trades=trades,
-        ))
+            ))
+        events: list[VenueEvent] = [] if nonce is None else [NonceAdvanced(nonce, now_ms)]
+        events += decide.catch_up(self._state, self._config, now_ms=now_ms, trades=trades)
+        await self._commit(events)
 
     async def _handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path.lstrip("/")
@@ -166,22 +213,32 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
             return _json(404, wire.error_body(404, "simulated venue: unexpected request"))
         name, params = routed
         body = await request.aread()
-        refusal = self._auth.check(path=path, body=body, headers=request.headers)
-        if refusal is not None:
-            return _json(500, wire.error_body(*refusal))
+        accepted = self._auth.check(
+            path=path, body=body, headers=request.headers, last_nonce=self._state.last_nonce)
+        if isinstance(accepted, tuple):
+            return _json(500, wire.error_body(*accepted))
         fault = self._faults.next_fault(_TARGETS[name]) if name in _TARGETS else None
         if fault is FaultKind.UNKNOWN_NOT_PLACED_LOST:
             raise httpx.ConnectError("simulated: request lost before the venue", request=request)
         try:
+            await self._sync(self._now(), accepted)
             payload = _body_object(body)
-            await self._sync(self._now())
             return await self._dispatch(name, params, payload, fault, request)
         except _BadRequestError as exc:
             return _json(500, wire.error_body(_ERR_GENERIC, f"bad request: {exc}"))
         except httpx.HTTPError:
             raise
+        except VenueStoreError as exc:
+            # A durable-write failure is the one internal failure that is also a venue
+            # behaviour ("not recorded, caller unsure"): 5xx, and counted as internal.
+            self._record_internal("store", repr(exc))
+            return _json(500, wire.error_body(_ERR_STORAGE, "simulated venue: write failed"))
+        except SimulatedVenueInternalError as exc:
+            self._record_internal(exc.kind, str(exc))
+            raise
         except Exception as exc:
-            return _json(500, wire.error_body(_ERR_STORAGE, f"simulated venue failure: {exc!r}"))
+            self._record_internal("bug", repr(exc))
+            raise SimulatedVenueInternalError(f"simulator bug: {exc!r}") from exc
 
     async def _dispatch(
         self, name: str, params: dict[str, str], payload: dict[str, Any],
@@ -283,11 +340,13 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
                 raise _BadRequestError(f"invalid submit payload: {exc!r}") from exc
             if amount <= 0:
                 return self._business_error(type_, "amount: borrowing is not simulated", now)
-            book = await self._feed.book(symbol, at_ms=now)
+            book = await self._feed_call("book", self._feed.book(symbol, at_ms=now))
             decided = decide.decide_submit(
                 self._state, self._config, now_ms=now, symbol=symbol, amount=amount,
                 rate=rate, period=period, book=book,
             )
+            if isinstance(decided, decide.NoMarketData):
+                raise NoMarketDataError(decided.reason)  # ours to fix, not a venue answer
             if isinstance(decided, decide.Refusal):
                 return self._business_error(type_, decided.reason, now)
             await self._commit(decided)
@@ -304,6 +363,8 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
                 raise _BadRequestError("id must be an integer")
             cancelled = decide.decide_cancel(self._state, now_ms=now, offer_id=offer_id)
             if isinstance(cancelled, decide.Refusal):
+                if self._config.cancel_rejection == "5xx":
+                    return _json(500, wire.error_body(_ERR_GENERIC, cancelled.reason))
                 return _json(200, wire.notification(now, type_, None, "ERROR", cancelled.reason))
             await self._commit(cancelled)
             return _json(200, wire.notification(
