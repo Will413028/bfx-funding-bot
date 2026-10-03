@@ -39,6 +39,7 @@ from bfx_funding_bot.modules.lending.tracking.fill_rate import (
     BucketStat,
     _percentile,
 )
+from bfx_funding_bot.modules.lending.tracking.queue_fill import filled_amount, queue_ahead_of
 from bfx_funding_bot.modules.marketfeed.book_period_coverage import BookAskSnapshot
 
 BOOK_SOURCE = "book"
@@ -56,11 +57,7 @@ class _Acc:
 
 def queue_ahead(snapshot: BookAskSnapshot, *, period_days: int, offer_rate: Decimal) -> Decimal:
     """Ask amount at `period_days` resting at or below `offer_rate` (FIFO: same rate counts)."""
-    return sum(
-        (amount for rate, period, amount in snapshot.asks
-         if period == period_days and rate <= offer_rate),
-        Decimal("0"),
-    )
+    return queue_ahead_of(snapshot.asks, period_days=period_days, offer_rate=offer_rate)
 
 
 class BookReplayLearner:
@@ -110,13 +107,14 @@ class BookReplayLearner:
                 continue
             for bps in self.bucket_grid:
                 offer = ref * (Decimal(1) + Decimal(bps) / Decimal(10000))
-                needed = queue_ahead(snap, period_days=self.period_days, offer_rate=offer)
-                needed += self.offer_amount
+                ahead = queue_ahead(snap, period_days=self.period_days, offer_rate=offer)
                 cumulative = Decimal("0")
                 fill_at_ms: int | None = None
                 for c in window:
                     cumulative += c.volume if c.volume is not None else Decimal("0")
-                    if cumulative >= needed:
+                    if filled_amount(
+                        queue_ahead=ahead, amount=self.offer_amount, cumulative_volume=cumulative,
+                    ) >= self.offer_amount:
                         fill_at_ms = c.mts + _MS_PER_HOUR  # filled somewhere inside that hour
                         break
                 for horizon_h in self.horizons:
