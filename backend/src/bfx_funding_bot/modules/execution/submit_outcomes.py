@@ -361,11 +361,11 @@ class SubmitCancelledNotSent(asyncio.CancelledError):
 def _structured_rejection_reason(body: Any) -> str | None:
     """Extract a bounded reason only from known Bitfinex error shapes."""
     if isinstance(body, list):
-        # Funding REST responses use [mts, type, ..., status, ..., text].
+        # Funding REST responses use [mts, type, message_id, _, offer, code, status, text].
         if len(body) < 7 or body[6] not in {"ERROR", "FAILURE"}:
             return None
         code = _bounded_text(body[1] if len(body) > 1 else None)
-        text = _bounded_text(body[8] if len(body) > 8 else None)
+        text = _bounded_text(body[7] if len(body) > 7 else None)
     elif isinstance(body, Mapping):
         status = body.get("status", body.get("STATUS", body.get("result")))
         if str(status).upper() not in {"ERROR", "FAILURE", "REJECTED"}:

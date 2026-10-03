@@ -34,13 +34,12 @@ def _success_body(venue_offer_id: int = 42) -> list[object]:
         [venue_offer_id, "fUST", 0, 0, 100.0, 0, "REQ"],
         None,
         "SUCCESS",
-        None,
         "Submitting",
     ]
 
 
 def _error_body(text: str = "Funds insufficient") -> list[object]:
-    return [1716383500000, "fon-req", None, None, None, None, "ERROR", None, text]
+    return [1716383500000, "fon-req", None, None, None, None, "ERROR", text]
 
 
 def test_success_with_venue_id_is_acknowledged() -> None:
@@ -64,6 +63,16 @@ def test_structured_2xx_error_is_rejected() -> None:
     assert len(str(outcome.raw_response)) < 1_000
     assert "Funds insufficient" in str(outcome.raw_response)
     assert _error_body() != outcome.raw_response
+
+
+def test_documented_error_text_at_index_7_is_the_rejection_reason() -> None:
+    body = [1568713496510, "fon-req", None, None, None, None, "ERROR", "Funds insufficient"]
+    assert len(body) == 8
+
+    outcome = classify_submit_response(200, body, True, None)
+
+    assert isinstance(outcome, SubmitRejected)
+    assert outcome.reason.endswith(":Funds insufficient")
 
 
 def test_allowlisted_structured_4xx_is_rejected() -> None:

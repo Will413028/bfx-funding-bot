@@ -802,7 +802,7 @@ class CancelAcknowledged:
     signal_correlation_id: UUID
     account_id: str
     rest_status: Literal["success", "already_terminal"]
-    venue_response_text: str | None = None  # Bitfinex 9th element TEXT field
+    venue_response_text: str | None = None  # Bitfinex notification TEXT, index 7
     venue_seq: int | None = None  # always None — not WS-sourced
     event_seq: int | None = None
     occurred_at_ms: int | None = None

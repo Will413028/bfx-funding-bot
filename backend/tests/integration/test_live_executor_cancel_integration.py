@@ -79,7 +79,7 @@ async def test_cancel_success_full_chain_sends_signed_post() -> None:
                 return_value=Response(200, json=[
                     1700000000000, "foc-req", None, None,
                     ["123", "fUSD", "rate", "amount"],
-                    "0", "SUCCESS", None, "Submitting cancel request",
+                    "0", "SUCCESS", "Submitting cancel request",
                 ]),
             )
             await executor.cancel(
