@@ -119,7 +119,7 @@ def test_upgrade_refuses_an_unreadable_rate_or_period(ledger_db, payload) -> Non
     engine = create_engine(url)
     try:
         with engine.begin() as conn:
-            _seed(conn)
+            _seed(conn, pre_verdict=True)
             _rewrite_payload(conn, payload)
         with pytest.raises(RuntimeError, match="refuse upgrade"):
             alembic(url, "upgrade", "head")
@@ -151,7 +151,7 @@ def test_upgrade_from_the_previous_head_fills_existing_rows(ledger_db) -> None: 
     engine = create_engine(url)
     try:
         with engine.begin() as conn:
-            _seed(conn)
+            _seed(conn, pre_verdict=True)
             for sequence, (label, payload) in enumerate(_PAYLOADS.items(), start=10):
                 _attempt_with_payload(conn, label, payload, sequence=sequence)
             conn.exec_driver_sql("ALTER TABLE ledger_observation DISABLE TRIGGER USER")
@@ -228,7 +228,7 @@ def test_round_trip_drops_and_restores_the_objects(ledger_db) -> None:  # noqa: 
             assert _objects(conn) == dict.fromkeys(
                 ("attempt_columns", "observation_columns", "check", "offer_grant"), False)
         with engine.begin() as conn:
-            _seed(conn)
+            _seed(conn, pre_verdict=True)
             _rewrite_payload(conn, _PAYLOADS["full"])
         alembic(url, "upgrade", "head")
         with engine.connect() as conn:

@@ -874,11 +874,25 @@ class AcceptedCapitalBasisSymbolRow(Base):
     unattributed_credits: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     foreign_offers: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     block: Mapped[dict[str, Any] | None] = mapped_column(_JSON)
+    # Conservation verdict against the scope's previous accepted basis
+    # (``ledger/conservation.py``); stored with the basis it was computed on.
+    conservation: Mapped[str] = mapped_column(Text, nullable=False)
+    lent_unexplained: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    foreign_executed: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     __table_args__ = (
         CheckConstraint(
             "available >= 0 AND offered >= 0 AND credits >= 0 AND unattributed_credits >= "
             "0 AND foreign_offers >= 0 AND unattributed_credits <= credits",
             name="ck_accepted_basis_symbol_amount",
+        ),
+        CheckConstraint(
+            "lent_unexplained >= 0 AND foreign_executed >= 0 AND CASE conservation "
+            "WHEN 'baseline' THEN lent_unexplained = 0 AND foreign_executed = 0 "
+            "WHEN 'conserved' THEN true "
+            "WHEN 'foreign_lending' THEN lent_unexplained > 0 AND foreign_executed > 0 "
+            "WHEN 'unexplained_lending' THEN lent_unexplained > 0 "
+            "ELSE false END",
+            name="ck_accepted_basis_symbol_conservation",
         ),
     )
 

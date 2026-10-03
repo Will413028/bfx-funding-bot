@@ -132,6 +132,24 @@ def _blocked(value: Any) -> Blocked | None:
     return Blocked(reasons[0]["reason"], evidence)
 
 
+def _symbol_block(row: AcceptedCapitalBasisSymbolRow) -> Blocked | None:
+    """The symbol's refusal: unexplained lending leads, then its fact-level block.
+
+    The verdict is stored with the basis and holds while that basis is the latest;
+    the next accepted basis compares against this one, so it lifts by itself.
+    """
+    fact = _blocked(row.block)
+    if row.conservation != "unexplained_lending":
+        return fact
+    evidence = [
+        ("lent_unexplained", str(row.lent_unexplained)),
+        ("foreign_executed", str(row.foreign_executed)),
+    ]
+    if fact is not None:
+        evidence.append(("also", fact.reason))
+    return Blocked("venue_lent_above_ledger", tuple(evidence))
+
+
 async def _policy(
     session: AsyncSession, account: UUID, environment: str, symbol: str
 ) -> AppliedPolicy | Blocked:
@@ -381,7 +399,7 @@ async def _read(
                 symbol_row.unattributed_credits,
                 symbol_row.foreign_offers,
                 tuple(sorted((cell.cell_id, cell.amount) for cell in cells)),
-                _blocked(symbol_row.block),
+                _symbol_block(symbol_row),
             ),
         )
     accepted = AcceptedCapitalBasis(

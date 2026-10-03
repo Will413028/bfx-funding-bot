@@ -100,6 +100,9 @@ DENIED = (
     ("accepted_capital_basis", "scope_block"),
     ("accepted_capital_basis", "digest"),
     ("accepted_capital_basis_symbol", "block"),
+    ("accepted_capital_basis_symbol", "conservation"),
+    ("accepted_capital_basis_symbol", "lent_unexplained"),
+    ("accepted_capital_basis_symbol", "foreign_executed"),
     ("submission_attempt_journal", "normalized_payload"),
     ("submission_attempt_journal", "authorization_evidence"),
     ("submission_attempt_journal", "seed_provenance"),
@@ -290,7 +293,7 @@ def test_upgrade_refuses_an_unusable_payload_amount(ledger_db, payload) -> None:
     engine = create_engine(url)
     try:
         with engine.begin() as conn:
-            _seed(conn)
+            _seed(conn, pre_verdict=True)
             _rewrite_payload(conn, payload)
         with pytest.raises(RuntimeError, match="refuse upgrade"):
             alembic(url, "upgrade", "head")
@@ -340,7 +343,7 @@ def test_round_trip_drops_and_restores_the_objects(ledger_db) -> None:  # noqa: 
                         {"t": table, "c": column},
                     ), (table, column)
         with engine.begin() as conn:
-            _seed(conn)
+            _seed(conn, pre_verdict=True)
             _rewrite_payload(conn, '{"amount": "12.5"}')
         alembic(url, "upgrade", "head")
         with engine.connect() as conn:

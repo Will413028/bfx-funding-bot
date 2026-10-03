@@ -72,6 +72,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingState,
     TransitionResult,
 )
+from bfx_funding_bot.modules.ledger.conservation import LEDGER_EPSILON
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
@@ -120,6 +121,9 @@ CAPITAL_BLOCK_TRIGGERS: dict[str, str] = {
         "attempt_evidence_conflict",
         "uncertainty_scope_conflict",
     ), IDENTITY_CONFLICT),
+    # Ledger conservation (S1-3e5c): the accepted basis stored lending that no
+    # observed offer and no foreign execution explains.
+    "venue_lent_above_ledger": VENUE_LENT_ABOVE_LEDGER,
 }
 # Ledger refusals that deliberately stay transient: more attempts since the
 # latest accepted basis than one read folds. The read already refuses to spend,
@@ -135,8 +139,6 @@ def capital_block_trigger(reason: str) -> str | None:
 AUTO_RESUME_CLEAN_SNAPSHOTS = 3
 AUTO_RESUME_ACTOR = "auto-resume"
 
-# Same tolerance as the reconcile divergence report.
-LEDGER_EPSILON = Decimal("0.01")
 _DETAIL_LIMIT = 400
 
 
@@ -494,7 +496,6 @@ __all__ = [
     "COMMAND_RATE_EXCEEDED",
     "FOREIGN_LENDING",
     "IDENTITY_CONFLICT",
-    "LEDGER_EPSILON",
     "NAV_DROP",
     "OFFER_AMOUNT_MISMATCH",
     "TRIGGERS",

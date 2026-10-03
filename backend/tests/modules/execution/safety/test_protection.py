@@ -325,7 +325,8 @@ def test_capital_block_trigger_keeps_every_legacy_reason_and_maps_the_ledger_one
         ), "identity_conflict"),
     }
     ledger = {"attempt_evidence_conflict": "identity_conflict",
-              "uncertainty_scope_conflict": "identity_conflict"}
+              "uncertainty_scope_conflict": "identity_conflict",
+              "venue_lent_above_ledger": "venue_lent_above_ledger"}
     assert legacy | ledger == CAPITAL_BLOCK_TRIGGERS
     for reason, trigger in (legacy | ledger).items():
         assert capital_block_trigger(reason) == trigger

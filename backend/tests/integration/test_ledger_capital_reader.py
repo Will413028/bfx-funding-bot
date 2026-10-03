@@ -808,7 +808,10 @@ async def test_terminal_history_allows_venue_clock_tolerance(book, occurred, ref
     if reflected:
         assert _view(read).snapshot.cell_exposure == Decimal("200")
     else:
-        assert _reason(read) == "unclassifiable_commitment"
+        # The unplaced attempt cannot offset the loan, so its lending is also unexplained;
+        # the protection-grade verdict leads and names the fact-level cause.
+        assert _reason(read) == "venue_lent_above_ledger"
+        assert ("also", "unclassifiable_commitment") in read.result.evidence
 
 
 @pytest.mark.asyncio

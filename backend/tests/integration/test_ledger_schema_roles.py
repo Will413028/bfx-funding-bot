@@ -158,11 +158,15 @@ def ledger_db(pg_templates, pg_clone):
         engine.dispose()
 
 
-def _seed(conn, *, old_member: bool = False) -> None:
+def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
     """Owner inserts one valid row per ledger table so row triggers are exercised."""
     # ``old_member``: the pre-d4e5f6a7b8c9 shape (no attempt cell, no trade evidence).
     cell_column = "" if old_member else "\n      cell_id,"
     cell_value = "" if old_member else "\n      'cell',"
+    # The conservation columns arrived with a3b4c5d6e7f8; ``pre_verdict`` seeds before them.
+    verdict = not (old_member or pre_verdict)
+    verdict_column = ",\n      conservation,\n      lent_unexplained,\n      foreign_executed" if verdict else ""
+    verdict_value = ",\n      'baseline',\n      0,\n      0" if verdict else ""
     # ``opened_revision`` arrived with e5f6a7b8c9d0 (after the old-member shape).
     revision_column = "" if old_member else "\n      opened_revision,"
     revision_value = "" if old_member else "\n      1,"
@@ -315,14 +319,14 @@ def _seed(conn, *, old_member: bool = False) -> None:
       offered,
       credits,
       unattributed_credits,
-      foreign_offers)
+      foreign_offers{verdict_column})
       VALUES ('{_B}',
       'fUST',
       10,
       0,
       0,
       0,
-      0)""",
+      0{verdict_value})""",
         f"""INSERT INTO accepted_capital_basis_cell(basis_id,
       symbol,
       cell_id,
