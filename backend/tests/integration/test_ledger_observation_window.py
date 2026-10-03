@@ -71,7 +71,7 @@ async def test_window_high_water_tail_uses_earliest_start_not_sequence(ledger_fi
     # Each helper call creates its own execution_decisions row (UNIQUE FK).
     await ledger_fixture.attempt(amount="10", outcome="rejected", started_at_ms=250_000)
     await ledger_fixture.attempt(amount="10", outcome="rejected", started_at_ms=200_000)
-    assert await _window(ledger_fixture) == ObservationWindow(200_000, 300_000, 140_000)
+    assert await _window(ledger_fixture) == ObservationWindow(200_000, 300_000, 140_000, frozenset({"fUST"}))
 
 
 @pytest.mark.asyncio
@@ -83,7 +83,7 @@ async def test_window_basis_unresolved_survives_the_high_water(ledger_fixture) -
     basis = await ledger_fixture.accept(_observation(), started_at_ms=300_000)
     assert basis.attempts[attempt] == ("fUST", "unresolved")
     await ledger_fixture.attempt(amount="10", outcome="rejected", started_at_ms=200_000)
-    assert await _window(ledger_fixture) == ObservationWindow(100_000, 300_000, 40_000)
+    assert await _window(ledger_fixture) == ObservationWindow(100_000, 300_000, 40_000, frozenset({"fUST"}))
 
 
 @pytest.mark.asyncio
@@ -92,13 +92,13 @@ async def test_window_open_unknown_until_resolution_is_accepted(ledger_fixture) 
     unknown = await ledger_fixture.attempt(
         amount="10", outcome="unknown", started_at_ms=100_000
     )
-    assert await _window(ledger_fixture) == ObservationWindow(100_000, 150_000, 40_000)
+    assert await _window(ledger_fixture) == ObservationWindow(100_000, 150_000, 40_000, frozenset({"fUST"}))
     basis = await ledger_fixture.accept(_observation(), started_at_ms=300_000)
     assert basis.attempts[unknown] == ("fUST", "unresolved")
-    assert await _window(ledger_fixture) == ObservationWindow(100_000, 300_000, 40_000)
+    assert await _window(ledger_fixture) == ObservationWindow(100_000, 300_000, 40_000, frozenset({"fUST"}))
     await ledger_fixture.resolve(unknown, "not_accepted")
     # The latest basis still lists it; the next acceptance removes that anchor.
-    assert await _window(ledger_fixture) == ObservationWindow(100_000, 300_000, 40_000)
+    assert await _window(ledger_fixture) == ObservationWindow(100_000, 300_000, 40_000, frozenset({"fUST"}))
     await ledger_fixture.accept(_observation(), started_at_ms=500_000)
     assert await _window(ledger_fixture) == ObservationWindow(None, 500_000, 440_000)
 
@@ -107,7 +107,7 @@ async def test_window_open_unknown_until_resolution_is_accepted(ledger_fixture) 
 async def test_window_previous_query_can_precede_all_attempts(ledger_fixture) -> None:
     await ledger_fixture.accept(_observation(), started_at_ms=150_000)
     await ledger_fixture.attempt(amount="10", outcome="rejected", started_at_ms=200_000)
-    assert await _window(ledger_fixture) == ObservationWindow(200_000, 150_000, 90_000)
+    assert await _window(ledger_fixture) == ObservationWindow(200_000, 150_000, 90_000, frozenset({"fUST"}))
 
 
 @pytest.mark.asyncio
@@ -149,7 +149,7 @@ async def test_window_tail_cap_fails_closed(ledger_fixture, monkeypatch) -> None
     await ledger_fixture.accept(_observation(), started_at_ms=150_000)
     monkeypatch.setattr(reads, "MAX_TAIL_ATTEMPTS", 1)
     await ledger_fixture.attempt(amount="10", outcome="rejected", started_at_ms=100_000)
-    assert await _window(ledger_fixture) == ObservationWindow(100_000, 150_000, 40_000)
+    assert await _window(ledger_fixture) == ObservationWindow(100_000, 150_000, 40_000, frozenset({"fUST"}))
     await ledger_fixture.attempt(amount="10", outcome="rejected", started_at_ms=200_000)
     with pytest.raises(LedgerReadUnbounded):
         await _window(ledger_fixture)

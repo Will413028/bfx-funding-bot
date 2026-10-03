@@ -36,13 +36,13 @@ async def test_no_basis_still_reads_the_earliest_attempt(monkeypatch) -> None:
     monkeypatch.setattr(reads, "previous_basis", AsyncMock(return_value=None))
     tail = AsyncMock(
         return_value=[
-            SubmissionAttemptJournalRow(started_at_ms=200_000),
-            SubmissionAttemptJournalRow(started_at_ms=100_000),
+            SubmissionAttemptJournalRow(started_at_ms=200_000, symbol="fUSD"),
+            SubmissionAttemptJournalRow(started_at_ms=100_000, symbol="fUST"),
         ]
     )
     monkeypatch.setattr(reads, "tail_attempts", tail)
     assert await reads.observation_window(session, scope) == ObservationWindow(
-        100_000, None, 40_000
+        100_000, None, 40_000, frozenset({"fUST", "fUSD"})
     )
     tail.assert_awaited_once_with(
         session, scope.exchange_account_id, "ci", 0, limit=reads.MAX_TAIL_ATTEMPTS + 1
@@ -77,11 +77,13 @@ async def test_window_includes_only_unresolved_r6_source_attempts(monkeypatch) -
     unresolved = AsyncMock(return_value=[
         SimpleNamespace(source_attempt_id=None), SimpleNamespace(source_attempt_id=source),
     ])
-    sources = AsyncMock(return_value=[SubmissionAttemptJournalRow(started_at_ms=100_000)])
+    sources = AsyncMock(
+        return_value=[SubmissionAttemptJournalRow(started_at_ms=100_000, symbol="fUST")]
+    )
     monkeypatch.setattr(reads, "unresolved_quarantines", unresolved)
     monkeypatch.setattr(reads, "attempts_by_id", sources)
     assert await reads.observation_window(session, scope) == ObservationWindow(
-        100_000, 300_000, 40_000,
+        100_000, 300_000, 40_000, frozenset({"fUST"}),
     )
     unresolved.assert_awaited_once_with(session, scope, basis)
     sources.assert_awaited_once_with(session, [source])

@@ -189,7 +189,7 @@ async def test_views_carry_the_mapped_fields(book, scenario) -> None:
     system = await _get(book, scenario.resolved_quarantine)
     assert system is not None
     assert (system.state, system.resolved_by_operator_id, system.resolution_reason) == (
-        "resolved", None, "checked by hand",
+        "resolved", "op-7", "checked by hand",  # legacy parity: a system actor is shown by id
     )
 
 

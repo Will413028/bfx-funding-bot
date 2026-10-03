@@ -15,7 +15,7 @@ from bfx_funding_bot.modules.ledger import (
     QueryHandle,
     Scope,
 )
-from bfx_funding_bot.modules.ledger._internal import clock, journal
+from bfx_funding_bot.modules.ledger._internal import clock, journal, resolver
 from bfx_funding_bot.modules.ledger.wiring import build_observation_sink
 
 SCOPE = Scope(uuid4(), "ci")
@@ -44,7 +44,7 @@ class Factory:
             self.active = None
 
 
-def cycle(monkeypatch, *, decision="accepted", refuse=False, grace=120_000):
+def cycle(monkeypatch, *, decision="accepted", refuse=False, grace=120_000, resolved=(), settle=120_000):
     factory = Factory()
     handle = QueryHandle(uuid4(), 1, 0, 300_000)
     window = ObservationWindow(100_000, 200_000, 40_000)
@@ -89,12 +89,19 @@ def cycle(monkeypatch, *, decision="accepted", refuse=False, grace=120_000):
         factory.events.append("accept")
         return Acceptance(decision, observation_id, None, None)
 
+    async def resolve(session, scope, accepted_id, *, now_ms, settle_ms):
+        assert session is factory.active and scope == SCOPE
+        assert (accepted_id, now_ms, settle_ms) == (observation_id, 300_000, settle)
+        factory.events.append("resolve")
+        return tuple(SimpleNamespace(id=item) for item in resolved)
+
     monkeypatch.setattr(clock, "lock_scope", lock)
+    monkeypatch.setattr(resolver, "resolve_unknowns", resolve)
     sink = build_observation_sink(
         factory, SimpleNamespace(observe=observe),
         journal_port=SimpleNamespace(close_dangling=dangling),
         observations=SimpleNamespace(observation_window=get_window, begin_query=begin, accept=accept),
-        now_ms=lambda: 300_000, grace_ms=grace,
+        now_ms=lambda: 300_000, grace_ms=grace, settle_ms=settle,
     )
     return sink, factory, observation_id
 
@@ -105,9 +112,16 @@ async def test_dangling_before_query_committed_before_io_accept_in_txn2(monkeypa
     assert await sink.run(SCOPE) == CycleResult("accepted", observation_id)
     assert factory.events == [
         "begin", "lock", "dangling", "window", "query", "commit", "observe",
-        "begin", "lock", "accept", "commit",
+        "begin", "lock", "accept", "resolve", "commit",
     ]
     assert factory.active is None and factory.commits == 2
+
+
+@pytest.mark.asyncio
+async def test_resolutions_are_returned_for_post_commit_notices(monkeypatch):
+    ids = (uuid4(), uuid4())
+    sink, _, observation_id = cycle(monkeypatch, resolved=ids, settle=7_000)
+    assert await sink.run(SCOPE) == CycleResult("accepted", observation_id, ids)
 
 
 @pytest.mark.parametrize("decision", ["fenced", "incomplete_or_unequal"])
@@ -116,6 +130,7 @@ async def test_acceptance_refusals_commit_and_return(monkeypatch, decision):
     sink, factory, _ = cycle(monkeypatch, decision=decision)
     assert await sink.run(SCOPE) == CycleResult(decision)
     assert factory.commits == 2
+    assert "resolve" not in factory.events  # only an accepted observation resolves
 
 
 @pytest.mark.asyncio

@@ -36,6 +36,7 @@ def test_r6_requires_complete_evidence_and_exact_margin(
         trades_requested_end_ms=100_000,
         history_requested_start_ms=start,
         history_requested_end_ms=end,
+        evidence={"history_symbols": ["fUST"]},
     )
     assert (
         _can_quarantine(
@@ -45,6 +46,7 @@ def test_r6_requires_complete_evidence_and_exact_margin(
             {"gone"} if presence == "terminal" else set(),
             {"gone"} if presence == "trade" else set(),
             observation,
+            "fUST",
         )
         is expected
     )
@@ -70,5 +72,24 @@ def test_r6_requires_trades_requested_range(start, end, expected: bool) -> None:
         history_requested_end_ms=100_000,
         trades_requested_start_ms=start,
         trades_requested_end_ms=end,
+        evidence={"history_symbols": ["fUST"]},
     )
-    assert _can_quarantine(100_000, "gone", (), (), (), observation) is expected
+    assert _can_quarantine(100_000, "gone", (), (), (), observation, "fUST") is expected
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [{}, {"history_symbols": None}, {"history_symbols": ["fUSD"]}, {"history_symbols": "fUST"}],
+)
+def test_r6_fails_closed_for_a_symbol_the_port_did_not_declare(evidence) -> None:
+    """G1/R6: absence from a symbol's history proves nothing when none was fetched."""
+    observation = LedgerObservationRow(
+        offer_history_complete=True,
+        trades_complete=True,
+        history_requested_start_ms=40_000,
+        history_requested_end_ms=100_000,
+        trades_requested_start_ms=40_000,
+        trades_requested_end_ms=100_000,
+        evidence=evidence,
+    )
+    assert _can_quarantine(100_000, "gone", (), (), (), observation, "fUST") is False

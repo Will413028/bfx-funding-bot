@@ -444,7 +444,9 @@ async def record_resolution(session: AsyncSession, scope: Scope, resolution: Res
                 ExecutionResolutionJournalRow.attempt_id == resolution.attempt_id
             )
         )
-        opening_ms = subject.started_at_ms if subject is not None else None
+        # The observation must begin after the UNKNOWN was recorded, not merely after the
+        # submit started (legacy: the uncertainty's opening event, never the attempt).
+        opening_ms = outcome.completed_at_ms if subject is not None else None
     else:
         subject = await session.get(QuarantineOpeningRow, resolution.quarantine_id)
         existing = await session.scalar(

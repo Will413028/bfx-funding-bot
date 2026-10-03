@@ -241,7 +241,8 @@ async def test_journal_writes_and_first_write_errors(seeded_fixture) -> None:  #
     engine = _engine(seeded_fixture)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     attempt = _attempt()
-    outcome = Outcome(attempt.attempt_id, "unknown", None, None, 2, {})
+    # Recorded before the seeded observation's query began (G2: the UNKNOWN is the opening).
+    outcome = Outcome(attempt.attempt_id, "unknown", None, None, 0, {})
     quarantine = Quarantine(uuid4(), "fUST", Decimal("1"), 0, {})
     member = QuarantineMember(quarantine.quarantine_id, "offer", "offer-1", UUID(_O), Decimal("1"))
     try:

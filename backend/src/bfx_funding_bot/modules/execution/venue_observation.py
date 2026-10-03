@@ -229,8 +229,11 @@ class BitfinexVenueObservation:
                                              for credit in active.credits))
         else:
             trade_start_ms = start_ms
+        # Wallet and credit symbols are the capital; the window's anchor attempts add
+        # the symbols an UNKNOWN or R6 absence proof needs even when no wallet names them.
         symbols = sorted({wallet.symbol for wallet in active.wallets if wallet.symbol is not None}
-                         | {credit.symbol for credit in active.credits})
+                         | {credit.symbol for credit in active.credits}
+                         | window.anchor_symbols)
         offers: list[CoveredHistory[OfferHistory]] = []
         credits: list[CoveredHistory[CreditHistory]] = []
         trades: list[CoveredHistory[Trade]] = []
@@ -270,6 +273,7 @@ class BitfinexVenueObservation:
             trades_complete=trade_range_matches and all(h.complete for h in trades),
             trades_requested_start_ms=trades[0].requested_start_ms if trades else trade_start_ms,
             trades_requested_end_ms=trades[0].requested_end_ms if trades else end_ms,
+            history_symbols=frozenset(symbols),
         )
         first = replace(active, coverage=coverage, finished_at_ms=self._clock_ms(),
                         offer_history=tuple(row for h in offers for row in h.rows),
