@@ -79,8 +79,11 @@ def build_venue_hint_sink(
 
 
 class _SqlCommandJournal:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession], *, max_snapshot_age_ms: int
+    ) -> None:
         self._session_factory = session_factory
+        self._max_snapshot_age_ms = max_snapshot_age_ms
 
     async def authorize(
         self, session: AsyncSession, scope: Scope, attempt: CommandAttempt,
@@ -88,6 +91,7 @@ class _SqlCommandJournal:
     ) -> Authorized | CommandRefused:
         return await journal.authorize_command(
             session, scope, attempt, basis_token, now_ms=now_ms, locked_guard=locked_guard,
+            max_snapshot_age_ms=self._max_snapshot_age_ms,
         )
 
     async def admit_cancel(
@@ -129,8 +133,11 @@ class _SqlCommandJournal:
             return None if stored is None else self._command_outcome(stored)
 
 
-def build_command_journal(session_factory: async_sessionmaker[AsyncSession]) -> CommandJournal:
-    return _SqlCommandJournal(session_factory)
+def build_command_journal(
+    session_factory: async_sessionmaker[AsyncSession], *, max_snapshot_age_ms: int
+) -> CommandJournal:
+    """``max_snapshot_age_ms`` is the one value the legacy repository is built with."""
+    return _SqlCommandJournal(session_factory, max_snapshot_age_ms=max_snapshot_age_ms)
 
 
 class _SqlLedgerJournal:

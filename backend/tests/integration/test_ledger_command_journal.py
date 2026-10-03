@@ -55,7 +55,7 @@ async def test_ack_only_cancel_bumps_once_and_rollback_restores_clock(factory): 
     async with factory.begin() as session:
         attempt = await _own_attempt(session)
         before = await _state(session)
-    port = build_command_journal(factory)
+    port = build_command_journal(factory, max_snapshot_age_ms=1000)
     async with factory.begin() as session:
         result = await port.admit_cancel(session, SCOPE, "cancel-me", now_ms=20, locked_guard=_guard)
         assert isinstance(result, CancelAdmitted)
@@ -105,7 +105,7 @@ async def test_cancel_refusal_has_no_writes(factory, change):  # noqa: F811
     reason = ("cancel_provenance_uncertain" if change in {"unknown", "quarantine"}
               else "cancel_provenance_conflict" if change == "conflict" else "cancel_provenance_missing")
     async with factory.begin() as session:
-        assert await build_command_journal(factory).admit_cancel(
+        assert await build_command_journal(factory, max_snapshot_age_ms=1000).admit_cancel(
             session, SCOPE, "absent" if change == "missing" else "cancel-me",
             now_ms=20, locked_guard=never,
         ) == CommandRefused(reason)
@@ -126,7 +126,7 @@ async def test_cancel_guard_failure_can_be_caught_and_commits_nothing(factory): 
 
     async with factory.begin() as session:
         with pytest.raises(RuntimeError, match="guard refused"):
-            await build_command_journal(factory).admit_cancel(
+            await build_command_journal(factory, max_snapshot_age_ms=1000).admit_cancel(
                 session, SCOPE, "cancel-me", now_ms=20, locked_guard=refuse,
             )
         assert await _state(session) == before
@@ -139,7 +139,7 @@ async def test_command_outcome_owned_commit_duplicate_and_scoped_readback(factor
     async with factory.begin() as session:
         attempt = await _own_attempt(session, kind=None)
         before = await _state(session)
-    port = build_command_journal(factory)
+    port = build_command_journal(factory, max_snapshot_age_ms=1000)
     assert await port.read_back_outcome(SCOPE, attempt.attempt_id) is None
     outcome = CommandOutcome("ack", "cancel-me", None, 10, {"test": True})
     await port.record_outcome(SCOPE, attempt.attempt_id, outcome)
