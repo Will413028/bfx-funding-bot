@@ -84,3 +84,7 @@ Phase 3b-WFO（[2026-05-18-phase3b-walk-forward-over-single-split](2026-05-18-ph
 
 - 來源（Provenance）：`2026-05-18-phase4-roadmap-design.md`（首版 `c1ab7f1`、schema lock `5d78b72`）（原文已不在 repo，本 ADR 即紀錄）
 - 前置：[2026-05-18-phase3b-walk-forward-over-single-split](2026-05-18-phase3b-walk-forward-over-single-split.md)；4.1 設計：[2026-05-18-phase4.1-live-signal-pipeline](2026-05-18-phase4.1-live-signal-pipeline.md)
+
+## Amendment (2026-10-03): testnet 約束措辭
+
+「Bitfinex 沒有 funding testnet」不精確：Paper Trading 子帳戶含 funding，但官方說明不重現 live；結論（真錢前的驗證只能是 live feed 上的模擬）不變。模擬的現行做法見 [2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue](2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue.md)。
