@@ -48,8 +48,8 @@ Will 已決定模擬要改接 ledger（同一套 ledger port 加模擬 venue）�
 
 ## Decision
 
-- **D1 = A。** 模擬固定在獨立 DB 執行，epoch 設為 `ledger`、realm 設為 `shadow`，S1-7 前就能開機。simulated venue 只接受 epoch `ledger`；realm 為 `prod` 時，config 與 DB CHECK 都拒絕。prod DB 永遠不會出現 `shadow`／`ci` 資料列。
-- **D2 = T。** venue 的狀態以 event-sourced 方式存在 simulation DB，ledger journal 一律不讀。CI 與 unit 改用同一介面的記憶體實作。成交模型採 book-queue 加成交量的決定性規則，從 `lending/tracking/book_replay.py` 抽出純函式，研究與模擬共用。利息依 Bitfinex 付息節奏直接記入 wallet，attribution 不在本次範圍。故障注入（UNKNOWN、REJECTED、NOT_SENT、history 不完整）預設關閉，CI 打開。
+- **D1 = A。** 模擬固定在獨立 DB 執行：同一個 Postgres cluster 裡另開一個 database，epoch 設為 `ledger`、realm 設為 `shadow`，S1-7 前就能開機。sim bot 沿用 `bfx_bot` 登入。simulated venue 只接受 epoch `ledger`；realm 為 `prod` 時 config 會拒絕。DB 層的保護是每個 database 存一列 `database_realm`，由 trigger 拒絕與本 DB realm 不符的寫入。之所以不用表 CHECK，是因為同一條 migration chain 在 sim DB 也必須接受 `shadow`。prod DB 永遠不會出現 `shadow`／`ci` 資料列。
+- **D2 = T。** venue 的狀態以 event-sourced 方式存在 simulation DB，ledger journal 一律不讀。CI 與 unit 改用同一介面的記憶體實作。成交模型採 book-queue 加成交量的決定性規則，從 `lending/tracking/book_replay.py` 抽出純函式，研究與模擬共用。模擬吃公開 funding trades 的逐筆成交量；研究端仍用小時 K。逐筆 trades 依小時加總後應等於 K 線成交量，以測試對齊。利息依 Bitfinex 付息節奏直接記入 wallet，attribution 不在本次範圍。venue 故障注入（UNKNOWN，包括 venue 拒絕卻回 5xx 加 `["error",…]` 的形狀、REJECTED、history 不完整）預設關閉，CI 打開。NOT_SENT 不是 venue 故障：executor 在 HTTP 送出前就標記 transport 已開始，transport 拋出的例外一律判為 UNKNOWN。NOT_SENT 改在 executor 之前，以本地故障注入。模擬器回應的形狀取自 Bitfinex 文件或 live 擷取，不照 client parser 抄。
 - **D3 = b。** soak 門檻草案：
   - 至少 72 小時，期間至少 2 次部署重啟與 1 次 kill；
   - `unexplained_lending` 為 0；
@@ -62,7 +62,7 @@ Will 已決定模擬要改接 ledger（同一套 ledger port 加模擬 venue）�
 
 ## Rationale
 
-- **D1**：獨立 DB 的隔離是物理上的，不必靠查詢過濾。S1-7 前就能取得 ledger 全鏈證據，也不必放寬 epoch 的保護。**不選 B**：S1-7 前開不了機，切換前拿不到證據。**不選 C**：為了模擬去削弱 prod 的休眠保護，得不償失。**代價**：部署工具要能 migrate 第二個 DB，VM 還要多跑一個 Postgres（資源餘裕待量測）。
+- **D1**：獨立 DB 的隔離是物理上的，不必靠查詢過濾。S1-7 前就能取得 ledger 全鏈證據，也不必放寬 epoch 的保護。**不選 B**：S1-7 前開不了機，切換前拿不到證據。**不選 C**：為了模擬去削弱 prod 的休眠保護，得不償失。**代價**：部署工具必須能 migrate 第二個 database；default privileges 以 database 為單位，建立 sim DB 時要重新設定。VM 資源已量過（2026-10-04：可用記憶體 18 GB，bot 265 MiB、Postgres 179 MiB），足以多跑一個 bot 和一個 database。
 - **D2**：本系統的正確性骨幹是對帳。`BitfinexVenueObservation` 的 symbol 集合、時間窗、coverage 判定（G1 缺陷就出在這裡），以及 executor 對 HTTP 回應的 ACK／UNKNOWN 分類，都應該留在迴圈內。只有 T 能做到。**不選 P**：會繞過上述兩層，而 P 的優勢只有工作量（SELF-IMPOSED）。**不選 W**：要另寫簽章、nonce 與 WS，成本約為 T 的 2 到 3 倍。**不選 S**：不重現 live，只能當臨時的傳輸一致性檢查。**狀態存 DB 不存記憶體**：模擬 venue 的耐久度不能低於 bot 自己的耐久度，否則每次重啟都會製造真 venue 不會有的 quarantine，測到的是模擬器失憶，而不是 bot。**代價**：成交模型偏樂觀（不模擬後來者削價），模擬 P&L 校準前不能拿來做決策。
 - **D3**：母 ADR D7'' 放棄切換前的持續觀測，理由之一是 shadow 基礎設施用完即丟。現在模擬器是永久保留的，這個理由不再成立；soak 是用最便宜的方式補回這段證據。**不選 a**：CI 只跑單一行程的短情境，抓不到重啟、長時間漂移與部署互動。**不選 c**：要多一條部署路徑，在目前沒有實驗需求的情況下只是成本。**代價**：模擬 venue 無法驗證 Bitfinex 本身的語意，soak 證明的範圍只到 ledger、組裝與 runtime。
 - **D4**：系統未上線，沒有相容負擔。保留沒有 producer 的 `is_simulated` 分支只是技術債。
@@ -77,8 +77,8 @@ Will 已決定模擬要改接 ledger（同一套 ledger port 加模擬 venue）�
 
 - [ ] P1：simulated venue 模組、simulation DB 的 migration 路徑與故障注入，先以 dormant 狀態合併。
 - [ ] P2：組裝改為 venue 軸並執行 D4 的刪除；把 SignalEngine 與 `date_provider` 的 wall time 改接 composition clock。
-- [ ] 量測 VM 能否再承載一個 bot 與一個 Postgres，再定案 soak 的執行方式與門檻。
-- [ ] prod DB 加 CHECK，限制 realm 只能是 `prod`。
+- [ ] soak 前單獨一個 PR：每個 database 一列 `database_realm` 加 trigger。
+- [ ] 定案 soak 的執行方式（常駐第二個 compose service 或 one-shot job）與門檻。
 
 ## Revocation Triggers
 
