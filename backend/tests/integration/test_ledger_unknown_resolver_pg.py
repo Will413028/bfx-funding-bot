@@ -324,9 +324,12 @@ async def test_prod_sequences_9502_9539_and_9849_9859_resolve_not_accepted_in_a_
 
     Legacy resolves each as ``zero_match`` -> UncertaintyMarkedNotAccepted (the same
     evidence is asserted through the legacy matcher); the ledger resolves them
-    NOT_ACCEPTED too. Declared divergence: after the resolution but before the next
-    acceptance legacy reads ``snapshot_superseded_by_unfenced_observation``
-    (test_trading_shadow_unknown_cycles.py:102-109), the ledger ``execution_unknown``.
+    NOT_ACCEPTED too. No divergence in what is read after the resolution: both read
+    ``execution_unknown`` until the next acceptance (the legacy ``BootRecovery`` accepts the
+    snapshot before it resolves, in one transaction; ``snapshot_superseded...`` appears only
+    in the hand-appended shadow fixture of test_trading_shadow_unknown_cycles.py). The
+    composed legacy and ledger processes run both sequences in
+    test_unknown_sequences_e2e.py.
     """
     await start(book)
     clock = Clock()
