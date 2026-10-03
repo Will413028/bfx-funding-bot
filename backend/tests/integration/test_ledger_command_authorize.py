@@ -236,6 +236,15 @@ async def test_policy_change_is_final_and_not_retried(book, port, reads) -> None
     assert len(reads) == 1 and guard.calls == 0 and await _written(book) == before
 
 
+async def test_policy_change_wins_over_the_new_policys_budget(book, port) -> None:  # noqa: F811
+    await _ready(book)
+    attempt, token = await _decide(book)
+    await book.policy("fUST", reserve="1000000")  # the new revision leaves no budget
+    result = await _authorize(book, port, attempt, token, Guard())
+    # The budget is the decision's policy's question; a new revision is reported as such.
+    assert result == CommandRefused("capital_policy_revision_changed")
+
+
 async def test_policy_change_with_a_stale_clock_is_final_after_the_retry_read(
     book, port, reads  # noqa: F811
 ) -> None:
