@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
@@ -95,6 +95,35 @@ async def add_quarantine_member(
     )
     await session.flush()
     await bump_locked(session, scope)
+
+
+async def has_unresolved_quarantine(
+    session: AsyncSession, scope: Scope, basis: AcceptedCapitalBasisRow | None, symbol: str
+) -> bool:
+    """``unresolved_quarantines`` for one symbol as one bounded EXISTS (LIMIT 1)."""
+    candidate = QuarantineOpeningRow.opened_revision > (
+        basis.accept_revision if basis is not None else 0
+    )
+    if basis is not None:
+        candidate = candidate | QuarantineOpeningRow.quarantine_id.in_(
+            select(AcceptedCapitalBasisQuarantineRow.quarantine_id).where(
+                AcceptedCapitalBasisQuarantineRow.basis_id == basis.id
+            )
+        )
+    found = await session.scalar(
+        select(QuarantineOpeningRow.quarantine_id)
+        .where(
+            QuarantineOpeningRow.exchange_account_id == scope.exchange_account_id,
+            QuarantineOpeningRow.deployment_environment == scope.deployment_environment,
+            QuarantineOpeningRow.symbol == symbol,
+            candidate,
+            ~exists().where(
+                ExecutionResolutionJournalRow.quarantine_id == QuarantineOpeningRow.quarantine_id
+            ),
+        )
+        .limit(1)
+    )
+    return found is not None
 
 
 async def unresolved_quarantines(

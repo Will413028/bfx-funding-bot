@@ -36,8 +36,8 @@ from bfx_funding_bot.modules.ledger.tables import (
     VenueOfferMirrorRow,
 )
 
-_ATTEMPT_KIND = "submit_outcome_unknown"
-_QUARANTINE_KIND = "unattributed_venue_offer"
+_ATTEMPT_KIND = reads.UNCERTAINTY_KINDS["attempt"]
+_QUARANTINE_KIND = reads.UNCERTAINTY_KINDS["quarantine"]
 _R6_REASON = "acked_offer_unobserved"
 
 

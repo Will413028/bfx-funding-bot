@@ -1,5 +1,6 @@
 """Pure trading contracts; implementations and wiring do not belong in this facade."""
 
+from bfx_funding_bot.modules.trading.amount import AMOUNT_QUANTUM, fingerprint_of
 from bfx_funding_bot.modules.trading.capital import (
     AcceptedCapitalBasis,
     AppliedPolicy,
@@ -41,12 +42,12 @@ from bfx_funding_bot.modules.trading.policy import (
 )
 
 __all__ = [
-    "ENVELOPE_KEYS", "POLICY_KEYS", "VENUE_MAX_PERIOD_DAYS", "VENUE_MIN_PERIOD_DAYS",
+    "AMOUNT_QUANTUM", "ENVELOPE_KEYS", "POLICY_KEYS", "VENUE_MAX_PERIOD_DAYS", "VENUE_MIN_PERIOD_DAYS",
     "AcceptedCapitalBasis", "AppliedPolicy", "AttemptFact", "AttemptOutcome", "Available",
     "Blocked", "CapitalBlockedReason", "CapitalBudget", "CapitalPolicy", "CapitalReadContext",
     "CapitalResult", "CapitalScope", "CapitalSnapshot", "CapitalView", "ComparisonKind",
     "ComparisonStatus", "DifferenceClassification", "OfferEnvelope", "PolicyHead",
     "PolicyRejectedError", "PolicyRevisionKey", "SymbolCapital", "UncertaintyFact", "check_pointer",
-    "derive_capital", "envelope_payload", "evaluate_capital", "parse_policy", "policy_digest",
+    "derive_capital", "envelope_payload", "evaluate_capital", "fingerprint_of", "parse_policy", "policy_digest",
     "policy_payload", "policy_schema_version",
 ]

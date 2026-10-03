@@ -20,10 +20,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
     FundingOfferHistory,
     FundingOfferHistoryCoverage,
 )
-from bfx_funding_bot.modules.execution.amount_fingerprint import (
-    fingerprint_of,
-    fingerprints_in_use,
-)
+from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprints_in_use
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.boot_recovery import (
     SYSTEM_RESOLVER,
@@ -50,7 +47,7 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     SubmissionAttemptRow,
 )
 from bfx_funding_bot.modules.observability import alerts
-from bfx_funding_bot.modules.trading import CapitalPolicy
+from bfx_funding_bot.modules.trading import CapitalPolicy, fingerprint_of
 
 from .test_automatic_protection import FakeAuth, Recorder, _offer
 from .test_capital_command_boundary import AMOUNT, boundary, second_ready

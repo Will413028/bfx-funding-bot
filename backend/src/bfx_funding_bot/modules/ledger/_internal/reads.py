@@ -60,7 +60,10 @@ from bfx_funding_bot.modules.ledger._internal.attempts import (
 )
 from bfx_funding_bot.modules.ledger._internal.basis import previous_basis
 from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance, sole_owner
-from bfx_funding_bot.modules.ledger._internal.quarantine import unresolved_quarantines
+from bfx_funding_bot.modules.ledger._internal.quarantine import (
+    has_unresolved_quarantine,
+    unresolved_quarantines,
+)
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisRow,
@@ -78,6 +81,11 @@ _DECISIONS = table(
     column("decision_id", Text),
     column("signal_correlation_id", Text),
 )
+# The operator-visible code per subject: OperatorReads and the consumer port share it.
+UNCERTAINTY_KINDS: dict[str, str] = {
+    "attempt": "submit_outcome_unknown",
+    "quarantine": "unattributed_venue_offer",
+}
 # Settled attempts free their fingerprint; everything else still holds it.
 _SETTLED_OUTCOMES = frozenset(("rejected", "not_sent"))
 
@@ -224,6 +232,21 @@ async def open_uncertainties(
     return tuple(found)
 
 
+async def has_open_uncertainty(session: AsyncSession, scope: Scope, symbol: str) -> bool:
+    """``open_uncertainties(symbol)`` is non-empty, quarantines as one LIMIT 1 EXISTS."""
+    candidates = await _candidates(session, scope, with_payload=False)
+    if any(
+        attempt_symbol == symbol
+        for _, attempt_symbol in open_unknowns(
+            ((row.attempt_id, row.symbol) for row in candidates.attempts),
+            candidates.outcomes,
+            candidates.resolutions,
+        )
+    ):
+        return True
+    return await has_unresolved_quarantine(session, scope, candidates.basis, symbol)
+
+
 def _live_mirror(scope: Scope) -> Select[tuple[VenueOfferMirrorRow]]:
     # A terminal row is never present (ck_venue_offer_mirror_terminal), so the
     # present flag alone selects the live, non-terminal offers. Written as the
@@ -290,6 +313,29 @@ async def _correlations(session: AsyncSession, decision_ids: Iterable[str]) -> d
         )
     )
     return dict(rows.tuples().all())
+
+
+async def live_symbols(session: AsyncSession, scope: Scope) -> frozenset[str]:
+    """Symbols with any live mirror offer: managed, foreign or contradictory."""
+    return frozenset(
+        await session.scalars(
+            select(VenueOfferMirrorRow.symbol)
+            .where(
+                VenueOfferMirrorRow.exchange_account_id == scope.exchange_account_id,
+                VenueOfferMirrorRow.deployment_environment == scope.deployment_environment,
+                VenueOfferMirrorRow.present_in_latest_accepted_snapshot,
+            )
+            .distinct()
+        )
+    )
+
+
+async def count_live_offers(session: AsyncSession, scope: Scope, symbol: str) -> int:
+    """Managed plus contradictory live offers of ``symbol`` (fail-closed upper bound)."""
+    live = await _live(
+        session, scope, _live_mirror(scope).where(VenueOfferMirrorRow.symbol == symbol)
+    )
+    return len(live.managed) + len(live.conflicts)
 
 
 def _managed_offer(
@@ -412,8 +458,12 @@ async def fingerprints_in_use(
 
 
 __all__ = [
+    "UNCERTAINTY_KINDS",
     "cancel_provenance",
+    "count_live_offers",
     "fingerprints_in_use",
+    "has_open_uncertainty",
+    "live_symbols",
     "managed_live_offers",
     "observation_window",
     "open_uncertainties",

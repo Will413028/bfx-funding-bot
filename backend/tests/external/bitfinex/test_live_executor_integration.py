@@ -232,9 +232,9 @@ async def test_planned_amount_reaches_the_venue_body_unchanged(planned, fingerpr
     from bfx_funding_bot.modules.execution.amount_fingerprint import (
         FINGERPRINT_SPACE,
         choose_fingerprinted_amount,
-        fingerprint_of,
     )
     from bfx_funding_bot.modules.execution.command_gate import _normalized_venue_payload
+    from bfx_funding_bot.modules.trading import fingerprint_of
 
     amount = choose_fingerprinted_amount(
         planned, seed_key="exact-path",

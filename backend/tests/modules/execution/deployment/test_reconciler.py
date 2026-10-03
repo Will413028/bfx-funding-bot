@@ -134,7 +134,7 @@ def _capital_ports(capital, *, offers=None, uncertainty=None, scope=None, sessio
 
 def _planned(sent, planned: str) -> bool:
     """The planned amount as sent: fingerprinted (D3a), so below it by < 0.0001."""
-    from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprint_of
+    from bfx_funding_bot.modules.trading import fingerprint_of
     value = D(str(sent))
     return D(planned) - D("0.0001") < value <= D(planned) and bool(fingerprint_of(value))
 
@@ -1646,9 +1646,9 @@ def _fingerprinting(rec, held):
 async def test_planner_fingerprints_the_amount_the_guards_audit_and_executor_all_see():
     from bfx_funding_bot.modules.execution.amount_fingerprint import (
         FINGERPRINT_SPACE,
-        fingerprint_of,
         fingerprint_seed,
     )
+    from bfx_funding_bot.modules.trading import fingerprint_of
     quote = _post_quote("fUST_a30")
     safety = _FakeSafety(allowed=True)
     rec, ex, tracker, _ = _build(exposure=D("370"), quotes=[quote], safety=safety)

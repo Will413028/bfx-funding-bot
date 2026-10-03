@@ -8,10 +8,10 @@ import pytest
 from bfx_funding_bot.modules.execution.amount_fingerprint import (
     FINGERPRINT_SPACE,
     choose_fingerprinted_amount,
-    fingerprint_of,
     fingerprint_seed,
     fingerprinted,
 )
+from bfx_funding_bot.modules.trading import fingerprint_of
 
 D = Decimal
 
