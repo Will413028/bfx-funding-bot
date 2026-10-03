@@ -12,7 +12,9 @@ provenance means the offer is foreign; more than one story is a fact-level
 block, never a reason to call it foreign.
 
 Blocks are per symbol (``accepted_capital_basis_symbol.block``); a fact that
-cannot be tied to a symbol row of this basis goes to ``scope_block``.
+cannot be tied to a symbol row of this basis goes to ``scope_block``. Each symbol
+row also stores its conservation verdict against the previous accepted basis
+(``ledger/conservation.py``).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from sqlalchemy.orm import load_only
 from bfx_funding_bot.core.venue_time import HISTORY_QUERY_MARGIN_MS, VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.modules.ledger import JsonObject, Quarantine, Scope
 from bfx_funding_bot.modules.ledger._internal import history_symbols
+from bfx_funding_bot.modules.ledger._internal.conservation_facts import symbol_verdicts
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
 from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance, sole_owner
 from bfx_funding_bot.modules.ledger._internal.quarantine import (
@@ -45,6 +48,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisRow,
     AcceptedCapitalBasisSymbolRow,
     ExecutionResolutionJournalRow,
+    LedgerObservationCreditHistoryRow,
     LedgerObservationCreditRow,
     LedgerObservationOfferHistoryRow,
     LedgerObservationOfferRow,
@@ -233,6 +237,13 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             )
         )
     ).all()
+    credit_history = (
+        await session.scalars(
+            select(LedgerObservationCreditHistoryRow).where(
+                LedgerObservationCreditHistoryRow.observation_id == observation_id
+            )
+        )
+    ).all()
     symbols: dict[str, _Symbol] = {
         wallet.symbol: _Symbol(wallet.available) for wallet in wallets if wallet.symbol is not None
     }
@@ -240,17 +251,16 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
 
     # Previous basis evidence: its observation's offers now gone, its credits.
     current_ids = {offer.venue_offer_id for offer in offers}
-    gone: list[LedgerObservationOfferRow] = []
+    prior_offers: list[LedgerObservationOfferRow] = []
     prior_credits: list[AcceptedCapitalBasisCreditRow] = []
     prior_cells: dict[CreditKey, set[str]] = {}
     prior_attempts: list[AcceptedCapitalBasisAttemptRow] = []
     if previous is not None:
-        gone = list(
+        prior_offers = list(
             (
                 await session.scalars(
                     select(LedgerObservationOfferRow).where(
-                        LedgerObservationOfferRow.observation_id == previous.observation_id,
-                        LedgerObservationOfferRow.venue_offer_id.not_in(current_ids),
+                        LedgerObservationOfferRow.observation_id == previous.observation_id
                     )
                 )
             ).all()
@@ -283,6 +293,8 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             ).all()
         )
 
+    gone = [row for row in prior_offers if row.venue_offer_id not in current_ids]
+
     # Credit groups (symbol, period, opening) and this observation's trades at them.
     group_of: dict[CreditKey, Group] = {}
     live: dict[Group, Decimal] = {}
@@ -293,11 +305,14 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             live[key] = live.get(key, ZERO) + credit.amount
     trades: list[tuple[Group, Decimal, str]] = []
     traded_offer_ids: set[str] = set()
-    for trade in await session.scalars(
-        select(LedgerObservationTradeRow).where(
-            LedgerObservationTradeRow.observation_id == observation_id
+    trade_rows = list(
+        await session.scalars(
+            select(LedgerObservationTradeRow).where(
+                LedgerObservationTradeRow.observation_id == observation_id
+            )
         )
-    ):
+    )
+    for trade in trade_rows:
         traded_offer_ids.add(trade.venue_offer_id)
         key = (trade.symbol, trade.period_days, trade.mts_create)
         if key in live:
@@ -348,7 +363,8 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         [
             *current_ids,
             *(row.venue_offer_id for row in history),
-            *(row.venue_offer_id for row in gone),
+            *(row.venue_offer_id for row in prior_offers),
+            *(row.venue_offer_id for row in trade_rows),
             *(offer_id for _, _, offer_id in trades),
         ]
     )
@@ -575,6 +591,21 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         row.quarantine_id for row in await unresolved_quarantines(session, scope, previous)
     )
 
+    verdicts = await symbol_verdicts(
+        session,
+        previous=previous,
+        observation=observation,
+        symbols=symbols,
+        previous_offers=prior_offers,
+        previous_credits=prior_credits,
+        offers=offers,
+        credits=credits,
+        credit_history=credit_history,
+        terminal=terminal,
+        trades=trade_rows,
+        provenance=c.provenance,
+        quarantines=quarantines,
+    )
     scope_block = _block_json(c.scope_reasons)
     payload: JsonObject = {
         "domain": "bfx-ledger-capital-basis",
@@ -592,6 +623,10 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 _text(v.unattributed),
                 _text(v.foreign),
                 _block_json(v.reasons),
+                verdicts[name].conservation,
+                _text(verdicts[name].lent_unexplained),
+                _text(verdicts[name].foreign_executed),
+                verdicts[name].fill_conflicts,
             ]
             for name, v in sorted(symbols.items())
         ],
@@ -643,6 +678,10 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 unattributed_credits=v.unattributed,
                 foreign_offers=v.foreign,
                 block=_block_json(v.reasons),
+                conservation=verdicts[name].conservation,
+                lent_unexplained=verdicts[name].lent_unexplained,
+                foreign_executed=verdicts[name].foreign_executed,
+                fill_conflicts=verdicts[name].fill_conflicts,
             )
         )
     for (name, cell), amount in cells.items():

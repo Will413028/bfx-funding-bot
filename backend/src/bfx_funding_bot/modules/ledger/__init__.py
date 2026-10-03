@@ -11,6 +11,15 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.modules.ledger.conservation import (
+    LEDGER_EPSILON,
+    AcceptedConservation,
+    Conservation,
+    ConservationVerdict,
+    OfferFill,
+    SymbolConservation,
+    conservation_verdict,
+)
 from bfx_funding_bot.modules.ledger.matching import (
     UNKNOWN_SETTLE_MS,
     AutoAction,
@@ -764,6 +773,16 @@ class LedgerManagedOffers(Protocol):
         ...
 
 
+class LedgerConservationReader(Protocol):
+    """The conservation verdicts stored with the scope's latest accepted basis.
+
+    Acceptance computes and stores them; this only reads. ``None`` when the scope
+    has no accepted basis. Run it on the caller's session.
+    """
+
+    async def latest(self, session: AsyncSession, scope: Scope) -> AcceptedConservation | None: ...
+
+
 # ---------------------------------------------------------------------------
 # Consumer read ports (S1-3c1). Runtime consumers depend on these Protocols
 # only; apps injects an implementation (the legacy adapters today). Every
@@ -1052,6 +1071,7 @@ class CommandJournal(Protocol):
 __all__ = [
     "CREDIT_STATUSES",
     "CREDIT_TERMINAL_KINDS",
+    "LEDGER_EPSILON",
     "MANUAL_RESOLUTION_DECISIONS",
     "OBSERVATION_REF_PREFIX",
     "OFFER_STATUSES",
@@ -1059,6 +1079,7 @@ __all__ = [
     "UNKNOWN_SETTLE_MS",
     "Acceptance",
     "AcceptanceDecision",
+    "AcceptedConservation",
     "AppliedResolution",
     "Attempt",
     "AuthorizeRefused",
@@ -1076,6 +1097,8 @@ __all__ = [
     "CommandJournal",
     "CommandOutcome",
     "CommandRefused",
+    "Conservation",
+    "ConservationVerdict",
     "Coverage",
     "Credit",
     "CreditCloseHint",
@@ -1087,6 +1110,7 @@ __all__ = [
     "JsonObject",
     "LedgerCapitalRead",
     "LedgerCapitalReader",
+    "LedgerConservationReader",
     "LedgerJournal",
     "LedgerManagedOffers",
     "LedgerObservations",
@@ -1104,6 +1128,7 @@ __all__ = [
     "ObservationWindow",
     "Offer",
     "OfferCloseHint",
+    "OfferFill",
     "OfferHistory",
     "OfferStatus",
     "OfferTerminalKind",
@@ -1135,6 +1160,7 @@ __all__ = [
     "ResolutionSubject",
     "Scope",
     "ScopeLock",
+    "SymbolConservation",
     "Trade",
     "UncertaintyReader",
     "UncertaintyRecord",
@@ -1149,6 +1175,7 @@ __all__ = [
     "VerifiedEvidence",
     "Wallet",
     "amount_seen_since_start",
+    "conservation_verdict",
     "decide_unknown",
     "encode_basis_token",
     "match_unknown",

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from bfx_funding_bot.modules.ledger import (
     UNKNOWN_SETTLE_MS,
     Acceptance,
+    AcceptedConservation,
     Attempt,
     Authorized,
     AuthorizeRefused,
@@ -25,6 +26,7 @@ from bfx_funding_bot.modules.ledger import (
     CycleResult,
     LedgerCapitalRead,
     LedgerCapitalReader,
+    LedgerConservationReader,
     LedgerJournal,
     LedgerManagedOffers,
     LedgerObservations,
@@ -57,6 +59,7 @@ from bfx_funding_bot.modules.ledger import (
 from bfx_funding_bot.modules.ledger._internal import (
     capital_reader,
     clock,
+    conservation_read,
     journal,
     observation,
     operator_evidence,
@@ -211,6 +214,15 @@ class _SqlLedgerCapitalReader:
 
 def build_ledger_capital_reader() -> LedgerCapitalReader:
     return _SqlLedgerCapitalReader()
+
+
+class _SqlLedgerConservationReader:
+    async def latest(self, session: AsyncSession, scope: Scope) -> AcceptedConservation | None:
+        return await conservation_read.latest_conservation(session, scope)
+
+
+def build_ledger_conservation_reader() -> LedgerConservationReader:
+    return _SqlLedgerConservationReader()
 
 
 class _SqlLedgerObservations:

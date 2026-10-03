@@ -443,7 +443,10 @@ async def test_trade_attributed_credit_is_its_cells_exposure(book) -> None:
     await book.accept(_observation("800", offers=(_offer("101", "200"),)))
     await book.accept(
         _observation(
-            "800", credits=(_credit("c1", "200", opening=101_150),), trades=(_trade("101", "200"),)
+            "800",
+            credits=(_credit("c1", "200", opening=101_150),),
+            history=(OfferHistory(_offer("101", "200", "0"), "executed", 5000),),
+            trades=(_trade("101", "200"),),
         )
     )
     a30, p2 = _view(await book.read()), _view(await book.read(cell="p2"))
@@ -480,8 +483,14 @@ async def test_loan_turning_into_split_credits_stays_in_its_cells_exposure(book)
             lent("463464632", "68.91607434", 101_180),
         ),
     ]
-    for credits in stages:
-        await book.accept(_observation(cash, credits=credits))
+    filled = {
+        "history": (OfferHistory(_offer("101", str(trade), "0"), "executed", 5000),),
+        "trades": (_trade("101", str(trade)),),
+    }
+    for number, credits in enumerate(stages):
+        # The offer fills in the first stage; the venue then only re-cuts the same lending.
+        extra = filled if number == 0 else {}
+        await book.accept(_observation(cash, credits=credits, **extra))
         a30, p2 = _view(await book.read()), _view(await book.read(cell="p2"))
         assert a30.snapshot.cell_exposure == trade
         assert a30.unattributed_credit_exposure == p2.snapshot.cell_exposure == 0

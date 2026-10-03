@@ -268,7 +268,7 @@ def test_downgrade_round_trip_restores_the_prior_state(ledger_db) -> None:
     ledger_db.dispose()
     # Without the guard the prior build's bot writes as before.
     with ledger_db.begin() as conn:
-        _seed(conn)
+        _seed(conn, pre_verdict=True)
     with ledger_db.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         conn.exec_driver_sql(_ATTEMPT.format(attempt=uuid4()))
