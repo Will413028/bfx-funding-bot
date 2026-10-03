@@ -30,21 +30,15 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
+from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary, CommandFacts
 from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
     ReadyToSubmit,
     ReservationRef,
 )
 from bfx_funding_bot.modules.execution.event_store.persister import EventPersister
-from bfx_funding_bot.modules.execution.events import (
-    OrderFilled,
-    ReservationClaimed,
-    ReservationFailed,
-    ReservationIntent,
-    ReservationUnknown,
-)
-from bfx_funding_bot.modules.execution.legacy_command_journal import LegacyCommandJournal
+from bfx_funding_bot.modules.execution.events import ReservationIntent, ReservationUnknown
+from bfx_funding_bot.modules.execution.legacy_command_effects import persist_simulated_outcome
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     CancelPort,
@@ -63,11 +57,9 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
 from bfx_funding_bot.modules.ledger import (
     CancelAdmitted,
     CommandAttempt,
-    CommandJournal,
     CommandOutcome,
     CommandRefused,
     ManagedOfferReader,
-    OutcomeKind,
     Scope,
     UncertaintyReader,
 )
@@ -118,7 +110,7 @@ class AccountCommandGate:
         inner: ExecutorPort,
         *,
         bus: DomainEventBus,
-        persister: EventPersister,
+        persister: EventPersister | None = None,
         uncertainty_reader: UncertaintyReader,
         safety_evaluator: AuthoritativeSafetyEvaluator,
         deployment_environment: str,
@@ -126,9 +118,8 @@ class AccountCommandGate:
         clock: Callable[[], int] | None = None,
         date_provider: Callable[[], date] | None = None,
         uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
-        capital_runtime: CapitalRuntime | None = None,
+        boundary: CommandBoundary | None = None,
         managed_offers: ManagedOfferReader | None = None,
-        command_journal: CommandJournal | None = None,
     ) -> None:
         if not deployment_environment.strip():
             raise ValueError("deployment_environment must be non-empty")
@@ -142,16 +133,14 @@ class AccountCommandGate:
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._date_provider = date_provider or (lambda: datetime.now(UTC).date())
         self._uncertainty_handler = uncertainty_handler
-        if not is_simulated and capital_runtime is None:
-            raise ValueError("live command gate requires applied capital runtime")
-        self._capital = capital_runtime
-        if capital_runtime is not None and managed_offers is None:
+        if not is_simulated and boundary is None:
+            raise ValueError("live command gate requires a command boundary")
+        if boundary is None and persister is None:
+            raise ValueError("simulated command gate requires a persister")
+        if boundary is not None and managed_offers is None:
             raise ValueError("live command gate requires managed offer reads")
+        self._boundary = boundary
         self._offers = managed_offers
-        self._journal = command_journal or (LegacyCommandJournal(
-            capital_runtime, date_provider=self._date_provider, clock=self._clock,
-            uncertainty_reader=self._uncertainty_reader,
-        ) if capital_runtime is not None else None)
         # Automatic protections. ``trip`` only records and queues, so it is safe
         # to call here while this gate's account lock is held; the kill it
         # leads to waits for that lock from another task.
@@ -215,7 +204,7 @@ class AccountCommandGate:
         lock = self._account_locks.setdefault(lock_key, asyncio.Lock())
         async with lock:
             self._admit("submit")
-            if self._capital is None:
+            if self._boundary is None:
                 await self.check(ready, context)
                 await self._guard(ready.decision, context)
             return await self._submit_locked(
@@ -255,32 +244,30 @@ class AccountCommandGate:
             started_at_ms=intent_ms,
         )
         assert isinstance(attempt.attempt_id, UUID)
-        intent = ReservationIntent(
-            cid=cid,
-            size_usdt=size,
-            signal_correlation_id=decision.signal_correlation_id,
-            account_id=canonical_account,
-            is_simulated=self._is_simulated,
-            occurred_at_ms=intent_ms,
-            symbol=decision.symbol,
-            execution_decision_id=ready.decision_id,
-            reservation_ref=reference,
-            submission_attempt=attempt,
-        )
 
         # Durable boundary 1. The call must finish before the venue sees data.
-        if self._capital is None:
-            await self._persister.persist(intent)
+        boundary = self._boundary
+        if boundary is None:
+            assert self._persister is not None  # required without a boundary
+            await self._persister.persist(ReservationIntent(
+                cid=cid,
+                size_usdt=size,
+                signal_correlation_id=decision.signal_correlation_id,
+                account_id=canonical_account,
+                is_simulated=self._is_simulated,
+                occurred_at_ms=intent_ms,
+                symbol=decision.symbol,
+                execution_decision_id=ready.decision_id,
+                reservation_ref=reference,
+                submission_attempt=attempt,
+            ))
         else:
             view = ready.capital_view
             if view is None:
                 raise CommandGateBlocked("capital_authority_missing")
-            runtime = self._capital
-            if (str(runtime.repository.account_id), runtime.repository.environment) != (
-                canonical_account, self._deployment_environment,
-            ):
+            if boundary.scope != Scope(account_id, self._deployment_environment):
                 raise CommandGateBlocked("capital_scope_conflict")
-            async with runtime.session_factory.begin() as session:
+            async with boundary.session_factory.begin() as session:
                 row = await session.get(ExecutionDecisionRow, ready.decision_id)
                 if row is None or row.outcome != "ready" or (
                     row.applied_rate != decision.offer_rate
@@ -296,7 +283,7 @@ class AccountCommandGate:
                     fingerprint = fingerprint_of(size)
                     if not fingerprint:
                         raise CommandGateBlocked("amount_fingerprint_missing")
-                    assert self._offers is not None  # required with capital_runtime
+                    assert self._offers is not None  # required with a boundary
                     if fingerprint in await self._offers.fingerprints_in_use(
                         locked, Scope(account_id, self._deployment_environment),
                         decision.symbol,
@@ -306,15 +293,14 @@ class AccountCommandGate:
                         context, command_session=locked, capital_cell_id=row.cell_id,
                     ))
 
-                assert self._journal is not None
-                admission = await self._journal.authorize(
-                    session, Scope(account_id, self._deployment_environment),
+                admission = await boundary.journal.authorize(
+                    session, boundary.scope,
                     CommandAttempt(
                         attempt.attempt_id, ready.decision_id, decision.symbol,
                         dict(attempt.normalized_payload), size, intent_ms, view.applied.revision,
                         view.applied.digest, view.applied.revision_id,
                         command_date=command_date,
-                        event_id=intent.event_id,
+                        event_id=boundary.effects.new_event_id(),
                         cell_id=row.cell_id,
                     ), view.basis_token, now_ms=self._clock(), locked_guard=locked_guard,
                 )
@@ -326,7 +312,7 @@ class AccountCommandGate:
         try:
             # Recheck ownership/halt after commit; never charge the reserved amount twice.
             try:
-                if self._capital is not None:
+                if boundary is not None:
                     await self._guard(decision, context, transport=True)
                     if not ready.book_valid_at(self._clock()):
                         raise CommandGateBlocked("decision_book_invalid_or_expired")
@@ -342,7 +328,7 @@ class AccountCommandGate:
                 result = await self._inner.submit(
                     ready, replace(context, before_submit_transport=(
                         lambda: ready.book_valid_at(self._clock())
-                    )) if self._capital is not None else context,
+                    )) if boundary is not None else context,
                     cid=cid, reservation_ref=reference,
                 )
         except SubmitCancelledNotSent as cancelled:
@@ -398,16 +384,17 @@ class AccountCommandGate:
 
     async def _guard(self, decision: DecisionPayload, context: AccountContext,
                      *, transport: bool = False, cancel: bool = False) -> None:
-        if self._capital is not None:
-            runtime = self._capital
+        if self._boundary is not None:
+            boundary = self._boundary
+
             async def active(session: AsyncSession) -> bool:
                 return await session.scalar(select(ExchangeAccount.lifecycle_status).where(
-                    ExchangeAccount.id == runtime.repository.account_id,
+                    ExchangeAccount.id == boundary.scope.exchange_account_id,
                 )) == "active"
             if context.command_session is not None:
                 account_active = await active(context.command_session)
             else:
-                async with self._capital.session_factory() as session:
+                async with boundary.session_factory() as session:
                     account_active = await active(session)
             if not account_active:
                 raise CommandGateBlocked("account_inactive")
@@ -435,17 +422,17 @@ class AccountCommandGate:
         while the offer's scope has an open or unreadable uncertainty, at
         admission and again before every transport attempt.
         """
-        runtime = self._capital
-        if runtime is None or not isinstance(self._inner, CancelPort):
+        boundary = self._boundary
+        if boundary is None or not isinstance(self._inner, CancelPort):
             raise CommandGateBlocked("durable_cancel_unavailable")
-        if runtime.repository.environment != self._deployment_environment:
+        if boundary.scope.deployment_environment != self._deployment_environment:
             raise CommandGateBlocked("cancel_environment_conflict")
-        if account_id != ctx.account_id or account_id != str(runtime.repository.account_id):
+        if account_id != ctx.account_id or account_id != str(boundary.scope.exchange_account_id):
             raise CommandGateBlocked("cancel_account_conflict")
         lock = self._account_locks.setdefault((account_id, self._deployment_environment), asyncio.Lock())
         async with lock:
             self._admit("cancel")
-            scope = Scope(runtime.repository.account_id, self._deployment_environment)
+            scope = boundary.scope
             probe: DecisionPayload | None = None
 
             async def locked_guard(locked: AsyncSession, admission: CancelAdmitted) -> None:
@@ -457,9 +444,8 @@ class AccountCommandGate:
                     offer_duration_days=admission.period_days)
                 await self._guard(probe, replace(ctx, command_session=locked), cancel=True)
 
-            async with runtime.session_factory.begin() as session:
-                assert self._journal is not None
-                admission = await self._journal.admit_cancel(
+            async with boundary.session_factory.begin() as session:
+                admission = await boundary.journal.admit_cancel(
                     session, scope, venue_offer_id, now_ms=self._clock(), locked_guard=locked_guard,
                 )
                 if isinstance(admission, CommandRefused):
@@ -490,122 +476,41 @@ class AccountCommandGate:
         occurred_at_ms: int,
     ) -> None:
         decision = ready.decision
-        account_id = str(_canonical_account_id(context.account_id))
-        if result.outcome_kind is SubmitOutcomeKind.UNKNOWN:
-            unknown_event = ReservationUnknown(
-                cid=reference.cid,
-                size_usdt=size,
-                signal_correlation_id=decision.signal_correlation_id,
-                account_id=account_id,
-                is_simulated=self._is_simulated,
-                occurred_at_ms=occurred_at_ms,
-                symbol=decision.symbol,
-                reservation_ref=reference,
-                reason=_bounded_reason(
-                    result.outcome,
-                    "submit_outcome_unknown",
-                    secrets=(
-                        context.credentials.api_key,
-                        context.credentials.api_secret,
-                    ),
-                ),
-            )
-            await self._record_terminal(unknown_event, attempt_id)
-            # Lending envelope D3 level 2: the open uncertainty quarantines this
-            # symbol until a snapshot resolves it; nothing is halted.
-            if self._uncertainty_handler is not None:
-                await self._uncertainty_handler(unknown_event)
-            return
-        if result.outcome_kind is SubmitOutcomeKind.NOT_SENT:
-            await self._record_terminal(
-                ReservationFailed(
-                    cid=reference.cid,
-                    size_usdt=size,
-                    signal_correlation_id=decision.signal_correlation_id,
-                    account_id=account_id,
-                    is_simulated=self._is_simulated,
-                    occurred_at_ms=occurred_at_ms,
-                    symbol=decision.symbol,
-                    reservation_ref=reference,
-                    reason="local_pre_transport",
-                ), attempt_id,
-            )
-            return
-        if result.outcome_kind is SubmitOutcomeKind.REJECTED:
-            await self._record_terminal(
-                ReservationFailed(
-                    cid=reference.cid,
-                    size_usdt=size,
-                    signal_correlation_id=decision.signal_correlation_id,
-                    account_id=account_id,
-                    is_simulated=self._is_simulated,
-                    occurred_at_ms=occurred_at_ms,
-                    symbol=decision.symbol,
-                    reservation_ref=reference,
-                    reason=_bounded_reason(
-                        result.outcome,
-                        "submit_rejected",
-                        secrets=(
-                            context.credentials.api_key,
-                            context.credentials.api_secret,
-                        ),
-                    ),
-                ), attempt_id,
-            )
-            return
-
-        claimed = ReservationClaimed(
-            cid=reference.cid,
-            size_usdt=size,
-            signal_correlation_id=decision.signal_correlation_id,
-            account_id=account_id,
-            is_simulated=self._is_simulated,
-            occurred_at_ms=occurred_at_ms,
-            symbol=decision.symbol,
-            reservation_ref=reference,
-            venue_offer_id=result.venue_offer_id or "",
-        )
-        filled: OrderFilled | None = None
-        if result.status == "filled":
-            filled = OrderFilled(
-                cid=reference.cid,
-                size_usdt=size,
-                signal_correlation_id=decision.signal_correlation_id,
-                account_id=account_id,
-                is_simulated=self._is_simulated,
-                occurred_at_ms=occurred_at_ms,
-                symbol=decision.symbol,
-                reservation_ref=reference,
-                venue_offer_id=result.venue_offer_id or "",
-                credit_id=None,
-                fill_rate=float(decision.offer_rate or 0),  # paper fill event field
-            )
-        events: tuple[object, ...] = (claimed, filled) if filled is not None else (claimed,)
-        if self._journal is None:
-            await self._persister.persist(*events)
+        scope = Scope(_canonical_account_id(context.account_id), self._deployment_environment)
+        secrets = (context.credentials.api_key, context.credentials.api_secret)
+        kind = result.outcome_kind
+        boundary = self._boundary
+        event_id = boundary.effects.new_event_id() if boundary is not None else None
+        if kind is SubmitOutcomeKind.UNKNOWN:
+            outcome = CommandOutcome(
+                "unknown", None, _bounded_reason(result.outcome, "submit_outcome_unknown",
+                                                 secrets=secrets),
+                occurred_at_ms, {}, event_id=event_id)
+        elif kind is SubmitOutcomeKind.NOT_SENT:
+            outcome = CommandOutcome("not_sent", None, "local_pre_transport",
+                                     occurred_at_ms, {}, event_id=event_id)
+        elif kind is SubmitOutcomeKind.REJECTED:
+            outcome = CommandOutcome(
+                "rejected", None, _bounded_reason(result.outcome, "submit_rejected",
+                                                  secrets=secrets),
+                occurred_at_ms, {}, event_id=event_id)
         else:
-            await self._record_terminal(claimed, attempt_id)
-            if filled is not None:
-                await self._persister.persist(filled)
-        await self._safe_publish(claimed)
-        if filled is not None:
-            await self._safe_publish(filled)
-
-    async def _record_terminal(
-        self, event: ReservationClaimed | ReservationFailed | ReservationUnknown, attempt_id: UUID,
-    ) -> None:
-        if self._journal is None:
-            await self._persister.persist(event)
-            return
-        kind: OutcomeKind = ("ack" if isinstance(event, ReservationClaimed) else
-                "unknown" if isinstance(event, ReservationUnknown) else
-                "not_sent" if event.reason == "local_pre_transport" else "rejected")
-        await self._journal.record_outcome(
-            Scope(_canonical_account_id(event.account_id), self._deployment_environment), attempt_id,
-            CommandOutcome(kind, getattr(event, "venue_offer_id", None),
-                           getattr(event, "reason", None), event.occurred_at_ms or 0, {},
-                           event_id=event.event_id),
+            outcome = CommandOutcome("ack", result.venue_offer_id or "", None,
+                                     occurred_at_ms, {}, event_id=event_id)
+        facts = CommandFacts(
+            scope=scope, attempt_id=attempt_id, symbol=decision.symbol, amount=size,
+            signal_correlation_id=decision.signal_correlation_id, reference=reference,
+            offer_rate=decision.offer_rate, is_simulated=self._is_simulated,
+            filled=kind is SubmitOutcomeKind.ACKNOWLEDGED and result.status == "filled",
         )
+        if boundary is None:
+            assert self._persister is not None  # required without a boundary
+            await persist_simulated_outcome(
+                self._persister, self._bus, self._uncertainty_handler, facts, outcome,
+            )
+            return
+        await boundary.journal.record_outcome(scope, attempt_id, outcome)
+        await boundary.effects.outcome_recorded(facts, outcome)
 
     def _admit(self, kind: str) -> None:
         """Rate-limit venue writes before anything durable is written."""
@@ -622,16 +527,6 @@ class AccountCommandGate:
                      type(exc).__name__)
         alerts.emit(alerts.DAEMON_FATAL, error=f"{reason} ({symbol}): exiting")
         raise SubmitOutcomeLostError(f"{reason} ({symbol})") from exc
-
-    async def _safe_publish(self, event: object) -> None:
-        try:
-            await self._bus.publish(event)
-        except Exception as exc:
-            log.critical(
-                "bus_publish_failed_outer event=%s err=%r — projection lost, SoT already persisted",
-                type(event).__name__,
-                exc,
-            )
 
 
 def _canonical_account_id(value: str) -> UUID:

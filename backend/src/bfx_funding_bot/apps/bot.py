@@ -58,6 +58,7 @@ from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
+from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
@@ -85,6 +86,8 @@ from bfx_funding_bot.modules.execution.fill_tracker import (
     RestPollingFillTracker,
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
+from bfx_funding_bot.modules.execution.legacy_command_effects import LegacyCommandEffects
+from bfx_funding_bot.modules.execution.legacy_command_journal import LegacyCommandJournal
 from bfx_funding_bot.modules.execution.legacy_ports import (
     LegacyCapitalAuthority,
     LegacyManagedOffers,
@@ -702,17 +705,25 @@ async def build_daemon(
     # bfx_executor_submit_duration_seconds and counts outcomes. It re-raises /
     # returns unchanged, so the HeartbeatMiddleware I1 invariant and the
     # no-retry submit contract below are untouched.
+    command_boundary: CommandBoundary | None = None
+    if capital_runtime is not None:
+        command_boundary = CommandBoundary(
+            capital_scope, session_factory,
+            LegacyCommandJournal(
+                capital_runtime, date_provider=lambda: datetime.now(UTC).date(),
+                clock=lambda: int(time.time() * 1000), uncertainty_reader=uncertainty_reader,
+            ),
+            LegacyCommandEffects(persister, bus, ledger.on_reservation_unknown),
+        )
     reservation_middleware = ReservationEmittingMiddleware(
         executor,
         bus=bus,
         persister=persister,
         is_simulated=spec.is_simulated,
-        uncertainty_handler=(
-            ledger.on_reservation_unknown if not spec.is_simulated else None
-        ),
         safety_evaluator=safety_chain,
-        capital_runtime=capital_runtime,
-        managed_offers=managed_offers if capital_runtime is not None else None,
+        boundary=command_boundary,
+        uncertainty_reader=uncertainty_reader,
+        managed_offers=managed_offers if command_boundary is not None else None,
     )
     reservation_executor: ExecutorPort = reservation_middleware
 
