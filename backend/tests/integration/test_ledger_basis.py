@@ -98,6 +98,7 @@ def _coverage() -> Coverage:
         trades_complete=True,
         trades_requested_start_ms=0,
         trades_requested_end_ms=105_000,
+        history_symbols=frozenset({"fUST", "fUSD"}),
     )
 
 

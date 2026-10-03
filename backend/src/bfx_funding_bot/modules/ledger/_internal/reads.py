@@ -144,7 +144,8 @@ async def candidate_attempts(session: AsyncSession, scope: Scope) -> _Candidates
 
 
 def _window_from_anchors(
-    earliest_attempt_started_at_ms: int | None, previous_query_started_at_ms: int | None
+    earliest_attempt_started_at_ms: int | None, previous_query_started_at_ms: int | None,
+    anchor_symbols: frozenset[str] = frozenset(),
 ) -> ObservationWindow:
     anchors = [
         anchor
@@ -155,6 +156,7 @@ def _window_from_anchors(
         earliest_attempt_started_at_ms,
         previous_query_started_at_ms,
         min(anchors) - HISTORY_QUERY_MARGIN_MS if anchors else None,
+        anchor_symbols,
     )
 
 
@@ -200,7 +202,8 @@ async def observation_window(session: AsyncSession, scope: Scope) -> Observation
     ])
     attempts = (*attempts, *sources)
     return _window_from_anchors(
-        min((attempt.started_at_ms for attempt in attempts), default=None), previous_start
+        min((attempt.started_at_ms for attempt in attempts), default=None), previous_start,
+        frozenset(attempt.symbol for attempt in attempts),
     )
 
 
@@ -230,6 +233,19 @@ async def open_uncertainties(
         for row in await unresolved_quarantines(session, scope, candidates.basis, symbol=symbol)
     )
     return tuple(found)
+
+
+async def open_unknown_attempt_ids(session: AsyncSession, scope: Scope) -> list[UUID]:
+    """Open UNKNOWN attempts in attempt order: the automatic resolver's subjects."""
+    candidates = await _candidates(session, scope, with_payload=False)
+    return [
+        attempt_id
+        for attempt_id, _ in open_unknowns(
+            ((row.attempt_id, row.symbol) for row in candidates.attempts),
+            candidates.outcomes,
+            candidates.resolutions,
+        )
+    ]
 
 
 async def has_open_uncertainty(session: AsyncSession, scope: Scope, symbol: str) -> bool:

@@ -11,6 +11,18 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.modules.ledger.matching import (
+    UNKNOWN_SETTLE_MS,
+    AutoAction,
+    AutoDecision,
+    MatchEvidence,
+    UnknownMatch,
+    UnknownMatchKind,
+    UnknownTerms,
+    amount_seen_since_start,
+    decide_unknown,
+    match_unknown,
+)
 from bfx_funding_bot.modules.trading import (
     AppliedPolicy,
     CapitalBudget,
@@ -139,6 +151,10 @@ class Coverage:
     trades_complete: bool = False
     trades_requested_start_ms: int | None = None
     trades_requested_end_ms: int | None = None
+    # The symbols whose history streams the port actually fetched. Per-symbol
+    # absence proofs (UNKNOWN matching, R6) hold only for these; None = the
+    # port declared nothing, which fails closed.
+    history_symbols: frozenset[str] | None = None
 
     @property
     def active_complete(self) -> bool:
@@ -195,6 +211,8 @@ class CycleResult:
 
     decision: Literal["accepted", "query_admission_refused", "fenced", "incomplete_or_unequal"]
     observation_id: UUID | None = None
+    # Automatic UNKNOWN resolutions committed with this cycle (for post-commit notices).
+    resolutions: tuple[UUID, ...] = ()
 
 
 class ObservationSink(Protocol):
@@ -288,6 +306,9 @@ class ObservationWindow:
     earliest_attempt_started_at_ms: int | None
     previous_query_started_at_ms: int | None
     history_start_ms: int | None
+    # Symbols of the anchor attempts: the port must fetch their history even
+    # when no wallet or credit names them.
+    anchor_symbols: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -958,11 +979,14 @@ __all__ = [
     "OBSERVATION_REF_PREFIX",
     "OFFER_STATUSES",
     "OFFER_TERMINAL_KINDS",
+    "UNKNOWN_SETTLE_MS",
     "Acceptance",
     "AcceptanceDecision",
     "Attempt",
     "AuthorizeRefused",
     "Authorized",
+    "AutoAction",
+    "AutoDecision",
     "CancelAdmitted",
     "CancelProvenance",
     "CapitalAuthority",
@@ -996,6 +1020,7 @@ __all__ = [
     "ManagedOffer",
     "ManagedOfferReader",
     "ManagedOffers",
+    "MatchEvidence",
     "Observation",
     "ObservationSink",
     "ObservationWindow",
@@ -1031,13 +1056,19 @@ __all__ = [
     "UncertaintyReader",
     "UncertaintyRecord",
     "UncertaintyView",
+    "UnknownMatch",
+    "UnknownMatchKind",
+    "UnknownTerms",
     "VenueHintNotification",
     "VenueHintPublisher",
     "VenueHintSink",
     "VenueObservation",
     "VerifiedEvidence",
     "Wallet",
+    "amount_seen_since_start",
+    "decide_unknown",
     "encode_basis_token",
+    "match_unknown",
     "observation_evidence_ref",
     "parse_basis_token",
 ]

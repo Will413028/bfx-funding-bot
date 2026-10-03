@@ -39,7 +39,7 @@ async def test_window_covers_unresolved_r6_source_start_minus_margin(ledger_fixt
     await ledger_fixture.accept(_evidence(), started_at_ms=500_000)
     async with ledger_fixture.factory.begin() as session:
         window = await build_ledger_observations().observation_window(session, SCOPE)
-        assert window == ObservationWindow(100_000, 500_000, 40_000)
+        assert window == ObservationWindow(100_000, 500_000, 40_000, frozenset({"fUST"}))
     assert opening.source_attempt_id is not None
 
 

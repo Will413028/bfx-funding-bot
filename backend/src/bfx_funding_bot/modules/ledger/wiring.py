@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.modules.ledger import (
+    UNKNOWN_SETTLE_MS,
     Acceptance,
     Attempt,
     Authorized,
@@ -62,6 +63,7 @@ from bfx_funding_bot.modules.ledger._internal import (
     ports,
     quarantine,
     reads,
+    resolver,
 )
 from bfx_funding_bot.modules.ledger._internal.venue_hints import LedgerVenueHintSink
 from bfx_funding_bot.modules.ledger.tables import SubmissionAttemptJournalRow
@@ -274,7 +276,7 @@ class _LedgerObservationCycle:
     def __init__(
         self, session_factory: async_sessionmaker[AsyncSession], venue: VenueObservation,
         *, journal_port: LedgerJournal, observations: LedgerObservations,
-        now_ms: Callable[[], int], grace_ms: int,
+        now_ms: Callable[[], int], grace_ms: int, settle_ms: int,
     ) -> None:
         self._factory = session_factory
         self._venue = venue
@@ -282,6 +284,7 @@ class _LedgerObservationCycle:
         self._observations = observations
         self._now_ms = now_ms
         self._grace_ms = grace_ms
+        self._settle_ms = settle_ms
 
     async def run(self, scope: Scope) -> CycleResult:
         async with self._factory.begin() as session:
@@ -304,9 +307,19 @@ class _LedgerObservationCycle:
             accepted = await self._observations.accept(
                 session, scope, query, first, confirmation, confirmation_started,
             )
-            # resolver_after_accept seam (S1-3c3c): after acceptance, inside this same locked txn.
-            # No resolution is attempted until the R6 evidence gate is decided.
-        return CycleResult(accepted.decision, accepted.observation_id)
+            # Only an accepted observation resolves: the journal needs the scope's latest
+            # accepted one, and a fenced or incomplete one proves nothing. Same locked txn;
+            # the caller publishes any notice after commit.
+            resolutions: tuple[UUID, ...] = ()
+            if accepted.decision == "accepted":
+                assert accepted.observation_id is not None
+                resolutions = tuple(
+                    item.id for item in await resolver.resolve_unknowns(
+                        session, scope, accepted.observation_id,
+                        now_ms=self._now_ms(), settle_ms=self._settle_ms,
+                    )
+                )
+        return CycleResult(accepted.decision, accepted.observation_id, resolutions)
 
 
 def build_observation_sink(
@@ -315,12 +328,13 @@ def build_observation_sink(
     observations: LedgerObservations | None = None,
     now_ms: Callable[[], int] = lambda: time.time_ns() // 1_000_000,
     grace_ms: int = 120_000,
+    settle_ms: int = UNKNOWN_SETTLE_MS,
 ) -> ObservationSink:
     """Dormant cycle; app selection is deferred to S1-3e."""
     return _LedgerObservationCycle(
         session_factory, venue, journal_port=journal_port or build_ledger_journal(),
         observations=observations or build_ledger_observations(), now_ms=now_ms,
-        grace_ms=grace_ms,
+        grace_ms=grace_ms, settle_ms=settle_ms,
     )
 
 

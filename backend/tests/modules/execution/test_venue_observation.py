@@ -246,6 +246,18 @@ async def test_symbol_union_wallets_active_credits_and_loans() -> None:
         for kind in ("offers", "credits", "loans", "trades")] + ACTIVE_PATHS
     assert first.coverage.complete
     assert first.coverage.offer_history_pages == 4 and first.coverage.credit_history_pages == 8
+    assert first.coverage.history_symbols == frozenset({"fBTC", "fETH", "fUSD", "fUST"})
+
+
+async def test_anchor_attempt_symbols_are_fetched_and_declared() -> None:
+    """G1: an UNKNOWN on a symbol no wallet or credit names still gets its history fetched."""
+    venue = Venue()
+    window = ObservationWindow(900_000, None, 840_000, frozenset({"fEUR"}))
+    first, _, _ = await observe(venue, window=window)
+    fetched = {path.split("/")[1:3][1] for path in venue.paths if path.endswith("/hist")}
+    assert fetched == {"fEUR", "fUST"}
+    assert first.coverage.history_symbols == frozenset({"fEUR", "fUST"})
+    assert first.coverage.complete
 
 
 @pytest.mark.parametrize("stream", ["offers", "credits", "loans"])

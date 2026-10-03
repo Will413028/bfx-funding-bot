@@ -29,6 +29,7 @@ from bfx_funding_bot.modules.ledger import (
     Scope,
     Wallet,
 )
+from bfx_funding_bot.modules.ledger._internal import history_symbols
 from bfx_funding_bot.modules.ledger._internal.basis import previous_basis, write_basis
 from bfx_funding_bot.modules.ledger._internal.clock import lock_scope
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
@@ -295,6 +296,7 @@ async def accept_observation(
             confirmation_digest=confirmation_digest,
             accepted=accepted,
             evidence={
+                history_symbols.KEY: history_symbols.encode(coverage.history_symbols),
                 "confirmation_started_at_ms": confirmation_started_at_ms,
                 "first_page_counts": {
                     "wallet": coverage.wallet_pages,

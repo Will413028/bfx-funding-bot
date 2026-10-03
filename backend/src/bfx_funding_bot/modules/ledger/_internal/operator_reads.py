@@ -114,7 +114,8 @@ def _quarantine_view(
 
 
 def _resolved_by(resolution: _Resolution | None) -> str | None:
-    if resolution is None or resolution.actor_kind != "operator":
+    # Legacy parity: the operator-visible id of a system resolution is ``system:reconcile``.
+    if resolution is None or resolution.actor_kind not in ("operator", "system"):
         return None
     return resolution.actor_id
 

@@ -130,6 +130,28 @@ async def test_r6_trades_range_boundaries(ledger_fixture, start, end, expected) 
         assert basis.reasons() == ["unclassifiable_commitment"]
 
 
+@pytest.mark.parametrize("declared", [None, frozenset(), frozenset({"fUSD"}), frozenset({"fUST"})])
+@pytest.mark.asyncio
+async def test_r6_needs_the_port_to_have_fetched_the_attempts_symbol(
+    ledger_fixture,  # noqa: F811 - fixture parameter
+    declared,
+) -> None:
+    """G1 for R6: absence from a symbol's history proves nothing when none was fetched."""
+    await ledger_fixture.accept(_observation())
+    attempt_id = await ledger_fixture.attempt(
+        amount="200", venue_offer_id="gone", started_at_ms=100_000
+    )
+    evidence = _evidence()
+    evidence = replace(evidence, coverage=replace(evidence.coverage, history_symbols=declared))
+    basis = await ledger_fixture.accept(evidence, started_at_ms=200_000)
+    if declared == frozenset({"fUST"}):
+        assert basis.attempts[attempt_id] == ("fUST", "quarantined")
+    else:
+        assert basis.attempts[attempt_id] == ("fUST", "unresolved")
+        assert basis.reasons() == ["unclassifiable_commitment"]
+        assert await _openings(ledger_fixture) == []
+
+
 @pytest.mark.parametrize("source", ["ack", "bound"])
 @pytest.mark.asyncio
 async def test_r6_ack_and_bound_convert_once_across_acceptances(

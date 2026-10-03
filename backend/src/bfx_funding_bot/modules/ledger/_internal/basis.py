@@ -29,6 +29,7 @@ from sqlalchemy.orm import load_only
 
 from bfx_funding_bot.core.venue_time import HISTORY_QUERY_MARGIN_MS, VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.modules.ledger import JsonObject, Quarantine, Scope
+from bfx_funding_bot.modules.ledger._internal import history_symbols
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
 from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance, sole_owner
 from bfx_funding_bot.modules.ledger._internal.quarantine import (
@@ -543,6 +544,7 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 terminal.keys(),
                 traded_offer_ids,
                 observation,
+                attempt.symbol,
             )
         ):
             if source is None:
@@ -704,11 +706,14 @@ def _can_quarantine(
     terminal_ids: Iterable[str],
     trade_ids: Iterable[str],
     observation: LedgerObservationRow,
+    symbol: str,
 ) -> bool:
-    """R6 absence is proven only by complete evidence spanning the local start."""
+    """R6 absence is proven only by complete evidence spanning the local start,
+    for a symbol whose history (and trades) the port declared fetching."""
     start, end = observation.history_requested_start_ms, observation.history_requested_end_ms
     return (
-        observation.offer_history_complete
+        history_symbols.declared(observation.evidence, symbol)
+        and observation.offer_history_complete
         and _trades_cover(started_at_ms, observation)
         and start is not None
         and end is not None
