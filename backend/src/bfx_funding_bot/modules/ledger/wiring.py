@@ -13,6 +13,7 @@ from bfx_funding_bot.modules.ledger import (
     UNKNOWN_SETTLE_MS,
     Acceptance,
     AcceptedConservation,
+    AcceptedPositions,
     Attempt,
     Authorized,
     AuthorizeRefused,
@@ -24,9 +25,11 @@ from bfx_funding_bot.modules.ledger import (
     CommandOutcome,
     CommandRefused,
     CycleResult,
+    ForeignOffers,
     LedgerCapitalRead,
     LedgerCapitalReader,
     LedgerConservationReader,
+    LedgerCycleReads,
     LedgerJournal,
     LedgerManagedOffers,
     LedgerObservations,
@@ -60,6 +63,7 @@ from bfx_funding_bot.modules.ledger._internal import (
     capital_reader,
     clock,
     conservation_read,
+    cycle_reads,
     journal,
     observation,
     operator_evidence,
@@ -223,6 +227,20 @@ class _SqlLedgerConservationReader:
 
 def build_ledger_conservation_reader() -> LedgerConservationReader:
     return _SqlLedgerConservationReader()
+
+
+class _SqlLedgerCycleReads:
+    async def accepted_positions(
+        self, session: AsyncSession, scope: Scope
+    ) -> AcceptedPositions | None:
+        return await cycle_reads.accepted_positions(session, scope)
+
+    async def foreign_live_offers(self, session: AsyncSession, scope: Scope) -> ForeignOffers:
+        return await cycle_reads.foreign_live_offers(session, scope)
+
+
+def build_ledger_cycle_reads() -> LedgerCycleReads:
+    return _SqlLedgerCycleReads()
 
 
 class _SqlLedgerObservations:

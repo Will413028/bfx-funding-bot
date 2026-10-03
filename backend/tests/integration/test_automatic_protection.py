@@ -60,8 +60,8 @@ class Recorder:
     def trip(self, trigger: str, detail: str) -> None:
         self.trips.append((trigger, detail))
 
-    def observe_clean(self, event_seq: int | None) -> None:
-        self.clean.append(event_seq)
+    def observe_clean(self, evidence: str | None) -> None:
+        self.clean.append(evidence)
 
     @property
     def triggers(self) -> set[str]:

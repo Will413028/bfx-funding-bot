@@ -8,6 +8,7 @@ from bfx_funding_bot.modules.ledger._internal import observation
 from bfx_funding_bot.modules.ledger.wiring import (
     build_command_journal,
     build_ledger_conservation_reader,
+    build_ledger_cycle_reads,
     build_ledger_journal,
     build_ledger_managed_offers,
     build_ledger_observations,
@@ -108,9 +109,11 @@ def test_ports_expose_their_methods() -> None:
         "fingerprints_in_use",
     }
     assert _methods(ledger.LedgerConservationReader) == {"latest"}
+    assert _methods(ledger.LedgerCycleReads) == {"accepted_positions", "foreign_live_offers"}
     for port, protocol in (
         (build_command_journal(None, max_snapshot_age_ms=1000), ledger.CommandJournal),
         (build_ledger_conservation_reader(), ledger.LedgerConservationReader),
+        (build_ledger_cycle_reads(), ledger.LedgerCycleReads),
         (build_ledger_journal(), ledger.LedgerJournal),
         (build_ledger_observations(), ledger.LedgerObservations),
         (build_ledger_uncertainties(), ledger.LedgerUncertainties),

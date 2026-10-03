@@ -147,7 +147,7 @@ class ProtectionPort(Protocol):
 
 
 class ReconcileProtectionPort(ProtectionPort, Protocol):
-    def observe_clean(self, event_seq: int | None) -> None: ...
+    def observe_clean(self, evidence: str | None) -> None: ...
 
 
 class _TradingState(Protocol):
@@ -166,7 +166,8 @@ class Trip:
 
 @dataclass(frozen=True, slots=True)
 class CleanObservation:
-    event_seq: int | None
+    # Opaque reference to the accepted observation (legacy: its snapshot event_seq).
+    evidence: str | None
     at_ms: int
 
 
@@ -209,9 +210,16 @@ class AutomaticProtection:
         log.critical("automatic_protection_tripped trigger=%s detail=%s", trigger, tripped.detail)
         alerts.emit(alerts.PROTECTION_TRIPPED, trigger=trigger, detail=tripped.detail)  # T8
 
-    def observe_clean(self, event_seq: int | None) -> None:
-        """An accepted snapshot in which nothing tripped. Never blocks, never raises."""
-        observation = CleanObservation(event_seq=event_seq, at_ms=self._clock())
+    def observe_clean(self, evidence: str | None) -> None:
+        """An accepted snapshot in which nothing tripped. Never blocks, never raises.
+
+        ``evidence`` names the observation. One that is already counted is not counted again:
+        the auto-resume rule is *distinct* clean observations. Without a reference every
+        call is its own observation.
+        """
+        if evidence is not None and any(obs.evidence == evidence for obs in self._clean):
+            return
+        observation = CleanObservation(evidence=evidence, at_ms=self._clock())
         self._clean.append(observation)
         del self._clean[:-AUTO_RESUME_CLEAN_SNAPSHOTS]
         self._queue.put_nowait(observation)
@@ -278,10 +286,10 @@ class AutomaticProtection:
         if (len(clean) < AUTO_RESUME_CLEAN_SNAPSHOTS
                 or now_ms - current.created_at_ms < AUTO_RESUME_MIN_HALT_MS):
             return False
-        seqs = ",".join(str(obs.event_seq) for obs in clean)
+        refs = ", ".join(str(obs.evidence) for obs in clean)
         minutes = (now_ms - current.created_at_ms) // 60_000
-        reason = (f"condition cleared after {minutes} min: {len(clean)} clean accepted snapshots "
-                  f"(event_seq {seqs}); halt #{current.id} was {current.reason}")[:1000]
+        reason = (f"condition cleared after {minutes} min; clean observations: {refs}; "
+                  f"halt #{current.id} was {current.reason}")[:1000]
         try:
             result = await self._trading.transition(
                 ACTIVE, cause=CAUSE_AUTO, actor=AUTO_RESUME_ACTOR, reason=reason, now_ms=now_ms)

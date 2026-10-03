@@ -34,7 +34,7 @@ async def test_ack_only_cancel_refuses_conflicting_resolution(monkeypatch, actio
             return SimpleNamespace(action=action, venue_offer_id=venue, symbol=symbol,
                                    exchange_account_id=scope.exchange_account_id, deployment_environment="ci")
 
-    monkeypatch.setattr(reads, "_live", AsyncMock(return_value=reads._Live((), ())))
+    monkeypatch.setattr(reads, "_live", AsyncMock(return_value=reads._Live((), (), ())))
     monkeypatch.setattr(reads, "offer_provenance", AsyncMock(return_value={"offer": {attempt_id}}))
     monkeypatch.setattr(reads, "attempts_by_id", AsyncMock(return_value=[attempt]))
     monkeypatch.setattr(reads, "_correlations", AsyncMock(return_value={"decision": "correlation"}))

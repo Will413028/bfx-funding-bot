@@ -294,6 +294,18 @@ class VenueHintPublisher(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class UnknownResolutionNotice:
+    """An UNKNOWN submit the system resolved by itself in an accepted cycle.
+
+    Published only after that cycle's transaction committed; non-authoritative.
+    """
+
+    scope: Scope
+    observation_id: UUID
+    resolution_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
 class QueryHandle:
     query_id: UUID
     query_revision: int
@@ -783,6 +795,73 @@ class LedgerConservationReader(Protocol):
     async def latest(self, session: AsyncSession, scope: Scope) -> AcceptedConservation | None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class AcceptedSymbolPosition:
+    """One symbol of the latest accepted basis, as a venue snapshot's per-symbol totals.
+
+    ``offered`` is the managed offers' remaining amount; ``foreign_offers`` the live offers
+    nothing of this scope placed (kept out of ``offered``), so the symbol's reserved total
+    is their sum. ``n_offers`` counts every live offer of the symbol.
+    """
+
+    symbol: str
+    available: Decimal
+    offered: Decimal
+    foreign_offers: Decimal
+    credits: Decimal
+    n_credits: int
+    n_offers: int
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedPositions:
+    observation_id: UUID
+    accepted_at_ms: int
+    symbols: tuple[AcceptedSymbolPosition, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ForeignOffer:
+    """A live venue offer no attempt of this scope accounts for."""
+
+    venue_offer_id: str
+    symbol: str
+    amount_remaining: Decimal
+    amount_original: Decimal | None
+    # None when the venue did not report them (``rate_observed`` is then False).
+    rate: Decimal | None
+    rate_observed: bool
+    period_days: int | None
+    mts_created: int
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class ForeignOffers:
+    """The foreign live offers, and the id of every live offer (managed or not).
+
+    An offer that is the candidate of an open UNKNOWN submit may be ours, and an offer with
+    contradictory provenance is neither: neither is listed in ``offers``.
+    """
+
+    offers: tuple[ForeignOffer, ...]
+    live_offer_ids: frozenset[str]
+
+
+class LedgerCycleReads(Protocol):
+    """What the effects of an accepted cycle read beyond the capital and operator reads.
+
+    Both run on the caller's session over the scope's latest accepted basis and its offer
+    mirror; ``accepted_positions`` is None when the scope has no accepted basis.
+    """
+
+    async def accepted_positions(
+        self, session: AsyncSession, scope: Scope
+    ) -> AcceptedPositions | None: ...
+
+    async def foreign_live_offers(self, session: AsyncSession, scope: Scope) -> ForeignOffers: ...
+
+
 # ---------------------------------------------------------------------------
 # Consumer read ports (S1-3c1). Runtime consumers depend on these Protocols
 # only; apps injects an implementation (the legacy adapters today). Every
@@ -1080,6 +1159,8 @@ __all__ = [
     "Acceptance",
     "AcceptanceDecision",
     "AcceptedConservation",
+    "AcceptedPositions",
+    "AcceptedSymbolPosition",
     "AppliedResolution",
     "Attempt",
     "AuthorizeRefused",
@@ -1107,10 +1188,13 @@ __all__ = [
     "CreditStatus",
     "CreditTerminalKind",
     "CycleResult",
+    "ForeignOffer",
+    "ForeignOffers",
     "JsonObject",
     "LedgerCapitalRead",
     "LedgerCapitalReader",
     "LedgerConservationReader",
+    "LedgerCycleReads",
     "LedgerJournal",
     "LedgerManagedOffers",
     "LedgerObservations",
@@ -1167,6 +1251,7 @@ __all__ = [
     "UncertaintyView",
     "UnknownMatch",
     "UnknownMatchKind",
+    "UnknownResolutionNotice",
     "UnknownTerms",
     "VenueHintNotification",
     "VenueHintPublisher",
