@@ -42,6 +42,7 @@ from bfx_funding_bot.modules.execution.observation_sink import (
 )
 from bfx_funding_bot.modules.execution.safety.protection import (
     FOREIGN_LENDING,
+    VENUE_LENT_ABOVE_LEDGER,
     ReconcileProtectionPort,
     capital_block_trigger,
 )
@@ -55,6 +56,7 @@ from bfx_funding_bot.modules.ledger import (
     ObservationSink,
     OperatorReads,
     Scope,
+    SymbolConservation,
     UnknownResolutionNotice,
     observation_evidence_ref,
 )
@@ -172,17 +174,47 @@ class LedgerCycleEffects:
             if trigger is None:
                 continue  # a transient refusal: spending is blocked, nothing is halted
             tripped = True
-            if (symbol, read.reason) in reported:
-                continue
-            reported.add((symbol, read.reason))
             evidence = ", ".join(f"{key}={value}" for key, value in read.evidence)
-            self._protection.trip(
-                trigger,
+            self._trip(
+                reported, symbol, trigger,
                 f"capital authority refused {symbol}/{cell}: {read.reason}"
                 + (f" ({evidence})" if evidence else ""),
             )
+        # Lending nothing explains is judged per symbol of the cycle's own basis, whether or
+        # not a cell is configured for it (the capital read above only sees configured cells).
+        try:
+            unexplained = await self._unexplained_symbols(cycle)
+        except Exception as exc:
+            unreadable = True
+            log.critical("ledger_cycle_conservation_read_failed err=%r", exc)
+        else:
+            for verdict in unexplained:
+                tripped = True
+                self._trip(
+                    reported, verdict.symbol, VENUE_LENT_ABOVE_LEDGER,
+                    f"symbol={verdict.symbol} lent_unexplained={verdict.lent_unexplained} "
+                    f"foreign_executed={verdict.foreign_executed} "
+                    f"fill_conflicts={verdict.fill_conflicts}",
+                )
         if not tripped and not unreadable:
             self._protection.observe_clean(observation_evidence_ref(cycle.observation_id))
+
+    def _trip(self, reported: set[tuple[str, str]], symbol: str, trigger: str,
+              detail: str) -> None:
+        """One trip per (symbol, trigger) and cycle, whichever read found it first."""
+        if (symbol, trigger) in reported:
+            return
+        reported.add((symbol, trigger))
+        self._protection.trip(trigger, detail)
+
+    async def _unexplained_symbols(self, cycle: CycleResult) -> list[SymbolConservation]:
+        async with self._sf() as session, session.begin():
+            basis = await self._reads.accepted_positions(session, self._scope)
+            latest = await self._conservation.latest(session, self._scope)
+        if basis is None or latest is None or basis.observation_id != cycle.observation_id:
+            # Not the cycle's own basis (or none): it proves nothing about this cycle.
+            raise LookupError(f"no conservation verdict for observation {cycle.observation_id}")
+        return [v for v in latest.symbols if v.conservation == "unexplained_lending"]
 
     async def _publish_nav(self, cycle: CycleResult) -> None:
         async with self._sf() as session, session.begin():

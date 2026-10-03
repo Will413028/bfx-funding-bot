@@ -286,10 +286,10 @@ class AutomaticProtection:
         if (len(clean) < AUTO_RESUME_CLEAN_SNAPSHOTS
                 or now_ms - current.created_at_ms < AUTO_RESUME_MIN_HALT_MS):
             return False
-        seqs = ",".join(str(obs.evidence) for obs in clean)
+        refs = ", ".join(str(obs.evidence) for obs in clean)
         minutes = (now_ms - current.created_at_ms) // 60_000
-        reason = (f"condition cleared after {minutes} min: {len(clean)} clean accepted snapshots "
-                  f"(event_seq {seqs}); halt #{current.id} was {current.reason}")[:1000]
+        reason = (f"condition cleared after {minutes} min; clean observations: {refs}; "
+                  f"halt #{current.id} was {current.reason}")[:1000]
         try:
             result = await self._trading.transition(
                 ACTIVE, cause=CAUSE_AUTO, actor=AUTO_RESUME_ACTOR, reason=reason, now_ms=now_ms)

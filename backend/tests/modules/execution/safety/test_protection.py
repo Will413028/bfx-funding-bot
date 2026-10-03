@@ -410,7 +410,7 @@ async def test_a_cleared_automatic_halt_resumes_after_three_clean_snapshots_and_
     assert await protection.resume_if_cleared()
     resumed = await state.current()
     assert (resumed.state, resumed.cause, resumed.actor) == ("ACTIVE", "auto", "auto-resume")
-    assert "event_seq 100,101,102" in resumed.reason and "venue_lent_above_ledger" in resumed.reason
+    assert "clean observations: 100, 101, 102;" in resumed.reason and "venue_lent_above_ledger" in resumed.reason
 
 
 async def test_one_observation_reported_again_is_not_a_second_clean_observation() -> None:

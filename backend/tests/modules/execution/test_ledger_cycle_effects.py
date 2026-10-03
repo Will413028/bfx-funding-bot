@@ -210,7 +210,8 @@ class Rig:
         self.sink = LedgerCycleEffects(
             self.inner, scope=SCOPE, account_id="acct-1", session_factory=_Factory(self.trace),
             capital=self.capital, cells=cells, protection=self.protection, bus=self.bus,
-            reads=self.reads, conservation=_Conservation(self.trace, conservation),
+            reads=self.reads, conservation=_Conservation(
+                self.trace, conservation or verdicts(uuid4(), ("fUST", "conserved"))),
             operator_reads=_Operator(self.trace, views),
             foreign_exposure=ForeignExposureMonitor(), quarantine_age=QuarantineAgeMonitor(),
             foreign_grace_ms=60_000, clock=self.clock,
@@ -328,6 +329,7 @@ async def test_the_same_observation_is_clean_once() -> None:
     assert not await protection.resume_if_cleared()
     for observation in (uuid4(), uuid4()):   # two more, distinct, accepted cycles
         rig.inner.result = CycleResult("accepted", observation)
+        rig.reads.positions = positions(observation_id=observation)
         clock.now += 60_000
         await rig.run()
     assert await protection.resume_if_cleared()
@@ -408,6 +410,39 @@ async def test_foreign_lending_is_alerted_once_per_basis(sent) -> None:
     rig.sink._conservation = _Conservation(rig.trace, verdicts(uuid4(), ("fUST", "foreign_lending")))
     await rig.run()
     assert len([1 for e, _ in sent if e == FOREIGN_LENDING]) == 2   # a new basis is news
+
+
+@pytest.mark.parametrize("kind", ["conserved", "foreign_lending", "baseline"])
+async def test_a_verdict_other_than_unexplained_does_not_trip(kind) -> None:
+    rig = Rig(conservation=verdicts(uuid4(), ("fUSD", kind)))
+    await rig.run()
+    assert rig.protection.trips == []
+    assert rig.protection.clean == [observation_evidence_ref(OBS)]
+
+
+async def test_unexplained_lending_on_a_symbol_without_a_cell_trips_once_and_is_not_clean() -> None:
+    rig = Rig(cells=(("fUST", "a30"),),
+              conservation=verdicts(uuid4(), ("fUST", "conserved"), ("fUSD", "unexplained_lending")))
+    await rig.run()
+    assert [t for t, _ in rig.protection.trips] == [VENUE_LENT_ABOVE_LEDGER]
+    assert "symbol=fUSD" in rig.protection.trips[0][1]
+    assert rig.protection.clean == []
+
+
+async def test_unexplained_lending_on_a_configured_symbol_trips_exactly_once() -> None:
+    rig = Rig(cells=(("fUST", "a30"), ("fUST", "a60")),
+              conservation=verdicts(uuid4(), ("fUST", "unexplained_lending")),
+              refusals={("fUST", "a30"): "venue_lent_above_ledger",
+                        ("fUST", "a60"): "venue_lent_above_ledger"})
+    await rig.run()
+    assert [t for t, _ in rig.protection.trips] == [VENUE_LENT_ABOVE_LEDGER]
+    assert rig.protection.clean == []
+
+
+async def test_a_conservation_verdict_of_another_basis_is_not_judged_and_not_clean() -> None:
+    rig = Rig(book=positions(observation_id=uuid4()))
+    await rig.run()
+    assert rig.protection.trips == [] and rig.protection.clean == []
 
 
 async def test_unexplained_lending_is_a_trip_not_an_alert(sent) -> None:
