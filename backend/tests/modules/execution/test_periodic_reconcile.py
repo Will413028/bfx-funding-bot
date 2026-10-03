@@ -10,6 +10,7 @@ from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.execution.deployment_input import LegacyDeploymentInput
 from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
+from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import Scope
 
 
@@ -19,7 +20,7 @@ def _make_periodic(*, recovery, scope=None, **kwargs):
         recovery = LegacyObservationSink(recovery, scope)
         if kwargs.get("deployment") is not None:
             kwargs.setdefault("deployment_input", LegacyDeploymentInput())
-    return PeriodicReconcile(recovery=recovery, scope=scope, **kwargs)
+    return PeriodicReconcile(resync=ResyncChannel(), recovery=recovery, scope=scope, **kwargs)
 
 
 class _FakeProbe:
@@ -161,7 +162,7 @@ async def test_request_resync_wakes_loop_before_interval():
 
     async def _drive():
         await asyncio.sleep(0.02)
-        pr.request_resync("reconnect")
+        pr.resync.request("reconnect")
         await asyncio.sleep(0.05)
         stop.set()
 
@@ -183,7 +184,7 @@ async def test_repeated_requests_dedup_into_bounded_ticks():
     async def _drive():
         await asyncio.sleep(0.01)
         for _ in range(20):
-            pr.request_resync("seq_gap")  # storm before the loop wakes
+            pr.resync.request("seq_gap")  # storm before the loop wakes
         await asyncio.sleep(0.10)  # > debounce window → exactly one resync tick fires
         stop.set()
 
@@ -205,7 +206,7 @@ async def test_stop_during_debounce_exits_promptly():
 
     async def _drive():
         await asyncio.sleep(0.02)
-        pr.request_resync("reconnect")  # enters a 100s debounce wait
+        pr.resync.request("reconnect")  # enters a 100s debounce wait
         await asyncio.sleep(0.02)
         stop.set()  # must break the debounce wait
 
@@ -223,7 +224,7 @@ async def test_resync_requested_before_loop_start_is_honored():
         recovery=recovery, probe=probe, interval_s=10.0,
         max_consecutive_failures=3, min_resync_interval_s=0.0,
     )
-    pr.request_resync("reconnect")  # before the loop is even running
+    pr.resync.request("reconnect")  # before the loop is even running
     stop = asyncio.Event()
 
     async def _drive():

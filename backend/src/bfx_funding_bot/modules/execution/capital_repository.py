@@ -52,6 +52,8 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
 )
+from bfx_funding_bot.modules.ledger import PolicyRefused, Scope
+from bfx_funding_bot.modules.ledger.policy_write import write_policy_revision
 from bfx_funding_bot.modules.ledger.tables import CapitalPolicyHeadRow, CapitalPolicyRevisionRow
 from bfx_funding_bot.modules.live_validation.tables import FundingTradeRow
 from bfx_funding_bot.modules.trading import (
@@ -64,7 +66,6 @@ from bfx_funding_bot.modules.trading import (
     parse_policy,
     policy_digest,
     policy_payload,
-    policy_schema_version,
 )
 
 ZERO = Decimal("0")
@@ -193,30 +194,14 @@ class CapitalRepository:
     async def apply_policy(self, session: AsyncSession, *, symbol: str, policy: CapitalPolicy,
                            expected_revision: int, source: dict[str, Any]) -> AppliedCapitalPolicy:
         await self._prepare(session)
-        if symbol not in {"fUST", "fUSD"} or (symbol == "fUSD" and policy.enabled):
-            raise CapitalBlockedError("unsupported_enabled_symbol")
-        head = await session.get(CapitalPolicyHeadRow, (self.account_id, self.environment, symbol),
-                                 populate_existing=True)
-        version = head.revision if head is not None else 0
-        if type(expected_revision) is not int or expected_revision != version:
-            raise CapitalBlockedError("revision_changed")
-        payload = policy_payload(policy)
-        row = CapitalPolicyRevisionRow(
-            id=uuid4(), exchange_account_id=self.account_id, deployment_environment=self.environment,
-            symbol=symbol, revision=version + 1, schema_version=policy_schema_version(policy),
-            policy=payload,
-            digest=policy_digest(payload), source=source,
-        )
-        session.add(row)
-        await session.flush()
-        if head is None:
-            session.add(CapitalPolicyHeadRow(exchange_account_id=self.account_id,
-                deployment_environment=self.environment, symbol=symbol, revision_id=row.id,
-                revision=row.revision))
-        else:
-            head.revision_id, head.revision = row.id, row.revision
-        await session.flush()
-        return AppliedCapitalPolicy(row.revision, row.digest, policy, row.id)
+        try:
+            written = await write_policy_revision(
+                session, Scope(self.account_id, self.environment), symbol=symbol,
+                policy=policy, expected_revision=expected_revision, source=source,
+            )
+        except PolicyRefused as exc:
+            raise CapitalBlockedError(str(exc)) from exc
+        return AppliedCapitalPolicy(written.revision, written.digest, policy, written.revision_id)
 
     async def read_applied(self, session: AsyncSession, *, symbol: str) -> AppliedCapitalPolicy:
         await self._prepare(session)

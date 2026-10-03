@@ -117,12 +117,6 @@ _BOOK_BLOCK_REASONS: dict[BookUnavailable | None, BlockReason] = {
 }
 
 
-class _LedgerProtocol(Protocol):
-    def current_exposure(self, symbol: str) -> Decimal: ...
-    def reserved_exposure(self, symbol: str) -> Decimal: ...
-    def available_balance(self, symbol: str) -> Decimal: ...
-
-
 class _CapitalReadBlocked(Exception):  # noqa: N818 - message is the authority's reason code
     """A capital read refused; its reason is the authority's code."""
 
@@ -165,7 +159,7 @@ class DeploymentReconciler:
         *,
         store: StandingQuoteStore,
         tracker: CellDeploymentTracker,
-        ledger: _LedgerProtocol | None,
+        uncertainty_synced: Callable[[str], None] | None,
         safety_chain: _SafetyChainProtocol,
         executor: ExecutorPort,
         account_ctx: AccountContext,
@@ -201,7 +195,7 @@ class DeploymentReconciler:
         # D3/D4); None on paper/shadow.
         self._managed_sweep = managed_sweep
         self._tracker = tracker
-        self._ledger = ledger
+        self._uncertainty_synced = uncertainty_synced
         self._safety = safety_chain
         self._executor = executor
         self._ctx = account_ctx
@@ -359,18 +353,11 @@ class DeploymentReconciler:
                         pre_sizing_result.reason,
                     )
                     continue
-                # PostgreSQL is authoritative on the live money path.  A
-                # resolved uncertainty may leave the paper ledger's process-
-                # local counter stale because the API writer runs elsewhere.
-                # Once the durable pre-sizing guard allows, converge that
-                # compatibility cache before continuing this daemon tick.
-                # (A ledger-authority process has no such cache: ``self._ledger`` is None.)
-                uncertain_exposure = getattr(self._ledger, "uncertain_exposure", None)
-                clear_uncertainty = getattr(self._ledger, "clear_uncertainty", None)
-                if uncertain_exposure is not None and clear_uncertainty is not None:
-                    stale_amount = uncertain_exposure(symbol)
-                    if stale_amount > 0:
-                        clear_uncertainty(symbol, stale_amount)
+                # PostgreSQL is authoritative on the live money path. Once the durable
+                # pre-sizing guard allows, an authority that keeps a process-local cache
+                # of uncertainty converges it before this tick continues.
+                if self._uncertainty_synced is not None:
+                    self._uncertainty_synced(symbol)
             # A post-transport UNKNOWN is an account/symbol-wide command gate:
             # even if the residual cap gap is positive, submitting another
             # offer could duplicate the request that may already exist at the

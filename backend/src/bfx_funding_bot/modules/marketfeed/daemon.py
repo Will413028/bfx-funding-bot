@@ -64,7 +64,6 @@ from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.fill_tracker import (
     RestPollingFillTracker,
 )
-from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -290,8 +289,6 @@ class Daemon:
     executor: ExecutorPort
     safety_chain: SafetyGuardChain
     account_ctx: AccountContext
-    # The simulated paths' in-memory projection; a ledger-authority process has none.
-    ledger: PaperPositionLedger | None
     bus: DomainEventBus
     smoke_runner: SmokeRunner | None = None
     fill_tracker: RestPollingFillTracker | None = None

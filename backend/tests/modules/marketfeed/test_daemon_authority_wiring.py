@@ -42,6 +42,7 @@ from tests.apps.walk import legacy_state
 from tests.modules.marketfeed.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
     configure_account_env,
+    paper_ledger_of,
     seed_exchange_account,
 )
 from tests.modules.marketfeed.test_daemon_wiring import _write_cells_yaml
@@ -111,8 +112,7 @@ async def _build(monkeypatch, tmp_path, httpx_mock, authority: str):
 async def test_a_ledger_daemon_holds_no_legacy_state(monkeypatch, tmp_path, httpx_mock) -> None:
     engine, _, daemon = await _build(monkeypatch, tmp_path, httpx_mock, "ledger")
     try:
-        assert daemon.ledger is None
-        assert not hasattr(daemon, "offer_registry")
+        assert not hasattr(daemon, "ledger") and not hasattr(daemon, "offer_registry")
         assert legacy_state(daemon, "daemon") == []
         # Nothing of the event-sourced projection listens on the bus.
         handlers = {
@@ -133,14 +133,17 @@ async def test_a_ledger_daemon_holds_no_legacy_state(monkeypatch, tmp_path, http
 
 
 @pytest.mark.asyncio
-async def test_a_ledger_daemon_shares_one_ledger_hint_sink(monkeypatch, tmp_path, httpx_mock) -> None:
+async def test_a_ledger_daemon_hints_through_the_reconcile_channel_and_composes_no_rest_tracker(
+    monkeypatch, tmp_path, httpx_mock,
+) -> None:
+    # BFX_FILL_TRACKER_ENABLED=true is set: the ledger authority still composes no REST tracker.
     engine, _, daemon = await _build(monkeypatch, tmp_path, httpx_mock, "ledger")
     try:
-        assert daemon.fill_tracker is not None and daemon.ws_dispatcher is not None
-        sink = daemon.fill_tracker._venue_hints
+        assert daemon.fill_tracker is None
+        sink = daemon.ws_dispatcher._venue_hints
         assert type(sink).__name__ == "LedgerVenueHintSink"
-        assert daemon.ws_dispatcher._venue_hints is sink
-        assert sink._request_resync == daemon.periodic_reconcile.request_resync
+        assert sink._request_resync == daemon.periodic_reconcile.resync.request
+        assert daemon.auth_ws._on_resync_needed == daemon.periodic_reconcile.resync.request
     finally:
         await engine.dispose()
 
@@ -172,10 +175,12 @@ async def test_a_ledger_daemon_observes_through_cycle_effects(monkeypatch, tmp_p
         assert isinstance(runtime._inner, LedgerCycleEffects)
         assert daemon.boot_recovery._inner._grace_ms == 0
         assert runtime._inner._inner._grace_ms == 120_000
+        assert daemon.boot_recovery._foreign_grace_ms == 0
+        assert runtime._inner._foreign_grace_ms == 120_000
         assert daemon.observation_scope == Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci")
         # The consumers that only cached the projection take none.
-        assert daemon.trading_status._ledger is None
-        assert daemon.periodic_reconcile._deployment._ledger is None
+        assert type(daemon.trading_status._exposure).__name__ == "CapitalStatusReads"
+        assert daemon.periodic_reconcile._deployment._uncertainty_synced is None
         status = await daemon.trading_status.snapshot()
         assert "capital_policy" in {g["name"] for g in status["guards"]}
         assert not ({"allocation_cap", "buying_power"} & {g["name"] for g in status["guards"]})
@@ -187,7 +192,7 @@ async def test_a_ledger_daemon_observes_through_cycle_effects(monkeypatch, tmp_p
 async def test_a_legacy_daemon_is_wired_as_it_always_was(monkeypatch, tmp_path, httpx_mock) -> None:
     engine, _, daemon = await _build(monkeypatch, tmp_path, httpx_mock, "legacy")
     try:
-        assert type(daemon.ledger).__name__ == "PaperPositionLedger"
+        assert type(paper_ledger_of(daemon)).__name__ == "PaperPositionLedger"
         assert type(daemon.boot_recovery).__name__ == "LegacyObservationSink"
         recovery = daemon.periodic_reconcile._recovery
         assert type(recovery._inner).__name__ == "LegacyObservationSink"
@@ -200,8 +205,11 @@ async def test_a_legacy_daemon_is_wired_as_it_always_was(monkeypatch, tmp_path, 
         assert type(daemon.ws_dispatcher._venue_hints).__name__ == "LegacyVenueHintSink"
         assert type(daemon.command_gate._boundary.journal).__name__ == "LegacyCommandJournal"
         assert type(daemon.command_gate._boundary.effects).__name__ == "LegacyCommandEffects"
-        assert daemon.periodic_reconcile._deployment._ledger is daemon.ledger
-        assert daemon.trading_status._ledger is daemon.ledger
+        assert daemon.periodic_reconcile._deployment._uncertainty_synced is not None
+        assert type(daemon.trading_status._exposure).__name__ == "CapitalStatusReads"
+        assert type(daemon.fill_tracker).__name__ == "RestPollingFillTracker"
+        assert daemon.fill_tracker._venue_hints is daemon.ws_dispatcher._venue_hints
+        assert daemon.auth_ws._on_resync_needed == daemon.periodic_reconcile.resync.request
         # The projection and the registry listen on the bus, ledger first (as before).
         from bfx_funding_bot.modules.execution.events import ReservationClaimed
         owners = [type(getattr(h, "__self__", None)).__name__

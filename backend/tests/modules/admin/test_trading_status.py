@@ -173,7 +173,7 @@ def _service(
     )
     return TradingStatusService(
         chain=chain,
-        ledger=led,
+        exposure=led,
         account_ctx=_ctx(),
         cells=cells if cells is not None else [_cell("fUST")],
         caps=caps if caps is not None else {"fUST": D("10000")},
@@ -481,7 +481,7 @@ async def test_dry_run_emits_no_safety_trigger() -> None:
         cell="c1", account_id="default",
     )
     svc = TradingStatusService(
-        chain=chain, ledger=_FakeLedger(), account_ctx=_ctx(), cells=[_cell("fUST")],
+        chain=chain, exposure=_FakeLedger(), account_ctx=_ctx(), cells=[_cell("fUST")],
         caps={"fUST": D("10000")}, default_cap=D("0"), env_fallback_cap=D("0"),
         buffers={"fUST": D("3")}, default_buffer=D("0"), env_fallback_buffer=D("3"),
         phase=Phase.SHADOW, attempts=SubmitAttemptRecorder(),

@@ -174,7 +174,7 @@ class _SqlLedgerJournal:
         return await journal.authorize_attempt(session, scope, attempt, basis_token, now_ms=now_ms)
 
     async def close_dangling(
-        self, session: AsyncSession, scope: Scope, *, now_ms: int, grace_ms: int = 120_000
+        self, session: AsyncSession, scope: Scope, *, now_ms: int, grace_ms: int
     ) -> tuple[UUID, ...]:
         return await journal.close_dangling(session, scope, now_ms=now_ms, grace_ms=grace_ms)
 
@@ -358,10 +358,9 @@ class _LedgerObservationCycle:
 
 def build_observation_sink(
     session_factory: async_sessionmaker[AsyncSession], venue: VenueObservation,
-    *, journal_port: LedgerJournal | None = None,
+    *, grace_ms: int, journal_port: LedgerJournal | None = None,
     observations: LedgerObservations | None = None,
     now_ms: Callable[[], int] = lambda: time.time_ns() // 1_000_000,
-    grace_ms: int = 120_000,
     settle_ms: int = UNKNOWN_SETTLE_MS,
 ) -> ObservationSink:
     """The ledger observation cycle; ``apps/bot_ports.py`` selects it by authority epoch."""

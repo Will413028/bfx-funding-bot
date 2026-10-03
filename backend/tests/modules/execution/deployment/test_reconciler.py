@@ -206,6 +206,15 @@ class _FakeLedger:
             self._uncertain_symbols.discard(symbol)
 
 
+def _converge(ledger: "_FakeLedger"):
+    """What the legacy composition hands the reconciler: converge a process-local cache."""
+    def synced(symbol: str) -> None:
+        stale = ledger.uncertain_exposure(symbol)
+        if stale > 0:
+            ledger.clear_uncertainty(symbol, stale)
+    return synced
+
+
 class _FakeSafety:
     def __init__(self, allowed: bool = True) -> None:
         self.allowed = allowed
@@ -500,7 +509,7 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         **(capital_ports or _capital_ports(_simulated_capital(
             fixture_ledger, tracker, totals={"fUST": cap if cap is not None else D("570")}))),
         store=store, tracker=tracker,
-        ledger=fixture_ledger,
+        uncertainty_synced=_converge(fixture_ledger),
         safety_chain=safety, executor=ex, account_ctx=ctx, cells=cells,
         funding_rules=FixedRules(),
         clock=lambda: 1_000,
@@ -1141,7 +1150,7 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
         allocation_cap_usdt=D("10000"),
     )
     rec = DeploymentReconciler(
-        store=store, tracker=tracker, ledger=ledger,
+        store=store, tracker=tracker, uncertainty_synced=_converge(ledger),
         safety_chain=_FakeSafety(allowed=True), executor=_FakeExecutor(),
         **_capital_ports(_simulated_capital(ledger, tracker, totals={"fUST": D("10000")})),
         account_ctx=ctx, cells=cells, funding_rules=FixedRules(),
@@ -1170,7 +1179,7 @@ def _build_with_split_ledger(*, reserved, realized, quotes):
     ex = _FakeExecutor()
     safety = _FakeSafety(allowed=True)
     rec = DeploymentReconciler(
-        store=store, tracker=tracker, ledger=ledger,
+        store=store, tracker=tracker, uncertainty_synced=_converge(ledger),
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
         funding_rules=FixedRules(),
         clock=lambda: 1_000,
@@ -1228,7 +1237,7 @@ async def test_headroom_uses_cell_symbol_available():
     )
     ex = _FakeExecutor()
     rec = DeploymentReconciler(
-        store=store, tracker=tracker, ledger=ledger,
+        store=store, tracker=tracker, uncertainty_synced=_converge(ledger),
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=_ctx(),
         **_capital_ports(_simulated_capital(ledger, tracker)),
         cells=cells, funding_rules=FixedRules(),
@@ -1263,7 +1272,7 @@ def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
         available_by_symbol=available_by_symbol,
     )
     rec = DeploymentReconciler(
-        store=store, tracker=tracker, ledger=ledger,
+        store=store, tracker=tracker, uncertainty_synced=_converge(ledger),
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
         funding_rules=FixedRules(),
         **_capital_ports(_simulated_capital(ledger, tracker, totals=caps, reserves=buffers)),
@@ -1435,7 +1444,7 @@ async def test_tracker_is_diagnostic_and_cannot_relax_canonical_cell_limit():
     )
     ex = _FakeExecutor()
     rec = DeploymentReconciler(
-        store=store, tracker=tracker, ledger=ledger,
+        store=store, tracker=tracker, uncertainty_synced=_converge(ledger),
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=ctx,
         **_capital_ports(_simulated_capital(ledger, tracker, totals={"fUST": D("10000")})),
         cells=cells, funding_rules=FixedRules(),
@@ -1672,3 +1681,16 @@ async def test_planner_skips_the_submit_when_no_fingerprint_fits():
     _fingerprinting(rec, range(1, FINGERPRINT_SPACE + 1))
     await rec.deploy()
     assert ex.submitted == []
+
+
+def test_the_neutral_reconciler_keeps_no_authority_cache() -> None:
+    """Mutation: a ``ledger`` parameter, or a ``getattr`` convergence of its cache, returns."""
+    import inspect
+
+    from bfx_funding_bot.modules.execution.deployment import reconciler
+
+    parameters = inspect.signature(DeploymentReconciler.__init__).parameters
+    assert "ledger" not in parameters and "uncertainty_synced" in parameters
+    source = inspect.getsource(reconciler)
+    assert "uncertain_exposure" not in source and "clear_uncertainty" not in source
+    assert "getattr(self._ledger" not in source

@@ -22,6 +22,7 @@ from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.execution.deployment_input import LegacyDeploymentInput
 from bfx_funding_bot.modules.execution.observation_sink import LegacyCycleResult
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
+from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.observability import alerts
 
@@ -78,7 +79,7 @@ def sent(monkeypatch) -> list[tuple]:
 
 
 def _periodic(sink, *, probe=None, deployment=None, deployment_input=None):
-    return PeriodicReconcile(
+    return PeriodicReconcile(resync=ResyncChannel(),
         recovery=sink, scope=Scope(uuid4(), "ci"), probe=probe or _Probe(), interval_s=90,
         deployment=deployment, deployment_input=deployment_input,
     )

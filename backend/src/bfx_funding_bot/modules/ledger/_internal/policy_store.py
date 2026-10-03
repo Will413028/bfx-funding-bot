@@ -1,32 +1,20 @@
 """The ledger's policy store: the shared policy heads and revisions, and nothing else.
 
-No event stream is replayed or locked here. A write takes the scope's transaction lock
-(the one every ledger writer and the legacy writer share) before it reads the head it
-moves, so two amendments of one scope serialize and a lost update is a refusal.
+No event stream is replayed or locked here. The caller holds the scope lock
+(``ScopeLock.lock``) across a read and the write based on it; the write itself is the
+one writer both authorities share (``ledger.policy_write``).
 """
 
 from __future__ import annotations
 
 from typing import Any
-from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import PolicyRefused, Scope
-from bfx_funding_bot.modules.ledger._internal import capital_reader, clock
-from bfx_funding_bot.modules.ledger.tables import CapitalPolicyHeadRow, CapitalPolicyRevisionRow
-from bfx_funding_bot.modules.trading import (
-    AppliedPolicy,
-    Blocked,
-    CapitalPolicy,
-    policy_digest,
-    policy_payload,
-    policy_schema_version,
-)
-
-# The symbols a policy may exist for; only the first may be enabled (the capital epoch's
-# one funded currency). The legacy repository states the same rule.
-_POLICY_SYMBOLS = frozenset({"fUST", "fUSD"})
+from bfx_funding_bot.modules.ledger._internal import capital_reader
+from bfx_funding_bot.modules.ledger.policy_write import write_policy_revision
+from bfx_funding_bot.modules.trading import AppliedPolicy, Blocked, CapitalPolicy
 
 
 class LedgerPolicyStore:
@@ -47,31 +35,7 @@ class LedgerPolicyStore:
         self, session: AsyncSession, *, symbol: str, policy: CapitalPolicy,
         expected_revision: int, source: dict[str, Any],
     ) -> AppliedPolicy:
-        await clock.lock_scope(session, self._scope)
-        if symbol not in _POLICY_SYMBOLS or (symbol == "fUSD" and policy.enabled):
-            raise PolicyRefused("unsupported_enabled_symbol")
-        account = self._scope.exchange_account_id
-        environment = self._scope.deployment_environment
-        head = await session.get(
-            CapitalPolicyHeadRow, (account, environment, symbol), populate_existing=True
+        return await write_policy_revision(
+            session, self._scope, symbol=symbol, policy=policy,
+            expected_revision=expected_revision, source=source,
         )
-        version = head.revision if head is not None else 0
-        if type(expected_revision) is not int or expected_revision != version:
-            raise PolicyRefused("revision_changed")
-        payload = policy_payload(policy)
-        row = CapitalPolicyRevisionRow(
-            id=uuid4(), exchange_account_id=account, deployment_environment=environment,
-            symbol=symbol, revision=version + 1, schema_version=policy_schema_version(policy),
-            policy=payload, digest=policy_digest(payload), source=source,
-        )
-        session.add(row)
-        await session.flush()
-        if head is None:
-            session.add(CapitalPolicyHeadRow(
-                exchange_account_id=account, deployment_environment=environment, symbol=symbol,
-                revision_id=row.id, revision=row.revision,
-            ))
-        else:
-            head.revision_id, head.revision = row.id, row.revision
-        await session.flush()
-        return AppliedPolicy(account, environment, symbol, row.revision, row.digest, row.id, policy)

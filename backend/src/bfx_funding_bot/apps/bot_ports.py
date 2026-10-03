@@ -42,6 +42,12 @@ from bfx_funding_bot.modules.execution.deployment_input import (
 )
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+from bfx_funding_bot.modules.execution.events import (
+    OrderFilled,
+    PositionReconciled,
+    ReservationClaimed,
+    ReservationReleased,
+)
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.ledger_cycle_effects import LedgerCycleEffects
 from bfx_funding_bot.modules.execution.legacy_command_effects import LegacyCommandEffects
@@ -57,10 +63,13 @@ from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHint
 from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
+from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
 from bfx_funding_bot.modules.execution.uncertainty_resolution import LegacyOperatorResolution
 from bfx_funding_bot.modules.execution.venue_observation import BitfinexVenueObservation
 from bfx_funding_bot.modules.ledger import (
+    BOOT_GRACE_MS,
+    RUNTIME_GRACE_MS,
     CapitalAuthority,
     ManagedOfferReader,
     ObservationSink,
@@ -87,15 +96,6 @@ from bfx_funding_bot.modules.ledger.wiring import (
     build_venue_hint_sink,
 )
 
-# The boot closes every outcome-less attempt it finds (it holds the writer lock, so none can
-# be in flight); the runtime cycle leaves the ones younger than this to their own submit.
-BOOT_GRACE_MS = 0
-RUNTIME_GRACE_MS = 120_000
-# How long a live venue offer without provenance may sit before it is called foreign.
-FOREIGN_GRACE_MS = 120_000
-
-type ResyncRequest = Callable[[str], None]
-
 
 @dataclass(frozen=True, slots=True)
 class ObservationVenue:
@@ -115,6 +115,30 @@ class ObservationSinks:
 
 
 @dataclass(frozen=True, slots=True)
+class PolicyPorts:
+    """The applied-policy store and the lock its callers hold across a read and the write."""
+
+    store: PolicyStore
+    scope_lock: ScopeLock
+
+
+def select_policy_ports(
+    authority: Authority, scope: Scope, *, max_snapshot_age_ms: int,
+) -> PolicyPorts:
+    """The policy ports of ``authority``; the bot and the owner's amendment script share it."""
+    if authority == "ledger":
+        return PolicyPorts(build_policy_store(scope), build_scope_lock())
+    return _legacy_policy_ports(CapitalRepository(
+        account_id=scope.exchange_account_id, environment=scope.deployment_environment,
+        max_snapshot_age_ms=max_snapshot_age_ms,
+    ))
+
+
+def _legacy_policy_ports(repository: CapitalRepository) -> PolicyPorts:
+    return PolicyPorts(LegacyPolicyStore(repository), LegacyScopeLock(repository))
+
+
+@dataclass(frozen=True, slots=True)
 class CapitalPorts:
     """What a process that lends real capital binds to its authority, all or none."""
 
@@ -125,6 +149,9 @@ class CapitalPorts:
     operator_resolution: OperatorResolution
     deployment_input: DeploymentInput
     observation: Callable[[ObservationVenue], ObservationSinks]
+    # Called with a symbol once the durable pre-sizing guard allowed it: the event-sourced
+    # authority converges its in-memory uncertainty cache there. None where there is none.
+    uncertainty_synced: Callable[[str], None] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,9 +168,9 @@ class BotPorts:
     authority: Authority
     uncertainty_reader: UncertaintyReader
     managed_offers: ManagedOfferReader
-    # The sink for venue hints (WS and REST polling). Built once the resync request exists;
-    # a ledger sink debounces per instance, so the caller builds one and shares it.
-    venue_hint_sink: Callable[[ResyncRequest | None], VenueHintSink]
+    # The sink for venue hints (WS and REST polling). A ledger sink debounces per instance,
+    # so there is one, shared by every producer.
+    venue_hint_sink: VenueHintSink
     # None where nothing lends: paper and shadow.
     capital: CapitalPorts | None
     legacy: LegacyExtras | None
@@ -156,6 +183,7 @@ async def select_bot_ports(
     scope: Scope,
     account_id: str,
     bus: DomainEventBus,
+    resync: ResyncChannel,
     live: bool,
     clock: Callable[[], int],
     max_snapshot_age_ms: int,
@@ -165,7 +193,7 @@ async def select_bot_ports(
         if not live:
             raise ValueError("the ledger authority has no simulated composition")
         return _ledger_ports(
-            session_factory, scope, account_id, bus, clock, max_snapshot_age_ms,
+            session_factory, scope, account_id, bus, resync, clock, max_snapshot_age_ms,
         )
     return await _legacy_ports(
         session_factory, scope, account_id, bus, live, clock, max_snapshot_age_ms,
@@ -174,11 +202,13 @@ async def select_bot_ports(
 
 def _ledger_ports(
     session_factory: async_sessionmaker[AsyncSession], scope: Scope, account_id: str,
-    bus: DomainEventBus, clock: Callable[[], int], max_snapshot_age_ms: int,
+    bus: DomainEventBus, resync: ResyncChannel, clock: Callable[[], int],
+    max_snapshot_age_ms: int,
 ) -> BotPorts:
     capital_authority = build_capital_authority(
         session_factory, max_snapshot_age_ms=max_snapshot_age_ms,
     )
+    policy = select_policy_ports("ledger", scope, max_snapshot_age_ms=max_snapshot_age_ms)
 
     def observation(venue: ObservationVenue) -> ObservationSinks:
         observed = BitfinexVenueObservation(
@@ -189,6 +219,8 @@ def _ledger_ports(
         quarantine_age = QuarantineAgeMonitor()
 
         def sink(grace_ms: int) -> ObservationSink:
+            # One time constant per cycle: how long an attempt or an unexplained offer may
+            # still be in flight.
             return LedgerCycleEffects(
                 build_observation_sink(session_factory, observed, now_ms=clock, grace_ms=grace_ms),
                 scope=scope, account_id=account_id, session_factory=session_factory,
@@ -196,25 +228,20 @@ def _ledger_ports(
                 bus=bus, reads=build_ledger_cycle_reads(),
                 conservation=build_ledger_conservation_reader(),
                 operator_reads=build_operator_reads(), foreign_exposure=foreign_exposure,
-                quarantine_age=quarantine_age, foreign_grace_ms=FOREIGN_GRACE_MS, clock=clock,
+                quarantine_age=quarantine_age, foreign_grace_ms=grace_ms, clock=clock,
             )
 
         return ObservationSinks(boot=sink(BOOT_GRACE_MS), runtime=sink(RUNTIME_GRACE_MS))
-
-    def venue_hint_sink(request_resync: ResyncRequest | None) -> VenueHintSink:
-        if request_resync is None:
-            raise ValueError("the ledger venue hint sink needs the reconcile's resync request")
-        return build_venue_hint_sink(scope=scope, request_resync=request_resync, bus=bus)
 
     return BotPorts(
         authority="ledger",
         uncertainty_reader=build_uncertainty_reader(session_factory),
         managed_offers=build_managed_offer_reader(),
-        venue_hint_sink=venue_hint_sink,
+        venue_hint_sink=build_venue_hint_sink(scope=scope, request_resync=resync.request, bus=bus),
         capital=CapitalPorts(
             capital_authority=capital_authority,
-            scope_lock=build_scope_lock(),
-            policy_store=build_policy_store(scope),
+            scope_lock=policy.scope_lock,
+            policy_store=policy.store,
             command_boundary=CommandBoundary(
                 scope, session_factory,
                 build_command_journal(session_factory, max_snapshot_age_ms=max_snapshot_age_ms),
@@ -226,6 +253,7 @@ def _ledger_ports(
                 environment=scope.deployment_environment, offers=build_ledger_managed_offers(),
             ),
             observation=observation,
+            uncertainty_synced=None,
         ),
         legacy=None,
     )
@@ -250,11 +278,23 @@ async def _legacy_ports(
             clock=lambda: int(time.time() * 1000),
         )
 
-    def venue_hint_sink(request_resync: ResyncRequest | None) -> VenueHintSink:
-        # The event-log authority reconciles through the registry, not through a resync.
-        return LegacyVenueHintSink(
-            registry=offer_registry, bus=bus, persister=persister, account_id=account_id,
-        )
+    # The projection and the registry follow the bus, per event type in this order (the
+    # exposure projection first); later subscribers (NAV, metrics) come after.
+    bus.subscribe(ReservationClaimed, paper_ledger.on_reservation_claimed)
+    bus.subscribe(OrderFilled, paper_ledger.on_order_filled)
+    bus.subscribe(ReservationReleased, paper_ledger.on_reservation_released)
+    bus.subscribe(ReservationClaimed, offer_registry.handle)
+    bus.subscribe(OrderFilled, offer_registry.handle)
+    bus.subscribe(ReservationReleased, offer_registry.handle)
+    # PositionReconciled is the projection's sole exposure authority at reconcile time.
+    bus.subscribe(PositionReconciled, paper_ledger.on_position_reconciled)
+
+    def converge_uncertainty(symbol: str) -> None:
+        # PostgreSQL is authoritative on the live money path: a resolved uncertainty may
+        # leave the projection's process-local counter stale (the API writer runs elsewhere).
+        stale = paper_ledger.uncertain_exposure(symbol)
+        if stale > 0:
+            paper_ledger.clear_uncertainty(symbol, stale)
 
     capital: CapitalPorts | None = None
     if live:
@@ -292,10 +332,11 @@ async def _legacy_ports(
                 boot=recovery(BOOT_GRACE_MS), runtime=recovery(RUNTIME_GRACE_MS),
             )
 
+        policy = _legacy_policy_ports(runtime.repository)
         capital = CapitalPorts(
             capital_authority=LegacyCapitalAuthority(runtime),
-            scope_lock=LegacyScopeLock(runtime.repository),
-            policy_store=LegacyPolicyStore(runtime.repository),
+            scope_lock=policy.scope_lock,
+            policy_store=policy.store,
             command_boundary=CommandBoundary(
                 scope, session_factory,
                 LegacyCommandJournal(
@@ -307,12 +348,15 @@ async def _legacy_ports(
             operator_resolution=LegacyOperatorResolution(),
             deployment_input=LegacyDeploymentInput(),
             observation=observation,
+            uncertainty_synced=converge_uncertainty,
         )
     return BotPorts(
         authority="legacy",
         uncertainty_reader=uncertainty_reader,
         managed_offers=LegacyManagedOffers(),
-        venue_hint_sink=venue_hint_sink,
+        venue_hint_sink=LegacyVenueHintSink(
+            registry=offer_registry, bus=bus, persister=persister, account_id=account_id,
+        ),
         capital=capital,
         legacy=LegacyExtras(persister, paper_ledger, offer_registry),
     )

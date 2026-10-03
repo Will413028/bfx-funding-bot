@@ -97,11 +97,21 @@ async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool =
                         source={"synthetic_fixture": True})
 
 
+def paper_ledger_of(daemon):  # type: ignore[no-untyped-def]
+    """The simulated paper-position projection, found where it listens: on the bus."""
+    from bfx_funding_bot.modules.execution.events import PositionReconciled
+    from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
+    (ledger,) = {h.__self__ for h in daemon.bus._handlers[PositionReconciled]
+                 if isinstance(getattr(h, "__self__", None), PaperPositionLedger)}
+    return ledger
+
+
 __all__ = [
     "TEST_EXCHANGE_ACCOUNT_ID",
     "TEST_VAULT_KEK_B64",
     "configure_account_env",
     "configure_live_wiring_env",
+    "paper_ledger_of",
     "seed_exchange_account",
     "stamp_schema_head",
 ]

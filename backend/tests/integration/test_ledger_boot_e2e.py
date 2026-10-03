@@ -47,7 +47,13 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitAcknowledged
-from bfx_funding_bot.modules.ledger import Attempt, CapitalAvailable, CapitalBlocked, Scope
+from bfx_funding_bot.modules.ledger import (
+    RUNTIME_GRACE_MS,
+    Attempt,
+    CapitalAvailable,
+    CapitalBlocked,
+    Scope,
+)
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisRow,
     LedgerObservationRow,
@@ -114,7 +120,7 @@ class Env:
     async def first_basis(self) -> None:
         """An accepted observation, as a previous process left it."""
         result = await build_observation_sink(
-            self.factory, FakeVenue(Clock()), now_ms=_now).run(SCOPE)
+            self.factory, FakeVenue(Clock()), now_ms=_now, grace_ms=RUNTIME_GRACE_MS).run(SCOPE)
         assert result.decision == "accepted"
 
     async def count(self, table) -> int:

@@ -18,6 +18,7 @@ from bfx_funding_bot.modules.execution.observation_sink import LegacyObservation
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
+from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import Scope
 
 # Reuse the stub session/store/auth-rest shapes from the WS-dead integration test.
@@ -95,7 +96,7 @@ async def test_resync_request_reconciles_off_interval(
 
     # Huge interval: only an off-interval resync can produce a second reconcile.
     scope = Scope(uuid4(), _ENV)
-    pr = PeriodicReconcile(
+    pr = PeriodicReconcile(resync=ResyncChannel(),
         recovery=LegacyObservationSink(recovery, scope), scope=scope, probe=_FakeProbe(), interval_s=3600.0,
         max_consecutive_failures=3, min_resync_interval_s=0.0,
     )
@@ -105,7 +106,7 @@ async def test_resync_request_reconciles_off_interval(
         await asyncio.sleep(0.05)
         assert recovery.calls == 1                       # tick 1 (loop start) only
         assert ledger.current_exposure("fUST") == Decimal("0")  # ...and it really converged
-        pr.request_resync("reconnect")                   # the trigger under test
+        pr.resync.request("reconnect")                   # the trigger under test
         await asyncio.sleep(0.1)
         assert recovery.calls >= 2                        # off-interval reconcile ran
         stop.set()

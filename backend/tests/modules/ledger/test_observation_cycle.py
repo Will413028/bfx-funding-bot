@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import text
 
 from bfx_funding_bot.modules.ledger import (
+    RUNTIME_GRACE_MS,
     Acceptance,
     CycleResult,
     ObservationWindow,
@@ -165,7 +166,7 @@ async def test_close_dangling_respects_grace_boundary(sqlite_session, monkeypatc
     monkeypatch.setattr(journal, "lock_scope", AsyncMock())
     record = AsyncMock()
     monkeypatch.setattr(journal, "record_outcome", record)
-    assert await journal.close_dangling(sqlite_session, SCOPE, now_ms=300_000) == (older, boundary)
+    assert await journal.close_dangling(sqlite_session, SCOPE, now_ms=300_000, grace_ms=RUNTIME_GRACE_MS) == (older, boundary)
     assert [call.args[2].kind for call in record.await_args_list] == ["unknown", "unknown"]
 
 

@@ -41,6 +41,7 @@ from bfx_funding_bot.modules.execution.observation_sink import LegacyObservation
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
+from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import Scope
 
 from .conftest import make_reservation_ref
@@ -217,7 +218,7 @@ async def test_periodic_reconcile_converges_ledger_with_ws_dead(
 
     # 3. REAL PeriodicReconcile loop — NO ws_dispatcher, NO WS events fired.
     scope = Scope(uuid4(), _ENV)
-    pr = PeriodicReconcile(
+    pr = PeriodicReconcile(resync=ResyncChannel(),
         recovery=LegacyObservationSink(recovery, scope), scope=scope, probe=_FakeProbe(), interval_s=0.01,
         max_consecutive_failures=3,
     )

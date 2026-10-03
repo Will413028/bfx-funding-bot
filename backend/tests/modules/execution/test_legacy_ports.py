@@ -135,7 +135,6 @@ async def test_basis_token_is_the_snapshot_seq_and_status_renders_it_unchanged(c
     )
     service = TradingStatusService(
         chain=chain,
-        ledger=None,
         account_ctx=ctx,  # type: ignore[arg-type]
         cells=[_cell("fUST", "a30")],
         caps={},
@@ -147,7 +146,7 @@ async def test_basis_token_is_the_snapshot_seq_and_status_renders_it_unchanged(c
         phase=Phase.LIVE,
         attempts=SubmitAttemptRecorder(),
         trading_state=halt,
-        capital=status_reads(runtime),
+        exposure=status_reads(runtime),
     )
     status = (await service.snapshot())["symbols"]["fUST"]
     assert status["basis_token"] == str(seq)

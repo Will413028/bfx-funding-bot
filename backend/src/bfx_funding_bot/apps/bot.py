@@ -81,6 +81,7 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.fill_tracker import (
     RestPollingFillTracker,
 )
+from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
@@ -95,6 +96,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardRule,
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
+from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.config import (
     load_safety_config,
@@ -239,9 +241,10 @@ async def build_daemon(
     capital_scope = Scope(account_bootstrap.exchange_account_id, env_str)
     account_id = account_bootstrap.account_id
     bus = DomainEventBus()
+    resync = ResyncChannel()
     ports = await select_bot_ports(
         authority, session_factory=session_factory, scope=capital_scope, account_id=account_id,
-        bus=bus, live=live_executor, clock=now_ms_utc,
+        bus=bus, resync=resync, live=live_executor, clock=now_ms_utc,
         max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS,
     )
     capital = ports.capital
@@ -595,29 +598,11 @@ async def build_daemon(
         boot_recovery = sinks.boot
         runtime_recovery = sinks.runtime
 
-    # The event-log authority keeps an in-memory exposure projection and a CID offer
-    # registry fed from the bus; a ledger-authority process has neither, and its bus only
-    # carries notifications after the writing transaction committed.
-    if legacy is not None:
-        assert paper_ledger is not None
-        bus.subscribe(ReservationClaimed,  paper_ledger.on_reservation_claimed)
-        bus.subscribe(OrderFilled,         paper_ledger.on_order_filled)
-        bus.subscribe(ReservationReleased, paper_ledger.on_reservation_released)
-        # Phase 4.4a: OfferRegistry projection — stays in sync with event log.
-        bus.subscribe(ReservationClaimed,  legacy.offer_registry.handle)
-        bus.subscribe(OrderFilled,         legacy.offer_registry.handle)
-        bus.subscribe(ReservationReleased, legacy.offer_registry.handle)
     # 3b: cancel lifecycle → diagnostics (CANCEL_AUDIT). Forensic, best-effort.
     bus.subscribe(CancelRequested,     diagnostics.handle_cancel_requested)
     bus.subscribe(CancelAcknowledged,  diagnostics.handle_cancel_acknowledged)
-    # Credit-aware reconcile: PositionReconciled is the ledger's sole exposure
-    # authority at reconcile time (recovery FSM events are routed to the registry,
-    # not the bus — see BootRecovery._route_fsm). Wiring both together is required:
-    # subscribing here without the registry routing would double-count orphans.
-    if paper_ledger is not None:
-        bus.subscribe(PositionReconciled, paper_ledger.on_position_reconciled)
-    # Same snapshot feeds the NAV tracker (peak + 24h window) behind the NAV-drop
-    # alert, wrapped so it reads metrics the tracker already updated.
+    # The snapshot behind PositionReconciled feeds the NAV tracker (peak + 24h window) behind
+    # the NAV-drop alert, wrapped so it reads metrics the tracker already updated.
     nav_drop = NavDropMonitor(
         source=pnl_source,
         realized_loss_threshold_pct=safety_cfg.nav_alerts.realized_loss_24h_pct,
@@ -717,7 +702,7 @@ async def build_daemon(
             session_factory=session_factory,
             store=quote_store,
             tracker=CellDeploymentTracker(),
-            ledger=paper_ledger,
+            uncertainty_synced=capital.uncertainty_synced,
             safety_chain=safety_chain,
             executor=wrapped_executor,
             account_ctx=account_ctx,
@@ -793,27 +778,26 @@ async def build_daemon(
             min_resync_interval_s=resync_min_interval_s,
             deployment=deployment_reconciler,
             deployment_input=capital.deployment_input,
+            resync=resync,
         )
 
-    # The hint sink needs the reconcile's resync request, so it is built after it. WS and
-    # REST polling share the one sink: a ledger sink debounces per instance.
-    venue_hint_sink = (
-        ports.venue_hint_sink(
-            periodic_reconcile.request_resync if periodic_reconcile is not None else None)
-        if spec.fill_tracker_enabled or spec.ws_client_enabled else None
-    )
+    # The REST fill tracker is the event-log authority's: it needs the CID registry. The
+    # ledger authority covers a missed fill with WS hints and the periodic reconcile.
     fill_tracker: RestPollingFillTracker | None = None
-    if venue_hint_sink is not None and spec.fill_tracker_enabled:
-        fill_tracker = RestPollingFillTracker(
-            http=bitfinex_http,
-            event_sink=stdout_sink,
-            probe=probe,
-            phase=config.phase,
-            strategy=first_cell.strategy,
-            cell=first_cell.cell_id,
-            account_id=account_id,
-            venue_hint_sink=venue_hint_sink,
-        )
+    if spec.fill_tracker_enabled:
+        if legacy is None:
+            log.warning("fill_tracker_not_composed authority=%s", ports.authority)
+        else:
+            fill_tracker = RestPollingFillTracker(
+                http=bitfinex_http,
+                event_sink=stdout_sink,
+                probe=probe,
+                phase=config.phase,
+                strategy=first_cell.strategy,
+                cell=first_cell.cell_id,
+                account_id=account_id,
+                venue_hint_sink=ports.venue_hint_sink,
+            )
 
     # ---- Phase 4.4 prework: SmokeRunner ----
     from bfx_funding_bot.modules.admin.pg_event_log_query import PostgresEventLogQueryAdapter
@@ -1073,9 +1057,16 @@ async def build_daemon(
     # ---- GET /admin/trading-status + POST /admin/dry-evaluate ----
     # Real-money status uses the same applied policy reader as the planner and
     # command gate. Legacy scalar/map arguments are simulation diagnostics only.
+    if capital is not None:
+        status_exposure: CapitalStatusReads | PaperPositionLedger = CapitalStatusReads(
+            authority=capital.capital_authority, lock=capital.scope_lock, scope=capital_scope,
+            session_factory=session_factory, clock=now_ms_utc)
+    else:
+        assert paper_ledger is not None  # no capital authority: the simulated, legacy composition
+        status_exposure = paper_ledger
     trading_status = TradingStatusService(
         chain=safety_chain,
-        ledger=paper_ledger,
+        exposure=status_exposure,
         account_ctx=account_ctx,
         cells=config.cells,
         caps=hg.allocation_cap.caps,
@@ -1095,10 +1086,6 @@ async def build_daemon(
                               if deployment_identity.deployment_id else None),
         }),
         readiness=trading_readiness,
-        capital=(CapitalStatusReads(authority=capital.capital_authority, lock=capital.scope_lock,
-                                    scope=capital_scope, session_factory=session_factory,
-                                    clock=now_ms_utc)
-                 if capital is not None else None),
     )
 
     healthz_port_env = os.environ.get("BFX_HEALTHZ_PORT", "").strip()
@@ -1115,17 +1102,12 @@ async def build_daemon(
         auth_ws = BitfinexAuthWSClient(
             creds=credentials,
             auth_gate=bfx_auth_gate,
-            on_resync_needed=(
-                periodic_reconcile.request_resync
-                if periodic_reconcile is not None
-                else None
-            ),
+            on_resync_needed=resync.request if periodic_reconcile is not None else None,
         )
-        assert venue_hint_sink is not None  # built above for any WS-enabled executor
         ws_dispatcher = BitfinexLiveWSDispatcher(
             ws_client=auth_ws,
             event_sink=stdout_sink,
-            venue_hint_sink=venue_hint_sink,
+            venue_hint_sink=ports.venue_hint_sink,
         )
         bus.subscribe(CancelRequested, ws_dispatcher.handle_cancel_requested)
         # Saturation signal: queue depth read live at scrape time (replaces the
@@ -1170,7 +1152,6 @@ async def build_daemon(
         executor=executor,
         safety_chain=safety_chain,
         account_ctx=account_ctx,
-        ledger=paper_ledger,
         bus=bus,
         smoke_runner=smoke_runner,
         fill_tracker=fill_tracker,

@@ -611,7 +611,7 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     httpx_mock: HTTPXMock,
 ) -> None:
     """Live executor + WS client: auth_ws.on_resync_needed is bound to
-    periodic_reconcile.request_resync so a stream break triggers an off-interval
+    periodic_reconcile.resync.request so a stream break triggers an off-interval
     reconcile."""
     from bfx_funding_bot.apps.bot import build_daemon
 
@@ -662,7 +662,7 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     assert daemon.auth_ws is not None
     assert daemon.periodic_reconcile is not None
     # bound method equality: same __self__ + __func__
-    assert daemon.auth_ws._on_resync_needed == daemon.periodic_reconcile.request_resync
+    assert daemon.auth_ws._on_resync_needed == daemon.periodic_reconcile.resync.request
     assert daemon.periodic_reconcile._min_resync_interval_s == 7.0
     # Shared-nonce wiring invariant (2026-07 auth-WS flap fix): every auth client
     # on the one BFX_API_KEY MUST draw from ONE monotonic nonce source. A separate
