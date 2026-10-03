@@ -24,10 +24,13 @@ from typing import Protocol
 
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
+from bfx_funding_bot.modules.execution.deployment_input import DeploymentInput
 from bfx_funding_bot.modules.execution.observation_sink import (
     LegacyCycleResult,
 )
-from bfx_funding_bot.modules.ledger import ObservationSink, Scope
+from bfx_funding_bot.modules.ledger import CycleResult, ObservationSink, Scope
+from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +62,10 @@ class PeriodicReconcile:
         min_resync_interval_s: float = 10.0,
         monotonic: Callable[[], float] | None = None,
         deployment: _Deployment | None = None,
+        deployment_input: DeploymentInput | None = None,
     ) -> None:
+        if (deployment is None) != (deployment_input is None):
+            raise ValueError("deployment and deployment_input are given together")
         self._recovery = recovery
         self._scope = scope
         self._probe = probe
@@ -68,6 +74,8 @@ class PeriodicReconcile:
         self._min_resync_interval_s = min_resync_interval_s
         self._monotonic = monotonic or time.monotonic
         self._deployment = deployment
+        self._deployment_input = deployment_input
+        self._non_accepted = 0  # consecutive cycles the ledger did not accept
         self._consecutive_failures = 0
         self._tripped_down = False  # this loop owns the EXECUTOR DOWN it sets
         self._divergence_flagged = False  # this loop owns HealthTarget.RECONCILE
@@ -119,13 +127,45 @@ class PeriodicReconcile:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop_event.wait(), timeout=remaining)
 
+    def note_boot(self, decision: str) -> None:
+        """Seed the non-accepted streak with the boot cycle's decision."""
+        if decision == "accepted":
+            self._accepted()
+        else:
+            self._not_accepted(decision)
+
+    def _not_accepted(self, decision: str) -> None:
+        self._non_accepted += 1
+        log.warning(
+            "periodic_reconcile_not_accepted decision=%s streak=%d",
+            decision, self._non_accepted,
+        )
+        self._probe.update(
+            HealthTarget.RECONCILE, HealthStatus.DEGRADED,
+            error_message=(
+                f"reconcile not accepted decision={decision} "
+                f"consecutive={self._non_accepted}"
+            ),
+        )
+        if self._non_accepted == self._max_failures:
+            alerts.emit(
+                alerts.RECONCILE_NOT_ACCEPTED,
+                decision=decision, consecutive=self._non_accepted,
+            )
+
+    def _accepted(self) -> None:
+        if self._non_accepted == 0:
+            return
+        log.info("periodic_reconcile_accepted_again after=%d", self._non_accepted)
+        self._non_accepted = 0
+        self._probe.update(
+            HealthTarget.RECONCILE, HealthStatus.HEALTHY,
+            error_message="reconcile accepted again",
+        )
+
     async def _tick(self) -> None:
         try:
             cycle = await self._recovery.run(self._scope)
-            if cycle.decision != "accepted":
-                log.info("periodic_reconcile_refused decision=%s", cycle.decision)
-                return
-            result = cycle.legacy if isinstance(cycle, LegacyCycleResult) else None
         except Exception as exc:  # never let the backbone crash the daemon
             self._consecutive_failures += 1
             log.warning(
@@ -139,6 +179,10 @@ class PeriodicReconcile:
                     error_message=f"venue reconcile unreachable: {exc!r}",
                 )
             return
+        if cycle.decision != "accepted":
+            self._not_accepted(cycle.decision)
+            return
+        self._accepted()
 
         self._consecutive_failures = 0
         if self._tripped_down:
@@ -147,8 +191,14 @@ class PeriodicReconcile:
                 HealthTarget.EXECUTOR, HealthStatus.HEALTHY,
                 error_message="venue reconcile recovered",
             )
-        if result is None:
-            return
+        # Drift health compares the legacy reconcile's ledger with the venue; the
+        # ledger authority's RECONCILE health is the non-accepted streak above.
+        result = cycle.legacy if isinstance(cycle, LegacyCycleResult) else None
+        if result is not None:
+            self._report_drift(result)
+        await self._deploy(cycle)
+
+    def _report_drift(self, result: ReconcileResult) -> None:
         drifted = (
             result.realized_drift_usdt > _DRIFT_EPSILON
             or result.reserved_drift_usdt > _DRIFT_EPSILON
@@ -184,14 +234,13 @@ class PeriodicReconcile:
                 HealthTarget.RECONCILE, HealthStatus.HEALTHY,
                 error_message="reconcile drift cleared",
             )
-        if self._deployment is not None:
-            try:
-                # Only managed offers are the bot's to reprice (D2): a foreign
-                # offer is never cancelled, and an UNKNOWN's candidate has no
-                # claim a cancel could be admitted against.
-                await self._deployment.deploy(venue_offers=tuple(
-                    offer for offer in result.venue_offers
-                    if offer.venue_offer_id not in result.unmanaged_offer_ids
-                ))
-            except Exception:  # deployment must never crash the reconcile backbone
-                log.exception("deployment_phase_failed")
+
+    async def _deploy(self, cycle: CycleResult) -> None:
+        if self._deployment is None or self._deployment_input is None:
+            return
+        try:
+            await self._deployment.deploy(
+                venue_offers=await self._deployment_input.offers(cycle),
+            )
+        except Exception:  # deployment must never crash the reconcile backbone
+            log.exception("deployment_phase_failed")

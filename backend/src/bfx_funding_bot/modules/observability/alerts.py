@@ -61,6 +61,12 @@ UNKNOWN_QUARANTINE_AGED: Final = "unknown_quarantine_aged"
 # An automatic halt whose condition cleared, but the rolling auto-resume limit is
 # spent: it stays until an operator resumes (ADR 2026-09-26 auto resume).
 AUTO_RESUME_LIMIT_REACHED: Final = "auto_resume_limit_reached"
+# The periodic reconcile has not been accepted for N cycles in a row: the ledger
+# cannot see the venue, so nothing is deployed or repriced until it can.
+RECONCILE_NOT_ACCEPTED: Final = "reconcile_not_accepted"
+# One live offer's provenance contradicts itself: its currency places nothing
+# (the other currencies continue) until the contradiction is resolved.
+PROVENANCE_CONFLICT: Final = "provenance_conflict"
 
 # Fields that identify "the same event" for de-duplication. Unlisted events
 # de-duplicate on all of their fields.
@@ -72,6 +78,7 @@ DEDUP_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     DAEMON_FATAL: ("error",),
     FOREIGN_EXPOSURE: ("venue_offer_id",),
     UNKNOWN_QUARANTINE_AGED: ("attempt_id", "minutes"),
+    PROVENANCE_CONFLICT: ("symbol", "venue_offer_id"),
 }
 
 # Human titles for the protection triggers the plan names explicitly.
@@ -337,6 +344,10 @@ def title(event: str, fields: Mapping[str, object]) -> str:
         return "foreign offer on the account (not managed, left untouched)"
     if event == UNKNOWN_QUARANTINE_AGED:
         return f"{fields.get('symbol', '?')} paused: an UNKNOWN submit is still unresolved"
+    if event == RECONCILE_NOT_ACCEPTED:
+        return "venue reconcile not accepted: no deployment until it is"
+    if event == PROVENANCE_CONFLICT:
+        return f"{fields.get('symbol', '?')} paused: an offer's provenance is contradictory"
     if event == "nav_drop":
         return f"NAV drop on {fields.get('symbol', '?')} (alert only; lending continues)"
     if event == "foreign_lending":
