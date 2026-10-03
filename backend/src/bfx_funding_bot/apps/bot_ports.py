@@ -212,7 +212,7 @@ def _ledger_ports(
 
     def observation(venue: ObservationVenue) -> ObservationSinks:
         observed = BitfinexVenueObservation(
-            rest=venue.auth_rest, ctx=venue.account_ctx, scope=scope,
+            rest=venue.auth_rest, ctx=venue.account_ctx, scope=scope, clock_ms=clock,
         )
         # One alert per foreign offer and per aged UNKNOWN across the boot and the runtime.
         foreign_exposure = ForeignExposureMonitor()
@@ -326,6 +326,7 @@ async def _legacy_ports(
                     protection=venue.protection,
                     foreign_exposure=foreign_exposure,
                     action_grace_ms=action_grace_ms,
+                    clock=clock,
                 ), scope)
 
             return ObservationSinks(
@@ -341,7 +342,7 @@ async def _legacy_ports(
                 scope, session_factory,
                 LegacyCommandJournal(
                     runtime, date_provider=lambda: datetime.now(UTC).date(),
-                    clock=lambda: int(time.time() * 1000), uncertainty_reader=uncertainty_reader,
+                    clock=clock, uncertainty_reader=uncertainty_reader,
                 ),
                 LegacyCommandEffects(persister, bus, paper_ledger.on_reservation_unknown),
             ),

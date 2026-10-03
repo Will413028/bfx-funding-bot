@@ -640,6 +640,7 @@ async def build_daemon(
         boundary=capital.command_boundary if capital is not None else None,
         uncertainty_reader=uncertainty_reader,
         managed_offers=managed_offers if capital is not None else None,
+        clock=now_ms_utc,
     )
     reservation_executor: ExecutorPort = reservation_middleware
 
