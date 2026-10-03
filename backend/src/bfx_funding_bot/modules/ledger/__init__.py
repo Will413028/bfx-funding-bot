@@ -487,6 +487,73 @@ class OperatorEvidence(Protocol):
         ...
 
 
+type OperatorAction = Literal["bind_to_venue", "mark_not_accepted", "manual_resolution"]
+# The decisions an operator may state for a manual resolution (a quarantine only).
+MANUAL_RESOLUTION_DECISIONS: frozenset[str] = frozenset(
+    {"accepted_external_exposure", "closed_at_venue"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ResolutionIntent:
+    """What the operator asked for; ``evidence_ref`` is opaque until the authority maps it."""
+
+    uncertainty_id: UUID
+    action: OperatorAction
+    evidence_ref: str
+    operator_id: str
+    reason: str | None = None
+    venue_offer_id: str | None = None
+    decision: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RequestColumns:
+    """The authority's own evidence column of a request row: exactly one is set."""
+
+    reconcile_event_seq: int | None = None
+    observation_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedResolution:
+    """A request row as its authority applies it."""
+
+    request_id: UUID
+    intent: ResolutionIntent
+    columns: RequestColumns
+
+
+@dataclass(frozen=True, slots=True)
+class AppliedResolution:
+    """What applying produced; ``resolved_event_seq`` exists only under the legacy log."""
+
+    resolved_event_seq: int | None = None
+
+
+class OperatorResolution(Protocol):
+    """The operator request path of one authority: validated at the web API, applied by the daemon.
+
+    Both methods raise ``ResolutionRejected`` with the bounded operator codes.
+    """
+
+    def columns(self, evidence_ref: str) -> RequestColumns:
+        """Map a well-formed reference to its request column, else ``stale_reconcile_fence``."""
+        ...
+
+    async def prepare(
+        self, session: AsyncSession, scope: Scope, intent: ResolutionIntent, *, now_ms: int
+    ) -> RequestColumns:
+        """Everything the web API's own role can prove before queueing; returns the columns."""
+        ...
+
+    async def apply(
+        self, session: AsyncSession, scope: Scope, request: QueuedResolution, *, now_ms: int
+    ) -> AppliedResolution:
+        """Authoritative re-validation and the write, in the worker's locked transaction."""
+        ...
+
+
 class QueryAdmissionRefused(ValueError):  # noqa: N818 - named by query contract
     """An in-flight command makes a pre-I/O fence unsafe."""
 
@@ -976,12 +1043,14 @@ class CommandJournal(Protocol):
 __all__ = [
     "CREDIT_STATUSES",
     "CREDIT_TERMINAL_KINDS",
+    "MANUAL_RESOLUTION_DECISIONS",
     "OBSERVATION_REF_PREFIX",
     "OFFER_STATUSES",
     "OFFER_TERMINAL_KINDS",
     "UNKNOWN_SETTLE_MS",
     "Acceptance",
     "AcceptanceDecision",
+    "AppliedResolution",
     "Attempt",
     "AuthorizeRefused",
     "Authorized",
@@ -1031,8 +1100,10 @@ __all__ = [
     "OfferTerminalKind",
     "OfferView",
     "OpenUncertainty",
+    "OperatorAction",
     "OperatorEvidence",
     "OperatorReads",
+    "OperatorResolution",
     "Outcome",
     "OutcomeAlreadyRecorded",
     "OutcomeKind",
@@ -1043,11 +1114,14 @@ __all__ = [
     "QuarantineMemberConflict",
     "QueryAdmissionRefused",
     "QueryHandle",
+    "QueuedResolution",
     "RecordedAttempt",
+    "RequestColumns",
     "Resolution",
     "ResolutionAction",
     "ResolutionAlreadyRecorded",
     "ResolutionEvidence",
+    "ResolutionIntent",
     "ResolutionRejected",
     "ResolutionSubject",
     "Scope",

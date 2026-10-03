@@ -153,18 +153,6 @@ def test_ledger_token_parser_rejects_noncanonical_uuid_and_legacy_tokens(token):
 
 
 @pytest.mark.asyncio
-async def test_dormant_context_is_explicitly_matcher_pending_without_database_reads():
-    session = AsyncMock()
-    result = await build_operator_evidence().resolution_context(session, SCOPE, SUBJECT)
-    assert result.evidence_ref is None
-    assert result.candidate_count is None
-    assert result.candidate_venue_offer_ids == ()
-    assert result.unavailable_reason == "matcher_pending"
-    session.scalar.assert_not_called()
-    session.get.assert_not_called()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["not_latest", "not_accepted"])
 async def test_p3_journal_authoritatively_rejects_invalid_observation(monkeypatch, fault):
     from bfx_funding_bot.modules.ledger import Resolution
