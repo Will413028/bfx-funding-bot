@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
-
 from bfx_funding_bot.core.errors import ExecutorTransientError
 from bfx_funding_bot.external.bitfinex.live_executor import (
     FundingCancelAllClient,
@@ -178,13 +176,9 @@ async def test_cancel_rejection_can_use_the_200_notification_error_variant() -> 
     body = again.json()
     assert again.status_code == 200 and len(body) == 8 and body[1] == "foc-req"
     assert body[6] == "ERROR" and "not" in body[7].lower()  # TEXT at index 7
-    assert classify_cancel_response(body)[0] == "other"  # see the strict xfail below
+    assert classify_cancel_response(body)[0] == "already_terminal"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "finding: classify_cancel_response reads TEXT at index 8; Bitfinex documents "
-    "[MTS, TYPE, MESSAGE_ID, null, DATA, CODE, STATUS, TEXT] with TEXT at 7, so "
-    "already_terminal is never detected (fix PR fix/bitfinex-notification-text-index)"))
 async def test_client_detects_already_terminal_cancel_from_the_documented_shape() -> None:
     w = await make_world(funds={"UST": "1000"}, cfg=config(cancel_rejection="200"))
     oid = await w.submit_ok(amount="150")
@@ -193,9 +187,6 @@ async def test_client_detects_already_terminal_cancel_from_the_documented_shape(
     assert status == "already_terminal" and text
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "finding: _structured_rejection_reason reads TEXT at index 8, so the venue's rejection "
-    "text is dropped from the 200 ERROR form (same fix PR as above)"))
 async def test_client_keeps_the_venue_rejection_text_from_the_documented_shape() -> None:
     w = await make_world(funds={"UST": "1000"}, cfg=config(business_rejection="200"))
     response = await w.submit(amount="5000")
