@@ -155,11 +155,12 @@ async def test_worker_reverifies_injected_port_under_account_lock(uncertainty_ap
     from bfx_funding_bot.modules.execution import operator_requests
     from bfx_funding_bot.modules.execution.operator_evidence import LegacyOperatorEvidence
     from bfx_funding_bot.modules.execution.uncertainty_resolution import (
-        ResolutionIntent,
+        LegacyOperatorResolution,
         ResolutionScope,
         UncertaintyResolutionRequests,
         UncertaintyResolutionWorker,
     )
+    from bfx_funding_bot.modules.ledger import ResolutionIntent
 
     client, factory = uncertainty_app
     seq = await _append_snapshot(factory, finished_at=2000)
@@ -177,11 +178,11 @@ async def test_worker_reverifies_injected_port_under_account_lock(uncertainty_ap
         session.info["account_locked"] = True
 
     monkeypatch.setattr(operator_requests, "acquire_transaction_lock", mark_lock)
-    port = RecordingPort()
+    port = LegacyOperatorResolution(RecordingPort())
     async with factory.begin() as session:
         await UncertaintyResolutionRequests(scope, port).request(
             session,
-            ResolutionIntent(client.uncertainty_id, "mark_not_accepted", seq, "operator-1"),
+            ResolutionIntent(client.uncertainty_id, "mark_not_accepted", str(seq), "operator-1"),
             now_ms=3000,
         )
     assert calls == [False]
@@ -190,7 +191,7 @@ async def test_worker_reverifies_injected_port_under_account_lock(uncertainty_ap
         scope=scope,
         authority=_Authority(),
         clock=lambda: 4000,
-        evidence=port,
+        resolution=port,
     )
     assert await worker.tick()
     assert calls == [False, True]

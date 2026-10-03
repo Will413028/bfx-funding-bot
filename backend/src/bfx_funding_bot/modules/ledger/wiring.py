@@ -39,6 +39,7 @@ from bfx_funding_bot.modules.ledger import (
     OpenUncertainty,
     OperatorEvidence,
     OperatorReads,
+    OperatorResolution,
     Outcome,
     OutcomeAlreadyRecorded,
     Quarantine,
@@ -60,6 +61,7 @@ from bfx_funding_bot.modules.ledger._internal import (
     observation,
     operator_evidence,
     operator_reads,
+    operator_resolution,
     ports,
     quarantine,
     reads,
@@ -338,9 +340,18 @@ def build_observation_sink(
     )
 
 
-def build_operator_evidence() -> OperatorEvidence:
-    """Construct the ledger implementation without selecting it in apps."""
-    return operator_evidence.LedgerOperatorEvidence()
+def build_operator_evidence(*, match: bool = False) -> OperatorEvidence:
+    """``match``: also derive an attempt's candidates, which needs a role that reads the
+    observed offers and the attempt payload (the web API's column grants exclude both)."""
+    return operator_evidence.LedgerOperatorEvidence(
+        operator_reads.LedgerOperatorReads(),
+        operator_resolution.attempt_match if match else None,
+    )
+
+
+def build_operator_resolution() -> OperatorResolution:
+    """The ledger operator request path; apps select it by authority epoch."""
+    return operator_resolution.LedgerOperatorResolution(operator_reads.LedgerOperatorReads())
 
 
 def build_operator_reads() -> OperatorReads:

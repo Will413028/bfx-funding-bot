@@ -44,6 +44,7 @@ from bfx_funding_bot.modules.execution.operator_evidence import (
     RECONCILE_EVENT_TYPE,
     LegacyOperatorEvidence,
     ResolutionRejected,
+    legacy_evidence_seq,
 )
 from bfx_funding_bot.modules.execution.operator_requests import (
     APPLIED,
@@ -59,10 +60,16 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     UncertaintyResolutionRequestRow,
 )
 from bfx_funding_bot.modules.ledger import (
+    AppliedResolution,
     OperatorEvidence,
+    OperatorResolution,
+    QueuedResolution,
+    RequestColumns,
+    ResolutionIntent,
     ResolutionSubject,
     Scope,
     VerifiedEvidence,
+    observation_evidence_ref,
 )
 from bfx_funding_bot.modules.ledger import (
     ResolutionRejected as EvidenceRejected,
@@ -93,32 +100,32 @@ class ResolutionScope:
     environment: str
 
 
-@dataclass(frozen=True, slots=True)
-class ResolutionIntent:
-    """What the operator asked for; everything else is re-derived server side."""
+def request_evidence_ref(row: UncertaintyResolutionRequestRow) -> str:
+    """The opaque reference the operator cited, rebuilt from whichever column the row carries."""
+    if row.observation_id is not None:
+        return observation_evidence_ref(row.observation_id)
+    if row.reconcile_event_seq is None:
+        raise ValueError("request has no evidence column")
+    return str(row.reconcile_event_seq)
 
-    uncertainty_id: UUID
-    action: ResolutionAction
-    reconcile_event_seq: int
-    operator_id: str
-    reason: str | None = None
-    venue_offer_id: str | None = None
-    decision: str | None = None
 
-    @classmethod
-    def from_request(cls, row: UncertaintyResolutionRequestRow) -> ResolutionIntent:
-        # Only legacy requests reach this reader; ledger-evidence rows carry no seq.
-        if row.reconcile_event_seq is None:
-            raise ValueError("request has no reconcile_event_seq")
-        return cls(
-            uncertainty_id=row.uncertainty_id,
-            action=row.action,  # type: ignore[arg-type]  # CHECK constraint bounds it
-            reconcile_event_seq=row.reconcile_event_seq,
-            operator_id=row.requested_by,
-            reason=row.reason,
-            venue_offer_id=row.venue_offer_id,
-            decision=row.decision,
-        )
+def intent_from_request(row: UncertaintyResolutionRequestRow) -> ResolutionIntent:
+    return ResolutionIntent(
+        uncertainty_id=row.uncertainty_id,
+        action=row.action,  # type: ignore[arg-type]  # CHECK constraint bounds it
+        evidence_ref=request_evidence_ref(row),
+        operator_id=row.requested_by,
+        reason=row.reason,
+        venue_offer_id=row.venue_offer_id,
+        decision=row.decision,
+    )
+
+
+def request_rejection(exc: EvidenceRejected) -> ResolutionRejected:
+    """A port refusal as the operator-request outcome it is (never a fault)."""
+    if isinstance(exc, ResolutionRejected):
+        return exc
+    return ResolutionRejected(exc.code, kind=exc.kind)
 
 
 async def load_scoped_uncertainty(
@@ -165,6 +172,7 @@ async def build_resolution_event(
     request still earns the same code.
     """
     row = await load_open_uncertainty(session, scope, intent.uncertainty_id)
+    reconcile_event_seq = legacy_evidence_seq(intent.evidence_ref)
     account_id = str(scope.account_id)
     port = evidence if evidence is not None else LegacyOperatorEvidence()
     evidence_scope = Scope(scope.account_id, scope.environment)
@@ -172,7 +180,7 @@ async def build_resolution_event(
     try:
         if intent.action == "bind_to_venue":
             verified = await port.verify(
-                session, evidence_scope, subject, str(intent.reconcile_event_seq),
+                session, evidence_scope, subject, intent.evidence_ref,
                 require_history=True,
             )
             if row.kind != "submit_outcome_unknown" or row.attempt_id is None:
@@ -191,13 +199,13 @@ async def build_resolution_event(
                 environment=scope.environment,
                 symbol=row.symbol,
                 kind=row.kind,
-                reconcile_event_seq=intent.reconcile_event_seq,
+                reconcile_event_seq=reconcile_event_seq,
                 resolved_by_operator_id=intent.operator_id,
                 occurred_at_ms=occurred_at_ms,
                 venue_offer_id=intent.venue_offer_id,
                 resolution_reason=(intent.reason or "bind_to_venue_offer").strip(),
                 resolution_evidence=_resolution_audit(
-                    reconcile_event_seq=intent.reconcile_event_seq,
+                    reconcile_event_seq=reconcile_event_seq,
                     verified=verified,
                     candidate_count=1,
                     venue_offer_id=intent.venue_offer_id,
@@ -206,7 +214,7 @@ async def build_resolution_event(
             )
         if intent.action == "mark_not_accepted":
             verified = await port.verify(
-                session, evidence_scope, subject, str(intent.reconcile_event_seq),
+                session, evidence_scope, subject, intent.evidence_ref,
                 require_history=True,
             )
             if row.kind != "submit_outcome_unknown":
@@ -219,12 +227,12 @@ async def build_resolution_event(
                 environment=scope.environment,
                 symbol=row.symbol,
                 kind=row.kind,
-                reconcile_event_seq=intent.reconcile_event_seq,
+                reconcile_event_seq=reconcile_event_seq,
                 resolved_by_operator_id=intent.operator_id,
                 occurred_at_ms=occurred_at_ms,
                 resolution_reason=(intent.reason or "confirmed_not_accepted").strip(),
                 resolution_evidence=_resolution_audit(
-                    reconcile_event_seq=intent.reconcile_event_seq,
+                    reconcile_event_seq=reconcile_event_seq,
                     verified=verified,
                     candidate_count=0,
                 ),
@@ -238,7 +246,7 @@ async def build_resolution_event(
             if not (intent.reason or "").strip():
                 raise ResolutionRejected("operator_reason_required", kind="invalid")
             verified = await port.verify(
-                session, evidence_scope, subject, str(intent.reconcile_event_seq),
+                session, evidence_scope, subject, intent.evidence_ref,
                 require_history=False,
             )
             return UncertaintyManuallyResolved(
@@ -247,13 +255,13 @@ async def build_resolution_event(
                 environment=scope.environment,
                 symbol=row.symbol,
                 kind=row.kind,
-                reconcile_event_seq=intent.reconcile_event_seq,
+                reconcile_event_seq=reconcile_event_seq,
                 resolved_by_operator_id=intent.operator_id,
                 occurred_at_ms=occurred_at_ms,
                 resolution_reason=(intent.reason or "").strip(),
                 resolution_action=intent.decision,
                 resolution_evidence=_resolution_audit(
-                    reconcile_event_seq=intent.reconcile_event_seq,
+                    reconcile_event_seq=reconcile_event_seq,
                     verified=verified,
                 ),
             )
@@ -282,10 +290,12 @@ def _resolution_audit(*, reconcile_event_seq: int, verified: VerifiedEvidence,
     return result
 
 
-def _same_intent(row: UncertaintyResolutionRequestRow, intent: ResolutionIntent) -> bool:
+def _same_intent(
+    row: UncertaintyResolutionRequestRow, intent: ResolutionIntent, columns: RequestColumns
+) -> bool:
     return (
         row.action == intent.action
-        and row.reconcile_event_seq == intent.reconcile_event_seq
+        and RequestColumns(row.reconcile_event_seq, row.observation_id) == columns
         and row.requested_by == intent.operator_id
         and row.venue_offer_id == intent.venue_offer_id
         and row.decision == intent.decision
@@ -293,12 +303,45 @@ def _same_intent(row: UncertaintyResolutionRequestRow, intent: ResolutionIntent)
     )
 
 
+class LegacyOperatorResolution:
+    """The event-log authority's request path: validated and applied as domain events."""
+
+    def __init__(self, evidence: OperatorEvidence | None = None) -> None:
+        self.evidence = evidence if evidence is not None else LegacyOperatorEvidence()
+
+    def columns(self, evidence_ref: str) -> RequestColumns:
+        return RequestColumns(reconcile_event_seq=legacy_evidence_seq(evidence_ref))
+
+    async def prepare(
+        self, session: AsyncSession, scope: Scope, intent: ResolutionIntent, *, now_ms: int
+    ) -> RequestColumns:
+        await build_resolution_event(
+            session, ResolutionScope(scope.exchange_account_id, scope.deployment_environment),
+            intent, occurred_at_ms=now_ms, evidence=self.evidence,
+        )
+        return self.columns(intent.evidence_ref)
+
+    async def apply(
+        self, session: AsyncSession, scope: Scope, request: QueuedResolution, *, now_ms: int
+    ) -> AppliedResolution:
+        event = await build_resolution_event(
+            session, ResolutionScope(scope.exchange_account_id, scope.deployment_environment),
+            request.intent, occurred_at_ms=now_ms, evidence=self.evidence,
+        )
+        result = await AccountEventWriter(
+            store=PostgresEventStore(deployment_environment=scope.deployment_environment)
+        ).append(session, event)
+        return AppliedResolution(resolved_event_seq=result.event_seq)
+
+
 class UncertaintyResolutionRequests:
     """Account-serialized request queue. Caller owns the transaction."""
 
-    def __init__(self, scope: ResolutionScope, evidence: OperatorEvidence | None = None) -> None:
+    def __init__(
+        self, scope: ResolutionScope, resolution: OperatorResolution | None = None
+    ) -> None:
         self.scope = scope
-        self.evidence = evidence if evidence is not None else LegacyOperatorEvidence()
+        self.resolution = resolution if resolution is not None else LegacyOperatorResolution()
 
     async def get(self, session: AsyncSession, request_id: UUID) -> UncertaintyResolutionRequestRow:
         row = await session.scalar(
@@ -352,15 +395,21 @@ class UncertaintyResolutionRequests:
             latest.setdefault(row.uncertainty_id, row)
         return latest
 
+    def _columns(self, intent: ResolutionIntent) -> RequestColumns:
+        try:
+            return self.resolution.columns(intent.evidence_ref)
+        except EvidenceRejected as exc:
+            raise request_rejection(exc) from exc
+
     async def _pending_or_conflict(
-        self, session: AsyncSession, intent: ResolutionIntent
+        self, session: AsyncSession, intent: ResolutionIntent, columns: RequestColumns
     ) -> UncertaintyResolutionRequestRow | None:
         pending = (await self.pending_for(session, [intent.uncertainty_id])).get(
             intent.uncertainty_id
         )
         if pending is None:
             return None
-        if _same_intent(pending, intent):
+        if _same_intent(pending, intent, columns):
             return pending
         raise ResolutionRequestPending()
 
@@ -379,26 +428,32 @@ class UncertaintyResolutionRequests:
         request per uncertainty is the partial unique index's job, and the
         worker re-validates everything under the lock before appending.
         """
-        pending = await self._pending_or_conflict(session, intent)
+        columns = self._columns(intent)
+        pending = await self._pending_or_conflict(session, intent, columns)
         if pending is not None:
             return pending
-        await build_resolution_event(session, self.scope, intent, occurred_at_ms=now_ms,
-                                     evidence=self.evidence)
-        values = request_values(self.scope, intent, now_ms=now_ms)
+        try:
+            columns = await self.resolution.prepare(
+                session, Scope(self.scope.account_id, self.scope.environment), intent,
+                now_ms=now_ms,
+            )
+        except EvidenceRejected as exc:
+            raise request_rejection(exc) from exc
+        values = request_values(self.scope, intent, columns, now_ms=now_ms)
         if await insert_request(session, UncertaintyResolutionRequestRow, values):
             request_id = values["request_id"]
             assert isinstance(request_id, UUID)
             return await self.get(session, request_id)
         # A concurrent request won the pending slot: the same one is this
         # request, a different one is a conflict.
-        pending = await self._pending_or_conflict(session, intent)
+        pending = await self._pending_or_conflict(session, intent, columns)
         if pending is None:
             raise RuntimeError("uncertainty_resolution_request_refused")
         return pending
 
 
 def request_values(
-    scope: ResolutionScope, intent: ResolutionIntent, *, now_ms: int
+    scope: ResolutionScope, intent: ResolutionIntent, columns: RequestColumns, *, now_ms: int
 ) -> dict[str, object]:
     """Exactly the web API's granted columns (``REQUEST_COLUMNS``)."""
     return {
@@ -407,8 +462,8 @@ def request_values(
         "deployment_environment": scope.environment,
         "uncertainty_id": intent.uncertainty_id,
         "action": intent.action,
-        "reconcile_event_seq": intent.reconcile_event_seq,
-        "observation_id": None,
+        "reconcile_event_seq": columns.reconcile_event_seq,
+        "observation_id": columns.observation_id,
         "venue_offer_id": intent.venue_offer_id,
         "decision": intent.decision,
         "reason": intent.reason,
@@ -432,24 +487,30 @@ class UncertaintyResolutionWorker(OperatorRequestWorker[UncertaintyResolutionReq
         clock: Callable[[], int] | None = None,
         ownership: Callable[[], Awaitable[bool]] | None = None,
         poll_interval_s: float = 2.0,
-        evidence: OperatorEvidence | None = None,
+        resolution: OperatorResolution | None = None,
     ) -> None:
         super().__init__(session_factory=session_factory, account_id=scope.account_id,
                          environment=scope.environment, authority=authority, clock=clock,
                          ownership=ownership, poll_interval_s=poll_interval_s)
         self.scope = scope
-        self.requests = UncertaintyResolutionRequests(scope, evidence)
+        self.requests = UncertaintyResolutionRequests(scope, resolution)
 
     async def apply(self, session: AsyncSession, row: UncertaintyResolutionRequestRow,
                     prepared: None) -> Outcome:
-        event = await build_resolution_event(
-            session, self.scope, ResolutionIntent.from_request(row), occurred_at_ms=self.clock(),
-            evidence=self.requests.evidence
-        )
-        result = await AccountEventWriter(
-            store=PostgresEventStore(deployment_environment=self.scope.environment)
-        ).append(session, event)
-        return Outcome(APPLIED, columns={"resolved_event_seq": result.event_seq})
+        try:
+            applied = await self.requests.resolution.apply(
+                session, Scope(self.scope.account_id, self.scope.environment),
+                QueuedResolution(
+                    row.request_id, intent_from_request(row),
+                    RequestColumns(row.reconcile_event_seq, row.observation_id),
+                ),
+                now_ms=self.clock(),
+            )
+        except EvidenceRejected as exc:
+            raise request_rejection(exc) from exc
+        if applied.resolved_event_seq is None:
+            return Outcome(APPLIED)
+        return Outcome(APPLIED, columns={"resolved_event_seq": applied.resolved_event_seq})
 
     def failure_reason(self, exc: BaseException) -> str:
         if isinstance(exc, ProjectionWriteError):
@@ -459,6 +520,7 @@ class UncertaintyResolutionWorker(OperatorRequestWorker[UncertaintyResolutionReq
 
 __all__ = [
     "RECONCILE_EVENT_TYPE",
+    "LegacyOperatorResolution",
     "ResolutionAction",
     "ResolutionIntent",
     "ResolutionRejected",
@@ -467,6 +529,7 @@ __all__ = [
     "UncertaintyResolutionRequests",
     "UncertaintyResolutionWorker",
     "build_resolution_event",
+    "intent_from_request",
     "load_open_uncertainty",
     "load_scoped_uncertainty",
     "request_values",

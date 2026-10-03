@@ -25,6 +25,7 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     UNCERTAINTY_RESOLUTION_ACTIONS,
     UncertaintyResolutionRequestRow,
 )
+from bfx_funding_bot.modules.ledger import RequestColumns
 
 _VERSIONS = Path(__file__).resolve().parents[3] / "alembic/versions"
 _MIGRATION = "1c435a35dcb4_trading_governance.py"
@@ -65,9 +66,10 @@ def test_web_api_insert_names_only_the_granted_request_columns() -> None:
     values = request_values(
         ResolutionScope(uuid4(), "ci"),
         ResolutionIntent(
-            uncertainty_id=uuid4(), action="mark_not_accepted", reconcile_event_seq=1,
+            uncertainty_id=uuid4(), action="mark_not_accepted", evidence_ref="1",
             operator_id="operator-1",
         ),
+        RequestColumns(reconcile_event_seq=1),
         now_ms=1,
     )
     assert tuple(values) == UncertaintyResolutionRequestRow.REQUEST_COLUMNS

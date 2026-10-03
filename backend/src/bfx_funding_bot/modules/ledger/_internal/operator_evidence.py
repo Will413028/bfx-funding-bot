@@ -1,7 +1,9 @@
-"""Dormant operator evidence. Matching is deferred until S1-3c3c."""
+"""Operator evidence over the ledger: the fence an operator request is judged by."""
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from uuid import UUID
 
 from sqlalchemy import select
@@ -10,17 +12,21 @@ from sqlalchemy.orm import load_only
 
 from bfx_funding_bot.modules.ledger import (
     OBSERVATION_REF_PREFIX,
+    OperatorReads,
     ResolutionEvidence,
     ResolutionRejected,
     ResolutionSubject,
     Scope,
+    UnknownMatch,
     VerifiedEvidence,
+    observation_evidence_ref,
 )
 from bfx_funding_bot.modules.ledger.tables import (
     LedgerObservationQueryRow,
     LedgerObservationRow,
     QuarantineOpeningRow,
     SubmissionAttemptJournalRow,
+    TransportOutcomeJournalRow,
 )
 
 
@@ -64,7 +70,17 @@ async def latest_accepted(session: AsyncSession, scope: Scope) -> LedgerObservat
     return latest
 
 
+type AttemptMatcher = Callable[[AsyncSession, Scope, UUID, UUID], Awaitable[UnknownMatch | None]]
+
+
 class LedgerOperatorEvidence:
+    """``match`` reads the observed offers and the attempt payload, which the web API's role
+    is not granted: without it an attempt's context is unavailable rather than guessed."""
+
+    def __init__(self, reads: OperatorReads, match: AttemptMatcher | None = None) -> None:
+        self.reads = reads
+        self.match = match
+
     async def verify(
         self,
         session: AsyncSession,
@@ -113,8 +129,19 @@ class LedgerOperatorEvidence:
                         SubmissionAttemptJournalRow.exchange_account_id,
                         SubmissionAttemptJournalRow.deployment_environment,
                         SubmissionAttemptJournalRow.symbol,
-                        SubmissionAttemptJournalRow.started_at_ms.label("opened_at_ms"),
-                    ).where(SubmissionAttemptJournalRow.attempt_id == subject.attempt_id)
+                        # The uncertainty opens when the UNKNOWN was recorded, not at submit
+                        # (G2: the same moment ``record_resolution`` judges the observation by).
+                        TransportOutcomeJournalRow.completed_at_ms.label("opened_at_ms"),
+                    )
+                    .join(
+                        TransportOutcomeJournalRow,
+                        TransportOutcomeJournalRow.attempt_id
+                        == SubmissionAttemptJournalRow.attempt_id,
+                    )
+                    .where(
+                        SubmissionAttemptJournalRow.attempt_id == subject.attempt_id,
+                        TransportOutcomeJournalRow.kind == "unknown",
+                    )
                 )
             ).one_or_none()
         else:
@@ -174,4 +201,50 @@ class LedgerOperatorEvidence:
     async def resolution_context(
         self, session: AsyncSession, scope: Scope, subject: ResolutionSubject
     ) -> ResolutionEvidence:
-        return ResolutionEvidence(unavailable_reason="matcher_pending")
+        """What an operator may cite now: the latest accepted observation and, when this
+        role can read the offers, what the attempt matches against it (legacy shape)."""
+        view = await self.reads.get_uncertainty(session, scope, subject.uncertainty_id)
+        if view is None or view.attempt_id != subject.attempt_id:
+            raise ResolutionRejected("not_found", kind="not_found")
+        if view.state != "open":
+            return ResolutionEvidence(unavailable_reason="uncertainty_not_open")
+        latest = await latest_accepted(session, scope)
+        if latest is None:
+            return ResolutionEvidence(unavailable_reason="fresh_reconcile_required")
+        started, finished = (
+            await session.execute(
+                select(
+                    LedgerObservationQueryRow.started_at_ms,
+                    LedgerObservationRow.query_finished_at_ms,
+                )
+                .join(
+                    LedgerObservationRow,
+                    LedgerObservationRow.query_id == LedgerObservationQueryRow.query_id,
+                )
+                .where(LedgerObservationRow.id == latest.id)
+            )
+        ).one()
+        base = ResolutionEvidence(observation_evidence_ref(latest.id), started, finished)
+        try:
+            await self.verify(
+                session, scope, subject, base.evidence_ref or "", require_history=True
+            )
+        except ResolutionRejected as exc:
+            return replace(base, unavailable_reason=exc.code[:256])
+        if subject.attempt_id is None:
+            return base
+        if self.match is None:
+            return replace(base, unavailable_reason="match_evidence_unavailable")
+        match = await self.match(session, scope, subject.attempt_id, latest.id)
+        if match is None:
+            return replace(base, unavailable_reason="submission_attempt_not_resolvable")
+        if match.kind == "incomplete":
+            return replace(base, unavailable_reason="incomplete_match_evidence")
+        return replace(
+            base,
+            candidate_count=len(match.candidate_venue_offer_ids),
+            candidate_venue_offer_ids=match.candidate_venue_offer_ids[:16],
+            unavailable_reason="multiple_exact_candidates"
+            if match.kind == "multiple_match"
+            else None,
+        )

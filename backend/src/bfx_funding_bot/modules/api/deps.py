@@ -17,7 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
-from bfx_funding_bot.modules.ledger import OperatorEvidence, OperatorReads
+from bfx_funding_bot.modules.ledger import OperatorEvidence, OperatorReads, OperatorResolution
 
 MAX_READINESS_TIMEOUT_SECONDS = 10.0
 
@@ -64,6 +64,7 @@ class ReadModels:
 
     operator_reads: OperatorReads
     operator_evidence: OperatorEvidence
+    operator_resolution: OperatorResolution
 
 
 async def get_read_models(request: Request) -> ReadModels:

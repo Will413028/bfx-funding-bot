@@ -28,25 +28,25 @@ from bfx_funding_bot.modules.api.account_scope import (
 )
 from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models, get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
-from bfx_funding_bot.modules.execution.operator_evidence import (
-    LegacyOperatorEvidence,
-    legacy_evidence_seq,
-)
+from bfx_funding_bot.modules.execution.operator_evidence import LegacyOperatorEvidence
 from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     ResolutionAction,
-    ResolutionIntent,
     ResolutionRejected,
     ResolutionScope,
     UncertaintyResolutionRequests,
+    request_rejection,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import UncertaintyResolutionRequestRow
 from bfx_funding_bot.modules.ledger import (
     OperatorEvidence,
+    OperatorResolution,
+    ResolutionIntent,
     ResolutionSubject,
     Scope,
     UncertaintyView,
     observation_evidence_ref,
 )
+from bfx_funding_bot.modules.ledger import ResolutionRejected as EvidenceRejected
 
 _MAX_LIMIT = 100
 _MAX_REASON_LENGTH = 512
@@ -375,23 +375,24 @@ async def _queue(
     body: UncertaintyResolutionRequest,
     venue_offer_id: str | None = None,
     decision: str | None = None,
-    operator_evidence: OperatorEvidence,
+    resolution: OperatorResolution,
 ) -> dict[str, object]:
     try:
-        reconcile_event_seq = legacy_evidence_seq(body.evidence_ref)
-    except ResolutionRejected as exc:
-        raise _rejected(exc) from exc
+        # The reference is judged before who asked, as it always was.
+        resolution.columns(body.evidence_ref)
+    except EvidenceRejected as exc:
+        raise _rejected(request_rejection(exc)) from exc
     intent = ResolutionIntent(
         uncertainty_id=uncertainty_id,
         action=action,
-        reconcile_event_seq=reconcile_event_seq,
+        evidence_ref=body.evidence_ref,
         operator_id=_operator_id(context, body.operator_uuid),
         reason=body.reason,
         venue_offer_id=venue_offer_id,
         decision=decision,
     )
     try:
-        row = await UncertaintyResolutionRequests(_scope(context), operator_evidence).request(
+        row = await UncertaintyResolutionRequests(_scope(context), resolution).request(
             session, intent, now_ms=int(time.time() * 1000)
         )
     except ResolutionRejected as exc:
@@ -512,7 +513,7 @@ def build_uncertainties_router() -> APIRouter:
             uncertainty_id=uncertainty_id,
             action="bind_to_venue",
             body=body,
-            operator_evidence=models.operator_evidence,
+            resolution=models.operator_resolution,
             venue_offer_id=body.venue_offer_id,
         )
 
@@ -538,7 +539,7 @@ def build_uncertainties_router() -> APIRouter:
             uncertainty_id=uncertainty_id,
             action="mark_not_accepted",
             body=body,
-            operator_evidence=models.operator_evidence,
+            resolution=models.operator_resolution,
         )
 
     @router.post(
@@ -560,7 +561,7 @@ def build_uncertainties_router() -> APIRouter:
             uncertainty_id=uncertainty_id,
             action="manual_resolution",
             body=body,
-            operator_evidence=models.operator_evidence,
+            resolution=models.operator_resolution,
             decision=_manual_decision(evidence),
         )
 
