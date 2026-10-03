@@ -23,6 +23,10 @@ MAX_IGNORES_BY_ID = {
     "ledger-no-internal-access": 0,
     "ledger-wiring-is-top": 0,
     "ledger-not-legacy": 0,
+    "simulated-venue-independent": 0,
+    "simulated-venue-no-internal-access": 0,
+    "simulated-venue-wiring-is-top": 0,
+    "runtime-not-simulated-venue": 0,
     "trading-not-ledger": 0,
     "market-contracts-are-pure": 0,
     "market-contracts-no-sibling-dependencies": 0,
@@ -145,6 +149,32 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     assert ledger_internal["forbidden_modules"] == ["bfx_funding_bot.modules.ledger._internal"]
     assert ledger_internal["as_packages"] is True
     assert ledger_internal["allow_indirect_imports"] is True
+    simulated_internal = contracts_by_id["simulated-venue-no-internal-access"]
+    simulated = "bfx_funding_bot.modules.simulated_venue"
+    assert set(simulated_internal["source_modules"]) == (sibling_modules | {
+        "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.candles",
+        "bfx_funding_bot.core", "bfx_funding_bot.core.**",
+        "bfx_funding_bot.external", "bfx_funding_bot.external.**",
+        "bfx_funding_bot.apps", "bfx_funding_bot.apps.**",
+    }) - {simulated}
+    assert simulated_internal["forbidden_modules"] == [f"{simulated}._internal"]
+    assert simulated_internal["as_packages"] is True
+    simulated_wiring = contracts_by_id["simulated-venue-wiring-is-top"]
+    assert simulated_wiring["source_modules"] == wiring["source_modules"]
+    assert simulated_wiring["forbidden_modules"] == [f"{simulated}.wiring"]
+    assert simulated_wiring["as_packages"] is False
+    not_imported = contracts_by_id["runtime-not-simulated-venue"]
+    assert set(not_imported["source_modules"]) == set(simulated_internal["source_modules"]) - {
+        "bfx_funding_bot.apps", "bfx_funding_bot.apps.**",
+    }
+    assert not_imported["forbidden_modules"] == [simulated]
+    independent = contracts_by_id["simulated-venue-independent"]
+    assert independent["source_modules"] == [simulated]
+    assert {
+        "bfx_funding_bot.modules.ledger", "bfx_funding_bot.modules.execution",
+        "bfx_funding_bot.modules.trading", "bfx_funding_bot.modules.marketfeed",
+        "bfx_funding_bot.apps",
+    } <= set(independent["forbidden_modules"])
     legacy_authority = {
         f"bfx_funding_bot.modules.execution.{name}"
         for name in ("capital_repository", "capital_runtime", "event_store.tables",

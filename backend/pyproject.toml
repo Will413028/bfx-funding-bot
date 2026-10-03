@@ -152,6 +152,7 @@ forbidden_modules = [
     "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.trading",
     "bfx_funding_bot.modules.trading_shadow",
 ]
@@ -182,6 +183,7 @@ source_modules = [
     "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.trading",
     "bfx_funding_bot.modules.trading_shadow",
 ]
@@ -206,6 +208,7 @@ source_modules = [
     "bfx_funding_bot.modules.ledger",
     "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.trading",
 ]
 forbidden_modules = ["bfx_funding_bot.modules.trading_shadow._internal"]
@@ -298,6 +301,7 @@ source_modules = [
     "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.simulated_venue",
 ]
 forbidden_modules = ["bfx_funding_bot.modules.backtest"]
 ignore_imports = []
@@ -424,6 +428,8 @@ forbidden_modules = [
     "bfx_funding_bot.modules.marketfeed.**",
     "bfx_funding_bot.modules.observability",
     "bfx_funding_bot.modules.observability.**",
+    "bfx_funding_bot.modules.simulated_venue",
+    "bfx_funding_bot.modules.simulated_venue.**",
     "bfx_funding_bot.modules.strategy",
     "bfx_funding_bot.modules.strategy.**",
     "bfx_funding_bot.modules.trading",
@@ -458,6 +464,7 @@ source_modules = [
     "bfx_funding_bot.modules.live_validation",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.strategy",
     "bfx_funding_bot.modules.trading",
     "bfx_funding_bot.modules.trading_shadow",
@@ -494,6 +501,7 @@ source_modules = [
     "bfx_funding_bot.modules.lending", "bfx_funding_bot.modules.live_validation",
     "bfx_funding_bot.modules.market", "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability", "bfx_funding_bot.modules.strategy",
+    "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.trading", "bfx_funding_bot.modules.trading_shadow",
 ]
 forbidden_modules = ["bfx_funding_bot.modules.ledger._internal"]
@@ -515,6 +523,86 @@ as_packages = false
 forbidden_modules = ["bfx_funding_bot.modules.ledger.wiring"]
 ignore_imports = []
 broken_contract_guidance = "Construct ledger ports in apps; do not re-export wiring."
+
+[[tool.importlinter.contracts]]
+id = "simulated-venue-independent"
+name = "The simulated venue imports nothing of the bot it is a counterparty to"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.modules.simulated_venue"]
+forbidden_modules = [
+    "bfx_funding_bot.apps",
+    "bfx_funding_bot.external",
+    "bfx_funding_bot.modules.ledger",
+    "bfx_funding_bot.modules.execution",
+    "bfx_funding_bot.modules.trading",
+    "bfx_funding_bot.modules.trading_shadow",
+    "bfx_funding_bot.modules.marketfeed",
+]
+ignore_imports = []
+broken_contract_guidance = "The venue never peeks at bot state or parsers; inject what it needs through its contracts."
+
+[[tool.importlinter.contracts]]
+id = "simulated-venue-no-internal-access"
+name = "Simulated venue internals are private to the simulated venue"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.core", "bfx_funding_bot.core.**",
+    "bfx_funding_bot.external", "bfx_funding_bot.external.**",
+    "bfx_funding_bot.apps", "bfx_funding_bot.apps.**",
+    "bfx_funding_bot.modules.accounts", "bfx_funding_bot.modules.admin",
+    "bfx_funding_bot.modules.api", "bfx_funding_bot.modules.backfill",
+    "bfx_funding_bot.modules.backtest", "bfx_funding_bot.modules.candles",
+    "bfx_funding_bot.modules.deployments", "bfx_funding_bot.modules.execution",
+    "bfx_funding_bot.modules.external_signals", "bfx_funding_bot.modules.funding_stats",
+    "bfx_funding_bot.modules.lending", "bfx_funding_bot.modules.ledger",
+    "bfx_funding_bot.modules.live_validation", "bfx_funding_bot.modules.market",
+    "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.trading",
+    "bfx_funding_bot.modules.trading_shadow",
+]
+forbidden_modules = ["bfx_funding_bot.modules.simulated_venue._internal"]
+as_packages = true
+allow_indirect_imports = true
+ignore_imports = []
+broken_contract_guidance = "Use the simulated venue facade or construct it from apps."
+
+[[tool.importlinter.contracts]]
+id = "simulated-venue-wiring-is-top"
+name = "Only composition roots may import simulated venue wiring"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.core", "bfx_funding_bot.core.**",
+    "bfx_funding_bot.external", "bfx_funding_bot.external.**",
+    "bfx_funding_bot.modules", "bfx_funding_bot.modules.**",
+]
+as_packages = false
+forbidden_modules = ["bfx_funding_bot.modules.simulated_venue.wiring"]
+ignore_imports = []
+broken_contract_guidance = "Build the simulated venue in apps; do not re-export wiring."
+
+[[tool.importlinter.contracts]]
+id = "runtime-not-simulated-venue"
+name = "No runtime module imports the simulated venue; only composition roots do"
+type = "forbidden"
+source_modules = [
+    "bfx_funding_bot.core", "bfx_funding_bot.core.**",
+    "bfx_funding_bot.external", "bfx_funding_bot.external.**",
+    "bfx_funding_bot.modules.accounts", "bfx_funding_bot.modules.admin",
+    "bfx_funding_bot.modules.api", "bfx_funding_bot.modules.backfill",
+    "bfx_funding_bot.modules.backtest", "bfx_funding_bot.modules.candles",
+    "bfx_funding_bot.modules.deployments", "bfx_funding_bot.modules.execution",
+    "bfx_funding_bot.modules.external_signals", "bfx_funding_bot.modules.funding_stats",
+    "bfx_funding_bot.modules.lending", "bfx_funding_bot.modules.ledger",
+    "bfx_funding_bot.modules.live_validation", "bfx_funding_bot.modules.market",
+    "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.trading",
+    "bfx_funding_bot.modules.trading_shadow",
+]
+forbidden_modules = ["bfx_funding_bot.modules.simulated_venue"]
+as_packages = true
+allow_indirect_imports = true
+ignore_imports = []
+broken_contract_guidance = "Inject venue-facing ports from apps; the simulator is a counterparty, not a dependency."
 
 [[tool.importlinter.contracts]]
 id = "trading-not-ledger"
