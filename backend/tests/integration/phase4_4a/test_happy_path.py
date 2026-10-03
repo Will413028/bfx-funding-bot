@@ -20,7 +20,9 @@ from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
     ReadyToSubmit,
 )
+from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
+from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -122,9 +124,8 @@ async def test_submit_then_foc_executed_completes_orderfilled_chain(
     fake_ws = ScriptedWSClient([foc])
 
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=fake_ws, registry=registry, bus=bus,
-        event_sink=_EventCapture(), clock=lambda: 2500, queue_max=100,
-    )
+        ws_client=fake_ws,
+        event_sink=_EventCapture(), clock=lambda: 2500, queue_max=100, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id=None))
 
     stop = asyncio.Event()
     task = asyncio.create_task(dispatcher.run(stop))

@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,10 +35,17 @@ from bfx_funding_bot.modules.ledger.matching import (
 from bfx_funding_bot.modules.trading import (
     AppliedPolicy,
     CapitalBudget,
+    CapitalPolicy,
     CapitalResult,
     CapitalScope,
     CapitalSnapshot,
 )
+
+# How long after it started an attempt (or a venue offer without provenance) may still be in
+# flight: a submit's transport may be sent before its outcome is journaled. At boot the
+# process holds the writer lock and nothing is in flight, so nothing needs to be waited for.
+BOOT_GRACE_MS = 0
+RUNTIME_GRACE_MS = 120_000
 
 type JsonObject = dict[str, object]
 type OutcomeKind = Literal["ack", "rejected", "not_sent", "unknown"]
@@ -595,7 +602,7 @@ class LedgerJournal(Protocol):
         now_ms: int,
     ) -> Authorized | AuthorizeRefused: ...
     async def close_dangling(
-        self, session: AsyncSession, scope: Scope, *, now_ms: int, grace_ms: int = 120_000
+        self, session: AsyncSession, scope: Scope, *, now_ms: int, grace_ms: int
     ) -> tuple[UUID, ...]: ...
     async def record_outcome(
         self, session: AsyncSession, scope: Scope, outcome: Outcome
@@ -1076,6 +1083,39 @@ class ScopeLock(Protocol):
         ...
 
 
+class PolicyRefused(ValueError):  # noqa: N818 - a refusal, carrying the store's reason code
+    """The policy store refused to read or write; ``str(exc)`` is its reason code."""
+
+
+class PolicyStore(Protocol):
+    """The scope's applied capital policy: the shared policy heads and revisions.
+
+    Both authorities keep these two tables and share the one writer
+    (``ledger.policy_write``); what differs is what a store does first (the legacy one
+    replays its event stream). Lock ownership: the caller holds the scope lock
+    (``ScopeLock.lock``) across ``read_applied`` and the ``apply_policy`` based on it; the
+    store never takes it for the caller. The caller owns the transaction.
+    """
+
+    @property
+    def scope(self) -> Scope: ...
+
+    async def read_applied(self, session: AsyncSession, *, symbol: str) -> AppliedPolicy:
+        """The revision ``symbol``'s head points at, proven and parsed, or ``PolicyRefused``."""
+        ...
+
+    async def apply_policy(
+        self, session: AsyncSession, *, symbol: str, policy: CapitalPolicy,
+        expected_revision: int, source: dict[str, Any],
+    ) -> AppliedPolicy:
+        """Append revision ``expected_revision + 1`` and move the head; the caller commits.
+
+        ``PolicyRefused`` when the head moved (``revision_changed``) or the symbol may
+        not be enabled (``unsupported_enabled_symbol``).
+        """
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class CommandAttempt:
     """Consumer submit identity; legacy CID belongs exclusively to its adapter."""
@@ -1148,6 +1188,7 @@ class CommandJournal(Protocol):
 
 
 __all__ = [
+    "BOOT_GRACE_MS",
     "CREDIT_STATUSES",
     "CREDIT_TERMINAL_KINDS",
     "LEDGER_EPSILON",
@@ -1155,6 +1196,7 @@ __all__ = [
     "OBSERVATION_REF_PREFIX",
     "OFFER_STATUSES",
     "OFFER_TERMINAL_KINDS",
+    "RUNTIME_GRACE_MS",
     "UNKNOWN_SETTLE_MS",
     "Acceptance",
     "AcceptanceDecision",
@@ -1225,6 +1267,8 @@ __all__ = [
     "Outcome",
     "OutcomeAlreadyRecorded",
     "OutcomeKind",
+    "PolicyRefused",
+    "PolicyStore",
     "PositionView",
     "ProvenanceConflict",
     "Quarantine",

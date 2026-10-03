@@ -27,26 +27,28 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
+from bfx_funding_bot.apps.bot_ports import select_policy_ports
+from bfx_funding_bot.core.authority import read_authority
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
 from bfx_funding_bot.modules.accounts.capital_amendment import (
     PolicyChanges,
     amend_capital_policy,
 )
-from bfx_funding_bot.modules.execution.capital_repository import (
-    CapitalBlockedError,
-    CapitalRepository,
-)
-from bfx_funding_bot.modules.execution.legacy_ports import LegacyScopeLock
+from bfx_funding_bot.modules.ledger import PolicyRefused, Scope
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
     engine = make_async_engine_from_url(os.environ["DATABASE_URL"])
     try:
-        repo = CapitalRepository(account_id=args.exchange_account_id, environment=args.environment,
-                                 max_snapshot_age_ms=60_000)
-        async with make_session_factory(engine)() as session:
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            # The authority the database is under picks the store; an unsupported one refuses.
+            authority = await read_authority(session)
+        policy = select_policy_ports(
+            authority, Scope(args.exchange_account_id, args.environment), max_snapshot_age_ms=60_000)
+        async with factory() as session:
             report = await amend_capital_policy(
-                session, repository=repo, scope_lock=LegacyScopeLock(repo), symbol=args.symbol,
+                session, store=policy.store, scope_lock=policy.scope_lock, symbol=args.symbol,
                 changes=_changes(args), apply_digest=args.apply_digest)
             if report["status"] == "applied":
                 await session.commit()
@@ -97,7 +99,7 @@ def main() -> int:
     try:
         print(json.dumps(asyncio.run(run(args)), sort_keys=True, indent=2))
         return 0
-    except CapitalBlockedError as exc:
+    except PolicyRefused as exc:
         print(json.dumps({"status": "blocked", "reason": str(exc)}), file=sys.stderr)
         return 2
     except Exception:

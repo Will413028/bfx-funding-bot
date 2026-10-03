@@ -26,13 +26,6 @@ from bfx_funding_bot.external.bitfinex.auth_ws import (
     FccEvent,
     FocEvent,
 )
-from bfx_funding_bot.modules.execution.event_store.persister import (
-    EventPersister,
-    NoopEventPersister,
-)
-from bfx_funding_bot.modules.execution.legacy_venue_hints import (
-    LegacyVenueHintSink,
-)
 from bfx_funding_bot.modules.execution.legacy_venue_hints import (
     translate_bfx_event as translate_bfx_event,
 )
@@ -52,8 +45,8 @@ class _WSClientProtocol(Protocol):
 class BitfinexLiveWSDispatcher:
     """Consume BitfinexAuthWSClient stream → scoped VenueHintSink.
 
-    Registry/account/persister/bus construct the default legacy adapter. An
-    injected ledger sink bypasses that authority path entirely.
+    The sink is the capital authority's: composition picks it, this class never
+    knows which one it holds.
 
     Per spec §6.2 / §4 (G4): bounded queue + queue-depth observability.
     """
@@ -64,14 +57,10 @@ class BitfinexLiveWSDispatcher:
         self,
         *,
         ws_client: _WSClientProtocol,
-        registry: Any,  # OfferRegistry
-        bus: Any,       # DomainEventBus
         event_sink: _EventSink,
+        venue_hint_sink: VenueHintSink,
         clock: Callable[[], int] | None = None,
         queue_max: int = 10_000,
-        persister: EventPersister | None = None,
-        account_id: str | None = None,
-        venue_hint_sink: VenueHintSink | None = None,
     ) -> None:
         self._ws_client = ws_client
         self._events = event_sink
@@ -80,10 +69,7 @@ class BitfinexLiveWSDispatcher:
         self._queue_max = queue_max
         self._recent_cancels: dict[str, int] = {}
         self._last_depth_emit_ms: int = 0
-        self._venue_hints = venue_hint_sink if venue_hint_sink is not None else LegacyVenueHintSink(
-            registry=registry, bus=bus, persister=persister or NoopEventPersister(),
-            account_id=account_id,
-        )
+        self._venue_hints = venue_hint_sink
 
     @property
     def queue_depth(self) -> int:

@@ -35,6 +35,7 @@ from bfx_funding_bot.modules.execution.events import (
 )
 from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
 from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+    LegacyOperatorResolution,
     ResolutionScope,
     UncertaintyResolutionWorker,
 )
@@ -410,8 +411,7 @@ def test_web_api_queues_and_only_the_account_writer_appends(migrated, monkeypatc
 
                 worker = UncertaintyResolutionWorker(
                     session_factory=bot, scope=ResolutionScope(ACCOUNT_ID, "ci"),
-                    authority=operator_authorized, clock=lambda: 3000,
-                )
+                    authority=operator_authorized, clock=lambda: 3000, resolution=LegacyOperatorResolution())
                 assert await worker.tick() is True
                 assert await worker.tick() is False
 
@@ -567,8 +567,7 @@ def test_revoked_operator_request_is_rejected_by_the_account_writer(
 
             worker = UncertaintyResolutionWorker(
                 session_factory=bot, scope=scope, authority=operator_authorized,
-                clock=lambda: 3000,
-            )
+                clock=lambda: 3000, resolution=LegacyOperatorResolution())
             # Accepted while enrolled, then TOTP is removed before the daemon applies.
             revoked = await queue(2500)
             await _set_two_factor(owner, False)

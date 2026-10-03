@@ -12,6 +12,7 @@ from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from tests.modules.marketfeed.account_test_helpers import (
     configure_account_env,
+    paper_ledger_of,
     seed_exchange_account,
 )
 
@@ -207,7 +208,7 @@ phase3b_wfo_results_ref: x
     # The subscription bus.subscribe(PositionReconciled, ledger.on_position_reconciled)
     # must route this to the ledger; without the wiring realized_exposure() stays 0.
     event = PositionReconciled(
-        account_id=daemon.ledger.account_id,
+        account_id=paper_ledger_of(daemon).account_id,
         reserved_usdt=Decimal("0"),
         realized_usdt=Decimal("450"),
         available_usdt=Decimal("0"),
@@ -217,7 +218,7 @@ phase3b_wfo_results_ref: x
     symbol="fUST")
     await daemon.bus.publish(event)
 
-    assert daemon.ledger.realized_exposure("fUST") == Decimal("450"), (
+    assert paper_ledger_of(daemon).realized_exposure("fUST") == Decimal("450"), (
         "ledger.realized_exposure('fUST') should reflect PositionReconciled.realized_usdt "
         "after bus.publish — subscription missing or account_id mismatch"
     )

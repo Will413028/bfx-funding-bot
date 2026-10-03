@@ -5,7 +5,7 @@ flag is the everyday stop. The web API only inserts an ``enable`` or
 ``disable`` request (``capital_policy_requests``, the operator-request outbox);
 the :class:`CapitalPolicyRequestWorker` applies it under the account lock after
 re-checking the operator, through the amendment path
-(``accounts.capital_amendment`` → ``CapitalRepository.apply_policy``), and
+(``accounts.capital_amendment`` → the ``PolicyStore`` of the capital authority in force), and
 records the revision in force on the row.
 
 What follows a disable is not done here: ``DeploymentReconciler._pull_if_stopped``
@@ -28,10 +28,6 @@ from bfx_funding_bot.modules.accounts.capital_amendment import (
     PolicyChanges,
     amend_capital_policy,
 )
-from bfx_funding_bot.modules.execution.capital_repository import (
-    CapitalBlockedError,
-    CapitalRepository,
-)
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.operator_requests import (
     APPLIED,
@@ -42,7 +38,7 @@ from bfx_funding_bot.modules.execution.operator_requests import (
     RejectionKind,
     RequestRejected,
 )
-from bfx_funding_bot.modules.ledger import ScopeLock
+from bfx_funding_bot.modules.ledger import PolicyRefused, PolicyStore, Scope, ScopeLock
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
@@ -74,6 +70,7 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
         account_id: UUID,
         environment: str,
         authority: OperatorAuthority,
+        policy_store: PolicyStore,
         scope_lock: ScopeLock,
         clock: Callable[[], int] | None = None,
         ownership: Callable[[], Awaitable[bool]] | None = None,
@@ -82,33 +79,30 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
         super().__init__(session_factory=session_factory, account_id=account_id,
                          environment=environment, authority=authority, clock=clock,
                          ownership=ownership, poll_interval_s=poll_interval_s)
+        if policy_store.scope != Scope(account_id, environment):
+            raise ValueError("policy store scope differs from the worker's")
+        self.policy_store = policy_store
         self.scope_lock = scope_lock
-
-    def _repository(self) -> CapitalRepository:
-        # Only the policy is read and written here; the snapshot age is unused.
-        return CapitalRepository(account_id=self.account_id, environment=self.environment,
-                                 max_snapshot_age_ms=60_000)
 
     async def apply(self, session: AsyncSession, row: CapitalPolicyRequestRow,
                     prepared: None) -> Outcome:
-        repository = self._repository()
         enabled = row.action == "enable"
         changes = PolicyChanges(enabled=enabled)
         try:
-            report = await amend_capital_policy(session, repository=repository,
+            report = await amend_capital_policy(session, store=self.policy_store,
                                                 scope_lock=self.scope_lock, symbol=row.symbol,
                                                 changes=changes, apply_digest=None)
             if report["status"] == "unchanged":
-                current = await repository.read_applied(session, symbol=row.symbol)
+                current = await self.policy_store.read_applied(session, symbol=row.symbol)
                 return Outcome(APPLIED, f"unchanged: already {'enabled' if enabled else 'disabled'}",
                                columns={"policy_revision_id": current.revision_id})
             written = await amend_capital_policy(
-                session, repository=repository, scope_lock=self.scope_lock, symbol=row.symbol,
+                session, store=self.policy_store, scope_lock=self.scope_lock, symbol=row.symbol,
                 changes=changes,
                 apply_digest=report["amendment_digest"],
                 origin={"request_id": str(row.request_id), "requested_by": row.requested_by,
                         "reason": row.reason})
-        except CapitalBlockedError as exc:
+        except PolicyRefused as exc:
             code = str(exc)
             raise RequestRejected(code, kind=_REJECTION_KINDS.get(code, "conflict")) from exc
         note = "enabled" if enabled else "disabled"

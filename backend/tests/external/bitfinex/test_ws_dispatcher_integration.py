@@ -10,12 +10,14 @@ import pytest
 from bfx_funding_bot.external.bitfinex.auth_ws import BfxWSEvent, FocEvent
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
+from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import (
     CancelRequested,
     OrderFilled,
     ReservationClaimed,
     ReservationReleased,
 )
+from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.registry_offers import (
     ClaimRecord,
     OfferRegistry,
@@ -81,9 +83,8 @@ async def test_dispatcher_publishes_orderfilled_on_foc_executed() -> None:
     bus.subscribe(OrderFilled, capture)
 
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=fake_ws, registry=registry, bus=bus,
-        event_sink=_EventCapture(), clock=lambda: 5000, queue_max=100,
-    )
+        ws_client=fake_ws,
+        event_sink=_EventCapture(), clock=lambda: 5000, queue_max=100, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id=None))
 
     stop = asyncio.Event()
     task = asyncio.create_task(dispatcher.run(stop))
@@ -128,9 +129,8 @@ async def test_dispatcher_cancel_requested_subscriber_tracks_recent_cancels() ->
     fake_ws = _FakeWSClient([foc])
 
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=fake_ws, registry=registry, bus=bus,
-        event_sink=_EventCapture(), clock=lambda: 2200, queue_max=100,
-    )
+        ws_client=fake_ws,
+        event_sink=_EventCapture(), clock=lambda: 2200, queue_max=100, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id=None))
     bus.subscribe(CancelRequested, dispatcher.handle_cancel_requested)
 
     # Publish CancelRequested first (cancel @ 2000, dispatcher clock 2200 → δ=200ms ≤ 5000)
@@ -165,9 +165,7 @@ async def test_dispatcher_survives_a_foreign_offer_closing() -> None:
     for event_type in (OrderFilled, ReservationReleased):
         bus.subscribe(event_type, capture)
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=_FakeWSClient([]), registry=OfferRegistry(clock=lambda: 0),
-        bus=bus, event_sink=_EventCapture(), clock=lambda: 5000,
-    )
+        ws_client=_FakeWSClient([]), event_sink=_EventCapture(), clock=lambda: 5000, venue_hint_sink=LegacyVenueHintSink(registry=OfferRegistry(clock=lambda: 0), bus=bus, persister=NoopEventPersister(), account_id=None))
     canceled = FocEvent(
         venue_offer_id="foreign", symbol="fUST", mts_create=1000, mts_update=2000,
         amount=Decimal("152"), status="CANCELED", rate=0.00082, period_days=2,
@@ -186,9 +184,7 @@ async def test_dispatcher_fails_closed_on_uncorrelated_legacy_claim() -> None:
     registry._snapshot["legacy"] = replace(
         registry._snapshot["legacy"], reservation_ref=None)
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=_FakeWSClient([]), registry=registry,
-        bus=DomainEventBus(), event_sink=_EventCapture(), clock=lambda: 5000,
-    )
+        ws_client=_FakeWSClient([]), event_sink=_EventCapture(), clock=lambda: 5000, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=DomainEventBus(), persister=NoopEventPersister(), account_id=None))
 
     with pytest.raises(ReservationCorrelationError, match="uncorrelated legacy claim"):
         await dispatcher._process(_foc_executed("legacy"))
@@ -264,13 +260,9 @@ async def test_deduped_event_not_published_to_bus() -> None:
     fake_ws = _FakeWSClient([_foc_executed("v1", raw_seq=5)])
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=fake_ws,
-        registry=registry,
-        bus=bus,
         event_sink=_EventCapture(),
         clock=lambda: 5000,
-        queue_max=100,
-        persister=fake_persister,
-    )
+        queue_max=100, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=fake_persister, account_id=None))
 
     stop = asyncio.Event()
     task = asyncio.create_task(dispatcher.run(stop))
@@ -306,13 +298,9 @@ async def test_persisted_event_is_published_to_bus() -> None:
     fake_ws = _FakeWSClient([_foc_executed("v2", raw_seq=7)])
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=fake_ws,
-        registry=registry,
-        bus=bus,
         event_sink=_EventCapture(),
         clock=lambda: 5000,
-        queue_max=100,
-        persister=fake_persister,
-    )
+        queue_max=100, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=fake_persister, account_id=None))
 
     stop = asyncio.Event()
     task = asyncio.create_task(dispatcher.run(stop))
@@ -333,9 +321,7 @@ async def test_dispatcher_queue_observability_accessors() -> None:
     """queue_depth / queue_capacity are read-only observability accessors for
     the Prometheus saturation gauges (bfx_ws_dispatcher_queue_*). No behavior."""
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=_FakeWSClient([]), registry=OfferRegistry(clock=lambda: 0),
-        bus=DomainEventBus(), event_sink=_EventCapture(), queue_max=77,
-    )
+        ws_client=_FakeWSClient([]), event_sink=_EventCapture(), queue_max=77, venue_hint_sink=LegacyVenueHintSink(registry=OfferRegistry(clock=lambda: 0), bus=DomainEventBus(), persister=NoopEventPersister(), account_id=None))
     assert dispatcher.queue_depth == 0
     assert dispatcher.queue_capacity == 77
     dispatcher._queue.put_nowait(object())  # type: ignore[arg-type]

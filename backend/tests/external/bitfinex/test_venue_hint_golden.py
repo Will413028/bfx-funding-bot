@@ -21,6 +21,7 @@ from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.serialization import serialize_event
 from bfx_funding_bot.modules.execution.events import CreditClosed, OrderFilled, ReservationReleased
 from bfx_funding_bot.modules.execution.fill_tracker import RestPollingFillTracker
+from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.registry_offers import (
     ClaimRecord,
     OfferRegistry,
@@ -104,18 +105,14 @@ async def scenario(case, monkeypatch, persister=None, *, repeat=False):
     if case == "offer_gone":
         monkeypatch.setattr("bfx_funding_bot.modules.execution.fill_tracker.time.time", lambda: 9.0)
         tracker = RestPollingFillTracker(
-            http=SimpleNamespace(), event_sink=SimpleNamespace(), probe=HealthProbe(),
-            bus=bus, phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
-            cell="C-1", account_id=ACCOUNT, registry=reg, persister=persister,
-        )
+            http=SimpleNamespace(), event_sink=SimpleNamespace(), probe=HealthProbe(), phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
+            cell="C-1", account_id=ACCOUNT, venue_hint_sink=LegacyVenueHintSink(registry=reg, bus=bus, persister=persister, account_id=ACCOUNT))
         tracker._last_state = {"42": {"cid": 7, "status": "ACTIVE", "size": 100.0}}
         assert await tracker._diff_and_emit({}) == set()
     else:
         dispatcher = BitfinexLiveWSDispatcher(
-            ws_client=SimpleNamespace(), registry=reg, bus=bus,
-            event_sink=SimpleNamespace(), clock=lambda: 9000,
-            persister=persister, account_id=ACCOUNT,
-        )
+            ws_client=SimpleNamespace(),
+            event_sink=SimpleNamespace(), clock=lambda: 9000, venue_hint_sink=LegacyVenueHintSink(registry=reg, bus=bus, persister=persister, account_id=ACCOUNT))
         if case.startswith("credit_closed"):
             event = FccEvent(
                 credit_id=81, symbol="fUST", mts_create=1000, mts_update=2000,

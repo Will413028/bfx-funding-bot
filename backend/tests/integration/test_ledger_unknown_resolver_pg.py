@@ -23,6 +23,7 @@ from bfx_funding_bot.modules.execution.unknown_matching import (
     match_attempt_to_snapshot,
 )
 from bfx_funding_bot.modules.ledger import (
+    RUNTIME_GRACE_MS,
     Attempt,
     Coverage,
     CycleResult,
@@ -131,7 +132,7 @@ class FakeVenue:
 
 
 def cycle(book_: Book, venue: FakeVenue, clock: Clock):
-    return build_observation_sink(book_.factory, venue, now_ms=clock)
+    return build_observation_sink(book_.factory, venue, now_ms=clock, grace_ms=RUNTIME_GRACE_MS)
 
 
 async def run_cycle(book_: Book, venue: FakeVenue, clock: Clock, at: int) -> CycleResult:

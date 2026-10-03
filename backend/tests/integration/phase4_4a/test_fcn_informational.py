@@ -13,7 +13,9 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_ws import FcnEvent
+from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import OrderFilled, ReservationClaimed
+from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 
 from .conftest import ScriptedWSClient, make_reservation_ref
@@ -47,9 +49,8 @@ async def test_fcn_before_or_after_claim_produces_no_orderfilled(
     fake_ws = ScriptedWSClient([fcn])
 
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=fake_ws, registry=registry, bus=bus,
-        event_sink=_EventCapture(), clock=lambda: 500, queue_max=100,
-    )
+        ws_client=fake_ws,
+        event_sink=_EventCapture(), clock=lambda: 500, queue_max=100, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id=None))
 
     captured: list[OrderFilled] = []
     async def capture(ev: OrderFilled) -> None:

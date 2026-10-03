@@ -29,6 +29,7 @@ from bfx_funding_bot.modules.execution.deployment_input import DeploymentInput
 from bfx_funding_bot.modules.execution.observation_sink import (
     LegacyCycleResult,
 )
+from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import CycleResult, ObservationSink, Scope
 from bfx_funding_bot.modules.observability import alerts
 
@@ -56,6 +57,7 @@ class PeriodicReconcile:
         *,
         recovery: ObservationSink,
         scope: Scope,
+        resync: ResyncChannel,
         probe: _Probe,
         interval_s: float,
         max_consecutive_failures: int = 3,
@@ -79,16 +81,8 @@ class PeriodicReconcile:
         self._consecutive_failures = 0
         self._tripped_down = False  # this loop owns the EXECUTOR DOWN it sets
         self._divergence_flagged = False  # this loop owns HealthTarget.RECONCILE
-        self._resync_event = asyncio.Event()
-        self._resync_reason = ""
+        self.resync = resync
         self._last_tick_mono = 0.0
-
-    def request_resync(self, reason: str) -> None:
-        """Request one off-interval reconcile. Synchronous and safe to call from a
-        WS callback (same event loop). Multiple calls before the next wake collapse
-        into a single reconcile (the Event is idempotent)."""
-        self._resync_reason = reason  # best-effort: if several callers race, last wins
-        self._resync_event.set()
 
     async def run_loop(self, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():
@@ -96,8 +90,7 @@ class PeriodicReconcile:
             self._last_tick_mono = self._monotonic()
             self._probe.record_heartbeat(self.SUB_TASK)
             if await self._wait_next(stop_event):
-                reason = self._resync_reason
-                self._resync_event.clear()
+                reason = self.resync.take()
                 await self._debounce(stop_event)
                 log.info("periodic_reconcile_resync reason=%s", reason)
 
@@ -105,7 +98,7 @@ class PeriodicReconcile:
         """Sleep up to interval_s, waking early on stop or a resync request.
         Returns True iff a resync was requested (not on timeout/stop)."""
         stop_task = asyncio.create_task(stop_event.wait())
-        trig_task = asyncio.create_task(self._resync_event.wait())
+        trig_task = asyncio.create_task(self.resync.wait())
         try:
             done, _pending = await asyncio.wait(
                 {stop_task, trig_task},

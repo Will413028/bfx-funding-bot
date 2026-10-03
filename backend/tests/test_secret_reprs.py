@@ -54,7 +54,6 @@ def test_daemon_admin_token_hidden(
         executor=Mock(),
         safety_chain=Mock(),
         account_ctx=Mock(),
-        ledger=Mock(),
         bus=Mock(),
         admin_token="fake-admin-token",
     )

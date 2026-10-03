@@ -123,11 +123,9 @@ async def test_dispatcher_injected_port_bypasses_legacy_authority():
     from bfx_funding_bot.external.bitfinex.auth_ws import FccEvent, FcnEvent, FocEvent
 
     sink = SimpleNamespace(offer_closed=AsyncMock(), credit_closed=AsyncMock())
-    registry = SimpleNamespace(snapshot=lambda: pytest.fail("legacy registry read"))
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=SimpleNamespace(), registry=registry, bus=SimpleNamespace(),
-        event_sink=SimpleNamespace(), clock=lambda: 9000, venue_hint_sink=sink,
-    )
+        ws_client=SimpleNamespace(),
+        event_sink=SimpleNamespace(), clock=lambda: 9000, venue_hint_sink=sink)
     dispatcher._recent_cancels["42"] = 8500
     await dispatcher._process(FocEvent(
         "42", "fUST", 1000, 8000, Decimal(100), "EXECUTED", 0.0005, 2, 17,
@@ -153,12 +151,9 @@ async def test_fill_tracker_injected_port_retains_failed_hint_and_checks_paper_i
 
     sink = SimpleNamespace(offer_gone=AsyncMock(side_effect=[False, True]))
     tracker = RestPollingFillTracker(
-        http=SimpleNamespace(), event_sink=SimpleNamespace(), probe=HealthProbe(),
-        bus=DomainEventBus(), phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
+        http=SimpleNamespace(), event_sink=SimpleNamespace(), probe=HealthProbe(), phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
         cell="C-1", account_id=str(SCOPE.exchange_account_id),
-        registry=SimpleNamespace(snapshot=lambda: pytest.fail("legacy registry read")),
-        venue_hint_sink=sink,
-    )
+        venue_hint_sink=sink)
     tracker._last_state = {"42": {}}
     assert await tracker._diff_and_emit({}) == {"42"}
     assert await tracker._diff_and_emit({}) == set()

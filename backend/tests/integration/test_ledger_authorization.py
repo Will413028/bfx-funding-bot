@@ -20,6 +20,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bfx_funding_bot.modules.ledger import (
+    RUNTIME_GRACE_MS,
     Authorized,
     AuthorizeRefused,
     Outcome,
@@ -224,13 +225,13 @@ async def test_close_dangling_grace_scope_idempotence_and_admission(factory) -> 
         before = await _state(session)
         assert (
             await JOURNAL.close_dangling(
-                session, replace(SCOPE, deployment_environment="other"), now_ms=200_000
+                session, replace(SCOPE, deployment_environment="other"), now_ms=200_000, grace_ms=RUNTIME_GRACE_MS
             )
             == ()
         )
         assert await _state(session) == before
     async with factory.begin() as session:
-        closed = await JOURNAL.close_dangling(session, SCOPE, now_ms=200_000)
+        closed = await JOURNAL.close_dangling(session, SCOPE, now_ms=200_000, grace_ms=RUNTIME_GRACE_MS)
         assert closed == (old.attempt_id, boundary.attempt_id)
         for attempt_id in closed:
             assert await JOURNAL.read_back_outcome(session, attempt_id) == Outcome(
@@ -239,7 +240,7 @@ async def test_close_dangling_grace_scope_idempotence_and_admission(factory) -> 
         assert await JOURNAL.read_back_outcome(session, recent.attempt_id) is None
         assert (await _state(session))[2] == before[2] + 2
         after = await _state(session)
-        assert await JOURNAL.close_dangling(session, SCOPE, now_ms=200_000) == ()
+        assert await JOURNAL.close_dangling(session, SCOPE, now_ms=200_000, grace_ms=RUNTIME_GRACE_MS) == ()
         assert await _state(session) == after
         with pytest.raises(QueryAdmissionRefused):
             await JOURNAL.begin_query(session, SCOPE, 200_000)
@@ -256,7 +257,7 @@ async def test_close_dangling_rolls_back_outcome_and_clock(factory) -> None:
         await record_attempt(session, SCOPE, attempt)
         before = await _state(session)
     async with factory.begin() as session:
-        assert await JOURNAL.close_dangling(session, SCOPE, now_ms=120_000) == (attempt.attempt_id,)
+        assert await JOURNAL.close_dangling(session, SCOPE, now_ms=120_000, grace_ms=RUNTIME_GRACE_MS) == (attempt.attempt_id,)
         await session.rollback()
     async with factory.begin() as session:
         assert await _state(session) == before

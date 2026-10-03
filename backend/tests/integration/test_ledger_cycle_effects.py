@@ -26,6 +26,7 @@ from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.ledger_cycle_effects import LedgerCycleEffects
 from bfx_funding_bot.modules.ledger import (
+    RUNTIME_GRACE_MS,
     ForeignOffer,
     UnknownResolutionNotice,
     observation_evidence_ref,
@@ -121,7 +122,7 @@ async def test_a_candidate_of_an_open_unknown_is_not_foreign(book) -> None:  # n
     clock = Clock()
     venue = FakeVenue(clock, offers=(venue_offer("V1"), venue_offer("V2", amount="77")))
     clock.now = CYCLE_1
-    result = await build_observation_sink(book.factory, venue, now_ms=clock).run(SCOPE)
+    result = await build_observation_sink(book.factory, venue, now_ms=clock, grace_ms=RUNTIME_GRACE_MS).run(SCOPE)
     assert result.decision == "accepted" and result.resolutions == ()
     async with book.factory() as session, session.begin():
         found = await READS.foreign_live_offers(session, SCOPE)
@@ -161,7 +162,7 @@ async def test_effects_around_the_real_cycle(book, monkeypatch) -> None:  # noqa
     bus.subscribe(UnknownResolutionNotice, on)
     protection = _Protection()
     sink = LedgerCycleEffects(
-        build_observation_sink(book.factory, venue, now_ms=clock), scope=SCOPE,
+        build_observation_sink(book.factory, venue, now_ms=clock, grace_ms=RUNTIME_GRACE_MS), scope=SCOPE,
         account_id="acct", session_factory=book.factory,
         capital=build_capital_authority(book.factory, max_snapshot_age_ms=10**9),
         cells=(("fUST", "a30"),), protection=protection, bus=bus, reads=READS,

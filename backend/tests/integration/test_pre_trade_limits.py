@@ -22,13 +22,13 @@ from bfx_funding_bot.modules.accounts.capital_amendment import (
     PolicyChanges,
     amend_capital_policy,
 )
-from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, VenueOfferStateRow
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.legacy_ports import (
     LegacyCapitalAuthority,
     LegacyManagedOffers,
+    LegacyPolicyStore,
     LegacyScopeLock,
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
@@ -44,6 +44,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     NavDropMonitor,
 )
 from bfx_funding_bot.modules.execution.safety.tables import NavWindowSampleRow
+from bfx_funding_bot.modules.ledger import PolicyRefused
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from tests.modules.execution.safety.test_pre_trade import Book, book
@@ -99,7 +100,7 @@ def _envelope_guard(runtime) -> OfferEnvelopeGuard:
 async def _amend(factory, runtime, changes: PolicyChanges, *,
                  digest: str | None = None) -> dict[str, Any]:
     async with factory() as session:
-        report = await amend_capital_policy(session, repository=runtime.repository,
+        report = await amend_capital_policy(session, store=LegacyPolicyStore(runtime.repository),
                                             scope_lock=LegacyScopeLock(runtime.repository),
                                             symbol="fUST", changes=changes, apply_digest=digest)
         if report["status"] == "applied":
@@ -123,13 +124,13 @@ async def test_policy_without_an_envelope_refuses_and_the_amendment_bounds_each_
 
     # A first envelope needs every field; the dry run changes nothing; a stale
     # digest is refused.
-    with pytest.raises(CapitalBlockedError, match="envelope_incomplete: max_period_days"):
+    with pytest.raises(PolicyRefused, match="envelope_incomplete: max_period_days"):
         await _amend(factory, runtime, PolicyChanges(min_period_days=2))
     report = await _amend(factory, runtime, FULL)
     assert report["status"] == "dry_run" and report["expected_revision"] == 1
     assert report["new_schema_version"] == 3
     assert report["new_policy"]["envelope"]["min_rate_apr"] == "0.01"
-    with pytest.raises(CapitalBlockedError, match="amendment_changed"):
+    with pytest.raises(PolicyRefused, match="amendment_changed"):
         await _amend(factory, runtime, FULL, digest="0" * 64)
     applied = await _amend(factory, runtime, FULL, digest=report["amendment_digest"])
     assert (applied["status"], applied["new_revision"]) == ("applied", 2)
@@ -146,7 +147,7 @@ async def test_policy_without_an_envelope_refuses_and_the_amendment_bounds_each_
     # A later amendment may change one field, and a bad value is refused.
     one = await _amend(factory, runtime, PolicyChanges(max_open_offers=1))
     assert one["new_policy"]["envelope"]["max_open_offers"] == 1
-    with pytest.raises(CapitalBlockedError, match="invalid_policy"):
+    with pytest.raises(PolicyRefused, match="invalid_policy"):
         await _amend(factory, runtime, PolicyChanges(max_period_days=121))
 
 

@@ -289,7 +289,7 @@ def _offer_terms(payload: dict[str, object]) -> tuple[Decimal, Decimal, int] | N
 
 
 async def close_dangling(
-    session: AsyncSession, scope: Scope, *, now_ms: int, grace_ms: int = 120_000
+    session: AsyncSession, scope: Scope, *, now_ms: int, grace_ms: int
 ) -> tuple[UUID, ...]:
     """Crash-mid-flight has no durable rejection evidence: append UNKNOWN."""
     if grace_ms < 0:

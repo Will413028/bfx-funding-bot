@@ -487,7 +487,7 @@ class UncertaintyResolutionWorker(OperatorRequestWorker[UncertaintyResolutionReq
         clock: Callable[[], int] | None = None,
         ownership: Callable[[], Awaitable[bool]] | None = None,
         poll_interval_s: float = 2.0,
-        resolution: OperatorResolution | None = None,
+        resolution: OperatorResolution,
     ) -> None:
         super().__init__(session_factory=session_factory, account_id=scope.account_id,
                          environment=scope.environment, authority=authority, clock=clock,

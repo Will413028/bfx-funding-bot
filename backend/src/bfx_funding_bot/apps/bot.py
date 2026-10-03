@@ -18,8 +18,9 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
+from bfx_funding_bot.apps.bot_ports import ObservationVenue, select_bot_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
-from bfx_funding_bot.core.authority import read_authority
+from bfx_funding_bot.core.authority import Authority, read_authority
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
     EXIT_CODE_AUTH_FAILED,
@@ -53,12 +54,9 @@ from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.deployments.identity import DeploymentIdentity
 from bfx_funding_bot.modules.execution.audit import ExecutionDecisionRecorder
-from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery, ForeignExposureMonitor
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
-from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
-from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
-from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary
+from bfx_funding_bot.modules.execution.command_boundary import CommandOutcomeNotice
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
@@ -70,10 +68,7 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
 from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
-from bfx_funding_bot.modules.execution.deployment_input import LegacyDeploymentInput
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
-from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
-from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
     CancelRequested,
@@ -87,20 +82,11 @@ from bfx_funding_bot.modules.execution.fill_tracker import (
     RestPollingFillTracker,
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
-from bfx_funding_bot.modules.execution.legacy_command_effects import LegacyCommandEffects
-from bfx_funding_bot.modules.execution.legacy_command_journal import LegacyCommandJournal
-from bfx_funding_bot.modules.execution.legacy_ports import (
-    LegacyCapitalAuthority,
-    LegacyManagedOffers,
-    LegacyScopeLock,
-    LegacyUncertaintyReader,
-)
 from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
     ReservationEmittingMiddleware,
 )
-from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
 from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
@@ -110,7 +96,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardRule,
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
-from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
+from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.config import (
     load_safety_config,
@@ -148,7 +134,12 @@ from bfx_funding_bot.modules.execution.uncertainty_resolution import (
 )
 from bfx_funding_bot.modules.execution.venue_normalization_shadow import VenueNormalizationShadow
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
-from bfx_funding_bot.modules.ledger import ObservationSink, Scope
+from bfx_funding_bot.modules.ledger import (
+    ObservationSink,
+    Scope,
+    UnknownResolutionNotice,
+    VenueHintNotification,
+)
 from bfx_funding_bot.modules.live_validation.credit_history import CreditHistorySync
 from bfx_funding_bot.modules.live_validation.interest_ledger import (
     InterestLedgerSync,
@@ -223,6 +214,7 @@ async def build_daemon(
         raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be a decimal") from exc
     if not allocation_cap.is_finite() or allocation_cap < 0:
         raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be finite and >= 0")
+    authority: Authority = "legacy"
     if live_executor:
         # Before the credential vault or anything else is read: a database at
         # another schema means this is the wrong build for it (for instance a
@@ -231,7 +223,7 @@ async def build_daemon(
         try:
             async with session_factory() as schema_session:
                 await assert_schema_head(schema_session)
-                await read_authority(schema_session)
+                authority = await read_authority(schema_session)
         except Exception as exc:
             await _refuse_live_boot(exc, config=config, session_factory=session_factory)
             await db_engine.dispose()
@@ -243,29 +235,30 @@ async def build_daemon(
             allocation_cap_usdt=allocation_cap,
             phase=config.phase,
         )
-    capital_runtime: CapitalRuntime | None = None
-    # Read ports (S1-3c1): the capital epoch is legacy, so every consumer reads
-    # through the legacy adapters; nothing here selects a ledger implementation.
-    capital_scope = Scope(account_bootstrap.exchange_account_id,
-                          config.deployment_environment.value)
-    uncertainty_reader = LegacyUncertaintyReader(session_factory)
-    managed_offers = LegacyManagedOffers()
-    capital_authority: LegacyCapitalAuthority | None = None
-    scope_lock: LegacyScopeLock | None = None
-    if live_executor:
-        capital_runtime = CapitalRuntime(
-            repository=CapitalRepository(account_id=account_bootstrap.exchange_account_id,
-                environment=config.deployment_environment.value, max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS),
-            session_factory=session_factory, clock=now_ms_utc,
-        )
-        capital_authority = LegacyCapitalAuthority(capital_runtime)
-        scope_lock = LegacyScopeLock(capital_runtime.repository)
+    # Capital ports: the authority the database booted under picks every adapter a
+    # consumer binds to (apps/bot_ports.py); nothing below names an authority.
+    env_str = config.deployment_environment.value
+    capital_scope = Scope(account_bootstrap.exchange_account_id, env_str)
+    account_id = account_bootstrap.account_id
+    bus = DomainEventBus()
+    resync = ResyncChannel()
+    ports = await select_bot_ports(
+        authority, session_factory=session_factory, scope=capital_scope, account_id=account_id,
+        bus=bus, resync=resync, live=live_executor, clock=now_ms_utc,
+        max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS,
+    )
+    capital = ports.capital
+    uncertainty_reader = ports.uncertainty_reader
+    managed_offers = ports.managed_offers
+    legacy = ports.legacy
+    paper_ledger = legacy.paper_ledger if legacy is not None else None
+    if capital is not None:
         try:
             # Before anything can trade: every configured currency has an
             # applied capital policy.
             async with session_factory.begin() as policy_session:
                 for symbol in configured_symbols(config.cells):
-                    await capital_runtime.repository.read_applied(policy_session, symbol=symbol)
+                    await capital.policy_store.read_applied(policy_session, symbol=symbol)
         except Exception as exc:
             await _refuse_live_boot(exc, config=config, session_factory=session_factory)
             await db_engine.dispose()
@@ -369,7 +362,6 @@ async def build_daemon(
     # The immutable UUID, vault credential and optional config draft were
     # loaded before any venue client or worker was constructed. Every service
     # below receives this one canonical identity; no env realm is read here.
-    account_id = account_bootstrap.account_id
     credentials = account_bootstrap.credentials
     account_ctx = account_bootstrap.to_context()
     # ONE µs nonce gate shared by every auth client on this single API key.
@@ -380,28 +372,11 @@ async def build_daemon(
     # external/bitfinex/nonce.py.
     bfx_auth_gate = AuthRequestGate()
 
-    # Phase 4.4c / 3a: PG event-store replaces Axiom replay at boot.
-    # from_snapshot reads position_state + offer_claims from Postgres (written
-    # synchronously by ReservationEmittingMiddleware in the command txn — A2).
-    env_str = config.deployment_environment.value
-    event_store = PostgresEventStore(deployment_environment=env_str)
-    persister = EventStorePersister(store=event_store, session_factory=session_factory)
     diagnostics = DiagnosticsSink(
         session_factory=session_factory, account_id=account_id,
         deployment_environment=env_str,
         metrics=metrics,  # bfx_diagnostic_events_total (safety trips / decisions)
     )
-    async with session_factory() as snap_session:
-        ledger = await PaperPositionLedger.from_snapshot(
-            snap_session, account_id=account_id, deployment_environment=env_str
-        )
-        offer_registry = await OfferRegistry.from_snapshot(
-            snap_session,
-            account_id=account_id,
-            deployment_environment=env_str,
-            clock=lambda: int(time.time() * 1000),
-        )
-
     # Safety config — immutable for daemon lifetime. Config change = redeploy.
     safety_cfg_path = Path(
         os.environ.get("BFX_SAFETY_CONFIG", "configs/safety.yaml"),
@@ -409,7 +384,7 @@ async def build_daemon(
     safety_cfg = load_safety_config(safety_cfg_path)
     assert_live_guard_invariant(config.phase, safety_cfg)
     hg = safety_cfg.hard_guards
-    if capital_runtime is None:
+    if capital is None:
         assert_caps_invariant(config.cells, hg.allocation_cap)
 
     # Automatic protections (lending envelope D3 level 3): trips stop new offers
@@ -462,20 +437,19 @@ async def build_daemon(
         "effective_cap_per_symbol %s",
         # assert_caps_invariant (above) already proved every configured symbol has
         # an explicit caps entry in ALL phases, so direct indexing can't KeyError.
-        "applied CapitalPolicy" if capital_runtime else
+        "applied CapitalPolicy" if capital is not None else
         {s: hg.allocation_cap.caps[s] for s in configured_symbols(config.cells)},
     )
     # Single available-buffer bound shared by the per-offer BuyingPowerGuard and
     # the cumulative DeploymentReconciler clamp — read once so both consume the
     # same value (no double subtraction).
-    balance_buffer_usdt = Decimal("0") if capital_runtime else Decimal(os.environ.get("BFX_BALANCE_BUFFER_USDT", "3"))
+    balance_buffer_usdt = Decimal("0") if capital is not None else Decimal(os.environ.get("BFX_BALANCE_BUFFER_USDT", "3"))
 
     # Executor is built before the guard chain so guard composition can branch on
     # spec.is_simulated (BuyingPowerGuard is live-only — see allocation_cap block).
     # bus is the live executor's construction dependency, so it is created here.
     # Env-driven via registry (CC4 invariant — paper + fill_tracker rejected;
     # bitfinex_live rejected in 4.2; 4.4 enables live path).
-    bus = DomainEventBus()
     all_symbols = frozenset(configured_symbols(config.cells))
     spec = build_executor(
         event_sink=stdout_sink,
@@ -487,7 +461,7 @@ async def build_daemon(
         bus=bus,
         auth_gate=bfx_auth_gate,
     )
-    if not spec.is_simulated and capital_runtime is None:
+    if not spec.is_simulated and capital is None:
         raise ConfigurationError("live executor requires applied capital runtime")
 
     # Single-writer advisory lock (A1). Construct LIVE-ONLY (not spec.is_simulated)
@@ -536,18 +510,19 @@ async def build_daemon(
             # quiet markets via _ws_heartbeat_poll_loop (Bitfinex hb ~15s).
             watched_sub_tasks=["ws"],
         ))
-    if capital_authority is not None:
-        guards.append(CapitalPolicyGuard(authority=capital_authority, scope=capital_scope,
+    if capital is not None:
+        guards.append(CapitalPolicyGuard(authority=capital.capital_authority, scope=capital_scope,
                                          clock=now_ms_utc))
         # Always-on offer envelope (fail-closed); the command throttle config is
         # required for a live writer too.
         require_pre_trade_limits(safety_cfg.pre_trade_limits)
         guards.extend(build_pre_trade_guards(
-            authority=capital_authority, offers=managed_offers, scope=capital_scope,
+            authority=capital.capital_authority, offers=managed_offers, scope=capital_scope,
             session_factory=session_factory, book=funding_book_service, clock=now_ms_utc))
     elif hg.allocation_cap.enabled:
+        assert paper_ledger is not None  # no capital authority: the simulated, legacy composition
         guards.append(AllocationCapGuard(
-            ledger=ledger,
+            ledger=paper_ledger,
             caps=hg.allocation_cap.caps,
             default_cap=hg.allocation_cap.default_cap,
             # Legacy simulation-only configuration. Live always uses the policy above.
@@ -604,24 +579,7 @@ async def build_daemon(
             deployment_environment=env_str,
             symbols=sorted(configured_symbols(config.cells)),
         )
-        # One alert per foreign offer across the boot and the runtime reconcile.
-        foreign_exposure = ForeignExposureMonitor()
-        observation_scope = Scope(account_bootstrap.exchange_account_id, env_str)
-        boot_recovery = LegacyObservationSink(BootRecovery(
-            store=event_store,
-            session_factory=session_factory,
-            auth_rest=auth_rest,
-            account_ctx=account_ctx,
-            deployment_environment=env_str,
-            bus=bus,
-            offer_registry=offer_registry,
-            is_simulated=spec.is_simulated,
-            symbols=configured_symbols(config.cells),
-            uncertainty_handler=ledger.on_reservation_unknown,
-            capital_repository=capital_runtime.repository if capital_runtime else None,
-            protection=protection,
-            foreign_exposure=foreign_exposure,
-        ), observation_scope)
+        assert capital is not None  # validated immediately after executor construction
         reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
         if reconcile_interval_s <= 0:
             raise ValueError(
@@ -632,54 +590,19 @@ async def build_daemon(
             raise ValueError(
                 f"BFX_RESYNC_MIN_INTERVAL_S must be >= 0, got {resync_min_interval_s}"
             )
-        runtime_recovery = LegacyObservationSink(BootRecovery(
-            store=event_store,
-            session_factory=session_factory,
-            auth_rest=auth_rest,
-            account_ctx=account_ctx,
-            deployment_environment=env_str,
-            bus=bus,
-            offer_registry=offer_registry,
-            is_simulated=spec.is_simulated,
+        sinks = capital.observation(ObservationVenue(
+            auth_rest=auth_rest, account_ctx=account_ctx, protection=protection,
             symbols=configured_symbols(config.cells),
-            action_grace_ms=120_000,
-            uncertainty_handler=ledger.on_reservation_unknown,
-            capital_repository=capital_runtime.repository if capital_runtime else None,
-            protection=protection,
-            foreign_exposure=foreign_exposure,
-        ), observation_scope)
+            cells=[(cell.symbol, cell.cell_id) for cell in config.cells],
+        ))
+        boot_recovery = sinks.boot
+        runtime_recovery = sinks.runtime
 
-    fill_tracker: RestPollingFillTracker | None = None
-    if spec.fill_tracker_enabled:
-        fill_tracker = RestPollingFillTracker(
-            http=bitfinex_http,
-            event_sink=stdout_sink,
-            probe=probe,
-            bus=bus,
-            phase=config.phase,
-            strategy=first_cell.strategy,
-            cell=first_cell.cell_id,
-            account_id=account_id,
-            registry=offer_registry,
-            persister=persister,
-        )
-    bus.subscribe(ReservationClaimed,  ledger.on_reservation_claimed)
-    bus.subscribe(OrderFilled,         ledger.on_order_filled)
-    bus.subscribe(ReservationReleased, ledger.on_reservation_released)
-    # Phase 4.4a: OfferRegistry projection — stays in sync with event log.
-    bus.subscribe(ReservationClaimed,  offer_registry.handle)
-    bus.subscribe(OrderFilled,         offer_registry.handle)
-    bus.subscribe(ReservationReleased, offer_registry.handle)
     # 3b: cancel lifecycle → diagnostics (CANCEL_AUDIT). Forensic, best-effort.
     bus.subscribe(CancelRequested,     diagnostics.handle_cancel_requested)
     bus.subscribe(CancelAcknowledged,  diagnostics.handle_cancel_acknowledged)
-    # Credit-aware reconcile: PositionReconciled is the ledger's sole exposure
-    # authority at reconcile time (recovery FSM events are routed to the registry,
-    # not the bus — see BootRecovery._route_fsm). Wiring both together is required:
-    # subscribing here without the registry routing would double-count orphans.
-    bus.subscribe(PositionReconciled, ledger.on_position_reconciled)
-    # Same snapshot feeds the NAV tracker (peak + 24h window) behind the NAV-drop
-    # alert, wrapped so it reads metrics the tracker already updated.
+    # The snapshot behind PositionReconciled feeds the NAV tracker (peak + 24h window) behind
+    # the NAV-drop alert, wrapped so it reads metrics the tracker already updated.
     nav_drop = NavDropMonitor(
         source=pnl_source,
         realized_loss_threshold_pct=safety_cfg.nav_alerts.realized_loss_24h_pct,
@@ -693,6 +616,8 @@ async def build_daemon(
     for _domain_event_type in (
         ReservationClaimed, OrderFilled, ReservationReleased,
         CancelRequested, CancelAcknowledged, PositionReconciled, CreditClosed,
+        # What the ledger authority publishes after its transactions committed.
+        CommandOutcomeNotice, UnknownResolutionNotice, VenueHintNotification,
     ):
         bus.subscribe(_domain_event_type, domain_event_counter)
 
@@ -706,25 +631,15 @@ async def build_daemon(
     # bfx_executor_submit_duration_seconds and counts outcomes. It re-raises /
     # returns unchanged, so the HeartbeatMiddleware I1 invariant and the
     # no-retry submit contract below are untouched.
-    command_boundary: CommandBoundary | None = None
-    if capital_runtime is not None:
-        command_boundary = CommandBoundary(
-            capital_scope, session_factory,
-            LegacyCommandJournal(
-                capital_runtime, date_provider=lambda: datetime.now(UTC).date(),
-                clock=lambda: int(time.time() * 1000), uncertainty_reader=uncertainty_reader,
-            ),
-            LegacyCommandEffects(persister, bus, ledger.on_reservation_unknown),
-        )
     reservation_middleware = ReservationEmittingMiddleware(
         executor,
         bus=bus,
-        persister=persister,
+        persister=legacy.persister if legacy is not None else None,
         is_simulated=spec.is_simulated,
         safety_evaluator=safety_chain,
-        boundary=command_boundary,
+        boundary=capital.command_boundary if capital is not None else None,
         uncertainty_reader=uncertainty_reader,
-        managed_offers=managed_offers if command_boundary is not None else None,
+        managed_offers=managed_offers if capital is not None else None,
     )
     reservation_executor: ExecutorPort = reservation_middleware
 
@@ -756,8 +671,7 @@ async def build_daemon(
             raise ValueError(
                 "live execution requires a FundingBookService for the configured policy",
             )
-        assert capital_runtime is not None  # validated immediately after executor construction
-        assert capital_authority is not None and scope_lock is not None  # built with the runtime
+        assert capital is not None  # validated immediately after executor construction
         reprice_policy = policy_from_env(os.environ)
         ladder_policy = ladder_policy_from_env(os.environ)
         execution_gate = ExecutionGate(
@@ -775,19 +689,20 @@ async def build_daemon(
         )
         capital_policy_control = CapitalPolicyRequestWorker(
             session_factory=session_factory, account_id=UUID(account_id),
-            environment=env_str, authority=operator_authorized, scope_lock=scope_lock,
+            environment=env_str, authority=operator_authorized,
+            policy_store=capital.policy_store, scope_lock=capital.scope_lock,
             clock=now_ms_utc,
             ownership=writer_lock.verify_held if writer_lock is not None else None,
         )
         deployment_reconciler = DeploymentReconciler(
-            capital=capital_authority,
+            capital=capital.capital_authority,
             offers=managed_offers,
             uncertainty=uncertainty_reader,
             scope=capital_scope,
             session_factory=session_factory,
             store=quote_store,
             tracker=CellDeploymentTracker(),
-            ledger=ledger,
+            uncertainty_synced=capital.uncertainty_synced,
             safety_chain=safety_chain,
             executor=wrapped_executor,
             account_ctx=account_ctx,
@@ -826,11 +741,12 @@ async def build_daemon(
         assert writer_lock is not None
         # The web API queues operator adjudications; only this writer appends them.
         uncertainty_worker = UncertaintyResolutionWorker(
-            session_factory=capital_runtime.session_factory,
+            session_factory=session_factory,
             scope=ResolutionScope(account_bootstrap.exchange_account_id, env_str),
             authority=operator_authorized,
             clock=now_ms_utc,
             ownership=writer_lock.verify_held,
+            resolution=capital.operator_resolution,
         )
         # Execution-policy regime telemetry: one row per boot (flags are
         # boot-immutable, so boots are the regime boundaries). Best-effort —
@@ -856,13 +772,32 @@ async def build_daemon(
             recovery_runner = TracedReconcileRecovery(recovery_runner, tracing=tracing)
         periodic_reconcile = PeriodicReconcile(
             recovery=recovery_runner,
-            scope=observation_scope,
+            scope=capital_scope,
             probe=probe,
             interval_s=reconcile_interval_s,
             min_resync_interval_s=resync_min_interval_s,
             deployment=deployment_reconciler,
-            deployment_input=LegacyDeploymentInput(),
+            deployment_input=capital.deployment_input,
+            resync=resync,
         )
+
+    # The REST fill tracker is the event-log authority's: it needs the CID registry. The
+    # ledger authority covers a missed fill with WS hints and the periodic reconcile.
+    fill_tracker: RestPollingFillTracker | None = None
+    if spec.fill_tracker_enabled:
+        if legacy is None:
+            log.warning("fill_tracker_not_composed authority=%s", ports.authority)
+        else:
+            fill_tracker = RestPollingFillTracker(
+                http=bitfinex_http,
+                event_sink=stdout_sink,
+                probe=probe,
+                phase=config.phase,
+                strategy=first_cell.strategy,
+                cell=first_cell.cell_id,
+                account_id=account_id,
+                venue_hint_sink=ports.venue_hint_sink,
+            )
 
     # ---- Phase 4.4 prework: SmokeRunner ----
     from bfx_funding_bot.modules.admin.pg_event_log_query import PostgresEventLogQueryAdapter
@@ -889,10 +824,10 @@ async def build_daemon(
         )
 
     # ---- Phase 4.3 replay invariant report ----
-    if ledger.replay_floor_hit_count > 0:
+    if paper_ledger is not None and paper_ledger.replay_floor_hit_count > 0:
         probe.update(
             HealthTarget.LEDGER, HealthStatus.DEGRADED,
-            error_message=f"{ledger.replay_floor_hit_count} floor hits during replay",
+            error_message=f"{paper_ledger.replay_floor_hit_count} floor hits during replay",
         )
         await stdout_sink.emit({
             "timestamp": datetime.now(UTC).isoformat(),
@@ -904,7 +839,7 @@ async def build_daemon(
             "payload": {
                 "check_target": HealthTarget.LEDGER.value,
                 "status": HealthStatus.DEGRADED.value,
-                "error_message": f"replay_floor_hit_count={ledger.replay_floor_hit_count}",
+                "error_message": f"replay_floor_hit_count={paper_ledger.replay_floor_hit_count}",
             },
         })
 
@@ -1122,9 +1057,16 @@ async def build_daemon(
     # ---- GET /admin/trading-status + POST /admin/dry-evaluate ----
     # Real-money status uses the same applied policy reader as the planner and
     # command gate. Legacy scalar/map arguments are simulation diagnostics only.
+    if capital is not None:
+        status_exposure: CapitalStatusReads | PaperPositionLedger = CapitalStatusReads(
+            authority=capital.capital_authority, lock=capital.scope_lock, scope=capital_scope,
+            session_factory=session_factory, clock=now_ms_utc)
+    else:
+        assert paper_ledger is not None  # no capital authority: the simulated, legacy composition
+        status_exposure = paper_ledger
     trading_status = TradingStatusService(
         chain=safety_chain,
-        ledger=ledger,
+        exposure=status_exposure,
         account_ctx=account_ctx,
         cells=config.cells,
         caps=hg.allocation_cap.caps,
@@ -1144,10 +1086,6 @@ async def build_daemon(
                               if deployment_identity.deployment_id else None),
         }),
         readiness=trading_readiness,
-        capital=(CapitalStatusReads(authority=capital_authority, lock=scope_lock,
-                                    scope=capital_scope, session_factory=session_factory,
-                                    clock=now_ms_utc)
-                 if capital_authority is not None and scope_lock is not None else None),
     )
 
     healthz_port_env = os.environ.get("BFX_HEALTHZ_PORT", "").strip()
@@ -1164,19 +1102,12 @@ async def build_daemon(
         auth_ws = BitfinexAuthWSClient(
             creds=credentials,
             auth_gate=bfx_auth_gate,
-            on_resync_needed=(
-                periodic_reconcile.request_resync
-                if periodic_reconcile is not None
-                else None
-            ),
+            on_resync_needed=resync.request if periodic_reconcile is not None else None,
         )
         ws_dispatcher = BitfinexLiveWSDispatcher(
             ws_client=auth_ws,
-            registry=offer_registry,
-            bus=bus,
             event_sink=stdout_sink,
-            persister=persister,
-            account_id=account_id,
+            venue_hint_sink=ports.venue_hint_sink,
         )
         bus.subscribe(CancelRequested, ws_dispatcher.handle_cancel_requested)
         # Saturation signal: queue depth read live at scrape time (replaces the
@@ -1221,18 +1152,13 @@ async def build_daemon(
         executor=executor,
         safety_chain=safety_chain,
         account_ctx=account_ctx,
-        ledger=ledger,
         bus=bus,
         smoke_runner=smoke_runner,
         fill_tracker=fill_tracker,
-        offer_registry=offer_registry,
         auth_ws=auth_ws,
         ws_dispatcher=ws_dispatcher,
         boot_recovery=boot_recovery,
-        observation_scope=(
-            Scope(account_bootstrap.exchange_account_id, env_str)
-            if boot_recovery is not None else None
-        ),
+        observation_scope=capital_scope if boot_recovery is not None else None,
         book_snapshot_writer=book_snapshot_writer,
         interest_ledger_sync=interest_ledger_sync,
         credit_history_sync=credit_history_sync,

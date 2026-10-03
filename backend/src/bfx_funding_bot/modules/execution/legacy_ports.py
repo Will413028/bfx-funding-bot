@@ -10,12 +10,14 @@ scripts) construct them; consumers see the Protocols.
 from __future__ import annotations
 
 from collections.abc import Collection
+from typing import Any
 
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprints_in_use
 from bfx_funding_bot.modules.execution.capital_repository import (
+    AppliedCapitalPolicy,
     CapitalBlockedError,
     CapitalRepository,
     CapitalView,
@@ -30,10 +32,11 @@ from bfx_funding_bot.modules.ledger import (
     CapitalBlocked,
     CapitalRead,
     LiveManagedOffer,
+    PolicyRefused,
     Scope,
     UncertaintyRecord,
 )
-from bfx_funding_bot.modules.trading import AppliedPolicy, CapitalScope
+from bfx_funding_bot.modules.trading import AppliedPolicy, CapitalPolicy, CapitalScope
 
 
 def legacy_basis_token(snapshot_seq: int) -> str:
@@ -258,9 +261,50 @@ class LegacyScopeLock:
         await self._repository.writer.prepare_locked(session, account_id=scope.exchange_account_id)
 
 
+class LegacyPolicyStore:
+    """``PolicyStore`` over ``CapitalRepository``: every call replays the account stream first."""
+
+    def __init__(self, repository: CapitalRepository) -> None:
+        self._repository = repository
+        self._scope = Scope(repository.account_id, repository.environment)
+
+    @property
+    def scope(self) -> Scope:
+        return self._scope
+
+    async def read_applied(self, session: AsyncSession, *, symbol: str) -> AppliedPolicy:
+        try:
+            applied = await self._repository.read_applied(session, symbol=symbol)
+        except CapitalBlockedError as exc:
+            raise PolicyRefused(str(exc)) from exc
+        return self._applied(symbol, applied)
+
+    async def apply_policy(
+        self, session: AsyncSession, *, symbol: str, policy: CapitalPolicy,
+        expected_revision: int, source: dict[str, Any],
+    ) -> AppliedPolicy:
+        try:
+            applied = await self._repository.apply_policy(
+                session, symbol=symbol, policy=policy,
+                expected_revision=expected_revision, source=source,
+            )
+        except CapitalBlockedError as exc:
+            raise PolicyRefused(str(exc)) from exc
+        return self._applied(symbol, applied)
+
+    def _applied(self, symbol: str, applied: AppliedCapitalPolicy) -> AppliedPolicy:
+        return AppliedPolicy(
+            account_id=self._scope.exchange_account_id,
+            environment=self._scope.deployment_environment, symbol=symbol,
+            revision=applied.revision, digest=applied.digest,
+            revision_id=applied.revision_id, policy=applied.policy,
+        )
+
+
 __all__ = [
     "LegacyCapitalAuthority",
     "LegacyManagedOffers",
+    "LegacyPolicyStore",
     "LegacyScopeLock",
     "LegacyUncertaintyReader",
     "available_from_view",

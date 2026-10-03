@@ -41,6 +41,7 @@ from bfx_funding_bot.modules.execution.events import (
     VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
+from bfx_funding_bot.modules.execution.uncertainty_resolution import LegacyOperatorResolution
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 
 ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
@@ -245,8 +246,7 @@ def _apply_queued(factory, *, clock: int = 5_000, authority: _Authority | None =
         session_factory=factory,
         scope=ResolutionScope(ACCOUNT_ID, "ci"),
         authority=authority or _Authority(),
-        clock=lambda: clock,
-    )
+        clock=lambda: clock, resolution=LegacyOperatorResolution())
     return asyncio.run(worker.tick())
 
 
@@ -1235,8 +1235,7 @@ def test_worker_skips_a_request_it_cannot_even_mark_failed(uncertainty_app, monk
     monkeypatch.setattr(UncertaintyResolutionWorker, "_mark_failed", cannot_mark)
     worker = UncertaintyResolutionWorker(
         session_factory=factory, scope=ResolutionScope(ACCOUNT_ID, "ci"),
-        authority=_Authority(), clock=lambda: 5_000,
-    )
+        authority=_Authority(), clock=lambda: 5_000, resolution=LegacyOperatorResolution())
 
     async def two_ticks() -> tuple[bool, bool]:
         return await worker.tick(), await worker.tick()
@@ -1259,8 +1258,7 @@ def test_worker_only_touches_its_own_account(uncertainty_app) -> None:
         session_factory=factory,
         scope=ResolutionScope(OTHER_ACCOUNT_ID, "ci"),
         authority=_Authority(),
-        clock=lambda: 5_000,
-    )
+        clock=lambda: 5_000, resolution=LegacyOperatorResolution())
     assert asyncio.run(other.tick()) is False
     assert _request_outcome(client, request_id)["state"] == "requested"
 

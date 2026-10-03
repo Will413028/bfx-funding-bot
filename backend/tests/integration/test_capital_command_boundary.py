@@ -146,10 +146,10 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(cap
     chain = SafetyGuardChain(guards=[ManualKillGuard(trading_state=halt), policy_guard(runtime)],
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30", account_id=str(account))
-    service = TradingStatusService(chain=chain, ledger=None, account_ctx=ctx,
+    service = TradingStatusService(chain=chain, account_ctx=ctx,
         cells=[_cell("fUST", "a30"), _cell("fUST", "p2")], caps={}, default_cap=Decimal("0"),
         env_fallback_cap=None, buffers={}, default_buffer=Decimal("0"), env_fallback_buffer=None,
-        phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), trading_state=halt, capital=status_reads(runtime))
+        phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), trading_state=halt, exposure=status_reads(runtime))
     snapshot = await service.snapshot()
     assert snapshot["account_id"] == str(account)
     assert snapshot["deployment_environment"] == "ci"
@@ -222,10 +222,10 @@ async def test_status_with_an_envelope_serializes_to_json(capital_db):
     chain = SafetyGuardChain(guards=[ManualKillGuard(trading_state=halt)],
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30", account_id=str(account))
-    service = TradingStatusService(chain=chain, ledger=None, account_ctx=ctx,
+    service = TradingStatusService(chain=chain, account_ctx=ctx,
         cells=[_cell("fUST", "a30")], caps={}, default_cap=Decimal("0"),
         env_fallback_cap=None, buffers={}, default_buffer=Decimal("0"), env_fallback_buffer=None,
-        phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), trading_state=halt, capital=status_reads(runtime))
+        phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), trading_state=halt, exposure=status_reads(runtime))
     symbols = json.loads(json.dumps(await service.snapshot()))["symbols"]
     for symbol in ("fUST", "fUSD"):
         assert symbols[symbol]["policy"]["envelope"] == {

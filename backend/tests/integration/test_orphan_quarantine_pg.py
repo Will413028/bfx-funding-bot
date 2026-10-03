@@ -37,6 +37,7 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.ledger import Scope
 
@@ -321,7 +322,7 @@ async def test_unchanged_foreign_offer_only_degrades_first_periodic_run(pg_sessi
     )
     probe = _Probe()
     scope = Scope(_ACCOUNT, _ENV)
-    periodic = PeriodicReconcile(
+    periodic = PeriodicReconcile(resync=ResyncChannel(),
         recovery=LegacyObservationSink(recovery, scope), scope=scope,
         probe=probe,
         interval_s=90,

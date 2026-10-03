@@ -139,7 +139,7 @@ class TradingStatusService:
         self,
         *,
         chain: SafetyGuardChain,
-        ledger: _LedgerProtocol,
+        exposure: CapitalStatusReads | _LedgerProtocol,
         account_ctx: AccountContext,
         cells: list[CellConfig],
         caps: dict[str, Decimal],
@@ -154,13 +154,13 @@ class TradingStatusService:
         kill_switch: _KillSwitchProtocol | None = None,
         deployment: dict[str, Any] | None = None,
         readiness: TradingReadiness | None = None,
-        capital: CapitalStatusReads | None = None,
     ) -> None:
         self._chain = chain
-        if phase is Phase.LIVE and capital is None:
+        if phase is Phase.LIVE and not isinstance(exposure, CapitalStatusReads):
             raise ValueError("live status requires applied capital runtime")
-        self._capital = capital
-        self._ledger = ledger
+        # Where exposure comes from: the applied-capital reads, or (simulation only) the
+        # in-memory paper-position projection.
+        self._exposure = exposure
         self._ctx = account_ctx
         self._cells = cells
         self._caps = caps
@@ -186,13 +186,29 @@ class TradingStatusService:
     def _authority_scope(self) -> dict[str, str | None]:
         # Bind diagnostics to the scope actually supplying capital, not an
         # ambient env value or phase label. Legacy simulations have no live realm.
-        scope = self._capital.scope if self._capital else None
+        exposure = self._exposure
+        scope = exposure.scope if isinstance(exposure, CapitalStatusReads) else None
         return {
             "account_id": str(scope.exchange_account_id) if scope else self._ctx.account_id,
             "deployment_environment": scope.deployment_environment if scope else None,
         }
 
     async def snapshot(self) -> dict[str, Any]:
+        exposure = self._exposure
+        symbols: dict[str, dict[str, Any]]
+        env_fallback_cap: dict[str, Any] | None = None
+        env_fallback_buffer: dict[str, Any] | None = None
+        if isinstance(exposure, CapitalStatusReads):
+            symbols = {s: await self._capital_status(exposure, s)
+                       for s in sorted(set(self._symbols) | {"fUST", "fUSD"})}
+        else:
+            symbols = {s: self._symbol_status(exposure, s) for s in self._symbols}
+            env_fallback_cap = self._fallback_status(
+                self._caps, self._env_fallback_cap, self._default_cap, "cap",
+            )
+            env_fallback_buffer = self._fallback_status(
+                self._buffers, self._env_fallback_buffer, self._default_buffer, "buffer",
+            )
         return {
             "phase": self._phase.value,
             **self._authority_scope(),
@@ -206,15 +222,9 @@ class TradingStatusService:
                 {"name": g.name}
                 for g in self._chain.guards
             ],
-            "symbols": {s: await self._capital_status(s) if self._capital else self._symbol_status(s)
-                        for s in (sorted(set(self._symbols) | {"fUST", "fUSD"}) if self._capital else self._symbols)},
-            "env_fallback_cap": None if self._capital else self._fallback_status(
-                self._caps, self._env_fallback_cap, self._default_cap, "cap",
-            ),
-            "env_fallback_buffer": None if self._capital else self._fallback_status(
-                self._buffers, self._env_fallback_buffer, self._default_buffer,
-                "buffer",
-            ),
+            "symbols": symbols,
+            "env_fallback_cap": env_fallback_cap,
+            "env_fallback_buffer": env_fallback_buffer,
             "last_submit_attempt": self._attempts.as_dict(),
             "trading_readiness": self._readiness_dict(),
         }
@@ -305,7 +315,7 @@ class TradingStatusService:
             "scope_error": result.scope_error,
         }
 
-    def _symbol_status(self, symbol: str) -> dict[str, Any]:
+    def _symbol_status(self, ledger: _LedgerProtocol, symbol: str) -> dict[str, Any]:
         cap = resolve_for_symbol_with_source(
             self._caps, symbol,
             env_fallback=self._env_fallback_cap, default=self._default_cap,
@@ -314,7 +324,7 @@ class TradingStatusService:
             self._buffers, symbol,
             env_fallback=self._env_fallback_buffer, default=self._default_buffer,
         )
-        available = self._ledger.available_balance(symbol)
+        available = ledger.available_balance(symbol)
         # Floor explicitly rather than via max(Decimal("0"), …): max returns its
         # FIRST argument when the two compare equal, so available=3.00 with
         # buffer=3 would render "0" while available=3.10/buffer=3 renders "0.10"
@@ -326,9 +336,9 @@ class TradingStatusService:
             "cap": {"value": str(cap.value), "source": cap.source},
             "buffer": {"value": str(buffer.value), "source": buffer.source},
             "exposure": {
-                "reserved": str(self._ledger.reserved_exposure(symbol)),
-                "realized": str(self._ledger.realized_exposure(symbol)),
-                "total": str(self._ledger.current_exposure(symbol)),
+                "reserved": str(ledger.reserved_exposure(symbol)),
+                "realized": str(ledger.realized_exposure(symbol)),
+                "total": str(ledger.current_exposure(symbol)),
             },
             "available_balance": str(available),
             # Same clamp the reconciler applies when sizing. Zero here means no
@@ -337,9 +347,7 @@ class TradingStatusService:
             "deployable_headroom": str(headroom),
         }
 
-    async def _capital_status(self, symbol: str) -> dict[str, Any]:
-        reads = self._capital
-        assert reads is not None
+    async def _capital_status(self, reads: CapitalStatusReads, symbol: str) -> dict[str, Any]:
         scope = reads.scope
         try:
             async with reads.session_factory() as session:
