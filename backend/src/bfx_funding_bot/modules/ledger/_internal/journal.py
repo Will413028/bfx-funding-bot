@@ -68,44 +68,19 @@ async def _authorize_attempt(
     ``now_ms`` is its local clock, not an extra ledger freshness policy.
     """
     await lock_scope(session, scope)
-    try:
-        query_id, revision = parse_basis_token(basis_token)
-    except ValueError:
+    resolved = await _resolve_token(session, scope, basis_token)
+    if isinstance(resolved, AuthorizeRefused):
+        return resolved
+    if isinstance(resolved, _Stale) or attempt.basis_id != resolved[0]:
         return AuthorizeRefused("capital_snapshot_changed")
-    latest = await session.scalar(
-        select(LedgerObservationQueryRow.query_id)
-        .where(
-            LedgerObservationQueryRow.exchange_account_id == scope.exchange_account_id,
-            LedgerObservationQueryRow.deployment_environment == scope.deployment_environment,
-        )
-        .order_by(LedgerObservationQueryRow.query_revision.desc())
-        .limit(1)
-    )
-    if latest != query_id:
-        return AuthorizeRefused("capital_snapshot_changed")
-    basis_id = await session.scalar(
-        select(AcceptedCapitalBasisRow.id)
-        .join(
-            LedgerObservationRow, LedgerObservationRow.id == AcceptedCapitalBasisRow.observation_id
-        )
-        .where(
-            LedgerObservationRow.query_id == query_id,
-            LedgerObservationRow.accepted.is_(True),
-            AcceptedCapitalBasisRow.accepted.is_(True),
-            AcceptedCapitalBasisRow.exchange_account_id == scope.exchange_account_id,
-            AcceptedCapitalBasisRow.deployment_environment == scope.deployment_environment,
-        )
-    )
-    if basis_id is None:
-        return AuthorizeRefused("query_pending")
-    clock = await session.scalar(
-        select(CapitalCommandClockRow.revision).where(
-            CapitalCommandClockRow.exchange_account_id == scope.exchange_account_id,
-            CapitalCommandClockRow.deployment_environment == scope.deployment_environment,
-        )
-    )
-    if clock != revision or attempt.basis_id != basis_id:
-        return AuthorizeRefused("capital_snapshot_changed")
+    return await _admit(session, scope, attempt, locked_guard)
+
+
+async def _admit(
+    session: AsyncSession, scope: Scope, attempt: Attempt,
+    locked_guard: LockedCommandGuard | None,
+) -> Authorized | AuthorizeRefused:
+    """Under the held lock, after the token CAS: policy head, guard, then the insert."""
     policy = await session.scalar(
         select(CapitalPolicyHeadRow.revision_id).where(
             CapitalPolicyHeadRow.exchange_account_id == scope.exchange_account_id,
@@ -219,15 +194,14 @@ async def _command_pass(
         "max_new_offer": str(budget.max_new_offer),
         "retried": fresh is not None,
     }
-    admitted = await _authorize_attempt(
+    admitted = await _admit(
         session, scope, Attempt(
             attempt.attempt_id, attempt.execution_decision_id, attempt.symbol, attempt.cell_id,
             attempt.normalized_payload, basis_id, attempt.policy_revision_id,
             evidence, attempt.started_at_ms,
-        ), basis_token, now_ms=now_ms, locked_guard=locked_guard,
+        ), locked_guard,
     )
     if isinstance(admitted, AuthorizeRefused):
-        # The clock was checked above under the same lock, so only policy can differ here.
         return CommandRefused(admitted.reason)
     return admitted
 
