@@ -392,10 +392,11 @@ async def _halted_auto(clock: Clock) -> tuple[AutomaticProtection, RuleState]:
     return protection, state
 
 
-def _clean(protection: AutomaticProtection, clock: Clock, n: int, *, step: int = 60_000) -> None:
+def _clean(protection: AutomaticProtection, clock: Clock, n: int, *, step: int = 60_000,
+           first: int = 100) -> None:
     for seq in range(n):
         clock.now += step
-        protection.observe_clean(100 + seq)
+        protection.observe_clean(str(first + seq))
 
 
 async def test_a_cleared_automatic_halt_resumes_after_three_clean_snapshots_and_15_min() -> None:
@@ -410,6 +411,31 @@ async def test_a_cleared_automatic_halt_resumes_after_three_clean_snapshots_and_
     resumed = await state.current()
     assert (resumed.state, resumed.cause, resumed.actor) == ("ACTIVE", "auto", "auto-resume")
     assert "event_seq 100,101,102" in resumed.reason and "venue_lent_above_ledger" in resumed.reason
+
+
+async def test_one_observation_reported_again_is_not_a_second_clean_observation() -> None:
+    clock = Clock(1_000)
+    protection, state = await _halted_auto(clock)
+    clock.now += 60_000
+    protection.observe_clean("ledger:v1:obs:a")
+    for _ in range(3):
+        clock.now += 60_000
+        protection.observe_clean("ledger:v1:obs:a")
+    protection.observe_clean("ledger:v1:obs:b")
+    clock.now = state.rows[-1].created_at_ms + MIN_HALT
+    assert not await protection.resume_if_cleared()  # two distinct observations
+    protection.observe_clean("ledger:v1:obs:c")
+    assert await protection.resume_if_cleared()
+
+
+async def test_observations_without_a_reference_each_count() -> None:
+    clock = Clock(1_000)
+    protection, state = await _halted_auto(clock)
+    for _ in range(3):
+        clock.now += 60_000
+        protection.observe_clean(None)
+    clock.now = state.rows[-1].created_at_ms + MIN_HALT
+    assert await protection.resume_if_cleared()
 
 
 async def test_fewer_than_three_clean_snapshots_keep_the_halt() -> None:
@@ -427,10 +453,10 @@ async def test_any_trip_restarts_the_clean_count() -> None:
     _clean(protection, clock, 2)
     protection.trip(COMMAND_RATE_EXCEEDED, "still throttling")  # condition persists
     await protection.run_pending()
-    _clean(protection, clock, 2)
+    _clean(protection, clock, 2, first=200)
     clock.now += MIN_HALT
     assert not await protection.resume_if_cleared()
-    _clean(protection, clock, 1)
+    _clean(protection, clock, 1, first=300)
     assert await protection.resume_if_cleared()
 
 

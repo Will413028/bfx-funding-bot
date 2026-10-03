@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, NamedTuple, Protocol, cast
@@ -408,6 +408,22 @@ QUARANTINE_ALERT_AFTER_MS = 30 * 60 * 1000
 QUARANTINE_REPEAT_MS = 6 * 60 * 60 * 1000
 
 
+class AgingUnknown(Protocol):
+    """What the age monitor needs of an open UNKNOWN, whichever authority recorded it.
+
+    ``attempt_id`` is the uncertainty's own id (an UNKNOWN submit's attempt id).
+    """
+
+    @property
+    def attempt_id(self) -> UUID: ...
+    @property
+    def symbol(self) -> str: ...
+    @property
+    def started_at_ms(self) -> int: ...
+    @property
+    def amount(self) -> Decimal: ...
+
+
 class QuarantineAgeMonitor:
     """Alert when an UNKNOWN has held its symbol for too long (D3 level 2).
 
@@ -423,7 +439,7 @@ class QuarantineAgeMonitor:
         self._repeat = repeat_ms
         self._last: dict[UUID, int] = {}
 
-    def observe(self, still_open: list[UnknownSubmitAttempt], *, now_ms: int) -> None:
+    def observe(self, still_open: Sequence[AgingUnknown], *, now_ms: int) -> None:
         open_ids = {attempt.attempt_id for attempt in still_open}
         self._last = {key: at for key, at in self._last.items() if key in open_ids}
         for attempt in still_open:
@@ -551,7 +567,7 @@ class BootRecovery:
                 log.warning("foreign_lending %s", detail)
                 alerts.emit(FOREIGN_LENDING, detail=detail)
             if capital_accepted and not tripped and fence_refusal is None:
-                protection.observe_clean(drift.event_seq)
+                protection.observe_clean(None if drift.event_seq is None else str(drift.event_seq))
 
     async def run(self) -> ReconcileResult:
         # A reconcile is one account observation.  The venue calls intentionally

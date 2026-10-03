@@ -41,6 +41,7 @@ from sqlalchemy.orm import load_only
 from bfx_funding_bot.core.venue_time import HISTORY_QUERY_MARGIN_MS
 from bfx_funding_bot.modules.ledger import (
     CancelProvenance,
+    ForeignOffer,
     LedgerReadUnbounded,
     ManagedOffer,
     ManagedOffers,
@@ -104,6 +105,7 @@ class _Candidates:
 class _Live:
     managed: tuple[tuple[VenueOfferMirrorRow, SubmissionAttemptJournalRow, str], ...]
     conflicts: tuple[VenueOfferMirrorRow, ...]
+    foreign: tuple[VenueOfferMirrorRow, ...]
 
 
 async def _candidates(
@@ -305,13 +307,16 @@ async def _live(
     }
     owned: list[tuple[VenueOfferMirrorRow, SubmissionAttemptJournalRow]] = []
     conflicts: list[VenueOfferMirrorRow] = []
+    foreign: list[VenueOfferMirrorRow] = []
     for mirror in mirrors:
         try:
             owner = sole_owner(provenance[mirror.venue_offer_id], attempts, scope, mirror.symbol)
         except LookupError:
             conflicts.append(mirror)
             continue
-        if owner is not None:
+        if owner is None:
+            foreign.append(mirror)
+        else:
             owned.append((mirror, owner))
     correlations = await _correlations(session, (owner.execution_decision_id for _, owner in owned))
     managed: list[tuple[VenueOfferMirrorRow, SubmissionAttemptJournalRow, str]] = []
@@ -321,7 +326,11 @@ async def _live(
             conflicts.append(mirror)
         else:
             managed.append((mirror, owner, correlation))
-    return _Live(tuple(managed), tuple(sorted(conflicts, key=lambda row: row.venue_offer_id)))
+    return _Live(
+        tuple(managed),
+        tuple(sorted(conflicts, key=lambda row: row.venue_offer_id)),
+        tuple(foreign),
+    )
 
 
 async def _correlations(session: AsyncSession, decision_ids: Iterable[str]) -> dict[str, str]:
@@ -392,6 +401,29 @@ async def managed_live_offers(
         tuple(_managed_offer(*item) for item in live.managed),
         tuple(row.venue_offer_id for row in live.conflicts),
     )
+
+
+async def live_foreign(
+    session: AsyncSession, scope: Scope
+) -> tuple[tuple[ForeignOffer, ...], frozenset[str]]:
+    """Live offers nothing of this scope placed, and the id of every live offer.
+
+    An offer with contradictory provenance is in the ids but never among the foreign ones.
+    """
+    live = await _live(session, scope, _live_mirror(scope))
+    foreign = tuple(
+        ForeignOffer(
+            row.venue_offer_id, row.symbol, row.amount_remaining, row.amount_original, row.rate,
+            row.rate_observed, row.period_days, row.mts_created, row.status,
+        )
+        for row in live.foreign
+    )
+    ids = frozenset(
+        [row.venue_offer_id for row, _, _ in live.managed]
+        + [row.venue_offer_id for row in live.conflicts]
+        + [row.venue_offer_id for row in live.foreign]
+    )
+    return foreign, ids
 
 
 async def cancel_provenance(
