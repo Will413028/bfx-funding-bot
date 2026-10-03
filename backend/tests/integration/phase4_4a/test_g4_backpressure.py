@@ -9,6 +9,8 @@ from typing import Any
 import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_ws import BfxWSEvent, FcnEvent
+from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
+from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 
 
@@ -70,8 +72,9 @@ async def test_dispatcher_queue_full_pauses_producer(
     queue_max = 5
     fake_ws = _FloodingWSClient(count=100)
     dispatcher = _ObservingDispatcher(
-        ws_client=fake_ws, registry=registry, bus=bus,
-        event_sink=_SlowEventSink(), clock=lambda: 2000, queue_max=queue_max,
+        ws_client=fake_ws, event_sink=_SlowEventSink(), clock=lambda: 2000, queue_max=queue_max,
+        venue_hint_sink=LegacyVenueHintSink(
+            registry=registry, bus=bus, persister=NoopEventPersister(), account_id=None),
     )
 
     stop = asyncio.Event()

@@ -310,7 +310,6 @@ type = "acyclic_siblings"
 ancestors = ["bfx_funding_bot.modules"]
 depth = 0
 ignore_imports = [
-    "bfx_funding_bot.modules.accounts.capital_amendment -> bfx_funding_bot.modules.execution.capital_repository",
     "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.capital_repository",
     "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.safety.hard_guards",
     "bfx_funding_bot.modules.accounts.credential_bootstrap -> bfx_funding_bot.modules.execution.protocols",
@@ -531,7 +530,9 @@ id = "capital-consumers-via-ports"
 name = "Migrated capital consumers read the legacy authority only through the ledger ports"
 type = "forbidden"
 source_modules = [
+    "bfx_funding_bot.modules.accounts.capital_amendment",
     "bfx_funding_bot.modules.admin.trading_status",
+    "bfx_funding_bot.modules.execution.capital_policy_control",
     "bfx_funding_bot.modules.execution.command_gate",
     "bfx_funding_bot.modules.execution.contracts",
     "bfx_funding_bot.modules.execution.deployment.sizing",

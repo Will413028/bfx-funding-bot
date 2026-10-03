@@ -13,8 +13,10 @@ from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
+from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import ReservationClaimed, ReservationReleased
 from bfx_funding_bot.modules.execution.fill_tracker import RestPollingFillTracker
+from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 from bfx_funding_bot.modules.strategy import StrategyName
 
@@ -87,14 +89,11 @@ async def test_fill_tracker_ticks_emit_status_changes() -> None:
             http=client,
             event_sink=axiom,
             probe=probe,
-            bus=bus,
             phase=Phase.PAPER,
             strategy=StrategyName.MEAN_REVERSION,
             cell="fUSD_a30",
             account_id="default",
-            registry=registry,
-            poll_interval_s=0.01,
-        )
+            poll_interval_s=0.01, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id="default"))
         stop = asyncio.Event()
         task = asyncio.create_task(tracker.poll_loop(stop))
         await asyncio.sleep(0.1)

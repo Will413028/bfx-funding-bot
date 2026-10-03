@@ -32,11 +32,9 @@ from bfx_funding_bot.modules.accounts.capital_amendment import (
     PolicyChanges,
     amend_capital_policy,
 )
-from bfx_funding_bot.modules.execution.capital_repository import (
-    CapitalBlockedError,
-    CapitalRepository,
-)
-from bfx_funding_bot.modules.execution.legacy_ports import LegacyScopeLock
+from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+from bfx_funding_bot.modules.execution.legacy_ports import LegacyPolicyStore, LegacyScopeLock
+from bfx_funding_bot.modules.ledger import PolicyRefused
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -46,7 +44,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                                  max_snapshot_age_ms=60_000)
         async with make_session_factory(engine)() as session:
             report = await amend_capital_policy(
-                session, repository=repo, scope_lock=LegacyScopeLock(repo), symbol=args.symbol,
+                session, store=LegacyPolicyStore(repo), scope_lock=LegacyScopeLock(repo), symbol=args.symbol,
                 changes=_changes(args), apply_digest=args.apply_digest)
             if report["status"] == "applied":
                 await session.commit()
@@ -97,7 +95,7 @@ def main() -> int:
     try:
         print(json.dumps(asyncio.run(run(args)), sort_keys=True, indent=2))
         return 0
-    except CapitalBlockedError as exc:
+    except PolicyRefused as exc:
         print(json.dumps({"status": "blocked", "reason": str(exc)}), file=sys.stderr)
         return 2
     except Exception:

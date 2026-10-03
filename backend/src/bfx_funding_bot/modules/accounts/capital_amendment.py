@@ -9,7 +9,7 @@ field; afterwards any subset may change.
 Same contract as the legacy conversion: a dry run returns a reviewable report
 and its digest; apply recomputes the report in the same transaction, refuses if
 anything moved (the policy revision, its digest or the requested value), and
-appends exactly one new revision through ``CapitalRepository.apply_policy``.
+appends exactly one new revision through the ``PolicyStore`` of the capital authority in force.
 Nothing here writes a trading state, talks to the venue or resumes trading.
 """
 from __future__ import annotations
@@ -23,11 +23,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.execution.capital_repository import (
-    CapitalBlockedError,
-    CapitalRepository,
-)
-from bfx_funding_bot.modules.ledger import Scope, ScopeLock
+from bfx_funding_bot.modules.ledger import PolicyRefused, PolicyStore, ScopeLock
 from bfx_funding_bot.modules.trading import (
     CapitalPolicy,
     OfferEnvelope,
@@ -68,7 +64,7 @@ def _amended(policy: CapitalPolicy, changes: PolicyChanges) -> CapitalPolicy:
     if requested and envelope is None:
         missing = [name for name in _ENVELOPE_FIELDS if name not in requested]
         if missing:
-            raise CapitalBlockedError(f"envelope_incomplete: {','.join(missing)}")
+            raise PolicyRefused(f"envelope_incomplete: {','.join(missing)}")
     try:
         if requested:
             envelope = (OfferEnvelope(**requested) if envelope is None
@@ -80,11 +76,11 @@ def _amended(policy: CapitalPolicy, changes: PolicyChanges) -> CapitalPolicy:
                               else changes.max_offer_amount),
             envelope=envelope)
     except ValueError as exc:
-        raise CapitalBlockedError(f"invalid_policy: {exc}") from exc
+        raise PolicyRefused(f"invalid_policy: {exc}") from exc
 
 
 async def amend_capital_policy(
-    session: AsyncSession, *, repository: CapitalRepository, scope_lock: ScopeLock,
+    session: AsyncSession, *, store: PolicyStore, scope_lock: ScopeLock,
     symbol: str, changes: PolicyChanges, apply_digest: str | None,
     origin: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -94,13 +90,13 @@ async def amend_capital_policy(
     (who asked, and through which request); it is not part of the report.
     """
     if not changes.as_dict():
-        raise CapitalBlockedError("no_changes_requested")
-    await scope_lock.lock(session, Scope(repository.account_id, repository.environment))
-    applied = await repository.read_applied(session, symbol=symbol)
+        raise PolicyRefused("no_changes_requested")
+    await scope_lock.lock(session, store.scope)
+    applied = await store.read_applied(session, symbol=symbol)
     amended = _amended(applied.policy, changes)
     report: dict[str, Any] = {
-        "status": "dry_run", "account_id": str(repository.account_id),
-        "environment": repository.environment, "symbol": symbol,
+        "status": "dry_run", "account_id": str(store.scope.exchange_account_id),
+        "environment": store.scope.deployment_environment, "symbol": symbol,
         "changes": changes.as_dict(),
         "expected_revision": applied.revision, "current_policy_digest": applied.digest,
         "current_policy": policy_payload(applied.policy),
@@ -115,8 +111,8 @@ async def amend_capital_policy(
     if apply_digest is None:
         return report
     if apply_digest != digest:
-        raise CapitalBlockedError("amendment_changed")
-    written = await repository.apply_policy(
+        raise PolicyRefused("amendment_changed")
+    written = await store.apply_policy(
         session, symbol=symbol, policy=amended, expected_revision=applied.revision,
         source={**(origin or {}), "amendment_digest": digest,
                 "changes": changes.as_dict()},

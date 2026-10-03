@@ -253,6 +253,16 @@ sequenceDiagram
 - **Resync 觸發**：只有 authenticated WS（`external/bitfinex/auth_ws.py`）呼叫 `request_resync`：非首次連線（`reconnect`，含 venue 以 20051/20061 要求重連後的那次）與 SEQ_ALL 序號 gap（`seq_gap`）。首次連線由 boot reconcile 涵蓋。多次請求合併成一次，並受 `BFX_RESYNC_MIN_INTERVAL_S`（預設 10 s）debounce；單筆 fill 不觸發 resync。
 - **Snapshot acceptance（`CapitalRepository.begin_snapshot` / `accept_snapshot`）**：venue I/O 前先在短 transaction 持久化 `capital_snapshot_queries` 的 command fence（當下 event head；有未完成 submission attempt 時拒絕開始，`snapshot_inflight_command`）。acceptance 要求：fence 未變（`snapshot_command_fence_changed`）、這是最新一筆 query（`snapshot_query_superseded`）、主觀測與**時間上不重疊的第二次觀測**（confirmation 的 query start ≥ 主觀測的 query finish）內容**完全相同**（否則 `snapshot_unstable`），兩者都通過 freshness／完整性驗證。只有被接受的 snapshot 才寫 `capital_snapshots`，也只有它們由 `LedgerConservation` 判斷借出額（fill 落在 offers 與 credits 兩個 request 之間會把同一筆錢算兩次，兩次相同觀測排除這種假象）。
 
+### 3e. Bot 依 capital authority 組裝（`apps/bot_ports.py`）
+
+資料庫的 capital authority epoch（`legacy` / `ledger`）在 `build_daemon` 讀一次，`select_bot_ports(authority, ...)` 一次選定 bot 行程每個 consumer 綁定的 adapter（web API 對應 `apps/read_models.py`）；`apps/bot.py` 其餘部分不指名 authority。此 build 的 `SUPPORTED_AUTHORITIES` 仍只有 `legacy`，ledger 組裝只由測試以 monkeypatch epoch 讀取進入。
+
+- **`BotPorts`**：`uncertainty_reader`、`managed_offers`、`venue_hint_sink`（工廠，須在 `PeriodicReconcile` 建好後以其 `request_resync` 呼叫一次，fill tracker 與 WS dispatcher 共用同一個）、`capital: CapitalPorts | None`（paper / shadow 為 `None`）與 `legacy: LegacyExtras | None`。`CapitalPorts` 全有或全無：`capital_authority`、`scope_lock`、`policy_store`、`command_boundary`（journal + effects）、`operator_resolution`、`deployment_input`、`observation`（取得 venue 連線後建出 boot grace 0 與 runtime grace 120 000 兩個 sink）。
+- **legacy**：與原本相同的物件圖（`CapitalRuntime`、`LegacyCommandJournal` / `LegacyCommandEffects`、`BootRecovery` 包在 `LegacyObservationSink`、`EventStorePersister`、`PaperPositionLedger`、`OfferRegistry` 與其 bus 訂閱）。
+- **ledger**：不建立 `CapitalRuntime`、`CapitalRepository`、`PostgresEventStore`、`EventStorePersister`、`PaperPositionLedger`、`OfferRegistry`、legacy hint sink。唯一紀錄是 ledger 自己的表；bus 只在寫入 transaction commit 之後承載通知（`CommandOutcomeNotice`、`UnknownResolutionNotice`、`VenueHintNotification`、`PositionReconciled`）。observation sink 是 `ledger.wiring` 的 cycle 外包 `LedgerCycleEffects`（保護、NAV、告警），不得包住 legacy sink。
+- **Policy store（`ledger.PolicyStore`）**：`read_applied` / `apply_policy` 讀寫兩個 authority 共用的 `capital_policy_heads` / `capital_policy_revisions`。legacy 實作先 replay event stream（`prepare_locked`），ledger 實作不碰 event stream。boot 的 policy 預檢與 `CapitalPolicyRequestWorker`（經 `accounts.capital_amendment`）都走它。
+- **Boot 規則（`Daemon._run_boot_recovery`，與 authority 無關）**：`query_admission_refused` 擲 `BootInvariantError`（grace 0 且持有 writer lock，所有無 outcome 的 attempt 都已被 `close_dangling` 關閉，不應發生）；`fenced` / `incomplete_or_unequal` 記 WARNING、`periodic_reconcile.note_boot(decision)` 並繼續（無 accepted basis，交易由 `snapshot_query_pending` 擋下）；`accepted` 繼續。legacy sink 永遠回 `accepted`，行為不變。
+
 ---
 
 ## 4. 放貸演算法（End-to-End Lending Algorithm）

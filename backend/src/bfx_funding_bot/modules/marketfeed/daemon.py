@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import (
 
 from bfx_funding_bot.core.crypto import VaultNotConfiguredError, load_kek
 from bfx_funding_bot.core.errors import (
+    BootInvariantError,
     ConfigurationError,
 )
 from bfx_funding_bot.core.health import HealthProbe, assess_auth_ws_health
@@ -70,7 +71,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     ExecutorPort,
 )
-from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 from bfx_funding_bot.modules.execution.safety.boot_stop import report_refused_boot
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.config import (
@@ -290,11 +290,11 @@ class Daemon:
     executor: ExecutorPort
     safety_chain: SafetyGuardChain
     account_ctx: AccountContext
-    ledger: PaperPositionLedger
+    # The simulated paths' in-memory projection; a ledger-authority process has none.
+    ledger: PaperPositionLedger | None
     bus: DomainEventBus
     smoke_runner: SmokeRunner | None = None
     fill_tracker: RestPollingFillTracker | None = None
-    offer_registry: OfferRegistry | None = None
     auth_ws: BitfinexAuthWSClient | None = None
     ws_dispatcher: BitfinexLiveWSDispatcher | None = None
     boot_recovery: ObservationSink | None = None
@@ -337,9 +337,19 @@ class Daemon:
         try:
             if self.observation_scope is None:
                 raise ValueError("boot observation scope is required")
-            # Refusal is signalled by raising (legacy). How a dormant ledger
-            # cycle's non-accepted decision gates boot is decided in S1-3e.
-            await self.boot_recovery.run(self.observation_scope)
+            # One rule for either authority. The legacy sink raises on a refusal and
+            # otherwise answers ``accepted``. The ledger cycle answers by decision:
+            # an admission refusal at grace 0 under the writer lock is impossible
+            # (every outcome-less attempt was closed first), so it is an invariant
+            # failure; a fenced or incomplete observation boots with trading blocked
+            # (no accepted basis yet) and seeds the periodic loop's streak.
+            cycle = await self.boot_recovery.run(self.observation_scope)
+            if cycle.decision == "query_admission_refused":
+                raise BootInvariantError("boot observation refused query admission at grace 0")
+            if cycle.decision != "accepted":
+                log.warning("boot_observation_not_accepted decision=%s", cycle.decision)
+                if self.periodic_reconcile is not None:
+                    self.periodic_reconcile.note_boot(cycle.decision)
         except BaseException:
             # A protection tripped by the refused boot observation must be
             # durable before the daemon exits, or the next boot starts without

@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +35,7 @@ from bfx_funding_bot.modules.ledger.matching import (
 from bfx_funding_bot.modules.trading import (
     AppliedPolicy,
     CapitalBudget,
+    CapitalPolicy,
     CapitalResult,
     CapitalScope,
     CapitalSnapshot,
@@ -1076,6 +1077,38 @@ class ScopeLock(Protocol):
         ...
 
 
+class PolicyRefused(ValueError):  # noqa: N818 - a refusal, carrying the store's reason code
+    """The policy store refused to read or write; ``str(exc)`` is its reason code."""
+
+
+class PolicyStore(Protocol):
+    """The scope's applied capital policy: the shared policy heads and revisions.
+
+    Both authorities keep these two tables; what differs is what a store must do
+    first (the legacy one replays its event stream under the scope lock). The
+    caller owns the transaction and takes the scope lock before reading what it
+    then writes.
+    """
+
+    @property
+    def scope(self) -> Scope: ...
+
+    async def read_applied(self, session: AsyncSession, *, symbol: str) -> AppliedPolicy:
+        """The revision ``symbol``'s head points at, proven and parsed, or ``PolicyRefused``."""
+        ...
+
+    async def apply_policy(
+        self, session: AsyncSession, *, symbol: str, policy: CapitalPolicy,
+        expected_revision: int, source: dict[str, Any],
+    ) -> AppliedPolicy:
+        """Append revision ``expected_revision + 1`` and move the head; the caller commits.
+
+        ``PolicyRefused`` when the head moved (``revision_changed``) or the symbol may
+        not be enabled (``unsupported_enabled_symbol``).
+        """
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class CommandAttempt:
     """Consumer submit identity; legacy CID belongs exclusively to its adapter."""
@@ -1225,6 +1258,8 @@ __all__ = [
     "Outcome",
     "OutcomeAlreadyRecorded",
     "OutcomeKind",
+    "PolicyRefused",
+    "PolicyStore",
     "PositionView",
     "ProvenanceConflict",
     "Quarantine",

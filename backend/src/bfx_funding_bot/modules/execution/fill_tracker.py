@@ -37,19 +37,8 @@ import httpx
 
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
-from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.event_store.persister import (
-    EventPersister,
-    NoopEventPersister,
-)
 from bfx_funding_bot.modules.execution.legacy_venue_hints import (
     InvariantError as InvariantError,
-)
-from bfx_funding_bot.modules.execution.legacy_venue_hints import (
-    LegacyVenueHintSink,
-)
-from bfx_funding_bot.modules.execution.registry_offers import (
-    OfferRegistry,
 )
 from bfx_funding_bot.modules.ledger import VenueHintSink
 from bfx_funding_bot.modules.strategy import StrategyName
@@ -72,15 +61,12 @@ class RestPollingFillTracker:
         http: httpx.AsyncClient,
         event_sink: _EventSink,
         probe: HealthProbe,
-        bus: DomainEventBus,
         phase: Phase,
         strategy: StrategyName,
         cell: str,
         account_id: str,
-        registry: OfferRegistry,
+        venue_hint_sink: VenueHintSink,
         poll_interval_s: float = 30.0,
-        persister: EventPersister | None = None,
-        venue_hint_sink: VenueHintSink | None = None,
     ) -> None:
         self.http = http
         self._events = event_sink
@@ -90,10 +76,7 @@ class RestPollingFillTracker:
         self.cell = cell
         self.account_id = account_id
         self.poll_interval_s = poll_interval_s
-        self._venue_hints = venue_hint_sink if venue_hint_sink is not None else LegacyVenueHintSink(
-            registry=registry, bus=bus, persister=persister or NoopEventPersister(),
-            account_id=account_id,
-        )
+        self._venue_hints = venue_hint_sink
         # venue_offer_id (str) → {cid: int, status: str, size: float}
         self._last_state: dict[str, dict[str, Any]] = {}
         self._consecutive_failures = 0

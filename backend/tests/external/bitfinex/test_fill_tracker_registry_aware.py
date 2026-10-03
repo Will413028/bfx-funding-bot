@@ -9,11 +9,13 @@ from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
+from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
     ReservationReleased,
 )
 from bfx_funding_bot.modules.execution.fill_tracker import RestPollingFillTracker
+from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 from bfx_funding_bot.modules.strategy import StrategyName
 
@@ -62,10 +64,8 @@ async def test_fill_tracker_skips_emit_when_registry_already_released() -> None:
     pre_count = len(captured)
 
     tracker = RestPollingFillTracker(
-        http=http, event_sink=_EventCapture(), probe=HealthProbe(),
-        bus=bus, phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
-        cell="C-1", account_id="default", registry=registry,
-    )
+        http=http, event_sink=_EventCapture(), probe=HealthProbe(), phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        cell="C-1", account_id="default", venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id="default"))
     tracker._last_state = {
         "42": {"cid": 42, "status": "ACTIVE", "size": 100.0},
     }
@@ -99,10 +99,8 @@ async def test_fill_tracker_emits_with_claim_correlation_id_not_uuid4() -> None:
     bus.subscribe(ReservationReleased, capture)
 
     tracker = RestPollingFillTracker(
-        http=http, event_sink=_EventCapture(), probe=HealthProbe(),
-        bus=bus, phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
-        cell="C-1", account_id="default", registry=registry,
-    )
+        http=http, event_sink=_EventCapture(), probe=HealthProbe(), phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        cell="C-1", account_id="default", venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id="default"))
     tracker._last_state = {"42": {"cid": 42, "status": "ACTIVE", "size": 100.0}}
     await tracker._tick()
 
@@ -128,10 +126,8 @@ async def test_fill_tracker_skips_when_voi_not_in_registry() -> None:
     bus.subscribe(ReservationReleased, capture)
 
     tracker = RestPollingFillTracker(
-        http=http, event_sink=_EventCapture(), probe=HealthProbe(),
-        bus=bus, phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
-        cell="C-1", account_id="default", registry=registry,
-    )
+        http=http, event_sink=_EventCapture(), probe=HealthProbe(), phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        cell="C-1", account_id="default", venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id="default"))
     tracker._last_state = {"99": {"cid": 99, "status": "ACTIVE", "size": 50.0}}
     await tracker._tick()
 
@@ -162,10 +158,8 @@ async def test_fill_tracker_reservation_released_carries_claim_symbol() -> None:
     bus.subscribe(ReservationReleased, capture)
 
     tracker = RestPollingFillTracker(
-        http=http, event_sink=_EventCapture(), probe=HealthProbe(),
-        bus=bus, phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
-        cell="C-1", account_id="default", registry=registry,
-    )
+        http=http, event_sink=_EventCapture(), probe=HealthProbe(), phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        cell="C-1", account_id="default", venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id="default"))
     tracker._last_state = {"42": {"cid": 42, "status": "ACTIVE", "size": 100.0}}
     await tracker._tick()
 

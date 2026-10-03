@@ -10,7 +10,7 @@ from pathlib import Path
 CORE_IS_LEAF_MAX_IGNORES = 0
 VENUE_BELOW_MODULES_MAX_IGNORES = 19
 RUNTIME_NOT_RESEARCH_MAX_IGNORES = 0
-MODULES_ACYCLIC_MAX_IGNORES = 28
+MODULES_ACYCLIC_MAX_IGNORES = 27
 APPS_IS_TOP_MAX_IGNORES = 0
 STRATEGY_IS_PURE_MAX_IGNORES = 0
 STRATEGY_LOWER_ONLY_MAX_IGNORES = 0
@@ -152,7 +152,9 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     }
     consumers = contracts_by_id["capital-consumers-via-ports"]
     assert set(consumers["source_modules"]) == {
+        "bfx_funding_bot.modules.accounts.capital_amendment",
         "bfx_funding_bot.modules.admin.trading_status",
+        "bfx_funding_bot.modules.execution.capital_policy_control",
         "bfx_funding_bot.modules.execution.command_gate",
         "bfx_funding_bot.modules.execution.contracts",
         "bfx_funding_bot.modules.execution.deployment.sizing",

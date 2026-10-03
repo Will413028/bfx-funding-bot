@@ -47,6 +47,7 @@ from bfx_funding_bot.modules.ledger import (
     OperatorResolution,
     Outcome,
     OutcomeAlreadyRecorded,
+    PolicyStore,
     Quarantine,
     QuarantineMember,
     QueryAdmissionRefused,
@@ -69,6 +70,7 @@ from bfx_funding_bot.modules.ledger._internal import (
     operator_evidence,
     operator_reads,
     operator_resolution,
+    policy_store,
     ports,
     quarantine,
     reads,
@@ -83,7 +85,7 @@ def build_venue_hint_sink(
     *, scope: Scope, request_resync: Callable[[str], None], bus: VenueHintPublisher,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> VenueHintSink:
-    """Construct only; app selection remains deferred to S1-3e."""
+    """The ledger hint sink: notifications only, reconciliation owns truth."""
     return LedgerVenueHintSink(
         scope=scope, request_resync=request_resync, bus=bus, monotonic=monotonic,
     )
@@ -362,7 +364,7 @@ def build_observation_sink(
     grace_ms: int = 120_000,
     settle_ms: int = UNKNOWN_SETTLE_MS,
 ) -> ObservationSink:
-    """Dormant cycle; app selection is deferred to S1-3e."""
+    """The ledger observation cycle; ``apps/bot_ports.py`` selects it by authority epoch."""
     return _LedgerObservationCycle(
         session_factory, venue, journal_port=journal_port or build_ledger_journal(),
         observations=observations or build_ledger_observations(), now_ms=now_ms,
@@ -401,6 +403,11 @@ def build_uncertainty_reader(session_factory: async_sessionmaker[AsyncSession]) 
 
 def build_managed_offer_reader() -> ManagedOfferReader:
     return ports.LedgerManagedOfferReader()
+
+
+def build_policy_store(scope: Scope) -> PolicyStore:
+    """The ledger policy store of ``scope``; no event stream is replayed."""
+    return policy_store.LedgerPolicyStore(scope)
 
 
 def build_scope_lock() -> ScopeLock:

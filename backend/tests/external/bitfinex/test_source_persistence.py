@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.execution.event_store.store import PostgresEventSto
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, PositionStateRow
 from bfx_funding_bot.modules.execution.events import ReservationClaimed, ReservationIntent
 from bfx_funding_bot.modules.execution.fill_tracker import RestPollingFillTracker
+from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.registry_offers import (
     ClaimRecord,
     OfferRegistry,
@@ -86,10 +87,7 @@ async def test_ws_foc_executed_orderfilled_persisted_before_publish(pg_session_f
                    rate=0.0003, period_days=2, raw_seq=99, raw=[])
     bus = DomainEventBus()
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=_StubWSClient([foc]),
-        registry=_registry_with_claim("888", 11, scid, 100),
-        bus=bus, event_sink=_EventCapture(), persister=persister,
-    )
+        ws_client=_StubWSClient([foc]), event_sink=_EventCapture(), venue_hint_sink=LegacyVenueHintSink(registry=_registry_with_claim("888", 11, scid, 100), bus=bus, persister=persister, account_id=None))
     stop = asyncio.Event()
     task = asyncio.create_task(dispatcher.run(stop))
     await asyncio.sleep(0.2)
@@ -155,12 +153,9 @@ async def test_fill_tracker_release_persisted_before_publish(pg_session_factory)
                           )),
     )
     tracker = RestPollingFillTracker(
-        http=_OneTickHttp(), event_sink=_EventCapture(), probe=HealthProbe(), bus=DomainEventBus(),
+        http=_OneTickHttp(), event_sink=_EventCapture(), probe=HealthProbe(),
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
-        account_id=_ACC_FT,
-        registry=_registry_with_claim("888", 11, scid, 100, account_id=_ACC_FT),
-        persister=persister, poll_interval_s=0.05,
-    )
+        account_id=_ACC_FT, poll_interval_s=0.05, venue_hint_sink=LegacyVenueHintSink(registry=_registry_with_claim("888", 11, scid, 100, account_id=_ACC_FT), bus=DomainEventBus(), persister=persister, account_id=_ACC_FT))
     stop = asyncio.Event()
     task = asyncio.create_task(tracker.poll_loop(stop))
     await asyncio.sleep(0.25)  # let >=2 ticks run (present -> gone)
@@ -235,11 +230,9 @@ async def test_fill_tracker_release_retried_after_persist_failure(pg_session_fac
 
     flaky = _FlakyPersister(real)
     tracker = RestPollingFillTracker(
-        http=_GoneAfterFirst(), event_sink=_EventCapture(), probe=HealthProbe(), bus=DomainEventBus(),
+        http=_GoneAfterFirst(), event_sink=_EventCapture(), probe=HealthProbe(),
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
-        account_id=acc, registry=_registry_with_claim("889", 12, scid, 70, account_id=acc),
-        persister=flaky, poll_interval_s=0.05,
-    )
+        account_id=acc, poll_interval_s=0.05, venue_hint_sink=LegacyVenueHintSink(registry=_registry_with_claim("889", 12, scid, 70, account_id=acc), bus=DomainEventBus(), persister=flaky, account_id=acc))
     stop = asyncio.Event()
     task = asyncio.create_task(tracker.poll_loop(stop))
     await asyncio.sleep(0.4)  # tick1: present; tick2: gone -> persist fails (retained);

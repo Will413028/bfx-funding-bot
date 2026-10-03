@@ -27,6 +27,8 @@ from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
     ReadyToSubmit,
 )
+from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
+from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -345,10 +347,7 @@ class _StubSink:
 def _dispatcher(registry: _StubRegistry | None = None) -> BitfinexLiveWSDispatcher:
     return BitfinexLiveWSDispatcher(
         ws_client=_StubWSClient(),
-        registry=registry or _StubRegistry(),
-        bus=_StubBus(),
-        event_sink=_StubSink(),
-    )
+        event_sink=_StubSink(), venue_hint_sink=LegacyVenueHintSink(registry=registry or _StubRegistry(), bus=_StubBus(), persister=NoopEventPersister(), account_id=None))
 
 
 async def test_ws_dispatcher_instrumented_process_spans() -> None:

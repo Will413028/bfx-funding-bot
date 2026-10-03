@@ -1,6 +1,6 @@
 """Ledger implementations of the facade's consumer read ports (S1-3e1).
 
-Dormant: apps select them by authority epoch (S1-3e). They answer the same
+Apps select them by authority epoch (``apps/bot_ports.py``). They answer the same
 Protocols the legacy adapters do, from the ledger's journals, accepted basis and
 offer mirror; a consumer never learns which one it holds.
 """

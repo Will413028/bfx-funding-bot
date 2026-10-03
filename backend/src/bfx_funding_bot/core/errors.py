@@ -20,6 +20,10 @@ class ConfigurationError(ValueError):
     """Operator-controlled configuration is missing, malformed, or unsafe."""
 
 
+class BootInvariantError(FatalError):
+    """A state the boot proved impossible; the daemon refuses to start on it."""
+
+
 class ExecutorTransientError(TransientError):
     """Network / 5xx from venue. tenacity retries within executor scope."""
 

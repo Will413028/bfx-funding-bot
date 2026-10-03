@@ -16,10 +16,12 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_ws import FocEvent
+from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import (
     CancelRequested,
     ReservationClaimed,
 )
+from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 
 from .conftest import ScriptedWSClient, make_reservation_ref
@@ -62,9 +64,8 @@ async def test_cancel_then_foc_emits_user_cancel(
     )
     fake_ws = ScriptedWSClient([foc])
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=fake_ws, registry=registry, bus=bus,
-        event_sink=_EventCapture(), clock=lambda: 2100, queue_max=100,
-    )
+        ws_client=fake_ws,
+        event_sink=_EventCapture(), clock=lambda: 2100, queue_max=100, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id=None))
     bus.subscribe(CancelRequested, dispatcher.handle_cancel_requested)
 
     # 3. Directly publish CancelRequested with deterministic timestamp

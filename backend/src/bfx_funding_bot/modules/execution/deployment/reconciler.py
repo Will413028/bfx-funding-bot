@@ -165,7 +165,7 @@ class DeploymentReconciler:
         *,
         store: StandingQuoteStore,
         tracker: CellDeploymentTracker,
-        ledger: _LedgerProtocol,
+        ledger: _LedgerProtocol | None,
         safety_chain: _SafetyChainProtocol,
         executor: ExecutorPort,
         account_ctx: AccountContext,
@@ -364,6 +364,7 @@ class DeploymentReconciler:
                 # local counter stale because the API writer runs elsewhere.
                 # Once the durable pre-sizing guard allows, converge that
                 # compatibility cache before continuing this daemon tick.
+                # (A ledger-authority process has no such cache: ``self._ledger`` is None.)
                 uncertain_exposure = getattr(self._ledger, "uncertain_exposure", None)
                 clear_uncertainty = getattr(self._ledger, "clear_uncertainty", None)
                 if uncertain_exposure is not None and clear_uncertainty is not None:

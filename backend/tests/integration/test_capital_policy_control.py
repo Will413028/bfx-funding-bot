@@ -16,7 +16,7 @@ from sqlalchemy import insert, select
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
-from bfx_funding_bot.modules.execution.legacy_ports import LegacyScopeLock
+from bfx_funding_bot.modules.execution.legacy_ports import LegacyPolicyStore, LegacyScopeLock
 from bfx_funding_bot.modules.execution.safety.tables import (
     TradingControlRequestRow,
     TradingStateRow,
@@ -45,6 +45,7 @@ def repository(account) -> CapitalRepository:
 def worker(factory, account) -> CapitalPolicyRequestWorker:
     return CapitalPolicyRequestWorker(session_factory=factory, account_id=account,
                                       environment="ci", authority=allow,
+                                      policy_store=LegacyPolicyStore(repository(account)),
                                       scope_lock=LegacyScopeLock(repository(account)),
                                       clock=lambda: T0)
 

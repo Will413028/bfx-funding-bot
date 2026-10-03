@@ -139,7 +139,7 @@ class TradingStatusService:
         self,
         *,
         chain: SafetyGuardChain,
-        ledger: _LedgerProtocol,
+        ledger: _LedgerProtocol | None,
         account_ctx: AccountContext,
         cells: list[CellConfig],
         caps: dict[str, Decimal],
@@ -159,6 +159,8 @@ class TradingStatusService:
         self._chain = chain
         if phase is Phase.LIVE and capital is None:
             raise ValueError("live status requires applied capital runtime")
+        if capital is None and ledger is None:
+            raise ValueError("a status without applied capital reads the simulation ledger")
         self._capital = capital
         self._ledger = ledger
         self._ctx = account_ctx
@@ -306,6 +308,7 @@ class TradingStatusService:
         }
 
     def _symbol_status(self, symbol: str) -> dict[str, Any]:
+        assert self._ledger is not None  # only a status without applied capital gets here
         cap = resolve_for_symbol_with_source(
             self._caps, symbol,
             env_fallback=self._env_fallback_cap, default=self._default_cap,
