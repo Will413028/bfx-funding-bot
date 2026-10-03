@@ -8,7 +8,7 @@ Bitfinex 自動放貸 SaaS 平台。
 - `frontend/` — Next.js 16 前端
 - Python 後端曾名 `backend_py/`；舊文件與 SDD 裡的 `backend_py` 指的就是現在的 `backend/`
 - `backend/ARCHITECTURE.md` — **後端架構 source of truth**（event-sourced execution、reconcile 骨幹、deployment reconciler、放貸演算法、event model、DB schema、safety、phases/部署、key invariants；含 mermaid 架構/資料流圖）
-- 維運 runbook 在 `docs/runbooks/`；設計決策紀錄（ADR）、研究報告與 roadmap 另行私下保存，不放在本 repo（`.gitignore` 擋住舊路徑）
+- 維運 runbook 在 `docs/runbooks/`；決策紀錄（ADR）：`docs/adr/`；研究報告與 roadmap 另行私下保存，不放在本 repo（`.gitignore` 擋住舊路徑）
 
 ## 部署架構
 
