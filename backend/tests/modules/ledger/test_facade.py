@@ -107,7 +107,7 @@ def test_ports_expose_their_methods() -> None:
         "fingerprints_in_use",
     }
     for port, protocol in (
-        (build_command_journal(None), ledger.CommandJournal),
+        (build_command_journal(None, max_snapshot_age_ms=1000), ledger.CommandJournal),
         (build_ledger_journal(), ledger.LedgerJournal),
         (build_ledger_observations(), ledger.LedgerObservations),
         (build_ledger_uncertainties(), ledger.LedgerUncertainties),

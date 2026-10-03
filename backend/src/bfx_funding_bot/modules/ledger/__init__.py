@@ -895,8 +895,6 @@ class CommandAttempt:
     policy_digest: str
     policy_revision_id: UUID
     command_date: date | None = None  # freeze the legacy identity day across midnight
-    basis_id: UUID | None = None
-    authorization_evidence: JsonObject | None = None
     event_id: UUID | None = None
     cell_id: str | None = None
 

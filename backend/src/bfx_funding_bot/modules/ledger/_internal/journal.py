@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from typing import cast
@@ -18,6 +19,7 @@ from bfx_funding_bot.modules.ledger import (
     CancelAdmitted,
     CommandAttempt,
     CommandRefused,
+    JsonObject,
     LockedCancelGuard,
     LockedCommandGuard,
     Outcome,
@@ -30,8 +32,10 @@ from bfx_funding_bot.modules.ledger import (
     ResolutionAlreadyRecorded,
     ResolutionRejected,
     Scope,
+    encode_basis_token,
     parse_basis_token,
 )
+from bfx_funding_bot.modules.ledger._internal import capital_reader
 from bfx_funding_bot.modules.ledger._internal.clock import bump_locked, lock_scope
 from bfx_funding_bot.modules.ledger._internal.operator_evidence import latest_accepted
 from bfx_funding_bot.modules.ledger.tables import (
@@ -45,6 +49,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
 )
+from bfx_funding_bot.modules.trading import Blocked, CapitalScope
 
 
 async def authorize_attempt(
@@ -63,10 +68,152 @@ async def _authorize_attempt(
     ``now_ms`` is its local clock, not an extra ledger freshness policy.
     """
     await lock_scope(session, scope)
+    resolved = await _resolve_token(session, scope, basis_token)
+    if isinstance(resolved, AuthorizeRefused):
+        return resolved
+    if isinstance(resolved, _Stale) or attempt.basis_id != resolved[0]:
+        return AuthorizeRefused("capital_snapshot_changed")
+    return await _admit(session, scope, attempt, locked_guard)
+
+
+async def _admit(
+    session: AsyncSession, scope: Scope, attempt: Attempt,
+    locked_guard: LockedCommandGuard | None,
+) -> Authorized | AuthorizeRefused:
+    """Under the held lock, after the token CAS: policy head, guard, then the insert."""
+    policy = await session.scalar(
+        select(CapitalPolicyHeadRow.revision_id).where(
+            CapitalPolicyHeadRow.exchange_account_id == scope.exchange_account_id,
+            CapitalPolicyHeadRow.deployment_environment == scope.deployment_environment,
+            CapitalPolicyHeadRow.symbol == attempt.symbol,
+        )
+    )
+    if policy != attempt.policy_revision_id:
+        return AuthorizeRefused("capital_policy_revision_changed")
+    if locked_guard is not None:
+        await locked_guard(session)
+    recorded = await record_attempt(session, scope, attempt)
+    return Authorized(recorded.attempt_id, recorded.attempt_seq, recorded.payload_sha256)
+
+
+class _Stale:
+    """The token's query or clock moved since the decision: the one retryable refusal."""
+
+
+_STALE = _Stale()
+
+
+async def authorize_command(
+    session: AsyncSession, scope: Scope, attempt: CommandAttempt, basis_token: str, *,
+    now_ms: int, locked_guard: LockedCommandGuard, max_snapshot_age_ms: int,
+) -> Authorized | CommandRefused:
+    """Scope lock -> CAS -> in-lock budget -> guard -> insert, retrying a stale token once.
+
+    The retry re-reads capital under the same lock and transaction, so it never
+    sees a state a concurrent writer can still change. Only a moved query/clock
+    is retried; a pending query, a policy change, a blocked read or a budget
+    shortfall is final, and so is a second stale answer.
+    """
+    if attempt.cell_id is None:
+        return CommandRefused("execution_audit_conflict")
+    await lock_scope(session, scope)
+    first = await _command_pass(
+        session, scope, attempt, basis_token, None, now_ms=now_ms,
+        locked_guard=locked_guard, max_snapshot_age_ms=max_snapshot_age_ms,
+    )
+    if not isinstance(first, _Stale):
+        return first
+    fresh = await _read_budget(
+        session, scope, attempt, now_ms=now_ms, max_snapshot_age_ms=max_snapshot_age_ms
+    )
+    if isinstance(fresh, CommandRefused):
+        return fresh
+    second = await _command_pass(
+        session, scope, attempt, fresh.token, fresh, now_ms=now_ms,
+        locked_guard=locked_guard, max_snapshot_age_ms=max_snapshot_age_ms,
+    )
+    return CommandRefused("capital_snapshot_changed") if isinstance(second, _Stale) else second
+
+
+@dataclass(frozen=True, slots=True)
+class _Budget:
+    token: str
+    max_new_offer: Decimal
+
+
+async def _read_budget(
+    session: AsyncSession, scope: Scope, attempt: CommandAttempt, *, now_ms: int,
+    max_snapshot_age_ms: int,
+) -> _Budget | CommandRefused:
+    """The attempt's cell budget, read inside the held lock (legacy: same lock, same order)."""
+    assert attempt.cell_id is not None
+    read = await capital_reader.read_capital_locked(
+        session,
+        CapitalScope(scope.exchange_account_id, scope.deployment_environment,
+                     attempt.symbol, attempt.cell_id),
+        now_ms=now_ms, max_snapshot_age_ms=max_snapshot_age_ms,
+    )
+    result = read.result
+    if isinstance(result, Blocked):
+        return CommandRefused(
+            "query_pending" if result.reason == "snapshot_query_pending" else result.reason
+        )
+    view = result.view
+    if view.applied.revision_id != attempt.policy_revision_id:
+        return CommandRefused("capital_policy_revision_changed")
+    assert read.query_id is not None and read.clock_revision is not None
+    amount, budget = attempt.amount, view.budget
+    if not amount.is_finite() or amount <= 0:
+        return CommandRefused("intent_amount_conflict")
+    if amount > budget.max_new_offer:
+        return CommandRefused(budget.reason or "insufficient_deployable_funds")
+    return _Budget(encode_basis_token(read.query_id, read.clock_revision), budget.max_new_offer)
+
+
+async def _command_pass(
+    session: AsyncSession, scope: Scope, attempt: CommandAttempt, basis_token: str,
+    fresh: _Budget | None, *, now_ms: int, locked_guard: LockedCommandGuard,
+    max_snapshot_age_ms: int,
+) -> Authorized | CommandRefused | _Stale:
+    """One CAS + budget + guard + insert against ``basis_token`` (``fresh``: retry pass)."""
+    assert attempt.cell_id is not None
+    resolved = await _resolve_token(session, scope, basis_token)
+    if isinstance(resolved, AuthorizeRefused):
+        return CommandRefused(resolved.reason)
+    if isinstance(resolved, _Stale):
+        return resolved
+    basis_id, _ = resolved
+    budget = fresh or await _read_budget(
+        session, scope, attempt, now_ms=now_ms, max_snapshot_age_ms=max_snapshot_age_ms
+    )
+    if isinstance(budget, CommandRefused):
+        return budget
+    evidence: JsonObject = {
+        "basis_token": basis_token,
+        "basis_id": str(basis_id),
+        "max_new_offer": str(budget.max_new_offer),
+        "retried": fresh is not None,
+    }
+    admitted = await _admit(
+        session, scope, Attempt(
+            attempt.attempt_id, attempt.execution_decision_id, attempt.symbol, attempt.cell_id,
+            attempt.normalized_payload, basis_id, attempt.policy_revision_id,
+            evidence, attempt.started_at_ms,
+        ), locked_guard,
+    )
+    if isinstance(admitted, AuthorizeRefused):
+        return CommandRefused(admitted.reason)
+    return admitted
+
+
+async def _resolve_token(
+    session: AsyncSession, scope: Scope, basis_token: str
+) -> tuple[UUID, int] | AuthorizeRefused | _Stale:
+    """(basis of the token's own query, clock) or why the token cannot be used."""
     try:
         query_id, revision = parse_basis_token(basis_token)
     except ValueError:
-        return AuthorizeRefused("capital_snapshot_changed")
+        return AuthorizeRefused("capital_snapshot_changed")  # a caller bug, not a race
     latest = await session.scalar(
         select(LedgerObservationQueryRow.query_id)
         .where(
@@ -77,7 +224,7 @@ async def _authorize_attempt(
         .limit(1)
     )
     if latest != query_id:
-        return AuthorizeRefused("capital_snapshot_changed")
+        return _STALE
     basis_id = await session.scalar(
         select(AcceptedCapitalBasisRow.id)
         .join(
@@ -99,40 +246,7 @@ async def _authorize_attempt(
             CapitalCommandClockRow.deployment_environment == scope.deployment_environment,
         )
     )
-    if clock != revision or attempt.basis_id != basis_id:
-        return AuthorizeRefused("capital_snapshot_changed")
-    policy = await session.scalar(
-        select(CapitalPolicyHeadRow.revision_id).where(
-            CapitalPolicyHeadRow.exchange_account_id == scope.exchange_account_id,
-            CapitalPolicyHeadRow.deployment_environment == scope.deployment_environment,
-            CapitalPolicyHeadRow.symbol == attempt.symbol,
-        )
-    )
-    if policy != attempt.policy_revision_id:
-        return AuthorizeRefused("capital_policy_revision_changed")
-    if locked_guard is not None:
-        await locked_guard(session)
-    recorded = await record_attempt(session, scope, attempt)
-    return Authorized(recorded.attempt_id, recorded.attempt_seq, recorded.payload_sha256)
-
-
-async def authorize_command(
-    session: AsyncSession, scope: Scope, attempt: CommandAttempt, basis_token: str, *,
-    now_ms: int, locked_guard: LockedCommandGuard,
-) -> Authorized | CommandRefused:
-    """Dormant CAS wrapper; capital re-read/retry belongs to S1-3e."""
-    if attempt.basis_id is None:
-        return CommandRefused("query_pending")
-    if attempt.cell_id is None:
-        return CommandRefused("execution_audit_conflict")
-    recorded = await _authorize_attempt(
-        session, scope, Attempt(
-            attempt.attempt_id, attempt.execution_decision_id, attempt.symbol, attempt.cell_id,
-            attempt.normalized_payload, attempt.basis_id, attempt.policy_revision_id,
-            attempt.authorization_evidence or {}, attempt.started_at_ms,
-        ), basis_token, now_ms=now_ms, locked_guard=locked_guard,
-    )
-    return CommandRefused(recorded.reason) if isinstance(recorded, AuthorizeRefused) else recorded
+    return _STALE if clock != revision else (basis_id, revision)
 
 
 async def admit_cancel(

@@ -56,4 +56,4 @@ async def test_ledger_readback_refuses_mismatched_outcome_identity(monkeypatch):
 
     monkeypatch.setattr(journal, "read_back_outcome", AsyncMock(return_value=Outcome(uuid4(), "ack", "offer", None, 10, {})))
     with pytest.raises(ValueError, match="outcome identity mismatch"):
-        await build_command_journal(factory).read_back_outcome(scope, attempt_id)
+        await build_command_journal(factory, max_snapshot_age_ms=1000).read_back_outcome(scope, attempt_id)
