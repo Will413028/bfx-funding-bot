@@ -17,6 +17,14 @@ Mutations (apply one at a time, run this file, revert):
 * a quarantine member counted foreign (``held``): ``test_quarantine_member_is_not_called_foreign``.
 * the capital read ignores ``unexplained_lending`` (``_symbol_block``):
   ``test_unexplained_lending_blocks_the_capital_read_until_the_next_basis``.
+* drop the credit-history lendings (``for row in credit_history``):
+  ``opened_and_closed_inside_the_interval_with_its_fill``.
+* count a P lending found in the history as new (the ``prior`` skip):
+  ``previous_credit_that_closes_is_never_lending``.
+* count a lending in both active and history twice (``base + max(increase, amount)`` -> sum):
+  ``credit_in_both_active_and_history_counts_once``, ``loan_turned_into_credits_counts_once``.
+* ignore the opening boundary (``anchor > possible_after``):
+  ``lending_closed_before_the_previous_query_is_old``.
 Pure-function mutations: ``tests/modules/ledger/test_conservation.py``; the trigger mapping:
 ``tests/modules/execution/safety/test_protection.py``.
 """
@@ -28,7 +36,12 @@ from typing import Any
 
 import pytest
 
-from bfx_funding_bot.modules.ledger import OfferHistory, QuarantineMember, SymbolConservation
+from bfx_funding_bot.modules.ledger import (
+    CreditHistory,
+    OfferHistory,
+    QuarantineMember,
+    SymbolConservation,
+)
 from bfx_funding_bot.modules.ledger.wiring import build_ledger_conservation_reader
 from bfx_funding_bot.modules.trading import Available, Blocked
 
@@ -363,6 +376,102 @@ async def vanished_offer_without_history(ledger: Any) -> None:
     await accept(ledger, _observation("1000"), at=1000)
 
 
+def closed(venue_id: str, amount: str, occurred: int, **kwargs: Any) -> Any:
+    return CreditHistory(_credit(venue_id, amount, **kwargs), "closed", occurred)
+
+
+async def opened_and_closed_inside_the_interval_with_its_fill(ledger: Any) -> None:
+    await accept(ledger, _observation("1000"), at=10)
+    await ledger.attempt("100", venue_offer_id="mine")
+    await accept(
+        ledger,
+        _observation(
+            "1000",
+            history=(ended("mine", "100", "0", 1500),),
+            trades=(_trade("mine", "100"),),
+            credit_history=(closed("c1", "100", 1600, opening=101_100),),
+        ),
+        at=1000,
+    )
+
+
+async def opened_and_closed_inside_the_interval_without_a_fill(ledger: Any) -> None:
+    await accept(ledger, _observation("1000"), at=10)
+    await accept(
+        ledger,
+        _observation("1000", credit_history=(closed("c1", "100", 1600, opening=101_100),)),
+        at=1000,
+    )
+
+
+async def credit_in_both_active_and_history_counts_once(ledger: Any) -> None:
+    await accept(ledger, _observation("1000"), at=10)
+    await ledger.attempt("100", venue_offer_id="mine")
+    await accept(
+        ledger,
+        _observation(
+            "900",
+            credits=(loan("c1", "100"),),
+            history=(ended("mine", "100", "0", 1500),),
+            trades=(_trade("mine", "100"),),
+            credit_history=(closed("c1", "100", 1600, opening=101_100),),
+        ),
+        at=1000,
+    )
+
+
+async def previous_credit_that_closes_is_never_lending(ledger: Any) -> None:
+    await accept(ledger, _observation("900", credits=(loan("c0", "100", 100_000),)), at=10)
+    await accept(
+        ledger,
+        _observation("1000", credit_history=(closed("c0", "100", 1600, opening=100_000),)),
+        at=1000,
+    )
+
+
+async def loan_opened_and_closed_inside_the_interval_with_its_fill(ledger: Any) -> None:
+    """Funding loans are funds this account provided (not in use yet): lending like credits."""
+    await accept(ledger, _observation("1000"), at=10)
+    await ledger.attempt("100", venue_offer_id="mine")
+    await accept(
+        ledger,
+        _observation(
+            "1000",
+            history=(ended("mine", "100", "0", 1500),),
+            trades=(_trade("mine", "100"),),
+            credit_history=(closed("l1", "100", 1600, opening=101_100, kind="loan"),),
+        ),
+        at=1000,
+    )
+
+
+async def loan_turned_into_credits_counts_once(ledger: Any) -> None:
+    """The loan closes as its credits open under the same (period, opening): one lending."""
+    await accept(ledger, _observation("1000"), at=10)
+    await ledger.attempt("100", venue_offer_id="mine")
+    await accept(
+        ledger,
+        _observation(
+            "900",
+            credits=(loan("c1", "60"), loan("c2", "40")),
+            history=(ended("mine", "100", "0", 1500),),
+            trades=(_trade("mine", "100"),),
+            credit_history=(closed("l1", "100", 1600, opening=101_100, kind="loan"),),
+        ),
+        at=1000,
+    )
+
+
+async def lending_closed_before_the_previous_query_is_old(ledger: Any) -> None:
+    """Closed before P began (and so before the interval): in the history window, not new."""
+    await accept(ledger, _observation("1000"), at=20_000)
+    await accept(
+        ledger,
+        _observation("1000", credit_history=(closed("c9", "100", 9000, opening=5000),)),
+        at=30_000,
+    )
+
+
 MATRIX = {
     func.__name__: (func, *expected)
     for func, expected in (
@@ -386,6 +495,16 @@ MATRIX = {
         (credit_split_by_the_venue, ("conserved", "0", "0", 0)),
         (credit_merge_by_the_venue, ("conserved", "0", "0", 0)),
         (split_plus_extra_lending, ("unexplained_lending", "20", "0", 0)),
+        (opened_and_closed_inside_the_interval_with_its_fill, ("conserved", "0", "0", 0)),
+        (
+            opened_and_closed_inside_the_interval_without_a_fill,
+            ("unexplained_lending", "100", "0", 0),
+        ),
+        (credit_in_both_active_and_history_counts_once, ("conserved", "0", "0", 0)),
+        (previous_credit_that_closes_is_never_lending, ("conserved", "0", "0", 0)),
+        (loan_opened_and_closed_inside_the_interval_with_its_fill, ("conserved", "0", "0", 0)),
+        (loan_turned_into_credits_counts_once, ("conserved", "0", "0", 0)),
+        (lending_closed_before_the_previous_query_is_old, ("conserved", "0", "0", 0)),
         # A conflicting fill is left out of the sums, so its credit stays unexplained too.
         (trades_exceed_the_remaining_fill, ("unexplained_lending", "30", "0", 1)),
         (remaining_fill_without_trades, ("unexplained_lending", "60", "0", 1)),

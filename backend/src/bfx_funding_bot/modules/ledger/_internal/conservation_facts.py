@@ -13,6 +13,14 @@ places only, both unavoidable and both widened by the venue clock tolerance:
   two sums. The lower bound is checked only when C's trades window reaches back
   to P's finish, the upper only when it reaches back to P's start.
 
+* a lending that opened and closed inside the interval is in neither P's nor C's active
+  credits; C's credit history names it. It counts, at its amount, when P did not have it
+  (by id) and it opened after P's query start less the tolerance (its closing
+  time when the opening is unknown): in doubt it counts, so a mismatch trips rather than
+  hides. Loans count like credits: the venue's "funding loans" are funds this account
+  has provided that are not in use, "credits" those in use; both are lending (and a loan
+  becoming credits keeps its (period, opening) key).
+
 Own or foreign: an offer is foreign only when no attempt names it and it is not a
 member of an unresolved quarantine (a quarantine member is not known to be
 foreign). The split changes the alert, never the sum.
@@ -39,6 +47,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisCreditRow,
     AcceptedCapitalBasisRow,
     AcceptedCapitalBasisSymbolRow,
+    LedgerObservationCreditHistoryRow,
     LedgerObservationCreditRow,
     LedgerObservationOfferHistoryRow,
     LedgerObservationOfferRow,
@@ -62,7 +71,9 @@ def credit_key(
 
 
 def _credits(
-    rows: Sequence[AcceptedCapitalBasisCreditRow] | Sequence[LedgerObservationCreditRow],
+    rows: Sequence[AcceptedCapitalBasisCreditRow]
+    | Sequence[LedgerObservationCreditRow]
+    | Sequence[LedgerObservationCreditHistoryRow],
 ) -> dict[str, dict[str, Decimal]]:
     by_symbol: dict[str, dict[str, Decimal]] = defaultdict(dict)
     for row in rows:
@@ -81,6 +92,7 @@ async def symbol_verdicts(
     previous_credits: Sequence[AcceptedCapitalBasisCreditRow],
     offers: Sequence[LedgerObservationOfferRow],
     credits: Sequence[LedgerObservationCreditRow],
+    credit_history: Sequence[LedgerObservationCreditHistoryRow],
     terminal: Mapping[str, LedgerObservationOfferHistoryRow],
     trades: Sequence[LedgerObservationTradeRow],
     provenance: Mapping[str, set[UUID]],
@@ -175,6 +187,30 @@ async def symbol_verdicts(
 
     prior = _credits(previous_credits)
     current = _credits(credits)
+    # A lending opened and closed inside the interval is in neither P's nor C's active
+    # credits, but its fill counts: C's credit history names it. A history credit that P
+    # already had (a P lending that closed is a decrease) or that is still active in C (one
+    # credit in both lists) is not it; only the others are, if they can have opened after P
+    # began. Per lending key the new amount is the larger of the active increase and the
+    # history amount: a loan turning into credits shows both for one lending.
+    prior_ids = {(row.source_kind, row.venue_credit_id) for row in previous_credits}
+    active_ids = {(row.source_kind, row.venue_credit_id) for row in credits}
+    closed_new: dict[str, dict[str, Decimal]] = defaultdict(dict)
+    for row in credit_history:
+        ident = (row.source_kind, row.venue_credit_id)
+        if ident in prior_ids or ident in active_ids:
+            continue
+        anchor = row.mts_opening if row.mts_opening is not None else row.occurred_at_ms
+        if anchor > possible_after:
+            key = credit_key(row.source_kind, row.venue_credit_id, row.period_days, row.mts_opening)
+            closed_new[row.symbol][key] = closed_new[row.symbol].get(key, ZERO) + row.amount
+    for symbol, by_key in closed_new.items():
+        merged = current.setdefault(symbol, {})
+        before_amounts = prior.get(symbol, {})
+        for key, amount in by_key.items():
+            base = before_amounts.get(key, ZERO)
+            increase = max(ZERO, merged.get(key, ZERO) - base)
+            merged[key] = base + max(increase, amount)
     return {
         name: conservation_verdict(
             prior.get(name, {}) if name in prior_symbols else None,

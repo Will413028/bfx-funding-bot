@@ -41,6 +41,7 @@ from bfx_funding_bot.modules.ledger import (
     Attempt,
     Coverage,
     Credit,
+    CreditHistory,
     Observation,
     Offer,
     OfferHistory,
@@ -165,11 +166,14 @@ def _observation(
     history: tuple[OfferHistory, ...] = (),
     trades: tuple[Trade, ...] = (),
     usd: bool = False,
+    credit_history: tuple[CreditHistory, ...] = (),
 ) -> Observation:
     wallets = [Wallet("funding", "UST", Decimal(available), Decimal(available), "fUST")]
     if usd:
         wallets.append(Wallet("funding", "USD", Decimal("5"), Decimal("5"), "fUSD"))
-    return Observation(tuple(wallets), offers, credits, _coverage(), 2, history, (), trades)
+    return Observation(
+        tuple(wallets), offers, credits, _coverage(), 2, history, credit_history, trades
+    )
 
 
 @dataclass(frozen=True)

@@ -48,6 +48,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisRow,
     AcceptedCapitalBasisSymbolRow,
     ExecutionResolutionJournalRow,
+    LedgerObservationCreditHistoryRow,
     LedgerObservationCreditRow,
     LedgerObservationOfferHistoryRow,
     LedgerObservationOfferRow,
@@ -233,6 +234,13 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         await session.scalars(
             select(LedgerObservationOfferHistoryRow).where(
                 LedgerObservationOfferHistoryRow.observation_id == observation_id
+            )
+        )
+    ).all()
+    credit_history = (
+        await session.scalars(
+            select(LedgerObservationCreditHistoryRow).where(
+                LedgerObservationCreditHistoryRow.observation_id == observation_id
             )
         )
     ).all()
@@ -592,6 +600,7 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         previous_credits=prior_credits,
         offers=offers,
         credits=credits,
+        credit_history=credit_history,
         terminal=terminal,
         trades=trade_rows,
         provenance=c.provenance,
