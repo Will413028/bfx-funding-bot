@@ -22,7 +22,7 @@ from .test_ledger_schema_roles import _B, _seed, ledger_db, seeded  # noqa: F401
 pytestmark = pytest.mark.integration
 
 _PARENT = "e1f2a3b4c5d7"
-_NEW = ("conservation", "lent_unexplained", "foreign_executed")
+_NEW = ("conservation", "lent_unexplained", "foreign_executed", "fill_conflicts")
 _TABLE = "accepted_capital_basis_symbol"
 
 
@@ -30,14 +30,16 @@ def _columns(conn) -> set[str]:
     return {column["name"] for column in inspect(conn).get_columns(_TABLE)}
 
 
-def _insert(conn, conservation: str, unexplained: str, foreign: str, symbol: str = "fX") -> None:
+def _insert(
+    conn, conservation: str, unexplained: str, foreign: str, conflicts: int = 0, symbol: str = "fX"
+) -> None:
     conn.execute(
         text(
             f"INSERT INTO {_TABLE}(basis_id, symbol, available, offered, credits, "
             "unattributed_credits, foreign_offers, conservation, lent_unexplained, "
-            "foreign_executed) VALUES (:b, :s, 0, 0, 0, 0, 0, :c, :u, :f)"
+            "foreign_executed, fill_conflicts) VALUES (:b, :s, 0, 0, 0, 0, 0, :c, :u, :f, :n)"
         ),
-        {"b": _B, "s": symbol, "c": conservation, "u": unexplained, "f": foreign},
+        {"b": _B, "s": symbol, "c": conservation, "u": unexplained, "f": foreign, "n": conflicts},
     )
 
 
@@ -54,17 +56,23 @@ def test_upgrade_backfills_baseline_and_leaves_no_default(ledger_db) -> None:  #
         alembic(url, "check")
         with engine.connect() as conn:
             row = conn.execute(
-                text(f"SELECT conservation, lent_unexplained, foreign_executed FROM {_TABLE}")
-            ).one()
-            assert (row[0], row[1], row[2]) == ("baseline", 0, 0)
-            defaults = conn.execute(
                 text(
-                    "SELECT column_default FROM information_schema.columns "
-                    "WHERE table_name = :t AND column_name = ANY(:c)"
-                ),
-                {"t": _TABLE, "c": list(_NEW)},
-            ).scalars().all()
-            assert defaults == [None, None, None]
+                    f"SELECT conservation, lent_unexplained, foreign_executed, fill_conflicts FROM {_TABLE}"
+                )
+            ).one()
+            assert tuple(row) == ("baseline", 0, 0, 0)
+            defaults = (
+                conn.execute(
+                    text(
+                        "SELECT column_default FROM information_schema.columns "
+                        "WHERE table_name = :t AND column_name = ANY(:c)"
+                    ),
+                    {"t": _TABLE, "c": list(_NEW)},
+                )
+                .scalars()
+                .all()
+            )
+            assert defaults == [None] * len(_NEW)
             assert all(
                 column["nullable"] is False
                 for column in inspect(conn).get_columns(_TABLE)
@@ -107,21 +115,25 @@ def test_downgrade_refuses_to_drop_stored_verdicts(seeded) -> None:  # noqa: F81
 
 
 @pytest.mark.parametrize(
-    ("conservation", "unexplained", "foreign", "accepted"),
+    ("conservation", "unexplained", "foreign", "conflicts", "accepted"),
     [
-        ("baseline", "0", "0", True),
-        ("conserved", "0", "0", True),
-        ("conserved", "0.01", "5", True),
-        ("foreign_lending", "100", "100", True),
-        ("unexplained_lending", "100", "0", True),
-        ("baseline", "1", "0", False),
-        ("baseline", "0", "1", False),
-        ("conserved", "-1", "0", False),
-        ("conserved", "0", "-1", False),
-        ("foreign_lending", "100", "0", False),
-        ("foreign_lending", "0", "100", False),
-        ("unexplained_lending", "0", "0", False),
-        ("sideways", "0", "0", False),
+        ("baseline", "0", "0", 0, True),
+        ("conserved", "0", "0", 0, True),
+        ("conserved", "-0.01", "5", 0, True),
+        ("foreign_lending", "0", "100", 0, True),
+        ("unexplained_lending", "100", "0", 0, True),
+        ("unexplained_lending", "-60", "60", 0, True),
+        ("unexplained_lending", "0", "0", 1, True),
+        ("baseline", "1", "0", 0, False),
+        ("baseline", "0", "1", 0, False),
+        ("baseline", "0", "0", 1, False),
+        ("conserved", "0", "0", 1, False),
+        ("conserved", "0", "-1", 0, False),
+        ("conserved", "0", "0", -1, False),
+        ("foreign_lending", "0", "0", 0, False),
+        ("foreign_lending", "0", "100", 1, False),
+        ("unexplained_lending", "0", "0", 0, False),
+        ("sideways", "0", "0", 0, False),
     ],
 )
 def test_check_constraint_rejects_inconsistent_verdicts(
@@ -129,17 +141,18 @@ def test_check_constraint_rejects_inconsistent_verdicts(
     conservation,
     unexplained,
     foreign,
+    conflicts,
     accepted,
 ) -> None:
     if accepted:
         with seeded.begin() as conn:
-            _insert(conn, conservation, unexplained, foreign)
+            _insert(conn, conservation, unexplained, foreign, conflicts)
         return
     with (
         pytest.raises(Exception, match="ck_accepted_basis_symbol_conservation"),
         seeded.begin() as conn,
     ):
-        _insert(conn, conservation, unexplained, foreign)
+        _insert(conn, conservation, unexplained, foreign, conflicts)
 
 
 def test_verdict_is_immutable_and_only_the_bot_writes_it(seeded) -> None:  # noqa: F811

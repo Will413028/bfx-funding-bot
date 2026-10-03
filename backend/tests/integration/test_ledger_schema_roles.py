@@ -165,8 +165,8 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
     cell_value = "" if old_member else "\n      'cell',"
     # The conservation columns arrived with a3b4c5d6e7f8; ``pre_verdict`` seeds before them.
     verdict = not (old_member or pre_verdict)
-    verdict_column = ",\n      conservation,\n      lent_unexplained,\n      foreign_executed" if verdict else ""
-    verdict_value = ",\n      'baseline',\n      0,\n      0" if verdict else ""
+    verdict_column = ",\n      conservation,\n      lent_unexplained,\n      foreign_executed,\n      fill_conflicts" if verdict else ""
+    verdict_value = ",\n      'baseline',\n      0,\n      0,\n      0" if verdict else ""
     # ``opened_revision`` arrived with e5f6a7b8c9d0 (after the old-member shape).
     revision_column = "" if old_member else "\n      opened_revision,"
     revision_value = "" if old_member else "\n      1,"

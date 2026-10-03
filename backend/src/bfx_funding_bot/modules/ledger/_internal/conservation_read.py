@@ -38,7 +38,9 @@ async def latest_conservation(session: AsyncSession, scope: Scope) -> AcceptedCo
         if verdict is None:
             raise ValueError(f"unknown conservation verdict {row.conservation!r}")
         symbols.append(
-            SymbolConservation(row.symbol, verdict, row.lent_unexplained, row.foreign_executed)
+            SymbolConservation(
+                row.symbol, verdict, row.lent_unexplained, row.foreign_executed, row.fill_conflicts
+            )
         )
     return AcceptedConservation(basis.id, query_id, tuple(symbols))
 

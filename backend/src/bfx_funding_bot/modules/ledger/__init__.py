@@ -16,8 +16,8 @@ from bfx_funding_bot.modules.ledger.conservation import (
     AcceptedConservation,
     Conservation,
     ConservationVerdict,
+    OfferFill,
     SymbolConservation,
-    SymbolFlow,
     conservation_verdict,
 )
 from bfx_funding_bot.modules.ledger.matching import (
@@ -1128,6 +1128,7 @@ __all__ = [
     "ObservationWindow",
     "Offer",
     "OfferCloseHint",
+    "OfferFill",
     "OfferHistory",
     "OfferStatus",
     "OfferTerminalKind",
@@ -1160,7 +1161,6 @@ __all__ = [
     "Scope",
     "ScopeLock",
     "SymbolConservation",
-    "SymbolFlow",
     "Trade",
     "UncertaintyReader",
     "UncertaintyRecord",

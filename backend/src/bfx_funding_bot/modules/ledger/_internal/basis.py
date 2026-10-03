@@ -32,16 +32,12 @@ from sqlalchemy.orm import load_only
 from bfx_funding_bot.core.venue_time import HISTORY_QUERY_MARGIN_MS, VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.modules.ledger import JsonObject, Quarantine, Scope
 from bfx_funding_bot.modules.ledger._internal import history_symbols
+from bfx_funding_bot.modules.ledger._internal.conservation_facts import symbol_verdicts
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
 from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance, sole_owner
 from bfx_funding_bot.modules.ledger._internal.quarantine import (
     open_quarantine,
     unresolved_quarantines,
-)
-from bfx_funding_bot.modules.ledger.conservation import (
-    ConservationVerdict,
-    SymbolFlow,
-    conservation_verdict,
 )
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
@@ -59,7 +55,6 @@ from bfx_funding_bot.modules.ledger.tables import (
     LedgerObservationRow,
     LedgerObservationTradeRow,
     LedgerObservationWalletRow,
-    QuarantineMemberRow,
     QuarantineOpeningRow,
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
@@ -248,17 +243,16 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
 
     # Previous basis evidence: its observation's offers now gone, its credits.
     current_ids = {offer.venue_offer_id for offer in offers}
-    gone: list[LedgerObservationOfferRow] = []
+    prior_offers: list[LedgerObservationOfferRow] = []
     prior_credits: list[AcceptedCapitalBasisCreditRow] = []
     prior_cells: dict[CreditKey, set[str]] = {}
     prior_attempts: list[AcceptedCapitalBasisAttemptRow] = []
     if previous is not None:
-        gone = list(
+        prior_offers = list(
             (
                 await session.scalars(
                     select(LedgerObservationOfferRow).where(
-                        LedgerObservationOfferRow.observation_id == previous.observation_id,
-                        LedgerObservationOfferRow.venue_offer_id.not_in(current_ids),
+                        LedgerObservationOfferRow.observation_id == previous.observation_id
                     )
                 )
             ).all()
@@ -291,6 +285,8 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             ).all()
         )
 
+    gone = [row for row in prior_offers if row.venue_offer_id not in current_ids]
+
     # Credit groups (symbol, period, opening) and this observation's trades at them.
     group_of: dict[CreditKey, Group] = {}
     live: dict[Group, Decimal] = {}
@@ -301,11 +297,14 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             live[key] = live.get(key, ZERO) + credit.amount
     trades: list[tuple[Group, Decimal, str]] = []
     traded_offer_ids: set[str] = set()
-    for trade in await session.scalars(
-        select(LedgerObservationTradeRow).where(
-            LedgerObservationTradeRow.observation_id == observation_id
+    trade_rows = list(
+        await session.scalars(
+            select(LedgerObservationTradeRow).where(
+                LedgerObservationTradeRow.observation_id == observation_id
+            )
         )
-    ):
+    )
+    for trade in trade_rows:
         traded_offer_ids.add(trade.venue_offer_id)
         key = (trade.symbol, trade.period_days, trade.mts_create)
         if key in live:
@@ -356,14 +355,12 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         [
             *current_ids,
             *(row.venue_offer_id for row in history),
-            *(row.venue_offer_id for row in gone),
+            *(row.venue_offer_id for row in prior_offers),
+            *(row.venue_offer_id for row in trade_rows),
             *(offer_id for _, _, offer_id in trades),
         ]
     )
 
-    # Offers placed since the previous basis (symbol, venue offer, original amount), de-duplicated
-    # against the previous observation's offers in ``_conservation``.
-    placements: list[tuple[str, str, Decimal]] = []
     # Active offers: managed ones count their remaining amount in offered and cell.
     cells: dict[tuple[str, str], Decimal] = {}
     fills: list[_Fill] = []
@@ -384,8 +381,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             continue
         if managed is None:
             values.foreign += remaining
-            if original is not None:
-                placements.append((offer.symbol, offer.venue_offer_id, original))
             continue
         if original is None or _payload_amount(managed.normalized_payload) != original:
             c.block(offer.symbol, "offer_amount_conflict", venue_offer_id=offer.venue_offer_id)
@@ -537,9 +532,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             attempt, venue_id, reflected_by_offer, terminal.get(venue_id), observation
         ):
             classified[attempt.attempt_id] = (attempt.symbol, "reflected")
-            placed_amount = _payload_amount(attempt.normalized_payload)
-            if placed_amount is not None:
-                placements.append((attempt.symbol, venue_id, placed_amount))
             continue
         intended_amount = _payload_amount(attempt.normalized_payload)
         source = converted.get(attempt.attempt_id)
@@ -591,8 +583,19 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         row.quarantine_id for row in await unresolved_quarantines(session, scope, previous)
     )
 
-    verdicts = await _conservation(
-        session, c, previous, symbols, terminal, quarantines, placements
+    verdicts = await symbol_verdicts(
+        session,
+        previous=previous,
+        observation=observation,
+        symbols=symbols,
+        previous_offers=prior_offers,
+        previous_credits=prior_credits,
+        offers=offers,
+        credits=credits,
+        terminal=terminal,
+        trades=trade_rows,
+        provenance=c.provenance,
+        quarantines=quarantines,
     )
     scope_block = _block_json(c.scope_reasons)
     payload: JsonObject = {
@@ -614,6 +617,7 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 verdicts[name].conservation,
                 _text(verdicts[name].lent_unexplained),
                 _text(verdicts[name].foreign_executed),
+                verdicts[name].fill_conflicts,
             ]
             for name, v in sorted(symbols.items())
         ],
@@ -668,6 +672,7 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 conservation=verdicts[name].conservation,
                 lent_unexplained=verdicts[name].lent_unexplained,
                 foreign_executed=verdicts[name].foreign_executed,
+                fill_conflicts=verdicts[name].fill_conflicts,
             )
         )
     for (name, cell), amount in cells.items():
@@ -710,104 +715,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             )
     await session.flush()
     return basis_id
-
-
-async def _conservation(
-    session: AsyncSession,
-    c: _Classifier,
-    previous: AcceptedCapitalBasisRow | None,
-    symbols: dict[str, _Symbol],
-    terminal: dict[str, LedgerObservationOfferHistoryRow],
-    quarantines: list[UUID],
-    placements: list[tuple[str, str, Decimal]],
-) -> dict[str, ConservationVerdict]:
-    """Each symbol's conservation verdict against the previous accepted basis.
-
-    The previous basis is compared directly (offered + foreign offers = every
-    venue offer; credits = lent), so nothing is carried between observations.
-    A symbol without a row there, or a scope without a previous basis, is a
-    baseline. Foreign executed: offers of this observation's terminal history
-    with no provenance and no membership of an unresolved quarantine (neither
-    is called foreign), that ended after the previous accepted query began.
-    Placed: offers placed since the previous basis that were not already among
-    the previous observation's offers -- this bot's (attempts it classified
-    ``reflected``, active or ended) and every live foreign one (legacy's ledger
-    held both from the submit / the WS event, a basis does not). Ended foreign
-    offers are never placed: they are ``foreign_executed`` only, and only when
-    they were not in the previous observation (their previous remaining leaving
-    offered already explains their fills).
-    """
-    if previous is None:
-        return {
-            name: conservation_verdict(None, SymbolFlow(ZERO, ZERO), ZERO, ZERO) for name in symbols
-        }
-    prior = {
-        row.symbol: SymbolFlow(row.offered + row.foreign_offers, row.credits)
-        for row in await session.scalars(
-            select(AcceptedCapitalBasisSymbolRow).where(
-                AcceptedCapitalBasisSymbolRow.basis_id == previous.id
-            )
-        )
-    }
-    started_at_ms = await session.scalar(
-        select(LedgerObservationQueryRow.started_at_ms)
-        .join(
-            LedgerObservationRow, LedgerObservationRow.query_id == LedgerObservationQueryRow.query_id
-        )
-        .where(LedgerObservationRow.id == previous.observation_id)
-    )
-    assert started_at_ms is not None
-    seen = (
-        set(
-            await session.scalars(
-                select(LedgerObservationOfferRow.venue_offer_id).where(
-                    LedgerObservationOfferRow.observation_id == previous.observation_id,
-                    LedgerObservationOfferRow.venue_offer_id.in_(
-                        [*(p[1] for p in placements), *terminal]
-                    ),
-                )
-            )
-        )
-        if placements or terminal
-        else set()
-    )
-    placed: dict[str, Decimal] = {}
-    for symbol, venue_id, amount in placements:
-        if venue_id not in seen:
-            placed[symbol] = placed.get(symbol, ZERO) + amount
-    held = (
-        set(
-            await session.scalars(
-                select(QuarantineMemberRow.venue_object_id).where(
-                    QuarantineMemberRow.quarantine_id.in_(quarantines),
-                    QuarantineMemberRow.source_kind == "offer",
-                    QuarantineMemberRow.venue_object_id.in_(list(terminal)),
-                )
-            )
-        )
-        if quarantines and terminal
-        else set()
-    )
-    foreign_executed: dict[str, Decimal] = {}
-    for venue_id, row in terminal.items():
-        filled = (row.amount_original or ZERO) - row.amount_remaining
-        if (
-            filled > ZERO
-            and row.occurred_at_ms > started_at_ms
-            and not c.provenance.get(venue_id)
-            and venue_id not in held
-            and venue_id not in seen
-        ):
-            foreign_executed[row.symbol] = foreign_executed.get(row.symbol, ZERO) + filled
-    return {
-        name: conservation_verdict(
-            prior.get(name),
-            SymbolFlow(v.offered + v.foreign, v.credits),
-            foreign_executed.get(name, ZERO),
-            placed.get(name, ZERO),
-        )
-        for name, v in symbols.items()
-    }
 
 
 def _trades_cover(anchor_ms: int, observation: LedgerObservationRow) -> bool:

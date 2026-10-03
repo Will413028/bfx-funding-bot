@@ -144,6 +144,7 @@ def _symbol_block(row: AcceptedCapitalBasisSymbolRow) -> Blocked | None:
     evidence = [
         ("lent_unexplained", str(row.lent_unexplained)),
         ("foreign_executed", str(row.foreign_executed)),
+        ("fill_conflicts", str(row.fill_conflicts)),
     ]
     if fact is not None:
         evidence.append(("also", fact.reason))
