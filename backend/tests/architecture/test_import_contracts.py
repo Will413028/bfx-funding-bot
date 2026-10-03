@@ -153,9 +153,11 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     consumers = contracts_by_id["capital-consumers-via-ports"]
     assert set(consumers["source_modules"]) == {
         "bfx_funding_bot.modules.admin.trading_status",
+        "bfx_funding_bot.modules.execution.command_gate",
         "bfx_funding_bot.modules.execution.contracts",
         "bfx_funding_bot.modules.execution.deployment.sizing",
         "bfx_funding_bot.modules.execution.managed_cancel",
+        "bfx_funding_bot.modules.execution.middleware.reservation_emitting",
         "bfx_funding_bot.modules.execution.safety.hard_guards",
         "bfx_funding_bot.modules.execution.safety.kill_switch",
         "bfx_funding_bot.modules.execution.safety.pre_trade",

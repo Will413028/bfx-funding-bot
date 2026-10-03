@@ -368,15 +368,14 @@ async def test_waiting_submit_rechecks_authoritative_safety_inside_account_lock(
     assert len(persister.attempts) == 1
 
 
-def test_live_middleware_rejects_persister_without_durable_gate_capability() -> None:
-    """A live noop/wrapper must never silently select the legacy submit path."""
-    with pytest.raises(ValueError, match="durable command-gate"):
+def test_live_middleware_rejects_a_missing_command_boundary() -> None:
+    """A live noop/wrapper must never silently select the plain submit path."""
+    with pytest.raises(ValueError, match="command boundary"):
         ReservationEmittingMiddleware(
             _FakeVenue(),
             bus=DomainEventBus(),
             persister=NoopEventPersister(),
             is_simulated=False,
-            uncertainty_handler=lambda _event: asyncio.sleep(0),
         )
 
 @pytest.mark.asyncio

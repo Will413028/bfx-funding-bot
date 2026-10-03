@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
+from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary, CommandEffects
 from bfx_funding_bot.modules.execution.event_store.entities import VenueOfferObservation
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.events import (
@@ -101,6 +102,10 @@ class Stack:
     @property
     def scope(self) -> Scope:
         return SCOPE
+
+    def boundary(self, effects: CommandEffects) -> CommandBoundary:
+        """The command gate's boundary over this stack's journal."""
+        return CommandBoundary(SCOPE, self.factory, self.journal, effects)
 
     def capital_scope(self, symbol: str = "fUST", cell: str = CELL) -> CapitalScope:
         return CapitalScope(ACCOUNT, ENVIRONMENT, symbol, cell)

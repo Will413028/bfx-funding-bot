@@ -1,5 +1,6 @@
 """Real isolated SQL and command boundary; the venue is a recording transport."""
 from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
@@ -267,6 +268,25 @@ def stop_chain(halt, account, *guards):
         strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=str(account))
 
 
+def legacy_boundary(runtime, persister, bus):
+    """The legacy authority's command boundary (what apps composes today)."""
+    from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary
+    from bfx_funding_bot.modules.execution.legacy_command_effects import LegacyCommandEffects
+    from bfx_funding_bot.modules.execution.legacy_command_journal import LegacyCommandJournal
+    from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
+
+    async def ignore_unknown(_event):
+        return None
+
+    return CommandBoundary(
+        capital_scope(runtime), runtime.session_factory,
+        LegacyCommandJournal(
+            runtime, date_provider=lambda: datetime.now(UTC).date(), clock=lambda: 1100,
+            uncertainty_reader=LegacyUncertaintyReader(runtime.session_factory)),
+        LegacyCommandEffects(persister, bus, ignore_unknown),
+    )
+
+
 async def boundary(factory, account):
     from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
     from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
@@ -294,13 +314,14 @@ async def boundary(factory, account):
     await halt.transition("ACTIVE", cause="operator", reason="isolated test only", actor="test",
                           now_ms=1200)
     venue = Venue(factory)
-    gate = AccountCommandGate(venue, bus=DomainEventBus(),
-        persister=EventStorePersister(store=PostgresEventStore(deployment_environment="ci"),
-                                     session_factory=factory),
+    bus = DomainEventBus()
+    persister = EventStorePersister(store=PostgresEventStore(deployment_environment="ci"),
+                                    session_factory=factory)
+    gate = AccountCommandGate(venue, bus=bus, persister=persister,
         uncertainty_reader=LegacyUncertaintyReader(factory),
         safety_evaluator=stop_chain(halt, account), deployment_environment="ci",
-        capital_runtime=runtime, managed_offers=LegacyManagedOffers(), clock=lambda: 1100,
-        is_simulated=False)
+        boundary=legacy_boundary(runtime, persister, bus), managed_offers=LegacyManagedOffers(),
+        clock=lambda: 1100, is_simulated=False)
     ctx = AccountContext(str(account), Credentials("mock", "mock"), Decimal("0"))
     return gate, venue, ready, ctx, runtime, halt
 
@@ -476,7 +497,7 @@ async def test_independent_command_gates_cannot_spend_same_budget(pg_session_fac
     account = uuid4()
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="two-gates"))
-    gate, venue, first, ctx, runtime, halt = await boundary(factory, account)
+    gate, venue, first, ctx, _runtime, halt = await boundary(factory, account)
     # A distinct fingerprint: only the shared budget may decide between them.
     event, row = intent(account, "499.99990501", 20)
     async with factory.begin() as session:
@@ -484,10 +505,10 @@ async def test_independent_command_gates_cannot_spend_same_budget(pg_session_fac
     second = replace(first, decision_id=row.decision_id, decision=first.decision.model_copy(
         update={"signal_correlation_id": event.signal_correlation_id,
                 "offer_amount_usdt": Decimal("499.99990501")}))
-    competitor = AccountCommandGate(venue, bus=DomainEventBus(), persister=gate._persister,
+    competitor = AccountCommandGate(venue, bus=gate._bus, persister=gate._persister,
         uncertainty_reader=LegacyUncertaintyReader(factory),
         safety_evaluator=ManualKillGuard(trading_state=halt), deployment_environment="ci",
-        capital_runtime=runtime, managed_offers=LegacyManagedOffers(), clock=lambda: 1100,
+        boundary=gate._boundary, managed_offers=LegacyManagedOffers(), clock=lambda: 1100,
         is_simulated=False)
     results = await asyncio.gather(gate.submit(first, ctx), competitor.submit(second, ctx),
                                    return_exceptions=True)
@@ -515,7 +536,7 @@ async def test_cancel_requires_scoped_managed_provenance(capital_db, identity):
     from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
     from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
     factory, account = capital_db
-    gate, venue, ready, ctx, runtime, _ = await boundary(factory, account)
+    gate, venue, ready, ctx, _runtime, _ = await boundary(factory, account)
     await gate.submit(ready, ctx)
     venue.received.clear()
     target = "999" if identity in {"unknown", "forged_projection"} else "101"
@@ -532,7 +553,8 @@ async def test_cancel_requires_scoped_managed_provenance(capital_db, identity):
         elif identity == "forged_projection":
             claim.venue_offer_id = "999"
     if identity == "runtime_environment":
-        runtime.repository = repository(account, environment="shadow")
+        from bfx_funding_bot.modules.ledger import Scope
+        gate._boundary = replace(gate._boundary, scope=Scope(account, "shadow"))
     with pytest.raises(CommandGateBlocked, match=r"cancel_(provenance|environment)"):
         await gate.cancel(venue_offer_id=target, signal_correlation_id=uuid4(),
                           account_id=ctx.account_id, ctx=ctx)

@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     OfferClaimRow,
     PositionStateRow,
 )
+from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
 from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
     ReservationEmittingMiddleware,
 )
@@ -89,6 +90,7 @@ def _mw(inner, pg_session_factory) -> ReservationEmittingMiddleware:
         persister=persister,
         is_simulated=True,
         safety_evaluator=_AllowSafety(),
+        uncertainty_reader=LegacyUncertaintyReader(pg_session_factory),
     )
 
 

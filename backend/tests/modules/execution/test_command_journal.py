@@ -13,6 +13,7 @@ import pytest
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary, LedgerCommandEffects
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate, CommandGateBlocked
 from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.event_store.serialization import (
@@ -306,9 +307,6 @@ async def test_gate_port_guard_transaction_and_transport_after_commit(command):
     view = SimpleNamespace(applied=SimpleNamespace(revision=1, digest="digest", revision_id=uuid4()),
                            basis_token="10")
     ready = replace(ready, capital_view=view)
-    runtime = SimpleNamespace(session_factory=sessions, repository=SimpleNamespace(
-        account_id=ACCOUNT_ID, environment="ci",
-    ))
 
     class Offers:
         async def fingerprints_in_use(self, session, scope, symbol):
@@ -349,10 +347,12 @@ async def test_gate_port_guard_transaction_and_transport_after_commit(command):
             sessions.trace.append("transport")
 
     venue, port = Venue(), Port()
-    gate = AccountCommandGate(venue, bus=DomainEventBus(), persister=NoopEventPersister(),
+    bus = DomainEventBus()
+    boundary = CommandBoundary(SCOPE, sessions, port, LedgerCommandEffects(bus))
+    gate = AccountCommandGate(venue, bus=bus, persister=NoopEventPersister(),
         uncertainty_reader=Uncertainty(), safety_evaluator=_FakeSafetyEvaluator([]),
-        deployment_environment="ci", capital_runtime=runtime, managed_offers=Offers(),
-        is_simulated=False, clock=lambda: 100, command_journal=port)
+        deployment_environment="ci", boundary=boundary, managed_offers=Offers(),
+        is_simulated=False, clock=lambda: 100)
 
     async def guard(decision, context, **kwargs):
         if context.command_session is not None:

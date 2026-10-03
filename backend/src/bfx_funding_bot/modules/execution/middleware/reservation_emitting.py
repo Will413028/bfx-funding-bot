@@ -28,7 +28,7 @@ from uuid import UUID
 
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
+from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     AuthoritativeSafetyEvaluator,
@@ -45,15 +45,13 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationIntent,
     ReservationUnknown,
 )
-from bfx_funding_bot.modules.execution.legacy_command_journal import LegacyCommandJournal
-from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     ExecutorPort,
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
-from bfx_funding_bot.modules.ledger import ManagedOfferReader
+from bfx_funding_bot.modules.ledger import ManagedOfferReader, UncertaintyReader
 
 log = logging.getLogger(__name__)
 
@@ -66,19 +64,16 @@ class ReservationEmittingMiddleware:
         inner: ExecutorPort,
         *,
         bus: DomainEventBus,
-        persister: EventPersister,
+        persister: EventPersister | None = None,
         is_simulated: bool = True,
         clock: Callable[[], int] | None = None,
         date_provider: Callable[[], date] | None = None,
         uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
         safety_evaluator: AuthoritativeSafetyEvaluator | None = None,
-        capital_runtime: CapitalRuntime | None = None,
+        boundary: CommandBoundary | None = None,
+        uncertainty_reader: UncertaintyReader | None = None,
         managed_offers: ManagedOfferReader | None = None,
     ) -> None:
-        if not is_simulated and uncertainty_handler is None:
-            raise ValueError(
-                "live reservation middleware requires an uncertainty_handler"
-            )
         self._inner = inner
         self._bus = bus
         self._persister = persister
@@ -90,33 +85,36 @@ class ReservationEmittingMiddleware:
         capability = getattr(persister, "command_gate_persistence", None)
         if capability is not None and not isinstance(capability, CommandGatePersistence):
             raise TypeError("invalid durable command-gate capability")
-        if not is_simulated and capability is None:
-            raise ValueError("live middleware requires durable command-gate persistence")
+        if not is_simulated and boundary is None:
+            raise ValueError("live middleware requires a command boundary")
         if not is_simulated and safety_evaluator is None:
             raise ValueError("live middleware requires authoritative safety evaluator")
-        # Simulated unit adapters may intentionally retain the legacy path.
-        # Every production persister with an injected safety chain uses the
-        # serialized command boundary, including paper/shadow daemon modes.
-        if capability is not None and safety_evaluator is not None:
+        # Simulated unit adapters may intentionally retain the plain path.
+        # Every production executor with an injected safety chain uses the
+        # serialized command gate, including paper/shadow daemon modes: live
+        # ones through their boundary, simulated ones through the persister.
+        environment = (boundary.scope.deployment_environment if boundary is not None
+                       else capability.store.deployment_environment if capability is not None
+                       else None)
+        if environment is not None and safety_evaluator is not None:
+            if uncertainty_reader is None:
+                raise ValueError("the command gate requires an uncertainty reader")
             self._command_gate = AccountCommandGate(
                 inner,
                 bus=bus,
                 persister=persister,
-                uncertainty_reader=LegacyUncertaintyReader(
-                    capability.session_factory
-                ),
+                uncertainty_reader=uncertainty_reader,
                 safety_evaluator=safety_evaluator,
-                deployment_environment=capability.store.deployment_environment,
+                deployment_environment=environment,
                 is_simulated=is_simulated,
                 clock=self._clock,
                 date_provider=self._date_provider,
                 uncertainty_handler=uncertainty_handler,
-                capital_runtime=capital_runtime,
+                boundary=boundary,
                 managed_offers=managed_offers,
-                command_journal=LegacyCommandJournal(
-                    capital_runtime, date_provider=self._date_provider, clock=self._clock,
-                ) if capital_runtime is not None else None,
             )
+        elif persister is None:
+            raise ValueError("a middleware without a command gate requires a persister")
 
     @property
     def command_gate(self) -> AccountCommandGate | None:
@@ -141,6 +139,8 @@ class ReservationEmittingMiddleware:
                 cid=cid,
                 reservation_ref=reservation_ref,
             )
+        persister = self._persister
+        assert persister is not None  # required without a command gate
         # This middleware is the cid authority (A2). Ignore any incoming cid;
         # compute once so INTENT and outcome share the exact same value.
         decision = ready.decision
@@ -161,7 +161,7 @@ class ReservationEmittingMiddleware:
         intent_ms = self._clock()
 
         # txn1: write-ahead intent (durable before the venue submit)
-        await self._persister.persist(ReservationIntent(
+        await persister.persist(ReservationIntent(
             cid=cid, size_usdt=size, signal_correlation_id=scid,
             account_id=ctx.account_id, is_simulated=self._is_simulated,
             occurred_at_ms=intent_ms, symbol=decision.symbol,
@@ -210,14 +210,14 @@ class ReservationEmittingMiddleware:
             # This is a direct projection hook rather than a normal domain-bus
             # publication: UNKNOWN must never look like a venue claim, but the
             # live symbol gate must open before the next reconcile tick.
-            await self._persister.persist(unknown_event)
+            await persister.persist(unknown_event)
             if self._uncertainty_handler is not None:
                 await self._uncertainty_handler(unknown_event)
         elif result.outcome_kind is SubmitOutcomeKind.NOT_SENT:
             # Local validation happened before transport; it is safe to resolve
             # the intent as capital-neutral and it must not be labelled a venue
             # rejection.
-            await self._persister.persist(ReservationFailed(
+            await persister.persist(ReservationFailed(
                 cid=cid, size_usdt=size, signal_correlation_id=scid,
                 account_id=ctx.account_id, is_simulated=self._is_simulated,
                 reason="local_pre_transport", occurred_at_ms=outcome_ms,
@@ -242,16 +242,16 @@ class ReservationEmittingMiddleware:
                 )
             # txn2: outcome (event_log + snapshot, atomic)
             if filled is not None:
-                await self._persister.persist(claimed, filled)
+                await persister.persist(claimed, filled)
             else:
-                await self._persister.persist(claimed)
+                await persister.persist(claimed)
             # in-memory projections + diagnostics (after durable commit)
             await self._safe_publish(claimed)
             if filled is not None:
                 await self._safe_publish(filled)
         elif result.outcome_kind is SubmitOutcomeKind.REJECTED:
             # txn2: FAILED — reserved untouched
-            await self._persister.persist(ReservationFailed(
+            await persister.persist(ReservationFailed(
                 cid=cid, size_usdt=size, signal_correlation_id=scid,
                 account_id=ctx.account_id, is_simulated=self._is_simulated,
                 reason=getattr(result.outcome, "reason", "submit_failed"),
