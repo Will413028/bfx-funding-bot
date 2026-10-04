@@ -22,7 +22,6 @@ from bfx_funding_bot.modules.execution.protocols import AccountContext, Credenti
 from bfx_funding_bot.modules.execution.venue_observation import (
     HISTORY_INCOMPLETE_ALERT,
     OFFER_END_GRACE_MS,
-    OFFER_END_UNCONFIRMED_ALERT,
     BitfinexVenueObservation,
     normalize_credit,
     normalize_credit_history,
@@ -66,7 +65,8 @@ def test_active_offer_status_table(status: str, expected: str) -> None:
     assert result.amount_original == Decimal("10.30000000000000004")
     assert result.rate == Decimal("0.00030000000000000004")
     assert result.offer_type == "LIMIT" and result.flags == 64 and result.rate_observed
-    assert result.raw["row"] == list(row.raw)
+    assert result.raw["row"][4] == "-4.30000000000000004"  # exact digits, as a string
+    json.dumps(result.raw)  # JSON-safe: nothing for the ledger to convert
     assert result.mts_created == 950_000 and result.mts_updated == 999_900
 
 
@@ -98,7 +98,8 @@ def test_credit_history_closed_status_table(status: str, source_kind: Any) -> No
     assert result.credit.source_kind == source_kind and result.credit.venue_credit_id == "20"
     assert result.credit.mts_opening == 800_000 and result.occurred_at_ms == 999_800
     assert result.credit.amount == Decimal("6.00000000000000004")
-    assert result.credit.raw["row"] == list(row.raw)
+    json.dumps(result.credit.raw)
+    assert result.credit.raw["row"][5] == "-6.00000000000000004"
 
 
 @pytest.mark.parametrize("source_kind", ["credit", "loan"])
@@ -435,7 +436,7 @@ def _ended(row_id: int, status: str = "CANCELED", *, created: int = 100, updated
 async def test_a_vanished_old_offer_is_fetched_by_id_without_widening_the_window() -> None:
     venue = Venue()
     venue.active["funding/offers"] = []
-    venue.history["offers"] = [_ended(77)]  # created long before any window
+    venue.history["offers"] = [_ended(77, updated=500)]  # ended long before any window
     first, _, _ = await observe(venue, window=_vanish_window(77))
     assert _by_id_requests(venue) == [{"id": [77], "limit": 25}]
     assert [item.offer.venue_offer_id for item in first.offer_history] == ["77"]
@@ -473,7 +474,7 @@ async def test_a_vanished_id_the_venue_does_not_return_is_incomplete(monkeypatch
     assert not first.coverage.offer_history_complete and not first.coverage.complete
     assert first.coverage.credit_history_complete  # per stream, not a blanket flag
     assert [(f["stream"], f["reason"]) for f in emitted] == [
-        ("offers_by_id", "vanished_offer_not_returned")]
+        ("offers_by_id", "not_returned")]
 
 
 async def test_a_vanished_id_returned_non_terminal_is_incomplete() -> None:
@@ -496,7 +497,7 @@ async def test_vanished_ids_are_batched_per_symbol_and_counted() -> None:
     venue = Venue()
     venue.active["funding/offers"] = []
     ids = list(range(1000, 1030))
-    venue.history["offers"] = [_ended(i) for i in ids]
+    venue.history["offers"] = [_ended(i, updated=500) for i in ids]
     window = ObservationWindow(None, 970_000, 910_000, frozenset(),
                                (*_live(*ids), LiveOffer("9", "fUSD")))
     first, _, _ = await observe(venue, window=window)
@@ -511,7 +512,7 @@ async def test_vanished_ids_are_batched_per_symbol_and_counted() -> None:
 async def test_by_id_requests_draw_on_the_shared_budget(monkeypatch: Any) -> None:
     venue = Venue()
     venue.active["funding/offers"] = []
-    venue.history["offers"] = [_ended(77)]
+    venue.history["offers"] = [_ended(77, updated=500)]
     monkeypatch.setattr(alerts, "emit", lambda *_, **__: None)
     # 4 active + offers window + one by-id = 6 slots; credits, loans, trades starve.
     first, confirmation, _ = await observe(venue, window=_vanish_window(77), request_cap=10)
@@ -522,13 +523,14 @@ async def test_by_id_requests_draw_on_the_shared_budget(monkeypatch: Any) -> Non
 # --- C+E: grace for an id the venue does not return, then an unconfirmed end ------------------
 
 async def _cycles(venue: Venue, windows: list[ObservationWindow], *, gaps: list[int],
-                  restart_before: frozenset[int] = frozenset()) -> list[Any]:
+                  restart_before: frozenset[int] = frozenset(), request_cap: int = 48) -> list[Any]:
     """Run observations on one port (a process), advancing the clock by ``gaps`` between them."""
     out: list[Any] = []
     async with httpx.AsyncClient(transport=httpx.MockTransport(venue.handler)) as http:
         def make() -> BitfinexVenueObservation:
             return BitfinexVenueObservation(
-                rest=BitfinexAuthREST(http=http), ctx=CTX, scope=SCOPE, clock_ms=lambda: venue.now)
+                rest=BitfinexAuthREST(http=http), ctx=CTX, scope=SCOPE, clock_ms=lambda: venue.now,
+                request_cap=request_cap)
 
         port = make()
         for i, window in enumerate(windows):
@@ -557,7 +559,7 @@ async def test_within_the_grace_a_missing_id_stays_incomplete_then_is_unconfirme
     assert not second.coverage.offer_history_complete and second.unconfirmed_ends == ()  # not yet 120 s
     assert third.coverage.offer_history_complete and third.coverage.complete
     assert third.unconfirmed_ends == ("77",) and third.offer_history == ()  # nothing made up
-    ours = [f for event, f in emitted if event == OFFER_END_UNCONFIRMED_ALERT]
+    ours = [f for event, f in emitted if event == alerts.OFFER_END_UNCONFIRMED]
     assert len(ours) == 1 and ours[0]["venue_offer_id"] == "77" and ours[0]["symbol"] == "fUST"
 
 
@@ -597,17 +599,60 @@ async def test_an_id_that_shows_up_resets_its_grace_and_is_not_unconfirmed() -> 
     assert not third.coverage.offer_history_complete  # a new sighting, a new grace
 
 
-async def test_a_failed_by_id_request_is_never_an_unconfirmed_end() -> None:
-    venue = _missing_venue()
-    venue.override = lambda _, body: httpx.Response(500, text="boom") if "id" in body else None
-    window = _vanish_window(77)
-    _, second = await _cycles(venue, [window] * 2, gaps=[0, OFFER_END_GRACE_MS + 10_000])
-    assert not second.coverage.offer_history_complete and second.unconfirmed_ends == ()
+CAUSES = ("not_returned", "request_failed", "cap_exhausted", "unparseable")
 
 
-async def test_a_non_terminal_by_id_answer_is_never_an_unconfirmed_end() -> None:
+def _venue_with_cause(cause: str) -> tuple[Venue, int]:
+    """A venue whose by-id answer for offer 77 has the given cause; the request cap to use."""
     venue = _missing_venue()
-    venue.history["offers"] = [_ended(77, "ACTIVE")]
+    cap = 48
+    if cause == "request_failed":
+        venue.override = lambda _, body: httpx.Response(500, text="boom") if "id" in body else None
+    elif cause == "cap_exhausted":
+        cap = 9  # 4 active reads + the windowed offers page leave nothing for the lookup
+    elif cause == "unparseable":
+        venue.history["offers"] = [_ended(77, "ACTIVE", updated=100)]  # non-terminal, outside the window
+    return venue, cap
+
+
+@pytest.mark.parametrize("cause", CAUSES)
+async def test_every_cause_takes_the_same_grace_then_unconfirmed_path(cause: str, monkeypatch: Any) -> None:
+    emitted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(alerts, "emit", lambda event, **fields: emitted.append((event, fields)))
+    venue, cap = _venue_with_cause(cause)
     window = _vanish_window(77)
-    _, second = await _cycles(venue, [window] * 2, gaps=[0, OFFER_END_GRACE_MS + 10_000])
-    assert not second.coverage.offer_history_complete and second.unconfirmed_ends == ()
+    first, second, third = await _cycles(
+        venue, [window] * 3, gaps=[0, OFFER_END_GRACE_MS - 5_000, 10_000], request_cap=cap)
+    for within in (first, second):  # inside the grace: incomplete, nothing declared
+        assert not within.coverage.offer_history_complete and within.unconfirmed_ends == ()
+    assert third.coverage.offer_history_complete and third.unconfirmed_ends == ("77",)
+    assert third.offer_history == ()  # nothing made up
+    unconfirmed = [f for event, f in emitted if event == alerts.OFFER_END_UNCONFIRMED]
+    assert [(f["venue_offer_id"], f["cause"]) for f in unconfirmed] == [("77", cause)]
+    incomplete = [f["reason"] for event, f in emitted
+                  if event == HISTORY_INCOMPLETE_ALERT and f["stream"] == "offers_by_id"]
+    assert incomplete == [cause, cause]  # one per cycle inside the grace
+
+
+async def test_by_id_rows_are_their_own_evidence_not_window_coverage() -> None:
+    venue = Venue()
+    venue.active["funding/offers"] = []
+    venue.history["offers"] = [_ended(77, created=100, updated=500)]  # outside the window
+    first, _, _ = await observe(venue, window=_vanish_window(77))
+    assert [i.offer.venue_offer_id for i in first.offer_history] == ["77"]  # terminal evidence
+    cov = first.coverage
+    assert cov.offer_history_pages == 1  # the windowed query only, not the lookup request
+    assert (cov.history_requested_start_ms, cov.history_oldest_mts_created) == (910_000, 990_000)
+    assert cov.history_oldest_mts_created != 100 and cov.history_newest_mts_created == 990_000
+
+
+def test_the_adapter_output_is_json_safe_for_every_decimal() -> None:
+    wire = offer_row()
+    wire[4], wire[5], wire[14] = (Decimal(wire[4]), Decimal(wire[5]), Decimal(wire[14]))
+    row = parse_offer_observations([wire])[0]
+    assert any(isinstance(v, Decimal) for v in row.raw)  # the REST client decodes exactly
+    offer = normalize_offer(row)
+    assert json.loads(json.dumps(offer.raw)) == offer.raw
+    assert offer.raw["row"][14] == "0.00030000000000000004"
+    nested = replace(row, raw=(*row.raw[:9], {"flag": Decimal("1.50")}, *row.raw[10:]))
+    assert normalize_offer(nested).raw["row"][9] == {"flag": "1.50"}

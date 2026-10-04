@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from decimal import Decimal
 
 from bfx_funding_bot.core.venue_time import HISTORY_QUERY_MARGIN_MS
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
@@ -39,14 +40,18 @@ from bfx_funding_bot.modules.ledger import (
 from bfx_funding_bot.modules.observability import alerts
 
 HISTORY_PAGE_CAP = 5
+# 8 active requests + 4 streams * 5 pages * 2 symbols, of which the last four stay reserved for
+# the confirmation read. By-id lookups of vanished offers come out of the same budget:
+# ceil(vanished offers of a symbol / 25) requests per symbol, so one vanished offer costs one
+# request and the worst case is ceil(n / 25) + (symbols - 1) when n offers vanished at once.
+# A budget that runs out is not a stall: the affected ids take the grace -> unconfirmed-end
+# path (cause ``cap_exhausted``), where conservation judges them by trades.
 OBSERVATION_REQUEST_CAP = 8 + 4 * HISTORY_PAGE_CAP * 2
 HISTORY_INCOMPLETE_ALERT = "venue_observation_history_incomplete"
-# A vanished offer the venue still does not know by id after the grace: the observation
-# carries it as an unconfirmed end (no terminal row) and conservation judges it by trades.
-OFFER_END_UNCONFIRMED_ALERT = "offer_end_unconfirmed"
-# Venue history may lag an offer's end. Retried each cycle inside this grace, measured
-# in this process from the first "id not returned" sighting (a restart starts a new one:
-# only ever waits longer, so it still absorbs the lag).
+# Venue history may lag an offer's end. Whatever stops a vanished id from getting a terminal
+# answer (not returned, request failed, cap exhausted, unparseable row) is retried each cycle
+# inside this grace, measured in this process from the first sighting of that id without an
+# answer (a restart starts a new one: only ever waits longer, so it still absorbs the lag).
 OFFER_END_GRACE_MS = 120_000
 
 
@@ -71,6 +76,19 @@ def normalize_wallet(row: WalletObservation) -> Wallet:
                   "f" + row.currency if row.wallet_type == "funding" else None)
 
 
+def _json_safe(value: object) -> object:
+    """The venue row as JSON: ``parse_float=Decimal`` made the numbers exact Decimals, and
+    the ledger's ``raw`` is a ``JsonObject``. Exact decimals travel as strings
+    (``format(v, "f")``, the wire digits kept: ``-150.0`` stays ``-150.0``)."""
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    return value
+
+
 def _offer(row: OfferObservation, status: OfferStatus) -> Offer:
     flags = row.raw[9]
     return Offer(
@@ -80,7 +98,7 @@ def _offer(row: OfferObservation, status: OfferStatus) -> Offer:
         offer_type=str(row.raw[6]) if row.raw[6] is not None else None,
         flags=flags if isinstance(flags, (dict, int)) else None,
         status=status, mts_created=row.mts_created, mts_updated=row.mts_updated,
-        raw={"row": list(row.raw)},
+        raw={"row": _json_safe(row.raw)},
     )
 
 
@@ -115,7 +133,7 @@ def _credit(row: CreditObservation) -> Credit:
         amount=row.amount, rate=row.rate, period_days=row.period_days, status="active",
         flags=flags if isinstance(flags, (dict, int)) else None,
         mts_created=row.mts_created, mts_updated=row.mts_updated,
-        mts_opening=row.mts_opening, raw={"row": list(row.raw)},
+        mts_opening=row.mts_opening, raw={"row": _json_safe(row.raw)},
     )
 
 
@@ -136,6 +154,17 @@ def normalize_credit_history(row: CreditObservation) -> CreditHistory:
 def normalize_trade(row: TradeObservation) -> Trade:
     return Trade(row.trade_id, row.symbol, str(row.offer_id), row.amount,
                  row.rate, row.period_days, row.mts_create, row.maker)
+
+
+@dataclass(frozen=True, slots=True)
+class _OfferEnds:
+    """One symbol's offer-end evidence: the windowed query and the by-id lookups, kept apart."""
+
+    windowed: CoveredHistory[OfferHistory]
+    by_id: tuple[OfferHistory, ...]  # terminal rows found by id that the window did not carry
+    resolved: bool  # every vanished id has a terminal row or is an unconfirmed end
+    unconfirmed: tuple[str, ...]
+    missing: frozenset[str]  # ids without a terminal answer this cycle (grace bookkeeping)
 
 
 class BitfinexVenueObservation:
@@ -160,10 +189,9 @@ class BitfinexVenueObservation:
         self._scope = scope
         self._clock_ms = clock_ms
         self._request_cap = request_cap
-        self._missing_since: dict[str, int] = {}  # offer id -> first "not returned" sighting
-        self._alerted_ends: set[str] = set()
-        self._seen_missing: set[str] = set()
-        self._unconfirmed: list[str] = []
+        # The only state kept across cycles: offer id -> first sighting without a terminal
+        # answer. Alert de-duplication is the alerts registry's (DEDUP_FIELDS).
+        self._missing_since: dict[str, int] = {}
 
     async def _active(self, budget: ObservationRequestBudget) -> Observation:
         # Only funding wallets are this system's capital. Exchange/margin
@@ -216,69 +244,60 @@ class BitfinexVenueObservation:
     async def _offer_history(
         self, symbol: str, vanished: list[str], *, start_ms: int, end_ms: int,
         budget: ObservationRequestBudget,
-    ) -> CoveredHistory[OfferHistory]:
-        """Windowed rows (changed in the interval) plus the vanished offers by id.
+    ) -> _OfferEnds:
+        """The windowed query, plus the vanished offers as point lookups by id.
 
-        Absence never confirms terminal: a vanished id the venue does not return, or
-        returns in a non-terminal state, makes this symbol's coverage incomplete (the
-        next cycle retries, since the mirror is unchanged until acceptance).
+        The two stay separate evidence: coverage describes the windowed query only. Absence
+        never confirms terminal: a vanished id with no terminal answer (``not_returned``,
+        ``request_failed``, ``cap_exhausted`` or an ``unparseable`` row) is retried inside
+        the grace, which keeps this symbol incomplete; after it the id is an unconfirmed end
+        and conservation decides from the trades.
         """
         windowed = await self._history(
             self._rest.fetch_offer_history_observations, normalize_offer_history,
             stream="offers", symbol=symbol, start_ms=start_ms, end_ms=end_ms, budget=budget)
-        if not vanished:
-            return windowed
-        before = budget.requests_used
-        complete = windowed.complete
-        rows = list(windowed.rows)
-        by_id_failed = False
-        try:
-            found = await self._rest.fetch_offer_history_by_ids(
-                ctx=self._ctx, symbol=symbol, offer_ids=vanished, budget=budget)
-        except Exception as exc:
-            self._alert("offers_by_id", symbol, reason=type(exc).__name__)
-            found = {}
-            complete = False
-            by_id_failed = True
-        have = {item.offer.venue_offer_id for item in rows}
-        for offer_id in sorted(set(vanished)):
-            row = found.get(offer_id)
-            if row is None and offer_id in have:
-                continue  # the windowed stream already carries its terminal row
-            if row is None:
-                if not by_id_failed and not self._grace_over(offer_id):
-                    self._alert("offers_by_id", symbol, reason="vanished_offer_not_returned")
-                    complete = False
-                elif not by_id_failed:
-                    self._unconfirmed.append(offer_id)
-                    self._alert_unconfirmed(symbol, offer_id)
+        have = {item.offer.venue_offer_id for item in windowed.rows}
+        # The window already carries some terminal rows; only the others need a lookup.
+        need = sorted(set(vanished) - have)
+        if not need:
+            return _OfferEnds(windowed, (), True, (), frozenset())
+        lookup = await self._rest.fetch_offer_history_by_ids(
+            ctx=self._ctx, symbol=symbol, offer_ids=need, budget=budget)
+        by_id: list[OfferHistory] = []
+        unconfirmed: list[str] = []
+        missing: set[str] = set()
+        resolved = True
+        for offer_id in need:
+            cause = lookup.failed.get(offer_id)
+            row = lookup.found.get(offer_id)
+            if cause is None and row is None:
+                cause = "not_returned"
+            if cause is None:
+                assert row is not None
+                try:
+                    by_id.append(normalize_offer_history(row))
+                except ValueError:
+                    cause = "unparseable"
+            if cause is None:
                 continue
-            try:
-                item = normalize_offer_history(row)
-            except ValueError as exc:
-                complete = False
-                self._alert("offers_by_id", symbol, reason=str(exc))
-                continue
-            if offer_id not in have:
-                rows.append(item)
-        return CoveredHistory(tuple(rows), complete, windowed.pages + budget.requests_used - before,
-                              windowed.requested_start_ms, windowed.requested_end_ms)
+            missing.add(offer_id)
+            if self._grace_over(offer_id):
+                unconfirmed.append(offer_id)
+                alerts.emit(alerts.OFFER_END_UNCONFIRMED, level=alerts.WARNING,
+                            exchange_account_id=str(self._scope.exchange_account_id),
+                            deployment_environment=self._scope.deployment_environment,
+                            symbol=symbol, venue_offer_id=offer_id, cause=cause,
+                            grace_ms=OFFER_END_GRACE_MS)
+            else:
+                resolved = False
+                self._alert("offers_by_id", symbol, reason=cause)
+        return _OfferEnds(windowed, tuple(by_id), resolved, tuple(unconfirmed), frozenset(missing))
 
     def _grace_over(self, offer_id: str) -> bool:
-        """First sighting starts the grace; the end is unconfirmed once it has run out."""
+        """The first sighting without an answer starts the grace; true once it has run out."""
         now = self._clock_ms()
-        self._seen_missing.add(offer_id)
         first = self._missing_since.setdefault(offer_id, now)
         return now - first >= OFFER_END_GRACE_MS
-
-    def _alert_unconfirmed(self, symbol: str, offer_id: str) -> None:
-        if offer_id in self._alerted_ends:
-            return
-        self._alerted_ends.add(offer_id)
-        alerts.emit(OFFER_END_UNCONFIRMED_ALERT, level=alerts.WARNING,
-                    exchange_account_id=str(self._scope.exchange_account_id),
-                    deployment_environment=self._scope.deployment_environment,
-                    symbol=symbol, venue_offer_id=offer_id, grace_ms=OFFER_END_GRACE_MS)
 
     def _alert(self, stream: str, symbol: str, *, reason: str) -> None:
         alerts.emit(HISTORY_INCOMPLETE_ALERT, level=alerts.WARNING,
@@ -293,7 +312,6 @@ class BitfinexVenueObservation:
             raise ValueError("venue observation scope mismatch")
         # Reserve the final four requests without introducing a second budget.
         budget = ObservationRequestBudget(self._request_cap - 4)
-        self._seen_missing, self._unconfirmed = set(), []
         active = await self._active(budget)
         end_ms = active.finished_at_ms  # local time after all four streams
         start_ms = window.history_start_ms
@@ -321,11 +339,11 @@ class BitfinexVenueObservation:
         symbols = sorted({wallet.symbol for wallet in active.wallets if wallet.symbol is not None}
                          | {credit.symbol for credit in active.credits}
                          | window.anchor_symbols | vanished.keys())
-        offers: list[CoveredHistory[OfferHistory]] = []
+        ends: list[_OfferEnds] = []
         credits: list[CoveredHistory[CreditHistory]] = []
         trades: list[CoveredHistory[Trade]] = []
         for symbol in symbols:
-            offers.append(await self._offer_history(
+            ends.append(await self._offer_history(
                 symbol, vanished.get(symbol, []), start_ms=start_ms, end_ms=end_ms, budget=budget))
             credits.append(await self._history(
                 self._rest.fetch_credit_history_observations, normalize_credit_history,
@@ -336,6 +354,7 @@ class BitfinexVenueObservation:
             trades.append(await self._history(
                 self._rest.fetch_trade_observations, normalize_trade,
                 stream="trades", symbol=symbol, start_ms=trade_start_ms, end_ms=end_ms, budget=budget))
+        offers = [end.windowed for end in ends]  # coverage: the windowed query only
         history: list[CoveredHistory[OfferHistory] | CoveredHistory[CreditHistory]] = [*offers, *credits]
         # R-e: one shared requested range; never manufacture a broader range
         # than the covered pager reports. A mismatched range fails closed.
@@ -348,7 +367,8 @@ class BitfinexVenueObservation:
                        if h.credit.mts_created is not None)
         coverage = replace(
             active.coverage,
-            offer_history_complete=history_range_matches and all(h.complete for h in offers),
+            offer_history_complete=(history_range_matches and all(h.complete for h in offers)
+                                    and all(end.resolved for end in ends)),
             credit_history_complete=history_range_matches and all(h.complete for h in credits),
             offer_history_pages=sum(h.pages for h in offers),
             credit_history_pages=sum(h.pages for h in credits),
@@ -362,11 +382,12 @@ class BitfinexVenueObservation:
             history_symbols=frozenset(symbols),
         )
         # An id that is back, or no longer vanished, starts from scratch next time.
-        self._missing_since = {i: t for i, t in self._missing_since.items() if i in self._seen_missing}
-        self._alerted_ends &= self._seen_missing
+        missing = frozenset().union(*(end.missing for end in ends))
+        self._missing_since = {i: t for i, t in self._missing_since.items() if i in missing}
         first = replace(active, coverage=coverage, finished_at_ms=self._clock_ms(),
-                        unconfirmed_ends=tuple(sorted(self._unconfirmed)),
-                        offer_history=tuple(row for h in offers for row in h.rows),
+                        unconfirmed_ends=tuple(sorted(i for end in ends for i in end.unconfirmed)),
+                        offer_history=tuple(row for end in ends
+                                            for row in (*end.windowed.rows, *end.by_id)),
                         credit_history=tuple(row for h in credits for row in h.rows),
                         trades=tuple(row for h in trades for row in h.rows))
         confirmation_started_at_ms = self._clock_ms()

@@ -463,8 +463,10 @@ async def test_offer_by_id_request_shape_batches_and_filters_to_the_requested_id
 
     ids = [str(i) for i in range(1, 28)]
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        found = await BitfinexAuthREST(http=http).fetch_offer_history_by_ids(
+        lookup = await BitfinexAuthREST(http=http).fetch_offer_history_by_ids(
             ctx=_ctx(), symbol="fUST", offer_ids=ids, budget=ObservationRequestBudget(5))
+    found = lookup.found
+    assert lookup.failed == {}
     assert [(len(b["id"]), b["limit"]) for b in bodies] == [(25, 25), (2, 25)]
     assert all(isinstance(i, int) for b in bodies for i in b["id"])
     assert set(found) == set(ids[:24]) | {"26"}  # last id of each batch was not returned
@@ -472,9 +474,25 @@ async def test_offer_by_id_request_shape_batches_and_filters_to_the_requested_id
 
 
 @pytest.mark.asyncio
-async def test_offer_by_id_consumes_budget_and_stops_at_the_cap() -> None:
+async def test_offer_by_id_budget_exhaustion_is_a_cause_per_id_not_an_exception() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: _response([]))) as http:
-        with pytest.raises(ObservationRequestCapError):
-            await BitfinexAuthREST(http=http).fetch_offer_history_by_ids(
-                ctx=_ctx(), symbol="fUST", offer_ids=[str(i) for i in range(1, 30)],
-                budget=ObservationRequestBudget(1))
+        lookup = await BitfinexAuthREST(http=http).fetch_offer_history_by_ids(
+            ctx=_ctx(), symbol="fUST", offer_ids=[str(i) for i in range(1, 30)],
+            budget=ObservationRequestBudget(1))
+    assert lookup.found == {}  # the one batch asked came back empty
+    assert lookup.failed == {str(i): "cap_exhausted" for i in range(26, 30)}
+
+
+@pytest.mark.asyncio
+async def test_offer_by_id_request_failure_marks_the_unasked_ids_and_stops() -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(500, text="boom")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        lookup = await BitfinexAuthREST(http=http).fetch_offer_history_by_ids(
+            ctx=_ctx(), symbol="fUST", offer_ids=[str(i) for i in range(1, 30)])
+    assert len(calls) == 1  # no hammering a failing endpoint
+    assert lookup.failed == {str(i): "request_failed" for i in range(1, 30)}

@@ -149,6 +149,21 @@ class Trade:
 
 @dataclass(frozen=True, slots=True)
 class Coverage:
+    """What the port's reads cover. Two kinds of offer-history evidence, with two contracts:
+
+    * the windowed query (``history_requested_*``, ``offer_history_pages``,
+      ``history_oldest/newest_mts_created``): offers that CHANGED in the requested range
+      (the venue filters offers by MTS_UPDATE), paged to exhaustion. Absence from it proves
+      something only inside that range; the UNKNOWN matcher and R6 read only this.
+    * point lookups by id of the offers that vanished from the active list. Their rows are
+      terminal evidence for exactly those ids and never widen the range, the page counts
+      or the oldest/newest stamps above; absence of an id is not evidence (see
+      ``Observation.unconfirmed_ends``).
+
+    ``offer_history_complete`` is true when the windowed query was exhausted and every
+    vanished id was either found by id or declared in ``Observation.unconfirmed_ends``.
+    """
+
     wallets_complete: bool
     offers_complete: bool
     credits_complete: bool

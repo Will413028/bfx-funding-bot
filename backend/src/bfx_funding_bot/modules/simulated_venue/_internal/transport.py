@@ -271,13 +271,23 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         if fault is FaultKind.HISTORY_ERROR:
             return _json(503, wire.error_body(_ERR_GENERIC, "simulated: history unavailable"))
         request = self._page_request(payload)
-        rows = wire.page(
-            wire.history_rows(
-                self._state, self._config, stream=params["stream"],
-                symbol=params.get("symbol"), now_ms=now,
-            ),
-            request=request, ts=lambda r: r.ts, ident=lambda r: r.ident,
+        candidates = wire.history_rows(
+            self._state, self._config, stream=params["stream"],
+            symbol=params.get("symbol"), now_ms=now,
         )
+        if "id" in payload:
+            # By id (probed on the live account, offers only): exactly those ended offers,
+            # whatever their timestamps; ids the venue does not know are simply absent.
+            if params["stream"] != "offers":
+                raise _BadRequestError("id is supported for offers only")
+            ids = payload["id"]
+            if not isinstance(ids, list) or not all(
+                isinstance(i, int) and not isinstance(i, bool) for i in ids
+            ):
+                raise _BadRequestError("id must be a list of integers")
+            candidates = [r for r in candidates if r.ident in ids]
+            request = wire.PageRequest(None, None, request.limit, request.ascending)
+        rows = wire.page(candidates, request=request, ts=lambda r: r.ts, ident=lambda r: r.ident)
         if fault is FaultKind.HISTORY_OMIT_NEWEST and rows:
             newest = max(rows, key=lambda r: (r.ts, r.ident))
             rows = [r for r in rows if r is not newest]

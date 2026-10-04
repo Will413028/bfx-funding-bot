@@ -64,6 +64,13 @@ AUTO_RESUME_LIMIT_REACHED: Final = "auto_resume_limit_reached"
 # The periodic reconcile has not been accepted for N cycles in a row: the ledger
 # cannot see the venue, so nothing is deployed or repriced until it can.
 RECONCILE_NOT_ACCEPTED: Final = "reconcile_not_accepted"
+# A vanished offer the venue still does not know by id after the grace: the observation
+# carries it as an unconfirmed end (no terminal row) and conservation judges it by the
+# offer's own funding trades. One alert per offer id and process.
+OFFER_END_UNCONFIRMED: Final = "offer_end_unconfirmed"
+# What conservation made of that unconfirmed end once the verdict was written: the fill its
+# trades show (outcome=explained) or undeterminable (the conflict stands, HALT path).
+OFFER_END_JUDGED: Final = "offer_end_judged"
 # One live offer's provenance contradicts itself: its currency places nothing
 # (the other currencies continue) until the contradiction is resolved.
 PROVENANCE_CONFLICT: Final = "provenance_conflict"
@@ -79,6 +86,8 @@ DEDUP_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     FOREIGN_EXPOSURE: ("venue_offer_id",),
     UNKNOWN_QUARANTINE_AGED: ("attempt_id", "minutes"),
     PROVENANCE_CONFLICT: ("symbol", "venue_offer_id"),
+    OFFER_END_UNCONFIRMED: ("venue_offer_id",),
+    OFFER_END_JUDGED: ("venue_offer_id", "outcome"),
 }
 
 # Human titles for the protection triggers the plan names explicitly.

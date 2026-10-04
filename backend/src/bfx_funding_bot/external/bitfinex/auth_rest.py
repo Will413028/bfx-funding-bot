@@ -408,6 +408,16 @@ def parse_funding_trades(raw: Any) -> list[FundingTrade]:
 
 
 BITFINEX_AUTH_REST_BASE = "https://api.bitfinex.com"
+
+
+@dataclass(frozen=True, slots=True)
+class OfferIdLookup:
+    """Point lookups by offer id: rows the venue returned, and ids that could not be asked."""
+
+    found: dict[str, OfferObservation]
+    failed: dict[str, str]  # offer id -> "cap_exhausted" | "request_failed"
+
+
 OFFER_ID_BATCH = 25  # the venue default page size: one by-id response is never truncated
 _FUNDING_OFFERS_PATH = "v2/auth/r/funding/offers"  # /{symbol} appended; no leading slash (sign_request prepends /api/)
 _FUNDING_CREDITS_PATH = "v2/auth/r/funding/credits"
@@ -511,27 +521,38 @@ class BitfinexAuthREST:
     async def fetch_offer_history_by_ids(
         self, *, ctx: AccountContext, symbol: str, offer_ids: Iterable[str],
         budget: ObservationRequestBudget | None = None,
-    ) -> dict[str, OfferObservation]:
+    ) -> OfferIdLookup:
         """Ended offers by venue id (``{"id": [...]}``, probed 2026-10-04): only the
         requested ids that the venue returned. A missing id is absent evidence, never
         a terminal. Batches of ``OFFER_ID_BATCH`` ids, so a response never exceeds the
         venue's default page (25) and cannot be truncated.
+
+        A batch that cannot be asked does not raise: its ids come back in ``failed`` with
+        the cause (``cap_exhausted`` when the shared budget ran out, else ``request_failed``),
+        and later batches are not tried after a failure (the shared rate limit).
         """
         wanted = sorted(set(offer_ids), key=int)
         found: dict[str, OfferObservation] = {}
+        failed: dict[str, str] = {}
         path = f"{_FUNDING_OFFERS_PATH}/{symbol}/hist"
         for i in range(0, len(wanted), OFFER_ID_BATCH):
             batch = wanted[i:i + OFFER_ID_BATCH]
-            if budget is not None:
-                budget.consume()
-            rows = parse_offer_observations(await self._post_signed(
-                ctx=ctx, path=path,
-                body={"id": [int(offer_id) for offer_id in batch], "limit": OFFER_ID_BATCH},
-            ))
+            try:
+                if budget is not None:
+                    budget.consume()
+                rows = parse_offer_observations(await self._post_signed(
+                    ctx=ctx, path=path,
+                    body={"id": [int(offer_id) for offer_id in batch], "limit": OFFER_ID_BATCH},
+                ))
+            except Exception as exc:
+                cause = ("cap_exhausted" if isinstance(exc, ObservationRequestCapError)
+                         else "request_failed")
+                failed.update({offer_id: cause for offer_id in wanted[i:] if offer_id not in found})
+                break
             for row in rows:
                 if row.venue_offer_id in batch and row.symbol == symbol:
                     found.setdefault(row.venue_offer_id, row)
-        return found
+        return OfferIdLookup(found, failed)
 
     async def fetch_credit_history_observations(
         self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,

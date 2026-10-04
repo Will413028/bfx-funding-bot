@@ -55,8 +55,9 @@ async def test_raw_pages_are_newest_first_by_default_and_oldest_first_with_sort_
 async def test_a_full_page_is_returned_while_more_rows_exist_and_end_is_inclusive() -> None:
     w = await make_world(funds={"UST": "1000"})
     ids = await _five_cancelled_offers(w)
-    created = {oid: T0 + n * HOUR for n, oid in enumerate(ids)}
-    page = (await w.post(OFFERS, {"start": 0, "end": created[ids[3]], "limit": 2})).json()
+    # offers filter on MTS_UPDATE (the default): each was cancelled half a spacing after creation
+    updated = {oid: T0 + n * HOUR + HOUR // 2 for n, oid in enumerate(ids)}
+    page = (await w.post(OFFERS, {"start": 0, "end": updated[ids[3]], "limit": 2})).json()
     assert [r[0] for r in page] == [ids[3], ids[2]]  # exactly limit rows, boundary row kept
     assert len((await w.post(OFFERS, {"start": 0, "end": T0 + DAY, "limit": 500})).json()) == 5
     assert (await w.post(OFFERS, {"start": T0 + DAY, "end": T0 + 2 * DAY, "limit": 5})).json() == []
@@ -122,3 +123,32 @@ async def test_invalid_page_arguments_are_a_5xx_error_not_a_crash() -> None:
     for body in ({"limit": "x"}, {"sort": 2}, {"start": True}):
         response = await w.post(OFFERS, body)
         assert response.status_code == 500 and response.json()[0] == "error"
+
+
+async def test_the_default_filter_is_the_probed_one_update_time() -> None:
+    assert HistoryFilter().offers == "update" and config().history_filter.offers == "update"
+
+
+async def test_by_id_returns_exactly_the_requested_ended_offers_whatever_their_timestamps() -> None:
+    w = await make_world(funds={"UST": "1000"})
+    ids = await _five_cancelled_offers(w)
+    live = await w.submit_ok(amount="150")  # still resting: not history
+    w.clock.advance(30 * DAY)  # every row is far outside any recent window
+    got = (await w.post(OFFERS, {"id": [ids[1], ids[3], live, 999_999]})).json()
+    assert sorted(r[0] for r in got) == sorted([ids[1], ids[3]])
+    assert (await w.post(OFFERS, {"id": []})).json() == []
+    lookup = await w.rest.fetch_offer_history_by_ids(
+        ctx=CTX, symbol="fUST", offer_ids=[str(ids[0]), str(live), "999999"])
+    assert sorted(lookup.found) == [str(ids[0])] and lookup.failed == {}
+
+
+@pytest.mark.parametrize("bad", ["x", [1.5], [True], {"a": 1}])
+async def test_by_id_with_a_malformed_list_is_a_5xx_error(bad: object) -> None:
+    w = await make_world(funds={"UST": "1000"})
+    response = await w.post(OFFERS, {"id": bad})
+    assert response.status_code == 500 and response.json()[0] == "error"
+
+
+async def test_by_id_is_for_offers_only() -> None:
+    w = await make_world(funds={"UST": "1000"})
+    assert (await w.post("v2/auth/r/funding/credits/fUST/hist", {"id": [1]})).status_code == 500

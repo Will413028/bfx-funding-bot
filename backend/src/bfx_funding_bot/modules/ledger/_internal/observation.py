@@ -30,7 +30,7 @@ from bfx_funding_bot.modules.ledger import (
     Scope,
     Wallet,
 )
-from bfx_funding_bot.modules.ledger._internal import history_symbols
+from bfx_funding_bot.modules.ledger._internal import history_symbols, unconfirmed_ends
 from bfx_funding_bot.modules.ledger._internal.basis import previous_basis, write_basis
 from bfx_funding_bot.modules.ledger._internal.clock import lock_scope
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
@@ -81,38 +81,29 @@ def _decimal(value: Decimal) -> str:
     return "0" if value == 0 else format(value.normalize(), "f")
 
 
-def _json_raw(value: object) -> object:
-    """JSON-column form of venue raw evidence; Decimal digits are kept as the wire had them.
+def _check_json(value: object) -> None:
+    """Raw venue evidence must already be JSON: the adapter owns its encoding.
 
-    The adapter decodes the venue exactly (``parse_float=Decimal``) and a JSON
-    column cannot hold a Decimal, so the persistence boundary writes each as a
-    plain string (``format(v, "f")``, never normalized: ``-150.0`` stays
-    ``-150.0``). Anything else that is not JSON-representable is refused.
+    A Decimal is refused, not converted: the port type says ``JsonObject``, and the only
+    converter lives where the wire format is known (``venue_observation``).
     """
-    if isinstance(value, Decimal):
-        if not value.is_finite():
-            raise ValueError("non-finite number in raw venue evidence")
-        return format(value, "f")
     if value is None or isinstance(value, (str, bool, int)):
-        return value
+        return
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("non-finite number in raw venue evidence")
-        return value
+        return
     if isinstance(value, dict):
         if not all(isinstance(key, str) for key in value):
             raise ValueError("raw venue evidence has a non-string key")
-        return {key: _json_raw(item) for key, item in value.items()}
+        for item in value.values():
+            _check_json(item)
+        return
     if isinstance(value, (tuple, list)):
-        return [_json_raw(item) for item in value]
+        for item in value:
+            _check_json(item)
+        return
     raise ValueError(f"raw venue evidence is not JSON-representable: {type(value).__name__}")
-
-
-def _row[T](item: T) -> dict[str, object]:
-    """Column values of a ledger fact, with ``raw`` made JSON-safe."""
-    values: dict[str, object] = asdict(item)  # type: ignore[call-overload]
-    values["raw"] = _json_raw(values["raw"])
-    return values
 
 
 def _nonnegative(value: Decimal | None) -> bool:
@@ -197,7 +188,7 @@ def _validate(observation: Observation) -> None:
             or (offer.mts_updated is not None and offer.mts_updated < 0)
         ):
             raise ValueError("invalid offer")
-        _json_raw(offer.raw)
+        _check_json(offer.raw)
     for credit in (*observation.credits, *(item.credit for item in observation.credit_history)):
         if (
             credit.source_kind not in ("credit", "loan")
@@ -214,7 +205,7 @@ def _validate(observation: Observation) -> None:
             )
         ):
             raise ValueError("invalid credit or loan")
-        _json_raw(credit.raw)
+        _check_json(credit.raw)
     if any(
         item.occurred_at_ms < 0 or item.terminal_kind not in OFFER_TERMINAL_KINDS
         for item in observation.offer_history
@@ -339,8 +330,8 @@ async def accept_observation(
             evidence={
                 history_symbols.KEY: history_symbols.encode(coverage.history_symbols),
                 "confirmation_started_at_ms": confirmation_started_at_ms,
-                # Audit only: the verdict reads them from the accepted observation, in memory.
-                "unconfirmed_offer_ends": sorted(first.unconfirmed_ends),
+                # Read back by the basis (conservation), like history_symbols above.
+                unconfirmed_ends.KEY: unconfirmed_ends.encode(first.unconfirmed_ends),
                 "first_page_counts": {
                     "wallet": coverage.wallet_pages,
                     "offer": coverage.offer_pages,
@@ -361,11 +352,11 @@ async def accept_observation(
         session.add(LedgerObservationWalletRow(observation_id=observation_id, **asdict(wallet)))
     for offer in _unique(first.offers, lambda x: x.venue_offer_id).values():
         session.add(
-            LedgerObservationOfferRow(id=uuid4(), observation_id=observation_id, **_row(offer))
+            LedgerObservationOfferRow(id=uuid4(), observation_id=observation_id, **asdict(offer))
         )
     for credit in _unique(first.credits, lambda x: (x.source_kind, x.venue_credit_id)).values():
         session.add(
-            LedgerObservationCreditRow(id=uuid4(), observation_id=observation_id, **_row(credit))
+            LedgerObservationCreditRow(id=uuid4(), observation_id=observation_id, **asdict(credit))
         )
     for trade in _unique(first.trades, lambda x: x.trade_id).values():
         session.add(LedgerObservationTradeRow(observation_id=observation_id, **asdict(trade)))
@@ -379,7 +370,7 @@ async def accept_observation(
                 observation_id=observation_id,
                 terminal_kind=item.terminal_kind,
                 occurred_at_ms=item.occurred_at_ms,
-                **_row(item.offer),
+                **asdict(item.offer),
             )
         )
         previous = offer_history.get(item.offer.venue_offer_id)
@@ -393,7 +384,7 @@ async def accept_observation(
                 observation_id=observation_id,
                 terminal_kind=credit_item.terminal_kind,
                 occurred_at_ms=credit_item.occurred_at_ms,
-                **_row(credit_item.credit),
+                **asdict(credit_item.credit),
             )
         )
         credit_key = (credit_item.credit.source_kind, credit_item.credit.venue_credit_id)
@@ -407,9 +398,7 @@ async def accept_observation(
     if accepted:
         await _mirror_offers(session, scope, observation_id, first, offer_history)
         await _mirror_credits(session, scope, observation_id, first, credit_history)
-        await write_basis(
-            session, scope, observation_id, unconfirmed_ends=frozenset(first.unconfirmed_ends)
-        )
+        await write_basis(session, scope, observation_id)
     return Acceptance(
         "accepted" if accepted else "fenced", observation_id, first_digest, confirmation_digest
     )

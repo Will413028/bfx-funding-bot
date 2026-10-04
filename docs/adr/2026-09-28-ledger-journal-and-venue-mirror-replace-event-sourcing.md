@@ -135,7 +135,7 @@ D7'' 放棄 S2 前 live 新資料持續觀測的理由之一是 shadow 基礎設
   - **選 B**：窗口改依 MTS_UPDATE，消失的 mirror offer 依 id 查終態。
   - **查不到終態時**（venue 沒回、請求失敗、超過請求上限或無法解析），在本 process 內從第一次查不到起寬限 120 秒，期間該 symbol 維持 incomplete、每輪重試。
   - **寬限過後**，以本次 observation 的 funding trades 依 OFFER_ID 精確定出成交量：定得出來就照常對帳，單純撤單成交為 0；定不出或對不上，就走既有的 `unexplained_lending` → HALT → 條件解除後自動恢復（[2026-09-26-auto-halt-resumes-when-condition-clears](2026-09-26-auto-halt-resumes-when-condition-clears.md)）。
-  - **mirror**：不寫假的終態，仍然「缺席不證明終態」。這類 offer 的狀態是「推定結束、未確認」，記錄在 basis 的證據裡。
+  - **mirror**：不寫假的終態，仍然「缺席不證明終態」。這類 offer 的狀態是「推定結束、未確認」，其 id 記在 accepted observation 的證據裡，basis 從那裡讀回。
 - **Trade-off**：
   - 放棄的做法：凍結帳戶（違反放貸全自動，venue 一旦不回應就永久停擺）；區間對帳（放寬逐筆精確對帳，還要改兩條 quarantine 規則）；縮小 trip 範圍（等於拿掉第 3 級 HALT）。
   - 換到的：結果仍是逐筆精確對帳，而且只用既有的保護機制。
@@ -143,5 +143,5 @@ D7'' 放棄 S2 前 live 新資料持續觀測的理由之一是 shadow 基礎設
   - 120 秒取自 UNKNOWN settle 窗口；venue 寫入歷史的延遲尚未量測。
 - **重新評估條件**：
   - 寬限後的 fallback 每週超過 1 次：量測 history 延遲，調整寬限。
-  - trades 定不出量（basis 證據記為 `undeterminable`）反覆出現：重新評估隔離方案。
+  - trades 定不出量反覆出現（`offer_end_judged` 告警帶 `undeterminable`；結果可由已存的 observation 與 basis 重算）：重新評估隔離方案。
   - Bitfinex 改變 by-id 行為或歷史保留期。

@@ -12,9 +12,10 @@ possibility), and the by-id path must make both pass.
 
 Mutations (apply one at a time, run this file, revert):
 
-* ``_json_raw`` removed from ``_row`` (observation.py): ``test_fractional_raw_*``,
-  every flow test (TypeError at flush).
-* ``_json_raw`` uses ``value.normalize()``: ``test_fractional_raw_*`` (``-150.0``).
+* the adapter's ``_json_safe`` removed (venue_observation): every flow test (the ledger refuses
+  the Decimal raw); ``_json_safe`` using ``normalize()``: the adapter unit test (``-150.0``).
+* the ledger converts a Decimal instead of rejecting it (``_check_json``):
+  ``test_validate_refuses_raw_that_is_not_json_*``.
 * by-id fetch skipped (venue_observation ``_offer_history``): the ``ends`` flow tests.
 * a missing by-id row treated as terminal/complete: ``test_a_vanished_offer_the_venue_does_not_return_*``.
 * offer pager back to MTS_CREATE (auth_rest): the ``update`` pager unit test.
@@ -57,16 +58,18 @@ CTX = AccountContext(str(SCOPE.exchange_account_id), Credentials("K", "S"), Deci
 
 # --- F1 -----------------------------------------------------------------------------------
 
-RAW = {"row": [7, Decimal("0.00021"), Decimal("-150.0"), [Decimal("1.50"), None, "x"],
-               {"k": Decimal("2.50")}, 3, True]}
-EXPECTED_RAW = {"row": [7, "0.00021", "-150.0", ["1.50", None, "x"], {"k": "2.50"}, 3, True]}
+# The adapter hands the ledger JSON (exact decimals as strings); the ledger stores what it gets
+# and refuses anything that is not JSON, Decimal included.
+JSON_RAW = {"row": [7, "0.00021", "-150.0", ["1.50", None, "x"], {"k": "2.50"}, 3, True]}
+DECIMAL_RAW = {"row": [7, Decimal("0.00021"), Decimal("-150.0"), [Decimal("1.50"), None, "x"],
+                       {"k": Decimal("2.50")}, 3, True]}
 
 
-def _with_decimal_raw() -> Any:
-    offer = replace(_offer("o1", "100", "40"), raw=RAW)
-    ended = replace(_offer("o2", "10", "0"), raw=RAW)
-    credit = replace(_credit("c1", "60", opening=101_100), raw=RAW)
-    closed = replace(_credit("c2", "5", opening=101_100), raw=RAW)
+def _with_raw(raw: Any) -> Any:
+    offer = replace(_offer("o1", "100", "40"), raw=raw)
+    ended = replace(_offer("o2", "10", "0"), raw=raw)
+    credit = replace(_credit("c1", "60", opening=101_100), raw=raw)
+    closed = replace(_credit("c2", "5", opening=101_100), raw=raw)
     return replace(
         _observation("900", offers=(offer,), credits=(credit,),
                      history=(OfferHistory(ended, "executed", 101_500),)),
@@ -75,24 +78,26 @@ def _with_decimal_raw() -> Any:
 
 
 @pytest.mark.asyncio
-async def test_fractional_raw_persists_and_reads_back_with_exact_digits(book) -> None:  # noqa: F811
-    assert await book.accept(_with_decimal_raw()) == "accepted"
+async def test_json_raw_is_stored_and_read_back_exactly_in_all_four_tables(book) -> None:  # noqa: F811
+    assert await book.accept(_with_raw(JSON_RAW)) == "accepted"
     async with book.factory() as session:
         for table in ("ledger_observation_offer", "ledger_observation_credit",
                       "ledger_observation_offer_history", "ledger_observation_credit_history"):
             raws = (await session.execute(text(f"SELECT raw FROM {table}"))).scalars().all()
-            assert raws == [EXPECTED_RAW], table
+            assert raws == [JSON_RAW], table
 
 
-def test_digest_is_unchanged_by_the_persistence_encoding() -> None:
+def test_digest_is_unchanged_by_this_work() -> None:
     """The digest keeps its own (normalizing) encoding: pinned from the code before F1."""
-    assert digest(_with_decimal_raw()) == (
+    assert digest(_with_raw(DECIMAL_RAW)) == (
         "c4ff82722f1ea135e0af130620991181018e5272e8d001b918b59e194ad2308b")
 
 
-@pytest.mark.parametrize("bad", [{"x": object()}, {"x": Decimal("NaN")}, {"x": float("inf")},
+@pytest.mark.parametrize("bad", [{"x": object()}, {"x": Decimal("1.5")}, {"x": [Decimal("0")]},
+                                 {"x": Decimal("NaN")}, {"x": float("inf")},
                                  {"x": {1: "int key"}}, {"x": {"set"}}])
-def test_validate_refuses_raw_that_is_not_json_representable(bad: dict[str, Any]) -> None:
+def test_validate_refuses_raw_that_is_not_json_and_never_converts_a_decimal(
+        bad: dict[str, Any]) -> None:
     from bfx_funding_bot.modules.ledger._internal.observation import _validate
 
     for observation in (
@@ -214,7 +219,6 @@ async def cycle(ledger: Any, venue: Venue, *, request_cap: int = 48,
             clock_ms=lambda: venue.now, request_cap=request_cap)
         if venue.port is not None and not restart:
             port._missing_since = venue.port._missing_since
-            port._alerted_ends = venue.port._alerted_ends
         venue.port = port
         first, confirmation, confirmation_started = await port.observe(SCOPE, handle.started_at_ms, window)
     async with ledger.factory.begin() as session:
@@ -285,8 +289,8 @@ async def test_a_vanished_offer_the_venue_does_not_return_is_incomplete_then_con
 
 @pytest.mark.asyncio
 async def test_request_cap_exceeded_is_incomplete_then_converges(book) -> None:  # noqa: F811
-    venue = Venue()
-    offer_id = await rested_offer(book, venue, filter_field="update")
+    venue = Venue("create")  # the window cannot see the old offer, so the lookup is needed
+    offer_id = await rested_offer(book, venue, filter_field="create")
     venue.cancel(offer_id)
     before = await _accepted_count(book)
     # cap 9 -> 5 history slots after the confirmation reserve: 4 active reads + the window
@@ -376,11 +380,16 @@ async def test_after_the_grace_a_plain_cancel_with_no_trades_is_conserved_and_no
             LedgerObservationRow.id == book.observation_id))
         assert stored["unconfirmed_offer_ends"] == [str(offer_id)]
     unconfirmed = [f for event, f in emitted if event == "offer_end_unconfirmed"]
-    assert [(f["venue_offer_id"], f["symbol"]) for f in unconfirmed] == [(str(offer_id), "fUST")]
+    assert [(f["venue_offer_id"], f["symbol"], f["cause"]) for f in unconfirmed] == [
+        (str(offer_id), "fUST", "not_returned")]
+    # after the verdict: what the trades-only rule made of it, with the verdict it fed
+    judged = [f for event, f in emitted if event == "offer_end_judged"]
+    assert [(f["venue_offer_id"], f["outcome"], f["filled"], f["verdict"]) for f in judged] == [
+        (str(offer_id), "explained", "0", "conserved")]
     # the offer left P's live set: later cycles neither ask for it nor alert again
     venue.now += 60_000
     assert (await cycle(book, venue))[0] == "accepted"
-    assert len([1 for event, _ in emitted if event == "offer_end_unconfirmed"]) == 1
+    assert len([1 for event, _ in emitted if event == "offer_end_unconfirmed"]) == 1  # left the live set
     assert (await verdict(book)).conservation == "conserved"
 
 
@@ -505,3 +514,47 @@ def test_validate_refuses_malformed_unconfirmed_ends(ends: tuple[str, ...]) -> N
 
     with pytest.raises(ValueError, match="unconfirmed"):
         _validate(replace(_observation("1"), unconfirmed_ends=ends))
+
+
+# --- the basis is a function of stored rows -------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_recomputing_the_basis_from_stored_rows_gives_the_same_verdict(book) -> None:  # noqa: F811
+    """``unconfirmed_ends`` is read back from the observation's evidence, not carried in memory."""
+    from bfx_funding_bot.modules.ledger._internal import unconfirmed_ends
+    from bfx_funding_bot.modules.ledger._internal.basis import write_basis
+
+    await cons.accept(book, _observation("900", offers=(_offer("web", "100"),)), at=20_000)
+    await cons.accept(book, _vanished(trades=(_trade("web", "60", mts_create=29_000),), credit="60"),
+                      at=30_000)
+    assert book.observation_id is not None
+    columns = "symbol, conservation, lent_unexplained, foreign_executed, fill_conflicts"
+    async with book.factory() as session:
+        evidence = await session.scalar(select(LedgerObservationRow.evidence).where(
+            LedgerObservationRow.id == book.observation_id))
+        assert unconfirmed_ends.decode(evidence) == {"web"}
+        stored = (await session.execute(text(
+            f"SELECT {columns} FROM accepted_capital_basis_symbol s "
+            "JOIN accepted_capital_basis b ON b.id = s.basis_id WHERE b.observation_id = :o "
+            "ORDER BY symbol"), {"o": book.observation_id})).all()
+    assert any(row[1] == "foreign_lending" and row[4] == 0 for row in stored)  # E explained it
+    async with book.factory() as session:
+        # A scratch transaction (rolled back): drop the basis as an owner would and write it
+        # again from the stored rows alone.
+        await session.execute(text("SET LOCAL session_replication_role = replica"))
+        for table in ("accepted_capital_basis_credit_cell", "accepted_capital_basis_credit",
+                      "accepted_capital_basis_cell", "accepted_capital_basis_attempt",
+                      "accepted_capital_basis_quarantine", "accepted_capital_basis_symbol"):
+            await session.execute(text(
+                f"DELETE FROM {table} WHERE basis_id IN "
+                "(SELECT id FROM accepted_capital_basis WHERE observation_id = :o)"),
+                {"o": book.observation_id})
+        await session.execute(text("DELETE FROM accepted_capital_basis WHERE observation_id = :o"),
+                              {"o": book.observation_id})
+        await write_basis(session, SCOPE, book.observation_id)
+        again = (await session.execute(text(
+            f"SELECT {columns} FROM accepted_capital_basis_symbol s "
+            "JOIN accepted_capital_basis b ON b.id = s.basis_id WHERE b.observation_id = :o "
+            "ORDER BY symbol"), {"o": book.observation_id})).all()
+        await session.rollback()
+    assert again == stored

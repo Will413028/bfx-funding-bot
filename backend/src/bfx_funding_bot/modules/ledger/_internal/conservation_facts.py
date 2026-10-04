@@ -30,7 +30,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -58,6 +60,18 @@ from bfx_funding_bot.modules.ledger.tables import (
 )
 
 ZERO = Decimal(0)
+
+
+@dataclass(frozen=True, slots=True)
+class OfferEndOutcome:
+    """What the trades-only rule made of one unconfirmed offer end (a pure function of the
+    stored observation, so an audit can recompute it): ``explained`` with the fill the trades
+    show, or ``undeterminable`` (the conflict stays)."""
+
+    venue_offer_id: str
+    symbol: str
+    outcome: Literal["explained", "undeterminable"]
+    filled: Decimal | None
 
 
 def credit_key(
@@ -98,10 +112,10 @@ async def symbol_verdicts(
     provenance: Mapping[str, set[UUID]],
     quarantines: Sequence[UUID],
     unconfirmed_ends: Collection[str] = frozenset(),
-) -> dict[str, ConservationVerdict]:
+) -> tuple[dict[str, ConservationVerdict], list[OfferEndOutcome]]:
     """Each wallet symbol's verdict; a symbol without a row in P is a baseline."""
     if previous is None:
-        return {name: conservation_verdict(None, {}, []) for name in symbols}
+        return {name: conservation_verdict(None, {}, []) for name in symbols}, []
     prior_symbols = set(
         await session.scalars(
             select(AcceptedCapitalBasisSymbolRow.symbol).where(
@@ -161,6 +175,7 @@ async def symbol_verdicts(
     )
 
     fills: dict[str, list[OfferFill]] = defaultdict(list)
+    outcomes: list[OfferEndOutcome] = []
     for offer_id in sorted(ids):
         symbol: str
         original: Decimal | None
@@ -185,6 +200,9 @@ async def symbol_verdicts(
                 left = before[offer_id].amount_remaining - possible[offer_id]
                 if covers_upper and possible[offer_id] == certain[offer_id] and left >= 0:
                     original, remaining = before[offer_id].amount_original, left
+                    outcomes.append(OfferEndOutcome(offer_id, symbol, "explained", possible[offer_id]))
+                else:
+                    outcomes.append(OfferEndOutcome(offer_id, symbol, "undeterminable", None))
         start_remaining = before[offer_id].amount_remaining if offer_id in before else original
         foreign = not provenance.get(offer_id) and offer_id not in held
         if start_remaining is None or remaining is None:
@@ -222,7 +240,7 @@ async def symbol_verdicts(
             base = before_amounts.get(key, ZERO)
             increase = max(ZERO, merged.get(key, ZERO) - base)
             merged[key] = base + max(increase, amount)
-    return {
+    verdicts = {
         name: conservation_verdict(
             prior.get(name, {}) if name in prior_symbols else None,
             current.get(name, {}),
@@ -230,6 +248,7 @@ async def symbol_verdicts(
         )
         for name in symbols
     }
+    return verdicts, outcomes
 
 
 __all__ = ["credit_key", "symbol_verdicts"]
