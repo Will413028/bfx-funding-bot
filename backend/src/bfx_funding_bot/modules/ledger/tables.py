@@ -208,6 +208,9 @@ class LedgerObservationRow(Base):
     query_finished_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     confirmation_finished_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     accept_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # ``legacy_seed``: the one-time closure seed, owner-written only (never by a runtime role,
+    # never evidence of a resolution); every runtime observation is ``venue``.
+    origin: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'venue'"))
     wallets_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
     offers_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
     credits_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -241,11 +244,20 @@ class LedgerObservationRow(Base):
             "confirmation_finished_at_ms >= query_finished_at_ms AND accept_revision >= 0",
             name="ck_ledger_observation_order",
         ),
+        CheckConstraint("origin IN ('venue', 'legacy_seed')", name="ck_ledger_observation_origin"),
         CheckConstraint(
-            "NOT accepted OR (wallets_complete AND "
+            "NOT accepted OR origin <> 'venue' OR (wallets_complete AND "
             "offers_complete AND credits_complete AND loans_complete AND "
             "offer_history_complete AND credit_history_complete AND trades_complete)",
             name="ck_ledger_observation_acceptance",
+        ),
+        CheckConstraint(
+            "origin <> 'legacy_seed' OR (accepted AND NOT wallets_complete AND "
+            "NOT offer_history_complete AND NOT credit_history_complete AND "
+            "NOT trades_complete AND trades_requested_start_ms IS NULL AND "
+            "history_requested_start_ms IS NULL AND history_oldest_mts_created IS NULL AND "
+            "offer_history_pages IS NULL AND credit_history_pages IS NULL)",
+            name="ck_ledger_observation_seed",
         ),
         CheckConstraint(
             "(trades_requested_start_ms IS NULL) = (trades_requested_end_ms IS NULL) AND "
@@ -598,10 +610,11 @@ class SubmissionAttemptJournalRow(Base):
         ),
         nullable=False,
     )
-    policy_revision_id: Mapped[UUID] = mapped_column(
+    # NULL only for a seeded attempt (the legacy authorizing revision was never stored).
+    policy_revision_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("capital_policy_revisions.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
     )
     authorization_evidence: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
     seed_provenance: Mapped[dict[str, Any] | None] = mapped_column(_JSON)
@@ -634,6 +647,10 @@ class SubmissionAttemptJournalRow(Base):
         CheckConstraint(
             "attempt_seq >= 0 AND started_at_ms >= 0",
             name="ck_submission_attempt_nonnegative",
+        ),
+        CheckConstraint(
+            "policy_revision_id IS NOT NULL OR seed_provenance IS NOT NULL",
+            name="ck_submission_attempt_policy_or_seed",
         ),
         CheckConstraint(
             "intended_amount >= 0 AND intended_amount < 'Infinity'::numeric",
