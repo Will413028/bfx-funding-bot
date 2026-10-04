@@ -375,7 +375,15 @@ _FILTER_STATES = {
     "capital_policy_requests": ("requested", "applied"),
     "trading_control_requests": ("requested", "applied"),
 }
-_ALL_SOURCES = [table for table, _ in LEGACY_SCOPE_SOURCES] + list(LEDGER_SCOPE_TABLES)
+# Spelled out (not read from the module) so dropping a source from the inventory fails here.
+_ALL_SOURCES = [
+    "capital_policy_heads", "capital_snapshots", "submission_attempts", "execution_uncertainties",
+    "offer_claims", "trading_state", "uncertainty_resolution_requests", "capital_policy_requests",
+    "trading_control_requests", "capital_command_clock", "ledger_observation_query",
+    "ledger_observation", "venue_offer_mirror", "venue_credit_mirror",
+    "submission_attempt_journal", "quarantine_opening", "execution_resolution_journal",
+    "accepted_capital_basis",
+]  # fmt: skip
 
 
 def _plant(world: World, table: str, account: UUID, state: str | None) -> None:
@@ -459,6 +467,7 @@ async def test_ledger_scope_tables_cover_every_scope_bearing_ledger_table() -> N
         if {"exchange_account_id", "deployment_environment"} <= {c.name for c in table.columns}
     }
     assert scoped == set(LEDGER_SCOPE_TABLES)
+    assert set(_ALL_SOURCES) == {t for t, _ in LEGACY_SCOPE_SOURCES} | set(LEDGER_SCOPE_TABLES)
 
 
 async def test_missing_inventory_table_is_a_violation_not_a_skip(world) -> None:
