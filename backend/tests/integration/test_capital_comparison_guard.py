@@ -267,6 +267,10 @@ _UNSAFE: list[tuple[str, str, str, str]] = [
      "THEN CREATE ROLE bfx_bot NOLOGIN; END IF; END $$; GRANT bfx_bot TO {login}", "bfx_bot"),
     ("superuser", "role_attribute_privileged", "ALTER ROLE {login} SUPERUSER", "{login}"),
     ("login_inherits", "login_inherits", "ALTER ROLE {login} INHERIT", "{login}"),
+    # PG16+: inheritance is per grant, so a NOINHERIT LOGIN can still inherit through one grant.
+    ("login_grant_inherits", "login_inherits",
+     "REVOKE bfx_cutover_reader FROM {login}; "
+     "GRANT bfx_cutover_reader TO {login} WITH INHERIT TRUE, SET TRUE", "{login}"),
     ("reader_can_login", "reader_can_login", "ALTER ROLE bfx_cutover_reader LOGIN",
      "bfx_cutover_reader"),
     ("security_definer", "security_definer_executable",

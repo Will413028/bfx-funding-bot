@@ -107,7 +107,7 @@ bfx_cutover_reader` 並自行檢查同一份清單（`apps/capital_comparison_gu
 2. 從 LOGIN 沿 `pg_auth_members` 遞迴可達的 role 恰為 {LOGIN, 群組}（`role_closure_unexpected`）。
 3. 兩者的 `rolsuper`、`rolcreaterole`、`rolcreatedb`、`rolbypassrls`、`rolreplication` 都是 false
    （`role_attribute_privileged`）；群組 `rolcanlogin=false`（`reader_can_login`），LOGIN
-   `rolinherit=false`（`login_inherits`）；manifest 的 LOGIN 不得是群組本身（`login_is_reader`）。
+   `rolinherit=false`，且它對群組的那筆 grant `inherit_option=false`（`login_inherits`）；manifest 的 LOGIN 不得是群組本身（`login_is_reader`）。
 4. 可達 role 對每個非系統 schema（排除 `pg_catalog`、`information_schema`、`pg_toast*`、`pg_temp*`；
    含 `auth`，掃 `pg_class`，不用固定清單）的每個 relation 沒有 INSERT／UPDATE／DELETE／TRUNCATE／
    TRIGGER／MAINTAIN（`table_write_privilege`），沒有任何欄位 INSERT／UPDATE
@@ -122,6 +122,9 @@ bfx_cutover_reader` 並自行檢查同一份清單（`apps/capital_comparison_gu
 ```sql
 SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, rolreplication
   FROM pg_roles WHERE rolname IN ('bfx_cutover_attest', 'bfx_cutover_reader');
+SELECT m.inherit_option FROM pg_auth_members m  -- 必須為 false
+  JOIN pg_roles l ON l.oid = m.member JOIN pg_roles g ON g.oid = m.roleid
+ WHERE l.rolname = 'bfx_cutover_attest' AND g.rolname = 'bfx_cutover_reader';
 WITH RECURSIVE closure(oid) AS (
   SELECT oid FROM pg_roles WHERE rolname = 'bfx_cutover_attest'
   UNION SELECT m.roleid FROM pg_auth_members m JOIN closure c ON m.member = c.oid)

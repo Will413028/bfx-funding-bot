@@ -24,9 +24,6 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 READER_ROLE: Final = "bfx_cutover_reader"
-# Every non-system schema is scanned (``auth`` holds the web sessions and roles, so a write
-# there forges the operator path); TEMP is deliberately not checked (restore drill grants it
-# and a temp object cannot reach another session).
 FORBIDDEN_EXTENSIONS: Final = ("dblink", "postgres_fdw")
 _PRIVILEGED_ATTRIBUTES: Final = (
     "rolsuper",
@@ -163,6 +160,9 @@ _CLOSURE = (
     "SELECT r.oid FROM pg_roles r WHERE r.rolname = session_user "
     "UNION SELECT m.roleid FROM pg_auth_members m JOIN closure c ON m.member = c.oid) "
 )
+# Every non-system schema is scanned (``auth`` holds the web sessions and roles, so a write
+# there forges the operator path); TEMP is deliberately not checked (restore drill grants it
+# and a temp object cannot reach another session).
 _NOT_SYSTEM = (
     "n.nspname NOT IN ('pg_catalog', 'information_schema') "
     "AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp%'"
@@ -278,7 +278,16 @@ async def verify_connection(session: AsyncSession, plan: ConnectionPlan) -> None
     by_name = {row[0]: row for row in roles}
     if by_name[READER_ROLE][1]:
         raise GuardRejectedError("reader_can_login", READER_ROLE)
-    if by_name[plan.user][2]:
+    # Since PG16 inheritance is decided per grant; rolinherit only sets the default for new ones.
+    inheriting_grant = await session.scalar(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM pg_auth_members m "
+            "JOIN pg_roles l ON l.oid = m.member JOIN pg_roles g ON g.oid = m.roleid "
+            "WHERE l.rolname = session_user AND g.rolname = :reader AND m.inherit_option)"
+        ),
+        {"reader": READER_ROLE},
+    )
+    if by_name[plan.user][2] or inheriting_grant:
         raise GuardRejectedError("login_inherits", plan.user)
     for reason, query in _PRIVILEGE_SCANS:
         parameters: dict[str, object] = {}
