@@ -84,7 +84,7 @@ def _build_tracker(client: httpx.AsyncClient, axiom: _EventCapture,
         registry = OfferRegistry(clock=lambda: 5000)
     return RestPollingFillTracker(
         http=client, event_sink=axiom, probe=probe,
-        phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
+        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default", poll_interval_s=0.01, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus or DomainEventBus(), persister=NoopEventPersister(), account_id="default"))
 
 

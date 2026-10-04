@@ -13,7 +13,7 @@ def _envelope_dict(**overrides):
     base = {
         "timestamp": datetime.now(UTC).isoformat(),
         "level": "info",
-        "phase": "paper",
+        "phase": "shadow",
         "strategy": "mean_reversion",
         "cell": "fUSD_a30",
         "event_type": "signal",
@@ -32,7 +32,7 @@ def _envelope_dict(**overrides):
 def test_envelope_accepts_valid_signal_event():
     env = Envelope.model_validate(_envelope_dict())
     assert env.event_type == EventType.SIGNAL
-    assert env.phase == Phase.PAPER
+    assert env.phase == Phase.SHADOW
 
 
 def test_envelope_rejects_invalid_phase():

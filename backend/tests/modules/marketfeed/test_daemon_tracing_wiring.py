@@ -27,6 +27,7 @@ from bfx_funding_bot.modules.observability.tracing import (
     TracingSubmitMiddleware,
 )
 from tests.modules.marketfeed.account_test_helpers import (
+    boot_live_construction,
     configure_account_env,
     configure_live_wiring_env,
     seed_exchange_account,
@@ -86,48 +87,36 @@ async def test_build_daemon_default_tracing_disabled_nothing_wrapped(
     tmp_path: Path,
     httpx_mock: HTTPXMock,
 ) -> None:
-    monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
-    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
-    monkeypatch.delenv("BFX_EXECUTOR", raising=False)
     monkeypatch.delenv("BFX_OTEL_ENABLED", raising=False)
-    await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="tracing_off.db")
-
-    from bfx_funding_bot.apps.bot import build_daemon
-    daemon = await build_daemon(
-        cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
+    daemon, engine = await boot_live_construction(
+        monkeypatch, tmp_path, httpx_mock, name="tracing_off",
     )
+    await engine.dispose()
 
     assert isinstance(daemon.tracing, DaemonTracing)
     assert daemon.tracing.enabled is False
     # Disabled ⇒ executor chain is EXACTLY the metrics-era stack — no tracing
     # wrapper object anywhere on the money path.
-    assert daemon.smoke_runner is not None
-    assert isinstance(daemon.smoke_runner._executor, MetricsSubmitMiddleware)
+    assert daemon.periodic_reconcile is not None
+    assert isinstance(daemon.periodic_reconcile._deployment._executor, MetricsSubmitMiddleware)
 
 
 @pytest.mark.asyncio
-async def test_build_daemon_paper_tracing_enabled_wraps_submit_outermost(
+async def test_build_daemon_tracing_enabled_wraps_submit_outermost(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     httpx_mock: HTTPXMock,
 ) -> None:
-    monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
-    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
-    monkeypatch.delenv("BFX_EXECUTOR", raising=False)
-    monkeypatch.setenv("BFX_OTEL_ENABLED", "true")
-    await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="tracing_paper.db")
-
-    from bfx_funding_bot.apps.bot import build_daemon
-    daemon = await build_daemon(
-        cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
+    daemon, engine = await boot_live_construction(
+        monkeypatch, tmp_path, httpx_mock, name="tracing_on",
+        extra_env={"BFX_OTEL_ENABLED": "true"},
     )
+    await engine.dispose()
     try:
         assert isinstance(daemon.tracing, DaemonTracing)
         assert daemon.tracing.enabled is True
-        assert daemon.smoke_runner is not None
-        outer = daemon.smoke_runner._executor
+        assert daemon.periodic_reconcile is not None
+        outer = daemon.periodic_reconcile._deployment._executor
         assert isinstance(outer, TracingSubmitMiddleware)
         assert isinstance(outer._inner, MetricsSubmitMiddleware)
     finally:
@@ -148,7 +137,6 @@ async def test_build_daemon_live_tracing_enabled_wraps_reconcile_and_ws(
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
-    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_OTEL_ENABLED", "true")
     configure_live_wiring_env(monkeypatch, tmp_path)

@@ -3,10 +3,10 @@
 Before this existed the daemon exposed only its INPUTS: env vars, yaml files,
 and log lines. That is what made 2026-07-27 possible.
 
-- `BFX_ALLOCATION_CAP_USDT=0` was set to pause the canary. Every configured
-  symbol has an explicit cap in the safety config, so the env scalar bound
-  nothing and lending continued for hours. The value read as "paused"; only the
-  resolution SOURCE would have shown the knob was inert.
+- An env scalar set to 0 was used to pause the canary. Every configured
+  symbol had an explicit cap elsewhere, so the scalar bound nothing and lending
+  continued for hours. The value read as "paused"; nothing reported that the
+  knob was inert.
 - The pause was then "verified" by reading the env var back out of the
   container — checking the input we had just written. That check cannot fail,
   so it proved nothing.
@@ -19,9 +19,8 @@ Two design rules follow, and both are load-bearing:
    real ManualKillGuard, not by re-reading the trading state. If the guard's
    logic changes, this report changes with it; it cannot describe a rule the
    money path does not follow.
-2. **Report applied authority.** Live amounts and per-cell budgets come from
+2. **Report applied authority.** Amounts and per-cell budgets come from
    the canonical capital authority with applied revision/digest and basis.
-   The tier resolver below is retained only for simulation diagnostics.
 
 Read-only throughout: no emit, no state mutation, and the executor is not
 reachable from here.
@@ -42,9 +41,6 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-from bfx_funding_bot.modules.execution.safety.hard_guards import (
-    resolve_for_symbol_with_source,
-)
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillResult
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     CAUSE_OPERATOR,
@@ -75,13 +71,6 @@ MANUAL_KILL_GUARD_NAME = "manual_kill"
 # invented for the report.
 _DEFAULT_PROBE_RATE = 0.0001
 _DEFAULT_PROBE_PERIOD_DAYS = 2
-
-
-class _LedgerProtocol(Protocol):
-    def current_exposure(self, symbol: str) -> Decimal: ...
-    def reserved_exposure(self, symbol: str) -> Decimal: ...
-    def realized_exposure(self, symbol: str) -> Decimal: ...
-    def available_balance(self, symbol: str) -> Decimal: ...
 
 
 class _TradingStateProtocol(Protocol):
@@ -139,15 +128,9 @@ class TradingStatusService:
         self,
         *,
         chain: SafetyGuardChain,
-        exposure: CapitalStatusReads | _LedgerProtocol,
+        exposure: CapitalStatusReads,
         account_ctx: AccountContext,
         cells: list[CellConfig],
-        caps: dict[str, Decimal],
-        default_cap: Decimal,
-        env_fallback_cap: Decimal | None,
-        buffers: dict[str, Decimal],
-        default_buffer: Decimal,
-        env_fallback_buffer: Decimal | None,
         phase: Phase,
         attempts: SubmitAttemptRecorder,
         trading_state: _TradingStateProtocol | None = None,
@@ -156,19 +139,10 @@ class TradingStatusService:
         readiness: TradingReadiness | None = None,
     ) -> None:
         self._chain = chain
-        if phase is Phase.LIVE and not isinstance(exposure, CapitalStatusReads):
-            raise ValueError("live status requires applied capital runtime")
-        # Where exposure comes from: the applied-capital reads, or (simulation only) the
-        # in-memory paper-position projection.
+        # Where exposure comes from: the applied-capital reads.
         self._exposure = exposure
         self._ctx = account_ctx
         self._cells = cells
-        self._caps = caps
-        self._default_cap = default_cap
-        self._env_fallback_cap = env_fallback_cap
-        self._buffers = buffers
-        self._default_buffer = default_buffer
-        self._env_fallback_buffer = env_fallback_buffer
         self._phase = phase
         self._attempts = attempts
         self._trading_state = trading_state
@@ -185,30 +159,16 @@ class TradingStatusService:
 
     def _authority_scope(self) -> dict[str, str | None]:
         # Bind diagnostics to the scope actually supplying capital, not an
-        # ambient env value or phase label. Legacy simulations have no live realm.
-        exposure = self._exposure
-        scope = exposure.scope if isinstance(exposure, CapitalStatusReads) else None
+        # ambient env value or phase label.
+        scope = self._exposure.scope
         return {
-            "account_id": str(scope.exchange_account_id) if scope else self._ctx.account_id,
-            "deployment_environment": scope.deployment_environment if scope else None,
+            "account_id": str(scope.exchange_account_id),
+            "deployment_environment": scope.deployment_environment,
         }
 
     async def snapshot(self) -> dict[str, Any]:
-        exposure = self._exposure
-        symbols: dict[str, dict[str, Any]]
-        env_fallback_cap: dict[str, Any] | None = None
-        env_fallback_buffer: dict[str, Any] | None = None
-        if isinstance(exposure, CapitalStatusReads):
-            symbols = {s: await self._capital_status(exposure, s)
-                       for s in sorted(set(self._symbols) | {"fUST", "fUSD"})}
-        else:
-            symbols = {s: self._symbol_status(exposure, s) for s in self._symbols}
-            env_fallback_cap = self._fallback_status(
-                self._caps, self._env_fallback_cap, self._default_cap, "cap",
-            )
-            env_fallback_buffer = self._fallback_status(
-                self._buffers, self._env_fallback_buffer, self._default_buffer, "buffer",
-            )
+        symbols = {s: await self._capital_status(self._exposure, s)
+                   for s in sorted(set(self._symbols) | {"fUST", "fUSD"})}
         return {
             "phase": self._phase.value,
             **self._authority_scope(),
@@ -223,8 +183,6 @@ class TradingStatusService:
                 for g in self._chain.guards
             ],
             "symbols": symbols,
-            "env_fallback_cap": env_fallback_cap,
-            "env_fallback_buffer": env_fallback_buffer,
             "last_submit_attempt": self._attempts.as_dict(),
             "trading_readiness": self._readiness_dict(),
         }
@@ -315,38 +273,6 @@ class TradingStatusService:
             "scope_error": result.scope_error,
         }
 
-    def _symbol_status(self, ledger: _LedgerProtocol, symbol: str) -> dict[str, Any]:
-        cap = resolve_for_symbol_with_source(
-            self._caps, symbol,
-            env_fallback=self._env_fallback_cap, default=self._default_cap,
-        )
-        buffer = resolve_for_symbol_with_source(
-            self._buffers, symbol,
-            env_fallback=self._env_fallback_buffer, default=self._default_buffer,
-        )
-        available = ledger.available_balance(symbol)
-        # Floor explicitly rather than via max(Decimal("0"), …): max returns its
-        # FIRST argument when the two compare equal, so available=3.00 with
-        # buffer=3 would render "0" while available=3.10/buffer=3 renders "0.10"
-        # — the displayed precision would silently depend on which branch won.
-        headroom = available - buffer.value
-        if headroom < 0:
-            headroom = Decimal("0")
-        return {
-            "cap": {"value": str(cap.value), "source": cap.source},
-            "buffer": {"value": str(buffer.value), "source": buffer.source},
-            "exposure": {
-                "reserved": str(ledger.reserved_exposure(symbol)),
-                "realized": str(ledger.realized_exposure(symbol)),
-                "total": str(ledger.current_exposure(symbol)),
-            },
-            "available_balance": str(available),
-            # Same clamp the reconciler applies when sizing. Zero here means no
-            # offer can be sized at all — which is why an absence of orders is
-            # not evidence that a halt is working.
-            "deployable_headroom": str(headroom),
-        }
-
     async def _capital_status(self, reads: CapitalStatusReads, symbol: str) -> dict[str, Any]:
         scope = reads.scope
         try:
@@ -390,37 +316,6 @@ class TradingStatusService:
             }
         except Exception as exc:
             return {"capital_available": False, "reason": str(exc)}
-
-    def _fallback_status(
-        self, mapping: dict[str, Decimal], env_fallback: Decimal | None,
-        default: Decimal, label: str,
-    ) -> dict[str, Any]:
-        """Does this legacy env scalar bind anything, and if not, why not?
-
-        The 2026-07-27 answer would have been: value 0, binding false, because
-        every configured symbol has an explicit entry.
-        """
-        binding = [
-            s for s in self._symbols
-            if resolve_for_symbol_with_source(
-                mapping, s, env_fallback=env_fallback, default=default,
-            ).source == "env_fallback"
-        ]
-        if env_fallback is None:
-            why = f"env {label} fallback is unset; symbols without an entry use the default"
-        elif binding:
-            why = f"binds {label} for symbols without an explicit entry: {', '.join(binding)}"
-        else:
-            why = (
-                f"every configured symbol has an explicit {label} in the safety "
-                "config, so this value binds nothing"
-            )
-        return {
-            "value": None if env_fallback is None else str(env_fallback),
-            "binding": bool(binding),
-            "binding_symbols": binding,
-            "why": why,
-        }
 
     # ------------------------------------------------------------- dry run
 
@@ -501,9 +396,9 @@ class TradingStatusService:
     ) -> DecisionPayload:
         """A synthetic POST — never a SKIP.
 
-        SKIP short-circuits AllocationCapGuard and BuyingPowerGuard to allowed,
-        so a SKIP-based probe would cheerfully report "nothing blocks" whatever
-        the caps say. The probe has to look like the thing being gated.
+        SKIP short-circuits the capital guards to allowed, so a SKIP-based probe
+        would cheerfully report "nothing blocks" whatever the policy says. The
+        probe has to look like the thing being gated.
         """
         return DecisionPayload(
             decision_outcome=DecisionOutcome.POST,

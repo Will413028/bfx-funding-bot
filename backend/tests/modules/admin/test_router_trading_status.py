@@ -1,6 +1,6 @@
 """Admin router — GET /admin/trading-status and POST /admin/dry-evaluate.
 
-Both endpoints sit behind the same static Bearer token as /admin/smoke-test.
+Both endpoints sit behind the same static Bearer token as /admin/halt.
 Auth is retested here rather than assumed: these expose real-money position and
 balance figures, and /dry-evaluate runs the guard chain on demand.
 """
@@ -41,7 +41,7 @@ class _RaisingStatus(_FakeStatus):
 def _app(status: Any, token: str = "secret") -> FastAPI:
     app = FastAPI()
     app.include_router(build_router(
-        smoke_runner=None, admin_token=token, trading_status=status,
+        admin_token=token, trading_status=status,
     ))
     return app
 
@@ -121,11 +121,10 @@ def test_dry_evaluate_returns_400_for_an_unconfigured_symbol() -> None:
 
 
 def test_endpoints_are_absent_when_no_status_service_is_wired() -> None:
-    """Paper/shadow builds without the service must not 500 — the routes simply
-    do not exist there."""
+    """A build without the service must not 500 — the routes simply do not exist."""
     app = FastAPI()
     app.include_router(build_router(
-        smoke_runner=None, admin_token="secret", trading_status=None,
+        admin_token="secret", trading_status=None,
     ))
     client = TestClient(app)
     assert client.get(
@@ -136,9 +135,8 @@ def test_endpoints_are_absent_when_no_status_service_is_wired() -> None:
     ).status_code == 404
 
 
-def test_smoke_test_route_is_absent_when_no_runner_is_wired() -> None:
-    """The router now serves two independent feature sets; wiring only the
-    status service must not silently expose a broken smoke-test route."""
+def test_smoke_test_route_no_longer_exists() -> None:
+    """The boot smoke runner and its route were removed; nothing answers there."""
     client = TestClient(_app(_FakeStatus()))
     assert client.post(
         "/admin/smoke-test", headers={"Authorization": "Bearer secret"},

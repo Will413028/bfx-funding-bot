@@ -54,7 +54,7 @@ def _resolve_amount(ev: object) -> None:
 
     Exactly one of the two must be provided by the caller. We mirror the value
     into BOTH attributes so `.amount` (canonical) and `.size_usdt` (legacy read
-    path in ledger/smoke_runner) agree until all callsites migrate to `amount`.
+    path in the ledger) agree until all callsites migrate to `amount`.
     """
     amount = getattr(ev, "amount", None)
     size_usdt = getattr(ev, "size_usdt", None)

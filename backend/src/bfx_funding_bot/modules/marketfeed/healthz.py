@@ -37,7 +37,6 @@ from fastapi.responses import JSONResponse
 from bfx_funding_bot.core.health import LIVENESS_THRESHOLDS, HealthProbe
 
 if TYPE_CHECKING:
-    from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
     from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
     from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
     from bfx_funding_bot.modules.observability.metrics import DaemonMetrics
@@ -48,7 +47,6 @@ log = logging.getLogger(__name__)
 def make_app(
     probe: HealthProbe,
     *,
-    smoke_runner: SmokeRunner | None = None,
     admin_token: str | None = None,
     metrics: DaemonMetrics | None = None,
     trading_status: TradingStatusService | None = None,
@@ -56,10 +54,8 @@ def make_app(
 ) -> FastAPI:
     """Build the FastAPI app bound to a given HealthProbe instance.
 
-    The admin router is mounted when `admin_token` is set AND at least one
-    admin dependency is provided; each feature's routes then mount only if its
-    own dependency is present (`smoke_runner` → POST /admin/smoke-test,
-    `trading_status` → GET /admin/trading-status + POST /admin/dry-evaluate).
+    The admin router is mounted when `admin_token` is set AND `trading_status` is
+    provided (GET /admin/trading-status, POST /admin/dry-evaluate, POST /admin/halt).
     With no token, no admin route is exposed at all — trading-status serves
     live balances and positions. Defaults preserve healthz-only behaviour.
 
@@ -118,20 +114,14 @@ def make_app(
             return Response(content=metrics.render(), media_type=metrics.content_type)
         log.info("metrics_endpoint_mounted endpoint=/metrics")
 
-    if admin_token and (smoke_runner is not None or trading_status is not None):
+    if admin_token and trading_status is not None:
         from bfx_funding_bot.modules.admin.router import build_router
-        app.include_router(build_router(
-            smoke_runner=smoke_runner, admin_token=admin_token,
-            trading_status=trading_status,
-        ))
-        log.info(
-            "admin_router_mounted smoke_test=%s trading_status=%s",
-            smoke_runner is not None, trading_status is not None,
-        )
+        app.include_router(build_router(admin_token=admin_token, trading_status=trading_status))
+        log.info("admin_router_mounted trading_status=True")
     else:
         log.info(
-            "admin_router_skipped smoke_runner=%s trading_status=%s admin_token_set=%s",
-            smoke_runner is not None, trading_status is not None, bool(admin_token),
+            "admin_router_skipped trading_status=%s admin_token_set=%s",
+            trading_status is not None, bool(admin_token),
         )
 
     return app
@@ -143,7 +133,6 @@ async def run_healthz_server(
     host: str,
     port: int,
     stop_event: asyncio.Event,
-    smoke_runner: SmokeRunner | None = None,
     admin_token: str | None = None,
     metrics: DaemonMetrics | None = None,
     trading_status: TradingStatusService | None = None,
@@ -158,7 +147,7 @@ async def run_healthz_server(
     sub-tasks per D4 spec).
     """
     app = make_app(
-        probe, smoke_runner=smoke_runner, admin_token=admin_token, metrics=metrics,
+        probe, admin_token=admin_token, metrics=metrics,
         trading_status=trading_status, readiness=readiness,
     )
     config = uvicorn.Config(
@@ -166,7 +155,7 @@ async def run_healthz_server(
         log_level="warning", access_log=False,
         loop="asyncio",
         # uvicorn default is None = wait forever for in-flight connections.
-        # In paper-exit cycle this hung daemon TaskGroup drain indefinitely
+        # In a run-duration exit this hung daemon TaskGroup drain indefinitely
         # (2026-05-21 finding) — bound it so cleanup is guaranteed to make progress.
         timeout_graceful_shutdown=5,
     )

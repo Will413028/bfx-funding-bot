@@ -171,8 +171,7 @@ class BotPorts:
     # The sink for venue hints (WS and REST polling). A ledger sink debounces per instance,
     # so there is one, shared by every producer.
     venue_hint_sink: VenueHintSink
-    # None where nothing lends: paper and shadow.
-    capital: CapitalPorts | None
+    capital: CapitalPorts
     legacy: LegacyExtras | None
 
 
@@ -184,19 +183,16 @@ async def select_bot_ports(
     account_id: str,
     bus: DomainEventBus,
     resync: ResyncChannel,
-    live: bool,
     clock: Callable[[], int],
     max_snapshot_age_ms: int,
 ) -> BotPorts:
     """Both authorities are covered; ``SUPPORTED_AUTHORITIES`` decides which may boot."""
     if authority == "ledger":
-        if not live:
-            raise ValueError("the ledger authority has no simulated composition")
         return _ledger_ports(
             session_factory, scope, account_id, bus, resync, clock, max_snapshot_age_ms,
         )
     return await _legacy_ports(
-        session_factory, scope, account_id, bus, live, clock, max_snapshot_age_ms,
+        session_factory, scope, account_id, bus, clock, max_snapshot_age_ms,
     )
 
 
@@ -261,7 +257,7 @@ def _ledger_ports(
 
 async def _legacy_ports(
     session_factory: async_sessionmaker[AsyncSession], scope: Scope, account_id: str,
-    bus: DomainEventBus, live: bool, clock: Callable[[], int], max_snapshot_age_ms: int,
+    bus: DomainEventBus, clock: Callable[[], int], max_snapshot_age_ms: int,
 ) -> BotPorts:
     env = scope.deployment_environment
     uncertainty_reader = LegacyUncertaintyReader(session_factory)
@@ -296,61 +292,58 @@ async def _legacy_ports(
         if stale > 0:
             paper_ledger.clear_uncertainty(symbol, stale)
 
-    capital: CapitalPorts | None = None
-    if live:
-        runtime = CapitalRuntime(
-            repository=CapitalRepository(
-                account_id=scope.exchange_account_id, environment=env,
-                max_snapshot_age_ms=max_snapshot_age_ms,
-            ),
-            session_factory=session_factory, clock=clock,
+    runtime = CapitalRuntime(
+        repository=CapitalRepository(
+            account_id=scope.exchange_account_id, environment=env,
+            max_snapshot_age_ms=max_snapshot_age_ms,
+        ),
+        session_factory=session_factory, clock=clock,
+    )
+
+    def observation(venue: ObservationVenue) -> ObservationSinks:
+        # One alert per foreign offer across the boot and the runtime reconcile.
+        foreign_exposure = ForeignExposureMonitor()
+
+        def recovery(action_grace_ms: int) -> ObservationSink:
+            return LegacyObservationSink(BootRecovery(
+                store=event_store,
+                session_factory=session_factory,
+                auth_rest=venue.auth_rest,
+                account_ctx=venue.account_ctx,
+                deployment_environment=env,
+                bus=bus,
+                offer_registry=offer_registry,
+                symbols=venue.symbols,
+                uncertainty_handler=paper_ledger.on_reservation_unknown,
+                capital_repository=runtime.repository,
+                protection=venue.protection,
+                foreign_exposure=foreign_exposure,
+                action_grace_ms=action_grace_ms,
+                clock=clock,
+            ), scope)
+
+        return ObservationSinks(
+            boot=recovery(BOOT_GRACE_MS), runtime=recovery(RUNTIME_GRACE_MS),
         )
 
-        def observation(venue: ObservationVenue) -> ObservationSinks:
-            # One alert per foreign offer across the boot and the runtime reconcile.
-            foreign_exposure = ForeignExposureMonitor()
-
-            def recovery(action_grace_ms: int) -> ObservationSink:
-                return LegacyObservationSink(BootRecovery(
-                    store=event_store,
-                    session_factory=session_factory,
-                    auth_rest=venue.auth_rest,
-                    account_ctx=venue.account_ctx,
-                    deployment_environment=env,
-                    bus=bus,
-                    offer_registry=offer_registry,
-                    is_simulated=False,
-                    symbols=venue.symbols,
-                    uncertainty_handler=paper_ledger.on_reservation_unknown,
-                    capital_repository=runtime.repository,
-                    protection=venue.protection,
-                    foreign_exposure=foreign_exposure,
-                    action_grace_ms=action_grace_ms,
-                    clock=clock,
-                ), scope)
-
-            return ObservationSinks(
-                boot=recovery(BOOT_GRACE_MS), runtime=recovery(RUNTIME_GRACE_MS),
-            )
-
-        policy = _legacy_policy_ports(runtime.repository)
-        capital = CapitalPorts(
-            capital_authority=LegacyCapitalAuthority(runtime),
-            scope_lock=policy.scope_lock,
-            policy_store=policy.store,
-            command_boundary=CommandBoundary(
-                scope, session_factory,
-                LegacyCommandJournal(
-                    runtime, date_provider=lambda: datetime.now(UTC).date(),
-                    clock=clock, uncertainty_reader=uncertainty_reader,
-                ),
-                LegacyCommandEffects(persister, bus, paper_ledger.on_reservation_unknown),
+    policy = _legacy_policy_ports(runtime.repository)
+    capital = CapitalPorts(
+        capital_authority=LegacyCapitalAuthority(runtime),
+        scope_lock=policy.scope_lock,
+        policy_store=policy.store,
+        command_boundary=CommandBoundary(
+            scope, session_factory,
+            LegacyCommandJournal(
+                runtime, date_provider=lambda: datetime.now(UTC).date(),
+                clock=clock, uncertainty_reader=uncertainty_reader,
             ),
-            operator_resolution=LegacyOperatorResolution(),
-            deployment_input=LegacyDeploymentInput(),
-            observation=observation,
-            uncertainty_synced=converge_uncertainty,
-        )
+            LegacyCommandEffects(persister, bus, paper_ledger.on_reservation_unknown),
+        ),
+        operator_resolution=LegacyOperatorResolution(),
+        deployment_input=LegacyDeploymentInput(),
+        observation=observation,
+        uncertainty_synced=converge_uncertainty,
+    )
     return BotPorts(
         authority="legacy",
         uncertainty_reader=uncertainty_reader,

@@ -219,7 +219,7 @@ def _make_executor(
         http=http,
         event_sink=_EventCapture(),
         bus=bus,
-        phase=Phase.PAPER,
+        phase=Phase.SHADOW,
         strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUSD"}),
         cell="fUSD_p2",

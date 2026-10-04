@@ -33,7 +33,7 @@ def _ready() -> ReadyToSubmit:
     return ReadyToSubmit(
         decision=_decision(),
         decision_id="d-heartbeat",
-        policy=ExecutionPolicy.PAPER,
+        policy=ExecutionPolicy.BOOK_GUARDED,
         market_snapshot_id="snapshot-heartbeat",
         model_version=None,
         evidence={},

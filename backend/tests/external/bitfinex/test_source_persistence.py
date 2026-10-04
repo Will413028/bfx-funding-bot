@@ -154,7 +154,7 @@ async def test_fill_tracker_release_persisted_before_publish(pg_session_factory)
     )
     tracker = RestPollingFillTracker(
         http=_OneTickHttp(), event_sink=_EventCapture(), probe=HealthProbe(),
-        phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
+        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
         account_id=_ACC_FT, poll_interval_s=0.05, venue_hint_sink=LegacyVenueHintSink(registry=_registry_with_claim("888", 11, scid, 100, account_id=_ACC_FT), bus=DomainEventBus(), persister=persister, account_id=_ACC_FT))
     stop = asyncio.Event()
     task = asyncio.create_task(tracker.poll_loop(stop))
@@ -231,7 +231,7 @@ async def test_fill_tracker_release_retried_after_persist_failure(pg_session_fac
     flaky = _FlakyPersister(real)
     tracker = RestPollingFillTracker(
         http=_GoneAfterFirst(), event_sink=_EventCapture(), probe=HealthProbe(),
-        phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
+        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
         account_id=acc, poll_interval_s=0.05, venue_hint_sink=LegacyVenueHintSink(registry=_registry_with_claim("889", 12, scid, 70, account_id=acc), bus=DomainEventBus(), persister=flaky, account_id=acc))
     stop = asyncio.Event()
     task = asyncio.create_task(tracker.poll_loop(stop))

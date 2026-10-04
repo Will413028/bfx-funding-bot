@@ -6,6 +6,10 @@ daemon's TaskGroup calls submit() once at startup. Then runs daemon.main()
 unmodified — _run's `except* ExecutorAuthError → sys.exit(78)`
 handler must catch the propagated error and exit the process with 78.
 
+The daemon is the Bitfinex-venue composition; nothing here may reach the network, so the
+candle warm-up is skipped and the book/auth WebSocket tasks and the venue observation loops
+are detached (the same set ``go_offline`` detaches in the sqlite wiring tests).
+
 Not a pytest file (leading underscore) — pytest skips it during collection.
 """
 from __future__ import annotations
@@ -27,9 +31,31 @@ from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 _orig_build_daemon = daemon_mod.build_daemon
 
 
+async def _no_warmup(**_kw: Any) -> None:
+    return None
+
+
+daemon_mod.warmup_cell = _no_warmup  # type: ignore[assignment]
+
+
+def _detach_network(d: Any) -> None:
+    async def idle(stop_event: Any) -> None:
+        await stop_event.wait()
+
+    if d.funding_book_service is not None:
+        d.funding_book_service.run = idle
+    if d.ws_dispatcher is not None:
+        d.ws_dispatcher.run = idle
+    d.boot_recovery = None
+    d.periodic_reconcile = None
+    d.interest_ledger_sync = None
+    d.credit_history_sync = None
+
+
 async def _patched_build_daemon(*args: Any, **kwargs: Any) -> Any:
     kwargs.setdefault("skip_ws", True)
     d = await _orig_build_daemon(*args, **kwargs)
+    _detach_network(d)
 
     async def _auth_fail_submit(*_a: Any, **_kw: Any) -> Any:
         raise ExecutorAuthError("subprocess_synthetic_auth_fail")

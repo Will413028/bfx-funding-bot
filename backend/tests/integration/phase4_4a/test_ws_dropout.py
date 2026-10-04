@@ -69,7 +69,7 @@ async def test_fill_tracker_emits_missing_from_venue_when_ws_misses_event(
     )
 
     tracker = RestPollingFillTracker(
-        http=http, event_sink=_EventCapture(), probe=HealthProbe(), phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        http=http, event_sink=_EventCapture(), probe=HealthProbe(), phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
         cell="C-1", account_id="default", venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id="default"))
     # Seed last_state with the same voi (representing last tick saw it)
     tracker._last_state = {voi: {"cid": 42, "status": "ACTIVE", "size": 100.0}}

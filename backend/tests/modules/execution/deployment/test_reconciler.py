@@ -552,7 +552,7 @@ def test_reconciler_rejects_mismatched_execution_gate_policy() -> None:
         _build(
             exposure=D("370"),
             quotes=[_post_quote("fUST_a30")],
-            execution_policy=ExecutionPolicy.PAPER,
+            execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
         )
 
 

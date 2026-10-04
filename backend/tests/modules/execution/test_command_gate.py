@@ -1,4 +1,9 @@
-"""Account command gate ordering and fail-closed fault contracts."""
+"""Account command gate ordering and fail-closed fault contracts.
+
+The gate always runs over a ``CommandBoundary``. The contract tests below use the
+in-memory boundary of ``fake_boundary``; the event-store tests at the end persist the
+events the legacy journal writes straight through ``EventStorePersister``.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -12,17 +17,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.boot_recovery import (
     LocalClaim,
     compute_recovery_actions,
 )
-from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     CommandGateBlocked,
     SubmitOutcomeLostError,
+    _normalized_venue_payload,
 )
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
@@ -30,10 +36,7 @@ from bfx_funding_bot.modules.execution.contracts import (
     ReadyToSubmit,
     ReservationRef,
 )
-from bfx_funding_bot.modules.execution.event_store.persister import (
-    EventStorePersister,
-    NoopEventPersister,
-)
+from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
@@ -42,8 +45,6 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
 )
 from bfx_funding_bot.modules.execution.event_store.writer import ProjectionWriteError
 from bfx_funding_bot.modules.execution.events import (
-    ReservationClaimed,
-    ReservationFailed,
     ReservationIntent,
     ReservationUnknown,
 )
@@ -70,14 +71,21 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
 )
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
+from tests.modules.execution.fake_boundary import (  # noqa: F401  (fixture)
+    Recording,
+    boundary_stubs,
+    with_capital,
+)
 
 ACCOUNT_ID = UUID("3f19d046-5030-494c-9a0a-9573bb890c1f")
 ENVIRONMENT = "ci"
 SYMBOL = "fUST"
 
+pytestmark = pytest.mark.usefixtures("boundary_stubs")
+
 
 def _ready(*, decision_id: str = "decision-1", symbol: str = SYMBOL) -> ReadyToSubmit:
-    return ReadyToSubmit(
+    return with_capital(ReadyToSubmit(
         decision=DecisionPayload(
             decision_outcome=DecisionOutcome.POST,
             signal_correlation_id=uuid4(),
@@ -92,7 +100,7 @@ def _ready(*, decision_id: str = "decision-1", symbol: str = SYMBOL) -> ReadyToS
         model_version=None,
         evidence={},
         safety=GuardResult(allowed=True, guard_name="test"),
-    )
+    ))
 
 
 def _context() -> AccountContext:
@@ -117,53 +125,21 @@ class _FakeUncertaintyReader:
         return ()
 
 
-class _FakePersister:
-    """Fake serialized writer: commits calls and enforces one attempt per decision."""
-
-    def __init__(self, reader: _FakeUncertaintyReader) -> None:
-        self.reader = reader
-        self.txns: list[tuple[object, ...]] = []
-        self.attempts: dict[str, object] = {}
-        self.fail_on_call: int | None = None
-        self.unknown_started: asyncio.Event | None = None
-        self.allow_unknown_commit: asyncio.Event | None = None
-
-    async def persist(self, *events: object) -> list[bool]:
-        call_number = len(self.txns) + 1
-        if self.fail_on_call == call_number:
-            raise RuntimeError(f"persistence failed on call {call_number}")
-        for event in events:
-            if isinstance(event, ReservationIntent):
-                attempt = event.submission_attempt
-                assert attempt is not None
-                if event.execution_decision_id in self.attempts:
-                    raise ValueError("one submission attempt per execution decision")
-                self.attempts[event.execution_decision_id or ""] = attempt
-            elif isinstance(event, ReservationUnknown):
-                if self.unknown_started is not None:
-                    self.unknown_started.set()
-                if self.allow_unknown_commit is not None:
-                    await self.allow_unknown_commit.wait()
-                self.reader.open_scopes.add((ACCOUNT_ID, ENVIRONMENT, event.symbol))
-        self.txns.append(events)
-        return [True] * len(events)
-
-
 class _FakeVenue:
     def __init__(self, outcome: object | None = None, *, crash: bool = False) -> None:
         self.outcome = outcome or SubmitAcknowledged("venue-1")
         self.crash = crash
         self.calls = 0
-        self.events_seen_at_call: list[tuple[object, ...]] | None = None
-        self.persister: _FakePersister | None = None
+        self.txns_seen_at_call: list[tuple[object, ...]] | None = None
+        self.recording: Recording | None = None
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
         reservation_ref=None,
     ) -> SubmittedOrder:
         self.calls += 1
-        if self.persister is not None:
-            self.events_seen_at_call = list(self.persister.txns)
+        if self.recording is not None:
+            self.txns_seen_at_call = list(self.recording.txns)
         if self.crash:
             raise RuntimeError("process crash after durable intent")
         return SubmittedOrder(
@@ -186,6 +162,18 @@ class _FakeSafetyEvaluator:
         result = self.results[min(self.calls, len(self.results) - 1)]
         self.calls += 1
         return result
+
+
+@dataclass
+class _UncertaintyAwareEvaluator:
+    """What the real chain's UncertaintyGuard does: an open scope refuses the command."""
+
+    reader: _FakeUncertaintyReader
+
+    async def evaluate(self, decision: DecisionPayload, context: AccountContext) -> GuardResult:
+        if await self.reader.has_open(None, Scope(ACCOUNT_ID, ENVIRONMENT), decision.symbol):
+            return GuardResult(False, "uncertainty", reason="open execution uncertainty")
+        return GuardResult(True, "uncertainty")
 
 
 class _BlockingAckVenue(_FakeVenue):
@@ -223,77 +211,177 @@ class _MismatchedCidVenue(_FakeVenue):
         )
 
 
+def _recording(reader: _FakeUncertaintyReader) -> Recording:
+    """A boundary whose committed UNKNOWN opens the reader's scope, as the real one does."""
+    def opened(event: object) -> None:
+        if isinstance(event, ReservationUnknown):
+            reader.open_scopes.add((ACCOUNT_ID, ENVIRONMENT, event.symbol))
+
+    return Recording(environment=ENVIRONMENT, account_id=ACCOUNT_ID, on_event=opened)
+
+
 def _gate(
     venue: _FakeVenue,
     reader: _FakeUncertaintyReader,
-    persister: _FakePersister,
+    recording: Recording,
     *,
-    bus: DomainEventBus | None = None,
+    safety: object | None = None,
+    clock_values: tuple[int, ...] = (100, 101, 102, 103, 104, 105, 106, 107),
 ) -> AccountCommandGate:
-    venue.persister = persister
+    venue.recording = recording
     return AccountCommandGate(
         venue,
-        bus=bus or DomainEventBus(),
-        persister=persister,
         uncertainty_reader=reader,
-        safety_evaluator=_FakeSafetyEvaluator(
-            [GuardResult(allowed=True, guard_name="<chain>")]
-        ),
+        safety_evaluator=safety or _UncertaintyAwareEvaluator(reader),  # type: ignore[arg-type]
         deployment_environment=ENVIRONMENT,
-        is_simulated=True,
-        clock=iter((100, 101, 102, 103, 104, 105)).__next__,
+        boundary=recording.boundary(),
+        managed_offers=recording.offers,
+        clock=iter(clock_values).__next__,
         date_provider=lambda: date(2026, 9, 3),
     )
+
+
+# ---------------------------------------------------------------- construction
+
+
+def test_a_gate_cannot_be_built_without_a_command_boundary() -> None:
+    """There is no persister-only command path: the boundary is a required argument."""
+    reader = _FakeUncertaintyReader(set())
+    recording = _recording(reader)
+    with pytest.raises(TypeError, match="boundary"):
+        AccountCommandGate(  # type: ignore[call-arg]
+            _FakeVenue(),
+            uncertainty_reader=reader,
+            safety_evaluator=_UncertaintyAwareEvaluator(reader),
+            deployment_environment=ENVIRONMENT,
+            managed_offers=recording.offers,
+        )
+
+
+def test_a_gate_cannot_be_built_without_managed_offer_reads() -> None:
+    reader = _FakeUncertaintyReader(set())
+    with pytest.raises(TypeError, match="managed_offers"):
+        AccountCommandGate(  # type: ignore[call-arg]
+            _FakeVenue(),
+            uncertainty_reader=reader,
+            safety_evaluator=_UncertaintyAwareEvaluator(reader),
+            deployment_environment=ENVIRONMENT,
+            boundary=_recording(reader).boundary(),
+        )
+
+
+def test_the_middleware_cannot_be_built_without_a_command_boundary() -> None:
+    reader = _FakeUncertaintyReader(set())
+    recording = _recording(reader)
+    with pytest.raises(TypeError, match="boundary"):
+        ReservationEmittingMiddleware(  # type: ignore[call-arg]
+            _FakeVenue(),
+            safety_evaluator=_UncertaintyAwareEvaluator(reader),
+            uncertainty_reader=reader,
+            managed_offers=recording.offers,
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_middleware_submits_through_its_command_gate() -> None:
+    reader = _FakeUncertaintyReader(set())
+    recording = _recording(reader)
+    venue = _FakeVenue()
+    middleware = ReservationEmittingMiddleware(
+        venue,
+        safety_evaluator=_UncertaintyAwareEvaluator(reader),
+        boundary=recording.boundary(),
+        uncertainty_reader=reader,
+        managed_offers=recording.offers,
+        clock=iter(range(100, 110)).__next__,
+        date_provider=lambda: date(2026, 9, 3),
+    )
+    assert isinstance(middleware.command_gate, AccountCommandGate)
+    await middleware.submit(_ready(), _context())
+    assert venue.calls == 1
+    assert [type(event).__name__ for event in recording.events] == [
+        "ReservationIntent", "ReservationClaimed",
+    ]
+
+
+# ------------------------------------------------------------- uncertainty scope
 
 
 @pytest.mark.asyncio
 async def test_open_uncertainty_blocks_before_intent_and_venue_call() -> None:
     reader = _FakeUncertaintyReader({(ACCOUNT_ID, ENVIRONMENT, SYMBOL)})
-    persister = _FakePersister(reader)
+    recording = _recording(reader)
     venue = _FakeVenue()
 
     with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
-        await _gate(venue, reader, persister).submit(_ready(), _context())
+        await _gate(venue, reader, recording).submit(_ready(), _context())
 
     assert venue.calls == 0
-    assert persister.txns == []
+    assert recording.txns == []
 
 
 @pytest.mark.asyncio
-async def test_uncertainty_read_error_fails_closed_before_intent_and_venue_call() -> None:
+async def test_check_fails_closed_when_the_uncertainty_read_errors() -> None:
     reader = _FakeUncertaintyReader(set(), error=RuntimeError("database unavailable"))
-    persister = _FakePersister(reader)
-    venue = _FakeVenue()
+    gate = _gate(_FakeVenue(), reader, _recording(reader))
 
     with pytest.raises(CommandGateBlocked, match="uncertainty guard unavailable"):
-        await _gate(venue, reader, persister).submit(_ready(), _context())
-
-    assert venue.calls == 0
-    assert persister.txns == []
+        await gate.check(_ready(), _context())
 
 
 @pytest.mark.asyncio
-async def test_unknown_is_durable_and_blocks_next_command_without_publish_or_retry() -> None:
+async def test_check_scopes_uncertainty_to_the_symbol() -> None:
+    reader = _FakeUncertaintyReader({(ACCOUNT_ID, ENVIRONMENT, "fUSD")})
+    gate = _gate(_FakeVenue(), reader, _recording(reader))
+
+    await gate.check(_ready(symbol="fUST"), _context())
+    with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
+        await gate.check(_ready(symbol="fUSD"), _context())
+
+
+@pytest.mark.asyncio
+async def test_uncertainty_scope_does_not_block_another_symbol() -> None:
+    reader = _FakeUncertaintyReader({(ACCOUNT_ID, ENVIRONMENT, "fUSD")})
+    recording = _recording(reader)
+    venue = _FakeVenue(SubmitRejected("explicit_rejection"))
+
+    await _gate(venue, reader, recording).submit(_ready(symbol="fUST"), _context())
+
+    assert venue.calls == 1
+
+
+# --------------------------------------------------------------------- ordering
+
+
+@pytest.mark.asyncio
+async def test_the_intent_is_durable_before_the_venue_sees_data() -> None:
     reader = _FakeUncertaintyReader(set())
-    persister = _FakePersister(reader)
+    recording = _recording(reader)
+    venue = _FakeVenue()
+
+    await _gate(venue, reader, recording).submit(_ready(), _context())
+
+    assert venue.txns_seen_at_call is not None
+    assert [type(event) for txn in venue.txns_seen_at_call for event in txn] == [ReservationIntent]
+    assert [type(event).__name__ for event in recording.events] == [
+        "ReservationIntent", "ReservationClaimed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unknown_is_durable_and_blocks_next_command_without_retry() -> None:
+    reader = _FakeUncertaintyReader(set())
+    recording = _recording(reader)
     venue = _FakeVenue(SubmitOutcomeUnknown("transport_timeout", True))
-    bus = DomainEventBus()
-    published: list[object] = []
-
-    async def capture(event: object) -> None:
-        published.append(event)
-
-    bus.subscribe(ReservationClaimed, capture)
-    gate = _gate(venue, reader, persister, bus=bus)
+    gate = _gate(venue, reader, recording)
 
     result = await gate.submit(_ready(), _context())
     assert result.outcome_kind.value == "unknown"
     assert venue.calls == 1
-    assert venue.events_seen_at_call is not None
-    assert [type(event) for event in venue.events_seen_at_call[0]] == [ReservationIntent]
-    assert [type(event) for event in persister.txns[1]] == [ReservationUnknown]
+    assert venue.txns_seen_at_call is not None
+    assert [type(event) for event in venue.txns_seen_at_call[0]] == [ReservationIntent]
+    assert [type(event) for event in recording.txns[1]] == [ReservationUnknown]
     assert reader.open_scopes == {(ACCOUNT_ID, ENVIRONMENT, SYMBOL)}
-    assert published == []
 
     with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
         await gate.submit(_ready(decision_id="decision-2"), _context())
@@ -303,21 +391,21 @@ async def test_unknown_is_durable_and_blocks_next_command_without_publish_or_ret
 @pytest.mark.asyncio
 async def test_next_submit_waits_until_unknown_block_commit() -> None:
     reader = _FakeUncertaintyReader(set())
-    persister = _FakePersister(reader)
-    persister.unknown_started = asyncio.Event()
-    persister.allow_unknown_commit = asyncio.Event()
+    recording = _recording(reader)
+    recording.unknown_started = asyncio.Event()
+    recording.allow_unknown_commit = asyncio.Event()
     venue = _FakeVenue(SubmitOutcomeUnknown("response_lost", True))
-    gate = _gate(venue, reader, persister)
+    gate = _gate(venue, reader, recording)
 
     first = asyncio.create_task(gate.submit(_ready(), _context()))
-    await persister.unknown_started.wait()
+    await recording.unknown_started.wait()
     second = asyncio.create_task(
         gate.submit(_ready(decision_id="decision-2"), _context())
     )
     await asyncio.sleep(0)
     assert venue.calls == 1
 
-    persister.allow_unknown_commit.set()
+    recording.allow_unknown_commit.set()
     await first
     with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
         await second
@@ -328,11 +416,13 @@ async def test_next_submit_waits_until_unknown_block_commit() -> None:
 async def test_waiting_submit_rechecks_authoritative_safety_inside_account_lock() -> None:
     """Removing the locked evaluator would persist a second intent and call venue."""
     reader = _FakeUncertaintyReader(set())
-    persister = _FakePersister(reader)
+    recording = _recording(reader)
     venue = _BlockingAckVenue()
+    allow = GuardResult(allowed=True, guard_name="<chain>")
     safety = _FakeSafetyEvaluator(
         [
-            GuardResult(allowed=True, guard_name="<chain>"),
+            allow,  # first submit, inside its admission transaction
+            allow,  # first submit, again after commit
             GuardResult(
                 allowed=False,
                 guard_name="kill_switch",
@@ -340,17 +430,7 @@ async def test_waiting_submit_rechecks_authoritative_safety_inside_account_lock(
             ),
         ]
     )
-    gate = AccountCommandGate(
-        venue,
-        bus=DomainEventBus(),
-        persister=persister,
-        uncertainty_reader=reader,
-        safety_evaluator=safety,
-        deployment_environment=ENVIRONMENT,
-        is_simulated=True,
-        clock=iter((100, 101, 102, 103)).__next__,
-        date_provider=lambda: date(2026, 9, 3),
-    )
+    gate = _gate(venue, reader, recording, safety=safety)
 
     first = asyncio.create_task(gate.submit(_ready(), _context()))
     await venue.started.wait()
@@ -364,37 +444,19 @@ async def test_waiting_submit_rechecks_authoritative_safety_inside_account_lock(
     with pytest.raises(CommandGateBlocked, match="halted while waiting"):
         await second
     assert venue.calls == 1
-    assert safety.calls == 2
-    assert len(persister.attempts) == 1
+    assert safety.calls == 3
+    assert len(recording.attempts) == 1
 
 
-def test_live_middleware_rejects_a_missing_command_boundary() -> None:
-    """A live noop/wrapper must never silently select the plain submit path."""
-    with pytest.raises(ValueError, match="command boundary"):
-        ReservationEmittingMiddleware(
-            _FakeVenue(),
-            bus=DomainEventBus(),
-            persister=NoopEventPersister(),
-            is_simulated=False,
-        )
-
-@pytest.mark.asyncio
-async def test_uncertainty_scope_does_not_block_another_symbol() -> None:
-    reader = _FakeUncertaintyReader({(ACCOUNT_ID, ENVIRONMENT, "fUSD")})
-    persister = _FakePersister(reader)
-    venue = _FakeVenue(SubmitRejected("explicit_rejection"))
-
-    await _gate(venue, reader, persister).submit(_ready(symbol="fUST"), _context())
-
-    assert venue.calls == 1
+# ------------------------------------------------------------------ fault fencing
 
 
 @pytest.mark.asyncio
 async def test_one_attempt_per_decision_prevents_resubmit() -> None:
     reader = _FakeUncertaintyReader(set())
-    persister = _FakePersister(reader)
+    recording = _recording(reader)
     venue = _FakeVenue(SubmitRejected("explicit_rejection"))
-    gate = _gate(venue, reader, persister)
+    gate = _gate(venue, reader, recording)
     ready = _ready()
 
     await gate.submit(ready, _context())
@@ -402,24 +464,25 @@ async def test_one_attempt_per_decision_prevents_resubmit() -> None:
         await gate.submit(ready, _context())
 
     assert venue.calls == 1
-    assert len(persister.attempts) == 1
+    assert len(recording.attempts) == 1
 
 
 @pytest.mark.asyncio
 async def test_crash_after_intent_leaves_pending_for_boot_unknown_without_retry() -> None:
     reader = _FakeUncertaintyReader(set())
-    persister = _FakePersister(reader)
+    recording = _recording(reader)
     venue = _FakeVenue(crash=True)
-    gate = _gate(venue, reader, persister)
+    gate = _gate(venue, reader, recording)
     ready = _ready()
 
     with pytest.raises(SubmitOutcomeLostError, match="submit ended without durable outcome"):
         await gate.submit(ready, _context())
 
-    intent = persister.txns[0][0]
+    intent = recording.txns[0][0]
     assert isinstance(intent, ReservationIntent)
     assert intent.submission_attempt is not None
     assert intent.submission_attempt.outcome_kind is None
+    assert recording.outcomes == []
     actions = compute_recovery_actions(
         venue_offers=[],
         local_claims=[
@@ -435,7 +498,6 @@ async def test_crash_after_intent_leaves_pending_for_boot_unknown_without_retry(
             )
         ],
         account_id=str(ACCOUNT_ID),
-        is_simulated=False,
         now_ms=1_000,
         grace_ms=100,
         configured_symbols=frozenset({SYMBOL}),
@@ -449,12 +511,12 @@ async def test_crash_after_intent_leaves_pending_for_boot_unknown_without_retry(
 @pytest.mark.asyncio
 async def test_intent_persistence_failure_blocks_venue_call() -> None:
     reader = _FakeUncertaintyReader(set())
-    persister = _FakePersister(reader)
-    persister.fail_on_call = 1
+    recording = _recording(reader)
+    recording.fail_on_call = 1
     venue = _FakeVenue()
 
     with pytest.raises(RuntimeError, match="persistence failed"):
-        await _gate(venue, reader, persister).submit(_ready(), _context())
+        await _gate(venue, reader, recording).submit(_ready(), _context())
 
     assert venue.calls == 0
 
@@ -466,10 +528,10 @@ async def test_outcome_persistence_failure_ends_the_process() -> None:
     keeps alive, and the restarted daemon quarantines the symbol from the
     durable PENDING intent."""
     reader = _FakeUncertaintyReader(set())
-    persister = _FakePersister(reader)
-    persister.fail_on_call = 2
+    recording = _recording(reader)
+    recording.fail_on_call = 2
     venue = _FakeVenue()
-    gate = _gate(venue, reader, persister)
+    gate = _gate(venue, reader, recording)
 
     with pytest.raises(SubmitOutcomeLostError, match="outcome persistence failed") as lost:
         await gate.submit(_ready(), _context())
@@ -481,7 +543,7 @@ async def test_outcome_persistence_failure_ends_the_process() -> None:
 @pytest.mark.asyncio
 async def test_a_submit_that_raises_mid_transport_ends_the_process() -> None:
     reader = _FakeUncertaintyReader(set())
-    persister = _FakePersister(reader)
+    recording = _recording(reader)
     venue = _FakeVenue()
 
     async def explode(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -489,7 +551,7 @@ async def test_a_submit_that_raises_mid_transport_ends_the_process() -> None:
 
     venue.submit = explode  # type: ignore[method-assign]
     with pytest.raises(SubmitOutcomeLostError, match="submit ended without durable outcome"):
-        await _gate(venue, reader, persister).submit(_ready(), _context())
+        await _gate(venue, reader, recording).submit(_ready(), _context())
 
 
 @pytest.mark.asyncio
@@ -500,7 +562,7 @@ async def test_submit_cancelled_before_transport_closes_intent_as_not_sent() -> 
     from bfx_funding_bot.modules.execution.submit_outcomes import SubmitCancelledNotSent
 
     reader = _FakeUncertaintyReader(set())
-    persister = _FakePersister(reader)
+    recording = _recording(reader)
     venue = _FakeVenue()
 
     async def cancelled_waiting(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -508,10 +570,11 @@ async def test_submit_cancelled_before_transport_closes_intent_as_not_sent() -> 
 
     venue.submit = cancelled_waiting  # type: ignore[method-assign]
     with pytest.raises(asyncio.CancelledError):
-        await _gate(venue, reader, persister).submit(_ready(), _context())
+        await _gate(venue, reader, recording).submit(_ready(), _context())
 
-    assert [type(event) for event in persister.txns[1]] == [ReservationFailed]
-    assert persister.txns[1][0].reason == "local_pre_transport"
+    assert [type(event).__name__ for event in recording.txns[1]] == ["ReservationFailed"]
+    assert recording.txns[1][0].reason == "local_pre_transport"
+    assert [outcome.kind for _, outcome in recording.outcomes] == ["not_sent"]
     assert not reader.open_scopes
 
 
@@ -519,14 +582,14 @@ async def test_submit_cancelled_before_transport_closes_intent_as_not_sent() -> 
 async def test_executor_cid_mismatch_becomes_durable_unknown_and_blocks_scope() -> None:
     """Trusting a mismatched result CID would falsely claim another command's ACK."""
     reader = _FakeUncertaintyReader(set())
-    persister = _FakePersister(reader)
+    recording = _recording(reader)
     venue = _MismatchedCidVenue()
-    gate = _gate(venue, reader, persister)
+    gate = _gate(venue, reader, recording)
 
     result = await gate.submit(_ready(), _context())
 
     assert result.outcome_kind.value == "unknown"
-    assert [type(event) for event in persister.txns[1]] == [ReservationUnknown]
+    assert [type(event) for event in recording.txns[1]] == [ReservationUnknown]
     with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
         await gate.submit(_ready(decision_id="decision-2"), _context())
     assert venue.calls == 1
@@ -534,22 +597,68 @@ async def test_executor_cid_mismatch_becomes_durable_unknown_and_blocks_scope() 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("outcome", "event_type", "reason"),
+    ("outcome", "kind", "reason"),
     [
-        (SubmitNotSent("bad_local_input"), ReservationFailed, "local_pre_transport"),
-        (SubmitRejected("venue_rejected"), ReservationFailed, "venue_rejected"),
+        (SubmitNotSent("bad_local_input"), "not_sent", "local_pre_transport"),
+        (SubmitRejected("venue_rejected"), "rejected", "venue_rejected"),
     ],
 )
-async def test_non_ack_outcomes_persist_one_terminal_event(outcome, event_type, reason) -> None:
+async def test_non_ack_outcomes_persist_one_terminal_event(outcome, kind, reason) -> None:
     reader = _FakeUncertaintyReader(set())
-    persister = _FakePersister(reader)
+    recording = _recording(reader)
     venue = _FakeVenue(outcome)
 
-    await _gate(venue, reader, persister).submit(_ready(), _context())
+    await _gate(venue, reader, recording).submit(_ready(), _context())
 
-    assert len(persister.txns[1]) == 1
-    assert isinstance(persister.txns[1][0], event_type)
-    assert persister.txns[1][0].reason == reason
+    assert len(recording.txns[1]) == 1
+    assert recording.txns[1][0].reason == reason
+    assert [(recorded.kind, recorded.reason) for _, recorded in recording.outcomes] == [
+        (kind, reason)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_every_outcome_fact_is_marked_not_simulated() -> None:
+    """The gate carries the constant False: no simulated command path remains."""
+    reader = _FakeUncertaintyReader(set())
+    recording = _recording(reader)
+
+    await _gate(_FakeVenue(), reader, recording).submit(_ready(), _context())
+
+    assert [facts.is_simulated for facts, _ in recording.outcomes] == [False]
+    assert all(getattr(event, "is_simulated", False) is False for event in recording.events)
+
+
+# ----------------------------------------------------- event store, no gate involved
+
+
+async def _persist_intent(persister: EventStorePersister, ready: ReadyToSubmit) -> ReservationIntent:
+    """The write-ahead intent the legacy journal commits before the venue call."""
+    decision = ready.decision
+    cid = generate_cid(decision.signal_correlation_id, date(2026, 9, 3))
+    intent = ReservationIntent(
+        cid=cid, size_usdt=Decimal("12.5"),
+        signal_correlation_id=decision.signal_correlation_id,
+        account_id=str(ACCOUNT_ID), is_simulated=False, occurred_at_ms=100,
+        symbol=SYMBOL, execution_decision_id=ready.decision_id,
+        reservation_ref=ReservationRef(ready.decision_id, cid, decision.signal_correlation_id),
+        submission_attempt=SubmissionAttemptPayload(
+            attempt_id=uuid4(), execution_decision_id=ready.decision_id,
+            account_id=ACCOUNT_ID, environment=ENVIRONMENT, symbol=SYMBOL, cid=cid,
+            normalized_payload=_normalized_venue_payload(decision), started_at_ms=100,
+        ),
+    )
+    await persister.persist(intent)
+    return intent
+
+
+async def _persist_unknown(persister: EventStorePersister, intent: ReservationIntent) -> None:
+    await persister.persist(ReservationUnknown(
+        cid=intent.cid, size_usdt=intent.size_usdt,
+        signal_correlation_id=intent.signal_correlation_id, account_id=intent.account_id,
+        is_simulated=False, reason="transport_timeout", occurred_at_ms=101,
+        symbol=SYMBOL, reservation_ref=intent.reservation_ref,
+    ))
 
 
 @pytest.mark.asyncio
@@ -589,21 +698,9 @@ async def test_serialized_writer_commits_unknown_attempt_event_and_block_atomica
         await session.commit()
 
     store = PostgresEventStore(deployment_environment=ENVIRONMENT)
-    gate = AccountCommandGate(
-        _FakeVenue(SubmitOutcomeUnknown("transport_timeout", True)),
-        bus=DomainEventBus(),
-        persister=EventStorePersister(store=store, session_factory=session_factory),
-        uncertainty_reader=LegacyUncertaintyReader(session_factory),
-        safety_evaluator=_FakeSafetyEvaluator(
-            [GuardResult(allowed=True, guard_name="<chain>")]
-        ),
-        deployment_environment=ENVIRONMENT,
-        is_simulated=True,
-        clock=iter((100, 101)).__next__,
-        date_provider=lambda: date(2026, 9, 3),
-    )
+    persister = EventStorePersister(store=store, session_factory=session_factory)
+    await _persist_unknown(persister, await _persist_intent(persister, ready))
 
-    await gate.submit(ready, _context())
 
     async with session_factory() as session:
         events = (await session.execute(select(EventLogRow))).scalars().all()
@@ -663,20 +760,8 @@ async def test_full_rebuild_replays_attempt_and_uncertainty_with_stable_identity
         )
         await session.commit()
     store = PostgresEventStore(deployment_environment=ENVIRONMENT)
-    gate = AccountCommandGate(
-        _FakeVenue(SubmitOutcomeUnknown("transport_timeout", True)),
-        bus=DomainEventBus(),
-        persister=EventStorePersister(store=store, session_factory=session_factory),
-        uncertainty_reader=LegacyUncertaintyReader(session_factory),
-        safety_evaluator=_FakeSafetyEvaluator(
-            [GuardResult(allowed=True, guard_name="<chain>")]
-        ),
-        deployment_environment=ENVIRONMENT,
-        is_simulated=True,
-        clock=iter((100, 101)).__next__,
-        date_provider=lambda: date(2026, 9, 3),
-    )
-    await gate.submit(ready, _context())
+    persister = EventStorePersister(store=store, session_factory=session_factory)
+    await _persist_unknown(persister, await _persist_intent(persister, ready))
 
     async with session_factory() as session:
         original_attempt = (await session.execute(select(SubmissionAttemptRow))).scalar_one()
@@ -729,7 +814,7 @@ async def test_full_rebuild_replays_attempt_and_uncertainty_with_stable_identity
 async def test_persisted_crash_recovery_closes_pending_attempt_as_unknown(
     sqlite_engine,
 ) -> None:
-    """Recovery must update the durable attempt and block a fresh gate, never retry."""
+    """Recovery must update the durable attempt and open the symbol's uncertainty."""
     async with sqlite_engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     session_factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
@@ -763,22 +848,7 @@ async def test_persisted_crash_recovery_closes_pending_attempt_as_unknown(
         await session.commit()
     store = PostgresEventStore(deployment_environment=ENVIRONMENT)
     persister = EventStorePersister(store=store, session_factory=session_factory)
-    crashing_venue = _FakeVenue(crash=True)
-    gate = AccountCommandGate(
-        crashing_venue,
-        bus=DomainEventBus(),
-        persister=persister,
-        uncertainty_reader=LegacyUncertaintyReader(session_factory),
-        safety_evaluator=_FakeSafetyEvaluator(
-            [GuardResult(allowed=True, guard_name="<chain>")]
-        ),
-        deployment_environment=ENVIRONMENT,
-        is_simulated=True,
-        clock=iter((100, 101)).__next__,
-        date_provider=lambda: date(2026, 9, 3),
-    )
-    with pytest.raises(SubmitOutcomeLostError, match="submit ended without durable outcome"):
-        await gate.submit(ready, _context())
+    await _persist_intent(persister, ready)
 
     async with session_factory() as session:
         pending = (await session.execute(select(OfferClaimRow))).scalar_one()
@@ -804,7 +874,6 @@ async def test_persisted_crash_recovery_closes_pending_attempt_as_unknown(
             )
         ],
         account_id=str(ACCOUNT_ID),
-        is_simulated=False,
         now_ms=1_000,
         grace_ms=100,
         configured_symbols=frozenset({SYMBOL}),
@@ -821,22 +890,11 @@ async def test_persisted_crash_recovery_closes_pending_attempt_as_unknown(
     assert recovered_attempt.outcome_kind == "unknown"
     assert uncertainty.attempt_id == recovered_attempt.attempt_id
 
-    fresh_venue = _FakeVenue()
-    fresh_gate = AccountCommandGate(
-        fresh_venue,
-        bus=DomainEventBus(),
-        persister=persister,
-        uncertainty_reader=LegacyUncertaintyReader(session_factory),
-        safety_evaluator=_FakeSafetyEvaluator(
-            [GuardResult(allowed=True, guard_name="<chain>")]
-        ),
-        deployment_environment=ENVIRONMENT,
-        is_simulated=True,
-    )
-    with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
-        await fresh_gate.submit(_ready(decision_id="decision-after-crash"), _context())
-    assert crashing_venue.calls == 1
-    assert fresh_venue.calls == 0
+    # The restarted daemon's UncertaintyGuard reads this: the symbol is held open.
+    async with session_factory() as session:
+        assert await LegacyUncertaintyReader(session_factory).has_open(
+            session, Scope(ACCOUNT_ID, ENVIRONMENT), SYMBOL,
+        )
 
 
 @pytest.mark.asyncio
@@ -904,7 +962,6 @@ async def test_registered_legacy_pending_without_attempt_recovers_to_unknown(
             )
         ],
         account_id=str(ACCOUNT_ID),
-        is_simulated=False,
         now_ms=1_000,
         grace_ms=100,
         configured_symbols=frozenset({SYMBOL}),

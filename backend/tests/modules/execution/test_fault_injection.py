@@ -2,8 +2,9 @@
 
 The fake transport is deliberately test-local: production keeps using an
 ordinary injected ``httpx.AsyncClient`` and has no fault-mode branches.
-In-memory persistence/uncertainty fixtures are explicitly simulated. Actual
-policy-backed SQLite/PG command faults live in test_capital_command_boundary.
+The command boundary and uncertainty fixtures are in-memory doubles
+(``fake_boundary``). Actual policy-backed SQLite/PG command faults live in
+test_capital_command_boundary.
 """
 from __future__ import annotations
 
@@ -62,6 +63,13 @@ from bfx_funding_bot.modules.execution.unknown_matching import (
 )
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
+from tests.modules.execution.fake_boundary import (  # noqa: F401  (fixture)
+    Recording,
+    boundary_stubs,
+    with_capital,
+)
+
+pytestmark = pytest.mark.usefixtures("boundary_stubs")
 
 _ACCOUNT_ID = UUID("3f19d046-5030-494c-9a0a-9573bb890c1f")
 _ADJACENT_ACCOUNT_ID = UUID("28b31e79-83ce-4b32-a6b7-03d78043ce68")
@@ -185,18 +193,13 @@ class _EventSink:
         del event
 
 
-class _Persister:
-    def __init__(self, open_scopes: set[tuple[UUID, str, str]], environment: str) -> None:
-        self.events: list[object] = []
-        self._open_scopes = open_scopes
-        self._environment = environment
+def _recording(open_scopes: set[tuple[UUID, str, str]], environment: str) -> Recording:
+    """A boundary whose committed UNKNOWN opens the symbol's uncertainty scope."""
+    def opened(event: object) -> None:
+        if isinstance(event, ReservationUnknown):
+            open_scopes.add((UUID(event.account_id), environment, event.symbol))
 
-    async def persist(self, *events: object) -> list[bool]:
-        self.events.extend(events)
-        for event in events:
-            if isinstance(event, ReservationUnknown):
-                self._open_scopes.add((UUID(event.account_id), self._environment, event.symbol))
-        return [True] * len(events)
+    return Recording(environment=environment, account_id=_ACCOUNT_ID, on_event=opened)
 
 
 class _UncertaintyReader:
@@ -214,8 +217,16 @@ class _UncertaintyReader:
 
 
 class _SafetyEvaluator:
+    """The chain's UncertaintyGuard: an open scope for this account and symbol refuses."""
+
+    def __init__(self, reader: _UncertaintyReader, environment: str) -> None:
+        self._reader = reader
+        self._environment = environment
+
     async def evaluate(self, decision: DecisionPayload, context: AccountContext) -> GuardResult:
-        del decision, context
+        scope = Scope(UUID(context.account_id), self._environment)
+        if await self._reader.has_open(None, scope, decision.symbol):
+            return GuardResult(False, "uncertainty", reason="open execution uncertainty")
         return GuardResult(allowed=True, guard_name="fault_matrix")
 
 
@@ -250,7 +261,7 @@ class _TypedOutcomeExecutor:
 
 def _ready(*, decision_id: str, symbol: str = "fUST") -> ReadyToSubmit:
     from tests.external.bitfinex.test_funding_rules import evidence
-    return ReadyToSubmit(
+    return with_capital(ReadyToSubmit(
         decision=DecisionPayload(
             decision_outcome=DecisionOutcome.POST,
             signal_correlation_id=uuid4(),
@@ -266,7 +277,7 @@ def _ready(*, decision_id: str, symbol: str = "fUST") -> ReadyToSubmit:
         evidence={},
         safety=GuardResult(allowed=True, guard_name="fault_matrix"),
         funding_amount_evidence=evidence(symbol=symbol, now=int(time.time() * 1000)),
-    )
+    ))
 
 
 def _context(account_id: UUID = _ACCOUNT_ID) -> AccountContext:
@@ -364,7 +375,7 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
     """Run UNKNOWN persistence, two-candidate reconcile, then the blocked retry."""
     environment = "ci"
     open_scopes: set[tuple[UUID, str, str]] = set()
-    persister = _Persister(open_scopes, environment)
+    persister = _recording(open_scopes, environment)
     reader = _UncertaintyReader(open_scopes)
     transport = FakeBitfinexTransport(ACCEPT_DROP)
     async with httpx.AsyncClient(transport=transport) as http:
@@ -372,7 +383,7 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
             http=http,
             event_sink=_EventSink(),
             bus=DomainEventBus(),
-            phase=Phase.PAPER,
+            phase=Phase.SHADOW,
             strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUST"}),
             cell="fault-cell",
@@ -381,12 +392,11 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
         )
         gate = AccountCommandGate(
             executor,
-            bus=DomainEventBus(),
-            persister=persister,
             uncertainty_reader=reader,
-            safety_evaluator=_SafetyEvaluator(),
+            safety_evaluator=_SafetyEvaluator(reader, environment),
             deployment_environment=environment,
-            is_simulated=True,
+            boundary=persister.boundary(),
+            managed_offers=persister.offers,
             clock=iter(range(100, 200)).__next__,
             date_provider=lambda: date(2026, 9, 3),
         )
@@ -452,7 +462,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
     """Run one real executor/gate submit without any automatic retry path."""
     open_scopes: set[tuple[UUID, str, str]] = set()
     environment = "ci"
-    persister = _Persister(open_scopes, environment)
+    persister = _recording(open_scopes, environment)
     uncertainty_reader = _UncertaintyReader(open_scopes)
     transport = FakeBitfinexTransport(scenario)
     http = httpx.AsyncClient(transport=transport)
@@ -464,7 +474,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
                 http=http,
                 event_sink=_EventSink(),
                 bus=DomainEventBus(),
-                phase=Phase.PAPER,
+                phase=Phase.SHADOW,
                 strategy=StrategyName.RATE_PERCENTILE,
                 configured_symbols=frozenset({"fUST"}),
                 cell="fault-cell",
@@ -473,12 +483,11 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             )
         gate = AccountCommandGate(
             inner,  # type: ignore[arg-type]
-            bus=DomainEventBus(),
-            persister=persister,
             uncertainty_reader=uncertainty_reader,
-            safety_evaluator=_SafetyEvaluator(),
+            safety_evaluator=_SafetyEvaluator(uncertainty_reader, "ci"),
             deployment_environment="ci",
-            is_simulated=True,
+            boundary=persister.boundary(),
+            managed_offers=persister.offers,
             clock=iter(range(100, 200)).__next__,
             date_provider=lambda: date(2026, 9, 3),
         )
@@ -521,12 +530,11 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             await gate.check(_ready(decision_id=f"fault-{scenario.name}-other-account"), _context(_ADJACENT_ACCOUNT_ID))
             other_environment_gate = AccountCommandGate(
                 inner,  # type: ignore[arg-type]
-                bus=DomainEventBus(),
-                persister=persister,
                 uncertainty_reader=uncertainty_reader,
-                safety_evaluator=_SafetyEvaluator(),
+                safety_evaluator=_SafetyEvaluator(uncertainty_reader, "staging"),
                 deployment_environment="staging",
-                is_simulated=True,
+                boundary=_recording(open_scopes, "staging").boundary(),
+                managed_offers=persister.offers,
                 clock=iter(range(300, 400)).__next__,
                 date_provider=lambda: date(2026, 9, 3),
             )
@@ -670,16 +678,16 @@ async def test_durable_outcome_reason_redacts_credentials_and_authorization(
     event_type: type[ReservationUnknown] | type[ReservationFailed],
 ) -> None:
     open_scopes: set[tuple[UUID, str, str]] = set()
-    persister = _Persister(open_scopes, "ci")
+    persister = _recording(open_scopes, "ci")
     executor = _TypedOutcomeExecutor(outcome)
+    reader = _UncertaintyReader(open_scopes)
     gate = AccountCommandGate(
         executor,
-        bus=DomainEventBus(),
-        persister=persister,
-        uncertainty_reader=_UncertaintyReader(open_scopes),
-        safety_evaluator=_SafetyEvaluator(),
+        uncertainty_reader=reader,
+        safety_evaluator=_SafetyEvaluator(reader, "ci"),
         deployment_environment="ci",
-        is_simulated=True,
+        boundary=persister.boundary(),
+        managed_offers=persister.offers,
         clock=iter(range(100, 200)).__next__,
         date_provider=lambda: date(2026, 9, 3),
     )

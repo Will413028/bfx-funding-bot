@@ -71,7 +71,7 @@ def _envelope_kwargs(
     return {
         "timestamp": datetime.now(UTC).isoformat(),
         "level": Level.INFO.value,
-        "phase": Phase.PAPER.value,
+        "phase": Phase.SHADOW.value,
         "strategy": StrategyName.RATE_PERCENTILE.value,
         "cell": "bfx_USDT",
         "event_type": event_type.value,

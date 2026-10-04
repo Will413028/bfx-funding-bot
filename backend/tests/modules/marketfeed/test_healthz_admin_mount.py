@@ -1,8 +1,7 @@
 """healthz.make_app — admin router mounting rules.
 
-The smoke-test and trading-status feature sets mount independently; the token
-gates both. A live canary must be able to expose trading-status even where no
-smoke runner is wired, and no admin route may ever be reachable without a token.
+The admin routes (trading-status, dry-evaluate, halt) mount only with a token and a
+status service, and no admin route may ever be reachable without a token.
 """
 from __future__ import annotations
 
@@ -22,7 +21,7 @@ class _FakeStatus:
         return {"would_submit": True, "blocked_by": None, "guards": []}
 
 
-def test_trading_status_mounts_without_a_smoke_runner() -> None:
+def test_trading_status_mounts_with_a_token() -> None:
     app = make_app(HealthProbe(), admin_token="secret", trading_status=_FakeStatus())
     resp = TestClient(app).get(
         "/admin/trading-status", headers={"Authorization": "Bearer secret"},
@@ -43,3 +42,11 @@ def test_healthz_still_served_when_no_admin_feature_is_wired() -> None:
     assert client.get("/admin/trading-status").status_code == 404
     # /healthz itself must not depend on any admin wiring.
     assert client.get("/healthz").status_code in (200, 503)
+
+
+def test_healthz_is_unaffected_by_the_admin_router() -> None:
+    """Regression: mounting the admin router doesn't break /healthz."""
+    client = TestClient(make_app(HealthProbe(), admin_token="secret", trading_status=_FakeStatus()))
+    resp = client.get("/healthz")
+    assert resp.status_code == 503
+    assert resp.json()["status"] == "starting"

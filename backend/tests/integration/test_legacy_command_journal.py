@@ -42,7 +42,7 @@ async def test_event_log_golden_for_all_command_outcomes(capital_db, outcome, ev
     async def capture(event):
         notifications.append(event)
 
-    gate._bus.subscribe(ReservationClaimed, capture)
+    gate._boundary.effects._bus.subscribe(ReservationClaimed, capture)
     gate._boundary.effects._uncertainty_handler = capture
 
     async def submit(ready, context, *, cid, reservation_ref):
@@ -96,8 +96,8 @@ async def test_event_log_golden_for_filled_acknowledgement(capital_db):  # noqa:
     async def capture(event):
         published.append(event)
 
-    gate._bus.subscribe(ReservationClaimed, capture)
-    gate._bus.subscribe(OrderFilled, capture)
+    gate._boundary.effects._bus.subscribe(ReservationClaimed, capture)
+    gate._boundary.effects._bus.subscribe(OrderFilled, capture)
 
     async def submit(ready, context, *, cid, reservation_ref):
         return SubmittedOrder(cid=cid, venue_offer_id="101", status="filled",

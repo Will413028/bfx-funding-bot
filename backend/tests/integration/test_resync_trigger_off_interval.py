@@ -88,7 +88,7 @@ async def test_resync_request_reconciles_off_interval(
             credentials=Credentials(api_key="k", api_secret="s"),
             allocation_cap_usdt=Decimal("450"),
         ),
-        deployment_environment=_ENV, bus=bus, is_simulated=False,
+        deployment_environment=_ENV, bus=bus,
         action_grace_ms=_ACTION_GRACE_MS, max_attempts=1, backoff_base_s=0,
         clock=lambda: _NOW, symbol="fUST",
     )

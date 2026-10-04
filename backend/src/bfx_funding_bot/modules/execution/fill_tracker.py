@@ -17,12 +17,11 @@ Design notes (4.2 vs 4.4):
 Atomic poll (CC3): both GET calls must succeed or the entire tick aborts.
 last_state preserved; next tick retries fresh.
 
-CC4 paper_ prefix invariant: defense-in-depth. registry.build_executor
-(Task 17) catches the paper-executor + fill-tracker combo at startup. This
-runtime check catches bypass paths — if a paper_ prefixed venue_offer_id
-ever appears in last_state and we try to emit a status_change for it,
-something is fundamentally wrong → raise InvariantError → daemon
-TaskGroup cancel → Koyeb restart.
+CC4 paper_ prefix invariant: defense-in-depth. No executor mints a paper_
+offer id any more; if a paper_ prefixed venue_offer_id ever appears in
+last_state and we try to emit a status_change for it, something is
+fundamentally wrong → raise InvariantError → daemon TaskGroup cancel →
+restart.
 """
 from __future__ import annotations
 
@@ -165,8 +164,8 @@ class RestPollingFillTracker:
             if venue_offer_id.startswith("paper_"):
                 raise InvariantError(
                     f"fill_tracker last_state contained paper venue_offer_id="
-                    f"{venue_offer_id} — registry CC4 should have prevented this; "
-                    "check BFX_EXECUTOR / BFX_FILL_TRACKER_ENABLED wiring."
+                    f"{venue_offer_id} — no executor mints paper offer ids; "
+                    "check BFX_FILL_TRACKER_ENABLED wiring."
                 )
             if not await self._venue_hints.offer_gone(
                 venue_offer_id, occurred_at_ms=int(time.time() * 1000),

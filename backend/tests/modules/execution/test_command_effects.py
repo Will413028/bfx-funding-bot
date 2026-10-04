@@ -20,10 +20,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationFailed,
     ReservationUnknown,
 )
-from bfx_funding_bot.modules.execution.legacy_command_effects import (
-    LegacyCommandEffects,
-    persist_simulated_outcome,
-)
+from bfx_funding_bot.modules.execution.legacy_command_effects import LegacyCommandEffects
 from bfx_funding_bot.modules.ledger import CommandOutcome, Scope
 
 SCOPE = Scope(uuid4(), "ci")
@@ -31,12 +28,12 @@ ATTEMPT = uuid4()
 CORRELATION = uuid4()
 
 
-def _facts(*, filled: bool = False, simulated: bool = False) -> CommandFacts:
+def _facts(*, filled: bool = False) -> CommandFacts:
     return CommandFacts(
         scope=SCOPE, attempt_id=ATTEMPT, symbol="fUST", amount=Decimal("200.000005"),
         signal_correlation_id=CORRELATION,
         reference=ReservationRef("decision", 7, CORRELATION, venue_offer_id="m-1"),
-        offer_rate=Decimal("0.0001"), is_simulated=simulated, filled=filled,
+        offer_rate=Decimal("0.0001"), is_simulated=False, filled=filled,
     )
 
 
@@ -114,23 +111,6 @@ async def test_legacy_events_carry_the_stored_row_identity() -> None:
     assert [event.event_id for event in handled] == [event_id]
     assert handled[0].reason == "timeout" and handled[0].reservation_ref.cid == 7
     assert effects.new_event_id() != effects.new_event_id()
-
-
-@pytest.mark.asyncio
-async def test_simulated_unknown_is_persisted_before_the_handler() -> None:
-    trace = _Trace()
-    await persist_simulated_outcome(trace, trace.bus, trace.handler,  # type: ignore[arg-type]
-                                    _facts(simulated=True), _outcome("unknown", None, "timeout"))
-    assert trace.calls == [("persist", "ReservationUnknown"), ("uncertainty", "ReservationUnknown")]
-
-
-@pytest.mark.asyncio
-async def test_simulated_filled_ack_persists_claim_and_fill_together_then_publishes() -> None:
-    trace = _Trace()
-    await persist_simulated_outcome(trace, trace.bus, None,  # type: ignore[arg-type]
-                                    _facts(filled=True, simulated=True), _outcome("ack", "m-1"))
-    assert trace.calls == [("persist", "ReservationClaimed+OrderFilled"),
-                           ("publish", "ReservationClaimed"), ("publish", "OrderFilled")]
 
 
 @pytest.mark.asyncio

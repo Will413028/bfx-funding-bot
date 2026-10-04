@@ -257,7 +257,7 @@ sequenceDiagram
 
 資料庫的 capital authority epoch（`legacy` / `ledger`）在 `build_daemon` 讀一次，`select_bot_ports(authority, ...)` 一次選定 bot 行程每個 consumer 綁定的 adapter（web API 對應 `apps/read_models.py`）；`apps/bot.py` 其餘部分不指名 authority。此 build 的 `SUPPORTED_AUTHORITIES` 仍只有 `legacy`，ledger 組裝只由測試以 monkeypatch epoch 讀取進入。
 
-- **`BotPorts`**：`uncertainty_reader`、`managed_offers`、`venue_hint_sink`（一個實例；`select_bot_ports` 收到先建好的 `ResyncChannel`，`PeriodicReconcile`、auth WS 與 ledger hint sink 共用它）、`capital: CapitalPorts | None`（paper / shadow 為 `None`）與 `legacy: LegacyExtras | None`。`CapitalPorts` 全有或全無：`capital_authority`、`scope_lock`、`policy_store`、`command_boundary`（journal + effects）、`operator_resolution`、`deployment_input`、`observation`（取得 venue 連線後建出 boot 與 runtime 兩個 sink，時間常數為 `ledger.BOOT_GRACE_MS`=0 / `RUNTIME_GRACE_MS`=120 000，attempt 與 foreign-offer grace 共用）、`uncertainty_synced`（legacy 才有：reconciler 在 durable pre-sizing guard 放行後收斂 in-memory uncertainty cache）。legacy 的 `PaperPositionLedger` / `OfferRegistry` bus 訂閱在 `_legacy_ports` 內建立（每個事件型別先 projection 後 registry）。REST fill tracker 只在 legacy 組裝。
+- **`BotPorts`**：`uncertainty_reader`、`managed_offers`、`venue_hint_sink`（一個實例；`select_bot_ports` 收到先建好的 `ResyncChannel`，`PeriodicReconcile`、auth WS 與 ledger hint sink 共用它）、`capital: CapitalPorts`（必有；`select_bot_ports` 沒有 `live` 參數，每個組裝出來的 bot 都是 Bitfinex venue 上的 live writer）與 `legacy: LegacyExtras | None`。`CapitalPorts` 全有或全無：`capital_authority`、`scope_lock`、`policy_store`、`command_boundary`（journal + effects）、`operator_resolution`、`deployment_input`、`observation`（取得 venue 連線後建出 boot 與 runtime 兩個 sink，時間常數為 `ledger.BOOT_GRACE_MS`=0 / `RUNTIME_GRACE_MS`=120 000，attempt 與 foreign-offer grace 共用）、`uncertainty_synced`（legacy 才有：reconciler 在 durable pre-sizing guard 放行後收斂 in-memory uncertainty cache）。legacy 的 `PaperPositionLedger` / `OfferRegistry` bus 訂閱在 `_legacy_ports` 內建立（每個事件型別先 projection 後 registry）。REST fill tracker 只在 legacy 組裝。
 - **legacy**：與原本相同的物件圖（`CapitalRuntime`、`LegacyCommandJournal` / `LegacyCommandEffects`、`BootRecovery` 包在 `LegacyObservationSink`、`EventStorePersister`、`PaperPositionLedger`、`OfferRegistry` 與其 bus 訂閱）。
 - **ledger**：不建立 `CapitalRuntime`、`CapitalRepository`、`PostgresEventStore`、`EventStorePersister`、`PaperPositionLedger`、`OfferRegistry`、legacy hint sink。唯一紀錄是 ledger 自己的表；bus 只在寫入 transaction commit 之後承載通知（`CommandOutcomeNotice`、`UnknownResolutionNotice`、`VenueHintNotification`、`PositionReconciled`）。observation sink 是 `ledger.wiring` 的 cycle 外包 `LedgerCycleEffects`（保護、NAV、告警），不得包住 legacy sink。
 - **Policy store（`ledger.PolicyStore`）**：`select_policy_ports(authority, ...)`（bot 與 `scripts/amend_capital_policy.py` 共用；腳本先讀 epoch）選 store 與 scope lock。兩個 authority 共用唯一寫入者 `ledger.policy_write.write_policy_revision`，呼叫端持有 scope lock，store 不代鎖。`read_applied` / `apply_policy` 讀寫兩個 authority 共用的 `capital_policy_heads` / `capital_policy_revisions`。legacy 實作先 replay event stream（`prepare_locked`），ledger 實作不碰 event stream。boot 的 policy 預檢與 `CapitalPolicyRequestWorker`（經 `accounts.capital_amendment`）都走它。
@@ -363,7 +363,7 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 | Reconcile interval | ~90s（resync debounce 10s） | `BFX_RECONCILE_INTERVAL_S`, `BFX_RESYNC_MIN_INTERVAL_S` |
 | Period | 2 天（兩策略皆 `period_days=2`） | — |
 | Reprice sweep（E1） | enabled（canary 2026-07-07 起）；tolerance 10%；min age 30min；≤3 cancels/tick | `BFX_REPRICE_ENABLED`、`BFX_REPRICE_TOLERANCE_PCT`、`BFX_REPRICE_MIN_AGE_S`、`BFX_REPRICE_MAX_CANCELS_PER_TICK` |
-| Execution policy | `paper`、`book_guarded`、`optimizer_shadow`、`optimizer_live`；非 paper 必須設定 book freshness/reconcile/down-bound，optimizer_live 另需 empirical artifact + fee | `BFX_EXECUTION_POLICY`、`BFX_BOOK_*`、`BFX_FILL_MODEL_ARTIFACT`、`BFX_OPTIMIZER_FEE_RATE` |
+| Execution policy | `book_guarded`、`optimizer_shadow`、`optimizer_live`；必須設定 book freshness/reconcile/down-bound，optimizer_live 另需 empirical artifact + fee | `BFX_EXECUTION_POLICY`、`BFX_BOOK_*`、`BFX_FILL_MODEL_ARTIFACT`、`BFX_OPTIMIZER_FEE_RATE` |
 
 ### 4a. 回測引擎契約（`modules/backtest/engine.py::run_backtest`）
 
@@ -418,7 +418,7 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 1. `ManualKillGuard`（trading-state guard）— 已觸發但 HALTED 尚未寫入的自動保護、或 durable trading state 不是 `ACTIVE` 即擋新單，跑最前；讀不到 trading state、或從未記錄任何決策，一律視為 HALTED（fail-closed）。撤單不經過它（見下方 Trading state）。
 2. `AuthHealthGuard` — executor health 為 `DOWN` 時擋（`DEGRADED` 為 soft warn 不擋）。
 3. `HeartbeatGuard` — 只 watch `ws`（market-data liveness，own-loop），`age > threshold_seconds`（live 為 300s，由 `safety.live.yaml` 設定；`threshold_seconds` 為必填參數無 code default）擋。刻意**不** watch `executor`/`safety_chain`（reactive，靜市場時不跳動，誤判會造成 idle restart loop）。
-4. `AllocationCapGuard` — POST 時若 `(reserved + realized) + offer > cap` 則擋；恰好 at-cap 放行，over-cap 擋；SKIP 一律放行。
+4. `CapitalPolicyGuard` 與 `OfferEnvelopeGuard`：資金上限只來自已套用的 `CapitalPolicy`（沒有 `AllocationCapGuard` / `BuyingPowerGuard`，也沒有 safety config 的 `allocation_cap` / `buying_power` 區段）；鏈尾是 `WriterLockGuard`。
 
 5. `OfferEnvelopeGuard`（`safety/pre_trade.py`，lending envelope ADR 2026-09-25 D1）— 每筆新 offer 對 applied `CapitalPolicy` 的包絡檢查：`max_offer_amount`、天期 [min,max]、同幣別 open 的受管 offer 數（手動單不佔名額）、利率下限 ＝ max(`min_rate_apr`/365, 即時 bid 中位數 × `rate_floor_ratio`)。policy 沒有包絡（schema 1/2）、讀不到、沒有新鮮 book 一律擋。包絡改動走 `scripts/amend_capital_policy.py`（dry run → digest → apply，新 revision）；`enabled` 平常由 UI 請求切換（見下方 Trading state）；撤單不經過它。送單節流 `CommandThrottle` 是平台設定（`pre_trade_limits.command_rate`），不在包絡裡。
 
@@ -440,7 +440,7 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 **真錢 guard 不變式（`assert_live_guard_invariant`）**：`BFX_PHASE=live` 啟動時強制 trading-state/auth/heartbeat hard guards 全開，且必須有 `pre_trade_limits.command_rate`；每幣別的包絡在 DB policy，缺包絡的幣別由 `OfferEnvelopeGuard` 擋單。
 
-**Config 不可熱載**：`SafetyConfig` 啟動時讀一次（`BFX_SAFETY_CONFIG`，預設 `configs/safety.yaml`），改 threshold 需 redeploy。
+**Config 不可熱載**：`SafetyConfig` 啟動時讀一次（`BFX_SAFETY_CONFIG`，預設 `configs/safety.live.yaml`），改 threshold 需 redeploy。
 
 **/healthz liveness**：獨立 HTTP server（port 8080）。Liveness（own-loop，如 `ws`）staleness 致命 → daemon 自行退出，由 compose 的 `restart: unless-stopped` 重啟；Activity-class（reactive，如 `executor`/`safety_chain`）只 WARN 不致命——這是 2026-05-26 idle-market restart loop 修法的核心。`bfx-deploy` 部署時以 `/healthz` 做 health wait（bot 300 s）。現行 `deploy/vm/docker-compose.app.yml` 沒有 Docker healthcheck，也沒有 autoheal label；`willfarrell/autoheal` sidecar 只存在於 `docker-compose.bot.yml` 的 `legacy-app` profile（歷史定義，不可用來啟動應用程式），因此 restart 只來自 process 退出，不來自外部探活。
 
@@ -730,13 +730,12 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 
 ## 8. Phases & Deployment
 
-**現行部署 phase（`paper`／`shadow`／`live`）**
+**現行部署 phase（`shadow`／`live`）**
 
-| Phase | 性質 | Realm | Executor | 備註 |
+| Phase | 性質 | Realm | Venue | 備註 |
 |---|---|---|---|---|
-| `paper` | 1h 模擬 | `ci` | paper | `BFX_RUN_DURATION_HOURS=1` |
-| `shadow` | 模擬校準 | `shadow` | paper | 正常 profile 為 `book_guarded`；無 duration cap |
-| `live` | **真錢能力** | `prod` | `bitfinex_live` | `live.env`／`book_guarded`；資金只由已套用 CapitalPolicy 決定：fUST all_available、reserve0、max_cell_fraction0.70，fUSD disabled；能否掛新單看 trading state（ACTIVE）、該幣別 policy `enabled` 與包絡 guard（§6）；release flow／change class 已移除，部署不影響能否交易 |
+| `shadow` | 模擬校準 | `shadow` | simulated（尚未組裝） | `build_daemon` 在 realm 檢查之後拒絕啟動（"shadow runs on the simulated venue, composed in P2b"）；`paper` phase 與 echo executor 已刪除，`BFX_PHASE=paper` 在 `load_config` 直接拒絕並指向 `shadow` |
+| `live` | **真錢能力** | `prod` | Bitfinex | `live.env`／`book_guarded`；資金只由已套用 CapitalPolicy 決定：fUST all_available、reserve0、max_cell_fraction0.70，fUSD disabled；能否掛新單看 trading state（ACTIVE）、該幣別 policy `enabled` 與包絡 guard（§6）；release flow／change class 已移除，部署不影響能否交易 |
 
 **歷史相容性**：舊 `canary` phase、fUST cap10000／fUSD cap0、
 `BFX_BALANCE_BUFFER_USDT` 與 env-based canary profile 已退役，不是現行資金 authority。
@@ -745,7 +744,7 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 Halt 2 DR 收據）已由 ADR 2026-09-25 的 release flow 取代並刪除，資料見 `release_archive`。
 
 **Phase ⟷ Realm guard**（`load_config()`）：live 禁止 shadow realm；
-production 使用 prod，ci 僅供測試。paper/shadow 禁止 prod（模擬不可污染真錢分析）。
+production 使用 prod，ci 僅供測試。shadow 禁止 prod（模擬不可污染真錢分析）。
 違規 `ValueError` fail-fast；webapi 必須明確設定與 daemon 相同的 realm。
 
 **Cells**：`cells.yaml`（shadow，多對跨 fUSD/fUST 與 p2/p30/a30）；本輪
@@ -804,7 +803,7 @@ projection 表零寫權限，授權與收回都在 migration（`1c435a35dcb4`、
 
 **關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`、
 `BFX_EXCHANGE_ACCOUNT_ID`、`BFX_VAULT_KEK`、
-`BFX_EXECUTOR`、`BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`、
+`BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`（`BFX_EXECUTOR` 已不讀取，設了也被忽略）、
 `BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_VENUE_FLOOR_USD`、
 `BFX_MIN_OFFER_BUFFER_PCT`、`BFX_SCHEDULER_BUFFER_S`、
 `BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`。

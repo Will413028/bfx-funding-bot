@@ -147,8 +147,7 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(cap
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30", account_id=str(account))
     service = TradingStatusService(chain=chain, account_ctx=ctx,
-        cells=[_cell("fUST", "a30"), _cell("fUST", "p2")], caps={}, default_cap=Decimal("0"),
-        env_fallback_cap=None, buffers={}, default_buffer=Decimal("0"), env_fallback_buffer=None,
+        cells=[_cell("fUST", "a30"), _cell("fUST", "p2")],
         phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), trading_state=halt, exposure=status_reads(runtime))
     snapshot = await service.snapshot()
     assert snapshot["account_id"] == str(account)
@@ -223,8 +222,7 @@ async def test_status_with_an_envelope_serializes_to_json(capital_db):
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30", account_id=str(account))
     service = TradingStatusService(chain=chain, account_ctx=ctx,
-        cells=[_cell("fUST", "a30")], caps={}, default_cap=Decimal("0"),
-        env_fallback_cap=None, buffers={}, default_buffer=Decimal("0"), env_fallback_buffer=None,
+        cells=[_cell("fUST", "a30")],
         phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), trading_state=halt, exposure=status_reads(runtime))
     symbols = json.loads(json.dumps(await service.snapshot()))["symbols"]
     for symbol in ("fUST", "fUSD"):
@@ -317,11 +315,11 @@ async def boundary(factory, account):
     bus = DomainEventBus()
     persister = EventStorePersister(store=PostgresEventStore(deployment_environment="ci"),
                                     session_factory=factory)
-    gate = AccountCommandGate(venue, bus=bus, persister=persister,
+    gate = AccountCommandGate(venue,
         uncertainty_reader=LegacyUncertaintyReader(factory),
         safety_evaluator=stop_chain(halt, account), deployment_environment="ci",
         boundary=legacy_boundary(runtime, persister, bus), managed_offers=LegacyManagedOffers(),
-        clock=lambda: 1100, is_simulated=False)
+        clock=lambda: 1100)
     ctx = AccountContext(str(account), Credentials("mock", "mock"), Decimal("0"))
     return gate, venue, ready, ctx, runtime, halt
 
@@ -505,11 +503,10 @@ async def test_independent_command_gates_cannot_spend_same_budget(pg_session_fac
     second = replace(first, decision_id=row.decision_id, decision=first.decision.model_copy(
         update={"signal_correlation_id": event.signal_correlation_id,
                 "offer_amount_usdt": Decimal("499.99990501")}))
-    competitor = AccountCommandGate(venue, bus=gate._bus, persister=gate._persister,
+    competitor = AccountCommandGate(venue,
         uncertainty_reader=LegacyUncertaintyReader(factory),
         safety_evaluator=ManualKillGuard(trading_state=halt), deployment_environment="ci",
-        boundary=gate._boundary, managed_offers=LegacyManagedOffers(), clock=lambda: 1100,
-        is_simulated=False)
+        boundary=gate._boundary, managed_offers=LegacyManagedOffers(), clock=lambda: 1100)
     results = await asyncio.gather(gate.submit(first, ctx), competitor.submit(second, ctx),
                                    return_exceptions=True)
     assert sum(isinstance(r, SubmittedOrder) for r in results) == 1
@@ -825,3 +822,83 @@ async def test_stop_after_intent_commit_is_not_sent(capital_db, state):
         types = [row.event_type for row in (await session.scalars(select(EventLogRow))).all()]
     assert types.count("RESERVATION_INTENT") == 1
     assert types.count("RESERVATION_FAILED") == 1
+
+
+# ---- the durable write path through the legacy boundary (offer_claims / position_state) ----
+
+
+async def _claims(factory, account):
+    from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow, PositionStateRow
+    async with factory() as session:
+        claims = (await session.scalars(select(OfferClaimRow).where(
+            OfferClaimRow.account_id == str(account)))).all()
+        state = (await session.scalars(select(PositionStateRow).where(
+            PositionStateRow.account_id == str(account),
+            PositionStateRow.symbol == "fUST"))).one_or_none()
+    return claims, state
+
+
+@pytest.mark.asyncio
+async def test_the_intent_is_a_committed_pending_claim_when_the_venue_is_called(capital_db):
+    """Read-your-writes: the venue sees the write-ahead intent as a durable PENDING claim."""
+    from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
+    factory, account = capital_db
+    gate, _venue, ready, ctx, _runtime, _halt = await boundary(factory, account)
+    seen = []
+
+    class Asserting(Venue):
+        async def submit(self, ready, ctx, *, cid, reservation_ref):
+            async with factory() as session:
+                row = (await session.scalars(select(OfferClaimRow).where(
+                    OfferClaimRow.cid == cid, OfferClaimRow.account_id == str(account)))).one()
+            seen.append((row.state, row.venue_offer_id))
+            return await super().submit(ready, ctx, cid=cid, reservation_ref=reservation_ref)
+
+    gate._inner = Asserting(factory)
+    await gate.submit(ready, ctx)
+    assert seen == [("pending", None)]
+
+
+@pytest.mark.asyncio
+async def test_an_acknowledged_submit_promotes_the_same_claim_and_reserves_the_amount(capital_db):
+    factory, account = capital_db
+    gate, _venue, ready, ctx, _runtime, _halt = await boundary(factory, account)
+    await gate.submit(ready, ctx)
+    claims, state = await _claims(factory, account)
+    assert [(c.state, c.venue_offer_id) for c in claims] == [("claimed", "101")]  # promoted in place
+    assert state is not None and state.reserved == Decimal(AMOUNT)
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_submit_marks_the_claim_failed_and_reserves_nothing(capital_db):
+    from bfx_funding_bot.modules.execution.submit_outcomes import SubmitRejected
+    factory, account = capital_db
+    gate, _venue, ready, ctx, _runtime, _halt = await boundary(factory, account)
+
+    class Rejecting(Venue):
+        async def submit(self, ready, ctx, *, cid, reservation_ref):
+            return SubmittedOrder(cid=cid, venue_offer_id=None, outcome=SubmitRejected("no_funds"))
+
+    gate._inner = Rejecting(factory)
+    await gate.submit(ready, ctx)
+    claims, state = await _claims(factory, account)
+    assert [c.state for c in claims] == ["failed"]
+    assert state is None or state.reserved == Decimal("0")  # FAILED never reserves
+
+
+@pytest.mark.asyncio
+async def test_a_crash_between_intent_and_outcome_leaves_the_claim_pending(capital_db):
+    from bfx_funding_bot.modules.execution.command_gate import SubmitOutcomeLostError
+    factory, account = capital_db
+    gate, _venue, ready, ctx, _runtime, _halt = await boundary(factory, account)
+
+    class Crashing(Venue):
+        async def submit(self, ready, ctx, *, cid, reservation_ref):
+            raise RuntimeError("crash between INTENT and outcome")
+
+    gate._inner = Crashing(factory)
+    with pytest.raises(SubmitOutcomeLostError) as lost:
+        await gate.submit(ready, ctx)
+    assert isinstance(lost.value.__cause__, RuntimeError)
+    claims, _state = await _claims(factory, account)
+    assert [(c.state, c.venue_offer_id) for c in claims] == [("pending", None)]  # for 3a-recovery

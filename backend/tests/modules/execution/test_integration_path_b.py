@@ -1,6 +1,4 @@
-"""Path B — safety block: tentative POST → AllocationCap blocks → safety_trigger
-+ FINAL decision SKIP(SAFETY_BLOCK) emitted ONCE; executor not called.
-"""
+"""Path B — safety block: tentative POST → a guard blocks → safety_trigger emitted ONCE."""
 from __future__ import annotations
 
 from decimal import Decimal
@@ -11,17 +9,12 @@ import pytest
 
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import EventType, Phase
-from bfx_funding_bot.modules.execution.contracts import ReservationRef
-from bfx_funding_bot.modules.execution.events import OrderFilled
-from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
 )
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-from bfx_funding_bot.modules.execution.safety.hard_guards import (
-    AllocationCapGuard,
-)
+from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
 from bfx_funding_bot.modules.strategy import (
     DecisionOutcome,
     DecisionPayload,
@@ -45,24 +38,13 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
     diagnostics = _EventCapture()
     probe = HealthProbe()
 
-    # Pre-load ledger with 600 USDT realized so AllocationCap (cap=500) fires
-    ledger = PaperPositionLedger(account_id="default")
-    scid = uuid4()
-    await ledger.on_order_filled(OrderFilled(
-        cid=1, venue_offer_id="paper_x", credit_id=None,
-        size_usdt=Decimal("600"), fill_rate=0.0001,
-        signal_correlation_id=scid, account_id="default", is_simulated=True,
-        symbol="fUST", reservation_ref=ReservationRef(
-            execution_decision_id="d-path-b", cid=1,
-            signal_correlation_id=scid, venue_offer_id="paper_x",
-        )))
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
 
     chain = SafetyGuardChain(
-        guards=[AllocationCapGuard(ledger=ledger, caps={}, default_cap=Decimal("500"))],
+        guards=[ManualKillGuard(pending_stop=lambda: "test stop")],
         probe=probe,
         diagnostics=diagnostics,
-        phase=Phase.PAPER,
+        phase=Phase.SHADOW,
         strategy=StrategyName.MEAN_REVERSION,
         cell="fUSD_a30",
         account_id="default",
@@ -83,7 +65,7 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
         if e["event_type"] == EventType.SAFETY_TRIGGER.value
     ]
     assert len(safety_triggers) == 1
-    assert safety_triggers[0]["payload"]["guard_name"] == "allocation_cap"
+    assert safety_triggers[0]["payload"]["guard_name"] == "manual_kill"
 
     final = DecisionPayload(
         decision_outcome=DecisionOutcome.SKIP,
@@ -92,4 +74,4 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
         skip_reason_detail=result.reason,
     symbol="fUST")
     assert final.skip_reason == SkipReason.SAFETY_BLOCK
-    assert "cap" in (final.skip_reason_detail or "")
+    assert "test stop" in (final.skip_reason_detail or "")

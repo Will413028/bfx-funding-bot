@@ -89,7 +89,7 @@ async def test_fill_tracker_ticks_emit_status_changes() -> None:
             http=client,
             event_sink=axiom,
             probe=probe,
-            phase=Phase.PAPER,
+            phase=Phase.SHADOW,
             strategy=StrategyName.MEAN_REVERSION,
             cell="fUSD_a30",
             account_id="default",

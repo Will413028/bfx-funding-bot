@@ -63,7 +63,7 @@ def _engine(store: StandingQuoteStore, *, clock_ms: int) -> SignalEngine:
     candles_repo = MagicMock()
     candles_repo.get_up_to = AsyncMock(return_value=_history(8))
     return SignalEngine(
-        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
+        phase=Phase.SHADOW, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=candles_repo, quote_store=store, clock=lambda: clock_ms,
         reporter=DivergenceReporter(build_strategy_at_boundary),
     )

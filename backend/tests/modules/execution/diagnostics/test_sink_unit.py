@@ -38,7 +38,7 @@ def _decision_event() -> dict:
     return {
         "timestamp": datetime.now(UTC).isoformat(),
         "level": "info",
-        "phase": "paper",
+        "phase": "shadow",
         "strategy": "rate_percentile",
         "cell": "bfx_USDT",
         "event_type": "decision",

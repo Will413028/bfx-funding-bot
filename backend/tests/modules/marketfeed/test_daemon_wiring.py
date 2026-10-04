@@ -46,7 +46,7 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
             "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
         ):
             monkeypatch.delenv(name)
-    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
@@ -191,7 +191,7 @@ async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_p
             "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
         ):
             monkeypatch.delenv(name)
-    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0", "BFX_KILL_SWITCH": "true",
@@ -283,7 +283,7 @@ async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, 
             "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_DEPLOYMENT_ID",
         ):
             monkeypatch.delenv(name)
-    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
@@ -343,7 +343,7 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
-    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_HEALTHZ_PORT": "0",
         "BFX_BOOK_MAX_AGE_SECONDS": "30", "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
         "BFX_BOOK_MAX_DOWN_PCT": "0.15",
@@ -395,7 +395,7 @@ async def test_live_boot_on_an_unsupported_authority_stops_trading_and_refuses(
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
-    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_HEALTHZ_PORT": "0",
         "BFX_BOOK_MAX_AGE_SECONDS": "30", "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
         "BFX_BOOK_MAX_DOWN_PCT": "0.15",
@@ -452,12 +452,13 @@ phase3b_wfo_results_ref: x
 
 
 # Valid (phase, realm) deployable combos — the config.py phase<->realm guard
-# rejects canary+shadow and simulated+prod, so pair each realm value with a
-# phase that can actually ship it. Still exercises all 3 realm values flowing
-# through to the emit sink (the invariant under test).
+# rejects live+shadow; shadow itself is refused at boot until the simulated venue is
+# composed, so the Bitfinex-venue boot is exercised under both realms it may run in
+# (prod, and the ci test realm) to show the realm flowing through to the emit sink
+# (the invariant under test).
 @pytest.mark.parametrize(
     "phase,env_value",
-    [("paper", "ci"), ("shadow", "shadow"), ("live", "prod")],
+    [("live", "prod"), ("live", "ci")],
 )
 @pytest.mark.asyncio
 async def test_build_daemon_emit_and_query_env_symmetric(
@@ -469,17 +470,12 @@ async def test_build_daemon_emit_and_query_env_symmetric(
 ) -> None:
     monkeypatch.setenv("BFX_PHASE", phase)
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", env_value)
-    monkeypatch.setenv(
-        "BFX_EXECUTION_POLICY",
-        "paper" if phase == "paper" else "book_guarded",
-    )
-    if phase != "paper":
-        monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
-        monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-        monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
-    if phase == "live":
-        safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
-        monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
+    safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")  # avoid git subprocess
     # Phase 4.4c: file-based sqlite so event-store tables created below are
     # visible to build_daemon's engine (from_snapshot uses them at boot).
@@ -489,14 +485,12 @@ async def test_build_daemon_emit_and_query_env_symmetric(
     configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
-    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
+    monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
     monkeypatch.delenv("BFX_EXECUTOR", raising=False)
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
-    if phase == "live":
-        configure_live_wiring_env(monkeypatch, tmp_path)
-        monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
-        monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
+    configure_live_wiring_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -560,9 +554,6 @@ async def test_build_daemon_reconcile_interval_zero_raises(
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
-    # Must use the live executor path to enter the `if not spec.is_simulated` block
-    # where the guard lives; paper executor sets is_simulated=True and skips it.
-    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
@@ -619,7 +610,6 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
-    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
@@ -691,7 +681,6 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
-    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "optimizer_live")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
@@ -791,111 +780,22 @@ async def test_daemon_taskgroup_runs_book_service_through_its_finally_shutdown()
 
 
 @pytest.mark.asyncio
-async def test_smoke_runner_present_for_simulated_paper(
+async def test_the_boot_smoke_surface_is_gone(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     httpx_mock: HTTPXMock,
 ) -> None:
-    """Paper (simulated) keeps the boot/HTTP smoke runner — guards the live-gate
-    from over-disabling it."""
-    from bfx_funding_bot.apps.bot import build_daemon
+    """The boot/HTTP smoke runner submitted a probe through the executor chain with placeholder
+    credentials: against the real venue that is a bogus order. It was removed with the paper
+    executor it needed; the composed daemon carries no smoke runner and no admin smoke route."""
+    from tests.modules.marketfeed.account_test_helpers import boot_live_construction
 
-    monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
-    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
-    monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
-    db_path = tmp_path / "smoke_paper.db"
-    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
-    monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    configure_account_env(monkeypatch)
-    monkeypatch.setenv("BFX_API_KEY", "test_key")
-    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
-    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
-    monkeypatch.delenv("BFX_EXECUTOR", raising=False)
-    monkeypatch.delenv("BFX_WS_CLIENT_ENABLED", raising=False)
-    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
-
-    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
-    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
-
-    _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
-    async with _eng.begin() as _c:
-        await _c.run_sync(Base.metadata.create_all)
-    await seed_exchange_account(_eng)
-    await _eng.dispose()
-
-    httpx_mock.add_response(
-        url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
-        method="GET",
-        status_code=200,
-        json=[],
-        is_reusable=True,
-        is_optional=True,
-    )
-
-    daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
-    assert daemon.smoke_runner is not None  # simulated → smoke chain self-test wired
-    # Paper/shadow MUST never construct or contend a single-writer advisory lock:
-    # build_daemon gates writer_lock on `not spec.is_simulated`, so two shadow/paper
-    # instances provably can't contend a lock (and the writer_lock liveness sub-task
-    # is skipped in run()). Pin it so a future wiring change can't silently flip it.
-    assert daemon.writer_lock is None
-
-
-@pytest.mark.asyncio
-async def test_smoke_runner_gated_off_for_live_executor(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    httpx_mock: HTTPXMock,
-) -> None:
-    """Canary/live executor must NOT wire the SmokeRunner: its chain self-test
-    submits with placeholder creds, which against the real venue returns
-    `10100 apikey: digest invalid`. Smoke is a simulated-only self-test."""
-    from bfx_funding_bot.apps.bot import build_daemon
-
-    safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
-    monkeypatch.setenv("BFX_PHASE", "live")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
-    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
-    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
-    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
-    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
-    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
-    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
-    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
-    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
-    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
-    monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
-    db_path = tmp_path / "smoke_live.db"
-    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
-    monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    configure_live_wiring_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("BFX_API_KEY", "test_key")
-    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
-    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
-
-    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
-    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
-
-    _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
-    async with _eng.begin() as _c:
-        await _c.run_sync(Base.metadata.create_all)
-    await seed_exchange_account(_eng)
-    await _eng.dispose()
-
-    httpx_mock.add_response(
-        url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
-        method="GET",
-        status_code=200,
-        json=[],
-        is_reusable=True,
-        is_optional=True,
-    )
-
-    daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
-    assert daemon.smoke_runner is None  # live → smoke self-test disabled (no real-venue probe)
+    daemon, engine = await boot_live_construction(monkeypatch, tmp_path, httpx_mock, name="no_smoke")
+    await engine.dispose()
+    assert not hasattr(daemon, "smoke_runner")
+    from bfx_funding_bot.modules.marketfeed.healthz import make_app
+    app = make_app(daemon.probe, admin_token="secret", trading_status=daemon.trading_status)
+    assert "/admin/smoke-test" not in {route.path for route in app.routes}
 
 
 @pytest.mark.asyncio
@@ -908,15 +808,13 @@ async def test_canary_build_wires_writer_lock_and_guard(
     the fail-closed writer_lock guard to the safety chain. On a sqlite
     DATABASE_URL the lock is CONSTRUCTED but never ACQUIRED (acquire is
     Postgres-only) — so this asserts wiring without touching a real lock.
-    Paper/shadow leave writer_lock None (covered implicitly by the sibling
-    paper test which exercises the simulated path)."""
+    Every composed bot is a live writer, so the lock is never None."""
     from bfx_funding_bot.apps.bot import build_daemon
 
     safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
     monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
-    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")

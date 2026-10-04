@@ -74,10 +74,10 @@ async def factory(tmp_path):
         await engine.dispose()
 
 
-async def _select(factory, authority: str, *, live: bool = True, bus=None, resync=None) -> BotPorts:
+async def _select(factory, authority: str, *, bus=None, resync=None) -> BotPorts:
     return await select_bot_ports(
         authority, session_factory=factory, scope=SCOPE, account_id=str(ACCOUNT),
-        bus=bus or DomainEventBus(), resync=resync or ResyncChannel(), live=live,
+        bus=bus or DomainEventBus(), resync=resync or ResyncChannel(),
         clock=lambda: 1_000, max_snapshot_age_ms=10_000,
     )
 
@@ -168,18 +168,17 @@ async def test_ledger_venue_hint_sink_requests_resync_through_the_channel(factor
 
 
 @pytest.mark.asyncio
-async def test_the_ledger_has_no_simulated_composition(factory) -> None:
-    with pytest.raises(ValueError, match="no simulated composition"):
-        await _select(factory, "ledger", live=False)
+@pytest.mark.parametrize("authority", ["legacy", "ledger"])
+async def test_every_selection_has_capital_ports_and_the_signature_has_no_live_switch(
+    factory, authority: str,
+) -> None:
+    """No simulated composition is selectable here: capital ports always exist, and
+    ``select_bot_ports`` takes no ``live`` argument."""
+    import inspect
 
-
-@pytest.mark.asyncio
-async def test_legacy_paper_selection_has_no_capital_ports(factory) -> None:
-    ports = await _select(factory, "legacy", live=False)
-    assert ports.capital is None
-    assert type(ports.uncertainty_reader).__name__ == "LegacyUncertaintyReader"
-    assert type(ports.managed_offers).__name__ == "LegacyManagedOffers"
-    assert ports.legacy is not None
+    assert "live" not in inspect.signature(select_bot_ports).parameters
+    ports = await _select(factory, authority)
+    assert ports.capital is not None
 
 
 def _shape(obj: object) -> str:

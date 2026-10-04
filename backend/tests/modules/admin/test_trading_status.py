@@ -2,10 +2,9 @@
 
 Motivation (2026-07-27 incident, in three parts):
 
-1. `BFX_ALLOCATION_CAP_USDT=0` was set to pause the canary. Every configured
-   symbol has an explicit cap in the safety config, so the env scalar bound
-   nothing; the bot kept lending for hours. The value alone read as "paused" —
-   only the resolution SOURCE shows the knob was inert.
+1. An env scalar set to 0 was used to pause the canary. Every configured
+   symbol had an explicit cap elsewhere, so the scalar bound nothing; the bot
+   kept lending for hours. The value alone read as "paused".
 2. The pause was "verified" with `docker exec printenv` — reading back the
    input we had just written. A tautology: it cannot fail.
 3. `halted` was knowable only as an env var, never as behaviour.
@@ -20,29 +19,30 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 import pytest
 
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import Phase
-from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
+from bfx_funding_bot.modules.admin.trading_status import (
+    CapitalStatusReads,
+    TradingStatusService,
+)
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
-from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials, GuardResult
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-from bfx_funding_bot.modules.execution.safety.hard_guards import (
-    AllocationCapGuard,
-    BuyingPowerGuard,
-    ManualKillGuard,
-)
+from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingState,
     TransitionResult,
     restates,
     validate_transition,
 )
-from bfx_funding_bot.modules.strategy import CellConfig, StrategyName
+from bfx_funding_bot.modules.ledger import CapitalBlocked, Scope
+from bfx_funding_bot.modules.strategy import CellConfig, DecisionOutcome, StrategyName
 
 D = Decimal
 
@@ -53,13 +53,6 @@ async def test_status_exposes_actual_cell_choices_for_scoped_release_requests():
     assert status["configured_cells"] == [
         {"symbol": "fUST", "cell": "fUST_p2", "strategy": "mean_reversion", "period": "p2"}]
 
-# Module-level so they can be default arguments (B008). `None` cannot serve as
-# the "not supplied" sentinel here: an unset env fallback IS None, and one test
-# pins that None and Decimal("0") must not render identically.
-_ENV_CAP_ZERO = D("0")
-_ENV_BUFFER_3 = D("3")
-
-
 class _Sink:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
@@ -68,27 +61,50 @@ class _Sink:
         self.events.append(event)
 
 
-class _FakeLedger:
-    def __init__(
-        self, *, reserved: dict[str, Decimal] | None = None,
-        realized: dict[str, Decimal] | None = None,
-        available: dict[str, Decimal] | None = None,
-    ) -> None:
-        self._reserved = reserved or {}
-        self._realized = realized or {}
-        self._available = available or {}
+class _NoCapital:
+    """An authority with no answer: every read is blocked, so nothing may be spent."""
 
-    def current_exposure(self, symbol: str) -> Decimal:
-        return self.reserved_exposure(symbol) + self.realized_exposure(symbol)
+    async def read(self, scope: Any, *, now_ms: int, session: Any = None) -> CapitalBlocked:
+        return CapitalBlocked("test_no_capital_answer")
 
-    def reserved_exposure(self, symbol: str) -> Decimal:
-        return self._reserved.get(symbol, D("0"))
+    async def read_policy(self, session: Any, scope: Any, symbol: str) -> CapitalBlocked:
+        return CapitalBlocked("test_no_capital_answer")
 
-    def realized_exposure(self, symbol: str) -> Decimal:
-        return self._realized.get(symbol, D("0"))
 
-    def available_balance(self, symbol: str) -> Decimal:
-        return self._available.get(symbol, D("0"))
+class _NoLock:
+    async def lock(self, session: Any, scope: Any) -> None:
+        return None
+
+
+class _Session:
+    async def __aenter__(self) -> _Session:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+def _reads() -> CapitalStatusReads:
+    return CapitalStatusReads(
+        authority=_NoCapital(),  # type: ignore[arg-type]
+        lock=_NoLock(),  # type: ignore[arg-type]
+        scope=Scope(UUID(int=1), "ci"),
+        session_factory=lambda: _Session(),  # type: ignore[arg-type,return-value]
+        clock=lambda: 1_000,
+    )
+
+
+class _Guard:
+    """A guard that blocks every POST (or allows it), named like a real one."""
+
+    def __init__(self, name: str, *, allow: bool) -> None:
+        self.name = name
+        self._allow = allow
+
+    async def evaluate(self, decision: Any, ctx: Any) -> GuardResult:
+        if decision.decision_outcome != DecisionOutcome.POST or self._allow:
+            return GuardResult(True, self.name)
+        return GuardResult(False, self.name, reason=f"{self.name} refused")
 
 
 def _cell(symbol: str, period_agg: str = "a30") -> CellConfig:
@@ -154,17 +170,11 @@ def _halt_state(halted: bool, reason: str = "candle distortion") -> TradingState
 def _service(
     *,
     guards: list[Any] | None = None,
-    ledger: _FakeLedger | None = None,
-    caps: dict[str, Decimal] | None = None,
-    buffers: dict[str, Decimal] | None = None,
-    env_fallback_cap: Decimal | None = _ENV_CAP_ZERO,
-    env_fallback_buffer: Decimal | None = _ENV_BUFFER_3,
     cells: list[CellConfig] | None = None,
     recorder: SubmitAttemptRecorder | None = None,
     trading_state: Any = None,
     kill_switch: Any = None,
 ) -> TradingStatusService:
-    led = ledger if ledger is not None else _FakeLedger()
     chain = SafetyGuardChain(
         guards=guards if guards is not None else [ManualKillGuard(trading_state=trading_state)],
         probe=HealthProbe(), diagnostics=_Sink(),
@@ -173,15 +183,9 @@ def _service(
     )
     return TradingStatusService(
         chain=chain,
-        exposure=led,
+        exposure=_reads(),
         account_ctx=_ctx(),
         cells=cells if cells is not None else [_cell("fUST")],
-        caps=caps if caps is not None else {"fUST": D("10000")},
-        default_cap=D("0"),
-        env_fallback_cap=env_fallback_cap,
-        buffers=buffers if buffers is not None else {"fUST": D("3")},
-        default_buffer=D("0"),
-        env_fallback_buffer=env_fallback_buffer,
         phase=Phase.SHADOW,
         attempts=recorder if recorder is not None else SubmitAttemptRecorder(),
         trading_state=trading_state,
@@ -228,90 +232,26 @@ async def test_uninstalled_kill_guard_is_not_reported_as_running_normally(
 @pytest.mark.asyncio
 async def test_installed_guards_are_listed(monkeypatch: pytest.MonkeyPatch) -> None:
     snap = await _service(
-        guards=[
-            ManualKillGuard(),
-            AllocationCapGuard(
-                ledger=_FakeLedger(), caps={"fUST": D("10000")}, default_cap=D("0"),
-            ),
-        ],
+        guards=[ManualKillGuard(), _Guard("capital_policy", allow=True)],
     ).snapshot()
-    assert [g["name"] for g in snap["guards"]] == ["manual_kill", "allocation_cap"]
+    assert [g["name"] for g in snap["guards"]] == ["manual_kill", "capital_policy"]
 
 
 # --------------------------------------------------------------------------
-# effective config — value AND which tier bound it
+# capital — the applied authority, never a legacy env scalar or map
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_cap_reports_value_and_source() -> None:
-    snap = await _service().snapshot()
-    cap = snap["symbols"]["fUST"]["cap"]
-    assert cap["value"] == "10000"
-    assert cap["source"] == "symbol_map"
-
-
-@pytest.mark.asyncio
-async def test_env_fallback_cap_reports_non_binding_when_every_symbol_is_explicit() -> None:
-    """THE regression test for 2026-07-27: value 0 present, binds nothing."""
-    snap = await _service(env_fallback_cap=D("0")).snapshot()
-    fb = snap["env_fallback_cap"]
-    assert fb["value"] == "0"
-    assert fb["binding"] is False
-    assert fb["binding_symbols"] == []
-    assert "explicit" in fb["why"]
-
-
-@pytest.mark.asyncio
-async def test_env_fallback_cap_reports_binding_when_a_symbol_has_no_entry() -> None:
-    snap = await _service(
-        cells=[_cell("fUST"), _cell("fUSD")],
-        caps={"fUST": D("10000")},          # fUSD absent → falls through
-        buffers={"fUST": D("3")},
-        env_fallback_cap=D("400"),
-    ).snapshot()
-    fb = snap["env_fallback_cap"]
-    assert fb["binding"] is True
-    assert fb["binding_symbols"] == ["fUSD"]
-    assert snap["symbols"]["fUSD"]["cap"] == {"value": "400", "source": "env_fallback"}
-
-
-@pytest.mark.asyncio
-async def test_unset_env_fallback_is_reported_as_null_not_zero() -> None:
-    """None (unset) and Decimal('0') (set to zero) are different configurations
-    and must not render identically."""
-    snap = await _service(env_fallback_cap=None).snapshot()
-    assert snap["env_fallback_cap"]["value"] is None
-
-
-# --------------------------------------------------------------------------
-# funds — the reason a halt can be unverifiable
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_reports_balance_exposure_and_deployable_headroom() -> None:
-    snap = await _service(
-        ledger=_FakeLedger(
-            reserved={"fUST": D("100")}, realized={"fUST": D("400")},
-            available={"fUST": D("3.00")},
-        ),
-    ).snapshot()
-    s = snap["symbols"]["fUST"]
-    assert s["available_balance"] == "3.00"
-    assert s["exposure"] == {"reserved": "100", "realized": "400", "total": "500"}
-    # available 3.00 − buffer 3 = 0 → nothing deployable; this is exactly why
-    # "no orders appeared" proved nothing about the halt on 2026-07-27.
-    assert s["deployable_headroom"] == "0.00"
-
-
-@pytest.mark.asyncio
-async def test_deployable_headroom_floors_at_zero_never_negative() -> None:
-    snap = await _service(
-        ledger=_FakeLedger(available={"fUST": D("1")}),
-        buffers={"fUST": D("3")},
-    ).snapshot()
-    assert snap["symbols"]["fUST"]["deployable_headroom"] == "0"
+async def test_symbols_report_the_capital_authority_answer_and_no_legacy_tiers() -> None:
+    snap = await _service(cells=[_cell("fUST")]).snapshot()
+    assert snap["deployment_environment"] == "ci"
+    assert snap["symbols"]["fUST"] == {
+        "capital_available": False, "reason": "test_no_capital_answer",
+    }
+    # Symbols without a configured cell are still reported (the web UI reads both).
+    assert set(snap["symbols"]) == {"fUST", "fUSD"}
+    assert "env_fallback_cap" not in snap and "env_fallback_buffer" not in snap
 
 
 # --------------------------------------------------------------------------
@@ -358,22 +298,18 @@ async def test_dry_run_reports_the_halt_even_with_no_funds(
         trading_state=halted,
         guards=[
             ManualKillGuard(trading_state=halted),
-            BuyingPowerGuard(
-                ledger=_FakeLedger(available={"fUST": D("3.00")}),
-                buffers={"fUST": D("3")}, default_buffer=D("0"),
-            ),
+            _Guard("capital_policy", allow=False),
         ],
-        ledger=_FakeLedger(available={"fUST": D("3.00")}),
     )
     out = await svc.dry_run()
     assert out["would_submit_any"] is False
     fust = out["symbols"]["fUST"]
     assert fust["would_submit"] is False
     assert fust["blocked_by"] == "manual_kill"
-    # And the full picture: funds would ALSO block, so clearing the kill switch
+    # And the full picture: capital would ALSO block, so clearing the kill switch
     # alone would not resume trading.
     assert [g["name"] for g in fust["guards"] if not g["allowed"]] == [
-        "manual_kill", "buying_power",
+        "manual_kill", "capital_policy",
     ]
 
 
@@ -382,15 +318,13 @@ async def test_dry_run_probes_every_configured_symbol_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Live finding, 2026-07-27: defaulting to one symbol picked fUSD (sorted
-    first, and dark — zero balance), whose verdict was "blocked by buying_power".
+    first, and dark — zero balance), whose verdict was a funds block.
     An operator running the default probe would have concluded funds were the
     blocker while the funded symbol was held solely by the kill switch. A probe
     that reports on a symbol nobody is trading is worse than none."""
     svc = _service(
         trading_state=_FakeTradingState(_trading("HALTED")),
         cells=[_cell("fUST"), _cell("fUSD")],
-        caps={"fUST": D("10000"), "fUSD": D("400")},
-        buffers={"fUST": D("3"), "fUSD": D("3")},
     )
     out = await svc.dry_run()
     assert sorted(out["symbols"]) == ["fUSD", "fUST"]
@@ -401,14 +335,15 @@ async def test_dry_run_probes_every_configured_symbol_by_default(
 async def test_would_submit_any_is_true_when_any_single_symbol_would_trade() -> None:
     """The headline field must answer "could this daemon place ANY order right
     now" — one tradeable symbol is enough for the answer to be yes."""
+    class _OnlyFust:
+        name = "capital_policy"
+
+        async def evaluate(self, decision: Any, ctx: Any) -> GuardResult:
+            return GuardResult(decision.symbol == "fUST", self.name)
+
     svc = _service(
         cells=[_cell("fUST"), _cell("fUSD")],
-        caps={"fUST": D("10000"), "fUSD": D("400")},
-        buffers={"fUST": D("3"), "fUSD": D("3")},
-        guards=[BuyingPowerGuard(
-            ledger=_FakeLedger(available={"fUST": D("500"), "fUSD": D("0")}),
-            buffers={"fUST": D("3"), "fUSD": D("3")}, default_buffer=D("0"),
-        )],
+        guards=[_OnlyFust()],
     )
     out = await svc.dry_run()
     assert out["symbols"]["fUSD"]["would_submit"] is False
@@ -418,11 +353,7 @@ async def test_would_submit_any_is_true_when_any_single_symbol_would_trade() -> 
 
 @pytest.mark.asyncio
 async def test_dry_run_accepts_an_explicit_symbol_and_reports_only_that_one() -> None:
-    svc = _service(
-        cells=[_cell("fUST"), _cell("fUSD")],
-        caps={"fUST": D("10000"), "fUSD": D("400")},
-        buffers={"fUST": D("3"), "fUSD": D("3")},
-    )
+    svc = _service(cells=[_cell("fUST"), _cell("fUSD")])
     out = await svc.dry_run(symbol="fUST")
     assert list(out["symbols"]) == ["fUST"]
 
@@ -457,19 +388,14 @@ async def test_dry_run_rejects_an_unconfigured_symbol() -> None:
 
 @pytest.mark.asyncio
 async def test_dry_run_is_a_post_decision_so_the_sizing_guards_actually_run() -> None:
-    """SKIP decisions bypass AllocationCapGuard and BuyingPowerGuard entirely —
-    a probe built from one would report "nothing blocks" no matter the caps."""
-    svc = _service(
-        guards=[AllocationCapGuard(
-            ledger=_FakeLedger(realized={"fUST": D("10000")}),
-            caps={"fUST": D("10000")}, default_cap=D("0"),
-        )],
-    )
+    """SKIP decisions bypass the capital guards entirely — a probe built from
+    one would report "nothing blocks" no matter the policy."""
+    svc = _service(guards=[_Guard("capital_policy", allow=False)])
     out = await svc.dry_run()
     fust = out["symbols"]["fUST"]
     assert fust["decision"]["decision_outcome"] == "post"
     assert fust["would_submit"] is False
-    assert fust["blocked_by"] == "allocation_cap"
+    assert fust["blocked_by"] == "capital_policy"
 
 
 @pytest.mark.asyncio
@@ -481,9 +407,7 @@ async def test_dry_run_emits_no_safety_trigger() -> None:
         cell="c1", account_id="default",
     )
     svc = TradingStatusService(
-        chain=chain, exposure=_FakeLedger(), account_ctx=_ctx(), cells=[_cell("fUST")],
-        caps={"fUST": D("10000")}, default_cap=D("0"), env_fallback_cap=D("0"),
-        buffers={"fUST": D("3")}, default_buffer=D("0"), env_fallback_buffer=D("3"),
+        chain=chain, exposure=_reads(), account_ctx=_ctx(), cells=[_cell("fUST")],
         phase=Phase.SHADOW, attempts=SubmitAttemptRecorder(),
     )
     await svc.dry_run()
@@ -552,7 +476,7 @@ async def test_halt_is_the_operator_kill_and_reports_the_venue_part(complete: bo
 
 @pytest.mark.asyncio
 async def test_halt_without_a_store_is_a_clear_error_not_a_silent_noop() -> None:
-    """paper/shadow have no store. Silently accepting a halt request there
+    """A service built without a kill switch. Silently accepting a halt request there
     would report success while changing nothing."""
     svc = _service(trading_state=None)
     with pytest.raises(ValueError, match="not configured"):
