@@ -10,7 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections import deque
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -34,6 +35,7 @@ from bfx_funding_bot.modules.simulated_venue.contracts import (
     SimulatedVenueConfig,
     SimulatedVenueInternalError,
     VenueEventStore,
+    VenueObserver,
     VenueStoreError,
 )
 from bfx_funding_bot.modules.simulated_venue.events import NonceAdvanced, VenueEvent
@@ -47,6 +49,25 @@ _TARGETS = {
     "submit": FaultTarget.SUBMIT, "cancel": FaultTarget.CANCEL,
     "cancel_all": FaultTarget.CANCEL_ALL, "hist": FaultTarget.HISTORY,
 }
+
+
+# A soak runs for days: the in-memory logs keep the newest entries, the counters (here and in
+# the injected observer) keep the totals.
+LOG_LIMIT = 1000
+
+
+class BoundedLog[T](deque[T]):
+    """A bounded log that compares equal to the list of what it holds (``== []`` in tests)."""
+
+    def __init__(self) -> None:
+        super().__init__(maxlen=LOG_LIMIT)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (list, tuple, deque)):
+            return list(self) == list(other)
+        return NotImplemented
+
+    __hash__ = None
 
 
 class _BadRequestError(ValueError):
@@ -75,7 +96,7 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
     def __init__(
         self, *, account: SimAccount, config: SimulatedVenueConfig, store: VenueEventStore,
         feed: MarketFeed, clock_ms: Callable[[], int], faults: FaultPlan,
-        state: VenueState, seq: int,
+        state: VenueState, seq: int, observer: VenueObserver | None = None,
     ) -> None:
         self._account = account
         self._config = config
@@ -88,15 +109,19 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         self._seq = seq
         self._lock = asyncio.Lock()
         self.requests = 0
-        self.unexpected: list[tuple[str, str]] = []
+        self._observer = observer
+        self.unexpected: BoundedLog[tuple[str, str]] = BoundedLog()
+        self.unexpected_total = 0
         # Simulator-internal failures (never venue answers). CI asserts this is empty at
         # teardown and the soak report counts it apart from injected venue faults.
-        self.internal_failures: list[InternalFailure] = []
+        self.internal_failures: BoundedLog[InternalFailure] = BoundedLog()
+        self.internal_failures_total = 0
 
     @classmethod
     async def open(
         cls, *, account: SimAccount, config: SimulatedVenueConfig, store: VenueEventStore,
         feed: MarketFeed, clock_ms: Callable[[], int], faults: FaultPlan | None = None,
+        observer: VenueObserver | None = None,
     ) -> SimulatedVenue:
         """Rebuild the venue from its durable log (a restart answers identically)."""
         state = VenueState()
@@ -105,7 +130,7 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
             apply(state, event)
         return cls(
             account=account, config=config, store=store, feed=feed, clock_ms=clock_ms,
-            faults=faults or FaultPlan(), state=state, seq=len(events),
+            faults=faults or FaultPlan(), state=state, seq=len(events), observer=observer,
         )
 
     @property
@@ -119,6 +144,23 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
     async def fund_wallet(self, currency: str, amount: Decimal) -> None:
         async with self._lock:
             await self._commit(decide.fund_wallet(currency, amount, self._now()))
+
+    async def fund_wallets_if_empty(self, wallets: Mapping[str, Decimal]) -> bool:
+        """Seed the wallets in ONE append, and only on a venue whose log is empty.
+
+        A restart finds the log non-empty and funds nothing, so the wallet is never funded
+        twice; two processes racing on an empty log lose with `ConcurrentAppendError`
+        (the append is conditional on `expected_seq=0`). True when this call funded.
+        """
+        async with self._lock:
+            if self._seq != 0 or not wallets:
+                return False
+            now = self._now()
+            await self._commit([
+                event for currency, amount in sorted(wallets.items())
+                for event in decide.fund_wallet(currency, amount, now)
+            ])
+            return True
 
     async def aclose(self) -> None:
         return None
@@ -138,6 +180,9 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
 
     def _record_internal(self, kind: str, detail: str) -> None:
         self.internal_failures.append(InternalFailure(kind, detail))
+        self.internal_failures_total += 1
+        if self._observer is not None:
+            self._observer.internal_failure(kind)
         log.critical("simulated venue internal failure kind=%s detail=%s", kind, detail)
 
     async def _after_request(self) -> None:
@@ -193,15 +238,29 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
             raise FeedFailureError(f"feed {what} failed: {exc!r}") from exc
 
     async def _sync(self, now_ms: int, nonce: int | None = None) -> None:
-        """Record the accepted nonce, then every scheduled change due by `now_ms`."""
+        """Record the accepted nonce, then every scheduled change due by `now_ms`.
+
+        Public trades are consumed only up to the feed's event-time watermark: the range
+        `(market_through, min(now, watermark)]` is final, so a trade that reaches the feed
+        later with an older timestamp is still in a range nobody has consumed yet. A symbol
+        whose watermark is unknown consumes nothing and moves nothing.
+        """
         trades: dict[str, Sequence[PublicTrade]] = {}
+        through: dict[str, int] = {}
         for symbol in sorted({o.symbol for o in self._state.offers.values() if o.resting}):
+            mark = await self._feed_call("watermark", self._feed.complete_through(symbol))
+            if mark is None:
+                continue
+            upto = min(now_ms, mark)
+            after = self._state.market_through.get(symbol, now_ms)
+            if upto <= after:
+                continue
+            through[symbol] = upto
             trades[symbol] = await self._feed_call("trades", self._feed.trades(
-                symbol, after_ms=self._state.market_through.get(symbol, now_ms),
-                through_ms=now_ms,
-            ))
+                symbol, after_ms=after, through_ms=upto))
         events: list[VenueEvent] = [] if nonce is None else [NonceAdvanced(nonce, now_ms)]
-        events += decide.catch_up(self._state, self._config, now_ms=now_ms, trades=trades)
+        events += decide.catch_up(
+            self._state, self._config, now_ms=now_ms, trades=trades, through=through)
         await self._commit(events)
 
     async def _handle(self, request: httpx.Request) -> httpx.Response:
@@ -210,6 +269,9 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         if (request.method != "POST" or request.url.scheme != "https"
                 or request.url.host != HOST or routed is None):
             self.unexpected.append((request.method, str(request.url)))
+            self.unexpected_total += 1
+            if self._observer is not None:
+                self._observer.unexpected_request()
             return _json(404, wire.error_body(404, "simulated venue: unexpected request"))
         name, params = routed
         body = await request.aread()

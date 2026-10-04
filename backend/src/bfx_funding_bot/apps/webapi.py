@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
+from bfx_funding_bot.apps.authority_support import WEBAPI_SUPPORTED
 from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.core.authority import read_authority
 from bfx_funding_bot.core.db import make_engine, make_session_factory
@@ -39,7 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # refuses to start, so /health never reports a build on the wrong one.
         try:
             async with factory() as session:
-                authority = await read_authority(session)
+                authority = await read_authority(session, supported=WEBAPI_SUPPORTED)
             app.state.authority = authority
             app.state.read_models = select_read_models(authority)
         except Exception:

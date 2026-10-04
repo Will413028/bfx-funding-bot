@@ -172,8 +172,8 @@ async def test_ledger_venue_hint_sink_requests_resync_through_the_channel(factor
 async def test_every_selection_has_capital_ports_and_the_signature_has_no_live_switch(
     factory, authority: str,
 ) -> None:
-    """No simulated composition is selectable here: capital ports always exist, and
-    ``select_bot_ports`` takes no ``live`` argument."""
+    """The venue is chosen elsewhere (``apps/venue.py``): capital ports always exist, for
+    either authority, and ``select_bot_ports`` takes no ``live`` argument."""
     import inspect
 
     assert "live" not in inspect.signature(select_bot_ports).parameters

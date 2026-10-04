@@ -576,7 +576,7 @@ class BitfinexLiveExecutor:
         # 1. Publish CancelRequested (intent audit)
         await self._bus.publish(CancelRequested(
             venue_offer_id=venue_offer_id,
-            requested_at_ms=int(time.time() * 1000),
+            requested_at_ms=self._clock(),
             signal_correlation_id=signal_correlation_id,
             account_id=account_id,
         ))
@@ -605,7 +605,7 @@ class BitfinexLiveExecutor:
         if rest_status in ("success", "already_terminal"):
             await self._bus.publish(CancelAcknowledged(
                 venue_offer_id=venue_offer_id,
-                acknowledged_at_ms=int(time.time() * 1000),
+                acknowledged_at_ms=self._clock(),
                 signal_correlation_id=signal_correlation_id,
                 account_id=account_id,
                 rest_status=rest_status,

@@ -93,14 +93,48 @@ def test_normal_live_accepts_two_cells(tmp_path, monkeypatch):
     assert len(config.cells) == 2
 
 
+@pytest.mark.parametrize("phase", ["live", "shadow"])
 @pytest.mark.parametrize("name", [
     "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
-    "BFX_VENUE_FLOOR_USD", "BFX_MIN_OFFER_BUFFER_PCT",
+    "BFX_VENUE_FLOOR_USD", "BFX_MIN_OFFER_BUFFER_PCT", "BFX_EXECUTOR",
 ])
-def test_live_rejects_legacy_money_env(tmp_path, monkeypatch, name):
-    _set_required_config_env(monkeypatch, phase="live", policy="book_guarded")
+def test_every_phase_rejects_legacy_env(tmp_path, monkeypatch, name, phase):
+    """A set legacy knob is a config error in every phase (``BFX_EXECUTOR`` included)."""
+    _set_required_config_env(monkeypatch, phase=phase, policy="book_guarded")
     monkeypatch.setenv(name, "0")
-    with pytest.raises(ValueError, match="applied CapitalPolicy"):
+    with pytest.raises(ValueError, match=r"Remove legacy env .*applied CapitalPolicy"):
+        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+
+
+@pytest.mark.parametrize(("phase", "venue"), [("live", "bitfinex"), ("shadow", "simulated")])
+def test_the_venue_is_derived_from_the_phase(tmp_path, monkeypatch, phase, venue):
+    _set_required_config_env(monkeypatch, phase=phase, policy="book_guarded")
+    assert load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml())).venue == venue
+
+
+def test_the_venue_is_a_computed_property_not_a_field(tmp_path, monkeypatch):
+    """Mutation: store the venue again (a phase-and-venue pair that can disagree)."""
+    _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
+    config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+    assert "venue" not in type(config).model_fields
+    with pytest.raises(ValueError):  # extra="forbid": nobody can hand one in
+        type(config)(**{**config.model_dump(exclude={"venue"}), "venue": "bitfinex"})
+
+
+def test_initial_wallets_are_parsed(tmp_path, monkeypatch):
+    from decimal import Decimal
+
+    _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
+    monkeypatch.setenv("BFX_SIM_INITIAL_WALLETS", "UST:1000, USD:2.5")
+    config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+    assert config.simulated_initial_wallets == {"UST": Decimal(1000), "USD": Decimal("2.5")}
+
+
+@pytest.mark.parametrize("raw", ["UST", "UST:0", "UST:-1", "UST:abc", ":5", "UST:1,UST:2", "UST:nan"])
+def test_invalid_initial_wallets_are_refused(tmp_path, monkeypatch, raw):
+    _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
+    monkeypatch.setenv("BFX_SIM_INITIAL_WALLETS", raw)
+    with pytest.raises(ValueError, match="BFX_SIM_INITIAL_WALLETS"):
         load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 

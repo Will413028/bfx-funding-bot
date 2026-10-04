@@ -12,6 +12,7 @@ from uuid import UUID
 import pytest
 
 from bfx_funding_bot.core.authority import AuthorityMismatch
+from bfx_funding_bot.core.database_realm import DatabaseRealmMismatch, DatabaseRealmRow
 from bfx_funding_bot.core.db import Base, make_async_engine_from_url, make_session_factory
 from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
 from bfx_funding_bot.modules.ledger import Scope
@@ -32,6 +33,10 @@ def _args(**changes) -> argparse.Namespace:
     return argparse.Namespace(**{**base, **changes})
 
 
+async def _stamp(session, realm: str) -> None:
+    session.add(DatabaseRealmRow(realm=realm, stamped_at_ms=1, actor="test"))
+
+
 @pytest.fixture
 async def database(tmp_path, monkeypatch):
     url = f"sqlite+aiosqlite:///{tmp_path / 'amend.db'}"
@@ -41,6 +46,7 @@ async def database(tmp_path, monkeypatch):
         await conn.run_sync(Base.metadata.create_all)
     factory = make_session_factory(engine)
     async with factory.begin() as session:
+        await _stamp(session, "ci")
         await write_policy_revision(
             session, Scope(ACCOUNT, "ci"), symbol="fUST", policy=CapitalPolicy(enabled=True),
             expected_revision=0, source={"fixture": True})
@@ -49,7 +55,8 @@ async def database(tmp_path, monkeypatch):
 
 
 def _authority(monkeypatch, name: str) -> None:
-    async def read(_session: object) -> str:
+    async def read(_session: object, *, supported: object) -> str:
+        assert name in supported  # type: ignore[operator]
         return name
 
     monkeypatch.setattr(script, "read_authority", read)
@@ -84,9 +91,44 @@ async def test_the_script_amends_through_the_store_of_the_authority(
 
 @pytest.mark.asyncio
 async def test_an_unsupported_authority_refuses(database, monkeypatch) -> None:
-    async def refuse(_session: object) -> str:
+    async def refuse(_session: object, *, supported: object) -> str:
         raise AuthorityMismatch("authority_unsupported value=ledger build=legacy")
 
     monkeypatch.setattr(script, "read_authority", refuse)
     with pytest.raises(AuthorityMismatch):
+        await script.run(_args())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("realm", "expected"), [
+    ("prod", {"legacy"}), ("shadow", {"legacy", "ledger"}), ("ci", {"legacy", "ledger"}),
+])
+async def test_the_supported_authorities_follow_the_database_realm(
+    database, monkeypatch, realm: str, expected: set[str],
+) -> None:
+    """Mutation: one set for every realm (the old global) fails the ``prod`` and ``shadow`` rows."""
+    from sqlalchemy import text
+
+    async with database.begin() as session:
+        await session.execute(text("UPDATE database_realm SET realm = :realm"), {"realm": realm})
+    seen: list[frozenset[str]] = []
+
+    async def read(_session: object, *, supported: frozenset[str]) -> str:
+        seen.append(supported)
+        raise AuthorityMismatch("stop after the read")
+
+    monkeypatch.setattr(script, "read_authority", read)
+    with pytest.raises(AuthorityMismatch):
+        await script.run(_args())
+    assert seen == [frozenset(expected)]
+
+
+@pytest.mark.asyncio
+async def test_an_unstamped_database_refuses(database, monkeypatch) -> None:
+    from sqlalchemy import text
+
+    async with database.begin() as session:
+        await session.execute(text("DELETE FROM database_realm"))
+    _authority(monkeypatch, "legacy")
+    with pytest.raises(DatabaseRealmMismatch, match="unstamped"):
         await script.run(_args())

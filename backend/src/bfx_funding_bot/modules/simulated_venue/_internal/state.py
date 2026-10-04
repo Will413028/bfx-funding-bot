@@ -16,6 +16,7 @@ from bfx_funding_bot.modules.simulated_venue.events import (
     OfferFilled,
     OfferPlaced,
     TradesObserved,
+    TradeTick,
     VenueEvent,
     WalletFunded,
 )
@@ -50,6 +51,7 @@ class Offer:
     cum_mark: Decimal  # public volume at this (symbol, period) when the offer was placed
     ahead_ids: tuple[int, ...]  # own resting offers ahead of this one at placement
     ahead_filled_mark: Decimal  # what those had already filled at placement
+    placed_ms: int  # the real placement instant (`mts_create` may be stamped to the second)
     status: OfferStatus = "ACTIVE"
     was_partial: bool = False
     terminal_mts: int | None = None
@@ -183,8 +185,7 @@ def apply(state: VenueState, event: VenueEvent) -> None:
             _place(state, event)
         case TradesObserved():
             for tick in event.trades:
-                key = (event.symbol, tick.period)
-                state.volume_cum[key] = state.volume_cum.get(key, ZERO) + tick.amount
+                count_tick(state, event.symbol, tick)
             state.market_through[event.symbol] = max(
                 state.market_through.get(event.symbol, 0), event.through_ms,
             )
@@ -205,10 +206,28 @@ def apply(state: VenueState, event: VenueEvent) -> None:
             _interest(state, event)
 
 
+def count_tick(state: VenueState, symbol: str, tick: TradeTick) -> None:
+    """Add one public trade to the (symbol, period) volume, for the offers it can fill.
+
+    A trade that executed before an offer's real placement instant, but reaches the venue
+    after it (the feed's watermark trails `now`), is no volume for that offer: its mark moves
+    with the counter, as if the trade had been seen before the offer was placed.
+    """
+    key = (symbol, tick.period)
+    state.volume_cum[key] = state.volume_cum.get(key, ZERO) + tick.amount
+    for offer in state.resting_offers(symbol, tick.period):
+        if tick.mts <= offer.placed_ms:
+            offer.cum_mark += tick.amount
+
+
 def _place(state: VenueState, event: OfferPlaced) -> None:
     ahead = [
         o for o in state.resting_offers(event.symbol, event.period) if o.rate <= event.rate
     ]
+    # Other resting offers of the symbol still wait for the public trades in
+    # `(market_through, watermark]`: placing must not move that cursor past them. A symbol
+    # with nothing resting starts its cursor at the real placement instant.
+    nothing_else_rests = not state.resting_offers(event.symbol)
     state.offers[event.offer_id] = Offer(
         offer_id=event.offer_id, symbol=event.symbol, amount_original=event.amount,
         remaining=event.amount, rate=event.rate, period=event.period,
@@ -216,12 +235,14 @@ def _place(state: VenueState, event: OfferPlaced) -> None:
         cum_mark=state.volume_cum.get((event.symbol, event.period), ZERO),
         ahead_ids=tuple(o.offer_id for o in ahead),
         ahead_filled_mark=sum((o.filled for o in ahead), ZERO),
+        placed_ms=state.high_water_ms,
     )
-    # The offer may carry a whole-second stamp slightly in the past; consumption of public
-    # volume starts at the real placement instant, which the book event just recorded.
-    state.market_through[event.symbol] = max(
-        state.market_through.get(event.symbol, 0), state.high_water_ms,
-    )
+    if nothing_else_rests:
+        state.market_through[event.symbol] = max(
+            state.market_through.get(event.symbol, 0), state.high_water_ms,
+        )
+    else:
+        state.market_through.setdefault(event.symbol, state.high_water_ms)
     _bump(state, "offer", event.offer_id)
 
 

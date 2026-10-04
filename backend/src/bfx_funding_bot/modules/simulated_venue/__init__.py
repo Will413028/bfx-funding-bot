@@ -1,7 +1,7 @@
-"""Dormant, in-process simulated Bitfinex funding venue (httpx transport, event-sourced).
+"""In-process simulated Bitfinex funding venue (httpx transport, event-sourced).
 
-Nothing composes this yet. It imports nothing of ledger, execution, trading,
-marketfeed or `external`, and only composition roots import `wiring`.
+Only `apps` composes it (`apps/venue.py`). It imports nothing of ledger, execution,
+trading, marketfeed or `external`, and only composition roots import `wiring`.
 
 Not simulated (the venue is optimistic and the soak must not read P&L from it
 before the fill model is calibrated against live submit-to-fill latency):
@@ -54,12 +54,20 @@ from bfx_funding_bot.modules.simulated_venue.contracts import (
     SimulatedVenueConfig,
     SimulatedVenueInternalError,
     VenueEventStore,
+    VenueObserver,
     VenueStoreError,
+)
+from bfx_funding_bot.modules.simulated_venue.live_feed import (
+    BookFetcher,
+    LiveFeedConfig,
+    LiveMarketFeed,
+    TradesFetcher,
 )
 
 __all__ = [
     "ALLOWED_REALMS",
     "REQUIRED_AUTHORITY_EPOCH",
+    "BookFetcher",
     "BookSnapshot",
     "ConcurrentAppendError",
     "FaultKind",
@@ -71,6 +79,8 @@ __all__ = [
     "HistoryFilter",
     "InMemoryVenueEventStore",
     "InternalFailure",
+    "LiveFeedConfig",
+    "LiveMarketFeed",
     "MarketFeed",
     "NoMarketDataError",
     "PublicTrade",
@@ -80,6 +90,8 @@ __all__ = [
     "SimulatedVenueConfig",
     "SimulatedVenueInternalError",
     "SqlVenueEventStore",
+    "TradesFetcher",
     "VenueEventStore",
+    "VenueObserver",
     "VenueStoreError",
 ]

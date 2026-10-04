@@ -255,9 +255,9 @@ sequenceDiagram
 
 ### 3e. Bot 依 capital authority 組裝（`apps/bot_ports.py`）
 
-資料庫的 capital authority epoch（`legacy` / `ledger`）在 `build_daemon` 讀一次，`select_bot_ports(authority, ...)` 一次選定 bot 行程每個 consumer 綁定的 adapter（web API 對應 `apps/read_models.py`）；`apps/bot.py` 其餘部分不指名 authority。此 build 的 `SUPPORTED_AUTHORITIES` 仍只有 `legacy`，ledger 組裝只由測試以 monkeypatch epoch 讀取進入。
+資料庫的 capital authority epoch（`legacy` / `ledger`）在 `build_daemon` 讀一次，`select_bot_ports(authority, ...)` 一次選定 bot 行程每個 consumer 綁定的 adapter（web API 對應 `apps/read_models.py`）；`apps/bot.py` 其餘部分不指名 authority。可接受的 authority 不是 build 全域常數，而是各行程自己的集合（`apps/authority_support.py`）：Bitfinex venue 只收 `legacy`（S1-7 之前）、simulated venue 只收 `ledger`、web API 只收 `legacy`、`scripts/amend_capital_policy.py` 依資料庫的 realm stamp（`prod` 只收 `legacy`，`shadow`／`ci` 兩者皆收）。`read_authority(session, *, supported)` 由呼叫端傳入集合。Bitfinex venue 上的 ledger 組裝仍只由測試以 monkeypatch epoch 讀取進入；simulated venue 則以真實 epoch 列進入（見 §8「Venue 軸」）。
 
-- **`BotPorts`**：`uncertainty_reader`、`managed_offers`、`venue_hint_sink`（一個實例；`select_bot_ports` 收到先建好的 `ResyncChannel`，`PeriodicReconcile`、auth WS 與 ledger hint sink 共用它）、`capital: CapitalPorts`（必有；`select_bot_ports` 沒有 `live` 參數，每個組裝出來的 bot 都是 Bitfinex venue 上的 live writer）與 `legacy: LegacyExtras | None`。`CapitalPorts` 全有或全無：`capital_authority`、`scope_lock`、`policy_store`、`command_boundary`（journal + effects）、`operator_resolution`、`deployment_input`、`observation`（取得 venue 連線後建出 boot 與 runtime 兩個 sink，時間常數為 `ledger.BOOT_GRACE_MS`=0 / `RUNTIME_GRACE_MS`=120 000，attempt 與 foreign-offer grace 共用）、`uncertainty_synced`（legacy 才有：reconciler 在 durable pre-sizing guard 放行後收斂 in-memory uncertainty cache）。legacy 的 `PaperPositionLedger` / `OfferRegistry` bus 訂閱在 `_legacy_ports` 內建立（每個事件型別先 projection 後 registry）。REST fill tracker 只在 legacy 組裝。
+- **`BotPorts`**：`uncertainty_reader`、`managed_offers`、`venue_hint_sink`（一個實例；`select_bot_ports` 收到先建好的 `ResyncChannel`，`PeriodicReconcile`、auth WS 與 ledger hint sink 共用它）、`capital: CapitalPorts`（必有；`select_bot_ports` 沒有 `live` 參數，venue 由 `apps/venue.py` 另外決定，兩個 venue 共用同一組 ports）與 `legacy: LegacyExtras | None`。`CapitalPorts` 全有或全無：`capital_authority`、`scope_lock`、`policy_store`、`command_boundary`（journal + effects）、`operator_resolution`、`deployment_input`、`observation`（取得 venue 連線後建出 boot 與 runtime 兩個 sink，時間常數為 `ledger.BOOT_GRACE_MS`=0 / `RUNTIME_GRACE_MS`=120 000，attempt 與 foreign-offer grace 共用）、`uncertainty_synced`（legacy 才有：reconciler 在 durable pre-sizing guard 放行後收斂 in-memory uncertainty cache）。legacy 的 `PaperPositionLedger` / `OfferRegistry` bus 訂閱在 `_legacy_ports` 內建立（每個事件型別先 projection 後 registry）。REST fill tracker 只在 legacy 組裝。
 - **legacy**：與原本相同的物件圖（`CapitalRuntime`、`LegacyCommandJournal` / `LegacyCommandEffects`、`BootRecovery` 包在 `LegacyObservationSink`、`EventStorePersister`、`PaperPositionLedger`、`OfferRegistry` 與其 bus 訂閱）。
 - **ledger**：不建立 `CapitalRuntime`、`CapitalRepository`、`PostgresEventStore`、`EventStorePersister`、`PaperPositionLedger`、`OfferRegistry`、legacy hint sink。唯一紀錄是 ledger 自己的表；bus 只在寫入 transaction commit 之後承載通知（`CommandOutcomeNotice`、`UnknownResolutionNotice`、`VenueHintNotification`、`PositionReconciled`）。observation sink 是 `ledger.wiring` 的 cycle 外包 `LedgerCycleEffects`（保護、NAV、告警），不得包住 legacy sink。
 - **Policy store（`ledger.PolicyStore`）**：`select_policy_ports(authority, ...)`（bot 與 `scripts/amend_capital_policy.py` 共用；腳本先讀 epoch）選 store 與 scope lock。兩個 authority 共用唯一寫入者 `ledger.policy_write.write_policy_revision`，呼叫端持有 scope lock，store 不代鎖。`read_applied` / `apply_policy` 讀寫兩個 authority 共用的 `capital_policy_heads` / `capital_policy_revisions`。legacy 實作先 replay event stream（`prepare_locked`），ledger 實作不碰 event stream。boot 的 policy 預檢與 `CapitalPolicyRequestWorker`（經 `accounts.capital_amendment`）都走它。
@@ -450,7 +450,7 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 **Telemetry 與 diagnostics 分流**：operational telemetry（SIGNAL／HEALTH_CHECK／ORDER_SUBMIT／lifecycle 與上述 execution events）只寫 stdout 的 JSON line（`observability/stdout_sink.py`，logger `bfx_funding_bot.events`），由容器 log driver 收集，沒有第三方 log 平台 client；metrics 走 Prometheus，OTLP tracing（`observability/tracing.py`）預設關閉且 fail-open。forensic 的 DECISION／SAFETY_TRIGGER／CANCEL_AUDIT 由 `DiagnosticsSink`（`execution/diagnostics/sink.py`）寫 `diagnostics` 表：每筆**自己開一個 transaction**（`session_scope`，絕不搭 command transaction），失敗只記 log、永不往上拋，未列在 `_KIND_BY_EVENT_TYPE` 的事件直接丟棄。
 
-**Writer lock（`core/writer_lock.py`）**：live（非 simulated）daemon 開機時對 Postgres 取 session-level advisory lock，key 為 `blake2b("bfx-writer:{exchange_account_id}:{env}")` 的 signed int64（不用 process-salted `hash()`）；被別人持有 → `WriterLockUnacquired` → exit code 75（`EXIT_CODE_WRITER_LOCKED`）。`AccountEventWriter` 的 per-transaction advisory lock 用不同 namespace（`bfx-writer-xact`），兩者不互等。每筆真錢 submit 前 `WriterLockGuard.verify_held()` fail closed；`_writer_lock_liveness_loop` 每 30 s 以 `WriterLockWatch.check()` refresh（連線斷掉時重取），refresh 後仍未持有 → `WriterLockLostError`，daemon 退出、container 重啟、開機再等鎖；不寫 trading state。
+**Writer lock（`core/writer_lock.py`）**：兩個 venue 的 daemon 開機時對 Postgres 取 session-level advisory lock，key 為 `blake2b("bfx-writer:{exchange_account_id}:{env}")` 的 signed int64（不用 process-salted `hash()`）；被別人持有 → `WriterLockUnacquired` → exit code 75（`EXIT_CODE_WRITER_LOCKED`）。`AccountEventWriter` 的 per-transaction advisory lock 用不同 namespace（`bfx-writer-xact`），兩者不互等。每筆真錢 submit 前 `WriterLockGuard.verify_held()` fail closed；`_writer_lock_liveness_loop` 每 30 s 以 `WriterLockWatch.check()` refresh（連線斷掉時重取），refresh 後仍未持有 → `WriterLockLostError`，daemon 退出、container 重啟、開機再等鎖；不寫 trading state。
 
 **Heartbeat：liveness vs activity（`marketfeed/health_monitor.py`）**：每個 sub-task 只能屬於其一（import 時 assert 不重疊）。`LIVENESS_THRESHOLDS`（own-loop，會自己週期跳動：`ws` 90 s、`candle_writer`／`scheduler` 65 min、`health_check` 6 min、`db_keepalive` 7 min、`fill_tracker` 90 s、`periodic_reconcile` 270 s）過期 → `FatalError` → TaskGroup 結束 → process 退出、由 container restart policy 重啟。`ACTIVITY_THRESHOLDS`（reactive，靜市場時合法不跳：`safety_chain`、`executor`、`writer_lock`）過期只發 degraded／down 觀測事件，永不致命——把 reactive task 接到 liveness 就是 2026-05-26 idle-market restart loop 的成因。auth WS 健康同樣只觀測、不驅動 restart。
 
@@ -734,8 +734,25 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 
 | Phase | 性質 | Realm | Venue | 備註 |
 |---|---|---|---|---|
-| `shadow` | 模擬校準 | `shadow` | simulated（尚未組裝） | `build_daemon` 在 realm 檢查之後拒絕啟動（"shadow runs on the simulated venue, composed in P2b"）；`paper` phase 與 echo executor 已刪除，`BFX_PHASE=paper` 在 `load_config` 直接拒絕並指向 `shadow` |
+| `shadow` | 模擬校準 | `shadow` | simulated | 跑在 in-process 模擬 venue 上，只收 `ledger` authority，詳見下節「Venue 軸」；`paper` phase 與 echo executor 已刪除，`BFX_PHASE=paper` 在 `load_config` 直接拒絕並指向 `shadow` |
 | `live` | **真錢能力** | `prod` | Bitfinex | `live.env`／`book_guarded`；資金只由已套用 CapitalPolicy 決定：fUST all_available、reserve0、max_cell_fraction0.70，fUSD disabled；能否掛新單看 trading state（ACTIVE）、該幣別 policy `enabled` 與包絡 guard（§6）；release flow／change class 已移除，部署不影響能否交易 |
+
+**Venue 軸（`core/venue.py`、`apps/venue.py`）**：`Venue = "bitfinex" | "simulated"` 是 `MarketfeedConfig.phase` 的計算屬性（`live→bitfinex`、`shadow→simulated`），不儲存也不能單獨設定。`BFX_ALLOCATION_CAP_USDT`、`BFX_BALANCE_BUFFER_USDT`、`BFX_CONCENTRATION_PCT`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`、`BFX_EXECUTOR` 任何 phase 設了都在 `load_config` 拒絕（資金上限是已套用 CapitalPolicy 的，venue 由 phase 決定）。兩個 venue 的開機順序相同：schema head → `database_realm` → authority（該 venue 的集合）→ 之後才碰 vault、憑證與任何 client。simulated 的任何拒絕都 dispose engine 並擲出（不寫、不碰 venue）；Bitfinex 路徑另走 `_refuse_live_boot` 告警。
+
+`build_venue(config, ...)`（`apps/venue.py`，唯一 import `simulated_venue.wiring` 的地方，也是唯一決定 venue 差異的地方）對兩個 venue 回傳同形的 `VenueWiring`：憑證（來源也在此：Bitfinex 讀 vault，simulated 每次開機以 `secrets.token_hex` 產生，且 `BFX_VAULT_KEK` 出現在環境中就拒絕開機）、auth REST 與 executor（含 kill switch 的 cancel-all）使用的 `httpx` client、每個 process 一個 `AuthRequestGate`、`VenueCapabilities`（`auth_ws` required／forbidden、是否允許 REST fill tracker；`build_executor` 檢查 capabilities，不比對 venue 字串）、venue 自己的 task 與 `aclose`（`Daemon.venue_tasks`／`venue_aclose`，開機時先啟動並等 ready）。`load_account_bootstrap` 只讀帳戶列與 config draft，憑證由 wiring 提供。架構測試禁止 `apps/venue.py` 以外的程式比對 venue 名稱。
+- **bitfinex**：process 共用的真 client，requires auth WS（`BFX_WS_CLIENT_ENABLED=true`）。
+- **simulated**：`SqlVenueEventStore.open(engine)` 開在同一個資料庫（log 是 `sim_venue_event`），realm 必須是 `shadow`／`ci` 且 epoch 為 `ledger`；auth REST／executor 走 `httpx.AsyncClient(transport=<venue>)`，因此不會有任何 authenticated request 離開 process；公開 client 仍是真的（`FundingRules`、蠟燭、book）。沒有 auth WS 也沒有 REST fill tracker（`BFX_WS_CLIENT_ENABLED`／`BFX_FILL_TRACKER_ENABLED` 必須關閉，否則 `build_executor` 拒絕）；漏掉的 fill 靠週期 reconcile 與 resync 補上。`BFX_SIM_INITIAL_WALLETS=UST:1000,...` 只在 venue log 為空時以一次 append（`expected_seq=0`）入帳，重啟不重複入帳，賽跑輸家得 `ConcurrentAppendError`；Bitfinex wiring 設了它就拒絕。
+- **兩者相同**：同一條 safety config（`configs/safety.live.yaml`）、同一條 guard chain（含 `CapitalPolicyGuard`、pre-trade guards、`WriterLockGuard`）、reconciler、`InterestLedgerSync`／`CreditHistorySync`、kill switch（`venue=executor`）；每個 symbol 都必須讀得到已套用的 ledger CapitalPolicy。模擬組裝不建立 `PaperPositionLedger`、`OfferRegistry`、`EventStorePersister`、任何 `Legacy*`。兩個 venue 的開機拒絕都走 `_refuse_live_boot` 告警（告警路由是設定，`AlertSink` 已加 realm 前綴）。
+
+模擬 venue 的市場資料（`modules/simulated_venue/live_feed.py`，模組不 import `external`）：venue 在自己的 request lock 內讀 feed，所以 `book()`／`trades()`／`complete_through()` 只讀記憶體 buffer。book 來自第二個 `FundingBookStore`（獨立於 bot 的那份；WS 為主，沒有 baseline 時才 REST reconcile）。trades 以公開 WS `trades` 頻道為主（`external/bitfinex/funding_trades_ws.py`；只算 snapshot 與 `fte`，`ftu` 是同一筆的確認），REST `/v2/trades/f{SYM}/hist` 只在每次（重）連線後補缺口（從 watermark 停下的時間起，以 trade id 去重）；公開 REST 額度與 live bot 共用同一個 IP。每筆 trade 以 id 去重、只收一次。
+
+事件時間 watermark（`MarketFeed.complete_through(symbol)`）：feed 只宣稱它能證明的完整性。連線中且該 symbol 沒有缺口時，每個 frame（含 heartbeat）在本地時間 T 證明完整到 `T - watermark_lag_ms`；斷線時 watermark 停住，缺口補完才繼續；首次補完前是 None。venue 只消費 `(market_through, min(now, watermark)]`，`market_through` 也只推進到那裡（None＝這次不消費、不動）；放單不會把它推過還沒消費的區間，晚到、發生在新 offer 放單之前的 trade 只算給當時就在簿上的 offer（`placed_ms`），而 fill 的時間戳不早於 venue 已經讓外界看過的時間。來源失敗只會讓 buffer 變舊：舊 book 得「no market data」（內部失敗），watermark 凍結，不會編造資料。
+
+`internal_failures`／`unexpected` 是有上限的記憶體 log（最新 1000 筆）；soak 讀 Prometheus 計數器 `bfx_sim_venue_internal_failures_total{kind}`、`bfx_sim_venue_unexpected_requests_total`、`bfx_sim_venue_feed_failures_total{source}`（venue 只透過注入的 `VenueObserver` 回報，不 import metrics）。`Daemon.run` 先啟動 venue 的 task 並等第一批 book（最多 30 s）才啟動其餘 sub-task。venue 的 faults 在 production 組裝一律關閉，測試經 `VenueSeam`（`build_daemon(venue_seam=...)`）注入 feed 與 `FaultPlan`。
+
+時間：`SignalEngine`、command gate／middleware 的 `date_provider`（`datetime.fromtimestamp(clock()/1000, UTC).date()`）與 `BitfinexLiveExecutor`（`clock`、`date_provider`、cancel 時間戳）都來自組裝時鐘 `now_ms_utc`；telemetry 的 ISO 時間戳仍是牆鐘。
+
+`scripts/bootstrap_simulation_db.py`（owner 執行、冪等）：資料庫必須已 migrate 並 stamp 為 `shadow`（realm stamp 與各表的 realm trigger 是唯一權威，腳本不另外掃內容）；然後在同一個 transaction 內補 `ledger` epoch、建立 `simulation` 帳戶（無 credential 列；label 只是描述）、在 scope lock 下宣告式寫入每個 symbol 的目標 `CapitalPolicy`（`--symbol` enabled，含單筆上限與五個包絡選項；`--disabled-symbol` disabled；與已套用的 digest 相同就不寫 revision；能不能 enabled 由 `write_policy_revision` 決定）。
 
 **歷史相容性**：舊 `canary` phase、fUST cap10000／fUSD cap0、
 `BFX_BALANCE_BUFFER_USDT` 與 env-based canary profile 已退役，不是現行資金 authority。
@@ -803,10 +820,10 @@ projection 表零寫權限，授權與收回都在 migration（`1c435a35dcb4`、
 
 **關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`、
 `BFX_EXCHANGE_ACCOUNT_ID`、`BFX_VAULT_KEK`、
-`BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`（`BFX_EXECUTOR` 已不讀取，設了也被忽略）、
-`BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_VENUE_FLOOR_USD`、
-`BFX_MIN_OFFER_BUFFER_PCT`、`BFX_SCHEDULER_BUFFER_S`、
-`BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`。
+`BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`（Bitfinex 需要前者；simulated 兩者都必須關閉）、
+`BFX_SIM_INITIAL_WALLETS`（simulated 專用）、
+`BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_SCHEDULER_BUFFER_S`、
+`BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`。已退役、設了就拒絕開機：`BFX_EXECUTOR` 與舊資金 env（`BFX_ALLOCATION_CAP_USDT`、`BFX_BALANCE_BUFFER_USDT`、`BFX_CONCENTRATION_PCT`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`）。
 Bitfinex secret 不再從 `BFX_API_KEY`/`BFX_API_SECRET` 讀取；由 account-owned
 credential vault 解密。public read model 另以明確的
 `BFX_PUBLIC_EXCHANGE_ACCOUNT_ID` 綁定 UUID。

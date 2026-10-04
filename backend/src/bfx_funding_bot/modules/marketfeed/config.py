@@ -4,9 +4,10 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from bfx_funding_bot.core.telemetry import Phase
+from bfx_funding_bot.core.venue import Venue, venue_for_phase
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 from bfx_funding_bot.modules.strategy import CellConfig
@@ -14,7 +15,9 @@ from bfx_funding_bot.modules.strategy import CellConfig
 
 class MarketfeedConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    phase: Annotated[Phase, Field(description="paper / shadow / live")]
+    phase: Annotated[Phase, Field(description="shadow / live")]
+    # Simulated venue only: wallet currency -> amount funded when the venue log is empty.
+    simulated_initial_wallets: dict[str, Decimal] = Field(default_factory=dict)
     cells: list[CellConfig]
     database_url: str = Field(repr=False)
     deployment_environment: DeploymentEnvironment
@@ -36,3 +39,9 @@ class MarketfeedConfig(BaseModel):
     # p30 sparse cells override per-entry in cells.yaml (12h).
     # Override via BFX_STALENESS_BUDGET_HOURS_DEFAULT env var.
     staleness_budget_hours_default: int = Field(default=2, ge=1)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def venue(self) -> Venue:
+        """Derived from the phase, never stored: there is no phase-and-venue pair to disagree."""
+        return venue_for_phase(self.phase)

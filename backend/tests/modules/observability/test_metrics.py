@@ -606,3 +606,19 @@ async def test_cycle_wrapper_passes_scope_and_result_identity():
     wrapper = TimedReconcileRecovery(sink, metrics=metrics)
     assert await wrapper.run(scope) is result
     sink.run.assert_awaited_once_with(scope)
+
+
+def test_the_simulated_venue_observer_feeds_the_soak_counters() -> None:
+    """Mutation: the observer stops incrementing (the soak report would read zero)."""
+    from prometheus_client import generate_latest
+
+    metrics = DaemonMetrics()
+    observer = metrics.sim_venue_observer()
+    observer.internal_failure("no_market_data")
+    observer.internal_failure("no_market_data")
+    observer.unexpected_request()
+    observer.feed_failure("trades")
+    text = generate_latest(metrics.registry).decode()
+    assert 'bfx_sim_venue_internal_failures_total{kind="no_market_data"} 2.0' in text
+    assert "bfx_sim_venue_unexpected_requests_total 1.0" in text
+    assert 'bfx_sim_venue_feed_failures_total{source="trades"} 1.0' in text

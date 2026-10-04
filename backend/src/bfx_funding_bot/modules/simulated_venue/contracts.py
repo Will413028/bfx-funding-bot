@@ -79,8 +79,14 @@ class SimAccount:
 
 @dataclass(frozen=True, slots=True)
 class PublicTrade:
-    """One public funding trade: `[ID, MTS, AMOUNT, RATE, PERIOD]` reduced to what fills need."""
+    """One public funding trade: `[ID, MTS, AMOUNT, RATE, PERIOD]` reduced to what fills need.
 
+    `id` is the venue's trade id: a feed admits a trade exactly once by it (equal timestamps,
+    overlapping fetches and late arrivals are all told apart by identity, never by `mts`).
+    It is not part of any persisted venue event (`TradeTick` carries none).
+    """
+
+    id: int
     mts: int
     amount: Decimal
     rate: Decimal
@@ -106,6 +112,12 @@ class MarketFeed(Protocol):
       polls public data on its own task and only fills an in-memory buffer. The
       venue enforces this with `SimulatedVenueConfig.feed_deadline_s`; a call that
       exceeds it is an internal failure, not a venue answer.
+    - `complete_through` is the event-time watermark of the trades: the feed holds EVERY
+      public trade with `mts <= complete_through(symbol)`, so the venue may consume trades
+      up to `min(now, watermark)` and treat that range as final. `None` means nothing is
+      known to be complete yet (the venue consumes no trades and moves nothing); a feed of
+      recorded history is complete forever and answers a value at or beyond any `now`. A
+      live feed that has lost its source stops advancing it until the gap is filled.
     - `book` returns the latest valid snapshot at or before `at_ms`. A snapshot
       older than `SimulatedVenueConfig.max_book_age_ms` is not usable: a submit then
       ends in the explicit "no market data" outcome instead of freezing a queue
@@ -118,9 +130,21 @@ class MarketFeed(Protocol):
         """Public trades with `after_ms < mts <= through_ms`, any order."""
         ...
 
+    async def complete_through(self, symbol: str) -> int | None:
+        """Every trade with `mts <= this` is already in the buffer; None when unknown."""
+        ...
+
     async def book(self, symbol: str, *, at_ms: int) -> BookSnapshot | None:
         """The latest valid snapshot taken at or before `at_ms`, or None."""
         ...
+
+
+class VenueObserver(Protocol):
+    """Where the venue reports what a soak must count (metrics are injected, never imported)."""
+
+    def internal_failure(self, kind: str) -> None: ...
+
+    def unexpected_request(self) -> None: ...
 
 
 class VenueEventStore(Protocol):
