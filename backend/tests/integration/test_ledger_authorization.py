@@ -34,6 +34,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
 )
+from tests.async_wait import until
 
 from .test_ledger_journal import JOURNAL, SCOPE, _attempt, _engine
 from .test_ledger_schema_roles import (
@@ -199,17 +200,15 @@ async def test_contending_authorizations_wait_then_refuse_stale_clock(factory) -
         waiter = asyncio.create_task(contender())
         await entered.wait()
         async with factory() as observer:
-            for _ in range(100):
+            async def _locked() -> bool:
                 locked = await observer.scalar(
                     text("SELECT wait_event_type='Lock' FROM pg_stat_activity WHERE pid=:pid"),
                     {"pid": pid},
                 )
                 await observer.rollback()
-                if locked:
-                    break
-                await asyncio.sleep(0.01)
-            else:
-                pytest.fail("authorization never waited for the scope lock")
+                return bool(locked)
+
+            await until(_locked, what="the authorization to wait for the scope lock")
         assert not waiter.done()
     assert await asyncio.wait_for(waiter, 5) == AuthorizeRefused("capital_snapshot_changed")
 

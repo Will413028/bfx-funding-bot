@@ -10,7 +10,7 @@ import os
 import re
 import subprocess
 import sys
-import time
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -1598,9 +1598,13 @@ def test_cleanup_blocking_env_unlink_is_interrupted_with_remaining_budget(
     env_paths = []
     children = []
 
+    release_unlink = threading.Event()
+    unlink_returned = threading.Event()
+
     def blocking_unlink(path, *args, **kwargs):
         if path.suffix == ".env":
-            time.sleep(2)
+            release_unlink.wait(30)  # blocked until the test releases it
+            unlink_returned.set()
         return real_unlink(path, *args, **kwargs)
 
     def blocking_popen(command, *args, **kwargs):
@@ -1625,10 +1629,9 @@ def test_cleanup_blocking_env_unlink_is_interrupted_with_remaining_budget(
     monkeypatch.setattr(restore_drill.subprocess, "Popen", blocking_popen)
     fake = SlowComposeCleanup(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
     try:
-        started = time.monotonic()
         status = _drill(tmp_path, fake, clock=clock).run(_request(tmp_path))
-        elapsed = time.monotonic() - started
-        assert elapsed < 1.5, f"cleanup waited for blocking unlink: {elapsed:.2f}s"
+        # run() returned while the env unlink was still blocked: cleanup did not wait for it.
+        assert not unlink_returned.is_set(), "cleanup waited for blocking unlink"
         assert status == 2
         report = json.loads((tmp_path / "restore.json").read_text())
         assert report["error_code"] == "cleanup_failed"
@@ -1638,6 +1641,7 @@ def test_cleanup_blocking_env_unlink_is_interrupted_with_remaining_budget(
         assert children and all(child.poll() is not None for child in children)
         assert "DATABASE-PASSWORD-SENTINEL" not in json.dumps(report)
     finally:
+        release_unlink.set()
         for path in env_paths:
             real_unlink(path, missing_ok=True)
 

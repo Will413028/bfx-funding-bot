@@ -7,13 +7,16 @@ from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 
 @pytest.mark.asyncio
 async def test_limiter_allows_burst_within_capacity() -> None:
-    limiter = FundingRateLimiter(max_rate=5, time_period=1.0)
-    start = asyncio.get_event_loop().time()
-    for _ in range(5):
-        async with limiter.acquire():
-            pass
-    elapsed = asyncio.get_event_loop().time() - start
-    assert elapsed < 0.1
+    # A one-hour period: if any of the 5 acquires had to wait for a refill it would
+    # sleep ~12 minutes, so finishing inside the safety timeout proves none blocked.
+    limiter = FundingRateLimiter(max_rate=5, time_period=3600.0)
+
+    async def burst() -> None:
+        for _ in range(5):
+            async with limiter.acquire():
+                pass
+
+    await asyncio.wait_for(burst(), timeout=10.0)
 
 
 @pytest.mark.asyncio

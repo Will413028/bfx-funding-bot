@@ -15,6 +15,7 @@ from bfx_funding_bot.external.bitfinex.auth_ws import (
 )
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.protocols import Credentials
+from tests.async_wait import until
 
 
 class _SeqServer:
@@ -59,14 +60,13 @@ async def test_conf_seq_all_sent_on_connect():
             break
 
     task = asyncio.create_task(run())
-    deadline = asyncio.get_running_loop().time() + 3.0
-    while not any(
-        m.get("event") == "conf" and m.get("flags") == SEQ_ALL_FLAG
-        for m in server.received
-    ):
-        if asyncio.get_running_loop().time() > deadline:
-            break
-        await asyncio.sleep(0.02)
+    await until(
+        lambda: any(
+            m.get("event") == "conf" and m.get("flags") == SEQ_ALL_FLAG
+            for m in server.received
+        ),
+        what="the SEQ_ALL conf frame",
+    )
     await client.close()
     with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=2.0)
@@ -95,14 +95,17 @@ async def test_reconnect_fires_resync_but_first_connect_does_not():
                 await asyncio.sleep(0.02)
 
     task = asyncio.create_task(run())
-    await asyncio.sleep(0.3)
+    # The conf frame is written after the point where a reconnect would have fired the
+    # resync, so once the server has it the first connection is fully set up.
+    await until(
+        lambda: any(m.get("event") == "conf" for m in server.received),
+        what="the first connection to finish its handshake",
+    )
     assert "reconnect" not in reasons  # first connection: no resync
 
     for ws in list(server.connections):
         await ws.close()  # force a client reconnect
-    deadline = asyncio.get_running_loop().time() + 5.0
-    while "reconnect" not in reasons and asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(0.05)
+    await until(lambda: "reconnect" in reasons, what="the reconnect resync")
 
     await client.close()
     with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
@@ -160,9 +163,7 @@ async def test_venue_reconnect_notice_reconnects_and_resyncs(code: int):
                 pass
 
     task = asyncio.create_task(run())
-    deadline = asyncio.get_running_loop().time() + 5.0
-    while "reconnect" not in reasons and asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(0.05)
+    await until(lambda: "reconnect" in reasons, what="the reconnect resync")
 
     await client.close()
     with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):

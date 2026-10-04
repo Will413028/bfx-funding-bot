@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from bfx_funding_bot.core.schema_head import build_head
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
@@ -23,6 +23,7 @@ from bfx_funding_bot.modules.execution.event_store.writer import (
     ProjectionWriteError,
 )
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
+from tests.async_wait import until
 from tests.modules.execution.event_store.test_historical_claim_cycles import seal_prefix_chain
 from tests.pg_templates import alembic
 
@@ -238,10 +239,18 @@ async def test_same_account_transaction_lock_serializes_writers(
             pending = asyncio.create_task(
                 writer.append(session, _claimed(account_id, cid=1, venue_seq=1))
             )
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(asyncio.shield(pending), timeout=0.1)
+            # The append must be parked on the account lock the first writer holds.
+            async def _parked_on_lock() -> bool:
+                async with pg_session_factory() as observer:
+                    return bool(await observer.scalar(text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE wait_event_type='Lock' AND datname = current_database()"
+                    )))
+
+            await until(_parked_on_lock, what="the second writer to wait on the account lock")
+            assert not pending.done()
             release.set()
-            result = await asyncio.wait_for(pending, timeout=5)
+            result = await asyncio.wait_for(pending, timeout=10)
             await session.commit()
             return result
 

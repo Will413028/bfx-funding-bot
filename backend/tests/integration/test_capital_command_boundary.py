@@ -21,6 +21,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
+from tests.async_wait import until
 
 from .test_capital_repository import (
     capital_db as capital_db,
@@ -425,16 +426,14 @@ async def test_halt_writer_waits_for_authorization_lock(pg_session_factory):
             await acquire_transaction_lock(session, account_id=str(account), deployment_environment="ci")
             task = asyncio.create_task(halt.transition("HALTED", cause="operator", reason="stop",
                                                        actor="test"))
-            for _ in range(100):
+            async def _waiting() -> bool:
                 async with factory() as observer:
-                    waiting = await observer.scalar(text(
+                    return bool(await observer.scalar(text(
                         "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' "
                         "AND query LIKE 'SELECT pg_advisory_xact_lock%'"
-                    ))
-                if waiting:
-                    break
-                await asyncio.sleep(0.01)
-            assert waiting, "halt writer never joined the account authorization lock"
+                    )))
+
+            await until(_waiting, what="the halt writer to join the account authorization lock")
             assert not task.done()
         await task
         assert (await halt.current()).state == "HALTED"

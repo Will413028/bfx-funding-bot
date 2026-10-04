@@ -26,6 +26,7 @@ from bfx_funding_bot.modules.execution.fill_tracker import (
 from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 from bfx_funding_bot.modules.strategy import StrategyName
+from tests.async_wait import until
 
 _SCHEMA = json.loads(
     (Path(__file__).parent.parent.parent / "contracts" / "bitfinex_funding_api_schema.json")
@@ -93,10 +94,13 @@ async def test_atomic_poll_aborts_on_credits_failure() -> None:
     """Both /offers and /credits must succeed for a tick to count. If credits 500s,
     no events emit and last_state is preserved (next tick retries fresh)."""
     axiom = _EventCapture()
+    credits_failures = 0
 
     def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal credits_failures
         if "offers" in req.url.path:
             return httpx.Response(200, json=[_offer(venue_id=111, cid=1)])
+        credits_failures += 1
         return httpx.Response(500)  # credits fails
 
     async with httpx.AsyncClient(
@@ -108,7 +112,8 @@ async def test_atomic_poll_aborts_on_credits_failure() -> None:
         stop = asyncio.Event()
 
         task = asyncio.create_task(tracker.poll_loop(stop))
-        await asyncio.sleep(0.05)
+        # Two failed ticks (not a time window) so a retry is covered too.
+        await until(lambda: credits_failures >= 2, what="two failed credits polls")
         stop.set()
         await task
 
@@ -197,7 +202,7 @@ async def test_offer_disappearance_emits_reservation_released() -> None:
         stop = asyncio.Event()
 
         task = asyncio.create_task(tracker.poll_loop(stop))
-        await asyncio.sleep(0.05)  # allow at least 2 ticks
+        await until(lambda: released, what="the missing-from-venue release")
         stop.set()
         await task
 
@@ -232,7 +237,7 @@ async def test_paper_offer_id_invariant_at_emit_time() -> None:
         stop = asyncio.Event()
 
         task = asyncio.create_task(tracker.poll_loop(stop))
-        await asyncio.sleep(0.05)
+        await until(task.done, what="the loop to hit the invariant")
         stop.set()
         with pytest.raises(InvariantError):
             await task

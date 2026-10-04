@@ -27,6 +27,7 @@ from bfx_funding_bot.modules.execution.events import (
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
 from bfx_funding_bot.modules.trading import CapitalPolicy
+from tests.async_wait import until
 from tests.modules.execution.event_store.test_historical_claim_cycles import (
     seal_prefix_chain,
 )
@@ -935,17 +936,18 @@ async def test_pg_writer_lock_serializes_contending_authorization(pg_session_fac
         waiter = asyncio.create_task(second())
         await waiter_ready.wait()
         async with factory() as observer:
-            for _ in range(100):
+            async def _blocked() -> bool:
                 blocked = await observer.scalar(text(
                     "SELECT wait_event_type='Lock' FROM pg_stat_activity WHERE pid=:pid"),
                     {"pid": waiter_pid})
                 await observer.rollback()  # refresh pg_stat_activity statistics snapshot
-                if blocked:
-                    break
-                await asyncio.sleep(0.01)
-            else:
+                return bool(blocked)
+
+            try:
+                await until(_blocked, what="the second connection to contend for the account lock")
+            except AssertionError:
                 waiter.cancel()
-                pytest.fail("second independent connection never contended for account lock")
+                raise
         assert not waiter.done()
     assert await asyncio.wait_for(waiter, 5) == "blocked"
 

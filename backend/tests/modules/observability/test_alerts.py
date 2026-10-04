@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -33,6 +32,7 @@ from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from bfx_funding_bot.modules.observability import alerts
+from tests.async_wait import until
 
 # A fake bot token, assembled at run time so no token-shaped literal sits in the
 # source for secret scanners; same shape as a real one (digits:35 url-safe chars).
@@ -93,11 +93,13 @@ async def _drain(sink: alerts.AlertSink) -> None:
 async def test_emit_returns_at_once_while_telegram_hangs(installed: Any) -> None:
     transport = Recorder(hang=True)
     sink = installed(transport, send_timeout_s=0.05)
-    started = time.perf_counter()
+    loop_ran = asyncio.Event()
+    asyncio.get_running_loop().call_soon(loop_ran.set)
     for index in range(50):
         alerts.emit("probe", index=index)
-    assert time.perf_counter() - started < 0.05
-    await asyncio.sleep(0.2)
+    # emit never yields to the loop, so a hung transport cannot delay the caller.
+    assert not loop_ran.is_set()
+    await until(lambda: sink.counts.get("failed", 0) >= 1, what="a timed-out delivery")
     assert sink.counts.get("failed", 0) >= 1          # timed out, logged, counted
     await _drain(sink)
 
@@ -123,7 +125,7 @@ async def test_failed_delivery_is_logged_and_the_next_alert_still_goes_out(
     transport = Recorder(fail=True)
     sink = installed(transport)
     alerts.emit("first")
-    await asyncio.sleep(0.05)
+    await until(lambda: sink.counts.get("failed", 0) >= 1, what="the failed delivery")
     transport.fail = False
     alerts.emit("second")
     await _drain(sink)
@@ -156,10 +158,13 @@ async def trading(sqlite_engine: Any) -> Any:
 async def test_trading_path_is_not_delayed_by_a_hung_telegram(installed: Any, trading: Any) -> None:
     sink = installed(Recorder(hang=True), send_timeout_s=30)
     _, repo = trading
-    started = time.perf_counter()
-    result = await repo.transition("HALTED", cause="operator", actor="will", reason="maintenance")
-    elapsed = time.perf_counter() - started
-    assert result.changed and elapsed < 1.0          # the write never waits for delivery
+    # The hung delivery would take send_timeout_s=30; finishing inside the safety
+    # timeout shows the write never waits for it.
+    result = await asyncio.wait_for(
+        repo.transition("HALTED", cause="operator", actor="will", reason="maintenance"),
+        timeout=10.0,
+    )
+    assert result.changed
     assert (await repo.current()) is not None and (await repo.current()).state == "HALTED"
     await sink.aclose(timeout_s=0.05)                  # hung delivery is abandoned, not awaited
 
