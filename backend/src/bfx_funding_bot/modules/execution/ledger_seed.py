@@ -359,13 +359,13 @@ async def read_seed_closure(session: AsyncSession, scope: Scope) -> SeedClosure:
             select(CapitalPolicyHeadRow).where(*_scoped(CapitalPolicyHeadRow, scope))
         )
     }
-    carried: dict[str, int] = {}
+    # Pending requests of the other outboxes carry (F9): named here for the anti-join.
+    carried: dict[str, list[str]] = {}
     for name, row_type in (("capital_policy_requests", CapitalPolicyRequestRow),
                            ("trading_control_requests", TradingControlRequestRow)):
-        carried[name] = int(await session.scalar(
-            select(func.count()).select_from(row_type).where(
-                *_scoped(row_type, scope), row_type.state == "requested")
-        ) or 0)
+        carried[name] = sorted(str(request_id) for request_id in await session.scalars(
+            select(row_type.request_id).where(
+                *_scoped(row_type, scope), row_type.state == "requested")))
     return SeedClosure(
         scope=scope,
         watermarks=SeedWatermarks(
@@ -387,6 +387,7 @@ async def read_seed_closure(session: AsyncSession, scope: Scope) -> SeedClosure:
             "covered_prefix_hash": snapshot.covered_prefix_hash,
             "policy_head_revisions": dict(sorted(heads.items())),
             "carried_pending_requests": carried,
+            "failed_uncertainty_requests": [str(request_id) for request_id in pending],
         },
     )
 
@@ -456,11 +457,36 @@ async def _seed_attempt(
     )
 
 
+def claim_terms(offer: SeedOffer, *, size: Decimal, rate: Decimal | None,
+                period: int | None) -> JsonObject:
+    """The payload of a claim-only offer's seeded attempt: the terms legacy cancels it by.
+
+    Amount from the claim, rate and period from the claim's decision (what legacy's cancel
+    admission uses, ``legacy_command_journal.admit_cancel``), each checked against the observed
+    offer (venue offer terms are immutable); type and flags as observed. Without these the
+    ledger cancel refuses the offer (``cancel_provenance_conflict``) and it could never be
+    cancelled or repriced after the switch, so a mismatch refuses the seed.
+    """
+    if (rate is None or period is None or offer.rate is None or offer.period_days is None
+            or rate != offer.rate or int(period) != offer.period_days
+            or size != offer.amount_original):
+        raise SeedRefused("claim_offer_terms_mismatch", offer.venue_offer_id)
+    payload: JsonObject = {
+        "symbol": offer.symbol, "amount": format(size, "f"), "rate": format(rate, "f"),
+        "period": int(period),
+    }
+    if offer.offer_type is not None:
+        payload["type"] = offer.offer_type
+    if offer.flags is not None:
+        payload["flags"] = offer.flags
+    return payload
+
+
 async def _claim_only_attempt(
     session: AsyncSession, scope: Scope, venue_offer_id: str, entry: Mapping[str, Any],
     live: Mapping[str, SeedOffer], intents: Mapping[str, tuple[int, int]],
 ) -> SeedAttempt:
-    """The seeded partial of a live offer legacy owns through its claim alone (no attempt)."""
+    """The seeded attempt of a live offer legacy owns through its claim alone (no attempt)."""
     offer = live.get(venue_offer_id)
     claims = list(await session.scalars(
         select(OfferClaimRow).where(*_scoped(OfferClaimRow, scope),
@@ -476,6 +502,8 @@ async def _claim_only_attempt(
     if (decision is None or intent is None or decision.cell_id != entry.get("cell")
             or claim.symbol != offer.symbol or _amount(claim.size_usdt) != offer.amount_original):
         raise SeedRefused("claim_provenance_conflict", venue_offer_id)
+    payload = claim_terms(offer, size=claim.size_usdt, rate=decision.applied_rate,
+                          period=decision.duration_days)
     attempt_id = uuid5(
         CLAIM_ATTEMPT_NAMESPACE,
         f"{scope.exchange_account_id}|{scope.deployment_environment}|{claim.cid}|{decision_id}",
@@ -486,8 +514,7 @@ async def _claim_only_attempt(
         symbol=offer.symbol,
         cell_id=decision.cell_id,
         attempt_seq=intent[0],
-        # A seeded partial: what legacy recorded of the submit is its amount (the claim).
-        normalized_payload={"symbol": offer.symbol, "amount": format(claim.size_usdt, "f")},
+        normalized_payload=payload,
         started_at_ms=intent[1],
         outcome=SeedOutcome(
             "ack", venue_offer_id, None, await _event_time(session, claim.last_event_seq),
@@ -534,6 +561,7 @@ async def _seed_quarantine(
 __all__ = [
     "LEGACY_ATTRIBUTION",
     "LEGACY_OUTCOMES",
+    "claim_terms",
     "classification_digest",
     "credit_identity",
     "map_attribution",

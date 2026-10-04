@@ -17,7 +17,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from bfx_funding_bot.apps import ledger_seed as seed_app
@@ -408,3 +408,37 @@ async def test_a_pending_request_failure_is_part_of_the_seed(
         failed = await session.get(UncertaintyResolutionRequestRow, request_id)
     assert failed is not None
     assert (failed.state, failed.outcome_reason) == ("failed", "superseded_by_authority_switch")
+
+
+async def test_the_writers_are_locked_out_before_the_snapshot_starts(
+    bot_env: BotEnv, ledger_db: Any, tmp_path: Any,  # noqa: F811
+) -> None:
+    """R1-2: the writer locks and the runtime-session check run outside any transaction, and
+    every snapshot read (epoch, closure) inside the one REPEATABLE READ transaction after them;
+    a write or request landing between the checks and the snapshot would otherwise be unseen."""
+    env = bot_env
+    await legacy_with_live_offer(env)
+    seen: list[tuple[str, object]] = []
+
+    def connector(plan: Any) -> Any:
+        engine = seed_app.connect(plan)
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def record(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+            seen.append((statement, conn.get_execution_options().get("isolation_level")))
+
+        return engine
+
+    code, lines = await run_seed(seed_command(env, tmp_path, url=ledger_db.url),
+                                 now_ms=SEED_AT, connector=connector)
+    assert code == 0, lines
+
+    def first(fragment: str) -> int:
+        return next(i for i, (statement, _) in enumerate(seen) if fragment in statement)
+
+    locks, sessions = first("pg_try_advisory_lock"), first("pg_stat_activity")
+    epoch, closure = first("FROM public.capital_authority_epoch"), first("capital_snapshots")
+    assert seen[locks][1] == seen[sessions][1] == "AUTOCOMMIT"
+    assert seen[epoch][1] == seen[closure][1] == "REPEATABLE READ"
+    assert locks < sessions < epoch < closure
+    assert "pg_advisory_unlock_all" in seen[-1][0]

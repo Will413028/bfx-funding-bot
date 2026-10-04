@@ -65,6 +65,7 @@ from .bot_e2e import (
     CELL,
     SCOPE,
     T0,
+    AllowGuard,
     BotEnv,
     bot_env,  # noqa: F401 - fixture
     ledger_db,  # noqa: F401 - fixture dependency
@@ -295,6 +296,11 @@ async def test_the_first_real_basis_judges_the_seed_basis_and_the_halt_fill(
     assert verification["mismatches"] == [] and summary["committed"] is True
     assert seed_line["watermarks"]["trading_state_max_id"] == legacy.trading_state_id
     assert seed_line["failed_requests"] == 1
+    assert seed_line["failed_uncertainty_requests"] == [str(legacy.uncertainty_request)]
+    assert seed_line["carried_requests"] == {
+        "capital_policy_requests": [str(legacy.policy_request)],
+        "trading_control_requests": [str(legacy.control_request)],
+    }
 
     # ---- at the capture point: the seed is the legacy closure
     (seeded,) = await latest_bases(env)
@@ -313,7 +319,9 @@ async def test_the_first_real_basis_judges_the_seed_basis_and_the_halt_fill(
                  if row["execution_decision_id"] == legacy.claim_decision)
     assert claim["policy_revision_id"] is None
     assert claim["seed_provenance"]["legacy"] == "offer_claim"
-    assert claim["normalized_payload"] == {"symbol": "fUST", "amount": str(CLAIM)}
+    assert claim["normalized_payload"] == {
+        "symbol": "fUST", "amount": str(CLAIM), "rate": "0.0001", "period": 2, "type": "LIMIT",
+        "flags": {"raw": 0}}  # type and flags as the legacy snapshot observed them
     assert seed["attempts"][claim["attempt_id"]] == "reflected"
     assert all(row["seed_provenance"] and row["policy_revision_id"] is None
                for row in await _attempts(env))
@@ -449,3 +457,63 @@ async def _attempts(env: BotEnv) -> list[dict[str, Any]]:
 
 
 __all__ = ["Legacy", "Scope", "run_legacy", "stop"]
+
+
+class AllowCancel(AllowGuard):
+    """The guard chain is not under test; it admits a cancel like a submit."""
+
+    async def evaluate_cancel(self, decision: Any, context: Any) -> Any:
+        return await self.evaluate(decision, context)
+
+
+class CancellingVenue:
+    """The gate's inner executor for a cancel: records what reaches the venue."""
+
+    def __init__(self) -> None:
+        self.cancelled: list[str] = []
+
+    async def submit(self, ready: Any, ctx: Any, *, cid: Any, reservation_ref: Any) -> Any:
+        raise AssertionError("no submit in this test")
+
+    async def cancel(self, *, venue_offer_id: str, signal_correlation_id: UUID,
+                     account_id: str, ctx: Any) -> None:
+        self.cancelled.append(venue_offer_id)
+
+
+async def test_a_seeded_claim_only_offer_is_cancellable_by_the_ledger(
+    bot_env: BotEnv, ledger_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Any,  # noqa: F811
+) -> None:
+    """R1-1: the claim-only offer's seeded attempt carries the terms the ledger cancel needs
+    (rate and period from the claim's decision, checked against the observed offer), so after
+    the switch the ledger can cancel or reprice it like any managed offer (放貸全自動)."""
+    env = bot_env
+    env.venue.wallets = [["funding", "UST", "5000", 0, "5000"]]
+    daemon = await env.build()
+    await env.boot(daemon, T0)
+    claim_decision = await claim_only_offer(env, at=T0 + 5_000)
+    env.venue.offers = [offer_row(7006, CLAIM, CLAIM, T0 + 5_500, T0 + 5_500)]
+    await env.tick(daemon, T0 + 20_000)
+    assert daemon.periodic_reconcile._non_accepted == 0
+    await stop(daemon)
+
+    code, lines = await run_seed(seed_command(env, tmp_path, url=ledger_db.url), now_ms=SEED_AT)
+    assert code == 0, lines
+    (claim,) = [row for row in await _attempts(env)
+                if row["execution_decision_id"] == claim_decision]
+    assert claim["policy_revision_id"] is None and claim["seed_provenance"]["legacy"] == "offer_claim"
+    await flip_epoch(env, at=SEED_AT + 1_000)
+    boot_as_epoch(env, monkeypatch)
+    ledger = await env.build()
+    await env.boot(ledger, SEED_AT + 20_000)
+    assert ledger.periodic_reconcile._non_accepted == 0
+
+    gate = ledger.command_gate
+    venue = CancellingVenue()
+    gate._inner, gate._safety_evaluator = venue, AllowCancel()
+    await gate.cancel(venue_offer_id="7006", signal_correlation_id=uuid4(),
+                      account_id=str(SCOPE.exchange_account_id), ctx=env.ctx())
+    assert venue.cancelled == ["7006"]
+    # Checked last, so a seed without these terms fails at the cancel itself.
+    assert claim["normalized_payload"] == {
+        "symbol": "fUST", "amount": str(CLAIM), "rate": "0.0001", "period": 2, "type": "LIMIT",
+        "flags": {"raw": 0}}  # type and flags as the legacy snapshot observed them

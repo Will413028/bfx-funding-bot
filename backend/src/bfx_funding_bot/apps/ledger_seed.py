@@ -1,17 +1,18 @@
 """The one-time legacy -> ledger closure seed (S1-4d). Dormant: an owner tool for the halt.
 
 Never referenced by deploy, compose or systemd (``tests/architecture`` pins it). It refuses to
-write unless every guard holds, all inside the one REPEATABLE READ transaction it writes in:
+write unless every guard holds. On one connection, in this order:
 
-* ``--authorize-seed`` and a manifest (mode ``seed``, run id, host, port, database, user,
-  realm, scopes) that names exactly this DSN and these ``--scope`` arguments;
-* the DSN's login is the ledger tables' owner, used directly (no SET ROLE), and is none of
-  the runtime roles (the schema also refuses seed rows from any other role);
-* the database realm stamp equals the manifest's;
-* the latest ``capital_authority_epoch`` is ``legacy`` (the switch comes after the seed);
-* no session of a runtime login (``bfx_bot``, ``bfx_webapi`` or a member of them) exists;
-* per scope, the daemon writer lock and the transaction writer lock are free and taken here;
-* per scope, no ledger row exists yet (``ledger_not_empty``).
+1. before any transaction (autocommit): ``--authorize-seed`` and a manifest (mode ``seed``, run
+   id, host, port, database, user, realm, scopes) naming exactly this DSN and these
+   ``--scope`` arguments; the DSN's login is the ledger tables' owner, used directly (no SET
+   ROLE), and none of the runtime roles (the schema also refuses seed rows from any other
+   role); per scope, the daemon writer lock and the transaction writer lock are free and taken
+   as session locks (held to the end); then no session of a runtime login (``bfx_bot``,
+   ``bfx_webapi`` or a member of them) exists;
+2. only then the one REPEATABLE READ transaction, whose snapshot therefore follows the checks:
+   the realm stamp equals the manifest's, the latest ``capital_authority_epoch`` is ``legacy``,
+   and no ledger row exists for any scope (``ledger_not_empty``).
 
 Then, per scope: read the legacy closure (``execution.ledger_seed``), plan the rows and state
 the expected per-table digests (``ledger.seed.write_seed``), write. After every scope is
@@ -19,7 +20,8 @@ written the transaction is switched to READ ONLY and each scope's digests are re
 the database (``ledger.seed.verify_seed``); any difference rolls everything back (exit 2).
 A refusal exits 3 with its reason code. Output is JSONL evidence, one object per line:
 watermarks (legacy final event_seq, final snapshot event_seq/query id, trading_state max id),
-expected and actual digests, and a summary.
+the failed uncertainty request ids and the carried request ids per table, expected and actual
+digests, and a summary. The session locks are released after commit or rollback.
 """
 
 from __future__ import annotations
@@ -39,7 +41,12 @@ from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    create_async_engine,
+)
 
 from bfx_funding_bot.apps.capital_comparison_guard import GuardRejectedError, read_dsn
 from bfx_funding_bot.core.account_identity import account_id_canonical
@@ -149,11 +156,14 @@ def validate_seed_connection(
     )
 
 
-async def verify_owner(session: AsyncSession, plan: SeedPlanConnection) -> None:
-    users = (await session.execute(text("SELECT session_user, current_user"))).one()
+type Executor = AsyncSession | AsyncConnection
+
+
+async def verify_owner(conn: Executor, plan: SeedPlanConnection) -> None:
+    users = (await conn.execute(text("SELECT session_user, current_user"))).one()
     if users[0] != plan.user or users[1] != plan.user or plan.user in RUNTIME_ROLES:
         raise GuardRejectedError("dsn_not_owner")
-    owners = set((await session.execute(
+    owners = set((await conn.execute(
         text("SELECT pg_get_userbyid(c.relowner) FROM pg_class c "
              "JOIN pg_namespace n ON n.oid = c.relnamespace "
              "WHERE n.nspname = 'public' AND c.relname = ANY(:tables)"),
@@ -163,18 +173,28 @@ async def verify_owner(session: AsyncSession, plan: SeedPlanConnection) -> None:
         raise GuardRejectedError("dsn_not_owner")
 
 
-async def verify_halt(session: AsyncSession, plan: SeedPlanConnection) -> None:
-    try:
-        await assert_database_realm(session, plan.realm)
-    except DatabaseRealmMismatch:
-        raise GuardRejectedError("realm_mismatch") from None
-    authority = await session.scalar(text(
-        "SELECT authority FROM public.capital_authority_epoch ORDER BY epoch_seq DESC LIMIT 1"
-    ))
-    if authority != "legacy":
-        raise GuardRejectedError("epoch_not_legacy")
+def _lock_keys(scope: Scope) -> tuple[int, int]:
+    account = account_id_canonical(str(scope.exchange_account_id))
+    return (derive_lock_key(account, scope.deployment_environment),
+            derive_transaction_lock_key(account, scope.deployment_environment))
+
+
+async def quiesce(conn: AsyncConnection, plan: SeedPlanConnection) -> None:
+    """Before the seed's snapshot exists (autocommit): writers locked out, none connected.
+
+    Session-level advisory locks on both writer keys of every scope (the daemon's lifetime
+    lock and the per-transaction lock every legacy and ledger write takes), held until the
+    connection releases them after commit or rollback; then no runtime login may be connected.
+    Only after this does the REPEATABLE READ snapshot start, so no write or request can land
+    between the checks and the snapshot unseen.
+    """
+    for scope in plan.scopes:
+        for key in _lock_keys(scope):
+            taken = await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
+            if not taken:
+                raise GuardRejectedError("writer_lock_held")
     # Logins that are a runtime writer, or (recursively) a member of one.
-    runtime = await session.scalar(text("""
+    runtime = await conn.scalar(text("""
         WITH RECURSIVE writers(oid) AS (
           SELECT oid FROM pg_roles WHERE rolname = ANY(:roles)
           UNION
@@ -184,13 +204,23 @@ async def verify_halt(session: AsyncSession, plan: SeedPlanConnection) -> None:
     """), {"roles": list(RUNTIME_WRITERS)})
     if runtime:
         raise GuardRejectedError("runtime_session_present")
+
+
+async def verify_snapshot(session: AsyncSession, plan: SeedPlanConnection) -> None:
+    """Inside the seed's REPEATABLE READ snapshot: realm, epoch, empty ledger."""
+    isolation = await session.scalar(text("SELECT current_setting('transaction_isolation')"))
+    if isolation != "repeatable read":
+        raise GuardRejectedError("seed_snapshot_isolation")
+    try:
+        await assert_database_realm(session, plan.realm)
+    except DatabaseRealmMismatch:
+        raise GuardRejectedError("realm_mismatch") from None
+    authority = await session.scalar(text(
+        "SELECT authority FROM public.capital_authority_epoch ORDER BY epoch_seq DESC LIMIT 1"
+    ))
+    if authority != "legacy":
+        raise GuardRejectedError("epoch_not_legacy")
     for scope in plan.scopes:
-        account = account_id_canonical(str(scope.exchange_account_id))
-        for key in (derive_lock_key(account, scope.deployment_environment),
-                    derive_transaction_lock_key(account, scope.deployment_environment)):
-            taken = await session.scalar(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": key})
-            if not taken:
-                raise GuardRejectedError("writer_lock_held")
         if await ledger_rows_in_scope(session, scope):
             raise GuardRejectedError("ledger_not_empty")
 
@@ -227,6 +257,8 @@ def _seed_json(closure: SeedClosure, result: SeedResult) -> dict[str, object]:
         "attempts": len(closure.attempts),
         "quarantines": len(closure.quarantines),
         "failed_requests": result.failed_requests,
+        "failed_uncertainty_requests": [str(r) for r in closure.pending_uncertainty_requests],
+        "carried_requests": closure.evidence.get("carried_pending_requests"),
         "expected": {name: _digest_json(d) for name, d in sorted(result.expected.items())},
     }
 
@@ -239,14 +271,12 @@ def connect(plan: SeedPlanConnection) -> AsyncEngine:
 async def seed(
     session: AsyncSession, plan: SeedPlanConnection, *, now_ms: int, output: TextIO,
 ) -> int:
-    """Guards, closure, write and verification inside the caller's open transaction.
-
-    Returns the exit code; the caller commits only on ``EXIT_OK``.
+    """Snapshot guards, closure, write and verification inside the caller's REPEATABLE READ
+    transaction (``quiesce`` ran before it). Returns the exit code; the caller commits only
+    on ``EXIT_OK``.
     """
-    await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
     await session.execute(text("SET LOCAL search_path TO public"))
-    await verify_owner(session, plan)
-    await verify_halt(session, plan)
+    await verify_snapshot(session, plan)
     written: list[SeedResult] = []
     for scope in plan.scopes:
         closure = await read_seed_closure(session, scope)
@@ -272,6 +302,27 @@ async def seed(
     return exit_code
 
 
+async def _seed_transaction(
+    conn: AsyncConnection, plan: SeedPlanConnection, *, now_ms: int, output: TextIO,
+) -> int:
+    """The one REPEATABLE READ transaction; commits only on ``EXIT_OK``."""
+    await conn.commit()  # end SQLAlchemy's autobegun autocommit block (nothing to commit)
+    await conn.execution_options(isolation_level="REPEATABLE READ")
+    async with AsyncSession(bind=conn, autoflush=False, expire_on_commit=False,
+                            join_transaction_mode="rollback_only") as session:
+        transaction = await conn.begin()
+        try:
+            exit_code = await seed(session, plan, now_ms=now_ms, output=output)
+        except BaseException:
+            await transaction.rollback()
+            raise
+        if exit_code == EXIT_OK:
+            await transaction.commit()
+        else:
+            await transaction.rollback()
+    return exit_code
+
+
 async def run(
     argv: Sequence[str], *, output: TextIO,
     connector: Callable[[SeedPlanConnection], AsyncEngine] = connect,
@@ -285,17 +336,17 @@ async def run(
         )
         engine = connector(plan)
         try:
-            async with AsyncSession(engine, autoflush=False, expire_on_commit=False) as session:
-                transaction = await session.begin()
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
                 try:
-                    exit_code = await seed(session, plan, now_ms=clock(), output=output)
-                except BaseException:
-                    await transaction.rollback()
-                    raise
-                if exit_code == EXIT_OK:
-                    await transaction.commit()
-                else:
-                    await transaction.rollback()
+                    await verify_owner(conn, plan)
+                    await quiesce(conn, plan)
+                    exit_code = await _seed_transaction(conn, plan, now_ms=clock(), output=output)
+                finally:
+                    if conn.in_transaction():
+                        await conn.rollback()
+                    await conn.execution_options(isolation_level="AUTOCOMMIT")
+                    await conn.execute(text("SELECT pg_advisory_unlock_all()"))
         finally:
             await engine.dispose()
         emit(output, {"kind": "summary", "exit_code": exit_code, "run_id": plan.run_id,

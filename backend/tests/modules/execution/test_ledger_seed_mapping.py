@@ -15,6 +15,7 @@ from bfx_funding_bot.modules.execution.event_store.entities import (
 )
 from bfx_funding_bot.modules.execution.ledger_seed import (
     LEGACY_ATTRIBUTION,
+    claim_terms,
     credit_identity,
     map_attribution,
     seed_credit,
@@ -89,3 +90,20 @@ def test_an_offer_keeps_the_legacy_terms() -> None:
         flags={"hidden": False},
     ))
     assert (offer.status, offer.rate, offer.flags) == ("partially_filled", None, {"hidden": False})
+
+
+def test_a_claim_only_offer_takes_its_decision_terms_checked_against_the_offer() -> None:
+    """R1-1: rate/period from the claim's decision (what legacy cancels by), equal to the
+    observed offer's; otherwise the seed refuses (venue offer terms are immutable)."""
+    offer = seed_offer(VenueOfferObservation(
+        "o-1", "fUST", Decimal("120"), Decimal("120"), Decimal("0.0001"), 2, "ACTIVE", 5, 6,
+        offer_type="LIMIT"))
+    assert claim_terms(offer, size=Decimal("120"), rate=Decimal("0.00010"), period=2) == {
+        "symbol": "fUST", "amount": "120", "rate": "0.00010", "period": 2, "type": "LIMIT"}
+    for size, rate, period in ((Decimal("120"), Decimal("0.0002"), 2),
+                               (Decimal("120"), Decimal("0.0001"), 3),
+                               (Decimal("120"), None, 2), (Decimal("120"), Decimal("0.0001"), None),
+                               (Decimal("121"), Decimal("0.0001"), 2)):
+        with pytest.raises(SeedRefused) as raised:
+            claim_terms(offer, size=size, rate=rate, period=period)
+        assert raised.value.reason == "claim_offer_terms_mismatch"
