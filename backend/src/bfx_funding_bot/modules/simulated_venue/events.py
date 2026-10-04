@@ -6,7 +6,11 @@ recorded as events too, so a replay needs no network and no clock.
 Persisted form: `{"event_type": <stable name>, "schema_version": <int>, "data": {...}}`.
 The stable `event_type` string, not the Python class name, is the contract, and the
 decoder upcasts old versions step by step or refuses what it does not know (same
-convention as `modules/execution/events.py`). Version 1 is the first.
+convention as `modules/execution/events.py`). Version 1 is the first; version 2 added
+`fault_injected`, which only a version-2 writer emits. The version is one number for the whole
+log (a decoder refuses anything newer), so every event type has an identity upcaster 1 -> 2:
+a log written before the bump replays unchanged, and a process older than the bump refuses a log
+that holds a `fault_injected` row instead of misreading it.
 """
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, ClassVar
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class UnknownEventVersionError(ValueError):
@@ -134,23 +138,47 @@ class NonceAdvanced:
     schema_version: int = field(default=SCHEMA_VERSION, init=False, repr=False, compare=False)
 
 
+@dataclass(frozen=True, slots=True)
+class FaultInjected:
+    """One injected venue fault (soak only), recorded BEFORE its effect, so a restart or a
+    lost response never hides it: the soak report tells injected from organic UNKNOWN by it.
+
+    `target` is the request kind (`submit`, `history`, ...), `request_ordinal` its 1-based
+    count in this process, `nonce` the request's accepted nonce. The venue sees no client order
+    id on the wire (a funding submit has none), so `cid` is set only if a request ever carries
+    one; matching an attempt to an injection is by time.
+    """
+
+    event_type: ClassVar[str] = "fault_injected"
+    fault_kind: str
+    target: str
+    request_ordinal: int
+    nonce: int
+    cid: int | None
+    mts: int
+    schema_version: int = field(default=SCHEMA_VERSION, init=False, repr=False, compare=False)
+
+
 type VenueEvent = (
     WalletFunded | BookObserved | OfferPlaced | TradesObserved | OfferFilled
-    | LoanDrawn | OfferCanceled | CreditClosed | InterestPaid | NonceAdvanced
+    | LoanDrawn | OfferCanceled | CreditClosed | InterestPaid | NonceAdvanced | FaultInjected
 )
 
 _EVENTS: dict[str, type] = {
     cls.event_type: cls
     for cls in (
         WalletFunded, BookObserved, OfferPlaced, TradesObserved, OfferFilled,
-        LoanDrawn, OfferCanceled, CreditClosed, InterestPaid, NonceAdvanced,
+        LoanDrawn, OfferCanceled, CreditClosed, InterestPaid, NonceAdvanced, FaultInjected,
     )
 }
 _NESTED: dict[str, type] = {"trade_tick": TradeTick}
 
-# (event_type, from_version) -> data of from_version + 1. Empty while only v1 exists;
-# a future schema change adds its upcaster here instead of rewriting stored events.
-_UPCASTERS: dict[tuple[str, int], Callable[[dict[str, Any]], dict[str, Any]]] = {}
+# (event_type, from_version) -> data of from_version + 1. v1 -> v2 changed no shape (it only
+# added `fault_injected`), so each type that existed in v1 passes its data through; a future
+# schema change adds its upcaster here instead of rewriting stored events.
+_UPCASTERS: dict[tuple[str, int], Callable[[dict[str, Any]], dict[str, Any]]] = {
+    (name, 1): dict for name in _EVENTS if name != FaultInjected.event_type
+}
 
 
 def _encode(value: Any) -> Any:

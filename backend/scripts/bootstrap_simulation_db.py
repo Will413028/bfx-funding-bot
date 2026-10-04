@@ -13,7 +13,11 @@ ONE transaction, it:
      where it differs from what is applied: --symbol policies are enabled, with the offer
      ceiling and all five envelope options (without them the envelope guard refuses every
      offer); --disabled-symbol policies are disabled. What may be enabled is the ledger's
-     rule (``write_policy_revision``), not this script's.
+     rule (``write_policy_revision``), not this script's;
+  4. with ``--activate``, appends ``ACTIVE`` (cause ``operator``, actor ``bootstrap_simulation_db``)
+     to ``trading_state`` ONLY when the scope has no state row at all. A fresh scope is HALTED
+     until someone says otherwise, so a bootstrapped database that never trades makes a soak
+     vacuous. Any existing row (a HALT above all) is left alone: scripts never resume.
 
 A second run changes nothing. Run as a one-shot of the deployed backend image with the
 owner role; DATABASE_URL must be supplied explicitly (this command does not load .env):
@@ -21,7 +25,7 @@ owner role; DATABASE_URL must be supplied explicitly (this command does not load
   python -m scripts.bootstrap_simulation_db --exchange-account-id UUID \\
     --symbol fUST --disabled-symbol fUSD --max-offer-amount 200 \\
     --min-period-days 2 --max-period-days 2 --max-open-offers 6 \\
-    --rate-floor-ratio 0.5 --min-rate-apr 0.01
+    --rate-floor-ratio 0.5 --min-rate-apr 0.01 --activate
 """
 from __future__ import annotations
 
@@ -100,6 +104,23 @@ async def _ensure_account(session: AsyncSession, account_id: UUID) -> bool:
     return True
 
 
+async def _ensure_active(session: AsyncSession, *, scope: Scope, now_ms: int) -> str:
+    """Append the first ``ACTIVE`` row; "kept" when the scope already has any state row."""
+    existing = await session.scalar(text(
+        "SELECT state FROM trading_state WHERE exchange_account_id = :account "
+        "AND deployment_environment = :realm ORDER BY id DESC LIMIT 1"),
+        {"account": scope.exchange_account_id, "realm": scope.deployment_environment})
+    if existing is not None:
+        return f"kept_{existing.lower()}"
+    await session.execute(text(
+        "INSERT INTO trading_state (exchange_account_id, deployment_environment, state, cause, "
+        "actor, reason, created_at_ms) VALUES (:account, :realm, 'ACTIVE', 'operator', :actor, "
+        "'simulation bootstrap', :now)"),
+        {"account": scope.exchange_account_id, "realm": scope.deployment_environment,
+         "actor": _ACTOR, "now": now_ms})
+    return "activated"
+
+
 async def _ensure_policy(
     session: AsyncSession, *, scope: Scope, symbol: str, target: CapitalPolicy,
 ) -> str:
@@ -147,6 +168,9 @@ async def run(
                         session, scope=scope, symbol=symbol, target=target)
                     for symbol, target in sorted(targets.items())
                 }
+                trading = (
+                    await _ensure_active(session, scope=scope, now_ms=int(time.time() * 1000))
+                    if args.activate else "not_requested")
             except BaseException:
                 await session.rollback()
                 raise
@@ -154,7 +178,7 @@ async def run(
         return {
             "status": "ready", "realm": realm, "account_id": str(args.exchange_account_id),
             "authority_epoch_appended": epoch_appended, "account_created": account_created,
-            "policies": policies,
+            "policies": policies, "trading_state": trading,
         }
     finally:
         await engine.dispose()
@@ -182,6 +206,9 @@ def main() -> int:
     parser.add_argument("--rate-floor-ratio", type=_amount, required=True)
     parser.add_argument("--min-rate-apr", type=_amount, required=True,
                         help="annual fraction, 0.01 = 1%%")
+    parser.add_argument("--activate", action="store_true",
+                        help="append ACTIVE when the scope has no trading_state row yet "
+                             "(never overrides an existing HALT)")
     args = parser.parse_args()
     if not args.symbol and not args.disabled_symbol:
         parser.error("at least one --symbol or --disabled-symbol is required")

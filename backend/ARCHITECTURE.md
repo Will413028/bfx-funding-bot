@@ -748,7 +748,7 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 
 事件時間 watermark（`MarketFeed.complete_through(symbol)`）：feed 只宣稱它能證明的完整性。連線中且該 symbol 沒有缺口時，每個 frame（含 heartbeat）在本地時間 T 證明完整到 `T - watermark_lag_ms`；斷線時 watermark 停住，缺口補完才繼續；首次補完前是 None。venue 只消費 `(market_through, min(now, watermark)]`，`market_through` 也只推進到那裡（None＝這次不消費、不動）；放單不會把它推過還沒消費的區間，晚到、發生在新 offer 放單之前的 trade 只算給當時就在簿上的 offer（`placed_ms`），而 fill 的時間戳不早於 venue 已經讓外界看過的時間。來源失敗只會讓 buffer 變舊：舊 book 得「no market data」（內部失敗），watermark 凍結，不會編造資料。
 
-`internal_failures`／`unexpected` 是有上限的記憶體 log（最新 1000 筆）；soak 讀 Prometheus 計數器 `bfx_sim_venue_internal_failures_total{kind}`、`bfx_sim_venue_unexpected_requests_total`、`bfx_sim_venue_feed_failures_total{source}`（venue 只透過注入的 `VenueObserver` 回報，不 import metrics）。`Daemon.run` 先啟動 venue 的 task 並等第一批 book（最多 30 s）才啟動其餘 sub-task。venue 的 faults 在 production 組裝一律關閉，測試經 `VenueSeam`（`build_daemon(venue_seam=...)`）注入 feed 與 `FaultPlan`。
+`internal_failures`／`unexpected` 是有上限的記憶體 log（最新 1000 筆）；soak 讀 Prometheus 計數器 `bfx_sim_venue_internal_failures_total{kind}`、`bfx_sim_venue_unexpected_requests_total`、`bfx_sim_venue_feed_failures_total{source}`（venue 只透過注入的 `VenueObserver` 回報，不 import metrics）。`Daemon.run` 先啟動 venue 的 task 並等第一批 book（最多 30 s）才啟動其餘 sub-task。simulated 組裝預設不帶 faults；soak 以 `BFX_SIM_FAULTS`（`apps/sim_faults.py`，例如 `unknown_5xx=0.01,unknown_placed_lost=0.005,history_error=0.005,seed=N`）打開種子化的 `FaultPlan`，Bitfinex 組裝見到它就拒絕開機，故障只在行程內的 transport 發生。每一次注入先以 `fault_injected` 事件（種類、目標、請求序號、nonce、時間）append 到 `sim_venue_event`（事件 codec schema 2，v1 以恆等 upcaster 讀回），所以跨重啟存在，`scripts/sim_soak_report.py` 只靠 DB 區分注入與自然發生的 UNKNOWN。測試經 `VenueSeam`（`build_daemon(venue_seam=...)`）注入 feed 與 `FaultPlan`（優先於環境變數）。soak 另讀 `bfx_sim_venue_feed_stream_total{event}`（公開 trades WS 的連線與斷線）與 scrape 時計算的 `bfx_sim_venue_feed_watermark_lag_seconds{symbol}`（watermark 未知時沒有樣本）；live bot 的 `bfx_venue_rest_rate_limited_total` 是 HTTP 429 的專用計數（同時仍計入 `http_4xx`），abort rule 靠它。重啟後 feed 的第一次 trades backfill 從 venue 記錄的 `market_through`（只含仍有 resting offer 的 symbol，下限為 `retention_ms`）開始，不是固定 1 小時；沒有 resting offer 的 symbol 仍用固定的啟動視窗。soak 的執行步驟與判定見 `docs/runbooks/simulation-soak.md`，門檻（含活動下限）見 ADR 2026-10-03 的修訂。
 
 時間：`SignalEngine`、command gate／middleware 的 `date_provider`（`datetime.fromtimestamp(clock()/1000, UTC).date()`）與 `BitfinexLiveExecutor`（`clock`、`date_provider`、cancel 時間戳）都來自組裝時鐘 `now_ms_utc`；telemetry 的 ISO 時間戳仍是牆鐘。
 
@@ -821,7 +821,7 @@ projection 表零寫權限，授權與收回都在 migration（`1c435a35dcb4`、
 **關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`、
 `BFX_EXCHANGE_ACCOUNT_ID`、`BFX_VAULT_KEK`、
 `BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`（Bitfinex 需要前者；simulated 兩者都必須關閉）、
-`BFX_SIM_INITIAL_WALLETS`（simulated 專用）、
+`BFX_SIM_INITIAL_WALLETS`、`BFX_SIM_FAULTS`（simulated 專用，Bitfinex 組裝設了就拒絕開機）、
 `BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_SCHEDULER_BUFFER_S`、
 `BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`。已退役、設了就拒絕開機：`BFX_EXECUTOR` 與舊資金 env（`BFX_ALLOCATION_CAP_USDT`、`BFX_BALANCE_BUFFER_USDT`、`BFX_CONCENTRATION_PCT`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`）。
 Bitfinex secret 不再從 `BFX_API_KEY`/`BFX_API_SECRET` 讀取；由 account-owned

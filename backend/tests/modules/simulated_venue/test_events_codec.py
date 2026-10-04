@@ -27,6 +27,8 @@ SAMPLES = [
     ev.CreditClosed("loan", 3, 13, "expired"),
     ev.InterestPaid(5, "UST", D("0.01"), D("1000.51"), 14),
     ev.NonceAdvanced(99, 15),
+    ev.FaultInjected("unknown_placed_lost", "submit", 3, 99, None, 16),
+    ev.FaultInjected("unknown_5xx_error", "submit", 4, 100, 7, 17),
 ]
 
 
@@ -34,7 +36,7 @@ def test_every_event_type_is_covered_by_a_sample() -> None:
     assert {type(e).event_type for e in SAMPLES} == set(ev._EVENTS)
 
 
-@pytest.mark.parametrize("event", SAMPLES, ids=lambda e: type(e).event_type)
+@pytest.mark.parametrize("event", SAMPLES, ids=lambda e: f"{type(e).event_type}-{e.mts}")
 def test_payload_carries_stable_type_and_version_and_round_trips(event: ev.VenueEvent) -> None:
     payload = event_to_payload(event)
     assert payload["event_type"] == type(event).event_type
@@ -84,3 +86,23 @@ def test_an_old_version_is_upcast_step_by_step(monkeypatch: pytest.MonkeyPatch) 
         event_from_payload({**old, "schema_version": 0})
     with pytest.raises(UnknownEventVersionError):  # newer than this reader
         event_from_payload({**old, "schema_version": 4})
+
+
+def test_a_log_written_before_the_version_bump_still_decodes() -> None:
+    """Every type that existed at v1 reads back unchanged from a stored v1 payload; the type
+    added at v2 (``fault_injected``) has no v1 form, so a v1 row of it is refused."""
+    for event in SAMPLES:
+        payload = event_to_payload(event)
+        old = {**payload, "schema_version": 1}
+        if isinstance(event, ev.FaultInjected):
+            with pytest.raises(UnknownEventVersionError):
+                event_from_payload(old)
+        else:
+            assert event_from_payload(copy.deepcopy(old)) == event
+
+
+def test_a_fault_injection_keeps_its_kind_target_ordinal_and_time() -> None:
+    payload = event_to_payload(SAMPLES[-1])
+    assert payload["data"] == {
+        "fault_kind": "unknown_5xx_error", "target": "submit", "request_ordinal": 4,
+        "nonce": 100, "cid": 7, "mts": 17}

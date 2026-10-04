@@ -38,7 +38,11 @@ from bfx_funding_bot.modules.simulated_venue.contracts import (
     VenueObserver,
     VenueStoreError,
 )
-from bfx_funding_bot.modules.simulated_venue.events import NonceAdvanced, VenueEvent
+from bfx_funding_bot.modules.simulated_venue.events import (
+    FaultInjected,
+    NonceAdvanced,
+    VenueEvent,
+)
 
 log = logging.getLogger(__name__)
 
@@ -137,6 +141,16 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
     def state(self) -> VenueState:
         """Read-only view of the live state (tests and invariants)."""
         return self._state
+
+    def trade_resume_points(self) -> dict[str, int]:
+        """Per symbol with a resting offer: the instant its public trades were consumed up to.
+
+        A restarted live feed backfills from here: the range after it is what the resting
+        offers still wait for. A symbol with nothing resting needs no history (a new offer
+        starts its cursor at its own placement).
+        """
+        resting = {o.symbol for o in self._state.offers.values() if o.resting}
+        return {s: t for s, t in self._state.market_through.items() if s in resting}
 
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=self)
@@ -280,9 +294,12 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         if isinstance(accepted, tuple):
             return _json(500, wire.error_body(*accepted))
         fault = self._faults.next_fault(_TARGETS[name]) if name in _TARGETS else None
-        if fault is FaultKind.UNKNOWN_NOT_PLACED_LOST:
-            raise httpx.ConnectError("simulated: request lost before the venue", request=request)
         try:
+            if fault is not None:
+                await self._record_fault(name, fault, accepted, _body_object(body))
+            if fault is FaultKind.UNKNOWN_NOT_PLACED_LOST:
+                raise httpx.ConnectError(
+                    "simulated: request lost before the venue", request=request)
             await self._sync(self._now(), accepted)
             payload = _body_object(body)
             return await self._dispatch(name, params, payload, fault, request)
@@ -301,6 +318,24 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         except Exception as exc:
             self._record_internal("bug", repr(exc))
             raise SimulatedVenueInternalError(f"simulator bug: {exc!r}") from exc
+
+    async def _record_fault(
+        self, name: str, fault: FaultKind, nonce: int, payload: dict[str, Any],
+    ) -> None:
+        """Append the injection to the durable log BEFORE it takes effect.
+
+        A restart, or a response lost after the commit, then never hides it: the soak report
+        separates injected from organic UNKNOWN from the database alone.
+        """
+        cid = payload.get("cid")
+        await self._commit([FaultInjected(
+            fault_kind=fault.value, target=_TARGETS[name].value,
+            request_ordinal=self._faults.request_count(_TARGETS[name]), nonce=nonce,
+            cid=cid if isinstance(cid, int) and not isinstance(cid, bool) else None,
+            mts=self._now(),
+        )])
+        log.warning("simulated venue injected fault kind=%s target=%s", fault.value,
+                    _TARGETS[name].value)
 
     async def _dispatch(
         self, name: str, params: dict[str, str], payload: dict[str, Any],

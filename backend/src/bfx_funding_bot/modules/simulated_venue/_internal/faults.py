@@ -40,6 +40,10 @@ class FaultInjector:
         fired = self._fires(target, self._seen[target])
         return fired[0].kind if fired else None
 
+    def request_count(self, target: FaultTarget) -> int:
+        """How many requests of `target` were counted so far (the last one's 1-based ordinal)."""
+        return self._seen[target]
+
     def ticks_after(self, request_number: int) -> list[FaultRule]:
         """TICK_AFTER rules due after the `request_number`-th request received."""
         return self._fires(FaultTarget.ANY_REQUEST, request_number)

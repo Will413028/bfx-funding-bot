@@ -526,6 +526,51 @@ async def test_httpx_hooks_count_requests_latency_and_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_429_is_counted_on_its_own_and_as_a_4xx() -> None:
+    m = DaemonMetrics()
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429 if request.url.path == "/limited" else 404)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_respond), base_url="https://api.test",
+    ) as client:
+        attach_httpx_metrics(client, m)
+        await client.get("/other")
+        assert m.registry.get_sample_value("bfx_venue_rest_rate_limited_total") == 0.0
+        await client.get("/limited")
+        await client.post("/limited")
+
+    assert m.registry.get_sample_value("bfx_venue_rest_rate_limited_total") == 2.0
+    assert m.registry.get_sample_value(
+        "bfx_venue_rest_errors_total", {"kind": "http_4xx"}) == 3.0
+
+
+def test_sim_feed_stream_events_are_counted_and_bounded() -> None:
+    m = DaemonMetrics()
+    observer = m.sim_venue_observer()
+    observer.feed_stream("connected")
+    observer.feed_stream("disconnected")
+    observer.feed_stream("disconnected")
+    observer.feed_stream("anything else")  # unbounded labels are dropped
+    sample = m.registry.get_sample_value
+    assert sample("bfx_sim_venue_feed_stream_total", {"event": "connected"}) == 1.0
+    assert sample("bfx_sim_venue_feed_stream_total", {"event": "disconnected"}) == 2.0
+    assert sample("bfx_sim_venue_feed_stream_total", {"event": "anything else"}) is None
+
+
+def test_sim_watermark_lag_is_read_at_scrape_time_and_unknown_has_no_sample() -> None:
+    m = DaemonMetrics()
+    lag: dict[str, float | None] = {"fUST": 3.0, "fUSD": None}
+    m.bind_sim_watermark_lag(lambda: lag)
+    sample = m.registry.get_sample_value
+    assert sample("bfx_sim_venue_feed_watermark_lag_seconds", {"symbol": "fUST"}) == 3.0
+    assert sample("bfx_sim_venue_feed_watermark_lag_seconds", {"symbol": "fUSD"}) is None
+    lag["fUST"] = 90.0
+    assert sample("bfx_sim_venue_feed_watermark_lag_seconds", {"symbol": "fUST"}) == 90.0
+
+
+@pytest.mark.asyncio
 async def test_httpx_hooks_do_not_break_request_when_metrics_broken() -> None:
     m = DaemonMetrics()
 
