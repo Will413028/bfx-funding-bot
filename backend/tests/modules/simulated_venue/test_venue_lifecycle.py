@@ -278,6 +278,7 @@ async def test_a_feed_that_blocks_inside_the_lock_is_an_internal_failure() -> No
 async def test_a_failing_feed_is_an_internal_failure_never_a_venue_5xx() -> None:
     w = await make_world(funds={"UST": "1000"}, feed=BrokenFeed())
     await w.submit_ok(amount="150")  # resting offer: the next request pulls trades
+    w.clock.advance(1_000)
     with pytest.raises(FeedFailureError):
         await w.rest.fetch_wallet_observations(ctx=CTX)
     assert {f.kind for f in w.venue.internal_failures} == {"feed"}
@@ -369,3 +370,47 @@ async def test_two_processes_funding_an_empty_log_lose_the_race_loudly() -> None
     with pytest.raises(ConcurrentAppendError):
         await venues[1].fund_wallets_if_empty({"UST": Decimal(1000)})
     assert len(await store.load(ACCOUNT)) == 1
+
+
+class _Counting:
+    def __init__(self) -> None:
+        self.failures: list[str] = []
+        self.unexpected = 0
+
+    def internal_failure(self, kind: str) -> None:
+        self.failures.append(kind)
+
+    def unexpected_request(self) -> None:
+        self.unexpected += 1
+
+
+async def test_internal_failures_and_unrouted_requests_reach_the_observer_and_the_totals() -> None:
+    """Mutation: the venue records only in memory (no observer call, no total)."""
+    observer = _Counting()
+    store = InMemoryVenueEventStore()
+    venue = await build_simulated_venue(
+        account=ACCOUNT, config=config(), store=store, feed=FixtureMarketFeed(),
+        clock_ms=Clock(), observer=observer)
+    async with venue.client() as http:
+        assert (await http.get("https://api-pub.bitfinex.com/v2/anything")).status_code == 404
+    await venue.fund_wallet("UST", Decimal(1000))
+    with pytest.raises(NoMarketDataError):
+        await _raw_submit(World(venue, FixtureMarketFeed(), Clock(), store))
+    assert observer.unexpected == 1 and venue.unexpected_total == 1
+    assert observer.failures == ["no_market_data"] and venue.internal_failures_total == 1
+    venue.internal_failures.clear()
+    venue.unexpected.clear()
+
+
+async def test_the_in_memory_logs_are_bounded_but_the_totals_are_not() -> None:
+    from bfx_funding_bot.modules.simulated_venue._internal.transport import LOG_LIMIT
+
+    venue = await build_simulated_venue(
+        account=ACCOUNT, config=config(), store=InMemoryVenueEventStore(),
+        feed=FixtureMarketFeed(), clock_ms=Clock())
+    async with venue.client() as http:
+        for _ in range(LOG_LIMIT + 5):
+            await http.get("https://api-pub.bitfinex.com/v2/anything")
+    assert len(venue.unexpected) == LOG_LIMIT and venue.unexpected_total == LOG_LIMIT + 5
+    assert venue.unexpected == list(venue.unexpected) and venue.unexpected != []
+    venue.unexpected.clear()

@@ -54,6 +54,7 @@ from bfx_funding_bot.modules.simulated_venue.contracts import (
     SimulatedVenueConfig,
     SimulatedVenueInternalError,
     VenueEventStore,
+    VenueObserver,
     VenueStoreError,
 )
 from bfx_funding_bot.modules.simulated_venue.live_feed import (
@@ -91,5 +92,6 @@ __all__ = [
     "SqlVenueEventStore",
     "TradesFetcher",
     "VenueEventStore",
+    "VenueObserver",
     "VenueStoreError",
 ]

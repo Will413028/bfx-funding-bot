@@ -152,6 +152,25 @@ class _ProbeCollector(Collector):
             return []
 
 
+class SimVenueObserver:
+    """The simulated venue's ``VenueObserver``, fail-open like every metric here."""
+
+    def __init__(self, metrics: DaemonMetrics) -> None:
+        self._metrics = metrics
+
+    def internal_failure(self, kind: str) -> None:
+        with contextlib.suppress(Exception):
+            self._metrics.sim_venue_internal_failures.labels(kind=kind).inc()
+
+    def unexpected_request(self) -> None:
+        with contextlib.suppress(Exception):
+            self._metrics.sim_venue_unexpected_requests.inc()
+
+    def feed_failure(self, source: str) -> None:
+        with contextlib.suppress(Exception):
+            self._metrics.sim_venue_feed_failures.labels(source=source).inc()
+
+
 class DaemonMetrics:
     """All daemon Prometheus metrics behind fail-open observe methods."""
 
@@ -260,6 +279,25 @@ class DaemonMetrics:
             "Operator alerts by event and outcome (sent / failed / deduplicated / "
             "rate_limited / queue_full / log_only); drops never block trading",
             ["event", "outcome"],
+            registry=self.registry,
+        )
+        # Simulated venue only (never incremented on Bitfinex): the soak report reads these.
+        self.sim_venue_internal_failures = Counter(
+            "bfx_sim_venue_internal_failures",
+            "Failures of the simulator itself, never venue answers "
+            "(kind=no_market_data|feed|store|bug).",
+            ["kind"],
+            registry=self.registry,
+        )
+        self.sim_venue_unexpected_requests = Counter(
+            "bfx_sim_venue_unexpected_requests",
+            "Requests the simulated venue does not route (wrong host, method or path).",
+            registry=self.registry,
+        )
+        self.sim_venue_feed_failures = Counter(
+            "bfx_sim_venue_feed_failures",
+            "Failed fetches of the simulated venue's market feed (source=book|trades).",
+            ["source"],
             registry=self.registry,
         )
         self.funding_book_snapshots = Counter(
@@ -376,6 +414,9 @@ class DaemonMetrics:
             ).inc()
         except Exception:
             log.debug("metrics_observe_failed metric=execution_decisions", exc_info=True)
+
+    def sim_venue_observer(self) -> SimVenueObserver:
+        return SimVenueObserver(self)
 
     def observe_alert(self, event: str, outcome: str) -> None:
         with contextlib.suppress(Exception):

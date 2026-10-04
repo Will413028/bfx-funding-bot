@@ -9,7 +9,6 @@ from pathlib import Path
 import yaml
 
 from bfx_funding_bot.core.telemetry import Phase
-from bfx_funding_bot.core.venue import venue_for_phase
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
@@ -62,7 +61,6 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
             "and the venue follows BFX_PHASE"
         )
     phase = Phase(phase_str)
-    venue = venue_for_phase(phase)
 
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
@@ -249,8 +247,7 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
 
     config_kwargs: dict[str, object] = {
         "phase": phase,
-        "venue": venue,
-        "simulated_initial_wallets": _initial_wallets(venue),
+        "simulated_initial_wallets": _initial_wallets(),
         "cells": cells,
         "database_url": database_url,
         "deployment_environment": deployment_environment,
@@ -273,13 +270,14 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     return config
 
 
-def _initial_wallets(venue: str) -> dict[str, Decimal]:
-    """``BFX_SIM_INITIAL_WALLETS=UST:10000,USD:500``: simulated venue only, funded on an empty log."""
+def _initial_wallets() -> dict[str, Decimal]:
+    """``BFX_SIM_INITIAL_WALLETS=UST:10000,USD:500``, funded on an empty simulated log.
+
+    Only the simulated venue's wiring accepts it (``build_venue`` refuses it elsewhere).
+    """
     raw = os.environ.get("BFX_SIM_INITIAL_WALLETS", "").strip()
     if not raw:
         return {}
-    if venue != "simulated":
-        raise ValueError("BFX_SIM_INITIAL_WALLETS is only valid for the simulated venue")
     wallets: dict[str, Decimal] = {}
     for item in raw.split(","):
         currency, sep, amount_raw = item.strip().partition(":")

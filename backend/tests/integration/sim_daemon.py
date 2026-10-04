@@ -15,6 +15,7 @@ any request to the authenticated host that did.
 """
 from __future__ import annotations
 
+import itertools
 import os
 import re
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ from tests.modules.marketfeed.account_test_helpers import (
 )
 from tests.modules.marketfeed.test_daemon_wiring import _write_cells_yaml
 
+_IDS = itertools.count(1)
 SCOPE = Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci")
 CELL = "fUST_a30"
 T0 = 1_704_067_200_000  # 2024-01-01T00:00Z, a UTC midnight, far from the wall clock
@@ -93,6 +95,7 @@ class SimEnv:
     feed: FixtureMarketFeed
     cells_path: Path
     httpx_mock: Any
+    alerts: list[str]
     daemons: list[Any] = field(default_factory=list)
 
     async def build(self, *, faults: FaultPlan | None = None, feed: Any = None) -> Any:
@@ -130,7 +133,7 @@ class SimEnv:
 
     def trades(self, *trades: tuple[int, str, int, str]) -> None:
         self.feed.add_trades("fUST", [
-            PublicTrade(mts, Decimal(amount), Decimal(rate), period)
+            PublicTrade(next(_IDS), mts, Decimal(amount), Decimal(rate), period)
             for mts, amount, period, rate in trades])
 
     # -- driving ---------------------------------------------------------------------
@@ -223,7 +226,7 @@ async def make_sim_env(ledger_db: Any, monkeypatch: Any, httpx_mock: Any, tmp_pa
     monkeypatch.setattr(alerts, "emit", lambda event, **fields: sent.append(event))
     clock = FakeClock()
     monkeypatch.setattr(bot, "now_ms_utc", clock)
-    sim = SimEnv(url, factory, clock, FixtureMarketFeed(), _write_cells_yaml(tmp_path), httpx_mock)
+    sim = SimEnv(url, factory, clock, FixtureMarketFeed(), _write_cells_yaml(tmp_path), httpx_mock, sent)
     sim.feed.add_book(BookSnapshot("fUST", clock.now, ((Decimal("0.0003"), 2, Decimal("800")),)))
     return sim, engine
 
@@ -233,7 +236,7 @@ async def close_sim_env(sim: SimEnv, engine: Any) -> None:
         if daemon.writer_lock is not None:
             await daemon.writer_lock.release()
         await daemon.bitfinex_http.aclose()
-        if daemon.venue_client is not None:
-            await daemon.venue_client.aclose()
+        if daemon.venue_aclose is not None:
+            await daemon.venue_aclose()
         await daemon.db_engine.dispose()
     await engine.dispose()

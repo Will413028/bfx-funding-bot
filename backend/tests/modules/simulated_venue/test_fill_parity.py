@@ -33,9 +33,10 @@ def _venue_fill_ms(snap: BookSnapshot, candles: list, ref: Decimal, bps: int) ->
         apply(state, event)
     # A candle's volume traded "somewhere inside the hour": the venue sees it as one
     # public trade at the hour's end, which is exactly where book_replay stamps the fill.
-    prints = [PublicTrade(c.mts + HOUR, c.volume or D(0), ref, 2) for c in candles
+    prints = [PublicTrade(i, c.mts + HOUR, c.volume or D(0), ref, 2) for i, c in enumerate(candles)
               if c.mts >= t and c.mts + HOUR <= t + HORIZON_H * HOUR]
-    for event in catch_up(state, cfg, now_ms=t + HORIZON_H * HOUR, trades={"fUST": prints}):
+    for event in catch_up(state, cfg, now_ms=t + HORIZON_H * HOUR, trades={"fUST": prints},
+                          through={"fUST": t + HORIZON_H * HOUR}):
         apply(state, event)
     (offer,) = state.offers.values()
     return offer.terminal_mts if offer.status == "EXECUTED" else None

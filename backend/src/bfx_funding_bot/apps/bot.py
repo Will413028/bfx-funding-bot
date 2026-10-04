@@ -207,8 +207,8 @@ async def build_daemon(
     # rollback onto a newer schema); its stamped realm must equal the realm this process
     # runs as (E2); and the capital authority is read once, against the set this venue
     # supports (``apps/authority_support.py``): the simulated venue runs only on the
-    # ledger, Bitfinex only on legacy. Any refusal stops the boot; the Bitfinex path also
-    # alerts (``_refuse_live_boot``).
+    # ledger, Bitfinex only on legacy. Any refusal stops the boot and alerts
+    # (``_refuse_live_boot``: alert routing is configuration, the sink prefixes the realm).
     try:
         async with session_factory() as boot_session:
             await assert_schema_head(boot_session)
@@ -216,8 +216,7 @@ async def build_daemon(
             authority: Authority = await read_authority(
                 boot_session, supported=supported_for_venue(config.venue))
     except Exception as exc:
-        if config.venue == "bitfinex":
-            await _refuse_live_boot(exc, config=config, session_factory=session_factory)
+        await _refuse_live_boot(exc, config=config, session_factory=session_factory)
         await db_engine.dispose()
         raise
     try:
@@ -227,7 +226,6 @@ async def build_daemon(
                 deployment_environment=config.deployment_environment.value,
                 allocation_cap_usdt=Decimal("0"),
                 phase=config.phase,
-                venue=config.venue,
             )
     except Exception:
         await db_engine.dispose()
@@ -255,8 +253,7 @@ async def build_daemon(
             for symbol in configured_symbols(config.cells):
                 await capital.policy_store.read_applied(policy_session, symbol=symbol)
     except Exception as exc:
-        if config.venue == "bitfinex":
-            await _refuse_live_boot(exc, config=config, session_factory=session_factory)
+        await _refuse_live_boot(exc, config=config, session_factory=session_factory)
         await db_engine.dispose()
         raise
 
@@ -308,15 +305,15 @@ async def build_daemon(
     try:
         venue_wiring = await build_venue(
             config, exchange_account_id=account_bootstrap.exchange_account_id,
-            credentials=account_bootstrap.credentials, db_engine=db_engine,
-            bitfinex_http=bitfinex_http, bitfinex=bitfinex, clock=now_ms_utc, seam=venue_seam,
+            session_factory=session_factory, db_engine=db_engine,
+            bitfinex_http=bitfinex_http, bitfinex=bitfinex, clock=now_ms_utc, metrics=metrics,
+            seam=venue_seam,
         )
-    except Exception:
+    except Exception as exc:
+        await _refuse_live_boot(exc, config=config, session_factory=session_factory)
         await bitfinex_http.aclose()
         await db_engine.dispose()
         raise
-    if venue_wiring.owned_client is not None:
-        attach_httpx_metrics(venue_wiring.owned_client, metrics)
     funding_book_service = FundingBookService(
         store=FundingBookStore(max_age_seconds=config.book_max_age_seconds),
         rest=bitfinex,
@@ -371,8 +368,8 @@ async def build_daemon(
     # The immutable UUID, vault credential and optional config draft were
     # loaded before any venue client or worker was constructed. Every service
     # below receives this one canonical identity; no env realm is read here.
-    credentials = account_bootstrap.credentials
-    account_ctx = account_bootstrap.to_context()
+    credentials = venue_wiring.credentials
+    account_ctx = account_bootstrap.to_context(credentials)
     # ONE µs nonce gate shared by every auth client on this single API key (built with
     # the venue: one per process, whatever the venue).
     # Bitfinex nonces are per-key across REST *and* WS, so mixed scales /
@@ -443,7 +440,7 @@ async def build_daemon(
     # Env-driven via registry (CC4 invariant — WS client required).
     all_symbols = frozenset(configured_symbols(config.cells))
     spec = build_executor(
-        venue=config.venue,
+        capabilities=venue_wiring.capabilities,
         event_sink=stdout_sink,
         phase=config.phase,
         strategy=first_cell.strategy,
@@ -1068,9 +1065,9 @@ async def build_daemon(
         trading_control=trading_control,
         capital_policy_control=capital_policy_control,
         writer_lock_watch=WriterLockWatch(lock=writer_lock),
-        venue_feed=venue_wiring.feed_task,
+        venue_tasks=venue_wiring.tasks,
+        venue_aclose=venue_wiring.aclose,
         venue_diagnostics=venue_wiring.simulated,
-        venue_client=venue_wiring.owned_client,
     )
 
 
@@ -1168,9 +1165,9 @@ async def _run() -> None:
             with contextlib.suppress(Exception):
                 await daemon.writer_lock.release()
         await daemon.bitfinex_http.aclose()
-        if daemon.venue_client is not None:
+        if daemon.venue_aclose is not None:
             with contextlib.suppress(Exception):
-                await daemon.venue_client.aclose()
+                await daemon.venue_aclose()
         # Flush any batched spans before exit (no-op when tracing disabled).
         if daemon.tracing is not None:
             with contextlib.suppress(Exception):

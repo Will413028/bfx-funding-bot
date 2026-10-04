@@ -60,6 +60,7 @@ class Machine:
         self.now = to
         return self.emit(catch_up(
             self.state, self.cfg, now_ms=to, trades={"fUST": list(trades)} if trades else {},
+            through={"fUST": to} if trades else {},
         ))
 
 
@@ -303,3 +304,26 @@ def test_same_inputs_give_identical_events_independent_of_the_wall_clock() -> No
 def test_fund_wallet_rejects_non_positive_amounts() -> None:
     with pytest.raises(ValueError):
         fund_wallet("UST", D("0"), T0)
+
+
+def test_a_late_trade_from_before_a_placement_counts_for_the_old_offer_only() -> None:
+    """The watermark lets a trade reach the venue after a newer offer was placed: it is
+    volume for the offer that rested when it executed, never for the one placed afterwards.
+    Mutations: ``count_tick`` ignores ``placed_ms`` (B is filled too); ``_place`` advances
+    ``market_through`` past the unconsumed range (A is never filled)."""
+    m = Machine()
+    a = m.place("200", rate="0.0002")
+    placed_a = m.now
+    m.now = placed_a + 60_000
+    b = m.place("200", rate="0.0002")  # same price and period: behind A in the queue
+    assert m.state.market_through["fUST"] == placed_a  # placing B left A's range unconsumed
+    # A trade of 200 executed 10 s after A and 50 s BEFORE B, and reaches the venue only now.
+    m.tick(placed_a + 120_000, [trade(placed_a + 10_000, "200")])
+    assert m.state.offers[a].status == "EXECUTED"
+    assert m.state.offers[b].status == "ACTIVE" and m.state.offers[b].filled == 0
+    # Learned late, stamped no earlier than what the venue had already shown (placing B).
+    (fill,) = [e for e in m.log if isinstance(e, OfferFilled) and e.offer_id == a]
+    assert fill.mts == placed_a + 60_000
+    # Volume after B's placement is B's (A's 200 now sit ahead of it in the queue).
+    m.tick(placed_a + 180_000, [trade(placed_a + 130_000, "400")])
+    assert m.state.offers[b].status == "EXECUTED"

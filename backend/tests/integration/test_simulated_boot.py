@@ -33,6 +33,9 @@ async def _refused(ledger_db, monkeypatch, httpx_mock, tmp_path, exc: type[BaseE
             await before(engine)
         with pytest.raises(exc, match=match):
             await sim.build()
+        # A refused boot reports (alert routing is configuration, not a venue property):
+        # the same critical alert a refused Bitfinex boot sends.
+        assert sim.alerts == ["venue_offers_may_remain"], sim.alerts
         # Nothing reached a venue, and the venue log stayed empty.
         assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
         async with engine.connect() as conn:

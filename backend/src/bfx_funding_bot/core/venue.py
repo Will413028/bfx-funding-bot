@@ -6,6 +6,7 @@ this value in one place (``apps``); no module reads the phase to find out.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Final, Literal
 
 from bfx_funding_bot.core.telemetry import Phase
@@ -22,4 +23,17 @@ def venue_for_phase(phase: Phase) -> Venue:
     return _VENUE_OF_PHASE[phase]
 
 
-__all__ = ["Venue", "venue_for_phase"]
+@dataclass(frozen=True, slots=True)
+class VenueCapabilities:
+    """What a venue has, stated by its wiring so no consumer compares venue names.
+
+    ``auth_ws``: Bitfinex fills arrive on the authenticated WebSocket and a process without
+    it holds stale exposure (``required``); the simulated venue has none (``forbidden``).
+    ``rest_fill_tracker``: whether the REST fill tracker may be enabled.
+    """
+
+    auth_ws: Literal["required", "forbidden"]
+    rest_fill_tracker: bool
+
+
+__all__ = ["Venue", "VenueCapabilities", "venue_for_phase"]

@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from bfx_funding_bot.core.telemetry import Phase
+from bfx_funding_bot.core.venue import VenueCapabilities
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.registry import (
     ExecutorConfigError,
@@ -27,6 +28,8 @@ def _today() -> date:
     return date(2023, 11, 14)
 
 
+BITFINEX = VenueCapabilities(auth_ws="required", rest_fill_tracker=True)
+SIMULATED = VenueCapabilities(auth_ws="forbidden", rest_fill_tracker=False)
 _COMPOSITION = {"clock": _clock, "date_provider": _today}
 
 
@@ -44,7 +47,7 @@ def test_bitfinex_live_builder_does_not_require_env_credentials(
     from bfx_funding_bot.modules.execution.bus import DomainEventBus
 
     spec = build_executor(
-        venue="bitfinex", **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
+        capabilities=BITFINEX, **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
         strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         http=httpx.AsyncClient(), bus=DomainEventBus(),
@@ -58,7 +61,7 @@ def test_bitfinex_live_without_ws_client_raises(monkeypatch: pytest.MonkeyPatch)
     # ws_client_enabled defaults false → invalid
     with pytest.raises(ExecutorConfigError, match="BFX_WS_CLIENT_ENABLED"):
         build_executor(
-            venue="bitfinex", **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
+            capabilities=BITFINEX, **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
             strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUST"}), cell="C-1",
         )
@@ -70,7 +73,7 @@ def test_bitfinex_live_without_http_or_bus_raises(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     with pytest.raises(ExecutorConfigError, match="http"):
         build_executor(
-            venue="bitfinex", **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
+            capabilities=BITFINEX, **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
             strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUST"}), cell="C-1",
         )
@@ -83,7 +86,7 @@ def test_bitfinex_live_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
     from bfx_funding_bot.modules.execution.bus import DomainEventBus
     spec = build_executor(
-        venue="bitfinex", **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
+        capabilities=BITFINEX, **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
         strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         http=httpx.AsyncClient(),
@@ -105,7 +108,7 @@ def test_bitfinex_live_forwards_shared_auth_gate(
     from bfx_funding_bot.modules.execution.bus import DomainEventBus
     sentinel = AuthRequestGate()
     spec = build_executor(
-        venue="bitfinex", **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
+        capabilities=BITFINEX, **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
         strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         http=httpx.AsyncClient(), bus=DomainEventBus(),
@@ -123,7 +126,7 @@ def test_bfx_executor_env_is_refused(monkeypatch: pytest.MonkeyPatch, value: str
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     with pytest.raises(ExecutorConfigError, match="BFX_EXECUTOR"):
         build_executor(
-            venue="bitfinex", **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
+            capabilities=BITFINEX, **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
             strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUST"}), cell="C-1",
             http=httpx.AsyncClient(), bus=DomainEventBus(),
@@ -138,7 +141,7 @@ def test_the_executor_gets_the_composition_clock_and_date(
 
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     spec = build_executor(
-        venue="bitfinex", **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
+        capabilities=BITFINEX, **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.LIVE,
         strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         http=httpx.AsyncClient(), bus=DomainEventBus(),
@@ -154,9 +157,9 @@ def test_the_simulated_venue_forbids_a_websocket_and_the_rest_fill_tracker(
     from bfx_funding_bot.modules.execution.bus import DomainEventBus
 
     monkeypatch.setenv(flag, "true")
-    with pytest.raises(ExecutorConfigError, match="simulated venue has no WebSocket"):
+    with pytest.raises(ExecutorConfigError, match=r"no WebSocket|no REST fill tracker"):
         build_executor(
-            venue="simulated", **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.SHADOW,
+            capabilities=SIMULATED, **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.SHADOW,
             strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUST"}), cell="C-1",
             http=httpx.AsyncClient(), bus=DomainEventBus(),
@@ -168,7 +171,7 @@ def test_the_simulated_venue_builds_the_same_executor_without_either_flag() -> N
     from bfx_funding_bot.modules.execution.bus import DomainEventBus
 
     spec = build_executor(
-        venue="simulated", **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.SHADOW,
+        capabilities=SIMULATED, **_COMPOSITION, event_sink=_EventCapture(), phase=Phase.SHADOW,
         strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         http=httpx.AsyncClient(), bus=DomainEventBus(),

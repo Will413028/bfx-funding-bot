@@ -1,6 +1,7 @@
 """Shared builders for simulated venue tests. T0 is far from the wall clock on purpose."""
 from __future__ import annotations
 
+import itertools
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -56,8 +57,11 @@ def book(symbol: str = "fUST", at: int = T0, asks: list[tuple[str, int, str]] | 
     return BookSnapshot(symbol, at, tuple((Decimal(r), p, Decimal(a)) for r, p, a in levels))
 
 
+_TRADE_IDS = itertools.count(1)
+
+
 def trade(mts: int, amount: str, period: int = 2, rate: str = "0.0002") -> PublicTrade:
-    return PublicTrade(mts, Decimal(amount), Decimal(rate), period)
+    return PublicTrade(next(_TRADE_IDS), mts, Decimal(amount), Decimal(rate), period)
 
 
 WORLDS: list[World] = []  # every world built this test; conftest checks them at teardown

@@ -18,6 +18,7 @@ from bfx_funding_bot.modules.simulated_venue._internal.state import (
     Lending,
     VenueState,
     apply,
+    count_tick,
     currency_of,
 )
 from bfx_funding_bot.modules.simulated_venue.contracts import (
@@ -145,7 +146,7 @@ def _fills_for_tick(
     work: VenueState, symbol: str, tick: TradeTick, config: SimulatedVenueConfig,
 ) -> list[OfferFilled]:
     key = (symbol, tick.period)
-    work.volume_cum[key] = work.volume_cum.get(key, ZERO) + tick.amount
+    count_tick(work, symbol, tick)
     out: list[OfferFilled] = []
     for offer in work.resting_offers(symbol, tick.period):
         own_ahead = sum(
@@ -161,7 +162,10 @@ def _fills_for_tick(
         event = OfferFilled(
             offer_id=offer.offer_id, trade_id=work.next_id("trade", config.id_base),
             loan_id=work.next_id("loan", config.id_base), amount=delta, rate=offer.rate,
-            period=offer.period, mts=tick.mts,
+            # The venue learns of a trade at the earliest when its feed does: a fill is never
+            # stamped before what an earlier request could already have observed (no time
+            # travel in the venue's own history), however late the trade's source delivered.
+            period=offer.period, mts=max(tick.mts, work.high_water_ms),
         )
         apply(work, event)
         out.append(event)
@@ -196,12 +200,14 @@ def _candidates(
 
 def catch_up(
     state: VenueState, config: SimulatedVenueConfig, *, now_ms: int,
-    trades: Mapping[str, Sequence[PublicTrade]],
+    trades: Mapping[str, Sequence[PublicTrade]], through: Mapping[str, int],
 ) -> list[VenueEvent]:
     """Every scheduled change with `mts <= now_ms`, in time order.
 
-    `trades[symbol]` are the public trades fetched for `(market_through, now_ms]`;
-    only periods with a resting offer are kept and recorded.
+    `trades[symbol]` are the public trades fetched for `(market_through, through[symbol]]`,
+    a range the feed has declared complete (`through[symbol] <= now_ms`); only periods with a
+    resting offer are kept, and the symbol's market input is recorded as final up to
+    `through[symbol]`.
     """
     events: list[VenueEvent] = []
     ticks: list[tuple[int, str, TradeTick]] = []
@@ -209,11 +215,12 @@ def catch_up(
         periods = {o.period for o in state.resting_offers(symbol)}
         kept = tuple(sorted(
             (TradeTick(t.mts, t.amount, t.rate, t.period) for t in trades[symbol]
-             if t.period in periods and state.market_through.get(symbol, 0) < t.mts <= now_ms),
+             if t.period in periods
+             and state.market_through.get(symbol, 0) < t.mts <= through[symbol]),
             key=lambda t: (t.mts, t.period, t.amount, t.rate),
         ))
         if kept:
-            events.append(TradesObserved(symbol, now_ms, kept, now_ms))
+            events.append(TradesObserved(symbol, through[symbol], kept, now_ms))
             ticks.extend((t.mts, symbol, t) for t in kept)
     ticks.sort(key=lambda item: (item[0], item[1]))
 

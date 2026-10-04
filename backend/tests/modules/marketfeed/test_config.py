@@ -112,23 +112,22 @@ def test_the_venue_is_derived_from_the_phase(tmp_path, monkeypatch, phase, venue
     assert load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml())).venue == venue
 
 
-def test_a_hand_built_config_cannot_pair_a_phase_with_the_other_venue(tmp_path, monkeypatch):
+def test_the_venue_is_a_computed_property_not_a_field(tmp_path, monkeypatch):
+    """Mutation: store the venue again (a phase-and-venue pair that can disagree)."""
     _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
     config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
-    with pytest.raises(ValueError, match="does not match phase"):
-        type(config)(**{**config.model_dump(), "venue": "bitfinex"})
+    assert "venue" not in type(config).model_fields
+    with pytest.raises(ValueError):  # extra="forbid": nobody can hand one in
+        type(config)(**{**config.model_dump(exclude={"venue"}), "venue": "bitfinex"})
 
 
-def test_initial_wallets_are_parsed_for_the_simulated_venue_only(tmp_path, monkeypatch):
+def test_initial_wallets_are_parsed(tmp_path, monkeypatch):
     from decimal import Decimal
 
     _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
     monkeypatch.setenv("BFX_SIM_INITIAL_WALLETS", "UST:1000, USD:2.5")
     config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
     assert config.simulated_initial_wallets == {"UST": Decimal(1000), "USD": Decimal("2.5")}
-    _set_required_config_env(monkeypatch, phase="live", policy="book_guarded")
-    with pytest.raises(ValueError, match="only valid for the simulated venue"):
-        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
 @pytest.mark.parametrize("raw", ["UST", "UST:0", "UST:-1", "UST:abc", ":5", "UST:1,UST:2", "UST:nan"])

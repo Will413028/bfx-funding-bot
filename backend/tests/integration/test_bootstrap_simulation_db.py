@@ -1,8 +1,8 @@
 """``scripts/bootstrap_simulation_db.py`` on migrated PostgreSQL, run as the owner.
 
 Mutations (one at a time; revert after each): skip the realm check (``test_it_refuses_*``
-realm cases), skip the ``prod`` row scan (``test_it_refuses_a_database_holding_a_prod_row``),
-append the epoch on every run or create the account again (``test_a_second_run_changes_nothing``),
+realm cases), append the epoch on every run create the account again or write a revision on an unchanged second run
+(``test_a_second_run_changes_nothing``),
 leave the envelope out of the policy (``test_the_policy_carries_the_ledger_envelope``).
 """
 from __future__ import annotations
@@ -30,7 +30,7 @@ REALMS = ("shadow", "ci")  # ``ci`` only in tests: the CLI allows ``shadow`` alo
 
 def _args(**changes) -> argparse.Namespace:
     base = {
-        "exchange_account_id": ACCOUNT, "symbol": ["fUST", "fUSD"],
+        "exchange_account_id": ACCOUNT, "symbol": ["fUST"], "disabled_symbol": ["fUSD"],
         "max_offer_amount": Decimal("200"), "min_period_days": 2, "max_period_days": 2,
         "max_open_offers": 6, "rate_floor_ratio": Decimal("0.5"), "min_rate_apr": Decimal("0.01"),
     }
@@ -79,7 +79,7 @@ async def test_it_prepares_a_simulation_database(db) -> None:
     report = await script.run(_args(), database_url=url, allowed_realms=REALMS)
     assert report["status"] == "ready" and report["realm"] == "ci"
     assert report["authority_epoch_appended"] is True and report["account_created"] is True
-    assert report["policies"] == {"fUSD": "applied_disabled", "fUST": "applied"}
+    assert report["policies"] == {"fUSD": "applied", "fUST": "applied"}
     state = await _snapshot(engine)
     assert state["epochs"] == [(1, "legacy"), (2, "ledger")]
     assert state["accounts"] == [(ACCOUNT, "simulation", "active", "bitfinex")]
@@ -130,24 +130,33 @@ async def test_it_refuses_an_unstamped_database(db) -> None:
     assert (await _snapshot(engine))["epochs"] == [(1, "legacy")]
 
 
-async def test_it_refuses_a_database_holding_a_prod_row(db) -> None:
+async def test_a_changed_target_is_written_as_the_next_revision_and_only_that(db) -> None:
+    url, engine = db
+    await script.run(_args(), database_url=url, allowed_realms=REALMS)
+    report = await script.run(
+        _args(max_open_offers=3), database_url=url, allowed_realms=REALMS)
+    assert report["policies"] == {"fUSD": "unchanged", "fUST": "applied"}
+    assert (await _snapshot(engine))["revisions"] == [("fUSD", 1), ("fUST", 1), ("fUST", 2)]
+
+
+async def test_what_may_be_enabled_is_the_ledgers_rule_not_the_scripts(db) -> None:
+    from bfx_funding_bot.modules.ledger import PolicyRefused
+
+    url, engine = db
+    with pytest.raises(PolicyRefused, match="unsupported_enabled_symbol"):
+        await script.run(_args(symbol=["fUST", "fUSD"], disabled_symbol=[]),
+                         database_url=url, allowed_realms=REALMS)
+    state = await _snapshot(engine)
+    assert state["epochs"] == [(1, "legacy")] and state["revisions"] == []  # rolled back whole
+
+
+async def test_the_realm_stamp_is_the_only_content_check(db) -> None:
+    """A stamped-shadow database is prepared whatever else it holds; the stamp and the realm
+    trigger are the single authority (no scan for rows of another realm)."""
     url, engine = db
     await _restamp(engine, "shadow")
-    async with engine.begin() as conn:
-        await conn.execute(text("SET LOCAL session_replication_role = replica"))
-        await conn.execute(text(
-            "INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','real')"),
-            {"id": UUID("550e8400-e29b-41d4-a716-446655440000")})
-        await conn.execute(text(
-            "INSERT INTO capital_policy_revisions(id, exchange_account_id, deployment_environment, "
-            "symbol, revision, schema_version, policy, digest, source) VALUES "
-            "(gen_random_uuid(), '550e8400-e29b-41d4-a716-446655440000', 'prod', 'fUST', 1, 1, "
-            "'{}', 'p', '{}')"))
-    with pytest.raises(script.BootstrapRefused, match="prod_rows_present table=capital_policy_revisions"):
-        await script.run(_args(), database_url=url)
-    state = await _snapshot(engine)
-    assert state["epochs"] == [(1, "legacy")]
-    assert [a[1] for a in state["accounts"]] == ["real"]  # nothing was created beside it
+    report = await script.run(_args(), database_url=url)  # the CLI's default realm set
+    assert report["status"] == "ready" and report["realm"] == "shadow"
 
 
 async def test_it_refuses_an_account_that_holds_credentials(db) -> None:
