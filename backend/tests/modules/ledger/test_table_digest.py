@@ -59,7 +59,7 @@ GOLDEN: dict[str, str] = {
         "2c3fb0ed4c77cc77016ffe63602c91941f7bb26f58c2591f517055b481c9bd92"
     ),
     "ledger_observation": (
-        "249a14eb0e8468d003f94cde0a1266ac6355425b7e8959ea49e9cafe9f0bd16e"
+        "3bb767d9c3b25d4caaee8f014f11d714bbf940421554ed85cbe7d4e0b5268d63"
     ),
     "ledger_observation_wallet": (
         "01d913e24ea83ad2054772a6c92d4c9eb4a4af27a274f322df6ddef475163f9b"
