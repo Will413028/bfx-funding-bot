@@ -4,8 +4,6 @@ hard_guards:
   manual_kill: {enabled: true}
   auth_health: {enabled: true}
   heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
-  allocation_cap: {enabled: false}
-  buying_power: {enabled: false}
 
 # NAV-drop alerts (level 4): a Telegram alert, never a stop. Funding NAV only
 # falls through withdrawals, transfers or platform losses. null disables one.

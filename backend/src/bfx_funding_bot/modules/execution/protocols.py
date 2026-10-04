@@ -1,6 +1,6 @@
 """Protocols + dataclasses for execution pipeline.
 
-All concrete adapters (EchoPaperExecutor, BitfinexLiveExecutor 4.4,
+All concrete adapters (BitfinexLiveExecutor,
 RestPollingFillTracker, hard/calibrated guards) conform to these.
 
 AccountContext carries credentials + per-account allocation cap.  The daemon
@@ -231,7 +231,7 @@ class WriterLockHandle(Protocol):
 
 
 class ExecutorPort(Protocol):
-    """Venue executor (Echo paper / Bitfinex live).
+    """Venue executor (Bitfinex live).
 
     cid is centralized by ReservationEmittingMiddleware (A2: same cid for INTENT
     + outcome). It is threaded down through the chain; executors use it when
@@ -245,7 +245,7 @@ class ExecutorPort(Protocol):
 
 @runtime_checkable
 class CancelPort(Protocol):
-    """Venue funding-offer cancel（只有 live executor 實作；paper 無 venue offer）。
+    """Venue funding-offer cancel（只有 live executor 實作）。
 
     對應 BitfinexLiveExecutor.cancel：CancelRequested/CancelAcknowledged audit
     與 release 路徑（WS foc → ReservationReleased）都在那一側，呼叫方不碰 ledger。

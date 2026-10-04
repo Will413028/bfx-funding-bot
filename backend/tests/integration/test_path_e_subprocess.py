@@ -32,6 +32,7 @@ _HARNESS = Path(__file__).resolve().parent / "_path_e_harness.py"
 _CELLS_YAML = (
     Path(__file__).resolve().parents[2] / "configs" / "cells.yaml"
 )
+_SAFETY_YAML = Path(__file__).resolve().parents[2] / "configs" / "safety.live.yaml"
 
 
 @pytest.mark.asyncio
@@ -47,9 +48,17 @@ async def test_path_e_subprocess_exits_with_auth_failed_code(
     # the password as "***" by default; the subprocess needs the real one.
     env["DATABASE_URL"] = pg_engine.url.render_as_string(hide_password=False)
     env["BFX_CELLS_YAML"] = str(_CELLS_YAML)
-    env["BFX_PHASE"] = "paper"
+    env["BFX_PHASE"] = "live"
     env["BFX_DEPLOYMENT_ENV"] = "ci"
-    env["BFX_EXECUTION_POLICY"] = "paper"
+    env["BFX_EXECUTION_POLICY"] = "book_guarded"
+    env["BFX_BOOK_MAX_AGE_SECONDS"] = "30"
+    env["BFX_BOOK_RECONCILE_INTERVAL_SECONDS"] = "15"
+    env["BFX_BOOK_MAX_DOWN_PCT"] = "0.15"
+    env["BFX_WS_CLIENT_ENABLED"] = "true"
+    env["BFX_SAFETY_CONFIG"] = str(_SAFETY_YAML)
+    for legacy in ("BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_EXECUTOR",
+                   "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        env.pop(legacy, None)
     env["BFX_API_KEY"] = "test_key"
     env["BFX_API_SECRET"] = "test_secret"
     env["BFX_EXCHANGE_ACCOUNT_ID"] = str(TEST_EXCHANGE_ACCOUNT_ID)

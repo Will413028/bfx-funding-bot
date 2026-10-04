@@ -318,8 +318,8 @@ async def rig_factory(ledger_db):  # noqa: F811
             strategy=StrategyName.RATE_PERCENTILE, configured_symbols=frozenset({"fUST"}),
             cell=CELL, auth_gate=auth_gate, date_provider=today, clock=clock)
         gate = AccountCommandGate(
-            executor, bus=bus, persister=None, uncertainty_reader=build_uncertainty_reader(factory),
-            safety_evaluator=_Allow(), deployment_environment="ci", is_simulated=False,
+            executor, uncertainty_reader=build_uncertainty_reader(factory),
+            safety_evaluator=_Allow(), deployment_environment="ci",
             clock=clock, date_provider=today,
             boundary=CommandBoundary(
                 SCOPE, factory,

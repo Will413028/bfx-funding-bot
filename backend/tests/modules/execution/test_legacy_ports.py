@@ -137,12 +137,6 @@ async def test_basis_token_is_the_snapshot_seq_and_status_renders_it_unchanged(c
         chain=chain,
         account_ctx=ctx,  # type: ignore[arg-type]
         cells=[_cell("fUST", "a30")],
-        caps={},
-        default_cap=Decimal("0"),
-        env_fallback_cap=None,
-        buffers={},
-        default_buffer=Decimal("0"),
-        env_fallback_buffer=None,
         phase=Phase.LIVE,
         attempts=SubmitAttemptRecorder(),
         trading_state=halt,

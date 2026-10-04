@@ -1,13 +1,14 @@
 """build_daemon refuses a database whose realm stamp is missing or is another realm's (E2).
 
-The check runs in every phase, not only for live: a ``paper`` or ``shadow`` process pointed at
-the production database, and a process running under realm ``ci`` on a prod-stamped database
-(which ``apps/config.py`` alone allows), must both stop before they read anything else.
+The check runs in every phase, not only for live: a ``shadow`` process (which stops at the
+P2b refusal only after this check) pointed at the production database, and a process running
+under realm ``ci`` on a prod-stamped database (which ``apps/config.py`` alone allows), must
+both stop before they read anything else.
 
 Mutations (one at a time; revert after each):
 
 * skip ``assert_database_realm`` in ``build_daemon``: every refusal test here fails.
-* run it only when ``live_executor`` is true: the paper-phase tests fail.
+* run it only for the live phase: the shadow-phase tests fail.
 * compare against a constant instead of ``config.deployment_environment``: the mismatch tests fail.
 * treat an empty ``database_realm`` as the process realm: the unstamped tests fail.
 """
@@ -35,11 +36,9 @@ async def _database(monkeypatch, tmp_path, *, phase: str, realm: str | None, pro
     configure_account_env(monkeypatch)
     values = {"BFX_PHASE": phase, "BFX_DEPLOYMENT_ENV": process_realm, "BFX_HEALTHZ_PORT": "0",
               "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'realm.db'}"}
-    if phase == "paper":
-        values.update({"BFX_EXECUTION_POLICY": "paper", "BFX_ALLOCATION_CAP_USDT": "500"})
-    if phase == "live":
+    if phase in {"live", "shadow"}:
         values.update({
-            "BFX_EXECUTOR": "bitfinex_live", "BFX_WS_CLIENT_ENABLED": "true",
+            "BFX_WS_CLIENT_ENABLED": "true",
             "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
             "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
             "BFX_SAFETY_CONFIG": str(_SAFETY),
@@ -60,7 +59,7 @@ async def _database(monkeypatch, tmp_path, *, phase: str, realm: str | None, pro
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["live", "paper"])
+@pytest.mark.parametrize("phase", ["live", "shadow"])
 @pytest.mark.parametrize(("stamp", "match"), [
     (None, "database_realm_unstamped"),
     ("prod", "database_realm_mismatch stamp=prod process=ci"),
@@ -84,7 +83,7 @@ async def test_boot_refuses_an_unstamped_or_foreign_database(
 async def test_boot_refuses_a_database_without_the_table(monkeypatch, tmp_path) -> None:
     from bfx_funding_bot.apps.bot import build_daemon
 
-    engine = await _database(monkeypatch, tmp_path, phase="paper", realm="ci", process_realm="ci")
+    engine = await _database(monkeypatch, tmp_path, phase="live", realm="ci", process_realm="ci")
     try:
         async with engine.begin() as conn:
             await conn.execute(text("DROP TABLE database_realm"))
@@ -98,7 +97,7 @@ async def test_boot_refuses_a_database_without_the_table(monkeypatch, tmp_path) 
 async def test_a_matching_stamp_passes_the_realm_check(monkeypatch, tmp_path) -> None:
     from bfx_funding_bot.core.database_realm import assert_database_realm, read_database_realm
 
-    engine = await _database(monkeypatch, tmp_path, phase="paper", realm="ci", process_realm="ci")
+    engine = await _database(monkeypatch, tmp_path, phase="live", realm="ci", process_realm="ci")
     try:
         async with async_sessionmaker(engine, expire_on_commit=False)() as session:
             assert await read_database_realm(session) == "ci"

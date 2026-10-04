@@ -6,7 +6,6 @@ defaults), but enabled=True requires non-null threshold (validator below).
 """
 from __future__ import annotations
 
-from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
@@ -30,27 +29,11 @@ class _HeartbeatCfg(BaseModel):
     sub_task_stale_threshold_seconds: Annotated[int, Field(gt=0)]
 
 
-class _AllocationCapCfg(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    enabled: bool
-    caps: dict[str, Decimal] = {}
-    default_cap: Decimal = Decimal("0")
-
-
-class _BuyingPowerCfg(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    enabled: bool
-    buffers: dict[str, Decimal] = {}
-    default_buffer: Decimal = Decimal("0")
-
-
 class HardGuardsCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     manual_kill: _ManualKillCfg
     auth_health: _AuthHealthCfg
     heartbeat: _HeartbeatCfg
-    allocation_cap: _AllocationCapCfg
-    buying_power: _BuyingPowerCfg
 
 
 class NavAlertsCfg(BaseModel):
@@ -84,8 +67,8 @@ class SafetyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     hard_guards: HardGuardsCfg
     nav_alerts: NavAlertsCfg
-    # Optional here so paper/simulation configs stay valid; the live daemon
-    # refuses to boot without it (pre_trade.require_pre_trade_limits).
+    # Optional in the schema; the daemon refuses to boot without it
+    # (pre_trade.require_pre_trade_limits).
     pre_trade_limits: PreTradeLimitsCfg | None = None
 
 

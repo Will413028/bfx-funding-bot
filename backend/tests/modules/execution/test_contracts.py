@@ -57,7 +57,7 @@ def test_ready_to_submit_rejects_blank_decision_id() -> None:
     with pytest.raises(ValueError, match="decision_id"):
         contracts.ReadyToSubmit(
             decision=_decision(), decision_id=" ",
-            policy=contracts.ExecutionPolicy.PAPER,
+            policy=contracts.ExecutionPolicy.BOOK_GUARDED,
             market_snapshot_id="snapshot-1", model_version=None,
             evidence={}, safety=contracts.GuardResult(True, "test"),
         )
@@ -115,7 +115,6 @@ def test_protocol_annotations_are_runtime_resolvable() -> None:
 
 def test_execution_contract_enum_values_are_stable() -> None:
     assert [policy.value for policy in contracts.ExecutionPolicy] == [
-        "paper",
         "book_guarded",
         "optimizer_shadow",
         "optimizer_live",

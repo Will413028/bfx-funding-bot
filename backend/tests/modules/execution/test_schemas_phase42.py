@@ -138,7 +138,7 @@ def test_envelope_does_not_invent_an_account_realm() -> None:
     env = Envelope(
         timestamp="2026-05-21T00:00:00+00:00",
         level=Level.INFO,
-        phase=Phase.PAPER,
+        phase=Phase.SHADOW,
         strategy=StrategyName.MEAN_REVERSION,
         cell="fUSD_a30",
         event_type=EventType.SIGNAL,
@@ -157,7 +157,7 @@ def test_envelope_validates_order_submit_payload() -> None:
     with pytest.raises(ValidationError):
         Envelope(
             timestamp="2026-05-21T00:00:00+00:00",
-            level=Level.INFO, phase=Phase.PAPER,
+            level=Level.INFO, phase=Phase.SHADOW,
             strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
             event_type=EventType.ORDER_SUBMIT,
             correlation_id=uuid4(),

@@ -24,8 +24,6 @@ from bfx_funding_bot.modules.execution.command_boundary import (
 )
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate, CommandGateBlocked
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
-from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
-from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
@@ -148,10 +146,8 @@ async def _rig(stack: Stack, order: SubmittedOrder | None, *, journal=None, bus=
 
     venue = _Venue(order)
     gate = AccountCommandGate(
-        venue, bus=bus, persister=EventStorePersister(store=PostgresEventStore(deployment_environment=ENVIRONMENT),
-                                      session_factory=stack.factory),
-        uncertainty_reader=Reader(),
-        safety_evaluator=_Allow(), deployment_environment=ENVIRONMENT, is_simulated=False,
+        venue, uncertainty_reader=Reader(),
+        safety_evaluator=_Allow(), deployment_environment=ENVIRONMENT,
         clock=lambda: NOW, boundary=boundary, managed_offers=stack.offers,
     )
     ctx = AccountContext(str(ACCOUNT), Credentials("mock", "mock"), Decimal("0"))

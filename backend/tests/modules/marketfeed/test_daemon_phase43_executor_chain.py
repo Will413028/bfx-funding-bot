@@ -1,30 +1,21 @@
-"""Phase 4.3 executor-middleware integration: chain composition + end-to-end
-ledger / sad path subscriber isolation.
-"""
+"""Phase 4.3 executor-middleware integration: chain composition and the no-retry contract."""
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
-from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
 from bfx_funding_bot.core.health import HealthProbe
-from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.command_gate import SubmitOutcomeLostError
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
     ReservationRef,
 )
-from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
-from bfx_funding_bot.modules.execution.events import (
-    OrderFilled,
-    ReservationClaimed,
-    ReservationReleased,
-)
-from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
     ReservationEmittingMiddleware,
@@ -34,17 +25,33 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
+from tests.modules.execution.fake_boundary import (  # noqa: F401  (fixture)
+    Recording,
+    boundary_stubs,
+    with_capital,
+)
+
+pytestmark = pytest.mark.usefixtures("boundary_stubs")
+
+_ACCOUNT = UUID("550e8400-e29b-41d4-a716-446655440000")
 
 
-class _FailingSubscriber:
-    """Stub subscriber that always raises — used to verify bus.gather isolation."""
-
-    async def handle(self, event: Any) -> None:
-        raise RuntimeError("subscriber always fails")
+class _AllowChain:
+    async def evaluate(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:
+        return GuardResult(allowed=True, guard_name="test")
 
 
-class _PaperInner:
+class _UncertaintyNeverOpen:
+    async def has_open(self, session: object, scope: object, symbol: str) -> bool:
+        return False
+
+    async def list_open(self, session: object, scope: object, symbol: str | None = None) -> tuple[()]:
+        return ()
+
+
+class _AckInner:
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
         reservation_ref: ReservationRef | None = None,
@@ -53,10 +60,10 @@ class _PaperInner:
         assert reservation_ref is not None
         return SubmittedOrder(
             cid=cid,
-            venue_offer_id="paper_xyz",
-            status="filled",
+            venue_offer_id="venue-xyz",
+            outcome=SubmitAcknowledged("venue-xyz"),
             raw_response=None,
-            reservation_ref=reservation_ref.bind_venue_offer("paper_xyz"),
+            reservation_ref=reservation_ref.bind_venue_offer("venue-xyz"),
         )
 
 
@@ -87,54 +94,54 @@ def _decision() -> DecisionPayload:
 
 def _ctx() -> AccountContext:
     return AccountContext(
-        account_id="default",
+        account_id=str(_ACCOUNT),
         credentials=Credentials(api_key="k", api_secret="s"),
         allocation_cap_usdt=Decimal("10000"),
     )
 
 
 def _ready() -> ReadyToSubmit:
-    return ReadyToSubmit(
+    return with_capital(ReadyToSubmit(
         decision=_decision(), decision_id="d-daemon-chain",
-        policy=ExecutionPolicy.PAPER, market_snapshot_id="snapshot-daemon-chain",
+        policy=ExecutionPolicy.BOOK_GUARDED, market_snapshot_id="snapshot-daemon-chain",
         model_version=None, evidence={}, safety=GuardResult(allowed=True, guard_name="test"),
-    )
+    ))
 
 
 def _build_chain(
-    ledger: PaperPositionLedger,
-    inner: Any | None = None,
-) -> tuple[HeartbeatMiddleware, HealthProbe, DomainEventBus]:
-    """Mirror the daemon's production executor chain (daemon.build_daemon).
+    inner: object | None = None,
+) -> tuple[HeartbeatMiddleware, HealthProbe, Recording]:
+    """Mirror the daemon's production executor chain (apps/bot.build_daemon).
 
-    Keep this in lockstep with daemon.py's wrapped_executor composition.
+    Keep this in lockstep with bot.py's wrapped_executor composition.
     """
-    bus = DomainEventBus()
     probe = HealthProbe()
-    bus.subscribe(ReservationClaimed, ledger.on_reservation_claimed)
-    bus.subscribe(OrderFilled, ledger.on_order_filled)
-    bus.subscribe(ReservationReleased, ledger.on_reservation_released)
+    recording = Recording(environment="ci", account_id=_ACCOUNT)
     executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
-            inner or _PaperInner(), bus=bus,
-            persister=NoopEventPersister(),
+            inner or _AckInner(),  # type: ignore[arg-type]
+            safety_evaluator=_AllowChain(),
+            boundary=recording.boundary(),
+            uncertainty_reader=_UncertaintyNeverOpen(),  # type: ignore[arg-type]
+            managed_offers=recording.offers,
+            clock=iter(range(100, 1000)).__next__,
+            date_provider=lambda: date(2026, 9, 3),
         ),
         probe=probe,
     )
-    return executor, probe, bus
+    return executor, probe, recording
 
 
 @pytest.mark.asyncio
 async def test_wired_chain_types() -> None:
-    ledger = PaperPositionLedger(account_id="default")
-    executor, _probe, _bus = _build_chain(ledger)
+    executor, _probe, _recording = _build_chain()
     assert isinstance(executor, HeartbeatMiddleware)
     inner1 = executor._inner  # type: ignore[attr-defined]
     assert isinstance(inner1, ReservationEmittingMiddleware)
-    # No retry wrapper: ReservationEmitting wraps the executor directly (submit
-    # is a once-only financial write — see test_chain_does_not_retry_submit_on_transient).
-    inner2 = inner1._inner  # type: ignore[attr-defined]
-    assert isinstance(inner2, _PaperInner)
+    # No retry wrapper: the command gate wraps the executor directly (submit is a
+    # once-only financial write — see test_chain_does_not_retry_submit_on_transient).
+    inner2 = inner1.command_gate._inner  # type: ignore[attr-defined]
+    assert isinstance(inner2, _AckInner)
 
 
 @pytest.mark.asyncio
@@ -146,86 +153,26 @@ async def test_chain_does_not_retry_submit_on_transient() -> None:
     so any retry around submit risks a duplicate live offer. The executor chain
     must add no retry — a transient error propagates after a single attempt.
     """
-    ledger = PaperPositionLedger(account_id="default")
     inner = _TransientInner()
-    executor, _probe, _bus = _build_chain(ledger, inner=inner)
+    executor, _probe, _recording = _build_chain(inner=inner)
 
-    with pytest.raises(ExecutorTransientError):
+    # The gate turns the lost outcome into process fencing (a BaseException); the
+    # chain still attempted the submit exactly once.
+    with pytest.raises(SubmitOutcomeLostError) as raised:
         await executor.submit(_ready(), _ctx())
-
+    assert isinstance(raised.value.__cause__, ExecutorTransientError)
     assert inner.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_paper_end_to_end_ledger_heartbeat() -> None:
-    """Happy path: submit one paper order, verify ledger / heartbeat."""
-    ledger = PaperPositionLedger(account_id="default")
-    executor, probe, _bus = _build_chain(ledger)
+async def test_end_to_end_records_the_command_and_fires_the_heartbeat() -> None:
+    """Happy path: one submit is journaled intent-then-outcome and the heartbeat fires."""
+    executor, probe, recording = _build_chain()
 
     result = await executor.submit(_ready(), _ctx())
 
-    assert result.status == "filled"
-    # Ledger: paper CLAIMED + FILLED back-to-back → reserved=0, realized=100
-    assert ledger.current_exposure("fUST") == Decimal("100")
-    assert ledger.realized_exposure("fUST") == Decimal("100")
-    # Heartbeat fired
+    assert result.outcome_kind.value == "acknowledged"
+    assert [type(event).__name__ for event in recording.events] == [
+        "ReservationIntent", "ReservationClaimed",
+    ]
     assert probe.last_active_ts.get("executor") is not None
-
-
-@pytest.mark.asyncio
-async def test_fill_tracker_emits_release_via_bus_reduces_ledger() -> None:
-    """fill_tracker emit ReservationReleased → ledger reserved -=."""
-    ledger = PaperPositionLedger(account_id="default")
-    executor, _probe, bus = _build_chain(ledger)
-
-    # Submit once to create the paper sync claim+fill (reserved goes to 0, realized 100)
-    result = await executor.submit(_ready(), _ctx())
-    reference = result.reservation_ref
-    assert isinstance(reference, ReservationRef)
-    # Then simulate fill_tracker observing offer disappear → emit RELEASE
-    # Since paper FILL already 0'd reserved, RELEASE triggers floor (count++)
-    await bus.publish(
-        ReservationReleased(
-            cid=reference.cid,
-            venue_offer_id="paper_xyz",
-            size_usdt=Decimal("100"),
-            reason="missing_from_venue",
-            signal_correlation_id=reference.signal_correlation_id,
-            account_id="default",
-            is_simulated=False,
-            symbol="fUST",
-            reservation_ref=reference,
-        )
-    )
-    assert ledger.replay_floor_hit_count == 1
-
-
-@pytest.mark.asyncio
-async def test_sad_path_failing_subscriber_does_not_break_ledger() -> None:
-    """I4-EM + I6-Bus: a throwing bus subscriber does NOT break the ledger path.
-
-    bus.gather() isolates subscriber exceptions — one failing subscriber must
-    not prevent other subscribers (ledger) from running correctly.
-    """
-    ledger = PaperPositionLedger(account_id="default")
-    failing = _FailingSubscriber()
-
-    bus = DomainEventBus()
-    probe = HealthProbe()
-    bus.subscribe(ReservationClaimed, ledger.on_reservation_claimed)
-    bus.subscribe(OrderFilled, ledger.on_order_filled)
-    bus.subscribe(ReservationClaimed, failing.handle)
-    bus.subscribe(OrderFilled, failing.handle)
-
-    executor = HeartbeatMiddleware(
-        ReservationEmittingMiddleware(
-            _PaperInner(), bus=bus,
-            persister=NoopEventPersister(),
-        ),
-        probe=probe,
-    )
-
-    result = await executor.submit(_ready(), _ctx())  # 不 raise
-    assert result.status == "filled"
-    # Ledger 仍正確 (failing subscriber 不影響 — bus.gather isolates subscribers)
-    assert ledger.realized_exposure("fUST") == Decimal("100")

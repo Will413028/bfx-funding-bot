@@ -47,7 +47,7 @@ def _claim(cid, voi, state, size="100", scid=None, occurred=0, symbol="fUST"):
 def _actions(venue, local, grace_ms=120_000, now=_NOW):
     return compute_recovery_actions(
         venue_offers=venue, local_claims=local, account_id=_ACC,
-        is_simulated=False, now_ms=now, grace_ms=grace_ms,
+        now_ms=now, grace_ms=grace_ms,
         configured_symbols=frozenset({"fUSD", "fUST"}),
     )
 
@@ -126,7 +126,7 @@ def test_action_grace_skips_recent_missing_claim():
     claim = _claim(cid=1, voi="555", state=RegistryState.CLAIMED, occurred=_NOW - 50_000)
     acts = compute_recovery_actions(
         venue_offers=[], local_claims=[claim], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
+        now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
         configured_symbols=frozenset({"fUSD", "fUST"}),
     )
     assert acts == []
@@ -136,7 +136,7 @@ def test_action_grace_releases_stale_missing_claim():
     claim = _claim(cid=1, voi="555", state=RegistryState.CLAIMED, occurred=_NOW - 300_000)
     acts = compute_recovery_actions(
         venue_offers=[], local_claims=[claim], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
+        now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
         configured_symbols=frozenset({"fUSD", "fUST"}),
     )
     assert len(acts) == 1
@@ -613,7 +613,7 @@ def test_missing_claim_released_carries_own_claim_symbol() -> None:
     claim = _claim(cid=42, voi="999", state=RegistryState.CLAIMED, size="80")
     acts = compute_recovery_actions(
         venue_offers=[], local_claims=[claim], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000,
+        now_ms=_NOW, grace_ms=120_000,
         configured_symbols=frozenset({"fUST"}),
     )
     assert isinstance(acts[0], ReservationReleased) and acts[0].symbol == "fUST"
@@ -629,7 +629,7 @@ def test_compute_recovery_actions_requires_symbol() -> None:
     with pytest.raises(TypeError):
         compute_recovery_actions(
             venue_offers=[offer], local_claims=[], account_id=_ACC,
-            is_simulated=False, now_ms=_NOW, grace_ms=120_000,  # no symbols → TypeError
+            now_ms=_NOW, grace_ms=120_000,  # no symbols → TypeError
         )
 
 
@@ -641,7 +641,7 @@ def test_missing_release_uses_per_claim_symbol_not_primary():
                    scid=scid, symbol="fUST")
     acts = compute_recovery_actions(
         venue_offers=[], local_claims=[claim],
-        account_id="acct", is_simulated=False, now_ms=1_000,
+        account_id="acct", now_ms=1_000,
         grace_ms=0, action_grace_ms=0,
         configured_symbols=frozenset({"fUSD", "fUST"}))
     assert len(acts) == 1
@@ -656,7 +656,7 @@ def test_recovery_fails_loud_on_unconfigured_symbol():
     with pytest.raises(ValueError):
         compute_recovery_actions(
             venue_offers=[], local_claims=[claim],
-            account_id="acct", is_simulated=False, now_ms=1_000,
+            account_id="acct", now_ms=1_000,
             grace_ms=0, action_grace_ms=0,
             configured_symbols=frozenset({"fUSD", "fUST"}))
 

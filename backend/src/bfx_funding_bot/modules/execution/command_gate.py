@@ -11,7 +11,7 @@ import contextlib
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -29,16 +29,12 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
 )
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
-from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary, CommandFacts
 from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
     ReadyToSubmit,
     ReservationRef,
 )
-from bfx_funding_bot.modules.execution.event_store.persister import EventPersister
-from bfx_funding_bot.modules.execution.events import ReservationIntent, ReservationUnknown
-from bfx_funding_bot.modules.execution.legacy_command_effects import persist_simulated_outcome
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     CancelPort,
@@ -109,36 +105,22 @@ class AccountCommandGate:
         self,
         inner: ExecutorPort,
         *,
-        bus: DomainEventBus,
-        persister: EventPersister | None = None,
         uncertainty_reader: UncertaintyReader,
         safety_evaluator: AuthoritativeSafetyEvaluator,
         deployment_environment: str,
-        is_simulated: bool = True,
+        boundary: CommandBoundary,
+        managed_offers: ManagedOfferReader,
         clock: Callable[[], int] | None = None,
         date_provider: Callable[[], date] | None = None,
-        uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
-        boundary: CommandBoundary | None = None,
-        managed_offers: ManagedOfferReader | None = None,
     ) -> None:
         if not deployment_environment.strip():
             raise ValueError("deployment_environment must be non-empty")
         self._inner = inner
-        self._bus = bus
-        self._persister = persister
         self._uncertainty_reader = uncertainty_reader
         self._safety_evaluator = safety_evaluator
         self._deployment_environment = deployment_environment
-        self._is_simulated = is_simulated
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._date_provider = date_provider or (lambda: datetime.now(UTC).date())
-        self._uncertainty_handler = uncertainty_handler
-        if not is_simulated and boundary is None:
-            raise ValueError("live command gate requires a command boundary")
-        if boundary is None and persister is None:
-            raise ValueError("simulated command gate requires a persister")
-        if boundary is not None and managed_offers is None:
-            raise ValueError("live command gate requires managed offer reads")
         self._boundary = boundary
         self._offers = managed_offers
         # Automatic protections. ``trip`` only records and queues, so it is safe
@@ -204,9 +186,6 @@ class AccountCommandGate:
         lock = self._account_locks.setdefault(lock_key, asyncio.Lock())
         async with lock:
             self._admit("submit")
-            if self._boundary is None:
-                await self.check(ready, context)
-                await self._guard(ready.decision, context)
             return await self._submit_locked(
                 ready,
                 context,
@@ -222,7 +201,6 @@ class AccountCommandGate:
     ) -> SubmittedOrder:
         decision = ready.decision
         account_id = _canonical_account_id(context.account_id)
-        canonical_account = str(account_id)
         command_date = self._date_provider()
         cid = generate_cid(decision.signal_correlation_id, command_date)
         reference = reservation_ref or ReservationRef(
@@ -247,80 +225,64 @@ class AccountCommandGate:
 
         # Durable boundary 1. The call must finish before the venue sees data.
         boundary = self._boundary
-        if boundary is None:
-            assert self._persister is not None  # required without a boundary
-            await self._persister.persist(ReservationIntent(
-                cid=cid,
-                size_usdt=size,
-                signal_correlation_id=decision.signal_correlation_id,
-                account_id=canonical_account,
-                is_simulated=self._is_simulated,
-                occurred_at_ms=intent_ms,
-                symbol=decision.symbol,
-                execution_decision_id=ready.decision_id,
-                reservation_ref=reference,
-                submission_attempt=attempt,
-            ))
-        else:
-            view = ready.capital_view
-            if view is None:
-                raise CommandGateBlocked("capital_authority_missing")
-            if boundary.scope != Scope(account_id, self._deployment_environment):
-                raise CommandGateBlocked("capital_scope_conflict")
-            async with boundary.session_factory.begin() as session:
-                row = await session.get(ExecutionDecisionRow, ready.decision_id)
-                if row is None or row.outcome != "ready" or (
-                    row.applied_rate != decision.offer_rate
-                    or row.duration_days != decision.offer_duration_days
+        view = ready.capital_view
+        if view is None:
+            raise CommandGateBlocked("capital_authority_missing")
+        if boundary.scope != Scope(account_id, self._deployment_environment):
+            raise CommandGateBlocked("capital_scope_conflict")
+        async with boundary.session_factory.begin() as session:
+            row = await session.get(ExecutionDecisionRow, ready.decision_id)
+            if row is None or row.outcome != "ready" or (
+                row.applied_rate != decision.offer_rate
+                or row.duration_days != decision.offer_duration_days
+            ):
+                raise CommandGateBlocked("execution_audit_conflict")
+
+            async def locked_guard(locked: AsyncSession) -> None:
+                # D3a: the fingerprint is this submit's only identity at
+                # the venue. Checked under the account lock, in the
+                # transaction that writes the intent, so no two
+                # unresolved submits of a symbol can ever share one.
+                fingerprint = fingerprint_of(size)
+                if not fingerprint:
+                    raise CommandGateBlocked("amount_fingerprint_missing")
+                assert self._offers is not None  # required with a boundary
+                if fingerprint in await self._offers.fingerprints_in_use(
+                    locked, Scope(account_id, self._deployment_environment),
+                    decision.symbol,
                 ):
-                    raise CommandGateBlocked("execution_audit_conflict")
+                    raise CommandGateBlocked("amount_fingerprint_collision")
+                await self._guard(decision, replace(
+                    context, command_session=locked, capital_cell_id=row.cell_id,
+                ))
 
-                async def locked_guard(locked: AsyncSession) -> None:
-                    # D3a: the fingerprint is this submit's only identity at
-                    # the venue. Checked under the account lock, in the
-                    # transaction that writes the intent, so no two
-                    # unresolved submits of a symbol can ever share one.
-                    fingerprint = fingerprint_of(size)
-                    if not fingerprint:
-                        raise CommandGateBlocked("amount_fingerprint_missing")
-                    assert self._offers is not None  # required with a boundary
-                    if fingerprint in await self._offers.fingerprints_in_use(
-                        locked, Scope(account_id, self._deployment_environment),
-                        decision.symbol,
-                    ):
-                        raise CommandGateBlocked("amount_fingerprint_collision")
-                    await self._guard(decision, replace(
-                        context, command_session=locked, capital_cell_id=row.cell_id,
-                    ))
-
-                admission = await boundary.journal.authorize(
-                    session, boundary.scope,
-                    CommandAttempt(
-                        attempt.attempt_id, ready.decision_id, decision.symbol,
-                        dict(attempt.normalized_payload), size, intent_ms, view.applied.revision,
-                        view.applied.digest, view.applied.revision_id,
-                        command_date=command_date,
-                        event_id=boundary.effects.new_event_id(),
-                        cell_id=row.cell_id,
-                    ), view.basis_token, now_ms=self._clock(), locked_guard=locked_guard,
-                )
-                if isinstance(admission, CommandRefused):
-                    reason = {"revision_changed": "capital_policy_revision_changed",
-                              "snapshot_changed": "capital_snapshot_changed"}.get(
-                                  admission.reason, admission.reason)
-                    raise CommandGateBlocked(reason)
+            admission = await boundary.journal.authorize(
+                session, boundary.scope,
+                CommandAttempt(
+                    attempt.attempt_id, ready.decision_id, decision.symbol,
+                    dict(attempt.normalized_payload), size, intent_ms, view.applied.revision,
+                    view.applied.digest, view.applied.revision_id,
+                    command_date=command_date,
+                    event_id=boundary.effects.new_event_id(),
+                    cell_id=row.cell_id,
+                ), view.basis_token, now_ms=self._clock(), locked_guard=locked_guard,
+            )
+            if isinstance(admission, CommandRefused):
+                reason = {"revision_changed": "capital_policy_revision_changed",
+                          "snapshot_changed": "capital_snapshot_changed"}.get(
+                              admission.reason, admission.reason)
+                raise CommandGateBlocked(reason)
         try:
             # Recheck ownership/halt after commit; never charge the reserved amount twice.
             try:
-                if boundary is not None:
-                    await self._guard(decision, context, transport=True)
-                    if not ready.book_valid_at(self._clock()):
-                        raise CommandGateBlocked("decision_book_invalid_or_expired")
-                    try:
-                        validate_amount(size, ready.funding_amount_evidence,
-                                        symbol=decision.symbol, now_ms=self._clock())
-                    except (ValueError, ArithmeticError) as exc:
-                        raise CommandGateBlocked(str(exc)) from exc
+                await self._guard(decision, context, transport=True)
+                if not ready.book_valid_at(self._clock()):
+                    raise CommandGateBlocked("decision_book_invalid_or_expired")
+                try:
+                    validate_amount(size, ready.funding_amount_evidence,
+                                    symbol=decision.symbol, now_ms=self._clock())
+                except (ValueError, ArithmeticError) as exc:
+                    raise CommandGateBlocked(str(exc)) from exc
             except CommandGateBlocked as exc:
                 result = SubmittedOrder(cid=cid, venue_offer_id=None,
                     outcome=SubmitNotSent(reason=str(exc)), reservation_ref=reference)
@@ -328,7 +290,7 @@ class AccountCommandGate:
                 result = await self._inner.submit(
                     ready, replace(context, before_submit_transport=(
                         lambda: ready.book_valid_at(self._clock())
-                    )) if boundary is not None else context,
+                    )),
                     cid=cid, reservation_ref=reference,
                 )
         except SubmitCancelledNotSent as cancelled:
@@ -384,20 +346,19 @@ class AccountCommandGate:
 
     async def _guard(self, decision: DecisionPayload, context: AccountContext,
                      *, transport: bool = False, cancel: bool = False) -> None:
-        if self._boundary is not None:
-            boundary = self._boundary
+        boundary = self._boundary
 
-            async def active(session: AsyncSession) -> bool:
-                return await session.scalar(select(ExchangeAccount.lifecycle_status).where(
-                    ExchangeAccount.id == boundary.scope.exchange_account_id,
-                )) == "active"
-            if context.command_session is not None:
-                account_active = await active(context.command_session)
-            else:
-                async with boundary.session_factory() as session:
-                    account_active = await active(session)
-            if not account_active:
-                raise CommandGateBlocked("account_inactive")
+        async def active(session: AsyncSession) -> bool:
+            return await session.scalar(select(ExchangeAccount.lifecycle_status).where(
+                ExchangeAccount.id == boundary.scope.exchange_account_id,
+            )) == "active"
+        if context.command_session is not None:
+            account_active = await active(context.command_session)
+        else:
+            async with boundary.session_factory() as session:
+                account_active = await active(session)
+        if not account_active:
+            raise CommandGateBlocked("account_inactive")
         evaluate = self._safety_evaluator.evaluate
         if cancel:
             # Only an evaluator that knows which guards a cancel is exempt from
@@ -423,7 +384,7 @@ class AccountCommandGate:
         admission and again before every transport attempt.
         """
         boundary = self._boundary
-        if boundary is None or not isinstance(self._inner, CancelPort):
+        if not isinstance(self._inner, CancelPort):
             raise CommandGateBlocked("durable_cancel_unavailable")
         if boundary.scope.deployment_environment != self._deployment_environment:
             raise CommandGateBlocked("cancel_environment_conflict")
@@ -480,7 +441,7 @@ class AccountCommandGate:
         secrets = (context.credentials.api_key, context.credentials.api_secret)
         kind = result.outcome_kind
         boundary = self._boundary
-        event_id = boundary.effects.new_event_id() if boundary is not None else None
+        event_id = boundary.effects.new_event_id()
         if kind is SubmitOutcomeKind.UNKNOWN:
             outcome = CommandOutcome(
                 "unknown", None, _bounded_reason(result.outcome, "submit_outcome_unknown",
@@ -500,15 +461,9 @@ class AccountCommandGate:
         facts = CommandFacts(
             scope=scope, attempt_id=attempt_id, symbol=decision.symbol, amount=size,
             signal_correlation_id=decision.signal_correlation_id, reference=reference,
-            offer_rate=decision.offer_rate, is_simulated=self._is_simulated,
+            offer_rate=decision.offer_rate, is_simulated=False,
             filled=kind is SubmitOutcomeKind.ACKNOWLEDGED and result.status == "filled",
         )
-        if boundary is None:
-            assert self._persister is not None  # required without a boundary
-            await persist_simulated_outcome(
-                self._persister, self._bus, self._uncertainty_handler, facts, outcome,
-            )
-            return
         await boundary.journal.record_outcome(scope, attempt_id, outcome)
         await boundary.effects.outcome_recorded(facts, outcome)
 

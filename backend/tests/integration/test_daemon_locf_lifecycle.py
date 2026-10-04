@@ -135,7 +135,7 @@ async def _make_tick_fn(
                 )
 
     engine = SignalEngine(
-        phase=Phase.PAPER, event_sink=event_sink, diagnostics=NoopDiagnosticsSink(),
+        phase=Phase.SHADOW, event_sink=event_sink, diagnostics=NoopDiagnosticsSink(),
         candles_repo=_RepoBridge(),
         reporter=DivergenceReporter(build_strategy_at_boundary),
     )
@@ -175,7 +175,7 @@ async def _make_tick_fn(
                 await event_sink.emit({
                     "timestamp": datetime.now(UTC).isoformat(),
                     "level": Level.WARN.value,
-                    "phase": Phase.PAPER.value,
+                    "phase": Phase.SHADOW.value,
                     "strategy": None,
                     "cell": cell.cell_id,
                     "event_type": EventType.HEALTH_CHECK.value,
@@ -200,7 +200,7 @@ async def _make_tick_fn(
                 await event_sink.emit({
                     "timestamp": datetime.now(UTC).isoformat(),
                     "level": Level.WARN.value,
-                    "phase": Phase.PAPER.value,
+                    "phase": Phase.SHADOW.value,
                     "strategy": None,
                     "cell": cell.cell_id,
                     "event_type": EventType.HEALTH_CHECK.value,
@@ -221,7 +221,7 @@ async def _make_tick_fn(
             await event_sink.emit({
                 "timestamp": datetime.now(UTC).isoformat(),
                 "level": Level.INFO.value,
-                "phase": Phase.PAPER.value,
+                "phase": Phase.SHADOW.value,
                 "strategy": None,
                 "cell": cell.cell_id,
                 "event_type": EventType.HEALTH_CHECK.value,

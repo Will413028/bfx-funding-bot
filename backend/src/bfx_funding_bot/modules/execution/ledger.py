@@ -4,8 +4,8 @@ PostgreSQL event_log is SoT. On daemon startup, from_snapshot reads
 position_state (reserved / realized) to rebuild in-memory per-symbol
 dicts. Subscribe to DomainEventBus for live updates.
 
-reserved: open reservations (offer placed, no match yet). AllocationCap
-uses reserved+realized+uncertain for pre-trade reservation check. An uncertain
+reserved: open reservations (offer placed, no match yet). The legacy
+projection reports reserved+realized+uncertain as current exposure. An uncertain
 symbol is additionally command-gated until explicit resolution.
 realized: matched credits (actual exposure earning APR). L2 guards
 (DrawdownGuard / DivergenceRateGuard, Phase 4.4) use realized only.
@@ -204,7 +204,7 @@ class PaperPositionLedger:
     # ---------- public getters ----------
 
     def current_exposure(self, symbol: str) -> Decimal:
-        """For AllocationCapGuard: reserved + realized + uncertain for THIS
+        """Reserved + realized + uncertain for THIS
         symbol (native units; never cross-symbol).
 
         ``uncertain`` is pessimistic capital: the request may already exist at
@@ -265,7 +265,7 @@ class PaperPositionLedger:
         """Funding-wallet available balance from the last reconcile (in-memory;
         not persisted). 0 until the first reconcile populates it — fail-closed
         (the reconciler deploys nothing on unknown funds). Read by the
-        DeploymentReconciler balance clamp and BuyingPowerGuard.
+        DeploymentReconciler balance clamp.
 
         `symbol` is required — never sum across currencies implicitly.
         """

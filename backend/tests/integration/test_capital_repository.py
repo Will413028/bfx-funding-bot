@@ -582,7 +582,7 @@ async def test_boot_recovery_stable_capital_ingestion(capital_db, unstable):
     recovery = BootRecovery(store=PostgresEventStore(deployment_environment="ci"),
         session_factory=factory, auth_rest=Venue(), account_ctx=AccountContext(
             str(account), Credentials("fixture", "fixture"), Decimal("0")),
-        deployment_environment="ci", bus=Bus(), symbols=["fUST"], is_simulated=True,
+        deployment_environment="ci", bus=Bus(), symbols=["fUST"],
         clock=lambda: 1100, capital_repository=repo)
     if unstable:
         with pytest.raises(CapitalBlockedError, match="snapshot_unstable"):
@@ -1505,7 +1505,7 @@ async def test_an_offer_that_fills_between_snapshots_is_accounted_for(capital_db
     recovery = BootRecovery(store=PostgresEventStore(deployment_environment="ci"),
         session_factory=factory, auth_rest=Venue(), account_ctx=AccountContext(
             str(account), Credentials("fixture", "fixture"), Decimal("0")),
-        deployment_environment="ci", bus=Bus(), symbols=["fUST"], is_simulated=True,
+        deployment_environment="ci", bus=Bus(), symbols=["fUST"],
         clock=lambda: 1200, capital_repository=repo)
     await recovery.run()
 

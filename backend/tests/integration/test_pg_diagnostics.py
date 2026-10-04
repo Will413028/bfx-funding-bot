@@ -21,7 +21,7 @@ async def test_emit_decision_round_trip(pg_session_factory) -> None:
     scid = str(uuid4())
     await sink.emit({
         "timestamp": datetime.now(UTC).isoformat(),
-        "level": "info", "phase": "paper", "strategy": "rate_percentile",
+        "level": "info", "phase": "shadow", "strategy": "rate_percentile",
         "cell": "bfx_USDT", "event_type": "decision",
         "correlation_id": scid, "account_id": acct,
         "payload": {"decision_outcome": "post", "signal_correlation_id": scid,

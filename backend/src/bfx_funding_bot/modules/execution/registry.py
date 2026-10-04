@@ -1,17 +1,15 @@
 """build_executor factory + env-driven invariant validation.
 
 Env vars:
-  BFX_EXECUTOR=paper (4.2 default) | bitfinex_live (4.4+)
-  BFX_FILL_TRACKER_ENABLED=false (default) | true (bitfinex_live only)
-  BFX_WS_CLIENT_ENABLED=false (default) | true (required for bitfinex_live)
+  BFX_FILL_TRACKER_ENABLED=false (default) | true
+  BFX_WS_CLIENT_ENABLED=false (default) | true (required)
 
-CC4 invariants:
-  - paper + fill_tracker_enabled=true is invalid (paper offers don't exist at
-    venue → fill_tracker would emit false cancelled events).
-  - paper + ws_client_enabled=true is invalid (WS expects live venue offers;
-    paper offers never reach venue).
-  - bitfinex_live without BFX_WS_CLIENT_ENABLED=true is invalid (REST submit
-    returns "submitted" but never fills → stale exposure).
+The executor is always the Bitfinex live executor; there is no other venue adapter
+here. A ``BFX_EXECUTOR`` env value is not read.
+
+CC4 invariant:
+  - Without BFX_WS_CLIENT_ENABLED=true the executor is invalid (REST submit returns
+    "submitted" but never fills -> stale exposure).
 """
 from __future__ import annotations
 
@@ -22,8 +20,8 @@ from typing import Any, Protocol
 import httpx
 
 from bfx_funding_bot.core.telemetry import Phase
+from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
-from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
 from bfx_funding_bot.modules.execution.protocols import ExecutorPort
 from bfx_funding_bot.modules.strategy import StrategyName
 
@@ -41,7 +39,6 @@ class ExecutorSpec:
     executor: ExecutorPort
     fill_tracker_enabled: bool
     ws_client_enabled: bool
-    is_simulated: bool  # paper -> True; bitfinex_live -> False (drives A2 event payload)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -62,58 +59,25 @@ def build_executor(
     bus: Any | None = None,  # DomainEventBus typed via Any to avoid circular ref
     auth_gate: AuthRequestGate | None = None,
 ) -> ExecutorSpec:
-    executor_raw = os.environ.get("BFX_EXECUTOR", "paper")
-    executor_kind = executor_raw.lower()
     fill_tracker_enabled = _env_bool("BFX_FILL_TRACKER_ENABLED", False)
     ws_client_enabled = _env_bool("BFX_WS_CLIENT_ENABLED", False)
 
-    # Paper invariants
-    if executor_kind == "paper":
-        if fill_tracker_enabled:
-            raise ExecutorConfigError(
-                "BFX_EXECUTOR=paper with BFX_FILL_TRACKER_ENABLED=true is invalid "
-                "(CC4: paper offer_ids never appear at venue → would emit false "
-                "cancelled events). Set both to defaults (paper / false) or wire "
-                "BFX_EXECUTOR=bitfinex_live (4.4)."
-            )
-        if ws_client_enabled:
-            raise ExecutorConfigError(
-                "BFX_EXECUTOR=paper with BFX_WS_CLIENT_ENABLED=true is invalid "
-                "(WS expects live venue offers; paper offers never reach venue)."
-            )
-        return ExecutorSpec(
-            executor=EchoPaperExecutor(
-                event_sink=event_sink, phase=phase, strategy=strategy, cell=cell,
-            ),
-            fill_tracker_enabled=False,
-            ws_client_enabled=False,
-            is_simulated=True,
+    if not ws_client_enabled:
+        raise ExecutorConfigError(
+            "the Bitfinex executor without BFX_WS_CLIENT_ENABLED=true "
+            "= stale exposure (REST submit returns 'submitted'; WS foc EXECUTED fills). "
+            "Set BFX_WS_CLIENT_ENABLED=true."
         )
-
-    # Live invariants
-    if executor_kind == "bitfinex_live":
-        if not ws_client_enabled:
-            raise ExecutorConfigError(
-                "BFX_EXECUTOR=bitfinex_live without BFX_WS_CLIENT_ENABLED=true "
-                "= stale exposure (REST submit returns 'submitted'; WS foc EXECUTED fills). "
-                "Set BFX_WS_CLIENT_ENABLED=true."
-            )
-        if http is None or bus is None:
-            raise ExecutorConfigError(
-                "bitfinex_live requires http + bus deps to build_executor()"
-            )
-        from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
-        return ExecutorSpec(
-            executor=BitfinexLiveExecutor(
-                http=http, event_sink=event_sink, bus=bus,
-                phase=phase, strategy=strategy,
-                configured_symbols=configured_symbols or frozenset(),
-                cell=cell,
-                auth_gate=auth_gate,
-            ),
-            fill_tracker_enabled=fill_tracker_enabled,
-            ws_client_enabled=ws_client_enabled,
-            is_simulated=False,
-        )
-
-    raise ExecutorConfigError(f"unknown BFX_EXECUTOR={executor_raw!r}")
+    if http is None or bus is None:
+        raise ExecutorConfigError("build_executor() requires http + bus deps")
+    return ExecutorSpec(
+        executor=BitfinexLiveExecutor(
+            http=http, event_sink=event_sink, bus=bus,
+            phase=phase, strategy=strategy,
+            configured_symbols=configured_symbols or frozenset(),
+            cell=cell,
+            auth_gate=auth_gate,
+        ),
+        fill_tracker_enabled=fill_tracker_enabled,
+        ws_client_enabled=ws_client_enabled,
+    )

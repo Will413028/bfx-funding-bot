@@ -10,7 +10,6 @@ from __future__ import annotations
 from decimal import Decimal
 
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
-    resolve_for_symbol,
     resolve_for_symbol_with_source,
 )
 
@@ -49,20 +48,3 @@ def test_zero_env_fallback_is_still_a_binding_fallback_not_treated_as_unset() ->
     )
     assert r.value == Decimal("0")
     assert r.source == "env_fallback"
-
-
-def test_legacy_resolve_delegates_to_the_sourced_one() -> None:
-    """The scalar helper the guards and the reconciler call must be the SAME
-    resolution, or the status report describes a tier that never bound."""
-    cases = [
-        ({"fUST": Decimal("10000")}, "fUST", Decimal("0"), Decimal("5")),
-        ({"fUST": Decimal("10000")}, "fUSD", Decimal("400"), Decimal("5")),
-        ({}, "fUSD", None, Decimal("5")),
-        ({}, "fUSD", Decimal("0"), Decimal("5")),
-    ]
-    for mapping, symbol, env_fallback, default in cases:
-        assert resolve_for_symbol(mapping, symbol, env_fallback, default) == (
-            resolve_for_symbol_with_source(
-                mapping, symbol, env_fallback=env_fallback, default=default,
-            ).value
-        )

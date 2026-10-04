@@ -80,7 +80,7 @@ _KNOWN_SUBMIT_STATUSES = frozenset({"submitted", "filled", "failed", "unknown", 
 _KNOWN_EXECUTION_OUTCOMES = frozenset({"ready", "blocked", "no_recommendation"})
 _KNOWN_EXECUTION_REASONS = frozenset({"none", *(reason.value for reason in BlockReason)})
 _KNOWN_EXECUTION_POLICIES = frozenset({
-    "paper", "book_guarded", "optimizer_shadow", "optimizer_live",
+    "book_guarded", "optimizer_shadow", "optimizer_live",
 })
 _KNOWN_BOOK_SNAPSHOT_RESULTS = frozenset({"valid", "invalid", "unavailable", "error"})
 

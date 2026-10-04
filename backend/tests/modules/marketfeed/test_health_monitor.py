@@ -16,7 +16,7 @@ from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
 async def test_state_change_emits_immediately():
     event_sink = AsyncMock()
     probe = HealthProbe()
-    monitor = HealthMonitor(phase=Phase.PAPER, event_sink=event_sink, probe=probe,
+    monitor = HealthMonitor(phase=Phase.SHADOW, event_sink=event_sink, probe=probe,
                             heartbeat_interval_s=10.0)
     await monitor.start()
     probe.update(HealthTarget.BITFINEX_WS, HealthStatus.HEALTHY,
@@ -41,7 +41,7 @@ async def test_heartbeat_emits_periodically():
     probe = HealthProbe()
     probe.update(HealthTarget.BITFINEX_WS, HealthStatus.HEALTHY,
                  last_msg_age_ms=100, reconnect_count_last_hour=0)
-    monitor = HealthMonitor(phase=Phase.PAPER, event_sink=event_sink, probe=probe,
+    monitor = HealthMonitor(phase=Phase.SHADOW, event_sink=event_sink, probe=probe,
                             heartbeat_interval_s=0.1)
     await monitor.start()
     await asyncio.sleep(0.35)

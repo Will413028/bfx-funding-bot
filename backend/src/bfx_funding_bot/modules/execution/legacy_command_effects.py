@@ -3,8 +3,6 @@
 The legacy journal already wrote the terminal Reservation* row. What remains is
 what the gate used to do inline, in the same order: persist ``OrderFilled``,
 publish the claim and the fill, and open the symbol's uncertainty for UNKNOWN.
-``persist_simulated_outcome`` is the same sequence for the paper path, where the
-persister (not a journal) writes the terminal row.
 """
 from __future__ import annotations
 
@@ -56,7 +54,7 @@ def _filled_event(facts: CommandFacts, outcome: CommandOutcome) -> OrderFilled:
     return OrderFilled(
         **_fields(facts, outcome),  # type: ignore[arg-type]
         venue_offer_id=outcome.venue_offer_id or "", credit_id=None,
-        fill_rate=float(facts.offer_rate or 0),  # paper fill event field
+        fill_rate=float(facts.offer_rate or 0),  # legacy fill event field
     )
 
 
@@ -88,28 +86,3 @@ class LegacyCommandEffects:
         await publish_best_effort(self._bus, event)
         if filled is not None:
             await publish_best_effort(self._bus, filled)
-
-
-async def persist_simulated_outcome(
-    persister: EventPersister, bus: DomainEventBus,
-    uncertainty_handler: UncertaintyHandler | None,
-    facts: CommandFacts, outcome: CommandOutcome,
-) -> None:
-    """The paper path: the persister writes the terminal row (and the fill with a claim)."""
-    event = terminal_event(facts, outcome)
-    if isinstance(event, ReservationUnknown):
-        await persister.persist(event)
-        if uncertainty_handler is not None:
-            await uncertainty_handler(event)
-        return
-    if not isinstance(event, ReservationClaimed):
-        await persister.persist(event)
-        return
-    filled = _filled_event(facts, outcome) if facts.filled else None
-    if filled is None:
-        await persister.persist(event)
-    else:
-        await persister.persist(event, filled)
-    await publish_best_effort(bus, event)
-    if filled is not None:
-        await publish_best_effort(bus, filled)

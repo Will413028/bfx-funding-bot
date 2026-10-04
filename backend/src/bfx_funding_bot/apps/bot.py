@@ -58,7 +58,6 @@ from bfx_funding_bot.modules.execution.audit import ExecutionDecisionRecorder
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_boundary import CommandOutcomeNotice
-from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
 from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPricer
@@ -82,7 +81,6 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.fill_tracker import (
     RestPollingFillTracker,
 )
-from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
@@ -103,7 +101,6 @@ from bfx_funding_bot.modules.execution.safety.config import (
     load_safety_config,
 )
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
-    AllocationCapGuard,
     AuthHealthGuard,
     CapitalPolicyGuard,
     HeartbeatGuard,
@@ -154,7 +151,6 @@ from bfx_funding_bot.modules.marketfeed.daemon import (
     _DaemonAuditContextFactory,
     _emit_locf_degraded,
     _refuse_live_boot,
-    assert_caps_invariant,
     assert_live_guard_invariant,
     load_account_bootstrap,
     log,
@@ -204,18 +200,6 @@ async def build_daemon(
     config = load_config(cells_yaml_path=cells_yaml_path)
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
-    live_executor = os.environ.get("BFX_EXECUTOR", "paper").strip().lower() == "bitfinex_live"
-    if config.phase is Phase.LIVE and not live_executor:
-        raise ConfigurationError("normal live requires bitfinex_live executor")
-    try:
-        allocation_cap = Decimal(
-            "0" if config.phase is Phase.LIVE else os.environ.get("BFX_ALLOCATION_CAP_USDT", "500").strip()
-        )
-    except Exception as exc:
-        raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be a decimal") from exc
-    if not allocation_cap.is_finite() or allocation_cap < 0:
-        raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be finite and >= 0")
-    authority: Authority = "legacy"
     # Every phase, before the credential vault or anything else is read: a live
     # database at another schema means this is the wrong build for it (for instance
     # a rollback onto a newer schema), and the capital authority is read once, right
@@ -224,21 +208,25 @@ async def build_daemon(
     # database, or one stamped for another realm, refuses to boot.
     try:
         async with session_factory() as boot_session:
-            if live_executor:
-                await assert_schema_head(boot_session)
+            await assert_schema_head(boot_session)
             await assert_database_realm(boot_session, config.deployment_environment.value)
-            if live_executor:
-                authority = await read_authority(boot_session)
+            if config.phase is Phase.SHADOW:
+                # Shadow runs on the simulated venue, and nothing composes one yet: after
+                # the realm check (every phase), a shadow process stops here.
+                raise ConfigurationError(
+                    "BFX_PHASE=shadow runs on the simulated venue, which is composed in P2b; "
+                    "this build composes only the Bitfinex venue"
+                )
+            authority: Authority = await read_authority(boot_session)
     except Exception as exc:
-        if live_executor:
-            await _refuse_live_boot(exc, config=config, session_factory=session_factory)
+        await _refuse_live_boot(exc, config=config, session_factory=session_factory)
         await db_engine.dispose()
         raise
     async with session_factory() as bootstrap_session:
         account_bootstrap = await load_account_bootstrap(
             bootstrap_session,
             deployment_environment=config.deployment_environment.value,
-            allocation_cap_usdt=allocation_cap,
+            allocation_cap_usdt=Decimal("0"),
             phase=config.phase,
         )
     # Capital ports: the authority the database booted under picks every adapter a
@@ -250,25 +238,23 @@ async def build_daemon(
     resync = ResyncChannel()
     ports = await select_bot_ports(
         authority, session_factory=session_factory, scope=capital_scope, account_id=account_id,
-        bus=bus, resync=resync, live=live_executor, clock=now_ms_utc,
+        bus=bus, resync=resync, clock=now_ms_utc,
         max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS,
     )
     capital = ports.capital
     uncertainty_reader = ports.uncertainty_reader
     managed_offers = ports.managed_offers
     legacy = ports.legacy
-    paper_ledger = legacy.paper_ledger if legacy is not None else None
-    if capital is not None:
-        try:
-            # Before anything can trade: every configured currency has an
-            # applied capital policy.
-            async with session_factory.begin() as policy_session:
-                for symbol in configured_symbols(config.cells):
-                    await capital.policy_store.read_applied(policy_session, symbol=symbol)
-        except Exception as exc:
-            await _refuse_live_boot(exc, config=config, session_factory=session_factory)
-            await db_engine.dispose()
-            raise
+    try:
+        # Before anything can trade: every configured currency has an
+        # applied capital policy.
+        async with session_factory.begin() as policy_session:
+            for symbol in configured_symbols(config.cells):
+                await capital.policy_store.read_applied(policy_session, symbol=symbol)
+    except Exception as exc:
+        await _refuse_live_boot(exc, config=config, session_factory=session_factory)
+        await db_engine.dispose()
+        raise
 
     probe = HealthProbe()
     # ── Four Golden Signals metrics (observe-only; /metrics on healthz srv) ──
@@ -304,23 +290,21 @@ async def build_daemon(
         base_url=_BITFINEX_REST_BASE_URL,
         limiter=FundingRateLimiter(),
     )
-    funding_book_service: FundingBookService | None = None
-    if config.execution_policy is not ExecutionPolicy.PAPER:
-        if (
-            config.book_max_age_seconds is None
-            or config.book_reconcile_interval_seconds is None
-            or config.book_max_down_pct is None
-        ):
-            raise ValueError(
-                "book-capable execution policy requires FundingBookService configuration",
-            )
-        funding_book_service = FundingBookService(
-            store=FundingBookStore(max_age_seconds=config.book_max_age_seconds),
-            rest=bitfinex,
-            ws=FundingBookWSClient(symbols=sorted(configured_symbols(config.cells))),
-            symbols=sorted(configured_symbols(config.cells)),
-            reconcile_interval_seconds=config.book_reconcile_interval_seconds,
+    if (
+        config.book_max_age_seconds is None
+        or config.book_reconcile_interval_seconds is None
+        or config.book_max_down_pct is None
+    ):
+        raise ValueError(
+            "the execution policy requires FundingBookService configuration",
         )
+    funding_book_service = FundingBookService(
+        store=FundingBookStore(max_age_seconds=config.book_max_age_seconds),
+        rest=bitfinex,
+        ws=FundingBookWSClient(symbols=sorted(configured_symbols(config.cells))),
+        symbols=sorted(configured_symbols(config.cells)),
+        reconcile_interval_seconds=config.book_reconcile_interval_seconds,
+    )
     registry = StrategyRegistry(build_strategy)
     monitor = HealthMonitor(phase=config.phase, event_sink=stdout_sink, probe=probe)
     candle_q: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
@@ -385,13 +369,11 @@ async def build_daemon(
     )
     # Safety config — immutable for daemon lifetime. Config change = redeploy.
     safety_cfg_path = Path(
-        os.environ.get("BFX_SAFETY_CONFIG", "configs/safety.yaml"),
+        os.environ.get("BFX_SAFETY_CONFIG", "configs/safety.live.yaml"),
     )
     safety_cfg = load_safety_config(safety_cfg_path)
     assert_live_guard_invariant(config.phase, safety_cfg)
     hg = safety_cfg.hard_guards
-    if capital is None:
-        assert_caps_invariant(config.cells, hg.allocation_cap)
 
     # Automatic protections (lending envelope D3 level 3): trips stop new offers
     # at once and queue HALTED/auto + a managed-offer cancel, which a supervised
@@ -426,36 +408,19 @@ async def build_daemon(
     )
 
     # cells[0] used for safety_chain emit envelope (phase/strategy/cell) —
-    # 4.2 is single-cell paper / shadow; multi-cell uniform-policy refinement
-    # tracked in Phase 4.4. AllocationCap is account-scoped (not per-cell),
-    # so the envelope labels are informational only.
+    # multi-cell uniform-policy refinement tracked in Phase 4.4. The capital
+    # policy is account-scoped (not per-cell), so the envelope labels are
+    # informational only.
     first_cell = config.cells[0]
 
     # M2: SafetyConfig.<guard>.enabled is honoured at build time — disabled
     # guards are not constructed (cleaner than relying on internal no-op).
     # Live (real money) cannot boot with a required guard off
-    # (assert_live_guard_invariant); paper/shadow may disable them.
-    # Phase 2: every configured currency must have an explicit cap in simulation
-    # — config-fatal otherwise. Then log the effective cap per symbol so
-    # the boot log is the authoritative record of how much real money each
-    # currency may deploy.
-    log.info(
-        "effective_cap_per_symbol %s",
-        # assert_caps_invariant (above) already proved every configured symbol has
-        # an explicit caps entry in ALL phases, so direct indexing can't KeyError.
-        "applied CapitalPolicy" if capital is not None else
-        {s: hg.allocation_cap.caps[s] for s in configured_symbols(config.cells)},
-    )
-    # Single available-buffer bound shared by the per-offer BuyingPowerGuard and
-    # the cumulative DeploymentReconciler clamp — read once so both consume the
-    # same value (no double subtraction).
-    balance_buffer_usdt = Decimal("0") if capital is not None else Decimal(os.environ.get("BFX_BALANCE_BUFFER_USDT", "3"))
+    # (assert_live_guard_invariant). Capital limits are the applied
+    # CapitalPolicy's, enforced by CapitalPolicyGuard below.
 
-    # Executor is built before the guard chain so guard composition can branch on
-    # spec.is_simulated (BuyingPowerGuard is live-only — see allocation_cap block).
-    # bus is the live executor's construction dependency, so it is created here.
-    # Env-driven via registry (CC4 invariant — paper + fill_tracker rejected;
-    # bitfinex_live rejected in 4.2; 4.4 enables live path).
+    # bus is the executor's construction dependency, so it is created above.
+    # Env-driven via registry (CC4 invariant — WS client required).
     all_symbols = frozenset(configured_symbols(config.cells))
     spec = build_executor(
         event_sink=stdout_sink,
@@ -467,24 +432,19 @@ async def build_daemon(
         bus=bus,
         auth_gate=bfx_auth_gate,
     )
-    if not spec.is_simulated and capital is None:
-        raise ConfigurationError("live executor requires applied capital runtime")
 
-    # Single-writer advisory lock (A1). Construct LIVE-ONLY (not spec.is_simulated)
-    # so paper/shadow leave it None and the guard/liveness checks are inert.
-    # ACQUIRE only on Postgres: sqlite wiring tests construct the object but must
-    # never touch a real lock; the boot acquire raises WriterLockUnacquired on
-    # contention → propagates to main() → sys.exit(EXIT_CODE_WRITER_LOCKED). It is
-    # built here (before the guards block + the Daemon return) so the same variable
-    # is in scope at both the guard-append and the return.
-    writer_lock: WriterLock | None = None
-    if not spec.is_simulated:
-        writer_lock = WriterLock(
-            database_url=config.database_url,
-            key=derive_lock_key(account_id, env_str),
-        )
-        if config.database_url.startswith(("postgres", "postgresql")):
-            await writer_lock.acquire()  # raises WriterLockUnacquired on contention
+    # Single-writer advisory lock (A1). ACQUIRE only on Postgres: sqlite wiring
+    # tests construct the object but must never touch a real lock; the boot
+    # acquire raises WriterLockUnacquired on contention → propagates to main() →
+    # sys.exit(EXIT_CODE_WRITER_LOCKED). It is built here (before the guards block
+    # + the Daemon return) so the same variable is in scope at both the
+    # guard-append and the return.
+    writer_lock = WriterLock(
+        database_url=config.database_url,
+        key=derive_lock_key(account_id, env_str),
+    )
+    if config.database_url.startswith(("postgres", "postgresql")):
+        await writer_lock.acquire()  # raises WriterLockUnacquired on contention
 
     guards: list[GuardRule] = []
     if hg.manual_kill.enabled:
@@ -516,28 +476,16 @@ async def build_daemon(
             # quiet markets via _ws_heartbeat_poll_loop (Bitfinex hb ~15s).
             watched_sub_tasks=["ws"],
         ))
-    if capital is not None:
-        guards.append(CapitalPolicyGuard(authority=capital.capital_authority, scope=capital_scope,
-                                         clock=now_ms_utc))
-        # Always-on offer envelope (fail-closed); the command throttle config is
-        # required for a live writer too.
-        require_pre_trade_limits(safety_cfg.pre_trade_limits)
-        guards.extend(build_pre_trade_guards(
-            authority=capital.capital_authority, offers=managed_offers, scope=capital_scope,
-            session_factory=session_factory, book=funding_book_service, clock=now_ms_utc))
-    elif hg.allocation_cap.enabled:
-        assert paper_ledger is not None  # no capital authority: the simulated, legacy composition
-        guards.append(AllocationCapGuard(
-            ledger=paper_ledger,
-            caps=hg.allocation_cap.caps,
-            default_cap=hg.allocation_cap.default_cap,
-            # Legacy simulation-only configuration. Live always uses the policy above.
-            env_fallback_cap=allocation_cap,
-        ))
-    # Fail-closed single-writer guard — live-only (writer_lock is None on
-    # paper/shadow). Authoritative per-submit liveness via verify_held().
-    if writer_lock is not None:
-        guards.append(WriterLockGuard(lock=writer_lock))
+    guards.append(CapitalPolicyGuard(authority=capital.capital_authority, scope=capital_scope,
+                                     clock=now_ms_utc))
+    # Always-on offer envelope (fail-closed); the command throttle config is
+    # required for the writer too.
+    require_pre_trade_limits(safety_cfg.pre_trade_limits)
+    guards.extend(build_pre_trade_guards(
+        authority=capital.capital_authority, offers=managed_offers, scope=capital_scope,
+        session_factory=session_factory, book=funding_book_service, clock=now_ms_utc))
+    # Fail-closed single-writer guard. Authoritative per-submit liveness via verify_held().
+    guards.append(WriterLockGuard(lock=writer_lock))
 
     safety_chain = SafetyGuardChain(
         guards=guards,
@@ -550,59 +498,49 @@ async def build_daemon(
     )
 
     # ---- Phase 4.3/4.4a executor middleware chain wiring ----
-    # bus + spec (executor) are built above the guard chain (guard composition
-    # branches on spec.is_simulated).
     quote_store = StandingQuoteStore(
         ttl_ms=int(os.environ.get("BFX_QUOTE_TTL_MS", "3900000")),
     )
 
     executor: ExecutorPort = spec.executor
 
-    # 3a-recovery: live-only venue reconciliation. Paper/shadow have no real
-    # venue offers (BFX_FILL_TRACKER/WS gated off) -> boot_recovery stays None
-    # and Daemon.run() skips it.
-    boot_recovery: ObservationSink | None = None
-    periodic_reconcile: PeriodicReconcile | None = None
+    # 3a-recovery: venue reconciliation against the real venue.
     book_snapshot_writer: BookSnapshotWriter | None = None
-    interest_ledger_sync: InterestLedgerSync | None = None
-    credit_history_sync: CreditHistorySync | None = None
-    if not spec.is_simulated:
-        auth_rest = BitfinexAuthREST(
-            http=bitfinex_http, auth_gate=bfx_auth_gate,
-            response_observer=VenueNormalizationShadow(),
+    auth_rest = BitfinexAuthREST(
+        http=bitfinex_http, auth_gate=bfx_auth_gate,
+        response_observer=VenueNormalizationShadow(),
+    )
+    # Realized income truth (ledger category 28), read-only: see interest_ledger.
+    interest_ledger_sync = InterestLedgerSync(
+        rest=auth_rest, ctx=account_ctx, session_factory=session_factory,
+        exchange_account_id=account_bootstrap.exchange_account_id,
+        deployment_environment=env_str,
+        currencies=sorted({funding_currency(s) for s in configured_symbols(config.cells)}),
+    )
+    # Per-credit truth (credit history + funding trades), read-only: see credit_history.
+    credit_history_sync = CreditHistorySync(
+        rest=auth_rest, ctx=account_ctx, session_factory=session_factory,
+        exchange_account_id=account_bootstrap.exchange_account_id,
+        deployment_environment=env_str,
+        symbols=sorted(configured_symbols(config.cells)),
+    )
+    reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
+    if reconcile_interval_s <= 0:
+        raise ValueError(
+            f"BFX_RECONCILE_INTERVAL_S must be > 0, got {reconcile_interval_s}"
         )
-        # Realized income truth (ledger category 28), read-only: see interest_ledger.
-        interest_ledger_sync = InterestLedgerSync(
-            rest=auth_rest, ctx=account_ctx, session_factory=session_factory,
-            exchange_account_id=account_bootstrap.exchange_account_id,
-            deployment_environment=env_str,
-            currencies=sorted({funding_currency(s) for s in configured_symbols(config.cells)}),
+    resync_min_interval_s = float(os.environ.get("BFX_RESYNC_MIN_INTERVAL_S", "10"))
+    if resync_min_interval_s < 0:
+        raise ValueError(
+            f"BFX_RESYNC_MIN_INTERVAL_S must be >= 0, got {resync_min_interval_s}"
         )
-        # Per-credit truth (credit history + funding trades), read-only: see credit_history.
-        credit_history_sync = CreditHistorySync(
-            rest=auth_rest, ctx=account_ctx, session_factory=session_factory,
-            exchange_account_id=account_bootstrap.exchange_account_id,
-            deployment_environment=env_str,
-            symbols=sorted(configured_symbols(config.cells)),
-        )
-        assert capital is not None  # validated immediately after executor construction
-        reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
-        if reconcile_interval_s <= 0:
-            raise ValueError(
-                f"BFX_RECONCILE_INTERVAL_S must be > 0, got {reconcile_interval_s}"
-            )
-        resync_min_interval_s = float(os.environ.get("BFX_RESYNC_MIN_INTERVAL_S", "10"))
-        if resync_min_interval_s < 0:
-            raise ValueError(
-                f"BFX_RESYNC_MIN_INTERVAL_S must be >= 0, got {resync_min_interval_s}"
-            )
-        sinks = capital.observation(ObservationVenue(
-            auth_rest=auth_rest, account_ctx=account_ctx, protection=protection,
-            symbols=configured_symbols(config.cells),
-            cells=[(cell.symbol, cell.cell_id) for cell in config.cells],
-        ))
-        boot_recovery = sinks.boot
-        runtime_recovery = sinks.runtime
+    sinks = capital.observation(ObservationVenue(
+        auth_rest=auth_rest, account_ctx=account_ctx, protection=protection,
+        symbols=configured_symbols(config.cells),
+        cells=[(cell.symbol, cell.cell_id) for cell in config.cells],
+    ))
+    boot_recovery = sinks.boot
+    runtime_recovery = sinks.runtime
 
     # 3b: cancel lifecycle → diagnostics (CANCEL_AUDIT). Forensic, best-effort.
     bus.subscribe(CancelRequested,     diagnostics.handle_cancel_requested)
@@ -639,13 +577,10 @@ async def build_daemon(
     # no-retry submit contract below are untouched.
     reservation_middleware = ReservationEmittingMiddleware(
         executor,
-        bus=bus,
-        persister=legacy.persister if legacy is not None else None,
-        is_simulated=spec.is_simulated,
         safety_evaluator=safety_chain,
-        boundary=capital.command_boundary if capital is not None else None,
+        boundary=capital.command_boundary,
         uncertainty_reader=uncertainty_reader,
-        managed_offers=managed_offers if capital is not None else None,
+        managed_offers=managed_offers,
         clock=now_ms_utc,
     )
     reservation_executor: ExecutorPort = reservation_middleware
@@ -660,133 +595,120 @@ async def build_daemon(
         wrapped_executor = TracingSubmitMiddleware(wrapped_executor, tracing=tracing)
 
 
-    # Last-submit-attempt slot read by GET /admin/trading-status. Built
-    # unconditionally so the endpoint always has a `started_at` to report;
-    # only the live reconciler ever writes to it, so on paper/shadow it stays
-    # empty — which correctly reads as "this process has submitted nothing".
+    # Last-submit-attempt slot read by GET /admin/trading-status; empty reads as
+    # "this process has submitted nothing".
     attempt_recorder = SubmitAttemptRecorder()
 
-    deployment_reconciler = None
-    trading_control: TradingControlWorker | None = None
-    capital_policy_control: CapitalPolicyRequestWorker | None = None
     # What the deploy tool says this build is; it names every decision's build
     # and the status report's, and never gates trading (lending envelope D5).
     deployment_identity = DeploymentIdentity.from_env(os.environ)
-    uncertainty_worker = None
-    if not spec.is_simulated:
-        if funding_book_service is None:
-            raise ValueError(
-                "live execution requires a FundingBookService for the configured policy",
-            )
-        assert capital is not None  # validated immediately after executor construction
-        reprice_policy = policy_from_env(os.environ)
-        ladder_policy = ladder_policy_from_env(os.environ)
-        execution_gate = ExecutionGate(
-            policy=config.execution_policy,
-            audit=ExecutionDecisionRecorder(session_factory),
-            readiness=trading_readiness,
-            events=stdout_sink,
-            metrics=metrics,
-        )
-        funding_rules = FundingRules(http=bitfinex_http, clock=now_ms_utc)
-        trading_control = TradingControlWorker(
-            session_factory=session_factory, account_id=UUID(account_id),
-            environment=env_str, authority=operator_authorized, clock=now_ms_utc,
-            ownership=writer_lock.verify_held if writer_lock is not None else None,
-        )
-        capital_policy_control = CapitalPolicyRequestWorker(
-            session_factory=session_factory, account_id=UUID(account_id),
-            environment=env_str, authority=operator_authorized,
-            policy_store=capital.policy_store, scope_lock=capital.scope_lock,
-            clock=now_ms_utc,
-            ownership=writer_lock.verify_held if writer_lock is not None else None,
-        )
-        deployment_reconciler = DeploymentReconciler(
-            capital=capital.capital_authority,
-            offers=managed_offers,
-            uncertainty=uncertainty_reader,
-            scope=capital_scope,
-            session_factory=session_factory,
-            store=quote_store,
-            tracker=CellDeploymentTracker(),
-            uncertainty_synced=capital.uncertainty_synced,
-            safety_chain=safety_chain,
-            executor=wrapped_executor,
-            account_ctx=account_ctx,
-            cells=config.cells,
-            funding_rules=funding_rules,
-            clock=now_ms_utc,
-            event_sink=stdout_sink,
-            phase=config.phase,
-            canceller=reservation_middleware if isinstance(executor, CancelPort) else None,
-            reprice=reprice_policy,
-            ladder=ladder_policy,
-            attempt_recorder=attempt_recorder,
-            book_provider=funding_book_service,
-            execution_gate=execution_gate,
-            execution_policy=config.execution_policy,
-            optimizer_fee_rate=config.optimizer_fee_rate,
-            period_pricer=PeriodPricer(
-                max_down_pct=Decimal(str(config.book_max_down_pct)),
-                tick=Decimal("0.00000001"),
-            ),
-            # Every decision names the build that made it: the revision and
-            # image digest the deploy tool injected.
-            audit_context_factory=_DaemonAuditContextFactory(
-                account_id=account_id,
-                deployment_environment=env_str,
-                service_version=deployment_identity.source_revision or "unidentified",
-                config_hash=deployment_identity.backend_digest or "unidentified",
-            ),
-            protection=protection,
-            managed_sweep=(ManagedOfferSweep(
-                session_factory=session_factory, account_id=UUID(account_id),
-                environment=env_str, canceller=reservation_middleware, ctx=account_ctx,
-                offers=managed_offers)
-                if isinstance(executor, CancelPort) else None),
-        )
-        assert writer_lock is not None
-        # The web API queues operator adjudications; only this writer appends them.
-        uncertainty_worker = UncertaintyResolutionWorker(
-            session_factory=session_factory,
-            scope=ResolutionScope(account_bootstrap.exchange_account_id, env_str),
-            authority=operator_authorized,
-            clock=now_ms_utc,
-            ownership=writer_lock.verify_held,
-            resolution=capital.operator_resolution,
-        )
-        # Execution-policy regime telemetry: one row per boot (flags are
-        # boot-immutable, so boots are the regime boundaries). Best-effort —
-        # record_config_regime never raises.
-        await record_config_regime(
-            session_factory,
+    reprice_policy = policy_from_env(os.environ)
+    ladder_policy = ladder_policy_from_env(os.environ)
+    execution_gate = ExecutionGate(
+        policy=config.execution_policy,
+        audit=ExecutionDecisionRecorder(session_factory),
+        readiness=trading_readiness,
+        events=stdout_sink,
+        metrics=metrics,
+    )
+    funding_rules = FundingRules(http=bitfinex_http, clock=now_ms_utc)
+    trading_control = TradingControlWorker(
+        session_factory=session_factory, account_id=UUID(account_id),
+        environment=env_str, authority=operator_authorized, clock=now_ms_utc,
+        ownership=writer_lock.verify_held,
+    )
+    capital_policy_control = CapitalPolicyRequestWorker(
+        session_factory=session_factory, account_id=UUID(account_id),
+        environment=env_str, authority=operator_authorized,
+        policy_store=capital.policy_store, scope_lock=capital.scope_lock,
+        clock=now_ms_utc,
+        ownership=writer_lock.verify_held,
+    )
+    deployment_reconciler = DeploymentReconciler(
+        capital=capital.capital_authority,
+        offers=managed_offers,
+        uncertainty=uncertainty_reader,
+        scope=capital_scope,
+        session_factory=session_factory,
+        store=quote_store,
+        tracker=CellDeploymentTracker(),
+        uncertainty_synced=capital.uncertainty_synced,
+        safety_chain=safety_chain,
+        executor=wrapped_executor,
+        account_ctx=account_ctx,
+        cells=config.cells,
+        funding_rules=funding_rules,
+        clock=now_ms_utc,
+        event_sink=stdout_sink,
+        phase=config.phase,
+        canceller=reservation_middleware if isinstance(executor, CancelPort) else None,
+        reprice=reprice_policy,
+        ladder=ladder_policy,
+        attempt_recorder=attempt_recorder,
+        book_provider=funding_book_service,
+        execution_gate=execution_gate,
+        execution_policy=config.execution_policy,
+        optimizer_fee_rate=config.optimizer_fee_rate,
+        period_pricer=PeriodPricer(
+            max_down_pct=Decimal(str(config.book_max_down_pct)),
+            tick=Decimal("0.00000001"),
+        ),
+        # Every decision names the build that made it: the revision and
+        # image digest the deploy tool injected.
+        audit_context_factory=_DaemonAuditContextFactory(
             account_id=account_id,
             deployment_environment=env_str,
-            clamp_enabled=False,
-            reprice_enabled=reprice_policy.enabled,
-            git_sha=deployment_identity.source_revision,
-            now_ms=now_ms_utc(),
-        )
-        # Transparent timing shim (bfx_reconcile_tick_duration_seconds /
-        # bfx_reconcile_ticks_total) — PeriodicReconcile's failure handling
-        # sees exactly what the raw recovery would produce. When tracing is
-        # enabled, the "reconcile.tick" span wrapper stacks OUTSIDE the timer
-        # (same window as the histogram); both are observe-only pass-throughs.
-        recovery_runner: ObservationSink = (
-            TimedReconcileRecovery(runtime_recovery, metrics=metrics)
-        )
-        if tracing.enabled:
-            recovery_runner = TracedReconcileRecovery(recovery_runner, tracing=tracing)
-        periodic_reconcile = PeriodicReconcile(
-            recovery=recovery_runner,
-            scope=capital_scope,
-            probe=probe,
-            interval_s=reconcile_interval_s,
-            min_resync_interval_s=resync_min_interval_s,
-            deployment=deployment_reconciler,
-            deployment_input=capital.deployment_input,
-            resync=resync,
-        )
+            service_version=deployment_identity.source_revision or "unidentified",
+            config_hash=deployment_identity.backend_digest or "unidentified",
+        ),
+        protection=protection,
+        managed_sweep=(ManagedOfferSweep(
+            session_factory=session_factory, account_id=UUID(account_id),
+            environment=env_str, canceller=reservation_middleware, ctx=account_ctx,
+            offers=managed_offers)
+            if isinstance(executor, CancelPort) else None),
+    )
+    # The web API queues operator adjudications; only this writer appends them.
+    uncertainty_worker = UncertaintyResolutionWorker(
+        session_factory=session_factory,
+        scope=ResolutionScope(account_bootstrap.exchange_account_id, env_str),
+        authority=operator_authorized,
+        clock=now_ms_utc,
+        ownership=writer_lock.verify_held,
+        resolution=capital.operator_resolution,
+    )
+    # Execution-policy regime telemetry: one row per boot (flags are
+    # boot-immutable, so boots are the regime boundaries). Best-effort —
+    # record_config_regime never raises.
+    await record_config_regime(
+        session_factory,
+        account_id=account_id,
+        deployment_environment=env_str,
+        clamp_enabled=False,
+        reprice_enabled=reprice_policy.enabled,
+        git_sha=deployment_identity.source_revision,
+        now_ms=now_ms_utc(),
+    )
+    # Transparent timing shim (bfx_reconcile_tick_duration_seconds /
+    # bfx_reconcile_ticks_total) — PeriodicReconcile's failure handling
+    # sees exactly what the raw recovery would produce. When tracing is
+    # enabled, the "reconcile.tick" span wrapper stacks OUTSIDE the timer
+    # (same window as the histogram); both are observe-only pass-throughs.
+    recovery_runner: ObservationSink = (
+        TimedReconcileRecovery(runtime_recovery, metrics=metrics)
+    )
+    if tracing.enabled:
+        recovery_runner = TracedReconcileRecovery(recovery_runner, tracing=tracing)
+    periodic_reconcile = PeriodicReconcile(
+        recovery=recovery_runner,
+        scope=capital_scope,
+        probe=probe,
+        interval_s=reconcile_interval_s,
+        min_resync_interval_s=resync_min_interval_s,
+        deployment=deployment_reconciler,
+        deployment_input=capital.deployment_input,
+        resync=resync,
+    )
 
     # The REST fill tracker is the event-log authority's: it needs the CID registry. The
     # ledger authority covers a missed fill with WS hints and the periodic reconcile.
@@ -805,50 +727,6 @@ async def build_daemon(
                 account_id=account_id,
                 venue_hint_sink=ports.venue_hint_sink,
             )
-
-    # ---- Phase 4.4 prework: SmokeRunner ----
-    from bfx_funding_bot.modules.admin.pg_event_log_query import PostgresEventLogQueryAdapter
-    from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
-
-    # Simulated-only: the L2/L3 smoke submits a probe order through wrapped_executor
-    # with placeholder creds, expecting a simulated "filled". Against a live executor
-    # that is a real venue POST with bogus creds (→ 10100 "apikey: digest invalid"),
-    # or with real creds a real boot-time order. So wire smoke only when simulated;
-    # live (canary) leaves it None → boot smoke skips + HTTP /admin/smoke-test unmounted.
-    smoke_runner: SmokeRunner | None = None
-    if spec.is_simulated:
-        smoke_pg_query = PostgresEventLogQueryAdapter(
-            session_factory=session_factory,
-            deployment_environment=env_str,
-        )
-        smoke_runner = SmokeRunner(
-            executor=wrapped_executor,
-            bus=bus,
-            pg_query=smoke_pg_query,
-            phase=config.phase,
-            strategy=first_cell.strategy,
-            cell=first_cell.cell_id,
-        )
-
-    # ---- Phase 4.3 replay invariant report ----
-    if paper_ledger is not None and paper_ledger.replay_floor_hit_count > 0:
-        probe.update(
-            HealthTarget.LEDGER, HealthStatus.DEGRADED,
-            error_message=f"{paper_ledger.replay_floor_hit_count} floor hits during replay",
-        )
-        await stdout_sink.emit({
-            "timestamp": datetime.now(UTC).isoformat(),
-            "level": Level.WARN.value,
-            "phase": config.phase.value,
-            "strategy": None, "cell": None,
-            "event_type": EventType.HEALTH_CHECK.value,
-            "correlation_id": str(uuid4()),
-            "payload": {
-                "check_target": HealthTarget.LEDGER.value,
-                "status": HealthStatus.DEGRADED.value,
-                "error_message": f"replay_floor_hit_count={paper_ledger.replay_floor_hit_count}",
-            },
-        })
 
     signal_engine_obj = SignalEngine(
         phase=config.phase,
@@ -1040,58 +918,40 @@ async def build_daemon(
         session_factory=session_factory,
         ctx=account_ctx,
         configured_symbols=all_symbols,
-        venue=(executor if not spec.is_simulated and isinstance(executor, FundingCancelAllPort)
-               else None),
+        venue=executor if isinstance(executor, FundingCancelAllPort) else None,
         writer_lock=writer_lock,
         uncertainty=uncertainty_reader,
         offers=managed_offers,
-        quiesce=(
-            (lambda: command_gate.quiesced(account_id, timeout_s=QUIESCE_TIMEOUT_S))
-            if command_gate is not None else None
-        ),
+        quiesce=lambda: command_gate.quiesced(account_id, timeout_s=QUIESCE_TIMEOUT_S),
         clock=now_ms_utc,
     )
     # An automatic stop writes HALTED alone; the planner then pulls managed offers.
     protection.bind(trading_state)
-    if trading_control is not None:
-        trading_control.kill_switch = kill_switch  # the operator's kill request
-    if command_gate is not None:
-        command_gate.protection = protection
-        if safety_cfg.pre_trade_limits is not None:
-            command_gate.throttle = build_command_throttle(
-                safety_cfg.pre_trade_limits, protection=protection)
+    trading_control.kill_switch = kill_switch  # the operator's kill request
+    command_gate.protection = protection
+    if safety_cfg.pre_trade_limits is not None:
+        command_gate.throttle = build_command_throttle(
+            safety_cfg.pre_trade_limits, protection=protection)
 
     # ---- GET /admin/trading-status + POST /admin/dry-evaluate ----
-    # Real-money status uses the same applied policy reader as the planner and
-    # command gate. Legacy scalar/map arguments are simulation diagnostics only.
-    if capital is not None:
-        status_exposure: CapitalStatusReads | PaperPositionLedger = CapitalStatusReads(
-            authority=capital.capital_authority, lock=capital.scope_lock, scope=capital_scope,
-            session_factory=session_factory, clock=now_ms_utc)
-    else:
-        assert paper_ledger is not None  # no capital authority: the simulated, legacy composition
-        status_exposure = paper_ledger
+    # Status uses the same applied policy reader as the planner and command gate.
     trading_status = TradingStatusService(
         chain=safety_chain,
-        exposure=status_exposure,
+        exposure=CapitalStatusReads(
+            authority=capital.capital_authority, lock=capital.scope_lock, scope=capital_scope,
+            session_factory=session_factory, clock=now_ms_utc),
         account_ctx=account_ctx,
         cells=config.cells,
-        caps=hg.allocation_cap.caps,
-        default_cap=hg.allocation_cap.default_cap,
-        env_fallback_cap=allocation_cap,
-        buffers=hg.buying_power.buffers,
-        default_buffer=hg.buying_power.default_buffer,
-        env_fallback_buffer=balance_buffer_usdt,
         phase=config.phase,
         attempts=attempt_recorder,
         trading_state=trading_state,
         kill_switch=kill_switch,
-        deployment=(None if spec.is_simulated else {
+        deployment={
             "backend_digest": deployment_identity.backend_digest,
             "source_revision": deployment_identity.source_revision,
             "deployment_id": (str(deployment_identity.deployment_id)
                               if deployment_identity.deployment_id else None),
-        }),
+        },
         readiness=trading_readiness,
     )
 
@@ -1160,7 +1020,6 @@ async def build_daemon(
         safety_chain=safety_chain,
         account_ctx=account_ctx,
         bus=bus,
-        smoke_runner=smoke_runner,
         fill_tracker=fill_tracker,
         auth_ws=auth_ws,
         ws_dispatcher=ws_dispatcher,
@@ -1184,10 +1043,7 @@ async def build_daemon(
         protection=protection,
         trading_control=trading_control,
         capital_policy_control=capital_policy_control,
-        writer_lock_watch=(
-            WriterLockWatch(lock=writer_lock)
-            if writer_lock is not None else None
-        ),
+        writer_lock_watch=WriterLockWatch(lock=writer_lock),
     )
 
 
@@ -1219,10 +1075,6 @@ async def _run() -> None:
     alerts.install(alerts.AlertSink.from_environment(os.environ))
     try:
         daemon = await build_daemon()
-
-        # Phase 4.4 prework: boot smoke (pre-TaskGroup) — see daemon_smoke_boot.py
-        from bfx_funding_bot.modules.marketfeed.daemon_smoke_boot import run_boot_smoke
-        await run_boot_smoke(daemon)
     except Exception as exc:
         alerts.emit(alerts.BOOT_REFUSED, error=_error_text([exc]))
         await alerts.shutdown()
@@ -1279,16 +1131,11 @@ async def _run() -> None:
         # Cleanup after TaskGroup completes (close http client)
         log.info("daemon_shutdown_complete")
         # Release the single-writer advisory lock so the next process can acquire
-        # it without waiting for the server-side session to expire (live+PG only).
+        # it without waiting for the server-side session to expire (PG only).
         if daemon.writer_lock is not None:
             with contextlib.suppress(Exception):
                 await daemon.writer_lock.release()
         await daemon.bitfinex_http.aclose()
-        # SmokeRunner.aclose() is a no-op for PostgresEventLogQueryAdapter (no owned client);
-        # kept for forward-compatibility with adapters that may hold resources.
-        if daemon.smoke_runner is not None:
-            with contextlib.suppress(Exception):
-                await daemon.smoke_runner.aclose()
         # Flush any batched spans before exit (no-op when tracing disabled).
         if daemon.tracing is not None:
             with contextlib.suppress(Exception):

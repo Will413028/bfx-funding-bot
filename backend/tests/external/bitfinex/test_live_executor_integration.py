@@ -44,7 +44,7 @@ def _make_ctx() -> AccountContext:
 def _ready(decision: DecisionPayload) -> ReadyToSubmit:
     from tests.external.bitfinex.test_funding_rules import evidence
     return ReadyToSubmit(
-        decision=decision, decision_id="d-live-test", policy=ExecutionPolicy.PAPER,
+        decision=decision, decision_id="d-live-test", policy=ExecutionPolicy.BOOK_GUARDED,
         market_snapshot_id="snapshot-live-test", model_version=None,
         evidence={}, safety=GuardResult(allowed=True, guard_name="test"),
         funding_amount_evidence=evidence(now=int(time.time() * 1000)),
@@ -99,7 +99,7 @@ async def test_submit_rechecks_original_book_after_local_signing_work(expiring):
         return httpx.Response(500)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         executor = BitfinexLiveExecutor(http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-            phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+            phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUST"}), cell="C-1", auth_gate=AuthRequestGate(nonce), clock=lambda: now)
         ready = replace(_ready(_make_decision()),
                         funding_amount_evidence=evidence(now=-27900 if expiring == "fx" else 1000))
@@ -125,7 +125,7 @@ async def test_submit_returns_submitted_on_success() -> None:
     bus = DomainEventBus()
     executor = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=bus,
-        phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         auth_gate=AuthRequestGate(lambda: 1000),
         date_provider=lambda: date(2026, 5, 22),
@@ -145,7 +145,7 @@ async def test_submit_returns_unknown_on_http_5xx() -> None:
     bus = DomainEventBus()
     executor = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=bus,
-        phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         auth_gate=AuthRequestGate(lambda: 1000),
         date_provider=lambda: date(2026, 5, 22),
@@ -167,7 +167,7 @@ async def test_submit_returns_unbound_failure_on_http_200_error() -> None:
     ))
     executor = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         auth_gate=AuthRequestGate(lambda: 1000), date_provider=lambda: date(2026, 5, 22),
     )
@@ -203,7 +203,7 @@ async def test_submit_fixed_point_rate_serialization() -> None:
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     executor = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
+        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
         configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
         auth_gate=AuthRequestGate(lambda: 1000), date_provider=lambda: date(2026, 5, 22),
     )
@@ -284,7 +284,7 @@ async def test_submit_routes_by_decision_symbol_not_constructor() -> None:
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     ex = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
+        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
         cell="fUST_a30", configured_symbols=frozenset({"fUST"}),
         auth_gate=AuthRequestGate(lambda: 1000), date_provider=lambda: date(2026, 5, 22),
     )
@@ -302,7 +302,7 @@ async def test_submit_marks_unconfigured_symbol_not_sent() -> None:
     ))
     ex = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30",
+        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30",
         configured_symbols=frozenset({"fUST"}),
         auth_gate=AuthRequestGate(lambda: 1), date_provider=lambda: date(2026, 5, 22),
     )
@@ -319,7 +319,7 @@ async def test_submit_marks_malformed_success_response_unknown() -> None:
     ))
     ex = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30",
+        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30",
         configured_symbols=frozenset({"fUST"}), auth_gate=AuthRequestGate(lambda: 1),
         date_provider=lambda: date(2026, 5, 22),
     )
@@ -340,7 +340,7 @@ async def test_submit_failure_keeps_only_bounded_response_evidence() -> None:
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     executor = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
+        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
         configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
         auth_gate=AuthRequestGate(lambda: 1000), date_provider=lambda: date(2026, 5, 22),
     )
@@ -374,7 +374,7 @@ async def test_cancel_publishes_cancel_requested() -> None:
 
     executor = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=bus,
-        phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         auth_gate=AuthRequestGate(lambda: 1000),
         date_provider=lambda: date(2026, 5, 22),

@@ -8,8 +8,8 @@ Four Golden Signals L2 upgrade — the wiring invariants under test:
 - The shared Bitfinex httpx client has the request/response metric hooks.
 - DomainEventBus counts events (behavioral: publish → counter moves).
 - Live path: recovery is wrapped in TimedReconcileRecovery (tick latency) and
-  the ws dispatcher queue gauges are bound; smoke path executor chain is
-  MetricsSubmitMiddleware-outermost (paper).
+  the ws dispatcher queue gauges are bound; the executor chain is
+  MetricsSubmitMiddleware-outermost.
 """
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ from bfx_funding_bot.modules.observability.metrics import (
     TimedReconcileRecovery,
 )
 from tests.modules.marketfeed.account_test_helpers import (
+    boot_live_construction,
     configure_account_env,
     configure_live_wiring_env,
     seed_exchange_account,
@@ -89,21 +90,17 @@ async def _prepare_env(
 
 
 @pytest.mark.asyncio
-async def test_build_daemon_paper_wires_metrics_everywhere(
+async def test_build_daemon_wires_metrics_everywhere(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     httpx_mock: HTTPXMock,
 ) -> None:
-    monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
-    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
-    monkeypatch.delenv("BFX_EXECUTOR", raising=False)
-    await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="metrics_paper.db")
-
-    from bfx_funding_bot.apps.bot import build_daemon
-    daemon = await build_daemon(
-        cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
+    monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")  # avoid git subprocess
+    daemon, engine = await boot_live_construction(
+        monkeypatch, tmp_path, httpx_mock, name="metrics_live_ci",
+        extra_env={"BFX_SERVICE_VERSION": "test-sha"},
     )
+    await engine.dispose()
 
     assert isinstance(daemon.metrics, DaemonMetrics)
 
@@ -115,7 +112,7 @@ async def test_build_daemon_paper_wires_metrics_everywhere(
     out = daemon.metrics.render().decode()
     assert "bfx_subtask_heartbeat_threshold_seconds" in out
     assert (
-        'bfx_daemon_info{deployment_environment="ci",phase="paper",'
+        'bfx_daemon_info{deployment_environment="ci",phase="live",'
         'service_version="test-sha"} 1.0'
     ) in out
 
@@ -144,10 +141,6 @@ async def test_build_daemon_paper_wires_metrics_everywhere(
     assert daemon.metrics.registry.get_sample_value(
         "bfx_domain_events_total", {"event_type": "ReservationClaimed"},
     ) == 1.0
-
-    # Paper smoke runner submits through the metrics-outermost chain.
-    assert daemon.smoke_runner is not None
-    assert isinstance(daemon.smoke_runner._executor, MetricsSubmitMiddleware)
 
 
 @pytest.mark.asyncio

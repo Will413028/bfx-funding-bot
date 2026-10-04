@@ -249,7 +249,6 @@ def compute_recovery_actions(
     venue_offers: list[ActiveFundingOffer],
     local_claims: list[LocalClaim],
     account_id: str,
-    is_simulated: bool,
     now_ms: int,
     grace_ms: int,
     action_grace_ms: int = 0,
@@ -287,7 +286,7 @@ def compute_recovery_actions(
         actions.append(ReservationReleased(
             cid=claim.cid, venue_offer_id=voi, size_usdt=claim.size_usdt,
             reason="missing_from_venue", signal_correlation_id=claim.signal_correlation_id,
-            account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
+            account_id=account_id, is_simulated=False, occurred_at_ms=now_ms,
             symbol=claim.symbol,
             reservation_ref=claim.reservation_ref,
         ))
@@ -308,7 +307,7 @@ def compute_recovery_actions(
             actions.append(ReservationUnknown(
                 cid=c.cid, size_usdt=c.size_usdt,
                 signal_correlation_id=c.signal_correlation_id,
-                account_id=account_id, is_simulated=is_simulated,
+                account_id=account_id, is_simulated=False,
                 reason="unresolved_at_boot", occurred_at_ms=now_ms,
                 symbol=c.symbol,
                 reservation_ref=c.reservation_ref,
@@ -475,7 +474,6 @@ class BootRecovery:
         deployment_environment: str,
         bus: _Bus,
         offer_registry: _FsmSink | None = None,
-        is_simulated: bool = False,
         symbol: str | None = None,
         symbols: list[str] | None = None,
         grace_ms: int = 120_000,
@@ -505,7 +503,6 @@ class BootRecovery:
         self._env = deployment_environment
         self._bus = bus
         self._offer_registry = offer_registry
-        self._is_simulated = is_simulated
         # Configured symbols drive the per-symbol reconcile loop. Back-compat:
         # the legacy single `symbol` kwarg maps to a 1-element list. Dedup while
         # preserving order so a misconfigured duplicate cell can't fire twice.
@@ -663,7 +660,7 @@ class BootRecovery:
             local_claims = await self._load_local_claims(session)
             actions = compute_recovery_actions(
                 venue_offers=all_offers, local_claims=local_claims,
-                account_id=self._ctx.account_id, is_simulated=self._is_simulated,
+                account_id=self._ctx.account_id,
                 now_ms=query_finished_at_ms, grace_ms=self._grace_ms,
                 action_grace_ms=self._action_grace_ms,
                 configured_symbols=frozenset(self._symbols),
@@ -781,7 +778,7 @@ class BootRecovery:
                 n_fail += 1
             elif isinstance(persisted_action, ReservationUnknown):
                 n_unknown += 1
-                if self._uncertainty_handler is None and not self._is_simulated:
+                if self._uncertainty_handler is None:
                     # A live recovery that cannot update the local command gate
                     # must fail closed; returning normally would let the next
                     # deployment tick submit against an unresolved PENDING.
@@ -897,7 +894,7 @@ class BootRecovery:
                     venue_offer_id=offer.venue_offer_id,
                     signal_correlation_id=attempt.signal_correlation_id,
                     account_id=attempt.account_id,
-                    is_simulated=self._is_simulated,
+                    is_simulated=False,
                     venue_status=offer.status,
                     matched_mts_created=offer.mts_created,
                     reconcile_event_seq=snapshot_seq,

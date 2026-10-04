@@ -1,4 +1,4 @@
-"""Phase 4.1 paper/shadow daemon coordinator.
+"""Daemon coordinator.
 
 設計依據: phase 4.1 paper/shadow infra design Section "Data Flow"
 - Startup: load config → warmup all cells → start ws + writer + scheduler + health_monitor
@@ -14,7 +14,6 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import httpx
@@ -72,10 +71,7 @@ from bfx_funding_bot.modules.execution.protocols import (
 )
 from bfx_funding_bot.modules.execution.safety.boot_stop import report_refused_boot
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-from bfx_funding_bot.modules.execution.safety.config import (
-    SafetyConfig,
-    _AllocationCapCfg,
-)
+from bfx_funding_bot.modules.execution.safety.config import SafetyConfig
 from bfx_funding_bot.modules.execution.safety.protection import (
     AutomaticProtection,
     WriterLockWatch,
@@ -112,10 +108,7 @@ from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
 from bfx_funding_bot.modules.observability.tracing import (
     DaemonTracing,
 )
-from bfx_funding_bot.modules.strategy import CellConfig, DecisionPayload, configured_symbols
-
-if TYPE_CHECKING:
-    from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
+from bfx_funding_bot.modules.strategy import CellConfig, DecisionPayload
 
 log = logging.getLogger(__name__)
 
@@ -189,10 +182,9 @@ class AccountBootstrap:
 
     @staticmethod
     def reject_legacy_realm(*, phase: Phase) -> None:
-        """Reject the old process-global realm in live boot modes."""
+        """Reject the old process-global realm in live boot mode."""
         legacy = os.environ.get("BFX_ACCOUNT_ID", "").strip()
-        executor = os.environ.get("BFX_EXECUTOR", "paper").strip().lower()
-        if legacy and (phase is Phase.LIVE or executor == "bitfinex_live"):
+        if legacy and phase is Phase.LIVE:
             raise ConfigurationError(
                 "BFX_ACCOUNT_ID is no longer supported; use "
                 "BFX_EXCHANGE_ACCOUNT_ID"
@@ -290,7 +282,6 @@ class Daemon:
     safety_chain: SafetyGuardChain
     account_ctx: AccountContext
     bus: DomainEventBus
-    smoke_runner: SmokeRunner | None = None
     fill_tracker: RestPollingFillTracker | None = None
     auth_ws: BitfinexAuthWSClient | None = None
     ws_dispatcher: BitfinexLiveWSDispatcher | None = None
@@ -368,7 +359,7 @@ class Daemon:
             self.scheduler.register_from_now(cell)
 
         # 3a-recovery: reconcile against venue + resolve crash-mid-flight PENDING
-        # BEFORE any sub-task starts (live only; paper leaves this None). A venue
+        # BEFORE any sub-task starts (None only in unit compositions). A venue
         # fetch failure raises here -> daemon fails to start (fail-safe).
         await self._run_boot_recovery()
         self.booted = True
@@ -400,15 +391,14 @@ class Daemon:
                 tg.create_task(self._ws_consume_with_reconnect(), name="ws")
                 tg.create_task(self._ws_heartbeat_poll_loop(), name="ws_heartbeat")
             # Phase 4.2 Task 20: fill_tracker sub-task only runs when
-            # build_executor enabled it (live executor + flag). Paper +
-            # tracker is rejected at startup by registry CC4 invariant.
+            # build_executor enabled it (flag).
             if self.fill_tracker is not None:
                 tg.create_task(
                     self.fill_tracker.poll_loop(self._stop_event),
                     name="fill_tracker",
                 )
             # Phase 4.4a Task 19: WS dispatcher sub-task only runs when
-            # build_executor enabled it (live executor + BFX_WS_CLIENT_ENABLED).
+            # build_executor enabled it (BFX_WS_CLIENT_ENABLED).
             if self.ws_dispatcher is not None:
                 tg.create_task(
                     self.ws_dispatcher.run(self._stop_event),
@@ -580,7 +570,6 @@ class Daemon:
             host=self.healthz_host,
             port=self.healthz_port,
             stop_event=self._stop_event,
-            smoke_runner=self.smoke_runner,
             admin_token=self.admin_token,
             metrics=self.metrics,
             trading_status=self.trading_status,
@@ -863,10 +852,10 @@ _LIVE_REQUIRED_HARD = ("manual_kill", "auth_health", "heartbeat")
 def assert_live_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> None:
     """Real money cannot silently disable ownership-independent safety guards.
 
-    Live replaces the allocation/buying-power flags with the mandatory applied
-    capital policy and its offer envelope, and still requires the
-    trading-state/auth/heartbeat guards. No-op for paper/shadow. NAV drops only
-    alert (lending envelope D3): they are not a guard.
+    Live takes its capital limits from the mandatory applied capital policy and
+    its offer envelope, and requires the trading-state/auth/heartbeat guards.
+    No-op for other phases. NAV drops only alert (lending envelope D3): they are
+    not a guard.
     """
     if phase is not Phase.LIVE:
         return
@@ -878,20 +867,6 @@ def assert_live_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> None:
         raise ValueError(
             f"BFX_PHASE={phase.value} requires all safety guards enabled; disabled: {missing}"
         )
-
-
-def assert_caps_invariant(cells: list[CellConfig], alloc_cfg: _AllocationCapCfg) -> None:
-    """Simulation: every configured-cell symbol needs an explicit caps entry.
-
-    Config-fatal at boot (raises ValueError) — a configured currency with no
-    explicit cap is an operator mistake that must abort startup, not silently
-    fall through to default_cap. (Live sizes from the applied CapitalPolicy.)
-    """
-    for symbol in configured_symbols(cells):
-        if symbol not in alloc_cfg.caps:
-            raise ValueError(
-                f"caps invariant: configured symbol {symbol!r} has no explicit caps entry"
-            )
 
 
 async def _refuse_live_boot(exc: BaseException, *, config: MarketfeedConfig,

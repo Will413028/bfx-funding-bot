@@ -51,7 +51,7 @@ async def test_signal_engine_emits_signal_and_decision():
     candles_repo.get_up_to = AsyncMock(return_value=_history(8))
 
     engine = SignalEngine(
-        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
+        phase=Phase.SHADOW, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=candles_repo,
         reporter=DivergenceReporter(build_strategy_at_boundary),
     )
@@ -86,7 +86,7 @@ async def test_cp3_every_emit_passes_schema_validation():
     candles_repo.get_up_to = AsyncMock(return_value=_history(8))
 
     engine = SignalEngine(
-        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
+        phase=Phase.SHADOW, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=candles_repo,
         reporter=DivergenceReporter(build_strategy_at_boundary),
     )
@@ -138,7 +138,7 @@ async def test_cp3_divergence_path_also_passes_schema():
     })
 
     engine = SignalEngine(
-        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
+        phase=Phase.SHADOW, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=candles_repo, reporter=reporter,
     )
     cell = _cell()
@@ -270,7 +270,7 @@ async def test_process_candle_writes_standing_quote():
     store = StandingQuoteStore(ttl_ms=3_900_000)
     cell = _cell()
     engine = SignalEngine(
-        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
+        phase=Phase.SHADOW, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=candles_repo,
         reporter=DivergenceReporter(build_strategy_at_boundary),
         quote_store=store,

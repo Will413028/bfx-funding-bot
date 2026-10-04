@@ -21,7 +21,6 @@ from bfx_funding_bot.modules.strategy import DecisionPayload
 
 
 class ExecutionPolicy(StrEnum):
-    PAPER = "paper"
     BOOK_GUARDED = "book_guarded"
     OPTIMIZER_SHADOW = "optimizer_shadow"
     OPTIMIZER_LIVE = "optimizer_live"

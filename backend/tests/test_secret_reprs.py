@@ -22,11 +22,11 @@ REDIS_URL = "redis://u:fake-redis-password@h/0"
 @pytest.fixture
 def config() -> MarketfeedConfig:
     return MarketfeedConfig(
-        phase=Phase.PAPER,
+        phase=Phase.SHADOW,
         cells=[],
         database_url=DATABASE_URL,
         deployment_environment=DeploymentEnvironment.CI,
-        execution_policy=ExecutionPolicy.PAPER,
+        execution_policy=ExecutionPolicy.BOOK_GUARDED,
         redis_url=REDIS_URL,
     )
 

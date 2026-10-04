@@ -208,7 +208,6 @@ async def test_periodic_reconcile_converges_ledger_with_ws_dead(
         ),
         deployment_environment=_ENV,
         bus=bus,  # REAL bus from domain_chain — ledger reacts to ReservationReleased here
-        is_simulated=False,
         action_grace_ms=_ACTION_GRACE_MS,
         max_attempts=1,
         backoff_base_s=0,
@@ -276,7 +275,6 @@ async def test_reconcile_run_reports_the_release_as_divergence(
         ),
         deployment_environment=_ENV,
         bus=bus,
-        is_simulated=False,
         action_grace_ms=_ACTION_GRACE_MS,
         max_attempts=1,
         backoff_base_s=0,

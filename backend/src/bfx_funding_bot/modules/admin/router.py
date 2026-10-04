@@ -1,28 +1,20 @@
-"""Admin FastAPI router — smoke-test, trading-status, dry-evaluate.
+"""Admin FastAPI router — trading-status, dry-evaluate, halt.
 
-Mounted by healthz.make_app() whenever `admin_token` is set and at least one
-feature dependency is provided. Each route group is mounted independently:
-`smoke_runner` gates POST /admin/smoke-test, `trading_status` gates GET
-/admin/trading-status and POST /admin/dry-evaluate. A route whose dependency is
-missing is absent (404) rather than present-but-broken.
+Mounted by healthz.make_app() whenever `admin_token` is set and `trading_status`
+is provided; `trading_status` gates GET /admin/trading-status, POST
+/admin/dry-evaluate and POST /admin/halt.
 
 Auth: static `Authorization: Bearer <BFX_ADMIN_TOKEN>` header check on every
 route. trading-status exposes real-money balances and positions, and
 dry-evaluate runs the guard chain on demand — neither is public.
-
-Single-flight (smoke only): pre-check module-level _SMOKE_LOCK; 409 if held.
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
-from fastapi import APIRouter, Header, Query, Request, status
+from fastapi import APIRouter, Header, Query, status
 from fastapi.responses import JSONResponse
-
-from bfx_funding_bot.modules.admin import smoke_runner as sr_mod
-from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
 
 log = logging.getLogger(__name__)
 
@@ -54,33 +46,10 @@ def _auth_error(authorization: str | None, admin_token: str) -> JSONResponse | N
 
 def build_router(
     *,
-    smoke_runner: SmokeRunner | None,
     admin_token: str,
     trading_status: _TradingStatusProtocol | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/admin", tags=["admin"])
-
-    if smoke_runner is not None:
-        @router.post("/smoke-test")
-        async def smoke_test(
-            request: Request,
-            level: Literal["L2", "L3"] = Query(default="L3"),
-            authorization: str | None = Header(default=None),
-        ) -> JSONResponse:
-            denied = _auth_error(authorization, admin_token)
-            if denied is not None:
-                return denied
-            if sr_mod._SMOKE_LOCK.locked():
-                return JSONResponse(
-                    status_code=status.HTTP_409_CONFLICT,
-                    content={"error": "smoke_already_running"},
-                )
-            result = await (
-                smoke_runner.run_l2() if level == "L2"
-                else smoke_runner.run_l3()
-            )
-            # SmokeResult is frozen dataclass — asdict() yields a JSON-friendly dict.
-            return JSONResponse(status_code=200, content=asdict(result))
 
     if trading_status is not None:
         @router.get("/trading-status")

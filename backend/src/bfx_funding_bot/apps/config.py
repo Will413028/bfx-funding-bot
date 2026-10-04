@@ -38,9 +38,16 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     phase_str = os.environ.get("BFX_PHASE", "").strip()
     if not phase_str:
         raise ValueError("BFX_PHASE env var required")
-    if phase_str not in {"paper", "shadow", "live"}:
+    if phase_str == "paper":
+        # The paper phase and its echo executor were removed; simulation is the
+        # shadow phase (ADR 2026-10-03 D4).
+        raise ValueError(
+            "BFX_PHASE=paper was removed; use BFX_PHASE=shadow (simulation runs on the "
+            "simulated venue)"
+        )
+    if phase_str not in {"shadow", "live"}:
         # canary was retired with the per-build ceremony (ADR 2026-09-25).
-        raise ValueError(f"BFX_PHASE must be paper, shadow, or live, got {phase_str!r}")
+        raise ValueError(f"BFX_PHASE must be shadow or live, got {phase_str!r}")
     if phase_str == "live":
         legacy = [name for name in (
             "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
@@ -72,7 +79,7 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     # an env is set by hand). phase = rollout/real-money dimension;
     # deployment_environment = data-isolation realm (prod/shadow/ci). live is
     # real money -> must land in prod (never shadow, which holds the Phase 4.3
-    # calibration dataset). paper/shadow are simulated -> must never land in
+    # calibration dataset). shadow is simulated -> must never land in
     # prod (fake fills would corrupt real-money analytics). ci is the universal
     # test/dev realm and is always allowed.
     if phase_str == "live" and deployment_environment is DeploymentEnvironment.SHADOW:
@@ -81,7 +88,7 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
             "(BFX_DEPLOYMENT_ENV=shadow) -- it would pollute the simulated "
             "calibration dataset. Use prod (or ci for tests)."
         )
-    if phase_str in {"paper", "shadow"} and deployment_environment is DeploymentEnvironment.PROD:
+    if phase_str == "shadow" and deployment_environment is DeploymentEnvironment.PROD:
         raise ValueError(
             f"BFX_PHASE={phase_str} (simulated) must not run in the prod realm "
             "(BFX_DEPLOYMENT_ENV=prod) -- it would corrupt real-money analytics. "
@@ -99,9 +106,6 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
             f"BFX_EXECUTION_POLICY must be one of {valid}, got {execution_policy_raw!r}"
         ) from None
 
-    if phase_str == "live" and execution_policy is ExecutionPolicy.PAPER:
-        raise ValueError(f"{phase_str} execution_policy must be live-capable, not paper")
-
     def required_float(name: str) -> float:
         raw = os.environ.get(name, "").strip()
         if not raw:
@@ -111,20 +115,9 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         except ValueError:
             raise ValueError(f"{name} must be a number, got {raw!r}") from None
 
-    live_capable_policies = {
-        ExecutionPolicy.BOOK_GUARDED,
-        ExecutionPolicy.OPTIMIZER_SHADOW,
-        ExecutionPolicy.OPTIMIZER_LIVE,
-    }
-    book_max_age_seconds: float | None = None
-    book_reconcile_interval_seconds: float | None = None
-    book_max_down_pct: float | None = None
-    if execution_policy in live_capable_policies:
-        book_max_age_seconds = required_float("BFX_BOOK_MAX_AGE_SECONDS")
-        book_reconcile_interval_seconds = required_float(
-            "BFX_BOOK_RECONCILE_INTERVAL_SECONDS"
-        )
-        book_max_down_pct = required_float("BFX_BOOK_MAX_DOWN_PCT")
+    book_max_age_seconds = required_float("BFX_BOOK_MAX_AGE_SECONDS")
+    book_reconcile_interval_seconds = required_float("BFX_BOOK_RECONCILE_INTERVAL_SECONDS")
+    book_max_down_pct = required_float("BFX_BOOK_MAX_DOWN_PCT")
 
     fill_model_artifact = os.environ.get("BFX_FILL_MODEL_ARTIFACT", "").strip()
     if execution_policy is ExecutionPolicy.OPTIMIZER_LIVE and not fill_model_artifact:

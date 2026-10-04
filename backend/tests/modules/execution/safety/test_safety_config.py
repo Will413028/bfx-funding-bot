@@ -1,7 +1,6 @@
 """SafetyConfig yaml load + validation."""
 from __future__ import annotations
 
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -21,10 +20,6 @@ hard_guards:
   heartbeat:
     enabled: true
     sub_task_stale_threshold_seconds: 300
-  allocation_cap:
-    enabled: true
-  buying_power:
-    enabled: true
 nav_alerts:
   realized_loss_24h_pct: null
   drawdown_pct: null
@@ -43,8 +38,6 @@ hard_guards:
   manual_kill: {enabled: true}
   auth_health: {enabled: true}
   heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
-  allocation_cap: {enabled: true}
-  buying_power: {enabled: true}
 calibrated_guards:
   realized_loss_24h: {enabled: true, threshold_pct: 5}
 """)
@@ -64,8 +57,6 @@ hard_guards:
   manual_kill: {enabled: true}
   auth_health: {enabled: true}
   heartbeat: {enabled: true, sub_task_stale_threshold_seconds: -1}
-  allocation_cap: {enabled: true}
-  buying_power: {enabled: true}
 nav_alerts:
   realized_loss_24h_pct: null
   drawdown_pct: null
@@ -80,28 +71,19 @@ def test_live_nav_drop_alerts_at_5_and_10_pct() -> None:
     assert (cfg.nav_alerts.realized_loss_24h_pct, cfg.nav_alerts.drawdown_pct) == (5.0, 10.0)
 
 
-def test_caps_and_buffers_maps_parse(tmp_path: Path) -> None:
+@pytest.mark.parametrize("section", ["allocation_cap: {enabled: true}", "buying_power: {enabled: true}"])
+def test_retired_cap_and_buffer_sections_are_refused(tmp_path: Path, section: str) -> None:
+    """Capital limits are the applied CapitalPolicy's; the old per-guard sections no longer load."""
     p = tmp_path / "safety.yaml"
-    p.write_text("""
+    p.write_text(f"""
 hard_guards:
-  manual_kill: {enabled: true}
-  auth_health: {enabled: true}
-  heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
-  allocation_cap:
-    enabled: true
-    caps: {fUST: 3000, fUSD: 0}
-    default_cap: 0
-  buying_power:
-    enabled: true
-    buffers: {fUST: 3, fUSD: 3}
-    default_buffer: 0
+  manual_kill: {{enabled: true}}
+  auth_health: {{enabled: true}}
+  heartbeat: {{enabled: true, sub_task_stale_threshold_seconds: 300}}
+  {section}
 nav_alerts:
   realized_loss_24h_pct: null
   drawdown_pct: null
 """)
-    cfg = load_safety_config(p)
-    assert cfg.hard_guards.allocation_cap.caps["fUST"] == Decimal("3000")
-    assert cfg.hard_guards.allocation_cap.caps["fUSD"] == Decimal("0")
-    assert cfg.hard_guards.buying_power.buffers["fUSD"] == Decimal("3")
-    assert cfg.hard_guards.allocation_cap.default_cap == Decimal("0")
-    assert cfg.hard_guards.buying_power.default_buffer == Decimal("0")
+    with pytest.raises(ValidationError, match=section.split(":")[0]):
+        load_safety_config(p)

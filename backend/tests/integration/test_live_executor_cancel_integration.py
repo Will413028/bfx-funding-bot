@@ -66,7 +66,7 @@ async def test_cancel_success_full_chain_sends_signed_post() -> None:
             http=http,
             event_sink=_RecordingSink(),
             bus=bus,
-            phase=Phase.PAPER,
+            phase=Phase.SHADOW,
             strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUSD"}),
             cell="fUSD_p2",

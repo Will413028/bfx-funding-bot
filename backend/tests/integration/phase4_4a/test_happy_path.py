@@ -66,7 +66,7 @@ async def test_submit_then_foc_executed_completes_orderfilled_chain(
 
     executor = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=bus,
-        phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUSD"}), cell="C-1",
         auth_gate=AuthRequestGate(lambda: 1000),
         date_provider=lambda: date(2026, 5, 22),
@@ -90,7 +90,7 @@ async def test_submit_then_foc_executed_completes_orderfilled_chain(
     ready = ReadyToSubmit(
         decision=decision,
         decision_id="phase4-4a-happy-path",
-        policy=ExecutionPolicy.PAPER,
+        policy=ExecutionPolicy.BOOK_GUARDED,
         market_snapshot_id="phase4-4a-test-snapshot",
         model_version=None,
         evidence={},

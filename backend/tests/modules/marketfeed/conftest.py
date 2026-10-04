@@ -88,7 +88,7 @@ def capture_engine() -> tuple:
     store = StandingQuoteStore(ttl_ms=3_900_000)
     cell = _cell()
     engine = SignalEngine(
-        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
+        phase=Phase.SHADOW, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=_StubCandlesRepo(),
         reporter=DivergenceReporter(build_strategy_at_boundary),
         quote_store=store,
@@ -116,7 +116,7 @@ def capture_engine_blocked() -> tuple:
     store = StandingQuoteStore(ttl_ms=3_900_000)
     cell = _cell()
     engine = SignalEngine(
-        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
+        phase=Phase.SHADOW, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=_StubCandlesRepo(),
         reporter=DivergenceReporter(build_strategy_at_boundary),
         quote_store=store,
