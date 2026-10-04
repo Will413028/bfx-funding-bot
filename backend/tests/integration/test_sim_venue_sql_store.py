@@ -39,9 +39,12 @@ from bfx_funding_bot.modules.simulated_venue import (
     VenueStoreError,
 )
 from bfx_funding_bot.modules.simulated_venue.events import (
+    SCHEMA_VERSION,
     BookObserved,
     CreditClosed,
+    FaultInjected,
     InterestPaid,
+    InternalFailureRecorded,
     LoanDrawn,
     NonceAdvanced,
     OfferCanceled,
@@ -49,6 +52,7 @@ from bfx_funding_bot.modules.simulated_venue.events import (
     OfferPlaced,
     TradesObserved,
     TradeTick,
+    UnexpectedRequestRecorded,
     VenueEvent,
     WalletFunded,
 )
@@ -250,6 +254,12 @@ def _every_event_type() -> list[VenueEvent]:
         OfferCanceled(40_000_002, T0 + HOUR),
         CreditClosed("credit", 70_000_001, T0 + 3 * HOUR, "expired"),
         InterestPaid(80_000_001, "UST", D("0.12345678"), D("1000.62345678"), T0 + 5 * HOUR),
+        FaultInjected("unknown_placed_lost", "submit", 7, 1_700_000_000_000_002, "fUST", D("150"),
+                      D("0.0002"), 2, T0 + 6 * HOUR),
+        FaultInjected("history_error", "history", 8, 1_700_000_000_000_003, None, None, None, None,
+                      T0 + 6 * HOUR),
+        InternalFailureRecorded("feed", "feed trades failed", T0 + 6 * HOUR),
+        UnexpectedRequestRecorded("GET", "https://example.test/x", T0 + 6 * HOUR),
     ]
 
 
@@ -271,7 +281,7 @@ async def test_load_returns_events_in_seq_order(store: SqlVenueEventStore, ledge
             "(payload->>'schema_version')::int FROM sim_venue_event ORDER BY seq")).all()
     sync.dispose()
     assert [r[0] for r in rows] == [1, 2, 3, 4]
-    assert all(r[1] == r[3] == "wallet_funded" and r[2] == r[4] == 1 for r in rows)
+    assert all(r[1] == r[3] == "wallet_funded" and r[2] == r[4] == SCHEMA_VERSION for r in rows)
 
 
 async def test_an_empty_scope_loads_nothing_and_an_empty_append_is_a_no_op(

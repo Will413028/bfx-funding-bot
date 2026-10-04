@@ -18,7 +18,7 @@ Signal → metric map:
               bfx_subtask_heartbeat_threshold_seconds{sub_task,task_class}
               (alert expr: age > threshold — the explicit form of the old
               scan_staleness inference)
-- Errors:     bfx_venue_rest_errors_total{kind},
+- Errors:     bfx_venue_rest_errors_total{kind}, bfx_venue_rest_rate_limited_total (429),
               bfx_diagnostic_events_total{event_type,level} (safety_trigger trips),
               bfx_log_messages_total{level,logger} (WARNING+ incl.
               ws_dispatcher_persist_failed / bus_handler_failed),
@@ -152,6 +152,34 @@ class _ProbeCollector(Collector):
             return []
 
 
+class _SimWatermarkCollector(Collector):
+    """Scrape-time watermark lag of the simulated venue's trades feed, per symbol.
+
+    ``lag_fn`` returns ``{symbol: seconds behind now}``; a symbol whose watermark is unknown
+    (no backfill yet, or the stream dropped before the first one) has no sample, which a
+    reader must not mistake for zero. Fail-open like every collector here.
+    """
+
+    def __init__(self, lag_fn: Callable[[], Mapping[str, float | None]]) -> None:
+        self._lag_fn = lag_fn
+
+    def collect(self) -> Iterable[Metric]:
+        try:
+            lag = GaugeMetricFamily(
+                "bfx_sim_venue_feed_watermark_lag_seconds",
+                "Seconds the simulated venue's public-trades watermark trails now, per symbol "
+                "(absent while unknown; a stall shows as a growing value).",
+                labels=["symbol"],
+            )
+            for symbol, seconds in sorted(self._lag_fn().items()):
+                if seconds is not None:
+                    lag.add_metric([symbol], max(float(seconds), 0.0))
+            return [lag]
+        except Exception:
+            log.debug("sim_watermark_collector_failed", exc_info=True)
+            return []
+
+
 class SimVenueObserver:
     """The simulated venue's ``VenueObserver``, fail-open like every metric here."""
 
@@ -169,6 +197,13 @@ class SimVenueObserver:
     def feed_failure(self, source: str) -> None:
         with contextlib.suppress(Exception):
             self._metrics.sim_venue_feed_failures.labels(source=source).inc()
+
+    def feed_stream(self, event: str) -> None:
+        """The public trades WebSocket connected or disconnected (``event`` is bounded)."""
+        if event not in ("connected", "disconnected"):
+            return
+        with contextlib.suppress(Exception):
+            self._metrics.sim_venue_feed_stream.labels(event=event).inc()
 
 
 class DaemonMetrics:
@@ -244,6 +279,12 @@ class DaemonMetrics:
             ["result"],
             registry=self.registry,
         )
+        self.venue_rest_rate_limited = Counter(
+            "bfx_venue_rest_rate_limited",
+            "Bitfinex REST responses with HTTP 429 (also counted under http_4xx): "
+            "public and authenticated calls share one client and one per-IP limit.",
+            registry=self.registry,
+        )
         self.venue_rest_errors = Counter(
             "bfx_venue_rest_errors",
             "Bitfinex REST error responses (kind=http_4xx|http_5xx).",
@@ -296,8 +337,16 @@ class DaemonMetrics:
         )
         self.sim_venue_feed_failures = Counter(
             "bfx_sim_venue_feed_failures",
-            "Failed fetches of the simulated venue's market feed (source=book|trades).",
+            "Failed fetches of the simulated venue's market feed "
+            "(source=book|trades|trades_truncated|trades_beyond_retention).",
             ["source"],
+            registry=self.registry,
+        )
+        self.sim_venue_feed_stream = Counter(
+            "bfx_sim_venue_feed_stream",
+            "Public trades WebSocket of the simulated venue's feed "
+            "(event=connected|disconnected).",
+            ["event"],
             registry=self.registry,
         )
         self.funding_book_snapshots = Counter(
@@ -392,6 +441,8 @@ class DaemonMetrics:
             ).inc()
             if duration_s is not None:
                 self.venue_rest_duration.observe(duration_s)
+            if status_code == 429:
+                self.venue_rest_rate_limited.inc()
             if status_code >= 500:
                 self.venue_rest_errors.labels(kind="http_5xx").inc()
             elif status_code >= 400:
@@ -462,6 +513,15 @@ class DaemonMetrics:
             self.registry.register(_ProbeCollector(probe))
         except Exception:
             log.warning("metrics_register_probe_failed", exc_info=True)
+
+    def bind_sim_watermark_lag(
+        self, lag_fn: Callable[[], Mapping[str, float | None]],
+    ) -> None:
+        """Export the simulated feed's per-symbol watermark lag, read at scrape time."""
+        try:
+            self.registry.register(_SimWatermarkCollector(lag_fn))
+        except Exception:
+            log.warning("metrics_bind_sim_watermark_failed", exc_info=True)
 
     def bind_ws_dispatcher_queue(
         self, *, depth_fn: Callable[[], int], capacity: int,

@@ -16,8 +16,9 @@ how to close it.
   REST only to fill gaps, and an event-time watermark (``LiveMarketFeed``). This module is the
   only importer of ``simulated_venue.wiring``.
 
-Production composes the simulated venue without faults; tests inject a ``FaultPlan`` and a
-feed through ``VenueSeam``.
+The simulated venue is composed without faults unless ``BFX_SIM_FAULTS`` asks for a seeded
+plan (``apps/sim_faults.py``; refused for the bitfinex venue, injections are recorded in the
+venue's own log); tests inject a ``FaultPlan`` and a feed through ``VenueSeam``.
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ from uuid import UUID
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.apps.sim_faults import FAULT_KNOBS, SimFaultSpec
 from bfx_funding_bot.core.crypto import VaultNotConfiguredError, load_kek
 from bfx_funding_bot.core.errors import ConfigurationError
 from bfx_funding_bot.core.venue import Venue, VenueCapabilities
@@ -53,7 +55,10 @@ from bfx_funding_bot.modules.observability.metrics import DaemonMetrics, attach_
 from bfx_funding_bot.modules.simulated_venue import (
     BookFetcher,
     BookSnapshot,
+    FaultKind,
     FaultPlan,
+    FaultRule,
+    FaultTarget,
     LiveFeedConfig,
     LiveMarketFeed,
     MarketFeed,
@@ -63,6 +68,7 @@ from bfx_funding_bot.modules.simulated_venue import (
     SimulatedVenueConfig,
     SqlVenueEventStore,
     TradesFetcher,
+    TradesTruncated,
 )
 from bfx_funding_bot.modules.simulated_venue.wiring import build_simulated_venue
 from bfx_funding_bot.modules.strategy import configured_symbols
@@ -74,6 +80,16 @@ _TRADES_MAX_PAGES = 10
 
 BITFINEX_CAPABILITIES = VenueCapabilities(auth_ws="required", rest_fill_tracker=True)
 SIMULATED_CAPABILITIES = VenueCapabilities(auth_ws="forbidden", rest_fill_tracker=False)
+
+
+def fault_plan(spec: SimFaultSpec) -> FaultPlan:
+    """The plan for the transport; a rate of 0 adds no rule, no rates is the empty plan."""
+    rules = tuple(
+        FaultRule(target=FaultTarget(FAULT_KNOBS[name][0]), kind=FaultKind(FAULT_KNOBS[name][1]),
+                  probability=rate)
+        for name, rate in spec.rates.items() if rate > 0.0
+    )
+    return FaultPlan(rules=rules, seed=spec.seed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +195,8 @@ async def build_venue(
         if config.simulated_initial_wallets:
             raise ConfigurationError(
                 "BFX_SIM_INITIAL_WALLETS is only valid for the simulated venue")
+        if config.simulated_faults or config.simulated_fault_seed:
+            raise ConfigurationError("BFX_SIM_FAULTS is only valid for the simulated venue")
         async with session_factory() as session:
             credentials = await _vault_credentials(session, exchange_account_id)
         return VenueWiring(
@@ -203,6 +221,7 @@ async def _build_simulated(
     store = await SqlVenueEventStore.open(db_engine)
     tasks: tuple[VenueFeedTask, ...] = ()
     feed: MarketFeed
+    live_feed: LiveMarketFeed | None = None
     if seam.feed is not None:
         feed = seam.feed
     else:
@@ -213,28 +232,36 @@ async def _build_simulated(
             store=book_store, rest=bitfinex, ws=FundingBookWSClient(symbols=symbols),
             symbols=symbols, reconcile_interval_seconds=config.book_reconcile_interval_seconds,
         )
-        live_feed = LiveMarketFeed(
+        built = LiveMarketFeed(
             config=LiveFeedConfig(symbols=symbols),
             fetch_book=_book_fetcher(book_store, clock),
             fetch_trades=_trades_fetcher(bitfinex),
-            clock_ms=clock, on_failure=observer.feed_failure,
+            clock_ms=clock, on_failure=observer.feed_failure, on_stream=observer.feed_stream,
         )
         trades_stream = FundingTradesWSClient(
             symbols=symbols,
-            on_trades=lambda symbol, rows: live_feed.ingest(
+            on_trades=lambda symbol, rows: built.ingest(
                 symbol, [_public_trade(row) for row in rows]),
-            on_alive=live_feed.alive, on_connected=live_feed.stream_connected,
-            on_disconnected=live_feed.stream_disconnected, clock_ms=clock,
+            on_alive=built.alive, on_connected=built.stream_connected,
+            on_disconnected=built.stream_disconnected, clock_ms=clock,
         )
         tasks = (VenueFeedTask(
-            book_service=book_service, trades_stream=trades_stream, feed=live_feed),)
-        feed = live_feed
+            book_service=book_service, trades_stream=trades_stream, feed=built),)
+        live_feed = feed = built
     venue = await build_simulated_venue(
         account=account,
         config=SimulatedVenueConfig(
             api_key=credentials.api_key, api_secret=credentials.api_secret, symbols=symbols),
-        store=store, feed=feed, clock_ms=clock, faults=seam.faults, observer=observer,
+        store=store, feed=feed, clock_ms=clock,
+        faults=seam.faults if seam.faults is not None else fault_plan(SimFaultSpec(
+            config.simulated_faults, config.simulated_fault_seed)),
+        observer=observer,
     )
+    if live_feed is not None:
+        # A restart resumes the trades from where the venue's log says they were consumed,
+        # however long the process was down (bounded by the feed's retention).
+        live_feed.resume_from(venue.trade_resume_points())
+        metrics.bind_sim_watermark_lag(live_feed.watermark_lag_seconds)
     funded = await venue.fund_wallets_if_empty(config.simulated_initial_wallets)
     if funded:
         log.info("simulated_venue_funded wallets=%s", sorted(config.simulated_initial_wallets))
@@ -286,7 +313,8 @@ def _trades_fetcher(rest: BitfinexREST) -> TradesFetcher:
     """Public funding trades with ``mts >= since_ms`` over REST, paged on their timestamp.
 
     Only start-up and gap backfill use it (the live feed calls it after a stream
-    (re)connection). Overlap with what is already held is the feed's to dedupe, by id.
+    (re)connection). Overlap with what is already held is the feed's to dedupe, by id. Hitting the
+    page cap raises ``TradesTruncated`` carrying what was fetched.
     """
 
     async def fetch(symbol: str, since_ms: int) -> Sequence[PublicTrade]:
@@ -300,8 +328,9 @@ def _trades_fetcher(rest: BitfinexREST) -> TradesFetcher:
                 break
             start = page[-1].mts
         else:
-            log.warning("simulated_venue_trades_backfill_truncated symbol=%s since_ms=%d",
-                        symbol, since_ms)
+            # Ten full pages and still behind: say so with what was got, never return it as
+            # a finished answer (the feed keeps the gap open and continues from the newest).
+            raise TradesTruncated(list(by_id.values()))
         return list(by_id.values())
 
     return fetch

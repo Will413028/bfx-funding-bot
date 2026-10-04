@@ -3,7 +3,9 @@
 Mutations (one at a time; revert after each): skip the realm check (``test_it_refuses_*``
 realm cases), append the epoch on every run create the account again or write a revision on an unchanged second run
 (``test_a_second_run_changes_nothing``),
-leave the envelope out of the policy (``test_the_policy_carries_the_ledger_envelope``).
+leave the envelope out of the policy (``test_the_policy_carries_the_ledger_envelope``),
+let ``--activate`` append over an existing HALT (``test_activate_never_resumes_a_halt``) or on a
+second run (``test_activate_is_idempotent``).
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ def _args(**changes) -> argparse.Namespace:
         "exchange_account_id": ACCOUNT, "symbol": ["fUST"], "disabled_symbol": ["fUSD"],
         "max_offer_amount": Decimal("200"), "min_period_days": 2, "max_period_days": 2,
         "max_open_offers": 6, "rate_floor_ratio": Decimal("0.5"), "min_rate_apr": Decimal("0.01"),
+        "activate": False,
     }
     return argparse.Namespace(**{**base, **changes})
 
@@ -173,3 +176,44 @@ async def test_it_refuses_an_account_that_holds_credentials(db) -> None:
     with pytest.raises(script.BootstrapRefused, match="simulation_account_has_credentials"):
         await script.run(_args(), database_url=url, allowed_realms=REALMS)
     assert (await _snapshot(engine))["epochs"] == [(1, "legacy")]  # rolled back whole
+
+
+async def _states(engine) -> list[tuple[str, str, str]]:
+    async with engine.connect() as conn:
+        return [tuple(r) for r in (await conn.execute(text(
+            "SELECT state, cause, actor FROM trading_state ORDER BY id"))).all()]
+
+
+async def test_without_activate_the_scope_stays_without_a_state_row(db) -> None:
+    url, engine = db
+    report = await script.run(_args(), database_url=url, allowed_realms=REALMS)
+    assert report["trading_state"] == "not_requested"
+    assert await _states(engine) == []
+
+
+async def test_activate_appends_active_once_on_a_fresh_scope(db) -> None:
+    url, engine = db
+    report = await script.run(_args(activate=True), database_url=url, allowed_realms=REALMS)
+    assert report["trading_state"] == "activated"
+    assert await _states(engine) == [("ACTIVE", "operator", "bootstrap_simulation_db")]
+
+
+async def test_activate_is_idempotent(db) -> None:
+    url, engine = db
+    await script.run(_args(activate=True), database_url=url, allowed_realms=REALMS)
+    report = await script.run(_args(activate=True), database_url=url, allowed_realms=REALMS)
+    assert report["trading_state"] == "kept_active"
+    assert len(await _states(engine)) == 1
+
+
+async def test_activate_never_resumes_a_halt(db) -> None:
+    url, engine = db
+    await script.run(_args(), database_url=url, allowed_realms=REALMS)
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "INSERT INTO trading_state (exchange_account_id, deployment_environment, state, "
+            "cause, actor, reason, created_at_ms) VALUES (:a, 'ci', 'HALTED', 'operator', "
+            "'soak-kill', 'kill test', 1)"), {"a": ACCOUNT})
+    report = await script.run(_args(activate=True), database_url=url, allowed_realms=REALMS)
+    assert report["trading_state"] == "kept_halted"
+    assert await _states(engine) == [("HALTED", "operator", "soak-kill")]

@@ -14,6 +14,11 @@ from `run()`:
 - trades, REST only for gaps: `fetch_trades(symbol, since_ms)` (inclusive) is called by
   `run()` once after every (re)connection, from the watermark where it stopped (or the
   start-up window), and nowhere else. REST is a per-IP resource shared with the live bot.
+- restart: a new process holds no watermark, but the venue's durable log says how far each
+  symbol's trades were consumed (`market_through`). `resume_from()` seeds the first backfill
+  of a symbol from there instead of a fixed window, so a downtime longer than the window still
+  yields the trades the resting offers waited for. It is bounded by `retention_ms` (what the
+  public source can still serve and what the buffer keeps).
 
 Event-time watermark (`complete_through`): the feed claims completeness only where it can
 prove it. While the stream is connected and a symbol has no open gap, every frame at local
@@ -23,6 +28,13 @@ after the gap backfill of that symbol succeeded. Until the first backfill it is 
 
 Admission is by trade id, per symbol and pruned with the buffer, so overlapping fetches,
 equal timestamps and late or out-of-order arrivals are each admitted exactly once.
+
+A backfill that the source cannot deliver in one go (the fetcher raises `TradesTruncated` with
+what it did get) is never read as complete: the trades are kept, the watermark moves only to just
+before the newest trade fetched, the gap stays open and the next round continues from there,
+counted as `trades_truncated`. A downtime longer than `retention_ms` cannot be recovered at all:
+the backfill starts at the retention floor and says so (`trades_beyond_retention`, once per
+symbol and process), because the range before it is then final without its trades.
 
 A fetcher that raises or runs past `fetch_deadline_s` is logged, counted in `failures` and
 reported to `on_failure`; the buffers keep what they had, so a dead source ages the book
@@ -36,12 +48,20 @@ import asyncio
 import logging
 from bisect import bisect_right
 from collections import deque
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from bfx_funding_bot.modules.simulated_venue.contracts import BookSnapshot, PublicTrade
 
 log = logging.getLogger(__name__)
+
+class TradesTruncated(Exception):  # noqa: N818 - a partial answer, carrying what it got
+    """The trades source stopped before `since_ms` caught up with now (a page cap, say)."""
+
+    def __init__(self, trades: Sequence[PublicTrade]) -> None:
+        super().__init__(f"trades fetch truncated after {len(trades)} trades")
+        self.trades = tuple(trades)
+
 
 BookFetcher = Callable[[str], Awaitable[BookSnapshot | None]]
 TradesFetcher = Callable[[str, int], Awaitable[Sequence[PublicTrade]]]
@@ -75,12 +95,16 @@ class LiveMarketFeed:
     def __init__(
         self, *, config: LiveFeedConfig, fetch_book: BookFetcher, fetch_trades: TradesFetcher,
         clock_ms: Callable[[], int], on_failure: Callable[[str], None] | None = None,
+        on_stream: Callable[[str], None] | None = None,
     ) -> None:
         self._config = config
         self._fetch_book = fetch_book
         self._fetch_trades = fetch_trades
         self._clock_ms = clock_ms
         self._on_failure = on_failure
+        self._on_stream = on_stream
+        self._resume: dict[str, int] = {}
+        self._beyond_retention: set[str] = set()
         self._books: dict[str, deque[BookSnapshot]] = {s: deque(maxlen=_BOOK_HISTORY)
                                                        for s in config.symbols}
         # Per symbol: trades ordered by (mts, id), and the ids held (pruned with the rows).
@@ -112,6 +136,19 @@ class LiveMarketFeed:
                 return snapshot
         return None
 
+    def watermark_lag_seconds(self) -> dict[str, float | None]:
+        """Per symbol: seconds the event-time watermark trails now; None while unknown."""
+        now = self._clock_ms()
+        return {
+            symbol: None if (mark := self._complete.get(symbol)) is None
+            else max(now - mark, 0) / 1000
+            for symbol in self._config.symbols
+        }
+
+    def resume_from(self, through_ms: Mapping[str, int]) -> None:
+        """Seed the first backfill of each symbol from the venue's recorded `market_through`."""
+        self._resume = {s: t for s, t in through_ms.items() if s in self._trades}
+
     def has_books(self) -> bool:
         """Every configured symbol has at least one book in the buffer."""
         return all(self._books[s] for s in self._config.symbols)
@@ -123,11 +160,20 @@ class LiveMarketFeed:
         self._connected = True
         self._gap = set(self._config.symbols)
         self._retry_at.clear()
+        self._announce("connected")
 
     def stream_disconnected(self) -> None:
         """The watermark stops here; the next connection re-opens the gap of every symbol."""
         self._connected = False
         self._gap = set(self._config.symbols)
+        self._announce("disconnected")
+
+    def _announce(self, event: str) -> None:
+        if self._on_stream is not None:
+            try:
+                self._on_stream(event)
+            except Exception:
+                log.debug("simulated_venue_feed_stream_hook_failed", exc_info=True)
 
     def ingest(self, symbol: str, trades: Sequence[PublicTrade]) -> None:
         """Admit each trade once, by id (the stream's, and a backfill's, alike)."""
@@ -191,11 +237,24 @@ class LiveMarketFeed:
             # From the last instant proven complete (frozen since the stream dropped), not
             # from the newest trade held: live frames received during the gap are newer than
             # what the gap lost. What overlaps is admitted once, by id.
-            since = self._complete.get(symbol, started - self._config.backfill_ms)
-            fetched = await self._guarded(
-                f"trades {symbol}", self._fetch_trades(symbol, since))
-            if fetched is None:
+            since = self._complete.get(symbol)
+            if since is None:
+                since = self._first_backfill_start(symbol, started)
+
+            async def fetch(symbol: str = symbol, since: int = since) -> tuple[
+                    Sequence[PublicTrade], bool]:
+                try:
+                    return await self._fetch_trades(symbol, since), False
+                except TradesTruncated as partial:
+                    return partial.trades, True
+
+            result = await self._guarded(f"trades {symbol}", fetch())
+            if result is None:
                 self._retry_at[symbol] = self._monotonic() + self._config.backfill_retry_s
+                continue
+            fetched, truncated = result
+            if truncated:
+                self._keep_truncated(symbol, fetched, started)
                 continue
             self.ingest(symbol, fetched)
             self._prune(symbol, started)
@@ -205,6 +264,44 @@ class LiveMarketFeed:
             mark = started - self._config.watermark_lag_ms
             if mark > self._complete.get(symbol, -1):
                 self._complete[symbol] = mark
+
+    def _first_backfill_start(self, symbol: str, started_ms: int) -> int:
+        """Where a process with no watermark starts: the venue's recorded cursor when it has
+        one, else the fixed start-up window. A cursor older than the retention is not honoured
+        (nothing can serve it): the start is the retention floor and the loss is reported."""
+        resume = self._resume.get(symbol)
+        if resume is None:
+            return started_ms - self._config.backfill_ms
+        floor = started_ms - self._config.retention_ms
+        if resume < floor and symbol not in self._beyond_retention:
+            self._beyond_retention.add(symbol)
+            self._report("trades_beyond_retention")
+            log.error("simulated_venue_trades_beyond_retention symbol=%s resume_ms=%d floor_ms=%d",
+                      symbol, resume, floor)
+        return max(resume, floor)
+
+    def _keep_truncated(
+        self, symbol: str, fetched: Sequence[PublicTrade], started_ms: int,
+    ) -> None:
+        """Keep a partial answer; the watermark proves completeness only up to its newest trade
+        (less a millisecond: trades of that millisecond may be past the cut), the gap stays open."""
+        self.ingest(symbol, fetched)
+        self._prune(symbol, started_ms)
+        if fetched:
+            mark = max(t.mts for t in fetched) - 1
+            if mark > self._complete.get(symbol, -1):
+                self._complete[symbol] = mark
+        self._report("trades_truncated")
+        log.warning("simulated_venue_trades_backfill_truncated symbol=%s kept=%d",
+                    symbol, len(fetched))
+
+    def _report(self, source: str) -> None:
+        self.failures += 1
+        if self._on_failure is not None:
+            try:
+                self._on_failure(source)
+            except Exception:
+                log.debug("simulated_venue_feed_failure_hook_failed", exc_info=True)
 
     async def _guarded[T](self, what: str, call: Awaitable[T]) -> T | None:
         try:

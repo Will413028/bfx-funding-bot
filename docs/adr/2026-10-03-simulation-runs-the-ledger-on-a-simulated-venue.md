@@ -90,3 +90,27 @@ Will 已決定模擬要改接 ledger（同一套 ledger port 加模擬 venue）�
 
 - 來源：2026-10-03 唯讀 pre-flight 與獨立 critique（兩份 subagent 報告，未進 repo，結論與證據已收進本檔）；Will 2026-10-03 選定 D1–D3。
 - 取代 [2026-05-21-phase4.2-safety-harness-and-executor-port](2026-05-21-phase4.2-safety-harness-and-executor-port.md) D6（echo-only paper）；修正 [2026-05-18-phase4-staged-rollout-paper-shadow-canary](2026-05-18-phase4-staged-rollout-paper-shadow-canary.md) 的 testnet 約束；補充 [2026-09-28-ledger-journal-and-venue-mirror-replace-event-sourcing](2026-09-28-ledger-journal-and-venue-mirror-replace-event-sourcing.md) D7''。
+
+## Amendment (2026-10-04): D3 加入活動下限、整段視窗的故障注入與 kill／恢復流程
+
+### Amendment Context
+
+P2c 的 pre-flight（唯讀）發現 D3 草案有三個洞，Will 於 2026-10-04 逐項決定：
+
+- **空轉也能過。** 沒有 `trading_state` 列的 scope 是 HALTED，新 bootstrap 的 simulation DB 因此一筆都不送；D3 的五條都是「不出事」，閒置或停機的 bot 全部成立（A）。
+- **「注入的 UNKNOWN 全數自動結案」在 soak 裡做不出來。** 正式組裝不帶故障，注入又只存在行程記憶體，無法跨重啟，也分不出注入與自然發生的 UNKNOWN。
+- **operator kill 在 sim 裡收不回來。** `HALTED/operator` 只有 UI 的 MFA operator 流程能恢復，simulation DB 沒有 operator 身分；只做 kill 不恢復，就沒有 kill 之後的交易證據。
+
+### Amendment Decision
+
+- **活動下限（決定 C）：** D3 在原五條之外加上下限，數字在 soak 開始前固定，寫成 `backend/scripts/sim_soak_report.py` 的具名常數：視窗內 ≥ 50 筆 ack 的 submit、≥ 10 次成交、≥ 10 次撤單或 reprice、≥ 1 筆因到期結清的 credit，以及視窗內每個完整 UTC 日 ≥ 1 筆利息。改數字要修訂本 ADR。`bootstrap_simulation_db --activate` 只在 scope 沒有任何狀態列時追加 `ACTIVE`，從不覆蓋既有的 HALT。
+- **故障注入（決定 A）：** 整段視窗（不分階段）以低機率、固定種子注入故障：環境變數 `BFX_SIM_FAULTS`（例如 `unknown_5xx=0.01,unknown_placed_lost=0.005,history_error=0.005,seed=N`）在 simulated 組裝解析成 `FaultPlan`；Bitfinex 組裝見到它直接拒絕開機。故障只在行程內的 transport 發生，不會到 Bitfinex。機率規則以 `(seed, 規則, 目標, 請求 nonce)` 抽籤：venue 的 nonce 持久且只增不減，所以重啟不會重演舊的抽籤（行程內序號每次從 1 重數，不能當鍵）。每一次注入先以 `fault_injected` 事件（種類、目標、序號、nonce、時間；submit 另記 symbol、amount、rate、period）寫進 `sim_venue_event`，再生效，所以跨重啟存在。事件版本是**每個事件類型各自的**（既有類型維持 v1，`fault_injected` 自己從 v1 起算）：新增類型不動既有的 log，舊 reader 遇到未知類型直接拒絕。報告只靠 DB 區分注入與自然發生：submit 注入的內容（symbol、amount、rate、period）與某筆 UNKNOWN attempt 相同、時間落在該 attempt 的區間內、且尚未解釋其他 attempt，才算注入（bot 與 venue 同行程同時鐘，所以不留時間寬限）；其餘都是自然發生，計入第 3 條。第 5 條要求至少有一筆注入的 UNKNOWN，且每一筆（及其 quarantine）都自動結案。
+- **kill 與恢復（決定 B）：** 視窗第 24 到 48 小時之間做**一次** kill（`POST /admin/halt`）；維持 HALTED 至少一個 reconcile 週期，並刻意重啟同一個 digest 一次（HALTED 下開機）；之後由 owner 以 SQL 追加 `ACTIVE/operator`（actor `soak-orchestrator`）恢復，再交易 ≥ 24 小時且期間有 ack 的 submit。SQL 恢復是**測試 harness 的步驟，不是產品流程**（產品的恢復是 UI 的 MFA operator 路徑，或 `auto` 原因的自動恢復）；daemon 每次決策重讀 `trading_state`，不需重啟。D3 的「1 次 kill」改為「1 次 kill 且恢復後 ≥ 24 小時交易」。
+- **accepted cycle 的分母（決定 A 的後果）：** 時間範圍（query 開始到 observation 結束，沒有 observation 的到下一個 query 開始）內有 `history` 注入的 cycle，另列、不計入第 4 條的比例；閘門看的是其餘 cycle，所以注入的 `history_error` 本身不會讓這一條失敗。
+- **輔助護欄：** 模擬器內部失敗與 unexpected request 為 0：venue 把每一筆（有上限、盡力而為）append 成 `internal_failure_recorded`／`unexpected_request_recorded` 事件，報告從 DB 讀，跨重啟與當機都在，Prometheus 計數器只做即時監看。feed 的計數（trades WS 斷線、backfill 被截斷或超出保留期）只存在行程內，報告讀各代 `/metrics` 的存檔，缺少只讓該條 `UNAVAILABLE`，不當成 0；超出保留期而補不回的 trades 缺口為 FAIL，被截斷但已接續補完的只列出。`foreign_lending` 為 0（sim 沒有外來 actor）；重啟次數以 `execution_decisions.service_version` 計，出現 `unidentified` 即 FAIL。執行步驟在 [simulation-soak runbook](../runbooks/simulation-soak.md)。
+
+### Revocation Trigger
+
+- 活動下限的數字在前 24 小時的實際速率證明過高或過低 → 修訂本 ADR 並重新計 72 小時，不在視窗中途改報告常數。
+- `BFX_SIM_FAULTS` 在 prod 映像上可被環境變數打開是這個決定的代價：若出現 simulated 以外的組裝讀到它，或 Bitfinex 組裝不再拒絕它，撤回環境變數，改成只在測試注入。
+- S1-7 之後的回歸 soak 若要常駐（原 D3 的 revocation）→ 此流程改為常駐 service 的一部分。
