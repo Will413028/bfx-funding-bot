@@ -352,6 +352,7 @@ type = "forbidden"
 source_modules = [
     "bfx_funding_bot.apps.capital_comparison",
     "bfx_funding_bot.apps.capital_comparison_guard",
+    "bfx_funding_bot.apps.capital_comparison_inventory",
 ]
 forbidden_modules = ["bfx_funding_bot.core.settings"]
 allow_indirect_imports = true

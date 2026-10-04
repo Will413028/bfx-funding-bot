@@ -1,5 +1,9 @@
 """Dormant capital read: the latest query's accepted basis, its tail, and policy.
 
+Every statement names its columns (never a whole ORM row), so the cutover reader's
+column grants (``alembic/versions/*_cutover_reader_*``) are the exact set read here:
+no ``evidence``, ``normalized_payload`` or policy ``source``.
+
 Everything is read in the caller's one REPEATABLE READ READ ONLY transaction, so
 the basis, the tail and the clock come from one snapshot. Every statement is
 bounded by a key or by the basis:
@@ -28,10 +32,11 @@ applied where the basis compares venue stamps).
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from sqlalchemy import Select, select, text
+from sqlalchemy import Row, Select, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import CapitalReadRefused, LedgerCapitalRead, Scope
@@ -41,8 +46,6 @@ from bfx_funding_bot.modules.ledger._internal.attempts import (
     open_unknowns,
     tail_attempts,
 )
-from bfx_funding_bot.modules.ledger._internal.attempts import fresh_all as _all
-from bfx_funding_bot.modules.ledger._internal.attempts import payload_amount as _amount
 from bfx_funding_bot.modules.ledger._internal.clock import holds_scope_lock
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
@@ -56,6 +59,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     LedgerObservationQueryRow,
     LedgerObservationRow,
     QuarantineOpeningRow,
+    SubmissionAttemptJournalRow,
 )
 from bfx_funding_bot.modules.trading import (
     AcceptedCapitalBasis,
@@ -110,9 +114,19 @@ async def _require_locked_transaction(session: AsyncSession, scope: Scope) -> No
         raise CapitalReadRefused("locked capital read needs the scope's advisory lock")
 
 
-async def _one[T](session: AsyncSession, statement: Select[tuple[T]]) -> T | None:
-    rows = await _all(session, statement.limit(1))
+async def _rows(session: AsyncSession, statement: Select[Any]) -> list[Row[Any]]:
+    return list((await session.execute(statement)).all())
+
+
+async def _first(session: AsyncSession, statement: Select[Any]) -> Row[Any] | None:
+    rows = await _rows(session, statement.limit(1))
     return rows[0] if rows else None
+
+
+def _attempt_amount(row: SubmissionAttemptJournalRow) -> Decimal | None:
+    """The submitted amount from the generated ``intended_amount`` (the payload is not readable)."""
+    amount = row.intended_amount
+    return amount if amount is not None and amount.is_finite() and amount >= 0 else None
 
 
 def _blocked(value: Any) -> Blocked | None:
@@ -132,7 +146,7 @@ def _blocked(value: Any) -> Blocked | None:
     return Blocked(reasons[0]["reason"], evidence)
 
 
-def _symbol_block(row: AcceptedCapitalBasisSymbolRow) -> Blocked | None:
+def _symbol_block(row: Row[Any]) -> Blocked | None:
     """The symbol's refusal: unexplained lending leads, then its fact-level block.
 
     The verdict is stored with the basis and holds while that basis is the latest;
@@ -164,11 +178,20 @@ async def _policy(
             )
         )
     ).one_or_none()
-    row: CapitalPolicyRevisionRow | None = None
+    row: Row[Any] | None = None
     if head is not None:
-        row = await _one(
+        row = await _first(
             session,
-            select(CapitalPolicyRevisionRow).where(CapitalPolicyRevisionRow.id == head[0]),
+            select(
+                CapitalPolicyRevisionRow.id,
+                CapitalPolicyRevisionRow.exchange_account_id,
+                CapitalPolicyRevisionRow.deployment_environment,
+                CapitalPolicyRevisionRow.symbol,
+                CapitalPolicyRevisionRow.revision,
+                CapitalPolicyRevisionRow.schema_version,
+                CapitalPolicyRevisionRow.policy,
+                CapitalPolicyRevisionRow.digest,
+            ).where(CapitalPolicyRevisionRow.id == head[0]),
         )
     blocked = check_pointer(
         account,
@@ -201,7 +224,7 @@ async def read_policy(session: AsyncSession, scope: Scope, symbol: str) -> Appli
 
 
 def _context(
-    now_ms: int, max_age: int, query: LedgerObservationQueryRow | None, block: Blocked | None
+    now_ms: int, max_age: int, query: Row[Any] | None, block: Blocked | None
 ) -> CapitalReadContext:
     return CapitalReadContext(
         now_ms, max_age, _NO_QUERY if query is None else query.query_id, block
@@ -235,22 +258,26 @@ async def _read(
     account, environment = scope.account_id, scope.environment
     policy = await _policy(session, account, environment, scope.symbol)
 
-    query = await _one(
+    query = await _first(
         session,
-        select(LedgerObservationQueryRow)
+        select(LedgerObservationQueryRow.query_id, LedgerObservationQueryRow.started_at_ms)
         .where(
             LedgerObservationQueryRow.exchange_account_id == account,
             LedgerObservationQueryRow.deployment_environment == environment,
         )
         .order_by(LedgerObservationQueryRow.query_revision.desc()),
     )
-    observation: LedgerObservationRow | None = None
+    observation: Row[Any] | None = None
     if query is not None:
-        observation = await _one(
+        observation = await _first(
             session,
-            select(LedgerObservationRow).where(LedgerObservationRow.query_id == query.query_id),
+            select(
+                LedgerObservationRow.id,
+                LedgerObservationRow.accepted,
+                LedgerObservationRow.query_finished_at_ms,
+            ).where(LedgerObservationRow.query_id == query.query_id),
         )
-    basis: AcceptedCapitalBasisRow | None = None
+    basis: Row[Any] | None = None
     clock = await session.scalar(
         select(CapitalCommandClockRow.revision).where(
             CapitalCommandClockRow.exchange_account_id == account,
@@ -258,11 +285,14 @@ async def _read(
         )
     )
     if observation is not None and observation.accepted:
-        basis = await _one(
+        basis = await _first(
             session,
-            select(AcceptedCapitalBasisRow).where(
-                AcceptedCapitalBasisRow.observation_id == observation.id
-            ),
+            select(
+                AcceptedCapitalBasisRow.id,
+                AcceptedCapitalBasisRow.accept_revision,
+                AcceptedCapitalBasisRow.attempt_seq_high_water,
+                AcceptedCapitalBasisRow.scope_block,
+            ).where(AcceptedCapitalBasisRow.observation_id == observation.id),
         )
     if query is None or observation is None or basis is None:
         # The latest query has no accepted basis: an older basis is superseded.
@@ -298,45 +328,64 @@ async def _read(
             )
         )
 
-    symbol_row = await _one(
+    symbol_row = await _first(
         session,
-        select(AcceptedCapitalBasisSymbolRow).where(
+        select(
+            AcceptedCapitalBasisSymbolRow.symbol,
+            AcceptedCapitalBasisSymbolRow.available,
+            AcceptedCapitalBasisSymbolRow.offered,
+            AcceptedCapitalBasisSymbolRow.credits,
+            AcceptedCapitalBasisSymbolRow.unattributed_credits,
+            AcceptedCapitalBasisSymbolRow.foreign_offers,
+            AcceptedCapitalBasisSymbolRow.block,
+            AcceptedCapitalBasisSymbolRow.conservation,
+            AcceptedCapitalBasisSymbolRow.lent_unexplained,
+            AcceptedCapitalBasisSymbolRow.foreign_executed,
+            AcceptedCapitalBasisSymbolRow.fill_conflicts,
+        ).where(
             AcceptedCapitalBasisSymbolRow.basis_id == basis.id,
             AcceptedCapitalBasisSymbolRow.symbol == scope.symbol,
         ),
     )
-    cells = await _all(
+    cells = await _rows(
         session,
-        select(AcceptedCapitalBasisCellRow).where(
+        select(AcceptedCapitalBasisCellRow.cell_id, AcceptedCapitalBasisCellRow.amount).where(
             AcceptedCapitalBasisCellRow.basis_id == basis.id,
             AcceptedCapitalBasisCellRow.symbol == scope.symbol,
         ),
     )
-    classified = await _all(
+    classified = await _rows(
         session,
-        select(AcceptedCapitalBasisAttemptRow).where(
-            AcceptedCapitalBasisAttemptRow.basis_id == basis.id
-        ),
+        select(
+            AcceptedCapitalBasisAttemptRow.attempt_id,
+            AcceptedCapitalBasisAttemptRow.symbol,
+            AcceptedCapitalBasisAttemptRow.classification,
+        ).where(AcceptedCapitalBasisAttemptRow.basis_id == basis.id),
     )
-    listed = await _all(
+    listed = await _rows(
         session,
-        select(QuarantineOpeningRow)
+        select(QuarantineOpeningRow.quarantine_id, QuarantineOpeningRow.symbol)
         .join(
             AcceptedCapitalBasisQuarantineRow,
             AcceptedCapitalBasisQuarantineRow.quarantine_id == QuarantineOpeningRow.quarantine_id,
         )
         .where(AcceptedCapitalBasisQuarantineRow.basis_id == basis.id),
     )
-    later = await _all(
+    later = await _rows(
         session,
-        select(QuarantineOpeningRow).where(
+        select(QuarantineOpeningRow.quarantine_id, QuarantineOpeningRow.symbol).where(
             QuarantineOpeningRow.exchange_account_id == account,
             QuarantineOpeningRow.deployment_environment == environment,
             QuarantineOpeningRow.opened_revision > basis.accept_revision,
         ),
     )
     tail = await tail_attempts(
-        session, account, environment, basis.attempt_seq_high_water, limit=MAX_TAIL_ATTEMPTS + 1
+        session,
+        account,
+        environment,
+        basis.attempt_seq_high_water,
+        limit=MAX_TAIL_ATTEMPTS + 1,
+        with_payload=False,
     )
     if len(tail) > MAX_TAIL_ATTEMPTS:
         integrity.append(
@@ -368,7 +417,7 @@ async def _read(
 
     attempts: list[AttemptFact] = []
     for row in tail:
-        amount = _amount(row.normalized_payload)
+        amount = _attempt_amount(row)
         kind = outcomes.get(row.attempt_id)
         action = resolutions.get(row.attempt_id)
         if amount is None or (action is not None and kind != "unknown"):
@@ -432,7 +481,7 @@ async def _read(
     return LedgerCapitalRead(result, basis.id, query.query_id, clock)
 
 
-def _ids(rows: list[AcceptedCapitalBasisAttemptRow], classification: str) -> frozenset[UUID]:
+def _ids(rows: list[Row[Any]], classification: str) -> frozenset[UUID]:
     return frozenset(row.attempt_id for row in rows if row.classification == classification)
 
 

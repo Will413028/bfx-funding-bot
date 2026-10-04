@@ -174,12 +174,20 @@ def test_verdict_is_immutable_and_only_the_bot_writes_it(seeded) -> None:  # noq
         assert conn.scalar(text(f"SELECT conservation FROM {_TABLE} WHERE symbol = 'fBot'")) == (
             "conserved"
         )
+    # The capital comparison reads the verdict under the cutover reader (b5c6d7e8f9a0);
+    # the web API and auth roles still do not.
+    for column in _NEW:
+        assert seeded.connect().scalar(
+            text("SELECT has_column_privilege('bfx_cutover_reader', :t, :c, 'SELECT')"),
+            {"t": _TABLE, "c": column},
+        ), column
     for role in ("bfx_webapi", "bfx_webauth", "bfx_cutover_reader"):
         for column in _NEW:
-            assert not seeded.connect().scalar(
-                text("SELECT has_column_privilege(:r, :t, :c, 'SELECT')"),
-                {"r": role, "t": _TABLE, "c": column},
-            ), (role, column)
+            if role != "bfx_cutover_reader":
+                assert not seeded.connect().scalar(
+                    text("SELECT has_column_privilege(:r, :t, :c, 'SELECT')"),
+                    {"r": role, "t": _TABLE, "c": column},
+                ), (role, column)
         with pytest.raises(Exception, match="permission denied"), seeded.begin() as conn:
             conn.exec_driver_sql(f"SET LOCAL ROLE {role}")
             _insert(conn, "conserved", "0", "0", symbol="fNo")

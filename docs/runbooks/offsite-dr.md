@@ -729,7 +729,9 @@ Replace the example recovery target with the selected point; the launcher uses
 that instant as comparison `now_ms`. It refuses an image reference that differs
 from the deployed `bfx-bot` image and takes `--code-revision` from that pinned
 image's revision label. It creates a private restored database, disconnects its
-R2 egress, grants a per-run read-only comparison role on the restored copy, then
+R2 egress, creates a per-run LOGIN on the restored copy that is only a member of
+`bfx_cutover_reader` (the production shape: the tool does `SET LOCAL ROLE`, and the
+restored backup must already carry the reader's column grants), then
 runs the comparison in a hardened one-shot container on the internal DR network.
 No production prefix or stanza query is part of this mode. The existing monthly
 prefix test and heartbeat are separate.
@@ -744,8 +746,8 @@ under `$HOME/bfx/dr-evidence/capital-comparison-rehearsals/<run-id>/`:
   bytes (`cells_sha256`) alongside the pinned image and code revision.
 - `summary.json` is the comparison command's summary, including coverage,
   counts, and `inconclusive`.
-- `comparison.jsonl` contains the per-scope comparison records followed by the
-  command summary. It is present only when the command produced valid output.
+- `comparison.jsonl` contains the reverse scope inventory record, the per-scope
+  comparison records, then the command summary. It is present only when the command produced valid output.
 
 For the most recent run, inspect the final status before the command summary:
 

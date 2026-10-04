@@ -98,27 +98,66 @@ GRANT bfx_cutover_reader TO bfx_cutover_attest;
 \password bfx_cutover_attest
 ```
 
-以 `<owner>` 留存下列查詢結果；`bfx_cutover_attest` 與 `bfx_cutover_reader` 的
-`rolsuper`、`rolcreaterole`、`rolcreatedb`、`rolbypassrls` 都須為 false；群組
-`rolcanlogin=false`，LOGIN `rolinherit=false`：
+以 `<owner>` 留存下列查詢結果。`capital_comparison` 在每次執行開頭用 `SET LOCAL ROLE
+bfx_cutover_reader` 並自行檢查同一份清單（`apps/capital_comparison_guard.py`），任一項不符就以
+機器可讀的 reason 結束（exit 3）；operator 的 attestation 與工具是同一組檢查：
+
+1. `session_user` 是 manifest 的 LOGIN，`SET ROLE bfx_cutover_reader` 後 `current_user` 是群組
+   （`reader_role_unavailable`）。
+2. 從 LOGIN 沿 `pg_auth_members` 遞迴可達的 role 恰為 {LOGIN, 群組}（`role_closure_unexpected`）。
+3. 兩者的 `rolsuper`、`rolcreaterole`、`rolcreatedb`、`rolbypassrls`、`rolreplication` 都是 false
+   （`role_attribute_privileged`）；群組 `rolcanlogin=false`，LOGIN `rolinherit=false`。
+4. 可達 role 對 `public`、`archive`、`projection_audit` 的每個 relation（掃 `pg_class`，不用固定清單）
+   沒有 INSERT／UPDATE／DELETE／TRUNCATE（`table_write_privilege`），沒有任何欄位 INSERT／UPDATE
+   （`column_write_privilege`），對 sequence 沒有 USAGE／UPDATE（`sequence_privilege`）。
+5. 可達 role 不擁有任何 relation、function、schema（`owned_relation`／`owned_function`／`owned_schema`）。
+6. 可達 role 不能 EXECUTE 任何非 trigger 的 `SECURITY DEFINER` function
+   （`security_definer_executable`）。
+7. 未安裝 `dblink`、`postgres_fdw`（`forbidden_extension`）。
 
 ```sql
-SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls
+SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, rolreplication
   FROM pg_roles WHERE rolname IN ('bfx_cutover_attest', 'bfx_cutover_reader');
-SELECT pg_has_role('bfx_cutover_attest', 'bfx_cutover_reader', 'MEMBER') AS member;
+WITH RECURSIVE closure(oid) AS (
+  SELECT oid FROM pg_roles WHERE rolname = 'bfx_cutover_attest'
+  UNION SELECT m.roleid FROM pg_auth_members m JOIN closure c ON m.member = c.oid)
+SELECT r.rolname FROM closure c JOIN pg_roles r ON r.oid = c.oid ORDER BY 1;  -- 恰兩列
+-- 檢查 4～6 對每個可達 role 各跑一次（把 :role 換成兩個 role）：回傳列必須為空
+SELECT n.nspname, c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname IN ('public', 'archive', 'projection_audit')
+    AND ((c.relkind IN ('r','p','v','m','f')
+          AND (has_table_privilege(:'role', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE')
+               OR has_any_column_privilege(:'role', c.oid, 'INSERT,UPDATE')))
+         OR (c.relkind = 'S' AND has_sequence_privilege(:'role', c.oid, 'USAGE,UPDATE')));
+SELECT 'relation', relname::text FROM pg_class WHERE relowner = :'role'::regrole
+UNION ALL SELECT 'function', proname::text FROM pg_proc WHERE proowner = :'role'::regrole
+UNION ALL SELECT 'schema', nspname::text FROM pg_namespace WHERE nspowner = :'role'::regrole
+UNION ALL SELECT 'secdef', p.proname::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE p.prosecdef AND p.prorettype <> 'trigger'::regtype
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND has_function_privilege(:'role', p.oid, 'EXECUTE');
+SELECT extname FROM pg_extension WHERE extname IN ('dblink', 'postgres_fdw');  -- 空
+-- 群組只有欄位授權：table grants 必須為空；column grants 與下列清單完全一致
 SELECT table_name, privilege_type FROM information_schema.role_table_grants
   WHERE grantee = 'bfx_cutover_reader' AND table_schema = 'public' ORDER BY table_name, privilege_type;
 SELECT table_name, column_name, privilege_type FROM information_schema.role_column_grants
   WHERE grantee = 'bfx_cutover_reader' AND table_schema = 'public'
   ORDER BY table_name, column_name, privilege_type;
-SELECT n.nspname, p.proname, p.prosecdef,
-       has_function_privilege('bfx_cutover_attest', p.oid, 'EXECUTE') AS login_can_execute
-  FROM pg_proc p
-  JOIN pg_namespace n ON n.oid = p.pronamespace
-  WHERE n.nspname = 'public' AND p.prosecdef ORDER BY p.proname;
 ```
 
-群組的 table grants 應為空；column grants 應與 ledger migrations 的 `_READER_COLUMNS` 清單合併後完全一致。
+群組的 table grants 應為空；column grants 應與 ledger migrations 的 `_READER_COLUMNS` 清單，加上
+`b5c6d7e8f9a0`（`apps/capital_comparison` 的讀取，下列）合併後完全一致，全部只有 SELECT：
+
+- legacy 十張表 `event_log`、`event_prefix_hashes`、`capital_policy_heads`、`capital_policy_revisions`、
+  `capital_snapshots`、`capital_snapshot_queries`、`execution_decisions`、`projection_heads`、
+  `submission_attempts`、`execution_uncertainties`：baseline 讀整列，所以是 ORM 全部欄位。
+- inventory 掃描欄位：`offer_claims`（scope、`state`、`symbol`）、`trading_state`（scope）、
+  `uncertainty_resolution_requests`／`capital_policy_requests`／`trading_control_requests`（scope、`state`）。
+- ledger 讀取補充：`accepted_capital_basis_symbol` 的 `conservation`、`lent_unexplained`、
+  `foreign_executed`、`fill_conflicts`；`submission_attempt_journal.intended_amount`
+  （`normalized_payload` 與 `authorization_evidence` 仍不可讀）。
+
+其餘 ledger 欄位維持原 allowlist：
 其中 `ledger_observation_query` 可讀 `query_id`、`exchange_account_id`、
 `deployment_environment`、`query_revision`、
 `started_at_ms`、`start_revision`；`ledger_observation` 可讀 `query_id`、
@@ -126,7 +165,6 @@ SELECT n.nspname, p.proname, p.prosecdef,
 `accepted_capital_basis` 可讀 `observation_id`、`accept_revision`、`attempt_seq_high_water`、`scope_block`（不再有 `policy_revision_id`、`authorization_block`、`credit_cells_present`）；`accepted_capital_basis_symbol` 可讀 `block`；`submission_attempt_journal` 可讀 `cell_id`；`ledger_observation` 可讀 `trades_complete` 與 trade 請求範圍；`ledger_observation_wallet` 可讀 `symbol`；
 `quarantine_member` 可讀 `source_kind`、`venue_object_id`；`quarantine_opening` 可讀 `opened_revision`、`source_attempt_id`，
 `accepted_capital_basis_credit`、`accepted_capital_basis_credit_cell`、`ledger_observation_trade` 與 `capital_authority_epoch` 的所有欄位可讀。
-檢查 `SECURITY DEFINER` 函式清單，確認 LOGIN 沒有可藉以寫入 ledger 的 EXECUTE 權限。
 接著以 LOGIN 連線，在 **read-write transaction** 執行以下拒絕檢查；每個預期失敗的
 statement 都各自開新 transaction，避免前一個錯誤使後續 statement 自動失敗：
 

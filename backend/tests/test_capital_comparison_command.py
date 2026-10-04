@@ -11,7 +11,8 @@ from uuid import UUID
 import pytest
 
 from bfx_funding_bot.apps import capital_comparison as command
-from bfx_funding_bot.apps.capital_comparison_guard import validate_connection
+from bfx_funding_bot.apps.capital_comparison_guard import READER_ROLE, validate_connection
+from bfx_funding_bot.apps.capital_comparison_inventory import InventoryResult
 from bfx_funding_bot.modules.trading import Blocked, CapitalScope
 from bfx_funding_bot.modules.trading_shadow import ComparisonHeads, ShadowComparison
 
@@ -94,10 +95,18 @@ async def test_guard_rejection_never_connects(arguments, fault):
     assert "secret" not in output.getvalue() and "postgresql" not in output.getvalue()
 
 
+_SCAN_REASONS = (
+    "table_write_privilege", "column_write_privilege", "sequence_privilege", "owned_relation",
+    "owned_function", "owned_schema", "security_definer_executable", "forbidden_extension",
+)
+
+
 class Session:
-    def __init__(self, identity=("reader", "copy", "repeatable read", "on"), writable=False):
+    """Answers the attestation queries as a healthy reader session unless a fault is set."""
+
+    def __init__(self, identity=("reader", "copy", "repeatable read", "on"), fault=None):
         self.identity = identity
-        self.writable = writable
+        self.fault = fault
         self.statements = []
 
     async def __aenter__(self):
@@ -112,18 +121,55 @@ class Session:
     async def execute(self, query, params=None):
         sql = str(query)
         self.statements.append(sql)
-        if "current_user" in sql:
+        if "session_user, current_database()" in sql:
             return SimpleNamespace(one=lambda: self.identity)
+        if "FROM closure c JOIN pg_roles" in sql:
+            attributes = (self.fault == "attribute",) + (False,) * 4
+            rows = [("reader", *attributes), (READER_ROLE, *((False,) * 5))]
+            if self.fault == "closure":
+                rows.append(("bfx_bot", *((False,) * 5)))
+            return SimpleNamespace(all=lambda: rows)
         if "capital_policy_heads" in sql:
             return SimpleNamespace(first=lambda: (1, UUID(ACCOUNT)))
         return None
 
     async def scalar(self, query, params=None):
-        self.statements.append(str(query))
-        return self.writable
+        sql = str(query)
+        self.statements.append(sql)
+        if "SELECT current_user" in sql:
+            return "reader" if self.fault == "role_switch" else READER_ROLE
+        return None
+
+    async def scalars(self, query, params=None):
+        sql = str(query)
+        self.statements.append(sql)
+        found = ["public.x"] if self.fault == _fault_for(sql) else []
+        return SimpleNamespace(all=lambda: found)
 
     async def begin_nested(self):
         return SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+
+def _fault_for(sql):
+    markers = {
+        "has_table_privilege": "table_write_privilege",
+        "has_any_column_privilege": "column_write_privilege",
+        "has_sequence_privilege": "sequence_privilege",
+        "c.relowner": "owned_relation",
+        "p.proowner": "owned_function",
+        "n.nspowner": "owned_schema",
+        "prosecdef": "security_definer_executable",
+        "pg_extension": "forbidden_extension",
+    }
+    return next((reason for marker, reason in markers.items() if marker in sql), None)
+
+
+@pytest.fixture(autouse=True)
+def clean_inventory(monkeypatch):
+    async def inventory(session, *, scopes, policy_without_cell):
+        return InventoryResult("ok", ())
+
+    monkeypatch.setattr(command, "reverse_inventory", inventory)
 
 
 def comparison(status="equal", reason=None):
@@ -132,12 +178,24 @@ def comparison(status="equal", reason=None):
                             False, None, ComparisonHeads(), None)
 
 
-@pytest.mark.parametrize("fault", ["user", "database", "isolation", "readonly", "privilege"])
+_ATTESTATION_FAULTS = {
+    "user": "connection_attestation_failed",
+    "database": "connection_attestation_failed",
+    "isolation": "connection_attestation_failed",
+    "readonly": "connection_attestation_failed",
+    "role_switch": "reader_role_unavailable",
+    "closure": "role_closure_unexpected",
+    "attribute": "role_attribute_privileged",
+    **{reason: reason for reason in _SCAN_REASONS},
+}
+
+
+@pytest.mark.parametrize("fault", list(_ATTESTATION_FAULTS))
 async def test_post_connect_refusal_precedes_business_queries(arguments, monkeypatch, fault):
     identity = ["reader", "copy", "repeatable read", "on"]
-    if fault != "privilege":
+    if fault in {"user", "database", "isolation", "readonly"}:
         identity[["user", "database", "isolation", "readonly"].index(fault)] = "wrong"
-    session = Session(tuple(identity), fault == "privilege")
+    session = Session(tuple(identity), fault)
     monkeypatch.setattr(command, "AsyncSession", lambda *a, **kw: session)
     attempts = []
 
@@ -145,8 +203,10 @@ async def test_post_connect_refusal_precedes_business_queries(arguments, monkeyp
         attempts.append(plan)
         return SimpleNamespace(dispose=AsyncMock())
 
-    assert await command.run(arguments, output=io.StringIO(), connector=connector) == 3
+    output = io.StringIO()
+    assert await command.run(arguments, output=output, connector=connector) == 3
     assert len(attempts) == 1  # Actual identity/ACL cannot be checked before a connection.
+    assert json.loads(output.getvalue())["reason"] == _ATTESTATION_FAULTS[fault]
     assert not any("FROM public.capital_policy_heads" in sql for sql in session.statements)
 
 
@@ -164,7 +224,8 @@ async def test_run_jsonl_and_exit(arguments, monkeypatch, status, reason, exit_c
     assert await command.run(arguments, output=output,
                              connector=lambda plan: SimpleNamespace(dispose=AsyncMock())) == exit_code
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert len(rows) == 3
+    assert len(rows) == 4
+    assert rows.pop(0)["kind"] == "inventory"
     assert rows[-1]["coverage_complete"] is True
     assert rows[-1]["expected_scopes"] == rows[-1]["emitted_scopes"] == 2
     assert {row["scope"]["cell_id"] for row in rows[:-1]} == {"fUST_a30", "fUST_p2"}
@@ -195,11 +256,35 @@ async def test_output_and_connection_errors_are_sanitized(arguments, monkeypatch
 
 def test_summary_empty_missing_duplicate_and_mixed():
     scope = CapitalScope(UUID(ACCOUNT), "ci", "fUST", "fUST_a30")
-    assert command.summarize([], [])["exit_code"] == 1
-    assert command.summarize([scope], [])["exit_code"] == 1
-    assert command.summarize([scope, scope], [comparison(), comparison()])["exit_code"] == 1
+    ok = InventoryResult("ok", ())
+    assert command.summarize([], [], inventory=ok)["exit_code"] == 1
+    assert command.summarize([scope], [], inventory=ok)["exit_code"] == 1
+    assert command.summarize([scope, scope], [comparison(), comparison()], inventory=ok)["exit_code"] == 1
     assert command.summarize([scope, replace(scope, cell_id="fUST_p2")],
-                             [comparison(), comparison(reason="snapshot_stale")])["exit_code"] == 0
+                             [comparison(), comparison(reason="snapshot_stale")],
+                             inventory=ok)["exit_code"] == 0
+    violated = InventoryResult("not_comparable", ({"reason": "scope_unlisted"},))
+    both = [scope, replace(scope, cell_id="fUST_p2")]
+    summary = command.summarize(both, [comparison(), comparison()], inventory=violated)
+    assert (summary["exit_code"], summary["inventory_status"]) == (1, "not_comparable")
+
+
+async def test_inventory_violation_is_emitted_and_fails_the_run(arguments, monkeypatch):
+    violation = {"reason": "scope_unlisted", "table": "trading_state"}
+
+    async def inventory(session, *, scopes, policy_without_cell):
+        return InventoryResult("not_comparable", (violation,))
+
+    monkeypatch.setattr(command, "reverse_inventory", inventory)
+    monkeypatch.setattr(command, "AsyncSession", lambda *a, **kw: Session())
+    monkeypatch.setattr(command, "build_capital_comparator", lambda **kw: AsyncMock(return_value=comparison()))
+    output = io.StringIO()
+    assert await command.run(arguments, output=output,
+                             connector=lambda plan: SimpleNamespace(dispose=AsyncMock())) == 1
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[0] == {"kind": "inventory", "status": "not_comparable", "violations": [violation],
+                       "provenance": rows[0]["provenance"]}
+    assert rows[-1]["inventory_status"] == "not_comparable"
 
 
 def test_cutover_separate_manifest_actual_clock(arguments, tmp_path):
@@ -228,7 +313,7 @@ async def test_missing_policy_is_not_dropped(arguments, monkeypatch):
     output = io.StringIO()
     assert await command.run(arguments, output=output,
                              connector=lambda plan: SimpleNamespace(dispose=AsyncMock())) == 1
-    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    rows = [json.loads(line) for line in output.getvalue().splitlines()][1:]
     assert [row["status"] for row in rows[:-1]] == ["not_comparable", "not_comparable"]
     assert all(row["reason"] == "policy_missing" and row["evidence"] for row in rows[:-1])
     comparator.assert_not_called()
@@ -251,7 +336,7 @@ async def test_scope_error_rolls_back_savepoint_and_continues(arguments, monkeyp
     assert await command.run(arguments, output=output,
                              connector=lambda plan: SimpleNamespace(dispose=AsyncMock())) == 1
     assert "secret" not in output.getvalue()
-    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    rows = [json.loads(line) for line in output.getvalue().splitlines()][1:]
     assert [row["status"] for row in rows[:-1]] == ["error", "equal"]
     savepoints[0].rollback.assert_awaited_once()
     savepoints[1].commit.assert_awaited_once()
@@ -267,7 +352,7 @@ async def test_empty_cells_inconclusive_and_allowlist_duplicates_deduplicated(ar
     output = io.StringIO()
     assert await command.run(arguments, output=output,
                              connector=lambda plan: SimpleNamespace(dispose=AsyncMock())) == 1
-    assert json.loads(output.getvalue())["inconclusive"] is True
+    assert json.loads(output.getvalue().splitlines()[-1])["inconclusive"] is True
 
 
 async def test_cleanup_failure_has_no_success_summary(arguments, monkeypatch):

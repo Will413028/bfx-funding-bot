@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from dataclasses import replace
@@ -202,11 +203,11 @@ def test_rehearsal_uses_only_restored_copy_and_hardened_comparison(
     grant_command, grant_sql = next(item for item in runner.sql if "CREATE ROLE" in item[1])
     assert grant_command[5] == f"bfx-dr-{RESOURCE_ID}-db"
     assert grant_command in before
-    for table in (
-        "capital_policy_heads", "capital_policy_revisions", "capital_snapshots",
-        "capital_snapshot_queries", "execution_decisions", "event_prefix_hashes",
-    ):
-        assert f'public."{table}"' in grant_sql
+    # Production shape: a LOGIN member of the reader group (the tool does SET LOCAL ROLE),
+    # not table-level legacy grants.
+    assert re.search(r'GRANT bfx_cutover_reader TO "bfx_dr_[a-z0-9_]+";', grant_sql)
+    assert "GRANT SELECT" not in grant_sql
+    assert 'public."' not in grant_sql
     assert all("pgbackrest" not in command and "bfx-postgres" not in command
                for command in runner.commands)
     _assert_cleaned(runner)
