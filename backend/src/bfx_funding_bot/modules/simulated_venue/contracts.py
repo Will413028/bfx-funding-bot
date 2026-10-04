@@ -151,13 +151,14 @@ HistoryField = Literal["create", "update"]
 class HistoryFilter:
     """Which timestamp each `/hist` stream filters and pages on.
 
-    Bitfinex does not document this. Defaults are the client's assumption
-    (offers by MTS_CREATE, credits and loans by MTS_UPDATE; trades have a single
-    timestamp); tests also run the inverse to see whether the ledger stays sound
-    or fails closed.
+    Bitfinex does not document this. A read-only probe of the live account
+    (2026-10-04) showed that offers filter on MTS_UPDATE and that credits are
+    consistent with MTS_UPDATE too (trades have a single timestamp), so those are the
+    defaults. Tests also run offers by MTS_CREATE to show the ledger does not depend on
+    the field.
     """
 
-    offers: HistoryField = "create"
+    offers: HistoryField = "update"
     credits: HistoryField = "update"
     loans: HistoryField = "update"
 

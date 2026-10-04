@@ -19,6 +19,7 @@ row also stores its conservation verdict against the previous accepted basis
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -31,14 +32,18 @@ from sqlalchemy.orm import load_only
 
 from bfx_funding_bot.core.venue_time import HISTORY_QUERY_MARGIN_MS, VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.modules.ledger import JsonObject, Quarantine, Scope
-from bfx_funding_bot.modules.ledger._internal import history_symbols
-from bfx_funding_bot.modules.ledger._internal.conservation_facts import symbol_verdicts
+from bfx_funding_bot.modules.ledger._internal import history_symbols, unconfirmed_ends
+from bfx_funding_bot.modules.ledger._internal.conservation_facts import (
+    OfferEndOutcome,
+    symbol_verdicts,
+)
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
 from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance, sole_owner
 from bfx_funding_bot.modules.ledger._internal.quarantine import (
     open_quarantine,
     unresolved_quarantines,
 )
+from bfx_funding_bot.modules.ledger.conservation import ConservationVerdict
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisCellRow,
@@ -60,7 +65,9 @@ from bfx_funding_bot.modules.ledger.tables import (
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
 )
+from bfx_funding_bot.modules.observability import alerts
 
+log = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
 ZERO = Decimal(0)
 
@@ -203,7 +210,11 @@ async def previous_basis(session: AsyncSession, scope: Scope) -> AcceptedCapital
 
 
 async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID) -> UUID:
-    """Classify the just-accepted observation and write its basis in this transaction."""
+    """Classify the just-accepted observation and write its basis in this transaction.
+
+    Every input is a stored row of the observation, its evidence included (the port's
+    ``history_symbols`` and ``unconfirmed_offer_ends``): the basis is recomputable from them.
+    """
     observation = await session.get(LedgerObservationRow, observation_id)
     if observation is None or not observation.accepted:
         raise ValueError("basis requires an accepted observation")
@@ -591,7 +602,7 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         row.quarantine_id for row in await unresolved_quarantines(session, scope, previous)
     )
 
-    verdicts = await symbol_verdicts(
+    verdicts, end_outcomes = await symbol_verdicts(
         session,
         previous=previous,
         observation=observation,
@@ -605,6 +616,7 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         trades=trade_rows,
         provenance=c.provenance,
         quarantines=quarantines,
+        unconfirmed_ends=unconfirmed_ends.decode(observation.evidence),
     )
     scope_block = _block_json(c.scope_reasons)
     payload: JsonObject = {
@@ -723,7 +735,27 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 )
             )
     await session.flush()
+    _report_end_outcomes(end_outcomes, verdicts, observation_id)
     return basis_id
+
+
+def _report_end_outcomes(
+    outcomes: list[OfferEndOutcome], verdicts: dict[str, ConservationVerdict], observation_id: UUID,
+) -> None:
+    """After the verdict, so the signal says what became of each unconfirmed end (the
+    re-evaluation trigger "trades cannot decide, repeatedly" is this count)."""
+    for item in outcomes:
+        verdict = verdicts[item.symbol].conservation if item.symbol in verdicts else "unjudged"
+        log.warning(
+            "offer_end_judged offer=%s symbol=%s outcome=%s filled=%s verdict=%s observation=%s",
+            item.venue_offer_id, item.symbol, item.outcome, item.filled, verdict, observation_id,
+        )
+        alerts.emit(
+            alerts.OFFER_END_JUDGED,
+            level=alerts.INFO if item.outcome == "explained" else alerts.WARNING,
+            symbol=item.symbol, venue_offer_id=item.venue_offer_id, outcome=item.outcome,
+            filled=None if item.filled is None else str(item.filled), verdict=verdict,
+        )
 
 
 def _trades_cover(anchor_ms: int, observation: LedgerObservationRow) -> bool:

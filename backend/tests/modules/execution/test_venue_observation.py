@@ -21,6 +21,7 @@ from bfx_funding_bot.external.bitfinex.observations import (
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.venue_observation import (
     HISTORY_INCOMPLETE_ALERT,
+    OFFER_END_GRACE_MS,
     BitfinexVenueObservation,
     normalize_credit,
     normalize_credit_history,
@@ -28,7 +29,7 @@ from bfx_funding_bot.modules.execution.venue_observation import (
     normalize_offer_history,
     normalize_wallet,
 )
-from bfx_funding_bot.modules.ledger import ObservationWindow, Scope, VenueObservation
+from bfx_funding_bot.modules.ledger import LiveOffer, ObservationWindow, Scope, VenueObservation
 from bfx_funding_bot.modules.observability import alerts
 
 SCOPE = Scope(UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"), "test")
@@ -64,7 +65,8 @@ def test_active_offer_status_table(status: str, expected: str) -> None:
     assert result.amount_original == Decimal("10.30000000000000004")
     assert result.rate == Decimal("0.00030000000000000004")
     assert result.offer_type == "LIMIT" and result.flags == 64 and result.rate_observed
-    assert result.raw["row"] == list(row.raw)
+    assert result.raw["row"][4] == "-4.30000000000000004"  # exact digits, as a string
+    json.dumps(result.raw)  # JSON-safe: nothing for the ledger to convert
     assert result.mts_created == 950_000 and result.mts_updated == 999_900
 
 
@@ -96,7 +98,8 @@ def test_credit_history_closed_status_table(status: str, source_kind: Any) -> No
     assert result.credit.source_kind == source_kind and result.credit.venue_credit_id == "20"
     assert result.credit.mts_opening == 800_000 and result.occurred_at_ms == 999_800
     assert result.credit.amount == Decimal("6.00000000000000004")
-    assert result.credit.raw["row"] == list(row.raw)
+    json.dumps(result.credit.raw)
+    assert result.credit.raw["row"][5] == "-6.00000000000000004"
 
 
 @pytest.mark.parametrize("source_kind", ["credit", "loan"])
@@ -154,7 +157,13 @@ class Venue:
             if response is not None:
                 return response
         if path.endswith("/hist"):
-            rows = self.history[path.split("/")[1]]
+            kind = path.split("/")[1]
+            rows = self.history[kind]
+            if kind == "offers" and "id" in body:  # by id (probed 2026-10-04): no time filter
+                rows = [row for row in rows if row[0] in body["id"]]
+            elif kind in ("offers", "credits"):  # the venue filters on MTS_UPDATE
+                stamp = {"offers": 3, "credits": 4}[kind]
+                rows = [row for row in rows if body["start"] <= row[stamp] <= body["end"]]
             # Use the requested symbol; four independent fixtures need not
             # duplicate the same shape. Venue timestamps remain unchanged.
             rows = [[row[0], path.split("/")[2], *row[2:]] for row in rows]
@@ -401,3 +410,249 @@ def test_credit_history_rejects_non_closed_status(status: str) -> None:
     with pytest.raises(ValueError, match="history status"):
         normalize_credit_history(row)
 
+
+
+# --- F2: offers that vanished from the active list are looked up by id -------------------
+
+def _live(*ids: int, symbol: str = "fUST") -> tuple[LiveOffer, ...]:
+    return tuple(LiveOffer(str(i), symbol) for i in ids)
+
+
+def _vanish_window(*ids: int, symbol: str = "fUST") -> ObservationWindow:
+    return ObservationWindow(None, 970_000, 910_000, frozenset(), _live(*ids, symbol=symbol))
+
+
+def _by_id_requests(venue: Venue) -> list[dict[str, Any]]:
+    return [body for path, body in venue.requests if path.endswith("/hist") and "id" in body]
+
+
+def _ended(row_id: int, status: str = "CANCELED", *, created: int = 100, updated: int = 999_000,
+           symbol: str = "fUST") -> list[Any]:
+    row = offer_row(status, symbol=symbol, row_id=row_id)
+    row[2], row[3] = created, updated
+    return row
+
+
+async def test_a_vanished_old_offer_is_fetched_by_id_without_widening_the_window() -> None:
+    venue = Venue()
+    venue.active["funding/offers"] = []
+    venue.history["offers"] = [_ended(77, updated=500)]  # ended long before any window
+    first, _, _ = await observe(venue, window=_vanish_window(77))
+    assert _by_id_requests(venue) == [{"id": [77], "limit": 25}]
+    assert [item.offer.venue_offer_id for item in first.offer_history] == ["77"]
+    assert first.offer_history[0].terminal_kind == "canceled"
+    assert first.coverage.offer_history_complete
+    # R-e and R6 keep their range: no widening, shared by every history stream.
+    assert first.coverage.history_requested_start_ms == 910_000
+    windowed = [body for path, body in venue.requests
+                if path.endswith("/hist") and "id" not in body and "trades" not in path]
+    assert windowed and all(body["start"] == 910_000 for body in windowed)
+
+
+async def test_a_vanished_offer_also_seen_in_the_window_appears_once() -> None:
+    venue = Venue()
+    venue.active["funding/offers"] = []
+    venue.history["offers"] = [_ended(77, updated=999_900)]  # in window too
+    first, _, _ = await observe(venue, window=_vanish_window(77))
+    assert [item.offer.venue_offer_id for item in first.offer_history] == ["77"]
+
+
+async def test_a_still_active_offer_is_not_looked_up() -> None:
+    venue = Venue()  # offer 10 is active
+    first, _, _ = await observe(venue, window=_vanish_window(10))
+    assert _by_id_requests(venue) == [] and first.coverage.complete
+
+
+async def test_a_vanished_id_the_venue_does_not_return_is_incomplete(monkeypatch: Any) -> None:
+    venue = Venue()
+    venue.active["funding/offers"] = []
+    venue.history["offers"] = [_ended(77)]
+    emitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(alerts, "emit", lambda _, **fields: emitted.append(fields))
+    first, _, _ = await observe(venue, window=_vanish_window(77, 78))
+    assert [item.offer.venue_offer_id for item in first.offer_history] == ["77"]
+    assert not first.coverage.offer_history_complete and not first.coverage.complete
+    assert first.coverage.credit_history_complete  # per stream, not a blanket flag
+    assert [(f["stream"], f["reason"]) for f in emitted] == [
+        ("offers_by_id", "not_returned")]
+
+
+async def test_a_vanished_id_returned_non_terminal_is_incomplete() -> None:
+    venue = Venue()
+    venue.active["funding/offers"] = []
+    venue.history["offers"] = [_ended(77, "ACTIVE")]
+    first, _, _ = await observe(venue, window=_vanish_window(77))
+    assert first.offer_history == () and not first.coverage.offer_history_complete
+
+
+async def test_by_id_failure_is_incomplete_not_an_error() -> None:
+    venue = Venue()
+    venue.active["funding/offers"] = []
+    venue.override = lambda _, body: httpx.Response(500, text="boom") if "id" in body else None
+    first, confirmation, _ = await observe(venue, window=_vanish_window(77))
+    assert not first.coverage.offer_history_complete and confirmation.coverage.active_complete
+
+
+async def test_vanished_ids_are_batched_per_symbol_and_counted() -> None:
+    venue = Venue()
+    venue.active["funding/offers"] = []
+    ids = list(range(1000, 1030))
+    venue.history["offers"] = [_ended(i, updated=500) for i in ids]
+    window = ObservationWindow(None, 970_000, 910_000, frozenset(),
+                               (*_live(*ids), LiveOffer("9", "fUSD")))
+    first, _, _ = await observe(venue, window=window)
+    assert sorted(len(body["id"]) for body in _by_id_requests(venue)) == [1, 5, 25]
+    assert {path for path, body in venue.requests if "id" in body} == {
+        "funding/offers/fUST/hist", "funding/offers/fUSD/hist"}
+    assert not first.coverage.offer_history_complete  # fUSD offer 9 is not in the fixture rows
+    assert len([i for i in first.offer_history if i.offer.symbol == "fUST"]) == 30
+    assert first.coverage.history_symbols == frozenset({"fUST", "fUSD"})  # G1: declared
+
+
+async def test_by_id_requests_draw_on_the_shared_budget(monkeypatch: Any) -> None:
+    venue = Venue()
+    venue.active["funding/offers"] = []
+    venue.history["offers"] = [_ended(77, updated=500)]
+    monkeypatch.setattr(alerts, "emit", lambda *_, **__: None)
+    # 4 active + offers window + one by-id = 6 slots; credits, loans, trades starve.
+    first, confirmation, _ = await observe(venue, window=_vanish_window(77), request_cap=10)
+    assert len(_by_id_requests(venue)) == 1 and first.coverage.offer_history_complete
+    assert not first.coverage.credit_history_complete and confirmation.coverage.active_complete
+
+
+# --- C+E: grace for an id the venue does not return, then an unconfirmed end ------------------
+
+async def _cycles(venue: Venue, windows: list[ObservationWindow], *, gaps: list[int],
+                  restart_before: frozenset[int] = frozenset(), request_cap: int = 48) -> list[Any]:
+    """Run observations on one port (a process), advancing the clock by ``gaps`` between them."""
+    out: list[Any] = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(venue.handler)) as http:
+        def make() -> BitfinexVenueObservation:
+            return BitfinexVenueObservation(
+                rest=BitfinexAuthREST(http=http), ctx=CTX, scope=SCOPE, clock_ms=lambda: venue.now,
+                request_cap=request_cap)
+
+        port = make()
+        for i, window in enumerate(windows):
+            if i in restart_before:
+                port = make()
+            venue.now += gaps[i]
+            out.append((await port.observe(SCOPE, venue.now, window))[0])
+    return out
+
+
+def _missing_venue() -> Venue:
+    venue = Venue()
+    venue.active["funding/offers"] = []
+    venue.history["offers"] = []  # the venue does not know offer 77
+    return venue
+
+
+async def test_within_the_grace_a_missing_id_stays_incomplete_then_is_unconfirmed(monkeypatch: Any) -> None:
+    emitted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(alerts, "emit", lambda event, **fields: emitted.append((event, fields)))
+    venue = _missing_venue()
+    window = _vanish_window(77)
+    first, second, third = await _cycles(
+        venue, [window] * 3, gaps=[0, OFFER_END_GRACE_MS - 5_000, 10_000])
+    assert not first.coverage.offer_history_complete and first.unconfirmed_ends == ()
+    assert not second.coverage.offer_history_complete and second.unconfirmed_ends == ()  # not yet 120 s
+    assert third.coverage.offer_history_complete and third.coverage.complete
+    assert third.unconfirmed_ends == ("77",) and third.offer_history == ()  # nothing made up
+    ours = [f for event, f in emitted if event == alerts.OFFER_END_UNCONFIRMED]
+    assert len(ours) == 1 and ours[0]["venue_offer_id"] == "77" and ours[0]["symbol"] == "fUST"
+
+
+async def test_by_id_is_retried_each_cycle_while_the_grace_runs() -> None:
+    venue = _missing_venue()
+    first, second = await _cycles(venue, [_vanish_window(77)] * 2, gaps=[0, 30_000])
+    assert not first.coverage.offer_history_complete and not second.coverage.offer_history_complete
+    assert len(_by_id_requests(venue)) == 2
+
+
+async def test_a_restart_starts_a_new_grace() -> None:
+    venue = _missing_venue()
+    window = _vanish_window(77)
+    _, second, third = await _cycles(
+        venue, [window] * 3, gaps=[0, OFFER_END_GRACE_MS + 10_000, OFFER_END_GRACE_MS + 10_000],
+        restart_before=frozenset({1}))
+    assert not second.coverage.offer_history_complete and second.unconfirmed_ends == ()
+    assert third.unconfirmed_ends == ("77",)  # the restarted process, past its own grace
+
+
+async def test_an_id_that_shows_up_resets_its_grace_and_is_not_unconfirmed() -> None:
+    venue = _missing_venue()
+    window = _vanish_window(77)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(venue.handler)) as http:
+        port = BitfinexVenueObservation(
+            rest=BitfinexAuthREST(http=http), ctx=CTX, scope=SCOPE, clock_ms=lambda: venue.now)
+        first = (await port.observe(SCOPE, venue.now, window))[0]
+        venue.history["offers"] = [_ended(77)]  # the lag is over
+        venue.now += 30_000
+        second = (await port.observe(SCOPE, venue.now, window))[0]
+        venue.history["offers"] = []
+        venue.now += OFFER_END_GRACE_MS + 10_000  # long after the first sighting
+        third = (await port.observe(SCOPE, venue.now, window))[0]
+    assert not first.coverage.offer_history_complete
+    assert second.coverage.offer_history_complete and second.unconfirmed_ends == ()
+    assert [i.offer.venue_offer_id for i in second.offer_history] == ["77"]
+    assert not third.coverage.offer_history_complete  # a new sighting, a new grace
+
+
+CAUSES = ("not_returned", "request_failed", "cap_exhausted", "unparseable")
+
+
+def _venue_with_cause(cause: str) -> tuple[Venue, int]:
+    """A venue whose by-id answer for offer 77 has the given cause; the request cap to use."""
+    venue = _missing_venue()
+    cap = 48
+    if cause == "request_failed":
+        venue.override = lambda _, body: httpx.Response(500, text="boom") if "id" in body else None
+    elif cause == "cap_exhausted":
+        cap = 9  # 4 active reads + the windowed offers page leave nothing for the lookup
+    elif cause == "unparseable":
+        venue.history["offers"] = [_ended(77, "ACTIVE", updated=100)]  # non-terminal, outside the window
+    return venue, cap
+
+
+@pytest.mark.parametrize("cause", CAUSES)
+async def test_every_cause_takes_the_same_grace_then_unconfirmed_path(cause: str, monkeypatch: Any) -> None:
+    emitted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(alerts, "emit", lambda event, **fields: emitted.append((event, fields)))
+    venue, cap = _venue_with_cause(cause)
+    window = _vanish_window(77)
+    first, second, third = await _cycles(
+        venue, [window] * 3, gaps=[0, OFFER_END_GRACE_MS - 5_000, 10_000], request_cap=cap)
+    for within in (first, second):  # inside the grace: incomplete, nothing declared
+        assert not within.coverage.offer_history_complete and within.unconfirmed_ends == ()
+    assert third.coverage.offer_history_complete and third.unconfirmed_ends == ("77",)
+    assert third.offer_history == ()  # nothing made up
+    unconfirmed = [f for event, f in emitted if event == alerts.OFFER_END_UNCONFIRMED]
+    assert [(f["venue_offer_id"], f["cause"]) for f in unconfirmed] == [("77", cause)]
+    incomplete = [f["reason"] for event, f in emitted
+                  if event == HISTORY_INCOMPLETE_ALERT and f["stream"] == "offers_by_id"]
+    assert incomplete == [cause, cause]  # one per cycle inside the grace
+
+
+async def test_by_id_rows_are_their_own_evidence_not_window_coverage() -> None:
+    venue = Venue()
+    venue.active["funding/offers"] = []
+    venue.history["offers"] = [_ended(77, created=100, updated=500)]  # outside the window
+    first, _, _ = await observe(venue, window=_vanish_window(77))
+    assert [i.offer.venue_offer_id for i in first.offer_history] == ["77"]  # terminal evidence
+    cov = first.coverage
+    assert cov.offer_history_pages == 1  # the windowed query only, not the lookup request
+    assert (cov.history_requested_start_ms, cov.history_oldest_mts_created) == (910_000, 990_000)
+    assert cov.history_oldest_mts_created != 100 and cov.history_newest_mts_created == 990_000
+
+
+def test_the_adapter_output_is_json_safe_for_every_decimal() -> None:
+    wire = offer_row()
+    wire[4], wire[5], wire[14] = (Decimal(wire[4]), Decimal(wire[5]), Decimal(wire[14]))
+    row = parse_offer_observations([wire])[0]
+    assert any(isinstance(v, Decimal) for v in row.raw)  # the REST client decodes exactly
+    offer = normalize_offer(row)
+    assert json.loads(json.dumps(offer.raw)) == offer.raw
+    assert offer.raw["row"][14] == "0.00030000000000000004"
+    nested = replace(row, raw=(*row.raw[:9], {"flag": Decimal("1.50")}, *row.raw[10:]))
+    assert normalize_offer(nested).raw["row"][9] == {"flag": "1.50"}

@@ -266,8 +266,8 @@ async def test_r6_failure_rolls_back_opening_basis_and_clock(ledger_fixture, mon
         clock = await session.scalar(select(CapitalCommandClockRow.revision))
     original = observation.write_basis
 
-    async def fail_after_basis(session, scope, observation_id: UUID):
-        await original(session, scope, observation_id)
+    async def fail_after_basis(session, scope, observation_id: UUID, **kwargs):
+        await original(session, scope, observation_id, **kwargs)
         raise RuntimeError("crash before acceptance commit")
 
     monkeypatch.setattr(observation, "write_basis", fail_after_basis)

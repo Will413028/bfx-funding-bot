@@ -21,7 +21,6 @@ Mutations (one at a time, revert after each, run this file):
 """
 from __future__ import annotations
 
-import json
 import random
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -128,6 +127,7 @@ class Rig:
     next_fingerprint: int = 1
     periods_used: int = 0
     injected: int = 0
+    old_ended: int = 0  # offers that ended minutes after the observation that saw them rest
     cycles: list[CycleResult] = field(default_factory=list)
 
     # -- the real observation cycle -------------------------------------------------
@@ -275,18 +275,10 @@ def _plan(extra: tuple[FaultRule, ...] = ()) -> FaultPlan:
 async def rig_factory(ledger_db):  # noqa: F811
     opened: list[tuple[AsyncEngine, AsyncEngine, Any]] = []
 
-    async def make(seed: int, faults: FaultPlan | None, *, decimal_raw_workaround: bool = True,
+    async def make(seed: int, faults: FaultPlan | None, *,
                    history: HistoryFilter | None = None) -> Rig:
         url = ledger_db.url.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
-        # FINDING (P1b): the covered REST pager parses every JSON float of a venue row as
-        # Decimal (``auth_rest.py`` ``parse_float=Decimal``) and the ledger writes that row
-        # into ``ledger_observation_offer.raw`` unencoded (``observation.py`` ``asdict(offer)``),
-        # which a JSON column cannot serialize. Real Bitfinex rows carry fractional numbers, so
-        # the first observation of a resting offer fails. Existing fixtures use strings. Until the
-        # ledger encodes ``raw``, this rig serializes Decimal as a string;
-        # ``test_the_ledger_persists_a_venue_row_with_fractional_numbers`` pins the defect.
-        serializer = (lambda value: json.dumps(value, default=str)) if decimal_raw_workaround else None
-        engine = create_async_engine(url, json_serializer=serializer) if serializer else create_async_engine(url)
+        engine = create_async_engine(url)
         # The venue writes its log as the simulation bot would: bfx_bot.
         sim_engine = create_async_engine(url, connect_args={"server_settings": {"role": "bfx_bot"}})
         factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -348,21 +340,22 @@ async def rig_factory(ledger_db):  # noqa: F811
 async def _drive(rig: Rig, *, steps: int) -> None:
     """A seeded random walk; each step is followed by one real observation cycle.
 
-    Offers that end (cancel, fill) do so within seconds of their creation: the real client keeps
-    only history rows whose MTS_CREATE lies in its window, which starts a minute before the previous
-    query (``test_the_ledger_cannot_see_the_end_of_an_old_offer`` pins what else happens). Offers
-    that rest stay resting for the whole walk, and credits, expiries and interest run over days.
+    Offers rest, and any of them may end later (cancel, fill, partial fill), minutes after the
+    observation that saw it rest: far beyond the history window's margin, so the ledger must
+    find those terminal rows by id (F2). Credits, expiries and interest run over days.
     """
     await rig.observe_accepted()  # the baseline
     submits = 0
+    parked: list[int] = []  # resting offers a later step may end; each owns its period
     for _ in range(steps):
         op = rig.rng.choices(
-            ["rest", "fill", "partial", "cancel", "expire", "interest"],
-            weights=[4, 3, 2, 3, 1, 1])[0]
+            ["rest", "fill", "partial", "cancel", "expire", "interest", "end_old"],
+            weights=[4, 3, 2, 3, 1, 1, 4])[0]
         rig.clock.advance(rig.rng.randrange(1, 9) * 1_000)
         if op in ("rest", "fill", "partial", "cancel"):
             before = await rig.unknown_outcomes()
-            submitted = await rig.submit(days=rig.fresh_period() if op in ("fill", "partial") else None)
+            submitted = await rig.submit(
+                days=rig.fresh_period() if op in ("rest", "fill", "partial") else None)
             submits += 1
             if submitted.outcome_kind.value == "unknown":
                 assert await rig.unknown_outcomes() == before + 1
@@ -371,12 +364,25 @@ async def _drive(rig: Rig, *, steps: int) -> None:
                 continue
             assert submitted.outcome_kind.value == "acknowledged", submitted.outcome_kind
             offer_id = int(submitted.venue_offer_id)
-            if op == "cancel":
+            if op == "rest":
+                parked.append(offer_id)
+            elif op == "cancel":
                 await rig.observe_accepted()  # provenance for the offer cancelled below
                 rig.clock.advance(rig.rng.randrange(1, 9) * 1_000)
                 await rig.cancel(offer_id)
-            elif op in ("fill", "partial"):
+            else:
                 rig.fill(offer_id, Decimal(1) if op == "fill" else Decimal("0.4"))
+        elif op == "end_old":
+            parked = [i for i in parked if rig.venue.state.offers[i].resting]
+            if parked:
+                offer_id = parked.pop(rig.rng.randrange(len(parked)))
+                rig.clock.advance(rig.rng.randrange(2, 10) * 60_000)  # well beyond the 60 s margin
+                how = rig.rng.choice(("cancel", "fill", "partial"))
+                rig.old_ended += 1
+                if how == "cancel":
+                    await rig.cancel(offer_id)
+                else:
+                    rig.fill(offer_id, Decimal(1) if how == "fill" else Decimal("0.4"))
         elif op == "expire":
             rig.expire()
         else:
@@ -398,6 +404,7 @@ async def test_random_sequences_keep_every_accepted_basis_conserved(
         rig_factory, seed: int, offers_filter: str) -> None:
     rig = await rig_factory(seed, _plan(), history=HistoryFilter(offers=offers_filter))  # type: ignore[arg-type]
     await _drive(rig, steps=45)
+    assert rig.old_ended >= 2, "the walk never ended an old offer"
     assert rig.injected == 3 and await rig.unknown_outcomes() == 3  # exactly the injected ones
     assert await rig.resolutions() == 3  # and each resolved by the cycle, not an operator
     async with rig.factory() as session:
@@ -464,12 +471,13 @@ async def test_a_fill_between_the_reads_makes_that_observation_unacceptable_and_
     assert verdicts == ["conserved"]
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "P1b finding: the real pager keeps offer-history rows by MTS_CREATE inside a window that starts a "
-    "minute before the previous query, so the end of an older offer is invisible to the ledger and its "
-    "fill reconciliation conflicts (unexplained_lending), whichever field the venue filters on"))
 @pytest.mark.parametrize("offers_filter", ["create", "update"])
-async def test_the_ledger_cannot_see_the_end_of_an_old_offer(rig_factory, offers_filter: str) -> None:
+async def test_the_ledger_sees_the_end_of_an_old_offer(rig_factory, offers_filter: str) -> None:
+    """F2: an offer far older than the history window ends; the ledger finds its terminal row by id.
+
+    Both filter fields stay: ``update`` is what the live venue does (probe, 2026-10-04);
+    ``create`` proves the ledger does not depend on the undocumented field.
+    """
     rig = await rig_factory(7, None, history=HistoryFilter(offers=offers_filter))  # type: ignore[arg-type]
     await rig.observe_accepted()
     submitted = await rig.submit()
@@ -478,13 +486,19 @@ async def test_the_ledger_cannot_see_the_end_of_an_old_offer(rig_factory, offers
     await rig.observe_accepted()
     await rig.cancel(int(submitted.venue_offer_id))
     await rig.observe_accepted()
+    async with rig.factory() as session:
+        terminal = (await session.execute(text(
+            "SELECT venue_offer_id, terminal_kind FROM venue_offer_mirror"))).all()
+    assert terminal == [(submitted.venue_offer_id, "canceled")]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "ledger_observation_offer.raw is written with Decimal values the JSON column cannot "
-    "serialize (auth_rest parse_float=Decimal, observation.py asdict(offer)); P1b finding"))
 async def test_the_ledger_persists_a_venue_row_with_fractional_numbers(rig_factory) -> None:
-    rig = await rig_factory(1, None, decimal_raw_workaround=False)
+    """F1: the venue's fractional JSON numbers reach the JSON column as exact strings."""
+    rig = await rig_factory(1, None)
     await rig.observe_accepted()
     await rig.submit()
     await rig.observe_accepted()
+    async with rig.factory() as session:
+        row = (await session.execute(text("SELECT raw FROM ledger_observation_offer"))).scalars().all()
+    assert row and all(isinstance(value, (str, int, type(None))) for r in row for value in r["row"])
+    assert any(isinstance(value, str) and "." in value for r in row for value in r["row"])

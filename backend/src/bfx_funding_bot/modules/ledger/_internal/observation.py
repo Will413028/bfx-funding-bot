@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Hashable
 from dataclasses import asdict
 from decimal import Decimal
@@ -29,7 +30,7 @@ from bfx_funding_bot.modules.ledger import (
     Scope,
     Wallet,
 )
-from bfx_funding_bot.modules.ledger._internal import history_symbols
+from bfx_funding_bot.modules.ledger._internal import history_symbols, unconfirmed_ends
 from bfx_funding_bot.modules.ledger._internal.basis import previous_basis, write_basis
 from bfx_funding_bot.modules.ledger._internal.clock import lock_scope
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
@@ -78,6 +79,31 @@ def _decimal(value: Decimal) -> str:
     if not value.is_finite():
         raise ValueError("non-finite observation amount")
     return "0" if value == 0 else format(value.normalize(), "f")
+
+
+def _check_json(value: object) -> None:
+    """Raw venue evidence must already be JSON: the adapter owns its encoding.
+
+    A Decimal is refused, not converted: the port type says ``JsonObject``, and the only
+    converter lives where the wire format is known (``venue_observation``).
+    """
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("non-finite number in raw venue evidence")
+        return
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise ValueError("raw venue evidence has a non-string key")
+        for item in value.values():
+            _check_json(item)
+        return
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            _check_json(item)
+        return
+    raise ValueError(f"raw venue evidence is not JSON-representable: {type(value).__name__}")
 
 
 def _nonnegative(value: Decimal | None) -> bool:
@@ -162,6 +188,7 @@ def _validate(observation: Observation) -> None:
             or (offer.mts_updated is not None and offer.mts_updated < 0)
         ):
             raise ValueError("invalid offer")
+        _check_json(offer.raw)
     for credit in (*observation.credits, *(item.credit for item in observation.credit_history)):
         if (
             credit.source_kind not in ("credit", "loan")
@@ -178,6 +205,7 @@ def _validate(observation: Observation) -> None:
             )
         ):
             raise ValueError("invalid credit or loan")
+        _check_json(credit.raw)
     if any(
         item.occurred_at_ms < 0 or item.terminal_kind not in OFFER_TERMINAL_KINDS
         for item in observation.offer_history
@@ -186,6 +214,10 @@ def _validate(observation: Observation) -> None:
         for item in observation.credit_history
     ):
         raise ValueError("invalid terminal history")
+    if any(not offer_id for offer_id in observation.unconfirmed_ends) or len(
+        set(observation.unconfirmed_ends)
+    ) != len(observation.unconfirmed_ends):
+        raise ValueError("invalid unconfirmed offer ends")
     _unique(observation.trades, lambda x: x.trade_id)
     for trade in observation.trades:
         if (
@@ -298,6 +330,8 @@ async def accept_observation(
             evidence={
                 history_symbols.KEY: history_symbols.encode(coverage.history_symbols),
                 "confirmation_started_at_ms": confirmation_started_at_ms,
+                # Read back by the basis (conservation), like history_symbols above.
+                unconfirmed_ends.KEY: unconfirmed_ends.encode(first.unconfirmed_ends),
                 "first_page_counts": {
                     "wallet": coverage.wallet_pages,
                     "offer": coverage.offer_pages,
