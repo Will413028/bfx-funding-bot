@@ -95,6 +95,10 @@ class HttpVenue:
         self.credits: list[list[Any]] = []
         self.loans: list[list[Any]] = []
         self.history_offers: list[list[Any]] = []
+        # Credit/loan history and funding trades (empty unless a test serves them).
+        self.history_credits: list[list[Any]] = []
+        self.history_loans: list[list[Any]] = []
+        self.trades: list[list[Any]] = []
         # A history pager that fails certifies nothing: incomplete coverage on both stacks.
         self.history_fails = False
         self.paths: list[str] = []
@@ -111,7 +115,9 @@ class HttpVenue:
                     return httpx.Response(400, json=["error", 10020, "history unavailable"])
                 return httpx.Response(200, json=self.history_offers)
             if kind in ("credits", "loans", "trades"):
-                return httpx.Response(200, json=[])
+                served = {"credits": self.history_credits, "loans": self.history_loans,
+                          "trades": self.trades}[kind]
+                return httpx.Response(200, json=served)
         active = path.split("/")
         if active[0] == "wallets":
             return httpx.Response(200, json=self.wallets)
