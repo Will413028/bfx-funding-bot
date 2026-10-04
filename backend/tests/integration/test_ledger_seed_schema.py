@@ -76,19 +76,41 @@ def _seed_observation_sql(
     trades: bool = False,
     pages: str = "NULL",
     origin: str = "legacy_seed",
+    overrides: dict[str, str] | None = None,
 ) -> str:
+    """A seed header; ``overrides`` replaces or adds single columns (SQL literals)."""
+
     def flag(value: bool) -> str:
         return str(value).lower()
 
-    return f"""INSERT INTO ledger_observation (
-      id, query_id, exchange_account_id, deployment_environment, schema_version,
-      query_finished_at_ms, confirmation_finished_at_ms, accept_revision, origin,
-      wallets_complete, offers_complete, credits_complete, loans_complete,
-      offer_history_complete, credit_history_complete, trades_complete, offer_history_pages,
-      first_digest, confirmation_digest, accepted, evidence)
-      VALUES ('{observation_id}', '{query_id}', '{_A}', 'ci', 1, 2, 3, 0, '{origin}',
-      {flag(wallets)}, true, true, true, {flag(history)}, {flag(history)}, {flag(trades)},
-      {pages}, 'digest', 'digest', {flag(accepted)}, '{{}}')"""
+    columns = {
+        "id": f"'{observation_id}'",
+        "query_id": f"'{query_id}'",
+        "exchange_account_id": f"'{_A}'",
+        "deployment_environment": "'ci'",
+        "schema_version": "1",
+        "query_finished_at_ms": "2",
+        "confirmation_finished_at_ms": "3",
+        "accept_revision": "0",
+        "origin": f"'{origin}'",
+        "wallets_complete": flag(wallets),
+        "offers_complete": "true",
+        "credits_complete": "true",
+        "loans_complete": "true",
+        "offer_history_complete": flag(history),
+        "credit_history_complete": flag(history),
+        "trades_complete": flag(trades),
+        "offer_history_pages": pages,
+        "first_digest": "'digest'",
+        "confirmation_digest": "'digest'",
+        "accepted": flag(accepted),
+        "evidence": "'{}'",
+    }
+    columns.update(overrides or {})
+    return (
+        f"INSERT INTO ledger_observation ({', '.join(columns)}) "
+        f"VALUES ({', '.join(columns.values())})"
+    )
 
 
 def _new_query(conn, revision: int) -> str:
@@ -168,16 +190,18 @@ def _request_sql(observation_id: str) -> str:
       'operator', 6)"""
 
 
-def _seed_history_sql(table: str, history_id: str, observation_id: str) -> str:
+def _seed_history_sql(
+    table: str, history_id: str, observation_id: str, venue_id: str | None = None
+) -> str:
     if table == "ledger_observation_offer_history":
         return f"""INSERT INTO ledger_observation_offer_history(id, observation_id,
           venue_offer_id, symbol, amount_original, amount_remaining, rate_observed, status,
           mts_created, terminal_kind, occurred_at_ms, raw)
-          VALUES ('{history_id}', '{observation_id}', 'offer-1', 'fUST', 1, 0, true,
+          VALUES ('{history_id}', '{observation_id}', '{venue_id or 'offer-1'}', 'fUST', 1, 0, true,
           'CANCELLED', 1, 'cancelled', 3, '{{}}')"""
     return f"""INSERT INTO ledger_observation_credit_history(id, observation_id, venue_credit_id,
       source_kind, symbol, amount, status, terminal_kind, occurred_at_ms, raw)
-      VALUES ('{history_id}', '{observation_id}', 'credit-1', 'credit', 'fUST', 1, 'CLOSED',
+      VALUES ('{history_id}', '{observation_id}', '{venue_id or 'credit-1'}', 'credit', 'fUST', 1, 'CLOSED',
       'closed', 3, '{{}}')"""
 
 
@@ -205,18 +229,34 @@ def test_origin_is_one_of_the_two_values(seeded) -> None:
         conn.exec_driver_sql(_seed_observation_sql(str(uuid4()), query_id, origin="other"))
 
 
-def test_seed_observation_carries_no_history_or_wallet_coverage(seeded) -> None:
+_SEED_CLAUSE_CASES = {
+    "not_accepted": {"accepted": False},
+    "wallets": {"wallets": True},
+    "offer_history_flag": {"overrides": {"offer_history_complete": "true"}},
+    "credit_history_flag": {"overrides": {"credit_history_complete": "true"}},
+    "trades_flag": {"trades": True},
+    "trades_range": {
+        "overrides": {"trades_requested_start_ms": "1", "trades_requested_end_ms": "2"}
+    },
+    "history_range": {
+        "overrides": {"history_requested_start_ms": "1", "history_requested_end_ms": "2"}
+    },
+    "history_bounds": {
+        "overrides": {"history_oldest_mts_created": "1", "history_newest_mts_created": "2"}
+    },
+    "offer_history_pages": {"pages": "1"},
+    "credit_history_pages": {"overrides": {"credit_history_pages": "1"}},
+}
+
+
+@pytest.mark.parametrize("case", list(_SEED_CLAUSE_CASES))
+def test_seed_observation_clause_is_enforced_alone(seeded, case: str) -> None:
     with seeded.begin() as conn:
         query_id = _new_query(conn, 2)
-    for kwargs in (
-        {"accepted": False},
-        {"wallets": True},
-        {"history": True},
-        {"trades": True},
-        {"pages": "1"},
-    ):
-        with seeded.begin() as conn, pytest.raises(Exception, match="ck_ledger_observation_seed"):
-            conn.exec_driver_sql(_seed_observation_sql(str(uuid4()), query_id, **kwargs))
+    with seeded.begin() as conn, pytest.raises(Exception, match="ck_ledger_observation_seed"):
+        conn.exec_driver_sql(
+            _seed_observation_sql(str(uuid4()), query_id, **_SEED_CLAUSE_CASES[case])
+        )
     with seeded.begin() as conn:  # the truthful seed shape is accepted
         conn.exec_driver_sql(_seed_observation_sql(str(uuid4()), query_id))
 
@@ -287,6 +327,43 @@ def test_seed_observation_is_never_mirror_terminal_evidence(
             f"UPDATE {mirror} SET present_in_latest_accepted_snapshot=false, "
             f"terminal_evidence_id='{evidence}', terminal_kind='{kind}'"
         )
+
+
+def _terminal_mirror_insert_sql(mirror: str, venue_id: str, history_id: str) -> str:
+    if mirror == "venue_offer_mirror":
+        return f"""INSERT INTO venue_offer_mirror(exchange_account_id, deployment_environment,
+          venue_offer_id, symbol, amount_original, amount_remaining, rate_observed, status,
+          mts_created, last_accepted_observation_id, present_in_latest_accepted_snapshot,
+          terminal_evidence_id, terminal_kind)
+          VALUES ('{_A}', 'ci', '{venue_id}', 'fUST', 1, 0, true, 'CANCELLED', 1, '{_O}', false,
+          '{history_id}', 'cancelled')"""
+    return f"""INSERT INTO venue_credit_mirror(exchange_account_id, deployment_environment,
+      venue_credit_id, source_kind, symbol, amount, status, last_accepted_observation_id,
+      present_in_latest_accepted_snapshot, terminal_evidence_id, terminal_kind)
+      VALUES ('{_A}', 'ci', '{venue_id}', 'credit', 'fUST', 1, 'CLOSED', '{_O}', false,
+      '{history_id}', 'closed')"""
+
+
+@pytest.mark.parametrize(
+    ("mirror", "history_table"),
+    [
+        ("venue_offer_mirror", "ledger_observation_offer_history"),
+        ("venue_credit_mirror", "ledger_observation_credit_history"),
+    ],
+)
+def test_seed_observation_is_never_mirror_terminal_evidence_on_insert(
+    seeded, mirror: str, history_table: str
+) -> None:
+    seed_history, venue_history = str(uuid4()), str(uuid4())
+    with seeded.begin() as conn:
+        seed = _owner_seed_observation(conn)
+        conn.exec_driver_sql(_seed_history_sql(history_table, seed_history, seed, "obj-seed"))
+        conn.exec_driver_sql(_seed_history_sql(history_table, venue_history, _O, "obj-venue"))
+    with seeded.begin() as conn, pytest.raises(Exception, match="a seed observation is not evidence"):
+        conn.exec_driver_sql(_terminal_mirror_insert_sql(mirror, "obj-seed", seed_history))
+    # Control: the same insert citing a venue history row is accepted.
+    with seeded.begin() as conn:
+        conn.exec_driver_sql(_terminal_mirror_insert_sql(mirror, "obj-venue", venue_history))
 
 
 def test_seed_observation_is_allowed_as_member_mirror_anchor_and_basis(seeded) -> None:
