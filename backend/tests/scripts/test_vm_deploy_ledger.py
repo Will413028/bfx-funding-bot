@@ -3,6 +3,9 @@
 Runs the actual migrations, then drives PsqlLedger through `docker exec <pg>
 psql` against the test container -- the same argv, quoting and \\if logic as on
 the VM -- and proves the table is append-only and read-only to runtime roles.
+
+Marked `docker`: the production path is `docker exec`, so the database is the pinned
+production image in a container, not the per-process local server.
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ from sqlalchemy.engine import make_url
 
 from tests.pg_templates import alembic
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.docker]
 
 ROOT = Path(__file__).resolve().parents[3]
 BACKEND = ROOT / "backend"
@@ -46,6 +49,17 @@ bfx = _load("vm_ops_bfx_deploy_for_ledger", ROOT / "deploy/vm/ops/bfx_deploy.py"
 
 def _alembic(url: str, name: str, *args: str) -> None:
     alembic(url, name, *args)
+
+
+@pytest.fixture(scope="session")
+def pg_container(docker_pg_container: Any) -> Any:
+    """This module's database is the pinned production image, reached through `docker exec`."""
+    return docker_pg_container
+
+
+@pytest.fixture(scope="session")
+def pg_templates(docker_pg_templates: Any) -> Any:
+    return docker_pg_templates
 
 
 def _entry(**overrides: Any) -> Any:
@@ -282,7 +296,7 @@ def test_migration_is_reversible_and_leaves_no_drift(ledger_db: Any) -> None:
     # happened in an append-only ledger.
     ledger.append(_entry(attempt_id=ATTEMPT, outcome="started", finished_at=None))
     ledger.append(_entry(attempt_id=ATTEMPT))
-    result = subprocess.run(["uv", "run", "alembic", "downgrade", REVISION], cwd=BACKEND,
+    result = subprocess.run([sys.executable, "-m", "alembic", "downgrade", REVISION], cwd=BACKEND,
                             env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
     assert result.returncode != 0
     assert "recorded without a change class" in result.stdout + result.stderr

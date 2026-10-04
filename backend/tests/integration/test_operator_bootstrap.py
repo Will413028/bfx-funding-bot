@@ -53,44 +53,44 @@ def _redis_command(redis_url: str, *parts: str) -> str | int | None:
     raise AssertionError("isolated Redis returned an unexpected response")
 
 
+def _start_redis(executable: str, data_dir: Path) -> tuple[subprocess.Popen[bytes], str]:
+    """Start redis-server on a free port, retrying when another process takes it first.
+
+    A probed port can be taken between the probe and redis's bind (another xdist worker, a
+    Docker port mapping). Then our redis exits at once; a PONG only counts while our own
+    process is still alive.
+    """
+    for _attempt in range(10):
+        port = _free_port()
+        process = subprocess.Popen(
+            [executable, "--bind", "127.0.0.1", "--protected-mode", "yes", "--port", str(port),
+             "--save", "", "--appendonly", "no", "--dir", str(data_dir)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        redis_url = f"redis://127.0.0.1:{port}/0"
+        deadline = time.monotonic() + 10
+        while process.poll() is None and time.monotonic() < deadline:
+            try:
+                if _redis_command(redis_url, "PING") == "PONG" and process.poll() is None:
+                    return process, redis_url
+            except OSError:
+                pass
+            time.sleep(0.05)
+        if process.poll() is None:  # alive but never answered: not a bind race
+            process.kill()
+            process.wait(timeout=5)
+            break
+        process.wait(timeout=5)  # exited at once: the port was taken, try another
+    pytest.fail("disposable Redis did not become ready")
+
+
 @pytest.fixture(scope="module")
 def isolated_redis(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     executable = shutil.which("redis-server")
     if executable is None:
         pytest.skip("redis-server is unavailable for the disposable integration test")
-    port = _free_port()
-    data_dir = tmp_path_factory.mktemp("operator-bootstrap-redis")
-    process = subprocess.Popen(
-        [
-            executable,
-            "--bind",
-            "127.0.0.1",
-            "--protected-mode",
-            "yes",
-            "--port",
-            str(port),
-            "--save",
-            "",
-            "--appendonly",
-            "no",
-            "--dir",
-            str(data_dir),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    redis_url = f"redis://127.0.0.1:{port}/0"
+    process, redis_url = _start_redis(executable, tmp_path_factory.mktemp("operator-bootstrap-redis"))
     try:
-        deadline = time.monotonic() + 10
-        while True:
-            try:
-                if _redis_command(redis_url, "PING") == "PONG":
-                    break
-            except OSError:
-                pass
-            if process.poll() is not None or time.monotonic() >= deadline:
-                pytest.fail("disposable Redis did not become ready")
-            time.sleep(0.05)
         yield redis_url
     finally:
         process.terminate()

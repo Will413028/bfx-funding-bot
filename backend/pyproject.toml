@@ -52,6 +52,8 @@ dev = [
     # deploy/vm/ops tests import the host tooling, pinned in deploy/vm/ops/uv.lock.
     "pathspec==1.1.1",
     "import-linter==2.15",
+    "pytest-xdist>=3.8.0",
+    "pytest-postgresql>=9.1.0",
 ]
 
 [project.scripts]
@@ -103,6 +105,7 @@ markers = [
     "property: hypothesis-based property tests; CI default 100 iter, nightly 1k, pre-ship manual 10k",
     "live: requires real Bitfinex / Axiom credentials; never runs in CI",
     "benchmark: performance gates (R4.1.1 replay budget) — run manually",
+    "docker: needs a reachable Docker daemon (skipped without one; BFX_REQUIRE_DOCKER=1 makes that a failure)",
     "gate: deployment sanity gate; offline but slow (reads the committed candle fixture); runs as its own CI job",
 ]
 

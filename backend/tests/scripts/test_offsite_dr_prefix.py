@@ -448,7 +448,19 @@ def _run_prefix_verify(database_url: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@pytest.fixture(scope="session")
+def pg_container(docker_pg_container: Any) -> Any:
+    """The drill reads production through `docker exec ... psql`, so this test needs a container."""
+    return docker_pg_container
+
+
+@pytest.fixture(scope="session")
+def pg_templates(docker_pg_templates: Any) -> Any:
+    return docker_pg_templates
+
+
 @pytest.mark.integration
+@pytest.mark.docker
 async def test_backup_restore_and_prefix_comparison_on_real_postgres(pg_container, pg_engine,
                                                                      pg_session_factory) -> None:
     """Write events -> back up -> keep writing -> restore into an isolated DB -> compare.

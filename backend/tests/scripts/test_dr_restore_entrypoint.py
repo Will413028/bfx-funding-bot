@@ -147,6 +147,7 @@ def test_unreadable_configuration_fails_with_safe_marker() -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.docker
 @pytest.mark.parametrize(
     ("case", "expected"),
     [("empty", 42), ("existing", 2), ("hidden", 2), ("symlink", 2),

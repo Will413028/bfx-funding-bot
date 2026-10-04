@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.docker]
 
 _IMAGE = "python:3.12-alpine"
 

@@ -49,9 +49,15 @@ async def test_keepalive_loop_holds_connection_warm(pg_engine):
         )
 
     task = asyncio.create_task(runner())
-    await asyncio.sleep(0.35)
-    stop.set()
-    await task
+    # Wait for the ticks instead of sleeping a fixed window: the first one includes opening
+    # the pool's connection, which takes arbitrarily long on a loaded machine (xdist workers).
+    try:
+        async with asyncio.timeout(60):
+            while len(ticks) < 3:
+                await asyncio.sleep(0.01)
+    finally:
+        stop.set()
+        await task
 
-    # Expect ~3 ticks (at 0.1, 0.2, 0.3)
-    assert 2 <= len(ticks) <= 4, f"expected ~3 ticks, got {len(ticks)}"
+    assert len(ticks) >= 3, f"keepalive stopped ticking after {len(ticks)} pings"
+    assert ticks == sorted(ticks)

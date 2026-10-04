@@ -34,11 +34,15 @@ Bitfinex 自動放貸 SaaS 平台。
 
 | 工具 | 執行目錄 | 範例 |
 |------|----------|------|
-| `pytest` | `backend/` | `cd backend && uv run pytest -m "not integration"` |
+| `pytest`（單元，序列） | `backend/` | `cd backend && uv run pytest -m "not integration"` |
+| `pytest`（單元，平行） | `backend/` | `cd backend && uv run pytest -m "not integration" -n auto` |
+| `pytest`（整合，平行） | `backend/` | `cd backend && uv run pytest -m integration -n 6 --dist loadfile`（CI 用 `-n 4`） |
 | `mypy` / `ruff` | `backend/` | `cd backend && uv run mypy src/ && uv run ruff check` |
 | `alembic revision --autogenerate` | `backend/` | `cd backend && uv run alembic revision --autogenerate -m "..."` |
 | `alembic upgrade head` | `backend/` | `cd backend && uv run alembic upgrade head` |
 | `alembic check` | `backend/` | `cd backend && uv run alembic check`（驗證 metadata 與 DB 無 drift） |
+
+測試資料庫：DB 測試只用本機 PostgreSQL 18（每個 pytest process／xdist worker 各自啟動一台拋棄式 server，不用 Docker）。需要 PG18 binaries：macOS `brew install postgresql@18`（自動找 `/opt/homebrew/opt/postgresql@18/bin`），其他環境用 `BFX_TEST_PG_BIN` 指向 `bin` 目錄（Linux 為 PGDG `/usr/lib/postgresql/18/bin`）；major 必須等於 `deploy/vm/postgres/Dockerfile` 的 `FROM postgres:<major>`，否則測試開始即失敗，不會退回 Docker 或別的版本。標 `docker` 的測試（真實容器、`docker exec psql`）無 Docker daemon 時自動 skip；`BFX_REQUIRE_DOCKER=1`（CI 設定）改為失敗。預設序列執行，`addopts` 沒有 `-n`。
 
 備註：`backend/` 必須 cd 進去才會走 uv 管的 Python 3.13；從 repo root 直接跑會撞 pyenv 3.12 的 sqlalchemy。`.env` 是 repo root 的 symlink（worktree 重建後要 `ln -sf ../.env backend/.env`）。
 

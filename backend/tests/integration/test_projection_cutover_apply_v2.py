@@ -4,10 +4,13 @@ import base64
 import hashlib
 import importlib
 import json
+import subprocess
+import tempfile
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -694,61 +697,53 @@ async def _release_evidence(factory, tmp_path):
 
 
 @asynccontextmanager
-async def _restored_release_copy(archive_db):
-    """Real PG18 dump/restore into a different DB on this testcontainer only.
+async def _restored_release_copy(archive_db, pg_server):
+    """Real PG18 dump/restore into a different DB on the disposable local cluster only.
 
     No R2/PITR/network-isolation/RTO claim: those require the operator drill.
-    Container identity comes exclusively from archive_db's disposable fixture.
+    Every command runs the PG18 ``pg_dump``/``pg_restore`` of the fixture's own bin directory
+    and is pointed at the fixture's server, whose ``data_directory`` is asserted to live under
+    this fixture's temp directory before anything is dumped or created.
     """
-    from docker.errors import NotFound
-    from testcontainers.core.docker_client import DockerClient
-
     url = archive_db[1].url
     assert url.host in {"localhost", "127.0.0.1"} and url.database == "test"
-    client = DockerClient().client
-    candidates = [c for c in client.containers.list() if any(
-        b["HostPort"] == str(url.port)
-        for b in c.attrs["NetworkSettings"]["Ports"].get("5432/tcp", []) or []
-    )]
-    assert len(candidates) == 1
-    container = candidates[0]
-    assert container.attrs["Config"]["Image"] == "postgres:18-alpine"
+    assert url.port == pg_server.port
+    with archive_db[1].connect() as connection:
+        data_directory = Path(connection.scalar(text("SHOW data_directory"))).resolve()
+    assert data_directory.is_relative_to(pg_server.temp_root), (data_directory, pg_server.temp_root)
     name = "task6_restore_" + uuid4().hex
-    dump_path = "/tmp/" + name + ".dump"
-    restored_engine = create_async_engine(url.set(
-        drivername="postgresql+asyncpg", database=name,
-    ))
+    with tempfile.TemporaryDirectory(prefix="bfx-restore-") as work:
+        dump_path = Path(work) / (name + ".dump")
+        restored_engine = create_async_engine(url.set(drivername="postgresql+asyncpg", database=name))
 
-    def execute(argv):
-        result = container.exec_run(argv)
-        assert result.exit_code == 0, result.output.decode()
+        def execute(tool: str, *argv: str) -> None:
+            result = subprocess.run(
+                [pg_server.tool(tool), "--host=" + pg_server.host, "--port=" + str(pg_server.port),
+                 "--username=" + pg_server.username, *argv],
+                env=pg_server.tool_env(), capture_output=True, text=True, check=False, timeout=300,
+            )
+            assert result.returncode == 0, result.stderr
 
-    try:
-        execute(["pg_dump", "--username=test", "--dbname=test", "--format=custom",
-                 "--no-owner", "--no-privileges", "--file=" + dump_path])
-        execute(["createdb", "--username=test", name])
-        execute(["pg_restore", "--username=test", "--dbname=" + name,
-                 "--no-owner", "--no-privileges", "--exit-on-error", dump_path])
-        yield async_sessionmaker(restored_engine, expire_on_commit=False)
-    finally:
-        await restored_engine.dispose()
-        # Generated DB/file only; the source fixture and its container survive.
-        execute(["dropdb", "--username=test", "--if-exists", name])
-        execute(["rm", "-f", "--", dump_path])
-        with archive_db[1].connect() as connection:
-            assert connection.scalar(text("SELECT count(*) FROM pg_database WHERE datname=:n"),
-                                     {"n": name}) == 0
-        assert container.exec_run(["test", "!", "-e", dump_path]).exit_code == 0
-        # Container still exists; cleanup must not delete its owning fixture.
         try:
-            client.containers.get(container.id)
-        except NotFound:
-            pytest.fail("rehearsal cleanup removed the source testcontainer")
-        client.close()
+            execute("pg_dump", "--dbname=test", "--format=custom", "--no-owner", "--no-privileges",
+                    "--file=" + str(dump_path))
+            execute("createdb", name)
+            execute("pg_restore", "--dbname=" + name, "--no-owner", "--no-privileges",
+                    "--exit-on-error", str(dump_path))
+            yield async_sessionmaker(restored_engine, expire_on_commit=False)
+        finally:
+            await restored_engine.dispose()
+            # Generated DB/file only; the source fixture and its server survive.
+            execute("dropdb", "--if-exists", name)
+            dump_path.unlink(missing_ok=True)
+            with archive_db[1].connect() as connection:
+                assert connection.scalar(text("SELECT count(*) FROM pg_database WHERE datname=:n"),
+                                         {"n": name}) == 0
+            assert not dump_path.exists()
 
 
 @pytest.mark.parametrize("stale_head", [False, True])
-async def test_release_handoff_restores_history_then_verifies_new_baseline(archive_db, tmp_path, stale_head):
+async def test_release_handoff_restores_history_then_verifies_new_baseline(archive_db, pg_server, tmp_path, stale_head):
     """Catch lost history, partial zero coverage, scope leaks and self-derived DR expectations."""
     from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
     from bfx_funding_bot.modules.execution.events import SnapshotCoverage
@@ -794,7 +789,7 @@ async def test_release_handoff_restores_history_then_verifies_new_baseline(archi
 
     original_ref = reference(encode_row(prepared), expected, tmp_path / "independent-prepared")
     raw = dr_evidence._archive.transport((original_ref,), target_run_id=str(expected.run_id))
-    async with _restored_release_copy(archive_db) as restored:
+    async with _restored_release_copy(archive_db, pg_server) as restored:
         assert await complete_raw(restored) == archived
         async with restored() as session:
             report = await verify_restore_archives(session, scope=expected.scope, raw=raw, archive_only=True)
@@ -902,7 +897,7 @@ async def test_release_handoff_restores_history_then_verifies_new_baseline(archi
         verifier_image_digest=expected.image_digest,
     )
     complete_input = dr_evidence._archive.transport(baseline.archives)
-    async with _restored_release_copy(archive_db) as restored:
+    async with _restored_release_copy(archive_db, pg_server) as restored:
         assert await complete_raw(restored) == committed
         async with restored() as session:
             archive_report = await verify_restore_archives(session, scope=expected.scope,

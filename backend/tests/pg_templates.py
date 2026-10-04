@@ -50,8 +50,12 @@ def alembic(url: str, name: str, *args: str) -> None:
 
     from alembic import command
 
+    config = Config(str(ALEMBIC_INI))
+    # env.py's fileConfig() would rewire the pytest process's logging (root level and handlers,
+    # every existing logger disabled), so a later caplog test would see nothing.
+    config.attributes["configure_logger"] = False
     with database_url_env(url):
-        getattr(command, name)(Config(str(ALEMBIC_INI)), *args)
+        getattr(command, name)(config, *args)
 
 
 class TemplateDatabases:
