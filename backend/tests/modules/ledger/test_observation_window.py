@@ -31,6 +31,7 @@ def test_window_anchor_minimum_and_margin(attempt, previous, start) -> None:
 async def test_no_basis_still_reads_the_earliest_attempt(monkeypatch) -> None:
     monkeypatch.setattr(reads, "unresolved_quarantines", AsyncMock(return_value=[]))
     monkeypatch.setattr(reads, "attempts_by_id", AsyncMock(return_value=[]))
+    monkeypatch.setattr(reads, "live_offer_candidates", AsyncMock(return_value=()))
     session = AsyncMock()
     scope = Scope(uuid4(), "ci")
     monkeypatch.setattr(reads, "previous_basis", AsyncMock(return_value=None))
@@ -81,6 +82,7 @@ async def test_window_includes_only_unresolved_r6_source_attempts(monkeypatch) -
         return_value=[SubmissionAttemptJournalRow(started_at_ms=100_000, symbol="fUST")]
     )
     monkeypatch.setattr(reads, "unresolved_quarantines", unresolved)
+    monkeypatch.setattr(reads, "live_offer_candidates", AsyncMock(return_value=()))
     monkeypatch.setattr(reads, "attempts_by_id", sources)
     assert await reads.observation_window(session, scope) == ObservationWindow(
         100_000, 300_000, 40_000, frozenset({"fUST"}),

@@ -30,7 +30,7 @@ listed unresolved was settled or reflected by then.
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from uuid import UUID
 
@@ -43,6 +43,7 @@ from bfx_funding_bot.modules.ledger import (
     CancelProvenance,
     ForeignOffer,
     LedgerReadUnbounded,
+    LiveOffer,
     ManagedOffer,
     ManagedOffers,
     ObservationWindow,
@@ -162,6 +163,20 @@ def _window_from_anchors(
     )
 
 
+async def live_offer_candidates(session: AsyncSession, scope: Scope) -> tuple[LiveOffer, ...]:
+    """The latest accepted snapshot's live offers (partial index ``ix_venue_offer_mirror_live``)."""
+    rows = await session.execute(
+        select(VenueOfferMirrorRow.venue_offer_id, VenueOfferMirrorRow.symbol)
+        .where(
+            VenueOfferMirrorRow.exchange_account_id == scope.exchange_account_id,
+            VenueOfferMirrorRow.deployment_environment == scope.deployment_environment,
+            VenueOfferMirrorRow.present_in_latest_accepted_snapshot,
+        )
+        .order_by(VenueOfferMirrorRow.venue_offer_id)
+    )
+    return tuple(LiveOffer(offer_id, symbol) for offer_id, symbol in rows.tuples())
+
+
 async def observation_window(session: AsyncSession, scope: Scope) -> ObservationWindow:
     """Read only the latest basis, its unresolved set and the capped attempt tail.
 
@@ -203,9 +218,12 @@ async def observation_window(session: AsyncSession, scope: Scope) -> Observation
         if row.source_attempt_id is not None
     ])
     attempts = (*attempts, *sources)
-    return _window_from_anchors(
-        min((attempt.started_at_ms for attempt in attempts), default=None), previous_start,
-        frozenset(attempt.symbol for attempt in attempts),
+    return replace(
+        _window_from_anchors(
+            min((attempt.started_at_ms for attempt in attempts), default=None), previous_start,
+            frozenset(attempt.symbol for attempt in attempts),
+        ),
+        live_offers=await live_offer_candidates(session, scope),
     )
 
 

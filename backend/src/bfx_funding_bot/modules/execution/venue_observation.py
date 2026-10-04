@@ -41,6 +41,13 @@ from bfx_funding_bot.modules.observability import alerts
 HISTORY_PAGE_CAP = 5
 OBSERVATION_REQUEST_CAP = 8 + 4 * HISTORY_PAGE_CAP * 2
 HISTORY_INCOMPLETE_ALERT = "venue_observation_history_incomplete"
+# A vanished offer the venue still does not know by id after the grace: the observation
+# carries it as an unconfirmed end (no terminal row) and conservation judges it by trades.
+OFFER_END_UNCONFIRMED_ALERT = "offer_end_unconfirmed"
+# Venue history may lag an offer's end. Retried each cycle inside this grace, measured
+# in this process from the first "id not returned" sighting (a restart starts a new one:
+# only ever waits longer, so it still absorbs the lag).
+OFFER_END_GRACE_MS = 120_000
 
 
 def _clock_ms() -> int:
@@ -153,6 +160,10 @@ class BitfinexVenueObservation:
         self._scope = scope
         self._clock_ms = clock_ms
         self._request_cap = request_cap
+        self._missing_since: dict[str, int] = {}  # offer id -> first "not returned" sighting
+        self._alerted_ends: set[str] = set()
+        self._seen_missing: set[str] = set()
+        self._unconfirmed: list[str] = []
 
     async def _active(self, budget: ObservationRequestBudget) -> Observation:
         # Only funding wallets are this system's capital. Exchange/margin
@@ -202,6 +213,73 @@ class BitfinexVenueObservation:
         return CoveredHistory(tuple(rows), complete, covered.pages,
                               covered.requested_start_ms, covered.requested_end_ms)
 
+    async def _offer_history(
+        self, symbol: str, vanished: list[str], *, start_ms: int, end_ms: int,
+        budget: ObservationRequestBudget,
+    ) -> CoveredHistory[OfferHistory]:
+        """Windowed rows (changed in the interval) plus the vanished offers by id.
+
+        Absence never confirms terminal: a vanished id the venue does not return, or
+        returns in a non-terminal state, makes this symbol's coverage incomplete (the
+        next cycle retries, since the mirror is unchanged until acceptance).
+        """
+        windowed = await self._history(
+            self._rest.fetch_offer_history_observations, normalize_offer_history,
+            stream="offers", symbol=symbol, start_ms=start_ms, end_ms=end_ms, budget=budget)
+        if not vanished:
+            return windowed
+        before = budget.requests_used
+        complete = windowed.complete
+        rows = list(windowed.rows)
+        by_id_failed = False
+        try:
+            found = await self._rest.fetch_offer_history_by_ids(
+                ctx=self._ctx, symbol=symbol, offer_ids=vanished, budget=budget)
+        except Exception as exc:
+            self._alert("offers_by_id", symbol, reason=type(exc).__name__)
+            found = {}
+            complete = False
+            by_id_failed = True
+        have = {item.offer.venue_offer_id for item in rows}
+        for offer_id in sorted(set(vanished)):
+            row = found.get(offer_id)
+            if row is None and offer_id in have:
+                continue  # the windowed stream already carries its terminal row
+            if row is None:
+                if not by_id_failed and not self._grace_over(offer_id):
+                    self._alert("offers_by_id", symbol, reason="vanished_offer_not_returned")
+                    complete = False
+                elif not by_id_failed:
+                    self._unconfirmed.append(offer_id)
+                    self._alert_unconfirmed(symbol, offer_id)
+                continue
+            try:
+                item = normalize_offer_history(row)
+            except ValueError as exc:
+                complete = False
+                self._alert("offers_by_id", symbol, reason=str(exc))
+                continue
+            if offer_id not in have:
+                rows.append(item)
+        return CoveredHistory(tuple(rows), complete, windowed.pages + budget.requests_used - before,
+                              windowed.requested_start_ms, windowed.requested_end_ms)
+
+    def _grace_over(self, offer_id: str) -> bool:
+        """First sighting starts the grace; the end is unconfirmed once it has run out."""
+        now = self._clock_ms()
+        self._seen_missing.add(offer_id)
+        first = self._missing_since.setdefault(offer_id, now)
+        return now - first >= OFFER_END_GRACE_MS
+
+    def _alert_unconfirmed(self, symbol: str, offer_id: str) -> None:
+        if offer_id in self._alerted_ends:
+            return
+        self._alerted_ends.add(offer_id)
+        alerts.emit(OFFER_END_UNCONFIRMED_ALERT, level=alerts.WARNING,
+                    exchange_account_id=str(self._scope.exchange_account_id),
+                    deployment_environment=self._scope.deployment_environment,
+                    symbol=symbol, venue_offer_id=offer_id, grace_ms=OFFER_END_GRACE_MS)
+
     def _alert(self, stream: str, symbol: str, *, reason: str) -> None:
         alerts.emit(HISTORY_INCOMPLETE_ALERT, level=alerts.WARNING,
                     exchange_account_id=str(self._scope.exchange_account_id),
@@ -215,6 +293,7 @@ class BitfinexVenueObservation:
             raise ValueError("venue observation scope mismatch")
         # Reserve the final four requests without introducing a second budget.
         budget = ObservationRequestBudget(self._request_cap - 4)
+        self._seen_missing, self._unconfirmed = set(), []
         active = await self._active(budget)
         end_ms = active.finished_at_ms  # local time after all four streams
         start_ms = window.history_start_ms
@@ -231,16 +310,23 @@ class BitfinexVenueObservation:
             trade_start_ms = start_ms
         # Wallet and credit symbols are the capital; the window's anchor attempts add
         # the symbols an UNKNOWN or R6 absence proof needs even when no wallet names them.
+        # P's live offers that are gone from this active read ended somewhere in
+        # (P, now]: conservation needs each one's terminal row, however old the offer.
+        # The windowed stream cannot certify that, so ask the venue by id.
+        active_ids = {offer.venue_offer_id for offer in active.offers}
+        vanished: dict[str, list[str]] = {}
+        for live in window.live_offers:
+            if live.venue_offer_id not in active_ids:
+                vanished.setdefault(live.symbol, []).append(live.venue_offer_id)
         symbols = sorted({wallet.symbol for wallet in active.wallets if wallet.symbol is not None}
                          | {credit.symbol for credit in active.credits}
-                         | window.anchor_symbols)
+                         | window.anchor_symbols | vanished.keys())
         offers: list[CoveredHistory[OfferHistory]] = []
         credits: list[CoveredHistory[CreditHistory]] = []
         trades: list[CoveredHistory[Trade]] = []
         for symbol in symbols:
-            offers.append(await self._history(
-                self._rest.fetch_offer_history_observations, normalize_offer_history,
-                stream="offers", symbol=symbol, start_ms=start_ms, end_ms=end_ms, budget=budget))
+            offers.append(await self._offer_history(
+                symbol, vanished.get(symbol, []), start_ms=start_ms, end_ms=end_ms, budget=budget))
             credits.append(await self._history(
                 self._rest.fetch_credit_history_observations, normalize_credit_history,
                 stream="credits", symbol=symbol, start_ms=start_ms, end_ms=end_ms, budget=budget))
@@ -275,7 +361,11 @@ class BitfinexVenueObservation:
             trades_requested_end_ms=trades[0].requested_end_ms if trades else end_ms,
             history_symbols=frozenset(symbols),
         )
+        # An id that is back, or no longer vanished, starts from scratch next time.
+        self._missing_since = {i: t for i, t in self._missing_since.items() if i in self._seen_missing}
+        self._alerted_ends &= self._seen_missing
         first = replace(active, coverage=coverage, finished_at_ms=self._clock_ms(),
+                        unconfirmed_ends=tuple(sorted(self._unconfirmed)),
                         offer_history=tuple(row for h in offers for row in h.rows),
                         credit_history=tuple(row for h in credits for row in h.rows),
                         trades=tuple(row for h in trades for row in h.rows))

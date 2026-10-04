@@ -206,6 +206,11 @@ class Observation:
     offer_history: tuple[OfferHistory, ...] = ()
     credit_history: tuple[CreditHistory, ...] = ()
     trades: tuple[Trade, ...] = ()
+    # Ids of offers that left the active list and that the venue still does not know
+    # by id after the port's grace. No terminal row exists for them and none is made:
+    # absence never confirms terminal. Conservation determines their fill from this
+    # observation's funding trades (by OFFER_ID) or, if it cannot, conflicts.
+    unconfirmed_ends: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +326,14 @@ class QueryHandle:
 
 
 @dataclass(frozen=True, slots=True)
+class LiveOffer:
+    """An offer in the latest accepted snapshot: what the port needs to look its end up by id."""
+
+    venue_offer_id: str
+    symbol: str
+
+
+@dataclass(frozen=True, slots=True)
 class ObservationWindow:
     """Local anchors for the next observation's history request.
 
@@ -338,6 +351,11 @@ class ObservationWindow:
     # Symbols of the anchor attempts: the port must fetch their history even
     # when no wallet or credit names them.
     anchor_symbols: frozenset[str] = frozenset()
+    # The previous accepted snapshot's live offers. Conservation needs the end of
+    # every one that is gone from the next active read, however old it is; the
+    # anchor window above cannot certify that. The port computes the vanished set
+    # and asks the venue for those offers by id.
+    live_offers: tuple[LiveOffer, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1243,6 +1261,7 @@ __all__ = [
     "LedgerReadUnbounded",
     "LedgerUncertainties",
     "LiveManagedOffer",
+    "LiveOffer",
     "LockedCancelGuard",
     "LockedCommandGuard",
     "ManagedOffer",

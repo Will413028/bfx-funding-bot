@@ -158,6 +158,11 @@ class Book:
             result = await OBSERVATIONS.accept(
                 session, self.scope, handle, first, confirmation, finished
             )
+        await self.accept_result(result)
+        return result.decision
+
+    async def accept_result(self, result: Any) -> None:
+        """Track the basis of an acceptance made outside ``accept`` (a real port)."""
         if result.decision == "accepted":
             self.observation_id = result.observation_id
             async with self.factory.begin() as session:
@@ -166,7 +171,6 @@ class Book:
                         AcceptedCapitalBasisRow.observation_id == result.observation_id
                     )
                 )
-        return result.decision
 
     async def attempt(
         self,
@@ -176,6 +180,7 @@ class Book:
         venue_offer_id: str | None = None,
         cell: str = "a30",
         symbol: str = "fUST",
+        started_at_ms: int = 0,
     ) -> UUID:
         assert self.basis_id is not None
         self.decisions += 1
@@ -213,7 +218,7 @@ class Book:
                     self.basis_id,
                     UUID(_ATTEMPT_POLICY),
                     {},
-                    0,
+                    started_at_ms,
                 ),
             )
         if outcome is not None:

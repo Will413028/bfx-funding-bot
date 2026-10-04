@@ -29,7 +29,8 @@ def _ctx() -> AccountContext:
 
 def _row(kind: str, row_id: int, mts: int) -> list[Any]:
     if kind == "offer":
-        return [row_id, "fUST", mts, mts + 1, "NEGATIVE", "NEGATIVE", "LIMIT",
+        # the venue filters offers (like credits) by MTS_UPDATE; both stamps equal here
+        return [row_id, "fUST", mts, mts, "NEGATIVE", "NEGATIVE", "LIMIT",
                 None, None, 0, "CANCELED", None, None, None, "WIRE", 2, "extra"]
     if kind in ("credit", "loan"):
         return [row_id, "fUST", 1, mts - 1, mts, "WIRE", 0, "CLOSED (used)",
@@ -431,3 +432,49 @@ async def test_invalid_pager_arguments_make_no_requests(kwargs: dict[str, int]) 
 def test_negative_request_cap_is_rejected() -> None:
     with pytest.raises(ValueError):
         ObservationRequestBudget(request_cap=-1)
+
+
+def _offer(row_id: int, created: int, updated: int, symbol: str = "fUST") -> list[Any]:
+    row = _row("offer", row_id, created)
+    row[1], row[3] = symbol, updated
+    return row
+
+
+@pytest.mark.asyncio
+async def test_offer_pager_keeps_rows_by_update_time_as_the_venue_filters() -> None:
+    """Probed 2026-10-04: start/end filter MTS_UPDATE. An old offer ended in the window
+    is kept; one created in the window but last updated after it is out of range."""
+    rows = [_offer(1, created=10, updated=200), _offer(2, created=150, updated=150),
+            _offer(3, created=150, updated=400), _offer(4, created=10, updated=50)]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: _response(rows))) as http:
+        result = await _fetch(BitfinexAuthREST(http=http), "offer")
+    assert sorted(row.venue_offer_id for row in result.rows) == ["1", "2"]
+
+
+@pytest.mark.asyncio
+async def test_offer_by_id_request_shape_batches_and_filters_to_the_requested_ids() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        assert request.url.path == "/v2/auth/r/funding/offers/fUST/hist"
+        # The venue answers for the ids it knows; an unrequested row must be ignored too.
+        return _response([_offer(i, 1, 2) for i in (*bodies[-1]["id"][:-1], 999)])
+
+    ids = [str(i) for i in range(1, 28)]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        found = await BitfinexAuthREST(http=http).fetch_offer_history_by_ids(
+            ctx=_ctx(), symbol="fUST", offer_ids=ids, budget=ObservationRequestBudget(5))
+    assert [(len(b["id"]), b["limit"]) for b in bodies] == [(25, 25), (2, 25)]
+    assert all(isinstance(i, int) for b in bodies for i in b["id"])
+    assert set(found) == set(ids[:24]) | {"26"}  # last id of each batch was not returned
+    assert "999" not in found
+
+
+@pytest.mark.asyncio
+async def test_offer_by_id_consumes_budget_and_stops_at_the_cap() -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: _response([]))) as http:
+        with pytest.raises(ObservationRequestCapError):
+            await BitfinexAuthREST(http=http).fetch_offer_history_by_ids(
+                ctx=_ctx(), symbol="fUST", offer_ids=[str(i) for i in range(1, 30)],
+                budget=ObservationRequestBudget(1))

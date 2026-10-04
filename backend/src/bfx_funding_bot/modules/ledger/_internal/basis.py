@@ -202,8 +202,15 @@ async def previous_basis(session: AsyncSession, scope: Scope) -> AcceptedCapital
     return row
 
 
-async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID) -> UUID:
-    """Classify the just-accepted observation and write its basis in this transaction."""
+async def write_basis(
+    session: AsyncSession, scope: Scope, observation_id: UUID,
+    *, unconfirmed_ends: frozenset[str] = frozenset(),
+) -> UUID:
+    """Classify the just-accepted observation and write its basis in this transaction.
+
+    ``unconfirmed_ends`` are the observation's offers the venue could not date an end for
+    (see ``Observation.unconfirmed_ends``); only conservation reads them.
+    """
     observation = await session.get(LedgerObservationRow, observation_id)
     if observation is None or not observation.accepted:
         raise ValueError("basis requires an accepted observation")
@@ -605,6 +612,7 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         trades=trade_rows,
         provenance=c.provenance,
         quarantines=quarantines,
+        unconfirmed_ends=unconfirmed_ends,
     )
     scope_block = _block_json(c.scope_reasons)
     payload: JsonObject = {

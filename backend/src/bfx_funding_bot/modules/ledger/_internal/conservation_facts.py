@@ -97,6 +97,7 @@ async def symbol_verdicts(
     trades: Sequence[LedgerObservationTradeRow],
     provenance: Mapping[str, set[UUID]],
     quarantines: Sequence[UUID],
+    unconfirmed_ends: Collection[str] = frozenset(),
 ) -> dict[str, ConservationVerdict]:
     """Each wallet symbol's verdict; a symbol without a row in P is a baseline."""
     if previous is None:
@@ -174,6 +175,16 @@ async def symbol_verdicts(
             # Gone without a trace in the history, or known only by a trade: its end is unknown.
             symbol = before[offer_id].symbol if offer_id in before else trade_symbol[offer_id]
             original, remaining = None, None
+            if offer_id in unconfirmed_ends and offer_id in before:
+                # The venue still cannot date this end after the port's grace. Absence is not
+                # a terminal row, so the fill is only what this observation's funding trades
+                # of the offer id say, and only when they can say it exactly: the trades
+                # cover P's start, nothing is ambiguous around P's read (possible == certain)
+                # and the offer cannot have filled more than P left it. A plain cancel
+                # leaves no trade: zero fill. Anything else keeps the conflict.
+                left = before[offer_id].amount_remaining - possible[offer_id]
+                if covers_upper and possible[offer_id] == certain[offer_id] and left >= 0:
+                    original, remaining = before[offer_id].amount_original, left
         start_remaining = before[offer_id].amount_remaining if offer_id in before else original
         foreign = not provenance.get(offer_id) and offer_id not in held
         if start_remaining is None or remaining is None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -408,6 +408,7 @@ def parse_funding_trades(raw: Any) -> list[FundingTrade]:
 
 
 BITFINEX_AUTH_REST_BASE = "https://api.bitfinex.com"
+OFFER_ID_BATCH = 25  # the venue default page size: one by-id response is never truncated
 _FUNDING_OFFERS_PATH = "v2/auth/r/funding/offers"  # /{symbol} appended; no leading slash (sign_request prepends /api/)
 _FUNDING_CREDITS_PATH = "v2/auth/r/funding/credits"
 # Lent funds that no borrower has drawn into a position yet. Bitfinex lists
@@ -491,19 +492,60 @@ class BitfinexAuthREST:
         self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
     ) -> CoveredHistory[OfferObservation]:
-        """Per-symbol history by MTS_CREATE; retain MTS_UPDATE for normalization."""
+        """Per-symbol offers that CHANGED in [start, end], paged by MTS_UPDATE.
+
+        The venue's start/end filter MTS_UPDATE, not MTS_CREATE (read-only prod probe,
+        2026-10-04, fUST), so this stream is "rows updated in the interval". It is a
+        superset of the offers created in the interval (update >= create), which is
+        what R6 and the UNKNOWN matcher need. An older offer that ended in the interval
+        is also returned, but absence of one is never proof: look it up by id instead
+        (fetch_offer_history_by_ids).
+        """
         return await self._page_covered_history(
             ctx=ctx, endpoint=_FUNDING_OFFERS_PATH, symbol=symbol,
-            parse=parse_offer_observations, mts=lambda row: row.mts_created,
+            parse=parse_offer_observations, mts=lambda row: row.mts_updated,
             key=lambda row: row.venue_offer_id, start_ms=start_ms, end_ms=end_ms,
             limit=limit, max_pages=max_pages, budget=budget,
         )
+
+    async def fetch_offer_history_by_ids(
+        self, *, ctx: AccountContext, symbol: str, offer_ids: Iterable[str],
+        budget: ObservationRequestBudget | None = None,
+    ) -> dict[str, OfferObservation]:
+        """Ended offers by venue id (``{"id": [...]}``, probed 2026-10-04): only the
+        requested ids that the venue returned. A missing id is absent evidence, never
+        a terminal. Batches of ``OFFER_ID_BATCH`` ids, so a response never exceeds the
+        venue's default page (25) and cannot be truncated.
+        """
+        wanted = sorted(set(offer_ids), key=int)
+        found: dict[str, OfferObservation] = {}
+        path = f"{_FUNDING_OFFERS_PATH}/{symbol}/hist"
+        for i in range(0, len(wanted), OFFER_ID_BATCH):
+            batch = wanted[i:i + OFFER_ID_BATCH]
+            if budget is not None:
+                budget.consume()
+            rows = parse_offer_observations(await self._post_signed(
+                ctx=ctx, path=path,
+                body={"id": [int(offer_id) for offer_id in batch], "limit": OFFER_ID_BATCH},
+            ))
+            for row in rows:
+                if row.venue_offer_id in batch and row.symbol == symbol:
+                    found.setdefault(row.venue_offer_id, row)
+        return found
 
     async def fetch_credit_history_observations(
         self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
     ) -> CoveredHistory[CreditObservation]:
-        """Per-symbol ended credits, paged and filtered by MTS_UPDATE."""
+        """Per-symbol ended credits, paged and filtered by MTS_UPDATE.
+
+        No vanished-id retention here (unlike offers): no verdict depends on a credit
+        ending outside the window. A P credit that closes is a decrease, which
+        conservation ignores (conservation.py), and one opened and closed inside the
+        interval has mts_create >= start. A closed credit has MTS_UPDATE == MTS_CREATE
+        (credit 466642176, 2026-09-27; see the comment on the credit parser), so the
+        update filter is not a close-time filter either way.
+        """
         return await self._page_covered_history(
             ctx=ctx, endpoint=_FUNDING_CREDITS_PATH, symbol=symbol,
             parse=lambda raw: parse_credit_observations(raw, source_kind="credit"),
