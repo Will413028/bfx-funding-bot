@@ -15,7 +15,7 @@ from typing import Literal, Protocol
 from bfx_funding_bot.modules.simulated_venue.events import VenueEvent
 
 # The only realms a simulated venue may run in. `prod` is refused here and by the
-# `sim_venue_event` CHECK constraint added with the SQL store (P1b).
+# `sim_venue_event` CHECK constraint.
 ALLOWED_REALMS = ("shadow", "ci")
 REQUIRED_AUTHORITY_EPOCH = "ledger"
 
@@ -125,6 +125,13 @@ class MarketFeed(Protocol):
 
 class VenueEventStore(Protocol):
     """Append-only event log per account scope; one shape for memory and SQL."""
+
+    async def authority_epoch(self) -> str:
+        """The raw latest authority epoch of the database this store writes to.
+
+        Read by the store itself, on its own connection; a caller never supplies it.
+        """
+        ...
 
     async def load(self, account: SimAccount) -> Sequence[VenueEvent]:
         """All events of the scope, ordered by position."""

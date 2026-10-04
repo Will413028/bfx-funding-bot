@@ -18,7 +18,7 @@ the docs): the field `/hist` filters on, the history lag, the cancel-not-active
 answer shape (`cancel_rejection`), and the real business-rejection code numbers.
 
 Snapshot trigger: the event log is replayed in full on open and `catch_up` copies the
-state only when something is due. Add snapshots (P1b store) when a boot replay takes
+state only when something is due. Add snapshots (to the SQL store) when a boot replay takes
 longer than 5 seconds or the log exceeds 200_000 events, whichever comes first; the
 soak report records the event count (`len(await store.load(account))`).
 
@@ -32,6 +32,7 @@ from bfx_funding_bot.modules.simulated_venue._internal.market_replay import Fixt
 from bfx_funding_bot.modules.simulated_venue._internal.store_memory import (
     InMemoryVenueEventStore,
 )
+from bfx_funding_bot.modules.simulated_venue._internal.store_sql import SqlVenueEventStore
 from bfx_funding_bot.modules.simulated_venue._internal.transport import SimulatedVenue
 from bfx_funding_bot.modules.simulated_venue.contracts import (
     ALLOWED_REALMS,
@@ -78,6 +79,7 @@ __all__ = [
     "SimulatedVenue",
     "SimulatedVenueConfig",
     "SimulatedVenueInternalError",
+    "SqlVenueEventStore",
     "VenueEventStore",
     "VenueStoreError",
 ]

@@ -33,6 +33,7 @@ import bfx_funding_bot.modules.ledger.tables
 import bfx_funding_bot.modules.lending.tracking.tables
 import bfx_funding_bot.modules.live_validation.tables
 import bfx_funding_bot.modules.marketfeed.tables
+import bfx_funding_bot.modules.simulated_venue.tables
 from alembic import context
 from bfx_funding_bot.core.alembic_compare import compare_server_default, include_object
 from bfx_funding_bot.core.db import Base

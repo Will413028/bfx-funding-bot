@@ -128,7 +128,7 @@ async def make_world(
         feed.add_book(book("fUSD", clock.now, asks))
     venue = await (venue_factory or build_simulated_venue)(
         account=ACCOUNT, config=cfg, store=store, feed=feed, clock_ms=clock,
-        authority_epoch="ledger", faults=faults,
+        faults=faults,
     )
     if funds is not None:
         for currency, amount in funds.items():
