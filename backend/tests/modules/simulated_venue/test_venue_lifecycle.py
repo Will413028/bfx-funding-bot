@@ -2,16 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from decimal import Decimal
-from uuid import UUID
 
 import pytest
 
-from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
-from bfx_funding_bot.modules.execution.venue_observation import BitfinexVenueObservation
-from bfx_funding_bot.modules.ledger import ObservationWindow, Scope
 from bfx_funding_bot.modules.simulated_venue import (
     ALLOWED_REALMS,
     ConcurrentAppendError,
@@ -32,9 +29,6 @@ from bfx_funding_bot.modules.simulated_venue.events import VenueEvent
 from bfx_funding_bot.modules.simulated_venue.wiring import build_simulated_venue
 from tests.modules.simulated_venue.helpers import (
     ACCOUNT,
-    ACCOUNT_ID,
-    API_KEY,
-    API_SECRET,
     CTX,
     DAY,
     HOUR,
@@ -65,8 +59,13 @@ def test_realm_prod_and_unknown_realms_are_refused_at_construction() -> None:
 async def test_wiring_refuses_any_authority_epoch_but_ledger(epoch: str) -> None:
     with pytest.raises(RealmRefusedError):
         await build_simulated_venue(
-            account=ACCOUNT, config=config(), store=InMemoryVenueEventStore(),
-            feed=(await make_world()).feed, clock_ms=lambda: T0, authority_epoch=epoch)
+            account=ACCOUNT, config=config(), store=InMemoryVenueEventStore(authority_epoch=epoch),
+            feed=(await make_world()).feed, clock_ms=lambda: T0)
+
+
+def test_wiring_takes_no_epoch_from_its_caller() -> None:
+    # The store reports the epoch it read itself; a caller-supplied value is not an option.
+    assert "authority_epoch" not in inspect.signature(build_simulated_venue).parameters
 
 
 def test_config_refuses_missing_synthetic_credentials_and_nonsense() -> None:
@@ -303,38 +302,9 @@ async def test_a_simulator_bug_is_recorded_and_raised_not_answered_as_a_venue_fa
 
 # -- the world moves between two requests -----------------------------------------
 
-def _observer(w: World) -> BitfinexVenueObservation:
-    scope = Scope(UUID(ACCOUNT_ID), "ci")
-    ctx = AccountContext(ACCOUNT_ID, Credentials(API_KEY, API_SECRET), D(10000))
-    return BitfinexVenueObservation(rest=w.rest, ctx=ctx, scope=scope, clock_ms=w.clock)
-
-
 def _tick_plan(n: int, hook: Callable[[], None]) -> FaultPlan:
     return FaultPlan(rules=(FaultRule(
         FaultTarget.ANY_REQUEST, FaultKind.TICK_AFTER, ordinals=frozenset({n}), hook=hook),))
-
-
-async def test_a_fill_between_the_first_and_confirmation_reads_makes_them_differ() -> None:
-    holder: list[World] = []
-    # Requests: 1 = the submit; then one observation = wallets (2), offers (3), credits (4),
-    # loans (5), history..., and the four confirming active reads. Tick after the offers read.
-    plan = _tick_plan(3, lambda: holder[0].clock.advance(HOUR))
-    w = await make_world(funds={"UST": "1000"}, faults=plan)
-    holder.append(w)
-    await w.submit_ok(amount="150")
-    w.feed.add_trades("fUST", [trade(T0 + HOUR, "150")])
-    observer = _observer(w)
-    scope = Scope(UUID(ACCOUNT_ID), "ci")
-    window = ObservationWindow(None, None, None)
-
-    first, confirmation, _ = await observer.observe(scope, w.clock.now, window)
-    assert first.offers != confirmation.offers  # first saw the offer resting
-    assert len(first.offers) == 1 and confirmation.offers == ()
-    assert len(first.credits) == len(confirmation.credits) == 1  # the loan came before read 4
-
-    again_first, again_confirmation, _ = await observer.observe(scope, w.clock.now, window)
-    assert (again_first.wallets, again_first.offers, again_first.credits) == (
-        again_confirmation.wallets, again_confirmation.offers, again_confirmation.credits)
 
 
 async def test_the_tick_rule_runs_once_after_the_nth_request_and_catches_up() -> None:

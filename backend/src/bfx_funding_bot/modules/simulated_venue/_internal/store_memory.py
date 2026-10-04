@@ -8,8 +8,13 @@ from bfx_funding_bot.modules.simulated_venue.events import VenueEvent
 
 
 class InMemoryVenueEventStore:
-    def __init__(self) -> None:
+    def __init__(self, authority_epoch: str = "ledger") -> None:
+        # There is no database: tests state the epoch this fake pretends to sit on.
+        self._authority_epoch = authority_epoch
         self._events: dict[SimAccount, list[VenueEvent]] = {}
+
+    async def authority_epoch(self) -> str:
+        return self._authority_epoch
 
     async def load(self, account: SimAccount) -> Sequence[VenueEvent]:
         return tuple(self._events.get(account, ()))

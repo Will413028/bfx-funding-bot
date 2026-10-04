@@ -17,16 +17,16 @@ from bfx_funding_bot.modules.simulated_venue.contracts import (
 
 async def build_simulated_venue(
     *, account: SimAccount, config: SimulatedVenueConfig, store: VenueEventStore,
-    feed: MarketFeed, clock_ms: Callable[[], int], authority_epoch: str,
+    feed: MarketFeed, clock_ms: Callable[[], int],
     faults: FaultPlan | None = None,
 ) -> SimulatedVenue:
     """Open the venue over its store, refusing any database that is not on `ledger`.
 
-    `account` already refuses realm `prod`. `authority_epoch` is the raw latest
-    authority epoch of the database the process runs against, read by the
-    composition root (not through the bot's `read_authority`, which is venue-blind).
-    Faults are off unless a plan is given.
+    `account` already refuses realm `prod`. The authority epoch is reported by the store,
+    which reads it on its own connection to the database it writes to; the caller has no
+    way to pass one in. Faults are off unless a plan is given.
     """
+    authority_epoch = await store.authority_epoch()
     if authority_epoch != REQUIRED_AUTHORITY_EPOCH:
         raise RealmRefusedError(
             f"simulated venue needs authority epoch {REQUIRED_AUTHORITY_EPOCH!r}, "
