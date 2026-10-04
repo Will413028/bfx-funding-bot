@@ -51,6 +51,7 @@ from tests.modules.api.test_uncertainties_router import (
     _snapshot,
 )
 from tests.pg_templates import alembic as _alembic
+from tests.pg_templates import stamp_realm
 
 pytestmark = pytest.mark.integration
 
@@ -131,6 +132,7 @@ def _build_migrated(url: str) -> None:
     _alembic(url, "upgrade", "head")
     _alembic(url, "upgrade", "head")  # re-running is a no-op
     _alembic(url, "check")
+    stamp_realm(url, "ci")
     engine.dispose()
 
 

@@ -42,6 +42,7 @@ from bfx_funding_bot.modules.ledger import (
 from bfx_funding_bot.modules.ledger._internal.journal import record_attempt
 from bfx_funding_bot.modules.ledger.tables import CapitalCommandClockRow
 from bfx_funding_bot.modules.ledger.wiring import build_ledger_journal
+from tests.pg_templates import disable_realm_triggers
 
 from .test_ledger_schema_roles import (
     _A,
@@ -112,6 +113,8 @@ def _resolution(
 
 @pytest.mark.asyncio
 async def test_clock_transaction_and_scope_queries(ledger_db_fixture) -> None:  # noqa: F811
+    # The other scope is another realm in this one database; the realm trigger would refuse it.
+    disable_realm_triggers(ledger_db_fixture)
     engine = _engine(ledger_db_fixture)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     with ledger_db_fixture.begin() as conn:
@@ -141,6 +144,8 @@ async def test_clock_transaction_and_scope_queries(ledger_db_fixture) -> None:  
 
 @pytest.mark.asyncio
 async def test_begin_query_refuses_pending_attempt(seeded_fixture) -> None:  # noqa: F811
+    # The other scope is another realm in this one database; the realm trigger would refuse it.
+    disable_realm_triggers(seeded_fixture)
     engine = _engine(seeded_fixture)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     attempt = _attempt()

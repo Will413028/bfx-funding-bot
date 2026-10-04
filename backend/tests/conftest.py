@@ -219,7 +219,7 @@ def _build_archive_database(url: str) -> None:
             )
             conn.execute(
                 text(
-                    "INSERT INTO position_state(account_id,exchange_account_id,deployment_environment,symbol,reserved,last_updated_ms) VALUES (:s,:id,'ci','fUST',1.2300,123), (:s,:id,'shadow','fUSD',9.000,999)"
+                    "INSERT INTO position_state(account_id,exchange_account_id,deployment_environment,symbol,reserved,last_updated_ms) VALUES (:s,:id,'ci','fUST',1.2300,123)"
                 ),
                 {"s": _ARCHIVE_ACCOUNT, "id": _ARCHIVE_ACCOUNT},
             )
@@ -234,6 +234,17 @@ def _build_archive_database(url: str) -> None:
         with engine.begin() as conn:
             after = conn.execute(text("SELECT to_jsonb(p) FROM position_state p ORDER BY symbol")).all()
             assert after == before
+            # The migration stamped the database `ci` from the seeded rows. The archive tests
+            # also need one foreign-realm row (to prove the archive scopes by realm); the
+            # realm trigger forbids it, so it is planted with the trigger visibly disabled.
+            conn.exec_driver_sql("ALTER TABLE position_state DISABLE TRIGGER database_realm_write")
+            conn.execute(
+                text(
+                    "INSERT INTO position_state(account_id,exchange_account_id,deployment_environment,symbol,reserved,last_updated_ms) VALUES (:s,:id,'shadow','fUSD',9.000,999)"
+                ),
+                {"s": _ARCHIVE_ACCOUNT, "id": _ARCHIVE_ACCOUNT},
+            )
+            conn.exec_driver_sql("ALTER TABLE position_state ENABLE TRIGGER database_realm_write")
             conn.exec_driver_sql("CREATE SCHEMA unrelated")
             conn.exec_driver_sql("CREATE TABLE unrelated.keep_me(id integer)")
         alembic(url, "check")

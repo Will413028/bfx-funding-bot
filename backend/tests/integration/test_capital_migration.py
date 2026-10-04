@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from tests.pg_templates import alembic
+from tests.pg_templates import alembic, stamp_realm
 
 pytestmark = pytest.mark.integration
 
@@ -25,6 +25,7 @@ def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_container):
         connection.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO bfx_bot")
     alembic(url, "upgrade", "head")
     alembic(url, "check")
+    stamp_realm(url, "ci")
     with engine.begin() as connection:
         assert "capital_snapshots" in inspect(connection).get_table_names()
         assert connection.scalar(text("SELECT count(*) FROM capital_policy_revisions")) == 0

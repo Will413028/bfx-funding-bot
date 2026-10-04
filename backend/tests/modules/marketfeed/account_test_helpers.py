@@ -19,12 +19,16 @@ TEST_VAULT_KEK = bytes(range(32))
 TEST_VAULT_KEK_B64 = base64.b64encode(TEST_VAULT_KEK).decode()
 
 
-async def stamp_schema_head(engine: AsyncEngine) -> None:
-    """Record this build's schema head and the seeded ``legacy`` capital authority,
-    as ``alembic upgrade`` would on Postgres."""
+async def stamp_schema_head(engine: AsyncEngine, *, realm: str | None = None) -> None:
+    """Record this build's schema head, the seeded ``legacy`` capital authority and the
+    database realm (``ci`` unless a test boots as another realm), as ``alembic upgrade``
+    plus the owner's one-time stamp would on Postgres."""
+    import os
+
     from sqlalchemy import inspect, text
 
     from bfx_funding_bot.core.schema_head import build_head
+    realm = realm or os.environ.get("BFX_DEPLOYMENT_ENV", "").strip() or "ci"
     async with engine.begin() as conn:
         await conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"))
         await conn.execute(text("DELETE FROM alembic_version"))
@@ -35,6 +39,11 @@ async def stamp_schema_head(engine: AsyncEngine) -> None:
                 "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
                 "SELECT 1, 'legacy', 0, 'test', 'initial authority' "
                 "WHERE NOT EXISTS (SELECT 1 FROM capital_authority_epoch)"))
+        if await conn.run_sync(lambda sync: inspect(sync).has_table("database_realm")):
+            await conn.execute(text(
+                "INSERT INTO database_realm (realm, stamped_at_ms, actor) "
+                "SELECT :realm, 0, 'test' WHERE NOT EXISTS (SELECT 1 FROM database_realm)"),
+                {"realm": realm})
 
 
 def configure_account_env(monkeypatch: pytest.MonkeyPatch) -> None:

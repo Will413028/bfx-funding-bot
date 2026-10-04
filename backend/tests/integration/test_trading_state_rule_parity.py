@@ -15,6 +15,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import text
 
+from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     IllegalTradingTransition,
     check_transition,
@@ -61,12 +62,16 @@ _INSERT = text("""INSERT INTO trading_state (exchange_account_id, deployment_env
 
 @pytest.mark.asyncio
 async def test_python_and_postgresql_refuse_the_same_transitions(migrated_db):
-    factory, account = migrated_db
+    factory, _ = migrated_db
     disagreements = []
     database_verdicts = {}
     for (name, history), (state, cause) in itertools.product(HISTORIES.items(), NEXT):
-        env = f"parity-{uuid4().hex[:10]}"
+        # One scope per case: a fresh account in the database's own realm (the realm stamp
+        # forbids inventing a realm per case).
+        account, env = uuid4(), "ci"
         now_ms = int(time.time() * 1000)
+        async with factory.begin() as session:
+            session.add(ExchangeAccount(id=account, venue="bitfinex", label="parity"))
         async with factory.begin() as session:
             await session.execute(text("SET LOCAL session_replication_role = replica"))
             for row_state, row_cause, minutes_ago in history:

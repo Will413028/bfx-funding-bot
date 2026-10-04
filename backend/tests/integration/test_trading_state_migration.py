@@ -22,6 +22,10 @@ _PREVIOUS = "a7f3c1d9e204"
 _A = "00000000-0000-0000-0000-0000000000a1"
 _B = "00000000-0000-0000-0000-0000000000b1"
 _C = "00000000-0000-0000-0000-0000000000c1"
+# A fourth account carries the maintenance pause: one database holds one realm, and the
+# realm stamp the head migration derives refuses a database whose halts span realms.
+_D = "00000000-0000-0000-0000-0000000000d1"
+_E = "00000000-0000-0000-0000-0000000000e1"  # no halt history: a scope of its own
 _PRODUCTION_REASON = "L4 gate: candle distortion — keep halted until probation lands (halt 11)"
 
 
@@ -82,14 +86,14 @@ def _build_migrated(url: str) -> dict[str, int]:
     _alembic(url, "upgrade", _PREVIOUS)
     ids: dict[str, int] = {}
     with engine.begin() as conn:
-        for account in (_A, _B, _C):
+        for account in (_A, _B, _C, _D, _E):
             conn.execute(text("INSERT INTO exchange_accounts(id, venue, label) VALUES (:a, 'bitfinex', 'fixture')"),
                          {"a": account})
         # Production today: an operator's safety halt, never cleared.
         _halt(conn, _A, "prod", True, "maintenance", "earlier pause", "admin-api", 100)
         _halt(conn, _A, "prod", False, "maintenance", "pause over", "admin-api", 200)
         ids["prod"] = _halt(conn, _A, "prod", True, "safety", _PRODUCTION_REASON, "worker", 300)
-        ids["pause"] = _halt(conn, _A, "ci", True, "maintenance", "pg 18.6 upgrade", "will", 400)
+        ids["pause"] = _halt(conn, _D, "prod", True, "maintenance", "pg 18.6 upgrade", "will", 400)
         _halt(conn, _B, "prod", True, "release", "release_blocked", "worker", 500)
         ids["resumed"] = _halt(conn, _B, "prod", False, "safety", "release_promoted:x", "will", 600)
         ids["release"] = _halt(conn, _C, "prod", True, "release", "release_command_terminal", "worker", 700)
@@ -120,11 +124,11 @@ def test_current_halt_rows_carry_over_verbatim(migrated):
                                {"h": ids["pause"]})
     assert [tuple(r) for r in rows] == [
         (_A, "prod", "HALTED", "operator", "worker", _PRODUCTION_REASON, ids["prod"]),
-        (_A, "ci", "REDUCING", "operator", "will", "pg 18.6 upgrade", ids["pause"]),
+        (_D, "prod", "REDUCING", "operator", "will", "pg 18.6 upgrade", ids["pause"]),
         (_B, "prod", "ACTIVE", "operator", "will", "release_promoted:x", ids["resumed"]),
         (_C, "prod", "HALTED", "operator", "worker", "release_command_terminal", ids["release"]),
         # 5b1e7c9d2a40: the carried pause becomes the stricter stop.
-        (_A, "ci", "HALTED", "operator", "migration 5b1e7c9d2a40",
+        (_D, "prod", "HALTED", "operator", "migration 5b1e7c9d2a40",
          f"REDUCING retired (lending envelope ADR); carried over from trading_state {pause_id}: "
          "pg 18.6 upgrade", None),
     ]
@@ -244,7 +248,7 @@ def test_the_database_clock_decides_an_automatic_resume(migrated):
 
         engine = create_async_engine(url)
         repo = TradingStateRepository(async_sessionmaker(engine, expire_on_commit=False),
-                                      account_id=UUID(_B), deployment_environment="auto-resume")
+                                      account_id=UUID(_E), deployment_environment="prod")
         try:
             now = int(time.time() * 1000)
             await repo.transition("ACTIVE", cause="operator", actor="will", reason="start")

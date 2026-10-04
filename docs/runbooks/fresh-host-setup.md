@@ -50,6 +50,25 @@ webauth 在 public 什麼都沒有。`bfx_webapi` 在 public 的權限是 migrat
 `DATABASE_URL`）跑 `alembic upgrade head`。migration `e61f3d1ed7ca` 建立 `auth` schema 與
 Better Auth 的表。
 
+### 1b-1. 蓋 database realm（migration 之後，以 `<owner>` 執行一次）
+
+每個資料庫只屬於一個 realm。`database_realm` 是單列、只能插入的表（migration `a7c3e9f1b2d4`），
+39 張帶 `deployment_environment` 的表有 trigger，寫入的 realm 與這一列不同、或這一列不存在時一律拒絕
+（owner 也一樣）；bot 開機時也會拒絕 `BFX_DEPLOYMENT_ENV` 與這一列不同的資料庫，任何 phase 都適用。
+
+- 已有資料的資料庫（例如 prod）：migration 從現有資料推導並蓋章（只有一種 realm 時），不用手動做；
+  有多種 realm 時 migration 失敗，schema 維持原狀。
+- 空的資料庫（新主機、模擬用 `bfx_sim`）：migration 後是未蓋章，所有 realm 寫入都被拒絕，owner 蓋章一次：
+
+```sql
+-- <realm> 是 prod（新主機）或 shadow（模擬用資料庫，模擬 venue 只接受 shadow／ci）
+INSERT INTO database_realm (realm, stamped_at_ms, actor)
+VALUES ('<realm>', (extract(epoch FROM clock_timestamp()) * 1000)::bigint, 'owner bootstrap');
+```
+
+蓋章後不能 UPDATE／DELETE／TRUNCATE，執行時的 role 沒有寫入權限（`bfx_bot` 只有 SELECT）。
+用 `CREATE DATABASE ... TEMPLATE` 複製出來的資料庫會帶著原來的章，要換 realm 就在新庫重建而不是改章。
+
 ### 1c. `bfx_webauth` 的 auth schema grant（migration 之後，以 `<owner>` 執行）
 
 `auth` schema 要等 migration 建好才存在，所以這步在 1b 之後：
