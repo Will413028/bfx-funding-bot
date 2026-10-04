@@ -6,6 +6,8 @@ archived or kept as recorded, a current pause becomes an operator HALTED, and a
 downgrade puts everything back byte for byte.
 """
 import copy
+import subprocess
+import sys
 from uuid import UUID
 
 import pytest
@@ -160,10 +162,9 @@ def test_downgrade_refuses_while_new_requests_exist(before):
             VALUES ('00000000-0000-0000-0000-0000000000e2', :a, 'prod', 'kill', 'x', 'will', 9)"""),
             {"a": UUID(_B)})
     import os
-    import subprocess
 
     from .test_trading_state_migration import _BACKEND
-    result = subprocess.run(["uv", "run", "alembic", "downgrade", _BEFORE], cwd=_BACKEND,
+    result = subprocess.run([sys.executable, "-m", "alembic", "downgrade", _BEFORE], cwd=_BACKEND,
                             env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
     assert result.returncode != 0
     assert "refuse downgrade of recorded resume/kill requests" in result.stdout + result.stderr

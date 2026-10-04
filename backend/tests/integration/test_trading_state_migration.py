@@ -7,6 +7,7 @@ grants as the restricted runtime roles actually see them.
 import asyncio
 import os
 import subprocess
+import sys
 from pathlib import Path
 from uuid import UUID
 
@@ -35,7 +36,7 @@ def _alembic(url: str, name: str, *args: str) -> None:
 
 def _alembic_cli(url: str, *args: str) -> subprocess.CompletedProcess[str]:
     """The operator's `alembic` CLI: a refused migration must exit non-zero, saying why."""
-    return subprocess.run(["uv", "run", "alembic", *args], cwd=_BACKEND,
+    return subprocess.run([sys.executable, "-m", "alembic", *args], cwd=_BACKEND,
                           env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
 
 

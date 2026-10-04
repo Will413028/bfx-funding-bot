@@ -278,6 +278,7 @@ def _local_image_with_repo_digest() -> str | None:
 
 
 @pytest.mark.integration
+@pytest.mark.docker
 @needs_compose
 def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> None:
     """Create (never start) the three services from the real file and check them.

@@ -115,7 +115,8 @@ jobs:
       - run: uv run ruff check
       - run: uv run mypy --strict src
       - run: uv run lint-imports
-      - run: uv run pytest -m "not integration and not gate" -q
+      # Pure CPU and no shared state: one worker per core.
+      - run: uv run pytest -m "not integration and not gate" -q -n auto
 
   backend_gate:
     name: Backend (Python) — deploy gate
@@ -123,7 +124,6 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-    needs: backend_unit
     defaults:
       run:
         working-directory: backend
@@ -146,7 +146,6 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-    needs: backend_unit
     # Fork PRs cannot read secrets (GitHub security model); skip them. Same-repo
     # PRs and main pushes run the PG event_log read-your-writes integration tests.
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
@@ -158,6 +157,11 @@ jobs:
       BFX_SERVICE_VERSION: ${{ github.sha }}
       GITHUB_RUN_ID: ${{ github.run_id }}
       GITHUB_SHA: ${{ github.sha }}
+      # The DB tests run on one local PostgreSQL 18 per pytest process (tests/pg_local.py);
+      # the major must equal the one deploy/vm/postgres/Dockerfile pins.
+      BFX_TEST_PG_BIN: /usr/lib/postgresql/18/bin
+      # Tests marked `docker` (containers, `docker exec psql`) must run here, never skip.
+      BFX_REQUIRE_DOCKER: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -177,7 +181,24 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
       - run: uv sync --all-groups
+      # PostgreSQL 18 server binaries from PGDG (not started as a service: each pytest process
+      # initialises and runs its own throwaway cluster).
+      - name: Install PostgreSQL 18 (PGDG)
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-common
+          sudo sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf
+          sudo apt-get install -y --no-install-recommends postgresql-18
+          "$BFX_TEST_PG_BIN/pg_ctl" --version
       # Keep third-party live smoke tests out of deterministic CI; run them
       # explicitly with `uv run pytest -m 'integration and live'`.
       # --durations: the suite is near its timeout; each run lists the slowest tests.
-      - run: uv run pytest -m "integration and not live" -q --maxfail=3 --durations=25
+      # -n 4: the runner has 4 vCPU (public repository); loadfile keeps a module's templates on
+      # one worker.
+      - run: uv run pytest -m "integration and not live" -q --maxfail=3 --durations=25 -n 4 --dist loadfile

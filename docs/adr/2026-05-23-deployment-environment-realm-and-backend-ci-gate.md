@@ -72,3 +72,19 @@ related-commits:
 - 來源 spec：`2026-05-23-axiom-ci-env-separation-design.md`（原文已不在 repo，本 ADR 即紀錄）
 - 來源 plan：`2026-05-23-axiom-ci-env-separation.md`（原文已不在 repo，本 ADR 即紀錄）
 - 觸發：[2026-05-23-phase4.4b-prework-cutover-enablers](2026-05-23-phase4.4b-prework-cutover-enablers.md) Followup「HIGH — T12 真跑起來」與 R4。
+
+## Amendment (2026-10-04): unit 與 integration 並行
+
+### Amendment Context
+
+D2 讓 integration `needs` unit，失敗的 unit 不會再花 integration 的時間；代價是 CI 牆鐘時間是兩者相加（unit 約 4.5 分加 integration 約 13.6 分）。repo 是 public，Actions 分鐘不計費，省下的只剩 runner 時間；CI 結果是完整 integration 的唯一依據（本機只跑受影響的檔案），等待時間直接卡住每個 PR。
+
+### Amendment Decision
+
+- integration 與 deploy gate 不再 `needs` unit，三者並行；unit 用 `pytest -n auto`，integration 用 `-n 4 --dist loadfile`（4 vCPU runner）。
+- integration 的 DB 改為每個 pytest process 一台本機 PostgreSQL 18（PGDG apt），major 與 `deploy/vm/postgres/Dockerfile` 一致；需要 Docker 的測試標 `docker`，CI 上 `BFX_REQUIRE_DOCKER=1` 使其不得 skip。
+- D2 其餘部分（觸發、PR-only cancel、fork 跳過 integration、permissions、timeout、Dependabot）不變。
+
+### Revocation Trigger
+
+repo 轉為 private（Actions 分鐘計費）或 unit 失敗率高到並行的 integration 浪費明顯時，恢復 `needs`。
