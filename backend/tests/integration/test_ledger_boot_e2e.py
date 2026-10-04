@@ -140,7 +140,7 @@ async def env(ledger_db, monkeypatch, httpx_mock, tmp_path):  # noqa: F811
         ):
             monkeypatch.delenv(name)
     for name, value in {
-        "BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+        "BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_FILL_TRACKER_ENABLED": "true",
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",

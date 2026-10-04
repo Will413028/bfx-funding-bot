@@ -153,7 +153,6 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
-    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")

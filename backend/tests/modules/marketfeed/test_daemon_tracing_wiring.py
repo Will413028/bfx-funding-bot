@@ -137,7 +137,6 @@ async def test_build_daemon_live_tracing_enabled_wraps_reconcile_and_ws(
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
-    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_OTEL_ENABLED", "true")
     configure_live_wiring_env(monkeypatch, tmp_path)

@@ -58,7 +58,7 @@ async def _env_and_db(monkeypatch, tmp_path, httpx_mock, *, authority: str):
         ):
             monkeypatch.delenv(name)
     values = {
-        "BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+        "BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_FILL_TRACKER_ENABLED": "true",
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
