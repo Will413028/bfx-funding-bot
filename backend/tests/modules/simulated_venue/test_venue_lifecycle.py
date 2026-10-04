@@ -33,6 +33,7 @@ from tests.modules.simulated_venue.helpers import (
     DAY,
     HOUR,
     T0,
+    Clock,
     World,
     book,
     config,
@@ -335,3 +336,36 @@ async def test_concurrent_requests_are_serialized_and_see_consistent_state() -> 
     ids = [r.json()[4][0] for r in results]
     assert len(set(ids)) == 8
     assert w.venue.state.available("UST") == D("10000") - 8 * D("150")
+
+
+async def test_wallets_are_funded_in_one_append_and_only_on_an_empty_log() -> None:
+    """Mutation: fund on every boot (drop the empty-log check)."""
+    store = InMemoryVenueEventStore()
+    clock = Clock()
+    funds = {"UST": Decimal(1000), "USD": Decimal(50)}
+    first = await build_simulated_venue(
+        account=ACCOUNT, config=config(), store=store, feed=FixtureMarketFeed(), clock_ms=clock)
+    assert await first.fund_wallets_if_empty(funds) is True
+    assert len(await store.load(ACCOUNT)) == 2  # one append, both currencies
+    # A restart over the same log: nothing is funded again.
+    second = await build_simulated_venue(
+        account=ACCOUNT, config=config(), store=store, feed=FixtureMarketFeed(), clock_ms=clock)
+    assert await second.fund_wallets_if_empty(funds) is False
+    assert (second.state.wallets["UST"].balance, second.state.wallets["USD"].balance) == (
+        Decimal(1000), Decimal(50))
+    assert len(await store.load(ACCOUNT)) == 2
+    assert await first.fund_wallets_if_empty({}) is False
+
+
+async def test_two_processes_funding_an_empty_log_lose_the_race_loudly() -> None:
+    store = InMemoryVenueEventStore()
+    clock = Clock()
+    venues = [
+        await build_simulated_venue(
+            account=ACCOUNT, config=config(), store=store, feed=FixtureMarketFeed(), clock_ms=clock)
+        for _ in range(2)
+    ]
+    await venues[0].fund_wallets_if_empty({"UST": Decimal(1000)})
+    with pytest.raises(ConcurrentAppendError):
+        await venues[1].fund_wallets_if_empty({"UST": Decimal(1000)})
+    assert len(await store.load(ACCOUNT)) == 1

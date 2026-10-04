@@ -340,7 +340,7 @@ async def bot_env(authority, ledger_db, monkeypatch, httpx_mock, tmp_path):
     monkeypatch.setattr(alerts, "emit", lambda event, **fields: sent.append(event))
     monkeypatch.setattr(bot, "now_ms_utc", clock)
     if authority == "ledger":
-        async def ledger_epoch(_session: object) -> str:
+        async def ledger_epoch(_session: object, *, supported: object) -> str:
             return "ledger"
 
         monkeypatch.setattr(bot, "read_authority", ledger_epoch)

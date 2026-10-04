@@ -6,9 +6,8 @@ import logging
 import os
 import signal
 import sys
-import time
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -18,27 +17,27 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
+from bfx_funding_bot.apps.authority_support import supported_for_venue
 from bfx_funding_bot.apps.bot_ports import ObservationVenue, select_bot_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
+from bfx_funding_bot.apps.venue import VenueSeam, build_venue
 from bfx_funding_bot.core.authority import Authority, read_authority
 from bfx_funding_bot.core.database_realm import assert_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
     EXIT_CODE_AUTH_FAILED,
     EXIT_CODE_WRITER_LOCKED,
-    ConfigurationError,
     ExecutorAuthError,
     WriterLockUnacquired,
 )
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.schema_head import assert_schema_head
-from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
+from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
 from bfx_funding_bot.external.bitfinex.funding_rules import FundingRules
-from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.external.bitfinex.ws import (
@@ -196,39 +195,43 @@ async def build_daemon(
     *,
     cells_yaml_path: Path | None = None,
     skip_ws: bool = False,
+    venue_seam: VenueSeam | None = None,
 ) -> Daemon:
+    """Compose one bot process. ``venue_seam`` is for tests: production passes nothing, so
+    the simulated venue runs on the live market feed and without injected faults."""
     config = load_config(cells_yaml_path=cells_yaml_path)
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
-    # Every phase, before the credential vault or anything else is read: a live
-    # database at another schema means this is the wrong build for it (for instance
-    # a rollback onto a newer schema), and the capital authority is read once, right
-    # after: an authority this build does not support refuses too. The database's
-    # stamped realm must equal the realm this process runs as (E2): an unstamped
-    # database, or one stamped for another realm, refuses to boot.
+    # Both venues, in this order, before the credential vault or any client is touched:
+    # a database at another schema means this is the wrong build for it (for instance a
+    # rollback onto a newer schema); its stamped realm must equal the realm this process
+    # runs as (E2); and the capital authority is read once, against the set this venue
+    # supports (``apps/authority_support.py``): the simulated venue runs only on the
+    # ledger, Bitfinex only on legacy. Any refusal stops the boot; the Bitfinex path also
+    # alerts (``_refuse_live_boot``).
     try:
         async with session_factory() as boot_session:
             await assert_schema_head(boot_session)
             await assert_database_realm(boot_session, config.deployment_environment.value)
-            if config.phase is Phase.SHADOW:
-                # Shadow runs on the simulated venue, and nothing composes one yet: after
-                # the realm check (every phase), a shadow process stops here.
-                raise ConfigurationError(
-                    "BFX_PHASE=shadow runs on the simulated venue, which is composed in P2b; "
-                    "this build composes only the Bitfinex venue"
-                )
-            authority: Authority = await read_authority(boot_session)
+            authority: Authority = await read_authority(
+                boot_session, supported=supported_for_venue(config.venue))
     except Exception as exc:
-        await _refuse_live_boot(exc, config=config, session_factory=session_factory)
+        if config.venue == "bitfinex":
+            await _refuse_live_boot(exc, config=config, session_factory=session_factory)
         await db_engine.dispose()
         raise
-    async with session_factory() as bootstrap_session:
-        account_bootstrap = await load_account_bootstrap(
-            bootstrap_session,
-            deployment_environment=config.deployment_environment.value,
-            allocation_cap_usdt=Decimal("0"),
-            phase=config.phase,
-        )
+    try:
+        async with session_factory() as bootstrap_session:
+            account_bootstrap = await load_account_bootstrap(
+                bootstrap_session,
+                deployment_environment=config.deployment_environment.value,
+                allocation_cap_usdt=Decimal("0"),
+                phase=config.phase,
+                venue=config.venue,
+            )
+    except Exception:
+        await db_engine.dispose()
+        raise
     # Capital ports: the authority the database booted under picks every adapter a
     # consumer binds to (apps/bot_ports.py); nothing below names an authority.
     env_str = config.deployment_environment.value
@@ -252,7 +255,8 @@ async def build_daemon(
             for symbol in configured_symbols(config.cells):
                 await capital.policy_store.read_applied(policy_session, symbol=symbol)
     except Exception as exc:
-        await _refuse_live_boot(exc, config=config, session_factory=session_factory)
+        if config.venue == "bitfinex":
+            await _refuse_live_boot(exc, config=config, session_factory=session_factory)
         await db_engine.dispose()
         raise
 
@@ -298,6 +302,21 @@ async def build_daemon(
         raise ValueError(
             "the execution policy requires FundingBookService configuration",
         )
+    # The venue this process trades against. The simulated venue opens its own log here,
+    # on the database that just passed the schema, realm and authority checks; a refusal
+    # (wrong realm or epoch, unmigrated, lost append race) stops the boot.
+    try:
+        venue_wiring = await build_venue(
+            config, exchange_account_id=account_bootstrap.exchange_account_id,
+            credentials=account_bootstrap.credentials, db_engine=db_engine,
+            bitfinex_http=bitfinex_http, bitfinex=bitfinex, clock=now_ms_utc, seam=venue_seam,
+        )
+    except Exception:
+        await bitfinex_http.aclose()
+        await db_engine.dispose()
+        raise
+    if venue_wiring.owned_client is not None:
+        attach_httpx_metrics(venue_wiring.owned_client, metrics)
     funding_book_service = FundingBookService(
         store=FundingBookStore(max_age_seconds=config.book_max_age_seconds),
         rest=bitfinex,
@@ -354,13 +373,14 @@ async def build_daemon(
     # below receives this one canonical identity; no env realm is read here.
     credentials = account_bootstrap.credentials
     account_ctx = account_bootstrap.to_context()
-    # ONE µs nonce gate shared by every auth client on this single API key.
+    # ONE µs nonce gate shared by every auth client on this single API key (built with
+    # the venue: one per process, whatever the venue).
     # Bitfinex nonces are per-key across REST *and* WS, so mixed scales /
     # independent time-based providers get "nonce: small" rejections — that is
     # what left the auth WS flapping — and concurrent signed requests must also
     # ARRIVE in nonce order, so the gate serializes them. See
     # external/bitfinex/nonce.py.
-    bfx_auth_gate = AuthRequestGate()
+    bfx_auth_gate = venue_wiring.auth_gate
 
     diagnostics = DiagnosticsSink(
         session_factory=session_factory, account_id=account_id,
@@ -423,14 +443,17 @@ async def build_daemon(
     # Env-driven via registry (CC4 invariant — WS client required).
     all_symbols = frozenset(configured_symbols(config.cells))
     spec = build_executor(
+        venue=config.venue,
         event_sink=stdout_sink,
         phase=config.phase,
         strategy=first_cell.strategy,
         configured_symbols=all_symbols,
         cell=first_cell.cell_id,
-        http=bitfinex_http,
+        http=venue_wiring.auth_http,
         bus=bus,
         auth_gate=bfx_auth_gate,
+        clock=now_ms_utc,
+        date_provider=_composition_date,
     )
 
     # Single-writer advisory lock (A1). ACQUIRE only on Postgres: sqlite wiring
@@ -507,7 +530,7 @@ async def build_daemon(
     # 3a-recovery: venue reconciliation against the real venue.
     book_snapshot_writer: BookSnapshotWriter | None = None
     auth_rest = BitfinexAuthREST(
-        http=bitfinex_http, auth_gate=bfx_auth_gate,
+        http=venue_wiring.auth_http, auth_gate=bfx_auth_gate,
         response_observer=VenueNormalizationShadow(),
     )
     # Realized income truth (ledger category 28), read-only: see interest_ledger.
@@ -582,6 +605,7 @@ async def build_daemon(
         uncertainty_reader=uncertainty_reader,
         managed_offers=managed_offers,
         clock=now_ms_utc,
+        date_provider=_composition_date,
     )
     reservation_executor: ExecutorPort = reservation_middleware
 
@@ -735,7 +759,7 @@ async def build_daemon(
         candles_repo=_CandlesRepoBridge(),
         reporter=DivergenceReporter(build_strategy_at_boundary),
         quote_store=quote_store,
-        clock=lambda: int(time.time() * 1000),
+        clock=now_ms_utc,
     )
 
     async def on_scheduler_tick(
@@ -910,8 +934,8 @@ async def build_daemon(
 
     # ---- Kill switch: HALTED, then the venue funding cancel-all ----
     # The only venue write that bypasses the command gate; it needs the writer
-    # lock and nothing else. Paper/shadow have no venue, so they record the
-    # stop and skip the cancel-all.
+    # lock and nothing else. The executor cancels through the venue's own client, so
+    # on the simulated venue the cancel-all reaches the simulator.
     command_gate = reservation_middleware.command_gate
     kill_switch = KillSwitch(
         trading_state=trading_state,
@@ -960,9 +984,9 @@ async def build_daemon(
     healthz_host = os.environ.get("BFX_HEALTHZ_HOST", "0.0.0.0").strip() or "0.0.0.0"
     admin_token = os.environ.get("BFX_ADMIN_TOKEN", "").strip() or None
 
-    # Phase 4.4a Task 19: WS dispatcher — only wired when live executor +
-    # BFX_WS_CLIENT_ENABLED=true. Paper path: spec.ws_client_enabled=False
-    # → these remain None → run() TaskGroup skips the ws_dispatcher task.
+    # Phase 4.4a Task 19: WS dispatcher — wired only when BFX_WS_CLIENT_ENABLED=true,
+    # which the registry requires for Bitfinex and forbids for the simulated venue
+    # (it has no WebSocket); then these remain None and run() skips the dispatcher task.
     auth_ws: BitfinexAuthWSClient | None = None
     ws_dispatcher: BitfinexLiveWSDispatcher | None = None
     if spec.ws_client_enabled:
@@ -1044,7 +1068,15 @@ async def build_daemon(
         trading_control=trading_control,
         capital_policy_control=capital_policy_control,
         writer_lock_watch=WriterLockWatch(lock=writer_lock),
+        venue_feed=venue_wiring.feed_task,
+        venue_diagnostics=venue_wiring.simulated,
+        venue_client=venue_wiring.owned_client,
     )
+
+
+def _composition_date() -> date:
+    """The UTC date of the composition clock, so ids and rules never mix in wall time."""
+    return datetime.fromtimestamp(now_ms_utc() / 1000, UTC).date()
 
 
 def main() -> None:
@@ -1136,6 +1168,9 @@ async def _run() -> None:
             with contextlib.suppress(Exception):
                 await daemon.writer_lock.release()
         await daemon.bitfinex_http.aclose()
+        if daemon.venue_client is not None:
+            with contextlib.suppress(Exception):
+                await daemon.venue_client.aclose()
         # Flush any batched spans before exit (no-op when tracing disabled).
         if daemon.tracing is not None:
             with contextlib.suppress(Exception):

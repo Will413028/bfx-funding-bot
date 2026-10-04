@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from bfx_funding_bot.core.telemetry import Phase
+from bfx_funding_bot.core.venue import venue_for_phase
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
@@ -48,15 +49,20 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     if phase_str not in {"shadow", "live"}:
         # canary was retired with the per-build ceremony (ADR 2026-09-25).
         raise ValueError(f"BFX_PHASE must be shadow or live, got {phase_str!r}")
-    if phase_str == "live":
-        legacy = [name for name in (
-            "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
-            "BFX_VENUE_FLOOR_USD", "BFX_MIN_OFFER_BUFFER_PCT",
-        ) if name in os.environ]
-        if legacy:
-            raise ValueError(
-                f"Remove legacy money env {legacy}; convert and validate applied CapitalPolicy first"
-            )
+    # A set legacy knob is a configuration error in every phase, never silently ignored:
+    # the capital limits are the applied CapitalPolicy's, and the executor is not chosen
+    # by env.
+    legacy = [name for name in (
+        "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
+        "BFX_VENUE_FLOOR_USD", "BFX_MIN_OFFER_BUFFER_PCT", "BFX_EXECUTOR",
+    ) if name in os.environ]
+    if legacy:
+        raise ValueError(
+            f"Remove legacy env {legacy}; money limits come from the applied CapitalPolicy "
+            "and the venue follows BFX_PHASE"
+        )
+    phase = Phase(phase_str)
+    venue = venue_for_phase(phase)
 
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
@@ -242,7 +248,9 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         log.warning("cells.yaml has no Phase 3b qualified pair -- all entries are exploratory")
 
     config_kwargs: dict[str, object] = {
-        "phase": Phase(phase_str),
+        "phase": phase,
+        "venue": venue,
+        "simulated_initial_wallets": _initial_wallets(venue),
         "cells": cells,
         "database_url": database_url,
         "deployment_environment": deployment_environment,
@@ -263,6 +271,31 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         if cell.staleness_budget_hours is None:
             cell.staleness_budget_hours = config.staleness_budget_hours_default
     return config
+
+
+def _initial_wallets(venue: str) -> dict[str, Decimal]:
+    """``BFX_SIM_INITIAL_WALLETS=UST:10000,USD:500``: simulated venue only, funded on an empty log."""
+    raw = os.environ.get("BFX_SIM_INITIAL_WALLETS", "").strip()
+    if not raw:
+        return {}
+    if venue != "simulated":
+        raise ValueError("BFX_SIM_INITIAL_WALLETS is only valid for the simulated venue")
+    wallets: dict[str, Decimal] = {}
+    for item in raw.split(","):
+        currency, sep, amount_raw = item.strip().partition(":")
+        try:
+            amount = Decimal(amount_raw)
+        except Exception:
+            amount = Decimal(0)
+        if not sep or not currency or not amount.is_finite() or amount <= 0:
+            raise ValueError(
+                f"BFX_SIM_INITIAL_WALLETS entries are CURRENCY:AMOUNT with a positive amount, "
+                f"got {item!r}"
+            )
+        if currency in wallets:
+            raise ValueError(f"BFX_SIM_INITIAL_WALLETS names {currency} twice")
+        wallets[currency] = amount
+    return wallets
 
 
 def load_cells_only(cells_yaml_path: Path) -> list[CellConfig]:

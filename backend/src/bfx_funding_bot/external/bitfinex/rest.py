@@ -47,6 +47,31 @@ class FundingBookLevel:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class FundingTrade:
+    """One row of GET /v2/trades/f{sym}/hist -- [ID, MTS, AMOUNT, RATE, PERIOD].
+
+    Public executions: AMOUNT's sign says which side was the taker, the volume is its
+    magnitude. RATE is a daily decimal rate, as in the book."""
+    trade_id: int
+    mts: int
+    amount: float
+    rate: float
+    period: int
+
+    @classmethod
+    def from_bitfinex(cls, entry: list[Any]) -> "FundingTrade":
+        if not isinstance(entry, list) or len(entry) < 5:
+            raise BitfinexShapeError(f"funding trade row too short: {entry!r}")
+        try:
+            return cls(
+                trade_id=int(entry[0]), mts=int(entry[1]), amount=float(entry[2]),
+                rate=float(entry[3]), period=int(entry[4]),
+            )
+        except (TypeError, ValueError) as e:
+            raise BitfinexShapeError(f"funding trade parse failed: {e}; raw={entry!r}") from e
+
+
 def _bitfinex_period_agg_path(period_agg: str) -> str:
     """Translate user-facing period_agg → Bitfinex URL period_agg.
 
@@ -267,3 +292,28 @@ class BitfinexREST:
         if not isinstance(body, list):
             raise BitfinexShapeError(f"funding book: expected list, got {type(body).__name__}")
         return [FundingBookLevel.from_bitfinex(row) for row in body]
+
+    async def get_funding_trades(
+        self, *, symbol: str, start: int, limit: int = 1000
+    ) -> list[FundingTrade]:
+        """Public funding trades with ``mts >= start``, oldest first.
+
+        Endpoint: GET /v2/trades/f{sym}/hist?start=MS&limit=N&sort=1 (no auth). Used to
+        backfill and poll the simulated venue's fill volume; ``limit`` is the page size,
+        the caller pages on the last ``mts`` returned.
+        """
+        sym = symbol[1:] if symbol.startswith("f") else symbol
+        path = f"/v2/trades/f{sym}/hist"
+
+        resp = await self._get(path, {"start": start, "limit": limit, "sort": 1})
+        if resp.status_code != 200:
+            raise BitfinexAPIError(
+                status_code=resp.status_code, message=resp.text, raw=None
+            )
+        try:
+            body = resp.json()
+        except json.JSONDecodeError as e:
+            raise BitfinexShapeError(f"invalid JSON: {e}") from e
+        if not isinstance(body, list):
+            raise BitfinexShapeError(f"funding trades: expected list, got {type(body).__name__}")
+        return [FundingTrade.from_bitfinex(row) for row in body]

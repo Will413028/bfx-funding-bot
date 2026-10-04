@@ -17,6 +17,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 
 from bfx_funding_bot.apps import webapi
+from bfx_funding_bot.apps.authority_support import WEBAPI_SUPPORTED
 from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.core import authority as authority_module
 from bfx_funding_bot.modules.api import deps
@@ -34,8 +35,8 @@ def test_select_read_models_covers_both_authorities() -> None:
     assert type(ledger.operator_evidence).__name__ == "LedgerOperatorEvidence"
 
 
-def test_this_build_still_supports_only_the_legacy_authority() -> None:
-    assert {"legacy"} == authority_module.SUPPORTED_AUTHORITIES
+def test_the_web_api_still_supports_only_the_legacy_authority() -> None:
+    assert frozenset({"legacy"}) == WEBAPI_SUPPORTED
 
 
 class _Engine:
@@ -57,7 +58,8 @@ class _Session:
 async def test_lifespan_stores_the_authority_and_its_read_models(
     monkeypatch, authority: str, reads: str
 ) -> None:
-    async def read_authority(_session: object) -> str:
+    async def read_authority(_session: object, *, supported: object) -> str:
+        assert supported == WEBAPI_SUPPORTED
         return authority
 
     monkeypatch.setattr(webapi, "Settings", lambda: SimpleNamespace(log_level="WARNING"))
@@ -72,7 +74,7 @@ async def test_lifespan_stores_the_authority_and_its_read_models(
 
 @pytest.mark.asyncio
 async def test_lifespan_still_refuses_an_unreadable_authority(monkeypatch) -> None:
-    async def read_authority(_session: object) -> str:
+    async def read_authority(_session: object, *, supported: object) -> str:
         raise authority_module.AuthorityMismatch("authority_unsupported")
 
     monkeypatch.setattr(webapi, "Settings", lambda: SimpleNamespace(log_level="WARNING"))

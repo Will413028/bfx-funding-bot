@@ -18,16 +18,10 @@ from tests.modules.marketfeed.account_test_helpers import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("executor_env", [None, "", "paper", "bitfinex_live", "foo"])
-async def test_build_daemon_wires_the_bitfinex_executor_and_ignores_bfx_executor(
+async def test_build_daemon_wires_the_bitfinex_executor(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
-    executor_env: str | None,
 ) -> None:
-    """The executor knob is gone: whatever BFX_EXECUTOR holds, the Bitfinex executor is composed."""
-    daemon, engine = await boot_live_construction(
-        monkeypatch, tmp_path, httpx_mock,
-        extra_env={"BFX_EXECUTOR": executor_env} if executor_env is not None else None,
-    )
+    daemon, engine = await boot_live_construction(monkeypatch, tmp_path, httpx_mock)
     try:
         assert isinstance(daemon.executor, BitfinexLiveExecutor)
         assert daemon.account_ctx.account_id == str(TEST_EXCHANGE_ACCOUNT_ID)
@@ -37,6 +31,19 @@ async def test_build_daemon_wires_the_bitfinex_executor_and_ignores_bfx_executor
         assert daemon.writer_lock is not None
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("executor_env", ["", "paper", "bitfinex_live", "foo"])
+async def test_a_set_bfx_executor_refuses_the_boot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
+    executor_env: str,
+) -> None:
+    """The executor knob is gone: whatever it holds, a set value is a config error."""
+    with pytest.raises(ValueError, match="BFX_EXECUTOR"):
+        await boot_live_construction(
+            monkeypatch, tmp_path, httpx_mock, extra_env={"BFX_EXECUTOR": executor_env},
+        )
 
 
 @pytest.mark.asyncio

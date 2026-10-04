@@ -71,7 +71,7 @@ def _read(engine: Engine) -> str:
         async_engine = create_async_engine(url)
         try:
             async with async_engine.connect() as conn, AsyncSession(bind=conn) as session:
-                return await read_authority(session)
+                return await read_authority(session, supported=frozenset({"legacy"}))
         finally:
             await async_engine.dispose()
 

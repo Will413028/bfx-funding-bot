@@ -21,6 +21,7 @@ from bfx_funding_bot.modules.accounts.tables import (
     ExchangeAccountCredential,
 )
 from bfx_funding_bot.modules.execution.protocols import Credentials
+from bfx_funding_bot.modules.marketfeed import daemon as daemon_module
 from bfx_funding_bot.modules.marketfeed.daemon import (
     AccountBootstrap,
     _require_env,
@@ -124,6 +125,7 @@ async def test_bootstrap_loads_account_credential_and_draft(
             session,
             deployment_environment="ci",
             allocation_cap_usdt=Decimal("500"),
+            venue="bitfinex",
         )
 
     assert isinstance(bootstrap, AccountBootstrap)
@@ -162,6 +164,7 @@ async def test_bootstrap_fails_closed_for_unusable_account(
                 session,
                 deployment_environment="ci",
                 allocation_cap_usdt=Decimal("500"),
+                venue="bitfinex",
             )
 
 
@@ -189,4 +192,46 @@ async def test_bootstrap_fails_closed_for_pending_credential(
                 session,
                 deployment_environment="ci",
                 allocation_cap_usdt=Decimal("500"),
+                venue="bitfinex",
             )
+
+
+@pytest.mark.asyncio
+async def test_a_simulated_boot_never_opens_the_vault_and_gets_throwaway_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Mutation: the simulated branch calls ``load_kek`` / ``load_account_credentials``."""
+    await _seed_account(session_factory, credential=False)  # no credential row at all
+    monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT_ID))
+    monkeypatch.delenv("BFX_VAULT_KEK", raising=False)
+
+    def vault_must_stay_closed(*args: object, **kwargs: object) -> object:
+        raise AssertionError("a simulated boot must not open the vault")
+
+    monkeypatch.setattr(daemon_module, "load_kek", vault_must_stay_closed)
+    monkeypatch.setattr(daemon_module, "load_account_credentials", vault_must_stay_closed)
+    boots = []
+    for _ in range(2):
+        async with session_factory() as session:
+            boots.append(await load_account_bootstrap(
+                session, deployment_environment="ci", allocation_cap_usdt=Decimal("0"),
+                venue="simulated"))
+    first, second = (b.credentials for b in boots)
+    assert first.api_key and first.api_secret and first.api_key != "account-key"
+    assert first != second  # generated per boot, never stored
+
+
+@pytest.mark.asyncio
+async def test_a_simulated_boot_refuses_when_the_vault_key_is_in_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed_account(session_factory)
+    monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT_ID))
+    monkeypatch.setenv("BFX_VAULT_KEK", _KEK_B64)
+    async with session_factory() as session:
+        with pytest.raises(ConfigurationError, match="BFX_VAULT_KEK must not be set"):
+            await load_account_bootstrap(
+                session, deployment_environment="ci", allocation_cap_usdt=Decimal("0"),
+                venue="simulated")

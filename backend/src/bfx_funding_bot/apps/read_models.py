@@ -15,7 +15,7 @@ from bfx_funding_bot.modules.ledger.wiring import (
 
 
 def select_read_models(authority: Authority) -> ReadModels:
-    """Both authorities are covered; ``SUPPORTED_AUTHORITIES`` decides which may boot."""
+    """Both authorities are covered; ``apps/authority_support.py`` decides which may boot."""
     if authority == "ledger":
         return ReadModels(
             build_operator_reads(), build_operator_evidence(), build_operator_resolution()

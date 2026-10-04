@@ -11,9 +11,11 @@ import asyncio
 import contextlib
 import logging
 import os
+import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 import httpx
@@ -31,6 +33,7 @@ from bfx_funding_bot.core.errors import (
 )
 from bfx_funding_bot.core.health import HealthProbe, assess_auth_ws_health
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
+from bfx_funding_bot.core.venue import Venue
 from bfx_funding_bot.core.writer_lock import WriterLock
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
@@ -191,14 +194,50 @@ class AccountBootstrap:
             )
 
 
+async def _boot_credentials(
+    session: AsyncSession, *, venue: Venue, exchange_account_id: UUID, canonical_id: str,
+) -> Credentials:
+    if venue == "simulated":
+        if "BFX_VAULT_KEK" in os.environ:
+            raise ConfigurationError(
+                "BFX_VAULT_KEK must not be set for a simulated venue boot: the simulation "
+                "never opens the credential vault"
+            )
+        return Credentials(secrets.token_hex(16), secrets.token_hex(32))
+    try:
+        kek = load_kek()
+        return await load_account_credentials(
+            session, exchange_account_id=exchange_account_id, kek=kek
+        )
+    except AccountCredentialNotConfiguredError as exc:
+        raise ConfigurationError(str(exc)) from exc
+    except VaultKeyMismatchError as exc:
+        raise ConfigurationError(
+            f"exchange account {canonical_id} credential vault cannot be opened"
+        ) from exc
+    except VaultNotConfiguredError as exc:
+        raise ConfigurationError("BFX_VAULT_KEK is required for daemon boot") from exc
+    except Exception as exc:
+        # VaultNotConfiguredError and other crypto/config errors must not leak
+        # an implementation-specific traceback through the boot contract.
+        if isinstance(exc, (ValueError,)):
+            raise ConfigurationError(str(exc)) from exc
+        raise
+
+
 async def load_account_bootstrap(
     session: AsyncSession,
     *,
     deployment_environment: str,
     allocation_cap_usdt: Decimal,
     phase: Phase | None = None,
+    venue: Venue,
 ) -> AccountBootstrap:
-    """Resolve one explicit account and its vault/config material at boot.
+    """Resolve one explicit account and its credential/config material at boot.
+
+    ``bitfinex`` opens the vault. ``simulated`` never does: its credentials are generated
+    for this boot and mean nothing outside the process, and a vault key in the environment
+    refuses the boot (the real key must not be reachable even by a bug).
 
     This function is deliberately the sole UUID/env parsing seam.  All daemon
     services receive the resulting canonical account string from the returned
@@ -227,25 +266,9 @@ async def load_account_bootstrap(
         raise ConfigurationError(
             f"exchange account {canonical_id} must be active for daemon boot"
         )
-    try:
-        kek = load_kek()
-        credentials = await load_account_credentials(
-            session, exchange_account_id=exchange_account_id, kek=kek
-        )
-    except AccountCredentialNotConfiguredError as exc:
-        raise ConfigurationError(str(exc)) from exc
-    except VaultKeyMismatchError as exc:
-        raise ConfigurationError(
-            f"exchange account {canonical_id} credential vault cannot be opened"
-        ) from exc
-    except VaultNotConfiguredError as exc:
-        raise ConfigurationError("BFX_VAULT_KEK is required for daemon boot") from exc
-    except Exception as exc:
-        # VaultNotConfiguredError and other crypto/config errors must not leak
-        # an implementation-specific traceback through the boot contract.
-        if isinstance(exc, (ValueError,)):
-            raise ConfigurationError(str(exc)) from exc
-        raise
+    credentials = await _boot_credentials(
+        session, venue=venue, exchange_account_id=exchange_account_id, canonical_id=canonical_id,
+    )
 
     draft = await load_account_config_draft(
         session, exchange_account_id=exchange_account_id
@@ -258,6 +281,29 @@ async def load_account_bootstrap(
         config_draft=dict(draft.config) if draft is not None else None,
         config_revision=draft.revision if draft is not None else None,
     )
+
+
+class VenueFeedRunner(Protocol):
+    """The simulated venue's market-data task (``apps/venue.py``): supervised like any
+    sub-task, and the daemon waits (bounded) for its first books before the reconciler runs."""
+
+    async def run(self, stop: asyncio.Event) -> None: ...
+
+    async def wait_ready(self, stop: asyncio.Event, *, timeout_s: float) -> bool: ...
+
+
+class VenueDiagnostics(Protocol):
+    """What the soak report and CI read from the simulated venue: failures of the simulator
+    itself (never venue answers), requests it did not route, and its state."""
+
+    internal_failures: list[Any]
+    unexpected: list[Any]
+
+    @property
+    def state(self) -> Any: ...
+
+
+_VENUE_FEED_READY_TIMEOUT_S = 30.0
 
 
 @dataclass
@@ -317,6 +363,11 @@ class Daemon:
     # Applies operator enable/disable of one currency's policy (its own queue:
     # a kill never waits behind it).
     capital_policy_control: CapitalPolicyRequestWorker | None = None
+    # Simulated venue only: its own market-data task, and the client the venue answers
+    # through (closed with the daemon, by ``apps.bot._run``).
+    venue_feed: VenueFeedRunner | None = None
+    venue_diagnostics: VenueDiagnostics | None = None
+    venue_client: httpx.AsyncClient | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def _run_boot_recovery(self) -> None:
@@ -365,6 +416,14 @@ class Daemon:
         self.booted = True
 
         async with asyncio.TaskGroup() as tg:
+            if self.venue_feed is not None:
+                # First, and awaited: a submit that reaches the simulated venue before it
+                # holds a book would be a simulator-internal failure, not a venue answer.
+                tg.create_task(self.venue_feed.run(self._stop_event), name="venue_feed")
+                if not await self.venue_feed.wait_ready(
+                    self._stop_event, timeout_s=_VENUE_FEED_READY_TIMEOUT_S,
+                ):
+                    log.warning("venue_feed_not_ready_at_start")
             if self.protection is not None:
                 tg.create_task(self.protection.run(self._stop_event), name="automatic_protection")
             if self.trading_control is not None:

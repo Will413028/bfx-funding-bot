@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -119,6 +119,23 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
     async def fund_wallet(self, currency: str, amount: Decimal) -> None:
         async with self._lock:
             await self._commit(decide.fund_wallet(currency, amount, self._now()))
+
+    async def fund_wallets_if_empty(self, wallets: Mapping[str, Decimal]) -> bool:
+        """Seed the wallets in ONE append, and only on a venue whose log is empty.
+
+        A restart finds the log non-empty and funds nothing, so the wallet is never funded
+        twice; two processes racing on an empty log lose with `ConcurrentAppendError`
+        (the append is conditional on `expected_seq=0`). True when this call funded.
+        """
+        async with self._lock:
+            if self._seq != 0 or not wallets:
+                return False
+            now = self._now()
+            await self._commit([
+                event for currency, amount in sorted(wallets.items())
+                for event in decide.fund_wallet(currency, amount, now)
+            ])
+            return True
 
     async def aclose(self) -> None:
         return None

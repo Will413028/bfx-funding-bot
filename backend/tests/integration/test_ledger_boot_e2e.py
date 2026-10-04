@@ -158,7 +158,7 @@ async def env(ledger_db, monkeypatch, httpx_mock, tmp_path):  # noqa: F811
     httpx_mock.add_response(url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
                             method="GET", json=[], is_reusable=True, is_optional=True)
 
-    async def ledger_epoch(_session: object) -> str:
+    async def ledger_epoch(_session: object, *, supported: object) -> str:
         return "ledger"
 
     monkeypatch.setattr(bot, "read_authority", ledger_epoch)

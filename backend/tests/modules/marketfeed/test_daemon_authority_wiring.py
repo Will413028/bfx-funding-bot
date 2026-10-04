@@ -1,7 +1,8 @@
 """build_daemon composes the bot process by capital authority (sqlite construction only).
 
 A ledger-authority process is reachable only through the monkeypatched epoch read below:
-``SUPPORTED_AUTHORITIES`` still refuses it at a real boot.
+the Bitfinex venue's supported set (``apps/authority_support.py``) still refuses it at a
+real boot.
 
 Mutation checks (one at a time; revert after each):
 
@@ -30,7 +31,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from bfx_funding_bot.core.authority import SUPPORTED_AUTHORITIES, AuthorityMismatch
+from bfx_funding_bot.apps.authority_support import supported_for_venue
+from bfx_funding_bot.core.authority import AuthorityMismatch
 from bfx_funding_bot.modules.execution.deployment_input import (
     LedgerDeploymentInput,
     LegacyDeploymentInput,
@@ -101,7 +103,7 @@ async def _build(monkeypatch, tmp_path, httpx_mock, authority: str):
     engine, factory, path = await _env_and_db(monkeypatch, tmp_path, httpx_mock, authority=authority)
     await _apply_policies(factory, authority)
     if authority == "ledger":
-        async def ledger_epoch(_session: object) -> str:
+        async def ledger_epoch(_session: object, *, supported: object) -> str:
             return "ledger"
 
         monkeypatch.setattr(bot, "read_authority", ledger_epoch)
@@ -225,7 +227,7 @@ async def test_a_legacy_daemon_is_wired_as_it_always_was(monkeypatch, tmp_path, 
 async def test_a_ledger_epoch_still_refuses_a_live_boot(monkeypatch, tmp_path, httpx_mock) -> None:
     from bfx_funding_bot.apps.bot import build_daemon
 
-    assert frozenset({"legacy"}) == SUPPORTED_AUTHORITIES
+    assert supported_for_venue("bitfinex") == frozenset({"legacy"})
     engine, factory, path = await _env_and_db(monkeypatch, tmp_path, httpx_mock, authority="epoch")
     try:
         async with factory.begin() as session:

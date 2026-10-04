@@ -186,7 +186,7 @@ async def select_bot_ports(
     clock: Callable[[], int],
     max_snapshot_age_ms: int,
 ) -> BotPorts:
-    """Both authorities are covered; ``SUPPORTED_AUTHORITIES`` decides which may boot."""
+    """Both authorities are covered; ``apps/authority_support.py`` decides which may boot."""
     if authority == "ledger":
         return _ledger_ports(
             session_factory, scope, account_id, bus, resync, clock, max_snapshot_age_ms,

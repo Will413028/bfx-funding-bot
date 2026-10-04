@@ -27,8 +27,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
+from bfx_funding_bot.apps.authority_support import supported_for_policy_script
 from bfx_funding_bot.apps.bot_ports import select_policy_ports
 from bfx_funding_bot.core.authority import read_authority
+from bfx_funding_bot.core.database_realm import read_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
 from bfx_funding_bot.modules.accounts.capital_amendment import (
     PolicyChanges,
@@ -42,8 +44,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     try:
         factory = make_session_factory(engine)
         async with factory() as session:
-            # The authority the database is under picks the store; an unsupported one refuses.
-            authority = await read_authority(session)
+            # The authority the database is under picks the store; an unsupported one
+            # refuses, and which ones are supported follows the database's own realm.
+            realm = await read_database_realm(session)
+            authority = await read_authority(
+                session, supported=supported_for_policy_script(realm))
         policy = select_policy_ports(
             authority, Scope(args.exchange_account_id, args.environment), max_snapshot_age_ms=60_000)
         async with factory() as session:
