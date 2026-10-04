@@ -28,6 +28,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     WriterLockWatch,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingState, TransitionResult
+from tests.async_wait import until
 
 D = Decimal
 
@@ -71,12 +72,9 @@ async def test_trip_stops_at_once_and_the_supervised_task_kills_with_cause_auto(
     assert protection.pending_reason() == "offer_amount_mismatch: venue_offer_id=1 symbol=fUST"
     stop = asyncio.Event()
     task = asyncio.create_task(protection.run(stop))
-    for _ in range(100):
-        if kill.calls:
-            break
-        await asyncio.sleep(0.01)
+    await until(lambda: kill.calls, what="the supervised kill")
     stop.set()
-    await asyncio.wait_for(task, timeout=5)
+    await asyncio.wait_for(task, timeout=10)
     assert kill.calls == [("auto", "auto:offer_amount_mismatch",
                            "offer_amount_mismatch: venue_offer_id=1 symbol=fUST")]
     assert protection.pending_reason() is None
@@ -102,13 +100,15 @@ async def test_a_failed_kill_keeps_new_offers_stopped_and_is_retried() -> None:
     protection.trip(IDENTITY_CONFLICT, "conflict")
     stop = asyncio.Event()
     task = asyncio.create_task(protection.run(stop))
-    for _ in range(300):
+    def _third_attempt_made() -> bool:
         if len(kill.calls) == 3:
-            break
-        assert protection.pending_reason() is not None
-        await asyncio.sleep(0.01)
+            return True
+        assert protection.pending_reason() is not None  # stays stopped until it lands
+        return False
+
+    await until(_third_attempt_made, what="the third kill attempt")
     stop.set()
-    await asyncio.wait_for(task, timeout=5)
+    await asyncio.wait_for(task, timeout=10)
     assert len(kill.calls) == 3
     assert protection.pending_reason() is None
 
@@ -512,10 +512,10 @@ async def test_the_supervised_task_resumes_on_a_clean_observation() -> None:
     task = asyncio.create_task(protection.run(stop))
     clock.now += MIN_HALT
     _clean(protection, clock, 3)
-    for _ in range(200):
-        if (await state.current()).state == "ACTIVE":
-            break
-        await asyncio.sleep(0.01)
+    async def _active() -> bool:
+        return (await state.current()).state == "ACTIVE"
+
+    await until(_active, what="the auto-resume to ACTIVE")
     stop.set()
-    await asyncio.wait_for(task, timeout=5)
+    await asyncio.wait_for(task, timeout=10)
     assert (await state.current()).state == "ACTIVE"

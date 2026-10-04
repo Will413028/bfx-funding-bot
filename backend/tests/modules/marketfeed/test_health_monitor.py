@@ -11,6 +11,7 @@ from bfx_funding_bot.core.errors import FatalError
 from bfx_funding_bot.core.health import SUB_TASK_THRESHOLDS, HealthProbe
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget, Phase
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
+from tests.async_wait import until
 
 
 async def test_state_change_emits_immediately():
@@ -44,7 +45,7 @@ async def test_heartbeat_emits_periodically():
     monitor = HealthMonitor(phase=Phase.SHADOW, event_sink=event_sink, probe=probe,
                             heartbeat_interval_s=0.1)
     await monitor.start()
-    await asyncio.sleep(0.35)
+    await until(lambda: event_sink.emit.call_count >= 2, what="two heartbeats")
     await monitor.stop()
 
     assert event_sink.emit.call_count >= 2  # multiple heartbeats fired

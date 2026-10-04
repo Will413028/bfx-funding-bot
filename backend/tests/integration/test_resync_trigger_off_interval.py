@@ -4,7 +4,6 @@ Real DomainEventBus + ledger + OfferRegistry + BootRecovery + PeriodicReconcile.
 """
 from __future__ import annotations
 
-import asyncio
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -20,6 +19,7 @@ from bfx_funding_bot.modules.execution.protocols import AccountContext, Credenti
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import Scope
+from tests.async_wait import running, until, yield_loop
 
 # Reuse the stub session/store/auth-rest shapes from the WS-dead integration test.
 from tests.integration.test_reconcile_converges_without_ws import (
@@ -100,15 +100,15 @@ async def test_resync_request_reconciles_off_interval(
         recovery=LegacyObservationSink(recovery, scope), scope=scope, probe=_FakeProbe(), interval_s=3600.0,
         max_consecutive_failures=3, min_resync_interval_s=0.0,
     )
-    stop = asyncio.Event()
 
-    async def _drive() -> None:
-        await asyncio.sleep(0.05)
+    async with running(pr.run_loop):
+        # Tick 1 (loop start) is done once the stuck reservation has been released;
+        # the hour-long interval means nothing else can tick before the trigger.
+        await until(
+            lambda: ledger.current_exposure("fUST") == Decimal("0"), what="tick 1 to converge",
+        )
+        await yield_loop(50)
         assert recovery.calls == 1                       # tick 1 (loop start) only
-        assert ledger.current_exposure("fUST") == Decimal("0")  # ...and it really converged
         pr.resync.request("reconnect")                   # the trigger under test
-        await asyncio.sleep(0.1)
+        await until(lambda: recovery.calls >= 2, what="the off-interval reconcile")
         assert recovery.calls >= 2                        # off-interval reconcile ran
-        stop.set()
-
-    await asyncio.wait_for(asyncio.gather(pr.run_loop(stop), _drive()), timeout=5.0)

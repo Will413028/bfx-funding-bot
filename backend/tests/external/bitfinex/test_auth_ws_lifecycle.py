@@ -15,6 +15,7 @@ from bfx_funding_bot.external.bitfinex.auth_ws import (
 )
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.protocols import Credentials
+from tests.async_wait import until
 
 
 class _ServerState:
@@ -197,13 +198,13 @@ async def test_reconnect_count_increments_on_disconnect(fake_bfx_ws_server: Any)
             pass
 
     task = asyncio.create_task(collect())
-    await asyncio.sleep(0.3)
+    await until(lambda: client.auth_ok_count >= 1, what="the first authenticated connection")
 
     # Close server-side connection(s) to trigger client reconnect
     for ws in server_state.connections:
         await ws.close()
 
-    await asyncio.sleep(1.5)  # let backoff + reconnect attempt happen
+    await until(lambda: client.reconnect_count_last_hour() >= 1, what="the recorded disconnect")
     # reconnect_attempts now resets on a successful re-auth (consecutive-failure
     # semantics), so assert the durable disconnect history instead.
     assert client.reconnect_count_last_hour() >= 1

@@ -26,7 +26,6 @@ so it is not vacuously passing.
 """
 from __future__ import annotations
 
-import asyncio
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -43,6 +42,7 @@ from bfx_funding_bot.modules.execution.protocols import AccountContext, Credenti
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import Scope
+from tests.async_wait import run_until
 
 from .conftest import make_reservation_ref
 
@@ -221,14 +221,12 @@ async def test_periodic_reconcile_converges_ledger_with_ws_dead(
         recovery=LegacyObservationSink(recovery, scope), scope=scope, probe=_FakeProbe(), interval_s=0.01,
         max_consecutive_failures=3,
     )
-    stop = asyncio.Event()
-
-    async def _stop_after_a_tick() -> None:
-        # Let a couple of ticks run, then stop.
-        await asyncio.sleep(0.035)
-        stop.set()
-
-    await asyncio.gather(pr.run_loop(stop), _stop_after_a_tick())
+    # Run the loop until the periodic reconcile has converged the ledger, then stop.
+    await run_until(
+        pr.run_loop,
+        lambda: ledger.current_exposure("fUST") == Decimal("0"),
+        what="the ledger to converge to zero exposure",
+    )
 
     # 4. The stuck reservation was released purely by the periodic reconcile →
     #    exposure converged to 0 with the WS stream completely dead.

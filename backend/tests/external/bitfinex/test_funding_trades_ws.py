@@ -7,6 +7,7 @@ from typing import Any
 
 from bfx_funding_bot.external.bitfinex.funding_trades_ws import FundingTradesWSClient
 from bfx_funding_bot.external.bitfinex.rest import FundingTrade
+from tests.async_wait import until
 
 
 class Recorder:
@@ -122,12 +123,12 @@ async def test_run_reconnects_after_a_dropped_connection_and_reports_each_edge()
 
     client = rec.client(symbols=("fUST",), connect=connect, backoff=lambda attempt: 0)
     task = asyncio.create_task(client.run(stop))
-    for _ in range(200):
-        if scripted == [] and rec.events.count(("connected",)) == 2:
-            break
-        await asyncio.sleep(0.01)
+    await until(
+        lambda: scripted == [] and rec.events.count(("connected",)) == 2,
+        what="the second connection",
+    )
     stop.set()
-    await asyncio.wait_for(task, 5)
+    await asyncio.wait_for(task, 10)
     kinds = [e[0] for e in rec.events]
     assert kinds[:4] == ["connected", "alive", "disconnected", "connected"]
     assert first.closed and second.closed
