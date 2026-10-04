@@ -26,7 +26,7 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 
 from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES
-from tests.pg_templates import alembic
+from tests.pg_templates import alembic, disable_realm_triggers, stamp_realm
 
 from .test_trading_state_migration import _reset
 
@@ -63,6 +63,7 @@ def _build(url: str) -> None:
     engine.dispose()
     alembic(url, "upgrade", "head")
     alembic(url, "check")
+    stamp_realm(url, "ci")
 
 
 def _observation_sql(
@@ -574,6 +575,8 @@ def test_r6_source_attempt_unique_fk_and_nulls(seeded) -> None:
 
 @pytest.mark.parametrize("field", ["account", "environment", "symbol"])
 def test_r6_source_opening_cannot_cross_scope_or_symbol(seeded, field: str) -> None:
+    # The scope mismatch needs a row of another realm; the realm trigger would refuse it first.
+    disable_realm_triggers(seeded)
     other = str(uuid4())
     with seeded.begin() as conn:
         conn.execute(
@@ -683,6 +686,8 @@ def test_mirror_terminal_cannot_clear_or_reappear(seeded) -> None:
 
 
 def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
+    # The scope mismatch needs a row of another realm; the realm trigger would refuse it first.
+    disable_realm_triggers(seeded)
     with seeded.begin() as conn:
         conn.exec_driver_sql(_offer_sql(str(uuid4()), "offer-other", "fEUR"))
         conn.exec_driver_sql(
@@ -866,6 +871,8 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
 
 
 def test_credit_and_loan_members_match_detail_or_history_and_scope(seeded) -> None:
+    # The scope mismatch needs a row of another realm; the realm trigger would refuse it first.
+    disable_realm_triggers(seeded)
     with seeded.begin() as conn:
         conn.exec_driver_sql(_member_sql("credit", "credit-1"))
         for kind, venue_id, table in (
@@ -937,6 +944,8 @@ def test_basis_credit_constraints_and_foreign_key(seeded) -> None:
 
 
 def test_observation_pair_and_accepted_basis_are_enforced(seeded) -> None:
+    # The scope mismatch needs a row of another realm; the realm trigger would refuse it first.
+    disable_realm_triggers(seeded)
     other = str(uuid4())
     other_query = str(uuid4())
     with seeded.begin() as conn:
@@ -1035,6 +1044,8 @@ def test_accept_revision_must_match_query_start_and_current_clock(seeded) -> Non
 
 
 def test_observation_query_scope_mismatch_fails(seeded) -> None:
+    # The scope mismatch needs a row of another realm; the realm trigger would refuse it first.
+    disable_realm_triggers(seeded)
     query_id = str(uuid4())
     with seeded.begin() as conn:
         conn.exec_driver_sql(_query_sql(query_id, 1, environment="wrong"))

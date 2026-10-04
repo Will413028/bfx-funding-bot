@@ -22,7 +22,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError, InternalError, ProgrammingError
 
-from tests.pg_templates import alembic
+from tests.pg_templates import alembic, disable_realm_triggers, stamp_realm
 
 from .test_trading_state_migration import _reset
 
@@ -61,6 +61,7 @@ def _build_worst_case(url: str) -> None:
     engine.dispose()
     alembic(url, "upgrade", "head")
     alembic(url, "check")
+    stamp_realm(url, "ci")
 
 
 def _build_prod_faithful(url: str) -> None:
@@ -78,6 +79,7 @@ def _build_prod_faithful(url: str) -> None:
     engine.dispose()
     alembic(url, "upgrade", "head")
     alembic(url, "check")
+    stamp_realm(url, "ci")
 
 
 _BUILDS = {"sim_venue_worst_case": _build_worst_case, "sim_venue_prod_faithful": _build_prod_faithful}
@@ -108,6 +110,7 @@ def test_alembic_check_reports_no_drift(db: Any) -> None:
 @pytest.mark.parametrize("realm", ["prod", "PROD", "", "paper", "live"])
 def test_realm_check_rejects_every_realm_but_shadow_and_ci(db: Any, realm: str) -> None:
     _, engine = db
+    disable_realm_triggers(engine)  # the database stamp refuses these first; this tests the CHECK itself
     with pytest.raises(IntegrityError, match="ck_sim_venue_event_realm"), engine.begin() as conn:
         conn.exec_driver_sql(_row(realm))
     with engine.connect() as conn:
@@ -116,6 +119,7 @@ def test_realm_check_rejects_every_realm_but_shadow_and_ci(db: Any, realm: str) 
 
 def test_shadow_and_ci_rows_are_accepted_and_scopes_are_independent(db: Any) -> None:
     _, engine = db
+    disable_realm_triggers(engine)  # one database holds one realm; the CHECK itself admits both
     with engine.begin() as conn:
         for realm in ("shadow", "ci"):
             conn.exec_driver_sql(_row(realm, 1))
@@ -194,7 +198,7 @@ def test_bfx_bot_writes_while_the_authority_epoch_is_legacy(db: Any) -> None:
         assert conn.scalar(text(
             "SELECT authority FROM capital_authority_epoch ORDER BY epoch_seq DESC LIMIT 1")
         ) == "legacy"
-    _as("bfx_bot", engine, _row("shadow"))
+    _as("bfx_bot", engine, _row("ci"))
 
 
 @pytest.mark.parametrize("role", ["bfx_webapi", "bfx_webauth", "bfx_cutover_reader"])
@@ -251,6 +255,7 @@ def test_downgrade_round_trip_and_populated_refusal(db: Any) -> None:
         assert conn.scalar(text(f"SELECT to_regproc('public.{_FUNCTION}')")) is None
     alembic(url, "upgrade", "head")
     alembic(url, "check")
+    stamp_realm(url, "ci")
     with engine.begin() as conn:
         conn.exec_driver_sql(_row())
     with pytest.raises(RuntimeError, match="refusing to drop the log"):

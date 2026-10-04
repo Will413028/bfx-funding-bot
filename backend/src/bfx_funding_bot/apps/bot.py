@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import (
 from bfx_funding_bot.apps.bot_ports import ObservationVenue, select_bot_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
 from bfx_funding_bot.core.authority import Authority, read_authority
+from bfx_funding_bot.core.database_realm import assert_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
     EXIT_CODE_AUTH_FAILED,
@@ -215,19 +216,24 @@ async def build_daemon(
     if not allocation_cap.is_finite() or allocation_cap < 0:
         raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be finite and >= 0")
     authority: Authority = "legacy"
-    if live_executor:
-        # Before the credential vault or anything else is read: a database at
-        # another schema means this is the wrong build for it (for instance a
-        # rollback onto a newer schema). The capital authority is read once,
-        # right after: an authority this build does not support refuses too.
-        try:
-            async with session_factory() as schema_session:
-                await assert_schema_head(schema_session)
-                authority = await read_authority(schema_session)
-        except Exception as exc:
+    # Every phase, before the credential vault or anything else is read: a live
+    # database at another schema means this is the wrong build for it (for instance
+    # a rollback onto a newer schema), and the capital authority is read once, right
+    # after: an authority this build does not support refuses too. The database's
+    # stamped realm must equal the realm this process runs as (E2): an unstamped
+    # database, or one stamped for another realm, refuses to boot.
+    try:
+        async with session_factory() as boot_session:
+            if live_executor:
+                await assert_schema_head(boot_session)
+            await assert_database_realm(boot_session, config.deployment_environment.value)
+            if live_executor:
+                authority = await read_authority(boot_session)
+    except Exception as exc:
+        if live_executor:
             await _refuse_live_boot(exc, config=config, session_factory=session_factory)
-            await db_engine.dispose()
-            raise
+        await db_engine.dispose()
+        raise
     async with session_factory() as bootstrap_session:
         account_bootstrap = await load_account_bootstrap(
             bootstrap_session,

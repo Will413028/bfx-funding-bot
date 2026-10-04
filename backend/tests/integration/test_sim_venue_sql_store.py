@@ -13,6 +13,8 @@ Mutations (one at a time, revert after each, run this file):
   ``test_a_stale_writer_loses`` and ``test_concurrent_writers_exactly_one_wins``.
 * ``load`` ignores the scope filter: ``test_scopes_are_disjoint``.
 * ``load`` orders by nothing / reverses: ``test_load_returns_events_in_seq_order``.
+* ``_check_database_realm`` accepts a ``prod`` stamp / an unstamped database / is skipped:
+  the three ``test_open_refuses_*`` realm tests.
 * The decoder drops ``NonceAdvanced`` from ``_EVENTS``: the restart tests fail.
 """
 from __future__ import annotations
@@ -61,7 +63,7 @@ from tests.modules.simulated_venue.helpers import (
     make_world,
     trade,
 )
-from tests.pg_templates import alembic
+from tests.pg_templates import alembic, disable_realm_triggers, stamp_realm
 
 from .test_trading_state_migration import _reset
 
@@ -72,11 +74,16 @@ OTHER = SimAccount("aaaaaaaa-bbbb-4ccc-8ddd-000000000002", "ci")
 SHADOW = SimAccount(ACCOUNT.exchange_account_id, "shadow")
 
 
-def _build_migrated(url: str) -> None:
+def _build_unstamped(url: str) -> None:
     engine = create_engine(url)
     _reset(engine)
     engine.dispose()
     alembic(url, "upgrade", "head")
+
+
+def _build_migrated(url: str) -> None:
+    _build_unstamped(url)
+    stamp_realm(url, "ci")
 
 
 def _set_epoch(url: str, authority: str) -> None:
@@ -124,6 +131,60 @@ def _funded(n: int) -> list[VenueEvent]:
 
 
 # -- guards -------------------------------------------------------------------------
+
+def _database_stamped(pg_templates: Any, pg_clone: Any, realm: str | None) -> str:
+    url = pg_clone(pg_templates.template("sim_store_unstamped", _build_unstamped))
+    if realm is not None:
+        stamp_realm(url, realm)
+    _set_epoch(url, "ledger")
+    return url
+
+
+async def test_open_refuses_an_unstamped_database(pg_templates: Any, pg_clone: Any) -> None:
+    engine = _engine(_database_stamped(pg_templates, pg_clone, None))
+    try:
+        with pytest.raises(RealmRefusedError, match="not stamped"):
+            await SqlVenueEventStore.open(engine)
+    finally:
+        await engine.dispose()
+
+
+async def test_open_refuses_a_database_stamped_prod(pg_templates: Any, pg_clone: Any) -> None:
+    engine = _engine(_database_stamped(pg_templates, pg_clone, "prod"))
+    try:
+        with pytest.raises(RealmRefusedError, match="stamped 'prod'"):
+            await SqlVenueEventStore.open(engine)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("realm", ["shadow", "ci"])
+async def test_open_accepts_a_simulation_realm_and_the_trigger_binds_the_account(
+    pg_templates: Any, pg_clone: Any, realm: str
+) -> None:
+    engine = _engine(_database_stamped(pg_templates, pg_clone, realm))
+    try:
+        store = await SqlVenueEventStore.open(engine)
+        own = SimAccount(ACCOUNT.exchange_account_id, realm)
+        foreign = SimAccount(ACCOUNT.exchange_account_id, "ci" if realm == "shadow" else "shadow")
+        await store.append(own, 0, _funded(1))
+        with pytest.raises(VenueStoreError, match="refuses a write of realm"):
+            await store.append(foreign, 0, _funded(2))
+        assert len(await store.load(own)) == 1
+        assert await store.load(foreign) == ()
+    finally:
+        await engine.dispose()
+
+
+async def test_open_refuses_a_database_without_the_realm_table(ledger_url: str) -> None:
+    alembic(ledger_url, "downgrade", "e6b1d4a7c9f3")
+    engine = _engine(ledger_url)
+    try:
+        with pytest.raises(RealmRefusedError, match="database_realm"):
+            await SqlVenueEventStore.open(engine)
+    finally:
+        await engine.dispose()
+
 
 async def test_open_refuses_a_database_whose_latest_epoch_is_not_ledger(legacy_url: str) -> None:
     engine = _engine(legacy_url)
@@ -241,10 +302,9 @@ async def test_a_writer_from_the_future_cannot_leave_a_gap(store: SqlVenueEventS
 async def test_scopes_are_disjoint(store: SqlVenueEventStore) -> None:
     await store.append(ACCOUNT, 0, _funded(1))
     await store.append(OTHER, 0, _funded(2) + _funded(3))
-    await store.append(SHADOW, 0, _funded(4))
     assert [e.amount for e in await store.load(ACCOUNT)] == [D(1)]  # type: ignore[union-attr]
     assert [e.amount for e in await store.load(OTHER)] == [D(2), D(3)]  # type: ignore[union-attr]
-    assert [e.amount for e in await store.load(SHADOW)] == [D(4)]  # type: ignore[union-attr]
+    assert await store.load(SHADOW) == ()  # the same account id in another realm is another scope
     with pytest.raises(ConcurrentAppendError):
         await store.append(ACCOUNT, 2, _funded(5))  # the other scopes' lengths are not its own
 
@@ -269,7 +329,8 @@ async def test_concurrent_multi_event_writers_never_interleave(store: SqlVenueEv
 
 async def test_a_database_refusal_is_a_store_error_not_a_lost_race(
         store: SqlVenueEventStore, ledger_url: str) -> None:
-    # Bypass SimAccount's own refusal to prove the CHECK is the second line of defence.
+    # Bypass SimAccount's own refusal: the database stamp is the next line of defence and the
+    # realm CHECK the last (the trigger is switched off to reach it).
     class Forged:
         exchange_account_id = "forged"
         deployment_environment = "prod"
@@ -277,7 +338,14 @@ async def test_a_database_refusal_is_a_store_error_not_a_lost_race(
     with pytest.raises(VenueStoreError) as caught:
         await store.append(Forged(), 0, _funded(1))  # type: ignore[arg-type]
     assert not isinstance(caught.value, ConcurrentAppendError)
-    assert "ck_sim_venue_event_realm" in str(caught.value)
+    assert "database realm ci refuses a write of realm prod" in str(caught.value)
+    owner = create_engine(ledger_url)
+    try:
+        disable_realm_triggers(owner)
+    finally:
+        owner.dispose()
+    with pytest.raises(VenueStoreError, match="ck_sim_venue_event_realm"):
+        await store.append(Forged(), 0, _funded(1))  # type: ignore[arg-type]
 
 
 # -- the venue over the store ----------------------------------------------------------

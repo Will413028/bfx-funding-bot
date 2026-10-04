@@ -885,6 +885,11 @@ async def test_prepare_streams_exact_facts_without_projection_lists(archive_db, 
     monkeypatch.setattr(cli(), "_archive_projection_rows", forbidden, raising=False)
     if drift is not None:
         async with factory.begin() as session:
+            if drift == "scope":
+                # A row of another realm is exactly what the realm trigger refuses; the drift
+                # under test is planted with the trigger visibly off (per-test database).
+                await session.execute(text(
+                    "ALTER TABLE reconcile_observation DISABLE TRIGGER database_realm_write"))
             await session.execute(text({
                 "value": "UPDATE reconcile_observation SET recorded_at=recorded_at + interval '1 microsecond' WHERE deployment_environment='ci'",
                 "key": "UPDATE reconcile_observation SET id=id+100 WHERE deployment_environment='ci'",

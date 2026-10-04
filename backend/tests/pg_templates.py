@@ -21,7 +21,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import create_engine
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import Engine, make_url
 
 ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
 
@@ -107,6 +107,39 @@ class TemplateDatabases:
         self._admin(f'DROP DATABASE IF EXISTS "{make_url(url).database}" WITH (FORCE)')
 
 
+# A test that must plant rows of a realm other than the stamp's (to prove a reader filters by
+# realm) disables the realm trigger on purpose, in a visible statement, on its own clone.
+DISABLE_REALM_TRIGGERS_SQL = """DO $$ DECLARE r regclass; BEGIN
+  FOR r IN SELECT tgrelid::regclass FROM pg_trigger WHERE tgname = 'database_realm_write' LOOP
+    EXECUTE 'ALTER TABLE ' || r::text || ' DISABLE TRIGGER database_realm_write';
+  END LOOP; END $$"""
+
+
+def disable_realm_triggers(engine: Engine) -> None:
+    """Switch the realm trigger off on every table of this (per-test clone) database."""
+    with engine.begin() as conn:
+        conn.exec_driver_sql(DISABLE_REALM_TRIGGERS_SQL)
+
+
+def stamp_realm(url: str, realm: str = "ci") -> None:
+    """The owner's one-time ``database_realm`` stamp on a migrated, still-empty database.
+
+    Migrating an empty database leaves it unstamped, and an unstamped database refuses
+    every realm write; a fresh host stamps it once (docs/runbooks/fresh-host-setup.md).
+    """
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "INSERT INTO database_realm (realm, stamped_at_ms, actor) "
+                "VALUES (%s, (extract(epoch FROM clock_timestamp()) * 1000)::bigint, 'test')",
+                (realm,),
+            )
+    finally:
+        engine.dispose()
+
+
 def upgrade_head(url: str) -> None:
-    """The plain build: an empty database migrated to head."""
+    """The plain build: an empty database migrated to head and stamped ``ci``."""
     alembic(url, "upgrade", "head")
+    stamp_realm(url, "ci")

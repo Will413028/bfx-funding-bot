@@ -176,7 +176,7 @@ def test_bot_writes_are_rejected_until_the_ledger_epoch(seeded) -> None:
             conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
             conn.exec_driver_sql(statement)
     with seeded.begin() as conn:  # the owner still writes under legacy
-        conn.exec_driver_sql(_query_sql(str(uuid4()), 2, environment="owner"))
+        conn.exec_driver_sql(_query_sql(str(uuid4()), 3))
     with seeded.begin() as conn:
         _append(conn, 2, "ledger")
     with seeded.begin() as conn:

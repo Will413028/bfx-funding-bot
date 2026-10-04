@@ -44,6 +44,7 @@ from bfx_funding_bot.modules.ledger.wiring import (
     build_ledger_managed_offers,
     build_ledger_uncertainties,
 )
+from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL
 
 from .test_ledger_basis import _ledger_mappers, _observation, _offer
 from .test_ledger_capital_reader import SCOPE, Book
@@ -159,6 +160,9 @@ async def test_symbol_filter(book) -> None:
 
 @pytest.mark.asyncio
 async def test_scopes_are_isolated(ledger) -> None:
+    # The other scope is another realm in this one database; the realm trigger would refuse it.
+    async with ledger.factory.begin() as session:
+        await session.execute(text(DISABLE_REALM_TRIGGERS_SQL))
     other = Book(ledger.factory, Scope(SCOPE.exchange_account_id, "ci2"))
     await other.accept()
     await ledger.attempt("200", outcome="unknown")

@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, text
 
+from tests.pg_templates import stamp_realm
+
 pytestmark = pytest.mark.integration
 
 BACKEND = Path(__file__).resolve().parents[2]
@@ -22,12 +24,12 @@ INSERTS = {
         "INSERT INTO funding_credit_history (exchange_account_id, kind, credit_id, "
         "deployment_environment, symbol, side, mts_create, mts_update, amount, status, rate, "
         f"period, mts_opening, mts_last_payout) VALUES ('{ACCOUNT}', 'credit', 466642176, "
-        "'live', 'fUST', 1, 1790350246000, 1790350246000, 150.76884612, 'CLOSED', 0.00019999, "
+        "'ci', 'fUST', 1, 1790350246000, 1790350246000, 150.76884612, 'CLOSED', 0.00019999, "
         "2, 1790350246000, 1790351088000) ON CONFLICT DO NOTHING"),
     "funding_trades": (
         "INSERT INTO funding_trades (exchange_account_id, trade_id, deployment_environment, "
         f"symbol, mts_create, offer_id, amount, rate, period, maker) VALUES ('{ACCOUNT}', "
-        "432914136, 'live', 'fUST', 1790350246000, 5123273052, 150.76884612, 0.00019999, 2, "
+        "432914136, 'ci', 'fUST', 1790350246000, 5123273052, 150.76884612, 0.00019999, 2, "
         "NULL) ON CONFLICT DO NOTHING"),
 }
 
@@ -55,6 +57,7 @@ def migrated(pg_container: Any) -> Any:
             conn.exec_driver_sql(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {role}")
     try:
         _alembic(url, "upgrade", "head")
+        stamp_realm(url, "ci")
         yield url, engine
     finally:
         with engine.begin() as conn:

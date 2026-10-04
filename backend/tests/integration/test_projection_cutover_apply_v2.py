@@ -633,6 +633,9 @@ async def _release_history(factory, *, stale_head):
             "reserved_usdt,realized_usdt,n_offers,n_credits,observed_at_ms,event_seq_fence,recorded_at) "
             "VALUES (:s,:id,'ci',0,999,0,1,7000,6,'2000-01-01T00:00:00Z')"
         ), {"s": str(account), "id": account})
+        # The shadow row proves the cutover scopes by realm; a database holds one realm, so the
+        # realm trigger is switched off for this planting (the archive database is per test).
+        await session.execute(text("ALTER TABLE position_state DISABLE TRIGGER database_realm_write"))
         for owner, environment, symbol in (
             (account, "ci", "fEUR"), (other, "ci", "fGBP"), (account, "shadow", "fJPY"),
         ):

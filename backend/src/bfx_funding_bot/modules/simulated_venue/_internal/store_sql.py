@@ -5,9 +5,10 @@ caller: `open` reads the authority epoch on the store's OWN connection to the ta
 database and refuses unless the latest epoch is `ledger`. Nothing the caller passes can
 stand in for that read (finding 5 of the P1a design review; ADR 2026-10-03).
 
-Seam for `database_realm` (decision E2, its own later PR): `_check_database_realm` is where
-the store will read the database's stamped realm on the same connection and compare it with
-the account's. Until that table exists it checks nothing beyond the table's CHECK.
+`_check_database_realm` reads the database's `database_realm` stamp on the same connection
+and refuses an unstamped database or one stamped for any realm outside `ALLOWED_REALMS`
+(decision E2): a simulated venue never opens on the production database. The trigger on
+`sim_venue_event` then rejects every row whose realm differs from the stamp.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bfx_funding_bot.modules.simulated_venue.contracts import (
+    ALLOWED_REALMS,
     REQUIRED_AUTHORITY_EPOCH,
     ConcurrentAppendError,
     RealmRefusedError,
@@ -88,11 +90,19 @@ class SqlVenueEventStore:
         return latest
 
     async def _check_database_realm(self, conn: AsyncConnection) -> None:
-        """Seam for E2's `database_realm` row: compare the stamped realm with the account's.
-
-        Not implemented here by decision (own PR). When it lands, read the row on `conn`
-        and refuse unless it names a realm in `ALLOWED_REALMS`.
-        """
+        """Refuse a database that is unstamped or stamped for a realm the venue may not use."""
+        if await conn.scalar(text("SELECT to_regclass('public.database_realm')")) is None:
+            raise RealmRefusedError("this database has no database_realm table (not migrated)")
+        try:
+            stamps = (await conn.execute(text("SELECT realm FROM public.database_realm"))).scalars().all()
+        except DBAPIError as exc:
+            raise VenueStoreError(f"database realm unreadable: {exc!r}") from exc
+        if not stamps:
+            raise RealmRefusedError("this database is not stamped with a realm")
+        if stamps[0] not in ALLOWED_REALMS:
+            raise RealmRefusedError(
+                f"the simulated venue refuses a database stamped {stamps[0]!r}; allowed: {ALLOWED_REALMS}"
+            )
 
     async def load(self, account: SimAccount) -> Sequence[VenueEvent]:
         query = (

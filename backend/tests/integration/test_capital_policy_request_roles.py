@@ -21,6 +21,7 @@ from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyReques
 from bfx_funding_bot.modules.execution.legacy_ports import LegacyPolicyStore, LegacyScopeLock
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
+from tests.pg_templates import stamp_realm
 
 from .test_trading_state_migration import _alembic, _alembic_cli, _reset
 
@@ -40,6 +41,7 @@ def _build_migrated(url: str) -> None:
     engine.dispose()
     _alembic(url, "upgrade", "head")
     _alembic(url, "check")
+    stamp_realm(url, "ci")
 
 
 @pytest.fixture
@@ -288,6 +290,7 @@ def test_downgrade_round_trip_and_refusal(migrated):
         assert conn.scalar(text("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'runtime_policy_%'")) == 0
     _alembic(url, "upgrade", "head")
     _alembic(url, "check")
+    stamp_realm(url, "ci")  # the downgrade dropped the stamp; the tables hold no rows to derive it from
     with engine.begin() as conn:
         conn.exec_driver_sql(_request_sql())
     result = _alembic_cli(url, "downgrade", _BEFORE)
