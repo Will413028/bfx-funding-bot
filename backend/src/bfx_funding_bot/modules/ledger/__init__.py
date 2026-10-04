@@ -381,10 +381,16 @@ class Attempt:
     cell_id: str  # must equal the decision's cell (enforced by the scope trigger)
     normalized_payload: JsonObject
     basis_id: UUID
-    policy_revision_id: UUID
+    # None only for a seeded attempt (``seed_provenance`` set): the legacy authorizing
+    # revision was never stored. Runtime authorization refuses a None policy.
+    policy_revision_id: UUID | None
     authorization_evidence: JsonObject
     started_at_ms: int
     seed_provenance: JsonObject | None = None
+
+    def __post_init__(self) -> None:
+        if self.policy_revision_id is None and self.seed_provenance is None:
+            raise ValueError("an attempt without a policy revision must be a seeded attempt")
 
 
 @dataclass(frozen=True, slots=True)
@@ -476,6 +482,170 @@ class QuarantineMember:
     venue_object_id: str
     observation_id: UUID
     amount_at_join: Decimal
+
+
+# ---------------------------------------------------------------------------
+# Legacy closure seed (S1-4d, ADR D6'/D7'''). A neutral closure the legacy reader in
+# execution produces from the final legacy accepted snapshot, and ``ledger.seed.write_seed``
+# turns into the one ``legacy_seed`` observation, its basis, journals, mirrors and quarantines.
+# Every value here is a legacy fact as stored (F7: no re-derivation); vocabularies are the
+# ledger's, mapped by the reader. Deleted with the legacy authority in S1-8 (the DTOs and
+# ``write_seed`` stay as the record of how the seed rows were made).
+# ---------------------------------------------------------------------------
+
+type SeedClassification = Literal["reflected", "settled", "unresolved"]
+type AttributionBasis = Literal["trade", "carry", "recent_fill", "unattributed"]
+SEED_CLASSIFICATIONS: frozenset[str] = frozenset(("reflected", "settled", "unresolved"))
+ATTRIBUTION_BASES: frozenset[str] = frozenset(("trade", "carry", "recent_fill", "unattributed"))
+
+
+@dataclass(frozen=True, slots=True)
+class SeedOffer:
+    """A live venue offer of the final legacy snapshot (ours and foreign alike)."""
+
+    venue_offer_id: str
+    symbol: str
+    amount_original: Decimal
+    amount_remaining: Decimal
+    rate: Decimal | None
+    period_days: int | None
+    offer_type: str | None
+    flags: JsonObject | None
+    status: OfferStatus
+    mts_created: int
+    mts_updated: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class SeedCredit:
+    """A live credit or loan of the final legacy snapshot; ``mts_opening`` is required."""
+
+    source_kind: CreditKind
+    venue_credit_id: str
+    symbol: str
+    amount: Decimal
+    rate: Decimal | None
+    period_days: int
+    status: CreditStatus
+    flags: JsonObject | None
+    mts_created: int | None
+    mts_updated: int | None
+    mts_opening: int
+
+
+@dataclass(frozen=True, slots=True)
+class SeedSymbol:
+    """One symbol's legacy accepted totals and per-cell exposure (offers + credits)."""
+
+    symbol: str
+    available: Decimal
+    offered: Decimal
+    credits: Decimal
+    unattributed_credits: Decimal
+    foreign_offers: Decimal
+    cells: Mapping[str, Decimal]
+
+
+@dataclass(frozen=True, slots=True)
+class SeedCreditGroup:
+    """The legacy attribution of one live credit, keyed like the ledger's carry."""
+
+    source_kind: CreditKind
+    venue_credit_id: str
+    symbol: str
+    amount: Decimal
+    period_days: int
+    mts_opening: int
+    attribution_basis: AttributionBasis
+    cells: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class SeedOutcome:
+    kind: OutcomeKind
+    venue_offer_id: str | None
+    reason: str | None
+    completed_at_ms: int
+    evidence: JsonObject
+
+
+@dataclass(frozen=True, slots=True)
+class SeedAttempt:
+    """A legacy submission attempt (or the synthesized partial of a claim-only live offer).
+
+    ``attempt_seq`` is the legacy intent's ``event_seq`` (per-scope monotonic, never
+    synthetic); ``provenance`` names the legacy rows (attempt, decision, claim, events,
+    uncertainty) and becomes ``seed_provenance``.
+    """
+
+    attempt_id: UUID
+    execution_decision_id: str
+    symbol: str
+    cell_id: str
+    attempt_seq: int
+    normalized_payload: JsonObject
+    started_at_ms: int
+    outcome: SeedOutcome
+    classification: SeedClassification
+    provenance: JsonObject
+
+
+@dataclass(frozen=True, slots=True)
+class SeedQuarantineMember:
+    source_kind: Literal["offer", "credit", "loan"]
+    venue_object_id: str
+    amount_at_join: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class SeedQuarantine:
+    """An open legacy quarantine-kind uncertainty; ``quarantine_id`` is its uncertainty id."""
+
+    quarantine_id: UUID
+    symbol: str
+    intended_amount: Decimal
+    opened_at_ms: int
+    evidence: JsonObject
+    members: tuple[SeedQuarantineMember, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SeedWatermarks:
+    """Where the capture point is in legacy terms (evidence and anti-join anchors)."""
+
+    final_event_seq: int
+    snapshot_event_seq: int
+    snapshot_query_id: UUID
+    snapshot_command_fence: int
+    trading_state_max_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class SeedClosure:
+    """Everything the seed writes for one scope, read in one snapshot of the legacy tables."""
+
+    scope: Scope
+    watermarks: SeedWatermarks
+    query_started_at_ms: int
+    query_finished_at_ms: int
+    confirmation_finished_at_ms: int
+    offers: tuple[SeedOffer, ...]
+    credits: tuple[SeedCredit, ...]
+    symbols: tuple[SeedSymbol, ...]
+    credit_groups: tuple[SeedCreditGroup, ...]
+    attempts: tuple[SeedAttempt, ...]
+    quarantines: tuple[SeedQuarantine, ...]
+    pending_uncertainty_requests: tuple[UUID, ...]
+    evidence: JsonObject
+
+
+class SeedRefused(ValueError):  # noqa: N818 - a refusal, named by the seed contract
+    """The closure cannot be seeded truthfully; ``reason`` is a controlled code."""
+
+    def __init__(self, reason: str, *detail: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
 
 
 class OutcomeAlreadyRecorded(ValueError):  # noqa: N818 - named by journal contract
@@ -1221,6 +1391,7 @@ class CommandJournal(Protocol):
 
 
 __all__ = [
+    "ATTRIBUTION_BASES",
     "BOOT_GRACE_MS",
     "CREDIT_STATUSES",
     "CREDIT_TERMINAL_KINDS",
@@ -1230,6 +1401,7 @@ __all__ = [
     "OFFER_STATUSES",
     "OFFER_TERMINAL_KINDS",
     "RUNTIME_GRACE_MS",
+    "SEED_CLASSIFICATIONS",
     "UNKNOWN_SETTLE_MS",
     "Acceptance",
     "AcceptanceDecision",
@@ -1238,6 +1410,7 @@ __all__ = [
     "AcceptedSymbolPosition",
     "AppliedResolution",
     "Attempt",
+    "AttributionBasis",
     "AuthorizeRefused",
     "Authorized",
     "AutoAction",
@@ -1322,6 +1495,18 @@ __all__ = [
     "ResolutionSubject",
     "Scope",
     "ScopeLock",
+    "SeedAttempt",
+    "SeedClassification",
+    "SeedClosure",
+    "SeedCredit",
+    "SeedCreditGroup",
+    "SeedOffer",
+    "SeedOutcome",
+    "SeedQuarantine",
+    "SeedQuarantineMember",
+    "SeedRefused",
+    "SeedSymbol",
+    "SeedWatermarks",
     "SymbolConservation",
     "Trade",
     "UncertaintyReader",
