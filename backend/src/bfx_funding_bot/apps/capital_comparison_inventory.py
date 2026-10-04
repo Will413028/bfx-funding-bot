@@ -129,6 +129,9 @@ async def reverse_inventory(
                 )
             )
 
+    # Live offers/credits come from the latest accepted snapshot and open claims only. The legacy
+    # projections (venue_offer_state / venue_credit_state) are not readable by the cutover reader
+    # (no column grant); 4e's anti-joins compare legacy live offers/credits at the capture point.
     live: set[tuple[UUID, str, str]] = set()
     latest = await session.execute(
         text(

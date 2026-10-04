@@ -24,8 +24,9 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 READER_ROLE: Final = "bfx_cutover_reader"
-# Relations in these schemas are scanned for write privileges (absent schemas are skipped).
-WRITE_SCAN_SCHEMAS: Final = ("public", "archive", "projection_audit")
+# Every non-system schema is scanned (``auth`` holds the web sessions and roles, so a write
+# there forges the operator path); TEMP is deliberately not checked (restore drill grants it
+# and a temp object cannot reach another session).
 FORBIDDEN_EXTENSIONS: Final = ("dblink", "postgres_fdw")
 _PRIVILEGED_ATTRIBUTES: Final = (
     "rolsuper",
@@ -115,6 +116,8 @@ def validate_connection(
         for actual, key in ((url.port, "port"), (url.database, "database"), (url.username, "user")):
             if actual != manifest.get(key):
                 raise ValueError
+        if url.username == READER_ROLE:
+            raise GuardRejectedError("login_is_reader")
         if mode == "rehearsal":
             if manifest["host"] != f"bfx-dr-{run_id}-db" or manifest["port"] != 5432:
                 raise ValueError
@@ -160,8 +163,11 @@ _CLOSURE = (
     "SELECT r.oid FROM pg_roles r WHERE r.rolname = session_user "
     "UNION SELECT m.roleid FROM pg_auth_members m JOIN closure c ON m.member = c.oid) "
 )
-_NOT_SYSTEM = "n.nspname NOT IN ('pg_catalog', 'information_schema')"
-_SCANNED = "n.nspname = ANY(CAST(:schemas AS text[])) "
+_NOT_SYSTEM = (
+    "n.nspname NOT IN ('pg_catalog', 'information_schema') "
+    "AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp%'"
+)
+_SCANNED = _NOT_SYSTEM + " "
 _RELATIONS = "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace CROSS JOIN closure r "
 _PRIVILEGE_SCANS: tuple[tuple[str, str], ...] = (
     (
@@ -171,7 +177,7 @@ _PRIVILEGE_SCANS: tuple[tuple[str, str], ...] = (
         + "WHERE "
         + _SCANNED
         + "AND c.relkind IN ('r', 'p', 'v', 'm', 'f') "
-        "AND has_table_privilege(r.oid, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE')",
+        "AND has_table_privilege(r.oid, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,MAINTAIN')",
     ),
     (
         "column_write_privilege",
@@ -190,6 +196,17 @@ _PRIVILEGE_SCANS: tuple[tuple[str, str], ...] = (
         + _SCANNED
         + "AND c.relkind = 'S' "
         "AND has_sequence_privilege(r.oid, c.oid, 'USAGE,UPDATE')",
+    ),
+    (
+        "database_create_privilege",
+        "SELECT DISTINCT current_database() FROM closure r "
+        "WHERE has_database_privilege(r.oid, current_database(), 'CREATE')",
+    ),
+    (
+        "schema_create_privilege",
+        "SELECT DISTINCT n.nspname FROM pg_namespace n CROSS JOIN closure r WHERE "
+        + _NOT_SYSTEM
+        + " AND has_schema_privilege(r.oid, n.oid, 'CREATE')",
     ),
     (
         "owned_relation",
@@ -234,6 +251,8 @@ async def verify_connection(session: AsyncSession, plan: ConnectionPlan) -> None
     ).one()
     if tuple(identity) != (plan.user, plan.database, "repeatable read", "on"):
         raise GuardRejectedError("connection_attestation_failed")
+    if plan.user == READER_ROLE:
+        raise GuardRejectedError("login_is_reader")
     try:
         await session.execute(text(f"SET LOCAL ROLE {READER_ROLE}"))
         current = await session.scalar(text("SELECT current_user"))
@@ -245,7 +264,7 @@ async def verify_connection(session: AsyncSession, plan: ConnectionPlan) -> None
         await session.execute(
             text(
                 _CLOSURE
-                + "SELECT r.rolname, "
+                + "SELECT r.rolname, r.rolcanlogin, r.rolinherit, "
                 + ", ".join(f"r.{a}" for a in _PRIVILEGED_ATTRIBUTES)
                 + " FROM closure c JOIN pg_roles r ON r.oid = c.oid ORDER BY r.rolname"
             )
@@ -253,13 +272,16 @@ async def verify_connection(session: AsyncSession, plan: ConnectionPlan) -> None
     ).all()
     if {row[0] for row in roles} != {plan.user, READER_ROLE}:
         raise GuardRejectedError("role_closure_unexpected", *(row[0] for row in roles))
-    privileged = [row[0] for row in roles if any(row[1:])]
+    privileged = [row[0] for row in roles if any(row[3:])]
     if privileged:
         raise GuardRejectedError("role_attribute_privileged", *privileged)
+    by_name = {row[0]: row for row in roles}
+    if by_name[READER_ROLE][1]:
+        raise GuardRejectedError("reader_can_login", READER_ROLE)
+    if by_name[plan.user][2]:
+        raise GuardRejectedError("login_inherits", plan.user)
     for reason, query in _PRIVILEGE_SCANS:
         parameters: dict[str, object] = {}
-        if ":schemas" in query:
-            parameters["schemas"] = list(WRITE_SCAN_SCHEMAS)
         if ":extensions" in query:
             parameters["extensions"] = list(FORBIDDEN_EXTENSIONS)
         found = list((await session.scalars(text(_CLOSURE + query), parameters)).all())

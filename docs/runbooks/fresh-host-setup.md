@@ -106,10 +106,14 @@ bfx_cutover_reader` 並自行檢查同一份清單（`apps/capital_comparison_gu
    （`reader_role_unavailable`）。
 2. 從 LOGIN 沿 `pg_auth_members` 遞迴可達的 role 恰為 {LOGIN, 群組}（`role_closure_unexpected`）。
 3. 兩者的 `rolsuper`、`rolcreaterole`、`rolcreatedb`、`rolbypassrls`、`rolreplication` 都是 false
-   （`role_attribute_privileged`）；群組 `rolcanlogin=false`，LOGIN `rolinherit=false`。
-4. 可達 role 對 `public`、`archive`、`projection_audit` 的每個 relation（掃 `pg_class`，不用固定清單）
-   沒有 INSERT／UPDATE／DELETE／TRUNCATE（`table_write_privilege`），沒有任何欄位 INSERT／UPDATE
+   （`role_attribute_privileged`）；群組 `rolcanlogin=false`（`reader_can_login`），LOGIN
+   `rolinherit=false`（`login_inherits`）；manifest 的 LOGIN 不得是群組本身（`login_is_reader`）。
+4. 可達 role 對每個非系統 schema（排除 `pg_catalog`、`information_schema`、`pg_toast*`、`pg_temp*`；
+   含 `auth`，掃 `pg_class`，不用固定清單）的每個 relation 沒有 INSERT／UPDATE／DELETE／TRUNCATE／
+   TRIGGER／MAINTAIN（`table_write_privilege`），沒有任何欄位 INSERT／UPDATE
    （`column_write_privilege`），對 sequence 沒有 USAGE／UPDATE（`sequence_privilege`）。
+   對資料庫與每個非系統 schema 沒有 CREATE（`database_create_privilege`／`schema_create_privilege`）；
+   TEMP 不檢查（restore drill 會授予 TEMPORARY，暫存物件影響不到其他 session）。
 5. 可達 role 不擁有任何 relation、function、schema（`owned_relation`／`owned_function`／`owned_schema`）。
 6. 可達 role 不能 EXECUTE 任何非 trigger 的 `SECURITY DEFINER` function
    （`security_definer_executable`）。
@@ -124,9 +128,10 @@ WITH RECURSIVE closure(oid) AS (
 SELECT r.rolname FROM closure c JOIN pg_roles r ON r.oid = c.oid ORDER BY 1;  -- 恰兩列
 -- 檢查 4～6 對每個可達 role 各跑一次（把 :role 換成兩個 role）：回傳列必須為空
 SELECT n.nspname, c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname IN ('public', 'archive', 'projection_audit')
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'
     AND ((c.relkind IN ('r','p','v','m','f')
-          AND (has_table_privilege(:'role', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE')
+          AND (has_table_privilege(:'role', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,MAINTAIN')
                OR has_any_column_privilege(:'role', c.oid, 'INSERT,UPDATE')))
          OR (c.relkind = 'S' AND has_sequence_privilege(:'role', c.oid, 'USAGE,UPDATE')));
 SELECT 'relation', relname::text FROM pg_class WHERE relowner = :'role'::regrole
@@ -136,6 +141,12 @@ UNION ALL SELECT 'secdef', p.proname::text FROM pg_proc p JOIN pg_namespace n ON
   WHERE p.prosecdef AND p.prorettype <> 'trigger'::regtype
     AND n.nspname NOT IN ('pg_catalog', 'information_schema')
     AND has_function_privilege(:'role', p.oid, 'EXECUTE');
+SELECT 'database', datname FROM pg_database
+  WHERE datname = current_database() AND has_database_privilege(:'role', oid, 'CREATE')
+UNION ALL SELECT 'schema', nspname FROM pg_namespace
+  WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+    AND nspname NOT LIKE 'pg\_toast%' AND nspname NOT LIKE 'pg\_temp%'
+    AND has_schema_privilege(:'role', oid, 'CREATE');
 SELECT extname FROM pg_extension WHERE extname IN ('dblink', 'postgres_fdw');  -- 空
 -- 群組只有欄位授權：table grants 必須為空；column grants 與下列清單完全一致
 SELECT table_name, privilege_type FROM information_schema.role_table_grants

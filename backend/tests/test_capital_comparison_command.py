@@ -11,7 +11,13 @@ from uuid import UUID
 import pytest
 
 from bfx_funding_bot.apps import capital_comparison as command
-from bfx_funding_bot.apps.capital_comparison_guard import READER_ROLE, validate_connection
+from bfx_funding_bot.apps.capital_comparison_guard import (
+    READER_ROLE,
+    ConnectionPlan,
+    GuardRejectedError,
+    validate_connection,
+    verify_connection,
+)
 from bfx_funding_bot.apps.capital_comparison_inventory import InventoryResult
 from bfx_funding_bot.modules.trading import Blocked, CapitalScope
 from bfx_funding_bot.modules.trading_shadow import ComparisonHeads, ShadowComparison
@@ -96,7 +102,8 @@ async def test_guard_rejection_never_connects(arguments, fault):
 
 
 _SCAN_REASONS = (
-    "table_write_privilege", "column_write_privilege", "sequence_privilege", "owned_relation",
+    "table_write_privilege", "column_write_privilege", "sequence_privilege",
+    "database_create_privilege", "schema_create_privilege", "owned_relation",
     "owned_function", "owned_schema", "security_definer_executable", "forbidden_extension",
 )
 
@@ -125,9 +132,11 @@ class Session:
             return SimpleNamespace(one=lambda: self.identity)
         if "FROM closure c JOIN pg_roles" in sql:
             attributes = (self.fault == "attribute",) + (False,) * 4
-            rows = [("reader", *attributes), (READER_ROLE, *((False,) * 5))]
+            login = ("reader", False, self.fault == "login_inherits", *attributes)
+            reader = (READER_ROLE, self.fault == "reader_can_login", False, *((False,) * 5))
+            rows = [login, reader]
             if self.fault == "closure":
-                rows.append(("bfx_bot", *((False,) * 5)))
+                rows.append(("bfx_bot", False, False, *((False,) * 5)))
             return SimpleNamespace(all=lambda: rows)
         if "capital_policy_heads" in sql:
             return SimpleNamespace(first=lambda: (1, UUID(ACCOUNT)))
@@ -155,6 +164,8 @@ def _fault_for(sql):
         "has_table_privilege": "table_write_privilege",
         "has_any_column_privilege": "column_write_privilege",
         "has_sequence_privilege": "sequence_privilege",
+        "has_database_privilege": "database_create_privilege",
+        "has_schema_privilege": "schema_create_privilege",
         "c.relowner": "owned_relation",
         "p.proowner": "owned_function",
         "n.nspowner": "owned_schema",
@@ -186,6 +197,8 @@ _ATTESTATION_FAULTS = {
     "role_switch": "reader_role_unavailable",
     "closure": "role_closure_unexpected",
     "attribute": "role_attribute_privileged",
+    "reader_can_login": "reader_can_login",
+    "login_inherits": "login_inherits",
     **{reason: reason for reason in _SCAN_REASONS},
 }
 
@@ -387,3 +400,25 @@ async def test_dsn_file_rejection_never_connects(arguments, fault):
 
 def test_credentials_never_travel_in_argv(arguments):
     assert not any("secret" in value for value in arguments)
+
+
+def test_login_may_not_be_the_reader(arguments, tmp_path):
+    dsn = Path(arguments[arguments.index("--dsn-file") + 1])
+    dsn.write_text(f"postgresql://{READER_ROLE}:secret@bfx-dr-test-db:5432/copy\n")
+    manifest = Path(arguments[arguments.index("--manifest") + 1])
+    data = json.loads(manifest.read_text())
+    manifest.write_text(json.dumps({**data, "user": READER_ROLE}))
+    with pytest.raises(command.GuardRejectedError) as raised:
+        validate_connection(mode="rehearsal", dsn=dsn.read_text().strip(), manifest_path=manifest,
+                            cutover_manifest_path=None, run_id="test",
+                            authorize_cutover_read=False, wall_clock_ms=1)
+    assert raised.value.reason == "login_is_reader"
+
+
+async def test_verify_refuses_a_session_that_already_is_the_reader():
+    session = Session((READER_ROLE, "copy", "repeatable read", "on"))
+    plan = ConnectionPlan(None, READER_ROLE, "copy", "t", 1, "rehearsal")
+    with pytest.raises(GuardRejectedError) as raised:
+        await verify_connection(session, plan)
+    assert raised.value.reason == "login_is_reader"
+    assert not any("SET LOCAL ROLE" in sql for sql in session.statements)

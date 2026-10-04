@@ -235,64 +235,83 @@ async def test_owner_is_rejected_by_the_actual_closure_check(world, tmp_path, mo
     assert summary["reason"] == "role_closure_unexpected" and summary["exit_code"] == 3
 
 
-_COLUMN_GRANT = "GRANT UPDATE (state) ON public.trading_state TO {login}"
-_UNSAFE: dict[str, tuple[str, str]] = {
-    # reason: (setup SQL with {login}, a name the detail must carry; "" when none)
-    "table_write_privilege": ("GRANT INSERT ON public.trading_state TO {login}", "public.trading_state"),
-    "column_write_privilege": (_COLUMN_GRANT, "public.trading_state"),
-    "sequence_privilege": (
-        "GRANT USAGE ON SEQUENCE public.trading_state_id_seq TO {login}",
-        "public.trading_state_id_seq",
-    ),
-    "role_closure_unexpected": (
-        "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'bfx_bot') "
-        "THEN CREATE ROLE bfx_bot NOLOGIN; END IF; END $$; GRANT bfx_bot TO {login}",
-        "bfx_bot",
-    ),
-    "role_attribute_privileged": ("ALTER ROLE {login} SUPERUSER", "{login}"),
-    "security_definer_executable": (
-        "CREATE FUNCTION public.guard_probe() RETURNS int LANGUAGE sql SECURITY DEFINER "
-        "AS 'SELECT 1'; REVOKE ALL ON FUNCTION public.guard_probe() FROM PUBLIC; "
-        "GRANT EXECUTE ON FUNCTION public.guard_probe() TO {login}",
-        "public.guard_probe",
-    ),
-    # Owned objects sit outside the scanned schemas so only the ownership scan sees them.
-    "owned_relation": (
-        "CREATE SCHEMA other_schema; CREATE TABLE other_schema.owned(x int); "
-        "ALTER TABLE other_schema.owned OWNER TO {login}",
-        "other_schema.owned",
-    ),
-    "owned_function": (
-        "CREATE SCHEMA other_schema; CREATE FUNCTION other_schema.owned() RETURNS int "
-        "LANGUAGE sql AS 'SELECT 1'; ALTER FUNCTION other_schema.owned() OWNER TO {login}",
-        "other_schema.owned",
-    ),
-    "owned_schema": ("CREATE SCHEMA other_schema AUTHORIZATION {login}", "other_schema"),
-    "forbidden_extension": ("CREATE EXTENSION dblink", "dblink"),
-}
+_TRADING_STATE = "public.trading_state"
+_OTHER = "CREATE SCHEMA other_schema; "
+# (case id, reason, setup SQL with {login}/{db}, a name the detail must carry)
+_UNSAFE: list[tuple[str, str, str, str]] = [
+    ("table_insert", "table_write_privilege",
+     "GRANT INSERT ON public.trading_state TO {login}", _TRADING_STATE),
+    ("table_trigger", "table_write_privilege",
+     "GRANT TRIGGER ON public.trading_state TO {login}", _TRADING_STATE),
+    ("table_maintain", "table_write_privilege",
+     "GRANT MAINTAIN ON public.trading_state TO {login}", _TRADING_STATE),
+    # The web users, roles and credentials live in the auth schema: a write there forges the operator path.
+    ("auth_account_insert", "table_write_privilege",
+     "GRANT INSERT ON auth.account TO {login}", "auth.account"),
+    ("auth_user_role_update", "column_write_privilege",
+     'GRANT UPDATE (role) ON auth."user" TO {login}', "auth.user"),
+    ("other_schema_insert", "table_write_privilege",
+     _OTHER + "CREATE TABLE other_schema.t(x int); GRANT INSERT ON other_schema.t TO {login}",
+     "other_schema.t"),
+    ("column_update", "column_write_privilege",
+     "GRANT UPDATE (state) ON public.trading_state TO {login}", _TRADING_STATE),
+    ("sequence_usage", "sequence_privilege",
+     "GRANT USAGE ON SEQUENCE public.trading_state_id_seq TO {login}",
+     "public.trading_state_id_seq"),
+    ("database_create", "database_create_privilege",
+     'GRANT CREATE ON DATABASE "{db}" TO {login}', "{db}"),
+    ("schema_create", "schema_create_privilege",
+     "GRANT CREATE ON SCHEMA public TO {login}", "public"),
+    ("closure", "role_closure_unexpected",
+     "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'bfx_bot') "
+     "THEN CREATE ROLE bfx_bot NOLOGIN; END IF; END $$; GRANT bfx_bot TO {login}", "bfx_bot"),
+    ("superuser", "role_attribute_privileged", "ALTER ROLE {login} SUPERUSER", "{login}"),
+    ("login_inherits", "login_inherits", "ALTER ROLE {login} INHERIT", "{login}"),
+    ("reader_can_login", "reader_can_login", "ALTER ROLE bfx_cutover_reader LOGIN",
+     "bfx_cutover_reader"),
+    ("security_definer", "security_definer_executable",
+     "CREATE FUNCTION public.guard_probe() RETURNS int LANGUAGE sql SECURITY DEFINER "
+     "AS 'SELECT 1'; REVOKE ALL ON FUNCTION public.guard_probe() FROM PUBLIC; "
+     "GRANT EXECUTE ON FUNCTION public.guard_probe() TO {login}", "public.guard_probe"),
+    # Ownership always brings its own privileges; revoke them so only the ownership scan sees it.
+    ("owned_relation", "owned_relation",
+     _OTHER + "CREATE TABLE other_schema.owned(x int); "
+     "ALTER TABLE other_schema.owned OWNER TO {login}; "
+     "REVOKE ALL ON other_schema.owned FROM {login}", "other_schema.owned"),
+    ("owned_function", "owned_function",
+     _OTHER + "CREATE FUNCTION other_schema.owned() RETURNS int LANGUAGE sql AS 'SELECT 1'; "
+     "ALTER FUNCTION other_schema.owned() OWNER TO {login}", "other_schema.owned"),
+    ("owned_schema", "owned_schema",
+     "CREATE SCHEMA other_schema AUTHORIZATION {login}; "
+     "REVOKE ALL ON SCHEMA other_schema FROM {login}", "other_schema"),
+    ("forbidden_extension", "forbidden_extension", "CREATE EXTENSION dblink", "dblink"),
+]  # fmt: skip
 
 
-@pytest.mark.parametrize("reason", list(_UNSAFE))
-async def test_each_unsafe_shape_has_its_own_reason(world, reason) -> None:
-    setup, named = _UNSAFE[reason]
+@pytest.mark.parametrize(("case", "reason", "setup", "named"), _UNSAFE, ids=[c[0] for c in _UNSAFE])
+async def test_each_unsafe_shape_has_its_own_reason(world, case, reason, setup, named) -> None:
     login = world.login()
-    if reason == "forbidden_extension":
-        with_extension = create_engine(world.url.set(drivername="postgresql+psycopg"))
+    database = world.url.database
+    if case == "forbidden_extension":
+        probe = create_engine(world.url.set(drivername="postgresql+psycopg"))
         try:
-            with with_extension.connect() as conn:
+            with probe.connect() as conn:
                 available = conn.exec_driver_sql(
                     "SELECT count(*) FROM pg_available_extensions WHERE name = 'dblink'"
                 ).scalar()
         finally:
-            with_extension.dispose()
+            probe.dispose()
         if not available:
             pytest.skip("dblink is not installed in this PostgreSQL")
-    world.exec(setup.format(login=login))
-    with pytest.raises(GuardRejectedError) as raised:
-        await attest(world, login)
+    world.exec(setup.format(login=login, db=database))
+    try:
+        with pytest.raises(GuardRejectedError) as raised:
+            await attest(world, login)
+    finally:
+        if case == "reader_can_login":
+            world.exec("ALTER ROLE bfx_cutover_reader NOLOGIN")  # the role is cluster-wide
     assert raised.value.reason == reason
-    if named:
-        assert named.format(login=login) in raised.value.detail
+    assert named.format(login=login, db=database) in raised.value.detail
 
 
 async def test_a_direct_login_without_membership_cannot_switch_role(world) -> None:
@@ -305,12 +324,16 @@ async def test_safe_neighbours_pass(world) -> None:
     """Near misses of each unsafe shape stay accepted: no false positives on the real schema."""
     login = world.login()
     world.exec(
-        # SECURITY DEFINER without EXECUTE for the reachable roles; owned objects of other roles;
-        # writes on a table outside the scanned schemas; SELECT on a sequence is not USAGE.
+        # SECURITY DEFINER without EXECUTE for the reachable roles; SELECT (not write) on web
+        # sessions and on another schema; SELECT on a sequence is not USAGE; USAGE on a schema
+        # and TEMPORARY on the database (the restore drill grants it) are not CREATE.
         "CREATE FUNCTION public.guard_hidden() RETURNS int LANGUAGE sql SECURITY DEFINER "
         "AS 'SELECT 1'; REVOKE ALL ON FUNCTION public.guard_hidden() FROM PUBLIC; "
         "CREATE SCHEMA other_schema; CREATE TABLE other_schema.t(x int); "
-        f'GRANT INSERT, UPDATE, DELETE ON other_schema.t TO "{login}"; '
+        f'GRANT USAGE ON SCHEMA other_schema TO "{login}"; '
+        f'GRANT SELECT ON other_schema.t TO "{login}"; '
+        f'GRANT SELECT ON auth.account TO "{login}"; '
+        f'GRANT TEMPORARY ON DATABASE "{world.url.database}" TO "{login}"; '
         f'GRANT SELECT ON SEQUENCE public.trading_state_id_seq TO "{login}"'
     )
     await attest(world, login)
