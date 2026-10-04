@@ -3,6 +3,12 @@
 Supply --dsn-file (a 0600 file holding the DSN; never pass credentials as arguments), --scope ACCOUNT_UUID:ENVIRONMENT (repeatable), --cells,
 --run-id and --code-revision. Rehearsal takes --manifest; cutover instead takes
 --cutover-manifest and --authorize-cutover-read. Output is JSONL on stdout.
+
+The connection is a LOGIN that is a member of ``bfx_cutover_reader``; the command runs
+``SET LOCAL ROLE`` to it and attests the reachable roles and privileges first
+(``capital_comparison_guard``). A reverse inventory then proves the database holds no
+authority state outside the listed scopes (``capital_comparison_inventory``); any
+violation makes the run ``not_comparable`` (exit 1).
 """
 
 import argparse
@@ -27,6 +33,7 @@ from bfx_funding_bot.apps.capital_comparison_guard import (
     validate_connection,
     verify_connection,
 )
+from bfx_funding_bot.apps.capital_comparison_inventory import InventoryResult, reverse_inventory
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_cells_only
 from bfx_funding_bot.modules.execution.capital_shadow_baseline import read_baseline
 from bfx_funding_bot.modules.trading import Blocked, CapitalScope
@@ -78,7 +85,9 @@ def emit(output: TextIO, value: object) -> None:
     output.flush()
 
 
-def summarize(scopes: Sequence[CapitalScope], results: Sequence[ShadowComparison]) -> dict[str, object]:
+def summarize(
+    scopes: Sequence[CapitalScope], results: Sequence[ShadowComparison], *, inventory: InventoryResult
+) -> dict[str, object]:
     counts = Counter(result.status for result in results)
     blocked = [r for r in results if r.status == "equal" and isinstance(r.candidate, Blocked)]
     inconclusive = not scopes or (len(blocked) == len(scopes) and all(
@@ -88,22 +97,27 @@ def summarize(scopes: Sequence[CapitalScope], results: Sequence[ShadowComparison
         for r in blocked
     ))
     complete = len(scopes) == len(set(scopes)) == len(results)
-    passed = complete and not inconclusive and counts["equal"] == len(scopes)
+    passed = (
+        complete and not inconclusive and counts["equal"] == len(scopes) and inventory.status == "ok"
+    )
     return {
         "kind": "summary", "expected_scopes": len(scopes), "emitted_scopes": len(results),
         "coverage_complete": complete, "counts": dict(counts), "blocked_equal": len(blocked),
         "inconclusive": inconclusive, "baseline_evidence_complete": False,
-        "exit_code": 0 if passed else 1,
+        "inventory_status": inventory.status, "exit_code": 0 if passed else 1,
     }
 
 
 async def compare_scopes(
     session: AsyncSession, *, scopes: Sequence[CapitalScope], comparator: CapitalComparator,
     plan: ConnectionPlan, code_revision: str, max_snapshot_age_ms: int, output: TextIO,
+    inventory: InventoryResult,
 ) -> dict[str, object]:
     results = []
     provenance = {"code_revision": code_revision, "run_id": plan.run_id,
                   "now_ms": plan.now_ms, "mode": plan.mode}
+    emit(output, {"kind": "inventory", "status": inventory.status,
+                  "violations": list(inventory.violations), "provenance": provenance})
     # Enumeration and every comparison use this same caller-owned snapshot.
     for scope in scopes:
         head = (await session.execute(text(
@@ -145,7 +159,7 @@ async def compare_scopes(
         payload["heads"]["policy_revision"] = head[0] if head else None
         payload["heads"]["policy_revision_id"] = str(head[1]) if head else None
         emit(output, payload)
-    summary = summarize(scopes, results)
+    summary = summarize(scopes, results, inventory=inventory)
     summary["provenance"] = provenance
     return summary
 
@@ -185,15 +199,24 @@ async def run(
                 ))
                 await session.execute(text("SET LOCAL search_path TO public"))
                 await verify_connection(session, plan)
+                inventory = await reverse_inventory(
+                    session, scopes=scopes, policy_without_cell=plan.policy_without_cell,
+                )
                 summary = await compare_scopes(
                     session, scopes=scopes, comparator=comparator, plan=plan,
                     code_revision=args.code_revision, max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS,
-                    output=output,
+                    output=output, inventory=inventory,
                 )
         finally:
             await engine.dispose()
         emit(output, summary)
         return int(str(summary["exit_code"]))
+    except GuardRejectedError as exc:
+        # Controlled reason codes (and catalog object names) only, never exception text.
+        with suppress(Exception):
+            emit(output, {"kind": "summary", "exit_code": 3, "reason": exc.reason,
+                          "detail": list(exc.detail)})
+        return 3
     except Exception:
         # Never serialize exceptions: SQLAlchemy/driver errors may contain credentials.
         with suppress(Exception):

@@ -603,18 +603,27 @@ class RestoreDrill:
         # Connecting to the baseline database validates it exists before any SQL.
         # Send separate statements via psql stdin, with logging disabled before
         # the password-bearing statement is parsed/executed (including on error).
-        tables = (
-            "event_log", "offer_claims", "position_state", "venue_offer_state",
-            "venue_credit_state", "projection_heads", "reconcile_observation",
-            "submission_attempts", "execution_uncertainties", "alembic_version",
-        ) + (("event_prefix_hashes",) if prefix or rehearsal else ())
-        if rehearsal:
-            tables += (
-                "capital_policy_heads", "capital_policy_revisions", "capital_snapshots",
-                "capital_snapshot_queries", "execution_decisions",
-            )
         role = f'"{plan.verify_role}"'
-        table_list = ", ".join(f'public."{table}"' for table in tables)
+        if rehearsal:
+            # The capital comparison runs in the production shape: this LOGIN is a member of
+            # the cutover reader group and the tool does SET LOCAL ROLE to it. The group's
+            # column grants come from the restored database's migrations, so no table-level
+            # grant is made here (and a backup older than those migrations fails the drill).
+            access = f"GRANT bfx_cutover_reader TO {role};\n"
+        else:
+            tables = (
+                "event_log", "offer_claims", "position_state", "venue_offer_state",
+                "venue_credit_state", "projection_heads", "reconcile_observation",
+                "submission_attempts", "execution_uncertainties", "alembic_version",
+            ) + (("event_prefix_hashes",) if prefix else ())
+            table_list = ", ".join(f'public."{table}"' for table in tables)
+            access = (
+                f"GRANT SELECT ON TABLE {table_list} TO {role};\n"
+                "DO $archive$ BEGIN IF EXISTS (SELECT FROM pg_namespace WHERE nspname='projection_audit') THEN "
+                f"GRANT USAGE ON SCHEMA projection_audit TO {role}; "
+                f"GRANT SELECT ON TABLE projection_audit.runs, projection_audit.rows TO {role}; "
+                "END IF; END $archive$;\n"
+            )
         sql = (
             "SET log_statement = 'none';\n"
             "SET log_min_error_statement = 'panic';\n"
@@ -628,12 +637,8 @@ class RestoreDrill:
             f"NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '{password}';\n"
             f'GRANT CONNECT, TEMPORARY ON DATABASE "{plan.database_name}" TO {role};\n'
             f"GRANT USAGE ON SCHEMA public TO {role};\n"
-            f"GRANT SELECT ON TABLE {table_list} TO {role};\n"
-            "DO $archive$ BEGIN IF EXISTS (SELECT FROM pg_namespace WHERE nspname='projection_audit') THEN "
-            f"GRANT USAGE ON SCHEMA projection_audit TO {role}; "
-            f"GRANT SELECT ON TABLE projection_audit.runs, projection_audit.rows TO {role}; "
-            "END IF; END $archive$;\n"
-            "COMMIT;\n"
+            + access
+            + "COMMIT;\n"
         )
         self._require_success(
             (

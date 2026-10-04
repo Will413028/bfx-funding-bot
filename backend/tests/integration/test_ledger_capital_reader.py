@@ -337,6 +337,7 @@ class Book:
         max_age: int = 1000,
         mode: str = "ISOLATION LEVEL REPEATABLE READ READ ONLY",
         account: UUID | None = None,
+        role: str | None = None,
     ) -> LedgerCapitalRead:
         scope = CapitalScope(
             account or self.scope.exchange_account_id,
@@ -346,6 +347,8 @@ class Book:
         )
         async with self.factory() as session, session.begin():
             await session.execute(text(f"SET TRANSACTION {mode}"))
+            if role is not None:
+                await session.execute(text(f"SET LOCAL ROLE {role}"))
             read: LedgerCapitalRead = await READER.read_capital(
                 session, scope, now_ms=now, max_snapshot_age_ms=max_age
             )
