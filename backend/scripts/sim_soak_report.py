@@ -12,21 +12,27 @@ unusable arguments).
 
 ``DATABASE_URL`` must be supplied explicitly (this command does not load .env).
 
-Process-local counters (internal failures, unexpected requests, ...) reset on every restart, so
-the orchestrator saves the raw ``/metrics`` text of each process generation before stopping it
-and passes every file once::
+What the simulator itself did wrong is read from the database: internal failures and
+unrouted requests are ``internal_failure_recorded`` / ``unexpected_request_recorded`` rows of
+``sim_venue_event`` (durable across restarts and crashes; bounded per process).
+
+The feed counters (trades-WS disconnects, truncated or unrecoverable backfills) live only in a
+process, so the orchestrator saves the raw ``/metrics`` text of each process generation before
+stopping it and passes every file once::
 
     --metrics gen1-<rev>.metrics --metrics gen2-<rev>.metrics
 
 A family that is present in a file but has no sample counts as 0 (the process ran and never
-incremented it); a family that is missing, or a file that cannot be parsed, makes the criterion
-UNAVAILABLE, never 0.
+incremented it); a family that is missing, a generation without a snapshot, or a file that
+cannot be parsed makes only the criterion that needs it UNAVAILABLE, never 0.
 
 Injected versus organic: every injected venue fault is a ``fault_injected`` row in
-``sim_venue_event`` (durable across restarts). An UNKNOWN submit attempt is injected when an
-injection of a submit fault lies inside its ``started_at_ms .. completed_at_ms`` interval
-(the bot sends one authenticated request at a time, and the venue sees no client order id);
-a quarantine is injected when it was opened by such an attempt. Everything else is organic.
+``sim_venue_event`` (durable across restarts). A submit injection records what the request
+asked for; an UNKNOWN submit attempt is injected when an unused injection with the same
+symbol, amount, rate and period lies inside its ``started_at_ms .. completed_at_ms`` interval.
+A quarantine is injected when such an attempt opened it. Everything else is organic. A ledger
+cycle whose time span holds a history injection is reported apart and left out of the gated
+accepted-cycle ratio.
 """
 from __future__ import annotations
 
@@ -36,12 +42,13 @@ import json
 import logging
 import os
 import sys
+from bisect import bisect_left, bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import TextClause, bindparam, text
@@ -67,15 +74,10 @@ FLOOR_CREDITS_CLOSED_BY_EXPIRY = 1
 FLOOR_INTEREST_PAYMENTS_PER_DAY = 1  # per UTC calendar day lying wholly inside the window
 
 # Metric families (prometheus_client names, without the ``_total`` of their samples).
-FAMILY_INTERNAL_FAILURES = "bfx_sim_venue_internal_failures"
-FAMILY_UNEXPECTED_REQUESTS = "bfx_sim_venue_unexpected_requests"
 FAMILY_FEED_FAILURES = "bfx_sim_venue_feed_failures"
 FAMILY_FEED_STREAM = "bfx_sim_venue_feed_stream"
 FAMILY_WATERMARK_LAG = "bfx_sim_venue_feed_watermark_lag_seconds"
 
-# An injection is matched to an attempt within its interval, widened by the clock rounding of
-# two processes that share one clock.
-INJECTION_MATCH_SLACK_MS = 5_000
 UNKNOWN_FAULT_KINDS = frozenset({
     "unknown_5xx_error", "unknown_placed_lost", "unknown_not_placed_lost"})
 UNIDENTIFIED_VERSIONS = frozenset({"", "unidentified", "unknown"})
@@ -139,33 +141,68 @@ async def _scalar(session: AsyncSession, sql: str, params: Mapping[str, Any]) ->
     return await session.scalar(text(sql), dict(params))
 
 
+class Attempt(NamedTuple):
+    """An UNKNOWN submit attempt: its interval and what it asked for."""
+
+    attempt_id: UUID
+    started: int
+    completed: int
+    symbol: str
+    amount: Decimal | None
+    rate: Decimal | None
+    period: int | None
+
+
+def _decimal(value: Any) -> Decimal | None:
+    """A venue-event decimal (``{"$dec": "150"}``) or a journal number; None when absent/odd."""
+    if isinstance(value, Mapping):
+        value = value.get("$dec")
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except ArithmeticError:
+        return None
+
+
 async def _injections(
-    session: AsyncSession, scope: Scope, window: Window,
+    session: AsyncSession, scope: Scope, lo: int, hi: int,
 ) -> list[dict[str, Any]]:
-    """Injection events whose time lies in the window widened by the match slack."""
     rows = await _rows(session, """
         SELECT payload->'data' AS data FROM sim_venue_event
         WHERE exchange_account_id = :account_text AND deployment_environment = :realm
           AND event_type = 'fault_injected'
           AND (payload->'data'->>'mts')::bigint BETWEEN :lo AND :hi
-        ORDER BY seq""", {**scope.params, "lo": window.since_ms - INJECTION_MATCH_SLACK_MS,
-                          "hi": window.until_ms + INJECTION_MATCH_SLACK_MS})
+        ORDER BY seq""", {**scope.params, "lo": lo, "hi": hi})
     return [dict(r.data) for r in rows]
 
 
 def match_injected_attempts(
-    attempts: Sequence[tuple[UUID, int, int]], injections: Sequence[Mapping[str, Any]],
+    attempts: Sequence[Attempt], injections: Sequence[Mapping[str, Any]],
 ) -> set[UUID]:
-    """Attempts (id, started, completed) that an unused submit injection of an UNKNOWN fault
-    falls inside of; each injection explains at most one attempt."""
+    """The attempts that an unused submit injection of an UNKNOWN fault belongs to.
+
+    An injection belongs to an attempt when it asked for the same symbol, amount, rate and
+    period AND happened inside the attempt's interval; each injection explains at most one
+    attempt, the earliest attempt first. There is no time slack on purpose: the bot and the
+    venue run in one process on one clock, the attempt is stamped before it sends and after it
+    hears back, and the venue stamps the injection in between. A clock step then makes an
+    injected attempt look organic (FAIL), the safe direction; slack would let a nearby organic
+    UNKNOWN steal the match.
+    """
     pool = sorted(
-        int(i["mts"]) for i in injections
-        if i["target"] == "submit" and i["fault_kind"] in UNKNOWN_FAULT_KINDS)
+        (i for i in injections
+         if i.get("target") == "submit" and i.get("fault_kind") in UNKNOWN_FAULT_KINDS),
+        key=lambda i: int(i["mts"]))
     injected: set[UUID] = set()
-    for attempt_id, started, completed in sorted(attempts, key=lambda a: a[1]):
-        for index, mts in enumerate(pool):
-            if started - INJECTION_MATCH_SLACK_MS <= mts <= completed + INJECTION_MATCH_SLACK_MS:
-                injected.add(attempt_id)
+    for attempt in sorted(attempts, key=lambda a: (a.started, a.completed)):
+        for index, item in enumerate(pool):
+            if (attempt.started <= int(item["mts"]) <= attempt.completed
+                    and item.get("symbol") == attempt.symbol
+                    and _decimal(item.get("amount")) == attempt.amount
+                    and _decimal(item.get("rate")) == attempt.rate
+                    and item.get("period") == attempt.period):
+                injected.add(attempt.attempt_id)
                 del pool[index]
                 break
     return injected
@@ -275,27 +312,56 @@ async def conservation(session: AsyncSession, scope: Scope, window: Window) -> l
 
 
 async def accepted_cycles(session: AsyncSession, scope: Scope, window: Window) -> Criterion:
-    row = (await _rows(session, """
-        SELECT count(*) AS cycles, count(o.id) AS accepted
-        FROM ledger_observation_query q
-        LEFT JOIN ledger_observation o ON o.query_id = q.query_id AND o.accepted
-        WHERE q.exchange_account_id = :account AND q.deployment_environment = :realm
-          AND q.started_at_ms BETWEEN :t0 AND :t1""",
-        {**scope.params, "t0": window.since_ms, "t1": window.until_ms}))[0]
-    # A query without an observation (a crash or restart mid-cycle) counts as not accepted.
-    ratio = Decimal(row.accepted) / Decimal(row.cycles) if row.cycles else Decimal(0)
+    """Accepted / queries, with the cycles an injected history failure fell into taken out.
+
+    A cycle spans its query's start to its observation's end (to the next query's start when it
+    never produced an observation: a crash or restart mid-cycle; to the window's end for the last). Those spanning a ``history``
+    injection are counted apart; the gated ratio is over the organic cycles, and a query without
+    an observation still counts as not accepted there.
+    """
+    rows = await _rows(session, """
+        SELECT * FROM (
+          SELECT q.started_at_ms AS started, o.accepted AS accepted,
+                 o.confirmation_finished_at_ms AS finished,
+                 lead(q.started_at_ms) OVER (ORDER BY q.query_revision) AS next_start
+          FROM ledger_observation_query q
+          LEFT JOIN ledger_observation o ON o.query_id = q.query_id AND o.accepted
+          WHERE q.exchange_account_id = :account AND q.deployment_environment = :realm
+        ) cycles WHERE started BETWEEN :t0 AND :t1 ORDER BY started""",
+        {**scope.params, "t0": window.since_ms, "t1": window.until_ms})
+    history = sorted(
+        int(i["mts"]) for i in await _injections(session, scope, window.since_ms, window.until_ms)
+        if i.get("target") == "history")
+    organic = accepted = injected = injected_accepted = 0
+    for row in rows:
+        end = row.finished if row.finished is not None else (
+            row.next_start if row.next_start is not None else window.until_ms)
+        hit = bisect_right(history, end) > bisect_left(history, row.started)
+        if hit:
+            injected += 1
+            injected_accepted += bool(row.accepted)
+        else:
+            organic += 1
+            accepted += bool(row.accepted)
+    ratio = Decimal(accepted) / Decimal(organic) if organic else Decimal(0)
     return Criterion(
-        "d3.accepted_cycle_ratio", f">= {MIN_ACCEPTED_CYCLE_RATIO}",
-        _verdict(row.cycles > 0 and ratio >= MIN_ACCEPTED_CYCLE_RATIO),
-        {"queries": row.cycles, "accepted": row.accepted, "ratio": f"{ratio:.4f}"})
+        "d3.accepted_cycle_ratio", f">= {MIN_ACCEPTED_CYCLE_RATIO} over cycles without an injection",
+        _verdict(organic > 0 and ratio >= MIN_ACCEPTED_CYCLE_RATIO),
+        {"queries": len(rows), "organic_queries": organic, "organic_accepted": accepted,
+         "ratio": f"{ratio:.4f}", "injected_history_cycles": injected,
+         "injected_history_cycles_accepted_anyway": injected_accepted})
 
 
 async def uncertainty(
     session: AsyncSession, scope: Scope, window: Window,
 ) -> list[Criterion]:
     """Organic versus injected UNKNOWN / quarantine, and whether the injected ones closed."""
-    attempts = [(r.attempt_id, r.started, r.completed) for r in await _rows(session, """
-        SELECT a.attempt_id, a.started_at_ms AS started, t.completed_at_ms AS completed
+    attempts = [Attempt(r.attempt_id, r.started, r.completed, r.symbol, _decimal(r.amount),
+                        _decimal(r.rate), r.period) for r in await _rows(session, """
+        SELECT a.attempt_id, a.started_at_ms AS started, t.completed_at_ms AS completed,
+               a.symbol, a.normalized_payload->>'amount' AS amount,
+               a.normalized_payload->>'rate' AS rate,
+               (a.normalized_payload->>'period')::integer AS period
         FROM transport_outcome_journal t
         JOIN submission_attempt_journal a ON a.attempt_id = t.attempt_id
         WHERE a.exchange_account_id = :account AND a.deployment_environment = :realm
@@ -306,7 +372,11 @@ async def uncertainty(
         WHERE exchange_account_id = :account AND deployment_environment = :realm
           AND opened_at_ms BETWEEN :t0 AND :t1""",
         {**scope.params, "t0": window.since_ms, "t1": window.until_ms})
-    injections = await _injections(session, scope, window)
+    # An attempt that began before the window may have been injected before it: look back to
+    # its start (the injection lies inside the attempt's own interval).
+    lo = min([window.since_ms, *(a.started for a in attempts)])
+    hi = max([window.until_ms, *(a.completed for a in attempts)])
+    injections = await _injections(session, scope, lo, hi)
     in_window = [i for i in injections
                  if window.since_ms <= int(i["mts"]) <= window.until_ms]
     submit_injections = [i for i in in_window
@@ -409,6 +479,26 @@ async def activity_floor(session: AsyncSession, scope: Scope, window: Window) ->
     ]
 
 
+async def simulator_failures(session: AsyncSession, scope: Scope, window: Window) -> list[Criterion]:
+    """What the simulator got wrong, from its durable records (restart- and crash-proof)."""
+    out = []
+    for criterion_id, event_type, label in (
+            ("extra.internal_failures", "internal_failure_recorded", "kind"),
+            ("extra.unexpected_requests", "unexpected_request_recorded", "method")):
+        rows = await _rows(session, f"""
+            SELECT payload->'data'->>'{label}' AS label, count(*) AS n FROM sim_venue_event
+            WHERE exchange_account_id = :account_text AND deployment_environment = :realm
+              AND event_type = :event_type
+              AND (payload->'data'->>'mts')::bigint BETWEEN :t0 AND :t1
+            GROUP BY 1""", {**scope.params, "event_type": event_type,
+                            "t0": window.since_ms, "t1": window.until_ms})
+        by_label = {r.label: r.n for r in rows}
+        out.append(Criterion(
+            criterion_id, "== 0 in the venue log", _verdict(not by_label),
+            {"total": sum(by_label.values()), f"by_{label}": by_label}))
+    return out
+
+
 def _read_generation(path: Path) -> dict[str, list[Any]]:
     """Family name -> samples of one saved ``/metrics`` scrape (families without samples kept)."""
     from prometheus_client.parser import text_string_to_metric_families
@@ -419,46 +509,50 @@ def _read_generation(path: Path) -> dict[str, list[Any]]:
     return families
 
 
-def process_counters(metrics_files: Sequence[Path]) -> list[Criterion]:
-    """The per-process simulator counters, summed over every archived process generation."""
-    rule = "== 0 over every process generation"
-    ids = (("extra.internal_failures", FAMILY_INTERNAL_FAILURES),
-           ("extra.unexpected_requests", FAMILY_UNEXPECTED_REQUESTS))
+def feed_counters(metrics_files: Sequence[Path]) -> list[Criterion]:
+    """The feed counters, which live only in a process, summed over every saved generation.
+
+    A backfill that was cut short and continued (``trades_truncated``) is reported; one that
+    could not be recovered (``trades_beyond_retention``: the downtime outlived the retention)
+    lost trades for good and fails the criterion.
+    """
+    rule = "no unrecoverable trades gap (trades_beyond_retention == 0)"
+    criterion_id = "extra.trades_backfill_gaps"
     if not metrics_files:
-        return [Criterion(i, rule, "UNAVAILABLE", {"reason": "no metrics files"}) for i, _ in ids]
+        return [Criterion(criterion_id, rule, "UNAVAILABLE", {"reason": "no metrics files"})]
     generations: list[dict[str, list[Any]]] = []
     try:
         for path in metrics_files:
             generations.append(_read_generation(path))
     except (OSError, ValueError, UnicodeDecodeError) as exc:
-        return [Criterion(i, rule, "UNAVAILABLE",
-                          {"reason": f"metrics file unreadable: {type(exc).__name__}"})
-                for i, _ in ids]
+        return [Criterion(criterion_id, rule, "UNAVAILABLE",
+                          {"reason": f"metrics file unreadable: {type(exc).__name__}"})]
+    missing = [str(p) for p, g in zip(metrics_files, generations, strict=True)
+               if FAMILY_FEED_FAILURES not in g]
+    if missing:
+        return [Criterion(criterion_id, rule, "UNAVAILABLE",
+                          {"reason": f"{FAMILY_FEED_FAILURES} missing", "files": missing})]
 
     def total(family: str, **labels: str) -> float:
         return float(sum(
-            sample.value for generation in generations for sample in generation[family]
+            sample.value for generation in generations for sample in generation.get(family, [])
             if sample.name.endswith("_total")
             and all(sample.labels.get(k) == v for k, v in labels.items())))
 
-    out: list[Criterion] = []
-    for criterion_id, family in ids:
-        missing = [str(p) for p, g in zip(metrics_files, generations, strict=True)
-                   if family not in g]
-        if missing:
-            out.append(Criterion(criterion_id, rule, "UNAVAILABLE",
-                                 {"reason": f"{family} missing", "files": missing}))
-            continue
-        evidence: dict[str, Any] = {"total": total(family), "generations": len(generations)}
-        if all(FAMILY_FEED_FAILURES in g for g in generations):
-            evidence["info.feed_failures"] = total(FAMILY_FEED_FAILURES)
-        if all(FAMILY_FEED_STREAM in g for g in generations):
-            evidence["info.trades_ws_disconnects"] = total(FAMILY_FEED_STREAM, event="disconnected")
-        lags = [s.value for g in generations for s in g.get(FAMILY_WATERMARK_LAG, [])]
-        if lags:
-            evidence["info.watermark_lag_seconds_at_last_scrape_max"] = max(lags)
-        out.append(Criterion(criterion_id, rule, _verdict(evidence["total"] == 0), evidence))
-    return out
+    evidence: dict[str, Any] = {
+        "generations": len(generations),
+        "trades_beyond_retention": total(FAMILY_FEED_FAILURES, source="trades_beyond_retention"),
+        "trades_truncated_then_continued": total(FAMILY_FEED_FAILURES, source="trades_truncated"),
+        "book_fetch_failures": total(FAMILY_FEED_FAILURES, source="book"),
+        "trades_fetch_failures": total(FAMILY_FEED_FAILURES, source="trades"),
+    }
+    if all(FAMILY_FEED_STREAM in g for g in generations):
+        evidence["trades_ws_disconnects"] = total(FAMILY_FEED_STREAM, event="disconnected")
+    lags = [s.value for g in generations for s in g.get(FAMILY_WATERMARK_LAG, [])]
+    if lags:
+        evidence["watermark_lag_seconds_at_last_scrape_max"] = max(lags)
+    return [Criterion(criterion_id, rule, _verdict(evidence["trades_beyond_retention"] == 0),
+                      evidence)]
 
 
 # -- the report --------------------------------------------------------------------------
@@ -474,7 +568,8 @@ async def build_report(
     criteria.append(await accepted_cycles(session, scope, window))
     criteria += await uncertainty(session, scope, window)
     criteria += await activity_floor(session, scope, window)
-    criteria += process_counters(metrics_files)
+    criteria += await simulator_failures(session, scope, window)
+    criteria += feed_counters(metrics_files)
     return criteria
 
 

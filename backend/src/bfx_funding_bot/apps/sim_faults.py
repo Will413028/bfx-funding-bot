@@ -17,9 +17,18 @@ from dataclasses import dataclass
 
 ENV_NAME = "BFX_SIM_FAULTS"
 
-# The knobs and what each one means (apps/venue.py maps them onto the venue's fault kinds; the
-# venue facade may be imported by that one module only).
-FAULT_NAMES = ("unknown_5xx", "unknown_placed_lost", "unknown_not_placed_lost", "history_error")
+# The one table of knobs: name -> (request kind, fault kind), as the venue's own string values
+# (`FaultTarget`, `FaultKind`). apps/venue.py turns them into the enums; this module may not
+# import the venue facade. Submit faults make an UNKNOWN attempt for the ledger to resolve;
+# cancels are not faulted (a faulted cancel would surface as a quarantine the soak report could
+# not attribute to an injection).
+FAULT_KNOBS: dict[str, tuple[str, str]] = {
+    "unknown_5xx": ("submit", "unknown_5xx_error"),
+    "unknown_placed_lost": ("submit", "unknown_placed_lost"),
+    "unknown_not_placed_lost": ("submit", "unknown_not_placed_lost"),
+    "history_error": ("history", "history_error"),
+}
+FAULT_NAMES = tuple(FAULT_KNOBS)
 
 
 @dataclass(frozen=True, slots=True)

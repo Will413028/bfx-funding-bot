@@ -190,3 +190,17 @@ async def test_the_venue_feed_task_is_ready_once_every_symbol_has_a_book() -> No
     finally:
         stop.set()
         await running
+
+
+async def test_the_trades_fetcher_raises_what_it_got_when_it_hits_the_page_cap(monkeypatch) -> None:
+    """Ten full pages and still behind is a truncation, not a finished answer."""
+    from bfx_funding_bot.modules.simulated_venue import TradesTruncated
+
+    monkeypatch.setattr(venue_module, "_TRADES_PAGE", 2)
+    monkeypatch.setattr(venue_module, "_TRADES_MAX_PAGES", 3)
+    rest = _Rest([FundingTrade(i, T0 + i * 10, 5.0, 0.0002, 2) for i in range(1, 40)])
+    with pytest.raises(TradesTruncated) as caught:
+        await _trades_fetcher(rest)("fUST", T0)  # type: ignore[arg-type]
+    assert len(rest.calls) == 3
+    ids = sorted(t.id for t in caught.value.trades)
+    assert ids and ids == list(range(ids[0], ids[-1] + 1)) and ids[0] == 1  # the oldest, in order

@@ -47,7 +47,14 @@ from bfx_funding_bot.apps.bot_ports import select_policy_ports
 from bfx_funding_bot.core.authority import AUTHORITY_TABLE
 from bfx_funding_bot.core.database_realm import DatabaseRealmMismatch, read_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
+from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
+from bfx_funding_bot.modules.execution.safety.trading_state import (
+    ACTIVE,
+    CAUSE_OPERATOR,
+    append_transition,
+    read_current,
+)
 from bfx_funding_bot.modules.ledger import PolicyRefused, Scope
 from bfx_funding_bot.modules.trading import (
     CapitalPolicy,
@@ -105,19 +112,19 @@ async def _ensure_account(session: AsyncSession, account_id: UUID) -> bool:
 
 
 async def _ensure_active(session: AsyncSession, *, scope: Scope, now_ms: int) -> str:
-    """Append the first ``ACTIVE`` row; "kept" when the scope already has any state row."""
-    existing = await session.scalar(text(
-        "SELECT state FROM trading_state WHERE exchange_account_id = :account "
-        "AND deployment_environment = :realm ORDER BY id DESC LIMIT 1"),
-        {"account": scope.exchange_account_id, "realm": scope.deployment_environment})
-    if existing is not None:
-        return f"kept_{existing.lower()}"
-    await session.execute(text(
-        "INSERT INTO trading_state (exchange_account_id, deployment_environment, state, cause, "
-        "actor, reason, created_at_ms) VALUES (:account, :realm, 'ACTIVE', 'operator', :actor, "
-        "'simulation bootstrap', :now)"),
-        {"account": scope.exchange_account_id, "realm": scope.deployment_environment,
-         "actor": _ACTOR, "now": now_ms})
+    """Append the first ``ACTIVE`` row through the domain writer; "kept_*" when the scope
+    already has any state row (a HALT above all: scripts never resume)."""
+    await acquire_transaction_lock(
+        session, account_id=str(scope.exchange_account_id),
+        deployment_environment=scope.deployment_environment)
+    current = await read_current(
+        session, account_id=scope.exchange_account_id, environment=scope.deployment_environment)
+    if current is not None:
+        return f"kept_{current.state.lower()}"
+    await append_transition(
+        session, account_id=scope.exchange_account_id, environment=scope.deployment_environment,
+        state=ACTIVE, cause=CAUSE_OPERATOR, actor=_ACTOR, reason="simulation bootstrap",
+        now_ms=now_ms)
     return "activated"
 
 

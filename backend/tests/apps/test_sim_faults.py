@@ -12,8 +12,8 @@ from uuid import UUID
 
 import pytest
 
-from bfx_funding_bot.apps.sim_faults import FAULT_NAMES, parse_sim_faults
-from bfx_funding_bot.apps.venue import _FAULT_KNOBS, build_venue, fault_plan
+from bfx_funding_bot.apps.sim_faults import FAULT_KNOBS, FAULT_NAMES, parse_sim_faults
+from bfx_funding_bot.apps.venue import build_venue, fault_plan
 from bfx_funding_bot.core.errors import ConfigurationError
 from bfx_funding_bot.modules.simulated_venue import FaultKind, FaultTarget
 
@@ -56,8 +56,13 @@ def test_every_knob_maps_to_its_kind_and_target(
     assert name in FAULT_NAMES
 
 
-def test_the_parsed_names_and_the_mapped_names_are_the_same_set() -> None:
-    assert set(FAULT_NAMES) == set(_FAULT_KNOBS)
+def test_one_table_names_the_knobs_and_every_entry_is_a_valid_fault() -> None:
+    """The parser's names are the table's keys; every entry converts to the venue's enums
+    (a typo in the table fails here, not at the first soak boot)."""
+    assert tuple(FAULT_KNOBS) == FAULT_NAMES
+    for name in FAULT_NAMES:
+        plan = fault_plan(parse_sim_faults(f"{name}=0.5"))
+        assert len(plan.rules) == 1 and plan.rules[0].target.value == FAULT_KNOBS[name][0]
 
 
 def test_a_zero_rate_adds_no_rule() -> None:

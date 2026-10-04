@@ -39,8 +39,11 @@ from bfx_funding_bot.modules.simulated_venue.contracts import (
     VenueStoreError,
 )
 from bfx_funding_bot.modules.simulated_venue.events import (
+    DETAIL_LIMIT,
     FaultInjected,
+    InternalFailureRecorded,
     NonceAdvanced,
+    UnexpectedRequestRecorded,
     VenueEvent,
 )
 
@@ -58,6 +61,9 @@ _TARGETS = {
 # A soak runs for days: the in-memory logs keep the newest entries, the counters (here and in
 # the injected observer) keep the totals.
 LOG_LIMIT = 1000
+# Durable failure records per process and kind: a loop that fails on every request must not
+# turn the event log into its own incident (the counters and `*_total` keep the full count).
+PERSIST_LIMIT = 100
 
 
 class BoundedLog[T](deque[T]):
@@ -120,6 +126,7 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         # teardown and the soak report counts it apart from injected venue faults.
         self.internal_failures: BoundedLog[InternalFailure] = BoundedLog()
         self.internal_failures_total = 0
+        self._persisted = {"internal": 0, "unexpected": 0}
 
     @classmethod
     async def open(
@@ -192,12 +199,29 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
     def _now(self) -> int:
         return max(self._clock_ms(), self._state.high_water_ms)
 
-    def _record_internal(self, kind: str, detail: str) -> None:
+    async def _record_internal(self, kind: str, detail: str) -> None:
         self.internal_failures.append(InternalFailure(kind, detail))
         self.internal_failures_total += 1
         if self._observer is not None:
             self._observer.internal_failure(kind)
         log.critical("simulated venue internal failure kind=%s detail=%s", kind, detail)
+        await self._persist("internal", InternalFailureRecorded(
+            kind, detail[:DETAIL_LIMIT], self._now()))
+
+    async def _persist(self, which: str, event: VenueEvent) -> None:
+        """Best effort, bounded: the record must never turn one failure into another.
+
+        The durable copy is what lets the soak report count failures across restarts and
+        crashes (a Prometheus counter dies with its process); a store that is itself failing
+        simply cannot keep it, and the live counter still has it.
+        """
+        if self._persisted[which] >= PERSIST_LIMIT:
+            return
+        self._persisted[which] += 1
+        try:
+            await self._commit([event])
+        except Exception as exc:
+            log.warning("simulated venue could not persist a failure record: %r", exc)
 
     async def _after_request(self) -> None:
         """TICK_AFTER rules: the world moves between two requests of one caller."""
@@ -209,11 +233,11 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
             if due:
                 await self._sync(self._now())
         except SimulatedVenueInternalError as exc:
-            self._record_internal(exc.kind, str(exc))
+            await self._record_internal(exc.kind, str(exc))
         except VenueStoreError as exc:
-            self._record_internal("store", repr(exc))
+            await self._record_internal("store", repr(exc))
         except Exception as exc:
-            self._record_internal("bug", repr(exc))
+            await self._record_internal("bug", repr(exc))
 
     async def _reload(self) -> None:
         """Rebuild state from the durable log (after losing an append race)."""
@@ -286,6 +310,8 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
             self.unexpected_total += 1
             if self._observer is not None:
                 self._observer.unexpected_request()
+            await self._persist("unexpected", UnexpectedRequestRecorded(
+                request.method, str(request.url)[:DETAIL_LIMIT], self._now()))
             return _json(404, wire.error_body(404, "simulated venue: unexpected request"))
         name, params = routed
         body = await request.aread()
@@ -293,7 +319,8 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
             path=path, body=body, headers=request.headers, last_nonce=self._state.last_nonce)
         if isinstance(accepted, tuple):
             return _json(500, wire.error_body(*accepted))
-        fault = self._faults.next_fault(_TARGETS[name]) if name in _TARGETS else None
+        fault = (self._faults.next_fault(_TARGETS[name], nonce=accepted)
+                 if name in _TARGETS else None)
         try:
             if fault is not None:
                 await self._record_fault(name, fault, accepted, _body_object(body))
@@ -310,13 +337,13 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         except VenueStoreError as exc:
             # A durable-write failure is the one internal failure that is also a venue
             # behaviour ("not recorded, caller unsure"): 5xx, and counted as internal.
-            self._record_internal("store", repr(exc))
+            await self._record_internal("store", repr(exc))
             return _json(500, wire.error_body(_ERR_STORAGE, "simulated venue: write failed"))
         except SimulatedVenueInternalError as exc:
-            self._record_internal(exc.kind, str(exc))
+            await self._record_internal(exc.kind, str(exc))
             raise
         except Exception as exc:
-            self._record_internal("bug", repr(exc))
+            await self._record_internal("bug", repr(exc))
             raise SimulatedVenueInternalError(f"simulator bug: {exc!r}") from exc
 
     async def _record_fault(
@@ -327,12 +354,20 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         A restart, or a response lost after the commit, then never hides it: the soak report
         separates injected from organic UNKNOWN from the database alone.
         """
-        cid = payload.get("cid")
+        symbol = amount = rate = period = None
+        if name == "submit":  # what the request asked for: the report matches on it
+            raw_symbol, raw_period = payload.get("symbol"), payload.get("period")
+            symbol = raw_symbol if isinstance(raw_symbol, str) else None
+            period = raw_period if isinstance(raw_period, int) and not isinstance(
+                raw_period, bool) else None
+            try:
+                amount, rate = Decimal(str(payload["amount"])), Decimal(str(payload["rate"]))
+            except (KeyError, InvalidOperation):
+                amount = rate = None
         await self._commit([FaultInjected(
             fault_kind=fault.value, target=_TARGETS[name].value,
             request_ordinal=self._faults.request_count(_TARGETS[name]), nonce=nonce,
-            cid=cid if isinstance(cid, int) and not isinstance(cid, bool) else None,
-            mts=self._now(),
+            symbol=symbol, amount=amount, rate=rate, period=period, mts=self._now(),
         )])
         log.warning("simulated venue injected fault kind=%s target=%s", fault.value,
                     _TARGETS[name].value)

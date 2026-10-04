@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -36,22 +37,23 @@ pytestmark = pytest.mark.integration
 ACCOUNT = UUID("0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d")
 REALM = "ci"  # the CLI only accepts ``shadow``; tests stamp ``ci`` like the other sim tests
 HOUR = 3_600_000
+D150, D0002 = Decimal("150"), Decimal("0.0002")
 DAY = 86_400_000
 T0 = 1_704_067_200_000  # 2024-01-01T00:00Z, a UTC midnight
 WINDOW = report.Window(T0, T0 + 80 * HOUR)
 
 
-def scrape(tmp_path: Path, name: str, *, internal: int = 0, unexpected: int = 0,
-           disconnects: int = 0) -> Path:
+def scrape(tmp_path: Path, name: str, *, disconnects: int = 0, truncated: int = 0,
+           beyond_retention: int = 0) -> Path:
     """The saved ``/metrics`` text of one process generation, rendered by the real registry."""
     metrics = DaemonMetrics()
     observer = metrics.sim_venue_observer()
-    for _ in range(internal):
-        observer.internal_failure("feed")
-    for _ in range(unexpected):
-        observer.unexpected_request()
     for _ in range(disconnects):
         observer.feed_stream("disconnected")
+    for _ in range(truncated):
+        observer.feed_failure("trades_truncated")
+    for _ in range(beyond_retention):
+        observer.feed_failure("trades_beyond_retention")
     path = tmp_path / f"{name}.metrics"
     path.write_bytes(metrics.render())
     return path
@@ -81,6 +83,10 @@ class Soak:
     interest_days: Sequence[int] = (0, 1, 2)
     conservation: Sequence[tuple[str, int]] = (("baseline", T0 + 2 * HOUR),
                                                ("conserved", T0 + 3 * HOUR))
+    internal_failures: Sequence[int] = ()  # times of durable internal-failure records
+    unexpected_requests: Sequence[int] = ()
+    history_faults_in_cycles: Sequence[int] = ()  # cycle indexes that hold a history injection
+    overlapping_organic: bool = False  # an organic UNKNOWN of other content beside injection 0
     seq: int = field(default=0, init=False)
     attempt_seq: int = field(default=0, init=False)
     injected_attempts: list[UUID] = field(default_factory=list, init=False)
@@ -103,6 +109,7 @@ async def _event(conn: AsyncConnection, soak: Soak, event: ev.VenueEvent) -> Non
 
 async def _attempt(
     conn: AsyncConnection, soak: Soak, *, kind: str, started: int, completed: int,
+    amount: str = "150",
 ) -> UUID:
     soak.attempt_seq += 1
     attempt_id = uuid4()
@@ -115,7 +122,7 @@ async def _attempt(
             CAST(:payload AS jsonb), 'sha', :basis, :policy, CAST('{}' AS jsonb), :started)""",
              id=attempt_id, decision=f"decision-{attempt_id}", a=ACCOUNT, r=REALM,
              seq=soak.attempt_seq, basis=uuid4(), policy=uuid4(), started=started,
-             payload=json.dumps({"type": "LIMIT", "amount": "150", "rate": "0.0002",
+             payload=json.dumps({"type": "LIMIT", "amount": amount, "rate": "0.0002",
                                  "period": 2, "flags": 0}))
     await _x(conn, """
         INSERT INTO transport_outcome_journal (attempt_id, kind, venue_offer_id, reason,
@@ -231,12 +238,28 @@ async def seed(conn: AsyncConnection, soak: Soak) -> None:
             soak.injected_attempts.append(attempt)
             if soak.record_injections:
                 await _event(conn, soak, ev.FaultInjected(
-                    "unknown_placed_lost", "submit", index + 1, 1, None, started + 1_000))
+                    "unknown_placed_lost", "submit", index + 1, 1, "fUST", D150, D0002, 2,
+                    started + 1_000))
+                if index == 0 and soak.overlapping_organic:
+                    # another UNKNOWN, of another amount, that began first and ends last: it
+                    # contains the injection in time but is not the request that was injected
+                    stranger = await _attempt(conn, soak, kind="unknown", started=started - 500,
+                                              completed=started + 3_000, amount="200")
+                    await _resolve(conn, attempt=stranger, action="not_accepted")
             if index >= soak.leave_injected_open:
                 await _resolve(conn, attempt=attempt)
         else:
             await _resolve(conn, attempt=attempt, action="not_accepted")
-    await _event(conn, soak, ev.FaultInjected("history_error", "history", 1, 1, None, T0 + 5 * HOUR))
+    await _event(conn, soak, ev.FaultInjected(
+        "history_error", "history", 1, 1, None, None, None, None, T0 + 5 * HOUR))
+    for number, cycle in enumerate(soak.history_faults_in_cycles, start=2):
+        await _event(conn, soak, ev.FaultInjected(
+            "history_error", "history", number, 1, None, None, None, None,
+            T0 + 10 * 60_000 + cycle * 20 * 60_000 + 500))
+    for at in soak.internal_failures:
+        await _event(conn, soak, ev.InternalFailureRecorded("feed", "feed trades failed", at))
+    for at in soak.unexpected_requests:
+        await _event(conn, soak, ev.UnexpectedRequestRecorded("GET", "https://x.test/y", at))
     if soak.injected_quarantine_open:
         await _quarantine(conn, at=T0 + 5 * HOUR, source=soak.injected_attempts[0])
     for index in range(soak.organic_quarantine):
@@ -406,7 +429,7 @@ async def test_a_query_without_an_observation_is_not_accepted(engine, tmp_path) 
     by_id = await _report(engine, Soak(queries_without_observation=3), tmp_path=tmp_path)
     cycles = by_id["d3.accepted_cycle_ratio"]
     assert cycles.status == "FAIL"
-    assert (cycles.evidence["queries"], cycles.evidence["accepted"]) == (200, 197)
+    assert (cycles.evidence["organic_queries"], cycles.evidence["organic_accepted"]) == (200, 197)
     assert _failing(by_id) == {"d3.accepted_cycle_ratio"}
 
 
@@ -473,11 +496,14 @@ async def test_trading_after_the_resume_needs_acked_submits_in_it(engine, tmp_pa
     assert after.evidence["acked_submits_after_resume"] == 0 and after.status == "FAIL"
 
 
-async def test_missing_counters_are_unavailable_never_zero(engine) -> None:
+async def test_without_metrics_only_the_feed_criterion_is_unavailable(engine) -> None:
+    """Internal failures and unrouted requests come from the database; a generation whose
+    /metrics was not saved can only make the feed criterion UNAVAILABLE, never a pass."""
     by_id = await _report(engine, metrics=[])
-    assert by_id["extra.internal_failures"].status == "UNAVAILABLE"
-    assert by_id["extra.unexpected_requests"].status == "UNAVAILABLE"
-    assert _failing(by_id) == {"extra.internal_failures", "extra.unexpected_requests"}
+    assert _failing(by_id) == {"extra.trades_backfill_gaps"}
+    assert by_id["extra.trades_backfill_gaps"].status == "UNAVAILABLE"
+    assert by_id["extra.internal_failures"].status == "PASS"
+    assert by_id["extra.unexpected_requests"].status == "PASS"
     assert report.exit_code(list(by_id.values())) == 3
 
 
@@ -490,39 +516,98 @@ def _file(tmp_path: Path, name: str, content: str | bytes) -> Path:
 @pytest.mark.parametrize("content", [
     "# nothing of the simulator in this scrape\nbfx_up 1\n",  # the family is absent
     b"\xff\xfe not text",
-    "bfx_sim_venue_internal_failures_total{kind=\"feed\" 1\n",  # malformed
+    "bfx_sim_venue_feed_failures_total{source=\"book\" 1\n",  # malformed
 ])
 async def test_unusable_metrics_are_unavailable_not_zero(engine, tmp_path, content) -> None:
     good = scrape(tmp_path, "good")
     by_id = await _report(engine, metrics=[good, _file(tmp_path, "bad.metrics", content)])
-    statuses = {by_id["extra.internal_failures"].status, by_id["extra.unexpected_requests"].status}
-    assert "UNAVAILABLE" in statuses and "FAIL" not in statuses
+    assert by_id["extra.trades_backfill_gaps"].status == "UNAVAILABLE"
+    assert _failing(by_id) == {"extra.trades_backfill_gaps"}
     assert report.exit_code(list(by_id.values())) == 3
 
 
 async def test_a_scrape_with_no_sample_is_zero_because_the_family_is_present(
         engine, tmp_path) -> None:
     clean = scrape(tmp_path, "clean")
-    assert b"# TYPE bfx_sim_venue_internal_failures_total counter" in clean.read_bytes()
-    assert b"bfx_sim_venue_internal_failures_total{" not in clean.read_bytes()
+    assert b"# TYPE bfx_sim_venue_feed_failures_total counter" in clean.read_bytes()
+    assert b"bfx_sim_venue_feed_failures_total{" not in clean.read_bytes()
     by_id = await _report(engine, metrics=[clean])
-    assert by_id["extra.internal_failures"].evidence["total"] == 0.0
-    assert by_id["extra.internal_failures"].status == "PASS"
+    assert by_id["extra.trades_backfill_gaps"].status == "PASS"
+    assert by_id["extra.trades_backfill_gaps"].evidence["trades_beyond_retention"] == 0.0
 
 
-async def test_counters_of_every_generation_are_summed(engine, tmp_path) -> None:
+async def test_feed_counters_are_summed_over_generations_and_an_unrecoverable_gap_fails(
+        engine, tmp_path) -> None:
     by_id = await _report(engine, metrics=[
-        scrape(tmp_path, "gen1"), scrape(tmp_path, "gen2", internal=1, disconnects=4)])
+        scrape(tmp_path, "gen1", truncated=2, disconnects=1),
+        scrape(tmp_path, "gen2", beyond_retention=1, disconnects=3)])
+    gaps = by_id["extra.trades_backfill_gaps"]
+    assert gaps.status == "FAIL"
+    assert gaps.evidence["trades_beyond_retention"] == 1.0
+    assert gaps.evidence["trades_truncated_then_continued"] == 2.0
+    assert gaps.evidence["trades_ws_disconnects"] == 4.0
+    assert _failing(by_id) == {"extra.trades_backfill_gaps"}
+
+
+async def test_a_truncated_backfill_that_continued_is_reported_but_not_a_failure(
+        engine, tmp_path) -> None:
+    by_id = await _report(engine, metrics=[scrape(tmp_path, "gen1", truncated=3)])
+    assert by_id["extra.trades_backfill_gaps"].status == "PASS"
+    assert by_id["extra.trades_backfill_gaps"].evidence["trades_truncated_then_continued"] == 3.0
+
+
+async def test_internal_failures_come_from_the_database_whatever_the_metrics_say(
+        engine, tmp_path) -> None:
+    """Durable records: a failure of an earlier process life (its counter is gone) still counts,
+    and one outside the window does not."""
+    inside = T0 + 20 * HOUR
+    by_id = await _report(engine, Soak(
+        internal_failures=[inside, inside + 1, T0 - HOUR, WINDOW.until_ms + 1],
+        unexpected_requests=[inside]), tmp_path=tmp_path)
     assert by_id["extra.internal_failures"].status == "FAIL"
-    assert by_id["extra.internal_failures"].evidence["total"] == 1.0
-    assert by_id["extra.internal_failures"].evidence["info.trades_ws_disconnects"] == 4.0
-    assert by_id["extra.unexpected_requests"].status == "PASS"
-    assert report.exit_code(list(by_id.values())) == 1  # a FAIL outranks UNAVAILABLE
+    assert by_id["extra.internal_failures"].evidence == {"total": 2, "by_kind": {"feed": 2}}
+    assert by_id["extra.unexpected_requests"].status == "FAIL"
+    assert by_id["extra.unexpected_requests"].evidence["total"] == 1
+    assert _failing(by_id) == {"extra.internal_failures", "extra.unexpected_requests"}
 
 
-async def test_unexpected_requests_fail_on_their_own(engine, tmp_path) -> None:
-    by_id = await _report(engine, metrics=[scrape(tmp_path, "gen1", unexpected=2)])
-    assert _failing(by_id) == {"extra.unexpected_requests"}
+async def test_cycles_hit_by_an_injected_history_failure_leave_the_gated_ratio(
+        engine, tmp_path) -> None:
+    """3 of 200 queries never became an observation, and an injected history failure sits in
+    each: the gated ratio is over the other 197 (all accepted), the 3 are reported apart.
+    Mutation: counting them in the denominator."""
+    by_id = await _report(engine, Soak(
+        queries_without_observation=3, history_faults_in_cycles=(197, 198, 199)),
+        tmp_path=tmp_path)
+    cycles = by_id["d3.accepted_cycle_ratio"]
+    assert cycles.status == "PASS" and cycles.evidence["ratio"] == "1.0000"
+    assert cycles.evidence["injected_history_cycles"] == 3
+    assert cycles.evidence["organic_queries"] == 197 and cycles.evidence["queries"] == 200
+
+
+async def test_an_organic_failed_cycle_still_counts_beside_the_injected_ones(
+        engine, tmp_path) -> None:
+    by_id = await _report(engine, Soak(
+        queries_without_observation=4, history_faults_in_cycles=(198, 199)), tmp_path=tmp_path)
+    cycles = by_id["d3.accepted_cycle_ratio"]
+    assert cycles.evidence["injected_history_cycles"] == 2
+    assert cycles.evidence["organic_queries"] == 198 and cycles.evidence["organic_accepted"] == 196
+    assert cycles.status == "FAIL"  # 196 / 198 = 98.99 %
+
+
+async def test_a_history_injection_between_cycles_excludes_nothing(engine, tmp_path) -> None:
+    by_id = await _report(engine, Soak(queries_without_observation=3), tmp_path=tmp_path)
+    assert by_id["d3.accepted_cycle_ratio"].evidence["injected_history_cycles"] == 0
+    assert by_id["d3.accepted_cycle_ratio"].status == "FAIL"
+
+
+async def test_an_organic_unknown_inside_an_injected_interval_stays_organic(
+        engine, tmp_path) -> None:
+    """The stranger's interval holds injection 0 but it asked for another amount."""
+    by_id = await _report(engine, Soak(overlapping_organic=True), tmp_path=tmp_path)
+    organic = by_id["d3.organic_quarantine_unknown"]
+    assert organic.evidence["organic_unknown"] == 1 and organic.evidence["injected_unknown"] == 5
+    assert _failing(by_id) == {"d3.organic_quarantine_unknown"}
 
 
 async def test_the_report_refuses_a_database_that_is_not_the_simulation_realm(
@@ -545,21 +630,57 @@ async def test_run_reads_the_database_end_to_end(engine, tmp_path) -> None:
 # -- matching injected faults to attempts (no database) ------------------------------------
 
 
-def _inj(mts: int, kind: str = "unknown_placed_lost", target: str = "submit") -> dict[str, Any]:
-    return {"mts": mts, "fault_kind": kind, "target": target}
+def _inj(mts: int, kind: str = "unknown_placed_lost", target: str = "submit", *,
+         amount: str = "150") -> dict[str, Any]:
+    return {"mts": mts, "fault_kind": kind, "target": target, "symbol": "fUST",
+            "amount": {"$dec": amount}, "rate": {"$dec": "0.0002"}, "period": 2}
+
+
+def _att(started: int, completed: int, *, amount: str = "150") -> report.Attempt:
+    return report.Attempt(uuid4(), started, completed, "fUST", Decimal(amount),
+                          Decimal("0.0002"), 2)
 
 
 def test_each_injection_explains_at_most_one_attempt() -> None:
-    a, b = uuid4(), uuid4()
-    both_inside = [(a, 1_000, 1_500), (b, 1_200, 1_700)]
-    assert len(report.match_injected_attempts(both_inside, [_inj(1_300)])) == 1
-    assert report.match_injected_attempts(both_inside, [_inj(1_300), _inj(1_400)]) == {a, b}
+    a, b = _att(1_000, 1_500), _att(1_200, 1_700)
+    assert len(report.match_injected_attempts([a, b], [_inj(1_300)])) == 1
+    both = report.match_injected_attempts([a, b], [_inj(1_300), _inj(1_400)])
+    assert both == {a.attempt_id, b.attempt_id}
 
 
 def test_only_unknown_submit_injections_explain_an_unknown_attempt() -> None:
-    attempt = [(uuid4(), 1_000, 1_500)]
-    assert report.match_injected_attempts(attempt, [_inj(1_200, "history_error", "history")]) == set()
-    assert report.match_injected_attempts(attempt, [_inj(1_200, "rejected")]) == set()
-    assert report.match_injected_attempts(attempt, [_inj(1_200, "unknown_5xx_error")])
-    far = 1_500 + report.INJECTION_MATCH_SLACK_MS + 1
-    assert report.match_injected_attempts(attempt, [_inj(far)]) == set()
+    attempt = _att(1_000, 1_500)
+    assert report.match_injected_attempts([attempt], [_inj(1_200, "history_error", "history")]) == set()
+    assert report.match_injected_attempts([attempt], [_inj(1_200, "rejected")]) == set()
+    assert report.match_injected_attempts([attempt], [_inj(1_200, "unknown_5xx_error")])
+
+
+def test_an_injection_outside_the_attempts_interval_explains_nothing_there_is_no_slack() -> None:
+    attempt = _att(1_000, 1_500)
+    assert report.match_injected_attempts([attempt], [_inj(999)]) == set()
+    assert report.match_injected_attempts([attempt], [_inj(1_501)]) == set()
+    assert report.match_injected_attempts([attempt], [_inj(1_000)])  # the bounds are inclusive
+    assert report.match_injected_attempts([attempt], [_inj(1_500)])
+
+
+def test_a_nearby_organic_unknown_cannot_steal_the_match_by_time() -> None:
+    """The stranger began first and its interval holds the injection too; matching by time
+    alone gave it the injection (earliest attempt first) and left the injected attempt
+    organic. By content the injection belongs to the attempt that asked for it."""
+    stranger = _att(900, 2_500, amount="200")
+    injected = _att(1_000, 2_000, amount="150")
+    got = report.match_injected_attempts([stranger, injected], [_inj(1_500, amount="150")])
+    assert got == {injected.attempt_id}
+
+
+@pytest.mark.parametrize("change", [
+    {"symbol": "fUSD"}, {"rate": {"$dec": "0.0003"}}, {"period": 30}, {"amount": None},
+])
+def test_every_field_of_the_content_must_agree(change: dict[str, Any]) -> None:
+    attempt = _att(1_000, 1_500)
+    assert report.match_injected_attempts([attempt], [{**_inj(1_200), **change}]) == set()
+
+
+def test_decimals_compare_by_value_not_by_spelling() -> None:
+    attempt = _att(1_000, 1_500, amount="150.0")
+    assert report.match_injected_attempts([attempt], [_inj(1_200, amount="150")])

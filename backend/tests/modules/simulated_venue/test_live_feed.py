@@ -526,3 +526,78 @@ async def test_resume_points_exist_only_for_symbols_with_a_resting_offer() -> No
     assert world.venue.trade_resume_points() == {"fUST": clock.now}
     await world.cancel(offer_id)
     assert world.venue.trade_resume_points() == {}
+
+
+# -- a backfill that cannot be delivered whole ------------------------------------------------
+
+
+def _feed_with_failures(fetch_trades, clock: Clock, reasons: list[str], **config) -> LiveMarketFeed:  # type: ignore[no-untyped-def]
+    return LiveMarketFeed(
+        config=LiveFeedConfig(symbols=SYMBOLS, watermark_lag_ms=LAG, **config),
+        fetch_book=_no_book, fetch_trades=fetch_trades, clock_ms=clock, on_failure=reasons.append)
+
+
+async def test_a_truncated_backfill_moves_the_watermark_only_to_what_it_fetched_and_continues() -> None:
+    """The source delivers the oldest trades and stops (a page cap). The feed keeps them, the
+    watermark stops just before the newest one, the gap stays open and the next round continues
+    from there. Mutation: the watermark jumps to `started - lag` on truncation."""
+    from bfx_funding_bot.modules.simulated_venue import TradesTruncated
+
+    clock = Clock(T0 + 10 * 60_000)
+    everything = [_t(i, T0 + i * 60_000) for i in range(1, 10)]  # one a minute, 9 trades
+    calls: list[int] = []
+    reasons: list[str] = []
+
+    async def fetch_trades(symbol: str, since_ms: int) -> list[PublicTrade]:
+        if symbol != "fUST":
+            return []
+        calls.append(since_ms)
+        rows = [t for t in everything if t.mts >= since_ms]
+        if len(rows) > 3:  # three trades per call, then the cap
+            raise TradesTruncated(rows[:3])
+        return rows
+
+    feed = _feed_with_failures(fetch_trades, clock, reasons, backfill_ms=HOUR)
+    feed.stream_connected()
+    await feed.backfill_gaps()
+    assert reasons == ["trades_truncated"] and feed.failures == 1
+    assert await feed.complete_through("fUST") == T0 + 3 * 60_000 - 1  # not clock - LAG
+    assert "fUST" in feed._gap  # still open: no frame may move the watermark
+    feed.alive("fUST", clock.now)
+    assert await feed.complete_through("fUST") == T0 + 3 * 60_000 - 1
+    assert [t.id for t in await feed.trades("fUST", after_ms=0, through_ms=T0 + HOUR)] == [1, 2, 3]
+
+    await feed.backfill_gaps()  # continues from the watermark, not from the start
+    assert calls[1] == T0 + 3 * 60_000 - 1
+    assert await feed.complete_through("fUST") == T0 + 5 * 60_000 - 1  # the overlap is by id
+    await feed.backfill_gaps()
+    assert await feed.complete_through("fUST") == T0 + 7 * 60_000 - 1
+    await feed.backfill_gaps()  # now the rest fits: the gap closes and the watermark resumes
+    assert "fUST" not in feed._gap
+    assert await feed.complete_through("fUST") == clock.now - LAG
+    assert [t.id for t in await feed.trades("fUST", after_ms=0, through_ms=T0 + HOUR)] == list(
+        range(1, 10))
+    assert reasons == ["trades_truncated"] * 3
+
+
+async def test_a_downtime_beyond_the_retention_is_reported_not_silently_clamped() -> None:
+    clock = Clock(T0 + 100 * HOUR)
+    fetched: list[int] = []
+    reasons: list[str] = []
+
+    async def fetch_trades(symbol: str, since_ms: int) -> list[PublicTrade]:
+        if symbol == "fUST":
+            fetched.append(since_ms)
+        return []
+
+    feed = _feed_with_failures(fetch_trades, clock, reasons, backfill_ms=HOUR,
+                               retention_ms=72 * HOUR)
+    feed.resume_from({"fUST": T0, "fUSD": T0 + 90 * HOUR})  # fUSD is inside the retention
+    feed.stream_connected()
+    await feed.backfill_gaps()
+    assert fetched == [T0 + 28 * HOUR]  # the floor: nothing older can be served
+    assert reasons == ["trades_beyond_retention"]  # only fUST, not fUSD
+    feed.stream_disconnected()
+    feed.stream_connected()
+    await feed.backfill_gaps()
+    assert reasons == ["trades_beyond_retention"]  # said once per symbol and process

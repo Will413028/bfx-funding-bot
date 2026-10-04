@@ -6,11 +6,11 @@ recorded as events too, so a replay needs no network and no clock.
 Persisted form: `{"event_type": <stable name>, "schema_version": <int>, "data": {...}}`.
 The stable `event_type` string, not the Python class name, is the contract, and the
 decoder upcasts old versions step by step or refuses what it does not know (same
-convention as `modules/execution/events.py`). Version 1 is the first; version 2 added
-`fault_injected`, which only a version-2 writer emits. The version is one number for the whole
-log (a decoder refuses anything newer), so every event type has an identity upcaster 1 -> 2:
-a log written before the bump replays unchanged, and a process older than the bump refuses a log
-that holds a `fault_injected` row instead of misreading it.
+convention as `modules/execution/events.py`). The version belongs to the event TYPE: every type
+starts at 1 and a type that changes shape bumps its own number and registers its own upcaster.
+Adding a type therefore never touches the log that already exists: a reader that predates the new
+type finds it unknown and refuses the log (it never misreads it), and every older row keeps the
+version it was written with.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, ClassVar
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1  # the first version of a type (each class below names its own default)
 
 
 class UnknownEventVersionError(ValueError):
@@ -144,9 +144,9 @@ class FaultInjected:
     lost response never hides it: the soak report tells injected from organic UNKNOWN by it.
 
     `target` is the request kind (`submit`, `history`, ...), `request_ordinal` its 1-based
-    count in this process, `nonce` the request's accepted nonce. The venue sees no client order
-    id on the wire (a funding submit has none), so `cid` is set only if a request ever carries
-    one; matching an attempt to an injection is by time.
+    count in this process, `nonce` the request's accepted nonce. A submit also records what the
+    request asked for (`symbol`, `amount`, `rate`, `period`; None for other targets), so the
+    report matches an injection to the attempt that sent it by content, not by time alone.
     """
 
     event_type: ClassVar[str] = "fault_injected"
@@ -154,14 +154,45 @@ class FaultInjected:
     target: str
     request_ordinal: int
     nonce: int
-    cid: int | None
+    symbol: str | None
+    amount: Decimal | None
+    rate: Decimal | None
+    period: int | None
     mts: int
     schema_version: int = field(default=SCHEMA_VERSION, init=False, repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class InternalFailureRecorded:
+    """The simulator itself failed (never a venue answer): durable, so the soak report reads it
+    from the database across restarts and crashes. `detail` is cut to `DETAIL_LIMIT` chars."""
+
+    event_type: ClassVar[str] = "internal_failure_recorded"
+    kind: str
+    detail: str
+    mts: int
+    schema_version: int = field(default=SCHEMA_VERSION, init=False, repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class UnexpectedRequestRecorded:
+    """A request the venue does not route (wrong host, method or path). `url` is cut to
+    `DETAIL_LIMIT` chars."""
+
+    event_type: ClassVar[str] = "unexpected_request_recorded"
+    method: str
+    url: str
+    mts: int
+    schema_version: int = field(default=SCHEMA_VERSION, init=False, repr=False, compare=False)
+
+
+DETAIL_LIMIT = 300
 
 
 type VenueEvent = (
     WalletFunded | BookObserved | OfferPlaced | TradesObserved | OfferFilled
     | LoanDrawn | OfferCanceled | CreditClosed | InterestPaid | NonceAdvanced | FaultInjected
+    | InternalFailureRecorded | UnexpectedRequestRecorded
 )
 
 _EVENTS: dict[str, type] = {
@@ -169,16 +200,16 @@ _EVENTS: dict[str, type] = {
     for cls in (
         WalletFunded, BookObserved, OfferPlaced, TradesObserved, OfferFilled,
         LoanDrawn, OfferCanceled, CreditClosed, InterestPaid, NonceAdvanced, FaultInjected,
+        InternalFailureRecorded, UnexpectedRequestRecorded,
     )
 }
+# The current version of each type: only a type that changes shape moves its own number.
+_VERSIONS: dict[str, int] = dict.fromkeys(_EVENTS, SCHEMA_VERSION)
 _NESTED: dict[str, type] = {"trade_tick": TradeTick}
 
-# (event_type, from_version) -> data of from_version + 1. v1 -> v2 changed no shape (it only
-# added `fault_injected`), so each type that existed in v1 passes its data through; a future
-# schema change adds its upcaster here instead of rewriting stored events.
-_UPCASTERS: dict[tuple[str, int], Callable[[dict[str, Any]], dict[str, Any]]] = {
-    (name, 1): dict for name in _EVENTS if name != FaultInjected.event_type
-}
+# (event_type, from_version) -> data of from_version + 1. Empty while every type is at v1;
+# a type that changes shape adds its upcaster here instead of rewriting stored events.
+_UPCASTERS: dict[tuple[str, int], Callable[[dict[str, Any]], dict[str, Any]]] = {}
 
 
 def _encode(value: Any) -> Any:
@@ -226,12 +257,13 @@ def event_from_payload(payload: dict[str, Any]) -> VenueEvent:
             or isinstance(version, bool) or not isinstance(version, int)):
         raise UnknownEventVersionError(f"not a venue event payload: {payload!r}")
     data = dict(payload.get("data", {}))
-    while version < SCHEMA_VERSION:
+    current = _VERSIONS[event_type]
+    while version < current:
         upcast = _UPCASTERS.get((event_type, version))
         if upcast is None:
             raise UnknownEventVersionError(f"no upcaster for {event_type} v{version}")
         data, version = upcast(data), version + 1
-    if version != SCHEMA_VERSION:
+    if version != current:
         raise UnknownEventVersionError(
-            f"{event_type} schema_version {version} is newer than {SCHEMA_VERSION}")
+            f"{event_type} schema_version {version} is newer than {current}")
     return cls(**{k: _decode(v) for k, v in data.items()})  # type: ignore[no-any-return]

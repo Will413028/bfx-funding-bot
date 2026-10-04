@@ -62,6 +62,7 @@ from bfx_funding_bot.modules.simulated_venue.live_feed import (
     LiveFeedConfig,
     LiveMarketFeed,
     TradesFetcher,
+    TradesTruncated,
 )
 
 __all__ = [
@@ -91,6 +92,7 @@ __all__ = [
     "SimulatedVenueInternalError",
     "SqlVenueEventStore",
     "TradesFetcher",
+    "TradesTruncated",
     "VenueEventStore",
     "VenueObserver",
     "VenueStoreError",

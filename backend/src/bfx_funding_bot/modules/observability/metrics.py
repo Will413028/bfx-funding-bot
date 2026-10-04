@@ -337,7 +337,8 @@ class DaemonMetrics:
         )
         self.sim_venue_feed_failures = Counter(
             "bfx_sim_venue_feed_failures",
-            "Failed fetches of the simulated venue's market feed (source=book|trades).",
+            "Failed fetches of the simulated venue's market feed "
+            "(source=book|trades|trades_truncated|trades_beyond_retention).",
             ["source"],
             registry=self.registry,
         )

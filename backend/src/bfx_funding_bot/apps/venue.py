@@ -35,7 +35,7 @@ from uuid import UUID
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.apps.sim_faults import SimFaultSpec
+from bfx_funding_bot.apps.sim_faults import FAULT_KNOBS, SimFaultSpec
 from bfx_funding_bot.core.crypto import VaultNotConfiguredError, load_kek
 from bfx_funding_bot.core.errors import ConfigurationError
 from bfx_funding_bot.core.venue import Venue, VenueCapabilities
@@ -68,6 +68,7 @@ from bfx_funding_bot.modules.simulated_venue import (
     SimulatedVenueConfig,
     SqlVenueEventStore,
     TradesFetcher,
+    TradesTruncated,
 )
 from bfx_funding_bot.modules.simulated_venue.wiring import build_simulated_venue
 from bfx_funding_bot.modules.strategy import configured_symbols
@@ -81,21 +82,11 @@ BITFINEX_CAPABILITIES = VenueCapabilities(auth_ws="required", rest_fill_tracker=
 SIMULATED_CAPABILITIES = VenueCapabilities(auth_ws="forbidden", rest_fill_tracker=False)
 
 
-# ``BFX_SIM_FAULTS`` names -> (request kind, fault). Submit faults make an UNKNOWN attempt for
-# the ledger to resolve; cancels are not faulted (a faulted cancel would surface as a quarantine
-# the soak report could not attribute to an injection).
-_FAULT_KNOBS: dict[str, tuple[FaultTarget, FaultKind]] = {
-    "unknown_5xx": (FaultTarget.SUBMIT, FaultKind.UNKNOWN_5XX_ERROR),
-    "unknown_placed_lost": (FaultTarget.SUBMIT, FaultKind.UNKNOWN_PLACED_LOST),
-    "unknown_not_placed_lost": (FaultTarget.SUBMIT, FaultKind.UNKNOWN_NOT_PLACED_LOST),
-    "history_error": (FaultTarget.HISTORY, FaultKind.HISTORY_ERROR),
-}
-
-
 def fault_plan(spec: SimFaultSpec) -> FaultPlan:
     """The plan for the transport; a rate of 0 adds no rule, no rates is the empty plan."""
     rules = tuple(
-        FaultRule(target=_FAULT_KNOBS[name][0], kind=_FAULT_KNOBS[name][1], probability=rate)
+        FaultRule(target=FaultTarget(FAULT_KNOBS[name][0]), kind=FaultKind(FAULT_KNOBS[name][1]),
+                  probability=rate)
         for name, rate in spec.rates.items() if rate > 0.0
     )
     return FaultPlan(rules=rules, seed=spec.seed)
@@ -322,7 +313,8 @@ def _trades_fetcher(rest: BitfinexREST) -> TradesFetcher:
     """Public funding trades with ``mts >= since_ms`` over REST, paged on their timestamp.
 
     Only start-up and gap backfill use it (the live feed calls it after a stream
-    (re)connection). Overlap with what is already held is the feed's to dedupe, by id.
+    (re)connection). Overlap with what is already held is the feed's to dedupe, by id. Hitting the
+    page cap raises ``TradesTruncated`` carrying what was fetched.
     """
 
     async def fetch(symbol: str, since_ms: int) -> Sequence[PublicTrade]:
@@ -336,8 +328,9 @@ def _trades_fetcher(rest: BitfinexREST) -> TradesFetcher:
                 break
             start = page[-1].mts
         else:
-            log.warning("simulated_venue_trades_backfill_truncated symbol=%s since_ms=%d",
-                        symbol, since_ms)
+            # Ten full pages and still behind: say so with what was got, never return it as
+            # a finished answer (the feed keeps the gap open and continues from the newest).
+            raise TradesTruncated(list(by_id.values()))
         return list(by_id.values())
 
     return fetch

@@ -97,11 +97,13 @@ grep -c '^DATABASE_URL=postgresql://bfx_bot:.*/bfx_sim$' /opt/bfx/runtime/sim.en
   （後者是 prod ledger 的 row 名）。
 - `BFX_SIM_INITIAL_WALLETS` 只在 venue log 為空時生效（第一代）；之後各代不會再注資。
 - **`BFX_SIM_FAULTS`**（決定 A）：整個 72 小時都開，種子化、每個請求獨立抽籤。上面是起始值；rate 與 seed 在開跑前定案。
-  每一代換新的 seed（第 N 代用 `seed=N`），否則重啟後的請求序號從 1 重數，會重演同一串抽籤。
+  抽籤的鍵是 `(seed, 規則, 目標, 請求 nonce)`：venue 的 nonce 持久且只增不減，重啟後不會重演舊的抽籤，所以各代不需要換 seed。
   只作用在 simulated venue 行程內的 transport（submit 與 history），不會到 Bitfinex；Bitfinex 組裝見到這個變數會拒絕開機。
-  每一次注入都以 `fault_injected` 事件寫進 `sim_venue_event`（跨重啟存在），報告只靠 DB 就分得出注入與自然發生。
+  每一次注入都以 `fault_injected` 事件寫進 `sim_venue_event`（跨重啟存在；submit 的注入連同 symbol、amount、rate、period 一起記），
+  報告只靠 DB 就分得出注入與自然發生：注入要和某筆 UNKNOWN attempt 的內容相同、時間落在它的區間內才算配上，沒有時間寬限。
   `history_error` 的比例會直接壓低 accepted cycle 比例（每個 cycle 的 history 讀取數乘上 rate）；
-  開跑後第一個小時跑一次報告，`d3.accepted_cycle_ratio` 的趨勢低於 99% 時降低該 rate 並**重新計 72 小時**。
+  報告的 `d3.accepted_cycle_ratio` 已把「時間範圍內有 history 注入」的 cycle 從分母拿掉並另列（`injected_history_cycles`），
+  閘門看的是其餘 cycle 的比例；因此注入本身不會讓這一條失敗。
 - 兩個 env 檔和 `shadow.env` 的 key 互不重疊（`docker run` 對重複 key 的優先序未驗證，因此刻意避開）。
 
 ## 4. Image、migrate、蓋章、bootstrap
@@ -152,7 +154,7 @@ docker run --rm --name bfx-sim-bootstrap --pull=never --read-only \
   --activate
 ```
 
-輸出的 `trading_state` 必須是 `activated`。**沒有 `--activate`，新 scope 沒有任何 `trading_state` 列，等於 HALTED：
+輸出的 `trading_state` 必須是 `activated`（經 `trading_state` 的 domain writer 寫入，與 operator 路徑同一套轉換檢查）。**沒有 `--activate`，新 scope 沒有任何 `trading_state` 列，等於 HALTED：
 bot 一筆都不送，而 D3 的每一條安全門檻對一個閒置的 bot 都成立**（這就是活動下限存在的原因）。
 `--activate` 只在 scope 完全沒有狀態列時寫入 `ACTIVE`；已有任何一列（包括 HALT）都不動，
 輸出會是 `kept_active`／`kept_halted`。腳本從不恢復 HALT。
@@ -192,8 +194,9 @@ docker run -d --name bfx-sim --label autoheal=false --restart no \
 - (b) live `bfx_trading_ready` 為 0 超過 5 分鐘且原因是 book 不可用；
 - (c) 任一個 1 小時窗的 `funding_book_rest_reconcile_failed` 超過 §1 基準的最大值。
 
-同時看 sim 自己：`bfx_sim_venue_internal_failures_total`、`bfx_sim_venue_unexpected_requests_total` 必須是 0（>0 就是模擬器本身的缺陷，
-立即記錄；它們是報告的 `extra.*` 門檻），`bfx_sim_venue_feed_stream_total{event="disconnected"}` 與
+同時看 sim 自己：`bfx_sim_venue_internal_failures_total`、`bfx_sim_venue_unexpected_requests_total` 必須是 0（>0 就是模擬器本身的缺陷，立即記錄；
+這兩項的正式計數在 DB 裡：venue 把每一筆都 append 成 `internal_failure_recorded` / `unexpected_request_recorded` 事件，報告直接讀，
+不受重啟或當機影響；Prometheus 計數器只是即時監看），`bfx_sim_venue_feed_stream_total{event="disconnected"}` 與
 `bfx_sim_venue_feed_watermark_lag_seconds{symbol}`（持續成長＝trades 串流停滯）。
 
 ## 7. 視窗內的部署（每一次）
@@ -201,7 +204,8 @@ docker run -d --name bfx-sim --label autoheal=false --restart no \
 偵測：`docker inspect bfx-bot --format '{{.Config.Image}}'` 與 sim 的 image 不同（或 prod deployments ledger 有新的 `deployed` 列；
 `bfx-deploy.timer` 每 5 分鐘一次，所以每 5 分鐘看一次）。偵測到後：
 
-進程計數器隨重啟歸零，所以順序固定：先存這一代的 `/metrics`，再停、存 log、移除。存不下來的那一代，報告的 `extra.*` 就是 `UNAVAILABLE`。
+feed 的計數器（trades WS 斷線、backfill 被截斷或超出保留期）只存在行程內，隨重啟歸零，所以順序固定：先存這一代的 `/metrics`，再停、存 log、移除。
+存不下來的那一代，只有報告的 `extra.trades_backfill_gaps` 是 `UNAVAILABLE`（內部失敗與 unexpected request 讀 DB，不受影響）。
 
 ```bash
 R=/home/ubuntu/bfx/reports/sim-soak
@@ -216,11 +220,14 @@ docker rm bfx-sim
 
 1. 重新取 `$IMAGE`／`$REV`，把新 revision 的 `shadow.env` 放到 `/var/lib/bfx-sim/$REV/`（§4.1）。
 2. **用新 image migrate `bfx_sim`**（§4.2）。舊 image 的 sim 必須先停：舊程式不得跑在新 head 上。漏了 migrate 會被開機的 schema head 檢查拒絕，不會悄悄通過。
-3. `GEN=$((GEN+1))`，把 `sim.env` 裡 `BFX_SIM_FAULTS` 的 `seed=` 換成新的 `GEN`，再依 §5 啟動。
+3. `GEN=$((GEN+1))`，再依 §5 啟動。
 4. 確認新一代的第一個 accepted observation，append 一列到 `soak-ledger.jsonl`。
 5. **停機時間盡量短**（目標 < 1 小時）。live feed 的啟動 backfill 以 venue 記錄的 `market_through` 為起點（不再是固定 1 小時，停機超過 1 小時也補得到），
-   但受 `retention_ms`（72 小時）與 Bitfinex 公開 trades 的保留期限制，且每個 symbol 最多回補 10 頁 × 1000 筆；
-   超過這個量時 `simulated_venue_trades_backfill_truncated` 會出現在 log，視為缺口（成交偏悲觀、不會被計數）。
+   但受 `retention_ms`（72 小時）與 Bitfinex 公開 trades 的保留期限制，且每次最多 10 頁 × 1000 筆：
+   - 一次補不完時，feed 保留拿到的 trades，watermark 只推到最後一筆之前，缺口保持開啟，下一輪從那裡繼續；
+     計入 `bfx_sim_venue_feed_failures_total{source="trades_truncated"}`（報告列為 `trades_truncated_then_continued`，不是失敗）。
+   - 停機超過 `retention_ms` 時，無法補回的區段不會被悄悄截掉：計入 `source="trades_beyond_retention"` 並寫 ERROR log，
+     報告的 `extra.trades_backfill_gaps` 為 FAIL（成交偏悲觀，那段範圍等於沒有 trades）。
 
 同一個 digest 的重啟**不算**部署重啟（報告以 `service_version` 變動計）；視窗內自然發生的部署少於 2 次就延長視窗。
 
@@ -233,7 +240,7 @@ docker rm bfx-sim
    200＝`HALTED/operator` 且每個幣別 cancel-all 都 acknowledged；502＝HALTED 已生效但 venue 部分未完成，再呼叫一次。
    報告以「cause=operator 的 HALT ＋ 有 `acknowledged` 的 `funding_cancel_all_audit`」計一次 kill。
 2. 維持 HALTED 至少一個 reconcile 週期：下一個 accepted observation 的 basis 必須是 `conserved`，venue 沒有任何受管的 resting offer。
-3. **刻意重啟同一個 digest**（boot-while-halted）：照 §7 的存檔順序停掉、重開（換 seed 與 `GEN`），但不 migrate、不換 image。
+3. **刻意重啟同一個 digest**（boot-while-halted）：照 §7 的存檔順序停掉、重開（換 `GEN`），但不 migrate、不換 image。
    確認新一代在 HALTED 下開機、有 accepted observation、**沒有**任何 submit。
 4. 恢復：owner 在 `bfx_sim` 追加一列（SQL 是**測試 harness 的步驟**；產品的恢復只有 UI 的 MFA operator 路徑，
    `auto` 原因則由系統自動恢復，見 operations.md；sim 沒有 operator 身分，所以只能這樣）：
@@ -269,8 +276,10 @@ docker run --rm --name bfx-sim-report --pull=never --read-only \
 
 - 視窗還沒滿 72 小時、還沒有 2 次部署重啟、還沒 kill 時，對應的 criterion 本來就是 FAIL；每日報告看的是趨勢與其他項目。
 - 通過條件（ADR D3 與修訂）：視窗 ≥ 72 小時；≥ 2 次部署重啟（新 revision，且沒有 `unidentified`）；≥ 1 次 kill ＋ 恢復後 ≥ 24 小時交易；
-  `unexplained_lending` ＝ 0（外加 `foreign_lending` ＝ 0）；非注入的 quarantine／UNKNOWN ＝ 0；accepted cycle ≥ 99%；
-  注入的 UNKNOWN 全數自動結案（且至少有一筆）；模擬器內部失敗與 unexpected request ＝ 0；
+  `unexplained_lending` ＝ 0（外加 `foreign_lending` ＝ 0）；非注入的 quarantine／UNKNOWN ＝ 0；
+  accepted cycle ≥ 99%（分母不含時間範圍內有 history 注入的 cycle，那些另列）；
+  注入的 UNKNOWN 全數自動結案（且至少有一筆）；模擬器內部失敗與 unexpected request ＝ 0（讀 DB 的持久事件）；
+  無法補回的 trades 缺口 ＝ 0（讀各代 `/metrics`）；
   活動下限：≥ 50 筆 ack 的 submit、≥ 10 次成交、≥ 10 次撤單或 reprice、≥ 1 筆因到期結清的 credit、視窗內每個完整 UTC 日 ≥ 1 筆利息。
 - 每日報告另列（報告腳本外）：已過小時、各代的 revision、sim 與 live 的 RSS／CPU、live-bot 429 與 ready 狀態、異常。
 - 事件數會隨時間成長（約每個已驗證請求一筆 `NonceAdvanced`）：報告尾端的 `sim_venue_event` 列數接近 200 000，
