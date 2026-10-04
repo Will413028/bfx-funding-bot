@@ -50,7 +50,7 @@ print('sources:', json.dumps(s['halt']['sources']))
 print('would_submit_any:', p['would_submit_any'])
 for sym, r in sorted(p['symbols'].items()):
     print('  ', sym, 'blocked_by=', r['blocked_by'],
-          'headroom=', s['symbols'][sym]['deployable_headroom'])
+          'spendable=', s['symbols'].get(sym, {}).get('spendable'))
 print('last_submit_attempt:', json.dumps(s['last_submit_attempt']))
 " </dev/null 2>&1
   echo "DONE"
