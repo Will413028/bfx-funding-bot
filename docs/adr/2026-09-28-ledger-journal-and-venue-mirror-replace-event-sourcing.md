@@ -122,3 +122,26 @@ S1-2～S1-3 的契約選擇（basis 只存事實、epoch 表與 DB 強制休眠�
 ## Amendment (2026-10-03): 切換前的持續觀測由模擬 soak 補回
 
 D7'' 放棄 S2 前 live 新資料持續觀測的理由之一是 shadow 基礎設施用完即丟；模擬器改為永久保留後，S1-7 前以獨立 simulation DB 上的限時 soak 作入場條件（門檻與範圍見 [2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue](2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue.md) D3）。D7'' 的 B-lite＋C 不變。
+
+## Amendment (2026-10-04): 消失的 offer 依 id 查終態，查不到時以成交紀錄定量
+
+- **事實（prod 唯讀 probe，2026-10-04）**：`/v2/auth/r/funding/offers/{Symbol}/hist` 的 start/end 篩選的是 MTS_UPDATE，不是 MTS_CREATE；同一 endpoint 接受 `{"id": [...]}`，會回傳指定的已結束 offer；歷史保留期至少涵蓋整個帳號期間（≥130 天）。Bitfinex 文件兩者都沒寫，屬於觀察到的行為。
+- **問題**：舊做法在 client 端依 MTS_CREATE 過濾，查詢窗口只回推到上一輪 query 往前 60 秒。比窗口更早建立的 offer 結束時，ledger 看不到它的終態列，conservation 判 `unexplained_lending`。
+- **Options**：
+  - A 延伸共用窗口到消失 offer 的建立時間。
+  - B 依 id 查詢消失的 offer。這是業界基準：FIX Order Status Request（35=H）、Binance `GET /api/v3/order`、Kraken `QueryOrders`。
+  - 查不到時的處理另有四案：凍結整個帳戶直到查到；隔離該 offer 並把對帳放寬成區間；只把 trip 範圍縮到該 symbol；先寬限，再以成交紀錄定量。
+- **決策（Will 2026-10-04）**：
+  - **選 B**：窗口改依 MTS_UPDATE，消失的 mirror offer 依 id 查終態。
+  - **查不到終態時**（venue 沒回、請求失敗、超過請求上限或無法解析），在本 process 內從第一次查不到起寬限 120 秒，期間該 symbol 維持 incomplete、每輪重試。
+  - **寬限過後**，以本次 observation 的 funding trades 依 OFFER_ID 精確定出成交量：定得出來就照常對帳，單純撤單成交為 0；定不出或對不上，就走既有的 `unexplained_lending` → HALT → 條件解除後自動恢復（[2026-09-26-auto-halt-resumes-when-condition-clears](2026-09-26-auto-halt-resumes-when-condition-clears.md)）。
+  - **mirror**：不寫假的終態，仍然「缺席不證明終態」。這類 offer 的狀態是「推定結束、未確認」，記錄在 basis 的證據裡。
+- **Trade-off**：
+  - 放棄的做法：凍結帳戶（違反放貸全自動，venue 一旦不回應就永久停擺）；區間對帳（放寬逐筆精確對帳，還要改兩條 quarantine 規則）；縮小 trip 範圍（等於拿掉第 3 級 HALT）。
+  - 換到的：結果仍是逐筆精確對帳，而且只用既有的保護機制。
+  - 代價：寬限期間整個帳戶的 observation 不被接受；trades 定不出量時會 HALT 一次。
+  - 120 秒取自 UNKNOWN settle 窗口；venue 寫入歷史的延遲尚未量測。
+- **重新評估條件**：
+  - 寬限後的 fallback 每週超過 1 次：量測 history 延遲，調整寬限。
+  - trades 定不出量（basis 證據記為 `undeterminable`）反覆出現：重新評估隔離方案。
+  - Bitfinex 改變 by-id 行為或歷史保留期。
