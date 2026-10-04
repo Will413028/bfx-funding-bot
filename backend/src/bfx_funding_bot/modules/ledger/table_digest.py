@@ -354,6 +354,9 @@ def _cell(table: str, column: str, kind: CellKind, value: object) -> bytes:
     if kind == "decimal":
         if not isinstance(value, Decimal) or not value.is_finite():
             raise bad("expected finite Decimal")
+        if value.is_zero():
+            # PostgreSQL numeric has no negative zero: -0.00 reads back as 0.00.
+            value = value.copy_abs()
         return _json_text(format(value, "f"))
     if kind == "text":
         if not isinstance(value, str):
@@ -442,9 +445,14 @@ def digest_rows(table: str, rows: Iterable[Row], *, scope: Scope | None = None) 
     """
     if table not in CANONICAL_COLUMNS:
         raise KeyError(table)
-    ordered = sorted(rows, key=lambda row: _order_key(table, row))
+    keyed = sorted(((_order_key(table, row), row) for row in rows), key=lambda pair: pair[0])
     hasher = _TableHasher(table)
-    for row in ordered:
+    previous: tuple[Any, ...] | None = None
+    for key, row in keyed:
+        # The order ends in the primary key, so an equal key is a row the table could not hold.
+        if key == previous:
+            raise TableDigestRowInvalid(f"{table}: duplicate primary key {key!r}")
+        previous = key
         hasher.add(row)
     return hasher.finish(scope)
 

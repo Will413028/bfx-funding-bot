@@ -224,6 +224,16 @@ def test_decimal_trailing_zeros_are_significant() -> None:
     )
     assert td._cell("t", "c", "decimal", Decimal("1.10")) == b'"1.10"'
     assert td._cell("t", "c", "decimal", Decimal("1E+2")) == b'"100"'
+
+
+def test_negative_zero_encodes_as_the_zero_postgres_stores() -> None:
+    assert td._cell("t", "c", "decimal", Decimal("-0.00")) == b'"0.00"'
+
+
+def test_rows_sharing_a_primary_key_are_refused() -> None:
+    row = _sample("ledger_observation_wallet")
+    with pytest.raises(td.TableDigestRowInvalid, match="duplicate primary key"):
+        td.digest_rows("ledger_observation_wallet", [row, dict(row)])
     assert td._cell("t", "c", "decimal", Decimal("-0.50")) == b'"-0.50"'
 
 
