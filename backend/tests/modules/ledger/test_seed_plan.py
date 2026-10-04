@@ -202,3 +202,16 @@ def test_an_ack_must_name_its_offer_and_only_seeds_lack_a_policy() -> None:
     seeded = Attempt(uuid4(), "d", "fUST", "c", {"amount": "1"}, uuid4(), None, {}, 1,
                      seed_provenance={"legacy": "x"})
     assert seeded.policy_revision_id is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_admission_refuses_a_policy_less_attempt() -> None:
+    """Only the owner's seed writes a NULL policy; ``_admit`` refuses before any read or write
+    (the session is never touched)."""
+    from bfx_funding_bot.modules.ledger import AuthorizeRefused
+    from bfx_funding_bot.modules.ledger._internal import journal
+
+    seeded = Attempt(uuid4(), "d", "fUST", "c", {"amount": "1"}, uuid4(), None, {}, 1,
+                     seed_provenance={"legacy": "x"})
+    result = await journal._admit(None, SCOPE, seeded, None)  # type: ignore[arg-type]
+    assert result == AuthorizeRefused("capital_policy_revision_changed")
