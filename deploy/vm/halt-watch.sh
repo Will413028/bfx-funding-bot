@@ -34,7 +34,7 @@ halted = status['halt']['halted']
 installed = status['halt']['guard_installed']
 would = probe['would_submit_any']
 funded = sorted(
-    s for s, v in status['symbols'].items() if float(v['deployable_headroom']) > 0
+    s for s, v in status['symbols'].items() if float(v.get('spendable') or 0) > 0
 )
 detail = 'funded=' + (','.join(funded) or 'none')
 
