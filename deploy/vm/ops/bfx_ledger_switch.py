@@ -585,6 +585,7 @@ class Switcher:
         self._active_timers: list[str] = []
         self._seed_started: str | None = None  # the --switch container's name, once started
         self._seed_settled = True
+        self._seed_user: str | None = None  # the login of the seed's DSN (migrate.env)
         self._deploy_lock: IO[str] | None = None
         self.account = ""
 
@@ -847,6 +848,10 @@ class Switcher:
         else:
             try:
                 committed = self._db.epoch_authority() == "ledger"
+                if committed and re.fullmatch(
+                        re.escape(f"ledger_seed:{self.run_id}-a") + r"[0-9]+",
+                        self._db.epoch_actor()):
+                    self.evidence.data["seed_committed"] = True  # the evidence trail
             except SwitchError:
                 committed = None
         if committed is None:
@@ -1142,6 +1147,7 @@ class Switcher:
         except OSError:
             raise SwitchError("migrate_env_unreadable") from None
         dsn, fields = seed_dsn(text)
+        self._seed_user = str(fields["user"])
         manifest = {"mode": "seed", "run_id": seed_run_id, **fields,
                     "realm": self.settings.environment,
                     "scopes": [f"{self.account}:{self.settings.environment}"]}
@@ -1170,7 +1176,7 @@ class Switcher:
                                     f"name=^{name}$"], timeout=30.0)
                 if listed.returncode != 0 or listed.stdout.strip():
                     return "seed_container_present"
-                if self._db.owner_transactions(self.settings.db_user):
+                if self._db.owner_transactions(self._seed_user or self.settings.db_user):
                     return "seed_transaction_open"
                 return None
 
@@ -1358,14 +1364,11 @@ class Switcher:
             try:
                 switch = json.loads(source.read_text(encoding="utf-8"))
                 label, account = str(switch["backup_label"]), str(UUID(switch["account"]))
-                committed = switch.get("seed_committed") is True
             except (OSError, ValueError, KeyError, TypeError):
                 log(f"no usable evidence at {source}")
                 return EXIT_RESTORE_REFUSED
-            if not committed:
-                log(f"run {self.run_id} never committed a seed; its backup is not a halt backup "
-                    "this command may restore")
-                return EXIT_RESTORE_REFUSED
+            # Which run committed is the epoch's actor (`_restore_preconditions`), not an
+            # evidence flag: a run that lost its seed container after the commit never wrote one.
             self.account = account
             self.evidence = Evidence(self.run_dir / "restore.json",
                                      {"run_id": self.run_id, "label": label})

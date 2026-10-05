@@ -78,6 +78,7 @@ class FakeDb:
     actor: str = "migration"
     late_commit: str | None = None  # a seed run id whose transaction commits after the signal
     owner_polls: int = 0
+    owner_users: list[str] = field(default_factory=list)
     unexplained: tuple[str, ...] = ()
     basis: bool = False
     state: str | None = "ACTIVE"
@@ -132,6 +133,7 @@ class FakeDb:
     def owner_transactions(self, user: str) -> int:
         """A late seed: its transaction is still open at the first look, then commits."""
         self.owner_polls += 1
+        self.owner_users.append(user)
         if self.late_commit is not None:
             self.commit_seed(self.late_commit)
             self.late_commit = None
@@ -925,3 +927,40 @@ def test_no_legacy_container_address_fails_the_session_check_closed(env: Env) ->
     assert env.switcher().run() == switch.EXIT_PRECHECK
     assert env.evidence()["outcome"] == "precheck_failed:legacy_container_addresses_unknown"
     assert env.db.seen_addresses == []
+
+
+# --------------------------------------------------------------------------- review R2
+
+
+def test_a_seed_lost_after_its_commit_is_r2_and_its_restore_is_allowed(env: Env) -> None:
+    """R2-1: the seed container timed out after committing; the R2 notice names
+    restore-halt-backup, and that restore runs (the epoch actor ties it to this run)."""
+    env.host.switches = [bfx.CommandError("timeout:docker run", timed_out=True)]
+    assert env.switcher().run() == switch.EXIT_R2
+    assert "restore-halt-backup --run-id switch-test" in env.notes[-1][1]
+    assert env.evidence()["seed_committed"] is True
+    env.notes.clear()
+    assert env.switcher().restore_halt_backup() == switch.EXIT_OK
+    assert env.db.epoch == "legacy" and env.levels() == ["info"]
+
+
+def test_the_settle_wait_watches_the_seed_dsn_login(env: Env) -> None:
+    """R2-2: the seed connects as migrate.env's user, not the psql owner of the host reads."""
+    (env.settings.runtime_dir / "migrate.env").write_text(
+        f"DATABASE_URL=postgresql://bfx_owner:{DSN_PASSWORD}@bfx-postgres:5432/bfx\n")
+    assert env.settings.db_user == "bfx"
+    env.host.switches = ["late"]
+    assert env.switcher().run() == switch.EXIT_R2
+    assert env.db.owner_users and set(env.db.owner_users) == {"bfx_owner"}
+
+
+def test_a_restore_after_a_crash_before_the_evidence_flag_is_allowed(env: Env) -> None:
+    """R2-1: the tool died between the commit and writing ``seed_committed`` (no flag in the
+    evidence); the epoch actor alone decides that this run's halt backup may be restored."""
+    _committed_run(env)
+    path = env.settings.state_dir / "switch-test" / "evidence.json"
+    evidence = json.loads(path.read_text())
+    evidence.pop("seed_committed", None)
+    path.write_text(json.dumps(evidence))
+    assert env.switcher().restore_halt_backup() == switch.EXIT_OK
+    assert env.db.epoch == "legacy"

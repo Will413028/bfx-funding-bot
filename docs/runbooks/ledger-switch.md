@@ -125,8 +125,9 @@ transient unit 是 `Type=simple`，`TimeoutStartSec` 對它無效；上限用 `R
      sudo $OPS/.venv/bin/python $OPS/bfx_ledger_switch.py restore-halt-backup --run-id <通知裡的 run id>
      ```
 
-     只接受「這個 run 自己 commit 了 seed」：evidence 要有 `seed_committed`，最新 epoch 的 actor 要是
-     `ledger_seed:<這個 run id>-a<n>`；別的 run（例如先前一次 R1）的備份一律拒絕。只要出現任何 runtime 寫入就
+     只接受「這個 run 自己 commit 了 seed」：最新 epoch 的 actor 要是 `ledger_seed:<這個 run id>-a<n>`
+     （以資料庫為準；seed container 在 commit 後才失聯時 evidence 可能來不及記下）；別的 run（例如先前一次
+     R1）的備份一律拒絕。只要出現任何 runtime 寫入就
      拒絕：非 seed 的 `ledger_observation`（不論是否 accepted）或 query、沒有 `seed_provenance` 的 attempt、
      任何 execution resolution、seed basis 以外的 quarantine opening，或 clock revision 超過 seed 留下的值。
      同一組條件也決定 R2 與 R3。步驟：停 timer、拿 deploy flock、停 bot／web API／
