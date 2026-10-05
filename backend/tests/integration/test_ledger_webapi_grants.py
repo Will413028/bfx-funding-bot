@@ -49,7 +49,7 @@ ALLOWED: dict[str, set[str]] = {
     },
     "ledger_observation_offer": _OBSERVED_OFFER,
     "ledger_observation_offer_history": {*_OBSERVED_OFFER, "terminal_kind", "occurred_at_ms"},
-    # ae1b473d104c (the execution history's credit ends)
+    # f9a0b1c2d3e4 (the execution history's credit ends)
     "ledger_observation_credit_history": {
         "observation_id", "venue_credit_id", "source_kind", "symbol", "amount", "rate",
         "period_days", "terminal_kind", "occurred_at_ms",

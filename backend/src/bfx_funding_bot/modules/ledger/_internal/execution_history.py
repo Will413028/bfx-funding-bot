@@ -18,9 +18,14 @@ Fills and credit ends are not journal facts; above the watermark they come from 
 terminal history as the ledger's observations stored it, under the archive's names:
 
 * an offer history row with ``terminal_kind='executed'`` is ``ORDER_FILL`` (symbol, the offer's
-  ``amount_original``, its rate -- NULL for an FRR offer -- and ``venue_offer_id``);
-* a credit history row with ``terminal_kind='closed'`` is ``CREDIT_CLOSED`` (symbol, amount,
-  rate; no offer id, as in the archive).
+  ``amount_original``, its rate -- NULL for an FRR offer -- and ``venue_offer_id``), only for
+  the bot's own offers, as the archive wrote fills only for offers it had claimed: the offer id
+  is named for the scope by a transport outcome or a resolution (seeded attempts included, so
+  an offer placed before the switch and filled after it counts); a manual, foreign or
+  auto-renewed offer is not shown;
+* a credit history row with ``terminal_kind='closed'`` and ``source_kind='credit'`` is
+  ``CREDIT_CLOSED`` (symbol, amount, rate; no offer id, as in the archive, whose credit ends
+  came from ``fcc`` credits only -- a closed loan is not shown).
 
 Both are timed by the venue (``occurred_at_ms`` = ``mts_update``). Observations overlap, and a
 fenced (non-accepted) one is stored too, so every observation of the scope is read and each venue
@@ -30,7 +35,8 @@ the archive, which has the legacy ones; they are dropped before the dedupe, whic
 after it while every observation reports one end at the same venue time.
 
 Cursor ranks break ties within one millisecond: 0 attempt, 1 outcome, 2 resolution, 3 fill,
-4 credit end. A fill's id is its ``venue_offer_id``, a credit end's ``source_kind:venue_credit_id``.
+4 credit end. A fill's id is its ``venue_offer_id``, a credit end's ``source_kind:venue_credit_id``
+(always ``credit:...``; the prefix keeps the ids cursors already carry).
 
 Runs as the web API's role, so every statement names only granted columns (never
 ``normalized_payload`` or ``evidence``).
@@ -259,14 +265,35 @@ def _observed(scope: Scope) -> Any:
     )
 
 
+def _own_offers(scope: Scope) -> Any:
+    """The venue offer ids the scope's journal names: its outcomes and its resolutions."""
+    return union_all(
+        select(_O.venue_offer_id).join(_A, _A.attempt_id == _O.attempt_id).where(
+            _A.exchange_account_id == scope.exchange_account_id,
+            _A.deployment_environment == scope.deployment_environment,
+            _O.venue_offer_id.is_not(None),
+        ),
+        select(_R.venue_offer_id).where(
+            _R.exchange_account_id == scope.exchange_account_id,
+            _R.deployment_environment == scope.deployment_environment,
+            _R.venue_offer_id.is_not(None),
+        ),
+    )
+
+
 def _fills(scope: Scope, since: int) -> Any:
-    """One ``ORDER_FILL`` per executed venue offer, its earliest observation's values."""
+    """One ``ORDER_FILL`` per executed offer of the bot's, its earliest observation's values."""
     first = (
         select(
             _OH.occurred_at_ms, _OH.venue_offer_id, _OH.symbol, _OH.amount_original, _OH.rate,
         )
         .join(_OBS, _OBS.id == _OH.observation_id)
-        .where(*_observed(scope), _OH.terminal_kind == "executed", _OH.occurred_at_ms >= since)
+        .where(
+            *_observed(scope),
+            _OH.terminal_kind == "executed",
+            _OH.occurred_at_ms >= since,
+            _OH.venue_offer_id.in_(_own_offers(scope)),
+        )
         .distinct(_OH.venue_offer_id)
         .order_by(
             _OH.venue_offer_id, _OBS.query_finished_at_ms, _OBS.id, _OH.occurred_at_ms,
@@ -286,14 +313,19 @@ def _fills(scope: Scope, since: int) -> Any:
 
 
 def _credit_ends(scope: Scope, since: int) -> Any:
-    """One ``CREDIT_CLOSED`` per closed venue credit or loan, its earliest observation's values."""
+    """One ``CREDIT_CLOSED`` per closed venue credit (not loan), its earliest observation's values."""
     first = (
         select(
             _CH.occurred_at_ms, _CH.source_kind, _CH.venue_credit_id, _CH.symbol, _CH.amount,
             _CH.rate,
         )
         .join(_OBS, _OBS.id == _CH.observation_id)
-        .where(*_observed(scope), _CH.terminal_kind == "closed", _CH.occurred_at_ms >= since)
+        .where(
+            *_observed(scope),
+            _CH.terminal_kind == "closed",
+            _CH.source_kind == "credit",
+            _CH.occurred_at_ms >= since,
+        )
         .distinct(_CH.source_kind, _CH.venue_credit_id)
         .order_by(
             _CH.source_kind, _CH.venue_credit_id, _OBS.query_finished_at_ms, _OBS.id,

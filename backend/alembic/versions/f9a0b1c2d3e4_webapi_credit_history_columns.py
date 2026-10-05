@@ -11,7 +11,7 @@ copy of the exact allowlist ``d0e1f2a3b4c6`` introduced (its docstring says how 
 ``tests/integration/test_webapi_privilege_allowlist.py`` compares the effective privileges at
 head with this copy. Downgrade revokes only what this revision granted.
 
-Revision ID: ae1b473d104c
+Revision ID: f9a0b1c2d3e4
 Revises: e8f9a0b1c2d3
 """
 
@@ -19,7 +19,7 @@ from sqlalchemy import text
 
 from alembic import op
 
-revision = "ae1b473d104c"
+revision = "f9a0b1c2d3e4"
 down_revision = "e8f9a0b1c2d3"
 branch_labels = None
 depends_on = None

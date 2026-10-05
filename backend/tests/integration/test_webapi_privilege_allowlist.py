@@ -1,10 +1,10 @@
-"""d0e1f2a3b4c6 / e1f2a3b4c5d7 / ae1b473d104c: ``bfx_webapi``'s privileges in ``public`` are an
+"""d0e1f2a3b4c6 / e1f2a3b4c5d7 / f9a0b1c2d3e4: ``bfx_webapi``'s privileges in ``public`` are an
 exact allowlist.
 
 ``EXPECTED_*`` below is written out here, not imported from the migration: the
 test is the second opinion. A later migration that grants the web API anything
 must update this list in the same change, or ``test_effective_privileges_equal_the_allowlist``
-fails. ``MATCH_COLUMNS`` is the allowlist e1f2a3b4c5d7 left, which a downgrade of ae1b473d104c
+fails. ``MATCH_COLUMNS`` is the allowlist e1f2a3b4c5d7 left, which a downgrade of f9a0b1c2d3e4
 must restore exactly; ``PREVIOUS_*`` is the one d0e1f2a3b4c6 left, which a downgrade of
 e1f2a3b4c5d7 must restore exactly.
 
@@ -19,7 +19,7 @@ Mutation checks (one at a time; revert after each):
 * Grant ``raw`` (offer tables), ``evidence`` or ``normalized_payload`` in e1f2a3b4c5d7: the
   effective-privilege and constants tests fail.
 * Leave the allowlist copy in e1f2a3b4c5d7 unchanged while granting: the same two tests fail.
-* Grant ``raw`` on ``ledger_observation_credit_history`` in ae1b473d104c: the effective-privilege,
+* Grant ``raw`` on ``ledger_observation_credit_history`` in f9a0b1c2d3e4: the effective-privilege,
   payload-column and constants tests fail.
 """
 
@@ -218,7 +218,7 @@ def _held(columns: dict[tuple[str, str], set[str]]) -> set[tuple[str, ...]]:
     )
 
 
-# e1f2a3b4c5d7's allowlist: the head's without ae1b473d104c's credit-history grant.
+# e1f2a3b4c5d7's allowlist: the head's without f9a0b1c2d3e4's credit-history grant.
 MATCH_COLUMNS = {key: cols for key, cols in EXPECTED_COLUMNS.items() if key != _CREDIT_ENDS}
 EXPECTED = _held(EXPECTED_COLUMNS)
 MATCH = _held(MATCH_COLUMNS)
@@ -356,7 +356,7 @@ def test_execution_decisions_are_unreadable(head_db) -> None:
 
 def test_round_trip_keeps_the_allowlist(head_db) -> None:
     url, engine, _ = head_db
-    # ae1b473d104c's downgrade restores e1f2a3b4c5d7's allowlist exactly...
+    # f9a0b1c2d3e4's downgrade restores e1f2a3b4c5d7's allowlist exactly...
     alembic(url, "downgrade", _MATCH_HEAD)
     with engine.connect() as conn:
         assert _diff(_effective(conn), MATCH) == {"unexpected": [], "missing": []}
@@ -413,11 +413,11 @@ def _added(
 
 
 def test_the_migration_constants_are_the_allowlist() -> None:
-    newest = _load("ae1b473d104c_webapi_credit_history_columns")
+    newest = _load("f9a0b1c2d3e4_webapi_credit_history_columns")
     assert {t: set(p) for t, p in newest.WEBAPI_TABLE_PRIVILEGES.items()} == EXPECTED_TABLES
     assert {k: set(c) for k, c in newest.WEBAPI_COLUMN_PRIVILEGES.items()} == EXPECTED_COLUMNS
     assert all(len(set(c)) == len(c) for c in newest.WEBAPI_COLUMN_PRIVILEGES.values())
-    # What ae1b473d104c grants is exactly the difference to e1f2a3b4c5d7's copy.
+    # What f9a0b1c2d3e4 grants is exactly the difference to e1f2a3b4c5d7's copy.
     assert _added(EXPECTED_COLUMNS, MATCH_COLUMNS) == {
         k: set(v) for k, v in newest._GRANTED.items()}
     module = _load("e1f2a3b4c5d7_webapi_match_columns")
