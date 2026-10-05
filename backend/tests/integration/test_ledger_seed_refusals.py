@@ -437,8 +437,125 @@ async def test_the_writers_are_locked_out_before_the_snapshot_starts(
         return next(i for i, (statement, _) in enumerate(seen) if fragment in statement)
 
     locks, sessions = first("pg_try_advisory_lock"), first("pg_stat_activity")
+    requests = first("LOCK TABLE")
+    again = next(i for i, (statement, _) in enumerate(seen)
+                 if "pg_stat_activity" in statement and i > requests)
     epoch, closure = first("FROM public.capital_authority_epoch"), first("capital_snapshots")
     assert seen[locks][1] == seen[sessions][1] == "AUTOCOMMIT"
+    assert seen[requests][1] == seen[again][1] == "REPEATABLE READ"
     assert seen[epoch][1] == seen[closure][1] == "REPEATABLE READ"
-    assert locks < sessions < epoch < closure
+    assert locks < sessions < requests < again < epoch < closure
+    # Nothing in the transaction reads before the request lock (the lock takes no snapshot).
+    begin = next(i for i in range(sessions + 1, len(seen))
+                 if seen[i][1] == "REPEATABLE READ")
+    assert all(statement.lstrip().upper().startswith("SET LOCAL")
+               for statement, _ in seen[begin:requests])
     assert "pg_advisory_unlock_all" in seen[-1][0]
+
+
+def _trading_control_insert(request_id: UUID) -> Any:
+    return text(
+        "INSERT INTO trading_control_requests (request_id, exchange_account_id, "
+        "deployment_environment, action, reason, requested_by, created_at_ms) "
+        "VALUES (:r, :a, 'ci', 'kill', 'during the seed', 'operator', 1)"
+    ).bindparams(r=request_id, a=SCOPE.exchange_account_id)
+
+
+async def test_an_operator_request_waits_for_the_seed_to_end(
+    bot_env: BotEnv, ledger_db: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """R2-1: the web API inserts requests under no account lock; while the seed transaction
+    runs, an insert into a request table waits on the seed's SHARE lock (it times out on
+    ``lock_timeout`` with the seed's backend as its blocker), and goes in after the commit."""
+    env = bot_env
+    await legacy_with_live_offer(env)
+    other = create_async_engine(ledger_db.url.set(drivername="postgresql+asyncpg"))
+    blocked: list[str] = []
+    real = seed_app.verify_snapshot
+
+    async def during_seed(session: Any, plan: Any) -> None:
+        seed_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+        async with other.connect() as conn:
+            await conn.execute(text("SET lock_timeout = '100ms'"))
+            pid = await conn.scalar(text("SELECT pg_backend_pid()"))
+            try:
+                await conn.execute(_trading_control_insert(uuid4()))
+            except Exception as exc:  # the insert could not get its lock
+                blocked.append(str(exc))
+            await conn.rollback()
+            async with other.connect() as probe:  # who held it: the seed's backend
+                holders = await probe.scalar(text(
+                    "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation "
+                    "WHERE c.relname = 'trading_control_requests' AND l.mode = 'ShareLock' "
+                    "AND l.granted AND l.pid = :seed"), {"seed": seed_pid})
+            assert holders == 1 and pid != seed_pid
+        await real(session, plan)
+
+    monkeypatch.setattr(seed_app, "verify_snapshot", during_seed)
+    try:
+        code, lines = await run_seed(seed_command(env, tmp_path, url=ledger_db.url),
+                                     now_ms=SEED_AT)
+        assert code == 0, lines
+        assert len(blocked) == 1 and "lock timeout" in blocked[0], blocked
+        async with other.begin() as conn:  # the seed ended: the same insert goes in
+            await conn.execute(text("SET LOCAL lock_timeout = '100ms'"))
+            await conn.execute(_trading_control_insert(uuid4()))
+    finally:
+        await other.dispose()
+
+
+async def test_lock_table_takes_no_snapshot(ledger_db: Any) -> None:  # noqa: F811
+    """The premise of the ordering above, on this PostgreSQL: a REPEATABLE READ transaction
+    that has only run ``SET LOCAL`` and ``LOCK TABLE`` still sees a row committed after them;
+    its first read fixes the snapshot."""
+    url = ledger_db.url.set(drivername="postgresql+asyncpg")
+    seeder, writer = create_async_engine(url), create_async_engine(url)
+    insert = text("INSERT INTO exchange_accounts (id, venue, label) VALUES (:i, 'bitfinex', 'x')")
+    count = text("SELECT count(*) FROM exchange_accounts WHERE id = :i")
+    before, after = uuid4(), uuid4()
+    try:
+        async with seeder.connect() as conn:
+            await conn.execution_options(isolation_level="REPEATABLE READ")
+            await conn.begin()
+            await conn.execute(text("SET LOCAL lock_timeout = '1s'"))
+            await conn.execute(text(
+                "LOCK TABLE public.trading_control_requests IN SHARE MODE"))
+            async with writer.begin() as other:
+                await other.execute(insert, {"i": before})
+            assert await conn.scalar(count, {"i": before}) == 1  # no snapshot until now
+            async with writer.begin() as other:
+                await other.execute(insert, {"i": after})
+            assert await conn.scalar(count, {"i": after}) == 0  # the first read fixed it
+            await conn.rollback()
+    finally:
+        await seeder.dispose()
+        await writer.dispose()
+
+
+async def test_a_refusal_releases_the_writer_and_request_locks(
+    bot_env: BotEnv, ledger_db: Any, tmp_path: Any,  # noqa: F811
+) -> None:
+    """R1-2/R2-1 on the refusal path: a refusal inside the transaction (epoch, after both the
+    writer locks and the request lock were taken) leaves the writer keys and the request
+    tables free. (A refusal before the transaction is followed by a successful seed in
+    ``test_the_legacy_process_alive_or_a_runtime_session_refuses``.)"""
+    env = bot_env
+    await legacy_with_live_offer(env)
+    await flip_epoch(env, at=SEED_AT - 1)
+    argv = seed_command(env, tmp_path, url=ledger_db.url)
+    await refused(env, argv, "epoch_not_legacy")
+    other = create_async_engine(ledger_db.url.set(drivername="postgresql+asyncpg"))
+    try:
+        async with other.connect() as conn:
+            await conn.execute(text("SET lock_timeout = '100ms'"))
+            for key in seed_app._lock_keys(SCOPE):
+                assert await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
+                await conn.scalar(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+            await conn.execute(_trading_control_insert(uuid4()))
+            await conn.commit()
+            held = await conn.scalar(text(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                "AND pid <> pg_backend_pid()"))
+        assert held == 0
+    finally:
+        await other.dispose()

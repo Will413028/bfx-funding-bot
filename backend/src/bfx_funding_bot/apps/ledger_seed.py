@@ -10,9 +10,14 @@ write unless every guard holds. On one connection, in this order:
    role); per scope, the daemon writer lock and the transaction writer lock are free and taken
    as session locks (held to the end); then no session of a runtime login (``bfx_bot``,
    ``bfx_webapi`` or a member of them) exists;
-2. only then the one REPEATABLE READ transaction, whose snapshot therefore follows the checks:
-   the realm stamp equals the manifest's, the latest ``capital_authority_epoch`` is ``legacy``,
-   and no ledger row exists for any scope (``ledger_not_empty``).
+2. only then the one REPEATABLE READ transaction. Its first statements take no snapshot:
+   ``SET LOCAL`` and ``LOCK TABLE`` of the three operator request outboxes ``IN SHARE MODE``
+   (the web API inserts requests under no account lock; SHARE blocks every insert until the
+   seed ends). The snapshot is taken by the next read, after the lock is granted: the
+   runtime-session check again, then the realm stamp equals the manifest's, the latest
+   ``capital_authority_epoch`` is ``legacy``, and no ledger row exists for any scope
+   (``ledger_not_empty``). So no ledger or legacy write (writer locks) and no operator request
+   (table lock) can land between the checks and the snapshot unseen.
 
 Then, per scope: read the legacy closure (``execution.ledger_seed``), plan the rows and state
 the expected per-table digests (``ledger.seed.write_seed``), write. After every scope is
@@ -70,6 +75,10 @@ RUNTIME_ROLES: Final = ("bfx_bot", "bfx_webapi", "bfx_webauth", "bfx_cutover_rea
 # Logins whose sessions must be gone: the runtime writers (and their members).
 RUNTIME_WRITERS: Final = ("bfx_bot", "bfx_webapi")
 OWNED_TABLES: Final = ("ledger_observation", "submission_attempt_journal", "capital_authority_epoch")
+# The operator request outboxes (web API inserts, no account lock): held off during the seed.
+REQUEST_TABLES: Final = (
+    "uncertainty_resolution_requests", "capital_policy_requests", "trading_control_requests",
+)
 EXIT_OK, EXIT_DIGEST, EXIT_REFUSED = 0, 2, 3
 
 
@@ -185,14 +194,30 @@ async def quiesce(conn: AsyncConnection, plan: SeedPlanConnection) -> None:
     Session-level advisory locks on both writer keys of every scope (the daemon's lifetime
     lock and the per-transaction lock every legacy and ledger write takes), held until the
     connection releases them after commit or rollback; then no runtime login may be connected.
-    Only after this does the REPEATABLE READ snapshot start, so no write or request can land
-    between the checks and the snapshot unseen.
+    A runtime login connecting later cannot write ledger or legacy rows (writer locks); its
+    operator requests are held off by ``lock_requests`` inside the transaction.
     """
     for scope in plan.scopes:
         for key in _lock_keys(scope):
             taken = await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
             if not taken:
                 raise GuardRejectedError("writer_lock_held")
+    await refuse_runtime_sessions(conn)
+
+
+async def lock_requests(session: AsyncSession) -> None:
+    """The seed transaction's first lock: no operator request is inserted until it ends.
+
+    ``LOCK TABLE`` takes no snapshot, so the REPEATABLE READ snapshot (taken by the next read)
+    sees every request committed before the lock was granted, and none can follow it.
+    """
+    await session.execute(text("SET LOCAL lock_timeout = '30s'"))
+    await session.execute(text(
+        f"LOCK TABLE {', '.join('public.' + name for name in REQUEST_TABLES)} IN SHARE MODE"
+    ))
+
+
+async def refuse_runtime_sessions(conn: Executor) -> None:
     # Logins that are a runtime writer, or (recursively) a member of one.
     runtime = await conn.scalar(text("""
         WITH RECURSIVE writers(oid) AS (
@@ -276,6 +301,8 @@ async def seed(
     on ``EXIT_OK``.
     """
     await session.execute(text("SET LOCAL search_path TO public"))
+    await lock_requests(session)
+    await refuse_runtime_sessions(session)  # the first snapshot read, after the lock
     await verify_snapshot(session, plan)
     written: list[SeedResult] = []
     for scope in plan.scopes:
