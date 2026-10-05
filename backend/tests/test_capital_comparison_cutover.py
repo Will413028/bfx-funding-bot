@@ -363,7 +363,7 @@ def test_the_verifier_states_the_seed_contract_independently() -> None:
         LEGACY_OUTCOMES,
         credit_identity,
     )
-    from bfx_funding_bot.modules.ledger.seed import SUPERSEDED_REASON as SEED_REASON
+    from bfx_funding_bot.modules.execution.ledger_seed import SUPERSEDED_REASON as SEED_REASON
 
     assert dict(LEGACY_ATTRIBUTION) == LEDGER_ATTRIBUTION_OF_LEGACY
     assert dict(LEGACY_OUTCOMES) == LEDGER_OUTCOME_OF_LEGACY

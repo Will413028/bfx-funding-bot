@@ -271,13 +271,13 @@ async def test_a_tampered_row_is_a_digest_mismatch_and_rolls_back(
     env = bot_env
     await legacy_with_live_offer(env)
 
-    async def tampered(session: Any, closure: Any, *, now_ms: int) -> Any:
+    async def tampered(session: Any, closure: Any) -> Any:
         """Expected digests of the read closure, rows of one changed offer."""
         honest = expected_digests(plan_seed(closure), await epoch_rows(session))
         offer = closure.offers[0]
         changed = replace(closure, offers=(replace(offer, mts_updated=offer.mts_updated + 1),
                                            *closure.offers[1:]))
-        result = await write_seed(session, changed, now_ms=now_ms)
+        result = await write_seed(session, changed)
         return replace(result, expected=honest)
 
     monkeypatch.setattr(seed_app, "write_seed", tampered)
@@ -302,7 +302,7 @@ async def test_the_database_refuses_seed_rows_from_the_runtime_role(
         async with env.factory.begin() as session:
             closure = await read_seed_closure(session, SCOPE)
             await session.execute(text("SET LOCAL ROLE bfx_bot"))
-            await write_seed(session, closure, now_ms=SEED_AT)
+            await write_seed(session, closure)
     await assert_ledger_empty(env)
 
 

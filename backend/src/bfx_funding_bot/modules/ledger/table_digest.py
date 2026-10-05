@@ -44,7 +44,11 @@ from sqlalchemy.types import Uuid
 
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
-from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES, CapitalAuthorityEpochRow
+from bfx_funding_bot.modules.ledger.tables import (
+    LEDGER_TABLES,
+    SCOPE_PARENT,
+    CapitalAuthorityEpochRow,
+)
 
 TABLE_DIGEST_VERSION = 1
 _DOMAIN = "bfx-ledger-table-digest/v1"
@@ -254,34 +258,10 @@ WATERMARK_COLUMN: dict[str, str | None] = dict.fromkeys(CANONICAL_COLUMNS) | {
 # Capture-point-only tables: the clock and the mirrors are updated in place.
 MUTABLE_TABLES = frozenset({"capital_command_clock", "venue_offer_mirror", "venue_credit_mirror"})
 
-# How a table reaches its scope (exchange_account_id, deployment_environment):
-# None = the table has both columns; (fk column, parent table, parent column) = join the
-# parent; absent from the mapping = global (the epoch), never scope-filtered.
-_SCOPE_PARENT: dict[str, tuple[str, str, str] | None] = {
-    "capital_command_clock": None,
-    "ledger_observation_query": None,
-    "ledger_observation": None,
-    "ledger_observation_wallet": ("observation_id", "ledger_observation", "id"),
-    "ledger_observation_offer": ("observation_id", "ledger_observation", "id"),
-    "ledger_observation_credit": ("observation_id", "ledger_observation", "id"),
-    "ledger_observation_offer_history": ("observation_id", "ledger_observation", "id"),
-    "ledger_observation_credit_history": ("observation_id", "ledger_observation", "id"),
-    "ledger_observation_trade": ("observation_id", "ledger_observation", "id"),
-    "venue_offer_mirror": None,
-    "venue_credit_mirror": None,
-    "submission_attempt_journal": None,
-    "transport_outcome_journal": ("attempt_id", "submission_attempt_journal", "attempt_id"),
-    "quarantine_opening": None,
-    "quarantine_member": ("quarantine_id", "quarantine_opening", "quarantine_id"),
-    "execution_resolution_journal": None,
-    "accepted_capital_basis": None,
-    "accepted_capital_basis_symbol": ("basis_id", "accepted_capital_basis", "id"),
-    "accepted_capital_basis_cell": ("basis_id", "accepted_capital_basis", "id"),
-    "accepted_capital_basis_credit": ("basis_id", "accepted_capital_basis", "id"),
-    "accepted_capital_basis_credit_cell": ("basis_id", "accepted_capital_basis", "id"),
-    "accepted_capital_basis_attempt": ("basis_id", "accepted_capital_basis", "id"),
-    "accepted_capital_basis_quarantine": ("basis_id", "accepted_capital_basis", "id"),
-}
+# How a table reaches its scope (exchange_account_id, deployment_environment), derived from
+# the table metadata (``tables.SCOPE_PARENT``): None = the table has both columns; (fk column,
+# parent table, parent column) = join the parent; absent = global (the epoch), never filtered.
+_SCOPE_PARENT = SCOPE_PARENT
 
 _ALL_TABLES = cast("tuple[Table, ...]", (*LEDGER_TABLES, CapitalAuthorityEpochRow.__table__))
 _TABLES: dict[str, Table] = {table.name: table for table in _ALL_TABLES}

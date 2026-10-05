@@ -61,7 +61,11 @@ from bfx_funding_bot.core.database_realm import (
     assert_database_realm,
 )
 from bfx_funding_bot.core.writer_lock import derive_lock_key, derive_transaction_lock_key
-from bfx_funding_bot.modules.execution.ledger_seed import read_seed_closure
+from bfx_funding_bot.modules.execution.ledger_seed import (
+    fail_pending_uncertainty_requests,
+    read_pending_uncertainty_requests,
+    read_seed_closure,
+)
 from bfx_funding_bot.modules.ledger import Scope, SeedClosure, SeedRefused
 from bfx_funding_bot.modules.ledger.seed import (
     SeedResult,
@@ -264,7 +268,9 @@ def _scope_json(scope: Scope) -> dict[str, str]:
             "environment": scope.deployment_environment}
 
 
-def _seed_json(closure: SeedClosure, result: SeedResult) -> dict[str, object]:
+def _seed_json(
+    closure: SeedClosure, result: SeedResult, pending: Sequence[UUID], failed_requests: int,
+) -> dict[str, object]:
     marks = closure.watermarks
     return {
         "kind": "seed",
@@ -281,8 +287,8 @@ def _seed_json(closure: SeedClosure, result: SeedResult) -> dict[str, object]:
         "attempt_seq_high_water": result.attempt_seq_high_water,
         "attempts": len(closure.attempts),
         "quarantines": len(closure.quarantines),
-        "failed_requests": result.failed_requests,
-        "failed_uncertainty_requests": [str(r) for r in closure.pending_uncertainty_requests],
+        "failed_requests": failed_requests,
+        "failed_uncertainty_requests": [str(r) for r in pending],
         "carried_requests": closure.evidence.get("carried_pending_requests"),
         "expected": {name: _digest_json(d) for name, d in sorted(result.expected.items())},
     }
@@ -307,9 +313,11 @@ async def seed(
     written: list[SeedResult] = []
     for scope in plan.scopes:
         closure = await read_seed_closure(session, scope)
-        result = await write_seed(session, closure, now_ms=now_ms)
+        pending = await read_pending_uncertainty_requests(session, scope)
+        result = await write_seed(session, closure)
+        failed = await fail_pending_uncertainty_requests(session, scope, pending, now_ms=now_ms)
         written.append(result)
-        emit(output, _seed_json(closure, result))
+        emit(output, _seed_json(closure, result, pending, failed))
     # Keep the snapshot (and the writes), then read it back the way a verifier would.
     await session.execute(text("SET TRANSACTION READ ONLY"))
     exit_code = EXIT_OK

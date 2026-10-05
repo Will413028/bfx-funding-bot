@@ -23,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import Scope, SeedClosure
 from bfx_funding_bot.modules.ledger._internal.seed import (
-    SUPERSEDED_REASON,
     SeedPlan,
     ledger_rows_in_scope,
     plan_seed,
@@ -48,7 +47,6 @@ class SeedResult:
     observation_id: UUID
     basis_id: UUID
     attempt_seq_high_water: int
-    failed_requests: int
     expected: Mapping[str, TableDigest]
 
 
@@ -79,16 +77,16 @@ def expected_digests(
     }
 
 
-async def write_seed(session: AsyncSession, closure: SeedClosure, *, now_ms: int) -> SeedResult:
+async def write_seed(session: AsyncSession, closure: SeedClosure) -> SeedResult:
     """Plan, state the expected digests, then write the seed in the caller's transaction."""
     plan = plan_seed(closure)
     expected = expected_digests(plan, await epoch_rows(session))
-    failed = await write_plan(session, plan, now_ms=now_ms)
+    await write_plan(session, plan)
     (basis,) = plan.table_rows("accepted_capital_basis")
     high_water = basis["attempt_seq_high_water"]
     assert isinstance(high_water, int)
     return SeedResult(
-        plan.scope, plan.query_id, plan.observation_id, plan.basis_id, high_water, failed, expected
+        plan.scope, plan.query_id, plan.observation_id, plan.basis_id, high_water, expected
     )
 
 
@@ -114,7 +112,6 @@ async def verify_seed(
 
 __all__ = [
     "EPOCH_TABLE",
-    "SUPERSEDED_REASON",
     "DigestMismatch",
     "SeedPlan",
     "SeedResult",
