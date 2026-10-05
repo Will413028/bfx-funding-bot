@@ -78,13 +78,13 @@ def _snapshot(exposure: str, available: str = "1000") -> CapitalSnapshot:
 
 
 def legacy(exposure: str, *, cells: list[str], unattributed: str = "0",
-           available: str = "1000") -> ObservedAvailable:
+           available: str = "1000", basis: str = "funding_trade") -> ObservedAvailable:
     snapshot = _snapshot(exposure, available)
     return ObservedAvailable(
         ACCOUNT, "ci", "fUST", 1, "digest", REVISION_ID, POLICY, 10, snapshot,
         evaluate_capital(POLICY, snapshot), Decimal(unattributed),
         {"8002": {"symbol": "fUST", "amount": "150", "period": 2, "opening": 50,
-                  "cells": cells, "basis": "funding_trade"}},
+                  "cells": cells, "basis": basis}},
         10, 10,
     )
 
@@ -117,6 +117,7 @@ def test_field_map_is_the_fold_arms_minus_what_cannot_compare() -> None:
 @pytest.mark.parametrize("case", [
     "exact", "extra_difference", "not_seeded_recent_fill", "ledger_cells_moved",
     "legacy_not_subset", "amount_differs", "ledger_less_conservative",
+    "legacy_basis_recent_fill", "legacy_basis_partial",
 ])
 def test_f7_declares_only_an_exact_explanation(case: str) -> None:
     """b60: ledger carries the seed's {a30, b60}; legacy attributes 8002 to a30 only."""
@@ -134,6 +135,10 @@ def test_f7_declares_only_an_exact_explanation(case: str) -> None:
         ledger_groups = {("credit", "8002"): group({A, B}, amount="151")}
     elif case == "ledger_less_conservative":
         old, new = legacy("250", cells=[A, B]), ledger("100")
+    elif case == "legacy_basis_recent_fill":  # a subset, but not legacy's funding-trade upgrade
+        old = legacy("100", cells=[A], basis="recent_fill")
+    elif case == "legacy_basis_partial":
+        old = legacy("100", cells=[A], basis="funding_trade_partial")
     found = declare_divergence(SCOPE_B, old, ledger_fields(new), ledger_groups, seeded)
     if case == "exact":
         assert differences(ledger_fields(new), legacy_fields(old))  # it was a difference
@@ -154,16 +159,18 @@ def test_f7_moves_the_unattributed_amount_too() -> None:
     assert found is not None and found[0]["legacy_cells"] == []
 
 
-def _observation(account: UUID = ACCOUNT, **changes: Any) -> dict[str, Any]:
+def _observation(account: UUID = ACCOUNT, start: int = 1000, **changes: Any) -> dict[str, Any]:
     event = VenueSnapshotObserved(
-        account_id=str(account), environment="ci", query_started_at_ms=1000,
-        query_finished_at_ms=1050, offers=(), credits=(), wallet_available={"fUST": Decimal(1)},
-        coverage=SnapshotCoverage(True, True, True),
+        account_id=str(account), environment="ci", query_started_at_ms=start,
+        query_finished_at_ms=start + 50, offers=(), credits=(),
+        wallet_available={"fUST": Decimal(1)}, coverage=SnapshotCoverage(True, True, True),
     )
-    confirmation = replace(event, query_started_at_ms=1050, query_finished_at_ms=1060,
+    confirmation = replace(event, query_started_at_ms=start + 50, query_finished_at_ms=start + 60,
                            event_id=uuid4(), **changes)
     return {"account_id": str(account), "environment": "ci",
-            "event": serialize_event(event), "confirmation": serialize_event(confirmation)}
+            "event": serialize_event(event), "confirmation": serialize_event(confirmation),
+            "ledger": {"query_id": str(uuid4()), "observation_id": str(uuid4()),
+                       "first_digest": "f" * 64, "confirmation_digest": "f" * 64}}
 
 
 def _file(*entries: dict[str, Any]) -> dict[str, Any]:
@@ -173,7 +180,23 @@ def _file(*entries: dict[str, Any]) -> dict[str, Any]:
 def test_observation_file_parses_and_names_its_window() -> None:
     (parsed,) = parse_observations(_file(_observation()))
     assert (parsed.account_id, parsed.environment) == (ACCOUNT, "ci")
-    assert (window_start_ms([parsed]), observed_as_of_ms([parsed])) == (1050, 1060)
+    # The window starts at the FIRST observation's query start: legacy classifies that one.
+    assert (window_start_ms([parsed]), observed_as_of_ms([parsed])) == (1000, 1060)
+    assert parsed.ledger.first_digest == "f" * 64
+
+
+def test_the_window_starts_at_the_oldest_account_and_bounds_its_first_observation() -> None:
+    """R1-1: the confirmation starting within 300 s does not make an older first observation
+    (or an older account) fresh."""
+    older, newer = parse_observations(_file(_observation(), _observation(uuid4(), start=5000)))
+    assert window_start_ms([older, newer]) == 1000
+    assert observed_as_of_ms([older, newer]) == 5060
+    end = 1050 + 300_000  # within 300 s of the confirmation's start, not of the first query
+    summary = {"kind": "summary", "inventory_status": "ok",
+               "arms": {"ledger_reader": {"passed": True}, "closure": {"passed": True}}}
+    finished = command.finish_cutover(summary, window_start=window_start_ms([older]), now=end,
+                                      limit_ms=300_000)
+    assert finished["exit_code"] == 1 and finished["window"]["elapsed_ms"] == 300_050
 
 
 @pytest.mark.parametrize("fault,reason", [
@@ -185,6 +208,8 @@ def test_observation_file_parses_and_names_its_window() -> None:
     ("duplicate", "observation_scope_duplicate"),
     ("acceptance", "observation_carries_acceptance"),
     ("unversioned", "observation_event_invalid"),
+    ("ledger_missing", "observation_entry_invalid"),
+    ("ledger_id_invalid", "observation_entry_invalid"),
 ])
 def test_observation_file_refusals(fault: str, reason: str) -> None:
     entry = _observation()
@@ -205,6 +230,10 @@ def test_observation_file_refusals(fault: str, reason: str) -> None:
         payload = _file(_observation(capital_query_id=str(uuid4())))
     elif fault == "unversioned":
         del entry["event"]["__schema_version__"]
+    elif fault == "ledger_missing":
+        del entry["ledger"]
+    elif fault == "ledger_id_invalid":
+        entry["ledger"]["query_id"] = "not-a-uuid"
     with pytest.raises(ObservationRejectedError) as raised:
         parse_observations(json.loads(json.dumps(payload)))
     assert raised.value.reason == reason
@@ -308,7 +337,7 @@ def test_cutover_inputs_are_checked_before_connecting(tmp_path: Path) -> None:
         plan = ConnectionPlan(None, "reader", "db", "run", now_ms, "cutover")  # type: ignore[arg-type]
         return command.cutover_inputs(args, plan, scopes)
 
-    assert inputs().window_start_ms == 1050
+    assert inputs().window_start_ms == 1000
     for kwargs, reason in (
         ({"now_ms": 1059}, "as_of_mismatch"),
         ({"now_ms": 1061}, "as_of_mismatch"),

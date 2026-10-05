@@ -113,22 +113,29 @@ async def legacy_rest_observation(env: BotEnv, *, started: int, finished: int,
     return event, confirmation
 
 
-async def runner_times(env: BotEnv) -> tuple[int, int, int]:
-    """The ledger runner's latest query: (start, finish, confirmation finish)."""
+async def runner_observation(env: BotEnv) -> dict[str, Any]:
+    """The scope's latest ledger observation: times, identity and digests (the runner's file
+    names it; with no runner yet it is the seed's)."""
     async with env.factory() as session:
         row = (await session.execute(
             select(LedgerObservationQueryRow.started_at_ms, LedgerObservationRow.query_finished_at_ms,
-                   LedgerObservationRow.confirmation_finished_at_ms)
+                   LedgerObservationRow.confirmation_finished_at_ms, LedgerObservationRow.query_id,
+                   LedgerObservationRow.id, LedgerObservationRow.first_digest,
+                   LedgerObservationRow.confirmation_digest)
             .join(LedgerObservationRow,
                   LedgerObservationRow.query_id == LedgerObservationQueryRow.query_id)
             .order_by(LedgerObservationQueryRow.query_revision.desc()).limit(1))).one()
-    return int(row[0]), int(row[1]), int(row[2])
+    return {"started": int(row[0]), "finished": int(row[1]), "confirmed": int(row[2]),
+            "ledger": {"query_id": str(row[3]), "observation_id": str(row[4]),
+                       "first_digest": row[5], "confirmation_digest": row[6]}}
 
 
-def observation_file(event: VenueSnapshotObserved, confirmation: VenueSnapshotObserved) -> dict[str, Any]:
+def observation_file(event: VenueSnapshotObserved, confirmation: VenueSnapshotObserved,
+                     ledger: dict[str, str]) -> dict[str, Any]:
     return {"format": OBSERVATION_FORMAT, "version": OBSERVATION_VERSION, "observations": [{
         "account_id": str(SCOPE.exchange_account_id), "environment": "ci",
         "event": serialize_event(event), "confirmation": serialize_event(confirmation),
+        "ledger": ledger,
     }]}
 
 
@@ -136,11 +143,14 @@ async def build_cutover(
     env: BotEnv, ledger_db: Engine, monkeypatch: Any, tmp_path: Path, *, unknown: bool,
     before_seed: Callable[[BotEnv], Awaitable[None]] | None = None,
     at_capture: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
+    runner: bool = True,
 ) -> Cutover:
     """Legacy closure -> seed -> halt moves -> ledger runner observation -> legacy observation.
 
     ``before_seed`` runs after the final legacy snapshot; ``at_capture`` right after the seed
     (the capture point, before any runner observation) with the seed's evidence lines.
+    ``runner=False`` stops at the seed: the legacy observation is fetched at ``RUNNER_AT`` and the
+    file names the seed's observation (the ledger is still on the seed basis).
     """
     legacy = await run_legacy(env, unknown=unknown)
     if before_seed is not None:
@@ -152,14 +162,21 @@ async def build_cutover(
     await flip_epoch(env, at=SEED_AT + 1_000)
     boot_as_epoch(env, monkeypatch)
     halt_moves(env)
-    runner = await env.build()
-    await env.boot(runner, RUNNER_AT)
-    assert runner.periodic_reconcile._non_accepted == 0
-    started, finished, confirmed = await runner_times(env)
+    observed = await runner_observation(env)
+    if runner:
+        process = await env.build()
+        await env.boot(process, RUNNER_AT)
+        assert process.periodic_reconcile._non_accepted == 0
+        observed = await runner_observation(env)
+    else:
+        observed.update(started=RUNNER_AT, finished=RUNNER_AT + 200, confirmed=RUNNER_AT + 400)
+    started, finished, confirmed = observed["started"], observed["finished"], observed["confirmed"]
     event, confirmation = await legacy_rest_observation(
         env, started=started, finished=finished, confirmed=confirmed)
-    return Cutover(env, legacy, seed_lines, observation_file(event, confirmation),
-                   max(finished, confirmed), finished, tmp_path, ledger_db,
+    # Q6 (R1-1): the window starts at the first observation's query start.
+    return Cutover(env, legacy, seed_lines,
+                   observation_file(event, confirmation, observed["ledger"]),
+                   max(finished, confirmed), started, tmp_path, ledger_db,
                    reader_login(ledger_db))
 
 
@@ -224,5 +241,5 @@ def violations(rows: list[dict[str, Any]], check: str) -> list[str]:
 __all__ = [
     "PASSWORD", "WINDOW_MS", "Cutover", "arguments", "build_cutover", "by_kind", "cells_file",
     "legacy_rest_observation", "observation_file", "owner", "reader_login", "run_comparison",
-    "runner_times", "violations",
+    "runner_observation", "violations",
 ]

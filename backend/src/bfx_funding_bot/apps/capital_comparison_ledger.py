@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.auth_rest import LOAN_ID_PREFIX
 from bfx_funding_bot.modules.execution.capital_observed_baseline import (
+    CutoverObservation,
     ObservedAvailable,
     ObservedResult,
     ObservedScope,
@@ -60,7 +61,11 @@ from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisCreditRow,
     AcceptedCapitalBasisRow,
     CapitalPolicyHeadRow,
+    LedgerObservationCreditRow,
+    LedgerObservationOfferRow,
+    LedgerObservationQueryRow,
     LedgerObservationRow,
+    LedgerObservationWalletRow,
 )
 from bfx_funding_bot.modules.trading import (
     Available,
@@ -105,6 +110,10 @@ EXCLUDED_FIELDS: Final = {
     "evidence": "legacy blocks carry no evidence",
 }
 DECLARED_SEED_BASIS: Final = "recent_fill"
+# F7 covers only legacy's exact upgrade from synced funding trades (``traded >= live``,
+# ``capital_repository._attribute_credits`` step 1). ``funding_trade_partial`` keeps the carried
+# cells (never a strict subset) and any other basis is not an upgrade, so neither is declared.
+F7_LEGACY_BASES: Final = frozenset(("funding_trade",))
 _CARRIED: Final = frozenset(("carry", "recent_fill"))
 
 type ArmStatus = Literal["equal", "declared", "different", "not_comparable", "error"]
@@ -256,7 +265,8 @@ def declare_divergence(
 
     A group qualifies when the seed basis holds its (symbol, period, opening) as
     ``recent_fill``, the ledger still holds it carried with exactly the seed's cells, and
-    legacy names a strict subset of those cells for the same credit and amount. Their extra
+    legacy, by its exact funding-trade upgrade (``F7_LEGACY_BASES``), names a strict subset of
+    those cells for the same credit and amount. Their extra
     exposure (and the unattributed amount they move) is added to the legacy answer, whose
     budget is re-evaluated with legacy's own policy; only an exact match declares.
     """
@@ -273,7 +283,7 @@ def declare_divergence(
                 or group.attribution_basis not in _CARRIED or group.cells != seed_cells):
             continue
         entry = legacy_by_key.get((kind, venue_id))
-        if entry is None:
+        if entry is None or entry.get("basis") not in F7_LEGACY_BASES:
             continue
         legacy_cells = frozenset(str(cell) for cell in entry.get("cells") or ())
         if not legacy_cells < group.cells or Decimal(str(entry.get("amount"))) != group.amount:
@@ -307,6 +317,93 @@ def declare_divergence(
     return tuple(evidence)
 
 
+def _nonzero(values: Mapping[str, Decimal]) -> dict[str, Decimal]:
+    return {key: value for key, value in values.items() if value != 0}
+
+
+async def bind_observation(session: AsyncSession, observation: CutoverObservation) -> list[dict[str, object]]:
+    """Why the observation file is not the runner's accepted ledger observation (empty: bound).
+
+    F3 (i') holds only if both arms read the same REST responses. The file names the runner's
+    ledger observation; that observation must be the scope's latest query, venue-origin and
+    accepted (never the seed's), carry the file's digests and query times, and hold exactly the
+    file's first observation: its live offers, live credits and funding wallets.
+    """
+    ref, event = observation.ledger, observation.event
+    account, environment = observation.account_id, observation.environment
+    problems: list[dict[str, object]] = []
+
+    def problem(reason: str, **evidence: object) -> None:
+        problems.append({"reason": reason, **{k: _json(v) for k, v in sorted(evidence.items())}})
+
+    latest = (await session.execute(
+        select(LedgerObservationQueryRow.query_id, LedgerObservationQueryRow.started_at_ms)
+        .where(LedgerObservationQueryRow.exchange_account_id == account,
+               LedgerObservationQueryRow.deployment_environment == environment)
+        .order_by(LedgerObservationQueryRow.query_revision.desc()).limit(1))).first()
+    if latest is None or latest.query_id != ref.query_id:
+        problem("observation_not_latest_query", file=ref.query_id,
+                latest=None if latest is None else latest.query_id)
+    row = (await session.execute(select(
+        LedgerObservationRow.query_id, LedgerObservationRow.exchange_account_id,
+        LedgerObservationRow.deployment_environment, LedgerObservationRow.origin,
+        LedgerObservationRow.accepted, LedgerObservationRow.query_finished_at_ms,
+        LedgerObservationRow.confirmation_finished_at_ms, LedgerObservationRow.first_digest,
+        LedgerObservationRow.confirmation_digest,
+    ).where(LedgerObservationRow.id == ref.observation_id))).first()
+    if row is None:
+        problem("observation_missing", observation_id=ref.observation_id)
+        return problems
+    if (row.query_id, row.exchange_account_id, row.deployment_environment) != (
+        ref.query_id, account, environment,
+    ):
+        problem("observation_identity_mismatch", observation_id=ref.observation_id)
+    if row.origin != "venue" or not row.accepted:
+        problem("observation_not_accepted_venue", origin=row.origin, accepted=row.accepted)
+    if (row.first_digest, row.confirmation_digest) != (ref.first_digest, ref.confirmation_digest):
+        problem("observation_digest_mismatch")
+    started = await session.scalar(select(LedgerObservationQueryRow.started_at_ms).where(
+        LedgerObservationQueryRow.query_id == row.query_id))
+    times = (started, row.query_finished_at_ms, row.confirmation_finished_at_ms)
+    expected = (event.query_started_at_ms, event.query_finished_at_ms,
+                observation.confirmation.query_finished_at_ms)
+    if times != expected:
+        problem("observation_times_mismatch", ledger=list(times), file=list(expected))
+    offers = {
+        (o.venue_offer_id, o.symbol, o.amount_original, o.amount_remaining) for o in event.offers
+    }
+    ledger_offers = set((await session.execute(select(
+        LedgerObservationOfferRow.venue_offer_id, LedgerObservationOfferRow.symbol,
+        LedgerObservationOfferRow.amount_original, LedgerObservationOfferRow.amount_remaining,
+    ).where(LedgerObservationOfferRow.observation_id == ref.observation_id))).tuples().all())
+    if offers != ledger_offers:
+        problem("observation_offers_differ", file_only=sorted(map(str, offers - ledger_offers)),
+                ledger_only=sorted(map(str, ledger_offers - offers)))
+    credits = {
+        (legacy_credit_key(c.credit_id), c.symbol, c.amount, c.period_days, c.mts_opening)
+        for c in event.credits
+    }
+    ledger_credits = {
+        ((kind, venue_id), symbol, amount, period, opening)
+        for kind, venue_id, symbol, amount, period, opening in (await session.execute(select(
+            LedgerObservationCreditRow.source_kind, LedgerObservationCreditRow.venue_credit_id,
+            LedgerObservationCreditRow.symbol, LedgerObservationCreditRow.amount,
+            LedgerObservationCreditRow.period_days, LedgerObservationCreditRow.mts_opening,
+        ).where(LedgerObservationCreditRow.observation_id == ref.observation_id))).tuples()
+    }
+    if credits != ledger_credits:
+        problem("observation_credits_differ", file_only=sorted(map(str, credits - ledger_credits)),
+                ledger_only=sorted(map(str, ledger_credits - credits)))
+    wallets: dict[str, Decimal] = {str(symbol): amount for symbol, amount in (await session.execute(select(
+        LedgerObservationWalletRow.symbol, LedgerObservationWalletRow.available,
+    ).where(LedgerObservationWalletRow.observation_id == ref.observation_id,
+            LedgerObservationWalletRow.wallet_type == "funding",
+            LedgerObservationWalletRow.symbol.is_not(None)))).tuples().all()}
+    if _nonzero(dict(event.wallet_available)) != _nonzero(wallets):
+        problem("observation_wallets_differ")
+    return problems
+
+
 async def compare_ledger_arm(
     session: AsyncSession, *, scope: CapitalScope, evaluated: ObservedScope,
     ledger_reader: LedgerCapitalReader, now_ms: int, max_snapshot_age_ms: int,
@@ -327,6 +424,10 @@ async def compare_ledger_arm(
             return ArmResult(ARM, scope, "not_comparable", reason="policy_missing", evidence={
                 "table": "capital_policy_heads", "symbol": scope.symbol,
             })
+        unbound = await bind_observation(session, evaluated.observation)
+        if unbound:
+            return ArmResult(ARM, scope, "not_comparable", reason="observation_binding_mismatch",
+                             evidence={"problems": unbound})
         legacy: ObservedResult = await read_observed_baseline(
             session, evaluated, scope=scope, now_ms=now_ms, max_snapshot_age_ms=max_snapshot_age_ms,
         )
@@ -335,6 +436,10 @@ async def compare_ledger_arm(
         )
     except Exception as exc:
         return ArmResult(ARM, scope, "error", reason=type(exc).__name__)
+    if read.query_id != evaluated.observation.ledger.query_id:
+        return ArmResult(ARM, scope, "not_comparable", reason="observation_binding_mismatch",
+                         evidence={"problems": [{"reason": "ledger_read_on_another_query",
+                                                 "read": _json(read.query_id)}]})
     if isinstance(legacy, BaselineNotComparable):
         return ArmResult(ARM, scope, "not_comparable", reason=legacy.reason, evidence={
             "projection_cursor": legacy.projection_cursor, "watermark": legacy.watermark,
@@ -402,6 +507,7 @@ __all__ = [
     "CreditGroup",
     "arm_json",
     "basis_groups",
+    "bind_observation",
     "compare_ledger_arm",
     "declare_divergence",
     "differences",

@@ -13,7 +13,11 @@ Mutations (apply one at a time, run this file, revert; the test that fails is na
 * the command's transaction without ``READ ONLY``: ``test_seeded_state_compares_equal_under_the_reader``
   (the guard's attestation refuses it, exit 3);
 * ``declare_divergence`` returns its evidence without re-checking the adjusted legacy answer:
-  ``test_f7_divergence_with_any_other_difference_stays_different``.
+  ``test_f7_divergence_with_any_other_difference_stays_different``;
+* ``window_start_ms`` takes the latest query start: ``test_the_window_is_bounded_by_the_injected_clock``;
+* ``compare_ledger_arm`` skips ``bind_observation``: ``...[observation_content_differs]``,
+  ``...[observation_wallet_differs]``, ``test_a_ledger_still_on_the_seed_basis_is_never_compared``;
+* the post-runner mirror -> legacy direction dropped: ``...[unknown_live_mirror_row]``.
 """
 from __future__ import annotations
 
@@ -152,6 +156,14 @@ def _perturb_wallet(observation: dict[str, Any]) -> dict[str, Any]:
     return changed
 
 
+def _move_legacy_decision(db: Any, venue_offer_id: str, cell: str) -> None:
+    """The legacy decision behind an offer names another cell: legacy (i') moves its exposure,
+    the ledger (seeded attempts) does not. The observation stays the runner's, so it binds."""
+    owner(db, *_without_triggers("execution_decisions",
+          f"UPDATE execution_decisions SET cell_id = '{cell}' WHERE decision_id = "
+          f"(SELECT execution_decision_id FROM offer_claims WHERE venue_offer_id = '{venue_offer_id}')"))
+
+
 def _without_triggers(table: str, *statements: str) -> tuple[str, ...]:
     return (f"ALTER TABLE {table} DISABLE TRIGGER USER", *statements,
             f"ALTER TABLE {table} ENABLE TRIGGER USER")
@@ -202,10 +214,34 @@ def _inject(state: Cutover, name: str) -> dict[str, Any]:
         owner(db, *_without_triggers("uncertainty_resolution_requests",
               "UPDATE uncertainty_resolution_requests SET outcome_reason = 'expired' "
               f"WHERE request_id = '{request}'"))
+    elif name == "observation_from_another_query":  # the file names another ledger query
+        changed = copy.deepcopy(state.observation)
+        changed["observations"][0]["ledger"]["query_id"] = str(uuid4())
+        return {"observation": changed}
+    elif name == "observation_wallet_differs":
+        return {"observation": _perturb_wallet(state.observation)}
+    elif name == "observation_content_differs":  # not the responses the runner accepted
+        changed = copy.deepcopy(state.observation)
+        for part in ("event", "confirmation"):
+            offers = changed["observations"][0][part]["offers"]
+            changed["observations"][0][part]["offers"] = [
+                o for o in offers if o["venue_offer_id"] != "7006"]
+        return {"observation": changed}
+    elif name == "unknown_live_mirror_row":  # a live mirror offer neither legacy nor observed
+        observation = seed["observation_id"]
+        owner(db, *_without_triggers("venue_offer_mirror",
+              "INSERT INTO venue_offer_mirror (exchange_account_id, deployment_environment, "
+              "venue_offer_id, symbol, amount_original, amount_remaining, rate, rate_observed, "
+              "period_days, offer_type, flags, status, mts_created, mts_updated, "
+              "last_accepted_observation_id, present_in_latest_accepted_snapshot) "
+              "SELECT exchange_account_id, deployment_environment, '7999', symbol, "
+              "amount_original, amount_remaining, rate, rate_observed, period_days, offer_type, "
+              f"flags, status, mts_created, mts_updated, '{observation}', true "
+              "FROM venue_offer_mirror WHERE venue_offer_id = '7001'"))
     elif name == "cell_without_policy":  # a listed cell whose symbol has no policy head
         return {"extra_cells": ("fBTC_a30",)}
-    elif name == "legacy_value_perturbed":
-        return {"observation": _perturb_wallet(state.observation)}
+    elif name == "legacy_value_perturbed":  # legacy state the seed did not read moved
+        _move_legacy_decision(db, "7002", CELL_B)
     else:
         raise AssertionError(name)
     return {}
@@ -223,6 +259,14 @@ DISCREPANCIES: dict[str, tuple[bool, set[str], dict[str, str] | None, str]] = {
     "trading_state_moved": (False, {"trading_state_moved"}, None, "ok"),
     "failed_request_not_terminal": (True, {"failed_request_not_terminal"}, None, "ok"),
     "legacy_value_perturbed": (False, set(), {CELL: "different", CELL_B: "different"}, "ok"),
+    "observation_from_another_query": (
+        False, set(), {CELL: "not_comparable", CELL_B: "not_comparable"}, "ok"),
+    "observation_wallet_differs": (
+        False, set(), {CELL: "not_comparable", CELL_B: "not_comparable"}, "ok"),
+    "observation_content_differs": (
+        False, set(), {CELL: "not_comparable", CELL_B: "not_comparable"}, "ok"),
+    "unknown_live_mirror_row": (
+        False, {"live_mirror_offer_neither_legacy_nor_observed"}, None, "ok"),
     "cell_without_policy": (
         False, set(), {CELL: "equal", CELL_B: "equal", "fBTC_a30": "not_comparable"}, "ok"),
 }
@@ -245,6 +289,16 @@ async def test_each_discrepancy_fails_the_run(
     assert summary["inventory_status"] == inventory
     assert summary["arms"]["closure"]["passed"] is (not reasons)
     assert summary["arms"]["ledger_reader"]["passed"] is (statuses is None)
+    if name.startswith("observation_"):  # R1-2: never compared against another observation
+        for row in arms(rows).values():
+            assert row["reason"] == "observation_binding_mismatch", row
+        problems = {p["reason"] for p in arms(rows)[CELL]["evidence"]["problems"]}
+        assert problems == {
+            "observation_from_another_query": {"observation_not_latest_query",
+                                               "observation_identity_mismatch"},
+            "observation_content_differs": {"observation_offers_differ"},
+            "observation_wallet_differs": {"observation_wallets_differ"},
+        }[name], problems
     if name == "cell_without_policy":
         assert arms(rows)["fBTC_a30"]["reason"] == "policy_missing"
 
@@ -256,8 +310,13 @@ async def test_the_window_is_bounded_by_the_injected_clock(
     state = await build_cutover(bot_env, ledger_db, monkeypatch, tmp_path, unknown=False)
     code, rows = await run_comparison(state, end=state.window_start + 300_000)
     assert code == 0, rows[-1]
+    # R1-1: the window starts at the FIRST observation's query start, so an end still within
+    # 300 s of the confirmation's start fails.
+    confirmation_start = state.observation["observations"][0]["confirmation"]["query_started_at_ms"]
+    assert state.window_start < confirmation_start <= state.window_start + 300_001 - 1
+    assert state.window_start + 300_001 - confirmation_start <= 300_000
     code, rows = await run_comparison(state, end=state.window_start + 300_001)
-    assert code == 1 and rows[-1]["window"]["ok"] is False
+    assert code == 1 and rows[-1]["window"]["ok"] is False, (rows[-1].get("window"), rows[-1])
     assert rows[-1]["arms"]["ledger_reader"]["passed"] and rows[-1]["arms"]["closure"]["passed"]
     code, rows = await run_comparison(state, as_of=state.as_of - 1)
     assert code == 3 and rows[-1]["reason"] == "as_of_mismatch"
@@ -303,6 +362,24 @@ async def test_f7_divergence_with_any_other_difference_stays_different(
 ) -> None:
     state = await build_cutover(bot_env, ledger_db, monkeypatch, tmp_path, unknown=False,
                                 before_seed=_sync_recent_trade)
-    code, rows = await run_comparison(state, observation=_perturb_wallet(state.observation))
+    _move_legacy_decision(ledger_db, "7002", CELL_B)
+    code, rows = await run_comparison(state)
     assert code == 1
-    assert arms(rows)[CELL_B]["status"] == "different"
+    assert arms(rows)[CELL_B]["status"] == "different" and arms(rows)[CELL_B]["declared"] == []
+
+
+async def test_a_ledger_still_on_the_seed_basis_is_never_compared(
+    bot_env: BotEnv, ledger_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Any,  # noqa: F811
+) -> None:
+    """R1-2: no runner observation yet; the file names the seed's observation. Both scopes are
+    ``not_comparable`` (a seed observation is not an accepted venue observation)."""
+    state = await build_cutover(bot_env, ledger_db, monkeypatch, tmp_path, unknown=False,
+                                runner=False)
+    code, rows = await run_comparison(state)
+    assert code == 1, rows[-1]
+    for row in arms(rows).values():
+        assert (row["status"], row["reason"]) == ("not_comparable", "observation_binding_mismatch")
+        problems = {p["reason"] for p in row["evidence"]["problems"]}
+        assert "observation_not_accepted_venue" in problems, problems
+    assert closure_reasons(rows) == set()  # the capture point itself is clean
+    assert rows[-1]["arms"]["closure"]["passed"] and not rows[-1]["arms"]["ledger_reader"]["passed"]

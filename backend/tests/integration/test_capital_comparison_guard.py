@@ -190,6 +190,8 @@ def args(tmp_path: Path, world: World, login: str) -> list[str]:
             "event": serialize_event(event),
             "confirmation": serialize_event(replace(
                 event, query_started_at_ms=1050, query_finished_at_ms=1060, event_id=uuid4())),
+            "ledger": {"query_id": str(uuid4()), "observation_id": str(uuid4()),
+                       "first_digest": "0" * 64, "confirmation_digest": "0" * 64},
         }],
     }))
     scope = {"account_id": str(world.account), "environment": ENVIRONMENT}
@@ -227,13 +229,14 @@ async def test_runbook_shape_reaches_the_arms_without_permission_errors(
     world, tmp_path, monkeypatch
 ) -> None:
     """The command gets past attestation and inventory and runs both cutover arms. This world
-    has no seed and no ledger basis, so the run fails on evidence, never on a privilege."""
+    has no seed and no ledger observation, so the run fails on evidence, never on a privilege."""
     code, rows = await run_command(tmp_path, world, world.login(), monkeypatch)
     assert code == 1, rows[-1]
     assert rows[0]["kind"] == "inventory" and rows[0]["status"] == "ok"
     arms = [row for row in rows if row["kind"] == "arm"]
-    assert [row["status"] for row in arms] == ["different", "different"]
-    assert all(row["ledger"] == {"kind": "blocked", "reason": "snapshot_unavailable"} for row in arms)
+    # No runner observation exists in this world, so the file binds to nothing.
+    assert [(row["status"], row["reason"]) for row in arms] == [
+        ("not_comparable", "observation_binding_mismatch")] * 2
     closure = [row for row in rows if row["kind"] == "closure"]
     assert {v["reason"] for row in closure for v in row["violations"]} == {
         "seed_observation_mismatch", "seed_basis_mismatch", "legacy_final_snapshot_moved",

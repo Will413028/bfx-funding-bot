@@ -29,6 +29,7 @@ from sqlalchemy import text
 from bfx_funding_bot.apps.capital_comparison_ledger import compare_ledger_arm
 from bfx_funding_bot.modules.execution.capital_observed_baseline import (
     CutoverObservation,
+    LedgerObservationRef,
     evaluate_scope,
 )
 from bfx_funding_bot.modules.execution.capital_repository import (
@@ -280,7 +281,8 @@ async def test_the_arm_refuses_a_read_write_transaction(capital_db: Any) -> None
     repo = repository(account)
     _POLICY[account] = await setup_policy(factory, repo, "0", "0.70")
     event, confirmation = await _plain(factory, repo)
-    observed = CutoverObservation(account, "ci", event, confirmation)
+    observed = CutoverObservation(account, "ci", event, confirmation,
+                                  LedgerObservationRef(uuid4(), uuid4(), "0", "0"))
     async with factory() as session, session.begin():
         with pytest.raises(ValueError, match="repeatable_read_read_only_required"):
             await evaluate_scope(session, observed, now_ms=1060, max_snapshot_age_ms=10_000)

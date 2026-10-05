@@ -16,7 +16,10 @@ evidence; any violation makes the run exit non-zero.
     outcome (or a bound resolution) naming them, classified ``reflected``; legacy managed and
     foreign offers <-> the seed observation's live offers; and the live mirror: at the capture
     point (the scope's latest ledger query is the seed's) the mirror's live rows of the seed
-    observation, after it (the runner has observed since) a mirror row for each.
+    observation, both directions; after it (the runner has observed since) a mirror row for each
+    legacy live offer, and every live mirror row legacy did not know is in the runner's (latest)
+    observation. The capture-point mode is the stronger one: run it on the isolated DR copy
+    right after the seed, before prod (ARCHITECTURE "Cutover comparison").
 ``attempts`` (2)
     legacy attempts the final snapshot did not settle or reflect <-> seeded ``unresolved`` attempts
     with the same outcome kind; settled and reflected ones <-> seeded ones of the same class.
@@ -384,9 +387,27 @@ async def _live_offers(session: AsyncSession, key: Key, anchor: _Anchor, seeded:
                             ours | foreign, live)
         violations += [_v("live_mirror_not_from_seed", venue_offer_id=v) for v in sorted(stale)]
     else:
+        # The runner has observed since: the mirror is its book now. Legacy -> mirror: a row for
+        # each legacy live offer. Mirror -> legacy: a live row legacy did not know must come from
+        # the runner's (latest) observation, never from the seed or anywhere else.
         known = {row.venue_offer_id for row in mirror}
         violations += [_v("legacy_offer_without_mirror_row", venue_offer_id=v)
                        for v in sorted((ours | foreign) - known)]
+        latest = await session.scalar(
+            select(LedgerObservationRow.id)
+            .join(LedgerObservationQueryRow,
+                  LedgerObservationQueryRow.query_id == LedgerObservationRow.query_id)
+            .where(*_scoped(LedgerObservationQueryRow, key))
+            .order_by(LedgerObservationQueryRow.query_revision.desc()).limit(1))
+        observed = set() if latest is None else set(await session.scalars(
+            select(LedgerObservationOfferRow.venue_offer_id).where(
+                LedgerObservationOfferRow.observation_id == latest)))
+        violations += [
+            _v("live_mirror_offer_neither_legacy_nor_observed", venue_offer_id=row.venue_offer_id)
+            for row in sorted(mirror, key=lambda r: r.venue_offer_id)
+            if row.present_in_latest_accepted_snapshot and row.venue_offer_id not in ours | foreign
+            and (row.last_accepted_observation_id != latest or row.venue_offer_id not in observed)
+        ]
     return ClosureCheck("live_offers", *key, tuple(violations), {
         "mirror_check": "capture_point" if anchor.capture_point else "after_capture_point",
         "legacy_managed": len(ours), "legacy_foreign": len(foreign), "seed_live": len(seed_live),

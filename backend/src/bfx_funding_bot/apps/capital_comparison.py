@@ -19,7 +19,7 @@ Arms, all in one REPEATABLE READ READ ONLY transaction:
   ledger capital reader, both at the manifest's as-of ``now_ms``,
   ``capital_comparison_ledger``) and ``closure`` (the seed is the legacy closure,
   ``capital_comparison_closure``). The as-of must equal the observation's completion
-  instant, and the wall clock from the last observation's query start to the end of the
+  instant, and the wall clock from the earliest observation's query start to the end of the
   command must stay within ``CAPITAL_MAX_SNAPSHOT_AGE_MS`` (Q6). Exit 0 only if every arm
   passes, the inventory is clean and the window holds.
 """
@@ -306,7 +306,7 @@ async def compare_cutover(
 
 
 def finish_cutover(summary: dict[str, object], *, window_start: int, now: int, limit_ms: int) -> dict[str, object]:
-    """Q6's wall-clock window (last observation's query start -> command end) and the exit code."""
+    """Q6's wall-clock window (earliest observation query start -> command end) and the exit code."""
     elapsed = now - window_start
     window_ok = 0 <= elapsed <= limit_ms
     arms = summary["arms"]

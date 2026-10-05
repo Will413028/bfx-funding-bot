@@ -15,12 +15,16 @@ Observation file (JSON object)::
     {"format": "bfx-cutover-observation", "version": 1,
      "observations": [{"account_id": "<uuid>", "environment": "prod|shadow|ci",
                        "event": <serialize_event(VenueSnapshotObserved)>,
-                       "confirmation": <serialize_event(VenueSnapshotObserved)>}]}
+                       "confirmation": <serialize_event(VenueSnapshotObserved)>,
+                       "ledger": {"query_id": "<uuid>", "observation_id": "<uuid>",
+                                  "first_digest": "<hex>", "confirmation_digest": "<hex>"}}]}
 
 One entry per (account, environment); ``event`` carries the offer history, ``confirmation`` is
 the second observation (legacy ``BootRecovery.run``'s shape). The acceptance products
 (``capital_query_id``, ``capital_command_fence``, ``capital_confirmation``,
-``capital_classification_digest``) must be absent: this arm derives them.
+``capital_classification_digest``) must be absent: this arm derives them. ``ledger`` names the
+cutover observation the runner wrote from the same responses; the comparison binds the entry
+to it (``apps/capital_comparison_ledger.bind_observation``) before either arm counts.
 
 Deleted with the legacy authority (S1-8).
 """
@@ -74,11 +78,22 @@ class ObservationRejectedError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class LedgerObservationRef:
+    """The runner's ledger observation of the same REST responses (its identity and digests)."""
+
+    query_id: UUID
+    observation_id: UUID
+    first_digest: str
+    confirmation_digest: str
+
+
+@dataclass(frozen=True, slots=True)
 class CutoverObservation:
     account_id: UUID
     environment: str
     event: VenueSnapshotObserved
     confirmation: VenueSnapshotObserved
+    ledger: LedgerObservationRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,11 +148,21 @@ def parse_observations(payload: object) -> tuple[CutoverObservation, ...]:
     found: dict[tuple[UUID, str], CutoverObservation] = {}
     for item in payload["observations"]:
         if not isinstance(item, dict) or set(item) != {
-            "account_id", "environment", "event", "confirmation",
+            "account_id", "environment", "event", "confirmation", "ledger",
         }:
             raise ObservationRejectedError("observation_entry_invalid")
+        ledger = item["ledger"]
         try:
             account = UUID(str(item["account_id"]))
+            if not isinstance(ledger, dict) or set(ledger) != {
+                "query_id", "observation_id", "first_digest", "confirmation_digest",
+            } or not all(isinstance(ledger[k], str) and ledger[k]
+                         for k in ("first_digest", "confirmation_digest")):
+                raise ValueError
+            ref = LedgerObservationRef(
+                UUID(str(ledger["query_id"])), UUID(str(ledger["observation_id"])),
+                ledger["first_digest"], ledger["confirmation_digest"],
+            )
         except ValueError:
             raise ObservationRejectedError("observation_entry_invalid") from None
         environment = item["environment"]
@@ -149,14 +174,20 @@ def parse_observations(payload: object) -> tuple[CutoverObservation, ...]:
                 raise ObservationRejectedError("observation_scope_mismatch")
         if (account, environment) in found:
             raise ObservationRejectedError("observation_scope_duplicate")
-        found[(account, environment)] = CutoverObservation(account, environment, event, confirmation)
+        found[(account, environment)] = CutoverObservation(
+            account, environment, event, confirmation, ref,
+        )
     return tuple(found.values())
 
 
 def window_start_ms(observations: Sequence[CutoverObservation]) -> int:
-    """The last REST observation's query start: where Q6's 300 s window begins."""
-    return max(
-        max(o.event.query_started_at_ms, o.confirmation.query_started_at_ms)
+    """Where Q6's 300 s window begins: the earliest query start of any account's observations.
+
+    Legacy classifies the first observation (``event``), so the window must cover its data,
+    for the oldest account too (ADR Followup: freshness is never relaxed).
+    """
+    return min(
+        min(o.event.query_started_at_ms, o.confirmation.query_started_at_ms)
         for o in observations
     )
 
@@ -261,6 +292,7 @@ __all__ = [
     "OBSERVATION_FORMAT",
     "OBSERVATION_VERSION",
     "CutoverObservation",
+    "LedgerObservationRef",
     "ObservationRejectedError",
     "ObservedAvailable",
     "ObservedResult",
