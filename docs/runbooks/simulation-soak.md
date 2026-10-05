@@ -86,7 +86,7 @@ grep -c '^DATABASE_URL=.*/bfx_sim$' /opt/bfx/runtime/sim-migrate.env          # 
   printf 'BFX_ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)"
   printf 'BFX_EXCHANGE_ACCOUNT_ID=%s\n' "$SIM_ACCOUNT"
   printf 'BFX_SIM_INITIAL_WALLETS=UST:%s\n' "<prod funding wallet 的整數金額>"
-  printf 'BFX_SIM_FAULTS=%s\n' "unknown_5xx=0.15,unknown_placed_lost=0.10,history_error=0.005,seed=1"
+  printf 'BFX_SIM_FAULTS=%s\n' "unknown_5xx=0.01,unknown_5xx_at=3,unknown_placed_lost=0.005,history_error=0.005,seed=1"
 } > /opt/bfx/runtime/sim.env
 grep -c '^DATABASE_URL=postgresql://bfx_bot:.*/bfx_sim$' /opt/bfx/runtime/sim.env   # 必須印 1
 ```
@@ -97,9 +97,10 @@ grep -c '^DATABASE_URL=postgresql://bfx_bot:.*/bfx_sim$' /opt/bfx/runtime/sim.en
   （後者是 prod ledger 的 row 名）。
 - `BFX_SIM_INITIAL_WALLETS` 只在 venue log 為空時生效（第一代）；之後各代不會再注資。
 - **`BFX_SIM_FAULTS`**（決定 A）：整個視窗（24 小時）都開，種子化、每個請求獨立抽籤。rate 與 seed 在開跑前定案。
-  submit 的兩條 rate 依 2026-10-05 修訂調高，讓 24 小時內至少一筆注入的 UNKNOWN 的機率 ≥ 99%：單筆 submit 被注入的機率 p = 1 − (1 − 0.15)(1 − 0.10) = 0.235；
-  sim 24 小時的 submit 數估 20–50 筆（舊 rate 0.015 下零注入機率 47–74%，反推），扣掉 kill 的 HALTED 時段與重啟後取 n = 18：(1 − 0.235)^18 = 0.8%，即 P(≥ 1) ≈ 99.2%（n = 20 為 99.5%，n = 50 約 100%）。
-  `history_error` 不變。開跑後第一個小時看 `fault_injected` 事件數與 submit 數是否合這個估計；偏離就在 §9 前依 ADR 修訂（開跑前可改，開跑後改要重新計時）。
+  24 小時內要有 ≥ 1 筆注入的 UNKNOWN，但機率規則保證不了（nonce 是 bot 的掛鐘微秒，事先算不出哪個 nonce 會中，所以調 seed 也不行；
+  舊 rate 0.015 下 sim 24 小時約 20–50 筆 submit，零注入機率估 47–74%）。因此加 `unknown_5xx_at=3`：每個 process 的**第 3 筆 submit** 必定注入
+  （ordinal 是 process 內每種請求各自的計數，每次重啟從 1 重數，所以**每一代重啟後的第 3 筆 submit 都會再注入一次**），機率 rate 維持低值（決定 A）。
+  `unknown_5xx_at=3+7` 可列多個 ordinal；格式嚴格（ordinal ≥ 1、不重複、同一個 knob 只能寫一次）。
   抽籤的鍵是 `(seed, 規則, 目標, 請求 nonce)`：venue 的 nonce 持久且只增不減，重啟後不會重演舊的抽籤，所以各代不需要換 seed。
   只作用在 simulated venue 行程內的 transport（submit 與 history），不會到 Bitfinex；Bitfinex 組裝見到這個變數會拒絕開機。
   每一次注入都以 `fault_injected` 事件寫進 `sim_venue_event`（跨重啟存在；submit 的注入連同 symbol、amount、rate、period 一起記），

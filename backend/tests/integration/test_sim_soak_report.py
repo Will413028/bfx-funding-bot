@@ -75,6 +75,8 @@ class Soak:
     acked_from: int = 3 * HOUR  # offset of the first acked submit
     injected_unknown: int = 5
     record_injections: bool = True
+    injected_kind: str = "unknown_placed_lost"
+    injected_ordinal: int | None = None  # None: the injection's index + 1
     organic_unknown: int = 0
     organic_quarantine: int = 0
     injected_quarantine_open: bool = False
@@ -240,7 +242,8 @@ async def seed(conn: AsyncConnection, soak: Soak) -> None:
             soak.injected_attempts.append(attempt)
             if soak.record_injections:
                 await _event(conn, soak, ev.FaultInjected(
-                    "unknown_placed_lost", "submit", index + 1, 1, "fUST", D150, D0002, 2,
+                    soak.injected_kind, "submit",
+                    soak.injected_ordinal or index + 1, 1, "fUST", D150, D0002, 2,
                     started + 1_000))
                 if index == 0 and soak.overlapping_organic:
                     # another UNKNOWN, of another amount, that began first and ends last: it
@@ -365,6 +368,16 @@ async def test_expiry_settlement_and_cancels_are_reported_but_never_fail(engine,
     assert _failing(by_id) == set(), _statuses(by_id)
     assert by_id["info.credits_closed_by_expiry"].evidence == {"credit_closed_expired": 0}
     assert by_id["info.cancels"].evidence == {"offer_canceled": 0}
+
+
+async def test_an_ordinal_injection_counts_like_a_probability_one(engine, tmp_path) -> None:
+    """``unknown_5xx_at=3``: the injection is the same durable event (kind, ordinal 3), and the
+    report matches it to its UNKNOWN attempt by content, not by how the draw was made."""
+    by_id = await _report(engine, Soak(
+        injected_unknown=1, injected_kind="unknown_5xx_error", injected_ordinal=3),
+        tmp_path=tmp_path)
+    assert _failing(by_id) == set(), _statuses(by_id)
+    assert by_id["d3.injected_unknown_auto_closed"].evidence["injected_unknown"] == 1
 
 
 async def test_zero_injected_unknown_fails_the_bar(engine, tmp_path) -> None:

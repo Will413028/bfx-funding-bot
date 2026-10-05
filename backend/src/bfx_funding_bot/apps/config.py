@@ -252,6 +252,7 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         "simulated_initial_wallets": _initial_wallets(),
         "simulated_faults": dict(sim_faults.rates),
         "simulated_fault_seed": sim_faults.seed,
+        "simulated_fault_ordinals": dict(sim_faults.ordinals),
         "cells": cells,
         "database_url": database_url,
         "deployment_environment": deployment_environment,

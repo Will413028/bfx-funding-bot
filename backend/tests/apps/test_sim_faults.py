@@ -36,6 +36,9 @@ def test_empty_means_no_faults() -> None:
     "unknown_5xx", "unknown_5xx=", "=0.1", "unknown_5xx=abc", "unknown_5xx=1.5",
     "unknown_5xx=-0.1", "unknown_5xx=nan", "nope=0.1", "unknown_5xx=0.1,unknown_5xx=0.2",
     "seed=x", "seed=-1", "seed=1,seed=2", "unknown_5xx=0.1,",
+    "unknown_5xx_at=0", "unknown_5xx_at=-1", "unknown_5xx_at=x", "unknown_5xx_at=",
+    "unknown_5xx_at=3+3", "unknown_5xx_at=3+", "unknown_5xx_at=3,unknown_5xx_at=4",
+    "nope_at=3",
 ])
 def test_unreadable_specs_are_refused(raw: str) -> None:
     with pytest.raises(ValueError, match="BFX_SIM_FAULTS"):
@@ -73,9 +76,13 @@ def test_a_zero_rate_adds_no_rule() -> None:
 
 @pytest.mark.parametrize("config", [
     SimpleNamespace(venue="bitfinex", simulated_initial_wallets={},
-                    simulated_faults={"unknown_5xx": 0.01}, simulated_fault_seed=0),
+                    simulated_faults={"unknown_5xx": 0.01}, simulated_fault_seed=0,
+                    simulated_fault_ordinals={}),
     SimpleNamespace(venue="bitfinex", simulated_initial_wallets={},
-                    simulated_faults={}, simulated_fault_seed=5),
+                    simulated_faults={}, simulated_fault_seed=5, simulated_fault_ordinals={}),
+    SimpleNamespace(venue="bitfinex", simulated_initial_wallets={},
+                    simulated_faults={}, simulated_fault_seed=0,
+                    simulated_fault_ordinals={"unknown_5xx": (3,)}),
 ])
 async def test_the_bitfinex_venue_refuses_the_fault_knob(config: SimpleNamespace) -> None:
     with pytest.raises(ConfigurationError, match="BFX_SIM_FAULTS is only valid"):
@@ -85,3 +92,30 @@ async def test_the_bitfinex_venue_refuses_the_fault_knob(config: SimpleNamespace
             db_engine=None, bitfinex_http=None, bitfinex=None,  # type: ignore[arg-type]
             clock=lambda: 0, metrics=None,  # type: ignore[arg-type]
         )
+
+
+def test_an_ordinal_knob_parses_alone_or_as_a_list() -> None:
+    assert dict(parse_sim_faults("unknown_5xx_at=3").ordinals) == {"unknown_5xx": (3,)}
+    spec = parse_sim_faults("unknown_5xx=0.01,unknown_5xx_at=7+3,history_error_at=2,seed=1")
+    assert dict(spec.ordinals) == {"unknown_5xx": (3, 7), "history_error": (2,)}
+    assert dict(spec.rates) == {"unknown_5xx": 0.01}
+
+
+def test_fault_plan_maps_an_ordinal_knob_onto_the_rule_ordinals() -> None:
+    plan = fault_plan(parse_sim_faults(
+        "unknown_5xx=0.01,unknown_5xx_at=3,unknown_placed_lost=0.005,"
+        "unknown_not_placed_lost_at=4,seed=2"))
+    assert [(r.target, r.kind, r.probability, r.ordinals) for r in plan.rules] == [
+        (FaultTarget.SUBMIT, FaultKind.UNKNOWN_5XX_ERROR, 0.01, frozenset({3})),
+        (FaultTarget.SUBMIT, FaultKind.UNKNOWN_PLACED_LOST, 0.005, frozenset()),
+        (FaultTarget.SUBMIT, FaultKind.UNKNOWN_NOT_PLACED_LOST, 0.0, frozenset({4})),
+    ]
+
+
+def test_the_ordinal_fires_on_the_nth_submit_of_each_process_life() -> None:
+    from bfx_funding_bot.modules.simulated_venue._internal.faults import FaultInjector
+    plan = fault_plan(parse_sim_faults("unknown_5xx_at=3,seed=1"))
+    for _life in range(2):  # a new injector is a new process life: the ordinal restarts at 1
+        injector = FaultInjector(plan)
+        got = [injector.next_fault(FaultTarget.SUBMIT, nonce=10_000 + n) for n in range(1, 6)]
+        assert got == [None, None, FaultKind.UNKNOWN_5XX_ERROR, None, None]
