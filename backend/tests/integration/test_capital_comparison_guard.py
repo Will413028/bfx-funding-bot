@@ -2,7 +2,8 @@
 
 Every test runs against a real migrated database: the LOGIN is a ``NOINHERIT`` member of
 ``bfx_cutover_reader`` (the runbook shape), the guard does ``SET LOCAL ROLE`` to the group
-and the privilege scans read the real catalogs.
+and the privilege scans read the real catalogs. The whole cutover command under this shape,
+on a seeded database, is ``test_capital_comparison_cutover_e2e``.
 
 Mutations (apply one at a time, run this file, revert; the test that fails is named):
 
@@ -10,14 +11,14 @@ Mutations (apply one at a time, run this file, revert; the test that fails is na
   fails for the dropped scan's parameter;
 * drop the role-closure check: ``test_each_unsafe_shape_has_its_own_reason[role_closure_unexpected]``;
 * drop the role-attribute check: ``...[role_attribute_privileged]``;
-* skip ``SET LOCAL ROLE``: ``test_runbook_shape_passes_the_full_command`` (``reader_role_unavailable``);
+* skip ``SET LOCAL ROLE``: ``test_runbook_shape_passes_the_attestation`` (``reader_role_unavailable``);
 * make the reverse inventory ignore ``capital_policy_heads``:
   ``test_unlisted_policy_head_is_reported`` and ``test_every_authority_table_is_inventoried``.
 """
 
 import io
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -43,7 +44,13 @@ from bfx_funding_bot.apps.capital_comparison_inventory import (
 )
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
+from bfx_funding_bot.modules.execution.capital_observed_baseline import (
+    OBSERVATION_FORMAT,
+    OBSERVATION_VERSION,
+)
 from bfx_funding_bot.modules.execution.event_store.entities import VenueCreditObservation
+from bfx_funding_bot.modules.execution.event_store.serialization import serialize_event
+from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnapshotObserved
 from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES
 from bfx_funding_bot.modules.trading import CapitalScope
 from tests.integration.test_capital_repository import repository, setup_policy, snapshot
@@ -147,6 +154,9 @@ async def inventory(
 
 
 def args(tmp_path: Path, world: World, login: str) -> list[str]:
+    """Cutover argv with well-formed inputs: a runner observation of the world's account
+    (as-of 1060) and a committed seed's evidence (ids that need not exist: these tests stop at
+    the attestation)."""
     url = world.url.set(username=login, password=PASSWORD)
     manifest = tmp_path / "cutover.json"
     manifest.write_text(
@@ -158,6 +168,7 @@ def args(tmp_path: Path, world: World, login: str) -> list[str]:
                 "database": url.database,
                 "user": login,
                 "run_id": "integration",
+                "now_ms": 1060,
             }
         )
     )
@@ -166,10 +177,37 @@ def args(tmp_path: Path, world: World, login: str) -> list[str]:
         url.set(drivername="postgresql").render_as_string(hide_password=False)
     )
     dsn_file.chmod(0o600)
+    event = VenueSnapshotObserved(
+        account_id=str(world.account), environment=ENVIRONMENT, query_started_at_ms=1000,
+        query_finished_at_ms=1050, offers=(), credits=(), wallet_available={"fUST": Decimal(1)},
+        coverage=SnapshotCoverage(True, True, True),
+    )
+    observation = tmp_path / "observation.json"
+    observation.write_text(json.dumps({
+        "format": OBSERVATION_FORMAT, "version": OBSERVATION_VERSION,
+        "observations": [{
+            "account_id": str(world.account), "environment": ENVIRONMENT,
+            "event": serialize_event(event),
+            "confirmation": serialize_event(replace(
+                event, query_started_at_ms=1050, query_finished_at_ms=1060, event_id=uuid4())),
+        }],
+    }))
+    scope = {"account_id": str(world.account), "environment": ENVIRONMENT}
+    evidence = tmp_path / "seed.jsonl"
+    evidence.write_text("".join(json.dumps(line) + "\n" for line in (
+        {"kind": "seed", "scope": scope, "observation_id": str(uuid4()), "basis_id": str(uuid4()),
+         "watermarks": {"legacy_final_event_seq": 999_999, "snapshot_event_seq": 999_999,
+                        "snapshot_query_id": str(uuid4()), "trading_state_max_id": None},
+         "failed_uncertainty_requests": [],
+         "carried_requests": {"capital_policy_requests": [], "trading_control_requests": []}},
+        {"kind": "verification", "scope": scope, "mismatches": []},
+        {"kind": "summary", "exit_code": 0, "committed": True},
+    )))
     return [
         "--mode", "cutover", "--authorize-cutover-read", "--cutover-manifest", str(manifest),
         "--dsn-file", str(dsn_file), "--run-id", "integration", "--code-revision", "integration",
         "--scope", f"{world.account}:{ENVIRONMENT}", "--cells", str(CELLS),
+        "--observation", str(observation), "--seed-evidence", str(evidence),
     ]  # fmt: skip
 
 
@@ -185,33 +223,27 @@ async def run_command(
 # --- the runbook shape ---------------------------------------------------------------------------
 
 
-async def test_runbook_shape_passes_the_full_command(world, tmp_path, monkeypatch) -> None:
+async def test_runbook_shape_reaches_the_arms_without_permission_errors(
+    world, tmp_path, monkeypatch
+) -> None:
+    """The command gets past attestation and inventory and runs both cutover arms. This world
+    has no seed and no ledger basis, so the run fails on evidence, never on a privilege."""
     code, rows = await run_command(tmp_path, world, world.login(), monkeypatch)
-    assert code == 0, rows[-1]
+    assert code == 1, rows[-1]
     assert rows[0]["kind"] == "inventory" and rows[0]["status"] == "ok"
-    assert [row["status"] for row in rows[1:-1]] == ["equal", "equal"]
-    assert rows[-1]["exit_code"] == 0 and rows[-1]["inventory_status"] == "ok"
+    arms = [row for row in rows if row["kind"] == "arm"]
+    assert [row["status"] for row in arms] == ["different", "different"]
+    assert all(row["ledger"] == {"kind": "blocked", "reason": "snapshot_unavailable"} for row in arms)
+    closure = [row for row in rows if row["kind"] == "closure"]
+    assert {v["reason"] for row in closure for v in row["violations"]} == {
+        "seed_observation_mismatch", "seed_basis_mismatch", "legacy_final_snapshot_moved",
+        "legacy_stream_moved", "seed_anchor_unavailable",
+    }
+    assert "error" not in rows[-1]["arms"]["closure"]
 
 
 async def test_runbook_shape_passes_the_attestation(world) -> None:
     await attest(world, world.login())
-
-
-async def test_missing_policy_is_reported_and_exits_nonzero(world, tmp_path, monkeypatch) -> None:
-    absent = uuid4()
-    argv = [*args(tmp_path, world, world.login()), "--scope", f"{absent}:{ENVIRONMENT}"]
-    monkeypatch.setattr(command.time, "time_ns", lambda: 2_000_000_000)
-    output = io.StringIO()
-    assert await command.run(argv, output=output) == 1
-    rows = [json.loads(line) for line in output.getvalue().splitlines()]
-    missing = [row for row in rows if row.get("scope", {}).get("account_id") == str(absent)]
-    assert len(missing) == 2
-    assert all(
-        row["status"] == "not_comparable" and row["reason"] == "policy_missing" and row["evidence"]
-        for row in missing
-    )
-    assert rows[-1]["expected_scopes"] == rows[-1]["emitted_scopes"] == 4
-    assert rows[-1]["exit_code"] == 1
 
 
 async def test_owner_is_rejected_by_the_actual_closure_check(world, tmp_path, monkeypatch) -> None:
@@ -220,7 +252,8 @@ async def test_owner_is_rejected_by_the_actual_closure_check(world, tmp_path, mo
     manifest = tmp_path / "owner.json"
     manifest.write_text(
         json.dumps({"mode": "cutover", "host": url.host, "port": url.port,
-                    "database": url.database, "user": owner, "run_id": "integration"})
+                    "database": url.database, "user": owner, "run_id": "integration",
+                    "now_ms": 1060})
     )  # fmt: skip
     dsn_file = tmp_path / "owner-dsn"
     dsn_file.write_text(url.set(drivername="postgresql").render_as_string(hide_password=False))
@@ -507,24 +540,31 @@ async def test_missing_inventory_table_is_a_violation_not_a_skip(world) -> None:
 
 # --- the reader's grants -------------------------------------------------------------------------
 
+# Whole ORM rows: the baseline (b5c6d7e8f9a0) and the cutover legacy arm's ``_classify``
+# (offer_claims, funding_trades: d7e8f9a0b1c2).
 _LEGACY_READ = (
     "event_log", "event_prefix_hashes", "capital_policy_heads", "capital_policy_revisions",
     "capital_snapshots", "capital_snapshot_queries", "execution_decisions", "projection_heads",
-    "submission_attempts", "execution_uncertainties",
+    "submission_attempts", "execution_uncertainties", "offer_claims", "funding_trades",
 )  # fmt: skip
-_SCOPE_AND_STATE = ("exchange_account_id", "deployment_environment", "state")
+_SCOPE = ("exchange_account_id", "deployment_environment")
+_SCOPE_AND_STATE = (*_SCOPE, "state")
+# The inventory's scope/state columns plus what the closure verifier reads (d7e8f9a0b1c2).
 _INVENTORY_READ = {
-    "offer_claims": {*_SCOPE_AND_STATE, "symbol"},
-    "trading_state": {"exchange_account_id", "deployment_environment"},
-    "uncertainty_resolution_requests": set(_SCOPE_AND_STATE),
-    "capital_policy_requests": set(_SCOPE_AND_STATE),
-    "trading_control_requests": set(_SCOPE_AND_STATE),
+    "trading_state": {*_SCOPE, "id"},
+    "uncertainty_resolution_requests": {*_SCOPE_AND_STATE, "request_id", "outcome_reason"},
+    "capital_policy_requests": {*_SCOPE_AND_STATE, "request_id"},
+    "trading_control_requests": {*_SCOPE_AND_STATE, "request_id"},
+    "venue_offer_state": {*_SCOPE, "symbol", "is_terminal"},
+    "venue_credit_state": {*_SCOPE, "symbol", "is_terminal"},
 }
 _DENIED = (
     ("ledger_observation", "evidence"),
     ("ledger_observation_offer", "raw"),
-    ("submission_attempt_journal", "normalized_payload"),
     ("submission_attempt_journal", "authorization_evidence"),
+    ("transport_outcome_journal", "evidence"),
+    ("quarantine_opening", "evidence"),
+    ("execution_resolution_journal", "evidence"),
 )
 
 
@@ -561,7 +601,7 @@ def _reader_columns(world: World) -> dict[str, set[str]]:
 
 
 async def test_reader_grants_are_columns_only_and_exact(world) -> None:
-    """Pins the comparison's legacy and inventory grants (migration b5c6d7e8f9a0).
+    """Pins the comparison's legacy and inventory grants (b5c6d7e8f9a0, d7e8f9a0b1c2).
 
     The baseline loads whole ORM rows of the legacy tables, so the reader holds every mapped
     column of them; the inventory adds only scope and state columns of its other tables.
@@ -576,5 +616,7 @@ async def test_reader_grants_are_columns_only_and_exact(world) -> None:
     assert {"conservation", "lent_unexplained", "foreign_executed", "fill_conflicts"} <= (
         found["accepted_capital_basis_symbol"]
     )
-    assert "intended_amount" in found["submission_attempt_journal"]
-    assert "normalized_payload" not in found["submission_attempt_journal"]
+    assert {"intended_amount", "normalized_payload", "seed_provenance"} <= (
+        found["submission_attempt_journal"]
+    )
+    assert "origin" in found["ledger_observation"]

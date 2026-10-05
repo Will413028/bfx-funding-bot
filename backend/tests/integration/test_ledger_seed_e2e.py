@@ -123,10 +123,10 @@ class Legacy:
     """What the legacy phase left, for the assertions."""
 
     claim_decision: str
-    unknown_attempt: UUID
+    unknown_attempt: UUID | None
     tail_ack_attempt: UUID
     tail_rejected_attempt: UUID
-    uncertainty_request: UUID
+    uncertainty_request: UUID | None
     policy_request: UUID
     control_request: UUID
     trading_state_id: int
@@ -160,8 +160,11 @@ async def claim_only_offer(env: BotEnv, *, at: int) -> str:
     return decision_id
 
 
-async def run_legacy(env: BotEnv) -> Legacy:
-    """Every closure case, through the legacy process, ending with the process stopped."""
+async def run_legacy(env: BotEnv, *, unknown: bool = True) -> Legacy:
+    """Every closure case, through the legacy process, ending with the process stopped.
+
+    ``unknown=False`` leaves out the open UNKNOWN (and the uncertainty request citing it), so
+    fUST is not blocked and capital values can be compared (S1-4e)."""
     venue = env.venue
     venue.wallets = [["funding", "UST", "5000", 0, "5000"]]
     daemon = await env.build()
@@ -219,20 +222,23 @@ async def run_legacy(env: BotEnv) -> Legacy:
     venue.offers.append(offer_row(7007, TAIL_ACK, TAIL_ACK, T0 + 90_000, T0 + 90_000))
     env.clock.now = T0 + 92_000
     await submit(env, daemon, TAIL_REJECTED, rejected())
-    env.clock.now = T0 + 95_000
-    await submit(env, daemon, UNKNOWN, lost_response())
+    if unknown:
+        env.clock.now = T0 + 95_000
+        await submit(env, daemon, UNKNOWN, lost_response())
     await stop(daemon)
 
-    unknown_attempt = await attempt_of(env, UNKNOWN)
+    unknown_attempt = await attempt_of(env, UNKNOWN) if unknown else None
     requests = (uuid4(), uuid4(), uuid4())
     async with env.factory.begin() as session:
-        (uncertainty,) = await session.scalars(select(ExecutionUncertaintyRow.uncertainty_id)
-                                               .where(ExecutionUncertaintyRow.state == "open"))
-        session.add(UncertaintyResolutionRequestRow(
-            request_id=requests[0], exchange_account_id=SCOPE.exchange_account_id,
-            deployment_environment="ci", uncertainty_id=uncertainty,
-            action="mark_not_accepted", reconcile_event_seq=final.event_seq,
-            requested_by="operator-e2e", created_at_ms=T0 + 96_000))
+        if unknown:
+            (uncertainty,) = await session.scalars(
+                select(ExecutionUncertaintyRow.uncertainty_id)
+                .where(ExecutionUncertaintyRow.state == "open"))
+            session.add(UncertaintyResolutionRequestRow(
+                request_id=requests[0], exchange_account_id=SCOPE.exchange_account_id,
+                deployment_environment="ci", uncertainty_id=uncertainty,
+                action="mark_not_accepted", reconcile_event_seq=final.event_seq,
+                requested_by="operator-e2e", created_at_ms=T0 + 96_000))
         session.add(CapitalPolicyRequestRow(
             request_id=requests[1], exchange_account_id=SCOPE.exchange_account_id,
             deployment_environment="ci", symbol="fUSD", action="enable", reason="carry",
@@ -252,7 +258,8 @@ async def run_legacy(env: BotEnv) -> Legacy:
         trading_state = await session.scalar(select(func.max(TradingStateRow.id)))
     assert trading_state is not None
     return Legacy(claim_decision, unknown_attempt, await attempt_of(env, TAIL_ACK),
-                  await attempt_of(env, TAIL_REJECTED), *requests, int(trading_state))
+                  await attempt_of(env, TAIL_REJECTED), requests[0] if unknown else None,
+                  requests[1], requests[2], int(trading_state))
 
 
 def halt_moves(env: BotEnv) -> None:
@@ -456,7 +463,7 @@ async def _attempts(env: BotEnv) -> list[dict[str, Any]]:
         ]
 
 
-__all__ = ["Legacy", "Scope", "run_legacy", "stop"]
+__all__ = ["Legacy", "Scope", "halt_moves", "run_legacy", "stop"]
 
 
 class AllowCancel(AllowGuard):
