@@ -300,14 +300,25 @@ async def test_inventory_violation_is_emitted_and_fails_the_run(arguments, monke
     assert rows[-1]["inventory_status"] == "not_comparable"
 
 
-def test_cutover_separate_manifest_actual_clock(arguments, tmp_path):
+def test_cutover_takes_the_runner_as_of_never_the_wall_clock(arguments, tmp_path):
+    """F3 (i'): both arms are judged at the runner observation's as-of (manifest ``now_ms``),
+    not at the command's wall clock; a missing or future as-of is refused."""
     path = tmp_path / "cutover.json"
-    path.write_text(json.dumps({"mode": "cutover", "host": "db.example", "port": 6543,
-                                "database": "live", "user": "reader", "run_id": "cutover"}))
-    plan = validate_connection(mode="cutover", dsn="postgresql://reader:p@db.example:6543/live",
-                               manifest_path=None, cutover_manifest_path=path, run_id="cutover",
-                               authorize_cutover_read=True, wall_clock_ms=123456)
-    assert plan.now_ms == 123456
+    manifest = {"mode": "cutover", "host": "db.example", "port": 6543,
+                "database": "live", "user": "reader", "run_id": "cutover"}
+
+    def plan(wall_clock_ms, **extra):
+        path.write_text(json.dumps({**manifest, **extra}))
+        return validate_connection(
+            mode="cutover", dsn="postgresql://reader:p@db.example:6543/live", manifest_path=None,
+            cutover_manifest_path=path, run_id="cutover", authorize_cutover_read=True,
+            wall_clock_ms=wall_clock_ms)
+
+    assert plan(123456, now_ms=120000).now_ms == 120000
+    with pytest.raises(GuardRejectedError, match="invalid_connection_manifest"):
+        plan(123456)
+    with pytest.raises(GuardRejectedError, match="as_of_in_future"):
+        plan(123456, now_ms=123457)
 
 
 async def test_missing_policy_is_not_dropped(arguments, monkeypatch):

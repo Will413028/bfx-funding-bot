@@ -351,8 +351,11 @@ name = "Capital comparison never imports runtime settings directly"
 type = "forbidden"
 source_modules = [
     "bfx_funding_bot.apps.capital_comparison",
+    "bfx_funding_bot.apps.capital_comparison_closure",
     "bfx_funding_bot.apps.capital_comparison_guard",
     "bfx_funding_bot.apps.capital_comparison_inventory",
+    "bfx_funding_bot.apps.capital_comparison_ledger",
+    "bfx_funding_bot.modules.execution.capital_observed_baseline",
 ]
 forbidden_modules = ["bfx_funding_bot.core.settings"]
 allow_indirect_imports = true

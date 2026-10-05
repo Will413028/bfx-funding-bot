@@ -1133,10 +1133,11 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
                     text("SELECT has_table_privilege('bfx_bot',:t,:p)"),
                     {"t": table, "p": privilege},
                 )
+        # ``normalized_payload`` became readable with d7e8f9a0b1c2 (the closure verifier calls
+        # the ledger's own fingerprint read, which reads the submitted amount).
         for table, column in (
             ("ledger_observation", "evidence"),
             ("ledger_observation_offer", "raw"),
-            ("submission_attempt_journal", "normalized_payload"),
             ("submission_attempt_journal", "authorization_evidence"),
         ):
             assert not conn.scalar(

@@ -73,9 +73,15 @@ SCHEMA_VERSION = 1
 
 
 class _SnapshotBasis(NamedTuple):
-    """The validated accepted snapshot, before any commitment fold."""
+    """The validated accepted classification, before any commitment fold.
 
-    row: Any
+    Built from a stored snapshot row (``_snapshot_basis``) or from an observation
+    evaluated without writing (``read_observed``); both go through
+    ``_classified_basis``.
+    """
+
+    classification: Mapping[str, Any]
+    command_fence: int
     event: VenueSnapshotObserved
     available: Decimal
     offered: Decimal
@@ -160,6 +166,29 @@ class CapitalView:
     budget: CapitalBudget
     # Diagnostic: credits with no cell provenance (U). Part of total_capital,
     # never of snapshot.cell_exposure.
+    unattributed_credit_exposure: Decimal
+    attribution: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedAcceptance:
+    """An observation evaluated as ``accept_snapshot`` would, nothing stored (F3 (i'))."""
+
+    event: VenueSnapshotObserved
+    command_fence: int
+    classification: Mapping[str, Any]
+    # What acceptance would store as ``authorization_blocked_reason``.
+    blocked_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedCapital:
+    """``CapitalView`` of an ``ObservedAcceptance``: no snapshot row, so no ``snapshot_seq``."""
+
+    applied: AppliedCapitalPolicy
+    command_fence: int
+    snapshot: CapitalSnapshot
+    budget: CapitalBudget
     unattributed_credit_exposure: Decimal
     attribution: Mapping[str, Any]
 
@@ -293,11 +322,7 @@ class CapitalRepository:
         until it has a typed outcome. Existing no-policy reconciliation is unchanged.
         """
         await self._prepare(session)
-        await self._attempt_inventory(session)
-        pending = await session.scalar(select(SubmissionAttemptRow.attempt_id).where(
-            *self._scope(SubmissionAttemptRow), SubmissionAttemptRow.outcome_kind.is_(None)).limit(1))
-        if pending is not None:
-            raise CapitalBlockedError("snapshot_inflight_command")
+        await self._assert_fenceable(session)
         query = CapitalQueryRow(id=uuid4(), exchange_account_id=self.account_id,
             deployment_environment=self.environment, command_fence=await self._fence(session),
             query_revision=int(await session.scalar(select(func.max(CapitalQueryRow.query_revision))
@@ -329,29 +354,10 @@ class CapitalRepository:
             raise CapitalBlockedError("snapshot_query_superseded")
         if query.started_at_ms != event.query_started_at_ms:
             raise CapitalBlockedError("snapshot_query_start_mismatch")
-        self._validate_snapshot(event, now_ms)
-        self._validate_snapshot(confirmation, now_ms)
-        if (confirmation.account_id, confirmation.environment) != (event.account_id, event.environment):
-            raise CapitalBlockedError("snapshot_confirmation_scope")
-        if confirmation.query_started_at_ms < event.query_finished_at_ms:
-            raise CapitalBlockedError("snapshot_confirmation_overlaps")
-        if self._observation(confirmation) != self._observation(event):
-            raise CapitalBlockedError("snapshot_unstable")
-        classification = await self._classify(session, event)
-        # Prove the legacy intents here, where the fence is set, for every symbol a
-        # read can later ask about. Doing it once at acceptance is what lets an
-        # authorization read skip re-deriving the prefix without ever reporting
-        # still-committed capital as available. A failure is recorded, not raised:
-        # the observation itself still has to be stored, or the state that needs
-        # settling can never be observed again.
-        blocked: str | None = None
-        try:
-            await self._assert_historical_intents_settled(
-                session, event=event, fence=query.command_fence,
-                symbols=tuple(classification["symbols"]),
-            )
-        except CapitalBlockedError as exc:
-            blocked = str(exc)
+        classification, blocked = await self._evaluate_observation(
+            session, event=event, confirmation=confirmation, fence=query.command_fence,
+            now_ms=now_ms,
+        )
         observed = replace(event, capital_query_id=str(query.id),
             capital_command_fence=query.command_fence,
             capital_confirmation=serialize_event(confirmation),
@@ -371,6 +377,93 @@ class CapitalRepository:
             authorization_blocked_reason=blocked))
         await session.flush()
         return appended
+
+    async def _assert_fenceable(self, session: AsyncSession) -> None:
+        """``begin_snapshot``'s refusals: an inconsistent inventory or an in-flight submit."""
+        await self._attempt_inventory(session)
+        pending = await session.scalar(select(SubmissionAttemptRow.attempt_id).where(
+            *self._scope(SubmissionAttemptRow), SubmissionAttemptRow.outcome_kind.is_(None)).limit(1))
+        if pending is not None:
+            raise CapitalBlockedError("snapshot_inflight_command")
+
+    async def _evaluate_observation(
+        self, session: AsyncSession, *, event: VenueSnapshotObserved,
+        confirmation: VenueSnapshotObserved, fence: int, now_ms: int,
+    ) -> tuple[dict[str, Any], str | None]:
+        """Validate a stable observation and classify it against ``fence``; reads only.
+
+        Returns the classification and the historical-intent refusal acceptance
+        records with it (``authorization_blocked_reason``). Shared by
+        ``accept_snapshot`` and the read-only ``evaluate_observation_read_only``.
+        """
+        self._validate_snapshot(event, now_ms)
+        self._validate_snapshot(confirmation, now_ms)
+        if (confirmation.account_id, confirmation.environment) != (event.account_id, event.environment):
+            raise CapitalBlockedError("snapshot_confirmation_scope")
+        if confirmation.query_started_at_ms < event.query_finished_at_ms:
+            raise CapitalBlockedError("snapshot_confirmation_overlaps")
+        if self._observation(confirmation) != self._observation(event):
+            raise CapitalBlockedError("snapshot_unstable")
+        classification = await self._classify(session, event)
+        # Prove the legacy intents here, where the fence is set, for every symbol a
+        # read can later ask about. Doing it once at acceptance is what lets an
+        # authorization read skip re-deriving the prefix without ever reporting
+        # still-committed capital as available. A failure is recorded, not raised:
+        # the observation itself still has to be stored, or the state that needs
+        # settling can never be observed again.
+        blocked: str | None = None
+        try:
+            await self._assert_historical_intents_settled(
+                session, event=event, fence=fence,
+                symbols=tuple(classification["symbols"]),
+            )
+        except CapitalBlockedError as exc:
+            blocked = str(exc)
+        return classification, blocked
+
+    async def evaluate_observation_read_only(
+        self, session: AsyncSession, *, event: VenueSnapshotObserved,
+        confirmation: VenueSnapshotObserved, now_ms: int,
+    ) -> ObservedAcceptance:
+        """What ``begin_snapshot`` + ``accept_snapshot`` would accept now, without writing.
+
+        Cutover comparison only (F3 (i'), deleted with the legacy authority): no
+        query row, no event, no prefix link, no snapshot row, no account lock. The
+        fence is the stream head in the caller's snapshot -- what ``begin_snapshot``
+        would record with no writer running, which acceptance then requires to be
+        unchanged. Raises ``CapitalBlockedError`` exactly where acceptance would.
+        """
+        await self._assert_fenceable(session)
+        if (event.account_id, event.environment) != (str(self.account_id), self.environment):
+            raise CapitalBlockedError("snapshot_scope")
+        fence = await self._fence(session)
+        classification, blocked = await self._evaluate_observation(
+            session, event=event, confirmation=confirmation, fence=fence, now_ms=now_ms,
+        )
+        return ObservedAcceptance(event, fence, classification, blocked)
+
+    async def read_observed(
+        self, session: AsyncSession, acceptance: ObservedAcceptance, *, symbol: str,
+        cell_id: str, now_ms: int, applied: AppliedCapitalPolicy,
+    ) -> ObservedCapital:
+        """``_read_capital`` over an ``evaluate_observation_read_only`` result; reads only.
+
+        The same checks in the same order as a read right after ``accept_snapshot``
+        stored that classification: open uncertainty of the symbol, the recorded
+        historical-intent refusal, then ``_classified_basis`` and ``_fold_tail``.
+        """
+        await self._assert_no_unknown(session, symbol=symbol)
+        if acceptance.blocked_reason is not None:
+            raise CapitalBlockedError(acceptance.blocked_reason)
+        basis = self._classified_basis(
+            acceptance.classification, acceptance.event, command_fence=acceptance.command_fence,
+            symbol=symbol, cell_id=cell_id, now_ms=now_ms,
+        )
+        snapshot, budget = await self._fold_tail(
+            session, basis, symbol=symbol, cell_id=cell_id, applied=applied,
+        )
+        return ObservedCapital(applied, acceptance.command_fence, snapshot, budget,
+                               basis.shared, acceptance.classification)
 
     async def _latest_query(self, session: AsyncSession) -> UUID | None:
         return cast(UUID | None, await session.scalar(select(CapitalQueryRow.id)
@@ -727,17 +820,28 @@ class CapitalRepository:
         tail and reads as an unaccounted commitment; deriving it here instead would
         put the unbounded work straight back.
         """
-        basis = await self._snapshot_basis(
+        row, basis = await self._snapshot_basis(
             session, symbol=symbol, cell_id=cell_id, now_ms=now_ms,
         )
-        row, exposure, pending = basis.row, basis.exposure, ZERO
+        snapshot, budget = await self._fold_tail(
+            session, basis, symbol=symbol, cell_id=cell_id, applied=applied,
+        )
+        return CapitalView(applied, row.event_seq, snapshot, budget, basis.shared, row.classification)
+
+    async def _fold_tail(
+        self, session: AsyncSession, basis: _SnapshotBasis, *, symbol: str, cell_id: str,
+        applied: AppliedCapitalPolicy,
+    ) -> tuple[CapitalSnapshot, CapitalBudget]:
+        """Fold the bounded tail after the basis's fence into its snapshot and budget."""
+        exposure, pending = basis.exposure, ZERO
+        classification = basis.classification
         # Other symbols' unresolved attempts are accounted for too: the basis
         # already refused this symbol if one of them is its own.
-        accounted = frozenset(row.classification["reflected"]) | frozenset(
-            row.classification.get("settled", ())
-        ) | frozenset(row.classification.get("unresolved", {}))
+        accounted = frozenset(classification["reflected"]) | frozenset(
+            classification.get("settled", ())
+        ) | frozenset(classification.get("unresolved", {}))
         inventory = await self._attempt_inventory(
-            session, after_event_seq=row.command_fence, reflected=accounted,
+            session, after_event_seq=basis.command_fence, reflected=accounted,
         )
         for _logged_intent, decoded, attempt in inventory.values():
             if decoded.symbol != symbol:
@@ -756,12 +860,10 @@ class CapitalRepository:
                 exposure += amount
         snapshot = CapitalSnapshot(basis.available, pending,
                                    basis.available + basis.offered + basis.credits, exposure)
-        return CapitalView(applied, row.event_seq, snapshot,
-                           evaluate_capital(applied.policy, snapshot),
-                           basis.shared, row.classification)
+        return snapshot, evaluate_capital(applied.policy, snapshot)
 
     async def _snapshot_basis(self, session: AsyncSession, *, symbol: str, cell_id: str,
-                              now_ms: int) -> _SnapshotBasis:
+                              now_ms: int) -> tuple[Any, _SnapshotBasis]:
         """Validate the accepted snapshot both reads derive their answer from.
 
         Every check here is a single indexed row or an equality on already-loaded
@@ -811,28 +913,38 @@ class CapitalRepository:
             *self._scope(EventLogRow), EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED"))
         if latest_observation != row.event_seq:
             raise CapitalBlockedError("snapshot_superseded_by_unfenced_observation")
+        return row, self._classified_basis(
+            row.classification, event, command_fence=row.command_fence, symbol=symbol,
+            cell_id=cell_id, now_ms=now_ms,
+        )
+
+    def _classified_basis(self, classification: Mapping[str, Any], event: VenueSnapshotObserved,
+                          *, command_fence: int, symbol: str, cell_id: str,
+                          now_ms: int) -> _SnapshotBasis:
+        """Freshness and the symbol's values of an accepted classification (no I/O)."""
         self._validate_snapshot(event, now_ms)
-        if symbol not in row.classification["symbols"]:
+        if symbol not in classification["symbols"]:
             raise CapitalBlockedError("snapshot_symbol_missing")
-        if symbol in row.classification.get("unresolved", {}).values():
+        if symbol in classification.get("unresolved", {}).values():
             # Resolved since, perhaps -- but this snapshot was taken while it was
             # open and cannot say where that money is. The next one will.
             raise CapitalBlockedError("execution_unknown")
-        values = row.classification["symbols"][symbol]
+        values = classification["symbols"][symbol]
         available = _amount(values["available"])
         offered, credits = _amount(values["offered"]), _amount(values["credits"])
         shared = _amount(values["unattributed_credits"])
         # The cell's offers and the credits attributed to it at acceptance; U is
         # already in T via ``credits`` and in no cell.
         exposure = _amount(values["cells"].get(cell_id, "0"))
-        if "credit_cells" not in row.classification:
+        if "credit_cells" not in classification:
             # Accepted before credits were attributed: its ``cells`` hold offers
             # only, so fall back to charging U to every cell until the next
             # snapshot replaces it. Remove once every deployed scope has accepted
             # a snapshot carrying ``credit_cells`` (the first reconcile after
             # this ships does it).
             exposure += shared
-        return _SnapshotBasis(row, event, available, offered, credits, shared, exposure)
+        return _SnapshotBasis(classification, command_fence, event, available, offered, credits,
+                              shared, exposure)
 
     async def _read_capital_full(self, session: AsyncSession, *, symbol: str, cell_id: str,
                                  now_ms: int, applied: AppliedCapitalPolicy) -> CapitalView:
@@ -841,10 +953,10 @@ class CapitalRepository:
         No wall-clock budget applies here. This is what the bounded read is
         checked against, and what detects a prefix that stopped being true.
         """
-        basis = await self._snapshot_basis(
+        row, basis = await self._snapshot_basis(
             session, symbol=symbol, cell_id=cell_id, now_ms=now_ms,
         )
-        row, event = basis.row, basis.event
+        event = basis.event
         available, offered, credits = basis.available, basis.offered, basis.credits
         shared, exposure = basis.shared, basis.exposure
         pending = ZERO

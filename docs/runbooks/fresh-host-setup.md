@@ -160,7 +160,8 @@ SELECT table_name, column_name, privilege_type FROM information_schema.role_colu
 ```
 
 群組的 table grants 應為空；column grants 應與 ledger migrations 的 `_READER_COLUMNS` 清單，加上
-`b5c6d7e8f9a0`（`apps/capital_comparison` 的讀取，下列）合併後完全一致，全部只有 SELECT：
+`b5c6d7e8f9a0`（`apps/capital_comparison` 的讀取，下列）與 `d7e8f9a0b1c2`（cutover 兩個 arm 的讀取，下列）
+合併後完全一致，全部只有 SELECT：
 
 - legacy 十張表 `event_log`、`event_prefix_hashes`、`capital_policy_heads`、`capital_policy_revisions`、
   `capital_snapshots`、`capital_snapshot_queries`、`execution_decisions`、`projection_heads`、
@@ -169,7 +170,12 @@ SELECT table_name, column_name, privilege_type FROM information_schema.role_colu
   `uncertainty_resolution_requests`／`capital_policy_requests`／`trading_control_requests`（scope、`state`）。
 - ledger 讀取補充：`accepted_capital_basis_symbol` 的 `conservation`、`lent_unexplained`、
   `foreign_executed`、`fill_conflicts`；`submission_attempt_journal.intended_amount`
-  （`normalized_payload` 與 `authorization_evidence` 仍不可讀）。
+  （`authorization_evidence` 仍不可讀）。
+- `d7e8f9a0b1c2`：`offer_claims`、`funding_trades` 全部欄位（legacy arm 的 `_classify` 讀整列）；
+  `submission_attempt_journal` 的 `normalized_payload`、`seed_provenance`；`ledger_observation.origin`；
+  `trading_state.id`；`uncertainty_resolution_requests` 的 `request_id`、`outcome_reason`；
+  `capital_policy_requests`／`trading_control_requests` 的 `request_id`；`venue_offer_state`／
+  `venue_credit_state` 的 scope、`symbol`、`is_terminal`。
 
 其餘 ledger 欄位維持原 allowlist：
 其中 `ledger_observation_query` 可讀 `query_id`、`exchange_account_id`、

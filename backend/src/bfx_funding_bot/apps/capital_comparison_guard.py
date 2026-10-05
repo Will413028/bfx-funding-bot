@@ -1,10 +1,15 @@
 """Explicit endpoint attestation; never loads settings or environment files.
 
 Manifest JSON: mode, host, port (integer), database, user, run_id, and
-now_ms (integer recovery-target clock, rehearsal only). Optional
-``policy_without_cell``: a list of ``{account_id, environment, symbol}`` policy heads
-that deliberately have no configured cell. Launcher mounts it read-only.
-Cutover uses its own manifest and a command-start wall clock.
+now_ms (integer as-of clock). Optional ``policy_without_cell``: a list of
+``{account_id, environment, symbol}`` policy heads that deliberately have no
+configured cell. Launcher mounts it read-only.
+
+``now_ms`` is never the command's wall clock: rehearsal takes the recovery target's
+clock; cutover (its own manifest) takes the cutover runner's observation as-of, the
+instant its REST observations are complete (F3 (i'): both comparison arms are judged
+at that instant; the command checks it against the observation file and bounds the
+wall-clock window separately). A cutover as-of after the command's start is refused.
 
 ``user`` is the LOGIN (``session_user``). The tool then runs ``SET LOCAL ROLE
 bfx_cutover_reader`` and attests the reachable role set and its privileges
@@ -115,14 +120,15 @@ def validate_connection(
                 raise ValueError
         if url.username == READER_ROLE:
             raise GuardRejectedError("login_is_reader")
-        if mode == "rehearsal":
-            if manifest["host"] != f"bfx-dr-{run_id}-db" or manifest["port"] != 5432:
-                raise ValueError
-            now_ms = manifest.get("now_ms")
-        else:
-            now_ms = wall_clock_ms
+        if mode == "rehearsal" and (
+            manifest["host"] != f"bfx-dr-{run_id}-db" or manifest["port"] != 5432
+        ):
+            raise ValueError
+        now_ms = manifest.get("now_ms")
         if type(now_ms) is not int or now_ms < 0:
             raise ValueError
+        if mode == "cutover" and now_ms > wall_clock_ms:
+            raise GuardRejectedError("as_of_in_future")
         return ConnectionPlan(
             url.set(drivername="postgresql+asyncpg"),
             url.username,

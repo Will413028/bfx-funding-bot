@@ -416,13 +416,18 @@ def test_runtime_role_cannot_write_a_policyless_attempt(seeded) -> None:
         _insert_attempt(conn, 6, policy=None, provenance="{}")
 
 
-def test_origin_is_not_granted_beyond_the_bot(seeded) -> None:
+def test_origin_is_not_granted_beyond_the_bot_and_the_closure_verifier(seeded) -> None:
+    """The web roles never read ``origin``; the cutover reader reads it from d7e8f9a0b1c2 on (the
+    closure verifier tells the seed observation from venue ones, as this revision foresaw)."""
     with seeded.connect() as conn:
-        for role in ("bfx_webapi", "bfx_webauth", "bfx_cutover_reader"):
+        for role in ("bfx_webapi", "bfx_webauth"):
             assert not conn.scalar(
                 text("SELECT has_column_privilege(:r,'ledger_observation','origin','SELECT')"),
                 {"r": role},
             )
+        assert conn.scalar(text(
+            "SELECT has_column_privilege('bfx_cutover_reader','ledger_observation','origin','SELECT')"
+        ))
         assert conn.scalar(
             text("SELECT has_column_privilege('bfx_bot','ledger_observation','origin','INSERT')")
         )
