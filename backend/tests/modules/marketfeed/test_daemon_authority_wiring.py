@@ -1,8 +1,8 @@
 """build_daemon composes the bot process by capital authority (sqlite construction only).
 
-A ledger-authority process is reachable only through the monkeypatched epoch read below:
-the Bitfinex venue's supported set (``apps/authority_support.py``) still refuses it at a
-real boot.
+Most tests reach the ledger authority through the monkeypatched epoch read below; the
+boot-rule tests at the end read a real epoch row (Bitfinex supports both authorities,
+``apps/authority_support.py``) and the H-1 seed rule.
 
 Mutation checks (one at a time; revert after each):
 
@@ -19,7 +19,13 @@ Mutation checks (one at a time; revert after each):
   a legacy daemon wrapped in effects: ``test_a_legacy_daemon_is_wired_as_it_always_was``.
 * the legacy branch constructs a different object graph than before:
   ``test_a_legacy_daemon_is_wired_as_it_always_was``.
-* a real ledger epoch row stops refusing a live boot: ``test_a_ledger_epoch_still_refuses_a_live_boot``.
+* Bitfinex's set loses ``ledger``: ``test_a_ledger_epoch_boots_bitfinex_on_the_ledger``.
+* ``require_ledger_seed`` is not called (or passes without a seed) in ``build_daemon``:
+  ``test_a_prod_ledger_boot_without_the_seed_refuses``.
+* the seed lookup ignores ``origin`` or the scope: the ``venue``-origin and other-scope rows
+  of ``test_a_prod_ledger_boot_without_the_seed_refuses``.
+* the seed rule covers the simulated venue or a non-prod realm:
+  ``test_the_seed_rule_binds_only_the_real_venue_in_prod``.
 """
 from __future__ import annotations
 
@@ -50,7 +56,7 @@ from tests.modules.marketfeed.account_test_helpers import (
 from tests.modules.marketfeed.test_daemon_wiring import _write_cells_yaml
 
 
-async def _env_and_db(monkeypatch, tmp_path, httpx_mock, *, authority: str):
+async def _env_and_db(monkeypatch, tmp_path, httpx_mock, *, authority: str, realm: str = "ci"):
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 
     configure_account_env(monkeypatch)
@@ -60,7 +66,7 @@ async def _env_and_db(monkeypatch, tmp_path, httpx_mock, *, authority: str):
         ):
             monkeypatch.delenv(name)
     values = {
-        "BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
+        "BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": realm,
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_FILL_TRACKER_ENABLED": "true",
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
@@ -80,14 +86,14 @@ async def _env_and_db(monkeypatch, tmp_path, httpx_mock, *, authority: str):
     return engine, factory, _write_cells_yaml(tmp_path)
 
 
-async def _apply_policies(factory, authority: str) -> None:
+async def _apply_policies(factory, authority: str, realm: str = "ci") -> None:
     from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
     from bfx_funding_bot.modules.execution.legacy_ports import LegacyPolicyStore
     from bfx_funding_bot.modules.ledger.wiring import build_policy_store
 
-    scope = Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci")
+    scope = Scope(TEST_EXCHANGE_ACCOUNT_ID, realm)
     store = (build_policy_store(scope) if authority == "ledger" else LegacyPolicyStore(
-        CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment="ci",
+        CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment=realm,
                           max_snapshot_age_ms=10_000)))
     async with factory.begin() as session:
         await store.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
@@ -223,18 +229,116 @@ async def test_a_legacy_daemon_is_wired_as_it_always_was(monkeypatch, tmp_path, 
         await engine.dispose()
 
 
+async def _switched_db(monkeypatch, tmp_path, httpx_mock, *, realm: str):
+    """A database whose latest epoch is ``ledger`` (as the owner's switch leaves it)."""
+    engine, factory, path = await _env_and_db(
+        monkeypatch, tmp_path, httpx_mock, authority=f"switched-{realm}", realm=realm)
+    await _apply_policies(factory, "ledger", realm)
+    async with factory.begin() as session:
+        await session.execute(text(
+            "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
+            "VALUES (2, 'ledger', 2, 'test', 'switch')"))
+    return engine, factory, path
+
+
+async def _observation(factory, *, origin: str, account=TEST_EXCHANGE_ACCOUNT_ID,
+                       realm: str = "prod") -> None:
+    from uuid import uuid4
+
+    from bfx_funding_bot.modules.ledger.tables import LedgerObservationRow
+
+    async with factory.begin() as session:
+        session.add(LedgerObservationRow(
+            id=uuid4(), query_id=uuid4(), exchange_account_id=account,
+            deployment_environment=realm, schema_version=1, query_finished_at_ms=1,
+            confirmation_finished_at_ms=1, accept_revision=0, origin=origin,
+            wallets_complete=False, offers_complete=True, credits_complete=True,
+            loans_complete=True, offer_history_complete=False, credit_history_complete=False,
+            trades_complete=False, first_digest="d", confirmation_digest="d",
+            accepted=origin == "legacy_seed",  # a runtime one is accepted only when complete
+            evidence={},
+        ))
+
+
 @pytest.mark.asyncio
-async def test_a_ledger_epoch_still_refuses_a_live_boot(monkeypatch, tmp_path, httpx_mock) -> None:
+async def test_a_ledger_epoch_boots_bitfinex_on_the_ledger(monkeypatch, tmp_path, httpx_mock) -> None:
+    """The real epoch read (no monkeypatch) picks the ledger for Bitfinex; ``ci`` needs no seed."""
     from bfx_funding_bot.apps.bot import build_daemon
 
-    assert supported_for_venue("bitfinex") == frozenset({"legacy"})
-    engine, factory, path = await _env_and_db(monkeypatch, tmp_path, httpx_mock, authority="epoch")
+    assert supported_for_venue("bitfinex") == frozenset({"legacy", "ledger"})
+    engine, _, path = await _switched_db(monkeypatch, tmp_path, httpx_mock, realm="ci")
     try:
-        async with factory.begin() as session:
-            await session.execute(text(
-                "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-                "VALUES (2, 'ledger', 2, 'test', 'switch')"))
-        with pytest.raises(AuthorityMismatch, match="authority_unsupported"):
+        daemon = await build_daemon(cells_yaml_path=path, skip_ws=True)
+        assert isinstance(daemon.boot_recovery, LedgerCycleEffects)
+        assert legacy_state(daemon, "daemon") == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_prod_ledger_boot_without_the_seed_refuses(monkeypatch, tmp_path, httpx_mock) -> None:
+    """H-1: a switched prod database boots the ledger only over the scope's seed observation;
+    a runtime (``venue``) observation or another scope's seed is not it."""
+    from uuid import UUID
+
+    from bfx_funding_bot.apps import bot
+    from bfx_funding_bot.apps.bot import build_daemon
+
+    refused: list[str] = []
+    monkeypatch.setattr(bot, "_refuse_live_boot", _recording(refused))
+    engine, factory, path = await _switched_db(monkeypatch, tmp_path, httpx_mock, realm="prod")
+    try:
+        await _observation(factory, origin="venue")
+        await _observation(factory, origin="legacy_seed",
+                           account=UUID("00000000-0000-0000-0000-0000000000ff"))
+        with pytest.raises(AuthorityMismatch, match="ledger_seed_missing"):
             await build_daemon(cells_yaml_path=path, skip_ws=True)
+        assert refused == [f"ledger_seed_missing scope={TEST_EXCHANGE_ACCOUNT_ID}:prod"]
+
+        await _observation(factory, origin="legacy_seed")
+        daemon = await build_daemon(cells_yaml_path=path, skip_ws=True)
+        assert isinstance(daemon.boot_recovery, LedgerCycleEffects)
+        assert len(refused) == 1
+    finally:
+        await engine.dispose()
+
+
+def _recording(refused: list[str]):
+    async def refuse(exc: BaseException, **_: object) -> None:
+        refused.append(str(exc))
+
+    return refuse
+
+
+@pytest.mark.parametrize(("venue", "realm", "needed"), [
+    ("bitfinex", "prod", True),
+    ("bitfinex", "ci", False),
+    ("simulated", "shadow", False),
+    ("simulated", "ci", False),
+    ("simulated", "prod", False),
+])
+def test_the_seed_rule_binds_only_the_real_venue_in_prod(venue, realm, needed) -> None:
+    from bfx_funding_bot.apps.authority_support import ledger_boot_needs_seed
+
+    assert ledger_boot_needs_seed(venue, realm) is needed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("authority", "venue"), [("legacy", "bitfinex"), ("ledger", "simulated")])
+async def test_the_seed_rule_passes_legacy_and_the_simulated_venue_without_a_seed(
+    tmp_path, authority, venue,
+) -> None:
+    """A prod legacy boot and a simulated ledger boot never look for the seed."""
+    from bfx_funding_bot.apps.authority_support import require_ledger_seed
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+
+    engine = make_async_engine_from_url(f"sqlite+aiosqlite:///{tmp_path / 'rule'}.db")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with async_sessionmaker(engine)() as session:
+            for realm in ("prod", "shadow"):
+                await require_ledger_seed(session, authority=authority, venue=venue,
+                                          scopes=(Scope(TEST_EXCHANGE_ACCOUNT_ID, realm),))
     finally:
         await engine.dispose()

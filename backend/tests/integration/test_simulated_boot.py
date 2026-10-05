@@ -51,21 +51,6 @@ async def test_a_simulated_boot_on_a_legacy_epoch_is_refused(
                    "authority_unsupported value=legacy build=ledger", epoch=None)
 
 
-async def test_a_bitfinex_boot_on_a_real_ledger_epoch_is_refused(
-        ledger_db, monkeypatch, httpx_mock, tmp_path) -> None:  # noqa: F811
-    """Mutation: the Bitfinex venue's supported set includes ``ledger`` (no patch here)."""
-    sim, engine = await make_sim_env(ledger_db, monkeypatch, httpx_mock, tmp_path)
-    try:
-        monkeypatch.delenv("BFX_SIM_INITIAL_WALLETS")
-        monkeypatch.setenv("BFX_PHASE", "live")
-        monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
-        monkeypatch.setenv("BFX_VAULT_KEK", TEST_VAULT_KEK_B64)
-        with pytest.raises(AuthorityMismatch, match="authority_unsupported value=ledger build=legacy"):
-            await bot.build_daemon(cells_yaml_path=sim.cells_path, skip_ws=True)
-    finally:
-        await close_sim_env(sim, engine)
-
-
 async def test_a_simulated_boot_refuses_a_vault_key_in_the_environment(
         ledger_db, monkeypatch, httpx_mock, tmp_path) -> None:  # noqa: F811
     await _refused(ledger_db, monkeypatch, httpx_mock, tmp_path, ConfigurationError,
@@ -117,7 +102,7 @@ async def test_both_venues_compose_the_same_guard_chain_and_workers(
         monkeypatch.setenv("BFX_VAULT_KEK", TEST_VAULT_KEK_B64)
 
         async def ledger_epoch(_session: object, *, supported: object) -> str:
-            return "ledger"  # as test_daemon_authority_wiring: production still refuses it
+            return "ledger"  # as test_daemon_authority_wiring: the database keeps its legacy epoch
 
         monkeypatch.setattr(bot, "read_authority", ledger_epoch)
         bitfinex = await bot.build_daemon(cells_yaml_path=sim.cells_path, skip_ws=True)

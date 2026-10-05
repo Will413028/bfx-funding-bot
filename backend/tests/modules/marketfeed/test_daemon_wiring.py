@@ -383,11 +383,14 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
 async def test_live_boot_on_an_unsupported_authority_stops_trading_and_refuses(
         monkeypatch, tmp_path, httpx_mock, epoch, match):
     """Right after the schema head, the capital authority is read once through the
-    same refusal: an epoch this build does not support (a switched database) or
-    cannot read refuses the boot, writes nothing and reaches no venue."""
+    same refusal: an epoch this build does not support or cannot read refuses the boot,
+    writes nothing and reaches no venue. Bitfinex now supports both authorities, so the
+    unsupported case is a build that predates the switch (a rollback onto a switched
+    database): its venue set is narrowed to ``legacy`` here."""
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from bfx_funding_bot.apps import bot
     from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.core.authority import AuthorityMismatch
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -395,6 +398,8 @@ async def test_live_boot_on_an_unsupported_authority_stops_trading_and_refuses(
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
+    if epoch == "ledger":
+        monkeypatch.setattr(bot, "supported_for_venue", lambda _venue: frozenset({"legacy"}))
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_HEALTHZ_PORT": "0",
         "BFX_BOOK_MAX_AGE_SECONDS": "30", "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",

@@ -101,12 +101,13 @@ async def test_an_unsupported_authority_refuses(database, monkeypatch) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("realm", "expected"), [
-    ("prod", {"legacy"}), ("shadow", {"legacy", "ledger"}), ("ci", {"legacy", "ledger"}),
+    ("prod", {"legacy", "ledger"}), ("shadow", {"legacy", "ledger"}), ("ci", {"legacy", "ledger"}),
 ])
 async def test_the_supported_authorities_follow_the_database_realm(
     database, monkeypatch, realm: str, expected: set[str],
 ) -> None:
-    """Mutation: one set for every realm (the old global) fails the ``prod`` and ``shadow`` rows."""
+    """The owner amends policy in prod after the switch. Mutation: drop ``ledger`` from prod's
+    set fails the ``prod`` row; an unknown realm is refused (``supported_for_policy_script``)."""
     from sqlalchemy import text
 
     async with database.begin() as session:

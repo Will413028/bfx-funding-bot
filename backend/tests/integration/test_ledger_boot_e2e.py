@@ -1,7 +1,7 @@
 """A ledger-authority bot process, built by ``build_daemon`` and booted on migrated PostgreSQL.
 
-The epoch read is monkeypatched to ``ledger`` (production still refuses it, see
-``test_daemon_authority_wiring``) and the venue is a fake ``VenueObservation`` fed to the real
+The epoch read is monkeypatched to ``ledger`` (the database keeps its ``legacy`` epoch; the
+real read is covered by ``test_daemon_authority_wiring``) and the venue is a fake ``VenueObservation`` fed to the real
 ledger cycle, wrapped in the real effects. Everything else is the production composition.
 
 Mutations (apply one at a time, run this file, revert):
