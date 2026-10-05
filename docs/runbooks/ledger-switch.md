@@ -31,16 +31,18 @@ sudo $OPS/.venv/bin/python $OPS/bfx_ledger_switch.py preflight --digest sha256:<
 
 ```bash
 sudo systemd-run --unit bfx-ledger-switch-$(date -u +%Y%m%d) --collect --wait \
-  -p TimeoutStartSec=12h -p Environment=HOME=/root \
+  -p RuntimeMaxSec=12h -p KillMode=mixed -p TimeoutStopSec=15min -p Environment=HOME=/root \
   $OPS/.venv/bin/python $OPS/bfx_ledger_switch.py run --digest sha256:<soak 通過的 digest>
 journalctl -u 'bfx-ledger-switch-*' -f   # 另一個 shell 看進度
 ```
 
 之後不需要任何手動步驟；結果以 Telegram 通知（§4）與 evidence（§6）為準。
 
-12 h 大於兩次嘗試各段上限的總和（deploy flock 30 分、snapshot 10 分、備份 2 h、seed 15 分、recreate 1 h、
-上線 15 分）。工具收到 SIGTERM（逾時或 `systemctl stop`）時當成目前這一步失敗：照 §5 走對應分支、恢復 timer、
-發通知。
+transient unit 是 `Type=simple`，`TimeoutStartSec` 對它無效；上限用 `RuntimeMaxSec`。12 h 大於兩次嘗試各段上限的
+總和（deploy flock 30 分、snapshot 10 分、備份 2 h、seed 15 分、recreate 1 h、上線 15 分）。到上限或
+`systemctl stop` 時 systemd 只對工具本身送 SIGTERM（`KillMode=mixed`），工具把它當成目前這一步失敗：照 §5 走
+對應分支、恢復 timer、發通知；`TimeoutStopSec=15min` 留時間給這段收尾（含等待 seed container 結束，見 §5）。
+
 
 ## 3. 它做什麼
 
@@ -106,6 +108,10 @@ journalctl -u 'bfx-ledger-switch-*' -f   # 另一個 shell 看進度
 
 ## 5. 失敗分支
 
+- **判定 R1 或 R2 的時點**：seed 這一步只要以例外結束（逾時、SIGTERM、container 異常），工具先
+  `docker rm --force` seed container，並等到（最多 2 分鐘）container 消失、而且沒有 owner 的 TCP session 還在
+  transaction 裡，才讀 epoch 判定。等不到或資料庫讀不到就當 R2（不知道有沒有 commit 時一律不重啟 legacy）。
+  seed 還沒開始就失敗（例如備份失敗），一定是 R1。
 - **R1（seed 還沒 commit；資料庫的 epoch 仍是 `legacy`）**：`docker start bfx-bot bfx-webapi` 回到 legacy，
   timer 恢復。`attempt_outcome_missing`（F6）與 `legacy_query_pending` 代表停在 submit 或 query 中途：先等
   legacy 重啟後的一筆 accepted snapshot（boot recovery 收尾），再自動從 P-checks 重跑整個流程一次，最多一次。
@@ -119,7 +125,11 @@ journalctl -u 'bfx-ledger-switch-*' -f   # 另一個 shell 看進度
      sudo $OPS/.venv/bin/python $OPS/bfx_ledger_switch.py restore-halt-backup --run-id <通知裡的 run id>
      ```
 
-     只要出現任何 runtime ledger observation 就拒絕。步驟：停 timer、拿 deploy flock、停 bot／web API／
+     只接受「這個 run 自己 commit 了 seed」：evidence 要有 `seed_committed`，最新 epoch 的 actor 要是
+     `ledger_seed:<這個 run id>-a<n>`；別的 run（例如先前一次 R1）的備份一律拒絕。只要出現任何 runtime 寫入就
+     拒絕：非 seed 的 `ledger_observation`（不論是否 accepted）或 query、沒有 `seed_provenance` 的 attempt、
+     任何 execution resolution、seed basis 以外的 quarantine opening，或 clock revision 超過 seed 留下的值。
+     同一組條件也決定 R2 與 R3。步驟：停 timer、拿 deploy flock、停 bot／web API／
      frontend、再確認一次沒有 runtime 寫入、停 postgres、`pgbackrest restore --delta --set=<halt label>
      --type=immediate --target-action=promote`（postgres image 的 one-shot、沿用它的 volumes）、啟動
      postgres、確認 epoch 回到 `legacy` 且沒有 seed 列、**立即補一份 full 備份**、啟動 legacy、恢復 timer。
@@ -129,6 +139,10 @@ journalctl -u 'bfx-ledger-switch-*' -f   # 另一個 shell 看進度
   ledger 列刪不掉，之後重新 seed 會因 `ledger_not_empty` 被拒絕。
 - **R3（runtime ledger 已寫入）**：只能 forward-fix，工具不停任何東西。曝險被低估時 protection 會自動 HALT，
   條件解除後自動恢復。
+- **seed 已 commit 之後重跑**（例如工具在 seed 與 recreate 之間被殺）：P-check 一開始就看到 epoch 是 `ledger`，
+  不會說「legacy 照跑」：依 runtime 寫入判成那個 run 的 R2（exit 20，通知裡帶那個 run id 的
+  `restore-halt-backup` 指令）或 R3（exit 30），並把那個 run 停掉、還沒恢復的 timer 重新啟動；bot 維持原狀。
+  `preflight` 也回同樣的 exit code，但不動 timer。
 
 ## 6. Evidence 與 exit code
 
