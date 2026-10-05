@@ -74,7 +74,10 @@ class FakeDb:
     host: Any = None
     epoch: str = "legacy"
     seed_observations: int = 0
-    runtime_observations: int = 0
+    writes: dict[str, int] = field(default_factory=dict)
+    actor: str = "migration"
+    late_commit: str | None = None  # a seed run id whose transaction commits after the signal
+    owner_polls: int = 0
     unexplained: tuple[str, ...] = ()
     basis: bool = False
     state: str | None = "ACTIVE"
@@ -114,9 +117,26 @@ class FakeDb:
         self._guard()
         return self.epoch
 
-    def observations(self, account: str, environment: str) -> tuple[int, int]:
+    def epoch_actor(self) -> str:
         self._guard()
-        return self.seed_observations, self.runtime_observations
+        return self.actor
+
+    def commit_seed(self, seed_run_id: str) -> None:
+        self.epoch, self.seed_observations = "ledger", 1
+        self.actor = f"ledger_seed:{seed_run_id}"
+
+    def boundary(self, account: str, environment: str) -> Any:
+        self._guard()
+        return switch.Boundary(self.seed_observations, dict(self.writes))
+
+    def owner_transactions(self, user: str) -> int:
+        """A late seed: its transaction is still open at the first look, then commits."""
+        self.owner_polls += 1
+        if self.late_commit is not None:
+            self.commit_seed(self.late_commit)
+            self.late_commit = None
+            return 1
+        return 0
 
     def latest_runtime_basis(self, account: str, environment: str) -> Any:
         return switch.RuntimeBasis(True, self.unexplained) if self.basis else None
@@ -181,6 +201,9 @@ class FakeHost:
     share: str = "0.010000"
     backup_fails: bool = False
     recreate_ok: bool = True
+    recreate_failure_writes: dict[str, int] = field(default_factory=dict)
+    break_db_at: str | None = None  # "backup" | "seed": the database becomes unreadable there
+    no_ip: bool = False
     recreate_writes: bool = True
     ready: bool = True
     restore_ok: bool = True
@@ -221,6 +244,8 @@ class FakeHost:
         if argv[:2] == ["systemctl", "start"]:
             self.timers[argv[2]] = "active"
             return self.ok()
+        if argv[:3] == ["docker", "ps", "--all"]:
+            return self.ok("")  # the removed seed container is gone
         if argv[:2] == ["docker", "ps"]:
             return self.ok("\n".join([n for n, up in self.running.items() if up]
                                      + self.extra_containers) + "\n")
@@ -228,7 +253,7 @@ class FakeHost:
             records = [{"Name": "/" + name, "Config": {"Image": self.images.get(name, "")},
                         "State": {"Running": self.running.get(name, False)},
                         "NetworkSettings": {"Networks": {"bfx_default": {
-                            "IPAddress": f"172.18.0.{index + 2}"}}}}
+                            "IPAddress": "" if self.no_ip else f"172.18.0.{index + 2}"}}}}
                        for index, name in enumerate(argv[4:])]
             return self.ok(json.dumps(records))
         if argv[:2] in (["docker", "stop"], ["docker", "start"]):
@@ -243,10 +268,12 @@ class FakeHost:
         if argv[:2] == ["docker", "run"] and "--volumes-from" in argv:
             assert not self.running["bfx-postgres"], "restore while postgres runs"
             if self.restore_ok:
-                self.db.epoch, self.db.seed_observations = "legacy", 0
+                self.db.epoch, self.db.seed_observations, self.db.actor = "legacy", 0, "x"
                 return self.ok()
             return self.fail()
         if argv[:1] == ["runuser"] and argv[-3].endswith("backup.sh"):
+            if self.break_db_at == "backup":
+                self.db.unreadable = True
             if self.backup_fails:
                 return self.fail()
             self.labels.append(f"20261005-{len(self.labels):06d}D")
@@ -259,13 +286,14 @@ class FakeHost:
             return self.ok() if self.ready and self.running.get("bfx-webapi") else self.fail()
         if joined.startswith("/usr/local/sbin/bfx-deploy --recreate"):
             if not self.recreate_ok:
+                self.db.writes.update(self.recreate_failure_writes)
                 self.ledger.add("failed", DIGEST)
                 self.running["bfx-bot"] = False
                 return self.fail()
             self.ledger.add("deployed", DIGEST)
             self.running.update({"bfx-bot": True, "bfx-webapi": True})
             if self.recreate_writes:
-                self.db.runtime_observations, self.db.basis = 1, True
+                self.db.writes["observations"], self.db.basis = 1, True
             return self.ok()
         raise AssertionError(f"unexpected command: {argv}")
 
@@ -280,12 +308,18 @@ class FakeHost:
         if "--check" in argv:
             reason = self.checks.pop(0) if self.checks else None
             return bfx.CommandResult(3 if reason else 0, seed_lines("check", reason=reason), "")
+        run_id = self.seed_inputs[-1]["manifest"]["run_id"]
         outcome = self.switches.pop(0) if self.switches else None
+        if outcome == "late":  # signalled mid-seed; its transaction commits afterwards
+            self.db.late_commit = run_id
+            raise switch.Terminated("signal_15")
         if isinstance(outcome, Exception):
-            self.db.epoch, self.db.seed_observations = "ledger", 1  # committed, then lost
+            self.db.commit_seed(run_id)  # committed, then the container was lost
+            if self.break_db_at == "seed":
+                self.db.unreadable = True
             raise outcome
         if outcome is None:
-            self.db.epoch, self.db.seed_observations = "ledger", 1
+            self.db.commit_seed(run_id)
             return self.ok(seed_lines("switch", share=self.share))
         return bfx.CommandResult(3, seed_lines("switch", reason=outcome), "")
 
@@ -300,19 +334,19 @@ class Env:
     settings: Any
     tmp: Path
 
-    def switcher(self, **kwargs: Any) -> Any:
+    def switcher(self, run_id: str = "switch-test", **kwargs: Any) -> Any:
+        options: dict[str, Any] = {"chown": lambda path, uid, gid: None, **kwargs}
         return switch.Switcher(
             self.settings, runner=self.host, db=self.db, ledger=self.ledger,
             notify=lambda level, text: self.notes.append((level, text)), clock=self.clock,
-            sleep=self.clock.sleep, secret_check=lambda path: None,
-            chown=lambda path, uid, gid: None, run_id="switch-test", **kwargs)
+            sleep=self.clock.sleep, secret_check=lambda path: None, run_id=run_id, **options)
 
     def levels(self) -> list[str]:
         return [level for level, _ in self.notes]
 
-    def evidence(self, name: str = "evidence.json") -> dict[str, Any]:
+    def evidence(self, name: str = "evidence.json", run_id: str = "switch-test") -> dict[str, Any]:
         loaded: dict[str, Any] = json.loads(
-            (self.settings.state_dir / "switch-test" / name).read_text())
+            (self.settings.state_dir / run_id / name).read_text())
         return loaded
 
 
@@ -609,11 +643,20 @@ def test_r2_when_the_seed_committed_but_its_container_was_lost(env: Env) -> None
     assert env.host.names("docker rm --force")
 
 
-def test_an_unreadable_database_after_a_failure_is_treated_as_r2(env: Env) -> None:
-    env.host.backup_fails = True
-    env.db.unreadable = True
+def test_an_unreadable_database_after_the_seed_started_is_treated_as_r2(env: Env) -> None:
+    env.host.switches = [bfx.CommandError("timeout:docker run", timed_out=True)]
+    env.host.break_db_at = "seed"
     assert env.switcher().run() == switch.EXIT_R2
     assert not env.host.running["bfx-bot"]
+
+
+def test_a_failure_before_the_seed_with_an_unreadable_database_is_r1(env: Env) -> None:
+    """R1-5: the seed never ran, so nothing can have been written: legacy restarts."""
+    env.host.backup_fails = True
+    env.host.break_db_at = "backup"
+    assert env.switcher().run() == switch.EXIT_R1
+    assert env.host.running["bfx-bot"] and env.host.running["bfx-webapi"]
+    assert env.host.timers == INITIAL_TIMERS
 
 
 def test_r3_after_the_first_runtime_write_is_forward_fix_only(env: Env) -> None:
@@ -646,7 +689,7 @@ def _committed_run(env: Env) -> None:
 
 def test_restore_refuses_after_a_runtime_ledger_observation(env: Env) -> None:
     _committed_run(env)
-    env.db.runtime_observations = 1
+    env.db.writes["observations"] = 1
     assert env.switcher().restore_halt_backup() == switch.EXIT_RESTORE_REFUSED
     assert stops(env.host) == []
     assert not env.host.names("docker run")
@@ -759,3 +802,126 @@ def test_the_watch_notifies_only_when_nothing_traded(env: Env) -> None:
     env.db.activity = (0, 1)  # one reprice
     assert env.switcher().watch() == switch.EXIT_OK
     assert env.notes == []
+
+
+# --------------------------------------------------------------------------- review R1
+
+
+def test_a_sigterm_during_the_seed_waits_for_its_late_commit_then_r2(env: Env) -> None:
+    """R1-1: the seed container commits after the signal; the tool removes it, waits until no
+    owner transaction remains, and only then reads the epoch: R2, never R1."""
+    env.host.switches = ["late"]
+    assert env.switcher().run() == switch.EXIT_R2
+    host = env.host
+    seed_at = host.index("docker run --rm --name bfx-ledger-switch-switch")
+    assert host.index("docker rm --force bfx-ledger-switch-switch") > seed_at
+    assert env.db.owner_polls >= 2 and env.db.epoch == "ledger"
+    assert not [c for c in host.calls[seed_at:] if c[:3] == ["docker", "start", "bfx-bot"]]
+    assert not host.running["bfx-bot"] and host.timers == INITIAL_TIMERS
+    assert env.evidence()["outcome"].startswith("r2:")
+
+
+def test_a_seed_that_never_settles_is_r2(env: Env) -> None:
+    env.host.switches = ["late"]
+    env.db.late_commit = None
+
+    def stuck(user: str) -> int:
+        env.db.owner_polls += 1
+        return 1
+
+    env.db.owner_transactions = stuck  # type: ignore[method-assign]
+    assert env.switcher().run() == switch.EXIT_R2
+    assert env.db.epoch == "legacy"  # unknown is never taken as "nothing was written"
+    assert not env.host.running["bfx-bot"]
+
+
+WRITE_KINDS = ("observations", "queries", "attempts", "resolutions", "quarantines", "clock")
+
+
+@pytest.mark.parametrize("kind", WRITE_KINDS)
+def test_every_runtime_write_kind_turns_r2_into_r3(env: Env, kind: str) -> None:
+    """R1-2: any runtime ledger row, not only a basis-backed observation."""
+    env.host.recreate_ok = False
+    env.host.recreate_failure_writes = {kind: 1}
+    assert env.switcher().run() == switch.EXIT_R3
+    assert env.evidence()["runtime_writes"] == {kind: 1}
+
+
+@pytest.mark.parametrize("kind", WRITE_KINDS)
+def test_every_runtime_write_kind_blocks_the_restore(env: Env, kind: str) -> None:
+    _committed_run(env)
+    env.db.writes[kind] = 1
+    assert env.switcher().restore_halt_backup() == switch.EXIT_RESTORE_REFUSED
+    assert stops(env.host) == [] and not env.host.names("docker run")
+
+
+def test_restore_refuses_another_runs_backup(env: Env) -> None:
+    """R1-3: an earlier run that ended in R1 left a backup label but no committed seed."""
+    env.host.switches = ["claim_offer_terms_mismatch"]
+    assert env.switcher(run_id="switch-old").run() == switch.EXIT_R1
+    assert env.evidence(run_id="switch-old")["backup_label"]
+    _committed_run(env)  # switch-test commits and ends in R2
+    assert env.switcher(run_id="switch-old").restore_halt_backup() == \
+        switch.EXIT_RESTORE_REFUSED
+    assert stops(env.host) == [] and not env.host.names("docker run")
+
+
+def test_restore_refuses_when_the_epoch_is_not_this_runs(env: Env) -> None:
+    _committed_run(env)
+    env.db.actor = "ledger_seed:switch-other-a1"
+    assert env.switcher().restore_halt_backup() == switch.EXIT_RESTORE_REFUSED
+    assert env.evidence("restore.json")["outcome"] == "refused:epoch_not_from_this_run"
+    assert stops(env.host) == []
+
+
+def _crashed_after_commit(env: Env) -> None:
+    """switch-test committed its seed and died before go-live: bot stopped, timers stopped."""
+    _committed_run(env)
+    for timer, state in INITIAL_TIMERS.items():
+        if state == "active":
+            env.host.timers[timer] = "inactive"
+
+
+def test_a_rerun_after_a_commit_reports_r2_of_that_run_and_restores_its_timers(env: Env) -> None:
+    """R1-4: never "nothing was stopped, legacy keeps running"."""
+    _crashed_after_commit(env)
+    assert env.switcher(run_id="switch-rerun").run() == switch.EXIT_R2
+    assert env.host.timers == INITIAL_TIMERS
+    assert not [c for c in env.host.calls if c[:2] in (["docker", "stop"], ["docker", "start"])]
+    level, text = env.notes[-1]
+    assert level == "critical" and "restore-halt-backup --run-id switch-test" in text
+    assert "legacy keeps running" not in text
+    assert env.evidence(run_id="switch-rerun")["outcome"] == "already_switched:switch-test"
+
+
+def test_a_rerun_after_a_runtime_write_reports_r3(env: Env) -> None:
+    _crashed_after_commit(env)
+    env.db.writes["attempts"] = 1
+    assert env.switcher(run_id="switch-rerun").run() == switch.EXIT_R3
+    assert "R3" in env.notes[-1][1]
+
+
+def test_preflight_after_a_commit_reports_without_touching_anything(env: Env) -> None:
+    _crashed_after_commit(env)
+    assert env.switcher(run_id="switch-pre").preflight() == switch.EXIT_R2
+    assert env.host.calls == [] or not [c for c in env.host.calls if c[:2] in (
+        ["systemctl", "start"], ["systemctl", "stop"], ["docker", "stop"], ["docker", "start"])]
+
+
+def test_the_dsn_never_stays_on_disk_when_writing_the_inputs_fails(env: Env) -> None:
+    """R1-6: chown fails after the DSN file was written."""
+    def failing_chown(path: Path, uid: int, gid: int) -> None:
+        raise PermissionError("chown")
+
+    assert env.switcher(chown=failing_chown).run() == switch.EXIT_PRECHECK
+    assert not (env.settings.state_dir / "switch-test" / "seed-input").exists()
+    assert stops(env.host) == []
+    no_secret_leaked(env)
+
+
+def test_no_legacy_container_address_fails_the_session_check_closed(env: Env) -> None:
+    """R1-7: an empty exclusion set would let every TCP session through unseen."""
+    env.host.no_ip = True
+    assert env.switcher().run() == switch.EXIT_PRECHECK
+    assert env.evidence()["outcome"] == "precheck_failed:legacy_container_addresses_unknown"
+    assert env.db.seen_addresses == []

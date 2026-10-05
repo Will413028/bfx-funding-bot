@@ -41,7 +41,10 @@ Steps:
      no acknowledged submit and no reprice (a managed offer canceled) happened since the switch;
  11. restart the timers, notify success with the evidence path.
 
-Failure branches (each notifies immediately):
+Failure branches (each notifies immediately). When the seed step ends by an exception, its
+container is removed and the tool waits (bounded) until it is gone and no owner transaction is
+open before it reads the epoch; not knowing is R2. "Runtime write" is `Boundary`: any ledger
+row the seed never writes. A rerun after a committed seed reports that run's R2/R3.
   R1 before the seed committed (the database still says `legacy`): start bfx-bot and
      bfx-webapi on legacy, restart the timers. A refusal that means "stopped mid submit or
      mid query" (attempt_outcome_missing, legacy_query_pending) first lets legacy boot recovery
@@ -73,6 +76,7 @@ import fcntl
 import importlib.util
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -160,6 +164,15 @@ class SwitchError(Exception):
         self.reason = reason  # the seed's refusal code, when the seed refused
 
 
+class AlreadySwitched(SwitchError):  # noqa: N818 - a state, named like the other codes
+    """The epoch is already ``ledger`` (an earlier run committed its seed)."""
+
+    def __init__(self, previous_run: str | None, boundary: Boundary) -> None:
+        super().__init__("epoch_already_ledger")
+        self.previous_run = previous_run
+        self.boundary = boundary
+
+
 def _as_switch_error(exc: BaseException) -> SwitchError:
     if isinstance(exc, SwitchError):
         return exc
@@ -184,6 +197,25 @@ class SnapshotHead:
 
 
 @dataclass(frozen=True, slots=True)
+class Boundary:
+    """The first-runtime-write boundary of a scope (R2 vs R3, restore allowed or not).
+
+    ``writes`` counts every ledger row the runtime adds that the seed never writes: any
+    observation not ``legacy_seed`` (accepted or not), any query that is not the seed's, any
+    attempt without ``seed_provenance``, any execution resolution (the seed writes none), any
+    quarantine opening outside the seed basis, and clock revisions past the seed's (the seed
+    leaves the clock at its number of quarantine openings).
+    """
+
+    seed: int
+    writes: Mapping[str, int]
+
+    @property
+    def runtime(self) -> int:
+        return sum(self.writes.values())
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeBasis:
     accepted: bool
     unexplained: tuple[str, ...]
@@ -193,7 +225,9 @@ class SwitchDb(Protocol):
     def foreign_runtime_sessions(self, own_addresses: Sequence[str]) -> int: ...
     def latest_snapshot(self, account: str, environment: str) -> SnapshotHead | None: ...
     def epoch_authority(self) -> str: ...
-    def observations(self, account: str, environment: str) -> tuple[int, int]: ...
+    def epoch_actor(self) -> str: ...
+    def boundary(self, account: str, environment: str) -> Boundary: ...
+    def owner_transactions(self, user: str) -> int: ...
     def latest_runtime_basis(self, account: str, environment: str) -> RuntimeBasis | None: ...
     def trading_state(self, account: str, environment: str) -> str | None: ...
     def runtime_totals(self, account: str, environment: str) -> dict[str, str]: ...
@@ -209,7 +243,8 @@ SELECT json_build_object('count', count(*)) FROM pg_stat_activity a
 WHERE a.pid <> pg_backend_pid()
   AND (a.usesysid IN (SELECT oid FROM writers) OR a.datname = 'bfx_sim')
   AND (a.client_addr IS NULL
-       OR NOT (host(a.client_addr) = ANY (string_to_array(NULLIF(:'own', ''), ','))));
+       OR NOT coalesce(host(a.client_addr) = ANY (string_to_array(NULLIF(:'own', ''), ',')),
+                       false));
 """
 _SNAPSHOT = """
 SELECT coalesce((SELECT json_build_object(
@@ -222,16 +257,44 @@ SELECT coalesce((SELECT json_build_object(
   ORDER BY s.event_seq DESC LIMIT 1), 'null'::json);
 """
 _EPOCH = """
-SELECT json_build_object('authority', (SELECT authority FROM public.capital_authority_epoch
-  ORDER BY epoch_seq DESC LIMIT 1));
+SELECT coalesce((SELECT json_build_object('authority', authority, 'actor', actor)
+  FROM public.capital_authority_epoch ORDER BY epoch_seq DESC LIMIT 1), 'null'::json);
 """
-_OBSERVATIONS = """
+_BOUNDARY = """
+WITH seed_obs AS (
+  SELECT id, query_id FROM public.ledger_observation
+  WHERE exchange_account_id = :'account'::uuid AND deployment_environment = :'env'
+    AND origin = 'legacy_seed'),
+seed_quarantine AS (
+  SELECT bq.quarantine_id FROM public.accepted_capital_basis_quarantine bq
+  JOIN public.accepted_capital_basis b ON b.id = bq.basis_id
+  WHERE b.observation_id IN (SELECT id FROM seed_obs))
 SELECT json_build_object(
-  'seed', count(*) FILTER (WHERE o.origin = 'legacy_seed'),
-  'runtime', count(*) FILTER (WHERE o.origin <> 'legacy_seed' AND b.accepted))
-FROM public.ledger_observation o
-LEFT JOIN public.accepted_capital_basis b ON b.observation_id = o.id
-WHERE o.exchange_account_id = :'account'::uuid AND o.deployment_environment = :'env';
+  'seed', (SELECT count(*) FROM seed_obs),
+  'observations', (SELECT count(*) FROM public.ledger_observation
+     WHERE exchange_account_id = :'account'::uuid AND deployment_environment = :'env'
+       AND origin <> 'legacy_seed'),
+  'queries', (SELECT count(*) FROM public.ledger_observation_query
+     WHERE exchange_account_id = :'account'::uuid AND deployment_environment = :'env'
+       AND query_id NOT IN (SELECT query_id FROM seed_obs)),
+  'attempts', (SELECT count(*) FROM public.submission_attempt_journal
+     WHERE exchange_account_id = :'account'::uuid AND deployment_environment = :'env'
+       AND seed_provenance IS NULL),
+  'resolutions', (SELECT count(*) FROM public.execution_resolution_journal
+     WHERE exchange_account_id = :'account'::uuid AND deployment_environment = :'env'),
+  'quarantines', (SELECT count(*) FROM public.quarantine_opening
+     WHERE exchange_account_id = :'account'::uuid AND deployment_environment = :'env'
+       AND quarantine_id NOT IN (SELECT quarantine_id FROM seed_quarantine)),
+  'clock_revision', coalesce((SELECT revision FROM public.capital_command_clock
+     WHERE exchange_account_id = :'account'::uuid AND deployment_environment = :'env'), 0),
+  'seed_quarantines', (SELECT count(*) FROM seed_quarantine));
+"""
+# The seed's owner session, or any other owner session over TCP, still inside a transaction
+# (psql here comes in over the local socket: client_addr is NULL).
+_OWNER_TRANSACTIONS = """
+SELECT json_build_object('count', count(*)) FROM pg_stat_activity
+WHERE pid <> pg_backend_pid() AND usename = :'user' AND client_addr IS NOT NULL
+  AND xact_start IS NOT NULL;
 """
 _RUNTIME_BASIS = """
 SELECT coalesce((SELECT json_build_object(
@@ -328,12 +391,27 @@ class PsqlSwitchDb:
              for name, values in sorted(symbols.items())},
         )
 
-    def epoch_authority(self) -> str:
-        return str(self._json(_EPOCH)["authority"])
+    def _epoch(self) -> dict[str, Any]:
+        row = self._json(_EPOCH)
+        if not isinstance(row, dict):
+            raise SwitchError("epoch_missing")
+        return row
 
-    def observations(self, account: str, environment: str) -> tuple[int, int]:
-        row = self._json(_OBSERVATIONS, {"account": account, "env": environment})
-        return int(row["seed"]), int(row["runtime"])
+    def epoch_authority(self) -> str:
+        return str(self._epoch()["authority"])
+
+    def epoch_actor(self) -> str:
+        return str(self._epoch()["actor"])
+
+    def boundary(self, account: str, environment: str) -> Boundary:
+        row = self._json(_BOUNDARY, {"account": account, "env": environment})
+        writes = {key: int(row[key]) for key in
+                  ("observations", "queries", "attempts", "resolutions", "quarantines")}
+        writes["clock"] = max(0, int(row["clock_revision"]) - int(row["seed_quarantines"]))
+        return Boundary(int(row["seed"]), writes)
+
+    def owner_transactions(self, user: str) -> int:
+        return int(self._json(_OWNER_TRANSACTIONS, {"user": user})["count"])
 
     def latest_runtime_basis(self, account: str, environment: str) -> RuntimeBasis | None:
         row = self._json(_RUNTIME_BASIS, {"account": account, "env": environment})
@@ -392,6 +470,7 @@ class Settings:
     check_attempts: int = 3
     check_retry_seconds: float = 30.0
     seed_timeout: float = 900.0
+    seed_settle_seconds: float = 120.0
 
 
 @dataclass(slots=True)
@@ -504,6 +583,8 @@ class Switcher:
         self.run_id = run_id or _new_run_id(clock)
         self.evidence = Evidence(settings.state_dir / self.run_id / "evidence.json")
         self._active_timers: list[str] = []
+        self._seed_started: str | None = None  # the --switch container's name, once started
+        self._seed_settled = True
         self._deploy_lock: IO[str] | None = None
         self.account = ""
 
@@ -592,6 +673,12 @@ class Switcher:
                                       mode="preflight")
             try:
                 self._preflight()
+            except AlreadySwitched as exc:
+                code = EXIT_R3 if exc.boundary.runtime else EXIT_R2
+                self.evidence.data["outcome"] = f"already_switched:{exc.previous_run}"
+                self.evidence.save()
+                log(f"the epoch is already ledger (run {exc.previous_run}); see the runbook §5")
+                return code
             except SwitchError as exc:
                 self.evidence.data["outcome"] = f"precheck_failed:{exc.code}"
                 self.evidence.save()
@@ -629,10 +716,14 @@ class Switcher:
 
     def _attempt(self, number: int) -> int | str:
         self.evidence.data["attempts"].append({"attempt": number, "start_ms": self._now_ms()})
+        self._seed_started, self._seed_settled = None, True
         try:
             with self._step(f"preflight#{number}"):
                 self._preflight()
-        except SwitchError as exc:
+        except AlreadySwitched as exc:
+            return self._already_switched(exc)
+        except Exception as exc:
+            exc = _as_switch_error(exc)
             self.evidence.data["outcome"] = f"precheck_failed:{exc.code}"
             self.evidence.save()
             self._say("warning", f"not started, P-check failed ({exc.code}); nothing was "
@@ -676,7 +767,14 @@ class Switcher:
         with self._step("backup") as entry:
             entry["label"] = self.evidence.data["backup_label"] = self._backup("diff")
         with self._step("seed_switch") as entry:
-            summary, lines = self._run_seed("switch", f"{self.run_id}-a{number}")
+            try:
+                summary, lines = self._run_seed("switch", f"{self.run_id}-a{number}")
+            except BaseException:
+                # The container may still be alive and commit later: classify only after it
+                # is gone and no owner transaction remains (R1-1 of the PR-3 review).
+                self._seed_settled = self._settle_seed()
+                entry["seed_settled"] = self._seed_settled
+                raise
             entry["seed_summary"] = summary
             if summary.get("exit_code") != 0 or summary.get("committed") is not True:
                 raise SwitchError(f"seed_refused:{summary.get('reason', summary.get('exit_code'))}",
@@ -741,13 +839,19 @@ class Switcher:
     # ------------------------------------------------------------------ failure branches
 
     def _before_commit_failed(self, exc: SwitchError, number: int) -> int | str:
-        try:
-            committed = self._db.epoch_authority() == "ledger"
-        except SwitchError:
+        if self._seed_started is None:
+            # The seed never ran: nothing can have been written, whatever the database says.
+            committed: bool | None = False
+        elif not self._seed_settled:
             committed = None
+        else:
+            try:
+                committed = self._db.epoch_authority() == "ledger"
+            except SwitchError:
+                committed = None
         if committed is None:
-            return self._r2(exc, "the database could not be read to tell whether the seed "
-                                 "committed")
+            return self._r2(exc, "whether the seed committed is unknown (its container or "
+                                 "transaction did not go away, or the database is unreadable)")
         if committed:
             return self._r2(exc, "")
         restarted = self._r1(exc)
@@ -766,6 +870,43 @@ class Switcher:
                               f"({exc.reason})")
             return "retry"
         return EXIT_R1
+
+    def _already_switched(self, exc: AlreadySwitched) -> int:
+        """A rerun after an earlier run committed its seed (e.g. it crashed before go-live):
+        never "legacy keeps running"; R2 or R3 for that run, and its stopped timers back."""
+        previous = exc.previous_run
+        restarted: list[str] = []
+        try:
+            old = json.loads((self.settings.state_dir / str(previous) / "evidence.json")
+                             .read_text(encoding="utf-8"))
+            stopped = next((s.get("stopped") or [] for s in old.get("steps", [])
+                            if s.get("step") == "stop_timers"), [])
+        except (OSError, ValueError, TypeError, AttributeError):
+            stopped = []
+        for timer in stopped:
+            if timer not in TIMERS or self._run(["systemctl", "is-active", timer],
+                                                timeout=30.0).stdout.strip() == "active":
+                continue
+            if self._run(["systemctl", "start", timer], timeout=60.0).returncode == 0:
+                restarted.append(timer)
+        written = {k: v for k, v in exc.boundary.writes.items() if v}
+        self.evidence.data.update(outcome=f"already_switched:{previous}",
+                                  previous_run=previous, timers_restarted=restarted,
+                                  runtime_writes=written)
+        self.evidence.save()
+        if exc.boundary.runtime:
+            self._say("critical", (
+                f"not started: the epoch is already ledger (run {previous}) and the ledger "
+                f"runtime already wrote ({json.dumps(written, sort_keys=True)}). R3: "
+                f"forward-fix only. Timers restored: {restarted or 'none needed'}"))
+            return EXIT_R3
+        self._say("critical", (
+            f"not started: the epoch is already ledger (run {previous}) and no runtime ledger "
+            f"write exists. R2 of that run: forward-fix (sudo bfx-deploy --recreate after a "
+            f"fix, or a fixed release), or `bfx_ledger_switch.py restore-halt-backup --run-id "
+            f"{previous}`. The bot stays as it is. Timers restored: "
+            f"{restarted or 'none needed'}"))
+        return EXIT_R2
 
     def _r1(self, exc: SwitchError) -> bool:
         self.evidence.data["outcome"] = f"r1:{exc.code}"
@@ -815,16 +956,18 @@ class Switcher:
 
     def _after_commit_failed(self, exc: SwitchError) -> int:
         try:
-            _, runtime = self._db.observations(self.account, self.settings.environment)
+            boundary = self._db.boundary(self.account, self.settings.environment)
+            written = {k: v for k, v in boundary.writes.items() if v}
         except SwitchError:
-            runtime = -1
-        if runtime == 0:
+            boundary, written = None, {"unknown": 1}
+        if boundary is not None and boundary.runtime == 0:
             return self._r2(exc, "")
         self.evidence.data["outcome"] = f"r3:{exc.code}"
+        self.evidence.data["runtime_writes"] = written
         self.evidence.save()
         self._say("critical", (
-            f"R3: the ledger runtime already wrote ({'unknown count' if runtime < 0 else runtime} "
-            f"runtime observations) and the switch did not complete ({exc.code}). Forward-fix "
+            f"R3: the ledger runtime already wrote ({json.dumps(written, sort_keys=True)}) "
+            f"and the switch did not complete ({exc.code}). Forward-fix "
             f"only; protection halts by itself on an unexplained exposure. "
             f"Evidence {self.evidence.path}"))
         return EXIT_R3
@@ -837,6 +980,11 @@ class Switcher:
             raise SwitchError("digest_invalid")
         self.account = self._account()
         self.evidence.data["account"] = self.account
+        if self._db.epoch_authority() != "legacy":
+            actor = self._db.epoch_actor()
+            match = re.fullmatch(r"ledger_seed:(.+)-a[0-9]+", actor)
+            raise AlreadySwitched(match.group(1) if match else None,
+                                  self._db.boundary(self.account, settings.environment))
         view = self._ledger_view()
         last, success = view.last_attempt, view.last_success
         if last is None or success is None or last.id != success.id \
@@ -857,6 +1005,9 @@ class Switcher:
         if any(name == SIM_CONTAINER or name.startswith(SIM_CONTAINER + "-") for name in names):
             raise SwitchError("simulation_running")
         own = self._container_addresses(("bfx-bot", "bfx-webapi"))
+        if not own:
+            # An empty set would exclude nothing and prove nothing: fail closed (R1-7).
+            raise SwitchError("legacy_container_addresses_unknown")
         if self._db.foreign_runtime_sessions(own):
             raise SwitchError("runtime_session_present")
         self._seed_check()
@@ -1005,22 +1156,48 @@ class Switcher:
             self._chown(path, uid, uid)
         return directory
 
+    def _settle_seed(self) -> bool:
+        """Remove the --switch container and wait (bounded) until it is gone and no owner
+        transaction over TCP remains; True when settled, False when that is unknown."""
+        name = self._seed_started
+        if name is None:
+            return True
+        try:
+            self._run(["docker", "rm", "--force", name], timeout=120.0)
+
+            def missing() -> str | None:
+                listed = self._run(["docker", "ps", "--all", "--quiet", "--filter",
+                                    f"name=^{name}$"], timeout=30.0)
+                if listed.returncode != 0 or listed.stdout.strip():
+                    return "seed_container_present"
+                if self._db.owner_transactions(self.settings.db_user):
+                    return "seed_transaction_open"
+                return None
+
+            self._wait("seed_settle", self.settings.seed_settle_seconds, missing)
+        except Exception as exc:
+            log(f"seed did not settle: {_as_switch_error(exc).code}")
+            return False
+        return True
+
     def _run_seed(self, mode: str, seed_run_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        directory = self._write_seed_input(seed_run_id)
-        args = ["/app/.venv/bin/python", "-m", SEED_MODULE, f"--{mode}",
+        name = f"bfx-ledger-switch-{mode}-{secrets.token_hex(4)}"
+        try:
+            directory = self._write_seed_input(seed_run_id)
+            args = ["/app/.venv/bin/python", "-m", SEED_MODULE, f"--{mode}",
                 "--dsn-file", f"{SEED_INPUT_MOUNT}/dsn",
                 "--manifest", f"{SEED_INPUT_MOUNT}/manifest.json",
-                "--run-id", seed_run_id,
-                "--scope", f"{self.account}:{self.settings.environment}",
-                "--cells", self.settings.cells_path]
-        if mode == "switch":
-            args.append("--authorize-seed")
-        try:
-            result = self._one_shot(args, name=f"bfx-ledger-switch-{mode}-{secrets.token_hex(4)}",
-                                    timeout=self.settings.seed_timeout,
+                    "--run-id", seed_run_id,
+                    "--scope", f"{self.account}:{self.settings.environment}",
+                    "--cells", self.settings.cells_path]
+            if mode == "switch":
+                args.append("--authorize-seed")
+                self._seed_started = name
+            result = self._one_shot(args, name=name, timeout=self.settings.seed_timeout,
                                     mounts=(f"{directory}:{SEED_INPUT_MOUNT}:ro",))
         finally:
-            shutil.rmtree(directory, ignore_errors=True)
+            # Covers a failure while the input files are written too (R1-6).
+            shutil.rmtree(self.run_dir / "seed-input", ignore_errors=True)
         output = self.run_dir / f"seed-{seed_run_id}.jsonl"
         bfx_deploy._write_atomic(output, result.stdout, 0o600)
         return parse_seed_output(result.stdout)
@@ -1133,8 +1310,7 @@ class Switcher:
     def _live_missing(self) -> str | None:
         account, environment = self.account, self.settings.environment
         missing = []
-        _, runtime = self._db.observations(account, environment)
-        if runtime == 0:
+        if self._db.boundary(account, environment).writes.get("observations", 0) == 0:
             missing.append("runtime_observation")
         basis = self._db.latest_runtime_basis(account, environment)
         if basis is None or not basis.accepted:
@@ -1182,8 +1358,13 @@ class Switcher:
             try:
                 switch = json.loads(source.read_text(encoding="utf-8"))
                 label, account = str(switch["backup_label"]), str(UUID(switch["account"]))
+                committed = switch.get("seed_committed") is True
             except (OSError, ValueError, KeyError, TypeError):
                 log(f"no usable evidence at {source}")
+                return EXIT_RESTORE_REFUSED
+            if not committed:
+                log(f"run {self.run_id} never committed a seed; its backup is not a halt backup "
+                    "this command may restore")
                 return EXIT_RESTORE_REFUSED
             self.account = account
             self.evidence = Evidence(self.run_dir / "restore.json",
@@ -1204,8 +1385,11 @@ class Switcher:
     def _restore_preconditions(self) -> None:
         if self._db.epoch_authority() != "ledger":
             raise SwitchError("seed_not_committed")
-        _, runtime = self._db.observations(self.account, self.settings.environment)
-        if runtime:
+        # The epoch this backup may undo is this run's own switch (R1-3).
+        actor = self._db.epoch_actor()
+        if not re.fullmatch(re.escape(f"ledger_seed:{self.run_id}-a") + r"[0-9]+", actor):
+            raise SwitchError("epoch_not_from_this_run")
+        if self._db.boundary(self.account, self.settings.environment).runtime:
             raise SwitchError("runtime_ledger_write_exists")
 
     def _restore(self, label: str) -> int:
@@ -1256,8 +1440,8 @@ class Switcher:
                             code="postgres_start_failed", timeout=120.0)
                 self._wait("postgres", self.settings.postgres_wait_seconds, self._pg_missing)
             with self._step("verify_legacy"):
-                seed, runtime = self._db.observations(self.account, self.settings.environment)
-                if self._db.epoch_authority() != "legacy" or seed or runtime:
+                boundary = self._db.boundary(self.account, self.settings.environment)
+                if self._db.epoch_authority() != "legacy" or boundary.seed or boundary.runtime:
                     raise SwitchError("restored_state_not_legacy")
             with self._step("fresh_backup") as entry:
                 entry["label"] = self._backup("full")

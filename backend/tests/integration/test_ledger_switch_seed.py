@@ -16,8 +16,14 @@ Mutations (apply one at a time, run this file, revert; the test that fails is na
 """
 from __future__ import annotations
 
+import importlib.util
+import json
+import re
+import sys
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -331,3 +337,61 @@ async def test_check_reports_the_snapshot_guards_together(
     async with env.factory() as session:
         after = await session.scalar(text("SELECT count(*) FROM ledger_observation"))
     assert after == before
+
+
+def _ops_tool() -> ModuleType:
+    path = Path(__file__).resolve().parents[3] / "deploy/vm/ops/bfx_ledger_switch.py"
+    spec = importlib.util.spec_from_file_location("ops_ledger_switch_sql_under_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _psql(sql: str, variables: dict[str, str]) -> str:
+    """psql's ``:'name'`` substitution (a quoted literal), for running the tool's SQL here."""
+    return re.sub(r":'(\w+)'", lambda m: "'" + variables[m.group(1)].replace("'", "''") + "'",
+                  sql)
+
+
+async def test_the_host_tool_queries_run_on_the_real_schema(
+    bot_env: BotEnv, ledger_db: Any, tmp_path: Any,  # noqa: F811
+) -> None:
+    """The switch tool's psql queries against the migrated schema right after ``--switch``:
+    the seed is no runtime write (every boundary count 0), the epoch names the run, and a
+    clock revision past the seed's counts as one."""
+    tool = _ops_tool()
+    env = bot_env
+    await legacy_with_live_offer(env)
+    code, lines = await run_seed(switch_command(env, tmp_path, ledger_db.url), now_ms=SEED_AT)
+    assert code == 0, lines
+    account = str(lines[0]["scope"]["account_id"])
+    scope = {"account": account, "env": "ci"}
+
+    async def query(sql: str, **variables: str) -> Any:
+        async with env.factory() as session:
+            raw = (await session.execute(text(_psql(sql, variables).replace(":", "\\:")
+                                              .replace("\\:\\:", "::")))).scalar_one()
+        return raw if not isinstance(raw, str) else json.loads(raw)
+
+    boundary = await query(tool._BOUNDARY, **scope)
+    assert boundary["seed"] == 1 and boundary["clock_revision"] == boundary["seed_quarantines"]
+    assert {k: boundary[k] for k in ("observations", "queries", "attempts", "resolutions",
+                                     "quarantines")} == dict.fromkeys(
+        ("observations", "queries", "attempts", "resolutions", "quarantines"), 0)
+    assert await query(tool._EPOCH) == {"authority": "ledger", "actor": "ledger_seed:seed-e2e"}
+    snapshot = await query(tool._SNAPSHOT, **scope)
+    assert snapshot["symbols"]["fUST"]["available"] is not None
+    assert await query(tool._RUNTIME_BASIS, **scope) is None
+    assert await query(tool._RUNTIME_TOTALS, **scope) == {}
+    assert await query(tool._ACTIVITY, since="0", **scope) == {"acked": 0, "canceled": 0}
+    assert set(await query(tool._TRADING_STATE, **scope)) == {"state"}
+    assert await query(tool._OWNER_TRANSACTIONS, user="nobody") == {"count": 0}
+    for own in ("", "10.0.0.1,10.0.0.2"):
+        assert isinstance((await query(tool._SESSIONS, own=own))["count"], int)
+
+    async with env.factory.begin() as session:
+        await session.execute(text("UPDATE capital_command_clock SET revision = revision + 1"))
+    bumped = await query(tool._BOUNDARY, **scope)
+    assert bumped["clock_revision"] == bumped["seed_quarantines"] + 1
