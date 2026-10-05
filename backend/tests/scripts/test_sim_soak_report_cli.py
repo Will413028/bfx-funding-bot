@@ -13,14 +13,14 @@ ACCOUNT = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 
 
 def test_the_bar_and_the_floor_are_the_numbers_fixed_before_the_soak() -> None:
-    """ADR 2026-10-03 D3 and its 2026-10-04 amendment; a change here is an ADR amendment."""
+    """ADR 2026-10-03 D3 and its 2026-10-05 amendment; a change here is an ADR amendment."""
     assert (report.MIN_WINDOW_HOURS, report.MIN_DEPLOY_RESTARTS, report.MIN_OPERATOR_KILLS) == (
-        72, 2, 1)
+        24, 1, 1)
+    assert (report.KILL_WINDOW_START_HOUR, report.KILL_WINDOW_END_HOUR) == (6, 10)
     assert Decimal("0.99") == report.MIN_ACCEPTED_CYCLE_RATIO
-    assert report.MIN_TRADING_HOURS_AFTER_RESUME == 24
-    assert (report.FLOOR_ACKED_SUBMITS, report.FLOOR_FILLS, report.FLOOR_CANCELS,
-            report.FLOOR_CREDITS_CLOSED_BY_EXPIRY, report.FLOOR_INTEREST_PAYMENTS_PER_DAY) == (
-        50, 10, 10, 1, 1)
+    assert report.MIN_TRADING_HOURS_AFTER_RESUME == 8
+    assert (report.FLOOR_ACKED_SUBMITS, report.FLOOR_FILLS, report.FLOOR_INTEREST_PAYMENTS) == (
+        1, 1, 1)
 
 
 def test_instants_are_iso_with_an_offset() -> None:

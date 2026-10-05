@@ -22,6 +22,7 @@ class MarketfeedConfig(BaseModel):
     # (``BFX_SIM_FAULTS``, parsed in apps/sim_faults.py). Empty: no fault is injected.
     simulated_faults: dict[str, float] = Field(default_factory=dict)
     simulated_fault_seed: int = Field(default=0, ge=0)
+    simulated_fault_ordinals: dict[str, tuple[int, ...]] = Field(default_factory=dict)
     cells: list[CellConfig]
     database_url: str = Field(repr=False)
     deployment_environment: DeploymentEnvironment

@@ -40,7 +40,8 @@ HOUR = 3_600_000
 D150, D0002 = Decimal("150"), Decimal("0.0002")
 DAY = 86_400_000
 T0 = 1_704_067_200_000  # 2024-01-01T00:00Z, a UTC midnight
-WINDOW = report.Window(T0, T0 + 80 * HOUR)
+WINDOW = report.Window(T0, T0 + 26 * HOUR)
+CYCLE = 7 * 60_000  # a ledger query every 7 minutes: 200 of them fit the 24 h bar
 
 
 def scrape(tmp_path: Path, name: str, *, disconnects: int = 0, truncated: int = 0,
@@ -64,15 +65,19 @@ class Soak:
     """What to seed: the defaults are a soak that passes everything."""
 
     revisions: Sequence[tuple[str, int]] = (
-        ("rev-a", T0 + HOUR), ("rev-b", T0 + 26 * HOUR), ("rev-c", T0 + 50 * HOUR))
-    kill_at: int | None = T0 + 26 * HOUR
-    resume_at: int | None = T0 + 30 * HOUR
+        ("rev-a", T0 + HOUR), ("rev-b", T0 + 12 * HOUR))
+    kill_at: int | None = T0 + 8 * HOUR
+    resume_at: int | None = T0 + 9 * HOUR
+    later_kill: tuple[int, int] | None = None  # a second kill and its resume, after the first
     cancel_all_acknowledged: bool = True
     queries: int = 200
     queries_without_observation: int = 2
-    acked_submits: int = 60
+    acked_submits: int = 20
+    acked_from: int = 3 * HOUR  # offset of the first acked submit
     injected_unknown: int = 5
     record_injections: bool = True
+    injected_kind: str = "unknown_placed_lost"
+    injected_ordinal: int | None = None  # None: the injection's index + 1
     organic_unknown: int = 0
     organic_quarantine: int = 0
     injected_quarantine_open: bool = False
@@ -80,7 +85,7 @@ class Soak:
     fills: int = 12
     cancels: int = 12
     expired_credits: int = 1
-    interest_days: Sequence[int] = (0, 1, 2)
+    interest_days: Sequence[int] = (0, 1)
     conservation: Sequence[tuple[str, int]] = (("baseline", T0 + 2 * HOUR),
                                                ("conserved", T0 + 3 * HOUR))
     internal_failures: Sequence[int] = ()  # times of durable internal-failure records
@@ -174,6 +179,9 @@ async def seed(conn: AsyncConnection, soak: Soak) -> None:
         states.append(("HALTED", "operator", "soak-kill", soak.kill_at))
     if soak.resume_at is not None:
         states.append(("ACTIVE", "operator", "soak-orchestrator", soak.resume_at))
+    if soak.later_kill is not None:
+        states.append(("HALTED", "operator", "soak-kill", soak.later_kill[0]))
+        states.append(("ACTIVE", "operator", "soak-orchestrator", soak.later_kill[1]))
     for state, cause, actor, at in states:
         row = (await _x(conn, """
             INSERT INTO trading_state (exchange_account_id, deployment_environment, state, cause,
@@ -189,10 +197,10 @@ async def seed(conn: AsyncConnection, soak: Soak) -> None:
                      a=ACCOUNT, r=REALM, sid=row.id, attempt=uuid4(), at=at,
                      phase="acknowledged" if soak.cancel_all_acknowledged else "requested",
                      status="SUCCESS" if soak.cancel_all_acknowledged else None)
-    # ledger cycles: a query every 20 minutes; the last ones never produced an observation
+    # ledger cycles: a query every 7 minutes; the last ones never produced an observation
     for index in range(soak.queries):
         query_id = uuid4()
-        started = T0 + 10 * 60_000 + index * 20 * 60_000
+        started = T0 + 10 * 60_000 + index * CYCLE
         await _x(conn, """
             INSERT INTO ledger_observation_query (query_id, exchange_account_id,
                 deployment_environment, query_revision, started_at_ms, start_revision)
@@ -228,7 +236,7 @@ async def seed(conn: AsyncConnection, soak: Soak) -> None:
                  id=basis, verdict=verdict, lent=lent, foreign=foreign, conflicts=conflicts)
     # submits: acked ones, then UNKNOWN ones (injected, or organic when asked)
     for index in range(soak.acked_submits):
-        at = T0 + 3 * HOUR + index * HOUR
+        at = T0 + soak.acked_from + index * HOUR // 2
         await _attempt(conn, soak, kind="ack", started=at, completed=at + 500)
     for index in range(soak.injected_unknown + soak.organic_unknown):
         started = T0 + 4 * HOUR + index * HOUR
@@ -238,7 +246,8 @@ async def seed(conn: AsyncConnection, soak: Soak) -> None:
             soak.injected_attempts.append(attempt)
             if soak.record_injections:
                 await _event(conn, soak, ev.FaultInjected(
-                    "unknown_placed_lost", "submit", index + 1, 1, "fUST", D150, D0002, 2,
+                    soak.injected_kind, "submit",
+                    soak.injected_ordinal or index + 1, 1, "fUST", D150, D0002, 2,
                     started + 1_000))
                 if index == 0 and soak.overlapping_organic:
                     # another UNKNOWN, of another amount, that began first and ends last: it
@@ -255,7 +264,7 @@ async def seed(conn: AsyncConnection, soak: Soak) -> None:
     for number, cycle in enumerate(soak.history_faults_in_cycles, start=2):
         await _event(conn, soak, ev.FaultInjected(
             "history_error", "history", number, 1, None, None, None, None,
-            T0 + 10 * 60_000 + cycle * 20 * 60_000 + 500))
+            T0 + 10 * 60_000 + cycle * CYCLE + 500))
     for at in soak.internal_failures:
         await _event(conn, soak, ev.InternalFailureRecorded("feed", "feed trades failed", at))
     for at in soak.unexpected_requests:
@@ -318,11 +327,11 @@ async def test_a_soak_that_meets_the_bar_and_the_floor_passes_everything(engine,
     by_id = await _report(engine, tmp_path=tmp_path)
     assert _failing(by_id) == set(), _statuses(by_id)
     assert report.exit_code(list(by_id.values())) == 0
-    assert by_id["d3.deploy_restarts"].evidence["deploy_restarts"] == 2
+    assert by_id["d3.deploy_restarts"].evidence["deploy_restarts"] == 1
     assert by_id["d3.accepted_cycle_ratio"].evidence["ratio"] == "0.9900"
     assert by_id["d3.injected_unknown_auto_closed"].evidence["injected_unknown"] == 5
     assert by_id["d3.organic_quarantine_unknown"].evidence["organic_unknown"] == 0
-    assert by_id["floor.interest_per_day"].evidence["whole_days"] == 3
+    assert by_id["floor.interest_payments"].evidence["interest_paid"] == 2
     text_out = report.render(list(by_id.values()), event_count=3)
     assert text_out.splitlines()[-1] == "RESULT PASS" and "PASS" in text_out
 
@@ -332,38 +341,59 @@ async def test_a_soak_that_never_submitted_fails_the_floor(engine, tmp_path) -> 
     by_id = await _report(engine, Soak(
         acked_submits=0, injected_unknown=0, fills=0, cancels=0, expired_credits=0,
         interest_days=()), tmp_path=tmp_path)
-    assert {"floor.acked_submits", "floor.fills", "floor.cancels",
-            "floor.credits_closed_by_expiry", "floor.interest_per_day"} <= _failing(by_id)
+    assert {"floor.acked_submits", "floor.fills", "floor.interest_payments"} <= _failing(by_id)
     assert by_id["d3.unexplained_lending"].status == "PASS"
     assert by_id["d3.organic_quarantine_unknown"].status == "PASS"
     assert report.exit_code(list(by_id.values())) == 1
 
 
 @pytest.mark.parametrize(("change", "failing"), [
-    ({"acked_submits": report.FLOOR_ACKED_SUBMITS - 1}, "floor.acked_submits"),
-    ({"fills": report.FLOOR_FILLS - 1}, "floor.fills"),
-    ({"cancels": report.FLOOR_CANCELS - 1}, "floor.cancels"),
-    ({"expired_credits": 0}, "floor.credits_closed_by_expiry"),
-    ({"interest_days": (0, 2)}, "floor.interest_per_day"),  # day 1 has no payment
+    ({"fills": report.FLOOR_FILLS - 1}, {"floor.fills"}),
+    ({"interest_days": ()}, {"floor.interest_payments"}),
+    # no acked submit also leaves nothing to inject into and nothing after the resume
+    ({"acked_submits": report.FLOOR_ACKED_SUBMITS - 1, "injected_unknown": 0,
+      "record_injections": False},
+     {"floor.acked_submits", "d3.injected_unknown_auto_closed",
+      "amendment.trading_after_resume"}),
 ])
 async def test_each_floor_number_is_a_hard_threshold(engine, tmp_path, change, failing) -> None:
     by_id = await _report(engine, Soak(**change), tmp_path=tmp_path)
-    assert _failing(by_id) == {failing}, _statuses(by_id)
+    assert _failing(by_id) == failing, _statuses(by_id)
 
 
 async def test_the_floor_is_met_exactly_at_its_numbers(engine, tmp_path) -> None:
     by_id = await _report(engine, Soak(
-        acked_submits=report.FLOOR_ACKED_SUBMITS, fills=report.FLOOR_FILLS,
-        cancels=report.FLOOR_CANCELS, expired_credits=report.FLOOR_CREDITS_CLOSED_BY_EXPIRY,
-    ), tmp_path=tmp_path)
+        acked_submits=report.FLOOR_ACKED_SUBMITS, acked_from=10 * HOUR, fills=report.FLOOR_FILLS,
+        cancels=0, expired_credits=0, interest_days=(0,)), tmp_path=tmp_path)
     assert _failing(by_id) == set(), _statuses(by_id)
 
 
+async def test_expiry_settlement_and_cancels_are_reported_but_never_fail(engine, tmp_path) -> None:
+    by_id = await _report(engine, Soak(expired_credits=0, cancels=0), tmp_path=tmp_path)
+    assert _failing(by_id) == set(), _statuses(by_id)
+    assert by_id["info.credits_closed_by_expiry"].evidence == {"credit_closed_expired": 0}
+    assert by_id["info.cancels"].evidence == {"offer_canceled": 0}
+
+
+async def test_an_ordinal_injection_counts_like_a_probability_one(engine, tmp_path) -> None:
+    """``unknown_5xx_at=3``: the injection is the same durable event (kind, ordinal 3), and the
+    report matches it to its UNKNOWN attempt by content, not by how the draw was made."""
+    by_id = await _report(engine, Soak(
+        injected_unknown=1, injected_kind="unknown_5xx_error", injected_ordinal=3),
+        tmp_path=tmp_path)
+    assert _failing(by_id) == set(), _statuses(by_id)
+    assert by_id["d3.injected_unknown_auto_closed"].evidence["injected_unknown"] == 1
+
+
+async def test_zero_injected_unknown_fails_the_bar(engine, tmp_path) -> None:
+    by_id = await _report(engine, Soak(injected_unknown=0, record_injections=False),
+                          tmp_path=tmp_path)
+    assert _failing(by_id) == {"d3.injected_unknown_auto_closed"}, _statuses(by_id)
+
+
 async def test_acked_submits_do_not_count_the_unknown_ones(engine, tmp_path) -> None:
-    by_id = await _report(engine, Soak(acked_submits=report.FLOOR_ACKED_SUBMITS - 5),
-                          tmp_path=tmp_path)  # + the 5 injected UNKNOWN attempts
-    assert by_id["floor.acked_submits"].status == "FAIL"
-    assert by_id["floor.acked_submits"].evidence["acked_submits"] == 45
+    by_id = await _report(engine, Soak(acked_submits=3), tmp_path=tmp_path)
+    assert by_id["floor.acked_submits"].evidence["acked_submits"] == 3  # not 3 + 5 injected
 
 
 async def test_injected_unknown_is_separated_from_organic_by_the_recorded_injections(
@@ -455,21 +485,26 @@ async def test_the_window_must_be_long_enough(engine, tmp_path) -> None:
     assert by_id["d3.window_hours"].status == "FAIL"
 
 
+def test_the_bar_is_24_hours_not_72() -> None:
+    assert report.window_criterion(report.Window(T0, T0 + 71 * HOUR)).status == "PASS"
+    assert report.window_criterion(report.Window(T0, T0 + 23 * HOUR)).status == "FAIL"
+
+
 def test_a_window_of_exactly_the_minimum_passes() -> None:
     exact = report.Window(T0, T0 + report.MIN_WINDOW_HOURS * HOUR)
     assert report.window_criterion(exact).status == "PASS"
 
 
 async def test_restarts_need_new_revisions_and_an_identified_one(engine, tmp_path) -> None:
-    one = await _report(engine, Soak(revisions=(("rev-a", T0 + HOUR), ("rev-b", T0 + 26 * HOUR))),
-                        tmp_path=tmp_path)
-    assert one["d3.deploy_restarts"].status == "FAIL"
-    assert one["d3.deploy_restarts"].evidence["deploy_restarts"] == 1
+    none = await _report(engine, Soak(revisions=(("rev-a", T0 + HOUR), ("rev-a", T0 + 12 * HOUR))),
+                         tmp_path=tmp_path)  # restarted, but on the same revision
+    assert none["d3.deploy_restarts"].status == "FAIL"
+    assert none["d3.deploy_restarts"].evidence["deploy_restarts"] == 0
 
 
 async def test_an_unidentified_revision_fails_the_restart_count(engine, tmp_path) -> None:
     by_id = await _report(engine, Soak(revisions=(
-        ("rev-a", T0 + HOUR), ("unidentified", T0 + 26 * HOUR), ("rev-c", T0 + 50 * HOUR))),
+        ("rev-a", T0 + HOUR), ("unidentified", T0 + 12 * HOUR), ("rev-c", T0 + 20 * HOUR))),
         tmp_path=tmp_path)
     restarts = by_id["d3.deploy_restarts"]
     assert restarts.status == "FAIL" and restarts.evidence["unidentified"] == ["unidentified"]
@@ -480,7 +515,9 @@ async def test_an_unidentified_revision_fails_the_restart_count(engine, tmp_path
     ({"cancel_all_acknowledged": False},  # a HALT whose cancel-all never completed is no kill
      {"d3.operator_kill", "amendment.trading_after_resume"}),
     ({"resume_at": None}, {"amendment.trading_after_resume"}),  # HALTED at the end
-    ({"resume_at": T0 + 70 * HOUR}, {"amendment.trading_after_resume"}),  # only 10 h of trading
+    ({"resume_at": T0 + 20 * HOUR}, {"amendment.trading_after_resume"}),  # only 6 h of trading
+    ({"kill_at": T0 + 5 * HOUR, "resume_at": T0 + 6 * HOUR}, {"d3.operator_kill"}),  # too early
+    ({"kill_at": T0 + 10 * HOUR + 1, "resume_at": T0 + 11 * HOUR}, {"d3.operator_kill"}),  # late
 ])
 async def test_the_kill_and_the_trading_after_it_are_part_of_the_bar(
         engine, tmp_path, change, failing) -> None:
@@ -488,11 +525,22 @@ async def test_the_kill_and_the_trading_after_it_are_part_of_the_bar(
     assert _failing(by_id) == failing, _statuses(by_id)
 
 
+async def test_trading_after_the_resume_is_measured_from_the_qualifying_kill(
+        engine, tmp_path) -> None:
+    """A second, later kill (outside hours 6-10) neither replaces the qualifying one nor moves
+    the resume it is measured from: 17 h from the +9 h resume, not 1 h from the later one."""
+    by_id = await _report(engine, Soak(later_kill=(T0 + 24 * HOUR, T0 + 25 * HOUR)),
+                          tmp_path=tmp_path)
+    assert by_id["d3.operator_kill"].evidence["in_kill_window"] == 1
+    assert by_id["amendment.trading_after_resume"].evidence["hours_after_resume"] == 17.0
+    assert _failing(by_id) == set(), _statuses(by_id)
+
+
 async def test_trading_after_the_resume_needs_acked_submits_in_it(engine, tmp_path) -> None:
-    # every acked submit happens before the resume at +30 h
-    by_id = await _report(engine, Soak(acked_submits=15), tmp_path=tmp_path)
+    # every acked submit happens before the resume at +9 h
+    by_id = await _report(engine, Soak(acked_submits=4), tmp_path=tmp_path)
     after = by_id["amendment.trading_after_resume"]
-    assert after.evidence["hours_after_resume"] == 50.0
+    assert after.evidence["hours_after_resume"] == 17.0
     assert after.evidence["acked_submits_after_resume"] == 0 and after.status == "FAIL"
 
 

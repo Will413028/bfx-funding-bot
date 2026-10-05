@@ -84,10 +84,13 @@ SIMULATED_CAPABILITIES = VenueCapabilities(auth_ws="forbidden", rest_fill_tracke
 
 def fault_plan(spec: SimFaultSpec) -> FaultPlan:
     """The plan for the transport; a rate of 0 adds no rule, no rates is the empty plan."""
+    names = [n for n, rate in spec.rates.items() if rate > 0.0]
+    names += [n for n in spec.ordinals if n not in names]
     rules = tuple(
         FaultRule(target=FaultTarget(FAULT_KNOBS[name][0]), kind=FaultKind(FAULT_KNOBS[name][1]),
-                  probability=rate)
-        for name, rate in spec.rates.items() if rate > 0.0
+                  probability=spec.rates.get(name, 0.0),
+                  ordinals=frozenset(spec.ordinals.get(name, ())))
+        for name in names
     )
     return FaultPlan(rules=rules, seed=spec.seed)
 
@@ -195,7 +198,8 @@ async def build_venue(
         if config.simulated_initial_wallets:
             raise ConfigurationError(
                 "BFX_SIM_INITIAL_WALLETS is only valid for the simulated venue")
-        if config.simulated_faults or config.simulated_fault_seed:
+        if (config.simulated_faults or config.simulated_fault_ordinals
+                or config.simulated_fault_seed):
             raise ConfigurationError("BFX_SIM_FAULTS is only valid for the simulated venue")
         async with session_factory() as session:
             credentials = await _vault_credentials(session, exchange_account_id)
@@ -254,7 +258,8 @@ async def _build_simulated(
             api_key=credentials.api_key, api_secret=credentials.api_secret, symbols=symbols),
         store=store, feed=feed, clock_ms=clock,
         faults=seam.faults if seam.faults is not None else fault_plan(SimFaultSpec(
-            config.simulated_faults, config.simulated_fault_seed)),
+            config.simulated_faults, config.simulated_fault_seed,
+            config.simulated_fault_ordinals)),
         observer=observer,
     )
     if live_feed is not None:

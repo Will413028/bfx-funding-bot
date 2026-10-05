@@ -109,8 +109,20 @@ P2c 的 pre-flight（唯讀）發現 D3 草案有三個洞，Will 於 2026-10-04
 - **accepted cycle 的分母（決定 A 的後果）：** 時間範圍（query 開始到 observation 結束，沒有 observation 的到下一個 query 開始）內有 `history` 注入的 cycle，另列、不計入第 4 條的比例；閘門看的是其餘 cycle，所以注入的 `history_error` 本身不會讓這一條失敗。
 - **輔助護欄：** 模擬器內部失敗與 unexpected request 為 0：venue 把每一筆（有上限、盡力而為）append 成 `internal_failure_recorded`／`unexpected_request_recorded` 事件，報告從 DB 讀，跨重啟與當機都在，Prometheus 計數器只做即時監看。feed 的計數（trades WS 斷線、backfill 被截斷或超出保留期）只存在行程內，報告讀各代 `/metrics` 的存檔，缺少只讓該條 `UNAVAILABLE`，不當成 0；超出保留期而補不回的 trades 缺口為 FAIL，被截斷但已接續補完的只列出。`foreign_lending` 為 0（sim 沒有外來 actor）；重啟次數以 `execution_decisions.service_version` 計，出現 `unidentified` 即 FAIL。執行步驟在 [simulation-soak runbook](../runbooks/simulation-soak.md)。
 
+### Amendment 2026-10-05 (Will)：D3 改為 24 小時門檻
+
+單一使用者，切換不再以決定 C 的完整 soak 為閘門（見 `docs/superpowers/plans/2026-09-28-backend-capability-modules.md` 的「Re-plan: direct seed-and-switch」與「Switch decisions」H-3）。soak 尚未開始，所以「改數字要重新計時」成立。取代上面 D3 草案與 2026-10-04 修訂中的數字，其餘（形式、原因、報告機制）不變：
+
+- 視窗 ≥ 24 小時（原 72）；≥ 1 次部署重啟（新 revision，計法不變；原 2）；
+- kill 在視窗開始後第 6–10 小時（原第 24–48 小時），恢復後 ≥ 8 小時交易且 ≥ 1 筆 ack 的 submit（原 24 小時）；
+- 活動下限改為 prod 最近 7 天速率 × 0.5 換算每 24 小時。2026-10-05 在 prod 實測 7 天內 10 筆 ack 的 submit、10 次成交、10 筆 credit 結清、撤單約 0，所以下限為 ack 的 submit ≥ 1、成交 ≥ 1，撤單／reprice 無下限（只列報告）；
+- 利息：視窗內 ≥ 1 筆（venue 約每日 01:30Z 付息；不再要求每個完整 UTC 日）；
+- 到期結清（原 `credits_closed_by_expiry` 下限）移出閘門、只列報告，由 CI oracle（`tests/integration/test_sim_venue_ledger_oracle.py` 的 expire 案例）與另案的 seeded credit-expiry e2e 涵蓋；
+- 故障注入：24 小時內至少一筆注入的 UNKNOWN 才過。24 小時的 submit 很少（prod 約 10 筆／7 天），機率規則保證不了，而 draw 的鍵是 bot 的掛鐘微秒 nonce，調 seed 無法預選。維持低 rate（決定 A），新增序數 knob `unknown_5xx_at=1`：每個 process 的第 1 筆 submit 必定注入（未下單的 UNKNOWN，自動結案），每次重啟（ordinal 重數）再注入一次；注入仍是持久的 `fault_injected` 事件，報告歸因不變；
+- 不變：`unexplained_lending` 為 0、非注入的 quarantine／UNKNOWN 為 0、accepted cycle ≥ 99%、注入的 UNKNOWN 全數自動結案。
+
 ### Revocation Trigger
 
-- 活動下限的數字在前 24 小時的實際速率證明過高或過低 → 修訂本 ADR 並重新計 72 小時，不在視窗中途改報告常數。
+- 活動下限的數字在前 24 小時的實際速率證明過高或過低 → 修訂本 ADR 並重新計 24 小時（2026-10-05 修訂前為 72 小時），不在視窗中途改報告常數。
 - `BFX_SIM_FAULTS` 在 prod 映像上可被環境變數打開是這個決定的代價：若出現 simulated 以外的組裝讀到它，或 Bitfinex 組裝不再拒絕它，撤回環境變數，改成只在測試注入。
 - S1-7 之後的回歸 soak 若要常駐（原 D3 的 revocation）→ 此流程改為常駐 service 的一部分。

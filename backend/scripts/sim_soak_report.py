@@ -45,7 +45,7 @@ import sys
 from bisect import bisect_left, bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
@@ -60,18 +60,22 @@ from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_fac
 # -- the bar -----------------------------------------------------------------------------
 # docs/adr/2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue.md, D3 and its
 # 2026-10-04 amendment. Fixed before the soak starts; a change is an ADR amendment.
-MIN_WINDOW_HOURS = 72
-MIN_DEPLOY_RESTARTS = 2
+# 2026-10-05 amendment (Will): the bar is 24 h, the switch is no longer gated on decision C.
+MIN_WINDOW_HOURS = 24
+MIN_DEPLOY_RESTARTS = 1
 MIN_OPERATOR_KILLS = 1
+KILL_WINDOW_START_HOUR = 6  # the kill lands this many hours after the window opens ...
+KILL_WINDOW_END_HOUR = 10  # ... and no later than this, so >= 8 h of trading can follow it
 MIN_ACCEPTED_CYCLE_RATIO = Decimal("0.99")
-MIN_TRADING_HOURS_AFTER_RESUME = 24  # amendment (B): the kill is followed by real trading
+MIN_TRADING_HOURS_AFTER_RESUME = 8  # amendment (B): the kill is followed by real trading
 # Non-vacuity floor (amendment, decision C): a halted or idle bot satisfies every safety
 # criterion, so the window must also show this much activity.
-FLOOR_ACKED_SUBMITS = 50
-FLOOR_FILLS = 10
-FLOOR_CANCELS = 10  # cancels and reprices: every cancelled offer of the venue's own log
-FLOOR_CREDITS_CLOSED_BY_EXPIRY = 1
-FLOOR_INTEREST_PAYMENTS_PER_DAY = 1  # per UTC calendar day lying wholly inside the window
+# Floors are prod's last-7-day rates x 0.5 per 24 h (measured 2026-10-05: 10 acked submits, 10
+# fills, 10 credit closures, ~0 cancels in 7 days). Cancels have no floor and expiry settlement
+# is reported only (CI oracle covers it); the window needs >= 1 interest payment.
+FLOOR_ACKED_SUBMITS = 1
+FLOOR_FILLS = 1
+FLOOR_INTEREST_PAYMENTS = 1
 
 # Metric families (prometheus_client names, without the ``_total`` of their samples).
 FAMILY_FEED_FAILURES = "bfx_sim_venue_feed_failures"
@@ -81,7 +85,6 @@ FAMILY_WATERMARK_LAG = "bfx_sim_venue_feed_watermark_lag_seconds"
 UNKNOWN_FAULT_KINDS = frozenset({
     "unknown_5xx_error", "unknown_placed_lost", "unknown_not_placed_lost"})
 UNIDENTIFIED_VERSIONS = frozenset({"", "unidentified", "unknown"})
-DAY_MS = 86_400_000
 HOUR_MS = 3_600_000
 
 Status = Literal["PASS", "FAIL", "UNAVAILABLE"]
@@ -253,17 +256,25 @@ async def kill_and_resume(session: AsyncSession, scope: Scope, window: Window) -
         GROUP BY s.id, s.actor, s.created_at_ms ORDER BY s.id""",
         {**scope.params, "t0": window.since_ms, "t1": window.until_ms})
     kills = [h for h in halts if h.acknowledged > 0]
+    lo = window.since_ms + KILL_WINDOW_START_HOUR * HOUR_MS
+    hi = window.since_ms + KILL_WINDOW_END_HOUR * HOUR_MS
+    timed = [h for h in kills if lo <= h.created_at_ms <= hi]
     kill_criterion = Criterion(
-        "d3.operator_kill", f">= {MIN_OPERATOR_KILLS} operator HALT with an acknowledged cancel-all",
-        _verdict(len(kills) >= MIN_OPERATOR_KILLS),
+        "d3.operator_kill",
+        f">= {MIN_OPERATOR_KILLS} operator HALT with an acknowledged cancel-all at hour "
+        f"{KILL_WINDOW_START_HOUR}-{KILL_WINDOW_END_HOUR}",
+        _verdict(len(timed) >= MIN_OPERATOR_KILLS),
         {"operator_halts": len(halts), "with_acknowledged_cancel_all": len(kills),
+         "in_kill_window": len(timed),
+         "kill_hours_after_start": [round((h.created_at_ms - window.since_ms) / HOUR_MS, 2)
+                                    for h in kills],
          "actors": sorted({h.actor for h in halts})})
     if not kills:
         return [kill_criterion, Criterion(
             "amendment.trading_after_resume",
             f">= {MIN_TRADING_HOURS_AFTER_RESUME} h of trading after the resume",
             "FAIL", {"reason": "no kill to resume from"})]
-    last_kill = kills[-1]
+    last_kill = (timed or kills)[-1]  # the kill that met the 6-10 h criterion, else the last
     resume = await _rows(session, """
         SELECT id, actor, created_at_ms FROM trading_state
         WHERE exchange_account_id = :account AND deployment_environment = :realm
@@ -448,34 +459,24 @@ async def activity_floor(session: AsyncSession, scope: Scope, window: Window) ->
           AND event_type = 'credit_closed' AND payload->'data'->>'reason' = 'expired'
           AND (payload->'data'->>'mts')::bigint BETWEEN :t0 AND :t1""",
         {**scope.params, "t0": window.since_ms, "t1": window.until_ms})
-    interest_times = [int(r.mts) for r in await _rows(session, """
-        SELECT (payload->'data'->>'mts')::bigint AS mts FROM sim_venue_event
+    interest = await _scalar(session, """
+        SELECT count(*) FROM sim_venue_event
         WHERE exchange_account_id = :account_text AND deployment_environment = :realm
           AND event_type = 'interest_paid'
           AND (payload->'data'->>'mts')::bigint BETWEEN :t0 AND :t1""",
-        {**scope.params, "t0": window.since_ms, "t1": window.until_ms})]
-    first_day = -(-window.since_ms // DAY_MS) * DAY_MS
-    days = list(range(first_day, window.until_ms - DAY_MS + 1, DAY_MS))
-    per_day = {
-        datetime.fromtimestamp(day / 1000, UTC).strftime("%Y-%m-%d"):
-            sum(1 for t in interest_times if day <= t < day + DAY_MS)
-        for day in days}
+        {**scope.params, "t0": window.since_ms, "t1": window.until_ms})
     fills, cancels = venue.get("offer_filled", 0), venue.get("offer_canceled", 0)
     return [
         Criterion("floor.acked_submits", f">= {FLOOR_ACKED_SUBMITS}",
                   _verdict(acked >= FLOOR_ACKED_SUBMITS), {"acked_submits": acked}),
         Criterion("floor.fills", f">= {FLOOR_FILLS}", _verdict(fills >= FLOOR_FILLS),
                   {"offer_filled": fills}),
-        Criterion("floor.cancels", f">= {FLOOR_CANCELS} cancels or reprices",
-                  _verdict(cancels >= FLOOR_CANCELS), {"offer_canceled": cancels}),
-        Criterion("floor.credits_closed_by_expiry", f">= {FLOOR_CREDITS_CLOSED_BY_EXPIRY}",
-                  _verdict(expired >= FLOOR_CREDITS_CLOSED_BY_EXPIRY),
+        # reported only: cancels/reprices (prod ~0) and expiry settlement (CI oracle covers it)
+        Criterion("info.cancels", "reported only", "PASS", {"offer_canceled": cancels}),
+        Criterion("info.credits_closed_by_expiry", "reported only", "PASS",
                   {"credit_closed_expired": expired}),
-        Criterion("floor.interest_per_day",
-                  f">= {FLOOR_INTEREST_PAYMENTS_PER_DAY} payment on each of >= 1 whole UTC days",
-                  _verdict(bool(per_day) and all(
-                      n >= FLOOR_INTEREST_PAYMENTS_PER_DAY for n in per_day.values())),
-                  {"whole_days": len(per_day), "payments_by_day": per_day}),
+        Criterion("floor.interest_payments", f">= {FLOOR_INTEREST_PAYMENTS} in the window",
+                  _verdict(interest >= FLOOR_INTEREST_PAYMENTS), {"interest_paid": interest}),
     ]
 
 
