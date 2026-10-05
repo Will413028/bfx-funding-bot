@@ -26,7 +26,6 @@ from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture
 
 pytestmark = pytest.mark.integration
 
-_REVISION = "e8f9a0b1c2d3"
 _PREVIOUS = "d7e8f9a0b1c2"
 # Written out, not imported from the migration: shrinking the migration's list must fail here.
 FROZEN = (
@@ -153,7 +152,7 @@ def test_downgrade_drops_the_trigger_and_upgrade_restores_it(ledger_db) -> None:
         assert not conn.scalar(text(
             "SELECT count(*) FROM pg_proc WHERE proname = 'guard_legacy_authority'"))
     ledger_db.dispose()
-    alembic(url, "upgrade", _REVISION)
+    alembic(url, "upgrade", "head")
     alembic(url, "check")
     with pytest.raises(Exception, match="legacy write after the authority switch: event_log"):
         _write(ledger_db, "event_log", "INSERT")
