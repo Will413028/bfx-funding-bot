@@ -10,8 +10,8 @@ parsed one slot late until then). Inputs, all read-only:
 - funding_trades (credit → our offer id) + offer_claims / venue_offer_state /
   ORDER_FILL (offer → execution decision / signal correlation id) +
   execution_decisions / diagnostics DECISION (→ cell); after the authority
-  switch new offers exist only in the ledger journal (acknowledged attempts, cell
-  from the attempt), read through the ledger's attribution port and unioned with
+  switch new offers exist only in the ledger journal (acknowledged or bound-to-venue
+  attempts, cell from the attempt), read through the ledger's attribution port and unioned with
   the legacy links (a disagreement is reported, never picked);
 - funding_interest_payments (the ledger) for the weekly reconciliation;
 - funding_candles / funding_stats for the baselines.
@@ -355,8 +355,11 @@ async def load_credit_inputs(
     known_to_mirror: set[str] = set()
     for m in mirror:
         lifetime = mirror_credit(m)
-        known_to_mirror.add(f"{LOAN_ID_PREFIX if m.source_kind == 'loan' else ''}"
-                            f"{m.venue_credit_id}")
+        # An incomplete mirror row (no rate/period) must not hide a usable legacy open row;
+        # a terminal one still does, so a stale legacy row never revives an ended credit.
+        if lifetime is not None or m.terminal:
+            known_to_mirror.add(f"{LOAN_ID_PREFIX if m.source_kind == 'loan' else ''}"
+                                f"{m.venue_credit_id}")
         if lifetime is not None and lifetime.credit_id not in seen:
             credits.append(lifetime)
             seen.add(lifetime.credit_id)

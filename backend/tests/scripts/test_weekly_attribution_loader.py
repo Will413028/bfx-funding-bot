@@ -504,6 +504,17 @@ async def test_mirror_credit_is_not_revived_from_a_stale_legacy_open_row(sf):
                if r.cell == "unattributed" and r.gross_interest_usdt > 0)
 
 
+async def test_an_incomplete_mirror_row_does_not_hide_the_legacy_open_row(sf):
+    incomplete = _mirror("503")
+    incomplete.rate = None
+    async with sf() as s:
+        s.add_all([_history_anchor(), incomplete, _legacy_open("503")])
+        await s.commit()
+    result = await _computed(sf)
+    assert result.cells is not None
+    assert set(result.cells.cell_by_credit) == {"1", "503"}
+
+
 async def test_terminal_mirror_credit_not_yet_in_history_counts_to_its_end(sf):
     async with sf() as s:
         s.add_all([_history_anchor(), _trade(), *_attempt(str(OFFER), "fUST_p2"),
