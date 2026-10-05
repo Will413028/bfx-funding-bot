@@ -81,6 +81,9 @@ async def _admit(
     locked_guard: LockedCommandGuard | None,
 ) -> Authorized | AuthorizeRefused:
     """Under the held lock, after the token CAS: policy head, guard, then the insert."""
+    if attempt.policy_revision_id is None:
+        # Only the owner's seed writes a policy-less attempt; runtime never admits one.
+        return AuthorizeRefused("capital_policy_revision_changed")
     policy = await session.scalar(
         select(CapitalPolicyHeadRow.revision_id).where(
             CapitalPolicyHeadRow.exchange_account_id == scope.exchange_account_id,
