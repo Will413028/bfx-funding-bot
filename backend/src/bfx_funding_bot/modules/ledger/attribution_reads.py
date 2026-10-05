@@ -10,23 +10,27 @@ under the bot role's table-level SELECT; nothing is written, nothing is inferred
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from decimal import Decimal
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import Scope
+from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance
 from bfx_funding_bot.modules.ledger.tables import (
     SubmissionAttemptJournalRow,
-    TransportOutcomeJournalRow,
     VenueCreditMirrorRow,
 )
+
+_BATCH = 2000
 
 
 @dataclass(frozen=True, slots=True)
 class JournalOfferCell:
-    """An acknowledged ledger attempt: the venue offer it created and its cell.
+    """A ledger attempt that placed a venue offer (ack or bound_to_venue) and its cell.
 
     ``seeded`` marks an attempt the legacy -> ledger seed wrote from a legacy attempt or
     claim; the same offer is then also in the legacy tables and both must name one cell.
@@ -36,6 +40,7 @@ class JournalOfferCell:
     cell_id: str
     execution_decision_id: str
     seeded: bool
+    attempt_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,40 +55,55 @@ class MirrorCredit:
     period_days: int | None
     mts_created: int | None
     mts_opening: int | None
-    open: bool  # live in the latest accepted snapshot and not terminal
+    mts_updated: int | None
+    terminal: bool  # ended: a terminal evidence row closed it (``mts_updated`` = its end)
 
 
 async def journal_offer_cells(
-    session: AsyncSession, scope: Scope
+    session: AsyncSession, scope: Scope, venue_offer_ids: Collection[str]
 ) -> tuple[JournalOfferCell, ...]:
-    """Every acknowledged attempt of the scope with its venue offer id, by offer id."""
-    rows = await session.execute(
-        select(
-            TransportOutcomeJournalRow.venue_offer_id,
-            SubmissionAttemptJournalRow.cell_id,
-            SubmissionAttemptJournalRow.execution_decision_id,
-            SubmissionAttemptJournalRow.seed_provenance.is_not(None),
+    """The attempts that placed each of ``venue_offer_ids``, by offer id then attempt.
+
+    Provenance is the ledger's own (``offer_provenance``): a transport ``ack`` outcome or a
+    ``bound_to_venue`` resolution (resolver auto-bind or operator) names the offer. An offer
+    no attempt names is absent (foreign to this source). One row per (offer, attempt): the
+    caller treats several attempts of one offer as one cell when they agree and as a conflict
+    when they differ."""
+    ids = sorted(set(venue_offer_ids))
+    owners: dict[str, set[UUID]] = {}
+    for start in range(0, len(ids), _BATCH):
+        for offer, attempts in (
+            await offer_provenance(session, scope, ids[start:start + _BATCH])
+        ).items():
+            if attempts:
+                owners[offer] = attempts
+    wanted = sorted({a for attempts in owners.values() for a in attempts})
+    attempts_by_id: dict[UUID, tuple[str, str, bool]] = {}
+    for start in range(0, len(wanted), _BATCH):
+        rows = await session.execute(
+            select(
+                SubmissionAttemptJournalRow.attempt_id,
+                SubmissionAttemptJournalRow.cell_id,
+                SubmissionAttemptJournalRow.execution_decision_id,
+                SubmissionAttemptJournalRow.seed_provenance.is_not(None),
+            ).where(
+                SubmissionAttemptJournalRow.attempt_id.in_(wanted[start:start + _BATCH]),
+                SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
+                SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
+            )
         )
-        .join(
-            TransportOutcomeJournalRow,
-            TransportOutcomeJournalRow.attempt_id == SubmissionAttemptJournalRow.attempt_id,
-        )
-        .where(
-            SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
-            SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
-            TransportOutcomeJournalRow.kind == "ack",
-            TransportOutcomeJournalRow.venue_offer_id.is_not(None),
-        )
-        .order_by(TransportOutcomeJournalRow.venue_offer_id, SubmissionAttemptJournalRow.attempt_seq)
-    )
+        for attempt_id, cell, decision, seeded in rows.tuples():
+            attempts_by_id[attempt_id] = (cell, decision, bool(seeded))
     return tuple(
-        JournalOfferCell(str(offer), cell, decision, bool(seeded))
-        for offer, cell, decision, seeded in rows.tuples()
+        JournalOfferCell(offer, *attempts_by_id[attempt], attempt_id=attempt)
+        for offer in sorted(owners)
+        for attempt in sorted(owners[offer], key=str)
+        if attempt in attempts_by_id
     )
 
 
 async def mirror_credits(session: AsyncSession, scope: Scope) -> tuple[MirrorCredit, ...]:
-    """Every credit and loan the ledger mirror knows for the scope (open and terminal)."""
+    """Every credit and loan the ledger mirror knows for the scope (open and ended)."""
     rows = await session.execute(
         select(
             VenueCreditMirrorRow.venue_credit_id,
@@ -94,8 +114,8 @@ async def mirror_credits(session: AsyncSession, scope: Scope) -> tuple[MirrorCre
             VenueCreditMirrorRow.period_days,
             VenueCreditMirrorRow.mts_created,
             VenueCreditMirrorRow.mts_opening,
-            VenueCreditMirrorRow.present_in_latest_accepted_snapshot,
-            VenueCreditMirrorRow.terminal_kind.is_(None),
+            VenueCreditMirrorRow.mts_updated,
+            VenueCreditMirrorRow.terminal_kind.is_not(None),
         )
         .where(
             VenueCreditMirrorRow.exchange_account_id == scope.exchange_account_id,
@@ -106,9 +126,9 @@ async def mirror_credits(session: AsyncSession, scope: Scope) -> tuple[MirrorCre
     return tuple(
         MirrorCredit(
             str(credit_id), kind, symbol, Decimal(amount),
-            None if rate is None else Decimal(rate), period_days, created, opening,
-            open=bool(present) and bool(not_terminal),
+            None if rate is None else Decimal(rate), period_days, created, opening, updated,
+            terminal=bool(terminal),
         )
-        for credit_id, kind, symbol, amount, rate, period_days, created, opening, present,
-        not_terminal in rows.tuples()
+        for credit_id, kind, symbol, amount, rate, period_days, created, opening, updated,
+        terminal in rows.tuples()
     )

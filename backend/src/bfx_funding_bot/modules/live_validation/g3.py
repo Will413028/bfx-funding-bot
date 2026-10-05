@@ -131,6 +131,11 @@ async def build_g3_report(
             cells = inputs.cells if inputs is not None else CreditCells(
                 {}, frozenset(), frozenset(), frozenset())
             payments = inputs.payments if inputs is not None else []
+            offer_conflicts = [
+                f"{c.venue_offer_id}: legacy={','.join(c.legacy_cells) or '-'}, "
+                f"journal={','.join(c.journal_cells)}"
+                for c in (inputs.offer_conflicts if inputs is not None else ())
+            ]
 
             # An explicit C wins; otherwise C per window is the funding-wallet
             # balance the venue ledger reports.
@@ -174,6 +179,7 @@ async def build_g3_report(
         now_ms=now,
         frr_points=frr_points_from_stats(funding_stats_of(frr_rows)),
         acks=acks,
+        offer_conflicts=offer_conflicts,
     )
 
 
@@ -296,6 +302,7 @@ def compute_g3_report(
     capital_source: str = "ledger",
     frr_points: list[MarketRatePoint] | None = None,
     acks: Mapping[int, str] | None = None,
+    offer_conflicts: Sequence[str] = (),
 ) -> G3Report:
     """Pure G3 report over already-built domain lists. No I/O.
 
@@ -434,6 +441,7 @@ def compute_g3_report(
         data_threshold=threshold,
         gate_weeks=gate_weeks,
         acknowledgements=acks,
+        offer_conflicts=tuple(offer_conflicts),
     )
 
 

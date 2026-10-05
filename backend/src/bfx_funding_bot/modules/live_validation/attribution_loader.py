@@ -175,7 +175,10 @@ def merge_offer_cells(
     An offer in one source takes that source's cell; an offer both sources know (a seeded
     attempt carries legacy provenance) must map to the same cell. A disagreement (also
     between two journal attempts of one offer) is returned as a conflict and the offer
-    stays out of the map, so its credits are 'unattributed' rather than silently assigned."""
+    stays out of the map, so its credits are 'unattributed' rather than silently assigned.
+    Several journal attempts naming one offer (ack and bound_to_venue of different attempts)
+    agree when they share a cell and merge into it; the ledger's own provenance calls any
+    second attempt a conflict, but the weekly only needs the cell, so agreement is not lost."""
     by_journal: dict[str, set[str]] = {}
     for link in journal:
         by_journal.setdefault(link.venue_offer_id, set()).add(link.cell_id)
@@ -226,19 +229,29 @@ def open_credit(r: VenueCreditStateRow) -> CreditLifetime | None:
     )
 
 
-def mirror_open_credit(m: MirrorCredit) -> CreditLifetime | None:
-    """A ledger-mirror credit still open; None when its terms are not observed."""
+def mirror_credit(m: MirrorCredit) -> CreditLifetime | None:
+    """A ledger-mirror credit as a lifetime; None when its terms are not observed.
+
+    Differs from a legacy open row on purpose: the opening is the venue's MTS_OPENING
+    (``mts_opening``; legacy open rows only had ``mts_created``), the key trades are matched
+    on. For a loan-derived credit (created after its opening) the group, the opening week and
+    ``n_fills`` of a credit open across the switch therefore move to the originating trade's
+    instant, which is what the same credit gets once it is in ``funding_credit_history``.
+    An ended credit ends at ``mts_updated`` until the history sync lands its real close."""
     if m.rate is None or m.period_days is None:
         return None
     created = m.mts_created if m.mts_created is not None else m.mts_opening
     opened = m.mts_opening if m.mts_opening is not None else m.mts_created
     if created is None or opened is None:
         return None
+    closed = None
+    if m.terminal:
+        closed = max(int(m.mts_updated if m.mts_updated is not None else opened), int(opened))
     prefix = LOAN_ID_PREFIX if m.source_kind == "loan" else ""
     return CreditLifetime(
         credit_id=f"{prefix}{m.venue_credit_id}", symbol=m.symbol, amount=abs(m.amount),
         rate=m.rate, period_days=m.period_days, mts_create=int(created),
-        opened_ms=int(opened), closed_ms=None,
+        opened_ms=int(opened), closed_ms=closed,
     )
 
 
@@ -330,23 +343,23 @@ async def load_credit_inputs(
     ))).all()
 
     scope = Scope(account_uuid, env)
-    journal_links = await journal_offer_cells(session, scope)
+    journal_links = await journal_offer_cells(
+        session, scope, {str(t.offer_id) for t in trade_rows})
     mirror = await mirror_credits(session, scope)
 
     credits = [credit_from_history(r) for r in history]
     seen = {c.credit_id for c in credits}
-    # Open credits: the ledger mirror is current after the switch, so it wins over a
-    # legacy open row, and a credit the mirror knows as ended is not revived from a stale
-    # legacy row (it is in the history once synced). Before the switch it is empty.
-    known_to_mirror = {
-        f"{LOAN_ID_PREFIX if m.source_kind == 'loan' else ''}{m.venue_credit_id}"
-        for m in mirror
-    }
+    # Credits not yet in the history: the ledger mirror is current after the switch, so it
+    # wins over a legacy open row (which stops being maintained), and it also carries the
+    # ones it knows ended until CreditHistorySync lands them. Before the switch it is empty.
+    known_to_mirror: set[str] = set()
     for m in mirror:
-        mirrored = mirror_open_credit(m) if m.open else None
-        if mirrored is not None and mirrored.credit_id not in seen:
-            credits.append(mirrored)
-            seen.add(mirrored.credit_id)
+        lifetime = mirror_credit(m)
+        known_to_mirror.add(f"{LOAN_ID_PREFIX if m.source_kind == 'loan' else ''}"
+                            f"{m.venue_credit_id}")
+        if lifetime is not None and lifetime.credit_id not in seen:
+            credits.append(lifetime)
+            seen.add(lifetime.credit_id)
     for r in open_rows:
         if r.credit_id in known_to_mirror:
             continue
