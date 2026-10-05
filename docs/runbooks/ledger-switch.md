@@ -14,6 +14,8 @@ snapshot 的 resting 總額，工具記進 evidence，也寫進每一則失敗�
   epoch 但沒有 `legacy_seed` observation 就拒絕開機」的 guard 與 legacy 表的凍結 trigger），而且它就是
   24 h soak PASS 時的 backend digest。工具只接受命令列給的這個 digest。
 - soak 已結束、`bfx-sim` container 已拆掉（[simulation-soak.md](simulation-soak.md) §10）。還在跑就拒絕。
+- soak 的最終判定已寫成結果檔（[simulation-soak.md](simulation-soak.md) §9「最終判定」，預設
+  `/home/ubuntu/bfx/reports/sim-soak/result/soak-result.json`；別的路徑用 `--soak-result <path>`）。
 - 不在週一 04:17 UTC 的 weekly report 期間（工具會檢查 service，並在切換期間停掉 timer）。
 
 ## 2. 啟動（Will，VM，root）
@@ -49,6 +51,7 @@ journalctl -u 'bfx-ledger-switch-*' -f   # 另一個 shell 看進度
 | deployments ledger 最新一筆是 `deployed`，而且就是最後成功的那一筆、digest 等於命令列的 digest | `last_deploy_not_successful` / `running_digest_is_not_the_soaked_digest` |
 | `bfx-bot`、`bfx-webapi` 都在跑，image 是 `<repo>@<digest>` | `running_digest_mismatch:*` / `legacy_not_running:*` |
 | 該 image 的 one-shot `alembic current` 等於 `alembic heads` | `schema_not_at_head` |
+| soak 結果檔存在且 `verdict` 是 PASS、`image_digest` 等於命令列的 digest、最後一代的 `last_service_version` 等於該 digest 在 deployments ledger 的 revision | `soak_result_missing` / `soak_result_not_pass` / `soak_result_digest_mismatch` / `soak_result_revision_mismatch` |
 | `bfx-weekly-report.service` 沒在跑 | `weekly_report_running` |
 | 沒有 `bfx-sim` container | `simulation_running` |
 | 整個 cluster 沒有其他 runtime session（`bfx_bot`／`bfx_webapi` 或其成員，或任何連 `bfx_sim` 的 session），bot 與 web API 自己 container 的除外 | `runtime_session_present` |
@@ -74,13 +77,24 @@ journalctl -u 'bfx-ledger-switch-*' -f   # 另一個 shell 看進度
    `deployed`。
 9. 等（最多 15 分鐘）：一筆非 seed 的 accepted `ledger_observation`、最新 runtime basis 沒有任何 symbol 是
    `unexplained_lending`、`trading_state` 是 ACTIVE、web API `/ready` 200。
-10. 重啟第 1 步停掉的 timer，通知成功。
+10. 只回報、不回滾的兩項檢查：
+    - **NAV 連續**（一次）：第一個 runtime basis 每個 symbol 的 total capital（available + offered + credits）
+      對照第 2 步記下的最後一筆 legacy snapshot。相對差超過 0.5 % 就通知（halt 期間只有入帳的利息與手動的
+      foreign offer 會合法地改變總額；成交與到期只是在 offered、credits、available 之間移動，理由寫在
+      `NAV_TOLERANCE`）。
+    - **24 小時活動 watch**：以 transient timer（`bfx-ledger-switch-watch-<run id>`，`systemd-run --on-active=24h`）
+      在 24 小時後跑 `bfx_ledger_switch.py watch --run-id <id>`；這段期間既沒有 ack 的 submit、也沒有 reprice
+      （我們的 offer 被撤）就通知。prod 平均每天約 1.4 筆 submit，所以切換本身不等成交。
+11. 重啟第 1 步停掉的 timer，通知成功。
 
 ## 4. 通知的意思
 
 | 等級 | 開頭 | 意思 | 要做什麼 |
 |---|---|---|---|
 | info | `done: capital authority is ledger…` | 切換完成 | 無；之後第一次週一報告照 PR-2 的排程核對 |
+| warning | `NAV continuity: …` | 第一個 runtime basis 的總額和 halt 開始時差超過 0.5 % | 查 halt 期間有沒有入金／出金或手動 offer，再看 basis；切換不回滾 |
+| warning | `post-switch watch: no acknowledged submit and no reprice …` | 切換後 24 小時沒有任何交易動作 | 查 `/admin/trading-status`、policy 與 cells |
+| warning | `post-switch check … could not run` | NAV 檢查或 watch 排程本身失敗 | 手動跑 `watch --run-id <id>`（24 小時後）或查 basis |
 | warning | `F7: live credits still recent_fill are …` | 仍是 `recent_fill` 的 live credit 超過某個 symbol 資本的 20 %；它們在 ledger 維持多 cell 直到結束 | 無（不中止）；知道 attribution 暫時較粗 |
 | warning | `not started, P-check failed (<code>)` | 什麼都沒停 | 依 code 處理（§3 表），再重跑 |
 | warning | `R1: failed before the seed committed …` | 沒有寫入，legacy 已重啟，timer 已恢復 | 依 code 處理，再重跑 |
@@ -124,7 +138,8 @@ journalctl -u 'bfx-ledger-switch-*' -f   # 另一個 shell 看進度
   resting 曝險、備份 label、seed summary、F7 max share、`outcome`（`switched`、`precheck_failed:*`、
   `r1:*`、`r2:*`、`r3:*`）；
 - `seed-<seed run id>.jsonl`：每次 `--check` 與 `--switch` 的完整輸出（不含 DSN）；
-- `restore.json`：`restore-halt-backup` 的步驟與結果。
+- `restore.json`：`restore-halt-backup` 的步驟與結果；
+- `watch.json`：24 小時 watch 的 ack submit 數與 reprice 數。
 
 | exit | 意思 |
 |---|---|
