@@ -75,9 +75,16 @@ def reader_login(ledger_db: Engine) -> str:
     return name
 
 
-async def legacy_rest_observation(env: BotEnv, *, started: int, finished: int,
-                                  confirmed: int) -> tuple[VenueSnapshotObserved, VenueSnapshotObserved]:
-    """The stopped legacy process fetches the venue as ``BootRecovery.run`` does (no fence)."""
+async def legacy_rest_observation(
+    env: BotEnv, *, started: int, finished: int, confirmed: int,
+    history_window: tuple[bool, int | None, int | None] | None = None,
+) -> tuple[VenueSnapshotObserved, VenueSnapshotObserved]:
+    """The stopped legacy process fetches the venue as ``BootRecovery.run`` does (no fence).
+
+    ``history_window`` (complete, start, end) stamps the runner's offer-history request on the
+    legacy coverage: the S1-5 runner makes one request and both arms read it (the fake venue
+    serves the same rows for any window).
+    """
     recovery: Any = env.daemons[0].periodic_reconcile._recovery
     while not isinstance(recovery, BootRecovery):  # timing and sink wrappers
         recovery = getattr(recovery, "_inner", None) or recovery._recovery
@@ -99,10 +106,13 @@ async def legacy_rest_observation(env: BotEnv, *, started: int, finished: int,
         coverage=SnapshotCoverage(
             active_offers_complete=True, active_credits_complete=True, wallets_complete=True,
             active_offer_pages=1, active_credit_pages=1, wallet_pages=1,
-            offer_history_complete=history.coverage.complete,
+            offer_history_complete=(history.coverage.complete if history_window is None
+                                    else history_window[0]),
             offer_history_pages=history.coverage.pages,
-            offer_history_start_ms=history.coverage.requested_start_ms,
-            offer_history_end_ms=history.coverage.requested_end_ms,
+            offer_history_start_ms=(history.coverage.requested_start_ms if history_window is None
+                                    else history_window[1]),
+            offer_history_end_ms=(history.coverage.requested_end_ms if history_window is None
+                                  else history_window[2]),
             offer_history_oldest_mts=history.coverage.oldest_mts_created,
             offer_history_newest_mts=history.coverage.newest_mts_created,
         ),
@@ -121,11 +131,15 @@ async def runner_observation(env: BotEnv) -> dict[str, Any]:
             select(LedgerObservationQueryRow.started_at_ms, LedgerObservationRow.query_finished_at_ms,
                    LedgerObservationRow.confirmation_finished_at_ms, LedgerObservationRow.query_id,
                    LedgerObservationRow.id, LedgerObservationRow.first_digest,
-                   LedgerObservationRow.confirmation_digest)
+                   LedgerObservationRow.confirmation_digest,
+                   LedgerObservationRow.offer_history_complete,
+                   LedgerObservationRow.history_requested_start_ms,
+                   LedgerObservationRow.history_requested_end_ms)
             .join(LedgerObservationRow,
                   LedgerObservationRow.query_id == LedgerObservationQueryRow.query_id)
             .order_by(LedgerObservationQueryRow.query_revision.desc()).limit(1))).one()
     return {"started": int(row[0]), "finished": int(row[1]), "confirmed": int(row[2]),
+            "history": (bool(row[7]), row[8], row[9]),
             "ledger": {"query_id": str(row[3]), "observation_id": str(row[4]),
                        "first_digest": row[5], "confirmation_digest": row[6]}}
 
@@ -172,7 +186,8 @@ async def build_cutover(
         observed.update(started=RUNNER_AT, finished=RUNNER_AT + 200, confirmed=RUNNER_AT + 400)
     started, finished, confirmed = observed["started"], observed["finished"], observed["confirmed"]
     event, confirmation = await legacy_rest_observation(
-        env, started=started, finished=finished, confirmed=confirmed)
+        env, started=started, finished=finished, confirmed=confirmed,
+        history_window=observed["history"] if runner else None)
     # Q6 (R1-1): the window starts at the first observation's query start.
     return Cutover(env, legacy, seed_lines,
                    observation_file(event, confirmation, observed["ledger"]),

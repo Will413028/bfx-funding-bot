@@ -55,6 +55,7 @@ from bfx_funding_bot.modules.execution.capital_shadow_port import (
     BaselineBlocked,
     BaselineNotComparable,
 )
+from bfx_funding_bot.modules.execution.event_store.entities import is_terminal_offer_status
 from bfx_funding_bot.modules.ledger import LedgerCapitalReader
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisCreditCellRow,
@@ -62,6 +63,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisRow,
     CapitalPolicyHeadRow,
     LedgerObservationCreditRow,
+    LedgerObservationOfferHistoryRow,
     LedgerObservationOfferRow,
     LedgerObservationQueryRow,
     LedgerObservationRow,
@@ -321,13 +323,64 @@ def _nonzero(values: Mapping[str, Decimal]) -> dict[str, Decimal]:
     return {key: value for key, value in values.items() if value != 0}
 
 
+# Every observation field legacy's acceptance and classification read (``CapitalRepository.
+# _validate_snapshot`` / ``_observation`` / ``_classify`` / ``_attribute_credits`` /
+# ``_check_historical_intent``), by attribute name, and what ``bind_observation`` does with it.
+# ``test_capital_comparison_cutover`` collects those attribute names from the source: a field
+# legacy starts reading without an entry here fails that test.
+BINDING_OF_LEGACY_FIELDS: Final[dict[str, str]] = {
+    # snapshot
+    "account_id": "compared: entry scope = ledger observation scope",
+    "environment": "compared: entry scope = ledger observation scope",
+    "query_started_at_ms": "compared: = ledger query started_at_ms",
+    "query_finished_at_ms": "compared: = ledger query_finished_at_ms (confirmation: confirmation_finished_at_ms)",
+    "wallet_available": "compared: = ledger funding wallets' available (non-zero)",
+    "offers": "compared: row set = ledger_observation_offer",
+    "credits": "compared: row set = ledger_observation_credit",
+    "offer_history": "compared: row set = ledger_observation_offer_history",
+    "coverage": "compared: the flags and window below",
+    "schema_version": "not an observation value (stored event rows' schema check)",
+    # coverage
+    "active_offers_complete": "compared: = offers_complete",
+    "active_credits_complete": "compared: = credits_complete and loans_complete",
+    "wallets_complete": "compared: = wallets_complete",
+    "offer_history_complete": "compared: = offer_history_complete",
+    "offer_history_start_ms": "compared: = history_requested_start_ms",
+    "offer_history_end_ms": "compared: = history_requested_end_ms",
+    # offers, history rows and credits
+    "venue_offer_id": "compared: offer and history row identity",
+    "symbol": "compared: offers, history rows, credits",
+    "status": "compared: offers, credits; history rows as legacy-terminal (ledger: terminal_kind)",
+    "amount_original": "compared: offers, history rows",
+    "amount_remaining": "compared: offers, history rows",
+    "mts_created": "compared: offers, history rows, credits (recent_fill created <= opening)",
+    "mts_updated": "compared: history rows (terminal within the history window)",
+    "period_days": "compared: offers, credits (group key)",
+    "credit_id": "compared: credit identity (source kind, venue id)",
+    "amount": "compared: credits",
+    "mts_opening": "compared: credits (group key)",
+    # names shared with legacy rows read in the same methods, never observation values
+    "cid": "not an observation value (claim/intent rows)",
+    "execution_decision_id": "not an observation value (claim/attempt rows)",
+    "signal_correlation_id": "not an observation value (claim rows)",
+}
+_LEGACY_NOT_TERMINAL: Final = frozenset(("absent", "quarantined"))
+
+
+def _legacy_terminal(status: str) -> bool:
+    """A history row legacy accepts as terminal evidence (``_classify`` / ``_attribute_credits``)."""
+    return is_terminal_offer_status(status) and status not in _LEGACY_NOT_TERMINAL
+
+
 async def bind_observation(session: AsyncSession, observation: CutoverObservation) -> list[dict[str, object]]:
     """Why the observation file is not the runner's accepted ledger observation (empty: bound).
 
     F3 (i') holds only if both arms read the same REST responses. The file names the runner's
     ledger observation; that observation must be the scope's latest query, venue-origin and
-    accepted (never the seed's), carry the file's digests and query times, and hold exactly the
-    file's first observation: its live offers, live credits and funding wallets.
+    accepted (never the seed's), carry the file's digests and query times, and hold exactly
+    what legacy reads of the file's first observation (``BINDING_OF_LEGACY_FIELDS``): live
+    offers, live credits, terminal offer history, coverage flags and history window, funding
+    wallets.
     """
     ref, event = observation.ledger, observation.event
     account, environment = observation.account_id, observation.environment
@@ -335,6 +388,11 @@ async def bind_observation(session: AsyncSession, observation: CutoverObservatio
 
     def problem(reason: str, **evidence: object) -> None:
         problems.append({"reason": reason, **{k: _json(v) for k, v in sorted(evidence.items())}})
+
+    def rows_differ(reason: str, file: set[Any], ledger: set[Any]) -> None:
+        if file != ledger:
+            problem(reason, file_only=sorted(map(str, file - ledger)),
+                    ledger_only=sorted(map(str, ledger - file)))
 
     latest = (await session.execute(
         select(LedgerObservationQueryRow.query_id, LedgerObservationQueryRow.started_at_ms)
@@ -349,7 +407,11 @@ async def bind_observation(session: AsyncSession, observation: CutoverObservatio
         LedgerObservationRow.deployment_environment, LedgerObservationRow.origin,
         LedgerObservationRow.accepted, LedgerObservationRow.query_finished_at_ms,
         LedgerObservationRow.confirmation_finished_at_ms, LedgerObservationRow.first_digest,
-        LedgerObservationRow.confirmation_digest,
+        LedgerObservationRow.confirmation_digest, LedgerObservationRow.offers_complete,
+        LedgerObservationRow.credits_complete, LedgerObservationRow.loans_complete,
+        LedgerObservationRow.wallets_complete, LedgerObservationRow.offer_history_complete,
+        LedgerObservationRow.history_requested_start_ms,
+        LedgerObservationRow.history_requested_end_ms,
     ).where(LedgerObservationRow.id == ref.observation_id))).first()
     if row is None:
         problem("observation_missing", observation_id=ref.observation_id)
@@ -369,34 +431,66 @@ async def bind_observation(session: AsyncSession, observation: CutoverObservatio
                 observation.confirmation.query_finished_at_ms)
     if times != expected:
         problem("observation_times_mismatch", ledger=list(times), file=list(expected))
-    offers = {
-        (o.venue_offer_id, o.symbol, o.amount_original, o.amount_remaining) for o in event.offers
-    }
-    ledger_offers = set((await session.execute(select(
+    coverage = event.coverage
+    file_coverage = (
+        coverage.active_offers_complete, coverage.active_credits_complete,
+        coverage.active_credits_complete, coverage.wallets_complete,
+        coverage.offer_history_complete, coverage.offer_history_start_ms,
+        coverage.offer_history_end_ms,
+    )
+    ledger_coverage = (
+        row.offers_complete, row.credits_complete, row.loans_complete, row.wallets_complete,
+        row.offer_history_complete, row.history_requested_start_ms, row.history_requested_end_ms,
+    )
+    if file_coverage != ledger_coverage:
+        problem("observation_coverage_differs", file=list(file_coverage),
+                ledger=list(ledger_coverage))
+    observed_id = ref.observation_id
+    rows_differ("observation_offers_differ", {
+        (o.venue_offer_id, o.symbol, o.status, o.amount_original, o.amount_remaining,
+         o.period_days, o.mts_created) for o in event.offers
+    }, set((await session.execute(select(
         LedgerObservationOfferRow.venue_offer_id, LedgerObservationOfferRow.symbol,
-        LedgerObservationOfferRow.amount_original, LedgerObservationOfferRow.amount_remaining,
-    ).where(LedgerObservationOfferRow.observation_id == ref.observation_id))).tuples().all())
-    if offers != ledger_offers:
-        problem("observation_offers_differ", file_only=sorted(map(str, offers - ledger_offers)),
-                ledger_only=sorted(map(str, ledger_offers - offers)))
-    credits = {
-        (legacy_credit_key(c.credit_id), c.symbol, c.amount, c.period_days, c.mts_opening)
-        for c in event.credits
-    }
-    ledger_credits = {
-        ((kind, venue_id), symbol, amount, period, opening)
-        for kind, venue_id, symbol, amount, period, opening in (await session.execute(select(
-            LedgerObservationCreditRow.source_kind, LedgerObservationCreditRow.venue_credit_id,
-            LedgerObservationCreditRow.symbol, LedgerObservationCreditRow.amount,
-            LedgerObservationCreditRow.period_days, LedgerObservationCreditRow.mts_opening,
-        ).where(LedgerObservationCreditRow.observation_id == ref.observation_id))).tuples()
-    }
-    if credits != ledger_credits:
-        problem("observation_credits_differ", file_only=sorted(map(str, credits - ledger_credits)),
-                ledger_only=sorted(map(str, ledger_credits - credits)))
+        LedgerObservationOfferRow.status, LedgerObservationOfferRow.amount_original,
+        LedgerObservationOfferRow.amount_remaining, LedgerObservationOfferRow.period_days,
+        LedgerObservationOfferRow.mts_created,
+    ).where(LedgerObservationOfferRow.observation_id == observed_id))).tuples().all()))
+    # Legacy reads a history row's status only as "terminal evidence or not"
+    # (``_legacy_terminal``). A ledger history row keeps the offer's last live status and states
+    # its terminality in ``terminal_kind`` (executed / canceled), so that is what goes through
+    # legacy's rule on the ledger side.
+    rows_differ("observation_offer_history_differs", {
+        (o.venue_offer_id, o.symbol, o.amount_original, o.amount_remaining, o.mts_created,
+         o.mts_updated, _legacy_terminal(o.status)) for o in event.offer_history
+    }, {
+        (venue_id, symbol, original, remaining, created, updated, _legacy_terminal(kind))
+        for venue_id, symbol, original, remaining, created, updated, kind in (
+            await session.execute(select(
+                LedgerObservationOfferHistoryRow.venue_offer_id,
+                LedgerObservationOfferHistoryRow.symbol,
+                LedgerObservationOfferHistoryRow.amount_original,
+                LedgerObservationOfferHistoryRow.amount_remaining,
+                LedgerObservationOfferHistoryRow.mts_created,
+                LedgerObservationOfferHistoryRow.mts_updated,
+                LedgerObservationOfferHistoryRow.terminal_kind,
+            ).where(LedgerObservationOfferHistoryRow.observation_id == observed_id))).tuples()
+    })
+    rows_differ("observation_credits_differ", {
+        (legacy_credit_key(c.credit_id), c.symbol, c.status, c.amount, c.period_days,
+         c.mts_opening, c.mts_created) for c in event.credits
+    }, {
+        ((kind, venue_id), symbol, status, amount, period, opening, created)
+        for kind, venue_id, symbol, status, amount, period, opening, created in (
+            await session.execute(select(
+                LedgerObservationCreditRow.source_kind, LedgerObservationCreditRow.venue_credit_id,
+                LedgerObservationCreditRow.symbol, LedgerObservationCreditRow.status,
+                LedgerObservationCreditRow.amount, LedgerObservationCreditRow.period_days,
+                LedgerObservationCreditRow.mts_opening, LedgerObservationCreditRow.mts_created,
+            ).where(LedgerObservationCreditRow.observation_id == observed_id))).tuples()
+    })
     wallets: dict[str, Decimal] = {str(symbol): amount for symbol, amount in (await session.execute(select(
         LedgerObservationWalletRow.symbol, LedgerObservationWalletRow.available,
-    ).where(LedgerObservationWalletRow.observation_id == ref.observation_id,
+    ).where(LedgerObservationWalletRow.observation_id == observed_id,
             LedgerObservationWalletRow.wallet_type == "funding",
             LedgerObservationWalletRow.symbol.is_not(None)))).tuples().all()}
     if _nonzero(dict(event.wallet_available)) != _nonzero(wallets):
@@ -501,6 +595,7 @@ def arm_json(result: ArmResult) -> dict[str, Any]:
 
 __all__ = [
     "ARM",
+    "BINDING_OF_LEGACY_FIELDS",
     "COMPARED_FIELDS",
     "EXCLUDED_FIELDS",
     "ArmResult",

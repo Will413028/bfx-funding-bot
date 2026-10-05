@@ -14,7 +14,9 @@ Mutations (apply one at a time, run this file, revert; the test that fails is na
   (the guard's attestation refuses it, exit 3);
 * ``declare_divergence`` returns its evidence without re-checking the adjusted legacy answer:
   ``test_f7_divergence_with_any_other_difference_stays_different``;
-* ``window_start_ms`` takes the latest query start: ``test_the_window_is_bounded_by_the_injected_clock``;
+* ``window_start_ms`` takes the latest query start instead of the earliest:
+  ``test_the_window_is_bounded_by_the_injected_clock``;
+* ``bind_observation`` skips the offer-history rows: ``...[observation_history_differs]``;
 * ``compare_ledger_arm`` skips ``bind_observation``: ``...[observation_content_differs]``,
   ``...[observation_wallet_differs]``, ``test_a_ledger_still_on_the_seed_basis_is_never_compared``;
 * the post-runner mirror -> legacy direction dropped: ``...[unknown_live_mirror_row]``.
@@ -218,6 +220,23 @@ def _inject(state: Cutover, name: str) -> dict[str, Any]:
         changed = copy.deepcopy(state.observation)
         changed["observations"][0]["ledger"]["query_id"] = str(uuid4())
         return {"observation": changed}
+    elif name == "observation_history_differs":  # a terminal history row legacy would read
+        changed = copy.deepcopy(state.observation)
+        history = changed["observations"][0]["event"]["offer_history"]
+        assert history, "the halt fill and 7004 are in the runner's history"
+        history[0]["mts_updated"] = int(history[0]["mts_updated"]) + 1
+        return {"observation": changed}
+    elif name == "observation_history_window_differs":  # whether reflection is possible
+        changed = copy.deepcopy(state.observation)
+        coverage = changed["observations"][0]["event"]["coverage"]
+        coverage["offer_history_start_ms"] = int(coverage["offer_history_start_ms"]) - 1
+        return {"observation": changed}
+    elif name == "observation_mts_created_differs":  # recent_fill: created <= opening
+        changed = copy.deepcopy(state.observation)
+        for part in ("event", "confirmation"):
+            offer = changed["observations"][0][part]["offers"][0]
+            offer["mts_created"] = int(offer["mts_created"]) + 1
+        return {"observation": changed}
     elif name == "observation_wallet_differs":
         return {"observation": _perturb_wallet(state.observation)}
     elif name == "observation_content_differs":  # not the responses the runner accepted
@@ -261,6 +280,12 @@ DISCREPANCIES: dict[str, tuple[bool, set[str], dict[str, str] | None, str]] = {
     "legacy_value_perturbed": (False, set(), {CELL: "different", CELL_B: "different"}, "ok"),
     "observation_from_another_query": (
         False, set(), {CELL: "not_comparable", CELL_B: "not_comparable"}, "ok"),
+    "observation_history_differs": (
+        False, set(), {CELL: "not_comparable", CELL_B: "not_comparable"}, "ok"),
+    "observation_history_window_differs": (
+        False, set(), {CELL: "not_comparable", CELL_B: "not_comparable"}, "ok"),
+    "observation_mts_created_differs": (
+        False, set(), {CELL: "not_comparable", CELL_B: "not_comparable"}, "ok"),
     "observation_wallet_differs": (
         False, set(), {CELL: "not_comparable", CELL_B: "not_comparable"}, "ok"),
     "observation_content_differs": (
@@ -298,6 +323,9 @@ async def test_each_discrepancy_fails_the_run(
                                                "observation_identity_mismatch"},
             "observation_content_differs": {"observation_offers_differ"},
             "observation_wallet_differs": {"observation_wallets_differ"},
+            "observation_history_differs": {"observation_offer_history_differs"},
+            "observation_history_window_differs": {"observation_coverage_differs"},
+            "observation_mts_created_differs": {"observation_offers_differ"},
         }[name], problems
     if name == "cell_without_policy":
         assert arms(rows)["fBTC_a30"]["reason"] == "policy_missing"
@@ -306,7 +334,8 @@ async def test_each_discrepancy_fails_the_run(
 async def test_the_window_is_bounded_by_the_injected_clock(
     bot_env: BotEnv, ledger_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Any,  # noqa: F811
 ) -> None:
-    """Q6: last observation's query start -> command end <= 300 s, by the command's clock."""
+    """Q6: earliest observation query start (any account) -> command end <= 300 s, by the
+    command's clock."""
     state = await build_cutover(bot_env, ledger_db, monkeypatch, tmp_path, unknown=False)
     code, rows = await run_comparison(state, end=state.window_start + 300_000)
     assert code == 0, rows[-1]

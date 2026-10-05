@@ -371,3 +371,38 @@ def test_the_verifier_states_the_seed_contract_independently() -> None:
     for credit_id in ("123", "loan:9"):
         assert legacy_credit_key(credit_id) == credit_identity(credit_id)
     assert legacy_credit_key("loan:") is None and legacy_credit_key("") is None
+
+
+def test_every_observation_field_legacy_reads_has_a_binding_decision() -> None:
+    """R2-1: the attribute names legacy's acceptance and classification read that are fields of
+    the observation dataclasses equal ``BINDING_OF_LEGACY_FIELDS``'s keys. A field legacy starts
+    reading (or stops reading) without a binding decision fails here."""
+    import ast
+    import dataclasses
+    import inspect
+    import textwrap
+
+    from bfx_funding_bot.apps.capital_comparison_ledger import BINDING_OF_LEGACY_FIELDS
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+    from bfx_funding_bot.modules.execution.event_store.entities import (
+        VenueCreditObservation,
+        VenueOfferObservation,
+    )
+
+    observed = {
+        field.name
+        for cls in (VenueSnapshotObserved, SnapshotCoverage, VenueOfferObservation,
+                    VenueCreditObservation)
+        for field in dataclasses.fields(cls)
+    }
+    read: set[str] = set()
+    for method in ("evaluate_observation_read_only", "read_observed", "_validate_snapshot",
+                   "_observation", "_evaluate_observation", "_classify", "_attribute_credits",
+                   "_assert_historical_intents_settled", "_check_historical_intent",
+                   "_classified_basis"):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(CapitalRepository, method))))
+        read |= {node.attr for node in ast.walk(tree)
+                 if isinstance(node, ast.Attribute) and node.attr in observed}
+    assert set(BINDING_OF_LEGACY_FIELDS) == read
+    assert all(decision.startswith(("compared:", "not an observation value"))
+               for decision in BINDING_OF_LEGACY_FIELDS.values())
