@@ -9,7 +9,8 @@ P-checks, any failure ends the run before anything is stopped:
   the running backend digest is the one given on the command line (the digest the soak passed
   on) and the deployments ledger's newest attempt deployed it; the soak's result file
   (`sim_soak_report.py --result-out`) says PASS for that digest, its last generation being that
-  release's revision; `alembic current` equals
+  release's revision, unless Will waives the soak with `--waive-soak <reason>` (the reason is
+  recorded in the evidence); `alembic current` equals
   `alembic heads` in a one-shot of that image; bfx-weekly-report.service is not running; no
   bfx-sim container runs; no runtime session (bfx_bot, bfx_webapi or a member, or any session
   on the bfx_sim database) exists other than the bot's and the web API's own containers; the
@@ -457,6 +458,7 @@ class Settings:
     environment: str = "prod"
     cells_path: str = "/app/configs/cells.live.yaml"
     soak_result: Path = Path("/home/ubuntu/bfx/reports/sim-soak/result/soak-result.json")
+    soak_waiver: str = ""
     container_uid: int = 1000
     dr_current: Path = _DEPLOY.dr_root / "current"
     backup_user: str = _DEPLOY.backup_user
@@ -1018,7 +1020,14 @@ class Switcher:
         self._seed_check()
 
     def _require_soak_pass(self, revision: str) -> None:
-        """The soak's result file: PASS, on this digest, its last generation this revision."""
+        """The soak's result file: PASS, on this digest, its last generation this revision.
+
+        A waiver replaces the file: Will's decision, recorded with its reason instead of a verdict.
+        """
+        if self.settings.soak_waiver:
+            log(f"soak waived: {self.settings.soak_waiver}")
+            self.evidence.data["soak_result"] = {"waived": self.settings.soak_waiver}
+            return
         try:
             result = json.loads(self.settings.soak_result.read_text(encoding="utf-8"))
             verdict, digest = result["verdict"], result["image_digest"]
@@ -1473,6 +1482,13 @@ class Switcher:
 # --------------------------------------------------------------------------- CLI
 
 
+def _waiver(value: str) -> str:
+    reason = value.strip()
+    if not reason:
+        raise argparse.ArgumentTypeError("a waiver needs a reason")
+    return reason
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1481,8 +1497,11 @@ def _parser() -> argparse.ArgumentParser:
         sub = commands.add_parser(name)
         sub.add_argument("--digest", required=True,
                          help="the backend digest the soak passed on (sha256:...)")
-        sub.add_argument("--soak-result", type=Path, default=Settings().soak_result,
-                         help="the soak's result file (sim_soak_report.py --result-out)")
+        soak = sub.add_mutually_exclusive_group()
+        soak.add_argument("--soak-result", type=Path, default=Settings().soak_result,
+                          help="the soak's result file (sim_soak_report.py --result-out)")
+        soak.add_argument("--waive-soak", type=_waiver, metavar="REASON",
+                          help="switch without a soak PASS; the reason goes into the evidence")
     for name in ("restore-halt-backup", "watch"):
         commands.add_parser(name).add_argument("--run-id", required=True)
     return parser
@@ -1496,7 +1515,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _terminate)
     defaults = Settings()
     settings = Settings(digest=getattr(args, "digest", "") or "",
-                        soak_result=getattr(args, "soak_result", None) or defaults.soak_result)
+                        soak_result=getattr(args, "soak_result", None) or defaults.soak_result,
+                        soak_waiver=getattr(args, "waive_soak", None) or "")
     runner = bfx_deploy.subprocess_runner
     notify_config = defaults.runtime_dir / "notify.env"
 
