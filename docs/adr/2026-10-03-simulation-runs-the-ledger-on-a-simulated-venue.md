@@ -117,8 +117,8 @@ P2c 的 pre-flight（唯讀）發現 D3 草案有三個洞，Will 於 2026-10-04
 - kill 在視窗開始後第 6–10 小時（原第 24–48 小時），恢復後 ≥ 8 小時交易且 ≥ 1 筆 ack 的 submit（原 24 小時）；
 - 活動下限改為 prod 最近 7 天速率 × 0.5 換算每 24 小時。2026-10-05 在 prod 實測 7 天內 10 筆 ack 的 submit、10 次成交、10 筆 credit 結清、撤單約 0，所以下限為 ack 的 submit ≥ 1、成交 ≥ 1，撤單／reprice 無下限（只列報告）；
 - 利息：視窗內 ≥ 1 筆（venue 約每日 01:30Z 付息；不再要求每個完整 UTC 日）；
-- 到期結清（`FLOOR_CREDITS_CLOSED_BY_EXPIRY`）移出閘門、只列報告，由 CI oracle（`tests/integration/test_sim_venue_ledger_oracle.py` 的 expire 案例）與另案的 seeded credit-expiry e2e 涵蓋；
-- 故障注入：24 小時內至少一筆注入的 UNKNOWN 才過，機率規則在 24 小時內零注入的機率估為 47–74%，而 draw 的鍵是 bot 的掛鐘微秒 nonce，調 seed 無法預選。維持低 rate（決定 A），新增序數 knob `unknown_5xx_at=3`：每個 process 的第 3 筆 submit 必定注入，每次重啟（ordinal 重數）再注入一次；注入仍是持久的 `fault_injected` 事件，報告歸因不變；
+- 到期結清（原 `credits_closed_by_expiry` 下限）移出閘門、只列報告，由 CI oracle（`tests/integration/test_sim_venue_ledger_oracle.py` 的 expire 案例）與另案的 seeded credit-expiry e2e 涵蓋；
+- 故障注入：24 小時內至少一筆注入的 UNKNOWN 才過。24 小時的 submit 很少（prod 約 10 筆／7 天），機率規則保證不了，而 draw 的鍵是 bot 的掛鐘微秒 nonce，調 seed 無法預選。維持低 rate（決定 A），新增序數 knob `unknown_5xx_at=1`：每個 process 的第 1 筆 submit 必定注入（未下單的 UNKNOWN，自動結案），每次重啟（ordinal 重數）再注入一次；注入仍是持久的 `fault_injected` 事件，報告歸因不變；
 - 不變：`unexplained_lending` 為 0、非注入的 quarantine／UNKNOWN 為 0、accepted cycle ≥ 99%、注入的 UNKNOWN 全數自動結案。
 
 ### Revocation Trigger

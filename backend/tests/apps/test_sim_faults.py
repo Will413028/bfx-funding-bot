@@ -38,7 +38,8 @@ def test_empty_means_no_faults() -> None:
     "seed=x", "seed=-1", "seed=1,seed=2", "unknown_5xx=0.1,",
     "unknown_5xx_at=0", "unknown_5xx_at=-1", "unknown_5xx_at=x", "unknown_5xx_at=",
     "unknown_5xx_at=3+3", "unknown_5xx_at=3+", "unknown_5xx_at=3,unknown_5xx_at=4",
-    "nope_at=3",
+    "nope_at=3", "unknown_5xx_at=3_0", "unknown_5xx_at= 3", "unknown_5xx_at=3 +4",
+    "unknown_5xx_at=+3", "unknown_5xx_at=٣",
 ])
 def test_unreadable_specs_are_refused(raw: str) -> None:
     with pytest.raises(ValueError, match="BFX_SIM_FAULTS"):

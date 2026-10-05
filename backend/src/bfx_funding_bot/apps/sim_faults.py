@@ -66,11 +66,10 @@ def parse_sim_faults(raw: str) -> SimFaultSpec:
             knob = name[:-len(ORDINAL_SUFFIX)]
             if knob in ordinals:
                 raise ValueError(f"{ENV_NAME} names {name} twice")
-            try:
-                picked = tuple(int(part) for part in value.split("+"))
-            except ValueError:
+            if not all(part.isascii() and part.isdigit() for part in value.split("+")):
                 raise ValueError(
-                    f"{ENV_NAME} {name} is ordinals joined by '+', got {value!r}") from None
+                    f"{ENV_NAME} {name} is ordinals joined by '+', got {value!r}")
+            picked = tuple(int(part) for part in value.split("+"))
             if any(n < 1 for n in picked) or len(set(picked)) != len(picked):
                 raise ValueError(f"{ENV_NAME} {name} needs distinct ordinals >= 1, got {value!r}")
             ordinals[knob] = tuple(sorted(picked))

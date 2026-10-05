@@ -115,6 +115,24 @@ async def test_the_env_fault_knob_injects_and_records(fresh, monkeypatch) -> Non
                                 "WHERE event_type = 'fault_injected'") >= injected
 
 
+async def test_the_env_ordinal_knob_reaches_the_injector(fresh, monkeypatch) -> None:
+    """env -> load_config -> MarketfeedConfig -> _build_simulated: ``unknown_5xx_at=1`` faults the
+    first submit of the process with no probability rule at all."""
+    sim, engine = fresh
+    monkeypatch.setenv("BFX_SIM_FAULTS", "unknown_5xx_at=1,seed=3")
+    await bootstrap.run(_args(activate=True), database_url=sim.url, allowed_realms=("ci",))
+    daemon = await sim.build()
+    await _first_cycle(sim, daemon)
+    rows = await _count(engine, "SELECT count(*) FROM sim_venue_event "
+                                "WHERE event_type = 'fault_injected' "
+                                "AND payload->'data'->>'fault_kind' = 'unknown_5xx_error' "
+                                "AND payload->'data'->>'target' = 'submit' "
+                                "AND payload->'data'->>'request_ordinal' = '1'")
+    assert rows == 1
+    assert await _count(engine, "SELECT count(*) FROM transport_outcome_journal "
+                                "WHERE kind = 'unknown'") >= 1
+
+
 async def test_no_knob_means_no_injection_event(fresh, monkeypatch) -> None:
     sim, engine = fresh
     monkeypatch.delenv("BFX_SIM_FAULTS", raising=False)

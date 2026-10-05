@@ -85,7 +85,6 @@ FAMILY_WATERMARK_LAG = "bfx_sim_venue_feed_watermark_lag_seconds"
 UNKNOWN_FAULT_KINDS = frozenset({
     "unknown_5xx_error", "unknown_placed_lost", "unknown_not_placed_lost"})
 UNIDENTIFIED_VERSIONS = frozenset({"", "unidentified", "unknown"})
-DAY_MS = 86_400_000
 HOUR_MS = 3_600_000
 
 Status = Literal["PASS", "FAIL", "UNAVAILABLE"]
@@ -275,7 +274,7 @@ async def kill_and_resume(session: AsyncSession, scope: Scope, window: Window) -
             "amendment.trading_after_resume",
             f">= {MIN_TRADING_HOURS_AFTER_RESUME} h of trading after the resume",
             "FAIL", {"reason": "no kill to resume from"})]
-    last_kill = kills[-1]
+    last_kill = (timed or kills)[-1]  # the kill that met the 6-10 h criterion, else the last
     resume = await _rows(session, """
         SELECT id, actor, created_at_ms FROM trading_state
         WHERE exchange_account_id = :account AND deployment_environment = :realm

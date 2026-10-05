@@ -86,7 +86,7 @@ grep -c '^DATABASE_URL=.*/bfx_sim$' /opt/bfx/runtime/sim-migrate.env          # 
   printf 'BFX_ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)"
   printf 'BFX_EXCHANGE_ACCOUNT_ID=%s\n' "$SIM_ACCOUNT"
   printf 'BFX_SIM_INITIAL_WALLETS=UST:%s\n' "<prod funding wallet 的整數金額>"
-  printf 'BFX_SIM_FAULTS=%s\n' "unknown_5xx=0.01,unknown_5xx_at=3,unknown_placed_lost=0.005,history_error=0.005,seed=1"
+  printf 'BFX_SIM_FAULTS=%s\n' "unknown_5xx=0.01,unknown_5xx_at=1,unknown_placed_lost=0.005,history_error=0.005,seed=1"
 } > /opt/bfx/runtime/sim.env
 grep -c '^DATABASE_URL=postgresql://bfx_bot:.*/bfx_sim$' /opt/bfx/runtime/sim.env   # 必須印 1
 ```
@@ -97,10 +97,12 @@ grep -c '^DATABASE_URL=postgresql://bfx_bot:.*/bfx_sim$' /opt/bfx/runtime/sim.en
   （後者是 prod ledger 的 row 名）。
 - `BFX_SIM_INITIAL_WALLETS` 只在 venue log 為空時生效（第一代）；之後各代不會再注資。
 - **`BFX_SIM_FAULTS`**（決定 A）：整個視窗（24 小時）都開，種子化、每個請求獨立抽籤。rate 與 seed 在開跑前定案。
-  24 小時內要有 ≥ 1 筆注入的 UNKNOWN，但機率規則保證不了（nonce 是 bot 的掛鐘微秒，事先算不出哪個 nonce 會中，所以調 seed 也不行；
-  舊 rate 0.015 下 sim 24 小時約 20–50 筆 submit，零注入機率估 47–74%）。因此加 `unknown_5xx_at=3`：每個 process 的**第 3 筆 submit** 必定注入
-  （ordinal 是 process 內每種請求各自的計數，每次重啟從 1 重數，所以**每一代重啟後的第 3 筆 submit 都會再注入一次**），機率 rate 維持低值（決定 A）。
-  `unknown_5xx_at=3+7` 可列多個 ordinal；格式嚴格（ordinal ≥ 1、不重複、同一個 knob 只能寫一次）。
+  24 小時內要有 ≥ 1 筆注入的 UNKNOWN，但機率規則保證不了：nonce 是 bot 的掛鐘微秒，事先算不出哪個 nonce 會中，所以調 seed 也不行；
+  而 24 小時的 submit 數很少（活動下限只要求 ≥ 1；prod 約 10 筆／7 天），機率 rate 低時很可能一筆都沒注入。
+  因此加 `unknown_5xx_at=1`：每個 process 的**第 1 筆 submit** 必定注入（`unknown_5xx_error` 是未下單的 UNKNOWN，會自動結案；CI oracle 有先例），
+  所以只要有 1 筆 submit 就有注入。ordinal 是 process 內每種請求各自的計數，每次重啟從 1 重數，所以**每一代重啟後的第 1 筆 submit 都會再注入一次**；
+  機率 rate 維持低值（決定 A）。
+  `unknown_5xx_at=1+3` 可列多個 ordinal；格式嚴格（ordinal 只含數字 0-9 且 ≥ 1、不重複、無空白或底線、同一個 knob 只能寫一次）。
   抽籤的鍵是 `(seed, 規則, 目標, 請求 nonce)`：venue 的 nonce 持久且只增不減，重啟後不會重演舊的抽籤，所以各代不需要換 seed。
   只作用在 simulated venue 行程內的 transport（submit 與 history），不會到 Bitfinex；Bitfinex 組裝見到這個變數會拒絕開機。
   每一次注入都以 `fault_injected` 事件寫進 `sim_venue_event`（跨重啟存在；submit 的注入連同 symbol、amount、rate、period 一起記），
@@ -279,14 +281,14 @@ docker run --rm --name bfx-sim-report --pull=never --read-only \
 （永遠不把讀不到當成 0），2＝拒絕執行（資料庫不是 `shadow` 章，或參數不可用）。
 
 - 視窗還沒滿 24 小時、還沒有部署重啟、還沒 kill 時，對應的 criterion 本來就是 FAIL；每日報告看的是趨勢與其他項目。
-- 通過條件（ADR D3 與修訂）：視窗 ≥ 24 小時；≥ 1 次部署重啟（新 revision，且沒有 `unidentified`）；視窗後第 6–10 小時內 ≥ 1 次 kill ＋ 恢復後 ≥ 8 小時交易（其間 ≥ 1 筆 ack 的 submit）；
+- 通過條件（ADR D3 與修訂）：視窗 ≥ 24 小時；≥ 1 次部署重啟（新 revision，且沒有 `unidentified`）；視窗開始後第 6–10 小時內 ≥ 1 次 kill ＋ 恢復後 ≥ 8 小時交易（其間 ≥ 1 筆 ack 的 submit）；
   `unexplained_lending` ＝ 0（外加 `foreign_lending` ＝ 0）；非注入的 quarantine／UNKNOWN ＝ 0；
   accepted cycle ≥ 99%（分母不含時間範圍內有 history 注入的 cycle，那些另列）；
   注入的 UNKNOWN 全數自動結案（且至少有一筆）；模擬器內部失敗與 unexpected request ＝ 0（讀 DB 的持久事件）；
   無法補回的 trades 缺口 ＝ 0（讀各代 `/metrics`）；
   活動下限（prod 最近 7 天速率 × 0.5 換算每 24 小時；2026-10-05 在 prod 實測 7 天內 10 筆 ack 的 submit、10 次成交、10 筆 credit 結清、撤單約 0）：
   ≥ 1 筆 ack 的 submit、≥ 1 次成交、視窗內 ≥ 1 筆利息（venue 約每日 01:30Z 付息，不要求每個完整 UTC 日）。
-  撤單／reprice 無下限、到期結清（`FLOOR_CREDITS_CLOSED_BY_EXPIRY`）移出閘門，兩者只在報告列出（`info.*`）；到期結算由 CI oracle（`tests/integration/test_sim_venue_ledger_oracle.py` 的 expire 案例）與另案的 seeded credit-expiry e2e 涵蓋。
+  撤單／reprice 無下限、到期結清（原 `credits_closed_by_expiry` 下限）移出閘門，兩者只在報告列出（`info.*`）；到期結算由 CI oracle（`tests/integration/test_sim_venue_ledger_oracle.py` 的 expire 案例）與另案的 seeded credit-expiry e2e 涵蓋。
 - 每日報告另列（報告腳本外）：已過小時、各代的 revision、sim 與 live 的 RSS／CPU、live-bot 429 與 ready 狀態、異常。
 - 事件數會隨時間成長（約每個已驗證請求一筆 `NonceAdvanced`）：報告尾端的 `sim_venue_event` 列數接近 200 000，
   或 boot replay 超過 5 秒，就是 `modules/simulated_venue/__init__.py` 寫的 snapshot 觸發條件。

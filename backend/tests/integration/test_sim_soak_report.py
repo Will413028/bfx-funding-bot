@@ -68,6 +68,7 @@ class Soak:
         ("rev-a", T0 + HOUR), ("rev-b", T0 + 12 * HOUR))
     kill_at: int | None = T0 + 8 * HOUR
     resume_at: int | None = T0 + 9 * HOUR
+    later_kill: tuple[int, int] | None = None  # a second kill and its resume, after the first
     cancel_all_acknowledged: bool = True
     queries: int = 200
     queries_without_observation: int = 2
@@ -178,6 +179,9 @@ async def seed(conn: AsyncConnection, soak: Soak) -> None:
         states.append(("HALTED", "operator", "soak-kill", soak.kill_at))
     if soak.resume_at is not None:
         states.append(("ACTIVE", "operator", "soak-orchestrator", soak.resume_at))
+    if soak.later_kill is not None:
+        states.append(("HALTED", "operator", "soak-kill", soak.later_kill[0]))
+        states.append(("ACTIVE", "operator", "soak-orchestrator", soak.later_kill[1]))
     for state, cause, actor, at in states:
         row = (await _x(conn, """
             INSERT INTO trading_state (exchange_account_id, deployment_environment, state, cause,
@@ -344,16 +348,17 @@ async def test_a_soak_that_never_submitted_fails_the_floor(engine, tmp_path) -> 
 
 
 @pytest.mark.parametrize(("change", "failing"), [
+    ({"fills": report.FLOOR_FILLS - 1}, {"floor.fills"}),
+    ({"interest_days": ()}, {"floor.interest_payments"}),
+    # no acked submit also leaves nothing to inject into and nothing after the resume
     ({"acked_submits": report.FLOOR_ACKED_SUBMITS - 1, "injected_unknown": 0,
-      "record_injections": False}, "floor.acked_submits"),
-    ({"fills": report.FLOOR_FILLS - 1}, "floor.fills"),
-    ({"interest_days": ()}, "floor.interest_payments"),
+      "record_injections": False},
+     {"floor.acked_submits", "d3.injected_unknown_auto_closed",
+      "amendment.trading_after_resume"}),
 ])
 async def test_each_floor_number_is_a_hard_threshold(engine, tmp_path, change, failing) -> None:
     by_id = await _report(engine, Soak(**change), tmp_path=tmp_path)
-    assert failing in _failing(by_id), _statuses(by_id)
-    assert {failing, "d3.injected_unknown_auto_closed", "amendment.trading_after_resume"} >= (
-        _failing(by_id)), _statuses(by_id)
+    assert _failing(by_id) == failing, _statuses(by_id)
 
 
 async def test_the_floor_is_met_exactly_at_its_numbers(engine, tmp_path) -> None:
@@ -518,6 +523,17 @@ async def test_the_kill_and_the_trading_after_it_are_part_of_the_bar(
         engine, tmp_path, change, failing) -> None:
     by_id = await _report(engine, Soak(**change), tmp_path=tmp_path)
     assert _failing(by_id) == failing, _statuses(by_id)
+
+
+async def test_trading_after_the_resume_is_measured_from_the_qualifying_kill(
+        engine, tmp_path) -> None:
+    """A second, later kill (outside hours 6-10) neither replaces the qualifying one nor moves
+    the resume it is measured from: 17 h from the +9 h resume, not 1 h from the later one."""
+    by_id = await _report(engine, Soak(later_kill=(T0 + 24 * HOUR, T0 + 25 * HOUR)),
+                          tmp_path=tmp_path)
+    assert by_id["d3.operator_kill"].evidence["in_kill_window"] == 1
+    assert by_id["amendment.trading_after_resume"].evidence["hours_after_resume"] == 17.0
+    assert _failing(by_id) == set(), _statuses(by_id)
 
 
 async def test_trading_after_the_resume_needs_acked_submits_in_it(engine, tmp_path) -> None:
