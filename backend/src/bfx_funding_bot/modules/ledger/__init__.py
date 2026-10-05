@@ -1241,6 +1241,53 @@ class OperatorReads(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionEventView:
+    """One row of the operator's execution history.
+
+    ``event_key`` is opaque and unique within the history; ``event_type`` uses the legacy
+    event names the console already knows. ``amount`` is decimal text as the source holds it.
+    """
+
+    event_key: str
+    event_type: str
+    occurred_at_ms: int
+    symbol: str | None
+    venue_offer_id: str | None
+    cid: int | None
+    amount: str | None
+    rate: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPage:
+    """Newest first; ``next_before`` is the opaque cursor of the next page, None at the end."""
+
+    events: tuple[ExecutionEventView, ...]
+    next_before: str | None
+
+
+class ExecutionCursorError(ValueError):
+    """A ``before`` cursor this history did not issue."""
+
+
+class ExecutionHistory(Protocol):
+    """The operator's execution history of one scope, on the caller's session."""
+
+    async def list_executions(
+        self,
+        session: AsyncSession,
+        scope: Scope,
+        *,
+        before: str | None,
+        limit: int,
+        event_type: str | None,
+    ) -> ExecutionPage:
+        """At most ``limit`` events older than ``before`` (from the start when None), newest
+        first, of ``event_type`` when given; ExecutionCursorError for a foreign cursor."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
 class LiveManagedOffer:
     """A live offer this scope placed (traced to an execution decision)."""
 
@@ -1429,6 +1476,10 @@ __all__ = [
     "CreditStatus",
     "CreditTerminalKind",
     "CycleResult",
+    "ExecutionCursorError",
+    "ExecutionEventView",
+    "ExecutionHistory",
+    "ExecutionPage",
     "ForeignOffer",
     "ForeignOffers",
     "JsonObject",

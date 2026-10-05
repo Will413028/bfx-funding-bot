@@ -182,6 +182,7 @@ class Book:
         cell: str = "a30",
         symbol: str = "fUST",
         started_at_ms: int = 0,
+        completed_at_ms: int = 0,
     ) -> UUID:
         assert self.basis_id is not None
         self.decisions += 1
@@ -232,7 +233,7 @@ class Book:
                         outcome,  # type: ignore[arg-type]
                         venue_offer_id if outcome == "ack" else None,
                         None if outcome == "ack" else "test",
-                        0,
+                        completed_at_ms,
                         {},
                     ),
                 )
@@ -246,6 +247,7 @@ class Book:
         quarantine_id: UUID | None = None,
         venue_offer_id: str | None = None,
         symbol: str = "fUST",
+        resolved_at_ms: int = 10,
     ) -> None:
         assert self.observation_id is not None
         async with self.factory.begin() as session:
@@ -260,7 +262,7 @@ class Book:
                     self.observation_id,
                     "system",
                     "test",
-                    10,
+                    resolved_at_ms,
                     "test",
                     {},
                     attempt_id=attempt_id,

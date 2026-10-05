@@ -57,7 +57,7 @@ export function ExecutionEventsTable({ events }: ExecutionEventsTableProps) {
         </div>
         {events.map((e) => (
           <div
-            key={e.eventSeq}
+            key={e.eventKey}
             className="grid grid-cols-[170px_70px_1fr_1fr_1fr] items-center gap-2 border-b border-white/[0.03] py-2.5 text-sm last:border-0"
           >
             <Badge

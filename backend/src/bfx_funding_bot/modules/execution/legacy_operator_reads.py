@@ -1,4 +1,5 @@
-"""Legacy ``OperatorReads``: the execution-uncertainty projection, as the API always read it."""
+"""Legacy ``OperatorReads`` and ``ExecutionHistory``: the execution-uncertainty projection and
+the event log, as the API always read them."""
 
 from __future__ import annotations
 
@@ -9,14 +10,26 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow, PositionStateRow
+from bfx_funding_bot.modules.execution.event_store.tables import (
+    EventLogRow,
+    OfferClaimRow,
+    PositionStateRow,
+)
 from bfx_funding_bot.modules.execution.operator_evidence import ResolutionRejected
 from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     ResolutionScope,
     load_scoped_uncertainty,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
-from bfx_funding_bot.modules.ledger import OfferView, PositionView, Scope, UncertaintyView
+from bfx_funding_bot.modules.ledger import (
+    ExecutionCursorError,
+    ExecutionEventView,
+    ExecutionPage,
+    OfferView,
+    PositionView,
+    Scope,
+    UncertaintyView,
+)
 
 
 def _view(row: ExecutionUncertaintyRow) -> UncertaintyView:
@@ -124,4 +137,55 @@ class LegacyOperatorReads:
                 last_updated_ms=row.last_updated_ms,
             )
             for row in rows
+        )
+
+
+class LegacyExecutionHistory:
+    """The scope's ``event_log``, newest first; the cursor is the last row's ``event_seq``.
+
+    Also the archive the ledger's history continues into after the switch (the event log is
+    frozen then, ``e8f9a0b1c2d3``).
+    """
+
+    async def list_executions(
+        self,
+        session: AsyncSession,
+        scope: Scope,
+        *,
+        before: str | None,
+        limit: int,
+        event_type: str | None,
+    ) -> ExecutionPage:
+        stmt = select(EventLogRow).where(
+            EventLogRow.exchange_account_id == scope.exchange_account_id,
+            EventLogRow.deployment_environment == scope.deployment_environment,
+        )
+        if before is not None:
+            if not before.isascii() or not before.isdigit():
+                raise ExecutionCursorError(before)
+            stmt = stmt.where(EventLogRow.event_seq < int(before))
+        if event_type is not None:
+            stmt = stmt.where(EventLogRow.event_type == event_type)
+        rows = (
+            await session.execute(stmt.order_by(EventLogRow.event_seq.desc()).limit(limit + 1))
+        ).scalars().all()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        events = []
+        for row in rows:
+            payload = row.payload or {}
+            amount = payload.get("amount") or payload.get("size_usdt")
+            rate = payload.get("rate") if payload.get("rate") is not None else payload.get("fill_rate")
+            events.append(ExecutionEventView(
+                event_key=str(row.event_seq),
+                event_type=row.event_type,
+                occurred_at_ms=row.occurred_at_ms,
+                symbol=payload.get("symbol"),
+                venue_offer_id=row.venue_offer_id,
+                cid=row.cid,
+                amount=str(amount) if amount is not None else None,
+                rate=float(rate) if rate is not None else None,
+            ))
+        return ExecutionPage(
+            tuple(events), str(rows[-1].event_seq) if has_more and rows else None
         )

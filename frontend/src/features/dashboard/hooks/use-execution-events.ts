@@ -7,12 +7,12 @@ export const EXECUTION_EVENTS_PAGE_SIZE = 25;
 
 /**
  * Contract v2: the server pagination envelope drives the before-cursor —
- * `nextBefore` is the smallest event_seq of the page, `hasMore` replaces
- * the old "full page => more" heuristic.
+ * `nextBefore` is an opaque token sent back as is (non-null means send it),
+ * `hasMore` replaces the old "full page => more" heuristic.
  */
 export function getNextEventsPageParam(
   lastPage: ExecutionEventsResponse,
-): number | undefined {
+): string | undefined {
   const { hasMore, nextBefore } = lastPage.pagination;
   return hasMore && nextBefore != null ? nextBefore : undefined;
 }
@@ -39,13 +39,13 @@ export function useExecutionEvents({
           params: {
             limit: String(pageSize),
             ...(eventType !== undefined ? { event_type: eventType } : {}),
-            ...(pageParam !== undefined ? { before: String(pageParam) } : {}),
+            ...(pageParam !== undefined ? { before: pageParam } : {}),
           },
         },
       );
     },
     enabled: Boolean(exchangeAccountId),
-    initialPageParam: undefined as number | undefined,
+    initialPageParam: undefined as string | undefined,
     getNextPageParam: getNextEventsPageParam,
     staleTime: 60_000,
   });
