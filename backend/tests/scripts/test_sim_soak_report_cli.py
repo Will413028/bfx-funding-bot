@@ -54,3 +54,22 @@ def test_exit_codes_rank_fail_over_unavailable_over_pass() -> None:
     assert report.exit_code([c("PASS"), c("PASS")]) == 0
     assert report.exit_code([c("PASS"), c("UNAVAILABLE")]) == 3
     assert report.exit_code([c("UNAVAILABLE"), c("FAIL")]) == 1
+
+
+def test_the_result_file_names_the_verdict_and_the_last_generation() -> None:
+    from uuid import UUID
+    revisions = [{"service_version": "a" * 40}, {"service_version": "b" * 40}]
+    criteria = [report.Criterion("d3.deploy_restarts", "r", "PASS", {"revisions": revisions}),
+                report.Criterion("d3.window_hours", "r", "PASS")]
+    window = report.Window(1_000, 2_000)
+    document = report.result_document(criteria, account=UUID(ACCOUNT), window=window,
+                                      image_digest="sha256:" + "3" * 64)
+    assert (document["verdict"], document["last_service_version"], document["image_digest"],
+            document["window"]) == ("PASS", "b" * 40, "sha256:" + "3" * 64,
+                                    {"since_ms": 1_000, "until_ms": 2_000})
+    assert len(document["report_sha256"]) == 64
+    failed = report.result_document(
+        [*criteria, report.Criterion("floor.fills", "r", "FAIL")], account=UUID(ACCOUNT),
+        window=window, image_digest=None)
+    assert (failed["verdict"], failed["image_digest"]) == ("FAIL", None)
+    assert failed["report_sha256"] != document["report_sha256"]

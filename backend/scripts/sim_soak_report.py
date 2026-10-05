@@ -598,6 +598,40 @@ def render(criteria: Sequence[Criterion], *, event_count: int | None = None) -> 
     return "\n".join(lines)
 
 
+RESULT_SCHEMA_VERSION = 1
+
+
+def result_document(
+    criteria: Sequence[Criterion], *, account: UUID, window: Window, image_digest: str | None,
+) -> dict[str, Any]:
+    """The final verdict as a file the authority switch checks (``bfx_ledger_switch.py``).
+
+    ``last_service_version`` is the source revision of the window's last generation (the
+    deploy-restart criterion's newest revision); ``image_digest`` is the digest the report ran
+    on (``BFX_IMAGE_DIGEST`` of the report container, the soaked image); ``report_sha256``
+    hashes the criteria exactly as written here.
+    """
+    from hashlib import sha256  # local: keeps the module's import block as it is
+
+    body = [{"id": c.id, "rule": c.rule, "status": c.status, "evidence": dict(c.evidence)}
+            for c in criteria]
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
+    revisions = next((c.evidence.get("revisions") for c in criteria
+                      if c.id == "d3.deploy_restarts"), None) or []
+    code = exit_code(criteria)
+    return {
+        "schema": RESULT_SCHEMA_VERSION,
+        "verdict": {0: "PASS", 1: "FAIL"}.get(code, "UNAVAILABLE"),
+        "exit_code": code,
+        "exchange_account_id": str(account),
+        "window": {"since_ms": window.since_ms, "until_ms": window.until_ms},
+        "last_service_version": revisions[-1]["service_version"] if revisions else None,
+        "image_digest": image_digest or None,
+        "report_sha256": sha256(canonical.encode()).hexdigest(),
+        "criteria": body,
+    }
+
+
 async def run(
     *, database_url: str, account: UUID, window: Window, metrics_files: Sequence[Path] = (),
     realm: str = "shadow",
@@ -638,6 +672,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--metrics", type=Path, action="append", default=[],
                         help="saved /metrics text of one process generation (repeat per file)")
     parser.add_argument("--json", action="store_true", help="print JSON instead of text")
+    parser.add_argument("--result-out", type=Path,
+                        help="also write the final verdict file the ledger switch checks")
     args = parser.parse_args(argv)
     logging.disable(sys.maxsize)
     try:
@@ -659,6 +695,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             sort_keys=True, indent=2, default=str))
     else:
         print(render(criteria, event_count=events))
+    if args.result_out is not None:
+        document = result_document(
+            criteria, account=args.exchange_account_id, window=Window(args.since, args.until),
+            image_digest=os.environ.get("BFX_IMAGE_DIGEST"))
+        args.result_out.write_text(json.dumps(document, sort_keys=True, indent=2, default=str)
+                                   + "\n")
     return exit_code(criteria)
 
 
