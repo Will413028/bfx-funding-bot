@@ -198,12 +198,14 @@ def test_executions_desc_with_limit_and_cursor(app_client):
     # contract v2: pagination envelope
     assert body["pagination"]["hasMore"] is True
     before = body["pagination"]["nextBefore"]
-    assert before == data[-1]["eventSeq"]
+    # Opaque string tokens (ADR 2026-10-02 D4); under legacy the event_seq as text.
+    assert isinstance(before, str) and before == data[-1]["eventKey"]
 
     resp2 = app_client.get(_EXECUTIONS_PATH, params={"limit": 2, "before": before})
     body2 = resp2.json()
     assert len(body2["data"]) == 2
-    assert body2["data"][0]["eventSeq"] < before
+    assert int(body2["data"][0]["eventKey"]) < int(before)
+    assert [e["eventType"] for e in body2["data"]] == ["RESERVATION_CLAIMED", "RESERVATION_INTENT"]
     # 4 realm rows total -> second page exhausts them
     assert body2["pagination"]["hasMore"] is False
     assert body2["pagination"]["nextBefore"] is None
@@ -215,6 +217,12 @@ def test_executions_event_type_filter(app_client):
     body = resp.json()
     assert [e["eventType"] for e in body["data"]] == ["ORDER_FILL"]  # canary row excluded
     assert body["pagination"]["hasMore"] is False
+
+
+def test_executions_refuse_a_cursor_they_did_not_issue(app_client):
+    for cursor in ("j.MTox", "abc", "-1"):
+        resp = app_client.get(_EXECUTIONS_PATH, params={"before": cursor})
+        assert (resp.status_code, resp.json()["detail"]) == (422, "invalid_cursor"), cursor
 
 
 def test_executions_limit_capped(app_client):

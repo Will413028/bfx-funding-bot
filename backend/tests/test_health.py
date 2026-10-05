@@ -66,5 +66,10 @@ def test_startup_refuses_an_unreadable_or_unsupported_authority(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, epoch: str, match: str
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", _authority_db(tmp_path / f"{epoch}.db", epoch))
+    if epoch == "ledger":
+        # The web API supports both authorities; a build predating the switch did not.
+        from bfx_funding_bot.apps import webapi
+
+        monkeypatch.setattr(webapi, "WEBAPI_SUPPORTED", frozenset({"legacy"}))
     with pytest.raises(AuthorityMismatch, match=match), TestClient(app):
         pass

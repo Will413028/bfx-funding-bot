@@ -25,6 +25,7 @@ from bfx_funding_bot.modules.ledger import (
     CommandOutcome,
     CommandRefused,
     CycleResult,
+    ExecutionHistory,
     ForeignOffers,
     LedgerCapitalRead,
     LedgerCapitalReader,
@@ -65,6 +66,7 @@ from bfx_funding_bot.modules.ledger._internal import (
     clock,
     conservation_read,
     cycle_reads,
+    execution_history,
     journal,
     observation,
     operator_evidence,
@@ -387,6 +389,12 @@ def build_operator_resolution() -> OperatorResolution:
 def build_operator_reads() -> OperatorReads:
     """The ledger operator read model; apps select it by authority epoch."""
     return operator_reads.LedgerOperatorReads()
+
+
+def build_execution_history(archive: ExecutionHistory) -> ExecutionHistory:
+    """The ledger's execution history: the journal above the switch, ``archive`` (the frozen
+    legacy event log) below it, behind one cursor (plan Q4)."""
+    return execution_history.LedgerExecutionHistory(archive)
 
 
 def build_capital_authority(

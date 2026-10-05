@@ -52,6 +52,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     QuarantineOpeningRow,
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
+    VenueCreditMirrorRow,
     VenueOfferMirrorRow,
 )
 from bfx_funding_bot.modules.ledger.wiring import (
@@ -85,8 +86,10 @@ from .seed_e2e import (
     run_seed,
     seed_command,
     submit,
+    table_count,
     trade_row,
 )
+from .test_legacy_authority_freeze import FROZEN
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -363,7 +366,7 @@ async def test_the_first_real_basis_judges_the_seed_basis_and_the_halt_fill(
 
     # ---- switch, the venue moves during the halt, the ledger process boots
     await flip_epoch(env, at=SEED_AT + 1_000)
-    boot_as_epoch(env, monkeypatch)
+    boot_as_epoch(env)
     halt_moves(env)
     ledger = await env.build()
     await env.boot(ledger, RUNNER_AT)
@@ -509,7 +512,7 @@ async def test_a_seeded_claim_only_offer_is_cancellable_by_the_ledger(
                 if row["execution_decision_id"] == claim_decision]
     assert claim["policy_revision_id"] is None and claim["seed_provenance"]["legacy"] == "offer_claim"
     await flip_epoch(env, at=SEED_AT + 1_000)
-    boot_as_epoch(env, monkeypatch)
+    boot_as_epoch(env)
     ledger = await env.build()
     await env.boot(ledger, SEED_AT + 20_000)
     assert ledger.periodic_reconcile._non_accepted == 0
@@ -524,3 +527,78 @@ async def test_a_seeded_claim_only_offer_is_cancellable_by_the_ledger(
     assert claim["normalized_payload"] == {
         "symbol": "fUST", "amount": str(CLAIM), "rate": "0.0001", "period": 2, "type": "LIMIT",
         "flags": {"raw": 0}}  # type and flags as the legacy snapshot observed them
+
+
+async def test_seeded_credits_end_and_split_after_the_switch(
+    bot_env: BotEnv, ledger_db: Any, tmp_path: Any,  # noqa: F811
+) -> None:
+    """Pre-flight §B gap (PR-1): every seeded credit ends within its period after the switch.
+
+    After the ledger's first basis, two seeded groups end by expiry (the single-cell ``trade``
+    credit 8003 and the multi-cell ``recent_fill`` credit 8002, F7) with their terminal history
+    rows, and the seeded loan's credit 8101 is split by the venue into two credits of the same
+    (period, opening). The next basis conserves, keeps the split credits' cells and explains all
+    lending; the ledger process writes no legacy table (the freeze, ``e8f9a0b1c2d3``).
+    """
+    env = bot_env
+    await run_legacy(env, unknown=False)
+    code, lines = await run_seed(seed_command(env, tmp_path, url=ledger_db.url), now_ms=SEED_AT)
+    assert code == 0, lines
+    legacy_rows = {name: await table_count(env, name) for name in FROZEN}
+    await flip_epoch(env, at=SEED_AT + 1_000)
+    boot_as_epoch(env)
+    halt_moves(env)
+    ledger = await env.build()
+    await env.boot(ledger, RUNNER_AT)
+    assert ledger.periodic_reconcile._non_accepted == 0
+    first, seeded = await latest_bases(env)
+    assert (await basis_view(env, first.id))["groups"] == {
+        ("credit", "8002"): (2, RECENT_OPENING, "carry", frozenset({CELL, CELL_B})),
+        ("credit", "8003"): (2, FILLED_AT, "carry", frozenset({CELL})),
+        ("credit", "8101"): (2, LOAN_OPENING, "carry", frozenset({CELL, CELL_B})),
+        ("credit", "8102"): (2, LOAN_OPENING, "carry", frozenset({CELL, CELL_B})),
+        ("credit", "8005"): (2, HALT_FILL_AT, "trade", frozenset({CELL_B})),
+    }
+
+    venue = env.venue
+    ended_at = RUNNER_AT + 30_000
+    venue.credits = [
+        *(row for row in venue.credits if row[0] not in (8002, 8003, 8101)),
+        credit_row(8201, Decimal("35"), LOAN_OPENING, ended_at),
+        credit_row(8202, Decimal("25"), LOAN_OPENING, ended_at),
+    ]
+    closed = [credit_row(8002, RECENT_CREDIT, RECENT_OPENING, status="CLOSED (expired)"),
+              credit_row(8003, FILLED, FILLED_AT, status="CLOSED (expired)")]
+    for row in closed:
+        row[4] = ended_at  # MTS_UPDATE: when the credit ended
+    venue.history_credits = closed
+    returned = Decimal("5000") + RECENT_CREDIT + FILLED
+    venue.wallets = [["funding", "UST", str(returned), 0, str(returned)]]
+    await env.tick(ledger, RUNNER_AT + 60_000)
+    assert ledger.periodic_reconcile._non_accepted == 0
+
+    after, previous, *_ = await latest_bases(env)
+    assert previous.id == first.id and seeded.id not in (after.id, first.id)
+    view = await basis_view(env, after.id)
+    fust = view["symbols"]["fUST"]
+    assert (fust.conservation, fust.lent_unexplained, fust.fill_conflicts, fust.block) == (
+        "conserved", ZERO, 0, None), (fust.conservation, fust.lent_unexplained, fust.block)
+    assert after.scope_block is None
+    # The ended groups are gone; the split credits keep the seeded loan's cells.
+    assert view["groups"] == {
+        ("credit", "8102"): (2, LOAN_OPENING, "carry", frozenset({CELL, CELL_B})),
+        ("credit", "8201"): (2, LOAN_OPENING, "carry", frozenset({CELL, CELL_B})),
+        ("credit", "8202"): (2, LOAN_OPENING, "carry", frozenset({CELL, CELL_B})),
+        # The halt fill's trade is still in the window: attributed by it again.
+        ("credit", "8005"): (2, HALT_FILL_AT, "trade", frozenset({CELL_B})),
+    }
+    async with env.factory() as session:
+        ended = {row.venue_credit_id: row.terminal_kind for row in await session.scalars(
+            select(VenueCreditMirrorRow).where(
+                VenueCreditMirrorRow.venue_credit_id.in_(("8002", "8003"))))}
+    assert ended == {"8002": "closed", "8003": "closed"}
+    # No basis since the switch holds unexplained lending in any symbol.
+    for basis in (first, after):
+        verdicts = {s.conservation for s in (await basis_view(env, basis.id))["symbols"].values()}
+        assert "unexplained_lending" not in verdicts, verdicts
+    assert {name: await table_count(env, name) for name in FROZEN} == legacy_rows

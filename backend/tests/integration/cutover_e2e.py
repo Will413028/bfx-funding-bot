@@ -174,7 +174,7 @@ async def build_cutover(
     if at_capture is not None:
         await at_capture(seed_lines)
     await flip_epoch(env, at=SEED_AT + 1_000)
-    boot_as_epoch(env, monkeypatch)
+    boot_as_epoch(env)
     halt_moves(env)
     observed = await runner_observation(env)
     if runner:

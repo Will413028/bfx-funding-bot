@@ -4,8 +4,8 @@ Shared by the composed end-to-end tests. The venue is faked at HTTP level (one s
 the legacy ``BootRecovery`` and the ledger ``BitfinexVenueObservation`` through the real
 ``BitfinexAuthREST``), and one fake clock drives the whole composition: ``bot.now_ms_utc`` is
 the composition clock, every time source below ``select_bot_ports`` and the gate follows it.
-The ledger authority is selected by monkeypatching ``bot.read_authority`` (production still
-refuses it, see ``test_daemon_authority_wiring``).
+The ledger authority is selected by monkeypatching ``bot.read_authority`` (the database keeps
+its ``legacy`` epoch; the seed tests read the real one, ``seed_e2e.boot_as_epoch``).
 
 Only an operator's authority check is replaced (the worker's ``authority``), as in
 ``test_ledger_boot_e2e``; everything else is the production composition.

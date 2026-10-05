@@ -35,8 +35,9 @@ def test_select_read_models_covers_both_authorities() -> None:
     assert type(ledger.operator_evidence).__name__ == "LedgerOperatorEvidence"
 
 
-def test_the_web_api_still_supports_only_the_legacy_authority() -> None:
-    assert frozenset({"legacy"}) == WEBAPI_SUPPORTED
+def test_the_web_api_supports_both_authorities() -> None:
+    """The epoch picks the read models (S1-7 switch-capable release)."""
+    assert frozenset({"legacy", "ledger"}) == WEBAPI_SUPPORTED
 
 
 class _Engine:

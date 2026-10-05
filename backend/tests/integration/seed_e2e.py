@@ -18,9 +18,8 @@ from uuid import UUID, uuid4
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 
-from bfx_funding_bot.apps import bot, ledger_seed
+from bfx_funding_bot.apps import ledger_seed
 from bfx_funding_bot.apps.read_models import select_read_models
-from bfx_funding_bot.core.authority import read_authority
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
@@ -164,13 +163,10 @@ async def flip_epoch(env: BotEnv, *, at: int) -> None:
             actor="seed-e2e", reason="authority switch after seed", evidence=None))
 
 
-def boot_as_epoch(env: BotEnv, monkeypatch: Any) -> None:
-    """Later processes read the real epoch; only Bitfinex's ``legacy``-only support is lifted
-    (production refuses a ledger Bitfinex boot until S1-7, ``test_daemon_authority_wiring``)."""
-    async def epoch(session: Any, *, supported: object) -> str:
-        return await read_authority(session, supported=frozenset({"legacy", "ledger"}))
-
-    monkeypatch.setattr(bot, "read_authority", epoch)
+def boot_as_epoch(env: BotEnv) -> None:
+    """Later processes read the real epoch against the production support sets
+    (``apps/authority_support.py``: Bitfinex runs either authority); only the test's own
+    read models follow the switch."""
     env.authority = "ledger"
     env.reads = select_read_models("ledger")
 

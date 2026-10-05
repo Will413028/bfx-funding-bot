@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
-from bfx_funding_bot.apps.authority_support import supported_for_venue
+from bfx_funding_bot.apps.authority_support import require_ledger_seed, supported_for_venue
 from bfx_funding_bot.apps.bot_ports import ObservationVenue, select_bot_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
 from bfx_funding_bot.apps.venue import VenueSeam, build_venue
@@ -207,7 +207,7 @@ async def build_daemon(
     # rollback onto a newer schema); its stamped realm must equal the realm this process
     # runs as (E2); and the capital authority is read once, against the set this venue
     # supports (``apps/authority_support.py``): the simulated venue runs only on the
-    # ledger, Bitfinex only on legacy. Any refusal stops the boot and alerts
+    # ledger, Bitfinex on either (the epoch decides). Any refusal stops the boot and alerts
     # (``_refuse_live_boot``: alert routing is configuration, the sink prefixes the realm).
     try:
         async with session_factory() as boot_session:
@@ -234,6 +234,15 @@ async def build_daemon(
     # consumer binds to (apps/bot_ports.py); nothing below names an authority.
     env_str = config.deployment_environment.value
     capital_scope = Scope(account_bootstrap.exchange_account_id, env_str)
+    # H-1: a switched prod database without the seed refuses, before any ledger write.
+    try:
+        async with session_factory() as seed_session:
+            await require_ledger_seed(seed_session, venue=config.venue,
+                                      authority=authority, scopes=(capital_scope,))
+    except Exception as exc:
+        await _refuse_live_boot(exc, config=config, session_factory=session_factory)
+        await db_engine.dispose()
+        raise
     account_id = account_bootstrap.account_id
     bus = DomainEventBus()
     resync = ResyncChannel()

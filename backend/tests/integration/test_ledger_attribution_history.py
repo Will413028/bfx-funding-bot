@@ -117,7 +117,7 @@ async def test_weekly_is_unchanged_by_the_switch_and_attributes_journal_only_off
     # same offers map to the same cells, no conflict, and the numbers do not move.
     assert numbers(await weekly(env)) == before
 
-    boot_as_epoch(env, monkeypatch)
+    boot_as_epoch(env)
     halt_moves(env)
     ledger = await env.build()
     await env.boot(ledger, RUNNER_AT)

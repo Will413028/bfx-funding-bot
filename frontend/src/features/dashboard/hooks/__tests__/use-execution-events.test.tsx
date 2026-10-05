@@ -16,9 +16,9 @@ vi.mock("@/lib/api-client", () => ({
     `/exchange-accounts/${id}${path}`,
 }));
 
-function makeEvent(eventSeq: number): ExecutionEvent {
+function makeEvent(eventKey: string): ExecutionEvent {
   return {
-    eventSeq,
+    eventKey,
     eventType: "ORDER_FILL",
     occurredAtMs: 1_790_000_000_000,
     symbol: "fUST",
@@ -30,10 +30,10 @@ function makeEvent(eventSeq: number): ExecutionEvent {
 }
 
 function makePage(
-  eventSeqs: number[],
+  eventKeys: string[],
   pagination: ExecutionEventsResponse["pagination"],
 ): ExecutionEventsResponse {
-  return { data: eventSeqs.map(makeEvent), pagination };
+  return { data: eventKeys.map(makeEvent), pagination };
 }
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -45,14 +45,17 @@ function wrapper({ children }: { children: ReactNode }) {
 
 describe("getNextEventsPageParam", () => {
   it("returns nextBefore when the server says there is more", () => {
-    const page = makePage([200, 199], { hasMore: true, nextBefore: 199 });
-    expect(getNextEventsPageParam(page)).toBe(199);
+    const page = makePage(["j:0:b", "j:0:a"], {
+      hasMore: true,
+      nextBefore: "j.MTk5",
+    });
+    expect(getNextEventsPageParam(page)).toBe("j.MTk5");
   });
 
   it("returns undefined when the log is exhausted", () => {
     expect(
       getNextEventsPageParam(
-        makePage([3], { hasMore: false, nextBefore: null }),
+        makePage(["3"], { hasMore: false, nextBefore: null }),
       ),
     ).toBeUndefined();
     expect(
@@ -67,10 +70,10 @@ describe("useExecutionEvents", () => {
   it("fetches the first page without a cursor, then pages with nextBefore", async () => {
     vi.mocked(apiClient.getList)
       .mockResolvedValueOnce(
-        makePage([200, 199], { hasMore: true, nextBefore: 199 }),
+        makePage(["200", "199"], { hasMore: true, nextBefore: "199" }),
       )
       .mockResolvedValueOnce(
-        makePage([100], { hasMore: false, nextBefore: null }),
+        makePage(["100"], { hasMore: false, nextBefore: null }),
       );
 
     const { result } = renderHook(
@@ -105,7 +108,7 @@ describe("useExecutionEvents", () => {
 
   it("passes the event_type filter and custom page size through", async () => {
     vi.mocked(apiClient.getList).mockResolvedValueOnce(
-      makePage([50], { hasMore: false, nextBefore: null }),
+      makePage(["50"], { hasMore: false, nextBefore: null }),
     );
 
     const { result } = renderHook(

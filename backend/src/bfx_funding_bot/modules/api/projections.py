@@ -1,8 +1,7 @@
 """Explicit ExchangeAccount projection read endpoints."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.api.account_scope import ExchangeAccountContext, require_account_member
@@ -14,8 +13,7 @@ from bfx_funding_bot.modules.api.schemas import (
     OfferClaimResponse,
     PositionResponse,
 )
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-from bfx_funding_bot.modules.ledger import Scope
+from bfx_funding_bot.modules.ledger import ExecutionCursorError, Scope
 
 _ACTIVE_CLAIM_STATES = ("pending", "unknown", "claimed")
 _EXECUTIONS_LIMIT_CAP = 200
@@ -85,48 +83,39 @@ def build_projections_router() -> APIRouter:
     @router.get("/exchange-accounts/{exchange_account_id}/executions")
     async def account_executions(
         limit: int = Query(default=50, ge=1, le=_EXECUTIONS_LIMIT_CAP),
-        before: int | None = Query(default=None, description="event_seq cursor"),
+        before: str | None = Query(default=None, description="opaque cursor (nextBefore)"),
         event_type: str | None = Query(default=None),
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
+        models: ReadModels = Depends(get_read_models),  # noqa: B008
     ) -> dict[str, object]:
-        stmt = select(EventLogRow).where(
-            EventLogRow.exchange_account_id == context.exchange_account_id,
-            EventLogRow.deployment_environment == context.deployment_environment,
-        )
-        if before is not None:
-            stmt = stmt.where(EventLogRow.event_seq < before)
-        if event_type is not None:
-            stmt = stmt.where(EventLogRow.event_type == event_type)
-        rows = (
-            await session.execute(
-                stmt.order_by(EventLogRow.event_seq.desc()).limit(limit + 1)
+        try:
+            page = await models.execution_history.list_executions(
+                session,
+                Scope(context.exchange_account_id, context.deployment_environment),
+                before=before, limit=limit, event_type=event_type,
             )
-        ).scalars().all()
-        has_more = len(rows) > limit
-        rows = rows[:limit]
-        data = []
-        for row in rows:
-            payload = row.payload or {}
-            amount = payload.get("amount") or payload.get("size_usdt")
-            rate = payload.get("rate") if payload.get("rate") is not None else payload.get("fill_rate")
-            data.append(
-                ExecutionEventResponse(
-                    event_seq=row.event_seq,
-                    event_type=row.event_type,
-                    occurred_at_ms=row.occurred_at_ms,
-                    symbol=payload.get("symbol"),
-                    venue_offer_id=row.venue_offer_id,
-                    cid=row.cid,
-                    amount=str(amount) if amount is not None else None,
-                    rate=float(rate) if rate is not None else None,
-                ).model_dump(by_alias=True)
-            )
+        except ExecutionCursorError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid_cursor"
+            ) from None
         return {
-            "data": data,
+            "data": [
+                ExecutionEventResponse(
+                    event_key=event.event_key,
+                    event_type=event.event_type,
+                    occurred_at_ms=event.occurred_at_ms,
+                    symbol=event.symbol,
+                    venue_offer_id=event.venue_offer_id,
+                    cid=event.cid,
+                    amount=event.amount,
+                    rate=event.rate,
+                ).model_dump(by_alias=True)
+                for event in page.events
+            ],
             "pagination": {
-                "hasMore": has_more,
-                "nextBefore": rows[-1].event_seq if has_more and rows else None,
+                "hasMore": page.next_before is not None,
+                "nextBefore": page.next_before,
             },
         }
 

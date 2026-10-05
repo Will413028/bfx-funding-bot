@@ -365,7 +365,7 @@ async def test_an_open_legacy_quarantine_keeps_its_id_and_holds_its_offer(
     assert [row.quarantine_id for row in listed] == [uncertainty.uncertainty_id]
 
     await flip_epoch(env, at=SEED_AT + 1_000)
-    boot_as_epoch(env, monkeypatch)
+    boot_as_epoch(env)
     ledger = await env.build()
     await env.boot(ledger, SEED_AT + 20_000)
     runner, _ = await latest_bases(env)

@@ -7,7 +7,7 @@ const NOW = Date.now();
 
 const EVENTS: ExecutionEvent[] = [
   {
-    eventSeq: 981,
+    eventKey: "981",
     eventType: "ORDER_FILL",
     occurredAtMs: NOW - 120_000,
     symbol: "fUST",
@@ -17,7 +17,7 @@ const EVENTS: ExecutionEvent[] = [
     rate: 0.0002,
   },
   {
-    eventSeq: 980,
+    eventKey: "980",
     eventType: "RESERVATION_INTENT",
     occurredAtMs: NOW - 180_000,
     symbol: "fUST",

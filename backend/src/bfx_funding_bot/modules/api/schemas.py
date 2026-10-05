@@ -172,9 +172,10 @@ class OfferClaimResponse(BaseModel):
 
 
 class ExecutionEventResponse(BaseModel):
-    """SP4: one event_log row (amount/rate lifted from payload when present)."""
+    """One execution-history row: an event_log row under legacy, a journal row (or the frozen
+    event_log below the switch) under the ledger. ``eventKey`` is opaque (ADR 2026-10-02 D4)."""
 
-    event_seq: int = Field(serialization_alias="eventSeq")
+    event_key: str = Field(serialization_alias="eventKey")
     event_type: str = Field(serialization_alias="eventType")
     occurred_at_ms: int = Field(serialization_alias="occurredAtMs")
     symbol: str | None = None

@@ -328,9 +328,13 @@ export interface OfferClaim {
   lastUpdatedMs: number;
 }
 
-/** GET /executions — one event_log row, event_seq descending. */
+/**
+ * GET /executions — one history row, newest first (the event log under the
+ * legacy authority; the journal, then the frozen event log, under the ledger).
+ */
 export interface ExecutionEvent {
-  eventSeq: number;
+  /** Opaque, unique within the history (ADR 2026-10-02 D4). */
+  eventKey: string;
   eventType: ExecutionEventType;
   occurredAtMs: number;
   symbol: string | null;
@@ -348,8 +352,8 @@ export interface ExecutionEvent {
  */
 export interface ExecutionEventsPagination {
   hasMore: boolean;
-  /** event_seq cursor for the next page; null when the log is exhausted. */
-  nextBefore: number | null;
+  /** Opaque cursor for the next page, sent back as is; null when exhausted. */
+  nextBefore: string | null;
 }
 
 /** GET /executions — full response envelope. */

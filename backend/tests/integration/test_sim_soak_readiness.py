@@ -154,7 +154,7 @@ async def test_the_bitfinex_composition_refuses_the_fault_knob(
         monkeypatch.setenv("BFX_SIM_FAULTS", "unknown_5xx=0.01")
 
         async def ledger_epoch(_session: object, *, supported: object) -> str:
-            return "ledger"  # as test_simulated_boot: production still refuses it for Bitfinex
+            return "ledger"  # as test_simulated_boot: the database keeps its legacy epoch
 
         monkeypatch.setattr(bot, "read_authority", ledger_epoch)
         with pytest.raises(ConfigurationError, match="BFX_SIM_FAULTS is only valid"):
