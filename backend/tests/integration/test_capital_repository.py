@@ -121,7 +121,7 @@ async def simulated_guard(session):
 async def test_applied_policy_cas_and_unavailable_fail_closed(capital_db):
     factory, account = capital_db
     repo = repository(account)
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     async with factory.begin() as session:
         with pytest.raises(CapitalBlockedError, match="policy_unavailable"):
             await repo.read_applied(session, symbol="fUST")
@@ -173,7 +173,7 @@ async def test_two_independent_pg_sessions_only_one_reservation_fits(pg_session_
     repo = repository(account)
     policy = await setup_policy(factory, repo, reserve="0")
     seq = await snapshot(factory, repo, "700")
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     ready = asyncio.Barrier(2)
 
     async def compete(cid):
@@ -203,7 +203,7 @@ async def test_stable_observation_required_before_capital_acceptance(capital_db)
         wallet_available={"fUST": Decimal("1000")}, coverage=SnapshotCoverage(True, True, True))
     changed = replace(event, wallet_available={"fUST": Decimal("800")}, event_id=uuid4(),
                       query_started_at_ms=1050, query_finished_at_ms=1060)
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     async with factory.begin() as session:
         with pytest.raises(CapitalBlockedError, match="snapshot_unstable"):
             await repo.accept_snapshot(session, fence=fence, event=event,
@@ -345,7 +345,7 @@ async def test_repeated_fills_cannot_push_a_cell_past_its_cap(capital_db):
     carried), so a fourth offer is refused with cell_headroom_exhausted while p2
     keeps its own 700 of headroom. With ed4df67 alone every filled credit left
     a30's exposure, which stayed 0 and let a30 keep lending up to the cash."""
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     factory, account = capital_db
     repo = repository(account)
     policy = await setup_policy(factory, repo, "0", "0.70")
@@ -505,7 +505,7 @@ async def test_changed_command_during_snapshot_fetch_rejected(capital_db):
     event = VenueSnapshotObserved(account_id=str(account), environment="ci",
         query_started_at_ms=1000, query_finished_at_ms=1050, offers=(), credits=(),
         wallet_available={"fUST": Decimal("1000")}, coverage=SnapshotCoverage(True, True, True))
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     async with factory.begin() as session:
         with pytest.raises(CapitalBlockedError, match="snapshot_command_fence_changed"):
             await repo.accept_snapshot(session, fence=fence, event=event,
@@ -520,7 +520,7 @@ async def test_locked_guard_failure_leaves_no_intent_or_decision(capital_db):
     policy = await setup_policy(factory, repo)
     seq = await snapshot(factory, repo)
     event, decision = intent(account)
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
 
     async def halted(session):
         assert session.in_transaction()
@@ -542,7 +542,7 @@ async def test_new_unfinished_query_invalidates_old_snapshot(capital_db):
     await snapshot(factory, repo)
     async with factory.begin() as session:
         await repo.begin_snapshot(session, now_ms=1100)
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     async with factory.begin() as session:
         with pytest.raises(CapitalBlockedError, match="snapshot_query_pending"):
             await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
@@ -552,7 +552,7 @@ async def test_new_unfinished_query_invalidates_old_snapshot(capital_db):
 @pytest.mark.parametrize("unstable", [False, True])
 async def test_boot_recovery_stable_capital_ingestion(capital_db, unstable):
     from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
     from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
     factory, account = capital_db
@@ -607,7 +607,7 @@ async def test_boot_recovery_stable_capital_ingestion(capital_db, unstable):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["not_sent", "rejected", "unknown"])
 async def test_typed_outcome_releases_or_blocks_commitment(capital_db, kind):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from bfx_funding_bot.modules.execution.events import ReservationFailed, ReservationUnknown
     factory, account = capital_db
     repo = repository(account)
@@ -663,7 +663,7 @@ async def test_partial_fill_does_not_add_original_reservation(capital_db):
 
 @pytest.mark.asyncio
 async def test_policy_and_snapshot_fences_isolation_and_rollback(capital_db):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     factory, account = capital_db
     repo = repository(account)
     policy = await setup_policy(factory, repo)
@@ -766,7 +766,7 @@ async def test_resolved_unknowns_add_no_work_to_an_authorization_read(capital_db
 
 @pytest.mark.asyncio
 async def test_corrupt_snapshot_classification_fails_closed(capital_db):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
     factory, account = capital_db
     repo = repository(account)
@@ -879,7 +879,7 @@ async def test_historical_terminal_intent_is_not_a_permanent_block(capital_db):
 
 @pytest.mark.asyncio
 async def test_unknown_schema_stale_snapshot_and_other_account_are_blocked(capital_db):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow
     factory, account = capital_db
     repo = repository(account)
@@ -903,7 +903,7 @@ async def test_unknown_schema_stale_snapshot_and_other_account_are_blocked(capit
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_pg_writer_lock_serializes_contending_authorization(pg_session_factory):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     factory = pg_session_factory
     account = uuid4()
     async with factory.begin() as session:
@@ -954,7 +954,7 @@ async def test_pg_writer_lock_serializes_contending_authorization(pg_session_fac
 
 @pytest.mark.asyncio
 async def test_outcome_without_terminal_event_cannot_release_capital(capital_db):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
     factory, account = capital_db
     repo = repository(account)
@@ -973,7 +973,7 @@ async def test_outcome_without_terminal_event_cannot_release_capital(capital_db)
 
 @pytest.mark.asyncio
 async def test_unknown_active_credit_status_does_not_authorize(capital_db):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from bfx_funding_bot.modules.execution.event_store.entities import VenueCreditObservation
     factory, account = capital_db
     repo = repository(account)
@@ -986,7 +986,7 @@ async def test_unknown_active_credit_status_does_not_authorize(capital_db):
 
 @pytest.mark.parametrize("fault", ["missing", "account", "environment", "symbol", "cid", "payload"])
 async def test_current_cursor_cannot_hide_durable_commitment(capital_db, fault):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from bfx_funding_bot.modules.execution.event_store.tables import ProjectionHeadRow
     from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
     factory, account = capital_db
@@ -1079,7 +1079,7 @@ async def test_completed_historical_cycles_allow_capital(capital_db, reused, ter
 @pytest.mark.parametrize("fault", ["partial_fill", "correlation", "venue", "row_cid", "scope"])
 @pytest.mark.parametrize("terminal", ["ORDER_FILL", "RESERVATION_RELEASED"])
 async def test_historical_terminal_requires_exact_cycle_evidence(capital_db, fault, terminal):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     factory, account = capital_db
     repo = repository(account)
     sequences = await seed_historical_cycles(factory, account, reused=False, terminal=terminal)
@@ -1105,7 +1105,7 @@ async def test_historical_terminal_requires_exact_cycle_evidence(capital_db, fau
 
 
 async def test_historical_completion_after_query_fence_cannot_release_capital(capital_db):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from tests.modules.execution.event_store.test_historical_claim_cycles import historical_rows
     factory, account = capital_db
     repo = repository(account)
@@ -1123,7 +1123,7 @@ async def test_historical_completion_after_query_fence_cannot_release_capital(ca
 
 
 async def test_snapshot_acceptance_rechecks_complete_attempt_inventory(capital_db):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
     factory, account = capital_db
     repo = repository(account)
@@ -1152,7 +1152,7 @@ async def test_snapshot_acceptance_rechecks_complete_attempt_inventory(capital_d
 
 @pytest.mark.parametrize("shared_venue", [False, True])
 async def test_historical_cycles_validate_venue_ownership_across_cids(capital_db, shared_venue):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
     from tests.modules.execution.event_store.test_historical_claim_cycles import historical_rows
     factory, account = capital_db
@@ -1352,7 +1352,7 @@ async def test_snapshot_whose_prefix_no_longer_matches_cannot_authorize(capital_
     NULL is unproven rather than absent: a snapshot accepted before the binding
     existed has made no checkable claim, so it cannot authorize either.
     """
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 
     factory, account = capital_db
@@ -1549,7 +1549,7 @@ async def test_open_unknown_withholds_only_its_symbol_and_does_not_stop_acceptan
     """Point 4 of T2: an UNKNOWN on fUST no longer refuses every snapshot of the
     account. The snapshot is accepted with the attempt recorded against fUST;
     fUST reads refuse, another symbol reads normally."""
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
     from bfx_funding_bot.modules.execution.events import ReservationUnknown
     factory, account = capital_db

@@ -12,7 +12,7 @@ import pytest
 
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
 from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary, LedgerCommandEffects
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate, CommandGateBlocked
 from bfx_funding_bot.modules.execution.event_store.serialization import (

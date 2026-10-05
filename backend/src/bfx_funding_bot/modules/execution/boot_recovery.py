@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, NamedTuple, Protocol, cast
@@ -46,10 +46,8 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
 )
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.modules.accounts.exchange_accounts import account_scope_clause
-from bfx_funding_bot.modules.execution.capital_repository import (
-    CapitalBlockedError,
-    CapitalRepository,
-)
+from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
+from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.entities import (
@@ -76,6 +74,11 @@ from bfx_funding_bot.modules.execution.events import (
     VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext
+from bfx_funding_bot.modules.execution.reconcile_monitors import (
+    ForeignExposureMonitor,
+    QuarantineAgeMonitor,
+)
+from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 from bfx_funding_bot.modules.execution.safety.protection import (
     CAPITAL_BLOCK_TRIGGERS,
@@ -125,27 +128,6 @@ def _normalize_flags(value: Mapping[str, Any] | int | None) -> Mapping[str, Any]
     if value is None:
         return {}
     return {"raw": value}
-
-
-@dataclass(frozen=True, slots=True)
-class ReconcileResult:
-    n_claimed: int
-    n_released: int
-    n_failed: int
-    reserved_usdt: Decimal = Decimal("0")
-    realized_usdt: Decimal = Decimal("0")
-    available_usdt: Decimal = Decimal("0")
-    n_credits: int = 0
-    reserved_drift_usdt: Decimal = Decimal("0")
-    realized_drift_usdt: Decimal = Decimal("0")
-    venue_offers: tuple[ActiveFundingOffer, ...] = ()
-    n_unknown: int = 0
-    n_matched: int = 0
-    n_not_sent: int = 0
-    snapshot_event_seq: int | None = None
-    # Active offers no claim or attempt traces to (foreign, or a candidate of an
-    # UNKNOWN not yet resolved). Nothing the bot may cancel or reprice.
-    unmanaged_offer_ids: frozenset[str] = frozenset()
 
 
 class _SymbolSnapshot(NamedTuple):
@@ -378,78 +360,6 @@ class _FsmSink(Protocol):
     # the OfferRegistry (which satisfies .handle), bypassing the bus so reconcile-time
     # exposure stays single-writer (only PositionReconciled reaches the ledger's bus).
     async def handle(self, event: Any) -> None: ...
-
-
-class ForeignExposureMonitor:
-    """Alert once per foreign venue offer id (D2, ladder level 4).
-
-    Shared by the boot and the runtime reconcile so a restart of neither
-    repeats an alert the process already sent. Ids that left the book are
-    forgotten, which keeps the set as small as the account's live offers.
-    """
-
-    def __init__(self) -> None:
-        self._alerted: set[str] = set()
-
-    def observe(self, foreign: list[ActiveFundingOffer], *, active_ids: set[str]) -> None:
-        self._alerted &= active_ids
-        for offer in foreign:
-            if offer.venue_offer_id in self._alerted:
-                continue
-            self._alerted.add(offer.venue_offer_id)
-            alerts.emit(alerts.FOREIGN_EXPOSURE, venue_offer_id=offer.venue_offer_id,
-                        symbol=offer.symbol, amount=offer.amount,
-                        amount_original=offer.amount_original, rate=offer.rate,
-                        period_days=offer.period_days, mts_created=offer.mts_created)
-
-
-QUARANTINE_ALERT_AFTER_MS = 30 * 60 * 1000
-QUARANTINE_REPEAT_MS = 6 * 60 * 60 * 1000
-
-
-class AgingUnknown(Protocol):
-    """What the age monitor needs of an open UNKNOWN, whichever authority recorded it.
-
-    ``attempt_id`` is the uncertainty's own id (an UNKNOWN submit's attempt id).
-    """
-
-    @property
-    def attempt_id(self) -> UUID: ...
-    @property
-    def symbol(self) -> str: ...
-    @property
-    def started_at_ms(self) -> int: ...
-    @property
-    def amount(self) -> Decimal: ...
-
-
-class QuarantineAgeMonitor:
-    """Alert when an UNKNOWN has held its symbol for too long (D3 level 2).
-
-    The quarantine itself never escalates to a halt -- it already stops new
-    offers for that symbol -- but lending there is paused until evidence or an
-    operator resolves it, so after ``QUARANTINE_ALERT_AFTER_MS`` the operator
-    is told, and reminded every ``QUARANTINE_REPEAT_MS`` while it lasts.
-    """
-
-    def __init__(self, *, alert_after_ms: int = QUARANTINE_ALERT_AFTER_MS,
-                 repeat_ms: int = QUARANTINE_REPEAT_MS) -> None:
-        self._after = alert_after_ms
-        self._repeat = repeat_ms
-        self._last: dict[UUID, int] = {}
-
-    def observe(self, still_open: Sequence[AgingUnknown], *, now_ms: int) -> None:
-        open_ids = {attempt.attempt_id for attempt in still_open}
-        self._last = {key: at for key, at in self._last.items() if key in open_ids}
-        for attempt in still_open:
-            age = now_ms - attempt.started_at_ms
-            last = self._last.get(attempt.attempt_id)
-            if age < self._after or (last is not None and now_ms - last < self._repeat):
-                continue
-            self._last[attempt.attempt_id] = now_ms
-            alerts.emit(alerts.UNKNOWN_QUARANTINE_AGED, symbol=attempt.symbol,
-                        attempt_id=str(attempt.attempt_id), minutes=age // 60_000,
-                        amount=str(attempt.amount))
 
 
 class BootRecovery:

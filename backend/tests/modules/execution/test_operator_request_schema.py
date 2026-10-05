@@ -16,7 +16,7 @@ from bfx_funding_bot.modules.execution.capital_tables import (
 )
 from bfx_funding_bot.modules.execution.operator_requests import REQUEST_STATES
 from bfx_funding_bot.modules.execution.safety.tables import TradingControlRequestRow
-from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionIntent,
     ResolutionScope,
     request_values,

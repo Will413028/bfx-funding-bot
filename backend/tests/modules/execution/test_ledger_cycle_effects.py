@@ -30,16 +30,16 @@ from uuid import UUID, uuid4
 import pytest
 
 from bfx_funding_bot.modules.execution import ledger_cycle_effects
-from bfx_funding_bot.modules.execution.boot_recovery import (
-    ForeignExposureMonitor,
-    QuarantineAgeMonitor,
-)
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.ledger_cycle_effects import LedgerCycleEffects
 from bfx_funding_bot.modules.execution.observation_sink import (
     LegacyCycleResult,
     LegacyObservationSink,
+)
+from bfx_funding_bot.modules.execution.reconcile_monitors import (
+    ForeignExposureMonitor,
+    QuarantineAgeMonitor,
 )
 from bfx_funding_bot.modules.execution.safety.protection import (
     FOREIGN_LENDING,

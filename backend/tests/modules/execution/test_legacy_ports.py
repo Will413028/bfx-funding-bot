@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
 from bfx_funding_bot.modules.execution.event_store.tables import VenueOfferStateRow
 from bfx_funding_bot.modules.execution.legacy_ports import (
     LegacyCapitalAuthority,

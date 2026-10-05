@@ -26,12 +26,12 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.legacy_operator_reads import LegacyOperatorReads
 from bfx_funding_bot.modules.execution.operator_evidence import LegacyOperatorEvidence
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
-from bfx_funding_bot.modules.execution.uncertainty_resolution import (
-    LegacyOperatorResolution,
+from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionScope,
     UncertaintyResolutionRequests,
     UncertaintyResolutionWorker,
 )
+from bfx_funding_bot.modules.execution.uncertainty_resolution import LegacyOperatorResolution
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     UncertaintyResolutionRequestRow,

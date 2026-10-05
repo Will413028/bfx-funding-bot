@@ -26,9 +26,6 @@ from bfx_funding_bot.external.bitfinex.auth_ws import (
     FccEvent,
     FocEvent,
 )
-from bfx_funding_bot.modules.execution.legacy_venue_hints import (
-    translate_bfx_event as translate_bfx_event,
-)
 from bfx_funding_bot.modules.ledger import CreditCloseHint, OfferCloseHint, VenueHintSink
 
 log = logging.getLogger(__name__)

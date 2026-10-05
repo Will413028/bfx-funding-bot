@@ -125,7 +125,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingStateRepository,
 )
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
-from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionScope,
     UncertaintyResolutionWorker,
 )

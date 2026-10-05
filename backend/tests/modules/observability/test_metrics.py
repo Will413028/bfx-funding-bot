@@ -21,7 +21,6 @@ import pytest
 
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
-from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.execution.contracts import (
     BlockReason,
     ExecutionPolicy,
@@ -35,6 +34,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,

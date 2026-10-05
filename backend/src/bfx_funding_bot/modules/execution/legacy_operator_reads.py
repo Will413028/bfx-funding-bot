@@ -16,10 +16,8 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     PositionStateRow,
 )
 from bfx_funding_bot.modules.execution.operator_evidence import ResolutionRejected
-from bfx_funding_bot.modules.execution.uncertainty_resolution import (
-    ResolutionScope,
-    load_scoped_uncertainty,
-)
+from bfx_funding_bot.modules.execution.uncertainty_requests import ResolutionScope
+from bfx_funding_bot.modules.execution.uncertainty_resolution import load_scoped_uncertainty
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.ledger import (
     ExecutionCursorError,

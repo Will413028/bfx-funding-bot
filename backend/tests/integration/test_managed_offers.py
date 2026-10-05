@@ -28,7 +28,7 @@ from bfx_funding_bot.modules.execution.boot_recovery import (
     BootRecovery,
 )
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
 from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore

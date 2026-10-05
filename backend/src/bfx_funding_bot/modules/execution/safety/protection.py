@@ -60,7 +60,6 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol
 
-from bfx_funding_bot.modules.execution.event_store.store import SymbolLedgerDelta
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     ACTIVE,
@@ -140,6 +139,30 @@ AUTO_RESUME_CLEAN_SNAPSHOTS = 3
 AUTO_RESUME_ACTOR = "auto-resume"
 
 _DETAIL_LIMIT = 400
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolLedgerDelta:
+    """One symbol's ledger immediately before a complete snapshot, and what it saw.
+
+    ``baseline`` is False when the ledger had never been set by a venue
+    observation for this symbol (new currency, first deployment): there is
+    nothing to compare against, so the observation only establishes one.
+    """
+    symbol: str
+    prior_offered: Decimal
+    prior_lent: Decimal
+    observed_offered: Decimal
+    observed_lent: Decimal
+    baseline: bool
+
+    @property
+    def offered_change(self) -> Decimal:
+        return self.observed_offered - self.prior_offered
+
+    @property
+    def lent_change(self) -> Decimal:
+        return self.observed_lent - self.prior_lent
 
 
 class ProtectionPort(Protocol):

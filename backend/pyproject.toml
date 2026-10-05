@@ -653,9 +653,8 @@ id = "planner-via-ports"
 name = "The deployment planner reads the legacy authority only through the ledger ports"
 type = "forbidden"
 source_modules = ["bfx_funding_bot.modules.execution.deployment.reconciler"]
-# amount_fingerprint stays importable here only for its pure amount codec
-# (fingerprint_of / choose_fingerprinted_amount); fingerprints in use come from
-# ManagedOfferReader.
+# The planner imports only the pure amount codec (deployment.fingerprinted_amount and
+# trading.fingerprint_of); fingerprints in use come from ManagedOfferReader.
 forbidden_modules = [
     "bfx_funding_bot.modules.execution.capital_repository",
     "bfx_funding_bot.modules.execution.capital_runtime",

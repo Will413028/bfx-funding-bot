@@ -141,7 +141,7 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
 
         # One changed wallet observation must invalidate authority, not reuse
         # the previous successful snapshot or turn the persistent halt off.
-        from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+        from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
 
         httpx_mock.add_response(
             url="https://api.bitfinex.com/v2/auth/r/wallets",

@@ -8,11 +8,11 @@ from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationReleased,
 )
+from bfx_funding_bot.modules.execution.legacy_venue_hints import translate_bfx_event
 from bfx_funding_bot.modules.execution.registry_offers import (
     ClaimRecord,
     RegistryState,
 )
-from bfx_funding_bot.modules.execution.ws_dispatcher import translate_bfx_event
 
 
 def _claim_record(voi: str = "v1", state: RegistryState = RegistryState.CLAIMED) -> ClaimRecord:

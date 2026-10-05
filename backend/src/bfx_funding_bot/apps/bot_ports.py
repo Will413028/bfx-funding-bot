@@ -23,11 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.authority import Authority
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
-from bfx_funding_bot.modules.execution.boot_recovery import (
-    BootRecovery,
-    ForeignExposureMonitor,
-    QuarantineAgeMonitor,
-)
+from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
@@ -62,6 +58,10 @@ from bfx_funding_bot.modules.execution.legacy_ports import (
 from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
 from bfx_funding_bot.modules.execution.protocols import AccountContext
+from bfx_funding_bot.modules.execution.reconcile_monitors import (
+    ForeignExposureMonitor,
+    QuarantineAgeMonitor,
+)
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection

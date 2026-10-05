@@ -7,10 +7,8 @@ from sqlalchemy import func, select
 import bfx_funding_bot.apps.bot  # noqa: F401
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-from bfx_funding_bot.modules.execution.capital_repository import (
-    CapitalBlockedError,
-    CapitalRepository,
-)
+from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
+from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.protocols import Credentials

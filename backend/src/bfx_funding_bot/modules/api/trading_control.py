@@ -35,7 +35,7 @@ from bfx_funding_bot.modules.api.account_scope import (
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.deployments.tables import DeploymentRow
-from bfx_funding_bot.modules.execution.capital_repository import (
+from bfx_funding_bot.modules.execution.capital_policy_read import (
     CapitalBlockedError,
     read_policy_unlocked,
 )

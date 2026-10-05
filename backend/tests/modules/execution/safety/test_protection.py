@@ -11,7 +11,6 @@ from decimal import Decimal
 
 import pytest
 
-from bfx_funding_bot.modules.execution.event_store.store import SymbolLedgerDelta
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
 from bfx_funding_bot.modules.execution.safety.protection import (
@@ -24,6 +23,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     AutomaticProtection,
     LedgerConservation,
     NavDropMonitor,
+    SymbolLedgerDelta,
     WriterLockLostError,
     WriterLockWatch,
 )

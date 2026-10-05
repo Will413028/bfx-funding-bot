@@ -18,13 +18,13 @@ from typing import Any
 
 import pytest
 
-from bfx_funding_bot.modules.execution.boot_recovery import (
-    ForeignExposureMonitor,
-    QuarantineAgeMonitor,
-)
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.ledger_cycle_effects import LedgerCycleEffects
+from bfx_funding_bot.modules.execution.reconcile_monitors import (
+    ForeignExposureMonitor,
+    QuarantineAgeMonitor,
+)
 from bfx_funding_bot.modules.ledger import (
     RUNTIME_GRACE_MS,
     ForeignOffer,

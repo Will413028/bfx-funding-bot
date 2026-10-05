@@ -4,8 +4,8 @@ from uuid import uuid4
 
 import pytest
 
-from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
+from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 
 

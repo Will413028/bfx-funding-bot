@@ -229,11 +229,11 @@ async def test_planned_amount_reaches_the_venue_body_unchanged(planned, fingerpr
     """D3a: the fingerprinted Decimal the planner chooses is byte-for-byte what
     the decision records (as its audit JSON too), what the command gate's
     durable attempt names and what the venue receives. No float in between."""
-    from bfx_funding_bot.modules.execution.amount_fingerprint import (
+    from bfx_funding_bot.modules.execution.command_gate import _normalized_venue_payload
+    from bfx_funding_bot.modules.execution.deployment.fingerprinted_amount import (
         FINGERPRINT_SPACE,
         choose_fingerprinted_amount,
     )
-    from bfx_funding_bot.modules.execution.command_gate import _normalized_venue_payload
     from bfx_funding_bot.modules.trading import fingerprint_of
 
     amount = choose_fingerprinted_amount(

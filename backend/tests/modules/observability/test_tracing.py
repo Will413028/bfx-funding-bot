@@ -21,7 +21,6 @@ import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
-from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
@@ -34,6 +33,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.observability.resource import (
     DeploymentEnvironment,

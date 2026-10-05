@@ -8,7 +8,6 @@ from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.execution.boot_recovery import (
     BootRecovery,
     LocalClaim,
-    ReconcileResult,
     compute_recovery_actions,
 )
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
@@ -18,6 +17,7 @@ from bfx_funding_bot.modules.execution.events import (
     VenueOfferQuarantined,
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 
 _ACC = "default"

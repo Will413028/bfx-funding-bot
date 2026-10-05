@@ -237,7 +237,7 @@ class _Authority:
 
 def _apply_queued(factory, *, clock: int = 5_000, authority: _Authority | None = None) -> bool:
     """Run the daemon-side resolution worker once, as the account writer would."""
-    from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+    from bfx_funding_bot.modules.execution.uncertainty_requests import (
         ResolutionScope,
         UncertaintyResolutionWorker,
     )
@@ -1213,7 +1213,7 @@ def test_worker_skips_a_request_it_cannot_even_mark_failed(uncertainty_app, monk
         AccountEventWriter,
         AppendResult,
     )
-    from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+    from bfx_funding_bot.modules.execution.uncertainty_requests import (
         ResolutionScope,
         UncertaintyResolutionWorker,
     )
@@ -1246,7 +1246,7 @@ def test_worker_skips_a_request_it_cannot_even_mark_failed(uncertainty_app, monk
 
 
 def test_worker_only_touches_its_own_account(uncertainty_app) -> None:
-    from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+    from bfx_funding_bot.modules.execution.uncertainty_requests import (
         ResolutionScope,
         UncertaintyResolutionWorker,
     )

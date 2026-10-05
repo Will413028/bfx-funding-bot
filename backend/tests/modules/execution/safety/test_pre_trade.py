@@ -20,7 +20,7 @@ from bfx_funding_bot.core.errors import ConfigurationError
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
-from bfx_funding_bot.modules.execution.capital_repository import (
+from bfx_funding_bot.modules.execution.capital_policy_read import (
     CapitalBlockedError,
     policy_from_row,
 )

@@ -206,7 +206,7 @@ async def test_an_unknown_on_the_disabled_currency_withholds_only_that_currency(
     ("unknown_ust", "execution_unknown"),
 ])
 async def test_disabled_currency_does_not_bypass_enabled_or_account_guards(capital_db, fault, reason):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
 
     factory, account = capital_db
     repo = repository(account)
@@ -237,7 +237,7 @@ async def test_disabled_currency_does_not_bypass_enabled_or_account_guards(capit
 @pytest.mark.asyncio
 @pytest.mark.parametrize("changed", ["snapshot", "legacy", "policy"])
 async def test_ust_only_conversion_digest_binds_enabled_evidence_and_sources(capital_db, changed):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     from bfx_funding_bot.modules.trading import CapitalPolicy
 
     factory, account = capital_db
@@ -266,7 +266,7 @@ async def test_ust_only_conversion_digest_binds_enabled_evidence_and_sources(cap
 
 @pytest.mark.asyncio
 async def test_invalid_legacy_and_stale_draft_do_not_apply(capital_db):
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
     factory, account = capital_db
     repo = repository(account)
     await snapshot(factory, repo)

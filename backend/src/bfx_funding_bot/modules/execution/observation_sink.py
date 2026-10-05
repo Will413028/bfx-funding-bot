@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
+from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 
 
