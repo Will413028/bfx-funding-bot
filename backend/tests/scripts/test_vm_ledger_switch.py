@@ -83,6 +83,16 @@ class FakeDb:
     last_started_ms: int = 0
     unreadable: bool = False
     seen_addresses: list[Sequence[str]] = field(default_factory=list)
+    ledger_totals: dict[str, str] = field(default_factory=lambda: {"fUST": "5003.5"})
+    activity: tuple[int, int] = (0, 0)
+    activity_asked: list[int] = field(default_factory=list)
+
+    def runtime_totals(self, account: str, environment: str) -> dict[str, str]:
+        return dict(self.ledger_totals)
+
+    def activity_since(self, account: str, environment: str, since_ms: int) -> tuple[int, int]:
+        self.activity_asked.append(since_ms)
+        return self.activity
 
     def _guard(self) -> None:
         if self.unreadable:
@@ -97,7 +107,8 @@ class FakeDb:
         if self.produce_snapshots and self.host.running.get("bfx-bot"):
             self.last_started_ms = int(self.clock() * 1000)
         return switch.SnapshotHead(41, self.last_started_ms, False,
-                                   {"fUST": {"offered": "1200", "foreign": "75"}}, 3)
+                                   {"fUST": {"offered": "1200", "foreign": "75"}}, 3,
+                                   {"fUST": "5000"})
 
     def epoch_authority(self) -> str:
         self._guard()
@@ -174,6 +185,7 @@ class FakeHost:
     ready: bool = True
     restore_ok: bool = True
     labels: list[str] = field(default_factory=lambda: ["20261005-000000F"])
+    watch_schedule_ok: bool = True
     calls: list[list[str]] = field(default_factory=list)
     seed_inputs: list[dict[str, Any]] = field(default_factory=list)
 
@@ -197,6 +209,8 @@ class FakeHost:
         argv = list(argv)
         self.calls.append(argv)
         joined = " ".join(argv)
+        if argv[:1] == ["systemd-run"]:
+            return self.ok() if self.watch_schedule_ok else self.fail()
         if argv[:2] == ["systemctl", "is-active"]:
             unit = argv[2]
             return self.ok((self.weekly if unit == switch.WEEKLY_SERVICE
@@ -309,6 +323,11 @@ def env(tmp_path: Path) -> Env:
     (runtime / "bot.env").write_text(f"BFX_EXCHANGE_ACCOUNT_ID={ACCOUNT}\nOTHER=x\n")
     (runtime / "migrate.env").write_text(
         f"DATABASE_URL=postgresql://bfx:{DSN_PASSWORD}@bfx-postgres/bfx\n")
+    soak = tmp_path / "soak-result.json"
+    soak.write_text(json.dumps({"verdict": "PASS", "image_digest": DIGEST,
+                                "last_service_version": "b" * 40,
+                                "window": {"since_ms": 1, "until_ms": 2},
+                                "report_sha256": "f" * 64}))
     clock = FakeClock()
     db = FakeDb(clock)
     ledger = FakeLedger()
@@ -317,7 +336,7 @@ def env(tmp_path: Path) -> Env:
     settings = switch.Settings(
         digest=DIGEST, runtime_dir=runtime, state_dir=tmp_path / "state",
         lock_file=tmp_path / "switch.lock", deploy_lock_file=tmp_path / "deploy.lock",
-        dr_current=tmp_path / "dr-current")
+        dr_current=tmp_path / "dr-current", soak_result=soak)
     return Env(host, db, ledger, clock, [], settings, tmp_path)
 
 
@@ -364,10 +383,14 @@ def test_the_switch_succeeds_end_to_end(env: Env) -> None:
     assert [s["step"] for s in evidence["steps"]] == [
         "preflight#1", "stop_timers", "deploy_lock", "record_resting", "stop_webapi",
         "wait_legacy_snapshot", "stop_bot", "backup", "seed_switch", "recreate",
-        "wait_ledger_live"]
+        "wait_ledger_live", "nav_continuity", "schedule_watch"]
     assert all(s["result"] == "ok" and s["end_ms"] >= s["start_ms"] for s in evidence["steps"])
     assert evidence["resting"] == {"snapshot_event_seq": 41, "offers": 3,
-                                   "symbols": {"fUST": {"offered": "1200", "foreign": "75"}}}
+                                   "symbols": {"fUST": {"offered": "1200", "foreign": "75"}},
+                                   "total_capital": {"fUST": "5000"}}
+    (watch,) = host.names("systemd-run")
+    assert "--on-active=24h" in watch and watch[-3:] == ["watch", "--run-id", "switch-test"]
+    assert evidence["soak_result"]["report_sha256"] == "f" * 64
     assert evidence["backup_label"] == host.labels[-1]
     assert env.levels() == ["info"]
     no_secret_leaked(env)
@@ -429,6 +452,27 @@ def _check_transient_forever(env: Env) -> None:
     env.host.checks = ["attempt_outcome_missing"] * 3
 
 
+def _soak_result_missing(env: Env) -> None:
+    env.settings.soak_result.unlink()
+
+
+def _soak_result_fail(env: Env) -> None:
+    _rewrite_soak(env, verdict="FAIL")
+
+
+def _soak_result_other_digest(env: Env) -> None:
+    _rewrite_soak(env, image_digest=OTHER)
+
+
+def _soak_result_other_revision(env: Env) -> None:
+    _rewrite_soak(env, last_service_version="c" * 40)
+
+
+def _rewrite_soak(env: Env, **changes: str) -> None:
+    path = env.settings.soak_result
+    path.write_text(json.dumps({**json.loads(path.read_text()), **changes}))
+
+
 def _bad_digest_argument(env: Env) -> None:
     env.settings = switch.Settings(**{**{f: getattr(env.settings, f) for f in
                                          env.settings.__dataclass_fields__}, "digest": "latest"})
@@ -446,6 +490,10 @@ def _bad_digest_argument(env: Env) -> None:
     (_check_refused, "seed_check_refused:credit_opening_unkeyable"),
     (_check_transient_forever, "seed_check_refused:attempt_outcome_missing"),
     (_bad_digest_argument, "digest_invalid"),
+    (_soak_result_missing, "soak_result_missing"),
+    (_soak_result_fail, "soak_result_not_pass"),
+    (_soak_result_other_digest, "soak_result_digest_mismatch"),
+    (_soak_result_other_revision, "soak_result_revision_mismatch"),
 ], ids=lambda value: value if isinstance(value, str) else value.__name__.strip("_"))
 def test_every_p_check_failure_stops_nothing(env: Env, break_it: Callable[[Env], None],
                                              code: str) -> None:
@@ -672,3 +720,42 @@ def test_a_running_deploy_is_waited_for_then_r1(env: Env) -> None:
     assert not env.host.names("docker stop")
     assert env.host.timers == INITIAL_TIMERS
     assert env.evidence()["outcome"].startswith("r1:deploy_lock_timeout")
+
+
+# --------------------------------------------------------------------------- post-switch
+
+
+def test_a_nav_breach_notifies_and_the_switch_still_succeeds(env: Env) -> None:
+    env.db.ledger_totals = {"fUST": "5100"}  # +2 %: beyond what interest during a halt explains
+    assert env.switcher().run() == switch.EXIT_OK
+    assert env.levels() == ["warning", "info"]
+    assert "NAV continuity" in env.notes[0][1] and "fUST" in env.notes[0][1]
+    (nav,) = [s for s in env.evidence()["steps"] if s["step"] == "nav_continuity"]
+    assert (nav["result"], nav["breaches"]) == ("breach", ["fUST"])
+
+
+def test_nav_breaches_use_the_relative_tolerance_per_symbol() -> None:
+    assert switch.nav_breaches({"fUST": "1000"}, {"fUST": "1004.9"}) == []
+    assert switch.nav_breaches({"fUST": "1000"}, {"fUST": "994"}) == ["fUST"]
+    assert switch.nav_breaches({"fUST": "1000"}, {"fUST": "1000", "fUSD": "1"}) == ["fUSD"]
+    assert switch.nav_breaches({"fUSD": "0"}, {}) == []
+
+
+def test_a_failed_watch_schedule_warns_and_the_switch_still_succeeds(env: Env) -> None:
+    env.host.watch_schedule_ok = False
+    assert env.switcher().run() == switch.EXIT_OK
+    assert env.levels() == ["warning", "info"] and "schedule_watch" in env.notes[0][1]
+
+
+def test_the_watch_notifies_only_when_nothing_traded(env: Env) -> None:
+    assert env.switcher().run() == switch.EXIT_OK
+    switched_at = env.evidence()["switched_at_ms"]
+    env.notes.clear()
+    assert env.switcher().watch() == switch.EXIT_OK
+    assert env.db.activity_asked == [switched_at]
+    assert env.levels() == ["warning"] and "no acknowledged submit" in env.notes[0][1]
+    assert env.evidence("watch.json")["acked_submits"] == 0
+    env.notes.clear()
+    env.db.activity = (0, 1)  # one reprice
+    assert env.switcher().watch() == switch.EXIT_OK
+    assert env.notes == []

@@ -7,7 +7,9 @@ patterns as bfx-deploy (Runner abstraction, flock, Telegram notify through bfx_n
 
 P-checks, any failure ends the run before anything is stopped:
   the running backend digest is the one given on the command line (the digest the soak passed
-  on) and the deployments ledger's newest attempt deployed it; `alembic current` equals
+  on) and the deployments ledger's newest attempt deployed it; the soak's result file
+  (`sim_soak_report.py --result-out`) says PASS for that digest, its last generation being that
+  release's revision; `alembic current` equals
   `alembic heads` in a one-shot of that image; bfx-weekly-report.service is not running; no
   bfx-sim container runs; no runtime session (bfx_bot, bfx_webapi or a member, or any session
   on the bfx_sim database) exists other than the bot's and the web API's own containers; the
@@ -33,7 +35,11 @@ Steps:
   8. release the flock, `bfx-deploy --recreate` (same digest; bot and web API boot ledger);
   9. wait (bounded) for a non-seed accepted ledger observation, the latest runtime basis
      without `unexplained_lending` on any symbol, trading_state ACTIVE and web API /ready 200;
- 10. restart the timers, notify success with the evidence path.
+ 10. report-only, never a rollback: NAV continuity once (each symbol's total capital of the
+     first runtime basis against the last legacy snapshot at halt start, `NAV_TOLERANCE`), and
+     a transient systemd timer that runs `watch --run-id <id>` 24 h later, which notifies when
+     no acknowledged submit and no reprice (a managed offer canceled) happened since the switch;
+ 11. restart the timers, notify success with the evidence path.
 
 Failure branches (each notifies immediately):
   R1 before the seed committed (the database still says `legacy`): start bfx-bot and
@@ -117,6 +123,15 @@ SIM_CONTAINER = "bfx-sim"
 # settles them; the run retries once after it.
 TRANSIENT_REFUSALS = frozenset({"attempt_outcome_missing", "legacy_query_pending"})
 F7_NOTIFY_SHARE = Decimal("0.20")
+# NAV continuity across the halt, per symbol: |ledger total - legacy total| / legacy total.
+# The halt legitimately moves a symbol's total (available + offered + credits) only through
+# interest credited to the wallet while the bot was stopped (Bitfinex pays daily; at most
+# ~0.1 %/day of what is lent at the rates the bot trades) and foreign offers placed or
+# removed by hand; fills move amounts between offered and credits and expiries back to
+# available, neither changes the total. 0.5 % covers a halt of a few days of interest; more is
+# a deposit, a withdrawal or a counting difference and is worth a look (report only).
+NAV_TOLERANCE = Decimal("0.005")
+WATCH_DELAY = "24h"
 SEED_INPUT_MOUNT = "/run/bfx-seed"
 EXIT_OK, EXIT_PRECHECK, EXIT_R1, EXIT_R2, EXIT_R3, EXIT_USAGE = 0, 10, 11, 20, 30, 2
 EXIT_RESTORE_REFUSED, EXIT_RESTORE_FAILED = 40, 41
@@ -165,6 +180,7 @@ class SnapshotHead:
     blocked: bool
     resting: Mapping[str, Mapping[str, str]]  # symbol -> offered / foreign
     offers: int
+    totals: Mapping[str, str] = field(default_factory=dict)  # available + offered + credits
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +196,8 @@ class SwitchDb(Protocol):
     def observations(self, account: str, environment: str) -> tuple[int, int]: ...
     def latest_runtime_basis(self, account: str, environment: str) -> RuntimeBasis | None: ...
     def trading_state(self, account: str, environment: str) -> str | None: ...
+    def runtime_totals(self, account: str, environment: str) -> dict[str, str]: ...
+    def activity_since(self, account: str, environment: str, since_ms: int) -> tuple[int, int]: ...
 
 
 _SESSIONS = """
@@ -227,6 +245,34 @@ SELECT coalesce((SELECT json_build_object(
   WHERE o.origin <> 'legacy_seed'
     AND b.exchange_account_id = :'account'::uuid AND b.deployment_environment = :'env'
   ORDER BY q.query_revision DESC LIMIT 1), 'null'::json);
+"""
+_RUNTIME_TOTALS = """
+SELECT coalesce((SELECT json_object_agg(s.symbol, (s.available + s.offered + s.credits)::text)
+  FROM public.accepted_capital_basis_symbol s WHERE s.basis_id = (
+    SELECT b.id FROM public.accepted_capital_basis b
+    JOIN public.ledger_observation o ON o.id = b.observation_id
+    JOIN public.ledger_observation_query q ON q.query_id = o.query_id
+    WHERE o.origin <> 'legacy_seed' AND b.accepted
+      AND b.exchange_account_id = :'account'::uuid AND b.deployment_environment = :'env'
+    ORDER BY q.query_revision DESC LIMIT 1)), '{}'::json);
+"""
+# Acknowledged submits the runtime made, and managed offers it canceled (a reprice cancels,
+# then submits), both after the switch.
+_ACTIVITY = """
+SELECT json_build_object(
+  'acked', (SELECT count(*) FROM public.submission_attempt_journal a
+            JOIN public.transport_outcome_journal t ON t.attempt_id = a.attempt_id
+            WHERE a.exchange_account_id = :'account'::uuid AND a.deployment_environment = :'env'
+              AND a.seed_provenance IS NULL AND t.kind = 'ack'
+              AND t.completed_at_ms > :'since'::bigint),
+  'canceled', (SELECT count(DISTINCT h.venue_offer_id)
+            FROM public.ledger_observation_offer_history h
+            JOIN public.ledger_observation o ON o.id = h.observation_id
+            WHERE o.exchange_account_id = :'account'::uuid AND o.deployment_environment = :'env'
+              AND h.terminal_kind = 'canceled' AND h.occurred_at_ms > :'since'::bigint
+              AND h.venue_offer_id IN (SELECT t.venue_offer_id
+                                       FROM public.transport_outcome_journal t
+                                       WHERE t.kind = 'ack')));
 """
 _TRADING_STATE = """
 SELECT json_build_object('state', (SELECT state FROM public.trading_state
@@ -277,6 +323,9 @@ class PsqlSwitchDb:
                     "foreign": str(values.get("foreign", "0"))}
              for name, values in sorted(symbols.items())},
             len(row.get("offers") or {}),
+            {name: format(sum((Decimal(str(values.get(k, "0")))
+                               for k in ("available", "offered", "credits")), Decimal(0)), "f")
+             for name, values in sorted(symbols.items())},
         )
 
     def epoch_authority(self) -> str:
@@ -295,6 +344,15 @@ class PsqlSwitchDb:
     def trading_state(self, account: str, environment: str) -> str | None:
         state = self._json(_TRADING_STATE, {"account": account, "env": environment})["state"]
         return None if state is None else str(state)
+
+    def runtime_totals(self, account: str, environment: str) -> dict[str, str]:
+        row = self._json(_RUNTIME_TOTALS, {"account": account, "env": environment})
+        return {str(k): str(v) for k, v in sorted(row.items())}
+
+    def activity_since(self, account: str, environment: str, since_ms: int) -> tuple[int, int]:
+        row = self._json(_ACTIVITY, {"account": account, "env": environment,
+                                     "since": str(since_ms)})
+        return int(row["acked"]), int(row["canceled"])
 
 
 # --------------------------------------------------------------------------- settings
@@ -320,6 +378,7 @@ class Settings:
     db_name: str = _DEPLOY.db_name
     environment: str = "prod"
     cells_path: str = "/app/configs/cells.live.yaml"
+    soak_result: Path = Path("/home/ubuntu/bfx/reports/sim-soak/result/soak-result.json")
     container_uid: int = 1000
     dr_current: Path = _DEPLOY.dr_root / "current"
     backup_user: str = _DEPLOY.backup_user
@@ -407,6 +466,19 @@ def max_recent_fill_share(lines: Sequence[Mapping[str, Any]]) -> Decimal | None:
             except InvalidOperation:
                 raise SwitchError("seed_output_unparsable") from None
     return max(shares) if shares else None
+
+
+def nav_breaches(before: Mapping[str, str], after: Mapping[str, str]) -> list[str]:
+    """Symbols whose total capital moved across the halt by more than ``NAV_TOLERANCE``."""
+    breaches = []
+    for symbol in sorted(set(before) | set(after)):
+        old = Decimal(str(before.get(symbol, "0")))
+        new = Decimal(str(after.get(symbol, "0")))
+        if old == 0 and new == 0:
+            continue
+        if old == 0 or abs(new - old) / old > NAV_TOLERANCE:
+            breaches.append(symbol)
+    return breaches
 
 
 # --------------------------------------------------------------------------- switcher
@@ -631,6 +703,40 @@ class Switcher:
                 raise SwitchError("recreate_not_recorded_as_deployed")
         with self._step("wait_ledger_live"):
             self._wait("ledger_live", self.settings.live_wait_seconds, self._live_missing)
+        self.evidence.data["switched_at_ms"] = self._now_ms()
+        self._report_only("nav_continuity", self._nav_continuity)
+        self._report_only("schedule_watch", self._schedule_watch)
+
+    def _report_only(self, name: str, check: Callable[[dict[str, Any]], None]) -> None:
+        """A post-switch check: recorded and notified, never a failure of the switch."""
+        try:
+            with self._step(name) as entry:
+                check(entry)
+        except Exception as exc:
+            code = _as_switch_error(exc).code
+            self._say("warning", f"post-switch check {name} could not run ({code}); the switch "
+                                 "itself is done")
+
+    def _nav_continuity(self, entry: dict[str, Any]) -> None:
+        before = (self.evidence.data.get("resting") or {}).get("total_capital") or {}
+        after = self._db.runtime_totals(self.account, self.settings.environment)
+        breaches = nav_breaches(before, after)
+        entry.update(legacy=before, ledger=after, breaches=breaches,
+                     tolerance=format(NAV_TOLERANCE, "f"))
+        if breaches:
+            entry["result"] = "breach"
+            self._say("warning", "NAV continuity: the first runtime basis differs from the last "
+                                 f"legacy snapshot by more than {NAV_TOLERANCE:.1%} on "
+                                 f"{', '.join(breaches)} (legacy {before}, ledger {after}); "
+                                 "report only, check deposits/withdrawals and the basis")
+
+    def _schedule_watch(self, entry: dict[str, Any]) -> None:
+        unit = f"bfx-ledger-switch-watch-{self.run_id}"
+        argv = ["systemd-run", "--unit", unit, f"--on-active={WATCH_DELAY}",
+                "--timer-property=AccuracySec=5min", "--property=Environment=HOME=/root",
+                sys.executable, str(Path(__file__).resolve()), "watch", "--run-id", self.run_id]
+        self._check(argv, code="watch_schedule_failed", timeout=60.0)
+        entry["unit"] = unit
 
     # ------------------------------------------------------------------ failure branches
 
@@ -738,6 +844,7 @@ class Switcher:
             raise SwitchError("last_deploy_not_successful")
         if success.backend_digest != settings.digest:
             raise SwitchError("running_digest_is_not_the_soaked_digest")
+        self._require_soak_pass(success.source_revision)
         self._require_running_digest()
         current, heads = self._schema()
         if not heads or set(current) != set(heads):
@@ -753,6 +860,24 @@ class Switcher:
         if self._db.foreign_runtime_sessions(own):
             raise SwitchError("runtime_session_present")
         self._seed_check()
+
+    def _require_soak_pass(self, revision: str) -> None:
+        """The soak's result file: PASS, on this digest, its last generation this revision."""
+        try:
+            result = json.loads(self.settings.soak_result.read_text(encoding="utf-8"))
+            verdict, digest = result["verdict"], result["image_digest"]
+            last = result["last_service_version"]
+        except (OSError, ValueError, KeyError, TypeError):
+            raise SwitchError("soak_result_missing") from None
+        if verdict != "PASS":
+            raise SwitchError("soak_result_not_pass")
+        if digest != self.settings.digest:
+            raise SwitchError("soak_result_digest_mismatch")
+        if last != revision:
+            raise SwitchError("soak_result_revision_mismatch")
+        self.evidence.data["soak_result"] = {
+            "path": str(self.settings.soak_result), "window": result.get("window"),
+            "report_sha256": result.get("report_sha256")}
 
     def _ledger_view(self) -> Any:
         try:
@@ -956,7 +1081,8 @@ class Switcher:
         if head is None:
             raise SwitchError("legacy_snapshot_missing")
         resting = {"snapshot_event_seq": head.event_seq, "offers": head.offers,
-                   "symbols": {k: dict(v) for k, v in head.resting.items()}}
+                   "symbols": {k: dict(v) for k, v in head.resting.items()},
+                   "total_capital": dict(head.totals)}
         self.evidence.data["resting"] = resting
         return resting
 
@@ -1021,6 +1147,29 @@ class Switcher:
         if not self._probe_ready():
             missing.append("webapi_ready")
         return ",".join(missing) or None
+
+    # ------------------------------------------------------------------ post-switch watch
+
+    def watch(self) -> int:
+        """24 h after the switch (transient timer): notify when the ledger runtime neither
+        acknowledged a submit nor repriced since the switch. Report only."""
+        try:
+            switch = json.loads(self.evidence.path.read_text(encoding="utf-8"))
+            account, since = str(UUID(switch["account"])), int(switch["switched_at_ms"])
+        except (OSError, ValueError, KeyError, TypeError):
+            log(f"no usable evidence at {self.evidence.path}")
+            return EXIT_USAGE
+        acked, canceled = self._db.activity_since(account, self.settings.environment, since)
+        report = {"run_id": self.run_id, "since_ms": since, "acked_submits": acked,
+                  "repriced_or_canceled": canceled}
+        Evidence(self.run_dir / "watch.json", report).save()
+        if acked == 0 and canceled == 0:
+            self._say("warning", f"post-switch watch: no acknowledged submit and no reprice in "
+                                 f"the {WATCH_DELAY} since the switch; check the policy, the "
+                                 "cells and /admin/trading-status (report only)")
+        else:
+            log(f"post-switch watch: {acked} acked submits, {canceled} repriced/canceled")
+        return EXIT_OK
 
     # ------------------------------------------------------------------ restore
 
@@ -1145,8 +1294,10 @@ def _parser() -> argparse.ArgumentParser:
         sub = commands.add_parser(name)
         sub.add_argument("--digest", required=True,
                          help="the backend digest the soak passed on (sha256:...)")
-    restore = commands.add_parser("restore-halt-backup")
-    restore.add_argument("--run-id", required=True)
+        sub.add_argument("--soak-result", type=Path, default=Settings().soak_result,
+                         help="the soak's result file (sim_soak_report.py --result-out)")
+    for name in ("restore-halt-backup", "watch"):
+        commands.add_parser(name).add_argument("--run-id", required=True)
     return parser
 
 
@@ -1157,7 +1308,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_USAGE
     signal.signal(signal.SIGTERM, _terminate)
     defaults = Settings()
-    settings = Settings(digest=getattr(args, "digest", "") or "")
+    settings = Settings(digest=getattr(args, "digest", "") or "",
+                        soak_result=getattr(args, "soak_result", None) or defaults.soak_result)
     runner = bfx_deploy.subprocess_runner
     notify_config = defaults.runtime_dir / "notify.env"
 
@@ -1174,6 +1326,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if args.command == "restore-halt-backup":
         return switcher.restore_halt_backup()
+    if args.command == "watch":
+        return switcher.watch()
     if args.command == "preflight":
         return switcher.preflight()
     return switcher.run()

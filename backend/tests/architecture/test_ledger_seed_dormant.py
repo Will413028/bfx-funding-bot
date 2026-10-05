@@ -4,7 +4,8 @@ Deploy, compose, systemd, the image, CI workflows and the package scripts never 
 ``src`` only the seed CLI imports the closure reader and the seed facade. The one exception is
 the host switch tool (``deploy/vm/ops/bfx_ledger_switch.py``, switch pre-flight §F): Will runs
 it by hand, once, as root; it starts the seed CLI in a one-shot container. No unit, timer,
-compose file, wrapper or other tool names the switch tool, so nothing runs it automatically.
+compose file, wrapper or other tool names the switch tool, so nothing runs it automatically
+(the transient timer the tool itself schedules after a switch runs only its read-only ``watch``).
 
 Mutation check: reference ``bfx_funding_bot.apps.ledger_seed`` from a systemd unit, the app
 compose file or the bot composition root; or ``bfx_ledger_switch`` from a timer, a unit or
