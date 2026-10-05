@@ -41,7 +41,7 @@ OBSERVED_OFFER_MATCH_COLUMNS = (
 
 CREDIT_END_COLUMNS = (
     "observation_id", "venue_credit_id", "source_kind", "symbol", "amount", "rate",
-    "period_days", "terminal_kind", "occurred_at_ms",
+    "terminal_kind", "occurred_at_ms",
 )
 
 _RW = ("DELETE", "INSERT", "SELECT", "UPDATE")

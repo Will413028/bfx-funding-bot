@@ -52,7 +52,7 @@ ALLOWED: dict[str, set[str]] = {
     # f9a0b1c2d3e4 (the execution history's credit ends)
     "ledger_observation_credit_history": {
         "observation_id", "venue_credit_id", "source_kind", "symbol", "amount", "rate",
-        "period_days", "terminal_kind", "occurred_at_ms",
+        "terminal_kind", "occurred_at_ms",
     },
     "accepted_capital_basis": {
         "id", "exchange_account_id", "deployment_environment", "observation_id",
@@ -104,6 +104,7 @@ DENIED = (
     ("ledger_observation_offer_history", "id"),
     ("ledger_observation_credit_history", "raw"),
     ("ledger_observation_credit_history", "id"),
+    ("ledger_observation_credit_history", "period_days"),
     ("accepted_capital_basis", "scope_block"),
     ("accepted_capital_basis", "digest"),
     ("accepted_capital_basis_symbol", "block"),

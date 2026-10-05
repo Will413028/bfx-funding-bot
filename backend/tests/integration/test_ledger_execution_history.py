@@ -19,6 +19,10 @@ Mutation checks (one at a time; revert after each):
 * drop the fills' own-offer filter: the same test (the foreign fill appears).
 * drop the resolutions from the own offers: the same test (the bound FRR fill is missing).
 * drop the credit-only filter: the same test (the closed loan appears).
+* drop the scope predicate of ``_own_offers`` or ``_observed``:
+  ``test_another_scopes_observations_and_journal_add_nothing``.
+* own offers only from outcomes completed after the watermark:
+  ``test_a_seeded_offer_filled_after_the_switch_is_a_fill``.
 * read the credit history's ``raw``: every request fails under the column grant.
 """
 
@@ -27,7 +31,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -42,7 +46,8 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.projections import build_projections_router
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-from bfx_funding_bot.modules.ledger import CreditHistory, OfferHistory
+from bfx_funding_bot.modules.ledger import CreditHistory, OfferHistory, Scope
+from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL
 
 from .test_ledger_basis import _credit, _observation, _offer
 from .test_ledger_capital_reader import SCOPE, Book
@@ -236,6 +241,57 @@ async def test_the_fill_filter_walks_from_the_observations_into_the_archive(
     assert [[(row["occurredAtMs"], row["venueOfferId"]) for row in p] for p in fills] == [
         [(2_800, "f-bound")], [(2_500, "o-1")], [(200, "legacy-1")]]
     assert [[row["occurredAtMs"] for row in p] for p in ends] == [[2_700]]
+
+
+async def _observe(
+    book: Book, at: int, *, history: tuple[OfferHistory, ...] = (),
+    credit_history: tuple[CreditHistory, ...] = (),
+) -> None:
+    assert await book.accept(
+        _observation(history=history, credit_history=credit_history),
+        started=at, finished=at + 10, confirmed=at + 20,
+    ) == "accepted"
+
+
+def _fill(venue_offer_id: str, at: int) -> OfferHistory:
+    return OfferHistory(_offer(venue_offer_id, "10", "0", created=2_000), "executed", at)
+
+
+async def _history(book: Book, monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, ...]]:
+    async with await _client(book, monkeypatch) as client:
+        (page,) = await _pages(client, limit=50)
+    return [(row["eventType"], row["occurredAtMs"], row["venueOfferId"]) for row in page]
+
+
+async def test_a_seeded_offer_filled_after_the_switch_is_a_fill(book, monkeypatch) -> None:
+    """Day one: the offer was acked before the watermark (a seeded attempt), filled after it."""
+    await _scenario(book)
+    await _observe(book, 3_300, history=(_fill("seeded-1", 2_900),))
+    assert ("ORDER_FILL", 2_900, "seeded-1") in await _history(book, monkeypatch)
+
+
+async def test_another_scopes_observations_and_journal_add_nothing(book, monkeypatch) -> None:
+    """Another exchange account and another deployment environment: their observations hold
+    SCOPE's offer and a closed credit, their journal names an offer SCOPE observed executed."""
+    await _scenario(book)
+    own = await _history(book, monkeypatch)
+    async with book.factory.begin() as session:
+        # Foreign realms in one database: plant them with the realm trigger off.
+        await session.execute(text(DISABLE_REALM_TRIGGERS_SQL))
+        account = uuid4()
+        await session.execute(
+            text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
+            {"id": account})
+    for other in (Book(book.factory, Scope(account, SCOPE.deployment_environment)),
+                  Book(book.factory, Scope(SCOPE.exchange_account_id, "ci2"))):
+        await other.accept()
+        await other.attempt("11", outcome="ack", venue_offer_id="theirs", started_at_ms=2_000,
+                            completed_at_ms=2_010)
+        await _observe(other, 3_300, history=(_fill("o-1", 2_900),), credit_history=(
+            CreditHistory(_credit("99", "10", opening=2_000), "closed", 2_900),))
+    # SCOPE's own observation sees the offer only the other scopes' journals name.
+    await _observe(book, 3_400, history=(_fill("theirs", 2_950),))
+    assert await _history(book, monkeypatch) == own
 
 
 async def test_the_web_api_cannot_read_the_credit_history_payload(book) -> None:

@@ -30,9 +30,12 @@ terminal history as the ledger's observations stored it, under the archive's nam
 Both are timed by the venue (``occurred_at_ms`` = ``mts_update``). Observations overlap, and a
 fenced (non-accepted) one is stored too, so every observation of the scope is read and each venue
 key -- ``venue_offer_id`` for a fill, ``(source_kind, venue_credit_id)`` for a credit end -- is
-shown once, with its earliest observation's values. Rows timed before the watermark are left to
-the archive, which has the legacy ones; they are dropped before the dedupe, which is the same as
-after it while every observation reports one end at the same venue time.
+shown once, with its earliest observation's values. Rows timed before the watermark are not
+shown (dropped before the dedupe, which is the same as after it while every observation reports
+one end at the same venue time). The archive's fills and credit ends stop where the legacy bot
+stopped, so ends between that stop and the watermark are shown by neither side, by design: the
+switch is one-time, and in production's (2026-10-05) that gap (~72 s) held no executed offer and
+no closed credit in the ledger's observations.
 
 Cursor ranks break ties within one millisecond: 0 attempt, 1 outcome, 2 resolution, 3 fill,
 4 credit end. A fill's id is its ``venue_offer_id``, a credit end's ``source_kind:venue_credit_id``

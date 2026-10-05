@@ -113,7 +113,7 @@ EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
     },
     _CREDIT_ENDS: {
         "observation_id", "venue_credit_id", "source_kind", "symbol", "amount", "rate",
-        "period_days", "terminal_kind", "occurred_at_ms",
+        "terminal_kind", "occurred_at_ms",
     },
     ("ledger_observation_offer", "SELECT"): _OBSERVED_OFFER,
     ("ledger_observation_offer_history", "SELECT"): {
