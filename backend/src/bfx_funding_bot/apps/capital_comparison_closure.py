@@ -5,7 +5,9 @@ Runs in the comparison's one REPEATABLE READ READ ONLY transaction under the cut
 the seed command's evidence JSONL (``apps/ledger_seed.py``). The capture point is the seed's: the
 final legacy accepted snapshot (``watermarks.snapshot_event_seq``), the seed observation and basis.
 Every check compares both directions and reports each unmatched element as a violation with its
-evidence; any violation makes the run exit non-zero.
+evidence; any violation makes the run exit non-zero. The authority switch also runs it as a
+pre-flip check, on the seed's own owner session before the epoch append (``apps/ledger_seed.py``
+``--switch``, capture-point mode; a violation rolls the seed back).
 
 ``seed_anchor``
     evidence exists for exactly the listed scopes; the scope's one ``legacy_seed`` observation and

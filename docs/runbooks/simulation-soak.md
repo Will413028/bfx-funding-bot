@@ -293,6 +293,28 @@ docker run --rm --name bfx-sim-report --pull=never --read-only \
 - 事件數會隨時間成長（約每個已驗證請求一筆 `NonceAdvanced`）：報告尾端的 `sim_venue_event` 列數接近 200 000，
   或 boot replay 超過 5 秒，就是 `modules/simulated_venue/__init__.py` 寫的 snapshot 觸發條件。
 
+### 最終判定（寫結果檔，ledger 切換會讀）
+
+視窗滿足條件後再跑一次報告，加 `--result-out` 與報告所用 image 的 digest，結果檔就是
+[ledger-switch.md](ledger-switch.md) P-check 讀的那一份（verdict、視窗、最後一代的 `service_version`、image digest、
+報告 sha256）：
+
+```bash
+R=/home/ubuntu/bfx/reports/sim-soak
+install -d -o 1000 -g 1000 -m 0755 "$R/result"
+docker run --rm --name bfx-sim-report --pull=never --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m --user 1000:1000 --cap-drop=ALL \
+  --security-opt=no-new-privileges --network bfx_default --workdir /app \
+  --env-file /opt/bfx/runtime/sim.env -v "$R":/reports:ro -v "$R/result":/result \
+  --env PYTHONDONTWRITEBYTECODE=1 --env BFX_IMAGE_DIGEST="${IMAGE#*@}" \
+  --entrypoint /app/.venv/bin/python "$IMAGE" \
+  -m scripts.sim_soak_report --exchange-account-id "$SIM_ACCOUNT" --since <起算> --until <結束> \
+  --metrics /reports/gen1-<rev>.metrics --metrics /reports/genN-<rev>.metrics \
+  --result-out /result/soak-result.json
+```
+
+`$IMAGE` 必須是最後一代跑的 image（也就是要切換的 digest）。
+
 ## 10. 結束與拆除
 
 視窗滿足 §9 的條件後：

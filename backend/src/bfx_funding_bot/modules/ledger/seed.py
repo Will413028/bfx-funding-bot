@@ -7,6 +7,11 @@ database (``table_digest.digest_ledger``, which needs the transaction switched t
 after the writes) and lists every table whose count, bytes or watermark differ. The caller
 (``apps/ledger_seed.py``) commits only on an empty list.
 
+The switch (``--switch``) appends the ``ledger`` epoch in the same transaction, after the
+writes and before the verification: ``switch_epoch_row`` plans the row (next ``epoch_seq``),
+``append_switch_epoch`` writes it, and ``with_epoch`` replaces every scope's expected epoch
+digest with the digest of the prior rows plus that row, so the read-back covers it too.
+
 Never called by a runtime role: the schema refuses a ``legacy_seed`` observation and a
 policy-less attempt from any role but the table owner, and the epoch trigger refuses every
 ledger write from runtime roles until the switch.
@@ -18,7 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import Scope, SeedClosure
@@ -38,6 +43,7 @@ from bfx_funding_bot.modules.ledger.table_digest import (
 from bfx_funding_bot.modules.ledger.tables import CapitalAuthorityEpochRow
 
 EPOCH_TABLE = CapitalAuthorityEpochRow.__tablename__
+SWITCH_AUTHORITY = "ledger"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +64,7 @@ class DigestMismatch:
 
 
 async def epoch_rows(session: AsyncSession) -> tuple[dict[str, object], ...]:
-    """The (global) epoch table's canonical rows in this snapshot; the seed never writes it."""
+    """The (global) epoch table's canonical rows in this snapshot (before any switch append)."""
     epoch = CapitalAuthorityEpochRow.__table__
     rows = await session.execute(
         select(*(epoch.c[name] for name in CANONICAL_COLUMNS[EPOCH_TABLE]))
@@ -90,6 +96,29 @@ async def write_seed(session: AsyncSession, closure: SeedClosure) -> SeedResult:
     )
 
 
+def switch_epoch_row(
+    prior: tuple[dict[str, object], ...], *, now_ms: int, actor: str, reason: str,
+    evidence: dict[str, object],
+) -> dict[str, object]:
+    """The ``ledger`` epoch row the switch appends after ``prior`` (the snapshot's rows)."""
+    latest = max((int(str(row["epoch_seq"])) for row in prior), default=0)
+    return {"epoch_seq": latest + 1, "authority": SWITCH_AUTHORITY, "set_at_ms": now_ms,
+            "actor": actor, "reason": reason, "evidence": evidence}
+
+
+async def append_switch_epoch(session: AsyncSession, row: dict[str, object]) -> None:
+    """Write the planned epoch row in the caller's (seed) transaction; owner only."""
+    await session.execute(insert(CapitalAuthorityEpochRow).values(**row))
+
+
+def with_epoch(
+    expected: Mapping[str, TableDigest], prior: tuple[dict[str, object], ...],
+    row: dict[str, object],
+) -> dict[str, TableDigest]:
+    """``expected`` with the epoch table as it is after ``row`` was appended to ``prior``."""
+    return {**expected, EPOCH_TABLE: digest_rows(EPOCH_TABLE, (*prior, row))}
+
+
 async def verify_seed(
     session: AsyncSession, scope: Scope, expected: Mapping[str, TableDigest]
 ) -> tuple[DigestMismatch, ...]:
@@ -112,14 +141,18 @@ async def verify_seed(
 
 __all__ = [
     "EPOCH_TABLE",
+    "SWITCH_AUTHORITY",
     "DigestMismatch",
     "SeedPlan",
     "SeedResult",
+    "append_switch_epoch",
     "epoch_rows",
     "expected_digests",
     "ledger_rows_in_scope",
     "plan_seed",
+    "switch_epoch_row",
     "verify_seed",
+    "with_epoch",
     "write_plan",
     "write_seed",
 ]
