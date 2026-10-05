@@ -41,6 +41,6 @@ def test_the_derived_scope_roots_are_the_audited_list() -> None:
 
 
 def test_the_derived_scope_parents_are_the_audited_mapping() -> None:
-    assert SCOPE_PARENT == {**dict.fromkeys(ROOTS), **CHILDREN}
+    assert {**dict.fromkeys(ROOTS), **CHILDREN} == SCOPE_PARENT
     assert set(SCOPE_PARENT) == {table.name for table in LEDGER_TABLES}
     assert _SCOPE_PARENT is SCOPE_PARENT
