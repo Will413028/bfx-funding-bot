@@ -93,6 +93,7 @@ UNGRANTED = (
 # Evidence-bearing columns that stay denied whatever else is granted.
 DENIED = (
     ("ledger_observation", "evidence"),
+    ("ledger_observation", "origin"),
     ("ledger_observation_offer", "raw"),
     ("ledger_observation_offer", "id"),
     ("ledger_observation_offer_history", "raw"),

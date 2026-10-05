@@ -90,7 +90,7 @@ CANONICAL_COLUMNS: dict[str, tuple[str, ...]] = {
         "trades_requested_start_ms", "trades_requested_end_ms", "offer_history_pages",
         "credit_history_pages", "history_requested_start_ms", "history_requested_end_ms",
         "history_oldest_mts_created", "history_newest_mts_created", "first_digest",
-        "confirmation_digest", "accepted", "evidence",
+        "confirmation_digest", "accepted", "evidence", "origin",
     ),
     "ledger_observation_wallet": (
         "observation_id", "wallet_type", "currency", "available", "balance", "symbol",
