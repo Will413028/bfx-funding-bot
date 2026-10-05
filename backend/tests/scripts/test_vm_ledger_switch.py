@@ -542,6 +542,37 @@ def test_every_p_check_failure_stops_nothing(env: Env, break_it: Callable[[Env],
     assert not env.host.names("/usr/local/sbin/bfx-deploy")
 
 
+def _waived(env: Env, reason: str = "Will: single user, skip the soak") -> None:
+    env.settings = switch.Settings(**{**{f: getattr(env.settings, f) for f in
+                                         env.settings.__dataclass_fields__},
+                                      "soak_waiver": reason})
+
+
+def test_a_waiver_replaces_the_soak_result_and_is_recorded(env: Env) -> None:
+    env.settings.soak_result.unlink()
+    _waived(env)
+    assert env.switcher().run() == switch.EXIT_OK
+    assert env.evidence()["soak_result"] == {"waived": "Will: single user, skip the soak"}
+
+
+def test_a_waiver_skips_only_the_soak_check(env: Env) -> None:
+    _waived(env)
+    _soaked_other_digest(env)
+    assert env.switcher().run() == switch.EXIT_PRECHECK
+    assert env.evidence()["outcome"] == "precheck_failed:running_digest_is_not_the_soaked_digest"
+
+
+def test_the_cli_waiver_needs_a_reason_and_excludes_a_result_file() -> None:
+    parser = switch._parser()
+    args = parser.parse_args(["run", "--digest", DIGEST, "--waive-soak", " skip "])
+    assert args.waive_soak == "skip"
+    assert parser.parse_args(["preflight", "--digest", DIGEST]).waive_soak is None
+    for argv in (["run", "--digest", DIGEST, "--waive-soak", "  "],
+                 ["run", "--digest", DIGEST, "--waive-soak", "x", "--soak-result", "/r.json"]):
+        with pytest.raises(SystemExit):
+            parser.parse_args(argv)
+
+
 def test_the_session_check_excludes_only_the_legacy_containers(env: Env) -> None:
     assert env.switcher().preflight() == switch.EXIT_OK
     assert env.db.seen_addresses == [("172.18.0.2", "172.18.0.3")]

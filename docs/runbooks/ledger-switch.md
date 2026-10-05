@@ -16,6 +16,8 @@ snapshot 的 resting 總額，工具記進 evidence，也寫進每一則失敗�
 - soak 已結束、`bfx-sim` container 已拆掉（[simulation-soak.md](simulation-soak.md) §10）。還在跑就拒絕。
 - soak 的最終判定已寫成結果檔（[simulation-soak.md](simulation-soak.md) §9「最終判定」，預設
   `/home/ubuntu/bfx/reports/sim-soak/result/soak-result.json`；別的路徑用 `--soak-result <path>`）。
+  Will 決定不跑 soak 時，`preflight` 與 `run` 改帶 `--waive-soak "<理由>"`（與 `--soak-result` 互斥、理由不可空白）：
+  工具略過結果檔檢查，把理由記進 evidence 的 `soak_result.waived`；其他 P-check 照舊，`--digest` 仍須是正在跑的 digest。
 - 不在週一 04:17 UTC 的 weekly report 期間（工具會檢查 service，並在切換期間停掉 timer）。
 
 ## 2. 啟動（Will，VM，root）
@@ -53,7 +55,7 @@ transient unit 是 `Type=simple`，`TimeoutStartSec` 對它無效；上限用 `R
 | deployments ledger 最新一筆是 `deployed`，而且就是最後成功的那一筆、digest 等於命令列的 digest | `last_deploy_not_successful` / `running_digest_is_not_the_soaked_digest` |
 | `bfx-bot`、`bfx-webapi` 都在跑，image 是 `<repo>@<digest>` | `running_digest_mismatch:*` / `legacy_not_running:*` |
 | 該 image 的 one-shot `alembic current` 等於 `alembic heads` | `schema_not_at_head` |
-| soak 結果檔存在且 `verdict` 是 PASS、`image_digest` 等於命令列的 digest、最後一代的 `last_service_version` 等於該 digest 在 deployments ledger 的 revision | `soak_result_missing` / `soak_result_not_pass` / `soak_result_digest_mismatch` / `soak_result_revision_mismatch` |
+| soak 結果檔存在且 `verdict` 是 PASS、`image_digest` 等於命令列的 digest、最後一代的 `last_service_version` 等於該 digest 在 deployments ledger 的 revision | `soak_result_missing` / `soak_result_not_pass` / `soak_result_digest_mismatch` / `soak_result_revision_mismatch`（帶 `--waive-soak` 時不檢查） |
 | `bfx-weekly-report.service` 沒在跑 | `weekly_report_running` |
 | 沒有 `bfx-sim` container | `simulation_running` |
 | 整個 cluster 沒有其他 runtime session（`bfx_bot`／`bfx_webapi` 或其成員，或任何連 `bfx_sim` 的 session），bot 與 web API 自己 container 的除外 | `runtime_session_present` |
