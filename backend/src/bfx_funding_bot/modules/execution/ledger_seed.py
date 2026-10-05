@@ -41,7 +41,7 @@ from hashlib import sha256
 from typing import Any, cast
 from uuid import UUID, uuid5
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
@@ -89,6 +89,7 @@ from bfx_funding_bot.modules.ledger import (
 from bfx_funding_bot.modules.ledger.tables import CapitalPolicyHeadRow
 
 SNAPSHOT_SCHEMA_VERSION = 1
+SUPERSEDED_REASON = "superseded_by_authority_switch"  # ruling 2026-10-02
 LOAN_PREFIX = "loan:"  # legacy credit ids of loans (``auth_rest.LOAN_ID_PREFIX``)
 LEGACY_ATTRIBUTION: Mapping[str, AttributionBasis] = {
     "funding_trade": "trade",
@@ -341,12 +342,7 @@ async def read_seed_closure(session: AsyncSession, scope: Scope) -> SeedClosure:
     for item in sorted(uncertainties, key=lambda u: str(u.uncertainty_id)):
         if item.state == "open" and item.kind in QUARANTINE_KINDS:
             quarantines.append(await _seed_quarantine(session, item, live))
-    pending = tuple(sorted(await session.scalars(
-        select(UncertaintyResolutionRequestRow.request_id).where(
-            *_scoped(UncertaintyResolutionRequestRow, scope),
-            UncertaintyResolutionRequestRow.state == "requested",
-        )
-    ), key=str))
+    pending = await read_pending_uncertainty_requests(session, scope)
     final_event_seq = int(await session.scalar(
         select(func.max(EventLogRow.event_seq)).where(*_scoped(EventLogRow, scope))
     ) or 0)
@@ -381,7 +377,6 @@ async def read_seed_closure(session: AsyncSession, scope: Scope) -> SeedClosure:
         credit_groups=groups,
         attempts=tuple(sorted(attempts, key=lambda a: a.attempt_seq)),
         quarantines=tuple(quarantines),
-        pending_uncertainty_requests=pending,
         evidence={
             "classification_digest": classification_digest(classification),
             "covered_prefix_hash": snapshot.covered_prefix_hash,
@@ -390,6 +385,46 @@ async def read_seed_closure(session: AsyncSession, scope: Scope) -> SeedClosure:
             "failed_uncertainty_requests": [str(request_id) for request_id in pending],
         },
     )
+
+
+async def read_pending_uncertainty_requests(
+    session: AsyncSession, scope: Scope
+) -> tuple[UUID, ...]:
+    """The scope's ``requested`` uncertainty resolution requests, sorted by id text."""
+    return tuple(sorted(await session.scalars(
+        select(UncertaintyResolutionRequestRow.request_id).where(
+            *_scoped(UncertaintyResolutionRequestRow, scope),
+            UncertaintyResolutionRequestRow.state == "requested",
+        )
+    ), key=str))
+
+
+async def fail_pending_uncertainty_requests(
+    session: AsyncSession, scope: Scope, pending: tuple[UUID, ...], *, now_ms: int
+) -> int:
+    """Fail the ``pending`` requests ``superseded_by_authority_switch`` (ruling 2026-10-02).
+
+    ``pending`` is what the closure was read with: refuses (``pending_requests_changed``) when
+    the update does not hit exactly those, or when any request of the scope is still
+    ``requested`` afterwards. The other request outboxes carry. Returns the number failed.
+    """
+    failed = 0
+    if pending:
+        result = await session.execute(
+            update(UncertaintyResolutionRequestRow)
+            .where(
+                UncertaintyResolutionRequestRow.request_id.in_(pending),
+                *_scoped(UncertaintyResolutionRequestRow, scope),
+                UncertaintyResolutionRequestRow.state == "requested",
+            )
+            .values(state="failed", processed_at_ms=now_ms, outcome_reason=SUPERSEDED_REASON)
+        )
+        failed = int(result.rowcount or 0)  # type: ignore[attr-defined]
+        if failed != len(pending):
+            raise SeedRefused("pending_requests_changed")
+    if await read_pending_uncertainty_requests(session, scope):
+        raise SeedRefused("pending_requests_changed")
+    return failed
 
 
 async def _seed_attempt(

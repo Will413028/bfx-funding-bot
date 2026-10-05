@@ -19,8 +19,9 @@ isolated DR copy or on the database itself, writes the same bytes.
    members (citing the seed observation, which the schema allows) and the basis quarantine
    rows; the clock ends at the last opening's revision;
 6. the offer and credit mirrors (live, last accepted observation = the seed);
-7. pending ``uncertainty_resolution_requests`` of the scope fail
-   ``superseded_by_authority_switch`` (ruling 2026-10-02). The other request tables carry.
+
+Failing the pending ``uncertainty_resolution_requests`` (execution's table) is the caller's
+step in the same transaction (``execution.ledger_seed.fail_pending_uncertainty_requests``).
 """
 
 from __future__ import annotations
@@ -34,9 +35,8 @@ from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid5
 
-from sqlalchemy import column, exists, select, table, update
+from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.types import BigInteger, Text, Uuid
 
 from bfx_funding_bot.modules.ledger import (
     ATTRIBUTION_BASES,
@@ -48,6 +48,7 @@ from bfx_funding_bot.modules.ledger import (
 )
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
 from bfx_funding_bot.modules.ledger.tables import (
+    SCOPE_ROOT_TABLES,
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisCellRow,
     AcceptedCapitalBasisCreditCellRow,
@@ -56,7 +57,6 @@ from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisRow,
     AcceptedCapitalBasisSymbolRow,
     CapitalCommandClockRow,
-    ExecutionResolutionJournalRow,
     LedgerObservationCreditRow,
     LedgerObservationOfferRow,
     LedgerObservationQueryRow,
@@ -70,36 +70,11 @@ from bfx_funding_bot.modules.ledger.tables import (
 )
 
 SEED_SCHEMA_VERSION = 1
-SUPERSEDED_REASON = "superseded_by_authority_switch"
 # Fixed: every seed id is uuid5(namespace, scope | legacy snapshot | kind | key).
 SEED_NAMESPACE = UUID("6f1d3f0e-0c4b-5e5a-9d2b-1c7a5e0b4d21")
 ZERO = Decimal(0)
 
 type Row = dict[str, object]
-
-# The request outbox is execution's table; ledger names only what the failure writes.
-_REQUESTS = table(
-    "uncertainty_resolution_requests",
-    column("request_id", Uuid),
-    column("exchange_account_id", Uuid),
-    column("deployment_environment", Text),
-    column("state", Text),
-    column("processed_at_ms", BigInteger),
-    column("outcome_reason", Text),
-)
-
-# Scoped parents: no child row can exist in a scope without one of these (foreign keys).
-_SCOPE_TABLES = (
-    CapitalCommandClockRow,
-    LedgerObservationQueryRow,
-    LedgerObservationRow,
-    VenueOfferMirrorRow,
-    VenueCreditMirrorRow,
-    SubmissionAttemptJournalRow,
-    QuarantineOpeningRow,
-    ExecutionResolutionJournalRow,
-    AcceptedCapitalBasisRow,
-)
 
 # Insert order (see the module docstring); the clock is inserted at 0 and set last.
 _INSERT_ORDER = (
@@ -148,14 +123,13 @@ _TABLES: dict[str, Any] = {
 
 @dataclass(frozen=True, slots=True)
 class SeedPlan:
-    """Every row of the seed (canonical columns, final values) and the requests it fails."""
+    """Every row of the seed (canonical columns, final values)."""
 
     scope: Scope
     query_id: UUID
     observation_id: UUID
     basis_id: UUID
     rows: Mapping[str, tuple[Row, ...]]
-    pending_uncertainty_requests: tuple[UUID, ...]
 
     def table_rows(self, name: str) -> tuple[Row, ...]:
         return self.rows.get(name, ())
@@ -527,29 +501,28 @@ def plan_seed(closure: SeedClosure) -> SeedPlan:
     return SeedPlan(
         scope, query_id, observation_id, basis_id,
         {name: tuple(values) for name, values in rows.items()},
-        tuple(sorted(set(closure.pending_uncertainty_requests), key=str)),
     )
 
 
 async def ledger_rows_in_scope(session: AsyncSession, scope: Scope) -> tuple[str, ...]:
     """The scoped ledger tables that already hold a row of ``scope`` (children need one)."""
     found: list[str] = []
-    for row in _SCOPE_TABLES:
+    for row in SCOPE_ROOT_TABLES:
         present = await session.scalar(
             select(
                 exists().where(
-                    row.exchange_account_id == scope.exchange_account_id,
-                    row.deployment_environment == scope.deployment_environment,
+                    row.c.exchange_account_id == scope.exchange_account_id,
+                    row.c.deployment_environment == scope.deployment_environment,
                 )
             )
         )
         if present:
-            found.append(row.__tablename__)
+            found.append(row.name)
     return tuple(found)
 
 
-async def write_plan(session: AsyncSession, plan: SeedPlan, *, now_ms: int) -> int:
-    """Insert ``plan`` in trigger/FK order; returns the number of requests failed."""
+async def write_plan(session: AsyncSession, plan: SeedPlan) -> None:
+    """Insert ``plan`` in trigger/FK order."""
     scope = plan.scope
     occupied = await ledger_rows_in_scope(session, scope)
     if occupied:
@@ -568,36 +541,10 @@ async def write_plan(session: AsyncSession, plan: SeedPlan, *, now_ms: int) -> i
         )
         .values(revision=clock["revision"])
     )
-    failed = 0
-    if plan.pending_uncertainty_requests:
-        result = await session.execute(
-            update(_REQUESTS)
-            .where(
-                _REQUESTS.c.request_id.in_(plan.pending_uncertainty_requests),
-                _REQUESTS.c.exchange_account_id == scope.exchange_account_id,
-                _REQUESTS.c.deployment_environment == scope.deployment_environment,
-                _REQUESTS.c.state == "requested",
-            )
-            .values(state="failed", processed_at_ms=now_ms, outcome_reason=SUPERSEDED_REASON)
-        )
-        failed = int(result.rowcount or 0)  # type: ignore[attr-defined]
-        if failed != len(plan.pending_uncertainty_requests):
-            raise SeedRefused("pending_requests_changed")
-    left = await session.scalar(
-        select(exists().where(
-            _REQUESTS.c.exchange_account_id == scope.exchange_account_id,
-            _REQUESTS.c.deployment_environment == scope.deployment_environment,
-            _REQUESTS.c.state == "requested",
-        ))
-    )
-    if left:
-        raise SeedRefused("pending_requests_changed")
-    return failed
 
 
 __all__ = [
     "SEED_NAMESPACE",
-    "SUPERSEDED_REASON",
     "SeedPlan",
     "ledger_rows_in_scope",
     "plan_seed",

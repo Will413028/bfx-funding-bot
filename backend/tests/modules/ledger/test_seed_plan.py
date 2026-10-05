@@ -14,7 +14,6 @@ from uuid import UUID, uuid4
 import pytest
 
 from bfx_funding_bot.modules.ledger import (
-    Attempt,
     Scope,
     SeedAttempt,
     SeedClosure,
@@ -85,7 +84,6 @@ def closure(**changes: object) -> SeedClosure:
             SeedQuarantine(UUID(int=99), "fUST", Decimal("50"), 1_400, {"legacy": True},
                            (SeedQuarantineMember("offer", "o-foreign", Decimal("50")),)),
         ),
-        pending_uncertainty_requests=(UUID(int=5),),
         evidence={"classification_digest": "d"},
     )
     return replace(base, **changes)  # type: ignore[arg-type]
@@ -142,7 +140,6 @@ def test_the_seed_basis_carries_the_legacy_closure_as_given() -> None:
     assert {m["venue_offer_id"] for m in mirrors} == {"o-1", "o-foreign"}
     assert all(m["present_in_latest_accepted_snapshot"] for m in mirrors)
     assert len(plan.table_rows("venue_credit_mirror")) == 2
-    assert plan.pending_uncertainty_requests == (UUID(int=5),)
 
 
 def _refused(reason: str, **changes: object) -> None:
@@ -193,25 +190,7 @@ def test_duplicate_sequences_and_unobserved_members_are_refused() -> None:
     _refused("quarantine_member_unobserved", quarantines=(quarantine,))
 
 
-def test_an_ack_must_name_its_offer_and_only_seeds_lack_a_policy() -> None:
+def test_an_ack_must_name_its_offer() -> None:
     base = closure()
     broken = replace(base.attempts[0], outcome=SeedOutcome("ack", None, None, 1, {}))
     _refused("attempt_outcome_invalid", attempts=(broken, *base.attempts[1:]))
-    with pytest.raises(ValueError, match="seeded attempt"):
-        Attempt(uuid4(), "d", "fUST", "c", {"amount": "1"}, uuid4(), None, {}, 1)
-    seeded = Attempt(uuid4(), "d", "fUST", "c", {"amount": "1"}, uuid4(), None, {}, 1,
-                     seed_provenance={"legacy": "x"})
-    assert seeded.policy_revision_id is None
-
-
-@pytest.mark.asyncio
-async def test_runtime_admission_refuses_a_policy_less_attempt() -> None:
-    """Only the owner's seed writes a NULL policy; ``_admit`` refuses before any read or write
-    (the session is never touched)."""
-    from bfx_funding_bot.modules.ledger import AuthorizeRefused
-    from bfx_funding_bot.modules.ledger._internal import journal
-
-    seeded = Attempt(uuid4(), "d", "fUST", "c", {"amount": "1"}, uuid4(), None, {}, 1,
-                     seed_provenance={"legacy": "x"})
-    result = await journal._admit(None, SCOPE, seeded, None)  # type: ignore[arg-type]
-    assert result == AuthorizeRefused("capital_policy_revision_changed")

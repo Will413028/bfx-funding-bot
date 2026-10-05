@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import (
@@ -17,6 +17,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    Table,
     Text,
     UniqueConstraint,
     text,
@@ -1041,4 +1042,56 @@ LEDGER_TABLES = (
     AcceptedCapitalBasisCreditCellRow.__table__,
     AcceptedCapitalBasisAttemptRow.__table__,
     AcceptedCapitalBasisQuarantineRow.__table__,
+)
+
+
+_SCOPE_COLUMNS = frozenset({"exchange_account_id", "deployment_environment"})
+
+
+def _ledger_tables() -> tuple[Table, ...]:
+    return cast("tuple[Table, ...]", LEDGER_TABLES)
+
+
+def _scope_parents() -> dict[str, tuple[str, str, str] | None]:
+    """How each scoped ledger table reaches its scope, derived from the table metadata.
+
+    ``None``: the table carries ``exchange_account_id`` and ``deployment_environment``.
+    ``(fk column, parent table, parent column)``: a child, joined through the foreign key of
+    its first column (primary key first) whose foreign key leads to a scoped table (directly, or through a scoped
+    child whose own link column that foreign key targets). A ledger table that cannot be
+    placed fails at import, so a new table is never silently unscoped.
+    """
+    by_name = {table.name: table for table in _ledger_tables()}
+    parents: dict[str, tuple[str, str, str] | None] = {
+        name: None for name, table in by_name.items() if set(table.c.keys()) >= _SCOPE_COLUMNS
+    }
+
+    def link(name: str) -> tuple[str, str, str] | None:
+        table = by_name[name]
+        ordered = (*table.primary_key.columns, *table.c)
+        for column in ordered:
+            for foreign_key in column.foreign_keys:
+                parent_name, _, parent_column = foreign_key.target_fullname.partition(".")
+                if parent_name not in by_name:
+                    continue
+                if parent_name in parents and parents[parent_name] is None:
+                    return (column.name, parent_name, parent_column)
+                if parent_name not in parents and parent_name != name:
+                    parents[parent_name] = link(parent_name)
+                inherited = parents.get(parent_name)
+                if inherited is not None and inherited[0] == parent_column:
+                    return (column.name, inherited[1], inherited[2])
+        raise RuntimeError(f"ledger table {name} has no path to its scope")
+
+    for name in by_name:
+        if name not in parents:
+            parents[name] = link(name)
+    return {name: parents[name] for name in by_name}
+
+
+# Every ledger table scoped by (account, environment), in ``LEDGER_TABLES`` order.
+SCOPE_PARENT: dict[str, tuple[str, str, str] | None] = _scope_parents()
+# The tables that carry the scope themselves (no child row exists without one of these).
+SCOPE_ROOT_TABLES = tuple(
+    table for table in _ledger_tables() if SCOPE_PARENT[table.name] is None
 )

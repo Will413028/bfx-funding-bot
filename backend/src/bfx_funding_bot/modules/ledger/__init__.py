@@ -381,16 +381,10 @@ class Attempt:
     cell_id: str  # must equal the decision's cell (enforced by the scope trigger)
     normalized_payload: JsonObject
     basis_id: UUID
-    # None only for a seeded attempt (``seed_provenance`` set): the legacy authorizing
-    # revision was never stored. Runtime authorization refuses a None policy.
-    policy_revision_id: UUID | None
+    policy_revision_id: UUID
     authorization_evidence: JsonObject
     started_at_ms: int
     seed_provenance: JsonObject | None = None
-
-    def __post_init__(self) -> None:
-        if self.policy_revision_id is None and self.seed_provenance is None:
-            raise ValueError("an attempt without a policy revision must be a seeded attempt")
 
 
 @dataclass(frozen=True, slots=True)
@@ -635,7 +629,6 @@ class SeedClosure:
     credit_groups: tuple[SeedCreditGroup, ...]
     attempts: tuple[SeedAttempt, ...]
     quarantines: tuple[SeedQuarantine, ...]
-    pending_uncertainty_requests: tuple[UUID, ...]
     evidence: JsonObject
 
 
