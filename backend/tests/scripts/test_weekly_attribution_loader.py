@@ -8,9 +8,10 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+import bfx_funding_bot.apps.bot
 import bfx_funding_bot.modules.accounts.tables
 import bfx_funding_bot.modules.execution.audit.tables
 import bfx_funding_bot.modules.execution.diagnostics.tables
@@ -26,9 +27,18 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     VenueCreditStateRow,
 )
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
+from bfx_funding_bot.modules.ledger.attribution_reads import JournalOfferCell
+from bfx_funding_bot.modules.ledger.tables import (
+    ExecutionResolutionJournalRow,
+    SubmissionAttemptJournalRow,
+    TransportOutcomeJournalRow,
+    VenueCreditMirrorRow,
+)
 from bfx_funding_bot.modules.live_validation.attribution_loader import (
+    OfferCellConflict,
     OfferLink,
     load_and_compute,
+    merge_offer_cells,
     persist_rows,
     reconciliation_weeks,
     render_reconciliation,
@@ -298,3 +308,250 @@ async def test_persist_rows_replace_is_realm_scoped(sf):
             )
         )).scalars().all()
     assert len(others) == 1
+
+
+# ---- S1-6: after the switch new offers exist only in the ledger journal ----------------
+
+def _u(n: int) -> UUID:
+    # not numeric-looking: sqlite's NUMERIC affinity would read an all-digit hex id as an int
+    return UUID(f"aaaaaaaa-0000-4000-8000-{n:012d}")
+
+
+def _attempt(voi: str | None, cell: str, *, seq: int = 1, kind: str = "ack",
+             seeded: bool = False) -> list[object]:
+    attempt_id = _u(seq)
+    return [
+        SubmissionAttemptJournalRow(
+            attempt_id=attempt_id, execution_decision_id=f"jd{seq}", exchange_account_id=_UUID,
+            deployment_environment=_ENV, symbol="fUST", cell_id=cell, attempt_seq=seq,
+            normalized_payload={"amount": str(AMOUNT), "rate": str(RATE), "period": 2},
+            payload_sha256="x", basis_id=_u(99), authorization_evidence={},
+            seed_provenance={"legacy": "offer_claim"} if seeded else None,
+            started_at_ms=CREATED - 1_000,
+        ),
+        TransportOutcomeJournalRow(
+            attempt_id=attempt_id, kind=kind, venue_offer_id=voi if kind == "ack" else None,
+            completed_at_ms=CREATED, evidence={},
+        ),
+    ]
+
+
+async def _attributed_cells(sf) -> set[str]:
+    result = await load_and_compute(sf, account_id=_ACCT, deployment_environment=_ENV, now_ms=NOW)
+    return {r.cell for r in result.rows if r.n_fills}
+
+
+async def test_journal_only_offer_is_attributed_to_its_cell(sf):
+    """The legacy tables know nothing of the offer (post-switch): the journal's ack does."""
+    async with sf() as s:
+        s.add_all([_credit(), _trade(), *_attempt(str(OFFER), "fUST_p2")])
+        await s.commit()
+    assert await _attributed_cells(sf) == {"fUST_p2"}
+    result = await load_and_compute(sf, account_id=_ACCT, deployment_environment=_ENV, now_ms=NOW)
+    assert result.cells is not None and not result.cells.foreign_offer
+    assert result.offer_conflicts == ()
+
+
+async def test_only_acknowledged_attempts_link_an_offer(sf):
+    async with sf() as s:
+        s.add_all([_credit(), _trade(), *_attempt(None, "fUST_p2", kind="rejected")])
+        await s.commit()
+    assert await _attributed_cells(sf) == {"unattributed"}
+
+
+async def test_seeded_attempt_agreeing_with_legacy_is_one_offer_without_conflict(sf):
+    async with sf() as s:
+        s.add_all([_credit(), _trade(), _claim(str(OFFER), "d1"), _decision("d1", "fUST_p2"),
+                   *_attempt(str(OFFER), "fUST_p2", seeded=True)])
+        await s.commit()
+    result = await load_and_compute(sf, account_id=_ACCT, deployment_environment=_ENV, now_ms=NOW)
+    assert {r.cell for r in result.rows if r.n_fills} == {"fUST_p2"}
+    assert result.offer_conflicts == ()
+
+
+async def test_legacy_and_journal_disagreeing_on_a_cell_is_reported_not_picked(sf):
+    async with sf() as s:
+        s.add_all([_credit(), _trade(), _claim(str(OFFER), "d1"), _decision("d1", "fUST_p2"),
+                   *_attempt(str(OFFER), "fUST_a30", seeded=True)])
+        await s.commit()
+    result = await load_and_compute(sf, account_id=_ACCT, deployment_environment=_ENV, now_ms=NOW)
+    assert result.offer_conflicts == (OfferCellConflict(str(OFFER), ("fUST_p2",), ("fUST_a30",)),)
+    assert {r.cell for r in result.rows if r.n_fills} == {"unattributed"}
+    assert "OFFER CELL CONFLICTS (1)" in render_reconciliation(result)
+
+
+def test_merge_offer_cells_unions_and_flags_journal_self_conflicts():
+    links = [JournalOfferCell("1", "c1", "d", False), JournalOfferCell("2", "c2", "d", False),
+             JournalOfferCell("2", "c3", "d", False), JournalOfferCell("3", "c3", "d", True)]
+    merged, conflicts = merge_offer_cells({"3": "c3", "4": "c4"}, links)
+    assert merged == {"1": "c1", "3": "c3", "4": "c4"}
+    assert conflicts == [OfferCellConflict("2", (), ("c2", "c3"))]
+
+
+async def test_bound_to_venue_offer_is_attributed_to_its_cell(sf):
+    """An UNKNOWN attempt later bound to the venue offer (resolver or operator) is a real
+    submit: the ledger's provenance (ack or bound_to_venue) places it, not only ack."""
+    async with sf() as s:
+        s.add_all([_credit(), _trade(), *_attempt(None, "fUST_p2", kind="unknown")])
+        s.add(ExecutionResolutionJournalRow(
+            id=_u(500), attempt_id=_u(1), exchange_account_id=_UUID,
+            deployment_environment=_ENV, symbol="fUST", action="bound_to_venue",
+            venue_offer_id=str(OFFER), observation_id=_u(7), actor_kind="system",
+            actor_id="resolver", resolved_at_ms=CREATED, reason="exact_fingerprint_match",
+            evidence={},
+        ))
+        await s.commit()
+    assert await _attributed_cells(sf) == {"fUST_p2"}
+
+
+async def test_unresolved_unknown_attempt_does_not_link_an_offer(sf):
+    async with sf() as s:
+        s.add_all([_credit(), _trade(), *_attempt(None, "fUST_p2", kind="unknown")])
+        await s.commit()
+    assert await _attributed_cells(sf) == {"unattributed"}
+
+
+async def test_two_attempts_of_one_offer_agree_on_a_cell_or_conflict(sf):
+    async with sf() as s:
+        s.add_all([_credit(), _trade(), *_attempt(str(OFFER), "fUST_p2", seq=1),
+                   *_attempt(None, "fUST_p2", seq=2, kind="unknown")])
+        s.add(ExecutionResolutionJournalRow(
+            id=_u(500), attempt_id=_u(2), exchange_account_id=_UUID,
+            deployment_environment=_ENV, symbol="fUST", action="bound_to_venue",
+            venue_offer_id=str(OFFER), observation_id=_u(7), actor_kind="system",
+            actor_id="resolver", resolved_at_ms=CREATED, reason="x", evidence={},
+        ))
+        await s.commit()
+    result = await load_and_compute(sf, account_id=_ACCT, deployment_environment=_ENV, now_ms=NOW)
+    assert result.offer_conflicts == ()
+    assert {r.cell for r in result.rows if r.n_fills} == {"fUST_p2"}
+    async with sf() as s:
+        await s.execute(delete(TransportOutcomeJournalRow))
+        s.add(TransportOutcomeJournalRow(attempt_id=_u(1), kind="ack",
+                                         venue_offer_id=str(OFFER), completed_at_ms=CREATED,
+                                         evidence={}))
+        s.add(TransportOutcomeJournalRow(attempt_id=_u(2), kind="unknown",
+                                         completed_at_ms=CREATED, evidence={}))
+        attempt = await s.get(SubmissionAttemptJournalRow, _u(2))
+        assert attempt is not None
+        attempt.cell_id = "fUST_a30"
+        await s.commit()
+    result = await load_and_compute(sf, account_id=_ACCT, deployment_environment=_ENV, now_ms=NOW)
+    assert result.offer_conflicts == (
+        OfferCellConflict(str(OFFER), (), ("fUST_a30", "fUST_p2")),)
+
+
+def _mirror(credit_id: str, *, terminal: bool = False, present: bool = True, kind: str = "credit",
+            created: int = CREATED, opening: int = CREATED,
+            updated: int = CREATED) -> VenueCreditMirrorRow:
+    return VenueCreditMirrorRow(
+        exchange_account_id=_UUID, deployment_environment=_ENV, venue_credit_id=credit_id,
+        source_kind=kind, symbol="fUST", amount=AMOUNT, rate=RATE, period_days=2,
+        status="closed" if terminal else "active", mts_created=created, mts_updated=updated,
+        mts_opening=opening, last_accepted_observation_id=_u(7),
+        present_in_latest_accepted_snapshot=present and not terminal,
+        terminal_kind="closed" if terminal else None,
+        terminal_evidence_id=_u(8) if terminal else None,
+    )
+
+
+def _legacy_open(credit_id: str, *, created: int = CREATED) -> VenueCreditStateRow:
+    return VenueCreditStateRow(
+        exchange_account_id=_UUID, deployment_environment=_ENV, credit_id=credit_id,
+        symbol="fUST", amount=AMOUNT, rate=RATE, period_days=2, status="ACTIVE", flags={},
+        mts_created=created, mts_updated=created, first_seen_event_seq=1,
+        last_seen_event_seq=1, is_terminal=False,
+    )
+
+
+async def _computed(sf):
+    return await load_and_compute(sf, account_id=_ACCT, deployment_environment=_ENV, now_ms=NOW)
+
+
+async def test_mirror_only_open_credit_is_attributed_to_its_cell(sf):
+    """Post-switch: no history row, no legacy open row; the mirror has the open credit and
+    the journal its offer."""
+    async with sf() as s:
+        s.add_all([_history_anchor(), _trade(), *_attempt(str(OFFER), "fUST_p2"),
+                   _mirror("500")])
+        await s.commit()
+    result = await _computed(sf)
+    assert result.cells is not None
+    assert set(result.cells.cell_by_credit) == {"1", "500"}
+    assert result.cells.cell_by_credit["500"] == "fUST_p2"
+    assert result.credits == 2
+
+
+def _history_anchor() -> FundingCreditHistoryRow:
+    """An ended credit of another opening so the account has credit history."""
+    return FundingCreditHistoryRow(
+        exchange_account_id=_UUID, kind="credit", credit_id=1, deployment_environment=_ENV,
+        symbol="fUST", side=1, mts_create=CREATED - _DAY, mts_update=CREATED - _DAY + 1_000,
+        amount=Decimal("10"), status="CLOSED", rate=RATE, period_days=2,
+        mts_opening=CREATED - _DAY, mts_last_payout=CREATED - _DAY + 1_000,
+    )
+
+
+async def test_mirror_credit_is_not_revived_from_a_stale_legacy_open_row(sf):
+    async with sf() as s:
+        s.add_all([_history_anchor(), _mirror("501", terminal=True), _legacy_open("501")])
+        await s.commit()
+    result = await _computed(sf)
+    assert result.cells is not None
+    assert set(result.cells.cell_by_credit) == {"1", "501"}
+    # ended at its mirror end (mts_updated == opening): no accrual into later weeks
+    assert all(r.week_start_ms < _MON + 7 * _DAY for r in result.rows
+               if r.cell == "unattributed" and r.gross_interest_usdt > 0)
+
+
+async def test_an_incomplete_mirror_row_does_not_hide_the_legacy_open_row(sf):
+    incomplete = _mirror("503")
+    incomplete.rate = None
+    async with sf() as s:
+        s.add_all([_history_anchor(), incomplete, _legacy_open("503")])
+        await s.commit()
+    result = await _computed(sf)
+    assert result.cells is not None
+    assert set(result.cells.cell_by_credit) == {"1", "503"}
+
+
+async def test_terminal_mirror_credit_not_yet_in_history_counts_to_its_end(sf):
+    async with sf() as s:
+        s.add_all([_history_anchor(), _trade(), *_attempt(str(OFFER), "fUST_p2"),
+                   _mirror("502", terminal=True, updated=REPAID)])
+        await s.commit()
+    result = await _computed(sf)
+    row = next(r for r in result.rows if r.cell == "fUST_p2" and r.week_start_ms == _MON)
+    assert row.gross_interest_usdt == GROSS_842S  # held CREATED..REPAID, ended not open
+
+
+async def test_mirror_credit_gone_from_the_snapshot_without_terminal_evidence_stays_open(sf):
+    async with sf() as s:
+        s.add_all([_history_anchor(), _mirror("503", present=False)])
+        await s.commit()
+    result = await _computed(sf)
+    assert result.cells is not None and "503" in result.cells.cell_by_credit
+
+
+async def test_mirror_opening_wins_over_legacy_created_for_a_loan_derived_credit(sf):
+    """A credit that came from a loan: created a day after its venue opening. The legacy open
+    row only had ``mts_created`` and matched no trade; the mirror's ``mts_opening`` matches the
+    originating trade, so the credit now lands in the trade's cell and week (as it will once
+    it is in funding_credit_history)."""
+    created = CREATED + _DAY
+    async with sf() as s:
+        s.add_all([_history_anchor(), _trade(), *_attempt(str(OFFER), "fUST_p2"),
+                   _legacy_open("600", created=created)])
+        await s.commit()
+    legacy_only = await _computed(sf)
+    assert legacy_only.cells is not None
+    assert legacy_only.cells.cell_by_credit["600"] == "unattributed"
+    async with sf() as s:
+        s.add(_mirror("600", created=created, opening=CREATED, updated=created))
+        await s.commit()
+    result = await _computed(sf)
+    assert result.cells is not None
+    assert result.cells.cell_by_credit["600"] == "fUST_p2"
+    weeks = {r.week_start_ms: r.n_fills for r in result.rows if r.cell == "fUST_p2"}
+    assert min(weeks) == _MON and weeks[_MON] == 1  # the fill is the opening week's
+    assert "600" not in result.cells.without_trade

@@ -5,10 +5,14 @@ Since 2026-09-27 the per-cell numbers come from venue credit records, not from
 ORDER_FILL × held-to-term capped by CREDIT_CLOSED (whose rate/period/close were
 parsed one slot late until then). Inputs, all read-only:
 - funding_credit_history (ended credits/loans: rate, period, opening, actual
-  close) + venue_credit_state (credits/loans still open): per-credit truth;
+  close) + venue_credit_state (legacy) and venue_credit_mirror (ledger) for the
+  credits/loans still open: per-credit truth;
 - funding_trades (credit → our offer id) + offer_claims / venue_offer_state /
   ORDER_FILL (offer → execution decision / signal correlation id) +
-  execution_decisions / diagnostics DECISION (→ cell);
+  execution_decisions / diagnostics DECISION (→ cell); after the authority
+  switch new offers exist only in the ledger journal (acknowledged or bound-to-venue
+  attempts, cell from the attempt), read through the ledger's attribution port and unioned with
+  the legacy links (a disagreement is reported, never picked);
 - funding_interest_payments (the ledger) for the weekly reconciliation;
 - funding_candles / funding_stats for the baselines.
 Matching, accrual and the reconciliation window: modules/live_validation/
@@ -46,6 +50,13 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
 )
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
+from bfx_funding_bot.modules.ledger import Scope
+from bfx_funding_bot.modules.ledger.attribution_reads import (
+    JournalOfferCell,
+    MirrorCredit,
+    journal_offer_cells,
+    mirror_credits,
+)
 from bfx_funding_bot.modules.live_validation.credit_attribution import (
     PAYOUT_LAG_MS,
     PAYOUT_SETTLE_MS,
@@ -148,12 +159,52 @@ def resolve_offer_cells(
 
 
 @dataclass(frozen=True)
+class OfferCellConflict:
+    """One venue offer two sources place in different cells."""
+
+    venue_offer_id: str
+    legacy_cells: tuple[str, ...]
+    journal_cells: tuple[str, ...]
+
+
+def merge_offer_cells(
+    legacy: dict[str, str], journal: Iterable[JournalOfferCell],
+) -> tuple[dict[str, str], list[OfferCellConflict]]:
+    """Union of the legacy and journal offer -> cell maps.
+
+    An offer in one source takes that source's cell; an offer both sources know (a seeded
+    attempt carries legacy provenance) must map to the same cell. A disagreement (also
+    between two journal attempts of one offer) is returned as a conflict and the offer
+    stays out of the map, so its credits are 'unattributed' rather than silently assigned.
+    Several journal attempts naming one offer (ack and bound_to_venue of different attempts)
+    agree when they share a cell and merge into it; the ledger's own provenance calls any
+    second attempt a conflict, but the weekly only needs the cell, so agreement is not lost."""
+    by_journal: dict[str, set[str]] = {}
+    for link in journal:
+        by_journal.setdefault(link.venue_offer_id, set()).add(link.cell_id)
+    merged = dict(legacy)
+    conflicts: list[OfferCellConflict] = []
+    for offer in sorted(by_journal):
+        cells = by_journal[offer]
+        legacy_cell = legacy.get(offer)
+        known = cells | ({legacy_cell} if legacy_cell is not None else set())
+        if len(known) > 1:
+            merged.pop(offer, None)
+            conflicts.append(OfferCellConflict(
+                offer, (legacy_cell,) if legacy_cell is not None else (), tuple(sorted(cells))))
+        else:
+            merged[offer] = next(iter(known))
+    return merged, conflicts
+
+
+@dataclass(frozen=True)
 class AttributionResult:
     rows: list[WeeklyCellRow]
     reconciliations: list[WeeklyReconciliation]
     credits: int
     cells: CreditCells | None
     has_credit_history: bool
+    offer_conflicts: tuple[OfferCellConflict, ...] = ()
 
 
 def credit_from_history(r: FundingCreditHistoryRow) -> CreditLifetime:
@@ -178,6 +229,32 @@ def open_credit(r: VenueCreditStateRow) -> CreditLifetime | None:
     )
 
 
+def mirror_credit(m: MirrorCredit) -> CreditLifetime | None:
+    """A ledger-mirror credit as a lifetime; None when its terms are not observed.
+
+    Differs from a legacy open row on purpose: the opening is the venue's MTS_OPENING
+    (``mts_opening``; legacy open rows only had ``mts_created``), the key trades are matched
+    on. For a loan-derived credit (created after its opening) the group, the opening week and
+    ``n_fills`` of a credit open across the switch therefore move to the originating trade's
+    instant, which is what the same credit gets once it is in ``funding_credit_history``.
+    An ended credit ends at ``mts_updated`` until the history sync lands its real close."""
+    if m.rate is None or m.period_days is None:
+        return None
+    created = m.mts_created if m.mts_created is not None else m.mts_opening
+    opened = m.mts_opening if m.mts_opening is not None else m.mts_created
+    if created is None or opened is None:
+        return None
+    closed = None
+    if m.terminal:
+        closed = max(int(m.mts_updated if m.mts_updated is not None else opened), int(opened))
+    prefix = LOAN_ID_PREFIX if m.source_kind == "loan" else ""
+    return CreditLifetime(
+        credit_id=f"{prefix}{m.venue_credit_id}", symbol=m.symbol, amount=abs(m.amount),
+        rate=m.rate, period_days=m.period_days, mts_create=int(created),
+        opened_ms=int(opened), closed_ms=closed,
+    )
+
+
 def reconciliation_weeks(now_ms: int, weeks: int) -> list[int]:
     """The last `weeks` calendar weeks whose payouts are all in, oldest first.
 
@@ -196,6 +273,7 @@ class CreditInputs:
     cells: CreditCells
     payments: list[InterestPayment]
     has_credit_history: bool
+    offer_conflicts: tuple[OfferCellConflict, ...] = ()
 
 
 async def load_credit_inputs(
@@ -264,9 +342,30 @@ async def load_credit_inputs(
         FundingInterestPaymentRow.deployment_environment == env,
     ))).all()
 
+    scope = Scope(account_uuid, env)
+    journal_links = await journal_offer_cells(
+        session, scope, {str(t.offer_id) for t in trade_rows})
+    mirror = await mirror_credits(session, scope)
+
     credits = [credit_from_history(r) for r in history]
     seen = {c.credit_id for c in credits}
+    # Credits not yet in the history: the ledger mirror is current after the switch, so it
+    # wins over a legacy open row (which stops being maintained), and it also carries the
+    # ones it knows ended until CreditHistorySync lands them. Before the switch it is empty.
+    known_to_mirror: set[str] = set()
+    for m in mirror:
+        lifetime = mirror_credit(m)
+        # An incomplete mirror row (no rate/period) must not hide a usable legacy open row;
+        # a terminal one still does, so a stale legacy row never revives an ended credit.
+        if lifetime is not None or m.terminal:
+            known_to_mirror.add(f"{LOAN_ID_PREFIX if m.source_kind == 'loan' else ''}"
+                                f"{m.venue_credit_id}")
+        if lifetime is not None and lifetime.credit_id not in seen:
+            credits.append(lifetime)
+            seen.add(lifetime.credit_id)
     for r in open_rows:
+        if r.credit_id in known_to_mirror:
+            continue
         still_open = open_credit(r)
         if still_open is not None and still_open.credit_id not in seen:
             credits.append(still_open)
@@ -288,14 +387,21 @@ async def load_credit_inputs(
         str(f.payload.get("venue_offer_id") or f.venue_offer_id or ""), None,
         str(f.payload.get("signal_correlation_id") or "") or None,
     ) for f in fills]
-    offer_cells = resolve_offer_cells(
-        links, cell_by_decision={did: cell for did, _scid, cell in decisions},
-        cell_by_scid=cell_by_scid,
+    offer_cells, offer_conflicts = merge_offer_cells(
+        resolve_offer_cells(
+            links, cell_by_decision={did: cell for did, _scid, cell in decisions},
+            cell_by_scid=cell_by_scid,
+        ),
+        journal_links,
     )
+    for conflict in offer_conflicts:
+        log.warning("attribution_offer_cell_conflict offer=%s legacy=%s journal=%s",
+                    conflict.venue_offer_id, conflict.legacy_cells, conflict.journal_cells)
     payments = [InterestPayment(r.ledger_id, r.currency, None, r.mts, Decimal(r.amount),
                                 Decimal(r.balance), r.description) for r in ledger_rows]
     return CreditInputs(credits, assign_cells(credits, trades, offer_cells), payments,
-                        has_credit_history=bool(history))
+                        has_credit_history=bool(history),
+                        offer_conflicts=tuple(offer_conflicts))
 
 
 async def load_and_compute(
@@ -316,7 +422,8 @@ async def load_and_compute(
         credits = inputs.credits
         if not credits:
             return AttributionResult([], [], 0, None,
-                                     has_credit_history=inputs.has_credit_history)
+                                     has_credit_history=inputs.has_credit_history,
+                                     offer_conflicts=inputs.offer_conflicts)
 
         start = min(c.opened_ms for c in credits)
         close_points = await load_market_points(
@@ -348,7 +455,8 @@ async def load_and_compute(
         for week in reconciliation_weeks(now, reconcile_weeks)
     ]
     return AttributionResult(rows, reconciliations, len(credits), cells,
-                             has_credit_history=inputs.has_credit_history)
+                             has_credit_history=inputs.has_credit_history,
+                             offer_conflicts=inputs.offer_conflicts)
 
 
 def render_reconciliation(result: AttributionResult) -> str:
@@ -374,6 +482,13 @@ def render_reconciliation(result: AttributionResult) -> str:
                       "opening instant whose trades lead to different cells; allocated by "
                       f"amount, {len(c.shares)} split proportionally; no trade -> "
                       "'unattributed')"]
+    if result.offer_conflicts:
+        lines += ["", f"OFFER CELL CONFLICTS ({len(result.offer_conflicts)}): legacy records and "
+                      "the ledger journal place the same venue offer in different cells; "
+                      "its credits are 'unattributed' until resolved.", "",
+                  "| venue offer | legacy cell | journal cell |", "|---|---|---|"]
+        lines += [f"| {c.venue_offer_id} | {', '.join(c.legacy_cells) or '—'} "
+                  f"| {', '.join(c.journal_cells)} |" for c in result.offer_conflicts]
     return "\n".join(lines) + "\n"
 
 

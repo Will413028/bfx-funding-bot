@@ -160,6 +160,13 @@ def render_markdown(*, report: G3Report, fee_rate: Decimal) -> str:
             " a C-sized budget (no clamp applied)."
         )
 
+    if report.offer_conflicts:
+        honesty.append(
+            f"- **{len(report.offer_conflicts)} offer cell conflict(s)**: legacy records and the"
+            " ledger journal place these venue offers in different cells, so their credits are"
+            " unattributed and excluded: " + "; ".join(report.offer_conflicts)
+        )
+
     frr_section = ["", "## AlwaysFRR benchmark (value bar)"]
     if frr.available:
         frr_section += [
@@ -233,6 +240,7 @@ def verdict_to_json(report: G3Report, *, fee_rate: Decimal) -> dict[str, object]
             "comparable_with_reports_before": False,
             "capital_source": report.capital_source,
         },
+        "offer_cell_conflicts": list(report.offer_conflicts),
         "state": v.state.value,
         "headline_bot_vs_idle": str(v.headline_bot_vs_idle),
         "n_windows": v.n_windows,

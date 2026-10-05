@@ -207,3 +207,12 @@ def test_verdict_to_json_carries_methodology_coverage_and_reconciliation():
     assert j["mr_alpha"]["cells"][0]["cell"] == "fUST_p2"  # type: ignore[index]
     assert j["mr_alpha"]["coverage"] == "1"  # type: ignore[index]
     assert j["headline_bot_vs_idle"] == "0.06"
+
+
+def test_offer_cell_conflicts_are_in_the_markdown_and_the_json():
+    conflict = "5123273052: legacy=fUST_p2, journal=fUST_a30"
+    report = _report(offer_conflicts=(conflict,))
+    assert "1 offer cell conflict(s)" in render_markdown(report=report, fee_rate=_FEE)
+    assert conflict in render_markdown(report=report, fee_rate=_FEE)
+    assert verdict_to_json(report, fee_rate=_FEE)["offer_cell_conflicts"] == [conflict]
+    assert verdict_to_json(_report(), fee_rate=_FEE)["offer_cell_conflicts"] == []

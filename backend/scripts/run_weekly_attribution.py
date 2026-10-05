@@ -53,7 +53,8 @@ async def _amain(args: argparse.Namespace) -> int:
     finally:
         await engine.dispose()
     unattributed = sum(1 for r in result.rows if r.cell == "unattributed")
-    print(f"attribution_weekly upserted={n} unattributed_rows={unattributed}")
+    print(f"attribution_weekly upserted={n} unattributed_rows={unattributed} "
+          f"offer_cell_conflicts={len(result.offer_conflicts)}")
     report = render_reconciliation(result)
     if args.out:
         Path(args.out).write_text(f"# Attribution vs ledger\n\n{report}")
