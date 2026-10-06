@@ -396,15 +396,15 @@ def test_seed_observation_is_allowed_as_member_mirror_anchor_and_basis(seeded) -
         )
 
 
-def test_attempt_policy_may_be_null_only_for_a_seed(seeded) -> None:
-    with seeded.begin() as conn, pytest.raises(
-        Exception, match="ck_submission_attempt_policy_or_seed"
-    ):
-        _insert_attempt(conn, 5, policy=None, provenance=None)
+def test_an_attempt_names_exactly_one_of_policy_and_seed(seeded) -> None:
+    """a6c7e8f9b0d1: a live attempt names its policy, a seeded one its provenance, never both."""
+    for policy, provenance in ((None, None), (_P, "{}")):
+        with seeded.begin() as conn, pytest.raises(
+            Exception, match="ck_submission_attempt_policy_or_seed"
+        ):
+            _insert_attempt(conn, 5, policy=policy, provenance=provenance)
     with seeded.begin() as conn:  # a seeded attempt names no policy
         _insert_attempt(conn, 6, policy=None, provenance="{}")
-    with seeded.begin() as conn:  # a seeded attempt may still name one
-        _insert_attempt(conn, 7, policy=_P, provenance="{}")
     with seeded.begin() as conn:  # an ordinary attempt names one
         _insert_attempt(conn, 8, policy=_P, provenance=None)
 

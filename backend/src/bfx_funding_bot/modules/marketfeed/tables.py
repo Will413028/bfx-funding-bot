@@ -12,15 +12,11 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import BigInteger, DateTime, Index, Integer, Numeric, Text, text
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.types import JSON
 
-from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.db import JSON_DOCUMENT, Base
 
-# JSONB on Postgres, plain JSON on sqlite (test backend) — same pattern as
-# event_log.payload.
-_JSON = JSON().with_variant(JSONB(), "postgresql")
+_JSON = JSON_DOCUMENT
 _NOW = text("CURRENT_TIMESTAMP")
 _BIG_PK = BigInteger().with_variant(Integer(), "sqlite")  # sqlite autoincrement 限 INTEGER PK
 

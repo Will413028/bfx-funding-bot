@@ -7,7 +7,6 @@ from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import (
-    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -22,15 +21,14 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Mapped, MappedColumn, mapped_column
 from sqlalchemy.types import Uuid
 
-from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.db import JSON_DOCUMENT, Base
 
-_JSON = JSON().with_variant(JSONB, "postgresql")
+_JSON = JSON_DOCUMENT
 
 
 _INTENDED_AMOUNT_SQL = "(normalized_payload->>'amount')::numeric"
@@ -650,7 +648,9 @@ class SubmissionAttemptJournalRow(Base):
             name="ck_submission_attempt_nonnegative",
         ),
         CheckConstraint(
-            "policy_revision_id IS NOT NULL OR seed_provenance IS NOT NULL",
+            # Exactly one: a live attempt names its policy revision, a seeded one its legacy
+            # provenance (a6c7e8f9b0d1; before it, either or both).
+            "(policy_revision_id IS NULL) <> (seed_provenance IS NULL)",
             name="ck_submission_attempt_policy_or_seed",
         ),
         CheckConstraint(

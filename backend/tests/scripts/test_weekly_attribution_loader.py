@@ -302,6 +302,8 @@ def _attempt(voi: str | None, cell: str, *, seq: int = 1, kind: str = "ack",
             deployment_environment=_ENV, symbol="fUST", cell_id=cell, attempt_seq=seq,
             normalized_payload={"amount": str(AMOUNT), "rate": str(RATE), "period": 2},
             payload_sha256="x", basis_id=_u(99), authorization_evidence={},
+            # A live attempt names its policy revision; a seeded one its legacy provenance.
+            policy_revision_id=None if seeded else _u(98),
             seed_provenance={"legacy": "offer_claim"} if seeded else None,
             started_at_ms=CREATED - 1_000,
         ),

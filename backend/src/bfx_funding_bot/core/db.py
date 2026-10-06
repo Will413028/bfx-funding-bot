@@ -1,6 +1,8 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import CheckConstraint, Column, Table, event
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -8,6 +10,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.types import JSON
 
 from bfx_funding_bot.core.settings import Settings
 
@@ -20,6 +23,30 @@ class Base(DeclarativeBase):
     with Alembic, alembic/env.py imports each module's tables file
     (their import side-effects populate Base.metadata).
     """
+
+
+# The one JSON column type: Python ``None`` is SQL NULL, never the JSON literal ``null`` (the
+# SQLAlchemy default, which ``IS NULL`` does not see). ``with_variant`` does not carry
+# ``none_as_null`` over, so both variants set it; tests/core/test_json_columns.py pins every
+# JSON column to it.
+JSON_DOCUMENT = JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")
+
+
+@event.listens_for(Column, "after_parent_attach")
+def _refuse_the_json_literal(column: Column[object], table: object) -> None:
+    """Every written ``JSON_DOCUMENT`` column of ``public`` also refuses a stored JSON ``null``
+    (raw SQL can still write one): ``ck_<table>_<column>_json``, added by a6c7e8f9b0d1. Not the
+    frozen ``legacy_archive`` (no role writes it) nor a generated column. PostgreSQL only;
+    sqlite has no ``jsonb_typeof``."""
+    if column.type is not JSON_DOCUMENT or column.computed is not None:
+        return
+    assert isinstance(table, Table)
+    if table.schema is not None:
+        return
+    table.append_constraint(CheckConstraint(
+        f"jsonb_typeof({column.name}) <> 'null'",
+        name=f"ck_{table.name}_{column.name}_json",
+    ).ddl_if(dialect="postgresql"))
 
 
 def _prepare_engine_kwargs(raw_url: str) -> dict[str, object]:

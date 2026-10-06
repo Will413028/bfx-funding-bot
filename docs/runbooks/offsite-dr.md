@@ -507,7 +507,10 @@ resources, then verifies the restored copy two ways:
    row names an accepted observation of its scope) and the restored clock must not be
    ahead of production's. The restored copy's bounded rows must equal its whole tables,
    so a wrong bound fails (`ledger_bound_invalid`) instead of hiding rows. A difference is
-   `ledger_digest_mismatch`; the journal names the tables (never row data).
+   `ledger_digest_mismatch`; the journal names the tables (never row data). Migration
+   `a6c7e8f9b0d1` rewrote append-only rows in place (JSON `null` to SQL NULL), so a drill
+   whose `target_backup_label`/`target_time` stops before it reports
+   `ledger_digest_mismatch` by design; replaying past it, or any later backup, matches.
 2. **Read-only boot check.** The image's own entry,
    `python -m bfx_funding_bot.apps.restore_boot_check`, runs in the `bfx-bot:local` image
    (the deployed one) on the internal network, as a per-run LOGIN that

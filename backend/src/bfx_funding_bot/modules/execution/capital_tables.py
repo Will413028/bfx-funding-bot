@@ -23,15 +23,14 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.types import JSON, Uuid
+from sqlalchemy.types import Uuid
 
-from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.db import JSON_DOCUMENT, Base
 from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA as ARCHIVE
 
-_JSON = JSON().with_variant(JSONB, "postgresql")
+_JSON = JSON_DOCUMENT
 
 
 class CapitalQueryRow(Base):

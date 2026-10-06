@@ -12,7 +12,6 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
-    JSON,
     BigInteger,
     CheckConstraint,
     DateTime,
@@ -21,10 +20,9 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.db import JSON_DOCUMENT, Base
 
 SIM_VENUE_EVENT_TABLE = "sim_venue_event"
 
@@ -40,7 +38,7 @@ class SimVenueEventRow(Base):
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(
-        JSON().with_variant(JSONB, "postgresql"), nullable=False)
+        JSON_DOCUMENT, nullable=False)
     # Bookkeeping only; the venue's own time is in the payload (`mts`, injected clock).
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()"))

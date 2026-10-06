@@ -24,12 +24,11 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.types import JSON, Uuid
+from sqlalchemy.types import Uuid
 
-from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.db import JSON_DOCUMENT, Base
 from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA as ARCHIVE
 from bfx_funding_bot.modules.execution.operator_requests import REQUEST_STATES
 
@@ -38,7 +37,7 @@ from bfx_funding_bot.modules.execution.operator_requests import REQUEST_STATES
 # FK is real and must remain visible to SQLAlchemy's create_all as well as
 # Alembic's complete metadata import.
 
-_JSON = JSON().with_variant(JSONB, "postgresql")
+_JSON = JSON_DOCUMENT
 _UUID = PG_UUID(as_uuid=True).with_variant(Uuid(as_uuid=True), "sqlite")
 _NOW = func.current_timestamp()
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
-    JSON,
     BigInteger,
     DateTime,
     Float,
@@ -15,7 +14,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.db import JSON_DOCUMENT, Base
 
 
 class FillRateModelArtifactRow(Base):
@@ -36,7 +35,7 @@ class FillRateModelArtifactRow(Base):
     sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
     confidence_min_samples: Mapped[int] = mapped_column(Integer, nullable=False)
     metadata_json: Mapped[dict[str, object]] = mapped_column(
-        JSON,
+        JSON_DOCUMENT,
         nullable=False,
         default=dict,
         server_default=text("'{}'"),
