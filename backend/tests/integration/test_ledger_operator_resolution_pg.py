@@ -53,7 +53,6 @@ from .test_ledger_capital_reader import (
     book,  # noqa: F401 - fixture re-export
 )
 from .test_ledger_schema_roles import (
-    append_epoch,
     ledger_db,  # noqa: F401 - fixture re-export
 )
 from .test_ledger_unknown_resolver_pg import (
@@ -131,6 +130,15 @@ async def request_row(factory: Any, request_id: UUID) -> UncertaintyResolutionRe
         return await UncertaintyResolutionRequests(RSCOPE).get(session, request_id)
 
 
+async def closed_evidence(factory: Any, request_id: UUID) -> tuple[Any, Any]:
+    """The pre-switch evidence columns the model no longer maps (e4f5a6b7c8d9)."""
+    async with factory() as session:
+        row = (await session.execute(text(
+            "SELECT reconcile_event_seq, resolved_event_seq FROM uncertainty_resolution_requests "
+            "WHERE request_id = :r"), {"r": request_id})).one()
+        return row.reconcile_event_seq, row.resolved_event_seq
+
+
 async def settle(factory: Any, request_id: UUID, resolution: Any = RESOLUTION) -> str:
     return await make_worker(factory, resolution).process(request_id)
 
@@ -155,15 +163,16 @@ async def test_mark_not_accepted_resolves_through_the_worker_and_writes_only_the
     request_id = await queue(book.factory, intent(attempt, ref, reason=" confirmed absent "))
     waiting = await request_row(book.factory, request_id)
     # Mutation 6: the ledger ref lands in observation_id, never in reconcile_event_seq.
-    assert (waiting.observation_id, waiting.reconcile_event_seq) == (
-        UUID(ref.rsplit(":", 1)[1]), None)
+    assert waiting.observation_id == UUID(ref.rsplit(":", 1)[1])
+    assert (await closed_evidence(book.factory, request_id))[0] is None
     assert waiting.state == "requested"
     before = await events(book.factory)
 
     assert await settle(book.factory, request_id) == "applied"
 
     done = await request_row(book.factory, request_id)
-    assert (done.state, done.resolved_event_seq, done.outcome_reason) == ("applied", None, None)
+    assert (done.state, done.outcome_reason) == ("applied", None)
+    assert await closed_evidence(book.factory, request_id) == (None, None)
     assert await events(book.factory) == before  # never the event log
     (stored,) = await resolutions(book)
     assert (stored.attempt_id, stored.quarantine_id) == (attempt, None)
@@ -617,31 +626,32 @@ def _role_factory(ledger_db, role: str):  # noqa: F811
 
 @pytest.mark.asyncio
 async def test_the_web_api_role_queues_and_the_bot_role_applies(book, ledger_db) -> None:  # noqa: F811
-    """No new grant: prepare reads only allowlisted columns; the epoch trigger gates the INSERT."""
+    """No new grant: prepare reads only allowlisted columns; neither role may write the closed
+    pre-switch evidence columns (e4f5a6b7c8d9 revoked their column grants)."""
     attempt, ref = await open_unknown(book, offers=(venue_offer("V1"),))
     web, web_factory = _role_factory(ledger_db, "bfx_webapi")
     bot, bot_factory = _role_factory(ledger_db, "bfx_bot")
     try:
         bind = intent(attempt, ref, "bind_to_venue", venue_offer_id="V1")
-        # Before the switch (a legacy epoch): the web API may not cite a ledger observation.
-        with ledger_db.begin() as conn:
-            append_epoch(conn, "legacy", "before the switch")
-        with pytest.raises(Exception, match="requires ledger authority"):
-            await queue(web_factory, bind)
-        with ledger_db.begin() as conn:
-            append_epoch(conn, "ledger", "switch")
         request_id = await queue(web_factory, bind)
-        # ...and may not hand it a legacy sequence under the ledger epoch.
-        with pytest.raises(Exception, match="closed under ledger authority"):
+        # The web API may not hand it a legacy sequence...
+        with pytest.raises(Exception, match="permission denied"):
             async with web_factory.begin() as session:
                 await session.execute(text(
                     "INSERT INTO uncertainty_resolution_requests(request_id, exchange_account_id, "
                     "deployment_environment, uncertainty_id, action, reconcile_event_seq, "
                     "requested_by, created_at_ms) VALUES (gen_random_uuid(), :a, 'ci', :u, "
                     "'mark_not_accepted', 5, 'op', 1)"), {"a": SCOPE.exchange_account_id, "u": uuid4()})
+        # ...nor the account writer a legacy resolution event.
+        with pytest.raises(Exception, match="permission denied"):
+            async with bot_factory.begin() as session:
+                await session.execute(text(
+                    "UPDATE uncertainty_resolution_requests SET resolved_event_seq = 5 "
+                    "WHERE request_id = :r"), {"r": request_id})
         assert await settle(bot_factory, request_id) == "applied"
         done = await request_row(book.factory, request_id)
-        assert (done.state, done.resolved_event_seq) == ("applied", None)
+        assert done.state == "applied"
+        assert await closed_evidence(book.factory, request_id) == (None, None)
         (stored,) = await resolutions(book)
         assert (stored.action, stored.venue_offer_id, stored.operator_request_id) == (
             "bound_to_venue", "V1", request_id)

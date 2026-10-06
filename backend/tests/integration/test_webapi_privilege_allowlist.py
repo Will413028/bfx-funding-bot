@@ -5,7 +5,9 @@ EFFECTIVE privileges of three builds (worst-case default privileges, production'
 stray grants at an earlier revision): a migration that grants or revokes anything for the web
 API must update it in the same change, or ``test_effective_privileges_equal_the_allowlist``
 fails. Each downgrade step must restore the previous revision's allowlist exactly
-(``test_round_trip_keeps_the_allowlist``): ``PRE_ARCHIVE_TABLES`` is the table list before
+(``test_round_trip_keeps_the_allowlist``): ``PRE_CONTRACT_COLUMNS`` is the one d3e4f5a6b7c8
+left (the head's plus the pre-switch evidence INSERT e4f5a6b7c8d9 revoked, kept by every
+earlier revision below); ``PRE_ARCHIVE_TABLES`` is the table list before
 c2d3e4f5a6b7 archived five of them (``ARCHIVED_READS``; at head the web API reads only
 ``ARCHIVE_COLUMNS`` of ``legacy_archive.event_log`` there); ``MATCH_COLUMNS`` the one
 e1f2a3b4c5d7 left, which a downgrade of f9a0b1c2d3e4 restores; ``PREVIOUS_*`` the one
@@ -43,6 +45,7 @@ from .test_trading_state_migration import _reset
 pytestmark = pytest.mark.integration
 
 _PREVIOUS = "c9d0e1f2a3b5"
+_PRE_CONTRACT = "d3e4f5a6b7c8"  # c2d3e4f5a6b7's allowlist, unchanged up to here
 _PREVIOUS_HEAD = "d0e1f2a3b4c6"
 _MATCH_HEAD = "e8f9a0b1c2d3"  # e1f2a3b4c5d7's allowlist, unchanged up to here
 _PRE_ARCHIVE = "b1c2d3e4f5a6"  # f9a0b1c2d3e4's allowlist, unchanged up to here
@@ -155,13 +158,19 @@ EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("uncertainty_resolution_requests", "INSERT"): {
         "request_id", "exchange_account_id", "deployment_environment", "uncertainty_id",
         "venue_offer_id", "action", "decision", "reason", "requested_by", "created_at_ms",
-        "reconcile_event_seq", "observation_id",
+        "observation_id",
     },
     ("venue_offer_mirror", "SELECT"): {
         "exchange_account_id", "deployment_environment", "venue_offer_id", "symbol",
         "amount_original", "amount_remaining", "mts_updated",
         "present_in_latest_accepted_snapshot",
     },
+}
+# Before e4f5a6b7c8d9 revoked it, the web API could still insert the pre-switch evidence column.
+_REQUEST_INSERT = ("uncertainty_resolution_requests", "INSERT")
+PRE_CONTRACT_COLUMNS = {
+    **EXPECTED_COLUMNS,
+    _REQUEST_INSERT: EXPECTED_COLUMNS[_REQUEST_INSERT] | {"reconcile_event_seq"},
 }
 PREVIOUS_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("accepted_capital_basis", "SELECT"): {
@@ -235,10 +244,11 @@ def _held(columns: dict[tuple[str, str], set[str]], *, archived: bool = False) -
     )
 
 
-# e1f2a3b4c5d7's allowlist: the head's without f9a0b1c2d3e4's credit-history grant.
-MATCH_COLUMNS = {key: cols for key, cols in EXPECTED_COLUMNS.items() if key != _CREDIT_ENDS}
+# e1f2a3b4c5d7's allowlist: d3e4f5a6b7c8's without f9a0b1c2d3e4's credit-history grant.
+MATCH_COLUMNS = {key: cols for key, cols in PRE_CONTRACT_COLUMNS.items() if key != _CREDIT_ENDS}
 EXPECTED = _held(EXPECTED_COLUMNS, archived=True)
-PRE_ARCHIVE = _held(EXPECTED_COLUMNS)
+PRE_CONTRACT = _held(PRE_CONTRACT_COLUMNS, archived=True)
+PRE_ARCHIVE = _held(PRE_CONTRACT_COLUMNS)
 MATCH = _held(MATCH_COLUMNS)
 PREVIOUS = _held(PREVIOUS_COLUMNS)
 
@@ -383,7 +393,11 @@ def test_execution_decisions_are_unreadable(head_db) -> None:
 
 def test_round_trip_keeps_the_allowlist(head_db) -> None:
     url, engine, _ = head_db
-    # c2d3e4f5a6b7's downgrade restores f9a0b1c2d3e4's allowlist exactly...
+    # e4f5a6b7c8d9's downgrade gives back the pre-switch evidence INSERT...
+    alembic(url, "downgrade", _PRE_CONTRACT)
+    with engine.connect() as conn:
+        assert _diff(_effective(conn), PRE_CONTRACT) == {"unexpected": [], "missing": []}
+    # ...c2d3e4f5a6b7's restores f9a0b1c2d3e4's allowlist exactly...
     alembic(url, "downgrade", _PRE_ARCHIVE)
     with engine.connect() as conn:
         assert _diff(_effective(conn), PRE_ARCHIVE) == {"unexpected": [], "missing": []}

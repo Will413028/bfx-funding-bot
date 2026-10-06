@@ -571,13 +571,9 @@ class ResolutionIntent:
 
 @dataclass(frozen=True, slots=True)
 class RequestColumns:
-    """The ledger evidence column of a request row: the observation the operator cited.
+    """The ledger evidence column of a request row: the observation the operator cited."""
 
-    Pre-switch rows cite a legacy reconcile event instead (``reconcile_event_seq``, kept for
-    their history); no request the ledger queues or applies has one.
-    """
-
-    observation_id: UUID | None = None
+    observation_id: UUID
 
 
 @dataclass(frozen=True, slots=True)

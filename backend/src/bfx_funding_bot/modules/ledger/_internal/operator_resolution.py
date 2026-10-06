@@ -225,7 +225,6 @@ class LedgerOperatorResolution:
         if intent.action != "manual_resolution":
             assert view.attempt_id is not None
             columns = self.columns(intent.evidence_ref)
-            assert columns.observation_id is not None
             # Legacy refuses a wrong offer or a non-zero match when the request is queued.
             _verdict(intent, await self._preview(session, scope, view.attempt_id, columns.observation_id))
         return self.columns(intent.evidence_ref)
@@ -234,8 +233,6 @@ class LedgerOperatorResolution:
         self, session: AsyncSession, scope: Scope, request: QueuedResolution, *, now_ms: int
     ) -> AppliedResolution:
         intent, observation = request.intent, request.columns.observation_id
-        if observation is None:
-            raise ValueError("ledger request has no observation_id")
         evidence_ref = observation_evidence_ref(observation)
         view, verified = await self._check(session, scope, intent, evidence_ref)
         detail: JsonObject = {
