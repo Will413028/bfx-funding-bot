@@ -21,11 +21,6 @@ import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.diagnostics.tables import DiagnosticsRow
-from bfx_funding_bot.modules.execution.event_store.tables import (
-    EventLogRow,
-    OfferClaimRow,
-    VenueCreditStateRow,
-)
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
 from bfx_funding_bot.modules.ledger.attribution_reads import JournalOfferCell
 from bfx_funding_bot.modules.ledger.tables import (
@@ -45,6 +40,8 @@ from bfx_funding_bot.modules.live_validation.attribution_loader import (
     resolve_offer_cells,
 )
 from bfx_funding_bot.modules.live_validation.tables import (
+    AttributionLegacyOfferLinkRow,
+    AttributionLegacyOpenCreditRow,
     AttributionWeeklyRow,
     FundingCreditHistoryRow,
     FundingInterestPaymentRow,
@@ -101,13 +98,17 @@ def _decision(decision_id: str, cell: str, scid: str = "scid-x") -> ExecutionDec
     )
 
 
-def _claim(voi: str, decision_id: str | None) -> OfferClaimRow:
-    return OfferClaimRow(
-        cid=1, account_id=_ACCT, exchange_account_id=_UUID, deployment_environment=_ENV,
-        state="FILLED", venue_offer_id=voi, symbol="fUST", size_usdt=AMOUNT,
-        signal_correlation_id="scid-x", execution_decision_id=decision_id,
-        occurred_at_ms=CREATED, last_updated_ms=CREATED, last_event_seq=1,
+def _link(source: str, voi: str, decision_id: str | None,
+          scid: str | None) -> AttributionLegacyOfferLinkRow:
+    """A legacy offer link as migration a0b1c2d3e4f5 copied it."""
+    return AttributionLegacyOfferLinkRow(
+        exchange_account_id=_UUID, deployment_environment=_ENV, source=source,
+        venue_offer_id=voi, execution_decision_id=decision_id, signal_correlation_id=scid,
     )
+
+
+def _claim(voi: str, decision_id: str | None) -> AttributionLegacyOfferLinkRow:
+    return _link("claim", voi, decision_id, "scid-x")
 
 
 GROSS_842S = AMOUNT * RATE * Decimal(842_000) / Decimal(_DAY)
@@ -127,12 +128,7 @@ async def test_credit_attributed_through_trade_offer_and_execution_decision(sf):
 async def test_fill_signal_correlation_falls_back_to_diagnostics_decision(sf):
     async with sf() as s:
         s.add_all([_credit(), _trade()])
-        s.add(EventLogRow(
-            account_id=_ACCT, exchange_account_id=_UUID, deployment_environment=_ENV,
-            event_type="ORDER_FILL", venue_offer_id=str(OFFER),
-            payload={"venue_offer_id": str(OFFER), "signal_correlation_id": "scid-old"},
-            occurred_at_ms=CREATED,
-        ))
+        s.add(_link("fill", str(OFFER), None, "scid-old"))
         s.add(DiagnosticsRow(
             account_id=_ACCT, exchange_account_id=_UUID, deployment_environment=_ENV,
             kind="decision", payload={"cell": "fUST_a30", "correlation_id": "scid-old"},
@@ -146,11 +142,10 @@ async def test_fill_signal_correlation_falls_back_to_diagnostics_decision(sf):
 async def test_unmatched_credit_and_open_credit_are_unattributed_and_accrue(sf):
     async with sf() as s:
         s.add(_credit(1, amount=Decimal("99")))            # no trade
-        s.add(VenueCreditStateRow(
+        s.add(AttributionLegacyOpenCreditRow(
             exchange_account_id=_UUID, deployment_environment=_ENV, credit_id="loan:7",
             symbol="fUST", amount=Decimal("100"), rate=Decimal("0.0002"), period_days=2,
-            status="ACTIVE", flags={}, mts_created=NOW - _DAY, mts_updated=NOW - _DAY,
-            first_seen_event_seq=1, last_seen_event_seq=1, is_terminal=False,
+            mts_created=NOW - _DAY,
         ))
         await s.commit()
     result = await load_and_compute(sf, account_id=_ACCT, deployment_environment=_ENV, now_ms=NOW)
@@ -218,6 +213,26 @@ def test_reconciliation_weeks_wait_for_tuesday_payouts():
     monday_run = _MON + 7 * _DAY + 4 * 3_600_000       # Mon 04:00Z after the week
     assert reconciliation_weeks(monday_run, 1) == [_MON - 7 * _DAY]
     assert reconciliation_weeks(monday_run + 2 * _DAY, 1) == [_MON]
+
+
+async def test_legacy_links_keep_the_legacy_source_precedence(sf):
+    """Two sources name one offer by signal correlation only, in different cells: the earlier
+    legacy source (venue offer before fill) wins whatever order the rows were written in, and
+    an audited decision of a later source still overrides both."""
+    async with sf() as s:
+        s.add_all([_credit(), _trade(), _link("fill", str(OFFER), None, "scid-fill"),
+                   _link("venue_offer", str(OFFER), None, "scid-vo"),
+                   _decision("d-fill", "fUST_a30", scid="scid-fill"),
+                   _decision("d-vo", "fUST_p2", scid="scid-vo")])
+        await s.commit()
+    assert await _attributed_cells(sf) == {"fUST_p2"}
+    async with sf() as s:
+        s.add_all([_link("claim", str(OFFER), "d-claim", "scid-x"),
+                   _link("venue_offer", str(OFFER), "d-late", None),
+                   _decision("d-claim", "fUST_p7", scid="scid-claim"),
+                   _decision("d-late", "fUST_p30", scid="scid-late")])
+        await s.commit()
+    assert await _attributed_cells(sf) == {"fUST_p30"}  # the last audited decision
 
 
 def test_audited_decision_wins_over_signal_correlation():
@@ -455,12 +470,10 @@ def _mirror(credit_id: str, *, terminal: bool = False, present: bool = True, kin
     )
 
 
-def _legacy_open(credit_id: str, *, created: int = CREATED) -> VenueCreditStateRow:
-    return VenueCreditStateRow(
+def _legacy_open(credit_id: str, *, created: int = CREATED) -> AttributionLegacyOpenCreditRow:
+    return AttributionLegacyOpenCreditRow(
         exchange_account_id=_UUID, deployment_environment=_ENV, credit_id=credit_id,
-        symbol="fUST", amount=AMOUNT, rate=RATE, period_days=2, status="ACTIVE", flags={},
-        mts_created=created, mts_updated=created, first_seen_event_seq=1,
-        last_seen_event_seq=1, is_terminal=False,
+        symbol="fUST", amount=AMOUNT, rate=RATE, period_days=2, mts_created=created,
     )
 
 

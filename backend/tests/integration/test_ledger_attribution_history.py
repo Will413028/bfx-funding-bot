@@ -24,6 +24,7 @@ from bfx_funding_bot.modules.live_validation.tables import (
 )
 
 from .bot_e2e import CELL, SCOPE, T0, BotEnv, bot_env, ledger_db  # noqa: F401 - fixtures
+from .legacy_attribution_links import materialize
 from .seed_e2e import (
     CELL_B,
     acked,
@@ -97,6 +98,9 @@ async def test_weekly_is_unchanged_by_the_switch_and_attributes_journal_only_off
 ) -> None:
     env = bot_env
     await run_legacy(env, unknown=False)
+    # The legacy rows exist now; the weekly reads them through the migration's copy (on the VM
+    # the copy ran after the switch froze them).
+    await materialize(env.factory)
     async with env.factory.begin() as session:
         session.add_all([
             # 7004's credit, ended: trade 9004 (inserted by run_legacy) -> offer 7004 -> CELL

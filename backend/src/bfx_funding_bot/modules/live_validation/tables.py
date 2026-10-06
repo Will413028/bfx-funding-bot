@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -178,3 +179,70 @@ class FundingTradeRow(Base):
             "exchange_account_id", "deployment_environment", "symbol", "mts_create",
         ),
     )
+
+
+# Precedence of the legacy link sources, as the weekly read them before S1-8: offer claims,
+# then the venue-offer projection, then ORDER_FILL events (resolve_offer_cells keeps the last
+# audited decision and the first signal-correlation fallback, so the order is part of the input).
+LEGACY_LINK_SOURCES = ("claim", "venue_offer", "fill")
+
+
+class AttributionLegacyOfferLinkRow(Base):
+    """What the frozen legacy authority recorded about one of our venue offers (S1-8).
+
+    The legacy offer -> decision / signal-correlation links the weekly attribution resolves to
+    a cell, copied once by migration ``a0b1c2d3e4f5`` from ``offer_claims``,
+    ``venue_offer_state`` and the ``ORDER_FILL`` events of ``event_log`` (frozen since the
+    authority switch), so attribution no longer reads those tables. Distinct per source;
+    offers placed after the switch are in the ledger journal instead. Owner-written only;
+    the weekly (``bfx_bot``) reads it.
+    """
+
+    __tablename__ = "attribution_legacy_offer_links"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), primary_key=True, autoincrement=True,
+    )
+    exchange_account_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    venue_offer_id: Mapped[str] = mapped_column(Text, nullable=False)
+    execution_decision_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    signal_correlation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "source IN ('claim', 'venue_offer', 'fill')",
+            name="ck_attribution_legacy_offer_links_source",
+        ),
+        CheckConstraint(
+            "venue_offer_id <> ''", name="ck_attribution_legacy_offer_links_offer",
+        ),
+        UniqueConstraint(
+            "exchange_account_id", "deployment_environment", "source", "venue_offer_id",
+            "execution_decision_id", "signal_correlation_id",
+            name="uq_attribution_legacy_offer_links",
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
+
+
+class AttributionLegacyOpenCreditRow(Base):
+    """A credit or loan the legacy authority last saw open, with complete terms (S1-8).
+
+    Copied once by migration ``a0b1c2d3e4f5`` from the non-terminal ``venue_credit_state``
+    rows that have a rate, period and creation time (the weekly could not use the others).
+    Read only for a credit neither ``funding_credit_history`` nor the ledger mirror knows.
+    ``credit_id`` keeps the legacy form (``loan:<id>`` for a loan).
+    """
+
+    __tablename__ = "attribution_legacy_open_credits"
+
+    exchange_account_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
+    credit_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    rate: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    period_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    mts_created: Mapped[int] = mapped_column(BigInteger, nullable=False)

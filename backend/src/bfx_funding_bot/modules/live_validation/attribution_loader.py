@@ -5,14 +5,16 @@ Since 2026-09-27 the per-cell numbers come from venue credit records, not from
 ORDER_FILL × held-to-term capped by CREDIT_CLOSED (whose rate/period/close were
 parsed one slot late until then). Inputs, all read-only:
 - funding_credit_history (ended credits/loans: rate, period, opening, actual
-  close) + venue_credit_state (legacy) and venue_credit_mirror (ledger) for the
-  credits/loans still open: per-credit truth;
-- funding_trades (credit → our offer id) + offer_claims / venue_offer_state /
-  ORDER_FILL (offer → execution decision / signal correlation id) +
-  execution_decisions / diagnostics DECISION (→ cell); after the authority
-  switch new offers exist only in the ledger journal (acknowledged or bound-to-venue
-  attempts, cell from the attempt), read through the ledger's attribution port and unioned with
-  the legacy links (a disagreement is reported, never picked);
+  close) + attribution_legacy_open_credits (what the legacy authority last saw open)
+  and venue_credit_mirror (ledger) for the credits/loans still open: per-credit truth;
+- funding_trades (credit → our offer id) + attribution_legacy_offer_links (offer →
+  execution decision / signal correlation id, as the legacy offer_claims /
+  venue_offer_state / ORDER_FILL recorded them; copied once by migration a0b1c2d3e4f5
+  because those tables are frozen and leave public in S1-8) + execution_decisions /
+  diagnostics DECISION (→ cell); after the authority switch new offers exist only in the
+  ledger journal (acknowledged or bound-to-venue attempts, cell from the attempt), read
+  through the ledger's attribution port and unioned with the legacy links (a disagreement
+  is reported, never picked);
 - funding_interest_payments (the ledger) for the weekly reconciliation;
 - funding_candles / funding_stats for the baselines.
 Matching, accrual and the reconciliation window: modules/live_validation/
@@ -30,8 +32,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import case, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.external.bitfinex.auth_rest import LOAN_ID_PREFIX, InterestPayment
@@ -42,12 +45,6 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.diagnostics.tables import DiagnosticsRow
-from bfx_funding_bot.modules.execution.event_store.tables import (
-    EventLogRow,
-    OfferClaimRow,
-    VenueCreditStateRow,
-    VenueOfferStateRow,
-)
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
 from bfx_funding_bot.modules.ledger import Scope
@@ -76,6 +73,9 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     frr_points_from_stats,
 )
 from bfx_funding_bot.modules.live_validation.tables import (
+    LEGACY_LINK_SOURCES,
+    AttributionLegacyOfferLinkRow,
+    AttributionLegacyOpenCreditRow,
     AttributionWeeklyRow,
     FundingCreditHistoryRow,
     FundingInterestPaymentRow,
@@ -90,7 +90,6 @@ from bfx_funding_bot.modules.live_validation.weekly_attribution import (
 
 log = logging.getLogger(__name__)
 
-_FILL_TYPE = "ORDER_FILL"
 _DECISION_KIND = "decision"
 _MARKET_SYMBOL = "fUST"
 _MARKET_PERIOD_AGG = "p2"
@@ -219,14 +218,38 @@ def credit_from_history(r: FundingCreditHistoryRow) -> CreditLifetime:
     )
 
 
-def open_credit(r: VenueCreditStateRow) -> CreditLifetime | None:
-    if r.mts_created is None or r.rate is None or r.period_days is None:
-        return None
-    return CreditLifetime(
+async def legacy_offer_links(
+    session: AsyncSession, account_uuid: UUID, deployment_environment: str,
+) -> list[OfferLink]:
+    """The legacy authority's offer links, in its source precedence (claims, venue offers,
+    fills; ``LEGACY_LINK_SOURCES``) and then a fixed order within a source."""
+    t = AttributionLegacyOfferLinkRow
+    rank = case({source: i for i, source in enumerate(LEGACY_LINK_SOURCES)}, value=t.source)
+    rows = await session.execute(select(
+        t.venue_offer_id, t.execution_decision_id, t.signal_correlation_id,
+    ).where(
+        t.exchange_account_id == account_uuid,
+        t.deployment_environment == deployment_environment,
+    ).order_by(rank, t.venue_offer_id, t.execution_decision_id.nulls_first(),
+               t.signal_correlation_id.nulls_first()))
+    return [OfferLink(voi, edid, scid) for voi, edid, scid in rows.tuples()]
+
+
+async def legacy_open_credits(
+    session: AsyncSession, account_uuid: UUID, deployment_environment: str,
+) -> list[CreditLifetime]:
+    """The credits the legacy authority last saw open (complete terms only), as lifetimes
+    opened at their creation (legacy rows have no venue opening)."""
+    t = AttributionLegacyOpenCreditRow
+    rows = (await session.scalars(select(t).where(
+        t.exchange_account_id == account_uuid,
+        t.deployment_environment == deployment_environment,
+    ).order_by(t.credit_id))).all()
+    return [CreditLifetime(
         credit_id=r.credit_id, symbol=r.symbol, amount=abs(Decimal(r.amount)),
         rate=Decimal(r.rate), period_days=int(r.period_days), mts_create=int(r.mts_created),
         opened_ms=int(r.mts_created), closed_ms=None,
-    )
+    ) for r in rows]
 
 
 def mirror_credit(m: MirrorCredit) -> CreditLifetime | None:
@@ -298,34 +321,12 @@ async def load_credit_inputs(
         FundingCreditHistoryRow.exchange_account_id == account_uuid,
         FundingCreditHistoryRow.deployment_environment == env,
     ))).all()
-    open_rows = (await session.scalars(select(VenueCreditStateRow).where(
-        VenueCreditStateRow.exchange_account_id == account_uuid,
-        VenueCreditStateRow.deployment_environment == env,
-        VenueCreditStateRow.is_terminal.is_(False),
-    ))).all()
+    legacy_open = await legacy_open_credits(session, account_uuid, env)
     trade_rows = (await session.scalars(select(FundingTradeRow).where(
         FundingTradeRow.exchange_account_id == account_uuid,
         FundingTradeRow.deployment_environment == env,
     ))).all()
-    claims = (await session.execute(select(
-        OfferClaimRow.venue_offer_id, OfferClaimRow.execution_decision_id,
-        OfferClaimRow.signal_correlation_id,
-    ).where(
-        OfferClaimRow.exchange_account_id == account_uuid,
-        OfferClaimRow.deployment_environment == env,
-        OfferClaimRow.venue_offer_id.is_not(None),
-    ))).all()
-    venue_offers = (await session.execute(select(
-        VenueOfferStateRow.venue_offer_id, VenueOfferStateRow.execution_decision_id,
-        VenueOfferStateRow.signal_correlation_id,
-    ).where(
-        VenueOfferStateRow.exchange_account_id == account_uuid,
-        VenueOfferStateRow.deployment_environment == env,
-    ))).all()
-    fills = (await session.scalars(select(EventLogRow).where(
-        EventLogRow.event_type == _FILL_TYPE, scoped(EventLogRow),
-        EventLogRow.deployment_environment == env,
-    ))).all()
+    links = await legacy_offer_links(session, account_uuid, env)
     decisions = (await session.execute(select(
         ExecutionDecisionRow.decision_id, ExecutionDecisionRow.signal_correlation_id,
         ExecutionDecisionRow.cell_id,
@@ -363,11 +364,10 @@ async def load_credit_inputs(
         if lifetime is not None and lifetime.credit_id not in seen:
             credits.append(lifetime)
             seen.add(lifetime.credit_id)
-    for r in open_rows:
-        if r.credit_id in known_to_mirror:
+    for still_open in legacy_open:
+        if still_open.credit_id in known_to_mirror:
             continue
-        still_open = open_credit(r)
-        if still_open is not None and still_open.credit_id not in seen:
+        if still_open.credit_id not in seen:
             credits.append(still_open)
 
     trades = [TradeRecord(
@@ -381,12 +381,6 @@ async def load_credit_inputs(
         if d.payload.get("correlation_id") and d.payload.get("cell")
     }
     cell_by_scid.update({scid: cell for _id, scid, cell in decisions})
-    links = [OfferLink(str(voi), edid, scid) for voi, edid, scid in claims]
-    links += [OfferLink(voi, edid, scid) for voi, edid, scid in venue_offers]
-    links += [OfferLink(
-        str(f.payload.get("venue_offer_id") or f.venue_offer_id or ""), None,
-        str(f.payload.get("signal_correlation_id") or "") or None,
-    ) for f in fills]
     offer_cells, offer_conflicts = merge_offer_cells(
         resolve_offer_cells(
             links, cell_by_decision={did: cell for did, _scid, cell in decisions},
