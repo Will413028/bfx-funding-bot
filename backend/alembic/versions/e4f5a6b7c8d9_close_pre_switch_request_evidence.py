@@ -9,7 +9,8 @@ appended). This revision takes away what still lets anyone write them:
 * drops ``uncertainty_request_evidence_epoch`` and its function
   ``guard_uncertainty_request_evidence_epoch`` (``b8c9d0e1f2a4``): its observation branch is
   dead (every database at head has a ``ledger`` epoch since the genesis of ``b1c2d3e4f5a6``)
-  and its reconcile branch is replaced by the two rules below, which hold for the owner too;
+  and its reconcile branch is replaced by the NOT NULL below, which (with the evidence CHECK)
+  holds for the owner too; the revoke covers only non-owner roles;
 * revokes every column privilege on the two columns (the web API's INSERT and the account
   writer's UPDATE from ``1c435a35dcb4``, and any an environment added);
 * makes ``observation_id`` NOT NULL. With ``ck_uncertainty_resolution_requests_evidence``
