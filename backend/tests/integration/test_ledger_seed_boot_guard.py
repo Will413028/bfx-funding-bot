@@ -1,21 +1,21 @@
-"""``require_ledger_seed`` (H-1) on clone PostgreSQL: a scope with legacy history boots the
-real venue only over its ``legacy_seed`` observation; without history no seed is needed.
-
-Legacy history is a frozen ``event_log`` row of the scope's exchange account in its
-environment. (The database holds ``event_log.exchange_account_id`` NOT NULL since the
-identity contract, ``9b2c3d4e5f6a``: no row is unattributed.)
+"""``require_ledger_seed`` (H-1) on clone PostgreSQL: the real venue boots on the latest
+``ledger`` epoch by its writer -- the genesis migration needs no seed, the S1-7 switch needs
+every scope's ``legacy_seed`` observation, and any other writer refuses. It reads the epoch and
+the ledger only, never the frozen legacy tables.
 
 Mutation checks (one at a time; revert after each):
 
-* Return ``True`` from ``has_legacy_history`` (the guard keyed on nothing but the seed again):
-  ``test_a_scope_without_legacy_history_needs_no_seed`` and
-  ``test_history_of_another_scope_or_environment_is_not_the_scopes`` fail.
-* Drop the exchange-account filter of ``has_legacy_history``:
-  ``test_history_of_another_scope_or_environment_is_not_the_scopes`` fails.
+* Let an unknown writer through (drop the ``SWITCH_ACTOR_PREFIX`` refusal):
+  ``test_an_epoch_written_by_anyone_else_refuses`` fails.
+* Skip the seed lookup after a switch epoch:
+  ``test_a_switch_epoch_needs_every_scopes_seed`` fails.
+* Require the seed after the genesis epoch too:
+  ``test_the_genesis_epoch_needs_no_seed`` fails.
 """
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 from uuid import UUID
 
 import pytest
@@ -23,11 +23,16 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from bfx_funding_bot.apps.authority_support import has_legacy_history, require_ledger_seed
+from bfx_funding_bot.apps import ledger_seed
+from bfx_funding_bot.apps.authority_support import (
+    GENESIS_ACTOR,
+    SWITCH_ACTOR_PREFIX,
+    require_ledger_seed,
+)
 from bfx_funding_bot.core.authority import AuthorityMismatch
+from bfx_funding_bot.core.schema_head import ALEMBIC_DIR
 from bfx_funding_bot.core.venue import Venue
 from bfx_funding_bot.modules.ledger import Scope
-from tests.pg_templates import disable_realm_triggers
 
 from .test_ledger_schema_roles import _A, _build, _seed
 from .test_ledger_seed_schema import _owner_seed_observation
@@ -35,7 +40,8 @@ from .test_ledger_seed_schema import _owner_seed_observation
 pytestmark = pytest.mark.integration
 
 SCOPE = Scope(UUID(_A), "ci")
-OTHER = "00000000-0000-0000-0000-00000000b001"
+OTHER = Scope(UUID("00000000-0000-0000-0000-00000000b001"), "ci")
+SWITCH = f"{SWITCH_ACTOR_PREFIX}switch-20261005T182054Z-fe1cc4-a1"  # prod's shape
 
 
 @pytest.fixture
@@ -45,82 +51,87 @@ def db(pg_templates, pg_clone):
     with engine.begin() as conn:
         _seed(conn)  # the scope's exchange account and one row per ledger table
         conn.exec_driver_sql(
-            f"INSERT INTO exchange_accounts(id,venue,label) VALUES ('{OTHER}','bitfinex','other')")
+            f"INSERT INTO exchange_accounts(id,venue,label) VALUES "
+            f"('{OTHER.exchange_account_id}','bitfinex','other')")
     try:
         yield engine
     finally:
         engine.dispose()
 
 
-def _event(engine: Engine, account: str, environment: str = "ci") -> None:
+def _epoch(engine: Engine, authority: str, actor: str) -> None:
     with engine.begin() as conn:
         conn.exec_driver_sql(
-            "INSERT INTO event_log(account_id, exchange_account_id, deployment_environment, "
-            f"event_type, payload, occurred_at_ms) VALUES ('{account}', '{account}', "
-            f"'{environment}', 'x', '{{}}', 1)")
+            "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
+            f"SELECT max(epoch_seq) + 1, '{authority}', 1, '{actor}', 'test' "
+            "FROM capital_authority_epoch")
 
 
 def _seeded(engine: Engine) -> None:
     with engine.begin() as conn:
-        _owner_seed_observation(conn)
+        _owner_seed_observation(conn)  # scope ``SCOPE``
 
 
-def _guard(engine: Engine, *, venue: Venue = "bitfinex") -> bool:
-    """Run the guard for ``SCOPE``; True when it lets the boot through."""
+def _guard(engine: Engine, *, venue: Venue = "bitfinex",
+           scopes: tuple[Scope, ...] = (SCOPE,)) -> str | None:
+    """Run the guard; the refusal text, or None when it lets the boot through."""
     url = engine.url.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
 
-    async def run() -> bool:
+    async def run() -> str | None:
         async_engine = create_async_engine(url)
         try:
             async with AsyncSession(async_engine) as session:
                 try:
-                    await require_ledger_seed(session, venue=venue, scopes=(SCOPE,))
+                    await require_ledger_seed(session, venue=venue, scopes=scopes)
                 except AuthorityMismatch as exc:
-                    assert str(exc) == f"ledger_seed_missing scope={_A}:ci"
-                    return False
-                return True
+                    return str(exc)
+                return None
         finally:
             await async_engine.dispose()
 
     return asyncio.run(run())
 
 
-def _history(engine: Engine) -> bool:
-    url = engine.url.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
-
-    async def run() -> bool:
-        async_engine = create_async_engine(url)
-        try:
-            async with AsyncSession(async_engine) as session:
-                return await has_legacy_history(session, SCOPE)
-        finally:
-            await async_engine.dispose()
-
-    return asyncio.run(run())
+def test_the_writers_are_the_ones_that_append_epochs() -> None:
+    assert SWITCH_ACTOR_PREFIX == ledger_seed.SWITCH_ACTOR_PREFIX
+    [path] = (ALEMBIC_DIR / "versions").glob("b1c2d3e4f5a6_*.py")
+    spec = importlib.util.spec_from_file_location("genesis_migration", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert GENESIS_ACTOR == module.ACTOR
 
 
-def test_legacy_history_without_the_seed_refuses_and_with_it_boots(db) -> None:
-    _event(db, _A)
-    assert _history(db) is True
-    assert _guard(db) is False
-    _seeded(db)
-    assert _guard(db) is True
-
-
-def test_a_scope_without_legacy_history_needs_no_seed(db) -> None:
+def test_the_genesis_epoch_needs_no_seed(db) -> None:
     """A fresh host: whatever rests at the venue is foreign to the ledger."""
-    assert _history(db) is False
-    assert _guard(db) is True
+    assert _guard(db) is None
+    assert _guard(db, scopes=(SCOPE, OTHER)) is None
 
 
-def test_history_of_another_scope_or_environment_is_not_the_scopes(db) -> None:
-    _event(db, OTHER)
-    disable_realm_triggers(db)  # plant a row of another realm on purpose, on this clone
-    _event(db, _A, "prod")
-    assert _history(db) is False
-    assert _guard(db) is True
+def test_a_switch_epoch_needs_every_scopes_seed(db) -> None:
+    _epoch(db, "ledger", SWITCH)
+    assert _guard(db) == f"ledger_seed_missing scope={_A}:ci"
+    _seeded(db)
+    assert _guard(db) is None
+    # Another scope's seed is not this one's.
+    assert _guard(db, scopes=(SCOPE, OTHER)) == (
+        f"ledger_seed_missing scope={OTHER.exchange_account_id}:ci")
+
+
+@pytest.mark.parametrize("actor", ["bootstrap_simulation_db", "test", "ledger_seed"])
+def test_an_epoch_written_by_anyone_else_refuses(db, actor: str) -> None:
+    _seeded(db)
+    _epoch(db, "ledger", actor)
+    assert _guard(db) == f"ledger_epoch_writer_unknown actor={actor!r}"
+
+
+def test_a_legacy_epoch_refuses(db) -> None:
+    _epoch(db, "legacy", "test")
+    assert _guard(db) == "authority_unsupported value=legacy build=ledger"
 
 
 def test_the_simulated_venue_never_needs_the_seed(db) -> None:
-    _event(db, _A)
-    assert _guard(db, venue="simulated") is True
+    _epoch(db, "ledger", SWITCH)
+    assert _guard(db, venue="simulated") is None
+    _epoch(db, "ledger", "bootstrap_simulation_db")
+    assert _guard(db, venue="simulated") is None

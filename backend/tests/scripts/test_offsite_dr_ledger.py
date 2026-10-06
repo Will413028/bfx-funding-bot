@@ -554,9 +554,7 @@ def test_bootstrap_grants_are_per_mode() -> None:
     drill._bootstrap_role(plan, "DATABASE-PASSWORD-SENTINEL")
     drill._bootstrap_role(plan, "DATABASE-PASSWORD-SENTINEL", ledger=True)
     assert 'public."event_log"' in seen[0] and "ALL TABLES" not in seen[0]
-    assert "ALL TABLES" not in seen[1]
-    # The ledger role reads one legacy table, the seed guard's event_log, and no other.
-    assert "offer_claims" not in seen[1] and "position_state" not in seen[1]
+    assert "ALL TABLES" not in seen[1] and "event_log" not in seen[1]
     # The ledger grant is exactly the verifier list, derived from the digest rules.
     granted = re.search(r"ARRAY\[(.*?)\] LOOP", seen[1])
     assert granted is not None
@@ -567,8 +565,7 @@ def test_the_verifier_reads_the_ledger_and_the_boot_check_extras_only() -> None:
     expected = (*ledger.RULES, *ledger.MUTABLE_TABLES, *ledger.BOOT_CHECK_EXTRA_TABLES)
     assert expected == ledger.VERIFIER_TABLES
     assert set(ledger.BOOT_CHECK_EXTRA_TABLES) == {
-        "alembic_version", "database_realm", "capital_policy_heads", "capital_policy_revisions",
-        "event_log"}
+        "alembic_version", "database_realm", "capital_policy_heads", "capital_policy_revisions"}
 
 
 def test_every_read_is_bounded_on_the_server() -> None:

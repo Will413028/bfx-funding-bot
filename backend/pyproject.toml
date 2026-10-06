@@ -652,6 +652,8 @@ type = "forbidden"
 # What remains of the legacy authority after S1-8 serves only the baseline restore drill's replay
 # (scripts/verify_projection_replay.py) and the switch scaffolding (capital comparison,
 # seed); both go in later steps. The processes that lend and serve must not grow back into it.
+# The frozen tables (event_store.tables) are read only outside these sources: the archived
+# execution history (modules.execution.archived_execution_history), the scaffolding and the drill.
 source_modules = [
     "bfx_funding_bot.apps.authority_support",
     "bfx_funding_bot.apps.bot",
@@ -671,6 +673,7 @@ forbidden_modules = [
     "bfx_funding_bot.modules.execution.event_store.projector",
     "bfx_funding_bot.modules.execution.event_store.replay_verification",
     "bfx_funding_bot.modules.execution.event_store.store",
+    "bfx_funding_bot.modules.execution.event_store.tables",
     "bfx_funding_bot.modules.execution.event_store.writer",
     "bfx_funding_bot.modules.execution.registry_offers",
 ]

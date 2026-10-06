@@ -29,6 +29,7 @@ async def stamp_schema_head(engine: AsyncEngine, *, realm: str | None = None) ->
 
     from sqlalchemy import inspect, text
 
+    from bfx_funding_bot.apps.authority_support import GENESIS_ACTOR
     from bfx_funding_bot.core.schema_head import build_head
     realm = realm or os.environ.get("BFX_DEPLOYMENT_ENV", "").strip() or "ci"
     async with engine.begin() as conn:
@@ -43,8 +44,9 @@ async def stamp_schema_head(engine: AsyncEngine, *, realm: str | None = None) ->
                 "WHERE NOT EXISTS (SELECT 1 FROM capital_authority_epoch)"))
             await conn.execute(text(
                 "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-                "SELECT 2, 'ledger', 0, 'test', 'genesis: no legacy history' "
-                "WHERE (SELECT max(epoch_seq) FROM capital_authority_epoch) = 1"))
+                "SELECT 2, 'ledger', 0, :actor, 'genesis: no legacy history' "
+                "WHERE (SELECT max(epoch_seq) FROM capital_authority_epoch) = 1"),
+                {"actor": GENESIS_ACTOR})
         if await conn.run_sync(lambda sync: inspect(sync).has_table("database_realm")):
             await conn.execute(text(
                 "INSERT INTO database_realm (realm, stamped_at_ms, actor) "

@@ -15,8 +15,9 @@ Mutation checks (one at a time; revert after each):
 * the cycle effects are left off: ``test_the_daemon_observes_through_cycle_effects``.
 * the bot accepts a database whose latest epoch is ``legacy``:
   ``test_a_legacy_epoch_refuses_either_venue``.
-* ``require_ledger_seed`` is not called in ``build_daemon``, or its history check is dropped:
-  ``test_a_scope_with_legacy_history_boots_only_over_its_seed``.
+* ``require_ledger_seed`` is not called in ``build_daemon``:
+  ``test_a_switched_database_boots_only_over_the_scopes_seed`` and
+  ``test_an_epoch_from_an_unknown_writer_refuses_the_real_venue``.
 """
 from __future__ import annotations
 
@@ -182,12 +183,12 @@ async def _db(monkeypatch, tmp_path, httpx_mock, *, realm: str):
     return engine, factory, path
 
 
-async def _legacy_history(factory, *, account=TEST_EXCHANGE_ACCOUNT_ID, realm: str = "prod") -> None:
+async def _epoch(factory, actor: str) -> None:
     async with factory.begin() as session:
         await session.execute(text(
-            "INSERT INTO event_log (account_id, exchange_account_id, deployment_environment, "
-            "event_type, payload, occurred_at_ms) VALUES (:a, :e, :r, 'x', '{}', 1)"),
-            {"a": str(account), "e": str(account).replace("-", ""), "r": realm})
+            "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
+            "SELECT max(epoch_seq) + 1, 'ledger', 3, :actor, 'test' FROM capital_authority_epoch"),
+            {"actor": actor})
 
 
 async def _observation(factory, *, origin: str, account=TEST_EXCHANGE_ACCOUNT_ID,
@@ -211,7 +212,7 @@ async def _observation(factory, *, origin: str, account=TEST_EXCHANGE_ACCOUNT_ID
 
 @pytest.mark.asyncio
 async def test_the_real_epoch_boots_bitfinex_on_the_ledger(monkeypatch, tmp_path, httpx_mock) -> None:
-    """The real epoch read (no monkeypatch); ``ci`` has no legacy history, so no seed."""
+    """The real epoch read (no monkeypatch); the genesis epoch needs no seed."""
     from bfx_funding_bot.apps.bot import build_daemon
 
     assert frozenset({"ledger"}) == SUPPORTED
@@ -249,11 +250,11 @@ async def test_a_legacy_epoch_refuses_either_venue(monkeypatch, tmp_path, httpx_
 
 
 @pytest.mark.asyncio
-async def test_a_scope_with_legacy_history_boots_only_over_its_seed(
+async def test_a_switched_database_boots_only_over_the_scopes_seed(
     monkeypatch, tmp_path, httpx_mock,
 ) -> None:
-    """H-1: a scope with legacy history boots the ledger only over its seed observation; a
-    runtime (``venue``) observation or another scope's seed is not it."""
+    """H-1: after the switch's epoch the scope boots only over its seed observation; a runtime
+    (``venue``) observation or another scope's seed is not it. The genesis epoch needs none."""
     from uuid import UUID
 
     from bfx_funding_bot.apps import bot
@@ -263,9 +264,8 @@ async def test_a_scope_with_legacy_history_boots_only_over_its_seed(
     monkeypatch.setattr(bot, "_refuse_live_boot", _recording(refused))
     engine, factory, path = await _db(monkeypatch, tmp_path, httpx_mock, realm="prod")
     try:
-        # Without legacy history the boot needs no seed.
-        await build_daemon(cells_yaml_path=path, skip_ws=True)
-        await _legacy_history(factory)
+        await build_daemon(cells_yaml_path=path, skip_ws=True)  # the genesis epoch: no seed
+        await _epoch(factory, "ledger_seed:switch-20261005T182054Z-fe1cc4-a1")
         await _observation(factory, origin="venue")
         await _observation(factory, origin="legacy_seed",
                            account=UUID("00000000-0000-0000-0000-0000000000ff"))
@@ -277,6 +277,25 @@ async def test_a_scope_with_legacy_history_boots_only_over_its_seed(
         daemon = await build_daemon(cells_yaml_path=path, skip_ws=True)
         assert isinstance(daemon.boot_recovery, LedgerCycleEffects)
         assert len(refused) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_epoch_from_an_unknown_writer_refuses_the_real_venue(
+    monkeypatch, tmp_path, httpx_mock,
+) -> None:
+    from bfx_funding_bot.apps import bot
+    from bfx_funding_bot.apps.bot import build_daemon
+
+    refused: list[str] = []
+    monkeypatch.setattr(bot, "_refuse_live_boot", _recording(refused))
+    engine, factory, path = await _db(monkeypatch, tmp_path, httpx_mock, realm="prod")
+    try:
+        await _epoch(factory, "bootstrap_simulation_db")
+        with pytest.raises(AuthorityMismatch, match="ledger_epoch_writer_unknown"):
+            await build_daemon(cells_yaml_path=path, skip_ws=True)
+        assert refused == ["ledger_epoch_writer_unknown actor='bootstrap_simulation_db'"]
     finally:
         await engine.dispose()
 
