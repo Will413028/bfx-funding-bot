@@ -5,8 +5,7 @@ cid = int(blake2b(correlation_id_bytes + utc_date_iso_bytes, digest_size=8)) & 0
 NOT sent to Bitfinex: the funding-offer submit API has no cid field (only trading
 orders do), so this is purely an internal idempotency/correlation key. It ties a
 journaled submit attempt to its outcome — see AccountCommandGate. The int63 /
-positive shape mirrors Bitfinex's
-historical cid format for consistency, nothing more.
+positive shape mirrors Bitfinex's historical cid format for consistency, nothing more.
 
 Determinism: same (correlation_id, UTC date) → same cid, so a crashed submit's
 PENDING intent is recoverable at boot. The UTC date gives a daily window (cross-day
