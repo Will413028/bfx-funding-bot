@@ -139,10 +139,13 @@ _CORE_TABLES = frozenset({
 })
 LEDGER_TABLES = (*RULES, *MUTABLE_TABLES)
 # What the image's boot check (ledger_boot_check.py) reads besides the ledger: the schema head,
-# the realm stamp and the capital policy the capital reader folds. The drill's per-run verifier
-# role gets SELECT on exactly these and the ledger tables, nothing else.
+# the realm stamp, the capital policy the capital reader folds, and the frozen ``event_log`` the
+# seed guard keys on since S1-8 PR-C (a scope with legacy history needs its seed; an older image
+# never reads it). The drill's per-run verifier role gets SELECT on exactly these and the ledger
+# tables, nothing else.
 BOOT_CHECK_EXTRA_TABLES = (
     "alembic_version", "database_realm", "capital_policy_heads", "capital_policy_revisions",
+    "event_log",
 )
 VERIFIER_TABLES = (*LEDGER_TABLES, *BOOT_CHECK_EXTRA_TABLES)
 _SCOPE_OWNERS = (

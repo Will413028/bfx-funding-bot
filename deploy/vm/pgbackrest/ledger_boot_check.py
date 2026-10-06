@@ -16,10 +16,16 @@ READ ONLY transaction:
    query is still pending (the restore point fell inside an observation cycle).
 
 Prints one JSON line {"boot": {...}}; exit 3 with {"error": <bounded code>} on a refusal.
+
+Cross-version: the deploy's restore-test gate pipes the TARGET release's copy of this file into
+the CURRENTLY DEPLOYED image, so it must run against the image's API as well as its own. Where
+that API changed it feature-detects (no version strings): ``require_ledger_seed`` took an
+``authority`` keyword before S1-8 PR-C and keys on legacy history without it since.
 """
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -147,9 +153,11 @@ async def _check(database_url: str) -> dict[str, object]:
                 raise RefusedError("boot_ledger_empty")
             if any(scope.deployment_environment != realm for scope in scopes):
                 raise RefusedError("boot_realm_mismatch")
+            seed_guard: dict[str, Any] = {"venue": VENUE, "scopes": tuple(scopes)}
+            if "authority" in inspect.signature(require_ledger_seed).parameters:
+                seed_guard["authority"] = authority  # the image predates S1-8 PR-C
             try:
-                await require_ledger_seed(session, authority=authority, venue=VENUE,
-                                          scopes=tuple(scopes))
+                await require_ledger_seed(session, **seed_guard)
             except AuthorityMismatch:
                 raise RefusedError("boot_seed_missing") from None
             checked: list[dict[str, object]] = []

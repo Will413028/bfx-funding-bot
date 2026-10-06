@@ -88,10 +88,10 @@ def _outcome_sql(attempt_id: str) -> str:
     )
 
 
-def _template(url: str) -> None:
-    """The ledger at the restore point: one accepted observation + basis, every table filled,
-    one attempt still without an outcome, the epoch switched to the ledger."""
-    _build(url)
+def restore_point(url: str) -> None:
+    """The ledger at the restore point on a migrated database: one accepted observation +
+    basis, every table filled, one attempt still without an outcome, the epoch ``ledger`` at
+    ``epoch_seq`` 2 (the genesis row at head; the switch row on a database migrated before it)."""
     engine = create_engine(url)
     try:
         with engine.begin() as conn:
@@ -101,10 +101,16 @@ def _template(url: str) -> None:
             conn.exec_driver_sql(_attempt_sql(_T2, _D2, 2))
             conn.exec_driver_sql(
                 "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, "
-                "reason) VALUES (2, 'ledger', 2, 'test', 'switch')"
+                "reason) SELECT 2, 'ledger', 2, 'test', 'switch' WHERE (SELECT authority FROM "
+                "capital_authority_epoch ORDER BY epoch_seq DESC LIMIT 1) <> 'ledger'"
             )
     finally:
         engine.dispose()
+
+
+def _template(url: str) -> None:
+    _build(url)
+    restore_point(url)
 
 
 def _production_moves_on(url: str) -> None:
