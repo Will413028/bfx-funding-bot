@@ -1,11 +1,10 @@
-"""One bot process per authority, built by ``bot.build_daemon`` on migrated PostgreSQL.
+"""One ledger bot process, built by ``bot.build_daemon`` on migrated PostgreSQL.
 
 Shared by the composed end-to-end tests. The venue is faked at HTTP level (one state feeds
-the legacy ``BootRecovery`` and the ledger ``BitfinexVenueObservation`` through the real
-``BitfinexAuthREST``), and one fake clock drives the whole composition: ``bot.now_ms_utc`` is
-the composition clock, every time source below ``select_bot_ports`` and the gate follows it.
-The ledger authority is selected by monkeypatching ``bot.read_authority`` (the database keeps
-its ``legacy`` epoch; the seed tests read the real one, ``seed_e2e.boot_as_epoch``).
+the ledger ``BitfinexVenueObservation`` through the real ``BitfinexAuthREST``), and one fake
+clock drives the whole composition: ``bot.now_ms_utc`` is the composition clock, every time
+source below ``select_bot_ports`` and the gate follows it. The database is at head, so its
+latest epoch is the genesis ``ledger`` one (``b1c2d3e4f5a6``) and the bot reads it for real.
 
 Only an operator's authority check is replaced (the worker's ``authority``), as in
 ``test_ledger_boot_e2e``; everything else is the production composition.
@@ -29,7 +28,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from bfx_funding_bot.apps import bot
 from bfx_funding_bot.apps.bot_ports import select_policy_ports
-from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS
 from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.contracts import (
@@ -185,17 +183,16 @@ class DeployRecorder:
 
 
 class BotEnv:
-    def __init__(self, authority: str, factory: async_sessionmaker[AsyncSession],
+    def __init__(self, factory: async_sessionmaker[AsyncSession],
                  cells_path: Path, clock: FakeClock, venue: HttpVenue,
                  alerts_sent: list[str]) -> None:
-        self.authority = authority
         self.factory = factory
         self.cells_path = cells_path
         self.clock = clock
         self.venue = venue
         self.alerts = alerts_sent
         self.daemons: list[Any] = []
-        self.reads = select_read_models(authority)  # type: ignore[arg-type]
+        self.reads = select_read_models()
 
     async def build(self) -> Any:
         """A bot process: composed, not yet booted. Its deployment is a recorder."""
@@ -229,7 +226,7 @@ class BotEnv:
         return await authority.read(self.capital_scope(), now_ms=self.clock())
 
     async def status(self, daemon: Any, symbol: str) -> dict[str, Any]:
-        """The operator's trading status of one symbol (neutral across authorities)."""
+        """The operator's trading status of one symbol."""
         return (await daemon.trading_status.snapshot())["symbols"][symbol]
 
     async def uncertainties(self, state: str) -> tuple[UncertaintyView, ...]:
@@ -241,16 +238,10 @@ class BotEnv:
         return await daemon.command_gate._uncertainty_reader.has_open(None, SCOPE, symbol)
 
     async def resolution_records(self) -> int:
-        """Stored resolutions: the legacy event log's marks, or the ledger journal's rows."""
-        from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+        """Stored resolutions: the ledger journal's rows."""
         from bfx_funding_bot.modules.ledger.tables import ExecutionResolutionJournalRow
 
-        if self.authority == "ledger":
-            return await self.count(ExecutionResolutionJournalRow)
-        async with self.factory() as session:
-            return int(await session.scalar(
-                select(func.count()).select_from(EventLogRow).where(
-                    EventLogRow.event_type == "UNCERTAINTY_MARKED_NOT_ACCEPTED")) or 0)
+        return await self.count(ExecutionResolutionJournalRow)
 
     async def count(self, table: Any) -> int:
         async with self.factory() as session:
@@ -309,7 +300,7 @@ class BotEnv:
 
 
 @pytest_asyncio.fixture
-async def bot_env(authority, ledger_db, monkeypatch, httpx_mock, tmp_path):
+async def bot_env(ledger_db, monkeypatch, httpx_mock, tmp_path):
     url = ledger_db.url.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
     engine = create_async_engine(url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -321,7 +312,6 @@ async def bot_env(authority, ledger_db, monkeypatch, httpx_mock, tmp_path):
             monkeypatch.delenv(name)
     for name, value in {
         "BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
-        "BFX_WS_CLIENT_ENABLED": "true", "BFX_FILL_TRACKER_ENABLED": "true",
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0", "DATABASE_URL": url,
@@ -329,7 +319,7 @@ async def bot_env(authority, ledger_db, monkeypatch, httpx_mock, tmp_path):
     }.items():
         monkeypatch.setenv(name, value)
     await seed_exchange_account(engine, capital_policies=False)
-    policy = select_policy_ports(authority, SCOPE, max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS)
+    policy = select_policy_ports(SCOPE)
     async with factory.begin() as session:
         await policy.store.apply_policy(session, symbol="fUST", policy=POLICY,
                                         expected_revision=0, source={"fixture": True})
@@ -345,12 +335,7 @@ async def bot_env(authority, ledger_db, monkeypatch, httpx_mock, tmp_path):
     from bfx_funding_bot.modules.observability import alerts
     monkeypatch.setattr(alerts, "emit", lambda event, **fields: sent.append(event))
     monkeypatch.setattr(bot, "now_ms_utc", clock)
-    if authority == "ledger":
-        async def ledger_epoch(_session: object, *, supported: object) -> str:
-            return "ledger"
-
-        monkeypatch.setattr(bot, "read_authority", ledger_epoch)
-    holder = BotEnv(authority, factory, _write_cells_yaml(tmp_path), clock, venue, sent)
+    holder = BotEnv(factory, _write_cells_yaml(tmp_path), clock, venue, sent)
     try:
         yield holder
     finally:

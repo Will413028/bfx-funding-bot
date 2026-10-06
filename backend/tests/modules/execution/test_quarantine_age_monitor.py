@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from bfx_funding_bot.modules.execution import boot_recovery
+from bfx_funding_bot.modules.execution import reconcile_monitors
 from bfx_funding_bot.modules.execution.reconcile_monitors import QuarantineAgeMonitor
 
 MINUTE = 60_000
@@ -21,7 +21,7 @@ def attempt(started_at_ms: int, symbol: str = "fUST") -> SimpleNamespace:
 @pytest.fixture
 def sent(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     captured: list[dict] = []
-    monkeypatch.setattr(boot_recovery.alerts, "emit",
+    monkeypatch.setattr(reconcile_monitors.alerts, "emit",
                         lambda event, **fields: captured.append({"event": event, **fields}))
     return captured
 
@@ -49,36 +49,3 @@ def test_a_resolved_unknown_is_forgotten_and_others_are_independent(sent) -> Non
     assert [s["symbol"] for s in sent] == ["fUST", "fUSD"]
     monitor.observe([first], now_ms=52 * MINUTE)             # an id seen again is new again
     assert [s["symbol"] for s in sent] == ["fUST", "fUSD", "fUST"]
-
-
-# ------------------------------------------- foreign fills for ledger conservation
-
-
-@pytest.mark.asyncio
-async def test_foreign_executed_counts_only_unmanaged_offers_that_ended_in_the_window() -> None:
-    """D2: what a foreign offer lent between two snapshots, from the offer history."""
-    from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
-
-    def offer(offer_id: str, status: str, *, original: str, remaining: str, updated: int,
-              symbol: str = "fUST") -> ActiveFundingOffer:
-        return ActiveFundingOffer(offer_id, symbol, Decimal(remaining), 0.0002, 2, 1, status,
-                                  amount_original=Decimal(original), mts_updated=updated)
-
-    history = (
-        offer("f1", "EXECUTED at 0.02% (200.0)", original="200", remaining="0", updated=5_000),
-        offer("f2", "CANCELED was: PARTIALLY FILLED at 0.02%", original="300", remaining="100",
-              updated=5_000),
-        offer("f3", "EXECUTED at 0.02%", original="50", remaining="0", updated=900),   # before
-        offer("m1", "EXECUTED at 0.02%", original="150", remaining="0", updated=5_000),  # ours
-        offer("f4", "EXECUTED at 0.02%", original="80", remaining="0", updated=5_000,
-              symbol="fUSD"),
-    )
-    recovery = object.__new__(boot_recovery.BootRecovery)
-    recovery._last_accepted_query_ms = 1_000
-
-    async def unattributed(session, offers):  # type: ignore[no-untyped-def]
-        return {o.venue_offer_id for o in offers if o.venue_offer_id.startswith("f")}
-
-    recovery._unattributed_offer_ids = unattributed  # type: ignore[method-assign]
-    lent = await recovery._foreign_executed(None, history, since_ms=0)  # type: ignore[arg-type]
-    assert lent == {"fUST": Decimal("400"), "fUSD": Decimal("80")}

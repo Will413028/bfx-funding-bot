@@ -146,7 +146,7 @@ async def test_watermarks_and_mutable_marks(pair) -> None:
         "ledger_observation_query": 1,
         "submission_attempt_journal": 1,
         "quarantine_opening": 1,
-        "capital_authority_epoch": 1,
+        "capital_authority_epoch": 2,  # the initial legacy row and the genesis ledger row
     }
     assert {d.table for d in digest.tables if d.mutable} == td.MUTABLE_TABLES
 
@@ -157,12 +157,13 @@ async def test_watermarks_follow_new_rows(pair) -> None:
     with engine.begin() as conn:
         conn.exec_driver_sql(
             "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-            "VALUES (2, 'ledger', 2, 'test', 'watermark')"
+            "SELECT max(epoch_seq) + 1, 'ledger', 2, 'test', 'watermark' FROM capital_authority_epoch"
         )
         conn.exec_driver_sql("UPDATE capital_command_clock SET revision = 4")
     before = await _digest(pair[1])
     after = await _digest(engine)
-    assert after.table("capital_authority_epoch").watermark == 2
+    assert after.table("capital_authority_epoch").watermark == (
+        before.table("capital_authority_epoch").watermark + 1)
     assert after.table("capital_authority_epoch").count == before.table("capital_authority_epoch").count + 1
     assert after.table("capital_command_clock").watermark == 4
     assert after.table("capital_command_clock").sha256 != before.table("capital_command_clock").sha256

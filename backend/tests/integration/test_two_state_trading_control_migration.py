@@ -13,6 +13,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import create_engine, text
 
+from .test_ledger_schema_roles import pre_switch_url
 from .test_trading_state_migration import _alembic, _reset
 
 pytestmark = pytest.mark.integration
@@ -135,6 +136,7 @@ def test_downgrade_restores_every_recorded_row(before):
     with engine.begin() as conn:
         appended = conn.execute(text(
             "SELECT id, state, cause, reason FROM trading_state ORDER BY id DESC LIMIT 1")).one()
+    pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     _alembic(url, "downgrade", _BEFORE)
     with engine.begin() as conn:
         restored = _snapshot(conn, "public", "public")
@@ -164,6 +166,7 @@ def test_downgrade_refuses_while_new_requests_exist(before):
     import os
 
     from .test_trading_state_migration import _BACKEND
+    pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     result = subprocess.run([sys.executable, "-m", "alembic", "downgrade", _BEFORE], cwd=_BACKEND,
                             env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
     assert result.returncode != 0

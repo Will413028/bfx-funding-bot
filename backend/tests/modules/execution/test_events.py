@@ -454,7 +454,7 @@ def test_position_reconciled_requires_symbol() -> None:
 def test_position_reconciled_back_compat_usdt_kwargs() -> None:
     from bfx_funding_bot.modules.execution.events import PositionReconciled
 
-    # legacy producer (boot_recovery) still passes *_usdt= until it migrates
+    # the legacy reconcile's *_usdt= keyword spelling is still accepted
     e = PositionReconciled(
         account_id="default",
         symbol="fUSD",

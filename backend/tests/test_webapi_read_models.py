@@ -2,7 +2,8 @@
 
 Mutation checks (one at a time; revert after each):
 
-* ``select_read_models`` always returns the legacy models: both selection tests.
+* ``select_read_models`` returns another reader than the ledger's: ``test_select_read_models_*``.
+* The lifespan reads the epoch against a set with ``legacy``: ``test_lifespan_*``.
 * The lifespan stops storing ``app.state.read_models``: ``test_lifespan_*``.
 * ``/ready`` ignores the epoch: ``test_ready_refuses_*``.
 * ``_request_model`` keeps ``str(reconcile_event_seq)`` for ledger rows: ``test_request_*``.
@@ -17,7 +18,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 
 from bfx_funding_bot.apps import webapi
-from bfx_funding_bot.apps.authority_support import WEBAPI_SUPPORTED
+from bfx_funding_bot.apps.authority_support import SUPPORTED
 from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.core import authority as authority_module
 from bfx_funding_bot.modules.api import deps
@@ -26,18 +27,16 @@ from bfx_funding_bot.modules.api.uncertainties import _request_model
 from tests.test_readiness import SuccessfulSession
 
 
-def test_select_read_models_covers_both_authorities() -> None:
-    legacy = select_read_models("legacy")
-    ledger = select_read_models("ledger")
-    assert type(legacy.operator_reads).__name__ == "LegacyOperatorReads"
-    assert type(legacy.operator_evidence).__name__ == "LegacyOperatorEvidence"
-    assert type(ledger.operator_reads).__name__ == "LedgerOperatorReads"
-    assert type(ledger.operator_evidence).__name__ == "LedgerOperatorEvidence"
+def test_select_read_models_are_the_ledgers() -> None:
+    models = select_read_models()
+    assert type(models.operator_reads).__name__ == "LedgerOperatorReads"
+    assert type(models.operator_evidence).__name__ == "LedgerOperatorEvidence"
+    assert type(models.operator_resolution).__name__ == "LedgerOperatorResolution"
 
 
-def test_the_web_api_supports_both_authorities() -> None:
-    """The epoch picks the read models (S1-7 switch-capable release)."""
-    assert frozenset({"legacy", "ledger"}) == WEBAPI_SUPPORTED
+def test_the_web_api_supports_only_the_ledger() -> None:
+    """The ledger is the only capital authority (S1-8): a legacy epoch refuses the boot."""
+    assert frozenset({"ledger"}) == SUPPORTED
 
 
 class _Engine:
@@ -54,14 +53,10 @@ class _Session:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("authority", "reads"), [("ledger", "LedgerOperatorReads"),
-                                                   ("legacy", "LegacyOperatorReads")])
-async def test_lifespan_stores_the_authority_and_its_read_models(
-    monkeypatch, authority: str, reads: str
-) -> None:
+async def test_lifespan_stores_the_authority_and_its_read_models(monkeypatch) -> None:
     async def read_authority(_session: object, *, supported: object) -> str:
-        assert supported == WEBAPI_SUPPORTED
-        return authority
+        assert supported == SUPPORTED
+        return "ledger"
 
     monkeypatch.setattr(webapi, "Settings", lambda: SimpleNamespace(log_level="WARNING"))
     monkeypatch.setattr(webapi, "make_engine", lambda _settings: _Engine())
@@ -69,8 +64,8 @@ async def test_lifespan_stores_the_authority_and_its_read_models(
     monkeypatch.setattr(webapi, "read_authority", read_authority)
     app = FastAPI()
     async with webapi.lifespan(app):
-        assert app.state.authority == authority
-        assert type(app.state.read_models.operator_reads).__name__ == reads
+        assert app.state.authority == "ledger"
+        assert type(app.state.read_models.operator_reads).__name__ == "LedgerOperatorReads"
 
 
 @pytest.mark.asyncio
@@ -95,7 +90,7 @@ async def test_get_read_models_is_a_503_until_booted() -> None:
     with pytest.raises(HTTPException) as refused:
         await get_read_models(absent)  # type: ignore[arg-type]
     assert (refused.value.status_code, refused.value.detail) == (503, "db_not_configured")
-    models = select_read_models("legacy")
+    models = select_read_models()
     booted = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(read_models=models)))
     assert await get_read_models(booted) is models  # type: ignore[arg-type]
     assert isinstance(models, ReadModels)
@@ -123,14 +118,12 @@ def _request(session: SuccessfulSession, **state: object) -> object:
 
 @pytest.mark.asyncio
 async def test_ready_refuses_when_the_latest_epoch_is_not_the_booted_authority() -> None:
-    mismatch = _EpochSession("ledger")
-    assert await deps.database_is_ready(_request(mismatch, authority="legacy")) is False  # type: ignore[arg-type]
     match = _EpochSession("ledger")
     assert await deps.database_is_ready(_request(match, authority="ledger")) is True  # type: ignore[arg-type]
     assert any("capital_authority_epoch" in statement for statement in match.statements)
+    # A database whose latest epoch is not the ledger (a restored pre-switch backup) is not ready.
     legacy = _EpochSession("legacy")
-    assert await deps.database_is_ready(_request(legacy, authority="legacy")) is True  # type: ignore[arg-type]
-    assert await deps.database_is_ready(_request(_EpochSession("ledger"), authority="legacy")) is False  # type: ignore[arg-type]
+    assert await deps.database_is_ready(_request(legacy, authority="ledger")) is False  # type: ignore[arg-type]
 
 
 def _row(**overrides: object) -> SimpleNamespace:

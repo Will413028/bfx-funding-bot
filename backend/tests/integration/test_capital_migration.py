@@ -10,8 +10,9 @@ from tests.pg_templates import alembic, stamp_realm
 pytestmark = pytest.mark.integration
 
 
-def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_container):
-    url = pg_container.get_connection_url().replace("+psycopg2", "+psycopg")
+def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_templates, pg_clone):
+    # A database of its own: the container's default one exists only after a pg_engine test.
+    url = pg_clone(pg_templates.template("empty_database", lambda _url: None))
     engine = create_engine(url)
     with engine.begin() as connection:
         connection.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
@@ -40,6 +41,9 @@ def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_container):
                 "DELETE FROM capital_snapshot_queries", "TRUNCATE capital_snapshot_queries CASCADE"):
         with engine.begin() as connection, pytest.raises(Exception, match="immutable capital"):
             connection.exec_driver_sql(sql)
+    # The legacy runtime's write path, as it ran before the switch (the epoch freezes it after).
+    from .test_ledger_schema_roles import pre_switch_url
+    pre_switch_url(url)
     asyncio.run(_migrated_runtime_roundtrip(url))
     for sql in ("UPDATE capital_policy_revisions SET digest='forged'",
                 "DELETE FROM capital_snapshots", "UPDATE event_log SET occurred_at_ms=0"):

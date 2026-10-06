@@ -9,9 +9,7 @@ not the control plane.
 
 The queue, worker loop and outcome recording are the shared operator-request
 contract (``operator_requests``); this module adds what adjudication means.
-What a resolution validates and writes is the capital authority's
-``OperatorResolution`` port (the legacy event-log one is
-``uncertainty_resolution.LegacyOperatorResolution``).
+What a resolution validates and writes is the ledger's ``OperatorResolution`` port.
 
 The validation is shared. The web API runs it before accepting a request
 so an operator still sees ``stale_reconcile_fence`` and friends immediately; the
@@ -31,13 +29,12 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.modules.execution.event_store.writer import ProjectionWriteError
-from bfx_funding_bot.modules.execution.operator_evidence import ResolutionRejected
 from bfx_funding_bot.modules.execution.operator_requests import (
     APPLIED,
     OperatorAuthority,
     OperatorRequestWorker,
     Outcome,
+    RequestRejected,
     insert_request,
     root_cause_name,
 )
@@ -56,6 +53,10 @@ from bfx_funding_bot.modules.ledger import (
 from bfx_funding_bot.modules.ledger import (
     ResolutionRejected as EvidenceRejected,
 )
+
+
+class ResolutionRejected(RequestRejected, EvidenceRejected):
+    """A refused resolution: an operator-request outcome and a port refusal at once."""
 
 
 class ResolutionRequestPending(ResolutionRejected):
@@ -299,8 +300,6 @@ class UncertaintyResolutionWorker(OperatorRequestWorker[UncertaintyResolutionReq
         return Outcome(APPLIED, columns={"resolved_event_seq": applied.resolved_event_seq})
 
     def failure_reason(self, exc: BaseException) -> str:
-        if isinstance(exc, ProjectionWriteError):
-            return "projection_write_failed:" + root_cause_name(exc)
         return "resolution_failed:" + root_cause_name(exc)
 
 

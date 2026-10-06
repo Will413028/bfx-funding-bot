@@ -16,19 +16,21 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
-from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
-from bfx_funding_bot.modules.execution.legacy_ports import LegacyPolicyStore, LegacyScopeLock
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
+from bfx_funding_bot.modules.ledger import Scope
+from bfx_funding_bot.modules.ledger.wiring import build_policy_store, build_scope_lock
 from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
 from tests.pg_templates import stamp_realm
 
+from .test_ledger_schema_roles import pre_switch_url
 from .test_trading_state_migration import _alembic, _alembic_cli, _reset
 
 pytestmark = pytest.mark.integration
 
 _BEFORE = "5b1e7c9d2a40"
 _A = UUID("00000000-0000-0000-0000-0000000000a1")
+_SCOPE = Scope(_A, "ci")
 _POLICY = CapitalPolicy(
     enabled=True, max_offer_amount=Decimal("200"),
     envelope=OfferEnvelope(min_period_days=2, max_period_days=2, max_open_offers=6,
@@ -94,9 +96,9 @@ async def _seed(url: str) -> None:
     engine, owner = _async(url)
     try:
         async with owner.begin() as session:
-            await CapitalRepository(account_id=_A, environment="ci", max_snapshot_age_ms=60_000
-                                    ).apply_policy(session, symbol="fUST", policy=_POLICY,
-                                                   expected_revision=0, source={"test": True})
+            await build_scope_lock().lock(session, _SCOPE)
+            await build_policy_store(_SCOPE).apply_policy(
+                session, symbol="fUST", policy=_POLICY, expected_revision=0, source={"test": True})
     finally:
         await engine.dispose()
 
@@ -203,10 +205,7 @@ def test_the_bot_applies_a_web_api_request_as_a_new_revision(migrated):
 
             worker = CapitalPolicyRequestWorker(
                 session_factory=bot, account_id=_A, environment="ci", authority=allow,
-                policy_store=LegacyPolicyStore(CapitalRepository(
-                    account_id=_A, environment="ci", max_snapshot_age_ms=60_000)),
-                scope_lock=LegacyScopeLock(CapitalRepository(
-                    account_id=_A, environment="ci", max_snapshot_age_ms=60_000)),
+                policy_store=build_policy_store(_SCOPE), scope_lock=build_scope_lock(),
                 clock=lambda: 6)
             assert await worker.tick() is True
             async with bot() as session:
@@ -281,6 +280,7 @@ def test_the_runtime_role_may_toggle_enabled_and_nothing_else(migrated):
 
 def test_downgrade_round_trip_and_refusal(migrated):
     url, engine = migrated
+    pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     _alembic(url, "downgrade", _BEFORE)
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT to_regclass('public.capital_policy_requests')")) is None
@@ -293,6 +293,7 @@ def test_downgrade_round_trip_and_refusal(migrated):
     stamp_realm(url, "ci")  # the downgrade dropped the stamp; the tables hold no rows to derive it from
     with engine.begin() as conn:
         conn.exec_driver_sql(_request_sql())
+    pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     result = _alembic_cli(url, "downgrade", _BEFORE)
     assert result.returncode != 0
     assert "refuse downgrade of recorded capital policy requests" in result.stdout + result.stderr

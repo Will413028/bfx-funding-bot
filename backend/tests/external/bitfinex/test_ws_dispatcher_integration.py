@@ -1,44 +1,45 @@
+"""The WS dispatcher's run loop, cancel tracking and queue accessors, on a venue hint sink.
+
+The dispatcher translates nothing into capital events: each closing offer or credit becomes
+an untrusted hint for the injected ``VenueHintSink`` (the ledger's, in the bot).
+"""
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import replace
 from decimal import Decimal
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
-from bfx_funding_bot.external.bitfinex.auth_ws import BfxWSEvent, FocEvent
+from bfx_funding_bot.external.bitfinex.auth_ws import BfxWSEvent, FcnEvent, FocEvent
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.contracts import ReservationRef
-from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import (
     CancelRequested,
     OrderFilled,
-    ReservationClaimed,
     ReservationReleased,
 )
-from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
-from bfx_funding_bot.modules.execution.registry_offers import (
-    ClaimRecord,
-    OfferRegistry,
-    RegistryState,
-    ReservationCorrelationError,
-)
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
+from bfx_funding_bot.modules.ledger import (
+    CreditCloseHint,
+    OfferCloseHint,
+    Scope,
+    VenueHintNotification,
+)
+from bfx_funding_bot.modules.ledger.wiring import build_venue_hint_sink
+
+SCOPE = Scope(UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"), "ci")
 
 
 class _FakeWSClient:
-    """Fake BitfinexAuthWSClient — emits scripted BfxWSEvent stream."""
+    """Fake BitfinexAuthWSClient — emits scripted BfxWSEvent stream, then holds open."""
+
     def __init__(self, events: list[BfxWSEvent]) -> None:
         self._events = events
 
     async def events(self) -> AsyncIterator[BfxWSEvent]:
         for ev in self._events:
             yield ev
-            await asyncio.sleep(0.001)
-        # hold open
-        while True:
-            await asyncio.sleep(0.1)
+        await asyncio.Event().wait()
 
 
 class _EventCapture:
@@ -46,274 +47,122 @@ class _EventCapture:
         pass
 
 
-def _ref(voi: str, cid: int, scid) -> ReservationRef:
-    return ReservationRef(
-        execution_decision_id=f"d-ws-{cid}", cid=cid,
-        signal_correlation_id=scid, venue_offer_id=voi,
+class _RecordingSink:
+    """A VenueHintSink that records each hint and signals the first one."""
+
+    def __init__(self) -> None:
+        self.offers: list[OfferCloseHint] = []
+        self.credits: list[CreditCloseHint] = []
+        self.received = asyncio.Event()
+
+    async def offer_closed(self, hint: OfferCloseHint) -> None:
+        self.offers.append(hint)
+        self.received.set()
+
+    async def credit_closed(self, hint: CreditCloseHint) -> None:
+        self.credits.append(hint)
+        self.received.set()
+
+    async def offer_gone(self, venue_offer_id: str, *, occurred_at_ms: int) -> bool:
+        return True
+
+
+def _foc(voi: str, status: str, raw_seq: int) -> FocEvent:
+    return FocEvent(
+        venue_offer_id=voi, symbol="fUSD", mts_create=1000, mts_update=2000,
+        amount=Decimal("100"), status=status, rate=0.0005, period_days=2,
+        raw_seq=raw_seq, raw=[],
     )
 
 
-@pytest.mark.asyncio
-async def test_dispatcher_publishes_orderfilled_on_foc_executed() -> None:
-    bus = DomainEventBus(clock=lambda: 5000)
-    registry = OfferRegistry(clock=lambda: 5000)
-    bus.subscribe(ReservationClaimed, registry.handle)
-    bus.subscribe(OrderFilled, registry.handle)
-    bus.subscribe(ReservationReleased, registry.handle)
-
-    scid = uuid4()
-    await bus.publish(ReservationClaimed(
-        cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
-        signal_correlation_id=scid, account_id="default", is_simulated=False,
-        occurred_at_ms=1000,
-        symbol="fUSD", reservation_ref=_ref("42", 42, scid)))
-
-    foc = FocEvent(
-        venue_offer_id="42", symbol="fUSD",
-        mts_create=1000, mts_update=2000,
-        amount=Decimal("100"), status="EXECUTED @ 0.0005 (100.0)",
-        rate=0.0005, period_days=2, raw_seq=5, raw=[],
-    )
-    fake_ws = _FakeWSClient([foc])
-
-    captured: list = []
-
-    async def capture(ev: OrderFilled) -> None:
-        captured.append(ev)
-    bus.subscribe(OrderFilled, capture)
-
-    dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=fake_ws,
-        event_sink=_EventCapture(), clock=lambda: 5000, queue_max=100, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id=None))
-
+async def _run_until_received(dispatcher: BitfinexLiveWSDispatcher, sink: _RecordingSink) -> None:
     stop = asyncio.Event()
     task = asyncio.create_task(dispatcher.run(stop))
-    await asyncio.sleep(0.3)
-    stop.set()
     try:
-        await asyncio.wait_for(task, timeout=2.0)
-    except (TimeoutError, asyncio.CancelledError):
-        task.cancel()
-
-    assert len(captured) == 1
-    assert captured[0].credit_id is None
-    assert captured[0].venue_offer_id == "42"
-    assert captured[0].fill_rate == 0.0005
+        await asyncio.wait_for(sink.received.wait(), timeout=5.0)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_cancel_requested_subscriber_tracks_recent_cancels() -> None:
-    bus = DomainEventBus(clock=lambda: 2200)
-    registry = OfferRegistry(clock=lambda: 2200)
-    bus.subscribe(ReservationClaimed, registry.handle)
-    bus.subscribe(ReservationReleased, registry.handle)
-
-    scid = uuid4()
-    await bus.publish(ReservationClaimed(
-        cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
-        signal_correlation_id=scid, account_id="default", is_simulated=False,
-        occurred_at_ms=1000,
-        symbol="fUSD", reservation_ref=_ref("42", 42, scid)))
-
-    captured: list = []
-    async def capture(ev: ReservationReleased) -> None:
-        captured.append(ev)
-    bus.subscribe(ReservationReleased, capture)
-
-    foc = FocEvent(
-        venue_offer_id="42", symbol="fUSD",
-        mts_create=1000, mts_update=2000,
-        amount=Decimal("100"), status="CANCELED",
-        rate=0.0005, period_days=2, raw_seq=7, raw=[],
-    )
-    fake_ws = _FakeWSClient([foc])
-
+async def test_run_hands_a_closing_offer_from_the_stream_to_the_sink() -> None:
+    sink = _RecordingSink()
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=fake_ws,
-        event_sink=_EventCapture(), clock=lambda: 2200, queue_max=100, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=NoopEventPersister(), account_id=None))
-    bus.subscribe(CancelRequested, dispatcher.handle_cancel_requested)
+        ws_client=_FakeWSClient([_foc("42", "EXECUTED @ 0.0005 (100.0)", 5)]),
+        event_sink=_EventCapture(), clock=lambda: 5000, queue_max=100, venue_hint_sink=sink)
 
-    # Publish CancelRequested first (cancel @ 2000, dispatcher clock 2200 → δ=200ms ≤ 5000)
+    await _run_until_received(dispatcher, sink)
+
+    assert sink.offers == [OfferCloseHint(
+        venue_offer_id="42", symbol="fUSD", kind="EXECUTED @ 0.0005 (100.0)", rate=0.0005,
+        occurred_at_ms=2000, venue_seq=5, received_at_ms=5000, cancel_requested_at_ms=None,
+    )]
+    assert sink.credits == []
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_requested_on_the_bus_rides_on_the_closing_hint() -> None:
+    bus = DomainEventBus(clock=lambda: 2200)
+    sink = _RecordingSink()
+    dispatcher = BitfinexLiveWSDispatcher(
+        ws_client=_FakeWSClient([_foc("42", "CANCELED", 7)]),
+        event_sink=_EventCapture(), clock=lambda: 2200, queue_max=100, venue_hint_sink=sink)
+    bus.subscribe(CancelRequested, dispatcher.handle_cancel_requested)
     await bus.publish(CancelRequested(
         venue_offer_id="42", requested_at_ms=2000,
         signal_correlation_id=uuid4(), account_id="default",
     ))
 
-    stop = asyncio.Event()
-    task = asyncio.create_task(dispatcher.run(stop))
-    await asyncio.sleep(0.3)
-    stop.set()
-    try:
-        await asyncio.wait_for(task, timeout=2.0)
-    except (TimeoutError, asyncio.CancelledError):
-        task.cancel()
+    await _run_until_received(dispatcher, sink)
 
-    assert len(captured) == 1
-    assert captured[0].reason == "user_cancel"
+    assert [(h.venue_offer_id, h.kind, h.cancel_requested_at_ms) for h in sink.offers] == [
+        ("42", "CANCELED", 2000)]
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_survives_a_foreign_offer_closing() -> None:
-    # Regression: cancelling a foreign offer (no claim) raised out of the
-    # TaskGroup and stopped the bot. It is logged and left to periodic reconcile.
+async def test_a_foreign_offer_closing_only_asks_the_ledger_to_reconcile() -> None:
+    # Regression: cancelling a foreign offer (no claim) once raised out of the TaskGroup
+    # and stopped the bot. Under the ledger it is a hint: a resync request and a
+    # notification, never a capital event.
     bus = DomainEventBus()
     published: list[object] = []
 
     async def capture(event: object) -> None:
         published.append(event)
 
-    for event_type in (OrderFilled, ReservationReleased):
+    for event_type in (OrderFilled, ReservationReleased, VenueHintNotification):
         bus.subscribe(event_type, capture)
+    requests: list[str] = []
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=_FakeWSClient([]), event_sink=_EventCapture(), clock=lambda: 5000, venue_hint_sink=LegacyVenueHintSink(registry=OfferRegistry(clock=lambda: 0), bus=bus, persister=NoopEventPersister(), account_id=None))
-    canceled = FocEvent(
-        venue_offer_id="foreign", symbol="fUST", mts_create=1000, mts_update=2000,
-        amount=Decimal("152"), status="CANCELED", rate=0.00082, period_days=2,
-        raw_seq=8, raw=[],
+        ws_client=_FakeWSClient([]), event_sink=_EventCapture(), clock=lambda: 5000,
+        venue_hint_sink=build_venue_hint_sink(
+            scope=SCOPE, request_resync=requests.append, bus=bus, monotonic=lambda: 0.0))
+
+    await dispatcher._process(_foc("foreign", "CANCELED", 8))
+
+    assert requests == ["venue_hint:offer_closed:foreign"]
+    assert [type(event) for event in published] == [VenueHintNotification]
+
+
+@pytest.mark.asyncio
+async def test_a_credit_notification_is_informational() -> None:
+    """fcn carries no offer id and closes nothing: no hint, before or after any offer event."""
+    sink = _RecordingSink()
+    dispatcher = BitfinexLiveWSDispatcher(
+        ws_client=_FakeWSClient([]), event_sink=_EventCapture(), clock=lambda: 5000,
+        venue_hint_sink=sink)
+    fcn = FcnEvent(
+        credit_id=81, symbol="fUSD", side=1, mts_create=1000, mts_update=2000,
+        amount=Decimal("100"), rate=0.0005, period_days=2, raw_seq=3, raw=[],
     )
 
-    await dispatcher._process(canceled)
-    await dispatcher._process(_foc_executed("foreign"))
+    await dispatcher._process(fcn)
+    await dispatcher._process(_foc("42", "EXECUTED @ 0.0005 (100.0)", 5))
+    await dispatcher._process(fcn)
 
-    assert published == []
-
-
-@pytest.mark.asyncio
-async def test_dispatcher_fails_closed_on_uncorrelated_legacy_claim() -> None:
-    registry = _registry_with_claim("legacy")
-    registry._snapshot["legacy"] = replace(
-        registry._snapshot["legacy"], reservation_ref=None)
-    dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=_FakeWSClient([]), event_sink=_EventCapture(), clock=lambda: 5000, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=DomainEventBus(), persister=NoopEventPersister(), account_id=None))
-
-    with pytest.raises(ReservationCorrelationError, match="uncorrelated legacy claim"):
-        await dispatcher._process(_foc_executed("legacy"))
-
-
-# ---------------------------------------------------------------------------
-# Audit I1: dedup-aware _persist_then_publish — skip publish on dedup
-# ---------------------------------------------------------------------------
-
-class _FakePersister:
-    """Fake EventPersister that simulates persist returning per-event dedup status."""
-
-    def __init__(self, statuses: list[list[bool]]) -> None:
-        """statuses: per-call list; each element is the list[bool] returned for that call."""
-        self._statuses = list(statuses)
-        self.calls: list[tuple[object, ...]] = []
-
-    async def persist(self, *events: object) -> list[bool]:
-        self.calls.append(events)
-        return self._statuses.pop(0) if self._statuses else [True] * len(events)
-
-
-def _registry_with_claim(voi: str) -> OfferRegistry:
-    reg = OfferRegistry(clock=lambda: 5000)
-    scid = uuid4()
-    reg._snapshot = {
-        voi: ClaimRecord(
-            venue_offer_id=voi,
-            cid=42,
-            signal_correlation_id=scid,
-            size_usdt=Decimal("100"),
-            account_id="default",
-            state=RegistryState.CLAIMED,
-            occurred_at_ms=1000,
-            last_updated_ms=1000,
-            reservation_ref=_ref(voi, 42, scid),
-        )
-    }
-    return reg
-
-
-def _foc_executed(voi: str = "v1", raw_seq: int = 5) -> FocEvent:
-    return FocEvent(
-        venue_offer_id=voi,
-        symbol="fUSD",
-        mts_create=1000,
-        mts_update=2000,
-        amount=Decimal("100"),
-        status="EXECUTED @ 0.0005 (100.0)",
-        rate=0.0005,
-        period_days=2,
-        raw_seq=raw_seq,
-        raw=[],
-    )
-
-
-@pytest.mark.asyncio
-async def test_deduped_event_not_published_to_bus() -> None:
-    """Audit I1: when persist() returns [False] (dedup), bus.publish is NOT called."""
-    bus = DomainEventBus(clock=lambda: 5000)
-    registry = _registry_with_claim("v1")
-
-    published: list[Any] = []
-
-    async def capture(ev: Any) -> None:
-        published.append(ev)
-
-    bus.subscribe(OrderFilled, capture)
-
-    # Persist returns False — simulating WS re-delivery of already-stored event.
-    fake_persister = _FakePersister(statuses=[[False]])
-
-    fake_ws = _FakeWSClient([_foc_executed("v1", raw_seq=5)])
-    dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=fake_ws,
-        event_sink=_EventCapture(),
-        clock=lambda: 5000,
-        queue_max=100, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=fake_persister, account_id=None))
-
-    stop = asyncio.Event()
-    task = asyncio.create_task(dispatcher.run(stop))
-    await asyncio.sleep(0.3)
-    stop.set()
-    try:
-        await asyncio.wait_for(task, timeout=2.0)
-    except (TimeoutError, asyncio.CancelledError):
-        task.cancel()
-
-    # persist was called once
-    assert len(fake_persister.calls) == 1
-    # but bus.publish was NOT called because persist returned False (dedup)
-    assert published == [], f"expected no publish, got {published}"
-
-
-@pytest.mark.asyncio
-async def test_persisted_event_is_published_to_bus() -> None:
-    """Audit I1 (positive path): persist() returns [True] → bus.publish IS called."""
-    bus = DomainEventBus(clock=lambda: 5000)
-    registry = _registry_with_claim("v2")
-
-    published: list[Any] = []
-
-    async def capture(ev: Any) -> None:
-        published.append(ev)
-
-    bus.subscribe(OrderFilled, capture)
-
-    # Persist returns True — new event, should publish.
-    fake_persister = _FakePersister(statuses=[[True]])
-
-    fake_ws = _FakeWSClient([_foc_executed("v2", raw_seq=7)])
-    dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=fake_ws,
-        event_sink=_EventCapture(),
-        clock=lambda: 5000,
-        queue_max=100, venue_hint_sink=LegacyVenueHintSink(registry=registry, bus=bus, persister=fake_persister, account_id=None))
-
-    stop = asyncio.Event()
-    task = asyncio.create_task(dispatcher.run(stop))
-    await asyncio.sleep(0.3)
-    stop.set()
-    try:
-        await asyncio.wait_for(task, timeout=2.0)
-    except (TimeoutError, asyncio.CancelledError):
-        task.cancel()
-
-    assert len(fake_persister.calls) == 1
-    assert len(published) == 1
-    assert isinstance(published[0], OrderFilled)
+    assert [hint.venue_offer_id for hint in sink.offers] == ["42"]
+    assert sink.credits == []
 
 
 @pytest.mark.asyncio
@@ -321,7 +170,8 @@ async def test_dispatcher_queue_observability_accessors() -> None:
     """queue_depth / queue_capacity are read-only observability accessors for
     the Prometheus saturation gauges (bfx_ws_dispatcher_queue_*). No behavior."""
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=_FakeWSClient([]), event_sink=_EventCapture(), queue_max=77, venue_hint_sink=LegacyVenueHintSink(registry=OfferRegistry(clock=lambda: 0), bus=DomainEventBus(), persister=NoopEventPersister(), account_id=None))
+        ws_client=_FakeWSClient([]), event_sink=_EventCapture(), queue_max=77,
+        venue_hint_sink=_RecordingSink())
     assert dispatcher.queue_depth == 0
     assert dispatcher.queue_capacity == 77
     dispatcher._queue.put_nowait(object())  # type: ignore[arg-type]

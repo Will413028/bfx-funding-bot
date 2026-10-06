@@ -9,6 +9,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow, PositionStateRow
 from bfx_funding_bot.modules.execution.events import (
@@ -16,18 +17,18 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
     ReservationReleased,
 )
-from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
-from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry, RegistryState
-
-from .conftest import make_reservation_ref
 
 pytestmark = pytest.mark.integration
 _SCID = UUID("11111111-1111-1111-1111-111111111111")
 _ACCOUNT = "00000000-0000-0000-0000-000000000031"
 _ACCOUNT_2 = "00000000-0000-0000-0000-000000000032"
-_SNAPSHOT_A = "00000000-0000-0000-0000-000000000033"
-_SNAPSHOT_B = "00000000-0000-0000-0000-000000000034"
 _REBUILD_ACCOUNT = "00000000-0000-0000-0000-000000000035"
+
+
+def make_reservation_ref(cid: int, signal_correlation_id: UUID, venue_offer_id: str) -> ReservationRef:
+    """The explicit correlation a lifecycle event carries."""
+    return ReservationRef(execution_decision_id=f"event-store-test-{cid}", cid=cid,
+                          signal_correlation_id=signal_correlation_id, venue_offer_id=venue_offer_id)
 
 
 async def test_position_state_reserved_realized(pg_session_factory) -> None:
@@ -135,36 +136,6 @@ async def test_fill_redelivery_does_not_double_count(pg_session_factory) -> None
             )
         ).scalar_one()
         assert row.realized == Decimal("3")  # not 6
-
-
-async def test_ledger_from_snapshot(pg_session_factory) -> None:
-    store = PostgresEventStore(deployment_environment="ci")
-    async with pg_session_factory() as s:
-        await store.append(s, ReservationClaimed(cid=10, venue_offer_id="v10",
-            size_usdt=Decimal("7"), signal_correlation_id=_SCID, account_id=_SNAPSHOT_A,
-            is_simulated=True, venue_seq=1, occurred_at_ms=1000, symbol="fUST",
-            reservation_ref=make_reservation_ref(10, _SCID, "v10")))
-        await s.commit()
-    async with pg_session_factory() as s:
-        ledger = await PaperPositionLedger.from_snapshot(s, account_id=_SNAPSHOT_A,
-                                                         deployment_environment="ci")
-    assert ledger.current_exposure("fUST") == Decimal("7")
-
-
-async def test_registry_from_snapshot(pg_session_factory) -> None:
-    store = PostgresEventStore(deployment_environment="ci")
-    async with pg_session_factory() as s:
-        await store.append(s, ReservationClaimed(cid=11, venue_offer_id="v11",
-            size_usdt=Decimal("1"), signal_correlation_id=_SCID, account_id=_SNAPSHOT_B,
-            is_simulated=True, venue_seq=1, occurred_at_ms=1000, symbol="fUST",
-            reservation_ref=make_reservation_ref(11, _SCID, "v11")))
-        await s.commit()
-    async with pg_session_factory() as s:
-        reg = await OfferRegistry.from_snapshot(s, account_id=_SNAPSHOT_B,
-                                                deployment_environment="ci")
-    snap = reg.snapshot()
-    assert "v11" in snap
-    assert snap["v11"].state is RegistryState.CLAIMED
 
 
 async def test_rebuild_matches_incremental(pg_session_factory) -> None:

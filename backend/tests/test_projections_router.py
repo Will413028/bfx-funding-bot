@@ -1,8 +1,10 @@
 """SP4 projection read endpoints — positions / offers / executions.
 
-Read-only over position_state / offer_claims / event_log, realm-scoped to the
-BFX_ACCOUNT_ID / BFX_DEPLOYMENT_ENV env (operator console v1: single bot
-account), every route behind require_operator.
+The router's own contract: the wire shape of the read models' views, the scope and states it
+asks them for, the cursor and limit validation, and the operator gate. Positions and offers
+come from a recording stand-in for the ledger's ``OperatorReads`` (its SQL is covered on
+PostgreSQL by ``tests/integration/test_ledger_positions_offers.py``); executions read the
+archived legacy ``event_log`` (the history below the switch) on SQLite.
 """
 from decimal import Decimal
 from uuid import UUID
@@ -12,20 +14,22 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
-from bfx_funding_bot.apps.read_models import select_read_models
+# Every table the shared metadata may reach by foreign key, whatever was imported first.
+import bfx_funding_bot.modules.execution.audit.tables
+import bfx_funding_bot.modules.execution.event_store.tables
+import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
 from bfx_funding_bot.core.auth import Principal, require_operator, require_user
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-from bfx_funding_bot.modules.api.deps import get_session
-from bfx_funding_bot.modules.api.projections import build_projections_router
+from bfx_funding_bot.modules.api.deps import ReadModels, get_session
+from bfx_funding_bot.modules.api.projections import _ACTIVE_CLAIM_STATES, build_projections_router
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
-from bfx_funding_bot.modules.execution.event_store.tables import (
-    EventLogRow,
-    OfferClaimRow,
-    PositionStateRow,
+from bfx_funding_bot.modules.execution.archived_execution_history import (
+    ArchivedExecutionHistory,
 )
+from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+from bfx_funding_bot.modules.ledger import OfferView, PositionView, Scope
 
 _ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 _ACC = "default"
@@ -35,27 +39,29 @@ _OFFERS_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/offers"
 _EXECUTIONS_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/executions"
 
 
-def _position(symbol: str, lent: str, account: str = _ACC, env: str = _ENV) -> PositionStateRow:
-    # ``reserved``/``realized`` hold deliberately different numbers: the wire reads the
-    # canonical buckets only.
-    return PositionStateRow(
-        account_id=account, deployment_environment=env, symbol=symbol,
-        exchange_account_id=_ACCOUNT_ID,
-        available_amount=Decimal("11.5"), offered_amount=Decimal("22.25"),
-        lent_amount=Decimal(lent),
-        reserved=Decimal("777"), realized=Decimal("888"),
-        last_updated_ms=1000, last_event_seq=7, last_reconciled_at=2000, n_credits=3,
-    )
+_SCOPE = Scope(_ACCOUNT_ID, _ENV)
 
 
-def _claim(cid: int, state: str, account: str = _ACC, env: str = _ENV) -> OfferClaimRow:
-    return OfferClaimRow(
-        cid=cid, account_id=account, deployment_environment=env, state=state,
-        exchange_account_id=_ACCOUNT_ID,
-        venue_offer_id=f"v{cid}", symbol="fUST", size_usdt=Decimal("100"),
-        signal_correlation_id="11111111-1111-1111-1111-111111111111",
-        occurred_at_ms=1000 + cid, last_updated_ms=2000 + cid, last_event_seq=cid,
-    )
+class _Reads:
+    """The positions and offers the router renders, and what it asked for."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Scope, tuple[str, ...] | None]] = []
+
+    async def list_positions(self, session, scope):
+        self.calls.append(("positions", scope, None))
+        return (
+            PositionView("fUSD", Decimal("0"), Decimal("0"), Decimal("0"), None, 0, 1000, None),
+            PositionView("fUST", Decimal("11.5"), Decimal("22.25"), Decimal("2314.03"),
+                         Decimal("4"), 3, 1000, 2000),
+        )
+
+    async def list_offers(self, session, scope, *, states):
+        self.calls.append(("offers", scope, tuple(states)))
+        return (
+            OfferView("2", None, "pending", "fUST", Decimal("100"), 1002, 2002),
+            OfferView("1", "v1", "claimed", "fUST", Decimal("100"), 1001, 2001),
+        )
 
 
 def _event(etype: str, ts: int, account: str = _ACC, env: str = _ENV) -> EventLogRow:
@@ -89,13 +95,6 @@ async def factory(sqlite_engine):
             user_id="user_abc",
             role="owner",
         )
-        s.add(_position("fUST", "2314.03"))
-        s.add(_position("fUSD", "0"))
-        s.add(_position("fUST", "999", env="canary"))       # other realm
-        s.add(_claim(1, "claimed"))
-        s.add(_claim(2, "pending"))
-        s.add(_claim(3, "released"))
-        s.add(_claim(4, "claimed", env="canary"))           # other realm
         for i, etype in enumerate(
             ["RESERVATION_INTENT", "RESERVATION_CLAIMED", "ORDER_FILL", "CREDIT_CLOSED"]
         ):
@@ -105,12 +104,22 @@ async def factory(sqlite_engine):
     return factory
 
 
+def _models(reads: _Reads) -> ReadModels:
+    unused = object()
+    return ReadModels(reads, unused, unused, ArchivedExecutionHistory())  # type: ignore[arg-type]
+
+
 @pytest_asyncio.fixture
-async def app_client(factory, monkeypatch):
+async def reads() -> _Reads:
+    return _Reads()
+
+
+@pytest_asyncio.fixture
+async def app_client(factory, reads, monkeypatch):
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     app = FastAPI()
     app.include_router(build_projections_router())
-    app.state.read_models = select_read_models("legacy")
+    app.state.read_models = _models(reads)
 
     async def _fake_operator():
         return Principal(user_id="user_abc", email="will@example.com", role="operator")
@@ -134,7 +143,7 @@ async def anon_client(factory):
     """No require_operator override — the real dependency must reject."""
     app = FastAPI()
     app.include_router(build_projections_router())
-    app.state.read_models = select_read_models("legacy")
+    app.state.read_models = _models(_Reads())
 
     async def _override_session():
         async with factory() as s:
@@ -144,15 +153,17 @@ async def anon_client(factory):
     return TestClient(app)
 
 
-def test_positions_realm_scoped_camel_case(app_client):
+def test_positions_realm_scoped_camel_case(app_client, reads):
     resp = app_client.get(_POSITIONS_PATH)
     assert resp.status_code == 200
+    assert reads.calls == [("positions", _SCOPE, None)]
     data = resp.json()["data"]
-    assert [p["symbol"] for p in data] == ["fUSD", "fUST"]  # symbol asc, no canary leak
+    assert [p["symbol"] for p in data] == ["fUSD", "fUST"]  # in the read model's order
     fust = data[1]
-    # Disjoint components straight from the canonical buckets; no reserved/realized.
+    # Disjoint components straight from the view; no reserved/realized.
     assert (fust["available"], fust["offered"], fust["lent"]) == ("11.5", "22.25", "2314.03")
-    assert fust["unattributedLent"] is None  # legacy has no such fact
+    assert fust["unattributedLent"] == "4"
+    assert data[0]["unattributedLent"] is None and data[0]["lastReconciledAtMs"] is None
     assert "reserved" not in fust and "realized" not in fust
     assert fust["nCredits"] == 3
     assert fust["lastReconciledAtMs"] == 2000  # *Ms suffix (contract v2 rename)
@@ -169,21 +180,22 @@ def test_position_responses_omit_event_seq_fields(app_client):
         assert "last_event_seq" not in position
 
 
-def test_offers_default_active_only_desc(app_client):
+def test_offers_default_active_only_desc(app_client, reads):
     resp = app_client.get(_OFFERS_PATH)
     assert resp.status_code == 200
+    assert reads.calls == [("offers", _SCOPE, tuple(_ACTIVE_CLAIM_STATES))]
     data = resp.json()["data"]
-    assert [o["offerKey"] for o in data] == ["2", "1"]  # last_updated_ms desc; released + canary excluded
-    assert data[0]["state"] == "pending"
+    assert [o["offerKey"] for o in data] == ["2", "1"]  # in the read model's order
+    assert data[0]["state"] == "pending" and data[0]["venueOfferId"] is None
     assert all("cid" not in o for o in data)
     assert data[1]["venueOfferId"] == "v1"
     assert data[1]["sizeUsdt"] == "100"
 
 
-def test_offers_state_filter(app_client):
+def test_offers_state_filter(app_client, reads):
     resp = app_client.get(_OFFERS_PATH, params={"state": "released"})
     assert resp.status_code == 200
-    assert [o["offerKey"] for o in resp.json()["data"]] == ["3"]
+    assert reads.calls == [("offers", _SCOPE, ("released",))]
 
 
 def test_executions_desc_with_limit_and_cursor(app_client):
@@ -198,7 +210,7 @@ def test_executions_desc_with_limit_and_cursor(app_client):
     # contract v2: pagination envelope
     assert body["pagination"]["hasMore"] is True
     before = body["pagination"]["nextBefore"]
-    # Opaque string tokens (ADR 2026-10-02 D4); under legacy the event_seq as text.
+    # Opaque string tokens (ADR 2026-10-02 D4); in the archive the event_seq as text.
     assert isinstance(before, str) and before == data[-1]["eventKey"]
 
     resp2 = app_client.get(_EXECUTIONS_PATH, params={"limit": 2, "before": before})

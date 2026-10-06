@@ -198,22 +198,6 @@ class _FakeLedger:
     def is_uncertain(self, symbol: str) -> bool:
         return symbol in self._uncertain_symbols
 
-    def uncertain_exposure(self, symbol: str) -> Decimal:
-        return Decimal("1") if symbol in self._uncertain_symbols else Decimal("0")
-
-    def clear_uncertainty(self, symbol: str, amount: Decimal) -> None:
-        if amount > 0:
-            self._uncertain_symbols.discard(symbol)
-
-
-def _converge(ledger: "_FakeLedger"):
-    """What the legacy composition hands the reconciler: converge a process-local cache."""
-    def synced(symbol: str) -> None:
-        stale = ledger.uncertain_exposure(symbol)
-        if stale > 0:
-            ledger.clear_uncertainty(symbol, stale)
-    return synced
-
 
 class _FakeSafety:
     def __init__(self, allowed: bool = True) -> None:
@@ -509,7 +493,6 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         **(capital_ports or _capital_ports(_simulated_capital(
             fixture_ledger, tracker, totals={"fUST": cap if cap is not None else D("570")}))),
         store=store, tracker=tracker,
-        uncertainty_synced=_converge(fixture_ledger),
         safety_chain=safety, executor=ex, account_ctx=ctx, cells=cells,
         funding_rules=FixedRules(),
         clock=lambda: 1_000,
@@ -570,7 +553,9 @@ async def test_unknown_symbol_is_fail_closed_and_never_resubmitted(caplog) -> No
     assert "uncertain" in "\n".join(r.getMessage() for r in caplog.records)
 
 
-async def test_db_pre_sizing_allow_clears_stale_local_uncertainty() -> None:
+async def test_db_pre_sizing_allow_is_authoritative_over_the_uncertainty_reader() -> None:
+    """Once the durable pre-sizing guard allows, the planner submits: it never second-guesses
+    PostgreSQL with another uncertainty read in the same tick."""
     ledger = _FakeLedger(D("0"), uncertain_symbols={"fUST"})
     rec, executor, _tracker, _safety = _build(
         exposure=D("0"),
@@ -582,7 +567,6 @@ async def test_db_pre_sizing_allow_clears_stale_local_uncertainty() -> None:
     await rec.deploy()
 
     assert executor.submitted
-    assert not ledger.is_uncertain("fUST")
 
 
 async def test_unknown_opens_gate_for_remaining_cells_in_same_tick() -> None:
@@ -1150,7 +1134,7 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
         allocation_cap_usdt=D("10000"),
     )
     rec = DeploymentReconciler(
-        store=store, tracker=tracker, uncertainty_synced=_converge(ledger),
+        store=store, tracker=tracker,
         safety_chain=_FakeSafety(allowed=True), executor=_FakeExecutor(),
         **_capital_ports(_simulated_capital(ledger, tracker, totals={"fUST": D("10000")})),
         account_ctx=ctx, cells=cells, funding_rules=FixedRules(),
@@ -1179,7 +1163,7 @@ def _build_with_split_ledger(*, reserved, realized, quotes):
     ex = _FakeExecutor()
     safety = _FakeSafety(allowed=True)
     rec = DeploymentReconciler(
-        store=store, tracker=tracker, uncertainty_synced=_converge(ledger),
+        store=store, tracker=tracker,
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
         funding_rules=FixedRules(),
         clock=lambda: 1_000,
@@ -1237,7 +1221,7 @@ async def test_headroom_uses_cell_symbol_available():
     )
     ex = _FakeExecutor()
     rec = DeploymentReconciler(
-        store=store, tracker=tracker, uncertainty_synced=_converge(ledger),
+        store=store, tracker=tracker,
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=_ctx(),
         **_capital_ports(_simulated_capital(ledger, tracker)),
         cells=cells, funding_rules=FixedRules(),
@@ -1272,7 +1256,7 @@ def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
         available_by_symbol=available_by_symbol,
     )
     rec = DeploymentReconciler(
-        store=store, tracker=tracker, uncertainty_synced=_converge(ledger),
+        store=store, tracker=tracker,
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
         funding_rules=FixedRules(),
         **_capital_ports(_simulated_capital(ledger, tracker, totals=caps, reserves=buffers)),
@@ -1444,7 +1428,7 @@ async def test_tracker_is_diagnostic_and_cannot_relax_canonical_cell_limit():
     )
     ex = _FakeExecutor()
     rec = DeploymentReconciler(
-        store=store, tracker=tracker, uncertainty_synced=_converge(ledger),
+        store=store, tracker=tracker,
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=ctx,
         **_capital_ports(_simulated_capital(ledger, tracker, totals={"fUST": D("10000")})),
         cells=cells, funding_rules=FixedRules(),
@@ -1684,13 +1668,14 @@ async def test_planner_skips_the_submit_when_no_fingerprint_fits():
 
 
 def test_the_neutral_reconciler_keeps_no_authority_cache() -> None:
-    """Mutation: a ``ledger`` parameter, or a ``getattr`` convergence of its cache, returns."""
+    """Mutation: a ``ledger`` parameter, an ``uncertainty_synced`` hook, or a ``getattr``
+    convergence of a process-local cache, returns."""
     import inspect
 
     from bfx_funding_bot.modules.execution.deployment import reconciler
 
     parameters = inspect.signature(DeploymentReconciler.__init__).parameters
-    assert "ledger" not in parameters and "uncertainty_synced" in parameters
+    assert "ledger" not in parameters and "uncertainty_synced" not in parameters
     source = inspect.getsource(reconciler)
     assert "uncertain_exposure" not in source and "clear_uncertainty" not in source
     assert "getattr(self._ledger" not in source

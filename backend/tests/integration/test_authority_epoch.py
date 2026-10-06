@@ -26,7 +26,7 @@ from bfx_funding_bot.core.authority import AuthorityMismatch, read_authority
 from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES
 from tests.pg_templates import alembic
 
-from .test_ledger_schema_roles import _A, _B, _D2, _P, _build, _query_sql, _seed
+from .test_ledger_schema_roles import _A, _B, _D2, _P, _build, _query_sql, _seed, pre_switch
 
 pytestmark = pytest.mark.integration
 
@@ -42,8 +42,11 @@ _ATTEMPT = f"""INSERT INTO submission_attempt_journal(attempt_id, execution_deci
 
 @pytest.fixture
 def ledger_db(pg_templates, pg_clone):
+    """A head database before the switch: this file tests the epoch the switch appended to."""
     url = pg_clone(pg_templates.template("ledger_s1_roles", _build))
     engine = create_engine(url)
+    with engine.begin() as conn:
+        pre_switch(conn)
     try:
         yield engine
     finally:
@@ -277,7 +280,10 @@ def test_downgrade_round_trip_restores_the_prior_state(ledger_db) -> None:
     alembic(url, "check")
     with ledger_db.connect() as conn:
         assert _guard_state(conn) == at_head
-    assert _read(ledger_db) == "legacy"
+        # Upgraded again without legacy history: the genesis (b1c2d3e4f5a6) appends ledger.
+        assert conn.scalar(text(
+            "SELECT authority FROM capital_authority_epoch ORDER BY epoch_seq DESC LIMIT 1"
+        )) == "ledger"
 
 
 def test_switched_authority_refuses_downgrade(ledger_db) -> None:

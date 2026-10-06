@@ -1,9 +1,4 @@
-"""``CommandJournal``: authorize, outcomes and cancel admission on the legacy and ledger stacks.
-
-Intended divergences are named in the tests that have them: the refusal codes the
-legacy adapter returns raw (the command gate maps them, see ``_reason``) and the
-stale token, which the ledger retries once under its lock while legacy stays terminal.
-"""
+"""``CommandJournal``: authorize, outcomes and cancel admission on the ledger stack."""
 
 from __future__ import annotations
 
@@ -25,16 +20,9 @@ from .stacks import NOW, SCOPE
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-# The command gate's own mapping of the legacy adapter's raw reasons (command_gate.py).
-_GATE_REASON = {
-    "revision_changed": "capital_policy_revision_changed",
-    "snapshot_changed": "capital_snapshot_changed",
-}
-
-
 def _reason(result: object) -> str:
     assert isinstance(result, CommandRefused), result
-    return _GATE_REASON.get(result.reason, result.reason)
+    return result.reason
 
 
 async def _guard(session) -> None:
@@ -163,9 +151,9 @@ async def test_guard_runs_once_inside_the_transaction(port_stack) -> None:
     assert isinstance(result, Authorized) and len(calls) == 1
 
 
-async def test_stale_token_legacy_refuses_ledger_retries_once(port_stack) -> None:
-    """Intended divergence (3c2 ruling 6): legacy keeps ``snapshot_changed`` terminal; the
-    ledger re-reads capital inside its lock and succeeds when the budget still allows."""
+async def test_stale_token_is_retried_once(port_stack) -> None:
+    """3c2 ruling 6: the ledger re-reads capital inside its lock and succeeds when the
+    budget still allows."""
     await _ready(port_stack)
     stale = await port_stack.token()
     await port_stack.snapshot("1000")  # a newer accepted snapshot since the decision
@@ -176,10 +164,6 @@ async def test_stale_token_legacy_refuses_ledger_retries_once(port_stack) -> Non
         calls.append(session)
 
     _, result = await _authorize(port_stack, "100", token=stale, guard=guard)
-    if port_stack.name == "legacy":
-        assert _reason(result) == "capital_snapshot_changed"
-        assert not calls and await port_stack.written() == before
-        return
     assert isinstance(result, Authorized) and len(calls) == 1
     assert await port_stack.written() != before
 

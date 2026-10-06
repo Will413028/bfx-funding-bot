@@ -54,7 +54,6 @@ async def test_path_e_subprocess_exits_with_auth_failed_code(
     env["BFX_BOOK_MAX_AGE_SECONDS"] = "30"
     env["BFX_BOOK_RECONCILE_INTERVAL_SECONDS"] = "15"
     env["BFX_BOOK_MAX_DOWN_PCT"] = "0.15"
-    env["BFX_WS_CLIENT_ENABLED"] = "true"
     env["BFX_SAFETY_CONFIG"] = str(_SAFETY_YAML)
     for legacy in ("BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_EXECUTOR",
                    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):

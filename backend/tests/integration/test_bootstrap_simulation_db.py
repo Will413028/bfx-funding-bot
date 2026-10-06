@@ -1,7 +1,8 @@
 """``scripts/bootstrap_simulation_db.py`` on migrated PostgreSQL, run as the owner.
 
 Mutations (one at a time; revert after each): skip the realm check (``test_it_refuses_*``
-realm cases), append the epoch on every run create the account again or write a revision on an unchanged second run
+realm cases), accept a latest ``legacy`` epoch (``test_it_refuses_a_legacy_latest_epoch``),
+create the account again or write a revision on an unchanged second run
 (``test_a_second_run_changes_nothing``),
 leave the envelope out of the policy (``test_the_policy_carries_the_ledger_envelope``),
 let ``--activate`` append over an existing HALT (``test_activate_never_resumes_a_halt``) or on a
@@ -81,12 +82,27 @@ async def test_it_prepares_a_simulation_database(db) -> None:
     url, engine = db
     report = await script.run(_args(), database_url=url, allowed_realms=REALMS)
     assert report["status"] == "ready" and report["realm"] == "ci"
-    assert report["authority_epoch_appended"] is True and report["account_created"] is True
+    # A migrated database is on the ledger already (the genesis, b1c2d3e4f5a6).
+    assert report["account_created"] is True
     assert report["policies"] == {"fUSD": "applied", "fUST": "applied"}
     state = await _snapshot(engine)
     assert state["epochs"] == [(1, "legacy"), (2, "ledger")]
     assert state["accounts"] == [(ACCOUNT, "simulation", "active", "bitfinex")]
     assert state["credentials"] == 0  # a simulated boot generates its own throwaway keys
+
+
+async def test_it_refuses_a_legacy_latest_epoch(db) -> None:
+    """A simulation database whose latest epoch is ``legacy`` again (restored from before the
+    switch) is refused: no script writes an epoch, and nothing else is written."""
+    url, engine = db
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
+            "VALUES (3, 'legacy', 3, 'test', 'restored')"))
+    with pytest.raises(script.BootstrapRefused, match="authority_epoch_not_ledger latest=legacy"):
+        await script.run(_args(), database_url=url, allowed_realms=REALMS)
+    state = await _snapshot(engine)
+    assert state["epochs"][-1] == (3, "legacy") and state["accounts"] == []
 
 
 async def test_the_policy_carries_the_ledger_envelope(db) -> None:
@@ -110,7 +126,7 @@ async def test_a_second_run_changes_nothing(db) -> None:
     await script.run(_args(), database_url=url, allowed_realms=REALMS)
     before = await _snapshot(engine)
     report = await script.run(_args(), database_url=url, allowed_realms=REALMS)
-    assert report["authority_epoch_appended"] is False and report["account_created"] is False
+    assert report["account_created"] is False
     assert report["policies"] == {"fUSD": "unchanged", "fUST": "unchanged"}
     assert await _snapshot(engine) == before
 
@@ -122,7 +138,7 @@ async def test_it_refuses_a_database_stamped_for_another_realm(db) -> None:
         with pytest.raises(script.BootstrapRefused, match=f"database_realm_not_simulation stamp={realm}"):
             await script.run(_args(), database_url=url)  # the CLI's default: shadow only
     state = await _snapshot(engine)
-    assert state["epochs"] == [(1, "legacy")] and state["accounts"] == []
+    assert state["epochs"] == [(1, "legacy"), (2, "ledger")] and state["accounts"] == []
 
 
 async def test_it_refuses_an_unstamped_database(db) -> None:
@@ -130,7 +146,7 @@ async def test_it_refuses_an_unstamped_database(db) -> None:
     await _restamp(engine, None)
     with pytest.raises(DatabaseRealmMismatch, match="unstamped"):
         await script.run(_args(), database_url=url, allowed_realms=REALMS)
-    assert (await _snapshot(engine))["epochs"] == [(1, "legacy")]
+    assert (await _snapshot(engine))["epochs"] == [(1, "legacy"), (2, "ledger")]
 
 
 async def test_a_changed_target_is_written_as_the_next_revision_and_only_that(db) -> None:
@@ -150,7 +166,7 @@ async def test_what_may_be_enabled_is_the_ledgers_rule_not_the_scripts(db) -> No
         await script.run(_args(symbol=["fUST", "fUSD"], disabled_symbol=[]),
                          database_url=url, allowed_realms=REALMS)
     state = await _snapshot(engine)
-    assert state["epochs"] == [(1, "legacy")] and state["revisions"] == []  # rolled back whole
+    assert state["epochs"] == [(1, "legacy"), (2, "ledger")] and state["revisions"] == []
 
 
 async def test_the_realm_stamp_is_the_only_content_check(db) -> None:
@@ -175,7 +191,7 @@ async def test_it_refuses_an_account_that_holds_credentials(db) -> None:
             {"id": ACCOUNT})
     with pytest.raises(script.BootstrapRefused, match="simulation_account_has_credentials"):
         await script.run(_args(), database_url=url, allowed_realms=REALMS)
-    assert (await _snapshot(engine))["epochs"] == [(1, "legacy")]  # rolled back whole
+    assert (await _snapshot(engine))["revisions"] == []  # rolled back whole
 
 
 async def _states(engine) -> list[tuple[str, str, str]]:

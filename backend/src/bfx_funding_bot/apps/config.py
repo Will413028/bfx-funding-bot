@@ -50,16 +50,18 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         # canary was retired with the per-build ceremony (ADR 2026-09-25).
         raise ValueError(f"BFX_PHASE must be shadow or live, got {phase_str!r}")
     # A set legacy knob is a configuration error in every phase, never silently ignored:
-    # the capital limits are the applied CapitalPolicy's, and the executor is not chosen
-    # by env.
+    # the capital limits are the applied CapitalPolicy's, the executor is not chosen by env,
+    # the authenticated WebSocket follows the venue's capabilities, and the REST fill tracker
+    # and the event-log projector left with the legacy runtime (S1-8).
     legacy = [name for name in (
         "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
         "BFX_VENUE_FLOOR_USD", "BFX_MIN_OFFER_BUFFER_PCT", "BFX_EXECUTOR",
+        "BFX_WS_CLIENT_ENABLED", "BFX_FILL_TRACKER_ENABLED", "BFX_PROJECTOR_VERSION",
     ) if name in os.environ]
     if legacy:
         raise ValueError(
-            f"Remove legacy env {legacy}; money limits come from the applied CapitalPolicy "
-            "and the venue follows BFX_PHASE"
+            f"Remove legacy env {legacy}; money limits come from the applied CapitalPolicy, "
+            "the venue follows BFX_PHASE and its capabilities, and the legacy runtime is gone"
         )
     phase = Phase(phase_str)
 

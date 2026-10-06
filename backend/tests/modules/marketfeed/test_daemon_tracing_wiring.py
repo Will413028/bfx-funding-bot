@@ -64,7 +64,6 @@ async def _prepare_env(
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
-    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -137,7 +136,6 @@ async def test_build_daemon_live_tracing_enabled_wraps_reconcile_and_ws(
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
-    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_OTEL_ENABLED", "true")
     configure_live_wiring_env(monkeypatch, tmp_path)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="tracing_live.db")

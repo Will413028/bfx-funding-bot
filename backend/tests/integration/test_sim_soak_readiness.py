@@ -46,8 +46,8 @@ def _args(**changes) -> argparse.Namespace:  # type: ignore[no-untyped-def]
 
 @pytest_asyncio.fixture
 async def fresh(ledger_db, monkeypatch, httpx_mock, tmp_path):  # noqa: F811
-    """A stamped, migrated database with nothing on the ledger epoch: only the owner's bootstrap
-    prepares it, and the daemon runs as the simulated account the script created."""
+    """A stamped, migrated database (on the ledger since its genesis) with no account or policy:
+    only the owner's bootstrap prepares it, and the daemon runs as the simulated account the script created."""
     sim, engine = await make_sim_env(
         ledger_db, monkeypatch, httpx_mock, tmp_path, epoch=None, policy=False)
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(SIM_ACCOUNT))
@@ -149,14 +149,9 @@ async def test_the_bitfinex_composition_refuses_the_fault_knob(
     try:
         monkeypatch.delenv("BFX_SIM_INITIAL_WALLETS")
         monkeypatch.setenv("BFX_PHASE", "live")
-        monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
         monkeypatch.setenv("BFX_VAULT_KEK", TEST_VAULT_KEK_B64)
         monkeypatch.setenv("BFX_SIM_FAULTS", "unknown_5xx=0.01")
 
-        async def ledger_epoch(_session: object, *, supported: object) -> str:
-            return "ledger"  # as test_simulated_boot: the database keeps its legacy epoch
-
-        monkeypatch.setattr(bot, "read_authority", ledger_epoch)
         with pytest.raises(ConfigurationError, match="BFX_SIM_FAULTS is only valid"):
             await bot.build_daemon(cells_yaml_path=sim.cells_path, skip_ws=True)
     finally:

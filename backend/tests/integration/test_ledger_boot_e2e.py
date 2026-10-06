@@ -1,8 +1,8 @@
-"""A ledger-authority bot process, built by ``build_daemon`` and booted on migrated PostgreSQL.
+"""A ledger bot process, built by ``build_daemon`` and booted on migrated PostgreSQL.
 
-The epoch read is monkeypatched to ``ledger`` (the database keeps its ``legacy`` epoch; the
-real read is covered by ``test_daemon_authority_wiring``) and the venue is a fake ``VenueObservation`` fed to the real
-ledger cycle, wrapped in the real effects. Everything else is the production composition.
+The database is at head, so the bot reads its genesis ``ledger`` epoch for real; the venue is
+a fake ``VenueObservation`` fed to the real ledger cycle, wrapped in the real effects.
+Everything else is the production composition.
 
 Mutations (apply one at a time, run this file, revert):
 
@@ -141,7 +141,6 @@ async def env(ledger_db, monkeypatch, httpx_mock, tmp_path):  # noqa: F811
             monkeypatch.delenv(name)
     for name, value in {
         "BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
-        "BFX_WS_CLIENT_ENABLED": "true", "BFX_FILL_TRACKER_ENABLED": "true",
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0", "DATABASE_URL": url,
@@ -158,10 +157,6 @@ async def env(ledger_db, monkeypatch, httpx_mock, tmp_path):  # noqa: F811
     httpx_mock.add_response(url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
                             method="GET", json=[], is_reusable=True, is_optional=True)
 
-    async def ledger_epoch(_session: object, *, supported: object) -> str:
-        return "ledger"
-
-    monkeypatch.setattr(bot, "read_authority", ledger_epoch)
     holder = Env(factory, _write_cells_yaml(tmp_path))
     monkeypatch.setattr(bot_ports, "BitfinexVenueObservation", lambda **_: holder.venue)
     try:

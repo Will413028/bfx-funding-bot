@@ -27,9 +27,9 @@ ONLY_DIFFERENT_VALUE = {
     "BFX_OTEL_ENABLED": ("true", "false"),
     "BFX_BOOK_SNAPSHOT_ENABLED": ("true", "false"),
 }
-# Keys only the live profile names: the auth WS is Bitfinex's (the registry refuses it for the
-# simulated venue) and the snapshot interval means nothing with the snapshot writer off.
-LIVE_ONLY = {"BFX_WS_CLIENT_ENABLED", "BFX_BOOK_SNAPSHOT_INTERVAL_S"}
+# Keys only the live profile names: the snapshot interval means nothing with the snapshot
+# writer off.
+LIVE_ONLY = {"BFX_BOOK_SNAPSHOT_INTERVAL_S"}
 SHADOW_ONLY: set[str] = set()
 
 FORBIDDEN = {

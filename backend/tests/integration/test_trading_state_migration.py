@@ -273,6 +273,8 @@ def test_downgrade_keeps_decisions_made_after_the_migration(migrated):
     url, engine, _ = migrated
     with engine.begin() as conn:
         _insert(conn, _B, "HALTED", "operator")
+    from .test_ledger_schema_roles import pre_switch_url  # circular at module level
+    pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     result = _alembic_cli(url, "downgrade", _PREVIOUS)
     assert result.returncode != 0
     assert "refuse downgrade of recorded trading state decisions" in result.stdout + result.stderr
@@ -453,6 +455,8 @@ def test_archiving_the_release_ceremony_is_lossless_both_ways(migrated):
     with engine.begin() as conn:
         archived = {table: _content(conn, "release_archive", table, key) for table, key in _ARCHIVED}
     # Back to before the archive (5b1e7c9d2a40's own round trip has its own test).
+    from .test_ledger_schema_roles import pre_switch_url  # circular at module level
+    pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     _alembic(url, "downgrade", "1c435a35dcb4")
     with engine.begin() as conn:
         assert conn.scalar(text("SELECT to_regnamespace('release_archive')")) is None
@@ -465,10 +469,11 @@ def test_archiving_the_release_ceremony_is_lossless_both_ways(migrated):
         assert {table: _content(conn, "release_archive", table, key) for table, key in _ARCHIVED} == archived
 
 
-def test_the_web_api_baseline_is_granted_by_migration_not_by_hand(pg_container):
+def test_the_web_api_baseline_is_granted_by_migration_not_by_hand(pg_templates, pg_clone):
     """No default privileges, no runbook: the migration alone gives the web API
     what it reads (and its own setup writes), and still no execution write."""
-    url = pg_container.get_connection_url().replace("+psycopg2", "+psycopg")
+    # A database of its own: the container's default one exists only after a pg_engine test.
+    url = pg_clone(pg_templates.template("empty_database", lambda _url: None))
     engine = create_engine(url)
     try:
         _reset(engine)

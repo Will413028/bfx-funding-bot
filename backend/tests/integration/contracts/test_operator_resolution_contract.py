@@ -1,15 +1,11 @@
-"""OperatorResolution: one request-path suite, run against the legacy and the ledger authority.
+"""OperatorResolution: the request-path suite on the ledger authority.
 
-Declared divergences (each asserted where it shows):
-
-* request columns: legacy ``reconcile_event_seq``, ledger ``observation_id``;
-* the applied record: legacy appends an event_log event and sets ``resolved_event_seq``,
-  the ledger writes one journal row (citing the request) and never the event log;
-* the cited reference of the context (an event sequence vs an observation ref).
+A request carries the ``observation_id`` it cites; the applied record is one journal row
+(citing the request) and never the event log.
 
 A bind naming the wrong offer and a not-accepted over a non-zero match are refused when
-the request is queued, under both authorities (S1-3e4b: the web API previews the match
-from granted columns); the worker re-judges every request regardless.
+the request is queued (S1-3e4b: the web API previews the match from granted columns); the
+worker re-judges every request regardless.
 """
 
 from __future__ import annotations
@@ -42,7 +38,7 @@ async def journal(driver: Driver) -> list[ExecutionResolutionJournalRow]:
 
 
 async def refusal(driver: Driver, item) -> str:
-    """The code that refuses this request at queue time (the same under both authorities)."""
+    """The code that refuses this request at queue time."""
     with pytest.raises(ResolutionRejected) as refused:
         await driver.request(item)
     return refused.value.code
@@ -63,21 +59,14 @@ async def test_mark_not_accepted_resolves_the_subject(driver) -> None:
     view = await driver.view(uncertainty)
     assert (view.state, view.resolved_by_operator_id, view.resolution_reason) == (
         "resolved", OPERATOR, "absent")
-    if driver.name == "legacy":
-        # Mutation 6: the legacy ref is the event sequence, nothing else.
-        assert (waiting.reconcile_event_seq, waiting.observation_id) == (int(ref), None)
-        assert done.resolved_event_seq is not None
-        assert await driver.event_log_rows() > before
-        assert await journal(driver) == []
-    else:
-        # Mutations 1, 2, 3, 6: the observation, no event_log, a journal row of this request.
-        assert (waiting.reconcile_event_seq, waiting.observation_id) == (
-            None, UUID(ref.rsplit(":", 1)[1]))
-        assert done.resolved_event_seq is None
-        assert await driver.event_log_rows() == before
-        (stored,) = await journal(driver)
-        assert (stored.attempt_id, stored.action, stored.operator_request_id) == (
-            uncertainty, "not_accepted", waiting.request_id)
+    # Mutations 1, 2, 3, 6: the observation, no event_log, a journal row of this request.
+    assert (waiting.reconcile_event_seq, waiting.observation_id) == (
+        None, UUID(ref.rsplit(":", 1)[1]))
+    assert done.resolved_event_seq is None
+    assert await driver.event_log_rows() == before
+    (stored,) = await journal(driver)
+    assert (stored.attempt_id, stored.action, stored.operator_request_id) == (
+        uncertainty, "not_accepted", waiting.request_id)
 
 
 @pytest.mark.asyncio
@@ -89,9 +78,8 @@ async def test_bind_to_venue_resolves_the_subject(driver) -> None:
     done = await driver.settle(waiting.request_id)
     assert (done.state, done.outcome_reason) == ("applied", None)
     assert (await driver.view(uncertainty)).state == "resolved"
-    if driver.name == "ledger":
-        (stored,) = await journal(driver)
-        assert (stored.action, stored.venue_offer_id) == ("bound_to_venue", "V1")
+    (stored,) = await journal(driver)
+    assert (stored.action, stored.venue_offer_id) == ("bound_to_venue", "V1")
 
 
 @pytest.mark.asyncio
@@ -187,7 +175,7 @@ async def test_malformed_foreign_and_unknown_requests(driver) -> None:
 async def test_the_resolution_context_carries_the_same_candidates(
     driver, offers, count, ids, reason
 ) -> None:
-    """The preview's candidate fields (count, offer ids, reason) are legacy's for one scenario."""
+    """The preview's candidate fields (count, offer ids, reason) for one scenario."""
     uncertainty = await driver.open_unknown()
     ref = await driver.observe(offers)
     context = await driver.context(uncertainty)

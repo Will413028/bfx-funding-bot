@@ -1,4 +1,4 @@
-"""ADR D4' on real PostgreSQL roles: the web API queues, the account writer appends.
+"""ADR D4' on real PostgreSQL roles: the web API queues, the account writer applies.
 
 The historical fixture below reproduces the manual baseline and the five extra
 grants from 2026-09-22. Migrations must repair that state and provision today's
@@ -6,52 +6,33 @@ permissions without manual grants. Owner-only fixtures would pass whether or not
 the web API could still write the ledger.
 """
 import asyncio
-from decimal import Decimal
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import create_engine, event, select, text
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-import bfx_funding_bot.modules.execution.audit.tables
-import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+import bfx_funding_bot.modules.execution.audit.tables  # noqa: F401
 from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
-from bfx_funding_bot.modules.execution.contracts import ReservationRef
-from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-from bfx_funding_bot.modules.execution.event_store.writer import (
-    AccountEventWriter,
-    ProjectionWriteError,
-)
-from bfx_funding_bot.modules.execution.events import (
-    ReservationIntent,
-    ReservationUnknown,
-    UncertaintyMarkedNotAccepted,
-)
 from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
 from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionScope,
     UncertaintyResolutionWorker,
 )
-from bfx_funding_bot.modules.execution.uncertainty_resolution import LegacyOperatorResolution
-from bfx_funding_bot.modules.execution.uncertainty_tables import (
-    ExecutionUncertaintyRow,
-    UncertaintyResolutionRequestRow,
-)
-from tests.modules.api.test_uncertainties_router import (
-    ACCOUNT_ID,
-    SCID,
-    _attempt,
-    _decision,
-    _snapshot,
-)
+from bfx_funding_bot.modules.ledger.tables import ExecutionResolutionJournalRow
+from bfx_funding_bot.modules.ledger.wiring import build_operator_reads, build_operator_resolution
 from tests.pg_templates import alembic as _alembic
 from tests.pg_templates import stamp_realm
+
+from .test_ledger_capital_reader import book  # noqa: F401 - fixture re-export
+from .test_ledger_operator_resolution_pg import open_unknown
+from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-export
+from .test_ledger_unknown_resolver_pg import SCOPE as LEDGER_SCOPE
 
 pytestmark = pytest.mark.integration
 
@@ -219,6 +200,9 @@ def test_outbox_grants_are_column_scoped_per_role(migrated) -> None:
 
 _ACCOUNT_SQL = """INSERT INTO exchange_accounts(id,venue,label,lifecycle_status)
     VALUES ('00000000-0000-0000-0000-00000000d401','bitfinex','outbox','active')"""
+_LEGACY_EPOCH_SQL = """INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason)
+    SELECT max(epoch_seq) + 1, 'legacy', 0, 'test', 'pre-switch request shape'
+    FROM capital_authority_epoch"""
 _REQUEST_SQL = """INSERT INTO uncertainty_resolution_requests(
     request_id,exchange_account_id,deployment_environment,uncertainty_id,action,
     reconcile_event_seq,requested_by,created_at_ms)
@@ -231,6 +215,9 @@ def test_request_is_immutable_and_its_outcome_terminal(migrated) -> None:
     first, second = uuid4(), uuid4()
     with engine.begin() as conn:
         conn.exec_driver_sql(_ACCOUNT_SQL)
+        # The outbox rules hold under either epoch; a request citing an event sequence is the
+        # pre-switch shape (the ledger epoch closes it: test_ledger_operator_resolution_pg).
+        conn.exec_driver_sql(_LEGACY_EPOCH_SQL)
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         conn.execute(text(_REQUEST_SQL), {"id": first, "u": uncertainty})
     denied = (
@@ -298,81 +285,51 @@ async def _set_two_factor(owner, enabled: bool) -> None:
         )
 
 
-async def _seed_open_submit_unknown(owner) -> tuple[UUID, int]:
-    async with owner.begin() as session:
-        # The configured sole admin operator, TOTP enrolled: what
-        # `operator_authorized` requires of whoever asked.
+async def _seed_open_submit_unknown(book_) -> tuple[UUID, str]:
+    """The configured sole admin operator, TOTP enrolled and a member of the account (what
+    ``operator_authorized`` requires of whoever asked), and an UNKNOWN submit with the ref of
+    the ledger observation an operator cites to mark it not accepted."""
+    async with book_.factory.begin() as session:
         await session.execute(text(
             'INSERT INTO auth."user" (id,name,email,"emailVerified","createdAt","updatedAt",'
             'role,banned,"twoFactorEnabled") VALUES (\'operator-1\',\'operator\','
             "'operator@test.invalid',true,now(),now(),'admin',false,true)"
         ))
         await session.execute(text(
-            "INSERT INTO exchange_accounts(id,venue,label,lifecycle_status) "
-            "VALUES (:id,'bitfinex','outbox','active')"
-        ), {"id": ACCOUNT_ID})
-        await session.execute(text(
             "INSERT INTO exchange_account_memberships(exchange_account_id,user_id,role) "
             "VALUES (:id,'operator-1','owner')"
-        ), {"id": ACCOUNT_ID})
-        session.add(_decision())
-        await session.flush()
-        store = PostgresEventStore(deployment_environment="ci")
-        await store.append_snapshot(session, _snapshot(ACCOUNT_ID, finished_at=1000))
-        reference = ReservationRef(execution_decision_id="decision-7", cid=7, signal_correlation_id=SCID)
-        await store.append(session, ReservationIntent(
-            symbol="fUST", cid=7, signal_correlation_id=SCID, account_id=str(ACCOUNT_ID),
-            is_simulated=True, execution_decision_id="decision-7", reservation_ref=reference,
-            submission_attempt=_attempt(), amount=Decimal("100"), occurred_at_ms=1050,
-        ))
-        await store.append(session, ReservationUnknown(
-            symbol="fUST", cid=7, size_usdt=Decimal("100"), signal_correlation_id=SCID,
-            account_id=str(ACCOUNT_ID), is_simulated=True, reason="connection_reset",
-            occurred_at_ms=1100, reservation_ref=reference,
-        ))
-    async with owner.begin() as session:
-        await PostgresEventStore(deployment_environment="ci").append_snapshot(
-            session, _snapshot(ACCOUNT_ID, finished_at=2000, started_at=1990)
-        )
+        ), {"id": LEDGER_SCOPE.exchange_account_id})
+    return await open_unknown(book_)
+
+
+def _url(ledger_db_) -> str:
+    return ledger_db_.url.render_as_string(hide_password=False)
+
+
+async def _journal_rows(owner) -> int:
     async with owner() as session:
-        uncertainty_id = await session.scalar(select(ExecutionUncertaintyRow.uncertainty_id))
-        reconcile_seq = await session.scalar(
-            select(EventLogRow.event_seq)
-            .where(EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED")
-            .order_by(EventLogRow.event_seq.desc())
-            .limit(1)
-        )
-    assert uncertainty_id is not None and reconcile_seq is not None
-    return uncertainty_id, reconcile_seq
+        return int(await session.scalar(
+            select(func.count()).select_from(ExecutionResolutionJournalRow)) or 0)
 
 
-def test_web_api_queues_and_only_the_account_writer_appends(migrated, monkeypatch) -> None:
-    url, _engine = migrated
+def test_web_api_queues_and_only_the_account_writer_applies(book, ledger_db, monkeypatch) -> None:  # noqa: F811
     _operator_env(monkeypatch)
+    url = _url(ledger_db)
 
     async def scenario() -> None:
-        owner_engine = create_async_engine(url.replace("+psycopg", "+asyncpg"))
+        uncertainty_id, ref = await _seed_open_submit_unknown(book)
+        owner = book.factory
         webapi_engine = _restricted_engine(url, "bfx_webapi")
         bot_engine = _restricted_engine(url, "bfx_bot")
-        owner = async_sessionmaker(owner_engine, expire_on_commit=False)
         webapi = async_sessionmaker(webapi_engine, expire_on_commit=False)
         bot = async_sessionmaker(bot_engine, expire_on_commit=False)
+        account = LEDGER_SCOPE.exchange_account_id
         try:
-            uncertainty_id, reconcile_seq = await _seed_open_submit_unknown(owner)
-
-            # The synchronous path this replaced cannot run as the web API any more.
-            with pytest.raises(ProjectionWriteError, match="permission denied"):
+            # The web API holds no write on the resolution journal: only the worker applies.
+            with pytest.raises(Exception, match="permission denied"):
                 async with webapi.begin() as session:
-                    assert await session.scalar(text("SELECT current_user")) == "bfx_webapi"
-                    await AccountEventWriter(
-                        store=PostgresEventStore(deployment_environment="ci")
-                    ).append(session, UncertaintyMarkedNotAccepted(
-                        uncertainty_id=uncertainty_id, account_id=str(ACCOUNT_ID),
-                        environment="ci", symbol="fUST", kind="submit_outcome_unknown",
-                        reconcile_event_seq=reconcile_seq, resolved_by_operator_id="operator-1",
-                        resolution_reason="direct", resolution_evidence={"candidate_count": 0},
-                        candidate_count=0, occurred_at_ms=2500,
-                    ))
+                    await session.execute(text(
+                        "INSERT INTO execution_resolution_journal(id) VALUES (gen_random_uuid())"))
 
             async def restricted_session():
                 async with webapi() as session:
@@ -385,13 +342,13 @@ def test_web_api_queues_and_only_the_account_writer_appends(migrated, monkeypatc
 
             app = FastAPI()
             app.include_router(build_uncertainties_router())
-            app.state.read_models = select_read_models("legacy")
+            app.state.read_models = select_read_models()
             app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
             app.dependency_overrides[get_session] = restricted_session
-            base = f"/api/v1/exchange-accounts/{ACCOUNT_ID}"
+            base = f"/api/v1/exchange-accounts/{account}"
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                body = {"evidenceRef": str(reconcile_seq), "operatorUuid": "operator-1",
+                body = {"evidenceRef": ref, "operatorUuid": "operator-1",
                         "reason": "zero exact candidates", "evidence": {"candidateCount": 0}}
                 first, repeat = await asyncio.gather(
                     client.post(f"{base}/uncertainties/{uncertainty_id}/mark-not-accepted", json=body),
@@ -403,17 +360,12 @@ def test_web_api_queues_and_only_the_account_writer_appends(migrated, monkeypatc
                 listed = (await client.get(f"{base}/uncertainties", params={"state": "open"})).json()
                 assert listed["data"][0]["resolutionRequest"]["requestId"] == request_id
                 assert listed["data"][0]["resolutionRequest"]["state"] == "requested"
-
-                async with owner() as session:
-                    assert await session.scalar(
-                        select(EventLogRow.event_seq).where(
-                            EventLogRow.event_type == "UNCERTAINTY_MARKED_NOT_ACCEPTED"
-                        )
-                    ) is None
+                assert await _journal_rows(owner) == 0  # queued, not applied
 
                 worker = UncertaintyResolutionWorker(
-                    session_factory=bot, scope=ResolutionScope(ACCOUNT_ID, "ci"),
-                    authority=operator_authorized, clock=lambda: 3000, resolution=LegacyOperatorResolution())
+                    session_factory=bot, scope=ResolutionScope(account, "ci"),
+                    authority=operator_authorized, clock=lambda: 3000,
+                    resolution=build_operator_resolution())
                 assert await worker.tick() is True
                 assert await worker.tick() is False
 
@@ -424,34 +376,19 @@ def test_web_api_queues_and_only_the_account_writer_appends(migrated, monkeypatc
                 detail = (await client.get(f"{base}/uncertainties/{uncertainty_id}")).json()["data"]
                 assert detail["state"] == "resolved"
                 assert detail["resolutionRequest"] == outcome
-                assert detail["resolutionRequest"]["state"] == "applied"
             async with owner() as session:
-                resolved_event_seq = await session.scalar(
-                    select(UncertaintyResolutionRequestRow.resolved_event_seq).where(
-                        UncertaintyResolutionRequestRow.request_id == UUID(request_id)
-                    )
-                )
-                assert resolved_event_seq is not None
-                assert await session.scalar(
-                    select(ExecutionUncertaintyRow.resolved_event_seq).where(
-                        ExecutionUncertaintyRow.uncertainty_id == uncertainty_id
-                    )
-                ) == resolved_event_seq
-                resolutions = list(await session.scalars(
-                    select(EventLogRow.event_seq).where(
-                        EventLogRow.event_type == "UNCERTAINTY_MARKED_NOT_ACCEPTED"
-                    )
-                ))
-            assert resolutions == [resolved_event_seq]
+                (stored,) = list(await session.scalars(select(ExecutionResolutionJournalRow)))
+            assert (stored.attempt_id, stored.action, stored.operator_request_id) == (
+                uncertainty_id, "not_accepted", UUID(request_id))
         finally:
-            for engine in (owner_engine, webapi_engine, bot_engine):
+            for engine in (webapi_engine, bot_engine):
                 await engine.dispose()
 
     asyncio.run(scenario())
 
 
 def test_queueing_a_request_never_waits_for_or_holds_the_account_writer_lock(
-    migrated, monkeypatch
+    book, ledger_db, monkeypatch  # noqa: F811
 ) -> None:
     """The web API must not contend for the daemon's account lock: a slow or
     abusive request would otherwise stall reconcile and submit."""
@@ -460,17 +397,16 @@ def test_queueing_a_request_never_waits_for_or_holds_the_account_writer_lock(
         derive_transaction_lock_key,
     )
 
-    url, _engine = migrated
     _operator_env(monkeypatch)
+    url = _url(ledger_db)
 
     async def scenario() -> None:
+        uncertainty_id, ref = await _seed_open_submit_unknown(book)
+        account = LEDGER_SCOPE.exchange_account_id
         owner_engine = create_async_engine(url.replace("+psycopg", "+asyncpg"))
         webapi_engine = _restricted_engine(url, "bfx_webapi")
-        owner = async_sessionmaker(owner_engine, expire_on_commit=False)
         webapi = async_sessionmaker(webapi_engine, expire_on_commit=False)
         try:
-            uncertainty_id, reconcile_seq = await _seed_open_submit_unknown(owner)
-
             async def restricted_session():
                 async with webapi() as session:
                     try:
@@ -482,10 +418,10 @@ def test_queueing_a_request_never_waits_for_or_holds_the_account_writer_lock(
 
             app = FastAPI()
             app.include_router(build_uncertainties_router())
-            app.state.read_models = select_read_models("legacy")
+            app.state.read_models = select_read_models()
             app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
             app.dependency_overrides[get_session] = restricted_session
-            key = derive_transaction_lock_key(account_id_canonical(str(ACCOUNT_ID)), "ci")
+            key = derive_transaction_lock_key(account_id_canonical(str(account)), "ci")
             daemon = await owner_engine.connect()
             transaction = await daemon.begin()
             try:
@@ -494,9 +430,9 @@ def test_queueing_a_request_never_waits_for_or_holds_the_account_writer_lock(
                 transport = httpx.ASGITransport(app=app)
                 async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await asyncio.wait_for(client.post(
-                        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/"
+                        f"/api/v1/exchange-accounts/{account}/uncertainties/"
                         f"{uncertainty_id}/mark-not-accepted",
-                        json={"evidenceRef": str(reconcile_seq), "operatorUuid": "operator-1",
+                        json={"evidenceRef": ref, "operatorUuid": "operator-1",
                               "evidence": {"candidateCount": 0}},
                     ), timeout=5)
                 assert response.status_code == 202, response.text
@@ -527,71 +463,60 @@ def test_account_writer_can_ask_the_shared_operator_authority(migrated) -> None:
 
 
 def test_revoked_operator_request_is_rejected_by_the_account_writer(
-    migrated, monkeypatch
+    book, ledger_db, monkeypatch  # noqa: F811
 ) -> None:
-    url, _engine = migrated
     _operator_env(monkeypatch)
+    url = _url(ledger_db)
 
     async def scenario() -> None:
-        owner_engine = create_async_engine(url.replace("+psycopg", "+asyncpg"))
+        uncertainty_id, ref = await _seed_open_submit_unknown(book)
+        owner = book.factory
+        account = LEDGER_SCOPE.exchange_account_id
         bot_engine = _restricted_engine(url, "bfx_bot")
-        owner = async_sessionmaker(owner_engine, expire_on_commit=False)
         bot = async_sessionmaker(bot_engine, expire_on_commit=False)
-        scope = ResolutionScope(ACCOUNT_ID, "ci")
+        scope = ResolutionScope(account, "ci")
+        observation_id = UUID(ref.rsplit(":", 1)[1])
         try:
-            uncertainty_id, reconcile_seq = await _seed_open_submit_unknown(owner)
-
             async def queue(created_at_ms: int) -> UUID:
                 request_id = uuid4()
                 async with owner.begin() as session:
                     await session.execute(text(
                         "INSERT INTO uncertainty_resolution_requests(request_id,exchange_account_id,"
-                        "deployment_environment,uncertainty_id,action,reconcile_event_seq,"
+                        "deployment_environment,uncertainty_id,action,observation_id,"
                         "requested_by,created_at_ms) VALUES (:id,:account,'ci',:u,"
-                        "'mark_not_accepted',:seq,'operator-1',:at)"
-                    ), {"id": request_id, "account": ACCOUNT_ID, "u": uncertainty_id,
-                        "seq": reconcile_seq, "at": created_at_ms})
+                        "'mark_not_accepted',:o,'operator-1',:at)"
+                    ), {"id": request_id, "account": account, "u": uncertainty_id,
+                        "o": observation_id, "at": created_at_ms})
                 return request_id
 
             async def outcome(request_id: UUID):
                 async with owner() as session:
                     return (await session.execute(text(
-                        "SELECT state, outcome_reason, resolved_event_seq "
-                        "FROM uncertainty_resolution_requests WHERE request_id=:id"
+                        "SELECT state, outcome_reason FROM uncertainty_resolution_requests "
+                        "WHERE request_id=:id"
                     ), {"id": request_id})).one()
-
-            async def resolutions() -> int:
-                async with owner() as session:
-                    return int(await session.scalar(text(
-                        "SELECT count(*) FROM event_log "
-                        "WHERE event_type='UNCERTAINTY_MARKED_NOT_ACCEPTED'"
-                    )))
 
             worker = UncertaintyResolutionWorker(
                 session_factory=bot, scope=scope, authority=operator_authorized,
-                clock=lambda: 3000, resolution=LegacyOperatorResolution())
+                clock=lambda: 3000, resolution=build_operator_resolution())
             # Accepted while enrolled, then TOTP is removed before the daemon applies.
             revoked = await queue(2500)
             await _set_two_factor(owner, False)
             assert await worker.tick() is True
-            assert tuple(await outcome(revoked)) == ("rejected", "operator_not_authorized", None)
-            assert await resolutions() == 0
+            assert tuple(await outcome(revoked)) == ("rejected", "operator_not_authorized")
+            assert await _journal_rows(owner) == 0
             async with owner() as session:
-                assert await session.scalar(
-                    select(ExecutionUncertaintyRow.state).where(
-                        ExecutionUncertaintyRow.uncertainty_id == uncertainty_id
-                    )
-                ) == "open"
+                view = await build_operator_reads().get_uncertainty(
+                    session, LEDGER_SCOPE, uncertainty_id)
+            assert view is not None and view.state == "open"
 
             # Re-enrolled, the same operator's fresh request applies.
             await _set_two_factor(owner, True)
             restored = await queue(2600)
             assert await worker.tick() is True
-            state, reason, event_seq = await outcome(restored)
-            assert (state, reason) == ("applied", None) and event_seq is not None
-            assert await resolutions() == 1
+            assert tuple(await outcome(restored)) == ("applied", None)
+            assert await _journal_rows(owner) == 1
         finally:
-            for engine in (owner_engine, bot_engine):
-                await engine.dispose()
+            await bot_engine.dispose()
 
     asyncio.run(scenario())

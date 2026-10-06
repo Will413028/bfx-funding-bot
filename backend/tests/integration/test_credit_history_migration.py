@@ -13,6 +13,8 @@ from sqlalchemy import create_engine, text
 
 from tests.pg_templates import stamp_realm
 
+from .test_ledger_schema_roles import pre_switch_url
+
 pytestmark = pytest.mark.integration
 
 BACKEND = Path(__file__).resolve().parents[2]
@@ -42,8 +44,9 @@ def _alembic(url: str, *args: str) -> None:
 
 
 @pytest.fixture
-def migrated(pg_container: Any) -> Any:
-    url = pg_container.get_connection_url().replace("+psycopg2", "+psycopg")
+def migrated(pg_templates: Any, pg_clone: Any) -> Any:
+    # A database of its own: the container's default one exists only after a pg_engine test.
+    url = pg_clone(pg_templates.template("empty_database", lambda _url: None))
     engine = create_engine(url)
     with engine.begin() as conn:
         for schema in ("projection_audit", "auth", "release_archive"):
@@ -100,6 +103,7 @@ def test_credit_history_kind_is_constrained(migrated: Any) -> None:
 def test_migration_is_reversible_and_leaves_no_drift(migrated: Any) -> None:
     url, engine = migrated
     _alembic(url, "check")
+    pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     _alembic(url, "downgrade", PARENT)
     with engine.connect() as conn:
         for table in TABLES:

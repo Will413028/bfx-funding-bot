@@ -14,16 +14,16 @@ import pytest
 from sqlalchemy import insert, select
 
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
-from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
-from bfx_funding_bot.modules.execution.legacy_ports import LegacyPolicyStore, LegacyScopeLock
 from bfx_funding_bot.modules.execution.safety.tables import (
     TradingControlRequestRow,
     TradingStateRow,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
+from bfx_funding_bot.modules.ledger import PolicyStore, Scope
 from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow
+from bfx_funding_bot.modules.ledger.wiring import build_policy_store, build_scope_lock
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
 
@@ -38,15 +38,16 @@ async def allow(session, *, account_id, user) -> bool:
     return user == "operator"
 
 
-def repository(account) -> CapitalRepository:
-    return CapitalRepository(account_id=account, environment="ci", max_snapshot_age_ms=60_000)
+def repository(account) -> PolicyStore:
+    """The ledger's policy store of the scope (the store the worker writes through)."""
+    return build_policy_store(Scope(account, "ci"))
 
 
 def worker(factory, account) -> CapitalPolicyRequestWorker:
     return CapitalPolicyRequestWorker(session_factory=factory, account_id=account,
                                       environment="ci", authority=allow,
-                                      policy_store=LegacyPolicyStore(repository(account)),
-                                      scope_lock=LegacyScopeLock(repository(account)),
+                                      policy_store=repository(account),
+                                      scope_lock=build_scope_lock(),
                                       clock=lambda: T0)
 
 
@@ -134,7 +135,7 @@ async def test_enabling_without_an_envelope_is_allowed_and_says_so(migrated_db):
 @pytest.mark.parametrize(("seeded", "symbol", "action", "by", "code"), [
     ("fUST", "fUST", "disable", "someone", "operator_not_authorized"),
     ("fUST", "fBTC", "enable", "operator", "policy_unavailable"),
-    # fUSD may hold a policy but never an enabled one (CapitalRepository.apply_policy).
+    # fUSD may hold a policy but never an enabled one (PolicyStore.apply_policy).
     ("fUSD", "fUSD", "enable", "operator", "unsupported_enabled_symbol"),
 ])
 async def test_refusals_leave_the_policy_as_it_was(migrated_db, seeded, symbol, action, by, code):

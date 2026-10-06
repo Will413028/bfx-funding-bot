@@ -18,15 +18,13 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+import bfx_funding_bot.modules.execution.audit.tables
 import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.execution.safety.tables
-import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
+import bfx_funding_bot.modules.execution.uncertainty_tables
+import bfx_funding_bot.modules.ledger.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-from bfx_funding_bot.modules.execution.legacy_ports import (
-    LegacyManagedOffers,
-    LegacyUncertaintyReader,
-)
 from bfx_funding_bot.modules.execution.protocols import FundingCancelAllResult
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
@@ -297,6 +295,23 @@ class Lock:
         return True
 
 
+class NoUncertainty:
+    """The kill switch's uncertainty read: nothing open (this test is about its alert)."""
+
+    async def list_open(self, session: Any, scope: Any, symbol: str | None = None) -> tuple[()]:
+        return ()
+
+    async def has_open(self, session: Any, scope: Any, symbol: str) -> bool:
+        return False
+
+
+class NoManagedOffers:
+    """The kill switch's managed-offer read: no live offer symbol beyond the configured ones."""
+
+    async def live_symbols(self, session: Any, scope: Any) -> frozenset[str]:
+        return frozenset()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("failing", "level", "title"), [
     (set(), "WARNING", "cancel-all complete"),
@@ -312,7 +327,7 @@ async def test_kill_switch_alerts_its_cancel_all_result(
     result = await KillSwitch(
         trading_state=repo, session_factory=factory, ctx=ctx,  # type: ignore[arg-type]
         configured_symbols={"fUST", "fUSD"}, venue=Venue(failing), writer_lock=Lock(),
-        uncertainty=LegacyUncertaintyReader(factory), offers=LegacyManagedOffers(),
+        uncertainty=NoUncertainty(), offers=NoManagedOffers(),  # type: ignore[arg-type]
         clock=lambda: 5000,
     ).engage(cause="operator", actor="will", reason="stop everything")
     await _drain(sink)

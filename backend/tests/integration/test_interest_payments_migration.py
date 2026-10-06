@@ -9,6 +9,8 @@ from sqlalchemy import create_engine, text
 from tests.pg_templates import alembic as _alembic
 from tests.pg_templates import stamp_realm
 
+from .test_ledger_schema_roles import pre_switch_url
+
 pytestmark = pytest.mark.integration
 
 ACCOUNT = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -73,6 +75,7 @@ def test_bot_appends_idempotently_and_web_api_only_reads(migrated: Any) -> None:
 def test_migration_is_reversible_and_leaves_no_drift(migrated: Any) -> None:
     url, engine = migrated
     _alembic(url, "check")
+    pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     _alembic(url, "downgrade", "5b9e3d7a2f41")
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT to_regclass('public.funding_interest_payments')")) is None

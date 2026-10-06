@@ -32,10 +32,6 @@ from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_boundary import publish_best_effort
 from bfx_funding_bot.modules.execution.events import PositionReconciled
-from bfx_funding_bot.modules.execution.observation_sink import (
-    LegacyCycleResult,
-    LegacyObservationSink,
-)
 from bfx_funding_bot.modules.execution.reconcile_monitors import (
     ForeignExposureMonitor,
     QuarantineAgeMonitor,
@@ -64,9 +60,6 @@ from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.trading import CapitalScope
 
 log = logging.getLogger(__name__)
-
-_LEGACY_REFUSED = ("ledger cycle effects wrap the ledger cycle only: the legacy reconcile "
-                   "runs these itself, and wrapping it would publish every position twice")
 
 # The open set is small by construction (one entry per unresolved UNKNOWN); the bound only
 # keeps the read finite, and is far above anything the age monitor needs to track.
@@ -107,8 +100,6 @@ class LedgerCycleEffects:
     ) -> None:
         if foreign_grace_ms < 0:
             raise ValueError("foreign_grace_ms must be non-negative")
-        if isinstance(inner, LegacyObservationSink):
-            raise TypeError(_LEGACY_REFUSED)
         self._inner = inner
         self._scope = scope
         self._account_id = account_id
@@ -130,8 +121,6 @@ class LedgerCycleEffects:
 
     async def run(self, scope: Scope) -> CycleResult:
         cycle = await self._inner.run(scope)
-        if isinstance(cycle, LegacyCycleResult):
-            raise TypeError(_LEGACY_REFUSED)
         # The cycle is durable. A failing effect is logged and never fails or repeats it.
         if cycle.decision == "accepted":
             await self._guard("protection", self._protect(cycle))
@@ -228,7 +217,7 @@ class LedgerCycleEffects:
             await publish_best_effort(self._bus, PositionReconciled(
                 account_id=self._account_id,
                 symbol=position.symbol,
-                # Legacy reserved is every active offer; a foreign one is the account's too,
+                # Reserved is every active offer (NAV's meaning); a foreign one is the account's too,
                 # and leaving it out would read a manual offer as a NAV drop.
                 reserved=position.offered + position.foreign_offers,
                 realized=position.credits,

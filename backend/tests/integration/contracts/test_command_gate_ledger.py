@@ -63,7 +63,7 @@ async def ledger_stack(ledger_db) -> Stack:  # noqa: F811
         ledger_db.url.render_as_string(hide_password=False).replace("+psycopg", "+asyncpg")
     )
     try:
-        yield build_stack("ledger", async_sessionmaker(engine, expire_on_commit=False))
+        yield build_stack(async_sessionmaker(engine, expire_on_commit=False))
     finally:
         await engine.dispose()
 

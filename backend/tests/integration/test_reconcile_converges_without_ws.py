@@ -1,156 +1,56 @@
-"""Integration: periodic reconcile converges the ledger with the WS stream DEAD.
+"""Integration: the periodic reconcile converges the ledger with the WS stream DEAD.
 
-Regression guard for a real-money incident (2026-05-26 / spec 2026-05-27):
+Regression guard for a real-money incident (2026-05-26 / spec 2026-05-27): an offer was
+placed and charged against capital, then it left the venue, and NO WS event was ever
+processed for it. The bot stayed pinned at its allocation cap and placed nothing more.
 
-  An offer was placed and recorded CLAIMED (ledger `reserved` rose by its size),
-  then it disappeared from the venue (matched/closed). NO WS fill/release event
-  was ever processed, so the reservation was never released → the ledger stayed
-  pinned at the allocation cap and the bot could place nothing further.
+The runtime ``PeriodicReconcile`` backbone is the fix: with no WS event at all, the
+periodic ledger observation cycle must see the offer gone and accept a basis that no
+longer charges it. Wired end to end on migrated PostgreSQL: the real ledger cycle
+(``build_observation_sink``) over a fake venue, driven by the real ``PeriodicReconcile``
+loop, with no WS dispatcher.
 
-  The fix is the runtime PeriodicReconcile backbone: with NO WS events at all,
-  the periodic venue-snapshot reconcile must notice that a local CLAIMED is
-  absent from the (empty) venue snapshot and publish ReservationReleased, which
-  the in-memory ledger projection applies — dropping exposure back to 0.
-
-This wires the REAL pieces end-to-end:
-  - REAL DomainEventBus + REAL PaperPositionLedger + REAL OfferRegistry
-    (the `domain_chain` fixture from phase4_4a — ledger is subscribed to
-    ReservationReleased on this bus).
-  - REAL BootRecovery.run() reconcile, publishing to that SAME real bus.
-  - REAL PeriodicReconcile.run_loop driving it on an interval.
-  - NO ws_dispatcher in the loop, and NO WS events fired.
-
-If the release did not happen (e.g. if BootRecovery published to a stub bus the
-ledger is not subscribed to), exposure would stay at 150 and this test FAILS —
-so it is not vacuously passing.
+Mutation: make the fake venue keep reporting the offer live after it was canceled; the
+cell exposure stays 150 and the test fails (it is not vacuously passing).
 """
 from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any
-from uuid import uuid4
 
 import pytest
 
-from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
-from bfx_funding_bot.modules.execution.event_store.store import SnapshotDrift
-from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
-from bfx_funding_bot.modules.execution.events import ReservationClaimed
-from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
-from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
-from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
-from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
-from bfx_funding_bot.modules.ledger import Scope
-from tests.async_wait import run_until
+from bfx_funding_bot.modules.ledger import CycleResult, ObservationSink, OfferHistory, Scope
+from tests.async_wait import running, until
 
-from .conftest import make_reservation_ref
+from .test_ledger_capital_reader import (
+    Book,
+    _view,
+    book,  # noqa: F401 - fixture re-export
+)
+from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-export
+from .test_ledger_unknown_resolver_pg import (
+    CYCLE_1,
+    CYCLE_2,
+    SCOPE,
+    Clock,
+    FakeVenue,
+    cycle,
+    run_cycle,
+    start,
+    venue_offer,
+)
 
-# The `domain_chain` fixture (real DomainEventBus + real PaperPositionLedger +
-# real OfferRegistry, fully subscriber-wired) is re-exported from the phase4_4a
-# harness by tests/integration/conftest.py, so it is available here by name.
+pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-# BootRecovery clock — the "now" the reconcile diffs against. The seeded claim's
-# occurred_at_ms must be OLDER than NOW - action_grace_ms so reconcile may act.
-_NOW = 2_000_000
-_ACCOUNT = "default"
-_ENV = "ci"
-_VOI = "777"
-_CID = 777
-_SIZE = Decimal("150")
-_ACTION_GRACE_MS = 120_000
-# Claim placed well before the action-grace window → reconcile is allowed to act.
-_CLAIM_OCCURRED_MS = _NOW - 600_000  # 10 min old
-
-
-class _OneRowScalars:
-    """`session.execute(...)` result whose `.scalars().all()` yields one row."""
-
-    def __init__(self, rows: list[OfferClaimRow]) -> None:
-        self._rows = rows
-
-    def scalars(self) -> _OneRowScalars:
-        return self
-
-    def all(self) -> list[OfferClaimRow]:
-        return self._rows
+VOI = "777"
+SIZE = "150"
+PLACED_AT = 950_000
 
 
-class _OneClaimSession:
-    """Async-session stub: returns a single CLAIMED OfferClaimRow on execute()."""
-
-    def __init__(self, row: OfferClaimRow) -> None:
-        self._row = row
-
-    async def execute(self, _stmt: Any) -> _OneRowScalars:
-        return _OneRowScalars([self._row])
-
-    async def commit(self) -> None:
-        pass
-
-    async def rollback(self) -> None:
-        pass
-
-
-class _OneClaimSessionCtx:
-    def __init__(self, row: OfferClaimRow) -> None:
-        self._row = row
-
-    async def __aenter__(self) -> _OneClaimSession:
-        return _OneClaimSession(self._row)
-
-    async def __aexit__(self, *_args: Any) -> None:
-        pass
-
-
-class _OneClaimSessionFactory:
-    def __init__(self, row: OfferClaimRow) -> None:
-        self._row = row
-
-    def __call__(self) -> _OneClaimSessionCtx:
-        return _OneClaimSessionCtx(self._row)
-
-
-class _StubStore:
-    """Durable append stub — append is not what we verify (bus→ledger is)."""
-
-    def __init__(self) -> None:
-        self.appended: list[Any] = []
-
-    async def append(self, _session: Any, event: Any) -> bool:
-        self.appended.append(event)
-        return True
-
-    async def append_snapshot(self, _session: Any, event: Any) -> SnapshotDrift:
-        self.appended.append(event)
-        return SnapshotDrift(reserved_drift=Decimal("0"), realized_drift=Decimal("0"))
-
-
-class _EmptyAuthRest:
-    """Venue snapshot is EMPTY — the offer has disappeared from the venue."""
-
-    async def get_active_funding_offers(
-        self, *, ctx: Any, symbol: str = "fUSD",
-    ) -> list[Any]:
-        return []
-
-    async def get_active_funding_loans(self, **kwargs):
-        # Lent but not yet drawn into a position; none in this fixture.
-        return []
-
-    async def get_active_funding_credits(
-        self, *, ctx: Any, symbol: str = "fUSD",
-    ) -> list[Any]:
-        return []
-
-    async def get_funding_available(
-        self, *, ctx: Any, currency: str,
-    ) -> Decimal:
-        return Decimal("0")
-
-
-class _FakeProbe:
+class FakeProbe:
     """No-op probe (heartbeat + health updates), like the unit tests use."""
 
     def record_heartbeat(self, _sub_task: str) -> None:
@@ -160,130 +60,51 @@ class _FakeProbe:
         pass
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_periodic_reconcile_converges_ledger_with_ws_dead(
-    domain_chain: dict[str, Any],
-) -> None:
-    bus = domain_chain["bus"]
-    ledger = domain_chain["ledger"]
+class CountingSink:
+    """The real ledger sink, recording each completed cycle."""
 
-    scid = uuid4()
+    def __init__(self, inner: ObservationSink) -> None:
+        self._inner = inner
+        self.results: list[CycleResult] = []
 
-    # 1. Seed a CLAIMED reservation on the REAL bus → ledger reserved rises to 150.
-    #    (occurred_at_ms here is just event metadata; the ledger only adds size.)
-    await bus.publish(ReservationClaimed(
-        cid=_CID, venue_offer_id=_VOI, size_usdt=_SIZE,
-        signal_correlation_id=scid, account_id=_ACCOUNT, is_simulated=False,
-        occurred_at_ms=_CLAIM_OCCURRED_MS,
-        symbol="fUST",
-        reservation_ref=make_reservation_ref(_CID, scid, _VOI),
-    ))
+    async def run(self, scope: Scope) -> CycleResult:
+        result = await self._inner.run(scope)
+        self.results.append(result)
+        return result
 
-    # Precondition: exposure MUST be 150 before reconcile, else the test proves nothing.
-    assert ledger.current_exposure("fUST") == Decimal("150")
 
-    # The same CLAIMED reservation as it lives in the snapshot table. _load_local_claims
-    # reads this and yields one CLAIMED LocalClaim; its occurred_at_ms is older than the
-    # action-grace window so the missing-from-venue release is allowed to fire.
-    # The snapshot stores RegistryState.value (lowercase "claimed"); _load_local_claims
-    # round-trips it via RegistryState(r.state), so we use the same stored form here.
-    claim_row = OfferClaimRow(
-        cid=_CID, account_id=_ACCOUNT, deployment_environment=_ENV,
-        state=RegistryState.CLAIMED.value, venue_offer_id=_VOI, size_usdt=_SIZE,
-        signal_correlation_id=str(scid), occurred_at_ms=_CLAIM_OCCURRED_MS,
-        last_updated_ms=_CLAIM_OCCURRED_MS, last_event_seq=1, symbol="fUST",
-        execution_decision_id=f"reconcile-test-{_CID}",
-    )
+async def cell_exposure(book_: Book, clock: Clock) -> Decimal:
+    read = await book_.read(now=clock.now, max_age=10**9)
+    return Decimal(_view(read).snapshot.cell_exposure)
 
-    # 2. REAL BootRecovery: empty venue snapshot + the one local CLAIMED row,
-    #    publishing to the SAME real bus the ledger is subscribed to.
-    recovery = BootRecovery(
-        store=_StubStore(),  # type: ignore[arg-type]
-        session_factory=_OneClaimSessionFactory(claim_row),  # type: ignore[arg-type]
-        auth_rest=_EmptyAuthRest(),
-        account_ctx=AccountContext(
-            account_id=_ACCOUNT,
-            credentials=Credentials(api_key="k", api_secret="s"),
-            allocation_cap_usdt=Decimal("450"),
-        ),
-        deployment_environment=_ENV,
-        bus=bus,  # REAL bus from domain_chain — ledger reacts to ReservationReleased here
-        action_grace_ms=_ACTION_GRACE_MS,
-        max_attempts=1,
-        backoff_base_s=0,
-        clock=lambda: _NOW,
-        symbol="fUST",
-    )
 
-    # 3. REAL PeriodicReconcile loop — NO ws_dispatcher, NO WS events fired.
-    scope = Scope(uuid4(), _ENV)
-    pr = PeriodicReconcile(resync=ResyncChannel(),
-        recovery=LegacyObservationSink(recovery, scope), scope=scope, probe=_FakeProbe(), interval_s=0.01,
+async def placed_and_live(book_: Book, clock: Clock) -> Any:
+    """A placed offer of 150 the venue reports live: the cell is charged 150."""
+    await start(book_)
+    await book_.attempt(SIZE, outcome="ack", venue_offer_id=VOI,
+                        started_at_ms=PLACED_AT, completed_at_ms=PLACED_AT + 100)
+    live = venue_offer(VOI, amount=SIZE, created=PLACED_AT + 50)
+    assert (await run_cycle(book_, FakeVenue(clock, offers=(live,)), clock, CYCLE_1)).decision \
+        == "accepted"
+    # Precondition: the cell is charged, else the convergence below proves nothing.
+    assert await cell_exposure(book_, clock) == Decimal(SIZE)
+    return live
+
+
+async def test_periodic_reconcile_converges_the_ledger_with_ws_dead(book) -> None:  # noqa: F811
+    clock = Clock()
+    live = await placed_and_live(book, clock)
+    # The offer left the venue (canceled); no WS event says so.
+    gone = FakeVenue(clock, past=(OfferHistory(live, "canceled", CYCLE_1 + 5_000),))
+    sink = CountingSink(cycle(book, gone, clock))
+    clock.now = CYCLE_2
+    reconcile = PeriodicReconcile(
+        resync=ResyncChannel(), recovery=sink, scope=SCOPE, probe=FakeProbe(), interval_s=0.01,
         max_consecutive_failures=3,
     )
-    # Run the loop until the periodic reconcile has converged the ledger, then stop.
-    await run_until(
-        pr.run_loop,
-        lambda: ledger.current_exposure("fUST") == Decimal("0"),
-        what="the ledger to converge to zero exposure",
-    )
-
-    # 4. The stuck reservation was released purely by the periodic reconcile →
-    #    exposure converged to 0 with the WS stream completely dead.
-    assert ledger.current_exposure("fUST") == Decimal("0")
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_reconcile_run_reports_the_release_as_divergence(
-    domain_chain: dict[str, Any],
-) -> None:
-    """A single reconcile run on the same setup reports exactly one release.
-
-    Guards that the convergence above is driven by a real missing-from-venue
-    release (ReconcileResult.n_released == 1), not some incidental zeroing.
-    """
-    bus = domain_chain["bus"]
-    scid = uuid4()
-
-    await bus.publish(ReservationClaimed(
-        cid=_CID, venue_offer_id=_VOI, size_usdt=_SIZE,
-        signal_correlation_id=scid, account_id=_ACCOUNT, is_simulated=False,
-        occurred_at_ms=_CLAIM_OCCURRED_MS,
-        symbol="fUST",
-        reservation_ref=make_reservation_ref(_CID, scid, _VOI),
-    ))
-
-    claim_row = OfferClaimRow(
-        cid=_CID, account_id=_ACCOUNT, deployment_environment=_ENV,
-        state=RegistryState.CLAIMED.value, venue_offer_id=_VOI, size_usdt=_SIZE,
-        signal_correlation_id=str(scid), occurred_at_ms=_CLAIM_OCCURRED_MS,
-        last_updated_ms=_CLAIM_OCCURRED_MS, last_event_seq=1, symbol="fUST",
-        execution_decision_id=f"reconcile-test-{_CID}",
-    )
-
-    recovery = BootRecovery(
-        store=_StubStore(),  # type: ignore[arg-type]
-        session_factory=_OneClaimSessionFactory(claim_row),  # type: ignore[arg-type]
-        auth_rest=_EmptyAuthRest(),
-        account_ctx=AccountContext(
-            account_id=_ACCOUNT,
-            credentials=Credentials(api_key="k", api_secret="s"),
-            allocation_cap_usdt=Decimal("450"),
-        ),
-        deployment_environment=_ENV,
-        bus=bus,
-        action_grace_ms=_ACTION_GRACE_MS,
-        max_attempts=1,
-        backoff_base_s=0,
-        clock=lambda: _NOW,
-        symbol="fUST",
-    )
-
-    result = await recovery.run()
-
-    assert isinstance(result, ReconcileResult)
-    assert result.n_released == 1
-    assert result.n_claimed == 0
-    assert result.n_failed == 0
+    async with running(reconcile.run_loop):
+        await until(lambda: any(r.decision == "accepted" for r in sink.results),
+                    what="an accepted periodic cycle")
+    # Released purely by the periodic cycle: the cell is no longer charged.
+    assert await cell_exposure(book, clock) == Decimal("0")
+    assert gone.windows  # the venue was observed by the loop, not by the test

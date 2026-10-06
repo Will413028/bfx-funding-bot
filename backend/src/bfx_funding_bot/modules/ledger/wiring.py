@@ -365,7 +365,7 @@ def build_observation_sink(
     now_ms: Callable[[], int] = lambda: time.time_ns() // 1_000_000,
     settle_ms: int = UNKNOWN_SETTLE_MS,
 ) -> ObservationSink:
-    """The ledger observation cycle; ``apps/bot_ports.py`` selects it by authority epoch."""
+    """The ledger observation cycle; ``apps/bot_ports.py`` builds it."""
     return _LedgerObservationCycle(
         session_factory, venue, journal_port=journal_port or build_ledger_journal(),
         observations=observations or build_ledger_observations(), now_ms=now_ms,
@@ -382,12 +382,12 @@ def build_operator_evidence() -> OperatorEvidence:
 
 
 def build_operator_resolution() -> OperatorResolution:
-    """The ledger operator request path; apps select it by authority epoch."""
+    """The ledger operator request path."""
     return operator_resolution.LedgerOperatorResolution(operator_reads.LedgerOperatorReads())
 
 
 def build_operator_reads() -> OperatorReads:
-    """The ledger operator read model; apps select it by authority epoch."""
+    """The ledger operator read model."""
     return operator_reads.LedgerOperatorReads()
 
 

@@ -1,11 +1,10 @@
-"""PeriodicReconcile under either authority: deploy input and the non-accepted streak.
+"""PeriodicReconcile over the ledger cycle: deploy input and the non-accepted streak.
 
 Mutations (apply one at a time, run this file, revert):
 
 1. deploy on a non-accepted cycle: ``test_a_non_accepted_cycle_never_deploys``.
 2. alert at streak 2 / never: ``test_alert_fires_once_when_the_streak_reaches_three``.
 3. an exception resets the streak: ``test_an_exception_neither_resets_nor_counts_the_streak``.
-8. legacy input drops the unmanaged filter: ``test_legacy_input_is_todays_filter``.
 9. an accepted cycle does not reset the streak: ``test_an_accepted_cycle_resets_the_streak``.
 """
 from __future__ import annotations
@@ -18,10 +17,7 @@ import pytest
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.execution import periodic_reconcile
-from bfx_funding_bot.modules.execution.deployment_input import LegacyDeploymentInput
-from bfx_funding_bot.modules.execution.observation_sink import LegacyCycleResult
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
-from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.observability import alerts
@@ -105,7 +101,7 @@ async def test_a_non_accepted_cycle_never_deploys(sent) -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_accepted_ledger_cycle_deploys_from_the_input_and_reports_no_drift(sent) -> None:
+async def test_an_accepted_cycle_deploys_from_the_input(sent) -> None:
     offer = ActiveFundingOffer("7", "fUST", Decimal("200"), 0.001, 2, 0, "active")
     deployment, source, probe = _Deployment(), _Input((offer,)), _Probe()
     periodic = _periodic(
@@ -169,21 +165,6 @@ async def test_an_accepted_boot_leaves_no_streak(sent) -> None:
     periodic = _periodic(_Sink(), probe=probe)
     periodic.note_boot("accepted")
     assert probe.updates == [] and sent == []
-
-
-@pytest.mark.asyncio
-async def test_legacy_input_is_todays_filter() -> None:
-    def offer(venue_offer_id: str) -> ActiveFundingOffer:
-        return ActiveFundingOffer(venue_offer_id, "fUST", Decimal("200"), 0.001, 2, 0, "ACTIVE")
-
-    managed, foreign = offer("42"), offer("777")
-    result = ReconcileResult(
-        0, 0, 0, venue_offers=(managed, foreign), unmanaged_offer_ids=frozenset({"777"})
-    )
-    cycle = LegacyCycleResult("accepted", legacy=result)
-    assert await LegacyDeploymentInput().offers(cycle) == (managed,)
-    with pytest.raises(TypeError):
-        await LegacyDeploymentInput().offers(ACCEPTED)
 
 
 def test_deployment_and_its_input_come_together() -> None:

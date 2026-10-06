@@ -9,7 +9,7 @@ only (not loans), as the archive has them.
 
 Mutation checks (one at a time; revert after each):
 
-* the ledger read models serve ``LegacyExecutionHistory`` (the event log) directly:
+* the ledger read models serve ``ArchivedExecutionHistory`` (the event log) directly:
   ``test_the_ledger_history_is_the_journal_then_the_archive`` (journal rows missing).
 * drop the watermark filter: the seeded attempt appears.
 * the archive continuation is dropped: the last page misses the event-log rows.
@@ -75,7 +75,8 @@ async def _scenario(book: Book) -> dict[str, UUID]:
     async with book.factory.begin() as session:
         await session.execute(text(
             "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-            f"VALUES (2, 'ledger', {WATERMARK}, 'test', 'switch')"))
+            f"SELECT max(epoch_seq) + 1, 'ledger', {WATERMARK}, 'test', 'switch' "
+            "FROM capital_authority_epoch"))
     acked = await book.attempt("30", outcome="ack", venue_offer_id="o-1",
                                started_at_ms=2_000, completed_at_ms=2_100)
     unknown = await book.attempt("20", outcome="unknown", started_at_ms=3_000,
@@ -98,7 +99,7 @@ async def _client(book: Book, monkeypatch: pytest.MonkeyPatch) -> httpx.AsyncCli
 
     app = FastAPI()
     app.include_router(build_projections_router())
-    app.state.read_models = select_read_models("ledger")
+    app.state.read_models = select_read_models()
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
     app.dependency_overrides[get_session] = restricted
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")

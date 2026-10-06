@@ -52,6 +52,10 @@ async def test_a_simulated_boot_on_a_legacy_epoch_is_refused(
     from sqlalchemy import text
     async with engine.begin() as conn:
         await conn.execute(text("UPDATE database_realm SET realm = :realm"), {"realm": realm})
+        # A database whose latest epoch is legacy again (restored from before the switch).
+        await conn.execute(text(
+            "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
+            "VALUES (3, 'legacy', 3, 'test', 'restored')"))
     try:
         with pytest.raises(AuthorityMismatch, match=r"authority_unsupported value=legacy build=ledger"):
             await build_daemon(cells_yaml_path=write_cells_yaml(tmp_path), skip_ws=True)

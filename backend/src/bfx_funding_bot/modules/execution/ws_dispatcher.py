@@ -1,16 +1,13 @@
-"""BitfinexLiveWSDispatcher — Bitfinex WS event → DomainEventBus (Phase 4.4a).
+"""BitfinexLiveWSDispatcher — Bitfinex WS event → VenueHintSink (Phase 4.4a).
 
-Queue/transport shell. Neutral hints go through VenueHintSink; the default
-legacy adapter retains translate_bfx_event and persist-before-publish semantics.
+Queue/transport shell. Each closing offer (foc) or credit (fcc) becomes an untrusted
+venue hint for the injected ``VenueHintSink`` (the ledger's: it requests a reconcile and
+publishes a notification; it never writes capital state):
 
-Per spec §6.2 dispatch table:
-  FocEvent EXECUTED + CLAIMED → OrderFilled + state RELEASED (authoritative fill)
-  FocEvent CANCELED + recent_cancel ≤5s → user_cancel
-  FocEvent CANCELED otherwise → venue_cancel
-  FocEvent EXPIRED → expired
-  FocEvent with no claim → warn only (foreign offer; reconcile converges)
-  FcnEvent → informational no-op (credit events carry no offer id)
-  any event on RELEASED → idempotent no-op
+  FocEvent (any status) → offer_closed hint, carrying a cancel this process
+                          requested within RECENT_CANCELS_TTL_MS
+  FccEvent              → credit_closed hint
+  FcnEvent / fcu / control frames → informational no-op
 """
 from __future__ import annotations
 
@@ -42,8 +39,7 @@ class _WSClientProtocol(Protocol):
 class BitfinexLiveWSDispatcher:
     """Consume BitfinexAuthWSClient stream → scoped VenueHintSink.
 
-    The sink is the capital authority's: composition picks it, this class never
-    knows which one it holds.
+    The sink is the ledger's: composition picks it, this class only hands it hints.
 
     Per spec §6.2 / §4 (G4): bounded queue + queue-depth observability.
     """

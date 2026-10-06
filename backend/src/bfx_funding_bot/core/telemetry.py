@@ -45,7 +45,6 @@ class HealthTarget(StrEnum):
     SIGNAL_PIPELINE = "signal_pipeline"
     EXECUTOR = "executor"
     SAFETY_CHAIN = "safety_chain"
-    FILL_TRACKER = "fill_tracker"
     LEDGER = "ledger"
     RECONCILE = "reconcile"
 

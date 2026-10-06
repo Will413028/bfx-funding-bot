@@ -38,7 +38,6 @@ async def _database(monkeypatch, tmp_path, *, phase: str, realm: str | None, pro
               "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'realm.db'}"}
     if phase in {"live", "shadow"}:
         values.update({
-            "BFX_WS_CLIENT_ENABLED": "true",
             "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
             "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
             "BFX_SAFETY_CONFIG": str(_SAFETY),

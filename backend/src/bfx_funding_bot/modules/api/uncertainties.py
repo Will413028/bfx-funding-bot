@@ -28,7 +28,6 @@ from bfx_funding_bot.modules.api.account_scope import (
 )
 from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models, get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
-from bfx_funding_bot.modules.execution.operator_evidence import LegacyOperatorEvidence
 from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionAction,
     ResolutionRejected,
@@ -314,10 +313,9 @@ def _read_scope(context: ExchangeAccountContext) -> Scope:
 
 async def _resolution_context(
     session: AsyncSession, *, context: ExchangeAccountContext, row: UncertaintyView,
-    evidence: OperatorEvidence | None = None,
+    evidence: OperatorEvidence,
 ) -> UncertaintyResolutionContext:
-    port = evidence if evidence is not None else LegacyOperatorEvidence()
-    result = await port.resolution_context(
+    result = await evidence.resolution_context(
         session, _read_scope(context),
         ResolutionSubject(row.uncertainty_id, row.symbol, row.attempt_id),
     )

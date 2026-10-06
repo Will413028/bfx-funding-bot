@@ -1,31 +1,23 @@
-"""build_daemon composes the bot process by capital authority (sqlite construction only).
+"""build_daemon composes the bot process on the ledger, the only capital authority (sqlite
+construction only).
 
-Most tests reach the ledger authority through the monkeypatched epoch read below; the
-boot-rule tests at the end read a real epoch row (Bitfinex supports both authorities,
-``apps/authority_support.py``) and the H-1 seed rule.
+The databases here hold the epochs a fresh database holds at head (``legacy``, then the
+``ledger`` genesis); the boot-rule tests read the real epoch row and the H-1 seed rule.
 
 Mutation checks (one at a time; revert after each):
 
-* a ledger-authority daemon holds any ``Legacy*`` adapter, the paper-position projection, the
-  offer registry, the event store or a persister: ``test_a_ledger_daemon_holds_no_legacy_state``.
-* ``PaperPositionLedger`` / ``OfferRegistry`` subscribed to the bus under the ledger: same test
-  (the walk follows the bus's handler lists to their bound methods).
-* the WS dispatcher or the fill tracker is left on the legacy hint sink, or each gets its own
-  ledger sink: ``test_a_ledger_daemon_shares_one_ledger_hint_sink``.
-* the policy worker builds its own repository / reaches the event stream under the ledger:
-  ``test_a_ledger_daemon_applies_policy_and_resolutions_through_the_ledger``.
+* the daemon holds any ``Legacy*`` adapter, the paper-position projection, the offer registry,
+  the event store or a persister: ``test_the_daemon_holds_no_legacy_state``.
+* the WS dispatcher gets its own ledger hint sink: ``test_the_daemon_hints_through_the_reconcile_channel``.
+* the policy worker builds its own repository / reaches the event stream:
+  ``test_the_daemon_applies_policy_and_resolutions_through_the_ledger``.
 * the uncertainty worker is built without the ledger resolution: same test.
-* the effects wrap the legacy sink: ``test_a_ledger_daemon_observes_through_cycle_effects``;
-  a legacy daemon wrapped in effects: ``test_a_legacy_daemon_is_wired_as_it_always_was``.
-* the legacy branch constructs a different object graph than before:
-  ``test_a_legacy_daemon_is_wired_as_it_always_was``.
-* Bitfinex's set loses ``ledger``: ``test_a_ledger_epoch_boots_bitfinex_on_the_ledger``.
-* ``require_ledger_seed`` is not called (or passes without a seed) in ``build_daemon``:
-  ``test_a_prod_ledger_boot_without_the_seed_refuses``.
-* the seed lookup ignores ``origin`` or the scope: the ``venue``-origin and other-scope rows
-  of ``test_a_prod_ledger_boot_without_the_seed_refuses``.
-* the seed rule covers the simulated venue or a non-prod realm:
-  ``test_the_seed_rule_binds_only_the_real_venue_in_prod``.
+* the cycle effects are left off: ``test_the_daemon_observes_through_cycle_effects``.
+* the bot accepts a database whose latest epoch is ``legacy``:
+  ``test_a_legacy_epoch_refuses_either_venue``.
+* ``require_ledger_seed`` is not called in ``build_daemon``:
+  ``test_a_switched_database_boots_only_over_the_scopes_seed`` and
+  ``test_an_epoch_from_an_unknown_writer_refuses_the_real_venue``.
 """
 from __future__ import annotations
 
@@ -37,12 +29,9 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from bfx_funding_bot.apps.authority_support import supported_for_venue
+from bfx_funding_bot.apps.authority_support import SUPPORTED
 from bfx_funding_bot.core.authority import AuthorityMismatch
-from bfx_funding_bot.modules.execution.deployment_input import (
-    LedgerDeploymentInput,
-    LegacyDeploymentInput,
-)
+from bfx_funding_bot.modules.execution.deployment_input import LedgerDeploymentInput
 from bfx_funding_bot.modules.execution.ledger_cycle_effects import LedgerCycleEffects
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.trading import CapitalPolicy
@@ -50,29 +39,25 @@ from tests.apps.walk import legacy_state
 from tests.modules.marketfeed.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
     configure_account_env,
-    paper_ledger_of,
     seed_exchange_account,
 )
 from tests.modules.marketfeed.test_daemon_wiring import _write_cells_yaml
 
 
-async def _env_and_db(monkeypatch, tmp_path, httpx_mock, *, authority: str, realm: str = "ci"):
+async def _env_and_db(monkeypatch, tmp_path, httpx_mock, *, name: str, realm: str = "ci"):
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 
     configure_account_env(monkeypatch)
     for name in list(os.environ):
-        if name.startswith("BFX_CANARY_") or name in (
-            "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
-        ):
+        if variable_is_legacy(name):
             monkeypatch.delenv(name)
     values = {
         "BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": realm,
-        "BFX_WS_CLIENT_ENABLED": "true", "BFX_FILL_TRACKER_ENABLED": "true",
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
         "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
-        "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / authority}.db",
+        "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / name}.db",
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -86,15 +71,17 @@ async def _env_and_db(monkeypatch, tmp_path, httpx_mock, *, authority: str, real
     return engine, factory, _write_cells_yaml(tmp_path)
 
 
-async def _apply_policies(factory, authority: str, realm: str = "ci") -> None:
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
-    from bfx_funding_bot.modules.execution.legacy_ports import LegacyPolicyStore
+def variable_is_legacy(name: str) -> bool:
+    return name.startswith("BFX_CANARY_") or name in (
+        "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
+        "BFX_WS_CLIENT_ENABLED", "BFX_FILL_TRACKER_ENABLED",
+    )
+
+
+async def _apply_policies(factory, realm: str = "ci") -> None:
     from bfx_funding_bot.modules.ledger.wiring import build_policy_store
 
-    scope = Scope(TEST_EXCHANGE_ACCOUNT_ID, realm)
-    store = (build_policy_store(scope) if authority == "ledger" else LegacyPolicyStore(
-        CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment=realm,
-                          max_snapshot_age_ms=10_000)))
+    store = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID, realm))
     async with factory.begin() as session:
         await store.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
                                  expected_revision=0, source={"fixture": True})
@@ -102,23 +89,17 @@ async def _apply_policies(factory, authority: str, realm: str = "ci") -> None:
                                  expected_revision=0, source={"fixture": True})
 
 
-async def _build(monkeypatch, tmp_path, httpx_mock, authority: str):
-    from bfx_funding_bot.apps import bot
+async def _build(monkeypatch, tmp_path, httpx_mock):
     from bfx_funding_bot.apps.bot import build_daemon
 
-    engine, factory, path = await _env_and_db(monkeypatch, tmp_path, httpx_mock, authority=authority)
-    await _apply_policies(factory, authority)
-    if authority == "ledger":
-        async def ledger_epoch(_session: object, *, supported: object) -> str:
-            return "ledger"
-
-        monkeypatch.setattr(bot, "read_authority", ledger_epoch)
+    engine, factory, path = await _env_and_db(monkeypatch, tmp_path, httpx_mock, name="ledger")
+    await _apply_policies(factory)
     return engine, factory, await build_daemon(cells_yaml_path=path, skip_ws=True)
 
 
 @pytest.mark.asyncio
-async def test_a_ledger_daemon_holds_no_legacy_state(monkeypatch, tmp_path, httpx_mock) -> None:
-    engine, _, daemon = await _build(monkeypatch, tmp_path, httpx_mock, "ledger")
+async def test_the_daemon_holds_no_legacy_state(monkeypatch, tmp_path, httpx_mock) -> None:
+    engine, _, daemon = await _build(monkeypatch, tmp_path, httpx_mock)
     try:
         assert not hasattr(daemon, "ledger") and not hasattr(daemon, "offer_registry")
         assert legacy_state(daemon, "daemon") == []
@@ -141,13 +122,12 @@ async def test_a_ledger_daemon_holds_no_legacy_state(monkeypatch, tmp_path, http
 
 
 @pytest.mark.asyncio
-async def test_a_ledger_daemon_hints_through_the_reconcile_channel_and_composes_no_rest_tracker(
+async def test_the_daemon_hints_through_the_reconcile_channel(
     monkeypatch, tmp_path, httpx_mock,
 ) -> None:
-    # BFX_FILL_TRACKER_ENABLED=true is set: the ledger authority still composes no REST tracker.
-    engine, _, daemon = await _build(monkeypatch, tmp_path, httpx_mock, "ledger")
+    engine, _, daemon = await _build(monkeypatch, tmp_path, httpx_mock)
     try:
-        assert daemon.fill_tracker is None
+        assert not hasattr(daemon, "fill_tracker")
         sink = daemon.ws_dispatcher._venue_hints
         assert type(sink).__name__ == "LedgerVenueHintSink"
         assert sink._request_resync == daemon.periodic_reconcile.resync.request
@@ -157,10 +137,10 @@ async def test_a_ledger_daemon_hints_through_the_reconcile_channel_and_composes_
 
 
 @pytest.mark.asyncio
-async def test_a_ledger_daemon_applies_policy_and_resolutions_through_the_ledger(
+async def test_the_daemon_applies_policy_and_resolutions_through_the_ledger(
     monkeypatch, tmp_path, httpx_mock,
 ) -> None:
-    engine, _, daemon = await _build(monkeypatch, tmp_path, httpx_mock, "ledger")
+    engine, _, daemon = await _build(monkeypatch, tmp_path, httpx_mock)
     try:
         worker = daemon.capital_policy_control
         assert type(worker.policy_store).__name__ == "LedgerPolicyStore"
@@ -175,8 +155,8 @@ async def test_a_ledger_daemon_applies_policy_and_resolutions_through_the_ledger
 
 
 @pytest.mark.asyncio
-async def test_a_ledger_daemon_observes_through_cycle_effects(monkeypatch, tmp_path, httpx_mock) -> None:
-    engine, _, daemon = await _build(monkeypatch, tmp_path, httpx_mock, "ledger")
+async def test_the_daemon_observes_through_cycle_effects(monkeypatch, tmp_path, httpx_mock) -> None:
+    engine, _, daemon = await _build(monkeypatch, tmp_path, httpx_mock)
     try:
         assert isinstance(daemon.boot_recovery, LedgerCycleEffects)
         runtime = daemon.periodic_reconcile._recovery  # the timing shim around the sink
@@ -188,7 +168,6 @@ async def test_a_ledger_daemon_observes_through_cycle_effects(monkeypatch, tmp_p
         assert daemon.observation_scope == Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci")
         # The consumers that only cached the projection take none.
         assert type(daemon.trading_status._exposure).__name__ == "CapitalStatusReads"
-        assert daemon.periodic_reconcile._deployment._uncertainty_synced is None
         status = await daemon.trading_status.snapshot()
         assert "capital_policy" in {g["name"] for g in status["guards"]}
         assert not ({"allocation_cap", "buying_power"} & {g["name"] for g in status["guards"]})
@@ -196,49 +175,20 @@ async def test_a_ledger_daemon_observes_through_cycle_effects(monkeypatch, tmp_p
         await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_a_legacy_daemon_is_wired_as_it_always_was(monkeypatch, tmp_path, httpx_mock) -> None:
-    engine, _, daemon = await _build(monkeypatch, tmp_path, httpx_mock, "legacy")
-    try:
-        assert type(paper_ledger_of(daemon)).__name__ == "PaperPositionLedger"
-        assert type(daemon.boot_recovery).__name__ == "LegacyObservationSink"
-        recovery = daemon.periodic_reconcile._recovery
-        assert type(recovery._inner).__name__ == "LegacyObservationSink"
-        assert isinstance(daemon.periodic_reconcile._deployment_input, LegacyDeploymentInput)
-        assert type(daemon.capital_policy_control.policy_store).__name__ == "LegacyPolicyStore"
-        assert type(daemon.capital_policy_control.scope_lock).__name__ == "LegacyScopeLock"
-        assert type(daemon.uncertainty_worker.requests.resolution).__name__ == (
-            "LegacyOperatorResolution")
-        assert type(daemon.fill_tracker._venue_hints).__name__ == "LegacyVenueHintSink"
-        assert type(daemon.ws_dispatcher._venue_hints).__name__ == "LegacyVenueHintSink"
-        assert type(daemon.command_gate._boundary.journal).__name__ == "LegacyCommandJournal"
-        assert type(daemon.command_gate._boundary.effects).__name__ == "LegacyCommandEffects"
-        assert daemon.periodic_reconcile._deployment._uncertainty_synced is not None
-        assert type(daemon.trading_status._exposure).__name__ == "CapitalStatusReads"
-        assert type(daemon.fill_tracker).__name__ == "RestPollingFillTracker"
-        assert daemon.fill_tracker._venue_hints is daemon.ws_dispatcher._venue_hints
-        assert daemon.auth_ws._on_resync_needed == daemon.periodic_reconcile.resync.request
-        # The projection and the registry listen on the bus, ledger first (as before).
-        from bfx_funding_bot.modules.execution.events import ReservationClaimed
-        owners = [type(getattr(h, "__self__", None)).__name__
-                  for h in daemon.bus._handlers[ReservationClaimed]]
-        assert owners[:2] == ["PaperPositionLedger", "OfferRegistry"]
-        assert any(name.startswith("Legacy") for name in
-                   (entry.split(": ")[1] for entry in legacy_state(daemon, "daemon")))
-    finally:
-        await engine.dispose()
-
-
-async def _switched_db(monkeypatch, tmp_path, httpx_mock, *, realm: str):
-    """A database whose latest epoch is ``ledger`` (as the owner's switch leaves it)."""
+async def _db(monkeypatch, tmp_path, httpx_mock, *, realm: str):
+    """A database as it is at head (latest epoch ``ledger``), with the policies applied."""
     engine, factory, path = await _env_and_db(
-        monkeypatch, tmp_path, httpx_mock, authority=f"switched-{realm}", realm=realm)
-    await _apply_policies(factory, "ledger", realm)
+        monkeypatch, tmp_path, httpx_mock, name=f"db-{realm}", realm=realm)
+    await _apply_policies(factory, realm)
+    return engine, factory, path
+
+
+async def _epoch(factory, actor: str) -> None:
     async with factory.begin() as session:
         await session.execute(text(
             "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-            "VALUES (2, 'ledger', 2, 'test', 'switch')"))
-    return engine, factory, path
+            "SELECT max(epoch_seq) + 1, 'ledger', 3, :actor, 'test' FROM capital_authority_epoch"),
+            {"actor": actor})
 
 
 async def _observation(factory, *, origin: str, account=TEST_EXCHANGE_ACCOUNT_ID,
@@ -261,12 +211,12 @@ async def _observation(factory, *, origin: str, account=TEST_EXCHANGE_ACCOUNT_ID
 
 
 @pytest.mark.asyncio
-async def test_a_ledger_epoch_boots_bitfinex_on_the_ledger(monkeypatch, tmp_path, httpx_mock) -> None:
-    """The real epoch read (no monkeypatch) picks the ledger for Bitfinex; ``ci`` needs no seed."""
+async def test_the_real_epoch_boots_bitfinex_on_the_ledger(monkeypatch, tmp_path, httpx_mock) -> None:
+    """The real epoch read (no monkeypatch); the genesis epoch needs no seed."""
     from bfx_funding_bot.apps.bot import build_daemon
 
-    assert supported_for_venue("bitfinex") == frozenset({"legacy", "ledger"})
-    engine, _, path = await _switched_db(monkeypatch, tmp_path, httpx_mock, realm="ci")
+    assert frozenset({"ledger"}) == SUPPORTED
+    engine, _, path = await _db(monkeypatch, tmp_path, httpx_mock, realm="ci")
     try:
         daemon = await build_daemon(cells_yaml_path=path, skip_ws=True)
         assert isinstance(daemon.boot_recovery, LedgerCycleEffects)
@@ -276,9 +226,35 @@ async def test_a_ledger_epoch_boots_bitfinex_on_the_ledger(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_a_prod_ledger_boot_without_the_seed_refuses(monkeypatch, tmp_path, httpx_mock) -> None:
-    """H-1: a switched prod database boots the ledger only over the scope's seed observation;
-    a runtime (``venue``) observation or another scope's seed is not it."""
+@pytest.mark.parametrize("phase", ["live", "shadow"])
+async def test_a_legacy_epoch_refuses_either_venue(monkeypatch, tmp_path, httpx_mock, phase) -> None:
+    """A database whose latest epoch is ``legacy`` (never switched, or restored from before the
+    switch) is refused by the bot on the real and on the simulated venue."""
+    from bfx_funding_bot.apps import bot
+    from bfx_funding_bot.apps.bot import build_daemon
+
+    refused: list[str] = []
+    monkeypatch.setattr(bot, "_refuse_live_boot", _recording(refused))
+    engine, factory, path = await _db(monkeypatch, tmp_path, httpx_mock, realm="ci")
+    monkeypatch.setenv("BFX_PHASE", phase)
+    try:
+        async with factory.begin() as session:
+            await session.execute(text(
+                "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
+                "VALUES (3, 'legacy', 3, 'test', 'restored')"))
+        with pytest.raises(AuthorityMismatch, match="authority_unsupported value=legacy"):
+            await build_daemon(cells_yaml_path=path, skip_ws=True)
+        assert refused == ["authority_unsupported value=legacy build=ledger"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_switched_database_boots_only_over_the_scopes_seed(
+    monkeypatch, tmp_path, httpx_mock,
+) -> None:
+    """H-1: after the switch's epoch the scope boots only over its seed observation; a runtime
+    (``venue``) observation or another scope's seed is not it. The genesis epoch needs none."""
     from uuid import UUID
 
     from bfx_funding_bot.apps import bot
@@ -286,8 +262,10 @@ async def test_a_prod_ledger_boot_without_the_seed_refuses(monkeypatch, tmp_path
 
     refused: list[str] = []
     monkeypatch.setattr(bot, "_refuse_live_boot", _recording(refused))
-    engine, factory, path = await _switched_db(monkeypatch, tmp_path, httpx_mock, realm="prod")
+    engine, factory, path = await _db(monkeypatch, tmp_path, httpx_mock, realm="prod")
     try:
+        await build_daemon(cells_yaml_path=path, skip_ws=True)  # the genesis epoch: no seed
+        await _epoch(factory, "ledger_seed:switch-20261005T182054Z-fe1cc4-a1")
         await _observation(factory, origin="venue")
         await _observation(factory, origin="legacy_seed",
                            account=UUID("00000000-0000-0000-0000-0000000000ff"))
@@ -303,42 +281,27 @@ async def test_a_prod_ledger_boot_without_the_seed_refuses(monkeypatch, tmp_path
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_an_epoch_from_an_unknown_writer_refuses_the_real_venue(
+    monkeypatch, tmp_path, httpx_mock,
+) -> None:
+    from bfx_funding_bot.apps import bot
+    from bfx_funding_bot.apps.bot import build_daemon
+
+    refused: list[str] = []
+    monkeypatch.setattr(bot, "_refuse_live_boot", _recording(refused))
+    engine, factory, path = await _db(monkeypatch, tmp_path, httpx_mock, realm="prod")
+    try:
+        await _epoch(factory, "bootstrap_simulation_db")
+        with pytest.raises(AuthorityMismatch, match="ledger_epoch_writer_unknown"):
+            await build_daemon(cells_yaml_path=path, skip_ws=True)
+        assert refused == ["ledger_epoch_writer_unknown actor='bootstrap_simulation_db'"]
+    finally:
+        await engine.dispose()
+
+
 def _recording(refused: list[str]):
     async def refuse(exc: BaseException, **_: object) -> None:
         refused.append(str(exc))
 
     return refuse
-
-
-@pytest.mark.parametrize(("venue", "realm", "needed"), [
-    ("bitfinex", "prod", True),
-    ("bitfinex", "ci", False),
-    ("simulated", "shadow", False),
-    ("simulated", "ci", False),
-    ("simulated", "prod", False),
-])
-def test_the_seed_rule_binds_only_the_real_venue_in_prod(venue, realm, needed) -> None:
-    from bfx_funding_bot.apps.authority_support import ledger_boot_needs_seed
-
-    assert ledger_boot_needs_seed(venue, realm) is needed
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("authority", "venue"), [("legacy", "bitfinex"), ("ledger", "simulated")])
-async def test_the_seed_rule_passes_legacy_and_the_simulated_venue_without_a_seed(
-    tmp_path, authority, venue,
-) -> None:
-    """A prod legacy boot and a simulated ledger boot never look for the seed."""
-    from bfx_funding_bot.apps.authority_support import require_ledger_seed
-    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
-
-    engine = make_async_engine_from_url(f"sqlite+aiosqlite:///{tmp_path / 'rule'}.db")
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        async with async_sessionmaker(engine)() as session:
-            for realm in ("prod", "shadow"):
-                await require_ledger_seed(session, authority=authority, venue=venue,
-                                          scopes=(Scope(TEST_EXCHANGE_ACCOUNT_ID, realm),))
-    finally:
-        await engine.dispose()

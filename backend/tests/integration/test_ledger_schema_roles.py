@@ -47,6 +47,42 @@ _HC = "00000000-0000-0000-0000-00000000a009"
 _C = "00000000-0000-0000-0000-00000000a010"
 
 
+GENESIS_ACTOR = "migration b1c2d3e4f5a6 genesis"
+
+
+def append_epoch(conn, authority: str, reason: str = "test") -> None:
+    """The owner appends the next capital authority epoch (what the S1-7 switch did)."""
+    conn.exec_driver_sql(
+        "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
+        f"SELECT max(epoch_seq) + 1, '{authority}', max(epoch_seq) + 1, 'test', '{reason}' "
+        "FROM capital_authority_epoch")
+
+
+def pre_switch(conn) -> None:
+    """Make this clone the database the S1-7 switch had not yet happened on: the owner takes
+    back the ``ledger`` row the genesis migration (``b1c2d3e4f5a6``) appends to an empty
+    database, so the latest epoch is ``legacy`` again (the epoch table is insert-only to
+    everyone but this explicit owner step). Tests of the pre-switch guards and of downgrades
+    through ``f6a7b8c9d0e1`` (which refuses a switched database) start from it."""
+    conn.exec_driver_sql("ALTER TABLE capital_authority_epoch DISABLE TRIGGER USER")
+    conn.exec_driver_sql(
+        f"DELETE FROM capital_authority_epoch WHERE actor = '{GENESIS_ACTOR}'")
+    conn.exec_driver_sql("ALTER TABLE capital_authority_epoch ENABLE TRIGGER USER")
+    assert conn.scalar(text(
+        "SELECT authority FROM capital_authority_epoch ORDER BY epoch_seq DESC LIMIT 1"
+    )) == "legacy"
+
+
+def pre_switch_url(url: str) -> None:
+    """``pre_switch`` on the database at ``url`` (before a downgrade through f6a7b8c9d0e1)."""
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            pre_switch(conn)
+    finally:
+        engine.dispose()
+
+
 def _build(url: str) -> None:
     engine = create_engine(url)
     _reset(engine)
@@ -643,8 +679,10 @@ def test_r6_populated_downgrade_preserves_facts(seeded) -> None:
             ),
             {"id": uuid4(), "a": _A, "source": _T},
         )
+    url = seeded.url.render_as_string(hide_password=False)
+    pre_switch_url(url)  # the downgrade below the genesis starts pre-switch
     with pytest.raises(Exception, match="refuse downgrade with R6 quarantine facts"):
-        alembic(seeded.url.render_as_string(hide_password=False), "downgrade", "f6a7b8c9d0e1")
+        alembic(url, "downgrade", "f6a7b8c9d0e1")
 
 
 def test_immutable_rows_reject_update_delete_truncate(seeded) -> None:
@@ -1168,10 +1206,7 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
             conn.exec_driver_sql(f"SELECT {column} FROM {table.name} LIMIT 1")
     # The grants hold as written once the ledger is the authority (f6a7b8c9d0e1).
     with seeded.begin() as conn:
-        conn.exec_driver_sql(
-            "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-            "VALUES (2, 'ledger', 2, 'test', 'role grants')"
-        )
+        append_epoch(conn, "ledger", "role grants")
     with seeded.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         conn.exec_driver_sql("UPDATE capital_command_clock SET revision=1")
@@ -1210,6 +1245,7 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
 def test_downgrade_removes_only_its_objects(ledger_db) -> None:
     url = ledger_db.url.render_as_string(hide_password=False)
     ledger_db.dispose()
+    pre_switch_url(url)
     alembic(url, "downgrade", "9a4d6e2c7b18")
     with create_engine(url).connect() as conn:
         assert not ({table.name for table in LEDGER_TABLES} & set(inspect(conn).get_table_names()))
@@ -1231,6 +1267,7 @@ def test_downgrade_removes_only_its_objects(ledger_db) -> None:
 def test_populated_ledger_refuses_downgrade(seeded) -> None:
     url = seeded.url.render_as_string(hide_password=False)
     seeded.dispose()
+    pre_switch_url(url)
     with pytest.raises(Exception, match="refuse downgrade of populated ledger"):
         alembic(url, "downgrade", "9a4d6e2c7b18")
 
@@ -1238,6 +1275,7 @@ def test_populated_ledger_refuses_downgrade(seeded) -> None:
 def test_corrective_downgrade_restores_offer_member_guard(ledger_db) -> None:
     url = ledger_db.url.render_as_string(hide_password=False)
     ledger_db.dispose()
+    pre_switch_url(url)
     alembic(url, "downgrade", "b1e2d3a4c5f6")
     engine = create_engine(url)
     try:

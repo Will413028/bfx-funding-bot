@@ -19,7 +19,6 @@ Mutations (apply one at a time, run this file, revert):
    (``tests/integration/test_ledger_cycle_effects.py``).
 9. ``foreign_lending`` alerted again for the same basis:
    ``test_foreign_lending_is_alerted_once_per_basis``.
-10. effects wrapping the legacy sink: ``test_the_legacy_sink_is_never_wrapped``.
 """
 from __future__ import annotations
 
@@ -33,10 +32,6 @@ from bfx_funding_bot.modules.execution import ledger_cycle_effects
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.ledger_cycle_effects import LedgerCycleEffects
-from bfx_funding_bot.modules.execution.observation_sink import (
-    LegacyCycleResult,
-    LegacyObservationSink,
-)
 from bfx_funding_bot.modules.execution.reconcile_monitors import (
     ForeignExposureMonitor,
     QuarantineAgeMonitor,
@@ -502,27 +497,3 @@ async def test_alerts_also_run_for_a_cycle_that_was_not_accepted(sent) -> None:
     rig = Rig(result=CycleResult("fenced"), views=(uncertainty(now - 40 * 60_000),), now=now)
     await rig.run()
     assert [e for e, _ in sent] == [alerts.UNKNOWN_QUARANTINE_AGED]
-
-
-# ----------------------------------------------------------------------------- the legacy sink
-
-
-async def test_the_legacy_sink_is_never_wrapped() -> None:
-    """The legacy reconcile publishes ``PositionReconciled`` itself: wrapping it doubles it."""
-    rig = Rig()
-    legacy = LegacyObservationSink(SimpleNamespace(), SCOPE)  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="ledger"):
-        LedgerCycleEffects(
-            legacy, scope=SCOPE, account_id="a", session_factory=rig.sink._sf,
-            capital=rig.capital, cells=(), protection=rig.protection, bus=rig.bus,
-            reads=rig.reads, conservation=rig.sink._conservation,
-            operator_reads=rig.sink._operator_reads, foreign_exposure=ForeignExposureMonitor(),
-            quarantine_age=QuarantineAgeMonitor(), foreign_grace_ms=0, clock=rig.clock,
-        )
-
-
-async def test_a_legacy_result_through_any_wrapper_is_refused() -> None:
-    rig = Rig(result=LegacyCycleResult("accepted", legacy=SimpleNamespace()))  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="ledger"):
-        await rig.run()
-    assert rig.nav == [] and rig.protection.clean == []

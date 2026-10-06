@@ -18,6 +18,8 @@ from bfx_funding_bot.modules.execution.projection_cutover.archive import (
 from bfx_funding_bot.modules.execution.projection_cutover.codec import decode_row
 from bfx_funding_bot.modules.execution.projection_cutover.contracts import Scope
 
+from .test_ledger_schema_roles import pre_switch
+
 pytestmark = pytest.mark.integration
 ACCOUNT = UUID(int=100)
 SCOPE = Scope(ACCOUNT, "ci")
@@ -239,8 +241,10 @@ async def test_runtime_role_denial_superuser_failclosed_and_select_only_verifier
 
 
 async def test_populated_downgrade_refused(archive_db):
-    factory, _ = archive_db
+    factory, engine = archive_db
     await capture(factory)
+    with engine.begin() as conn:
+        pre_switch(conn)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     with pytest.raises(Exception, match="populated"):
         command.downgrade(Config(str(INI)), "e7b1c2d3e4f5")
 

@@ -131,7 +131,6 @@ def test_event_type_includes_order_status_change() -> None:
 def test_health_target_includes_phase42_targets() -> None:
     assert HealthTarget.EXECUTOR.value == "executor"
     assert HealthTarget.SAFETY_CHAIN.value == "safety_chain"
-    assert HealthTarget.FILL_TRACKER.value == "fill_tracker"
 
 
 def test_envelope_does_not_invent_an_account_realm() -> None:

@@ -59,7 +59,7 @@ from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
 
-# Legacy ``execution.boot_recovery.SYSTEM_RESOLVER``: the operator-visible actor of a system resolution.
+# The operator-visible actor of a system resolution (the value the legacy reconcile used).
 SYSTEM_RESOLVER = "system:reconcile"
 RESOLUTION_REJECTED_ALERT = "ledger_unknown_resolution_rejected"
 

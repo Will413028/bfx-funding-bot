@@ -10,9 +10,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import bfx_funding_bot.modules.accounts.tables
+import bfx_funding_bot.modules.execution.audit.tables
 import bfx_funding_bot.modules.execution.event_store.tables
+import bfx_funding_bot.modules.execution.uncertainty_tables
 import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
-from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.core.auth import Principal
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
@@ -24,10 +25,10 @@ from bfx_funding_bot.modules.api.account_scope import (
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.attribution import build_attribution_router
 from bfx_funding_bot.modules.api.config import build_config_router
-from bfx_funding_bot.modules.api.deps import get_session
+from bfx_funding_bot.modules.api.deps import ReadModels, get_session
 from bfx_funding_bot.modules.api.projections import build_projections_router
 from bfx_funding_bot.modules.api.routers import build_router
-from bfx_funding_bot.modules.execution.event_store.tables import PositionStateRow
+from bfx_funding_bot.modules.ledger import PositionView
 
 _ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 
@@ -182,30 +183,6 @@ async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
             user_id="other-operator",
             role="owner",
         )
-        seed.add(
-            PositionStateRow(
-                account_id="legacy-a",
-                exchange_account_id=_ACCOUNT_ID,
-                deployment_environment="prod",
-                symbol="fUST",
-                reserved=Decimal("0"),
-                lent_amount=Decimal("2"),
-                last_updated_ms=1,
-                last_event_seq=1,
-            )
-        )
-        seed.add(
-            PositionStateRow(
-                account_id="legacy-b",
-                exchange_account_id=other_id,
-                deployment_environment="prod",
-                symbol="fUSD",
-                reserved=Decimal("0"),
-                lent_amount=Decimal("9"),
-                last_updated_ms=1,
-                last_event_seq=1,
-            )
-        )
         await seed.commit()
 
     app = FastAPI()
@@ -214,7 +191,17 @@ async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
     app.include_router(build_config_router())
     app.include_router(build_projections_router())
     app.include_router(build_attribution_router())
-    app.state.read_models = select_read_models("legacy")
+    lent = {_ACCOUNT_ID: ("fUST", Decimal("2")), other_id: ("fUSD", Decimal("9"))}
+
+    class _Positions:
+        """Each account's own position: a scope leak shows the other account's symbol."""
+
+        async def list_positions(self, session, scope):
+            symbol, amount = lent[scope.exchange_account_id]
+            return (PositionView(symbol, Decimal("0"), Decimal("0"), amount, None, 1, 1, None),)
+
+    unused = object()
+    app.state.read_models = ReadModels(_Positions(), unused, unused, unused)  # type: ignore[arg-type]
     current_user = {"value": "operator-1"}
 
     async def _operator() -> Principal:

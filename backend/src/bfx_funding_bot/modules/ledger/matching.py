@@ -27,7 +27,7 @@ from bfx_funding_bot.core.venue_time import VENUE_CLOCK_TOLERANCE_MS
 if TYPE_CHECKING:
     from bfx_funding_bot.modules.ledger import Coverage, JsonObject, Offer, OfferHistory
 
-# Legacy ``execution.boot_recovery.UNKNOWN_SETTLE_MS``; a test pins the equality.
+# How long after a submit started its offer may still be absent from the venue's answers.
 UNKNOWN_SETTLE_MS = 120_000
 
 type UnknownMatchKind = Literal["exact_match", "zero_match", "multiple_match", "incomplete"]

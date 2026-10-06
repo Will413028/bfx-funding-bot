@@ -129,7 +129,7 @@ async def test_a_simulated_daemon_composes_no_legacy_state(sim: SimEnv) -> None:
 
     daemon = await sim.build()
     assert legacy_state(daemon, "daemon") == []
-    assert daemon.fill_tracker is None and daemon.auth_ws is None and daemon.ws_dispatcher is None
+    assert daemon.auth_ws is None and daemon.ws_dispatcher is None
     assert daemon.venue_tasks == ()  # the seam replaced the live feed
     handlers = {
         type(getattr(handler, "__self__", None)).__name__

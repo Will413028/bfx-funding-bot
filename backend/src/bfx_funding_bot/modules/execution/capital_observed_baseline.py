@@ -26,7 +26,7 @@ the second observation (legacy ``BootRecovery.run``'s shape). The acceptance pro
 cutover observation the runner wrote from the same responses; the comparison binds the entry
 to it (``apps/capital_comparison_ledger.bind_observation``) before either arm counts.
 
-Deleted with the legacy authority (S1-8).
+Deleted with the switch scaffolding in PR-D.
 """
 
 from __future__ import annotations
