@@ -1,8 +1,11 @@
-"""Dormant capital read: the latest query's accepted basis, its tail, and policy.
+"""The ledger's capital read: the latest query's accepted basis, its tail, and policy.
 
-Every statement names its columns (never a whole ORM row): no ``evidence``,
-``normalized_payload`` or policy ``source``; the restore drill's verifier role reads it with
-SELECT on the ledger tables only (``deploy/vm/pgbackrest/ledger_digest.VERIFIER_TABLES``).
+Every statement names its columns (never a whole ORM row) so that no read carries the wide
+payload columns it does not use (observation ``evidence``, the attempt's
+``normalized_payload``, the policy's ``source``): the read runs every cycle and inside the
+command lock, and its cost stays bounded by the rows it folds. No grant requires it: every
+role that runs it (the bot, the restore drill's verifier with SELECT on the ledger tables,
+``deploy/vm/pgbackrest/ledger_digest.VERIFIER_TABLES``) reads these tables whole.
 
 Everything is read in the caller's one REPEATABLE READ READ ONLY transaction, so
 the basis, the tail and the clock come from one snapshot. Every statement is

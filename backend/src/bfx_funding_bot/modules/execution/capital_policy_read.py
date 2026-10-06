@@ -1,9 +1,9 @@
-"""Read a scope's applied capital policy from the shared policy heads and revisions.
+"""Read a scope's applied capital policy from the policy heads and revisions, unlocked.
 
-Both capital authorities keep these two tables (``ledger.tables``) and share one
-writer (``ledger.policy_write``); this reader replays no event stream, so it
-answers the same under either authority. ``CapitalBlockedError`` is the refusal
-every capital read here and in the legacy repository raises.
+The ledger's tables (``ledger.tables``), written only by ``ledger.policy_write``; the web
+API's trading status reads them here, without the account lock. ``CapitalBlockedError`` is the
+refusal: no head (``policy_unavailable``), a head not pointing at its own revision
+(``inconsistent_policy_pointer``), or a revision that does not parse against its digest.
 """
 from __future__ import annotations
 
@@ -52,10 +52,10 @@ async def read_policy_row(session: AsyncSession, *, account_id: UUID, environmen
 
 async def read_policy_unlocked(session: AsyncSession, *, account_id: UUID, environment: str,
                                symbol: str) -> CapitalPolicy:
-    """The applied policy without the account lock, for read-only pre-trade guards.
+    """The applied policy without the account lock, for read-only views.
 
     The command boundary re-reads and binds the policy revision under the lock
-    before any intent is written, so a guard reading a pointer that moves an
+    before any intent is written, so a reader seeing a pointer that moves an
     instant later cannot authorise anything by itself.
     """
     row = await read_policy_row(session, account_id=account_id, environment=environment,
