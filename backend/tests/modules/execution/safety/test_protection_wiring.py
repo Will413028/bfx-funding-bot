@@ -9,13 +9,16 @@ from uuid import UUID
 
 import pytest
 
-from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
 from bfx_funding_bot.modules.execution.safety.protection import (
     AutomaticProtection,
     WriterLockLostError,
     WriterLockWatch,
 )
 from bfx_funding_bot.modules.ledger import CapitalBlocked, Scope
+
+
+class _BootRefusedError(RuntimeError):
+    """A boot recovery's refusal (any exception type: the daemon re-raises it)."""
 
 
 class Recorder:
@@ -134,10 +137,10 @@ async def test_a_refused_boot_observation_makes_its_trips_durable_before_exit() 
     class _Recovery:
         async def run(self, scope):  # type: ignore[no-untyped-def]
             protection.trip("identity_conflict", "conflict at boot")
-            raise CapitalBlockedError("offer_provenance_conflict")
+            raise _BootRefusedError("offer_provenance_conflict")
 
     fake = SimpleNamespace(boot_recovery=_Recovery(), protection=protection,
                            observation_scope=object())
-    with pytest.raises(CapitalBlockedError):
+    with pytest.raises(_BootRefusedError):
         await Daemon._run_boot_recovery(fake)  # type: ignore[arg-type]
     assert engaged == ["auto:identity_conflict"]

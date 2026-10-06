@@ -106,7 +106,7 @@ async def factory(sqlite_engine):
 
 def _models(reads: _Reads) -> ReadModels:
     unused = object()
-    return ReadModels(reads, unused, unused, ArchivedExecutionHistory())  # type: ignore[arg-type]
+    return ReadModels(reads, unused, unused, ArchivedExecutionHistory(), unused)  # type: ignore[arg-type]
 
 
 @pytest_asyncio.fixture

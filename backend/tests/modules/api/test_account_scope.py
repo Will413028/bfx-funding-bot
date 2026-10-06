@@ -201,7 +201,7 @@ async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
             return (PositionView(symbol, Decimal("0"), Decimal("0"), amount, None, 1, 1, None),)
 
     unused = object()
-    app.state.read_models = ReadModels(_Positions(), unused, unused, unused)  # type: ignore[arg-type]
+    app.state.read_models = ReadModels(_Positions(), unused, unused, unused, unused)  # type: ignore[arg-type]
     current_user = {"value": "operator-1"}
 
     async def _operator() -> Principal:

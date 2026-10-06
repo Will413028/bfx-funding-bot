@@ -20,10 +20,6 @@ from bfx_funding_bot.core.errors import ConfigurationError
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
-from bfx_funding_bot.modules.execution.capital_policy_read import (
-    CapitalBlockedError,
-    policy_from_row,
-)
 from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPricer, PriceBranch
 from bfx_funding_bot.modules.execution.deployment.sizing import allocate_capital
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
@@ -50,6 +46,8 @@ from bfx_funding_bot.modules.strategy import (
 from bfx_funding_bot.modules.trading import (
     CapitalPolicy,
     OfferEnvelope,
+    PolicyRejectedError,
+    parse_policy,
     policy_payload,
     policy_schema_version,
 )
@@ -363,6 +361,11 @@ def test_max_offer_amount_must_be_a_positive_decimal(value: Any) -> None:
         CapitalPolicy(enabled=True, max_offer_amount=value)
 
 
+def policy_from_row(row: CapitalPolicyRevisionRow) -> CapitalPolicy:
+    """A stored revision parsed the way the ledger's policy read parses it."""
+    return parse_policy(row.schema_version, row.policy, row.digest)
+
+
 def _row(policy: dict[str, Any], schema: int) -> CapitalPolicyRevisionRow:
     import hashlib
     import json
@@ -406,7 +409,7 @@ def test_policy_schema_2_round_trips_and_schema_1_stays_readable_without_a_ceili
                    "rate_floor_ratio": "0.5", "min_rate_apr": "0.01"}}, 3),  # bool is not int
 ])
 def test_malformed_policy_rows_are_refused(payload: dict[str, Any], schema: int) -> None:
-    with pytest.raises(CapitalBlockedError):
+    with pytest.raises(PolicyRejectedError):
         policy_from_row(_row(payload, schema))
 
 

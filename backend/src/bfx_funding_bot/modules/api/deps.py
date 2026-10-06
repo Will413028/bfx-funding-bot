@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -22,6 +22,8 @@ from bfx_funding_bot.modules.ledger import (
     OperatorEvidence,
     OperatorReads,
     OperatorResolution,
+    PolicyStore,
+    Scope,
 )
 
 MAX_READINESS_TIMEOUT_SECONDS = 10.0
@@ -71,6 +73,8 @@ class ReadModels:
     operator_evidence: OperatorEvidence
     operator_resolution: OperatorResolution
     execution_history: ExecutionHistory
+    # The scope's applied-policy store; the web API only reads it (``read_applied``).
+    policy_store: Callable[[Scope], PolicyStore]
 
 
 async def get_read_models(request: Request) -> ReadModels:

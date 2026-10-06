@@ -4,8 +4,9 @@ Every statement names its columns (never a whole ORM row) so that no read carrie
 payload columns it does not use (observation ``evidence``, the attempt's
 ``normalized_payload``, the policy's ``source``): the read runs every cycle and inside the
 command lock, and its cost stays bounded by the rows it folds. No grant requires it: every
-role that runs it (the bot, the restore drill's verifier with SELECT on the ledger tables,
-``deploy/vm/pgbackrest/ledger_digest.VERIFIER_TABLES``) reads these tables whole.
+role that runs it (the bot; the restore drill's verifier with SELECT on the ledger tables,
+``deploy/vm/pgbackrest/ledger_digest.VERIFIER_TABLES``; the web API, whose trading status reads
+only the policy, through ``PolicyStore.read_applied``) reads these tables whole.
 
 Everything is read in the caller's one REPEATABLE READ READ ONLY transaction, so
 the basis, the tail and the clock come from one snapshot. Every statement is
@@ -171,7 +172,7 @@ def _symbol_block(row: Row[Any]) -> Blocked | None:
 async def _policy(
     session: AsyncSession, account: UUID, environment: str, symbol: str
 ) -> AppliedPolicy | Blocked:
-    """The symbol's head -> its revision, proven and parsed (legacy read_policy_row order)."""
+    """The symbol's head -> its revision, proven (``check_pointer``) and parsed."""
     head = (
         await session.execute(
             select(CapitalPolicyHeadRow.revision_id, CapitalPolicyHeadRow.revision).where(

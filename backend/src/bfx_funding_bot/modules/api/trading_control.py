@@ -32,13 +32,9 @@ from bfx_funding_bot.modules.api.account_scope import (
     require_account_member,
     require_account_write,
 )
-from bfx_funding_bot.modules.api.deps import get_session
+from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models, get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.deployments.tables import DeploymentRow
-from bfx_funding_bot.modules.execution.capital_policy_read import (
-    CapitalBlockedError,
-    read_policy_unlocked,
-)
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.execution.safety.tables import (
@@ -47,6 +43,7 @@ from bfx_funding_bot.modules.execution.safety.tables import (
     TradingStateRow,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import to_state
+from bfx_funding_bot.modules.ledger import PolicyRefused, PolicyStore, Scope
 from bfx_funding_bot.modules.ledger.tables import CapitalPolicyHeadRow
 from bfx_funding_bot.modules.trading import envelope_payload
 
@@ -82,7 +79,8 @@ def _currency_request(row: CapitalPolicyRequestRow) -> dict[str, Any]:
     }
 
 
-async def _currencies(session: AsyncSession, scope: tuple[UUID, str]) -> list[dict[str, Any]]:
+async def _currencies(session: AsyncSession, scope: tuple[UUID, str],
+                      store: PolicyStore) -> list[dict[str, Any]]:
     """Every currency with an applied policy, as the daemon reads it.
 
     An unreadable policy is shown as such (the daemon refuses its offers too);
@@ -97,10 +95,11 @@ async def _currencies(session: AsyncSession, scope: tuple[UUID, str]) -> list[di
         entry: dict[str, Any] = {"symbol": head.symbol, "revision": head.revision,
                                  "policy_error": None, "enabled": None,
                                  "max_offer_amount": None, "envelope": None}
+        # Unlocked: a view only (the command boundary re-reads and binds the revision under
+        # the account lock before any intent).
         try:
-            policy = await read_policy_unlocked(session, account_id=scope[0],
-                                                environment=scope[1], symbol=head.symbol)
-        except CapitalBlockedError as exc:
+            policy = (await store.read_applied(session, symbol=head.symbol)).policy
+        except PolicyRefused as exc:
             entry["policy_error"] = str(exc)
         else:
             entry.update(
@@ -158,7 +157,8 @@ def build_trading_control_router() -> APIRouter:
 
     @router.get("")
     async def overview(context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
-                       session: AsyncSession = Depends(get_session)) -> dict[str, Any]:  # noqa: B008
+                       session: AsyncSession = Depends(get_session),  # noqa: B008
+                       models: ReadModels = Depends(get_read_models)) -> dict[str, Any]:  # noqa: B008
         scope = (context.exchange_account_id, context.deployment_environment)
         state = await session.scalar(select(TradingStateRow).where(
             TradingStateRow.exchange_account_id == scope[0],
@@ -181,7 +181,7 @@ def build_trading_control_router() -> APIRouter:
                 "finished_at": deployment.finished_at.isoformat() if deployment.finished_at else None,
             },
             "requests": [_request(r) for r in requests],
-            "currencies": await _currencies(session, scope),
+            "currencies": await _currencies(session, scope, models.policy_store(Scope(*scope))),
         }}
 
     @router.post("/{action}", status_code=status.HTTP_202_ACCEPTED)
