@@ -252,7 +252,7 @@ HTTP 500（body 為 `nonce: small`）。bot 內所有簽章請求共用一個 `A
 kill 的 cancel-all）被拒：
 
 - webapi 的 `verify_account_key`（UI 驗證／更新帳戶 key 時呼叫 `auth/r/permissions`）
-- 一次性腳本：`scripts/bootstrap_capital.py`、`bootstrap_account_credential.py`、
+- 一次性腳本：`scripts/bootstrap_account_credential.py`、
   `cutover_identity.py`、`cutover_projection.py` 等會打 Bitfinex auth 端點的工具
 - 任何在其他機器上用同一把 key 的手動測試
 
