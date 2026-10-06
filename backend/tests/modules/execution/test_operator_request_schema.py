@@ -66,10 +66,10 @@ def test_web_api_insert_names_only_the_granted_request_columns() -> None:
     values = request_values(
         ResolutionScope(uuid4(), "ci"),
         ResolutionIntent(
-            uncertainty_id=uuid4(), action="mark_not_accepted", evidence_ref="1",
+            uncertainty_id=uuid4(), action="mark_not_accepted", evidence_ref="obs:x",
             operator_id="operator-1",
         ),
-        RequestColumns(reconcile_event_seq=1),
+        RequestColumns(observation_id=uuid4()),
         now_ms=1,
     )
     assert tuple(values) == UncertaintyResolutionRequestRow.REQUEST_COLUMNS

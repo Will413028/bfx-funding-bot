@@ -734,9 +734,12 @@ class ResolutionIntent:
 
 @dataclass(frozen=True, slots=True)
 class RequestColumns:
-    """The authority's own evidence column of a request row: exactly one is set."""
+    """The ledger evidence column of a request row: the observation the operator cited.
 
-    reconcile_event_seq: int | None = None
+    Pre-switch rows cite a legacy reconcile event instead (``reconcile_event_seq``, kept for
+    their history); no request the ledger queues or applies has one.
+    """
+
     observation_id: UUID | None = None
 
 
@@ -751,9 +754,7 @@ class QueuedResolution:
 
 @dataclass(frozen=True, slots=True)
 class AppliedResolution:
-    """What applying produced; ``resolved_event_seq`` exists only under the legacy log."""
-
-    resolved_event_seq: int | None = None
+    """Applying recorded a journal resolution; the request row carries no outcome column."""
 
 
 class OperatorResolution(Protocol):

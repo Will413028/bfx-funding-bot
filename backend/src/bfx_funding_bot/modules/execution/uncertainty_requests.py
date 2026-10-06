@@ -105,7 +105,8 @@ def _same_intent(
 ) -> bool:
     return (
         row.action == intent.action
-        and RequestColumns(row.reconcile_event_seq, row.observation_id) == columns
+        and row.reconcile_event_seq is None
+        and RequestColumns(row.observation_id) == columns
         and row.requested_by == intent.operator_id
         and row.venue_offer_id == intent.venue_offer_id
         and row.decision == intent.decision
@@ -249,7 +250,8 @@ def request_values(
         "deployment_environment": scope.environment,
         "uncertainty_id": intent.uncertainty_id,
         "action": intent.action,
-        "reconcile_event_seq": columns.reconcile_event_seq,
+        # Pre-switch evidence only; the epoch trigger refuses it under the ledger.
+        "reconcile_event_seq": None,
         "observation_id": columns.observation_id,
         "venue_offer_id": intent.venue_offer_id,
         "decision": intent.decision,
@@ -285,19 +287,17 @@ class UncertaintyResolutionWorker(OperatorRequestWorker[UncertaintyResolutionReq
     async def apply(self, session: AsyncSession, row: UncertaintyResolutionRequestRow,
                     prepared: None) -> Outcome:
         try:
-            applied = await self.requests.resolution.apply(
+            await self.requests.resolution.apply(
                 session, Scope(self.scope.account_id, self.scope.environment),
                 QueuedResolution(
                     row.request_id, intent_from_request(row),
-                    RequestColumns(row.reconcile_event_seq, row.observation_id),
+                    RequestColumns(row.observation_id),
                 ),
                 now_ms=self.clock(),
             )
         except EvidenceRejected as exc:
             raise request_rejection(exc) from exc
-        if applied.resolved_event_seq is None:
-            return Outcome(APPLIED)
-        return Outcome(APPLIED, columns={"resolved_event_seq": applied.resolved_event_seq})
+        return Outcome(APPLIED)
 
     def failure_reason(self, exc: BaseException) -> str:
         return "resolution_failed:" + root_cause_name(exc)
