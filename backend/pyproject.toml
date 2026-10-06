@@ -649,7 +649,7 @@ broken_contract_guidance = "Read through the ledger facade's ports (apps injects
 id = "runtime-not-legacy-authority"
 name = "The ledger runtime never imports what is left of the legacy capital authority"
 type = "forbidden"
-# What remains of the legacy authority after S1-8 serves only the DR prefix verification
+# What remains of the legacy authority after S1-8 serves only the baseline restore drill's replay
 # (scripts/verify_projection_replay.py) and the switch scaffolding (capital comparison,
 # seed); both go in later steps. The processes that lend and serve must not grow back into it.
 source_modules = [

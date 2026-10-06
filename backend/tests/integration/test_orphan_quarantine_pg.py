@@ -2,7 +2,7 @@
 
 Since lending envelope D2 an offer no durable intent traces to is foreign, and since S1-8
 no runtime writes the legacy event log at all. Breadcrumbs recorded before that still
-replay (the DR prefix verification rebuilds the projection from the frozen log), so the
+replay (the baseline restore drill rebuilds the projection from the frozen log), so the
 event store keeps its own regressions here. The history is planted with the event store's
 writer, as the legacy runtime appended it.
 """

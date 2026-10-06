@@ -19,7 +19,7 @@ that one statement, inside the migration's transaction. Any other state keeps ev
 switched database's epochs are its record; ``f6a7b8c9d0e1`` refuses below that).
 
 Revision ID: b1c2d3e4f5a6
-Revises: f9a0b1c2d3e4
+Revises: a0b1c2d3e4f5
 """
 
 from sqlalchemy import text
@@ -27,7 +27,7 @@ from sqlalchemy import text
 from alembic import op
 
 revision = "b1c2d3e4f5a6"
-down_revision = "f9a0b1c2d3e4"
+down_revision = "a0b1c2d3e4f5"
 branch_labels = None
 depends_on = None
 ledger_contract = "preserved"
