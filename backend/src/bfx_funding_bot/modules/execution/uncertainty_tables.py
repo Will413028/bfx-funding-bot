@@ -32,8 +32,8 @@ class UncertaintyResolutionRequestRow(Base):
     Not a projection: the web API only inserts the request columns and the
     daemon's resolution worker alone appends the resolution event, so the web
     API needs no ledger or projection write privilege. ``uncertainty_id`` is
-    deliberately not a foreign key -- ``execution_uncertainties`` is rebuilt
-    from the event log and must stay free to be.
+    deliberately not a foreign key: a ledger uncertainty is either a submission
+    attempt or a quarantine (``operator_reads.get_uncertainty``), two tables.
     """
 
     __tablename__ = "uncertainty_resolution_requests"

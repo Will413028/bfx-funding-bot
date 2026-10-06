@@ -136,16 +136,6 @@ OPEN_LEGACY_ARCHIVE_SQL = """DO $$ DECLARE r regclass; BEGIN
   END LOOP; END $$"""
 
 
-def open_legacy_archive(url: str) -> None:
-    """Let the owner write the twelve archived tables of this (per-test clone) database."""
-    engine = create_engine(url)
-    try:
-        with engine.begin() as conn:
-            conn.exec_driver_sql(OPEN_LEGACY_ARCHIVE_SQL)
-    finally:
-        engine.dispose()
-
-
 def stamp_realm(url: str, realm: str = "ci") -> None:
     """The owner's one-time ``database_realm`` stamp on a migrated, still-empty database.
 

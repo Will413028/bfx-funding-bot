@@ -13,7 +13,7 @@ from sqlalchemy.engine import Connection
 
 def _load_migration() -> ModuleType:
     path = (
-        Path(__file__).parents[4]
+        Path(__file__).parents[3]
         / "alembic"
         / "versions"
         / "a6c9e2f4b7d1_add_offer_claim_identity_uniques.py"
