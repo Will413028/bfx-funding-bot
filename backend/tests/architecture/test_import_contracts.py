@@ -31,12 +31,7 @@ MAX_IGNORES_BY_ID = {
     "market-contracts-are-pure": 0,
     "market-contracts-no-sibling-dependencies": 0,
     "market-contracts-via-facade": 0,
-    "capital-comparison-no-settings": 0,
     "strategy-wiring-is-top": 0,
-    "trading-shadow-no-internal-access": 0,
-    "trading-shadow-wiring-is-top": 0,
-    "trading-shadow-independent-loader": 0,
-    "trading-shadow-no-baseline-adapter": 0,
     "runtime-not-legacy-authority": 0,
     "trading-is-pure": TRADING_IS_PURE_MAX_IGNORES,
     "apps-is-top": APPS_IS_TOP_MAX_IGNORES,
@@ -69,11 +64,6 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
         and path.name not in {"candles", "strategy"}
     }
     assert set(contracts_by_id["strategy-lower-only"]["forbidden_modules"]) == sibling_modules
-    shadow_sources = set(contracts_by_id["trading-shadow-no-internal-access"]["source_modules"])
-    assert shadow_sources == (sibling_modules | {
-        "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.candles",
-        "bfx_funding_bot.core", "bfx_funding_bot.external", "bfx_funding_bot.apps",
-    }) - {"bfx_funding_bot.modules.trading_shadow"}
 
     strategy_sources = set(contracts_by_id["strategy-no-internal-access"]["source_modules"])
     assert strategy_sources == sibling_modules | {
@@ -125,7 +115,6 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
             "live_validation",
             "strategy",
             "trading",
-            "trading_shadow",
         )
     }
     wiring = contracts_by_id["strategy-wiring-is-top"]
@@ -178,7 +167,7 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     } <= set(independent["forbidden_modules"])
     legacy_authority = {
         f"bfx_funding_bot.modules.execution.{name}"
-        for name in ("capital_repository", "event_store.tables", "uncertainty_tables")
+        for name in ("event_store.tables", "uncertainty_tables")
     }
     consumers = contracts_by_id["capital-consumers-via-ports"]
     assert set(consumers["source_modules"]) == {
@@ -194,16 +183,14 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
         "bfx_funding_bot.modules.execution.safety.kill_switch",
         "bfx_funding_bot.modules.execution.safety.pre_trade",
     }
-    assert set(consumers["forbidden_modules"]) == legacy_authority | {
-        "bfx_funding_bot.modules.execution.amount_fingerprint",
-    }
+    assert set(consumers["forbidden_modules"]) == legacy_authority
     planner = contracts_by_id["planner-via-ports"]
     assert planner["source_modules"] == ["bfx_funding_bot.modules.execution.deployment.reconciler"]
     assert set(planner["forbidden_modules"]) == legacy_authority
     for contract in (consumers, planner):
         assert contract["type"] == "forbidden"
         assert contract["allow_indirect_imports"] is True
-    # What is left of the legacy authority (switch scaffolding) stays out of the
+    # What is left of the legacy authority (the archived tables' ORM) stays out of the
     # processes that lend and serve.
     runtime = contracts_by_id["runtime-not-legacy-authority"]
     assert {
@@ -211,11 +198,7 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
         "bfx_funding_bot.apps.webapi", "bfx_funding_bot.apps.read_models",
         "bfx_funding_bot.modules.ledger", "bfx_funding_bot.modules.api",
     } <= set(runtime["source_modules"])
-    assert {
-        "bfx_funding_bot.modules.execution.capital_repository",
-        "bfx_funding_bot.modules.execution.event_store.store",
-        "bfx_funding_bot.modules.execution.event_store.writer",
-    } <= set(runtime["forbidden_modules"])
+    assert runtime["forbidden_modules"] == ["bfx_funding_bot.modules.execution.event_store.tables"]
 
 
 def test_research_scripts_obtain_strategy_wiring_through_apps() -> None:

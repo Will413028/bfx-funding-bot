@@ -336,14 +336,8 @@ async def test_a_fenced_or_incomplete_boot_boots_with_trading_blocked(env, decis
 
 
 async def test_the_policy_worker_amends_the_policy_without_the_event_stream(
-    env, monkeypatch,
+    env,
 ) -> None:
-    from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
-
-    async def forbidden(*_args, **_kwargs):
-        raise AssertionError("the ledger authority must not replay the event stream")
-
-    monkeypatch.setattr(AccountEventWriter, "prepare_locked", forbidden)
     daemon = await env.build()
     worker = daemon.capital_policy_control
     request_id = uuid4()

@@ -27,7 +27,6 @@ from bfx_funding_bot.modules.execution.event_store.entities import (
     VenueCreditObservation,
     VenueOfferObservation,
 )
-from bfx_funding_bot.modules.execution.event_store.replay import _HistoricalReplayAuthorization
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
 
 __SCHEMA_VERSION__ = 3
@@ -100,8 +99,8 @@ def _validate_reservation_ref(
 ) -> None:
     """Reject internally contradictory correlation data before it is persisted.
 
-    Live producers must supply a reference. Historical rows bypass public
-    constructors through the stored-row replay factory below.
+    Live producers must supply a reference. (The stored-row replay factory that let
+    uncorrelated historical rows bypass this went with the event store, S1-8 PR-D.)
     """
     reference = getattr(ev, "reservation_ref", None)
     if reference is None:
@@ -809,48 +808,3 @@ class CancelAcknowledged:
     recorded_at_ms: int | None = None
     event_id: UUID = field(default_factory=uuid4)
     schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
-
-
-_HISTORICAL_LIFECYCLE_TYPES: dict[str, type[object]] = {
-    "RESERVATION_INTENT": ReservationIntent,
-    "RESERVATION_FAILED": ReservationFailed,
-    "SUBMIT_OUTCOME_UNKNOWN": ReservationUnknown,
-    "SUBMIT_MATCHED_TO_VENUE_OFFER": SubmitMatchedToVenueOffer,
-    "RESERVATION_CLAIMED": ReservationClaimed,
-    "ORDER_FILL": OrderFilled,
-    "RESERVATION_RELEASED": ReservationReleased,
-}
-
-
-def _construct_historical_legacy_event(
-    *,
-    cls: type[object],
-    event_type: str,
-    kwargs: dict[str, Any],
-    historical_authorization: _HistoricalReplayAuthorization,
-) -> object:
-    """Build an uncorrelated lifecycle event only from a consumed replay grant.
-
-    Public lifecycle constructors deliberately cannot represent this state.
-    The stored-row decoder has already bound ``historical_authorization`` to the
-    exact durable payload before calling this factory; consuming it here makes
-    the grant unusable for another event.
-    """
-    if _HISTORICAL_LIFECYCLE_TYPES.get(event_type) is not cls:
-        raise TypeError("historical replay event type conflicts")
-    if kwargs.get("reservation_ref") is not None:
-        raise TypeError("historical legacy event must be uncorrelated")
-    historical_authorization.consume(event_type=event_type)
-
-    event = object.__new__(cls)
-    for name, value in kwargs.items():
-        object.__setattr__(event, name, value)
-    # ``object.__new__`` bypasses dataclass defaults.  Seed the identity fields
-    # before the stored-row decoder replaces the temporary UUID with the
-    # deterministic historical identity.
-    object.__setattr__(event, "event_id", uuid4())
-    object.__setattr__(event, "schema_version", 2)
-    object.__setattr__(event, "is_legacy_uncorrelated", True)
-    _require_symbol(event)
-    _resolve_amount(event)
-    return event

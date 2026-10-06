@@ -4,6 +4,11 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+# Every table the shared metadata may reach by foreign key, whatever was imported first.
+import bfx_funding_bot.modules.accounts.tables
+import bfx_funding_bot.modules.execution.audit.tables
+import bfx_funding_bot.modules.execution.uncertainty_tables
+import bfx_funding_bot.modules.ledger.tables  # noqa: F401  (registers FK targets)
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.execution.event_store.tables import ReconcileObservationRow
 

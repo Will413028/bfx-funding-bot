@@ -14,31 +14,17 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.external.bitfinex.cid import generate_cid
-from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     CommandGateBlocked,
     SubmitOutcomeLostError,
-    _normalized_venue_payload,
 )
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
-    ReservationRef,
 )
-from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
-from bfx_funding_bot.modules.execution.event_store.tables import (
-    EventLogRow,
-    PositionStateRow,
-)
-from bfx_funding_bot.modules.execution.event_store.writer import ProjectionWriteError
 from bfx_funding_bot.modules.execution.events import (
     ReservationIntent,
     ReservationUnknown,
@@ -52,19 +38,13 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import (
-    SubmissionAttemptPayload,
     SubmitAcknowledged,
     SubmitNotSent,
     SubmitOutcomeUnknown,
     SubmitRejected,
 )
-from bfx_funding_bot.modules.execution.uncertainty_tables import (
-    ExecutionUncertaintyRow,
-    SubmissionAttemptRow,
-)
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
-from tests.integration.legacy_history import append_legacy
 from tests.modules.execution.fake_boundary import (  # noqa: F401  (fixture)
     Recording,
     boundary_stubs,
@@ -601,257 +581,3 @@ async def test_every_outcome_fact_is_marked_not_simulated() -> None:
 
     assert [facts.is_simulated for facts, _ in recording.outcomes] == [False]
     assert all(getattr(event, "is_simulated", False) is False for event in recording.events)
-
-
-# ----------------------------------------------------- event store, no gate involved
-
-
-async def _persist_intent(session_factory, ready: ReadyToSubmit) -> ReservationIntent:
-    """The write-ahead intent the legacy journal commits before the venue call."""
-    decision = ready.decision
-    cid = generate_cid(decision.signal_correlation_id, date(2026, 9, 3))
-    intent = ReservationIntent(
-        cid=cid, size_usdt=Decimal("12.5"),
-        signal_correlation_id=decision.signal_correlation_id,
-        account_id=str(ACCOUNT_ID), is_simulated=False, occurred_at_ms=100,
-        symbol=SYMBOL, execution_decision_id=ready.decision_id,
-        reservation_ref=ReservationRef(ready.decision_id, cid, decision.signal_correlation_id),
-        submission_attempt=SubmissionAttemptPayload(
-            attempt_id=uuid4(), execution_decision_id=ready.decision_id,
-            account_id=ACCOUNT_ID, environment=ENVIRONMENT, symbol=SYMBOL, cid=cid,
-            normalized_payload=_normalized_venue_payload(decision), started_at_ms=100,
-        ),
-    )
-    await append_legacy(session_factory, intent, environment=ENVIRONMENT)
-    return intent
-
-
-async def _persist_unknown(session_factory, intent: ReservationIntent) -> None:
-    await append_legacy(session_factory, ReservationUnknown(
-        cid=intent.cid, size_usdt=intent.size_usdt,
-        signal_correlation_id=intent.signal_correlation_id, account_id=intent.account_id,
-        is_simulated=False, reason="transport_timeout", occurred_at_ms=101,
-        symbol=SYMBOL, reservation_ref=intent.reservation_ref,
-    ), environment=ENVIRONMENT)
-
-
-@pytest.mark.asyncio
-async def test_serialized_writer_commits_unknown_attempt_event_and_block_atomically(
-    sqlite_engine,
-) -> None:
-    async with sqlite_engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
-    ready = _ready(decision_id="decision-durable")
-    async with session_factory() as session:
-        session.add(ExchangeAccount(id=ACCOUNT_ID, venue="bitfinex", label="ci"))
-        session.add(
-            ExecutionDecisionRow(
-                decision_id=ready.decision_id,
-                account_id=str(ACCOUNT_ID),
-                exchange_account_id=ACCOUNT_ID,
-                deployment_environment=ENVIRONMENT,
-                reconcile_id="reconcile-1",
-                cell_id="cell-1",
-                symbol=SYMBOL,
-                signal_correlation_id=str(ready.decision.signal_correlation_id),
-                outcome="ready",
-                signal_rate=Decimal("0.0001"),
-                applied_rate=Decimal("0.0001"),
-                amount_usdt=Decimal("12.5"),
-                duration_days=2,
-                model_evidence={},
-                safety_result={},
-                execution_policy="book_guarded",
-                service_version="test",
-                config_hash="config",
-                occurred_at_ms=99,
-                recorded_at_ms=99,
-            )
-        )
-        await session.commit()
-
-    await _persist_unknown(session_factory, await _persist_intent(session_factory, ready))
-
-
-    async with session_factory() as session:
-        events = (await session.execute(select(EventLogRow))).scalars().all()
-        attempt = (await session.execute(select(SubmissionAttemptRow))).scalar_one()
-        uncertainty = (
-            await session.execute(select(ExecutionUncertaintyRow))
-        ).scalar_one()
-        position = (await session.execute(select(PositionStateRow))).scalar_one()
-    assert [event.event_type for event in events] == [
-        "RESERVATION_INTENT",
-        "SUBMIT_OUTCOME_UNKNOWN",
-    ]
-    assert attempt.outcome_kind == "unknown"
-    assert attempt.completed_at_ms == 101
-    stored_attempt_id = UUID(events[0].payload["submission_attempt"]["attempt_id"])
-    assert stored_attempt_id == attempt.attempt_id
-    assert uncertainty.attempt_id == attempt.attempt_id
-    assert uncertainty.intended_amount == Decimal("12.5")
-    assert position.uncertain_amount == Decimal("12.5")
-    assert "never-persist" not in str(attempt.normalized_payload)
-
-
-@pytest.mark.asyncio
-async def test_full_rebuild_replays_attempt_and_uncertainty_with_stable_identity(
-    sqlite_engine,
-) -> None:
-    """Leaving either projection intact or regenerating IDs breaks second replay."""
-    async with sqlite_engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
-    ready = _ready(decision_id="decision-rebuild")
-    async with session_factory() as session:
-        session.add(ExchangeAccount(id=ACCOUNT_ID, venue="bitfinex", label="ci"))
-        session.add(
-            ExecutionDecisionRow(
-                decision_id=ready.decision_id,
-                account_id=str(ACCOUNT_ID),
-                exchange_account_id=ACCOUNT_ID,
-                deployment_environment=ENVIRONMENT,
-                reconcile_id="reconcile-rebuild",
-                cell_id="cell-rebuild",
-                symbol=SYMBOL,
-                signal_correlation_id=str(ready.decision.signal_correlation_id),
-                outcome="ready",
-                signal_rate=Decimal("0.0001"),
-                applied_rate=Decimal("0.0001"),
-                amount_usdt=Decimal("12.5"),
-                duration_days=2,
-                model_evidence={},
-                safety_result={},
-                execution_policy="book_guarded",
-                service_version="test",
-                config_hash="config",
-                occurred_at_ms=99,
-                recorded_at_ms=99,
-            )
-        )
-        await session.commit()
-    store = PostgresEventStore(deployment_environment=ENVIRONMENT)
-    await _persist_unknown(session_factory, await _persist_intent(session_factory, ready))
-
-    async with session_factory() as session:
-        original_attempt = (await session.execute(select(SubmissionAttemptRow))).scalar_one()
-        original_uncertainty = (
-            await session.execute(select(ExecutionUncertaintyRow))
-        ).scalar_one()
-        expected = (
-            original_attempt.attempt_id,
-            original_uncertainty.uncertainty_id,
-            original_uncertainty.correlation_key,
-        )
-        await store.rebuild_snapshot_from_log(
-            session,
-            account_id=str(ACCOUNT_ID),
-            deployment_environment=ENVIRONMENT,
-        )
-        await session.commit()
-
-    async with session_factory() as session:
-        rebuilt_attempt = (await session.execute(select(SubmissionAttemptRow))).scalar_one()
-        rebuilt_uncertainty = (
-            await session.execute(select(ExecutionUncertaintyRow))
-        ).scalar_one()
-        first_rebuild = (
-            rebuilt_attempt.attempt_id,
-            rebuilt_uncertainty.uncertainty_id,
-            rebuilt_uncertainty.correlation_key,
-        )
-        await store.rebuild_snapshot_from_log(
-            session,
-            account_id=str(ACCOUNT_ID),
-            deployment_environment=ENVIRONMENT,
-        )
-        await session.commit()
-
-    async with session_factory() as session:
-        second_attempt = (await session.execute(select(SubmissionAttemptRow))).scalar_one()
-        second_uncertainty = (
-            await session.execute(select(ExecutionUncertaintyRow))
-        ).scalar_one()
-    second_rebuild = (
-        second_attempt.attempt_id,
-        second_uncertainty.uncertainty_id,
-        second_uncertainty.correlation_key,
-    )
-    assert first_rebuild == second_rebuild == expected
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mismatched_field", ["account", "environment", "symbol"])
-async def test_attempt_rejects_cross_scope_execution_decision(
-    sqlite_engine,
-    mismatched_field: str,
-) -> None:
-    """Removing any decision-scope comparison would cross-link tenant audit state."""
-    async with sqlite_engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
-    other_account = UUID("24c4f9b8-c0a1-40bf-8f2e-21ad11cc4a14")
-    decision_account = other_account if mismatched_field == "account" else ACCOUNT_ID
-    decision_environment = "prod" if mismatched_field == "environment" else ENVIRONMENT
-    decision_symbol = "fUSD" if mismatched_field == "symbol" else SYMBOL
-    decision_id = f"decision-cross-{mismatched_field}"
-    signal_id = uuid4()
-    async with session_factory() as session:
-        session.add_all(
-            [
-                ExchangeAccount(id=ACCOUNT_ID, venue="bitfinex", label="ci"),
-                ExchangeAccount(id=other_account, venue="bitfinex", label="other"),
-            ]
-        )
-        session.add(
-            ExecutionDecisionRow(
-                decision_id=decision_id,
-                account_id=str(decision_account),
-                exchange_account_id=decision_account,
-                deployment_environment=decision_environment,
-                reconcile_id=f"reconcile-{mismatched_field}",
-                cell_id="cell-cross-scope",
-                symbol=decision_symbol,
-                signal_correlation_id=str(signal_id),
-                outcome="ready",
-                signal_rate=Decimal("0.0001"),
-                applied_rate=Decimal("0.0001"),
-                amount_usdt=Decimal("12.5"),
-                duration_days=2,
-                model_evidence={},
-                safety_result={},
-                execution_policy="book_guarded",
-                service_version="test",
-                config_hash="config",
-                occurred_at_ms=99,
-                recorded_at_ms=99,
-            )
-        )
-        await session.commit()
-    attempt = SubmissionAttemptPayload(
-        execution_decision_id=decision_id,
-        account_id=ACCOUNT_ID,
-        environment=ENVIRONMENT,
-        symbol=SYMBOL,
-        cid=88,
-        normalized_payload={"symbol": SYMBOL, "amount": "12.5"},
-        started_at_ms=100,
-    )
-    intent = ReservationIntent(
-        symbol=SYMBOL,
-        cid=88,
-        signal_correlation_id=signal_id,
-        account_id=str(ACCOUNT_ID),
-        is_simulated=False,
-        execution_decision_id=decision_id,
-        submission_attempt=attempt,
-        amount=Decimal("12.5"),
-        occurred_at_ms=100,
-    )
-
-    with pytest.raises(ProjectionWriteError, match="execution decision scope"):
-        await append_legacy(session_factory, intent, environment=ENVIRONMENT)
-
-    async with session_factory() as session:
-        assert (await session.execute(select(SubmissionAttemptRow))).scalar_one_or_none() is None

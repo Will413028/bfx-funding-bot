@@ -155,17 +155,18 @@ async def test_the_overview_shows_the_state_and_the_cancel_all_of_the_halt(migra
 async def _seed_policies(factory, account):
     from decimal import Decimal
 
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+    from bfx_funding_bot.modules.ledger import Scope
+    from bfx_funding_bot.modules.ledger.policy_write import write_policy_revision
     from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
-    repo = CapitalRepository(account_id=account, environment="ci", max_snapshot_age_ms=60_000)
+    scope = Scope(account, "ci")
     envelope = OfferEnvelope(min_period_days=2, max_period_days=30, max_open_offers=6,
                              rate_floor_ratio=Decimal("0.5"), min_rate_apr=Decimal("0.01"))
     async with factory.begin() as session:
-        await repo.apply_policy(session, symbol="fUST", expected_revision=0, source={"t": 1},
-                                policy=CapitalPolicy(enabled=True, max_offer_amount=Decimal("200"),
-                                                     envelope=envelope))
-        await repo.apply_policy(session, symbol="fUSD", expected_revision=0, source={"t": 1},
-                                policy=CapitalPolicy(enabled=False))
+        await write_policy_revision(
+            session, scope, symbol="fUST", expected_revision=0, source={"t": 1},
+            policy=CapitalPolicy(enabled=True, max_offer_amount=Decimal("200"), envelope=envelope))
+        await write_policy_revision(session, scope, symbol="fUSD", expected_revision=0,
+                                    source={"t": 1}, policy=CapitalPolicy(enabled=False))
 
 
 @pytest.mark.asyncio

@@ -1,9 +1,6 @@
 """Migration contract on an isolated PostgreSQL container, including runtime ACLs."""
-import asyncio
-
 import pytest
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from tests.pg_templates import alembic, stamp_realm
 
@@ -45,9 +42,8 @@ def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_templates, pg_c
                 "TRUNCATE legacy_archive.capital_snapshot_queries CASCADE"):
         with engine.begin() as connection, pytest.raises(Exception, match="legacy_archive is frozen"):
             connection.exec_driver_sql(sql)
-    # The legacy runtime's write path, as it ran before the switch (the epoch freezes it after)
-    # and before c2d3e4f5a6b7 archived its tables away from the bot; the capital tables' own
-    # immutability is what held them then.
+    # Below c2d3e4f5a6b7 (before the archive and the switch) the capital tables' own
+    # immutability is what held a written row.
     from .test_ledger_schema_roles import pre_switch_url
     pre_switch_url(url)
     alembic(url, "downgrade", "b1c2d3e4f5a6")
@@ -59,51 +55,4 @@ def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_templates, pg_c
                 "DELETE FROM capital_snapshot_queries", "TRUNCATE capital_snapshot_queries CASCADE"):
         with engine.begin() as connection, pytest.raises(Exception, match="immutable capital"):
             connection.exec_driver_sql(sql)
-    asyncio.run(_migrated_runtime_roundtrip(url))
-    for sql in ("UPDATE capital_policy_revisions SET digest='forged'",
-                "DELETE FROM capital_snapshots", "UPDATE event_log SET occurred_at_ms=0"):
-        with engine.begin() as connection, pytest.raises(Exception, match="immutable capital"):
-            connection.exec_driver_sql(sql)
     engine.dispose()
-
-
-async def _migrated_runtime_roundtrip(url):
-    from uuid import uuid4
-
-    from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-    from tests.integration.test_capital_repository import (
-        authorize,
-        intent,
-        repository,
-        setup_policy,
-        simulated_guard,
-        snapshot,
-    )
-
-    # The ORM names the archive schema; below c2d3e4f5a6b7 the tables are still in public.
-    engine = create_async_engine(url.replace("+psycopg", "+asyncpg"),
-                                 execution_options={"schema_translate_map": {"legacy_archive": None}})
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    account = uuid4()
-    async with factory.begin() as session:
-        session.add(ExchangeAccount(id=account, venue="bitfinex", label="migrated-runtime"))
-    repo = repository(account)
-    policy = await setup_policy(factory, repo)
-    seq = await snapshot(factory, repo)
-    # New migration must pass the real writer allowlist and restricted runtime
-    # must retain only the operational reads/inserts it already inherited.
-    event, decision = intent(account)
-    async with factory.begin() as session:
-        await session.execute(text("SET LOCAL ROLE bfx_bot"))
-        await repo.authorize_and_append_intent(session, intent=event, decision=decision,
-            expected_revision=policy.revision, expected_digest=policy.digest,
-            expected_snapshot_seq=seq, now_ms=1100, locked_guard=simulated_guard)
-    async with factory.begin() as session:
-        await session.execute(text("UPDATE alembic_version SET version_num='unknown-capital-head'"))
-    try:
-        with pytest.raises(ValueError, match="migration incomplete"):
-            await authorize(factory, repo, policy, seq, cid=2)
-    finally:
-        async with factory.begin() as session:
-            await session.execute(text("UPDATE alembic_version SET version_num='a9d3e5f7b102'"))
-        await engine.dispose()

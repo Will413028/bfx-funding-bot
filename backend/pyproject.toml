@@ -157,7 +157,6 @@ forbidden_modules = [
     "bfx_funding_bot.modules.observability",
     "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.trading",
-    "bfx_funding_bot.modules.trading_shadow",
 ]
 ignore_imports = []
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
@@ -188,63 +187,12 @@ source_modules = [
     "bfx_funding_bot.modules.observability",
     "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.trading",
-    "bfx_funding_bot.modules.trading_shadow",
 ]
 forbidden_modules = ["bfx_funding_bot.modules.strategy._internal"]
 as_packages = true
 allow_indirect_imports = true
 ignore_imports = []
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
-
-[[tool.importlinter.contracts]]
-id = "trading-shadow-no-internal-access"
-name = "Only trading shadow imports its internals directly"
-type = "forbidden"
-source_modules = [
-    "bfx_funding_bot.core", "bfx_funding_bot.external", "bfx_funding_bot.apps",
-    "bfx_funding_bot.modules.accounts", "bfx_funding_bot.modules.admin",
-    "bfx_funding_bot.modules.api", "bfx_funding_bot.modules.backfill",
-    "bfx_funding_bot.modules.backtest", "bfx_funding_bot.modules.candles",
-    "bfx_funding_bot.modules.deployments", "bfx_funding_bot.modules.execution",
-    "bfx_funding_bot.modules.external_signals", "bfx_funding_bot.modules.funding_stats",
-    "bfx_funding_bot.modules.lending", "bfx_funding_bot.modules.live_validation",
-    "bfx_funding_bot.modules.ledger",
-    "bfx_funding_bot.modules.market",
-    "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability",
-    "bfx_funding_bot.modules.simulated_venue",
-    "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.trading",
-]
-forbidden_modules = ["bfx_funding_bot.modules.trading_shadow._internal"]
-as_packages = true
-allow_indirect_imports = true
-ignore_imports = []
-
-[[tool.importlinter.contracts]]
-id = "trading-shadow-wiring-is-top"
-name = "Only composition roots may import trading shadow wiring"
-type = "forbidden"
-source_modules = ["bfx_funding_bot.core", "bfx_funding_bot.external", "bfx_funding_bot.modules"]
-forbidden_modules = ["bfx_funding_bot.modules.trading_shadow.wiring"]
-ignore_imports = []
-
-[[tool.importlinter.contracts]]
-id = "trading-shadow-independent-loader"
-name = "Trading shadow never imports the legacy capital repository or event store"
-type = "forbidden"
-source_modules = ["bfx_funding_bot.modules.trading_shadow"]
-forbidden_modules = [
-    "bfx_funding_bot.modules.execution.capital_repository",
-    "bfx_funding_bot.modules.execution.event_store",
-]
-ignore_imports = []
-
-[[tool.importlinter.contracts]]
-id = "trading-shadow-no-baseline-adapter"
-name = "Trading shadow receives the baseline reader by injection"
-type = "forbidden"
-source_modules = ["bfx_funding_bot.modules.trading_shadow"]
-forbidden_modules = ["bfx_funding_bot.modules.execution.capital_shadow_baseline"]
-ignore_imports = []
 
 [[tool.importlinter.contracts]]
 id = "apps-is-top"
@@ -320,7 +268,6 @@ ignore_imports = [
     "bfx_funding_bot.modules.accounts.credential_bootstrap -> bfx_funding_bot.modules.execution.protocols",
     "bfx_funding_bot.modules.accounts.vault -> bfx_funding_bot.modules.execution.protocols",
     "bfx_funding_bot.modules.admin.trading_status -> bfx_funding_bot.modules.marketfeed.readiness",
-    "bfx_funding_bot.modules.execution.capital_repository -> bfx_funding_bot.modules.live_validation.tables",
     "bfx_funding_bot.modules.execution.contracts -> bfx_funding_bot.modules.marketfeed.funding_book",
     "bfx_funding_bot.modules.execution.deployment.eligibility -> bfx_funding_bot.modules.marketfeed.funding_book",
     "bfx_funding_bot.modules.execution.deployment.period_pricing -> bfx_funding_bot.modules.marketfeed.funding_book",
@@ -336,22 +283,6 @@ ignore_imports = [
     "bfx_funding_bot.modules.observability.tracing -> bfx_funding_bot.modules.execution.protocols",
 ]
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
-
-[[tool.importlinter.contracts]]
-id = "capital-comparison-no-settings"
-name = "Capital comparison never imports runtime settings directly"
-type = "forbidden"
-source_modules = [
-    "bfx_funding_bot.apps.capital_comparison",
-    "bfx_funding_bot.apps.capital_comparison_closure",
-    "bfx_funding_bot.apps.capital_comparison_guard",
-    "bfx_funding_bot.apps.capital_comparison_inventory",
-    "bfx_funding_bot.apps.capital_comparison_ledger",
-    "bfx_funding_bot.modules.execution.capital_observed_baseline",
-]
-forbidden_modules = ["bfx_funding_bot.core.settings"]
-allow_indirect_imports = true
-ignore_imports = []
 
 [[tool.importlinter.contracts]]
 id = "strategy-wiring-is-top"
@@ -433,8 +364,6 @@ forbidden_modules = [
     "bfx_funding_bot.modules.strategy.**",
     "bfx_funding_bot.modules.trading",
     "bfx_funding_bot.modules.trading.**",
-    "bfx_funding_bot.modules.trading_shadow",
-    "bfx_funding_bot.modules.trading_shadow.**",
 ]
 as_packages = false
 ignore_imports = []
@@ -466,7 +395,6 @@ source_modules = [
     "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.strategy",
     "bfx_funding_bot.modules.trading",
-    "bfx_funding_bot.modules.trading_shadow",
 ]
 forbidden_modules = [
     "bfx_funding_bot.modules.market.contracts",
@@ -477,10 +405,10 @@ broken_contract_guidance = "Import market contracts from bfx_funding_bot.modules
 
 [[tool.importlinter.contracts]]
 id = "ledger-not-legacy"
-name = "Ledger does not import legacy execution or trading shadow"
+name = "Ledger does not import legacy execution"
 type = "forbidden"
 source_modules = ["bfx_funding_bot.modules.ledger"]
-forbidden_modules = ["bfx_funding_bot.modules.execution", "bfx_funding_bot.modules.trading_shadow"]
+forbidden_modules = ["bfx_funding_bot.modules.execution"]
 ignore_imports = []
 broken_contract_guidance = "Keep ledger independent; move the code or ask, do not add ignores."
 
@@ -501,7 +429,7 @@ source_modules = [
     "bfx_funding_bot.modules.market", "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability", "bfx_funding_bot.modules.strategy",
     "bfx_funding_bot.modules.simulated_venue",
-    "bfx_funding_bot.modules.trading", "bfx_funding_bot.modules.trading_shadow",
+    "bfx_funding_bot.modules.trading",
 ]
 forbidden_modules = ["bfx_funding_bot.modules.ledger._internal"]
 as_packages = true
@@ -534,7 +462,6 @@ forbidden_modules = [
     "bfx_funding_bot.modules.ledger",
     "bfx_funding_bot.modules.execution",
     "bfx_funding_bot.modules.trading",
-    "bfx_funding_bot.modules.trading_shadow",
     "bfx_funding_bot.modules.marketfeed",
 ]
 ignore_imports = []
@@ -557,7 +484,6 @@ source_modules = [
     "bfx_funding_bot.modules.live_validation", "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability",
     "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.trading",
-    "bfx_funding_bot.modules.trading_shadow",
 ]
 forbidden_modules = ["bfx_funding_bot.modules.simulated_venue._internal"]
 as_packages = true
@@ -595,7 +521,6 @@ source_modules = [
     "bfx_funding_bot.modules.live_validation", "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability",
     "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.trading",
-    "bfx_funding_bot.modules.trading_shadow",
 ]
 forbidden_modules = ["bfx_funding_bot.modules.simulated_venue"]
 as_packages = true
@@ -630,8 +555,6 @@ source_modules = [
     "bfx_funding_bot.modules.execution.safety.pre_trade",
 ]
 forbidden_modules = [
-    "bfx_funding_bot.modules.execution.amount_fingerprint",
-    "bfx_funding_bot.modules.execution.capital_repository",
     "bfx_funding_bot.modules.execution.event_store.tables",
     "bfx_funding_bot.modules.execution.uncertainty_tables",
 ]
@@ -643,11 +566,11 @@ broken_contract_guidance = "Read through the ledger facade's ports (apps injects
 id = "runtime-not-legacy-authority"
 name = "The ledger runtime never imports what is left of the legacy capital authority"
 type = "forbidden"
-# What remains of the legacy authority after S1-8 serves only the switch scaffolding (capital
-# comparison, seed; PR-D deletes it). The processes that lend and serve must not grow back into
-# it. The archived tables (event_store.tables, schema legacy_archive) are read at runtime only by
-# the archived execution history (modules.execution.archived_execution_history), which declares
-# its own table and imports none of these.
+# S1-8 PR-D deleted the legacy authority's writer, store, projector and readers. The processes
+# that lend and serve must not grow back into what is left: the archived tables'
+# ORM (event_store.tables, schema legacy_archive) is read at runtime only by the archived
+# execution history (modules.execution.archived_execution_history), which declares its own
+# table and imports none of it.
 source_modules = [
     "bfx_funding_bot.apps.authority_support",
     "bfx_funding_bot.apps.bot",
@@ -660,14 +583,7 @@ source_modules = [
     "bfx_funding_bot.modules.marketfeed",
 ]
 forbidden_modules = [
-    "bfx_funding_bot.modules.execution.amount_fingerprint",
-    "bfx_funding_bot.modules.execution.capital_repository",
-    "bfx_funding_bot.modules.execution.event_store.historical_claims",
-    "bfx_funding_bot.modules.execution.event_store.projector",
-    "bfx_funding_bot.modules.execution.event_store.store",
     "bfx_funding_bot.modules.execution.event_store.tables",
-    "bfx_funding_bot.modules.execution.event_store.writer",
-    "bfx_funding_bot.modules.execution.registry_offers",
 ]
 allow_indirect_imports = true
 ignore_imports = []
@@ -681,7 +597,6 @@ source_modules = ["bfx_funding_bot.modules.execution.deployment.reconciler"]
 # The planner imports only the pure amount codec (deployment.fingerprinted_amount and
 # trading.fingerprint_of); fingerprints in use come from ManagedOfferReader.
 forbidden_modules = [
-    "bfx_funding_bot.modules.execution.capital_repository",
     "bfx_funding_bot.modules.execution.event_store.tables",
     "bfx_funding_bot.modules.execution.uncertainty_tables",
 ]

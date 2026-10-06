@@ -1,8 +1,8 @@
 """Dormant capital read: the latest query's accepted basis, its tail, and policy.
 
-Every statement names its columns (never a whole ORM row), so the cutover reader's
-column grants (``alembic/versions/*_cutover_reader_*``) are the exact set read here:
-no ``evidence``, ``normalized_payload`` or policy ``source``.
+Every statement names its columns (never a whole ORM row): no ``evidence``,
+``normalized_payload`` or policy ``source``; the restore drill's verifier role reads it with
+SELECT on the ledger tables only (``deploy/vm/pgbackrest/ledger_digest.VERIFIER_TABLES``).
 
 Everything is read in the caller's one REPEATABLE READ READ ONLY transaction, so
 the basis, the tail and the clock come from one snapshot. Every statement is

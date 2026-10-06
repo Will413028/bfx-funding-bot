@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from bfx_funding_bot.modules.ledger.table_digest import _SCOPE_PARENT
 from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES, SCOPE_PARENT, SCOPE_ROOT_TABLES
 
 ROOTS = (
@@ -43,4 +42,3 @@ def test_the_derived_scope_roots_are_the_audited_list() -> None:
 def test_the_derived_scope_parents_are_the_audited_mapping() -> None:
     assert {**dict.fromkeys(ROOTS), **CHILDREN} == SCOPE_PARENT
     assert set(SCOPE_PARENT) == {table.name for table in LEDGER_TABLES}
-    assert _SCOPE_PARENT is SCOPE_PARENT
