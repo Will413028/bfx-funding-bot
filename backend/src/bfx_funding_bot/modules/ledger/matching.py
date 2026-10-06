@@ -7,11 +7,11 @@ what only the system adds (settle, observed-after, attribution, near miss).
 
 The candidate rule, the 5 s lower tolerance (none above), the incomplete
 conditions, the near-miss guard and the settle window follow the legacy boot
-recovery rule; the ledger cannot import execution, so they are re-stated here
-and pinned by a differential test. Stricter than legacy, on purpose: the history
-symbol must be declared by the port, an offer shared by two open UNKNOWNs is
-left to an operator, and a bind also needs an observation that began after the
-UNKNOWN was recorded.
+recovery rule, re-stated here (the legacy matcher and the differential test that
+pinned the two together were retired; both remain at 5097d3c7). Stricter than
+legacy, on purpose: the history symbol must be declared by the port, an offer
+shared by two open UNKNOWNs is left to an operator, and a bind also needs an
+observation that began after the UNKNOWN was recorded.
 """
 
 from __future__ import annotations

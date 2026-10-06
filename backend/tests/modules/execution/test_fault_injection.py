@@ -20,10 +20,6 @@ import httpx
 import pytest
 
 from bfx_funding_bot.core.telemetry import Phase
-from bfx_funding_bot.external.bitfinex.auth_rest import (
-    ActiveFundingOffer,
-    FundingOfferHistoryCoverage,
-)
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
@@ -53,11 +49,14 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmitOutcomeUnknown,
     SubmitRejected,
 )
-from bfx_funding_bot.modules.execution.unknown_matching import (
-    UnknownSubmitAttempt,
-    match_unknown_attempt,
+from bfx_funding_bot.modules.ledger import (
+    Coverage,
+    MatchEvidence,
+    Offer,
+    Scope,
+    UnknownTerms,
+    match_unknown,
 )
-from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
 from tests.modules.execution.fake_boundary import (  # noqa: F401  (fixture)
     Recording,
@@ -293,42 +292,32 @@ def _success_response() -> list[object]:
     ]
 
 
-def _unknown_attempt() -> UnknownSubmitAttempt:
-    ready = _ready(decision_id="candidate-ambiguity")
-    return UnknownSubmitAttempt(
-        attempt_id=UUID("22222222-2222-2222-2222-222222222222"),
-        execution_decision_id=ready.decision_id,
-        account_id=str(_ACCOUNT_ID),
-        symbol="fUST",
-        cid=7,
-        amount=Decimal("150"),
-        rate=Decimal("0.0001"),
-        period_days=2,
-        offer_type="LIMIT",
-        flags=0,
-        started_at_ms=1_000,
-        signal_correlation_id=ready.decision.signal_correlation_id,
-        reservation_ref=ReservationRef(
-            execution_decision_id=ready.decision_id,
-            cid=7,
-            signal_correlation_id=ready.decision.signal_correlation_id,
-        ),
+def _matching_offer(venue_offer_id: str, terms: UnknownTerms) -> Offer:
+    """An active venue offer carrying exactly the UNKNOWN attempt's terms."""
+    return Offer(
+        venue_offer_id, terms.symbol, terms.amount, terms.amount, terms.rate, True,
+        terms.period_days, terms.offer_type, terms.flags, "active",
+        terms.started_at_ms, terms.started_at_ms,
     )
 
 
-def _matching_offer(venue_offer_id: str, *, mts_created: int = 1_000) -> ActiveFundingOffer:
-    return ActiveFundingOffer(
-        venue_offer_id=venue_offer_id,
-        symbol="fUST",
-        amount=Decimal("150"),
-        amount_original=Decimal("150"),
-        rate=0.0001,
-        rate_decimal=Decimal("0.0001"),
-        period_days=2,
-        mts_created=mts_created,
-        status="ACTIVE",
-        offer_type="LIMIT",
-        flags=0,
+def _complete_evidence(terms: UnknownTerms, offers: tuple[Offer, ...]) -> MatchEvidence:
+    """One observation, begun after the UNKNOWN, whose offer history covers the submit."""
+    observed_at = terms.unknown_recorded_at_ms + 1
+    return MatchEvidence(
+        UUID("33333333-3333-3333-3333-333333333333"), observed_at, observed_at + 1,
+        Coverage(
+            wallets_complete=True, offers_complete=True, credits_complete=True,
+            loans_complete=True, offer_history_complete=True, credit_history_complete=True,
+            wallet_pages=1, offer_pages=1, credit_pages=1, loan_pages=1,
+            offer_history_pages=1, credit_history_pages=1,
+            history_requested_start_ms=terms.started_at_ms,
+            history_requested_end_ms=observed_at + 1,
+            history_oldest_mts_created=terms.started_at_ms,
+            history_newest_mts_created=terms.started_at_ms,
+            trades_complete=True, history_symbols=frozenset({terms.symbol}),
+        ),
+        offers, (),
     )
 
 
@@ -369,38 +358,18 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
         assert intent.submission_attempt is not None
         assert intent.reservation_ref is not None
         payload = intent.submission_attempt.normalized_payload
-        attempt = UnknownSubmitAttempt(
-            attempt_id=intent.submission_attempt.attempt_id,
-            execution_decision_id=intent.submission_attempt.execution_decision_id,
-            account_id=str(intent.submission_attempt.account_id),
-            symbol=intent.submission_attempt.symbol,
-            cid=intent.submission_attempt.cid,
-            amount=Decimal(str(payload["amount"])),
-            rate=Decimal(str(payload["rate"])),
-            period_days=int(payload["period"]),
-            offer_type=str(payload["type"]),
-            flags=payload["flags"],
-            started_at_ms=intent.submission_attempt.started_at_ms,
-            signal_correlation_id=intent.signal_correlation_id,
-            reservation_ref=intent.reservation_ref,
+        assert unknown.occurred_at_ms is not None
+        terms = UnknownTerms(
+            intent.submission_attempt.attempt_id, intent.submission_attempt.symbol,
+            Decimal(str(payload["amount"])), Decimal(str(payload["rate"])),
+            int(payload["period"]), str(payload["type"]), payload["flags"],
+            intent.submission_attempt.started_at_ms, unknown.occurred_at_ms,
         )
-        candidates = (
-            _matching_offer("venue-a", mts_created=attempt.started_at_ms),
-            _matching_offer("venue-b", mts_created=attempt.started_at_ms),
-        )
-        matched = match_unknown_attempt(
-            attempt,
-            candidates,
-            (),
-            FundingOfferHistoryCoverage(
-                requested_start_ms=attempt.started_at_ms,
-                requested_end_ms=attempt.started_at_ms,
-                oldest_mts_created=attempt.started_at_ms,
-                newest_mts_created=attempt.started_at_ms,
-                pages=1,
-                complete=True,
-            ),
-        )
+        candidates = {
+            offer.venue_offer_id: offer
+            for offer in (_matching_offer("venue-a", terms), _matching_offer("venue-b", terms))
+        }
+        matched = match_unknown(terms, _complete_evidence(terms, tuple(candidates.values())))
         request_count_before_retry = transport.request_count
         with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
             await gate.submit(_ready(decision_id="multiple-candidate-retry"), _context())
@@ -412,9 +381,12 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
             transport_request_count=transport.request_count,
             retry_count=retry_count,
             match_kind=matched.kind,
-            candidate_ids=tuple(candidate.venue_offer_id for candidate in matched.candidates),
+            candidate_ids=matched.candidate_venue_offer_ids,
             unknown_exposure_usdt=unknown.size_usdt,
-            candidate_exposure_usdt=sum(candidate.amount for candidate in matched.candidates),
+            candidate_exposure_usdt=sum(
+                candidates[venue_offer_id].amount_remaining
+                for venue_offer_id in matched.candidate_venue_offer_ids
+            ),
             unknown_scope=(UUID(unknown.account_id), environment, unknown.symbol),
         )
 
