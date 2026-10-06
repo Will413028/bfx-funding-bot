@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from bfx_funding_bot.modules.execution.amount_fingerprint import (
+from bfx_funding_bot.modules.execution.deployment.fingerprinted_amount import (
     FINGERPRINT_SPACE,
     choose_fingerprinted_amount,
     fingerprint_seed,

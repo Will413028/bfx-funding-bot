@@ -51,6 +51,7 @@ from bfx_funding_bot.modules.execution.events import (
     VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
+from bfx_funding_bot.modules.execution.safety.protection import SymbolLedgerDelta
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmissionAttemptPayload,
     SubmitOutcomeKind,
@@ -67,30 +68,6 @@ from bfx_funding_bot.modules.execution.unknown_matching import (
 
 _SUBMIT_UNCERTAINTY_NAMESPACE = UUID("d158ef54-c1dd-54e4-a9e9-9a670c938f73")
 _ORPHAN_UNCERTAINTY_NAMESPACE = UUID("b1f89542-a63e-584a-b5bc-cd448ed74f3f")
-
-
-@dataclass(frozen=True, slots=True)
-class SymbolLedgerDelta:
-    """One symbol's ledger immediately before a complete snapshot, and what it saw.
-
-    ``baseline`` is False when the ledger had never been set by a venue
-    observation for this symbol (new currency, first deployment): there is
-    nothing to compare against, so the observation only establishes one.
-    """
-    symbol: str
-    prior_offered: Decimal
-    prior_lent: Decimal
-    observed_offered: Decimal
-    observed_lent: Decimal
-    baseline: bool
-
-    @property
-    def offered_change(self) -> Decimal:
-        return self.observed_offered - self.prior_offered
-
-    @property
-    def lent_change(self) -> Decimal:
-        return self.observed_lent - self.prior_lent
 
 
 @dataclass(frozen=True, slots=True)

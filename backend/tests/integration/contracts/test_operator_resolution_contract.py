@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import select
 
-from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionRejected,
     ResolutionRequestPending,
 )

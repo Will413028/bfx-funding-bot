@@ -73,9 +73,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     WriterLockWatch,
 )
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
-from bfx_funding_bot.modules.execution.uncertainty_resolution import (
-    UncertaintyResolutionWorker,
-)
+from bfx_funding_bot.modules.execution.uncertainty_requests import UncertaintyResolutionWorker
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.ledger import ObservationSink, Scope
 from bfx_funding_bot.modules.live_validation.credit_history import CreditHistorySync

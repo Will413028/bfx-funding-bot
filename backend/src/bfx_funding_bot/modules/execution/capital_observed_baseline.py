@@ -40,13 +40,15 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.execution.capital_repository import (
-    AppliedCapitalPolicy,
+from bfx_funding_bot.modules.execution.capital_policy_read import (
     CapitalBlockedError,
-    CapitalRepository,
-    ObservedAcceptance,
     policy_from_row,
     read_policy_row,
+)
+from bfx_funding_bot.modules.execution.capital_repository import (
+    AppliedCapitalPolicy,
+    CapitalRepository,
+    ObservedAcceptance,
 )
 from bfx_funding_bot.modules.execution.capital_shadow_baseline import projection_lag
 from bfx_funding_bot.modules.execution.capital_shadow_port import (

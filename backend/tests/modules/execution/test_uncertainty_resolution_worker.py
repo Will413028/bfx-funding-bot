@@ -5,11 +5,11 @@ from uuid import UUID
 
 import pytest
 
-from bfx_funding_bot.modules.execution.uncertainty_resolution import (
-    LegacyOperatorResolution,
+from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionScope,
     UncertaintyResolutionWorker,
 )
+from bfx_funding_bot.modules.execution.uncertainty_resolution import LegacyOperatorResolution
 
 SCOPE = ResolutionScope(UUID("550e8400-e29b-41d4-a716-446655440000"), "ci")
 

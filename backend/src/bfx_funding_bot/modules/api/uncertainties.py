@@ -29,7 +29,7 @@ from bfx_funding_bot.modules.api.account_scope import (
 from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models, get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.execution.operator_evidence import LegacyOperatorEvidence
-from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionAction,
     ResolutionRejected,
     ResolutionScope,

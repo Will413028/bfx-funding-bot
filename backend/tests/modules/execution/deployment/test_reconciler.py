@@ -1653,7 +1653,7 @@ def _fingerprinting(rec, held):
 
 
 async def test_planner_fingerprints_the_amount_the_guards_audit_and_executor_all_see():
-    from bfx_funding_bot.modules.execution.amount_fingerprint import (
+    from bfx_funding_bot.modules.execution.deployment.fingerprinted_amount import (
         FINGERPRINT_SPACE,
         fingerprint_seed,
     )
@@ -1676,7 +1676,7 @@ async def test_planner_fingerprints_the_amount_the_guards_audit_and_executor_all
 
 
 async def test_planner_skips_the_submit_when_no_fingerprint_fits():
-    from bfx_funding_bot.modules.execution.amount_fingerprint import FINGERPRINT_SPACE
+    from bfx_funding_bot.modules.execution.deployment.fingerprinted_amount import FINGERPRINT_SPACE
     rec, ex, _, _ = _build(exposure=D("370"), quotes=[_post_quote("fUST_a30")])
     _fingerprinting(rec, range(1, FINGERPRINT_SPACE + 1))
     await rec.deploy()

@@ -20,10 +20,10 @@ from sqlalchemy.orm import Session
 
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.operator_requests import FAILED, REJECTED
-from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionRejected as RequestRefused,
 )
-from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionRequestPending,
     ResolutionScope,
     UncertaintyResolutionRequests,

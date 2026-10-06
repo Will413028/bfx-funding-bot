@@ -24,7 +24,6 @@ from bfx_funding_bot.external.bitfinex.funding_rules import (
     FundingRuleProvider,
     submit_amount,
 )
-from bfx_funding_bot.modules.execution.amount_fingerprint import choose_fingerprinted_amount
 from bfx_funding_bot.modules.execution.audit import AuditContext
 from bfx_funding_bot.modules.execution.contracts import (
     BlockedExecution,
@@ -33,6 +32,9 @@ from bfx_funding_bot.modules.execution.contracts import (
     ReadyToSubmit,
 )
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
+from bfx_funding_bot.modules.execution.deployment.fingerprinted_amount import (
+    choose_fingerprinted_amount,
+)
 from bfx_funding_bot.modules.execution.deployment.ladder import LadderPolicy, spike_rungs
 from bfx_funding_bot.modules.execution.deployment.period_pricing import (
     PeriodPricer,

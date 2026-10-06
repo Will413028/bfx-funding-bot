@@ -24,11 +24,11 @@ from typing import Protocol
 
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
-from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.execution.deployment_input import DeploymentInput
 from bfx_funding_bot.modules.execution.observation_sink import (
     LegacyCycleResult,
 )
+from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import CycleResult, ObservationSink, Scope
 from bfx_funding_bot.modules.observability import alerts

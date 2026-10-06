@@ -154,12 +154,12 @@ async def test_worker_reverifies_injected_port_under_account_lock(uncertainty_ap
 
     from bfx_funding_bot.modules.execution import operator_requests
     from bfx_funding_bot.modules.execution.operator_evidence import LegacyOperatorEvidence
-    from bfx_funding_bot.modules.execution.uncertainty_resolution import (
-        LegacyOperatorResolution,
+    from bfx_funding_bot.modules.execution.uncertainty_requests import (
         ResolutionScope,
         UncertaintyResolutionRequests,
         UncertaintyResolutionWorker,
     )
+    from bfx_funding_bot.modules.execution.uncertainty_resolution import LegacyOperatorResolution
     from bfx_funding_bot.modules.ledger import ResolutionIntent
 
     client, factory = uncertainty_app

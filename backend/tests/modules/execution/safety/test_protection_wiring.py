@@ -9,7 +9,7 @@ from uuid import UUID
 
 import pytest
 
-from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
 from bfx_funding_bot.modules.execution.legacy_ports import LegacyCapitalAuthority
 from bfx_funding_bot.modules.execution.safety.protection import (
     AutomaticProtection,

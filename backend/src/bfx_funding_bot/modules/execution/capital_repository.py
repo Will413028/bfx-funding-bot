@@ -19,6 +19,17 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
+
+# Re-exported for accounts.capital_conversion only: its import of this module is an
+# ignored sibling edge (modules-acyclic), and a new edge to the policy reader would need
+# another ignore. It goes with the legacy repository.
+from bfx_funding_bot.modules.execution.capital_policy_read import (
+    CapitalBlockedError as CapitalBlockedError,
+)
+from bfx_funding_bot.modules.execution.capital_policy_read import (
+    policy_from_row,
+    read_policy_row,
+)
 from bfx_funding_bot.modules.execution.capital_tables import (
     CapitalQueryRow,
     CapitalSnapshotRow,
@@ -54,16 +65,12 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
 )
 from bfx_funding_bot.modules.ledger import PolicyRefused, Scope
 from bfx_funding_bot.modules.ledger.policy_write import write_policy_revision
-from bfx_funding_bot.modules.ledger.tables import CapitalPolicyHeadRow, CapitalPolicyRevisionRow
 from bfx_funding_bot.modules.live_validation.tables import FundingTradeRow
 from bfx_funding_bot.modules.trading import (
     CapitalBudget,
     CapitalPolicy,
     CapitalSnapshot,
-    PolicyRejectedError,
-    check_pointer,
     evaluate_capital,
-    parse_policy,
     policy_digest,
     policy_payload,
 )
@@ -89,49 +96,6 @@ class _SnapshotBasis(NamedTuple):
     shared: Decimal
     exposure: Decimal
 LockedGuard = Callable[[AsyncSession], Awaitable[None]]
-
-
-class CapitalBlockedError(ValueError):
-    """No authorization was issued; caller must not submit."""
-
-
-def policy_from_row(row: CapitalPolicyRevisionRow) -> CapitalPolicy:
-    """Validate one stored policy revision (schema, digest, exact keys) or refuse."""
-    try:
-        return parse_policy(row.schema_version, row.policy, row.digest)
-    except PolicyRejectedError as exc:
-        raise CapitalBlockedError(exc.reason) from exc
-
-
-async def read_policy_row(session: AsyncSession, *, account_id: UUID, environment: str,
-                          symbol: str) -> CapitalPolicyRevisionRow:
-    """The revision the scope's policy head points at, or refuse."""
-    head = await session.get(CapitalPolicyHeadRow, (account_id, environment, symbol),
-                             populate_existing=True)
-    row = None if head is None else await session.get(
-        CapitalPolicyRevisionRow, head.revision_id, populate_existing=True)
-    blocked = check_pointer(
-        account_id, environment, symbol,
-        None if head is None else (head.revision_id, head.revision),
-        None if row is None else (row.id, row.exchange_account_id, row.deployment_environment,
-                                  row.symbol, row.revision))
-    if blocked is not None:
-        raise CapitalBlockedError(blocked.reason)
-    assert row is not None
-    return row
-
-
-async def read_policy_unlocked(session: AsyncSession, *, account_id: UUID, environment: str,
-                               symbol: str) -> CapitalPolicy:
-    """The applied policy without the account lock, for read-only pre-trade guards.
-
-    The command boundary re-reads and binds the policy revision under the lock
-    before any intent is written, so a guard reading a pointer that moves an
-    instant later cannot authorise anything by itself.
-    """
-    row = await read_policy_row(session, account_id=account_id, environment=environment,
-                                symbol=symbol)
-    return policy_from_row(row)
 
 
 def _digest(value: object) -> str:

@@ -32,12 +32,14 @@ from bfx_funding_bot.modules.execution.capital_observed_baseline import (
     LedgerObservationRef,
     evaluate_scope,
 )
-from bfx_funding_bot.modules.execution.capital_repository import (
-    AppliedCapitalPolicy,
+from bfx_funding_bot.modules.execution.capital_policy_read import (
     CapitalBlockedError,
-    CapitalRepository,
     policy_from_row,
     read_policy_row,
+)
+from bfx_funding_bot.modules.execution.capital_repository import (
+    AppliedCapitalPolicy,
+    CapitalRepository,
 )
 from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 from bfx_funding_bot.modules.execution.event_store.entities import (

@@ -16,13 +16,15 @@ from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprints_in_use
-from bfx_funding_bot.modules.execution.capital_repository import (
-    AppliedCapitalPolicy,
+from bfx_funding_bot.modules.execution.capital_policy_read import (
     CapitalBlockedError,
-    CapitalRepository,
-    CapitalView,
     policy_from_row,
     read_policy_row,
+)
+from bfx_funding_bot.modules.execution.capital_repository import (
+    AppliedCapitalPolicy,
+    CapitalRepository,
+    CapitalView,
 )
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.event_store.tables import VenueOfferStateRow

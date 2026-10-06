@@ -34,11 +34,11 @@ from bfx_funding_bot.modules.execution.events import (
     UncertaintyMarkedNotAccepted,
 )
 from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
-from bfx_funding_bot.modules.execution.uncertainty_resolution import (
-    LegacyOperatorResolution,
+from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionScope,
     UncertaintyResolutionWorker,
 )
+from bfx_funding_bot.modules.execution.uncertainty_resolution import LegacyOperatorResolution
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     UncertaintyResolutionRequestRow,

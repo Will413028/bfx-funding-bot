@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.api.account_scope import ExchangeAccountContext
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, PositionStateRow
-from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionRejected,
     ResolutionScope,
 )

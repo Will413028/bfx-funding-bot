@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.modules.execution import boot_recovery
-from bfx_funding_bot.modules.execution.boot_recovery import QuarantineAgeMonitor
+from bfx_funding_bot.modules.execution.reconcile_monitors import QuarantineAgeMonitor
 
 MINUTE = 60_000
 

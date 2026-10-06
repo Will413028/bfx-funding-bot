@@ -29,16 +29,16 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
-from bfx_funding_bot.modules.execution.boot_recovery import (
-    ForeignExposureMonitor,
-    QuarantineAgeMonitor,
-)
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_boundary import publish_best_effort
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.observation_sink import (
     LegacyCycleResult,
     LegacyObservationSink,
+)
+from bfx_funding_bot.modules.execution.reconcile_monitors import (
+    ForeignExposureMonitor,
+    QuarantineAgeMonitor,
 )
 from bfx_funding_bot.modules.execution.safety.protection import (
     FOREIGN_LENDING,

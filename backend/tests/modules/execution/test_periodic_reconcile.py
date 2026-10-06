@@ -5,10 +5,10 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
-from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.execution.deployment_input import LegacyDeploymentInput
 from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
+from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import Scope
 from tests.async_wait import run_until, running, until, yield_loop

@@ -26,10 +26,8 @@ from uuid import UUID
 
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
 from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
-from bfx_funding_bot.modules.execution.capital_repository import (
-    CapitalBlockedError,
-    CapitalRepository,
-)
+from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
+from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.legacy_ports import LegacyScopeLock
 
 
