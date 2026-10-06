@@ -248,7 +248,7 @@ class CancelPort(Protocol):
     """Venue funding-offer cancel（只有 live executor 實作）。
 
     對應 BitfinexLiveExecutor.cancel：CancelRequested/CancelAcknowledged audit
-    與 release 路徑（WS foc → ReservationReleased）都在那一側，呼叫方不碰 ledger。
+    都在那一側；offer 結束由 ledger 觀測（WS foc 只是 venue hint），呼叫方不碰 ledger。
     """
     async def cancel(
         self,
