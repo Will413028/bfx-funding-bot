@@ -122,8 +122,11 @@ def test_restore_test_runs_the_drill_of_the_release_it_is_instantiated_for() -> 
         assert _unit(name).one("Service", "ExecStart").startswith(
             "/home/ubuntu/bfx-releases/current/deploy/vm/pgbackrest/")
     assert "--heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json" in exec_start
-    # Prefix receipts never overwrite the baseline drill's restore.json.
-    assert "--evidence /home/ubuntu/bfx/dr-evidence/restore-prefix.json" in exec_start
+    # Ledger receipts never overwrite the baseline drill's restore.json; no scope config.
+    assert "--evidence /home/ubuntu/bfx/dr-evidence/restore-ledger.json" in exec_start
+    # A drill from before --restore-test (a revert) still finds its scope config and receipt.
+    assert "--legacy-config /home/ubuntu/bfx/restore-test.json" in exec_start
+    assert "--legacy-evidence /home/ubuntu/bfx/dr-evidence/restore-prefix.json" in exec_start
     check = _unit("bfx-backup-check.service").one("Service", "ExecStart")
     assert "--evidence /home/ubuntu/bfx/dr-evidence/backup.json" in check
     assert "--restore-heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json" in check
