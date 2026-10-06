@@ -172,6 +172,12 @@ def test_the_wrappers_default_paths_are_what_the_backup_check_watches(monkeypatc
     monkeypatch.setattr(wrapper.Path, "home", staticmethod(lambda: Path("/home/ubuntu")))
     monkeypatch.setattr(wrapper, "run_restore_test", lambda **kwargs: seen.update(kwargs) or 0)
     assert wrapper.main(["--drill", "/x/restore-drill.sh"]) == 0
+    # The arguments of the units before S1-8 PR-D are unknown now (every revert target's unit
+    # passes only --drill): argparse refuses them.
+    for retired in ("--legacy-config", "--config", "--legacy-evidence"):
+        with pytest.raises(SystemExit) as refused:
+            wrapper.main(["--drill", "/x/restore-drill.sh", retired, "/x"])
+        assert refused.value.code == 2
     assert seen["evidence"] == Path("/home/ubuntu/bfx/dr-evidence/restore-ledger.json")
     assert seen["heartbeat"] == Path("/home/ubuntu/bfx/dr-evidence/restore-heartbeat.json")
     check = _unit("bfx-backup-check.service").one("Service", "ExecStart")
