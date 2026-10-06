@@ -67,10 +67,8 @@ async def test_the_bitfinex_venue_always_composes_the_auth_websocket(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
     """CC4: REST submit without the fill WS is stale exposure, so the venue's capabilities
-    compose it; the removed flag cannot turn it off."""
-    daemon, engine = await boot_live_construction(
-        monkeypatch, tmp_path, httpx_mock, extra_env={"BFX_WS_CLIENT_ENABLED": "false"},
-    )
+    compose it; no flag exists to turn it off (a retired one is refused by the config)."""
+    daemon, engine = await boot_live_construction(monkeypatch, tmp_path, httpx_mock)
     try:
         assert daemon.auth_ws is not None and daemon.ws_dispatcher is not None
     finally:

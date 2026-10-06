@@ -97,6 +97,8 @@ def test_normal_live_accepts_two_cells(tmp_path, monkeypatch):
 @pytest.mark.parametrize("name", [
     "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
     "BFX_VENUE_FLOOR_USD", "BFX_MIN_OFFER_BUFFER_PCT", "BFX_EXECUTOR",
+    # retired with the legacy runtime (S1-8): the WS follows the venue's capabilities
+    "BFX_WS_CLIENT_ENABLED", "BFX_FILL_TRACKER_ENABLED", "BFX_PROJECTOR_VERSION",
 ])
 def test_every_phase_rejects_legacy_env(tmp_path, monkeypatch, name, phase):
     """A set legacy knob is a config error in every phase (``BFX_EXECUTOR`` included)."""

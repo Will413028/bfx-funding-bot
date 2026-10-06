@@ -4,10 +4,8 @@ The executor is always the Bitfinex live executor: on the ``simulated`` venue it
 the simulated venue's own ``httpx`` client, so the code that runs is the code that runs
 live. ``BFX_EXECUTOR`` is refused, not ignored.
 
-Whether the authenticated WebSocket runs follows the venue wiring's ``VenueCapabilities``
-(CC4), never a flag or a venue name: Bitfinex (``auth_ws="required"``) delivers fills there,
-and a process without it would hold stale exposure; the simulated venue
-(``auth_ws="forbidden"``) has none, and its fills are found by the periodic reconcile.
+Whether the authenticated WebSocket runs is not the executor's to decide: the composition
+root reads it from the venue wiring's ``VenueCapabilities`` (CC4), never a flag or a name.
 """
 from __future__ import annotations
 
@@ -20,7 +18,6 @@ from typing import Any, Protocol
 import httpx
 
 from bfx_funding_bot.core.telemetry import Phase
-from bfx_funding_bot.core.venue import VenueCapabilities
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.protocols import ExecutorPort
@@ -38,12 +35,10 @@ class ExecutorConfigError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class ExecutorSpec:
     executor: ExecutorPort
-    ws_client_enabled: bool
 
 
 def build_executor(
     *,
-    capabilities: VenueCapabilities,
     event_sink: _EventSink,
     phase: Phase,
     strategy: StrategyName,
@@ -69,5 +64,4 @@ def build_executor(
             clock=clock,
             date_provider=date_provider,
         ),
-        ws_client_enabled=capabilities.auth_ws == "required",
     )

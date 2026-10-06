@@ -441,7 +441,6 @@ async def build_daemon(
     # Env-driven via registry (CC4 invariant — WS client required).
     all_symbols = frozenset(configured_symbols(config.cells))
     spec = build_executor(
-        capabilities=venue_wiring.capabilities,
         event_sink=stdout_sink,
         phase=config.phase,
         strategy=first_cell.strategy,
@@ -968,7 +967,7 @@ async def build_daemon(
     # None and run() skips the dispatcher task.
     auth_ws: BitfinexAuthWSClient | None = None
     ws_dispatcher: BitfinexLiveWSDispatcher | None = None
-    if spec.ws_client_enabled:
+    if venue_wiring.capabilities.auth_ws == "required":
         auth_ws = BitfinexAuthWSClient(
             creds=credentials,
             auth_gate=bfx_auth_gate,
