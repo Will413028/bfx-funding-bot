@@ -384,3 +384,33 @@ def test_new_wrapper_with_the_base_drill_surface_passes(
         timeout=60, legacy_config=config, legacy_evidence=legacy_evidence,
         clock=lambda: NOW) == 0
     assert json.loads(heartbeat.read_text())["legacy_drill"] is True
+
+
+_NEW_DRILL_STUB = """#!{python}
+# This release's restore_drill.py surface for the restore test; writes a fresh receipt.
+import argparse, json, sys, time
+parser = argparse.ArgumentParser()
+parser.add_argument("--restore-test", action="store_true")
+parser.add_argument("--output")
+parser.add_argument("--prefix", action="store_true")
+args = parser.parse_args()
+if not args.restore_test or args.output is None:
+    sys.exit(2)
+with open(args.output, "w") as handle:
+    json.dump({{"measured": True, "kind": "restore_ledger", "restore_test": True,
+               "observed_at_ms": int(time.time() * 1000), "ledger": {{"scopes": []}}}}, handle)
+"""
+
+
+def test_the_previous_units_arguments_still_run_this_wrapper(tmp_path: Path) -> None:
+    """Tooling install stopped after the wrapper, before the unit: the old ExecStart reaches it."""
+    drill = tmp_path / "restore-drill.sh"
+    drill.write_text(_NEW_DRILL_STUB.format(python=sys.executable))
+    drill.chmod(0o755)
+    evidence = tmp_path / "restore-prefix.json"
+    heartbeat = tmp_path / "restore-heartbeat.json"
+    # The base (2c1bc87a) bfx-restore-test@.service ExecStart arguments, with tmp paths.
+    assert restore.main(["--config", str(tmp_path / "restore-test.json"), "--drill", str(drill),
+                         "--evidence", str(evidence), "--heartbeat", str(heartbeat)]) == 0
+    assert json.loads(evidence.read_text())["restore_test"] is True
+    assert json.loads(heartbeat.read_text())["legacy_drill"] is False

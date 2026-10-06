@@ -192,7 +192,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         default=home / "bfx/dr-evidence/restore-heartbeat.json")
     parser.add_argument("--timeout-seconds", type=float, default=7000.0)
     # Only for a drill from before --restore-test (see the module docstring, step 3).
-    parser.add_argument("--legacy-config", type=Path, default=home / "bfx/restore-test.json")
+    # `--config` is the previous unit's spelling: if installing this release's tooling stops
+    # after the wrapper but before the unit, the old unit still runs this wrapper with
+    # `--config ... --evidence .../restore-prefix.json`, and both keep working.
+    parser.add_argument("--legacy-config", "--config", dest="legacy_config", type=Path,
+                        default=home / "bfx/restore-test.json")
     parser.add_argument("--legacy-evidence", type=Path,
                         default=home / "bfx/dr-evidence/restore-prefix.json")
     args = parser.parse_args(argv)

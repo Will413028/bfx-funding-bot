@@ -327,7 +327,8 @@ def _info_json() -> str:
 
 class FakeDocker:
     def __init__(self, *, boot: tuple[int, str] | None = None, info_status: int = 0,
-                 production_rows: dict[str, list[str]] = ROWS, production_status: int = 0) -> None:
+                 production_rows: dict[str, list[str]] = ROWS, production_status: int = 0,
+                 production_stderr: str = "") -> None:
         self.calls: list[tuple[str, ...]] = []
         self.inputs: dict[tuple[str, ...], str] = {}
         self.env_text = ""
@@ -335,6 +336,7 @@ class FakeDocker:
         self.info_status = info_status
         self.production_rows = production_rows
         self.production_status = production_status
+        self.production_stderr = production_stderr
 
     def __call__(self, command: tuple[str, ...], *, timeout: float | None = None,
                  input_text: str | None = None, env: dict[str, str] | None = None,
@@ -376,14 +378,14 @@ class FakeDocker:
         return ok()
 
     def stream(self, command: tuple[str, ...], *, input_text: str, timeout: float,
-               consume: Callable[[bytes], None]) -> int:
+               consume: Callable[[bytes], None]) -> tuple[int, str]:
         self.calls.append(command)
         self.inputs[command] = input_text
         restored = DB_CONTAINER in command
         rows = ROWS if restored else self.production_rows
         for line in _stream_lines(clock=7 if restored else 9, rows=rows, restored=restored):
             consume(line)
-        return 0 if restored else self.production_status
+        return (0, "") if restored else (self.production_status, self.production_stderr)
 
     def find(self, predicate: Callable[[tuple[str, ...]], bool]) -> tuple[str, ...]:
         return next(call for call in self.calls if predicate(call))
@@ -485,6 +487,34 @@ def test_ledger_drill_failures_write_unmeasured_evidence_and_still_clean_up(
     assert any(c[:3] == ("docker", "volume", "rm") for c in fake.calls)
     if code == "ledger_digest_mismatch":  # table names (never row data) go to the journal
         assert "ledger_digest_mismatch: ledger_observation_wallet" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("status", "stderr", "cause"), [
+    (3, "psql:<stdin>:12: ERROR:  canceling statement due to statement timeout\n", "statement_timeout"),
+    (2, "FATAL:  terminating connection due to transaction timeout\n", "transaction_timeout"),
+    (3, "ERROR:  permission denied for table ledger_observation\n", "permission"),
+    (3, "ERROR:  something else DETAIL: Key (x)=(secret-value)\n", "other"),
+    (-9, "", "client_deadline"),
+])
+def test_a_failed_production_read_records_a_bounded_cause_never_the_text(
+    tmp_path: Path, status: int, stderr: str, cause: str, capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake = FakeDocker(production_status=status, production_stderr=stderr)
+    assert _ledger_drill(tmp_path, fake).run(drill_module.LedgerRequest()) == 2
+    report = json.loads((tmp_path / "restore-ledger.json").read_text())
+    assert (report["error_code"], report["cause"]) == ("production_read_failed", cause)
+    journal = capsys.readouterr().err
+    assert f"production_read_failed: cause={cause}" in journal
+    assert "secret-value" not in journal + json.dumps(report)
+
+
+def test_a_cause_is_only_for_ledger_receipts_and_bounded() -> None:
+    assert "cause" not in evidence.render_failure_evidence(
+        kind="restore_ledger", error_code="production_read_failed", observed_at_ms=1)
+    for kind, cause in (("restore", "statement_timeout"), ("restore_ledger", "free text")):
+        with pytest.raises(evidence.EvidenceError):
+            evidence.render_failure_evidence(kind=kind, error_code="restore_command_failed",
+                                             observed_at_ms=1, cause=cause)
 
 
 def test_unreadable_backup_catalog_fails_before_any_resource_exists(tmp_path: Path) -> None:
@@ -622,15 +652,25 @@ def test_cli_keeps_baseline_and_restore_test_modes_apart(argv: list[str]) -> Non
 
 def test_stream_runner_feeds_stdin_and_streams_every_line() -> None:
     lines: list[bytes] = []
-    status = drill_module._stream_command(
+    status, stderr = drill_module._stream_command(
         (sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read().upper())"),
         input_text="ledger\tone\nledger\ttwo\n", timeout=60, consume=lines.append)
-    assert status == 0
+    assert (status, stderr) == (0, "")
     assert lines == [b"LEDGER\tONE\n", b"LEDGER\tTWO\n"]
 
 
+def test_stream_runner_keeps_only_the_tail_of_a_long_stderr() -> None:
+    status, stderr = drill_module._stream_command(
+        (sys.executable, "-c",
+         "import sys; sys.stderr.write('x' * 100_000 + 'END'); sys.stdout.write('row\\n'); sys.exit(3)"),
+        input_text="", timeout=60, consume=lambda line: None)
+    assert status == 3
+    assert len(stderr) == drill_module._STDERR_TAIL_BYTES and stderr.endswith("END")
+
+
 def test_stream_runner_kills_a_reader_that_outlives_its_budget() -> None:
-    status = drill_module._stream_command(
+    status, _ = drill_module._stream_command(
         (sys.executable, "-c", "import time; time.sleep(30)"),
         input_text="", timeout=0.5, consume=lambda line: None)
-    assert status != 0
+    assert status < 0
+    assert ledger.classify_read_failure(status, "") == "client_deadline"

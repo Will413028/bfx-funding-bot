@@ -40,6 +40,7 @@ _CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _REPLAY_HASH = re.compile(r"[0-9a-f]{64}")
 _MAX_RTO_SECONDS = 3600
+_READ_FAILURE_CODES = frozenset({"production_read_failed", "restore_command_failed"})
 
 
 def _load_module(name: str, path: Path) -> ModuleType:
@@ -85,7 +86,11 @@ _REQUIRED_TIMING_STAGES = frozenset(
 
 
 class DrillFailureError(ValueError):
-    """A bounded restore failure code suitable for evidence."""
+    """A bounded restore failure code suitable for evidence, and optionally a bounded cause."""
+
+    def __init__(self, code: str, cause: str | None = None) -> None:
+        super().__init__(code)
+        self.cause = cause
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,8 +135,10 @@ class _CreatedResources:
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
-# (command, *, input_text, timeout, consume) -> exit status; stdout is fed line by line.
-StreamRunner = Callable[..., int]
+# (command, *, input_text, timeout, consume) -> (exit status, stderr tail); stdout is fed
+# line by line.
+StreamRunner = Callable[..., tuple[int, str]]
+_STDERR_TAIL_BYTES = 2048
 
 
 def _run_command(
@@ -145,16 +152,27 @@ def _run_command(
 
 def _stream_command(
     command: tuple[str, ...], *, input_text: str, timeout: float, consume: Callable[[bytes], None],
-) -> int:
+) -> tuple[int, str]:
     """Run `command`, feed `input_text` on stdin and every stdout line to `consume`.
 
     Output is never held in memory as a whole (production's ledger grows without bound); the
-    process is killed when `timeout` expires, which surfaces as a non-zero status.
+    process is killed when `timeout` expires, which surfaces as a negative status. Returns the
+    status and the last `_STDERR_TAIL_BYTES` of stderr (drained on its own thread, so a chatty
+    stderr cannot stall stdout), for classification only.
     """
+    tail = bytearray()
+
+    def drain(stream: object) -> None:
+        for chunk in iter(lambda: stream.read(4096), b""):  # type: ignore[attr-defined]
+            tail.extend(chunk)
+            del tail[:-_STDERR_TAIL_BYTES]
+
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL) as process:
+                          stderr=subprocess.PIPE) as process:
         timer = threading.Timer(timeout, process.kill)
         timer.start()
+        reader = threading.Thread(target=drain, args=(process.stderr,), daemon=True)
+        reader.start()
         try:
             assert process.stdin is not None and process.stdout is not None
             try:
@@ -164,7 +182,9 @@ def _stream_command(
                 pass
             for line in process.stdout:
                 consume(line)
-            return process.wait()
+            status = process.wait()
+            reader.join(timeout=5)
+            return status, bytes(tail).decode("utf-8", errors="replace")
         finally:
             timer.cancel()
             if process.poll() is None:
@@ -895,15 +915,17 @@ class RestoreDrill:
         script = _ledger.digest_script(bounds, restored=restored,
                                        timeout_ms=max(1, int(remaining * 1000) - 1000))
         try:
-            status = self._stream_runner(
+            status, stderr = self._stream_runner(
                 self._psql(container, plan), input_text=script,
                 timeout=remaining, consume=digest,
             )
         except Exception:
             _failure(failure_code)
-        self._remaining()
         if status != 0:
-            _failure(failure_code)
+            # The psql argv carries no DSN or password (admin role on the container's socket),
+            # but an error's DETAIL can quote row values: only the bounded cause leaves here.
+            raise DrillFailureError(failure_code, _ledger.classify_read_failure(status, stderr))
+        self._remaining()
         return round(max(0.0, self._clock() - started), 3)
 
     def _rehearsal_plan(self, request: RehearsalRequest) -> tuple[RestoreResources, int]:
@@ -1072,6 +1094,7 @@ class RestoreDrill:
         verifier_cleanup_eligible = False
         rto_started: float | None = None
         failure_code: str | None = None
+        failure_cause: str | None = None
         success_report: dict[str, object] | None = None
         cleanup_failed = False
         failure_persist_failed = False
@@ -1258,6 +1281,9 @@ class RestoreDrill:
                 end_timing("verification")
         except DrillFailureError as exc:
             failure_code = str(exc)
+            failure_cause = exc.cause
+            if failure_cause is not None:
+                print(f"restore drill: {failure_code}: cause={failure_cause}", file=sys.stderr)
         except EvidenceError as exc:
             failure_code = str(exc)
         except _ledger.LedgerVerificationError as exc:
@@ -1305,6 +1331,8 @@ class RestoreDrill:
                     report = render_failure_evidence(
                         kind=failure_kind, error_code=failure_code,
                         observed_at_ms=time.time_ns() // 1_000_000,
+                        # A later cleanup or persist failure replaces the code, not its cause.
+                        cause=failure_cause if failure_code in _READ_FAILURE_CODES else None,
                     )
                 except EvidenceError:
                     report = render_failure_evidence(

@@ -712,13 +712,17 @@ def render_failure_evidence(
     kind: Literal["backup", "restore", "archive_restore", "restore_ledger", "restore_prefix"],
     error_code: str,
     observed_at_ms: int,
+    cause: str | None = None,
 ) -> dict[str, object]:
-    """Return a measured=false report with only a bounded error code."""
+    """Return a measured=false report with only a bounded error code (and, for a failed
+    ledger-mode cluster read, a bounded cause such as ``statement_timeout``)."""
     allowlist = BACKUP_ERROR_CODES if kind == "backup" else (
         LEDGER_ERROR_CODES if kind in LEDGER_KINDS else RESTORE_ERROR_CODES
     )
     if kind not in {"backup", "restore", "archive_restore", *LEDGER_KINDS} or error_code not in allowlist:
         _raise("archiver_output_invalid" if kind == "backup" else "restore_output_invalid")
+    if cause is not None and (kind not in LEDGER_KINDS or cause not in _ledger.READ_FAILURE_CAUSES):
+        _raise("restore_output_invalid")
     observed = _nonnegative_int(observed_at_ms, code="archiver_output_invalid")
     return {
         "schema_version": 1,
@@ -726,6 +730,7 @@ def render_failure_evidence(
         "kind": kind,
         "observed_at_ms": observed,
         "error_code": error_code,
+        **({"cause": cause} if cause is not None else {}),
     }
 
 

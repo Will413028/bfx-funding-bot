@@ -157,7 +157,7 @@ def _bounds(url: str) -> Any:
 
 def _digest(url: str, bounds: Any, *, restored: bool) -> Any:
     digest = ledger.StreamDigest(ledger.compared_tables(bounds))
-    status = drill._stream_command(_psql(url), input_text=ledger.digest_script(bounds, restored=restored, timeout_ms=60_000),
+    status, _ = drill._stream_command(_psql(url), input_text=ledger.digest_script(bounds, restored=restored, timeout_ms=60_000),
                                    timeout=120, consume=digest)
     assert status == 0
     return digest
@@ -357,13 +357,33 @@ def test_boot_check_role_cannot_write(clusters) -> None:
         conn.execute("UPDATE capital_command_clock SET revision = revision")
 
 
-def test_the_server_ends_a_read_that_outlives_its_budget(clusters) -> None:
-    """A killed client cannot leave production's snapshot running past the drill's budget."""
-    restored, production = clusters
-    script = ledger.digest_script(_bounds(restored), restored=False, timeout_ms=300)
-    stalled = script.replace("SET LOCAL lock_timeout = '10s';",
-                             "SET LOCAL lock_timeout = '10s';\nSELECT pg_sleep(5);", 1)
-    completed = subprocess.run(_psql(production), input=stalled, capture_output=True, text=True,
-                               check=False, timeout=60)
-    assert completed.returncode != 0
-    assert "timeout" in completed.stderr
+def _stalled_read(production: str, *, statement_ms: int, transaction_ms: int,
+                  stall: str) -> tuple[int, str]:
+    """The drill's production script with each timeout set apart and a stall inserted."""
+    script = ledger.digest_script(_bounds(production), restored=False, timeout_ms=1)
+    script = script.replace("SET statement_timeout = 1;", f"SET statement_timeout = {statement_ms};")
+    script = script.replace("SET transaction_timeout = 1;",
+                            f"SET transaction_timeout = {transaction_ms};")
+    script = script.replace("SET LOCAL lock_timeout = '10s';",
+                            f"SET LOCAL lock_timeout = '10s';\n{stall}", 1)
+    return drill._stream_command(_psql(production), input_text=script, timeout=60,
+                                 consume=lambda line: None)
+
+
+def test_the_server_ends_a_statement_that_outlives_its_budget(clusters) -> None:
+    _, production = clusters
+    status, stderr = _stalled_read(production, statement_ms=300, transaction_ms=60_000,
+                                   stall="SELECT pg_sleep(5);")
+    assert status != 0 and "unrecognized configuration parameter" not in stderr
+    assert "canceling statement due to statement timeout" in stderr
+    assert ledger.classify_read_failure(status, stderr) == "statement_timeout"
+
+
+def test_the_server_ends_a_snapshot_whose_statements_each_fit_but_together_do_not(clusters) -> None:
+    """Only transaction_timeout can fire: every statement is far below statement_timeout."""
+    _, production = clusters
+    status, stderr = _stalled_read(production, statement_ms=60_000, transaction_ms=500,
+                                   stall="SELECT pg_sleep(0.2);\n" * 8)
+    assert status != 0 and "unrecognized configuration parameter" not in stderr
+    assert "terminating connection due to transaction timeout" in stderr
+    assert ledger.classify_read_failure(status, stderr) == "transaction_timeout"

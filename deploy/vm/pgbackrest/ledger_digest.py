@@ -335,6 +335,32 @@ def compared_tables(bounds: Bounds) -> tuple[str, ...]:
 
 IDLE_IN_TRANSACTION_TIMEOUT_MS = 60_000
 
+# Why a cluster read failed, as a bounded code for the receipt and the journal (never psql's
+# raw text: an error's DETAIL can quote row values). Matched on PostgreSQL's message text.
+_READ_FAILURE_MESSAGES = (
+    ("canceling statement due to statement timeout", "statement_timeout"),
+    ("terminating connection due to transaction timeout", "transaction_timeout"),
+    ("canceling statement due to lock timeout", "lock_timeout"),
+    ("terminating connection due to idle-in-transaction timeout", "idle_in_transaction_timeout"),
+    ("permission denied", "permission"),
+    ("could not connect", "connection"),
+    ("server closed the connection", "connection"),
+)
+READ_FAILURE_CAUSES = frozenset(
+    {cause for _, cause in _READ_FAILURE_MESSAGES} | {"client_deadline", "other"}
+)
+
+
+def classify_read_failure(status: int, stderr: str) -> str:
+    """A killed reader (negative status: the drill's own deadline) or the first known message."""
+    if status < 0:
+        return "client_deadline"
+    for message, cause in _READ_FAILURE_MESSAGES:
+        if message in stderr:
+            return cause
+    return "other"
+
+
 
 def digest_script(bounds: Bounds, *, restored: bool, timeout_ms: int) -> str:
     """The bounded COPY script; identical on both clusters except the restored-only totals.
