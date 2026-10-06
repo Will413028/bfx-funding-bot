@@ -59,7 +59,6 @@ uv run python -m bfx_funding_bot.apps.bot  # 跑 daemon（phase 由 BFX_PHASE �
 - [Release 0 operator-only containment runbook](docs/runbooks/release-0-operator-containment.md)
 - [Research one-shot jobs](docs/runbooks/research-one-shot-jobs.md) — 研究資料補齊與一次性容器。
 - [Rollback after a venue write](docs/runbooks/rollback-after-venue-write.md) — Venue 寫入後的回滾與還原判斷。
-- [Projection archive 契約](docs/runbooks/projection-audit-cutover.md) — Archive 驗證、restore 與 atomic apply 邊界。
 - [Offsite DR Terraform module](infra/terraform/r2/README.md) and
   [operator runbook](docs/runbooks/offsite-dr.md): Terraform manages only R2
   infrastructure; the VM wizard manages runtime secret injection.

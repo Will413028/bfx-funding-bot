@@ -318,12 +318,6 @@ ancestors = ["bfx_funding_bot.modules"]
 depth = 0
 ignore_imports = [
     "bfx_funding_bot.modules.accounts.credential_bootstrap -> bfx_funding_bot.modules.execution.protocols",
-    "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.audit.tables",
-    "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.diagnostics.tables",
-    "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.event_store.tables",
-    "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.protocols",
-    "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.safety.tables",
-    "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.live_validation.tables",
     "bfx_funding_bot.modules.accounts.vault -> bfx_funding_bot.modules.execution.protocols",
     "bfx_funding_bot.modules.admin.trading_status -> bfx_funding_bot.modules.marketfeed.readiness",
     "bfx_funding_bot.modules.execution.capital_repository -> bfx_funding_bot.modules.live_validation.tables",
@@ -649,11 +643,11 @@ broken_contract_guidance = "Read through the ledger facade's ports (apps injects
 id = "runtime-not-legacy-authority"
 name = "The ledger runtime never imports what is left of the legacy capital authority"
 type = "forbidden"
-# What remains of the legacy authority after S1-8 serves only the baseline restore drill's replay
-# (scripts/verify_projection_replay.py) and the switch scaffolding (capital comparison,
-# seed); both go in later steps. The processes that lend and serve must not grow back into it.
-# The frozen tables (event_store.tables) are read only outside these sources: the archived
-# execution history (modules.execution.archived_execution_history), the scaffolding and the drill.
+# What remains of the legacy authority after S1-8 serves only the switch scaffolding (capital
+# comparison, seed; PR-D deletes it). The processes that lend and serve must not grow back into
+# it. The archived tables (event_store.tables, schema legacy_archive) are read at runtime only by
+# the archived execution history (modules.execution.archived_execution_history), which declares
+# its own table and imports none of these.
 source_modules = [
     "bfx_funding_bot.apps.authority_support",
     "bfx_funding_bot.apps.bot",
@@ -667,11 +661,9 @@ source_modules = [
 ]
 forbidden_modules = [
     "bfx_funding_bot.modules.execution.amount_fingerprint",
-    "bfx_funding_bot.modules.execution.boot_recovery",
     "bfx_funding_bot.modules.execution.capital_repository",
     "bfx_funding_bot.modules.execution.event_store.historical_claims",
     "bfx_funding_bot.modules.execution.event_store.projector",
-    "bfx_funding_bot.modules.execution.event_store.replay_verification",
     "bfx_funding_bot.modules.execution.event_store.store",
     "bfx_funding_bot.modules.execution.event_store.tables",
     "bfx_funding_bot.modules.execution.event_store.writer",

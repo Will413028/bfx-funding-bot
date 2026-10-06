@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from bfx_funding_bot.modules.accounts.identity_cutover import IdentityCutover, IdentityManifest
 from tests.pg_templates import alembic
 
 pytestmark = pytest.mark.integration
@@ -57,44 +55,6 @@ async def test_identity_revision_creates_tables_and_nullable_columns(additive_ur
         and fk.get("options", {}).get("ondelete", "").upper() == "RESTRICT"
         for fk in fks
     )
-
-
-async def test_cutover_preflight_runs_at_additive_revision_before_event_v3(additive_url) -> None:
-    """Halt 1 must not select columns introduced only after its contract revision."""
-    sync_url = additive_url
-    engine = create_engine(sync_url)
-    try:
-        with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO event_log
-                    (account_id, deployment_environment, event_type, payload, occurred_at_ms)
-                VALUES ('primary', 'prod', 'TEST', '{"amount":"1"}'::jsonb, 1)
-            """))
-    finally:
-        engine.dispose()
-
-    manifest = IdentityManifest.from_dict({
-        "version": 1,
-        "accounts": [{
-            "exchange_account_id": "550e8400-e29b-41d4-a716-446655440000",
-            "venue": "bitfinex",
-            "label": "Primary",
-            "legacy_realms": ["primary"],
-            "user_ids": [],
-            "memberships": {},
-        }],
-    })
-    async_engine = create_async_engine(sync_url.replace("+psycopg", "+asyncpg"))
-    try:
-        factory = async_sessionmaker(async_engine, expire_on_commit=False)
-        async with factory() as session:
-            report = await IdentityCutover(kek=bytes(range(32))).preflight(session, manifest)
-    finally:
-        await async_engine.dispose()
-
-    assert report.event_head == 1
-    assert report.unmapped_rows == ()
-    assert report.legacy_realm_counts == {"primary": 1}
 
 
 @pytest.mark.parametrize(
