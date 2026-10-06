@@ -46,18 +46,26 @@ def _migration(name: str = _MIGRATION):
     return module
 
 
+def _open(columns: str, model) -> tuple[str, ...]:
+    """A migration's column list without the columns no code writes any more."""
+    closed = getattr(model, "CLOSED_COLUMNS", ())
+    return tuple(column for column in columns.split(",") if column not in closed)
+
+
 @pytest.mark.parametrize(("model", "migration_file", "prefix"), _OUTBOXES)
 def test_migration_grants_exactly_the_declared_column_split(model, migration_file, prefix) -> None:
     migration = _migration(migration_file)
-    assert tuple(getattr(migration, f"{prefix}REQUEST_COLUMNS").split(",")) == model.REQUEST_COLUMNS
-    assert tuple(getattr(migration, f"{prefix}WORKER_COLUMNS").split(",")) == model.WORKER_COLUMNS
+    assert _open(getattr(migration, f"{prefix}REQUEST_COLUMNS"), model) == model.REQUEST_COLUMNS
+    assert _open(getattr(migration, f"{prefix}WORKER_COLUMNS"), model) == model.WORKER_COLUMNS
 
 
 @pytest.mark.parametrize(("model", "migration_file", "prefix"), _OUTBOXES)
 def test_every_column_belongs_to_exactly_one_writer(model, migration_file, prefix) -> None:
     columns = {column.name for column in model.__table__.columns}
+    closed = set(getattr(model, "CLOSED_COLUMNS", ()))
     assert set(model.REQUEST_COLUMNS).isdisjoint(model.WORKER_COLUMNS)
-    assert columns == set(model.REQUEST_COLUMNS) | set(model.WORKER_COLUMNS)
+    assert closed.isdisjoint(set(model.REQUEST_COLUMNS) | set(model.WORKER_COLUMNS))
+    assert columns == set(model.REQUEST_COLUMNS) | set(model.WORKER_COLUMNS) | closed
     # The shared worker records these on every outcome.
     assert {"state", "processed_at_ms", "outcome_reason"} <= set(model.WORKER_COLUMNS)
 

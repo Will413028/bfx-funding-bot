@@ -27,6 +27,7 @@ AUTH = {"Authorization": "Bearer fixture"}
 
 
 async def _app(migrated_db, monkeypatch, *, role="owner", principal=None):
+    from bfx_funding_bot.apps.read_models import build_read_models
     from bfx_funding_bot.modules.api.trading_control import build_trading_control_router
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_OPERATOR_USER_ID", "operator")
@@ -38,6 +39,7 @@ async def _app(migrated_db, monkeypatch, *, role="owner", principal=None):
         session.add(ExchangeAccountMembership(exchange_account_id=account, user_id="operator", role=role))
     app = FastAPI()
     app.state.session_factory = factory
+    app.state.read_models = build_read_models()
     app.include_router(build_trading_control_router())
     return app, factory, account
 
@@ -184,6 +186,42 @@ async def test_the_overview_lists_each_currency_policy_and_its_envelope(migrated
          "envelope": {"min_period_days": 2, "max_period_days": 30, "max_open_offers": 6,
                       "rate_floor_ratio": "0.5", "min_rate_apr": "0.01"},
          "requests": []},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_policy_is_that_currencys_policy_error(migrated_db, monkeypatch):
+    """The ledger policy store's refusal is shown as the currency's ``policy_error`` (the
+    response the endpoint gave before it read through the store), never hiding the others.
+    Mutation: let ``capital_reader._policy`` skip ``check_pointer`` -- both broken heads read
+    a policy and this fails."""
+    from sqlalchemy import text
+
+    app, factory, account = await _app(migrated_db, monkeypatch)
+    await _seed_policies(factory, account)
+    async with factory.begin() as session:
+        # Corrupt pointers, behind the triggers: fUST's head off its own revision number,
+        # and a fEUR head at fUSD's revision.
+        await session.execute(text("SET LOCAL session_replication_role = replica"))
+        await session.execute(text(
+            "UPDATE capital_policy_heads SET revision = 2 WHERE exchange_account_id = :a "
+            "AND symbol = 'fUST'"), {"a": account})
+        await session.execute(text(
+            "INSERT INTO capital_policy_heads(exchange_account_id, deployment_environment, symbol, "
+            "revision_id, revision) SELECT exchange_account_id, deployment_environment, 'fEUR', "
+            "revision_id, revision FROM capital_policy_heads WHERE exchange_account_id = :a "
+            "AND symbol = 'fUSD'"), {"a": account})
+    base = f"/api/v1/exchange-accounts/{account}/trading-control"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        response = await client.get(base, headers=AUTH)
+    assert response.status_code == 200
+    unreadable = {"policy_error": "inconsistent_policy_pointer", "enabled": None,
+                  "max_offer_amount": None, "envelope": None, "requests": []}
+    assert response.json()["data"]["currencies"] == [
+        {"symbol": "fEUR", "revision": 1, **unreadable},
+        {"symbol": "fUSD", "revision": 1, "policy_error": None, "enabled": False,
+         "max_offer_amount": None, "envelope": None, "requests": []},
+        {"symbol": "fUST", "revision": 2, **unreadable},
     ]
 
 

@@ -521,10 +521,14 @@ def compare(bounds: Bounds, restored: StreamDigest, production: StreamDigest) ->
     }
 
 
+# The image's refusal codes. ``boot_seed_missing`` is the per-scope seed guard's code, which
+# images up to e4e699c4 still emit (the drill of a release judges the DEPLOYED image); images
+# after it emit ``boot_epoch_writer_unknown`` instead. Drop it once no deployed or revert-target
+# image can emit it.
 BOOT_ERROR_CODES = frozenset({
     "boot_schema_head_mismatch", "boot_realm_mismatch", "boot_authority_not_ledger",
-    "boot_ledger_empty", "boot_seed_missing", "boot_basis_missing", "boot_capital_read_failed",
-    "boot_capital_unread", "boot_check_failed",
+    "boot_epoch_writer_unknown", "boot_seed_missing", "boot_ledger_empty", "boot_basis_missing",
+    "boot_capital_read_failed", "boot_capital_unread", "boot_check_failed",
 })
 
 

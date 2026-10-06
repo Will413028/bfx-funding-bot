@@ -21,11 +21,10 @@ git-checks its config in the release's clean checkout under
 3. on any failure exits non-zero, so OnFailure=bfx-alert@%n.service alerts
    (the Telegram credentials are root-only; this process never reads them).
 
-The unit passes only `--drill`; `--evidence` and `--heartbeat` are optional overrides (an
-older unit passes them with these same defaults). Every release this wrapper can reach by a
-revert has a drill with `--restore-test`
-(since S1-8 D3); a release from before it is not supported (ADR
-2026-10-06-ledger-restore-verification-replaces-prefix-test, PR-D).
+The unit passes only `--drill`; `--evidence` and `--heartbeat` are optional overrides. Every
+release this wrapper can reach by a revert has a drill with `--restore-test` (since S1-8 D3)
+and a unit passing only `--drill` (since S1-8 PR-D); a release from before them is not
+supported (ADR 2026-10-06-ledger-restore-verification-replaces-prefix-test).
 """
 
 from __future__ import annotations
@@ -135,10 +134,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         default=home / "bfx/dr-evidence/restore-heartbeat.json")
     parser.add_argument("--timeout-seconds", type=float, default=7000.0)
     # The unit passes only --drill, so the wrapper owns its paths and a tooling install can never
-    # pair a unit and a wrapper that disagree. The arguments the unit of a release before S1-8 PR-D
-    # still passes (it stays loaded until systemd reloads) are accepted and ignored.
-    for legacy in ("--legacy-config", "--config", "--legacy-evidence"):
-        parser.add_argument(legacy, type=Path, help=argparse.SUPPRESS)
+    # pair a unit and a wrapper that disagree.
     args = parser.parse_args(argv)
     return run_restore_test(drill=args.drill, evidence=args.evidence,
                             heartbeat=args.heartbeat, timeout=args.timeout_seconds)

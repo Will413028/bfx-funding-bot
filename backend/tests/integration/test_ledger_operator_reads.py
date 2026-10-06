@@ -291,7 +291,7 @@ async def test_the_router_serves_the_ledger_read_model_as_the_web_api_role(
     import httpx
     from fastapi import FastAPI
 
-    from bfx_funding_bot.apps.read_models import select_read_models
+    from bfx_funding_bot.apps.read_models import build_read_models
     from bfx_funding_bot.core.auth import Principal, require_operator
     from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
     from bfx_funding_bot.modules.api.deps import get_session
@@ -310,7 +310,7 @@ async def test_the_router_serves_the_ledger_read_model_as_the_web_api_role(
 
     app = FastAPI()
     app.include_router(build_uncertainties_router())
-    app.state.read_models = select_read_models()
+    app.state.read_models = build_read_models()
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
     app.dependency_overrides[get_session] = restricted
     base = f"/api/v1/exchange-accounts/{account}/uncertainties"

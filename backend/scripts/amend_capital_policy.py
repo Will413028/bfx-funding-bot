@@ -27,9 +27,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
-from bfx_funding_bot.apps.authority_support import SUPPORTED
-from bfx_funding_bot.apps.bot_ports import select_policy_ports
-from bfx_funding_bot.core.authority import read_authority
+from bfx_funding_bot.apps.bot_ports import build_policy_ports
+from bfx_funding_bot.core.authority import require_ledger_authority
 from bfx_funding_bot.core.database_realm import read_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
 from bfx_funding_bot.modules.accounts.capital_amendment import (
@@ -46,8 +45,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         async with factory() as session:
             # An unstamped or unknown realm refuses, and so does a database not on the ledger.
             await read_database_realm(session)
-            await read_authority(session, supported=SUPPORTED)
-        policy = select_policy_ports(Scope(args.exchange_account_id, args.environment))
+            await require_ledger_authority(session)
+        policy = build_policy_ports(Scope(args.exchange_account_id, args.environment))
         async with factory() as session:
             report = await amend_capital_policy(
                 session, store=policy.store, scope_lock=policy.scope_lock, symbol=args.symbol,

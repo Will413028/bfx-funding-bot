@@ -5,9 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-from bfx_funding_bot.apps.authority_support import SUPPORTED
-from bfx_funding_bot.apps.read_models import select_read_models
-from bfx_funding_bot.core.authority import read_authority
+from bfx_funding_bot.apps.read_models import build_read_models
+from bfx_funding_bot.core.authority import require_ledger_authority
 from bfx_funding_bot.core.db import make_engine, make_session_factory
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
@@ -40,9 +39,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # start, so /health never reports a build on the wrong authority.
         try:
             async with factory() as session:
-                authority = await read_authority(session, supported=SUPPORTED)
-            app.state.authority = authority
-            app.state.read_models = select_read_models()
+                await require_ledger_authority(session)
+            app.state.read_models = build_read_models()
         except Exception:
             logging.critical("Startup refused: capital authority unreadable or unsupported")
             await app.state.engine.dispose()
@@ -51,8 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         # Boot state belongs to this lifespan: a later run on the same app object
-        # (tests, reload) must not inherit an authority it did not read.
-        app.state.authority = None
+        # (tests, reload) must not inherit read models it did not build.
         app.state.read_models = None
         existing_engine = getattr(app.state, "engine", None)
         if existing_engine is not None:

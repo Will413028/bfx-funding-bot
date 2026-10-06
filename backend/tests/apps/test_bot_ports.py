@@ -21,10 +21,10 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bfx_funding_bot.apps.bot_ports import (
-    BotPorts,
+    CapitalPorts,
     ObservationVenue,
-    select_bot_ports,
-    select_policy_ports,
+    build_capital_ports,
+    build_policy_ports,
 )
 from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
@@ -55,8 +55,8 @@ async def factory(tmp_path):
         await engine.dispose()
 
 
-def _select(factory, *, bus=None, resync=None) -> BotPorts:
-    return select_bot_ports(
+def _select(factory, *, bus=None, resync=None) -> CapitalPorts:
+    return build_capital_ports(
         session_factory=factory, scope=SCOPE, account_id=str(ACCOUNT),
         bus=bus or DomainEventBus(), resync=resync or ResyncChannel(),
         clock=lambda: 1_000, max_snapshot_age_ms=10_000,
@@ -75,7 +75,7 @@ def _venue() -> ObservationVenue:
 @pytest.mark.asyncio
 async def test_the_selection_builds_no_legacy_object(factory) -> None:
     ports = _select(factory)
-    sinks = ports.capital.observation(_venue())
+    sinks = ports.observation(_venue())
     hint_sink = ports.venue_hint_sink
 
     assert legacy_state(ports, "ports") == []
@@ -86,16 +86,14 @@ async def test_the_selection_builds_no_legacy_object(factory) -> None:
 @pytest.mark.asyncio
 async def test_the_selection_names_the_ledger_adapters(factory) -> None:
     ports = _select(factory)
-    capital = ports.capital
-    assert capital is not None
     names = {
         "uncertainty_reader": type(ports.uncertainty_reader).__name__,
         "managed_offers": type(ports.managed_offers).__name__,
-        "capital_authority": type(capital.capital_authority).__name__,
-        "scope_lock": type(capital.scope_lock).__name__,
-        "policy_store": type(capital.policy_store).__name__,
-        "journal": type(capital.command_boundary.journal).__name__,
-        "operator_resolution": type(capital.operator_resolution).__name__,
+        "capital_authority": type(ports.capital_authority).__name__,
+        "scope_lock": type(ports.scope_lock).__name__,
+        "policy_store": type(ports.policy_store).__name__,
+        "journal": type(ports.command_boundary.journal).__name__,
+        "operator_resolution": type(ports.operator_resolution).__name__,
         "hint_sink": type(ports.venue_hint_sink).__name__,
     }
     assert names == {
@@ -108,14 +106,14 @@ async def test_the_selection_names_the_ledger_adapters(factory) -> None:
         "operator_resolution": "LedgerOperatorResolution",
         "hint_sink": "LedgerVenueHintSink",
     }
-    assert isinstance(capital.command_boundary.effects, LedgerCommandEffects)
-    assert isinstance(capital.deployment_input, LedgerDeploymentInput)
-    assert capital.policy_store.scope == SCOPE
+    assert isinstance(ports.command_boundary.effects, LedgerCommandEffects)
+    assert isinstance(ports.deployment_input, LedgerDeploymentInput)
+    assert ports.policy_store.scope == SCOPE
 
 
 @pytest.mark.asyncio
 async def test_observation_sinks_are_effects_around_the_ledger_cycle(factory) -> None:
-    sinks = _select(factory).capital.observation(_venue())
+    sinks = _select(factory).observation(_venue())
 
     assert isinstance(sinks.boot, LedgerCycleEffects)
     assert isinstance(sinks.runtime, LedgerCycleEffects)
@@ -148,10 +146,10 @@ async def test_venue_hint_sink_requests_resync_through_the_channel(factory) -> N
 
 def test_the_signature_names_no_authority_and_no_live_switch() -> None:
     """The venue is chosen elsewhere (``apps/venue.py``) and the ledger is the only
-    authority: ``select_bot_ports`` takes neither an ``authority`` nor a ``live`` argument."""
+    authority: ``build_capital_ports`` takes neither an ``authority`` nor a ``live`` argument."""
     import inspect
 
-    parameters = inspect.signature(select_bot_ports).parameters
+    parameters = inspect.signature(build_capital_ports).parameters
     assert "live" not in parameters and "authority" not in parameters
 
 
@@ -166,7 +164,7 @@ async def test_the_selection_subscribes_nothing(factory) -> None:
 async def test_policy_ports_are_the_ledgers(factory) -> None:
     from bfx_funding_bot.modules.trading import CapitalPolicy
 
-    policy = select_policy_ports(SCOPE)
+    policy = build_policy_ports(SCOPE)
     assert type(policy.store).__name__ == "LedgerPolicyStore"
     assert type(policy.scope_lock).__name__ == "LedgerScopeLock"
     async with factory.begin() as session:
@@ -190,7 +188,7 @@ async def test_policy_ports_write_through_the_one_writer(factory, monkeypatch) -
         return await policy_write.write_policy_revision(*args, **kwargs)
 
     monkeypatch.setattr(policy_store, "write_policy_revision", write)
-    policy = select_policy_ports(SCOPE)
+    policy = build_policy_ports(SCOPE)
     async with factory.begin() as session:
         await policy.store.apply_policy(
             session, symbol="fUST", policy=CapitalPolicy(enabled=True), expected_revision=0,

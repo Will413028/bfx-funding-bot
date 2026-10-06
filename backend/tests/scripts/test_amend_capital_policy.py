@@ -92,16 +92,16 @@ async def test_every_known_realm_reads_the_epoch_against_the_ledger_alone(
 ) -> None:
     async with database.begin() as session:
         await session.execute(text("UPDATE database_realm SET realm = :realm"), {"realm": realm})
-    seen: list[frozenset[str]] = []
+    seen: list[object] = []
 
-    async def read(_session: object, *, supported: frozenset[str]) -> str:
-        seen.append(supported)
+    async def require(session: object) -> str:
+        seen.append(session)
         raise AuthorityMismatch("stop after the read")
 
-    monkeypatch.setattr(script, "read_authority", read)
+    monkeypatch.setattr(script, "require_ledger_authority", require)
     with pytest.raises(AuthorityMismatch):
         await script.run(_args())
-    assert seen == [frozenset({"ledger"})]
+    assert len(seen) == 1
 
 
 @pytest.mark.asyncio

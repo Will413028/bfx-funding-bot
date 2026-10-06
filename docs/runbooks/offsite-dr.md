@@ -512,7 +512,7 @@ resources, then verifies the restored copy two ways:
    `python -m bfx_funding_bot.apps.restore_boot_check`, runs in the `bfx-bot:local` image
    (the deployed one) on the internal network, as a per-run LOGIN that
    has `SELECT` on exactly the ledger tables plus `alembic_version`, `database_realm` and the capital policy tables, and `default_transaction_read_only`: schema at the image's
-   migration head, the stamped realm, epoch `ledger`, the Bitfinex seed guard, and the
+   migration head, the stamped realm, epoch `ledger` from a known writer (the Bitfinex epoch guard), and the
    ledger capital reader for every (symbol, cell) of each scope's newest accepted basis,
    which must fold a basis (or report that the newest query was still pending at the
    restore point). It contacts no venue.

@@ -17,11 +17,10 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
-from bfx_funding_bot.apps.authority_support import SUPPORTED, require_ledger_seed
-from bfx_funding_bot.apps.bot_ports import ObservationVenue, select_bot_ports
+from bfx_funding_bot.apps.authority_support import require_ledger_epoch
+from bfx_funding_bot.apps.bot_ports import ObservationVenue, build_capital_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
 from bfx_funding_bot.apps.venue import VenueSeam, build_venue
-from bfx_funding_bot.core.authority import read_authority
 from bfx_funding_bot.core.database_realm import assert_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
@@ -126,7 +125,6 @@ from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionScope,
     UncertaintyResolutionWorker,
 )
-from bfx_funding_bot.modules.execution.venue_normalization_shadow import VenueNormalizationShadow
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.ledger import (
     ObservationSink,
@@ -203,13 +201,14 @@ async def build_daemon(
     # a database at another schema means this is the wrong build for it (for instance a
     # rollback onto a newer schema); its stamped realm must equal the realm this process
     # runs as (E2); and the capital authority epoch is read once: either venue runs only
-    # on the ledger (``apps/authority_support.py``). Any refusal stops the boot and alerts
-    # (``_refuse_live_boot``: alert routing is configuration, the sink prefixes the realm).
+    # on the ledger, and the real venue only on an epoch a known writer appended
+    # (``apps/authority_support.py``), before any ledger write. Any refusal stops the boot and
+    # alerts (``_refuse_live_boot``: alert routing is configuration, the sink prefixes the realm).
     try:
         async with session_factory() as boot_session:
             await assert_schema_head(boot_session)
             await assert_database_realm(boot_session, config.deployment_environment.value)
-            await read_authority(boot_session, supported=SUPPORTED)
+            await require_ledger_epoch(boot_session, venue=config.venue)
     except Exception as exc:
         await _refuse_live_boot(exc, config=config, session_factory=session_factory)
         await db_engine.dispose()
@@ -228,25 +227,16 @@ async def build_daemon(
     # Capital ports: every adapter a consumer binds to is the ledger's (apps/bot_ports.py).
     env_str = config.deployment_environment.value
     capital_scope = Scope(account_bootstrap.exchange_account_id, env_str)
-    # H-1: a scope with legacy history but without the seed refuses, before any ledger write.
-    try:
-        async with session_factory() as seed_session:
-            await require_ledger_seed(seed_session, venue=config.venue, scopes=(capital_scope,))
-    except Exception as exc:
-        await _refuse_live_boot(exc, config=config, session_factory=session_factory)
-        await db_engine.dispose()
-        raise
     account_id = account_bootstrap.account_id
     bus = DomainEventBus()
     resync = ResyncChannel()
-    ports = select_bot_ports(
+    capital = build_capital_ports(
         session_factory=session_factory, scope=capital_scope, account_id=account_id,
         bus=bus, resync=resync, clock=now_ms_utc,
         max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS,
     )
-    capital = ports.capital
-    uncertainty_reader = ports.uncertainty_reader
-    managed_offers = ports.managed_offers
+    uncertainty_reader = capital.uncertainty_reader
+    managed_offers = capital.managed_offers
     try:
         # Before anything can trade: every configured currency has an
         # applied capital policy.
@@ -526,10 +516,7 @@ async def build_daemon(
 
     # 3a-recovery: venue reconciliation against the real venue.
     book_snapshot_writer: BookSnapshotWriter | None = None
-    auth_rest = BitfinexAuthREST(
-        http=venue_wiring.auth_http, auth_gate=bfx_auth_gate,
-        response_observer=VenueNormalizationShadow(),
-    )
+    auth_rest = BitfinexAuthREST(http=venue_wiring.auth_http, auth_gate=bfx_auth_gate)
     # Realized income truth (ledger category 28), read-only: see interest_ledger.
     interest_ledger_sync = InterestLedgerSync(
         rest=auth_rest, ctx=account_ctx, session_factory=session_factory,
@@ -976,7 +963,7 @@ async def build_daemon(
         ws_dispatcher = BitfinexLiveWSDispatcher(
             ws_client=auth_ws,
             event_sink=stdout_sink,
-            venue_hint_sink=ports.venue_hint_sink,
+            venue_hint_sink=capital.venue_hint_sink,
         )
         bus.subscribe(CancelRequested, ws_dispatcher.handle_cancel_requested)
         # Saturation signal: queue depth read live at scrape time (replaces the

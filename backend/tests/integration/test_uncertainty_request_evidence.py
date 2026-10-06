@@ -110,8 +110,8 @@ def test_insert_request_swallows_an_evidence_violation_as_slot_taken(seeded) -> 
     url = seeded.url.render_as_string(hide_password=False)
     values = {
         "request_id": uuid4(), "exchange_account_id": _A, "deployment_environment": "ci",
-        "uncertainty_id": uuid4(), "action": "mark_not_accepted", "reconcile_event_seq": 7,
-        "observation_id": _O, "venue_offer_id": None, "decision": None, "reason": None,
+        "uncertainty_id": uuid4(), "action": "mark_not_accepted",
+        "observation_id": None, "venue_offer_id": None, "decision": None, "reason": None,
         "requested_by": "op", "created_at_ms": 1,
     }
 
@@ -124,11 +124,11 @@ def test_insert_request_swallows_an_evidence_violation_as_slot_taken(seeded) -> 
             await engine.dispose()
 
     values["exchange_account_id"] = UUID(str(_A))
-    values["observation_id"] = UUID(str(_O))
+    # No evidence column (the request columns no longer name the reconcile event).
     # Known behaviour: every IntegrityError reads as "pending slot taken".
     assert asyncio.run(run(values)) is False
     # Same values with one evidence column is accepted, so the False above is the XOR CHECK.
-    assert asyncio.run(run({**values, "observation_id": None})) is True
+    assert asyncio.run(run({**values, "observation_id": UUID(str(_O))})) is True
 
 
 def test_outcome_shape_follows_the_evidence_kind(seeded) -> None:

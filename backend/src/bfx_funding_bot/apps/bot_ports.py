@@ -91,14 +91,14 @@ class PolicyPorts:
     scope_lock: ScopeLock
 
 
-def select_policy_ports(scope: Scope) -> PolicyPorts:
+def build_policy_ports(scope: Scope) -> PolicyPorts:
     """The policy ports of ``scope``; the bot and the owner's scripts share them."""
     return PolicyPorts(build_policy_store(scope), build_scope_lock())
 
 
 @dataclass(frozen=True, slots=True)
 class CapitalPorts:
-    """What a process that lends real capital binds to the ledger."""
+    """Every ledger port the bot process binds a consumer to (on either venue)."""
 
     capital_authority: CapitalAuthority
     scope_lock: ScopeLock
@@ -107,19 +107,14 @@ class CapitalPorts:
     operator_resolution: OperatorResolution
     deployment_input: DeploymentInput
     observation: Callable[[ObservationVenue], ObservationSinks]
-
-
-@dataclass(frozen=True, slots=True)
-class BotPorts:
     uncertainty_reader: UncertaintyReader
     managed_offers: ManagedOfferReader
     # The sink for venue hints (WS and REST polling). A ledger sink debounces per instance,
     # so there is one, shared by every producer.
     venue_hint_sink: VenueHintSink
-    capital: CapitalPorts
 
 
-def select_bot_ports(
+def build_capital_ports(
     *,
     session_factory: async_sessionmaker[AsyncSession],
     scope: Scope,
@@ -128,12 +123,12 @@ def select_bot_ports(
     resync: ResyncChannel,
     clock: Callable[[], int],
     max_snapshot_age_ms: int,
-) -> BotPorts:
+) -> CapitalPorts:
     """The bot boots only on the ``ledger`` authority (``apps/authority_support.py``)."""
     capital_authority = build_capital_authority(
         session_factory, max_snapshot_age_ms=max_snapshot_age_ms,
     )
-    policy = select_policy_ports(scope)
+    policy = build_policy_ports(scope)
 
     def observation(venue: ObservationVenue) -> ObservationSinks:
         observed = BitfinexVenueObservation(
@@ -158,25 +153,23 @@ def select_bot_ports(
 
         return ObservationSinks(boot=sink(BOOT_GRACE_MS), runtime=sink(RUNTIME_GRACE_MS))
 
-    return BotPorts(
+    return CapitalPorts(
+        capital_authority=capital_authority,
+        scope_lock=policy.scope_lock,
+        policy_store=policy.store,
+        command_boundary=CommandBoundary(
+            scope, session_factory,
+            build_command_journal(session_factory, max_snapshot_age_ms=max_snapshot_age_ms),
+            LedgerCommandEffects(bus),
+        ),
+        operator_resolution=build_operator_resolution(),
+        deployment_input=LedgerDeploymentInput(
+            session_factory=session_factory, account_id=scope.exchange_account_id,
+            environment=scope.deployment_environment, offers=build_ledger_managed_offers(),
+        ),
+        observation=observation,
         uncertainty_reader=build_uncertainty_reader(session_factory),
         managed_offers=build_managed_offer_reader(),
         venue_hint_sink=build_venue_hint_sink(scope=scope, request_resync=resync.request, bus=bus),
-        capital=CapitalPorts(
-            capital_authority=capital_authority,
-            scope_lock=policy.scope_lock,
-            policy_store=policy.store,
-            command_boundary=CommandBoundary(
-                scope, session_factory,
-                build_command_journal(session_factory, max_snapshot_age_ms=max_snapshot_age_ms),
-                LedgerCommandEffects(bus),
-            ),
-            operator_resolution=build_operator_resolution(),
-            deployment_input=LedgerDeploymentInput(
-                session_factory=session_factory, account_id=scope.exchange_account_id,
-                environment=scope.deployment_environment, offers=build_ledger_managed_offers(),
-            ),
-            observation=observation,
-        ),
     )
 

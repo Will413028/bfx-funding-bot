@@ -281,12 +281,17 @@ class UncertaintyResolutionRequestRow(Base):
     # column-scoped INSERT grant, and the daemon's UPDATE grant.
     REQUEST_COLUMNS: ClassVar[tuple[str, ...]] = (
         "request_id", "exchange_account_id", "deployment_environment", "uncertainty_id",
-        "action", "reconcile_event_seq", "observation_id", "venue_offer_id", "decision",
-        "reason", "requested_by", "created_at_ms",
+        "action", "observation_id", "venue_offer_id", "decision", "reason", "requested_by",
+        "created_at_ms",
     )
     WORKER_COLUMNS: ClassVar[tuple[str, ...]] = (
-        "state", "processed_at_ms", "resolved_event_seq", "outcome_reason",
+        "state", "processed_at_ms", "outcome_reason",
     )
+    # Pre-switch evidence: values of requests made under the legacy authority. No code writes
+    # them any more; the grants 1c435a35dcb4 gave (web API INSERT, bot UPDATE) stay until the
+    # contract migration drops the columns, so an image from before this split keeps working
+    # while a deploy runs.
+    CLOSED_COLUMNS: ClassVar[tuple[str, ...]] = ("reconcile_event_seq", "resolved_event_seq")
 
     request_id: Mapped[UUID] = mapped_column(_UUID, primary_key=True)
     exchange_account_id: Mapped[UUID] = mapped_column(

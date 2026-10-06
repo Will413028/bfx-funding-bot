@@ -295,6 +295,8 @@ def test_boot_output_fails_closed(output: str, code: str) -> None:
 
 
 @pytest.mark.parametrize(("stdout", "code"), [
+    ('{"error": "boot_epoch_writer_unknown"}\n', "boot_epoch_writer_unknown"),
+    # The deployed image up to e4e699c4 still refuses with its per-scope seed code.
     ('{"error": "boot_seed_missing"}\n', "boot_seed_missing"),
     ('{"error": "boot_check_failed", "type": "OSError"}\n', "boot_check_failed"),
     ('{"error": "anything else"}\n', "boot_check_failed"),
@@ -304,6 +306,42 @@ def test_boot_output_fails_closed(output: str, code: str) -> None:
 def test_boot_refusal_codes_are_bounded(stdout: str, code: str) -> None:
     assert ledger.boot_failure_code(stdout) == code
     assert code in evidence.LEDGER_ERROR_CODES
+
+
+# The boot check's JSON comes from the DEPLOYED image and is parsed by the TARGET release's drill:
+# required keys and types are checked at every level, keys a newer image adds are ignored.
+
+def test_a_newer_images_extra_keys_at_every_level_parse_and_stay_out_of_the_receipt() -> None:
+    payload = json.loads(_boot())
+    payload["image_note"] = "top"
+    payload["boot"]["checks"] = ["schema_head", "realm"]
+    [scope] = payload["boot"]["scopes"]
+    scope["epoch_actor"] = "ledger_seed:switch-x"
+    [read] = scope["reads"]
+    read["max_snapshot_age_ms"] = 600_000
+    boot = ledger.parse_boot(json.dumps(payload) + "\n", _bounds())
+    assert boot == ledger.parse_boot(_boot(), _bounds())
+    assert set(boot) == {"schema_head", "realm", "authority", "scopes"}
+    assert set(boot["scopes"][0]) == {"exchange_account_id", "deployment_environment",
+                                      "basis_id", "reads"}
+    assert set(boot["scopes"][0]["reads"][0]) == {"symbol", "cell_id", "basis_id", "result"}
+
+
+@pytest.mark.parametrize(("level", "key", "value"), [
+    ("boot", "realm", None), ("boot", "scopes", "x"), ("boot", "authority", ...),
+    ("scope", "basis_id", None), ("scope", "reads", ...), ("scope", "exchange_account_id", 1),
+    ("read", "result", ...), ("read", "basis_id", 7), ("read", "symbol", None),
+])
+def test_a_missing_or_mistyped_required_key_still_refuses(level: str, key: str, value: Any) -> None:
+    payload = json.loads(_boot())
+    target = {"boot": payload["boot"], "scope": payload["boot"]["scopes"][0],
+              "read": payload["boot"]["scopes"][0]["reads"][0]}[level]
+    if value is ...:
+        del target[key]
+    else:
+        target[key] = value
+    with pytest.raises(ledger.LedgerVerificationError, match="restore_output_invalid"):
+        ledger.parse_boot(json.dumps(payload) + "\n", _bounds())
 
 
 def test_only_the_ledger_receipt_kind_remains() -> None:

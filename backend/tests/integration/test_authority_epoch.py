@@ -4,12 +4,11 @@ Mutation checks (one at a time; revert after each):
 
 * Drop the epoch condition from ``guard_ledger_authority``. The bot's attempt
   INSERT under ``legacy`` succeeds.
-* Treat a missing epoch row as legacy in ``read_authority``. The empty-table read
+* Treat a missing epoch row as ledger in ``require_ledger_authority``. The empty-table read
   returns instead of refusing.
-* Accept an unknown authority value in ``check_authority``. The unknown-value read
-  returns instead of refusing.
-* Read the first instead of the latest epoch row. The switched database reads
-  ``legacy`` and the ``ledger`` read no longer refuses.
+* Accept an unknown authority value there. The unknown-value read returns instead of refusing.
+* Read the first instead of the latest epoch row. The switched database reads ``legacy`` and
+  refuses, and the database switched back is let through.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from bfx_funding_bot.core.authority import AuthorityMismatch, read_authority
+from bfx_funding_bot.core.authority import AuthorityMismatch, require_ledger_authority
 from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES
 from tests.pg_templates import alembic
 
@@ -74,7 +73,7 @@ def _read(engine: Engine) -> str:
         async_engine = create_async_engine(url)
         try:
             async with async_engine.connect() as conn, AsyncSession(bind=conn) as session:
-                return await read_authority(session, supported=frozenset({"legacy"}))
+                return await require_ledger_authority(session)
         finally:
             await async_engine.dispose()
 
@@ -92,7 +91,8 @@ def test_seed_is_one_legacy_row(ledger_db) -> None:
     assert [tuple(row) for row in rows] == [
         (1, "legacy", "migration f6a7b8c9d0e1", "initial authority", None, True)
     ]
-    assert _read(ledger_db) == "legacy"
+    with pytest.raises(AuthorityMismatch, match="authority_unsupported value=legacy"):
+        _read(ledger_db)
 
 
 def test_epoch_rows_are_immutable(ledger_db) -> None:
@@ -188,17 +188,19 @@ def test_bot_writes_are_rejected_until_the_ledger_epoch(seeded) -> None:
         conn.exec_driver_sql("UPDATE capital_command_clock SET revision=2")
 
 
-def test_read_authority_takes_the_latest_row(ledger_db) -> None:
-    with ledger_db.begin() as conn:
-        _append(conn, 2, "ledger")
-    with pytest.raises(AuthorityMismatch, match="authority_unsupported value=ledger"):
+def test_require_ledger_authority_takes_the_latest_row(ledger_db) -> None:
+    with pytest.raises(AuthorityMismatch, match="authority_unsupported value=legacy build=ledger"):
         _read(ledger_db)
     with ledger_db.begin() as conn:
+        _append(conn, 2, "ledger")
+    assert _read(ledger_db) == "test"  # the epoch's writer
+    with ledger_db.begin() as conn:
         _append(conn, 3, "legacy")
-    assert _read(ledger_db) == "legacy"
+    with pytest.raises(AuthorityMismatch, match="authority_unsupported value=legacy"):
+        _read(ledger_db)
 
 
-def test_read_authority_refuses_an_unknown_value(ledger_db) -> None:
+def test_require_ledger_authority_refuses_an_unknown_value(ledger_db) -> None:
     with ledger_db.begin() as conn:
         conn.exec_driver_sql(
             "ALTER TABLE capital_authority_epoch DROP CONSTRAINT ck_capital_authority_epoch_authority"
@@ -208,7 +210,7 @@ def test_read_authority_refuses_an_unknown_value(ledger_db) -> None:
         _read(ledger_db)
 
 
-def test_read_authority_refuses_a_missing_row_or_table(ledger_db) -> None:
+def test_require_ledger_authority_refuses_a_missing_row_or_table(ledger_db) -> None:
     with ledger_db.begin() as conn:
         conn.exec_driver_sql("ALTER TABLE capital_authority_epoch DISABLE TRIGGER USER")
         conn.exec_driver_sql("DELETE FROM capital_authority_epoch")

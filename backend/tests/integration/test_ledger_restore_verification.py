@@ -356,6 +356,19 @@ def test_boot_check_refuses_a_restored_copy_that_is_not_on_the_ledger(clusters) 
     assert ledger.boot_failure_code(completed.stdout) == "boot_authority_not_ledger"
 
 
+def test_boot_check_refuses_a_ledger_epoch_from_an_unknown_writer(clusters) -> None:
+    """The Bitfinex bot's epoch guard: only the genesis migration or the S1-7 switch writes it."""
+    restored, _ = clusters
+    _superuser(restored, "INSERT INTO capital_authority_epoch "
+               "(epoch_seq, authority, set_at_ms, actor, reason) "
+               "SELECT max(epoch_seq) + 1, 'ledger', 9, 'by hand', 'test' "
+               "FROM capital_authority_epoch")
+    completed = _boot_check(_verifier_url(restored))
+    assert completed.returncode == 3
+    assert json.loads(completed.stdout.splitlines()[-1]) == {"error": "boot_epoch_writer_unknown"}
+    assert ledger.boot_failure_code(completed.stdout) == "boot_epoch_writer_unknown"
+
+
 def test_boot_check_role_cannot_write(clusters) -> None:
     restored, _ = clusters
     url = make_url(_verifier_url(restored)).set(drivername="postgresql")

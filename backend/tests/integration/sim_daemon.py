@@ -9,7 +9,7 @@ simulated venue through its own ``httpx`` client. What a test controls:
 * the bot's own funding book, written into its store with the same clock.
 
 The ledger epoch is the migrated database's own (the genesis); a test that wants another latest
-epoch gets a REAL row appended as the owner (no ``read_authority`` patch). The database is stamped ``ci`` by the shared seed, and public endpoints are answered by
+epoch gets a REAL row appended as the owner (no ``require_ledger_authority`` patch). The database is stamped ``ci`` by the shared seed, and public endpoints are answered by
 ``httpx_mock``. Authenticated traffic never reaches ``httpx_mock``: ``auth_requests`` lists
 any request to the authenticated host that did.
 """

@@ -268,10 +268,7 @@ class AccountCommandGate:
                 ), view.basis_token, now_ms=self._clock(), locked_guard=locked_guard,
             )
             if isinstance(admission, CommandRefused):
-                reason = {"revision_changed": "capital_policy_revision_changed",
-                          "snapshot_changed": "capital_snapshot_changed"}.get(
-                              admission.reason, admission.reason)
-                raise CommandGateBlocked(reason)
+                raise CommandGateBlocked(admission.reason)
         try:
             # Recheck ownership/halt after commit; never charge the reserved amount twice.
             try:

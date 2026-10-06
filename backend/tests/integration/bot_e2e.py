@@ -3,7 +3,7 @@
 Shared by the composed end-to-end tests. The venue is faked at HTTP level (one state feeds
 the ledger ``BitfinexVenueObservation`` through the real ``BitfinexAuthREST``), and one fake
 clock drives the whole composition: ``bot.now_ms_utc`` is the composition clock, every time
-source below ``select_bot_ports`` and the gate follows it. The database is at head, so its
+source below ``build_capital_ports`` and the gate follows it. The database is at head, so its
 latest epoch is the genesis ``ledger`` one (``b1c2d3e4f5a6``) and the bot reads it for real.
 
 Only an operator's authority check is replaced (the worker's ``authority``), as in
@@ -27,8 +27,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.apps import bot
-from bfx_funding_bot.apps.bot_ports import select_policy_ports
-from bfx_funding_bot.apps.read_models import select_read_models
+from bfx_funding_bot.apps.bot_ports import build_policy_ports
+from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
@@ -192,7 +192,7 @@ class BotEnv:
         self.venue = venue
         self.alerts = alerts_sent
         self.daemons: list[Any] = []
-        self.reads = select_read_models()
+        self.reads = build_read_models()
 
     async def build(self) -> Any:
         """A bot process: composed, not yet booted. Its deployment is a recorder."""
@@ -319,7 +319,7 @@ async def bot_env(ledger_db, monkeypatch, httpx_mock, tmp_path):
     }.items():
         monkeypatch.setenv(name, value)
     await seed_exchange_account(engine, capital_policies=False)
-    policy = select_policy_ports(SCOPE)
+    policy = build_policy_ports(SCOPE)
     async with factory.begin() as session:
         await policy.store.apply_policy(session, symbol="fUST", policy=POLICY,
                                         expected_revision=0, source={"fixture": True})
