@@ -1,14 +1,18 @@
 """The restore-test boot check runs against the image it is piped into, older or newer.
 
 bfx-deploy's restore-test gate feeds the TARGET release's ``ledger_boot_check.py`` to ``python -``
-inside the CURRENTLY DEPLOYED image. So this tree's copy runs on the release before S1-8 PR-C
-(``require_ledger_seed(..., authority=...)``), and on this tree (no ``authority``). Both are run
-here for real: the older release's ``backend/`` from git (``PRE_LEDGER_ONLY``) on a database at
-its own migration head, and this tree's ``src`` on a database at this head.
+inside the CURRENTLY DEPLOYED image. An image with its own entry
+(``bfx_funding_bot.apps.restore_boot_check``) is judged by it; the release before S1-8 PR-C has
+none, and the script's fallback (``require_ledger_seed(..., authority=...)``) judges it. Both
+are run here for real: that release's ``backend/`` from git (``PRE_LEDGER_ONLY``) on a database
+at its own migration head, and this tree's ``src`` on a database at this head; the entry is
+also run on its own, as later drills will (``python -m``).
 
-Mutation (applied alone to deploy/vm/pgbackrest/ledger_boot_check.py and reverted): always pass
-``authority=`` again: the ``current`` case fails (boot_check_failed TypeError); never pass it:
-the ``pre_ledger_only`` case fails.
+Mutations (each applied alone to deploy/vm/pgbackrest/ledger_boot_check.py and reverted):
+
+* never use the image entry (``image_entry`` returns None): the ``current`` case fails (the
+  fallback's ``authority=`` meets the ledger-only guard: boot_check_failed TypeError);
+* always use it: the ``pre_ledger_only`` case fails (no such module in that image).
 """
 from __future__ import annotations
 
@@ -100,3 +104,17 @@ def test_the_boot_check_passes_on_both_apis(image, request, pg_templates, pg_clo
     assert (scope["exchange_account_id"], scope["basis_id"]) == (_A, _B)
     assert boot["schema_head"] == (PRE_LEDGER_ONLY_HEAD if image == "pre_ledger_only"
                                    else build_head())
+
+
+def test_the_image_entry_runs_on_its_own(pg_templates, pg_clone) -> None:
+    """What a drill after the fallback's removal runs: the image's module, no piped script."""
+    backend = ROOT / "backend"
+    url = pg_clone(pg_templates.template("ledger_restore_verification", _template))
+    completed = subprocess.run(
+        [sys.executable, "-m", "bfx_funding_bot.apps.restore_boot_check"], cwd=backend,
+        env={**os.environ, "DATABASE_URL": _verifier_url(url)}, capture_output=True, text=True,
+        check=False, timeout=300,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    boot = json.loads(completed.stdout.splitlines()[-1])["boot"]
+    assert (boot["authority"], boot["schema_head"]) == ("ledger", build_head())

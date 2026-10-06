@@ -53,4 +53,4 @@ prior state：每月與變更觸發的還原測試（[2026-09-04-pgbackrest-in-p
 
 - 單次 production 讀取時間逼近 RTO 預算，或長 snapshot 影響 vacuum → 改為增量比對（上次驗證的 W 與 digest 存入 evidence，只讀 (W_prev, W]）或從 standby 讀。
 - ledger 表新增共同 commit stamp → 以它作為唯一邊界。
-- boot check 仍以 stdin 腳本依賴 image 內部 API；image 內建 check 入口後（本 release 部署之後即可）改呼叫該入口。
+- S1-8 PR-C 起 image 內建入口 `python -m bfx_funding_bot.apps.restore_boot_check`；drill 的 `ledger_boot_check.py` 先以 `find_spec` 探測，有入口就交給它，沒有（PR-C 之前的 image，只在部署 PR-C 那一次）才跑 stdin 腳本自帶的舊 API 版檢查。**PR-C 部署後的第一個 release** → 刪除該 fallback，drill 直接對 image 跑 `python -m`。

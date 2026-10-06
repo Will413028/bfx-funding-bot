@@ -1,11 +1,11 @@
-"""Read-only boot check of a restored ledger database, run INSIDE the backend image.
+"""Read-only boot check of a restored ledger database: this image's own restore-test entry.
 
-restore_drill.py --restore-test feeds this file to `python -` on the verifier container's stdin
-(working directory /app) on the isolated network, with only the ephemeral read-only
-DATABASE_URL of the restored cluster: it never sees production, R2, a venue or any
-application secret, and it contacts no venue. It uses the image's own boot guards, so it
-judges the restored copy the way a bot of that image would at boot, in one REPEATABLE READ
-READ ONLY transaction:
+``python -m bfx_funding_bot.apps.restore_boot_check`` with only the ephemeral read-only
+DATABASE_URL of the restored cluster (restore_drill.py --restore-test runs it on the verifier
+container, on the isolated network): it never sees production, R2, a venue or any application
+secret, and it contacts no venue. It uses this image's own boot guards, so it judges the
+restored copy the way a bot of this image would at boot, in one REPEATABLE READ READ ONLY
+transaction:
 
 1. schema at the image's single migration head (``assert_schema_head``);
 2. the stamped realm, and every ledger scope in it;
@@ -15,31 +15,22 @@ READ ONLY transaction:
    accepted basis, as of that scope's newest query: it must fold a basis, or say the newest
    query is still pending (the restore point fell inside an observation cycle).
 
-Prints one JSON line {"boot": {...}}; exit 3 with {"error": <bounded code>} on a refusal.
-
-Cross-version: the deploy's restore-test gate pipes the TARGET release's copy of this file into
-the CURRENTLY DEPLOYED image. An image that carries its own entry
-(``bfx_funding_bot.apps.restore_boot_check``, since S1-8 PR-C) is judged by that entry: the
-checks then always match the API of the image they run in. The checks below are the fallback
-for an image without it, written against that image's API (``require_ledger_seed`` with
-``authority=``).
-
-REMOVE the fallback in the first release after S1-8 PR-C is deployed: from then on every
-deployed image has the entry, and the drill can run ``python -m`` on it directly (ADR
-2026-10-06-ledger-restore-verification-replaces-prefix-test.md).
+Prints one JSON line {"boot": {...}}; exit 3 with {"error": <bounded code>} on a refusal. The
+drill's ``deploy/vm/pgbackrest/ledger_boot_check.py`` delegates here when the image has it, so
+the checks always run against the API of the image they judge.
 """
 from __future__ import annotations
 
 import asyncio
-import importlib
-import importlib.util
 import json
 import os
 import sys
-from typing import Any
+from typing import Any, Final
+
+from bfx_funding_bot.core.venue import Venue
 
 EXIT_REFUSED = 3
-VENUE = "bitfinex"
+VENUE: Final[Venue] = "bitfinex"
 _PENDING = "snapshot_query_pending"
 
 
@@ -161,8 +152,7 @@ async def _check(database_url: str) -> dict[str, object]:
             if any(scope.deployment_environment != realm for scope in scopes):
                 raise RefusedError("boot_realm_mismatch")
             try:
-                await require_ledger_seed(session, authority=authority, venue=VENUE,
-                                          scopes=tuple(scopes))
+                await require_ledger_seed(session, venue=VENUE, scopes=tuple(scopes))
             except AuthorityMismatch:
                 raise RefusedError("boot_seed_missing") from None
             checked: list[dict[str, object]] = []
@@ -181,24 +171,7 @@ async def _check(database_url: str) -> dict[str, object]:
                      "scopes": checked}}
 
 
-# The image's own entry (S1-8 PR-C and later).
-IMAGE_ENTRY = "bfx_funding_bot.apps.restore_boot_check"
-
-
-def image_entry() -> Any:
-    """The image's own boot check module, or None for an image without it (no side effects
-    beyond importing the package parents ``find_spec`` must resolve)."""
-    try:
-        found = importlib.util.find_spec(IMAGE_ENTRY)
-    except ModuleNotFoundError:
-        return None
-    return None if found is None else importlib.import_module(IMAGE_ENTRY)
-
-
 def main() -> int:
-    entry = image_entry()
-    if entry is not None:
-        return int(entry.main())
     try:
         result = asyncio.run(_check(os.environ["DATABASE_URL"]))
     except RefusedError as exc:
