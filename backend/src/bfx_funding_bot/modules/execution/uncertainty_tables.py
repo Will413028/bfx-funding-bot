@@ -287,8 +287,10 @@ class UncertaintyResolutionRequestRow(Base):
     WORKER_COLUMNS: ClassVar[tuple[str, ...]] = (
         "state", "processed_at_ms", "outcome_reason",
     )
-    # Pre-switch evidence: values of requests made under the legacy authority, which no role
-    # writes any more (e4f5a6b7c8d9 revoked both grants).
+    # Pre-switch evidence: values of requests made under the legacy authority. No code writes
+    # them any more; the grants 1c435a35dcb4 gave (web API INSERT, bot UPDATE) stay until the
+    # contract migration drops the columns, so an image from before this split keeps working
+    # while a deploy runs.
     CLOSED_COLUMNS: ClassVar[tuple[str, ...]] = ("reconcile_event_seq", "resolved_event_seq")
 
     request_id: Mapped[UUID] = mapped_column(_UUID, primary_key=True)
@@ -305,7 +307,7 @@ class UncertaintyResolutionRequestRow(Base):
     uncertainty_id: Mapped[UUID] = mapped_column(_UUID, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
     # Exactly one evidence column is set (ck_..._evidence): the legacy reconcile
-    # event (pre-switch rows only; CLOSED_COLUMNS), or the ledger observation.
+    # event, or the ledger observation.
     reconcile_event_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     observation_id: Mapped[UUID | None] = mapped_column(
         _UUID,

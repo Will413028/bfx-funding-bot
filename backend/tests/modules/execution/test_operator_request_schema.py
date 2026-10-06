@@ -47,7 +47,7 @@ def _migration(name: str = _MIGRATION):
 
 
 def _open(columns: str, model) -> tuple[str, ...]:
-    """A migration's column list without the columns closed to every writer since."""
+    """A migration's column list without the columns no code writes any more."""
     closed = getattr(model, "CLOSED_COLUMNS", ())
     return tuple(column for column in columns.split(",") if column not in closed)
 
@@ -57,12 +57,6 @@ def test_migration_grants_exactly_the_declared_column_split(model, migration_fil
     migration = _migration(migration_file)
     assert _open(getattr(migration, f"{prefix}REQUEST_COLUMNS"), model) == model.REQUEST_COLUMNS
     assert _open(getattr(migration, f"{prefix}WORKER_COLUMNS"), model) == model.WORKER_COLUMNS
-
-
-def test_the_closed_columns_are_the_ones_e4f5a6b7c8d9_revoked() -> None:
-    migration = _migration("e4f5a6b7c8d9_close_pre_switch_request_evidence.py")
-    assert {column for _, _, column in migration.GRANTS} == set(
-        UncertaintyResolutionRequestRow.CLOSED_COLUMNS)
 
 
 @pytest.mark.parametrize(("model", "migration_file", "prefix"), _OUTBOXES)

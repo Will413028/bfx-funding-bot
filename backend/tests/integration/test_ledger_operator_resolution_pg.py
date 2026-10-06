@@ -631,8 +631,8 @@ async def test_the_web_api_role_queues_and_the_bot_role_applies(book, ledger_db)
         with ledger_db.begin() as conn:
             append_epoch(conn, "ledger", "switch")
         request_id = await queue(web_factory, bind)
-        # ...and may not hand it a legacy sequence at all (e4f5a6b7c8d9 revoked the column).
-        with pytest.raises(Exception, match="permission denied"):
+        # ...and may not hand it a legacy sequence under the ledger epoch.
+        with pytest.raises(Exception, match="closed under ledger authority"):
             async with web_factory.begin() as session:
                 await session.execute(text(
                     "INSERT INTO uncertainty_resolution_requests(request_id, exchange_account_id, "
