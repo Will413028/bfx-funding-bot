@@ -118,6 +118,7 @@ S1-2～S1-3 的契約選擇（basis 只存事實、epoch 表與 DB 強制休眠�
 - 取代 [2026-09-10-historical-replay-and-projection-audit-cutover](2026-09-10-historical-replay-and-projection-audit-cutover.md)、[2026-09-20-capital-authority-bounded-read-by-prefix-hash](2026-09-20-capital-authority-bounded-read-by-prefix-hash.md)（S3 生效，之前現行程式仍依它們運作）；修訂 [2026-08-31-production-integrity-staged-clean-cutovers](2026-08-31-production-integrity-staged-clean-cutovers.md) D4 的 event-only projector 部分與 [2026-08-31-account-isolated-execution-target-architecture](2026-08-31-account-isolated-execution-target-architecture.md) Expected Outcome 的「projection 可決定性重建」。
 - [2026-05-23-postgres-event-store-sot-migration](2026-05-23-postgres-event-store-sot-migration.md) — 原 Hybrid 決定；[2026-05-27-reconcile-as-correctness-backbone](2026-05-27-reconcile-as-correctness-backbone.md)。
 - [2026-09-28-backend-capability-modules-enforced-boundaries](2026-09-28-backend-capability-modules-enforced-boundaries.md) — D6 由本 ADR 決定；trading 模組依本模型切分。
+- D7'''（切換程序）與 D6（既有歷史封存）由 [2026-10-06-switch-by-seed-and-retire-the-legacy-authority](2026-10-06-switch-by-seed-and-retire-the-legacy-authority.md) 取代：seed 後直接切換、豁免模擬 soak，legacy 表進 `legacy_archive`。
 
 ## Amendment (2026-10-03): 切換前的持續觀測由模擬 soak 補回
 
