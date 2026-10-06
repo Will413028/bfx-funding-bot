@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -136,11 +137,12 @@ def test_every_rule_is_bounded_from_above_and_scoped() -> None:
 
 def test_both_clusters_run_the_same_read_only_copy_script() -> None:
     bounds = _bounds()
-    restored = ledger.digest_script(bounds, restored=True)
-    production = ledger.digest_script(bounds, restored=False)
+    restored = ledger.digest_script(bounds, restored=True, timeout_ms=60_000)
+    production = ledger.digest_script(bounds, restored=False, timeout_ms=60_000)
     for script in (restored, production):
         assert script.startswith("SET client_encoding = 'UTF8';\n")
-        assert "SET extra_float_digits = 3;\nBEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\n" in script
+        assert "SET extra_float_digits = 3;\n" in script.split("BEGIN", 1)[0]
+        assert "\nBEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\n" in script
         assert script.rstrip().endswith("ROLLBACK;")
         assert not any(word in script.upper() for word in ("INSERT ", "UPDATE ", "DELETE ", "CREATE "))
     copies = [line for line in production.splitlines() if line.startswith("COPY")]
@@ -151,14 +153,16 @@ def test_both_clusters_run_the_same_read_only_copy_script() -> None:
     assert f"'{ACCOUNT}'::uuid, 'prod'::text, 5::bigint, 5::bigint, 4::bigint, 3::bigint" in production
     assert f"ARRAY['{PENDING}']::uuid[]" in production
     assert "t.epoch_seq <= 2::bigint" in production
-    assert "'{}'::uuid[]" in ledger.digest_script(_bounds(pending=False), restored=False)
+    no_pending = ledger.digest_script(_bounds(pending=False), restored=False, timeout_ms=60_000)
+    assert "'{}'::uuid[]" in no_pending
 
 
 def test_a_table_the_restored_schema_lacks_is_skipped_and_reported() -> None:
     present = tuple(name for name in ledger.LEDGER_TABLES if name != "ledger_observation_trade")
     bounds = _bounds(tables=present)
     assert "ledger_observation_trade" not in ledger.compared_tables(bounds)
-    assert "public.ledger_observation_trade" not in ledger.digest_script(bounds, restored=True)
+    script = ledger.digest_script(bounds, restored=True, timeout_ms=60_000)
+    assert "public.ledger_observation_trade" not in script
 
 
 @pytest.mark.parametrize(("output", "code"), [
@@ -181,7 +185,7 @@ def test_a_restored_copy_without_any_scope_is_refused() -> None:
     bounds = ledger.parse_bounds(_bounds_output().replace(
         f"scope\t{ACCOUNT}\tprod\t5\t5\t4\t3\t1\t7\n", ""))
     with pytest.raises(ledger.LedgerVerificationError, match=r"^ledger_empty$"):
-        ledger.digest_script(bounds, restored=True)
+        ledger.digest_script(bounds, restored=True, timeout_ms=60_000)
 
 
 # --------------------------------------------------------------------------- digest and comparison
@@ -419,6 +423,8 @@ def test_ledger_drill_restores_the_newest_backup_and_compares_with_production(tm
     assert (report["server_version_num"], report["migration_heads"]) == (180000, [HEAD])
     assert report["ledger"]["scopes"][0]["production_clock_revision"] == 9
     assert report["ledger"]["rows_compared"] == 9
+    assert set(report["ledger"]["read_seconds"]) == {"restored", "production"}
+    assert all(value >= 0 for value in report["ledger"]["read_seconds"].values())
     assert report["boot"]["scopes"][0]["basis_id"] == BASIS
     assert report["target_time"] is None and report["egress_disconnected"] is True
     assert report["restore_run_id"] == RUN_ID.lower()
@@ -436,7 +442,7 @@ def test_ledger_drill_restores_the_newest_backup_and_compares_with_production(tm
     assert verifier[verifier.index("--network") + 1] == NET
     assert fake.inputs[verifier] == (PGBACKREST / "ledger_boot_check.py").read_text()
     bootstrap = next(sql for sql in fake.inputs.values() if "CREATE ROLE" in sql)
-    assert "GRANT SELECT ON ALL TABLES IN SCHEMA public" in bootstrap
+    assert "ALL TABLES" not in bootstrap and "GRANT SELECT ON TABLE public.%I" in bootstrap
     assert "SET default_transaction_read_only = on" in bootstrap
 
     # Production is only read, with the restored copy's bounds, and only after isolation.
@@ -518,7 +524,29 @@ def test_bootstrap_grants_are_per_mode() -> None:
     drill._bootstrap_role(plan, "DATABASE-PASSWORD-SENTINEL")
     drill._bootstrap_role(plan, "DATABASE-PASSWORD-SENTINEL", ledger=True)
     assert 'public."event_log"' in seen[0] and "ALL TABLES" not in seen[0]
-    assert "ALL TABLES IN SCHEMA public" in seen[1] and "event_log" not in seen[1]
+    assert "ALL TABLES" not in seen[1] and "event_log" not in seen[1]
+    # The ledger grant is exactly the verifier list, derived from the digest rules.
+    granted = re.search(r"ARRAY\[(.*?)\] LOOP", seen[1])
+    assert granted is not None
+    assert tuple(re.findall(r"'([a-z_]+)'", granted.group(1))) == ledger.VERIFIER_TABLES
+
+
+def test_the_verifier_reads_the_ledger_and_the_boot_check_extras_only() -> None:
+    expected = (*ledger.RULES, *ledger.MUTABLE_TABLES, *ledger.BOOT_CHECK_EXTRA_TABLES)
+    assert expected == ledger.VERIFIER_TABLES
+    assert set(ledger.BOOT_CHECK_EXTRA_TABLES) == {
+        "alembic_version", "database_realm", "capital_policy_heads", "capital_policy_revisions"}
+
+
+def test_every_read_is_bounded_on_the_server() -> None:
+    script = ledger.digest_script(_bounds(), restored=False, timeout_ms=1_234_000)
+    head = script.split("BEGIN", 1)[0]
+    assert "SET statement_timeout = 1234000;" in head
+    assert "SET transaction_timeout = 1234000;" in head
+    assert "SET idle_in_transaction_session_timeout = 60000;" in head
+    for bad in (0, -1, 1.5):
+        with pytest.raises(ledger.LedgerVerificationError):
+            ledger.digest_script(_bounds(), restored=False, timeout_ms=bad)
 
 
 def test_ledger_verifier_command_runs_the_script_on_the_isolated_network() -> None:

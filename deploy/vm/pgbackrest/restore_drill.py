@@ -652,10 +652,15 @@ class RestoreDrill:
             # grant is made here (and a backup older than those migrations fails the drill).
             access = f"GRANT bfx_cutover_reader TO {role};\n"
         elif ledger:
-            # The boot check reads what a booting bot reads (schema head, realm, epoch, seed,
-            # the capital reader's tables); the role is read-only by default as well as by grant.
+            # Exactly the tables the boot check reads (ledger_digest.VERIFIER_TABLES), those the
+            # restored schema has (a newer release may know more); read-only by default too.
+            names = ", ".join(f"'{name}'" for name in _ledger.VERIFIER_TABLES)
             access = (
-                f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO {role};\n"
+                "DO $grant$ DECLARE name text; BEGIN "
+                f"FOREACH name IN ARRAY ARRAY[{names}] LOOP "
+                "IF to_regclass(format('public.%I', name)) IS NOT NULL THEN "
+                f"EXECUTE format('GRANT SELECT ON TABLE public.%I TO %I', name, '{plan.verify_role}'); "
+                "END IF; END LOOP; END $grant$;\n"
                 f"ALTER ROLE {role} SET default_transaction_read_only = on;\n"
             )
         else:
@@ -880,19 +885,26 @@ class RestoreDrill:
         return completed.stdout
 
     def _ledger_stream(
-        self, container: str, plan: RestoreResources, script: str,
-        digest: object, *, failure_code: str,
-    ) -> None:
+        self, container: str, plan: RestoreResources, bounds: object, *, restored: bool,
+        digest: object, failure_code: str,
+    ) -> float:
+        """Stream one cluster's bounded COPY into `digest`; returns the read's seconds."""
+        started = self._clock()
+        remaining = self._remaining()
+        # The server ends the snapshot a little before the client is killed.
+        script = _ledger.digest_script(bounds, restored=restored,
+                                       timeout_ms=max(1, int(remaining * 1000) - 1000))
         try:
             status = self._stream_runner(
                 self._psql(container, plan), input_text=script,
-                timeout=self._remaining(), consume=digest,
+                timeout=remaining, consume=digest,
             )
         except Exception:
             _failure(failure_code)
         self._remaining()
         if status != 0:
             _failure(failure_code)
+        return round(max(0.0, self._clock() - started), 3)
 
     def _rehearsal_plan(self, request: RehearsalRequest) -> tuple[RestoreResources, int]:
         if not request.scopes or not request.target_time or not request.cells_path.is_absolute():
@@ -1132,14 +1144,17 @@ class RestoreDrill:
                 boot = _ledger.parse_boot(self._ledger_boot(plan, verifier_image, env_path), bounds)
                 tables = _ledger.compared_tables(bounds)
                 restored = _ledger.StreamDigest(tables)
-                self._ledger_stream(plan.container_name, plan,
-                                    _ledger.digest_script(bounds, restored=True), restored,
-                                    failure_code="restore_command_failed")
+                restored_seconds = self._ledger_stream(
+                    plan.container_name, plan, bounds, restored=True, digest=restored,
+                    failure_code="restore_command_failed")
                 production = _ledger.StreamDigest(tables)
-                self._ledger_stream(request.production_container, plan,
-                                    _ledger.digest_script(bounds, restored=False), production,
-                                    failure_code="production_read_failed")
+                production_seconds = self._ledger_stream(
+                    request.production_container, plan, bounds, restored=False,
+                    digest=production, failure_code="production_read_failed")
                 ledger = _ledger.compare(bounds, restored, production)
+                # Visible growth: the ADR's revocation trigger is a read nearing the budget.
+                ledger["read_seconds"] = {"restored": restored_seconds,
+                                          "production": production_seconds}
                 image_digest, image_labels = self._image_metadata(plan)
                 elapsed_seconds = self._elapsed_seconds(rto_started)
                 self._remaining()

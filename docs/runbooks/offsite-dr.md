@@ -806,7 +806,7 @@ resources, then verifies the restored copy two ways:
    `ledger_digest_mismatch`; the journal names the tables (never row data).
 2. **Read-only boot check.** `deploy/vm/pgbackrest/ledger_boot_check.py` runs on stdin
    inside the `bfx-bot:local` image on the internal network, as a per-run LOGIN that
-   has `SELECT` on the schema and `default_transaction_read_only`: schema at the image's
+   has `SELECT` on exactly the ledger tables plus `alembic_version`, `database_realm` and the capital policy tables, and `default_transaction_read_only`: schema at the image's
    migration head, the stamped realm, epoch `ledger`, the Bitfinex seed guard, and the
    ledger capital reader for every (symbol, cell) of each scope's newest accepted basis,
    which must fold a basis (or report that the newest query was still pending at the
@@ -825,10 +825,9 @@ checkout `/home/ubuntu/bfx-releases/current`. bfx-deploy starts
 whenever it is about to apply a migration or
 ship a change under `deploy/vm/pgbackrest/`, `deploy/vm/postgres/`,
 `docker-compose.bot.yml` or `docker-compose.dr.yml` (or when the diff cannot be
-read); a failure alerts and blocks that deploy. The test needs no config file; the
-old `/home/ubuntu/bfx/restore-test.json` is still read by the previous release's
-wrapper during the first deploy of this one, so remove it only after that deploy
-succeeded.
+read); a failure alerts and blocks that deploy. The test needs no config file of
+its own; keep `/home/ubuntu/bfx/restore-test.json` until the D3 cleanup release
+removes the transitions below (it says when to delete it).
 bfx-deploy creates those checkouts (git worktrees of the mirror, owned by
 `ubuntu`) and points `current` at each release it deploys, so a DR change is
 tested with its own scripts before it ships and runs on schedule after it
@@ -855,8 +854,17 @@ through the restore-test unit and wrapper installed by the previous release; tho
 call the drill with `--prefix ...` and read `restore-prefix.json`. The drill still
 accepts that call, runs ledger mode and writes that receipt with
 `kind: restore_prefix`. Once that release is deployed its own unit and wrapper call
-`--restore-test --output ...`; the transitional `--prefix` call is then removed from
-the drill, and a later change of verification needs no such bridge.
+`--restore-test --output ...`, and a later change of verification needs no such bridge.
+The reverse also works: after a revert to a release from before `--restore-test`, the
+installed wrapper finds no `--restore-test` in that drill's `--help`, runs it in its own
+`--prefix` form with the scope in `/home/ubuntu/bfx/restore-test.json`, and accepts its
+`restore-prefix.json` as the old wrapper did. Both transitions and that file are removed
+by the D3 cleanup release.
+
+Each production and restored-copy read is bounded on the server
+(`statement_timeout` and `transaction_timeout` at the drill's remaining budget,
+`idle_in_transaction_session_timeout` 60 s, `lock_timeout` 10 s), and the receipt's
+`ledger.read_seconds` (also in the heartbeat) shows how long each took.
 
 ## Rotation and incident posture
 

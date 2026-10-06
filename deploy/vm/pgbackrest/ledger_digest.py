@@ -138,6 +138,13 @@ _CORE_TABLES = frozenset({
     "capital_authority_epoch", "venue_offer_mirror", "venue_credit_mirror",
 })
 LEDGER_TABLES = (*RULES, *MUTABLE_TABLES)
+# What the image's boot check (ledger_boot_check.py) reads besides the ledger: the schema head,
+# the realm stamp and the capital policy the capital reader folds. The drill's per-run verifier
+# role gets SELECT on exactly these and the ledger tables, nothing else.
+BOOT_CHECK_EXTRA_TABLES = (
+    "alembic_version", "database_realm", "capital_policy_heads", "capital_policy_revisions",
+)
+VERIFIER_TABLES = (*LEDGER_TABLES, *BOOT_CHECK_EXTRA_TABLES)
 _SCOPE_OWNERS = (
     "capital_command_clock", "ledger_observation_query", "submission_attempt_journal",
     "quarantine_opening",
@@ -326,10 +333,22 @@ def compared_tables(bounds: Bounds) -> tuple[str, ...]:
     return tuple(name for name in RULES if name in bounds.present)
 
 
-def digest_script(bounds: Bounds, *, restored: bool) -> str:
-    """The bounded COPY script; identical on both clusters except the restored-only totals."""
+IDLE_IN_TRANSACTION_TIMEOUT_MS = 60_000
+
+
+def digest_script(bounds: Bounds, *, restored: bool, timeout_ms: int) -> str:
+    """The bounded COPY script; identical on both clusters except the restored-only totals.
+
+    ``timeout_ms`` (the drill's remaining budget) bounds the whole snapshot on the server
+    (``transaction_timeout``, PostgreSQL 17+) and every statement, so a reader whose client was
+    killed cannot keep production's snapshot and AccessShareLocks past the drill: a migration
+    queued behind them waits at most that long. An abandoned session between statements ends
+    after ``IDLE_IN_TRANSACTION_TIMEOUT_MS``.
+    """
     if not bounds.scopes:
         _fail("ledger_empty")
+    if type(timeout_ms) is not int or timeout_ms <= 0:
+        _fail("restore_output_invalid")
     cte = _bounds_cte(bounds)
     pending = (
         "ARRAY[" + ", ".join(f"'{value}'" for value in bounds.pending) + "]::uuid[]"
@@ -343,6 +362,9 @@ def digest_script(bounds: Bounds, *, restored: bool) -> str:
         "SET IntervalStyle = 'postgres';",
         "SET TimeZone = 'UTC';",
         "SET extra_float_digits = 3;",
+        f"SET statement_timeout = {timeout_ms};",
+        f"SET transaction_timeout = {timeout_ms};",
+        f"SET idle_in_transaction_session_timeout = {IDLE_IN_TRANSACTION_TIMEOUT_MS};",
         "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;",
         "SET LOCAL lock_timeout = '10s';",
     ]

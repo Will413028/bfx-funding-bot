@@ -31,13 +31,23 @@ prior state：每月與變更觸發的還原測試（[2026-09-04-pgbackrest-in-p
 - **W 取自還原副本**：與舊 prefix 做法同（還原副本的頭，再讀 production 同一點）；RPO 由 bfx-backup-check 負責。
 - **各表有界鍵**：`query_revision`、`attempt_seq`、`opened_revision`、`epoch_seq` 在 scope lock 下分配；observation 家族（含 basis、quarantine member）以其 query 的 `query_revision`；resolution 只比對指向比還原副本最新 accepted observation 更舊者（嚴格 `<`）；outcome 排除還原時尚無 outcome 的 attempt。還原副本的有界集合必須等於整表（resolution 為至多），錯的邊界直接失敗而不是藏列。非 accepted observation 的提交順序依賴「每個 scope 一次一個 begin→accept 週期」；違反時是誤報（fail-closed），不是漏報。
 - **兩端讀同一份 COPY 文字**而非 table_digest canonicalizer：table_digest 沒有以 W 為界的版本（對已部署 image 是新程式），且在 production 端跑 Python 需要新憑證。
-- **wrapper 不帶模式**：wrapper 只呼叫 `--restore-test --output <path>` 並接受 `restore_test: true` 的新鮮 receipt，之後更換驗證方式不再需要跨版本橋接。本次仍保留過渡用 `--prefix`（上一版 wrapper 的呼叫），本 release 部署後移除。
+- **wrapper 不帶模式**：wrapper 只呼叫 `--restore-test --output <path>` 並接受 `restore_test: true` 的新鮮 receipt，之後更換驗證方式不再需要跨版本橋接。
+- **雙向過渡**：正向，drill 仍接受上一版 wrapper 的 `--prefix ...` 呼叫並寫 `restore-prefix.json`（`kind: restore_prefix`）。反向，revert 到 D3 之前的 release 時，新 wrapper 以 `--help` 探測目標 drill 是否有 `--restore-test`（不靠猜測實跑的 exit code），沒有就以舊形式呼叫（`/home/ubuntu/bfx/restore-test.json` 的 scope）並照舊 wrapper 的條件接受舊 receipt。兩個方向與 `restore-test.json` 都在 PR-D（docs／cleanup）移除。
+- **信賴 physical restore 的交易一致性**：W 與 scope 清單都取自還原副本，所以「還原副本缺了某個以自身為界的表的尾端，或缺了整個 scope」在 production 端看不出來。這依賴 PostgreSQL physical restore（base backup＋WAL replay 到一致點）本身就是交易一致的快照。沒有加跨 scope 的時間比對：scope 之間沒有 commit 順序，只能比 `started_at_ms`，restore point 落在新 scope 第一次 query 的 begin 與 commit 之間時會誤報。
+- **boot check 比 bot 嚴**：boot check 要求資料庫裡每個 scope 都通過；bot 開機只檢查它自己的一個 scope。現在 prod 只有一個 scope，兩者等價。
+- **production 讀取有界**：讀取 session 設 `statement_timeout` 與 `transaction_timeout`（drill 剩餘預算減 1 秒）、`idle_in_transaction_session_timeout` 60 秒、`lock_timeout` 10 秒；client 被殺時 server 端的 snapshot 與 AccessShareLock 最多留到預算用完，與月測重疊的 migration 最多等這麼久。receipt 的 `ledger.read_seconds` 與 heartbeat 記錄兩端讀取秒數，讓成長看得見。
+- **verifier role 最小權限**：只 GRANT `ledger_digest.VERIFIER_TABLES`（ledger 表＋`alembic_version`、`database_realm`、`capital_policy_heads`、`capital_policy_revisions`），清單由 RULES 推導並有測試釘住。
 
 ## Result
 
 - `deploy/vm/pgbackrest/ledger_digest.py`、`ledger_boot_check.py`、`restore_drill.py --restore-test`；runbook `docs/runbooks/offsite-dr.md`「Monthly and change-triggered ledger restore test」。
 
 ## Revocation Triggers
+
+- PR-D（D3 的 docs／cleanup PR）→ 移除 drill 的 `--prefix` 過渡呼叫、wrapper 的反向 fallback 與 `--legacy-*` 參數，並刪除 VM 上的 `/home/ubuntu/bfx/restore-test.json`。
+- D4b（legacy 表移到 archive schema）→ 完整 baseline 演練（Halt 2、事故驗收）也改驗 ledger；在那之前它仍比對已凍結的 legacy event chain。
+- 改用 logical 或部分還原（不再是 physical restore）→ 重評「W 與 scope 清單取自還原副本」，加上 production 端的 scope／尾端完整性比對。
+- 出現第二個交易所帳戶或 scope → 重評 boot check 要求每個 scope 都通過（bot 只看自己的 scope）。
 
 - 單次 production 讀取時間逼近 RTO 預算，或長 snapshot 影響 vacuum → 改為增量比對（上次驗證的 W 與 digest 存入 evidence，只讀 (W_prev, W]）或從 standby 讀。
 - ledger 表新增共同 commit stamp → 以它作為唯一邊界。

@@ -157,7 +157,7 @@ def _bounds(url: str) -> Any:
 
 def _digest(url: str, bounds: Any, *, restored: bool) -> Any:
     digest = ledger.StreamDigest(ledger.compared_tables(bounds))
-    status = drill._stream_command(_psql(url), input_text=ledger.digest_script(bounds, restored=restored),
+    status = drill._stream_command(_psql(url), input_text=ledger.digest_script(bounds, restored=restored, timeout_ms=60_000),
                                    timeout=120, consume=digest)
     assert status == 0
     return digest
@@ -355,3 +355,15 @@ def test_boot_check_role_cannot_write(clusters) -> None:
     with (psycopg.connect(url.render_as_string(hide_password=False), autocommit=True) as conn,
           pytest.raises(psycopg.errors.ReadOnlySqlTransaction)):
         conn.execute("UPDATE capital_command_clock SET revision = revision")
+
+
+def test_the_server_ends_a_read_that_outlives_its_budget(clusters) -> None:
+    """A killed client cannot leave production's snapshot running past the drill's budget."""
+    restored, production = clusters
+    script = ledger.digest_script(_bounds(restored), restored=False, timeout_ms=300)
+    stalled = script.replace("SET LOCAL lock_timeout = '10s';",
+                             "SET LOCAL lock_timeout = '10s';\nSELECT pg_sleep(5);", 1)
+    completed = subprocess.run(_psql(production), input=stalled, capture_output=True, text=True,
+                               check=False, timeout=60)
+    assert completed.returncode != 0
+    assert "timeout" in completed.stderr
