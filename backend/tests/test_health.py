@@ -48,7 +48,7 @@ def _authority_db(path: Path, epoch: str) -> str:
 def test_startup_reads_the_supported_authority(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("DATABASE_URL", _authority_db(tmp_path / "legacy.db", "legacy"))
+    monkeypatch.setenv("DATABASE_URL", _authority_db(tmp_path / "ledger.db", "ledger"))
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
         assert app.state.session_factory is not None
@@ -59,17 +59,13 @@ def test_startup_reads_the_supported_authority(
     [
         ("drop", "authority_missing table"),
         ("empty", "authority_missing row"),
-        ("ledger", "authority_unsupported value=ledger"),
+        # A database never switched (or restored from before the switch): only the ledger runs.
+        ("legacy", "authority_unsupported value=legacy"),
     ],
 )
 def test_startup_refuses_an_unreadable_or_unsupported_authority(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, epoch: str, match: str
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", _authority_db(tmp_path / f"{epoch}.db", epoch))
-    if epoch == "ledger":
-        # The web API supports both authorities; a build predating the switch did not.
-        from bfx_funding_bot.apps import webapi
-
-        monkeypatch.setattr(webapi, "WEBAPI_SUPPORTED", frozenset({"legacy"}))
     with pytest.raises(AuthorityMismatch, match=match), TestClient(app):
         pass

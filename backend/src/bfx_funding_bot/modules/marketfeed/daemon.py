@@ -56,9 +56,6 @@ from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
-from bfx_funding_bot.modules.execution.fill_tracker import (
-    RestPollingFillTracker,
-)
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -288,7 +285,6 @@ class Daemon:
     safety_chain: SafetyGuardChain
     account_ctx: AccountContext
     bus: DomainEventBus
-    fill_tracker: RestPollingFillTracker | None = None
     auth_ws: BitfinexAuthWSClient | None = None
     ws_dispatcher: BitfinexLiveWSDispatcher | None = None
     boot_recovery: ObservationSink | None = None
@@ -409,15 +405,8 @@ class Daemon:
             if self.ws_client is not None:
                 tg.create_task(self._ws_consume_with_reconnect(), name="ws")
                 tg.create_task(self._ws_heartbeat_poll_loop(), name="ws_heartbeat")
-            # Phase 4.2 Task 20: fill_tracker sub-task only runs when
-            # build_executor enabled it (flag).
-            if self.fill_tracker is not None:
-                tg.create_task(
-                    self.fill_tracker.poll_loop(self._stop_event),
-                    name="fill_tracker",
-                )
             # Phase 4.4a Task 19: WS dispatcher sub-task only runs when
-            # build_executor enabled it (BFX_WS_CLIENT_ENABLED).
+            # the venue's capabilities require the authenticated WebSocket.
             if self.ws_dispatcher is not None:
                 tg.create_task(
                     self.ws_dispatcher.run(self._stop_event),
@@ -854,15 +843,6 @@ async def _emit_locf_degraded(
         "correlation_id": str(uuid4()),
         "payload": payload,
     })
-
-
-# 3c: `AxiomReplayQueryAdapter` + `replay_from_axiom()` deleted — boot now uses
-# PG from_snapshot (ledger reads position_state; registry reads offer_claims).
-
-# _LedgerWrappedExecutor deleted in Phase 4.3 Task 10.
-# Replaced by: HeartbeatMiddleware(ReservationEmittingMiddleware(executor), probe)
-# (no retry wrapper — submit is a once-only financial write; see wrapped_executor).
-# Ledger + OfferRegistry subscribe to DomainEventBus in build_daemon.
 
 
 _LIVE_REQUIRED_HARD = ("manual_kill", "auth_health", "heartbeat")

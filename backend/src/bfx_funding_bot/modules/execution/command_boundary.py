@@ -1,11 +1,10 @@
-"""The command gate's authority-neutral boundary: a scope, a journal, and its effects.
+"""The command gate's boundary: a scope, a journal, and its effects.
 
 ``CommandBoundary`` is everything the gate needs from the capital authority:
 the scope it commands, the session factory its admission transaction runs on,
 the ``CommandJournal`` that makes an attempt and its outcome durable, and the
-``CommandEffects`` that run once an outcome is durable. The legacy authority's
-effects keep today's event-log and bus behaviour (``legacy_command_effects``);
-the ledger's effects only announce the committed outcome.
+``CommandEffects`` that run once an outcome is durable. The ledger's effects only
+announce the committed outcome.
 """
 from __future__ import annotations
 

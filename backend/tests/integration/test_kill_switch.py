@@ -1,4 +1,4 @@
-"""Kill switch against real SQL (SQLite and PostgreSQL); only the venue is fake.
+"""Kill switch against migrated PostgreSQL over the ledger; only the venue is fake.
 
 The fake venue holds live offers per currency and records, for every
 cancel-all it receives, the trading state as another reader sees it at that
@@ -9,22 +9,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import replace
-from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
-from bfx_funding_bot.modules.execution.event_store.entities import VenueOfferObservation
-from bfx_funding_bot.modules.execution.events import (
-    SnapshotCoverage,
-    VenueOfferQuarantined,
-    VenueSnapshotObserved,
-)
-from bfx_funding_bot.modules.execution.legacy_ports import (
-    LegacyManagedOffers,
-    LegacyUncertaintyReader,
-)
 from bfx_funding_bot.modules.execution.protocols import FundingCancelAllResult
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.tables import (
@@ -32,17 +21,23 @@ from bfx_funding_bot.modules.execution.safety.tables import (
     TradingStateRow,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import read_current
-from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 
-from .test_capital_command_boundary import append_cancel_race_unknown, boundary
+from .contracts.stacks import ACCOUNT, SCOPE, Venue
+from .test_capital_command_boundary import (
+    AMOUNT,
+    append_unknown,
+    boundary,
+    gate_stack,  # noqa: F401 - fixture re-export
+)
+from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-export
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def capital_db(migrated_db):
-    """The migrated PostgreSQL schema: its triggers are the rules' authority."""
-    return migrated_db
+def capital_db(gate_stack):  # noqa: F811
+    """(session factory, account) of one ledger scope on a migrated clone."""
+    return gate_stack.factory, ACCOUNT
 
 
 class FakeVenue:
@@ -70,44 +65,26 @@ class Lock:
         return self.held
 
 
-async def exposed_account(factory, account):
-    """A managed fUST offer, an orphan fUSD offer, and an UNKNOWN fBTC submit."""
-    gate, _, ready, ctx, runtime, trading = await boundary(factory, account)
-    await gate.submit(ready, ctx)  # managed offer 101 (fUST)
-    offers = (
-        VenueOfferObservation("101", "fUST", Decimal("500"), Decimal("500"), Decimal("0.0001"), 2,
-                              "ACTIVE", 1100, 1100),
-        VenueOfferObservation("555", "fUSD", Decimal("40"), Decimal("40"), Decimal("0.0002"), 2,
-                              "ACTIVE", 1000, 1000),
-    )
-    # Capital acceptance refuses a snapshot with an orphan in it; recovery then
-    # records the raw observation through the event writer, as done here.
-    observed = VenueSnapshotObserved(
-        account_id=str(account), environment="ci", query_started_at_ms=1000,
-        query_finished_at_ms=1050, offers=offers, credits=(),
-        wallet_available={"fUST": Decimal("500"), "fUSD": Decimal("0")},
-        coverage=SnapshotCoverage(True, True, True),
-    )
-    async with factory.begin() as session:
-        seq = (await runtime.repository.writer.append(session, observed)).event_seq
-        await runtime.repository.writer.append(session, VenueOfferQuarantined(
-            venue_offer_id="555", symbol="fUSD", amount=Decimal("40"), account_id=str(account),
-            observed_at_ms=1060, event_seq=seq,
-        ))
-    await append_cancel_race_unknown(factory, account, symbol="fBTC")
+async def exposed_account(factory, account, stack):
+    """A managed fUST offer, a foreign fUSD offer, and an UNKNOWN fBTC submit."""
+    rig = await boundary(stack)
+    await rig.gate.submit(rig.ready, rig.ctx)  # managed offer 101 (fUST)
+    # The venue reports it next to somebody else's fUSD offer (foreign to the ledger).
+    await stack.snapshot("500", offers=(Venue("101", AMOUNT), Venue("555", "40", symbol="fUSD")))
+    await append_unknown(stack, symbol="fBTC")
     async with factory() as session:
-        open_scopes = set(await session.scalars(select(ExecutionUncertaintyRow.kind + ":"
-            + ExecutionUncertaintyRow.symbol).where(ExecutionUncertaintyRow.state == "open")))
-    assert open_scopes == {"unattributed_venue_offer:fUSD", "submit_outcome_unknown:fBTC"}
+        open_symbols = {r.symbol for r in await stack.uncertainties.list_open(session, SCOPE)}
+        live = await stack.offers.live_symbols(session, SCOPE)
+    assert open_symbols == {"fBTC"} and live == {"fUST", "fUSD"}
     venue = FakeVenue(factory, account, {"UST": {"101"}, "USD": {"555"}, "BTC": {"777"}})
-    return gate, ctx, trading, venue
+    return rig.gate, rig.ctx, rig.halt, venue
 
 
-def kill_switch(factory, trading, ctx, venue, lock=None, **kwargs):
+def kill_switch(factory, trading, ctx, venue, lock=None, *, stack, **kwargs):
     return KillSwitch(trading_state=trading, session_factory=factory, ctx=ctx,
                       configured_symbols={"fUST"}, venue=venue,
                       writer_lock=lock if lock is not None else Lock(),
-                      uncertainty=LegacyUncertaintyReader(factory), offers=LegacyManagedOffers(),
+                      uncertainty=stack.uncertainties, offers=stack.offers,
                       clock=lambda: 5000, **kwargs)
 
 
@@ -125,10 +102,10 @@ async def halted_rows(factory):
 
 
 @pytest.mark.asyncio
-async def test_kill_writes_halted_then_cancels_managed_orphan_and_unknown_currencies(capital_db):
+async def test_kill_writes_halted_then_cancels_managed_orphan_and_unknown_currencies(capital_db, gate_stack):  # noqa: F811
     factory, account = capital_db
-    _, ctx, trading, venue = await exposed_account(factory, account)
-    result = await kill_switch(factory, trading, ctx, venue).engage(
+    _, ctx, trading, venue = await exposed_account(factory, account, gate_stack)
+    result = await kill_switch(factory, trading, ctx, venue, stack=gate_stack).engage(
         cause="operator", actor="test", reason="stop everything")
 
     assert result.complete
@@ -145,11 +122,11 @@ async def test_kill_writes_halted_then_cancels_managed_orphan_and_unknown_curren
 
 
 @pytest.mark.asyncio
-async def test_venue_failure_keeps_halted_and_a_retry_completes_without_a_second_halt(capital_db):
+async def test_venue_failure_keeps_halted_and_a_retry_completes_without_a_second_halt(capital_db, gate_stack):  # noqa: F811
     factory, account = capital_db
-    _, ctx, trading, venue = await exposed_account(factory, account)
+    _, ctx, trading, venue = await exposed_account(factory, account, gate_stack)
     venue.fail = {"USD"}
-    switch = kill_switch(factory, trading, ctx, venue)
+    switch = kill_switch(factory, trading, ctx, venue, stack=gate_stack)
 
     first = await switch.engage(cause="operator", actor="will", reason="kill")
     assert not first.complete
@@ -171,26 +148,26 @@ async def test_venue_failure_keeps_halted_and_a_retry_completes_without_a_second
 
 
 @pytest.mark.asyncio
-async def test_no_venue_call_when_halted_cannot_be_written(capital_db, monkeypatch):
+async def test_no_venue_call_when_halted_cannot_be_written(capital_db, gate_stack, monkeypatch):  # noqa: F811
     factory, account = capital_db
-    _, ctx, trading, venue = await exposed_account(factory, account)
+    _, ctx, trading, venue = await exposed_account(factory, account, gate_stack)
 
     async def unwritable(*args, **kwargs):
         raise RuntimeError("database unavailable")
 
     monkeypatch.setattr(trading, "transition", unwritable)
     with pytest.raises(RuntimeError, match="database unavailable"):
-        await kill_switch(factory, trading, ctx, venue).engage(
+        await kill_switch(factory, trading, ctx, venue, stack=gate_stack).engage(
             cause="operator", actor="test", reason="stop")
     assert venue.calls == []
     assert await audit(factory) == []
 
 
 @pytest.mark.asyncio
-async def test_without_the_writer_lock_the_stop_is_recorded_but_the_venue_untouched(capital_db):
+async def test_without_the_writer_lock_the_stop_is_recorded_but_the_venue_untouched(capital_db, gate_stack):  # noqa: F811
     factory, account = capital_db
-    _, ctx, trading, venue = await exposed_account(factory, account)
-    result = await kill_switch(factory, trading, ctx, venue, lock=Lock(held=False)).engage(
+    _, ctx, trading, venue = await exposed_account(factory, account, gate_stack)
+    result = await kill_switch(factory, trading, ctx, venue, stack=gate_stack, lock=Lock(held=False)).engage(
         cause="operator", actor="will", reason="kill")
     assert result.state.state == "HALTED"
     assert not result.complete
@@ -200,7 +177,7 @@ async def test_without_the_writer_lock_the_stop_is_recorded_but_the_venue_untouc
 
 
 @pytest.mark.asyncio
-async def test_kill_waits_for_an_in_flight_command_after_writing_halted(capital_db):
+async def test_kill_waits_for_an_in_flight_command_after_writing_halted(capital_db, gate_stack):  # noqa: F811
     """A submit already past its transport recheck must not land after the
     cancel-all: the kill holds the account command lock for the venue part.
 
@@ -211,7 +188,7 @@ async def test_kill_waits_for_an_in_flight_command_after_writing_halted(capital_
     quiesce limit is untouched and exercised by the wedged-command test.
     """
     factory, account = capital_db
-    gate, ctx, trading, venue = await exposed_account(factory, account)
+    gate, ctx, trading, venue = await exposed_account(factory, account, gate_stack)
     waiting_for_commands = asyncio.Event()
 
     @contextlib.asynccontextmanager
@@ -220,7 +197,7 @@ async def test_kill_waits_for_an_in_flight_command_after_writing_halted(capital_
         async with gate.quiesced(str(account), timeout_s=300) as quiet:
             yield quiet
 
-    switch = kill_switch(factory, trading, ctx, venue, quiesce=observed_quiesce)
+    switch = kill_switch(factory, trading, ctx, venue, stack=gate_stack, quiesce=observed_quiesce)
     in_flight = gate._account_locks.setdefault((str(account), "ci"), asyncio.Lock())
     await in_flight.acquire()
     task = asyncio.create_task(switch.engage(cause="operator", actor="will", reason="kill"))
@@ -247,10 +224,10 @@ async def test_kill_waits_for_an_in_flight_command_after_writing_halted(capital_
 
 
 @pytest.mark.asyncio
-async def test_a_wedged_command_does_not_hold_the_kill_hostage(capital_db):
+async def test_a_wedged_command_does_not_hold_the_kill_hostage(capital_db, gate_stack):  # noqa: F811
     factory, account = capital_db
-    gate, ctx, trading, venue = await exposed_account(factory, account)
-    switch = kill_switch(factory, trading, ctx, venue,
+    gate, ctx, trading, venue = await exposed_account(factory, account, gate_stack)
+    switch = kill_switch(factory, trading, ctx, venue, stack=gate_stack,
                          quiesce=lambda: gate.quiesced(str(account), timeout_s=0.05))
     wedged = gate._account_locks.setdefault((str(account), "ci"), asyncio.Lock())
     await wedged.acquire()
@@ -265,10 +242,10 @@ async def test_a_wedged_command_does_not_hold_the_kill_hostage(capital_db):
 
 
 @pytest.mark.asyncio
-async def test_unreadable_scope_still_cancels_configured_currencies(capital_db, monkeypatch):
+async def test_unreadable_scope_still_cancels_configured_currencies(capital_db, gate_stack, monkeypatch):  # noqa: F811
     factory, account = capital_db
-    _, ctx, trading, venue = await exposed_account(factory, account)
-    switch = kill_switch(factory, trading, ctx, venue)
+    _, ctx, trading, venue = await exposed_account(factory, account, gate_stack)
+    switch = kill_switch(factory, trading, ctx, venue, stack=gate_stack)
     original = switch._sf
 
     class Unreadable:
@@ -287,20 +264,20 @@ async def test_unreadable_scope_still_cancels_configured_currencies(capital_db, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cause", ["material_deploy", "nonsense"])  # a retired cause, a bogus one
-async def test_only_stop_causes_may_engage(capital_db, cause):
+async def test_only_stop_causes_may_engage(capital_db, gate_stack, cause):  # noqa: F811
     factory, account = capital_db
-    _, ctx, trading, venue = await exposed_account(factory, account)
+    _, ctx, trading, venue = await exposed_account(factory, account, gate_stack)
     before = await trading.current()
     with pytest.raises(ValueError, match="cannot halt"):
-        await kill_switch(factory, trading, ctx, venue).engage(cause=cause, actor="t", reason="t")
+        await kill_switch(factory, trading, ctx, venue, stack=gate_stack).engage(cause=cause, actor="t", reason="t")
     assert await trading.current() == before
     assert venue.calls == []
 
 
 @pytest.mark.asyncio
-async def test_credentials_never_reach_the_audit(capital_db):
+async def test_credentials_never_reach_the_audit(capital_db, gate_stack):  # noqa: F811
     factory, account = capital_db
-    _, ctx, trading, venue = await exposed_account(factory, account)
+    _, ctx, trading, venue = await exposed_account(factory, account, gate_stack)
     ctx = replace(ctx, credentials=replace(ctx.credentials, api_key="KEY-123", api_secret="SECRET-9"))
     venue.fail = {"UST"}
 
@@ -308,17 +285,17 @@ async def test_credentials_never_reach_the_audit(capital_db):
         raise ExecutorTransientError(f"upstream echoed {ctx.credentials.api_key} {ctx.credentials.api_secret}")
 
     venue.cancel_all_funding_offers = echo
-    await kill_switch(factory, trading, ctx, venue).engage(cause="operator", actor="t", reason="t")
+    await kill_switch(factory, trading, ctx, venue, stack=gate_stack).engage(cause="operator", actor="t", reason="t")
     async with factory() as session:
         details = [row.detail or "" for row in (await session.scalars(select(FundingCancelAllAuditRow))).all()]
     assert details and not any("KEY-123" in d or "SECRET-9" in d for d in details)
 
 
 @pytest.mark.asyncio
-async def test_an_automatic_kill_skips_the_venue_when_already_halted_but_an_operator_retry_does_not(capital_db):
+async def test_an_automatic_kill_skips_the_venue_when_already_halted_but_an_operator_retry_does_not(capital_db, gate_stack):  # noqa: F811
     factory, account = capital_db
-    _, ctx, trading, venue = await exposed_account(factory, account)
-    switch = kill_switch(factory, trading, ctx, venue)
+    _, ctx, trading, venue = await exposed_account(factory, account, gate_stack)
+    switch = kill_switch(factory, trading, ctx, venue, stack=gate_stack)
     first = await switch.engage(cause="auto", actor="auto:orphan_quarantined", reason="orphan",
                                 when_already_halted="skip")
     assert first.state_changed and first.complete and len(venue.calls) == 3
@@ -331,34 +308,3 @@ async def test_an_automatic_kill_skips_the_venue_when_already_halted_but_an_oper
     # written, so no automatic resume can lift it, and the venue part runs.
     assert retried.state_changed and retried.state.cause == "operator"
     assert len(venue.calls) == 6 and len(await audit(factory)) == 12
-
-
-# -------------------------- fixtures for the planner's managed-offer pull (D3/D4)
-
-
-class Canceller:
-    def __init__(self, fail: set[str] | None = None) -> None:
-        self.cancelled: list[str] = []
-        self.fail = fail or set()
-
-    async def cancel(self, *, venue_offer_id, signal_correlation_id, account_id, ctx):
-        if venue_offer_id in self.fail:
-            raise ExecutorTransientError("venue unavailable")
-        self.cancelled.append(venue_offer_id)
-
-
-async def _offer_rows(factory, account):
-    """Managed 101 and 102 (a durable intent traces to them), foreign 555 (manual),
-    and a terminal managed 103."""
-    from bfx_funding_bot.modules.execution.event_store.tables import VenueOfferStateRow
-    async with factory.begin() as session:
-        for offer_id, symbol, decision, terminal in (
-                ("101", "fUST", "d-101", False), ("102", "fUSD", "d-102", False),
-                ("555", "fUST", None, False), ("103", "fUST", "d-103", True)):
-            session.add(VenueOfferStateRow(
-                exchange_account_id=account, deployment_environment="ci", venue_offer_id=offer_id,
-                symbol=symbol, amount_original=Decimal("200"), amount_remaining=Decimal("200"),
-                rate=Decimal("0.0002"), period_days=2, status="ACTIVE", flags={}, mts_created=1,
-                mts_updated=1, first_seen_event_seq=1, last_seen_event_seq=1, is_terminal=terminal,
-                execution_decision_id=decision,
-                signal_correlation_id="00000000-0000-4000-8000-000000000001" if decision else None))

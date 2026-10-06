@@ -69,6 +69,7 @@ from tests.modules.simulated_venue.helpers import (
 )
 from tests.pg_templates import alembic, disable_realm_triggers, stamp_realm
 
+from .test_ledger_schema_roles import pre_switch
 from .test_trading_state_migration import _reset
 
 pytestmark = pytest.mark.integration
@@ -109,7 +110,15 @@ def _engine(url: str, *, role: str | None = "bfx_bot") -> AsyncEngine:
 
 @pytest.fixture
 def legacy_url(pg_templates: Any, pg_clone: Any) -> str:
-    return pg_clone(pg_templates.template("sim_store_migrated", _build_migrated))
+    """A head database before the switch (the genesis epoch taken back)."""
+    url = pg_clone(pg_templates.template("sim_store_migrated", _build_migrated))
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            pre_switch(conn)
+    finally:
+        engine.dispose()
+    return url
 
 
 @pytest.fixture

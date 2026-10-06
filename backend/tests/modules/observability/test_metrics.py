@@ -14,7 +14,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -34,8 +34,8 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
+from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
     LogMetricsHandler,
@@ -325,21 +325,21 @@ async def test_submit_middleware_fail_open_when_metrics_broken() -> None:
 # ── reconcile tick timing wrapper ────────────────────────────────────────────
 
 
-def _reconcile_result() -> ReconcileResult:
-    return ReconcileResult(
-        n_released=0, n_claimed=0, n_failed=0,
-        realized_drift_usdt=Decimal("0"), reserved_drift_usdt=Decimal("0"),
-        venue_offers=(),
-    )
+_SCOPE = Scope(UUID("00000000-0000-0000-0000-00000000a001"), "ci")
+
+
+def _reconcile_result() -> CycleResult:
+    return CycleResult("accepted")
 
 
 class _StubRecovery:
-    def __init__(self, result: ReconcileResult | None = None,
+    def __init__(self, result: CycleResult | None = None,
                  exc: Exception | None = None) -> None:
         self._result = result
         self._exc = exc
 
-    async def run(self) -> ReconcileResult:
+    async def run(self, scope: Scope) -> CycleResult:
+        assert scope == _SCOPE
         if self._exc is not None:
             raise self._exc
         assert self._result is not None
@@ -351,7 +351,7 @@ async def test_timed_recovery_passes_result_through() -> None:
     m = DaemonMetrics()
     result = _reconcile_result()
     wrapped = TimedReconcileRecovery(_StubRecovery(result=result), metrics=m)
-    got = await wrapped.run()
+    got = await wrapped.run(_SCOPE)
     assert got is result
     assert m.registry.get_sample_value(
         "bfx_reconcile_ticks_total", {"result": "ok"},
@@ -365,7 +365,7 @@ async def test_timed_recovery_reraises_and_counts_error() -> None:
     boom = ConnectionError("venue unreachable")
     wrapped = TimedReconcileRecovery(_StubRecovery(exc=boom), metrics=m)
     with pytest.raises(ConnectionError) as ei:
-        await wrapped.run()
+        await wrapped.run(_SCOPE)
     assert ei.value is boom
     assert m.registry.get_sample_value(
         "bfx_reconcile_ticks_total", {"result": "error"},

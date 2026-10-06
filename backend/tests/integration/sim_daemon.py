@@ -8,8 +8,8 @@ simulated venue through its own ``httpx`` client. What a test controls:
 * the venue's market feed and fault plan, through ``VenueSeam`` (production passes neither);
 * the bot's own funding book, written into its store with the same clock.
 
-The ledger epoch is a REAL row appended as the owner (no ``read_authority`` patch), the
-database is stamped ``ci`` by the shared seed, and public endpoints are answered by
+The ledger epoch is the migrated database's own (the genesis); a test that wants another latest
+epoch gets a REAL row appended as the owner (no ``read_authority`` patch). The database is stamped ``ci`` by the shared seed, and public endpoints are answered by
 ``httpx_mock``. Authenticated traffic never reaches ``httpx_mock``: ``auth_requests`` lists
 any request to the authenticated host that did.
 """
@@ -206,10 +206,18 @@ async def make_sim_env(ledger_db: Any, monkeypatch: Any, httpx_mock: Any, tmp_pa
         monkeypatch.setenv(name, value)
     await seed_exchange_account(engine, capital_policies=False)
     if epoch is not None:
-        async with engine.begin() as conn:  # the owner's switch: a real epoch row
-            await conn.execute(text(
-                "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-                "VALUES (2, :authority, 2, 'test', 'simulation')"), {"authority": epoch})
+        # A migrated database is on the ledger (the genesis, b1c2d3e4f5a6); any other latest
+        # epoch is a real row appended as the owner (a database restored from before it).
+        async with engine.begin() as conn:
+            latest = (await conn.execute(text(
+                "SELECT epoch_seq, authority FROM capital_authority_epoch "
+                "ORDER BY epoch_seq DESC LIMIT 1"))).one()
+            if latest.authority != epoch:
+                await conn.execute(text(
+                    "INSERT INTO capital_authority_epoch "
+                    "(epoch_seq, authority, set_at_ms, actor, reason) "
+                    "VALUES (:seq, :authority, :seq, 'test', 'simulation')"),
+                    {"seq": latest.epoch_seq + 1, "authority": epoch})
     if policy:
         store = build_policy_store(SCOPE)
         async with factory.begin() as session:

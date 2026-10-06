@@ -11,6 +11,7 @@ import httpx
 import pytest
 import respx
 from httpx import Response
+from sqlalchemy import text
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.core.telemetry import Phase
@@ -29,60 +30,140 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
 )
+from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.strategy import StrategyName
-from tests.integration.test_capital_repository import capital_db as capital_db
-from tests.integration.test_capital_repository import capital_engine as capital_engine
+from tests.integration.test_ledger_schema_roles import ledger_db as ledger_db
 
 
+async def _plant_unknown(stack, scope: str) -> None:
+    """An UNKNOWN submit appearing while the cancel is in flight, in ``scope``."""
+    from uuid import UUID
+
+    from tests.integration.contracts.stacks import SCOPE
+    from tests.integration.test_ledger_basis import _observation
+    from tests.integration.test_ledger_capital_reader import Book
+    from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL
+
+    if scope == "same":
+        await stack.unknown("10")
+    elif scope == "other_symbol":
+        await stack.unknown("10", symbol="fUSD")
+    else:
+        other = (SCOPE.exchange_account_id, "shadow") if scope == "other_environment" else (
+            UUID("00000000-0000-0000-0000-00000000a002"), "ci")
+        async with stack.factory.begin() as session:
+            if scope == "other_environment":
+                # The clone is stamped ``ci``; a write of another realm needs its trigger off.
+                await session.execute(text(DISABLE_REALM_TRIGGERS_SQL))
+            else:
+                await session.execute(text(
+                    "INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
+                    {"id": str(other[0])})
+        book = Book(stack.factory, Scope(*other))
+        await book.policy("fUST")
+        assert await book.accept(
+            _observation("1000", usd=True), started=1000, finished=1050, confirmed=1060,
+        ) == "accepted"
+        await book.attempt("10", outcome="unknown")
+
+
+@pytest.mark.integration
 @pytest.mark.usefixtures("_no_tenacity_sleep")
 @pytest.mark.parametrize("state", ["ACTIVE", "HALTED"])
 @pytest.mark.parametrize("scope", ["same", "other_symbol", "other_environment", "other_account", "unreadable", "clear"])
-async def test_cancel_retry_checks_current_scoped_uncertainty(capital_db, monkeypatch, scope, state):
-    """Every trading state admits the cancel; a new UNKNOWN or unreadable
-    projection in the offer's own scope still stops the retry before HTTP,
-    and the other scopes are the allowed control group."""
+async def test_cancel_retry_checks_current_scoped_uncertainty(ledger_db, monkeypatch, scope, state):
+    """Every trading state admits the cancel; a new UNKNOWN or an unreadable uncertainty
+    read in the offer's own scope still stops the retry before HTTP, and the other scopes
+    are the allowed control group. Runs on the ledger: its journal admits the cancel and
+    its reader answers the recheck."""
     import asyncio
 
-    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
-    from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-    from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
-    from tests.integration.test_capital_command_boundary import (
-        append_cancel_race_unknown,
-        cancel_http_boundary,
+    from bfx_funding_bot.core.health import HealthProbe
+    from bfx_funding_bot.modules.execution.command_boundary import LedgerCommandEffects
+    from bfx_funding_bot.modules.execution.command_gate import (
+        AccountCommandGate,
+        CommandGateBlocked,
     )
+    from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+    from bfx_funding_bot.modules.execution.safety.hard_guards import (
+        ManualKillGuard,
+        UncertaintyGuard,
+    )
+    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.ledger import Authorized, CommandOutcome
+    from tests.integration.contracts.stacks import ACCOUNT, NOW, SCOPE, build_stack, seed_account
+    from tests.modules.execution.deployment.test_reconciler import _CapturingSink
 
-    factory, account = capital_db
-    requests = []
+    await seed_account(ledger_db)
+    engine = create_async_engine(
+        ledger_db.url.render_as_string(hide_password=False).replace("+psycopg", "+asyncpg"))
+    try:
+        stack = build_stack(async_sessionmaker(engine, expire_on_commit=False))
+        await stack.policy()
+        await stack.snapshot("1000")
+        # A managed offer: authorized on the journal and acknowledged, no HTTP.
+        async def no_guard(session) -> None:
+            return None
 
-    async def transport(request):
-        requests.append(request)
-        async with factory() as observer:
-            assert await observer.scalar(select(EventLogRow.event_seq).where(
-                EventLogRow.event_type == "CANCEL_REQUESTED")) is not None
-        if len(requests) == 1:
-            if scope == "unreadable":
-                async def unavailable(*args, **kwargs):
-                    raise RuntimeError("synthetic uncertainty read failure")
-                monkeypatch.setattr(LegacyUncertaintyReader, "list_open", unavailable)
-            elif scope != "clear":
-                await append_cancel_race_unknown(factory,
-                    uuid4() if scope == "other_account" else account,
-                    symbol="fUSD" if scope == "other_symbol" else "fUST",
-                    environment="shadow" if scope == "other_environment" else "ci")
-            return Response(503)
-        return Response(200, json=[0, "foc-req", None, None, None, 0, "SUCCESS", "ok"])
+        async with stack.factory.begin() as session:
+            attempt = await stack.attempt(session, "200")
+            assert isinstance(await stack.journal.authorize(
+                session, SCOPE, attempt, await stack.token(), now_ms=NOW, locked_guard=no_guard,
+            ), Authorized)
+        await stack.journal.record_outcome(
+            SCOPE, attempt.attempt_id, CommandOutcome("ack", "101", None, NOW, {}))
+        halt = TradingStateRepository(
+            stack.factory, account_id=ACCOUNT, deployment_environment="ci")
+        await halt.transition("ACTIVE", cause="operator", reason="test", actor="test",
+                              now_ms=1200)
+        if state != "ACTIVE":
+            await halt.transition(state, cause="operator", reason="stopped during cancel",
+                                  actor="test")
+        requests = []
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
-        gate, ctx, _ = await cancel_http_boundary(factory, account, http, state=state)
-        command = gate.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
-                              account_id=str(account), ctx=ctx)
-        if scope in {"same", "unreadable"}:
-            with pytest.raises(CommandGateBlocked, match="uncertainty"):
+        async def transport(request):
+            requests.append(request)
+            if len(requests) == 1:
+                if scope == "unreadable":
+                    async def unavailable(*args, **kwargs):
+                        raise RuntimeError("synthetic uncertainty read failure")
+                    monkeypatch.setattr(type(stack.uncertainties), "has_open", unavailable)
+                    monkeypatch.setattr(type(stack.uncertainties), "list_open", unavailable)
+                elif scope != "clear":
+                    await _plant_unknown(stack, scope)
+                return Response(503)
+            return Response(200, json=[0, "foc-req", None, None, None, 0, "SUCCESS", "ok"])
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            sink = _CapturingSink()
+            gate = AccountCommandGate(
+                BitfinexLiveExecutor(
+                    http=http, event_sink=sink, bus=DomainEventBus(), phase=Phase.LIVE,
+                    strategy=StrategyName.MEAN_REVERSION, configured_symbols=frozenset({"fUST"}),
+                    cell="a30", auth_gate=AuthRequestGate(lambda: 123456789),
+                ),
+                uncertainty_reader=stack.uncertainties,
+                safety_evaluator=SafetyGuardChain(
+                    guards=[ManualKillGuard(trading_state=halt), UncertaintyGuard(
+                        reader=stack.uncertainties, deployment_environment="ci")],
+                    probe=HealthProbe(), diagnostics=sink, phase=Phase.LIVE,
+                    strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=str(ACCOUNT)),
+                deployment_environment="ci", clock=lambda: NOW,
+                boundary=stack.boundary(LedgerCommandEffects(DomainEventBus())),
+                managed_offers=stack.offers,
+            )
+            ctx = AccountContext(str(ACCOUNT), Credentials("mock", "mock"), Decimal("0"))
+            command = gate.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
+                                  account_id=str(ACCOUNT), ctx=ctx)
+            if scope in {"same", "unreadable"}:
+                with pytest.raises(CommandGateBlocked, match="uncertainty"):
+                    await asyncio.wait_for(command, timeout=10)
+            else:
                 await asyncio.wait_for(command, timeout=10)
-        else:
-            await asyncio.wait_for(command, timeout=10)
+    finally:
+        await engine.dispose()
     # No subsequent HTTP once uncertainty appears; otherwise idempotent retry survives.
     assert len(requests) == (1 if scope in {"same", "unreadable"} else 2)
 

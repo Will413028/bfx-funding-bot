@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError, InternalError, ProgrammingError
 
 from tests.pg_templates import alembic, disable_realm_triggers, stamp_realm
 
+from .test_ledger_schema_roles import pre_switch
 from .test_trading_state_migration import _reset
 
 pytestmark = pytest.mark.integration
@@ -194,6 +195,8 @@ def test_bfx_bot_dml_beyond_select_and_insert_is_denied_in_a_read_write_transact
 def test_bfx_bot_writes_while_the_authority_epoch_is_legacy(db: Any) -> None:
     # The table is deliberately not behind the ledger dormancy triggers.
     _, engine = db
+    with engine.begin() as conn:
+        pre_switch(conn)  # a database the switch has not happened on
     with engine.connect() as conn:
         assert conn.scalar(text(
             "SELECT authority FROM capital_authority_epoch ORDER BY epoch_seq DESC LIMIT 1")

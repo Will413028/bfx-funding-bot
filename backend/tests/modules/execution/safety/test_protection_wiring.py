@@ -10,13 +10,12 @@ from uuid import UUID
 import pytest
 
 from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
-from bfx_funding_bot.modules.execution.legacy_ports import LegacyCapitalAuthority
 from bfx_funding_bot.modules.execution.safety.protection import (
     AutomaticProtection,
     WriterLockLostError,
     WriterLockWatch,
 )
-from bfx_funding_bot.modules.ledger import Scope
+from bfx_funding_bot.modules.ledger import CapitalBlocked, Scope
 
 
 class Recorder:
@@ -27,22 +26,18 @@ class Recorder:
         self.trips.append((trigger, detail))
 
 
-class _RaisingCapital:
-    """A legacy capital runtime whose read meets an authority refusal."""
+class _RefusingCapital:
+    """A capital authority whose read meets a refusal (the port returns, never raises it)."""
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
-        self.session_factory = self._session
-        self.repository = self
-        self.account_id = SCOPE.exchange_account_id
-        self.environment = SCOPE.deployment_environment
 
     @contextlib.asynccontextmanager
-    async def _session(self):  # type: ignore[no-untyped-def]
+    async def session_factory(self):  # type: ignore[no-untyped-def]
         yield None
 
-    async def read_capital(self, session, **kwargs):  # type: ignore[no-untyped-def]
-        raise CapitalBlockedError(self.reason)
+    async def read(self, scope, *, now_ms, session=None):  # type: ignore[no-untyped-def]
+        return CapitalBlocked(self.reason)
 
 
 SCOPE = Scope(UUID(int=7), "test")
@@ -53,13 +48,12 @@ class _NoUncertainty:
         return False
 
 
-def _legacy_ports(reason: str) -> dict[str, object]:
-    """The planner's ports as apps builds them, over a refusing legacy authority."""
+def _refusing_ports(reason: str) -> dict[str, object]:
+    """The planner's ports as apps builds them, over a refusing capital authority."""
     from tests.modules.execution.deployment.test_reconciler import _capital_ports
-    runtime = _RaisingCapital(reason)
-    capital = LegacyCapitalAuthority(runtime)  # type: ignore[arg-type]
+    capital = _RefusingCapital(reason)
     return _capital_ports(capital, offers=SimpleNamespace(), uncertainty=_NoUncertainty(),
-                          scope=SCOPE, session_factory=runtime.session_factory)
+                          scope=SCOPE, session_factory=capital.session_factory)
 
 
 @pytest.mark.asyncio
@@ -74,7 +68,7 @@ async def test_planner_capital_read_trips_only_on_protection_reasons(reason, exp
     from tests.modules.execution.deployment.test_reconciler import _build, _post_quote
     recorder = Recorder()
     rec, executor, *_ = _build(exposure=Decimal("0"), quotes=[_post_quote("fUST_a30")],
-                               capital_ports=_legacy_ports(reason))
+                               capital_ports=_refusing_ports(reason))
     rec._protection = recorder
     await rec.deploy()
     assert [trigger for trigger, _ in recorder.trips] == expected

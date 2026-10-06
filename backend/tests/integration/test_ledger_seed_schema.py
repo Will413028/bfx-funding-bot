@@ -126,10 +126,13 @@ def _owner_seed_observation(conn, revision: int = 2) -> str:
     return observation_id
 
 
-def _append_epoch(conn, seq: int, authority: str) -> None:
+def _append_epoch(conn, authority: str) -> None:
+    """The owner appends the next epoch (a database at head already starts on ``ledger``:
+    the genesis epoch; appending it again keeps the precondition explicit)."""
     conn.exec_driver_sql(
         "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-        f"VALUES ({seq}, '{authority}', {seq}, 'test', 'switch')"
+        f"SELECT max(epoch_seq) + 1, '{authority}', max(epoch_seq) + 1, 'test', 'switch' "
+        "FROM capital_authority_epoch"
     )
 
 
@@ -263,7 +266,7 @@ def test_seed_observation_clause_is_enforced_alone(seeded, case: str) -> None:
 
 def test_runtime_role_cannot_write_seed_origin_even_under_ledger_epoch(seeded) -> None:
     with seeded.begin() as conn:
-        _append_epoch(conn, 2, "ledger")
+        _append_epoch(conn, "ledger")
         venue_query = _new_query(conn, 2)
         seed_query = _new_query(conn, 3)
     with seeded.begin() as conn:  # control: the bot writes a complete venue observation
@@ -292,7 +295,7 @@ def test_seed_observation_is_never_resolution_or_operator_evidence(seeded) -> No
         conn.exec_driver_sql(_request_sql(seed))
     # The web API cannot read ``origin``; the rule still holds for its INSERT (definer rights).
     with seeded.begin() as conn:
-        _append_epoch(conn, 2, "ledger")
+        _append_epoch(conn, "ledger")
     with seeded.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         conn.exec_driver_sql(_request_sql(_O))
@@ -407,7 +410,7 @@ def test_attempt_policy_may_be_null_only_for_a_seed(seeded) -> None:
 
 def test_runtime_role_cannot_write_a_policyless_attempt(seeded) -> None:
     with seeded.begin() as conn:
-        _append_epoch(conn, 2, "ledger")
+        _append_epoch(conn, "ledger")
     with seeded.begin() as conn:  # control: the bot writes an ordinary attempt
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         _insert_attempt(conn, 5, policy=_P, provenance=None)

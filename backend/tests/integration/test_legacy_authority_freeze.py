@@ -22,7 +22,11 @@ from sqlalchemy.engine import Connection, Engine
 
 from tests.pg_templates import alembic
 
-from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture
+from .test_ledger_schema_roles import (
+    append_epoch,
+    ledger_db,  # noqa: F401 - fixture
+    pre_switch,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -83,11 +87,16 @@ def _write(engine: Engine, table: str, operation: str, *, role: str | None = "bf
         conn.exec_driver_sql(statement)
 
 
-def _epoch(engine: Engine, seq: int, authority: str) -> None:
+def _epoch(engine: Engine, authority: str) -> None:
     with engine.begin() as conn:
-        conn.exec_driver_sql(
-            "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-            f"VALUES ({seq}, '{authority}', {seq}, 'test', 'switch')")
+        append_epoch(conn, authority, "switch")
+
+
+@pytest.fixture(autouse=True)
+def _before_the_switch(ledger_db) -> None:  # noqa: F811
+    """Each case starts on a head database the switch has not happened on (latest legacy)."""
+    with ledger_db.begin() as conn:
+        pre_switch(conn)
 
 
 def _cases(tables: tuple[str, ...]) -> list[tuple[str, str]]:
@@ -115,11 +124,11 @@ def test_frozen_tables_refuse_the_bot_under_ledger_and_pass_it_under_legacy(
     if operation not in _held(ledger_db, table):
         pytest.skip(f"bfx_bot holds no {operation} on {table}: the privilege check refuses first")
     _write(ledger_db, table, operation)  # legacy: the trigger passes
-    _epoch(ledger_db, 2, "ledger")
+    _epoch(ledger_db, "ledger")
     with pytest.raises(Exception, match=f"legacy write after the authority switch: {table}"):
         _write(ledger_db, table, operation)
     _write(ledger_db, table, operation, role=None)  # the owner still writes
-    _epoch(ledger_db, 3, "legacy")  # latest wins
+    _epoch(ledger_db, "legacy")  # latest wins
     _write(ledger_db, table, operation)
 
 
@@ -133,7 +142,7 @@ def test_every_frozen_table_is_writable_by_the_bot_under_legacy(ledger_db) -> No
 def test_shared_tables_stay_writable_after_the_switch(ledger_db, table: str) -> None:  # noqa: F811
     held = _held(ledger_db, table)
     assert held, f"bfx_bot writes {table} at runtime"
-    _epoch(ledger_db, 2, "ledger")
+    _epoch(ledger_db, "ledger")
     for operation in held:
         _write(ledger_db, table, operation)
     with ledger_db.connect() as conn:
@@ -144,7 +153,7 @@ def test_shared_tables_stay_writable_after_the_switch(ledger_db, table: str) -> 
 
 def test_downgrade_drops_the_trigger_and_upgrade_restores_it(ledger_db) -> None:  # noqa: F811
     url = ledger_db.url.render_as_string(hide_password=False)
-    _epoch(ledger_db, 2, "ledger")
+    _epoch(ledger_db, "ledger")
     ledger_db.dispose()
     alembic(url, "downgrade", _PREVIOUS)
     _write(ledger_db, "event_log", "INSERT")  # no freeze before this revision

@@ -1,7 +1,8 @@
 """The weekly's pre-S1-8 legacy offer -> cell read, and migration ``a0b1c2d3e4f5``'s copy on demand.
 
-Deleted together with the legacy runtime (S1-8 PR-C), with the tests that use it: both read
-the legacy tables and models that PR removes.
+Its last user is the migration's own test (``test_attribution_legacy_links_migration.py``): the
+legacy tables and models it reads are frozen, not removed, so it goes with that migration's
+retirement.
 
 * ``reference_legacy_offer_cells``: the loader's read before ``a0b1c2d3e4f5``, verbatim
   (``offer_claims`` / ``venue_offer_state`` / ``ORDER_FILL`` links resolved through

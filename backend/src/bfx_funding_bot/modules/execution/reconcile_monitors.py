@@ -1,4 +1,4 @@
-"""Operator alerts the venue reconcile raises, shared by both capital authorities.
+"""Operator alerts the ledger's venue reconcile raises.
 
 ``ForeignExposureMonitor`` reports venue offers no durable intent traces to;
 ``QuarantineAgeMonitor`` reports UNKNOWN submits that have quarantined their

@@ -28,6 +28,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError, IntegrityError, InternalError, ProgrammingError
 
 from bfx_funding_bot.core.database_realm import DATABASE_REALM_TABLE, KNOWN_REALMS
+from bfx_funding_bot.core.schema_head import migration_scripts
 from tests.pg_templates import alembic, stamp_realm
 
 from .test_trading_state_migration import _reset
@@ -39,6 +40,7 @@ _PREVIOUS = "e6b1d4a7c9f3"
 _TRIGGER = "database_realm_write"
 _ROLES = ("bfx_bot", "bfx_webapi", "bfx_webauth", "bfx_cutover_reader")
 _ACCOUNT = "00000000-0000-0000-0000-0000000000a1"
+_BEFORE_GENESIS = str(migration_scripts().get_revision("b1c2d3e4f5a6").down_revision)
 _VERSIONS = Path(__file__).resolve().parents[2] / "alembic/versions"
 
 
@@ -227,7 +229,9 @@ def _stamp_of(url: str) -> list[tuple[str, str]]:
 @pytest.mark.parametrize("sql", [_nav_peak("prod"), _event_log("prod")])
 def test_the_migration_stamps_prod_from_prod_data(previous_url: str, sql: str) -> None:
     _seed_previous(previous_url, sql)
-    alembic(previous_url, "upgrade", "head")
+    # Up to the ledger genesis, not through it: legacy history without a seed refuses it
+    # (b1c2d3e4f5a6), which is not what this revision's stamp is about.
+    alembic(previous_url, "upgrade", _BEFORE_GENESIS)
     assert _stamp_of(previous_url) == [("prod", f"migration {_REVISION}")]
 
 
@@ -273,9 +277,10 @@ def test_an_unstamped_database_refuses_every_realm_write_even_from_the_owner(uns
 
 
 def test_an_unstamped_database_refuses_the_bot_and_the_web_api(unstamped: Any) -> None:
-    _refused(unstamped, _event_log("ci"), "database realm is not stamped", role="bfx_bot")
+    # nav_peak, not event_log: the bot no longer writes the frozen legacy log at all.
+    _refused(unstamped, _nav_peak("ci"), "database realm is not stamped", role="bfx_bot")
     with unstamped.begin() as conn:
-        assert conn.scalar(text("SELECT count(*) FROM event_log")) == 0
+        assert conn.scalar(text("SELECT count(*) FROM nav_peak")) == 0
 
 
 @pytest.mark.parametrize("foreign", ["prod", "shadow"])
@@ -300,8 +305,9 @@ def test_updating_the_realm_column_is_checked_but_other_columns_are_not(ci_db: A
 
 
 def test_the_bot_role_is_checked_on_insert(ci_db: Any) -> None:
-    _run(ci_db, _event_log("ci"), role="bfx_bot")
-    _refused(ci_db, _event_log("prod"), "database realm ci refuses a write of realm prod to event_log", role="bfx_bot")
+    _run(ci_db, _nav_peak("ci"), role="bfx_bot")
+    _refused(ci_db, _nav_peak("prod", "fUSD"), "database realm ci refuses a write of realm prod to nav_peak",
+             role="bfx_bot")
 
 
 def test_the_web_api_is_checked_without_any_privilege_on_the_stamp(ci_db: Any) -> None:

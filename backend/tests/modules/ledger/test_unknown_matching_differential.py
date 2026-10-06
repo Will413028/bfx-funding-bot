@@ -5,8 +5,8 @@ stored-payload encoding of each case and the neutral ``match_unknown`` on the ty
 encoding; the verdicts must be equal unless the case declares the divergence.
 
 Layer 2 compares ``decide_unknown`` with a test-owned frozen copy of the branch
-predicates of ``BootRecovery._resolve_unknown``; an AST-identity check pins that copy
-to the source it was taken from (a legacy edit fails there first).
+predicates of the legacy ``BootRecovery._resolve_unknown`` (main b86cfdbd). That method is
+gone with the legacy runtime (S1-8), so the frozen copy is now the record of what it did.
 
 Declared divergences (each only where the ledger is deliberately stricter):
 ``g1_symbol``  the port never fetched the symbol's history (legacy fetched account-wide)
@@ -17,9 +17,6 @@ Declared divergences (each only where the ledger is deliberately stricter):
 
 from __future__ import annotations
 
-import ast
-import inspect
-import textwrap
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -42,7 +39,6 @@ from matching_fixtures import (
     terms,
 )
 
-from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.unknown_matching import (
     UnknownSubmitAttempt,
@@ -224,10 +220,7 @@ def frozen_legacy_decision(
     *, kind: str, query_started: int, started: int, settle: int, history_end: Any,
     amount_seen: bool, observed_after: bool, attributed: bool,
 ) -> str:
-    """Branch predicates of ``BootRecovery._resolve_unknown`` (boot_recovery.py, main b86cfdbd).
-
-    Their source text is pinned by ``FROZEN_PREDICATES`` below.
-    """
+    """Branch predicates of ``BootRecovery._resolve_unknown`` (boot_recovery.py, main b86cfdbd)."""
     settled_at = started + settle
     if query_started < settled_at:
         return "leave_open"
@@ -267,59 +260,3 @@ def test_decision_equals_the_frozen_legacy_branches_unless_declared(case: Case) 
 def test_every_declared_divergence_is_exercised_and_none_is_silent() -> None:
     names = {c.decision_divergence[0] for c in CASES if c.decision_divergence}
     assert names == {"g1_symbol", "bind_observed_after", "shared"}
-
-
-# --- the frozen branches still are the legacy source -------------------------------------------
-
-# The conditions, verbatim from the legacy method, in the order they appear in its loop.
-FROZEN_PREDICATES = {
-    "settle": "query_started_at_ms < settled_at",
-    "bind": 'match.kind == "exact_match" and match.offer is not None',
-    "attributed": "await self._offer_attributed(session, UUID(attempt.account_id), offer)",
-    "zero": (
-        'match.kind == "zero_match" and isinstance(history_end, int) '
-        "and history_end >= settled_at and not amount_seen_since_start(attempt, payload) "
-        "and await self._observed_after_opening(session, uncertainty, snapshot_seq, "
-        "query_started_at_ms)"
-    ),
-}
-
-
-def _dump(expression: str) -> str:
-    wrapped = ast.parse(f"async def _f():\n    return {expression}")
-    return ast.dump(wrapped.body[0].body[0].value)  # type: ignore[attr-defined]
-
-
-def _legacy_loop() -> ast.For:
-    source = textwrap.dedent(inspect.getsource(BootRecovery._resolve_unknown))
-    function = ast.parse(source).body[0]
-    loops = [n for n in ast.walk(function) if isinstance(n, ast.For)
-             and isinstance(n.target, ast.Name) and n.target.id == "attempt"
-             and any(isinstance(s, ast.Assign) and isinstance(s.targets[0], ast.Name)
-                     and s.targets[0].id == "match" for s in n.body)]
-    assert len(loops) == 1
-    return loops[0]
-
-
-def test_frozen_predicates_are_ast_identical_to_the_legacy_source() -> None:
-    loop = _legacy_loop()
-    ifs = [s for s in loop.body if isinstance(s, ast.If)]
-    settle = next(s for s in ifs if isinstance(s.test, ast.Compare))
-    chain = next(s for s in ifs if isinstance(s.test, ast.BoolOp))
-    zero = chain.orelse[0]
-    assert isinstance(zero, ast.If)
-    attributed = next(
-        n for n in ast.walk(chain) if isinstance(n, ast.If) and isinstance(n.test, ast.Await)
-    )
-    assert ast.dump(settle.test) == _dump(FROZEN_PREDICATES["settle"])
-    assert ast.dump(chain.test) == _dump(FROZEN_PREDICATES["bind"])
-    assert ast.dump(attributed.test) == _dump(FROZEN_PREDICATES["attributed"])
-    assert ast.dump(zero.test) == _dump(FROZEN_PREDICATES["zero"])
-    # And the `settled_at` they refer to.
-    assigns = [s for s in loop.body if isinstance(s, ast.Assign) and s.targets[0].id == "settled_at"]  # type: ignore[attr-defined]
-    assert ast.dump(assigns[0].value) == _dump("attempt.started_at_ms + self._unknown_settle_ms")
-
-
-def test_the_pin_catches_an_edited_predicate() -> None:
-    assert _dump("query_started_at_ms <= settled_at") != _dump(FROZEN_PREDICATES["settle"])
-

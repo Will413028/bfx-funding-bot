@@ -17,11 +17,11 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
-from bfx_funding_bot.apps.authority_support import require_ledger_seed, supported_for_venue
+from bfx_funding_bot.apps.authority_support import SUPPORTED, require_ledger_seed
 from bfx_funding_bot.apps.bot_ports import ObservationVenue, select_bot_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
 from bfx_funding_bot.apps.venue import VenueSeam, build_venue
-from bfx_funding_bot.core.authority import Authority, read_authority
+from bfx_funding_bot.core.authority import read_authority
 from bfx_funding_bot.core.database_realm import assert_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
@@ -76,9 +76,6 @@ from bfx_funding_bot.modules.execution.events import (
     PositionReconciled,
     ReservationClaimed,
     ReservationReleased,
-)
-from bfx_funding_bot.modules.execution.fill_tracker import (
-    RestPollingFillTracker,
 )
 from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.middleware import (
@@ -205,16 +202,14 @@ async def build_daemon(
     # Both venues, in this order, before the credential vault or any client is touched:
     # a database at another schema means this is the wrong build for it (for instance a
     # rollback onto a newer schema); its stamped realm must equal the realm this process
-    # runs as (E2); and the capital authority is read once, against the set this venue
-    # supports (``apps/authority_support.py``): the simulated venue runs only on the
-    # ledger, Bitfinex on either (the epoch decides). Any refusal stops the boot and alerts
+    # runs as (E2); and the capital authority epoch is read once: either venue runs only
+    # on the ledger (``apps/authority_support.py``). Any refusal stops the boot and alerts
     # (``_refuse_live_boot``: alert routing is configuration, the sink prefixes the realm).
     try:
         async with session_factory() as boot_session:
             await assert_schema_head(boot_session)
             await assert_database_realm(boot_session, config.deployment_environment.value)
-            authority: Authority = await read_authority(
-                boot_session, supported=supported_for_venue(config.venue))
+            await read_authority(boot_session, supported=SUPPORTED)
     except Exception as exc:
         await _refuse_live_boot(exc, config=config, session_factory=session_factory)
         await db_engine.dispose()
@@ -230,15 +225,13 @@ async def build_daemon(
     except Exception:
         await db_engine.dispose()
         raise
-    # Capital ports: the authority the database booted under picks every adapter a
-    # consumer binds to (apps/bot_ports.py); nothing below names an authority.
+    # Capital ports: every adapter a consumer binds to is the ledger's (apps/bot_ports.py).
     env_str = config.deployment_environment.value
     capital_scope = Scope(account_bootstrap.exchange_account_id, env_str)
-    # H-1: a switched prod database without the seed refuses, before any ledger write.
+    # H-1: a scope with legacy history but without the seed refuses, before any ledger write.
     try:
         async with session_factory() as seed_session:
-            await require_ledger_seed(seed_session, venue=config.venue,
-                                      authority=authority, scopes=(capital_scope,))
+            await require_ledger_seed(seed_session, venue=config.venue, scopes=(capital_scope,))
     except Exception as exc:
         await _refuse_live_boot(exc, config=config, session_factory=session_factory)
         await db_engine.dispose()
@@ -246,15 +239,14 @@ async def build_daemon(
     account_id = account_bootstrap.account_id
     bus = DomainEventBus()
     resync = ResyncChannel()
-    ports = await select_bot_ports(
-        authority, session_factory=session_factory, scope=capital_scope, account_id=account_id,
+    ports = select_bot_ports(
+        session_factory=session_factory, scope=capital_scope, account_id=account_id,
         bus=bus, resync=resync, clock=now_ms_utc,
         max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS,
     )
     capital = ports.capital
     uncertainty_reader = ports.uncertainty_reader
     managed_offers = ports.managed_offers
-    legacy = ports.legacy
     try:
         # Before anything can trade: every configured currency has an
         # applied capital policy.
@@ -662,7 +654,6 @@ async def build_daemon(
         session_factory=session_factory,
         store=quote_store,
         tracker=CellDeploymentTracker(),
-        uncertainty_synced=capital.uncertainty_synced,
         safety_chain=safety_chain,
         executor=wrapped_executor,
         account_ctx=account_ctx,
@@ -739,24 +730,6 @@ async def build_daemon(
         deployment_input=capital.deployment_input,
         resync=resync,
     )
-
-    # The REST fill tracker is the event-log authority's: it needs the CID registry. The
-    # ledger authority covers a missed fill with WS hints and the periodic reconcile.
-    fill_tracker: RestPollingFillTracker | None = None
-    if spec.fill_tracker_enabled:
-        if legacy is None:
-            log.warning("fill_tracker_not_composed authority=%s", ports.authority)
-        else:
-            fill_tracker = RestPollingFillTracker(
-                http=bitfinex_http,
-                event_sink=stdout_sink,
-                probe=probe,
-                phase=config.phase,
-                strategy=first_cell.strategy,
-                cell=first_cell.cell_id,
-                account_id=account_id,
-                venue_hint_sink=ports.venue_hint_sink,
-            )
 
     signal_engine_obj = SignalEngine(
         phase=config.phase,
@@ -990,9 +963,9 @@ async def build_daemon(
     healthz_host = os.environ.get("BFX_HEALTHZ_HOST", "0.0.0.0").strip() or "0.0.0.0"
     admin_token = os.environ.get("BFX_ADMIN_TOKEN", "").strip() or None
 
-    # Phase 4.4a Task 19: WS dispatcher — wired only when BFX_WS_CLIENT_ENABLED=true,
-    # which the registry requires for Bitfinex and forbids for the simulated venue
-    # (it has no WebSocket); then these remain None and run() skips the dispatcher task.
+    # Phase 4.4a Task 19: WS dispatcher — wired only for a venue whose capabilities require
+    # the authenticated WebSocket (Bitfinex); the simulated venue has none, so these remain
+    # None and run() skips the dispatcher task.
     auth_ws: BitfinexAuthWSClient | None = None
     ws_dispatcher: BitfinexLiveWSDispatcher | None = None
     if spec.ws_client_enabled:
@@ -1050,7 +1023,6 @@ async def build_daemon(
         safety_chain=safety_chain,
         account_ctx=account_ctx,
         bus=bus,
-        fill_tracker=fill_tracker,
         auth_ws=auth_ws,
         ws_dispatcher=ws_dispatcher,
         boot_recovery=boot_recovery,

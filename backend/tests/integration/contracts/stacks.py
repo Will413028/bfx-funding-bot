@@ -1,21 +1,18 @@
-"""Authority-neutral scenario builders over the legacy and the ledger stacks.
+"""Scenario builders over the ledger stack, the only capital authority.
 
 A contract test states a scenario once (``policy``, ``snapshot``, ``place``,
 ``unknown``, ``quarantine``) and asserts port-level observables on the four
-consumer read ports. Each stack writes through its own authority's write paths:
+consumer read ports. The stack writes through the ledger's write paths:
+``LedgerJournal`` and ``LedgerObservations.accept`` (the ``Book`` of
+``test_ledger_capital_reader``).
 
-* ``legacy``: ``CapitalRepository`` and its event writer (the existing
-  ``test_capital_repository`` helpers);
-* ``ledger``: ``LedgerJournal`` and ``LedgerObservations.accept`` (the ``Book``
-  of ``test_ledger_capital_reader``).
-
-Both stacks share one migrated database per test and one clock: snapshots
-start at 1000 and finish at 1050/1060, reads happen at ``NOW``.
+One migrated database per test and one clock: snapshots start at 1000 and finish at
+1050/1060, reads happen at ``NOW``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -25,23 +22,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
-from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary, CommandEffects
-from bfx_funding_bot.modules.execution.event_store.entities import VenueOfferObservation
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-from bfx_funding_bot.modules.execution.events import (
-    ReservationClaimed,
-    ReservationUnknown,
-    VenueOfferQuarantined,
-)
-from bfx_funding_bot.modules.execution.legacy_command_journal import LegacyCommandJournal
-from bfx_funding_bot.modules.execution.legacy_ports import (
-    LegacyCapitalAuthority,
-    LegacyManagedOffers,
-    LegacyScopeLock,
-    LegacyUncertaintyReader,
-)
-from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
 from bfx_funding_bot.modules.ledger import (
     CapitalAuthority,
     CapitalAvailable,
@@ -63,9 +44,8 @@ from bfx_funding_bot.modules.ledger.wiring import (
     build_scope_lock,
     build_uncertainty_reader,
 )
-from bfx_funding_bot.modules.trading import CapitalPolicy, CapitalScope
+from bfx_funding_bot.modules.trading import CapitalScope
 
-from ..test_capital_repository import authorize, repository, snapshot
 from ..test_ledger_basis import _observation, _offer
 from ..test_ledger_capital_reader import _ATTEMPT_POLICY, Book
 
@@ -113,7 +93,7 @@ class Stack:
     async def policy(
         self, symbol: str = "fUST", *, reserve: str = "100", enabled: bool = True
     ) -> None:
-        """Apply the symbol's policy (legacy supports fUST enabled, fUSD only disabled)."""
+        """Apply the symbol's policy."""
         await self.builders.policy(symbol, reserve, enabled)
 
     async def snapshot(self, available: str = "1000", *, offers: tuple[Venue, ...] = ()) -> None:
@@ -163,98 +143,8 @@ class Stack:
         )
 
     async def written(self) -> tuple[int, int]:
-        """What a refused or aborted authorize must leave unchanged (per authority)."""
+        """What a refused or aborted authorize must leave unchanged."""
         return await self.builders.written()
-
-
-class _LegacyBuilders:
-    def __init__(self, factory: async_sessionmaker[Any]) -> None:
-        self.factory = factory
-        self.repo = repository(ACCOUNT, ENVIRONMENT)
-        self.policies: dict[str, Any] = {}
-        self.seq = 0
-        self.cids = iter(range(1, 1000))
-        self.pending: dict[str, VenueOfferObservation] = {}
-        self.unknown_refs: list[Any] = []
-
-    async def policy(self, symbol: str, reserve: str, enabled: bool) -> None:
-        async with self.factory.begin() as session:
-            self.policies[symbol] = await self.repo.apply_policy(
-                session, symbol=symbol,
-                policy=CapitalPolicy(
-                    enabled=enabled, reserve_amount=Decimal(reserve),
-                    max_cell_fraction=Decimal(1),
-                ),
-                expected_revision=self.policies[symbol].revision if symbol in self.policies else 0,
-                source={"operator": "contract"},
-            )
-
-    async def snapshot(self, available: str, offers: tuple[Venue, ...]) -> None:
-        observed = tuple(
-            self.pending.get(o.venue_offer_id)
-            or VenueOfferObservation(
-                o.venue_offer_id, o.symbol, Decimal(o.amount), Decimal(o.amount),
-                Decimal("0.0001"), 2, "active", 1000, 1000,
-            )
-            for o in offers
-        )
-        self.seq = await snapshot(self.factory, self.repo, available, offers=observed)
-
-    async def place(self, venue_offer_id: str, amount: str, symbol: str) -> None:
-        cid = next(self.cids)
-        result = await authorize(
-            self.factory, self.repo, self.policies[symbol], self.seq, amount, cid, cell=CELL
-        )
-        async with self.factory.begin() as session:
-            await self.repo.writer.append(session, ReservationClaimed(
-                symbol=symbol, cid=cid, signal_correlation_id=result.intent.signal_correlation_id,
-                account_id=str(ACCOUNT), is_simulated=True, amount=Decimal(amount),
-                venue_offer_id=venue_offer_id,
-                reservation_ref=replace(
-                    result.intent.reservation_ref, venue_offer_id=venue_offer_id
-                ),
-                occurred_at_ms=1100,
-            ))
-        # The daemon enriches the observation with the claim's decision; that is
-        # what makes the projected offer managed.
-        self.pending[venue_offer_id] = VenueOfferObservation(
-            venue_offer_id, symbol, Decimal(amount), Decimal(amount), Decimal("0.0001"), 2,
-            "active", 1000, 1100,
-            execution_decision_id=result.intent.execution_decision_id,
-            signal_correlation_id=result.intent.signal_correlation_id,
-        )
-
-    async def unknown(self, amount: str, symbol: str) -> None:
-        cid = next(self.cids)
-        result = await authorize(
-            self.factory, self.repo, self.policies[symbol], self.seq, amount, cid, cell=CELL
-        )
-        async with self.factory.begin() as session:
-            await self.repo.writer.append(session, ReservationUnknown(
-                symbol=symbol, cid=cid, account_id=str(ACCOUNT), is_simulated=True,
-                signal_correlation_id=result.intent.signal_correlation_id,
-                reservation_ref=result.intent.reservation_ref, amount=Decimal(amount),
-                reason="contract", occurred_at_ms=1150,
-            ))
-
-    async def written(self) -> tuple[int, int]:
-        async with self.factory() as session:
-            return (
-                await session.scalar(select(func.count()).select_from(EventLogRow)) or 0,
-                await session.scalar(select(func.count()).select_from(SubmissionAttemptRow)) or 0,
-            )
-
-    async def quarantine(self, symbol: str, amount: str) -> None:
-        offer = VenueOfferObservation(
-            f"orphan-{symbol}", symbol, Decimal(amount), Decimal(amount), Decimal("0.0001"), 2,
-            "active", 1000, 1000,
-        )
-        self.seq = await snapshot(self.factory, self.repo, "1000", offers=(offer,))
-        async with self.factory.begin() as session:
-            await self.repo.writer.append(session, VenueOfferQuarantined(
-                venue_offer_id=offer.venue_offer_id, symbol=symbol, amount=Decimal(amount),
-                account_id=str(ACCOUNT), occurred_at_ms=1100,
-            ))
 
 
 class _LedgerBuilders:
@@ -268,7 +158,7 @@ class _LedgerBuilders:
     async def snapshot(self, available: str, offers: tuple[Venue, ...]) -> None:
         observation = _observation(
             available,
-            usd=True,  # the legacy wallet always reports fUSD (0)
+            usd=True,  # the wallet reports fUSD (0) too
             offers=tuple(
                 _offer(o.venue_offer_id, o.amount, created=500, symbol=o.symbol) for o in offers
             ),
@@ -317,23 +207,9 @@ async def seed_account(sync_engine: Any) -> None:
         )
 
 
-def build_stack(name: str, factory: async_sessionmaker[Any]) -> Stack:
-    if name == "legacy":
-        builders = _LegacyBuilders(factory)
-        runtime = CapitalRuntime(
-            repository=builders.repo, session_factory=factory, clock=lambda: NOW
-        )
-        return Stack(
-            name, factory, LegacyCapitalAuthority(runtime), LegacyUncertaintyReader(factory),
-            LegacyManagedOffers(), LegacyScopeLock(builders.repo),
-            LegacyCommandJournal(
-                runtime, date_provider=lambda: date(2026, 10, 3), clock=lambda: NOW
-            ),
-            builders,
-        )
-    assert name == "ledger"
+def build_stack(factory: async_sessionmaker[Any]) -> Stack:
     return Stack(
-        name, factory,
+        "ledger", factory,
         build_capital_authority(factory, max_snapshot_age_ms=MAX_SNAPSHOT_AGE_MS),
         build_uncertainty_reader(factory), build_managed_offer_reader(), build_scope_lock(),
         build_command_journal(factory, max_snapshot_age_ms=MAX_SNAPSHOT_AGE_MS),

@@ -317,8 +317,6 @@ type = "acyclic_siblings"
 ancestors = ["bfx_funding_bot.modules"]
 depth = 0
 ignore_imports = [
-    "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.capital_repository",
-    "bfx_funding_bot.modules.accounts.capital_conversion -> bfx_funding_bot.modules.execution.safety.hard_guards",
     "bfx_funding_bot.modules.accounts.credential_bootstrap -> bfx_funding_bot.modules.execution.protocols",
     "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.audit.tables",
     "bfx_funding_bot.modules.accounts.identity_cutover -> bfx_funding_bot.modules.execution.diagnostics.tables",
@@ -640,13 +638,45 @@ source_modules = [
 forbidden_modules = [
     "bfx_funding_bot.modules.execution.amount_fingerprint",
     "bfx_funding_bot.modules.execution.capital_repository",
-    "bfx_funding_bot.modules.execution.capital_runtime",
     "bfx_funding_bot.modules.execution.event_store.tables",
     "bfx_funding_bot.modules.execution.uncertainty_tables",
 ]
 allow_indirect_imports = true
 ignore_imports = []
 broken_contract_guidance = "Read through the ledger facade's ports (apps injects the adapters); do not add ignores."
+
+[[tool.importlinter.contracts]]
+id = "runtime-not-legacy-authority"
+name = "The ledger runtime never imports what is left of the legacy capital authority"
+type = "forbidden"
+# What remains of the legacy authority after S1-8 serves only the DR prefix verification
+# (scripts/verify_projection_replay.py) and the switch scaffolding (capital comparison,
+# seed); both go in later steps. The processes that lend and serve must not grow back into it.
+source_modules = [
+    "bfx_funding_bot.apps.authority_support",
+    "bfx_funding_bot.apps.bot",
+    "bfx_funding_bot.apps.bot_ports",
+    "bfx_funding_bot.apps.read_models",
+    "bfx_funding_bot.apps.venue",
+    "bfx_funding_bot.apps.webapi",
+    "bfx_funding_bot.modules.api",
+    "bfx_funding_bot.modules.ledger",
+    "bfx_funding_bot.modules.marketfeed",
+]
+forbidden_modules = [
+    "bfx_funding_bot.modules.execution.amount_fingerprint",
+    "bfx_funding_bot.modules.execution.boot_recovery",
+    "bfx_funding_bot.modules.execution.capital_repository",
+    "bfx_funding_bot.modules.execution.event_store.historical_claims",
+    "bfx_funding_bot.modules.execution.event_store.projector",
+    "bfx_funding_bot.modules.execution.event_store.replay_verification",
+    "bfx_funding_bot.modules.execution.event_store.store",
+    "bfx_funding_bot.modules.execution.event_store.writer",
+    "bfx_funding_bot.modules.execution.registry_offers",
+]
+allow_indirect_imports = true
+ignore_imports = []
+broken_contract_guidance = "The ledger is the only capital authority; do not add ignores."
 
 [[tool.importlinter.contracts]]
 id = "planner-via-ports"
@@ -657,7 +687,6 @@ source_modules = ["bfx_funding_bot.modules.execution.deployment.reconciler"]
 # trading.fingerprint_of); fingerprints in use come from ManagedOfferReader.
 forbidden_modules = [
     "bfx_funding_bot.modules.execution.capital_repository",
-    "bfx_funding_bot.modules.execution.capital_runtime",
     "bfx_funding_bot.modules.execution.event_store.tables",
     "bfx_funding_bot.modules.execution.uncertainty_tables",
 ]

@@ -35,8 +35,9 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
 
     from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.ledger import Scope
+    from bfx_funding_bot.modules.ledger.wiring import build_policy_store
     from bfx_funding_bot.modules.trading import CapitalPolicy
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
@@ -47,7 +48,7 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
         ):
             monkeypatch.delenv(name)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
-        "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
+        "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
         "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
@@ -62,7 +63,7 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
     halt = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
     await halt.transition("HALTED", cause="operator", reason="retained halt", actor="test")
     if with_policy:
-        repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment="ci", max_snapshot_age_ms=10000)
+        repo = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci"))
         async with factory.begin() as session:
             await repo.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
                                     expected_revision=0, source={"fixture": True})
@@ -105,61 +106,8 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
         assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
         assert (await halt.current()).state == "HALTED"
 
-        # A later periodic observation must not supersede the boot snapshot
-        # without updating canonical capital. Exercise the assembled recovery
-        # chain and real DB; only the venue HTTP boundary is simulated.
-        httpx_mock.add_response(
-            url=re.compile(r"https://api\.bitfinex\.com/v2/auth/r/funding/(offers|credits|loans).*"),
-            method="POST", json=[], is_reusable=True,
-        )
-        httpx_mock.add_response(
-            url="https://api.bitfinex.com/v2/auth/r/wallets",
-            method="POST", json=[["funding", "UST", 1000, 0, 1000]], is_reusable=True,
-        )
-        from time import time_ns
-
-        from sqlalchemy import func, select
-
-        from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-
-        previous_seq = 0
-        for recovery in (daemon.boot_recovery, daemon.periodic_reconcile._recovery,
-                         daemon.periodic_reconcile._recovery):
-            await recovery.run(daemon.observation_scope)
-            async with factory.begin() as session:
-                capital = await repo.read_capital(
-                    session, symbol="fUST", cell_id="fUST_a30", now_ms=time_ns() // 1_000_000,
-                )
-                latest = await session.scalar(select(func.max(EventLogRow.event_seq)).where(
-                    EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED",
-                ))
-                assert capital.snapshot_seq == latest
-                assert capital.snapshot_seq > previous_seq
-                assert capital.budget.spendable == Decimal("1000")
-                previous_seq = capital.snapshot_seq
-            assert (await halt.current()).state == "HALTED"
-
-        # One changed wallet observation must invalidate authority, not reuse
-        # the previous successful snapshot or turn the persistent halt off.
-        from bfx_funding_bot.modules.execution.capital_policy_read import CapitalBlockedError
-
-        httpx_mock.add_response(
-            url="https://api.bitfinex.com/v2/auth/r/wallets",
-            method="POST", json=[["funding", "UST", 800, 0, 800]],
-        )
-        httpx_mock.add_response(
-            url="https://api.bitfinex.com/v2/auth/r/wallets",
-            method="POST", json=[["funding", "UST", 1000, 0, 1000]],
-        )
-        with pytest.raises(CapitalBlockedError, match="snapshot_unstable"):
-            await daemon.periodic_reconcile._recovery.run(daemon.observation_scope)
-        async with factory.begin() as session:
-            with pytest.raises(CapitalBlockedError, match="snapshot_query_pending"):
-                await repo.read_capital(
-                    session, symbol="fUST", cell_id="fUST_a30", now_ms=time_ns() // 1_000_000,
-                )
-        assert (await halt.current()).state == "HALTED"
-        assert all("/auth/w/" not in str(r.url) for r in httpx_mock.get_requests())
+        # What the observation cycle then does to capital is the ledger's, on PostgreSQL
+        # (tests/integration/test_ledger_observation.py, test_ledger_boot_e2e.py).
     finally:
         await engine.dispose()
 
@@ -179,9 +127,10 @@ async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_p
     from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
     from bfx_funding_bot.core.writer_lock import WriterLock
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
     from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.ledger import Scope
+    from bfx_funding_bot.modules.ledger.wiring import build_policy_store
     from bfx_funding_bot.modules.trading import CapitalPolicy
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
@@ -192,7 +141,7 @@ async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_p
         ):
             monkeypatch.delenv(name)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
-        "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
+        "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0", "BFX_KILL_SWITCH": "true",
         "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
@@ -206,7 +155,7 @@ async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_p
     factory = async_sessionmaker(engine, expire_on_commit=False)
     trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
     await trading.transition("ACTIVE", cause="operator", reason="trading before the kill", actor="test")
-    repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment="ci", max_snapshot_age_ms=10000)
+    repo = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci"))
     async with factory.begin() as session:
         await repo.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
                                 expected_revision=0, source={"fixture": True})
@@ -271,8 +220,9 @@ async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, 
 
     from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
-    from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.ledger import Scope
+    from bfx_funding_bot.modules.ledger.wiring import build_policy_store
     from bfx_funding_bot.modules.trading import CapitalPolicy
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
@@ -284,7 +234,7 @@ async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, 
         ):
             monkeypatch.delenv(name)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
-        "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
+        "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
         "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
@@ -298,7 +248,7 @@ async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
     await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
-    repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment="ci", max_snapshot_age_ms=10000)
+    repo = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci"))
     async with factory.begin() as session:
         await repo.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
                                 expected_revision=0, source={"fixture": True})
@@ -344,7 +294,7 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
-        "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_HEALTHZ_PORT": "0",
+        "BFX_EXECUTION_POLICY": "book_guarded", "BFX_HEALTHZ_PORT": "0",
         "BFX_BOOK_MAX_AGE_SECONDS": "30", "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
         "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
@@ -378,19 +328,18 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
 @pytest.mark.parametrize(("epoch", "match"), [
     ("drop", "authority_missing table"),
     ("empty", "authority_missing row"),
-    ("ledger", "authority_unsupported value=ledger"),
+    ("legacy", "authority_unsupported value=legacy"),
 ])
 async def test_live_boot_on_an_unsupported_authority_stops_trading_and_refuses(
         monkeypatch, tmp_path, httpx_mock, epoch, match):
     """Right after the schema head, the capital authority is read once through the
     same refusal: an epoch this build does not support or cannot read refuses the boot,
-    writes nothing and reaches no venue. Bitfinex now supports both authorities, so the
-    unsupported case is a build that predates the switch (a rollback onto a switched
-    database): its venue set is narrowed to ``legacy`` here."""
+    writes nothing and reaches no venue. The ledger is the only authority, so the
+    unsupported case is a database whose latest epoch is ``legacy`` (never switched, or
+    restored from before the switch)."""
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    from bfx_funding_bot.apps import bot
     from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.core.authority import AuthorityMismatch
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -398,10 +347,8 @@ async def test_live_boot_on_an_unsupported_authority_stops_trading_and_refuses(
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
-    if epoch == "ledger":
-        monkeypatch.setattr(bot, "supported_for_venue", lambda _venue: frozenset({"legacy"}))
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
-        "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_HEALTHZ_PORT": "0",
+        "BFX_EXECUTION_POLICY": "book_guarded", "BFX_HEALTHZ_PORT": "0",
         "BFX_BOOK_MAX_AGE_SECONDS": "30", "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
         "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
@@ -420,7 +367,7 @@ async def test_live_boot_on_an_unsupported_authority_stops_trading_and_refuses(
         else:
             await conn.execute(text(
                 "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-                "VALUES (2, 'ledger', 1, 'test', 'switched')"))
+                "VALUES (3, 'legacy', 1, 'test', 'restored')"))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
     await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
@@ -492,10 +439,8 @@ async def test_build_daemon_emit_and_query_env_symmetric(
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
     monkeypatch.delenv("BFX_EXECUTOR", raising=False)
-    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
     configure_live_wiring_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -559,8 +504,6 @@ async def test_build_daemon_reconcile_interval_zero_raises(
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
-    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
-    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -615,7 +558,6 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
-    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
@@ -632,7 +574,6 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
-    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -686,7 +627,6 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
-    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "optimizer_live")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
@@ -700,7 +640,6 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     configure_live_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
-    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -761,7 +700,6 @@ async def test_daemon_taskgroup_runs_book_service_through_its_finally_shutdown()
     daemon.boot_recovery = None
     daemon.writer_lock = None
     daemon.ws_client = None
-    daemon.fill_tracker = None
     daemon.ws_dispatcher = None
     daemon.book_snapshot_writer = None
     daemon.auth_ws = None
@@ -820,7 +758,6 @@ async def test_canary_build_wires_writer_lock_and_guard(
     monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
-    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
@@ -832,7 +769,6 @@ async def test_canary_build_wires_writer_lock_and_guard(
     configure_live_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
-    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url

@@ -13,11 +13,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from bfx_funding_bot.modules.execution.operator_evidence import LegacyOperatorEvidence
 from bfx_funding_bot.modules.ledger import Quarantine, ResolutionRejected, ResolutionSubject, Scope
 from bfx_funding_bot.modules.ledger.wiring import build_operator_evidence
 
-from .test_ledger_journal import JOURNAL, OBSERVATION_ID, SCOPE, _engine, _resolution
+from .test_ledger_journal import JOURNAL, SCOPE, _engine, _resolution
 from .test_ledger_schema_roles import (
     _observation_sql,
     ledger_db,  # noqa: F401 - seeded fixture dependency
@@ -145,7 +144,7 @@ async def test_p3_journal_rejects_nonlatest_or_unaccepted_observation(seeded_fix
 
 
 @pytest.mark.asyncio
-async def test_evidence_namespaces_are_not_interchangeable_pg(seeded_fixture):  # noqa: F811
+async def test_a_legacy_event_sequence_is_not_ledger_evidence_pg(seeded_fixture):  # noqa: F811
     engine = _engine(seeded_fixture)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
@@ -153,10 +152,6 @@ async def test_evidence_namespaces_are_not_interchangeable_pg(seeded_fixture):  
             subject = ResolutionSubject(uuid4(), "fUST")
             with pytest.raises(ResolutionRejected, match="stale_reconcile_fence"):
                 await PORT.verify(session, SCOPE, subject, "42", require_history=True)
-            with pytest.raises(ResolutionRejected, match="stale_reconcile_fence"):
-                await LegacyOperatorEvidence().verify(
-                    session, SCOPE, subject, f"ledger:v1:obs:{OBSERVATION_ID}", require_history=True
-                )
     finally:
         await engine.dispose()
 

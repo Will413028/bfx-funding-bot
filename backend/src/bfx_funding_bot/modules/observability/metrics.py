@@ -249,7 +249,7 @@ class DaemonMetrics:
         )
         self.reconcile_tick_duration = Histogram(
             "bfx_reconcile_tick_duration_seconds",
-            "Duration of one periodic venue reconcile tick (BootRecovery.run).",
+            "Duration of one periodic venue reconcile tick (the observation cycle's run).",
             registry=self.registry,
             buckets=_RECONCILE_BUCKETS,
         )
@@ -604,7 +604,7 @@ class _RecoveryRunner[**P, R](Protocol):
 class TimedReconcileRecovery[**P, R]:
     """Transparent timing wrapper around the reconcile backbone's recovery.run().
 
-    Injected between PeriodicReconcile and BootRecovery at wiring time so the
+    Injected between PeriodicReconcile and the observation sink at wiring time so the
     reconcile module itself stays untouched. Result and exceptions pass through
     unchanged; PeriodicReconcile's own failure handling sees exactly what the
     raw recovery would have produced.

@@ -78,8 +78,8 @@ log = logging.getLogger(__name__)
 _TRADES_PAGE = 1000
 _TRADES_MAX_PAGES = 10
 
-BITFINEX_CAPABILITIES = VenueCapabilities(auth_ws="required", rest_fill_tracker=True)
-SIMULATED_CAPABILITIES = VenueCapabilities(auth_ws="forbidden", rest_fill_tracker=False)
+BITFINEX_CAPABILITIES = VenueCapabilities(auth_ws="required")
+SIMULATED_CAPABILITIES = VenueCapabilities(auth_ws="forbidden")
 
 
 def fault_plan(spec: SimFaultSpec) -> FaultPlan:

@@ -52,7 +52,10 @@ from bfx_funding_bot.modules.ledger.wiring import (
 from .test_ledger_capital_reader import (
     book,  # noqa: F401 - fixture re-export
 )
-from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-export
+from .test_ledger_schema_roles import (
+    append_epoch,
+    ledger_db,  # noqa: F401 - fixture re-export
+)
 from .test_ledger_unknown_resolver_pg import (
     JOURNAL,
     SCOPE,
@@ -620,13 +623,13 @@ async def test_the_web_api_role_queues_and_the_bot_role_applies(book, ledger_db)
     bot, bot_factory = _role_factory(ledger_db, "bfx_bot")
     try:
         bind = intent(attempt, ref, "bind_to_venue", venue_offer_id="V1")
-        # Legacy epoch (the default): the web API may not cite a ledger observation.
+        # Before the switch (a legacy epoch): the web API may not cite a ledger observation.
+        with ledger_db.begin() as conn:
+            append_epoch(conn, "legacy", "before the switch")
         with pytest.raises(Exception, match="requires ledger authority"):
             await queue(web_factory, bind)
         with ledger_db.begin() as conn:
-            conn.exec_driver_sql(
-                "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-                "VALUES (2, 'ledger', 2, 'test', 'switch')")
+            append_epoch(conn, "ledger", "switch")
         request_id = await queue(web_factory, bind)
         # ...and may not hand it a legacy sequence under the ledger epoch.
         with pytest.raises(Exception, match="closed under ledger authority"):
@@ -702,10 +705,6 @@ async def test_the_web_api_role_refuses_a_wrong_bind_when_queueing(book, ledger_
     attempt, ref = await open_unknown(book, offers=(venue_offer("V1"), venue_offer("V2")))
     web, web_factory = _role_factory(ledger_db, "bfx_webapi")
     try:
-        with ledger_db.begin() as conn:
-            conn.exec_driver_sql(
-                "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-                "VALUES (2, 'ledger', 2, 'test', 'switch')")
         # Two exact candidates: neither bind nor not-accepted may be queued.
         with pytest.raises(RequestRefused, match="venue_offer_match_not_exact"):
             await queue(web_factory, intent(attempt, ref, "bind_to_venue", venue_offer_id="V1"))

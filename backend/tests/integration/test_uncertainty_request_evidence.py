@@ -24,7 +24,7 @@ from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.execution.uncertainty_tables import UncertaintyResolutionRequestRow
 from tests.pg_templates import alembic
 
-from .test_ledger_schema_roles import _A, _O, _build, _seed
+from .test_ledger_schema_roles import _A, _O, _build, _seed, append_epoch, pre_switch
 
 pytestmark = pytest.mark.integration
 
@@ -37,6 +37,7 @@ def seeded(pg_templates, pg_clone):
     url = pg_clone(pg_templates.template("ledger_s1_roles", _build))
     engine = create_engine(url)
     with engine.begin() as conn:
+        pre_switch(conn)  # the request evidence rule is tested across the switch
         _seed(conn)
     try:
         yield engine
@@ -93,10 +94,7 @@ def _apply_as_bot(conn, request_id: str, *, resolved_event_seq: str = "NULL") ->
 
 
 def _set_epoch(conn, authority: str) -> None:
-    conn.exec_driver_sql(
-        "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-        f"VALUES (2, '{authority}', 2, 'test', 'switch')"
-    )
+    append_epoch(conn, authority, "switch")
 
 
 def test_exactly_one_evidence_column(seeded) -> None:

@@ -21,7 +21,8 @@ TEST_VAULT_KEK_B64 = base64.b64encode(TEST_VAULT_KEK).decode()
 
 
 async def stamp_schema_head(engine: AsyncEngine, *, realm: str | None = None) -> None:
-    """Record this build's schema head, the seeded ``legacy`` capital authority and the
+    """Record this build's schema head, the capital authority epochs a fresh database holds
+    at head (the seeded ``legacy`` row and the ``ledger`` genesis, ``b1c2d3e4f5a6``) and the
     database realm (``ci`` unless a test boots as another realm), as ``alembic upgrade``
     plus the owner's one-time stamp would on Postgres."""
     import os
@@ -40,6 +41,10 @@ async def stamp_schema_head(engine: AsyncEngine, *, realm: str | None = None) ->
                 "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
                 "SELECT 1, 'legacy', 0, 'test', 'initial authority' "
                 "WHERE NOT EXISTS (SELECT 1 FROM capital_authority_epoch)"))
+            await conn.execute(text(
+                "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
+                "SELECT 2, 'ledger', 0, 'test', 'genesis: no legacy history' "
+                "WHERE (SELECT max(epoch_seq) FROM capital_authority_epoch) = 1"))
         if await conn.run_sync(lambda sync: inspect(sync).has_table("database_realm")):
             await conn.execute(text(
                 "INSERT INTO database_realm (realm, stamped_at_ms, actor) "
@@ -56,11 +61,10 @@ def configure_account_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def configure_live_wiring_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:  # type: ignore[no-untyped-def]
-    """Normal live construction: explicit account, live phase, projector version."""
+    """Normal live construction: explicit account, live phase."""
     configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
-    monkeypatch.setenv("BFX_PROJECTOR_VERSION", "execution-state-v1")
 
 
 async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool = True) -> None:
@@ -95,14 +99,14 @@ async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool =
             )
         )
     if capital_policies:
-        from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+        from bfx_funding_bot.modules.ledger import Scope
+        from bfx_funding_bot.modules.ledger.wiring import build_policy_store
         from bfx_funding_bot.modules.trading import CapitalPolicy
         for environment in ("ci", "prod", "shadow"):
-            repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID,
-                                     environment=environment, max_snapshot_age_ms=10000)
+            store = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID, environment))
             async with factory.begin() as session:
                 for symbol in ("fUST", "fUSD"):
-                    await repo.apply_policy(session, symbol=symbol,
+                    await store.apply_policy(session, symbol=symbol,
                         policy=CapitalPolicy(enabled=symbol == "fUST"), expected_revision=0,
                         source={"synthetic_fixture": True})
 
@@ -124,11 +128,11 @@ def live_construction_env(
     for name in list(os.environ):
         if name.startswith("BFX_CANARY_") or name in (
             "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
-            "BFX_EXECUTOR", "BFX_FILL_TRACKER_ENABLED",
+            "BFX_EXECUTOR", "BFX_FILL_TRACKER_ENABLED", "BFX_WS_CLIENT_ENABLED",
         ):
             monkeypatch.delenv(name)
     values = {
-        "BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_WS_CLIENT_ENABLED": "true",
+        "BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
@@ -206,15 +210,6 @@ def go_offline(daemon) -> None:  # type: ignore[no-untyped-def]
     daemon.credit_history_sync = None
 
 
-def paper_ledger_of(daemon):  # type: ignore[no-untyped-def]
-    """The legacy paper-position projection, found where it listens: on the bus."""
-    from bfx_funding_bot.modules.execution.events import PositionReconciled
-    from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
-    (ledger,) = {h.__self__ for h in daemon.bus._handlers[PositionReconciled]
-                 if isinstance(getattr(h, "__self__", None), PaperPositionLedger)}
-    return ledger
-
-
 __all__ = [
     "TEST_EXCHANGE_ACCOUNT_ID",
     "TEST_VAULT_KEK_B64",
@@ -223,7 +218,6 @@ __all__ = [
     "configure_live_wiring_env",
     "go_offline",
     "live_construction_env",
-    "paper_ledger_of",
     "seed_exchange_account",
     "stamp_schema_head",
     "write_cells_yaml",

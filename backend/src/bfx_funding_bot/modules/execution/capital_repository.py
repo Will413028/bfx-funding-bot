@@ -19,14 +19,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
-
-# Re-exported for accounts.capital_conversion only: its import of this module is an
-# ignored sibling edge (modules-acyclic), and a new edge to the policy reader would need
-# another ignore. It goes with the legacy repository.
 from bfx_funding_bot.modules.execution.capital_policy_read import (
-    CapitalBlockedError as CapitalBlockedError,
-)
-from bfx_funding_bot.modules.execution.capital_policy_read import (
+    CapitalBlockedError,
     policy_from_row,
     read_policy_row,
 )

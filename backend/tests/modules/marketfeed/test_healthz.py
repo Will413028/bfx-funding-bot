@@ -35,7 +35,7 @@ def _probe_with(
 
 
 def test_healthz_returns_200_when_all_sub_tasks_fresh() -> None:
-    probe = _probe_with(fresh=["ws", "scheduler", "candle_writer", "fill_tracker"])
+    probe = _probe_with(fresh=["ws", "scheduler", "candle_writer", "periodic_reconcile"])
     client = TestClient(make_app(probe))
     resp = client.get("/healthz")
     assert resp.status_code == 200
@@ -62,14 +62,14 @@ def test_healthz_returns_503_when_any_sub_task_stale() -> None:
 def test_healthz_returns_503_when_multiple_sub_tasks_stale() -> None:
     probe = _probe_with(
         fresh=["scheduler"],
-        stale=["ws", "fill_tracker"],
+        stale=["ws", "periodic_reconcile"],
     )
     client = TestClient(make_app(probe))
     resp = client.get("/healthz")
     assert resp.status_code == 503
     body = resp.json()
     stale_tasks = sorted(s["task"] for s in body["stale"])
-    assert stale_tasks == ["fill_tracker", "ws"]
+    assert stale_tasks == ["periodic_reconcile", "ws"]
 
 
 def test_healthz_returns_503_when_no_liveness_sub_tasks_registered() -> None:

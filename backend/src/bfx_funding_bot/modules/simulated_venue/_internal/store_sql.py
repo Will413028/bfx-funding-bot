@@ -74,8 +74,8 @@ class SqlVenueEventStore:
     async def authority_epoch(self) -> str:
         """The raw latest authority epoch, read on a connection of this store's engine.
 
-        Raw on purpose: `core.authority.read_authority` refuses `ledger` while this build
-        still supports only `legacy`, and the venue must see the true value.
+        Raw on purpose: the venue reports the true value in its own refusal, independent of
+        the support set the bot's `core.authority.read_authority` checks against.
         """
         try:
             async with self._engine.connect() as conn:

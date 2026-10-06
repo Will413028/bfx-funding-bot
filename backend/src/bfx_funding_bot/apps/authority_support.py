@@ -1,22 +1,20 @@
-"""Which capital authorities each process may run under (the one place that says so).
+"""The capital authority every process runs under, and the ledger's boot guard for the seed.
 
-A process refuses to boot on an authority outside its set (``core.authority``), so a
-database switched to ``ledger`` never meets a process that still writes ``legacy``. The sets
-are per venue and per realm; there is no build-wide set. The database's epoch picks one of
-them (ADR 2026-10-02 D2); only the owner appends it (the S1-7 switch).
+The ledger is the only capital authority (S1-8). ``capital_authority_epoch`` still names
+it, and every process (the bot on either venue, the web API, the owner's policy script)
+refuses a database whose latest epoch is not ``ledger`` (``core.authority``): a database
+that was never switched, or a backup restored from before the switch, is not one this build
+may run on. A database without legacy history starts on the ledger at migration
+(``b1c2d3e4f5a6``); one with legacy history only through the S1-7 switch.
 
-* ``bitfinex`` runs either authority: legacy until the switch, the ledger after it.
-* ``simulated`` is born on the ledger: the legacy authority was never built for it.
-* The web API has no simulated counterpart and reads either authority.
-* The owner's policy script follows the database's realm; every known realm holds either.
-
-A switched database must also hold the seed (H-1, 2026-10-05): the real venue in the realm
-that has legacy history (``prod``) refuses a ``ledger`` boot until every configured scope has
-its ``legacy_seed`` observation (``require_ledger_seed``). Without it the first runtime basis
-is a ``baseline`` that disowns every resting offer and open credit, and the seed could never
-run afterwards (it refuses a non-empty ledger). A simulation database (``shadow``) is
-bootstrapped on the ledger without a seed and a ``ci`` database holds no legacy history, so
-neither needs one.
+A scope with legacy history must also hold the seed (H-1, 2026-10-05): the bot on the real
+venue refuses to boot until such a scope has its ``legacy_seed`` observation
+(``require_ledger_seed``). Without it the first runtime basis is a ``baseline`` that
+disowns every resting offer and open credit the legacy authority placed, and the seed could
+never run afterwards (it refuses a non-empty ledger). A scope without legacy history (a
+fresh host) needs no seed: whatever rests at the venue is foreign to the ledger, which is
+what it is. The simulated venue never needs one: its offers live in its own log, never in
+the legacy history.
 """
 from __future__ import annotations
 
@@ -27,50 +25,34 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.authority import Authority, AuthorityMismatch
 from bfx_funding_bot.core.venue import Venue
+from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger.tables import LedgerObservationRow
 
-SUPPORTED_BY_VENUE: Final[dict[Venue, frozenset[Authority]]] = {
-    "bitfinex": frozenset({"legacy", "ledger"}),
-    "simulated": frozenset({"ledger"}),
-}
-WEBAPI_SUPPORTED: Final[frozenset[Authority]] = frozenset({"legacy", "ledger"})
-_POLICY_SCRIPT_BY_REALM: Final[dict[str, frozenset[Authority]]] = {
-    "prod": frozenset({"legacy", "ledger"}),
-    "shadow": frozenset({"legacy", "ledger"}),
-    "ci": frozenset({"legacy", "ledger"}),
-}
-# The realms whose database holds legacy history: a ledger boot there needs the seed.
-_SEEDED_REALMS: Final[frozenset[str]] = frozenset({"prod"})
+SUPPORTED: Final[frozenset[Authority]] = frozenset({"ledger"})
 
 
-def supported_for_venue(venue: Venue) -> frozenset[Authority]:
-    return SUPPORTED_BY_VENUE[venue]
-
-
-def supported_for_policy_script(realm: str) -> frozenset[Authority]:
-    """A realm outside the known three has no set: the script refuses it."""
-    try:
-        return _POLICY_SCRIPT_BY_REALM[realm]
-    except KeyError:
-        raise ValueError(f"no capital authority is supported for realm {realm!r}") from None
-
-
-def ledger_boot_needs_seed(venue: Venue, realm: str) -> bool:
-    """A real (non-simulated) venue in a realm with legacy history boots the ledger only
-    over the seed."""
-    return venue != "simulated" and realm in _SEEDED_REALMS
+async def has_legacy_history(session: AsyncSession, scope: Scope) -> bool:
+    """Whether the frozen ``event_log`` holds a row of ``scope`` (``exchange_account_id`` is
+    NOT NULL in the database since ``9b2c3d4e5f6a``)."""
+    found = await session.scalar(
+        select(EventLogRow.event_seq).where(
+            EventLogRow.exchange_account_id == scope.exchange_account_id,
+            EventLogRow.deployment_environment == scope.deployment_environment,
+        ).limit(1)
+    )
+    return found is not None
 
 
 async def require_ledger_seed(
-    session: AsyncSession, *, authority: Authority, venue: Venue, scopes: tuple[Scope, ...]
+    session: AsyncSession, *, venue: Venue, scopes: tuple[Scope, ...]
 ) -> None:
-    """Refuse (AuthorityMismatch) a ``ledger`` boot of a real venue in a seeded realm while
-    any of ``scopes`` lacks its ``legacy_seed`` observation; every other boot passes."""
-    if authority != "ledger":
+    """Refuse (AuthorityMismatch) a real-venue boot while any of ``scopes`` has legacy
+    history but no ``legacy_seed`` observation; every other boot passes."""
+    if venue == "simulated":
         return
     for scope in scopes:
-        if not ledger_boot_needs_seed(venue, scope.deployment_environment):
+        if not await has_legacy_history(session, scope):
             continue
         seeded = await session.scalar(
             select(LedgerObservationRow.id).where(

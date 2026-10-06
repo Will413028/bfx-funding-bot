@@ -132,7 +132,7 @@ async def _ensure_policy(
     session: AsyncSession, *, scope: Scope, symbol: str, target: CapitalPolicy,
 ) -> str:
     """Write ``target`` as the next revision unless it is already what is applied."""
-    policy = select_policy_ports("ledger", scope, max_snapshot_age_ms=60_000)
+    policy = select_policy_ports(scope)
     await policy.scope_lock.lock(session, scope)
     try:
         applied = await policy.store.read_applied(session, symbol=symbol)

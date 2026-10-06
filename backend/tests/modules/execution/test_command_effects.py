@@ -1,4 +1,4 @@
-"""What follows a durable command outcome, per authority (statement order is the contract)."""
+"""What follows a durable command outcome: the ledger only announces it."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationFailed,
     ReservationUnknown,
 )
-from bfx_funding_bot.modules.execution.legacy_command_effects import LegacyCommandEffects
 from bfx_funding_bot.modules.ledger import CommandOutcome, Scope
 
 SCOPE = Scope(uuid4(), "ci")
@@ -43,7 +42,7 @@ def _outcome(kind: str, offer: str | None = None, reason: str | None = None,
 
 
 class _Trace:
-    """One ordered record of persister, bus and handler calls."""
+    """One ordered record of bus publications."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
@@ -55,62 +54,6 @@ class _Trace:
         for event_type in (ReservationClaimed, OrderFilled, CommandOutcomeNotice,
                            ReservationFailed, ReservationUnknown):
             self.bus.subscribe(event_type, on)
-
-    async def persist(self, *events) -> None:
-        self.calls.append(("persist", "+".join(type(event).__name__ for event in events)))
-
-    async def handler(self, event: ReservationUnknown) -> None:
-        self.calls.append(("uncertainty", type(event).__name__))
-
-
-def _legacy(trace: _Trace) -> LegacyCommandEffects:
-    return LegacyCommandEffects(trace, trace.bus, trace.handler)  # type: ignore[arg-type]
-
-
-@pytest.mark.asyncio
-async def test_legacy_filled_ack_persists_the_fill_before_either_publish() -> None:
-    trace = _Trace()
-    await _legacy(trace).outcome_recorded(_facts(filled=True), _outcome("ack", "m-1"))
-    assert trace.calls == [("persist", "OrderFilled"), ("publish", "ReservationClaimed"),
-                           ("publish", "OrderFilled")]
-
-
-@pytest.mark.asyncio
-async def test_legacy_plain_ack_only_publishes_the_claim() -> None:
-    trace = _Trace()
-    await _legacy(trace).outcome_recorded(_facts(), _outcome("ack", "m-1"))
-    assert trace.calls == [("publish", "ReservationClaimed")]
-
-
-@pytest.mark.asyncio
-async def test_legacy_unknown_opens_the_uncertainty_and_publishes_nothing() -> None:
-    trace = _Trace()
-    await _legacy(trace).outcome_recorded(_facts(), _outcome("unknown", None, "timeout"))
-    assert trace.calls == [("uncertainty", "ReservationUnknown")]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["rejected", "not_sent"])
-async def test_legacy_failures_have_no_effect_after_the_journal(kind) -> None:
-    trace = _Trace()
-    await _legacy(trace).outcome_recorded(_facts(), _outcome(kind, None, "why"))
-    assert trace.calls == []
-
-
-@pytest.mark.asyncio
-async def test_legacy_events_carry_the_stored_row_identity() -> None:
-    trace = _Trace()
-    event_id = uuid4()
-    handled: list[ReservationUnknown] = []
-
-    async def handler(event: ReservationUnknown) -> None:
-        handled.append(event)
-
-    effects = LegacyCommandEffects(trace, trace.bus, handler)  # type: ignore[arg-type]
-    await effects.outcome_recorded(_facts(), _outcome("unknown", None, "timeout", event_id=event_id))
-    assert [event.event_id for event in handled] == [event_id]
-    assert handled[0].reason == "timeout" and handled[0].reservation_ref.cid == 7
-    assert effects.new_event_id() != effects.new_event_id()
 
 
 @pytest.mark.asyncio

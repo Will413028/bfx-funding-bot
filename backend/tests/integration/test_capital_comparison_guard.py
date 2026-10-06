@@ -2,8 +2,7 @@
 
 Every test runs against a real migrated database: the LOGIN is a ``NOINHERIT`` member of
 ``bfx_cutover_reader`` (the runbook shape), the guard does ``SET LOCAL ROLE`` to the group
-and the privilege scans read the real catalogs. The whole cutover command under this shape,
-on a seeded database, is ``test_capital_comparison_cutover_e2e``.
+and the privilege scans read the real catalogs.
 
 Mutations (apply one at a time, run this file, revert; the test that fails is named):
 

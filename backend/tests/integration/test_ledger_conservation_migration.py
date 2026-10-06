@@ -17,7 +17,13 @@ from sqlalchemy import create_engine, inspect, text
 
 from tests.pg_templates import alembic
 
-from .test_ledger_schema_roles import _B, _seed, ledger_db, seeded  # noqa: F401 - fixtures
+from .test_ledger_schema_roles import (  # noqa: F401 - fixtures
+    _B,
+    _seed,
+    append_epoch,
+    ledger_db,
+    seeded,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -164,10 +170,7 @@ def test_verdict_is_immutable_and_only_the_bot_writes_it(seeded) -> None:  # noq
         with pytest.raises(Exception, match=r"immutable|permission denied"), seeded.begin() as conn:
             conn.exec_driver_sql(statement)
     with seeded.begin() as conn:
-        conn.exec_driver_sql(
-            "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-            "VALUES (2, 'ledger', 2, 'test', 'conservation grants')"
-        )
+        append_epoch(conn, "ledger", "conservation grants")
     with seeded.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         _insert(conn, "conserved", "0", "0", symbol="fBot")

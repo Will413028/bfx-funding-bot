@@ -26,15 +26,13 @@ from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
     ReadyToSubmit,
 )
-from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
-from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
+from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.observability.resource import (
     DeploymentEnvironment,
     EventResource,
@@ -117,12 +115,11 @@ class _StubExecutor:
         return self.order
 
 
-def _reconcile_result() -> ReconcileResult:
-    return ReconcileResult(
-        n_released=0, n_claimed=0, n_failed=0,
-        realized_drift_usdt=Decimal("0"), reserved_drift_usdt=Decimal("0"),
-        venue_offers=(),
-    )
+_SCOPE = Scope(uuid4(), "ci")
+
+
+def _reconcile_result() -> CycleResult:
+    return CycleResult("accepted")
 
 
 # ── env parsing / default-off ────────────────────────────────────────────────
@@ -285,11 +282,11 @@ async def test_reconcile_wrapper_passthrough_and_span() -> None:
     result = _reconcile_result()
 
     class _StubRecovery:
-        async def run(self) -> ReconcileResult:
+        async def run(self, scope: Scope) -> CycleResult:
             return result
 
     wrapper = TracedReconcileRecovery(_StubRecovery(), tracing=t)
-    got = await wrapper.run()
+    got = await wrapper.run(_SCOPE)
     assert got is result
     (span,) = exporter.get_finished_spans()
     assert span.name == "reconcile.tick"
@@ -304,12 +301,12 @@ async def test_reconcile_wrapper_exception_passthrough() -> None:
     boom = ConnectionError("venue fetch failed")
 
     class _BoomRecovery:
-        async def run(self) -> ReconcileResult:
+        async def run(self, scope: Scope) -> CycleResult:
             raise boom
 
     wrapper = TracedReconcileRecovery(_BoomRecovery(), tracing=t)
     with pytest.raises(ConnectionError) as exc_info:
-        await wrapper.run()
+        await wrapper.run(_SCOPE)
     assert exc_info.value is boom
     (span,) = exporter.get_finished_spans()
     assert span.status.status_code is StatusCode.ERROR
@@ -324,19 +321,25 @@ class _StubWSClient:
         raise NotImplementedError
 
 
-class _StubRegistry:
+class _StubHintSink:
+    """A venue hint sink that fails on every hint when built with ``exc``."""
+
     def __init__(self, exc: Exception | None = None) -> None:
         self.exc = exc
 
-    def snapshot(self) -> dict[str, Any]:
+    async def _hint(self) -> None:
         if self.exc is not None:
             raise self.exc
-        return {}
 
+    async def offer_closed(self, hint: Any) -> None:
+        await self._hint()
 
-class _StubBus:
-    async def publish(self, ev: Any) -> None:  # pragma: no cover
-        raise NotImplementedError
+    async def credit_closed(self, hint: Any) -> None:
+        await self._hint()
+
+    async def offer_gone(self, venue_offer_id: str, *, occurred_at_ms: int) -> bool:
+        await self._hint()
+        return True
 
 
 class _StubSink:
@@ -344,10 +347,10 @@ class _StubSink:
         raise NotImplementedError
 
 
-def _dispatcher(registry: _StubRegistry | None = None) -> BitfinexLiveWSDispatcher:
+def _dispatcher(sink: _StubHintSink | None = None) -> BitfinexLiveWSDispatcher:
     return BitfinexLiveWSDispatcher(
-        ws_client=_StubWSClient(),
-        event_sink=_StubSink(), venue_hint_sink=LegacyVenueHintSink(registry=registry or _StubRegistry(), bus=_StubBus(), persister=NoopEventPersister(), account_id=None))
+        ws_client=_StubWSClient(), event_sink=_StubSink(),
+        venue_hint_sink=sink or _StubHintSink())
 
 
 async def test_ws_dispatcher_instrumented_process_spans() -> None:
@@ -355,7 +358,7 @@ async def test_ws_dispatcher_instrumented_process_spans() -> None:
     t = _enabled_tracing(exporter)
     dispatcher = _dispatcher()
     instrument_ws_dispatcher(dispatcher, tracing=t)
-    await dispatcher._process(object())  # unknown event type → translate no-op
+    await dispatcher._process(object())  # unknown event type → no hint
     (span,) = exporter.get_finished_spans()
     assert span.name == "ws_dispatcher.process"
     assert span.attributes is not None
@@ -368,11 +371,11 @@ async def test_ws_dispatcher_instrumented_process_exception_passthrough() -> Non
 
     exporter = InMemorySpanExporter()
     t = _enabled_tracing(exporter)
-    boom = RuntimeError("registry broken")
-    dispatcher = _dispatcher(registry=_StubRegistry(exc=boom))
+    boom = RuntimeError("hint sink broken")
+    dispatcher = _dispatcher(_StubHintSink(exc=boom))
     instrument_ws_dispatcher(dispatcher, tracing=t)
     with pytest.raises(RuntimeError) as exc_info:
-        # Only lifecycle hints consult the legacy registry after port extraction.
+        # A closing offer is handed to the sink, whose failure passes through the span.
         await dispatcher._process(FocEvent(
             venue_offer_id="42", symbol="fUST", mts_create=1000, mts_update=2000,
             amount=Decimal("100"), status="EXECUTED", rate=0.0005,

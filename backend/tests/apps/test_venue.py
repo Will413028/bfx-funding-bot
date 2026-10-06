@@ -42,10 +42,8 @@ KEK_B64 = base64.b64encode(bytes(range(32))).decode()
 
 
 def test_the_capabilities_each_wiring_states() -> None:
-    assert (BITFINEX_CAPABILITIES.auth_ws, BITFINEX_CAPABILITIES.rest_fill_tracker) == (
-        "required", True)
-    assert (SIMULATED_CAPABILITIES.auth_ws, SIMULATED_CAPABILITIES.rest_fill_tracker) == (
-        "forbidden", False)
+    assert BITFINEX_CAPABILITIES.auth_ws == "required"
+    assert SIMULATED_CAPABILITIES.auth_ws == "forbidden"
 
 
 def test_simulated_credentials_are_generated_per_call_and_never_touch_the_vault(

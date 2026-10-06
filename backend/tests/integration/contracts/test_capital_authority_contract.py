@@ -1,8 +1,4 @@
-"""``CapitalAuthority``: the same port-level observables on the legacy and ledger stacks.
-
-Intended divergences are named in the tests that have them (basis token shape,
-the reason code of a missing snapshot); every other assertion is shared.
-"""
+"""``CapitalAuthority``: the port-level observables on the ledger stack."""
 
 from __future__ import annotations
 
@@ -31,7 +27,7 @@ async def test_budget_of_a_simple_snapshot(port_stack) -> None:
     assert read.budget.spendable == Decimal("900")  # 1000 less the 100 reserve
     assert read.applied.revision == 1 and read.applied.symbol == "fUST"
     assert read.unattributed_credit_exposure == 0
-    assert read.basis_token  # opaque; the shape differs by authority (below)
+    assert read.basis_token  # opaque (its prefix: below)
 
 
 async def test_basis_token_is_opaque_and_follows_the_basis(port_stack) -> None:
@@ -45,10 +41,9 @@ async def test_basis_token_is_opaque_and_follows_the_basis(port_stack) -> None:
     moved = await _read(port_stack)
     assert isinstance(moved, CapitalAvailable)
     assert moved.basis_token != first.basis_token
-    # Intended divergence: legacy names the snapshot event, the ledger (query, clock). The
-    # ledger's token also moves with a command (clock bump), legacy's does not: see
+    # The token names (query, clock); it also moves with a command (clock bump): see
     # test_ledger_read_ports.py.
-    assert moved.basis_token.startswith("ledger:v1:") == (port_stack.name == "ledger")
+    assert moved.basis_token.startswith("ledger:v1:")
 
 
 async def test_unreflected_commitment_is_charged_once(port_stack) -> None:

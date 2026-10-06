@@ -285,10 +285,10 @@ class CreditCloseHint:
 
 
 class VenueHintSink(Protocol):
-    """Scope is bound at construction, like the legacy registry/account.
+    """Scope is bound at construction.
 
-    Legacy persists authority before publishing. Ledger requests reconciliation
-    and publishes only non-authoritative notifications, without any DB writes.
+    The sink requests reconciliation and publishes only non-authoritative
+    notifications, without any DB writes.
     offer_gone returns False only when the caller should retry next poll.
     """
 

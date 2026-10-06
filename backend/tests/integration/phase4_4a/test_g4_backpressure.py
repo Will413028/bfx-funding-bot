@@ -9,9 +9,8 @@ from typing import Any
 import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_ws import BfxWSEvent, FcnEvent
-from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
-from bfx_funding_bot.modules.execution.legacy_venue_hints import LegacyVenueHintSink
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
+from tests.external.bitfinex.test_ws_dispatcher_integration import _RecordingSink
 
 
 class _FloodingWSClient:
@@ -38,10 +37,9 @@ class _FloodingWSClient:
         self._stop = True
 
 
-class _SlowEventSink:
-    """Slow event sink to keep the consumer busy so queue depth can build up."""
+class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
-        await asyncio.sleep(0.005)
+        pass
 
 
 class _ObservingDispatcher(BitfinexLiveWSDispatcher):
@@ -63,32 +61,28 @@ class _ObservingDispatcher(BitfinexLiveWSDispatcher):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_dispatcher_queue_full_pauses_producer(
-    domain_chain: dict[str, Any], event_sink_stub: Any,
-) -> None:
-    bus = domain_chain["bus"]
-    registry = domain_chain["registry"]
-
+async def test_dispatcher_queue_full_pauses_producer() -> None:
     queue_max = 5
     fake_ws = _FloodingWSClient(count=100)
     dispatcher = _ObservingDispatcher(
-        ws_client=fake_ws, event_sink=_SlowEventSink(), clock=lambda: 2000, queue_max=queue_max,
-        venue_hint_sink=LegacyVenueHintSink(
-            registry=registry, bus=bus, persister=NoopEventPersister(), account_id=None),
+        ws_client=fake_ws, event_sink=_EventCapture(), clock=lambda: 2000, queue_max=queue_max,
+        venue_hint_sink=_RecordingSink(),
     )
 
     stop = asyncio.Event()
     task = asyncio.create_task(dispatcher.run(stop))
 
-    # Allow enough time for the producer to flood and get blocked
-    await asyncio.sleep(0.3)
+    # Wait (bounded) until the producer delivered everything; no fixed sleep.
+    async def drained() -> None:
+        while fake_ws._produced < 100 or dispatcher.queue_depth > 0:
+            await asyncio.sleep(0)
 
-    stop.set()
     try:
-        await asyncio.wait_for(task, timeout=3.0)
-    except (TimeoutError, asyncio.CancelledError):
-        task.cancel()
-    await fake_ws.close()
+        await asyncio.wait_for(drained(), timeout=5.0)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+        await fake_ws.close()
 
     # The bounded queue must never exceed queue_max
     assert dispatcher.max_observed_depth <= queue_max

@@ -1,8 +1,7 @@
 """Ledger implementations of the facade's consumer read ports (S1-3e1).
 
-Apps select them by authority epoch (``apps/bot_ports.py``). They answer the same
-Protocols the legacy adapters do, from the ledger's journals, accepted basis and
-offer mirror; a consumer never learns which one it holds.
+Apps build them (``apps/bot_ports.py``). They answer the facade's Protocols from the
+ledger's journals, accepted basis and offer mirror.
 """
 
 from __future__ import annotations

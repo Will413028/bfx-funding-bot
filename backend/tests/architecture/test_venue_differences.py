@@ -24,9 +24,9 @@ def test_no_consumer_compares_a_venue_name_or_reads_config_venue() -> None:
             code = line.split("#", 1)[0]
             if COMPARES.search(code) or ATTRIBUTE.search(code):
                 offenders.append(f"{rel}:{number}: {line.strip()}")
-    # ``apps/bot.py`` passes ``config.venue`` to the authority map and the seed rule
-    # (``apps/authority_support.py``); nothing else may.
-    allowed = ("supported_for_venue", "require_ledger_seed")
+    # ``apps/bot.py`` passes ``config.venue`` to the seed rule (``apps/authority_support.py``);
+    # nothing else may.
+    allowed = ("require_ledger_seed",)
     assert [o for o in offenders
             if not o.startswith("apps/bot.py") or not any(a in o for a in allowed)] == []
 

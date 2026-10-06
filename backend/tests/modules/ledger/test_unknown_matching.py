@@ -42,10 +42,8 @@ def decide(*, match=None, ev=None, t=None, attributed=(), shared=(), settle=SETT
     )
 
 
-def test_settle_window_equals_legacy_boot_recovery() -> None:
-    from bfx_funding_bot.modules.execution.boot_recovery import UNKNOWN_SETTLE_MS as LEGACY
-
-    assert UNKNOWN_SETTLE_MS == LEGACY == 120_000
+def test_settle_window_is_two_minutes() -> None:
+    assert UNKNOWN_SETTLE_MS == 120_000
 
 
 # --- candidate rule ---------------------------------------------------------------

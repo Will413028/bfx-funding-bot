@@ -37,6 +37,7 @@ MAX_IGNORES_BY_ID = {
     "trading-shadow-wiring-is-top": 0,
     "trading-shadow-independent-loader": 0,
     "trading-shadow-no-baseline-adapter": 0,
+    "runtime-not-legacy-authority": 0,
     "trading-is-pure": TRADING_IS_PURE_MAX_IGNORES,
     "apps-is-top": APPS_IS_TOP_MAX_IGNORES,
     "core-is-leaf": CORE_IS_LEAF_MAX_IGNORES,
@@ -177,8 +178,7 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     } <= set(independent["forbidden_modules"])
     legacy_authority = {
         f"bfx_funding_bot.modules.execution.{name}"
-        for name in ("capital_repository", "capital_runtime", "event_store.tables",
-                     "uncertainty_tables")
+        for name in ("capital_repository", "event_store.tables", "uncertainty_tables")
     }
     consumers = contracts_by_id["capital-consumers-via-ports"]
     assert set(consumers["source_modules"]) == {
@@ -203,6 +203,20 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     for contract in (consumers, planner):
         assert contract["type"] == "forbidden"
         assert contract["allow_indirect_imports"] is True
+    # What is left of the legacy authority (DR replay, switch scaffolding) stays out of the
+    # processes that lend and serve.
+    runtime = contracts_by_id["runtime-not-legacy-authority"]
+    assert {
+        "bfx_funding_bot.apps.bot", "bfx_funding_bot.apps.bot_ports",
+        "bfx_funding_bot.apps.webapi", "bfx_funding_bot.apps.read_models",
+        "bfx_funding_bot.modules.ledger", "bfx_funding_bot.modules.api",
+    } <= set(runtime["source_modules"])
+    assert {
+        "bfx_funding_bot.modules.execution.capital_repository",
+        "bfx_funding_bot.modules.execution.boot_recovery",
+        "bfx_funding_bot.modules.execution.event_store.store",
+        "bfx_funding_bot.modules.execution.event_store.writer",
+    } <= set(runtime["forbidden_modules"])
 
 
 def test_research_scripts_obtain_strategy_wiring_through_apps() -> None:

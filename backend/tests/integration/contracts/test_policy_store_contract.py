@@ -1,8 +1,7 @@
-"""``PolicyStore``: read and amend the applied policy, the same on both authorities.
+"""``PolicyStore``: read and amend the applied policy on the ledger.
 
-The legacy store replays the event stream under the scope lock first; the ledger one never
-touches it. What a caller can observe is identical: the revision a head names, the refusals,
-the lost-update guard.
+The store never touches the frozen legacy event stream. What a caller observes: the
+revision a head names, the refusals, the lost-update guard.
 
 Mutations (one at a time; revert after each): the ledger store skips the head check
 (``revision_changed``), enables fUSD, returns a revision other than the one written, or
@@ -16,23 +15,18 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import func, select
 
-from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
-from bfx_funding_bot.modules.execution.legacy_ports import LegacyPolicyStore
 from bfx_funding_bot.modules.ledger import PolicyRefused, PolicyStore
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store
 from bfx_funding_bot.modules.trading import CapitalPolicy
 
-from .stacks import ACCOUNT, ENVIRONMENT, MAX_SNAPSHOT_AGE_MS, Stack
+from .stacks import ACCOUNT, ENVIRONMENT, Stack
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 
 def _store(stack: Stack) -> PolicyStore:
-    if stack.name == "legacy":
-        return LegacyPolicyStore(CapitalRepository(
-            account_id=ACCOUNT, environment=ENVIRONMENT, max_snapshot_age_ms=MAX_SNAPSHOT_AGE_MS))
     return build_policy_store(stack.scope)
 
 
@@ -82,9 +76,6 @@ async def test_a_lost_update_and_an_unsupported_policy_are_refused(port_stack) -
 
 
 async def test_the_ledger_store_never_touches_the_event_stream(port_stack, monkeypatch) -> None:
-    if port_stack.name != "ledger":
-        pytest.skip("the legacy store replays the stream by design")
-
     async def forbidden(*_args, **_kwargs):
         raise AssertionError("event stream touched")
 

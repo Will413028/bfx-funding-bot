@@ -1,24 +1,46 @@
-"""Original pricing evidence must survive every await until transport."""
+"""Original pricing evidence must survive every await until transport (the ledger gate)."""
 import asyncio
 from dataclasses import replace
 from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.modules.execution.audit import AuditContext, ExecutionDecisionRecorder
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
+from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.command_boundary import LedgerCommandEffects
+from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPricer
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
-from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
+from bfx_funding_bot.modules.execution.protocols import (
+    AccountContext,
+    Credentials,
+    SubmittedOrder,
+)
+from bfx_funding_bot.modules.execution.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitOutcomeKind,
+)
+from bfx_funding_bot.modules.ledger import CapitalAvailable
+from bfx_funding_bot.modules.ledger.tables import (
+    SubmissionAttemptJournalRow,
+    TransportOutcomeJournalRow,
+)
 from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookStore
-from tests.integration.test_capital_command_boundary import AMOUNT, boundary, planner_ports
-from tests.integration.test_capital_repository import capital_db as capital_db
-from tests.integration.test_capital_repository import capital_engine as capital_engine
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from tests.modules.execution.deployment.test_reconciler import _Readiness, _valid_snapshot
+
+from .contracts.stacks import ACCOUNT, CELL, ENVIRONMENT, NOW, Stack, build_stack, seed_account
+from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture dependency
+
+pytestmark = pytest.mark.integration
+
+AMOUNT = "499.99990500"
 
 
 def book_store(captured=-27900):
@@ -29,11 +51,87 @@ def book_store(captured=-27900):
     return store
 
 
+@pytest_asyncio.fixture
+async def stack(ledger_db) -> Stack:  # noqa: F811
+    await seed_account(ledger_db)
+    engine = create_async_engine(
+        ledger_db.url.render_as_string(hide_password=False).replace("+psycopg", "+asyncpg"))
+    try:
+        built = build_stack(async_sessionmaker(engine, expire_on_commit=False))
+        await built.policy()
+        await built.snapshot("1000")
+        yield built
+    finally:
+        await engine.dispose()
+
+
+class _Allow:
+    async def evaluate(self, decision, context) -> GuardResult:
+        return GuardResult(allowed=True, guard_name="test")
+
+
+class _NoneOpen:
+    async def has_open(self, session, scope, symbol) -> bool:
+        return False
+
+
+class Venue:
+    def __init__(self):
+        self.received = []
+
+    async def submit(self, ready, ctx, *, cid, reservation_ref):
+        self.received.append(ready)
+        return SubmittedOrder(cid=cid, venue_offer_id="101", outcome=SubmitAcknowledged("101"),
+                              reservation_ref=reservation_ref)
+
+
+async def boundary(stack: Stack):
+    """The ledger command gate, one admissible submit of ``AMOUNT`` and its audit row."""
+    from tests.external.bitfinex.test_funding_rules import evidence
+
+    view = await stack.capital.read(stack.capital_scope(), now_ms=NOW)
+    assert isinstance(view, CapitalAvailable), view
+    decision_id, correlation = str(uuid4()), uuid4()
+    async with stack.factory.begin() as session:
+        session.add(ExecutionDecisionRow(
+            decision_id=decision_id, account_id=str(ACCOUNT), exchange_account_id=ACCOUNT,
+            deployment_environment=ENVIRONMENT, reconcile_id="gate", cell_id=CELL,
+            symbol="fUST", signal_correlation_id=str(correlation), outcome="ready",
+            signal_rate=Decimal("0.0001"), applied_rate=Decimal("0.0001"),
+            amount_usdt=Decimal(AMOUNT), duration_days=2, model_evidence={}, safety_result={},
+            execution_policy="gate", service_version="test", config_hash="test",
+            occurred_at_ms=NOW, recorded_at_ms=NOW,
+        ))
+    ready = ReadyToSubmit(
+        decision=DecisionPayload(decision_outcome=DecisionOutcome.POST,
+            signal_correlation_id=correlation, offer_rate=Decimal("0.0001"),
+            offer_amount_usdt=Decimal(AMOUNT), offer_duration_days=2, symbol="fUST"),
+        decision_id=decision_id, policy=ExecutionPolicy.BOOK_GUARDED,
+        market_snapshot_id="book", model_version=None, evidence={},
+        safety=GuardResult(True, "test"), capital_view=view,
+        market_snapshot=replace(_valid_snapshot(), snapshot_id="book", max_age_ms=30000),
+        funding_amount_evidence=evidence(),
+    )
+    venue = Venue()
+    gate = AccountCommandGate(
+        venue, uncertainty_reader=_NoneOpen(), safety_evaluator=_Allow(),
+        deployment_environment=ENVIRONMENT, clock=lambda: NOW,
+        boundary=stack.boundary(LedgerCommandEffects(DomainEventBus())),
+        managed_offers=stack.offers,
+    )
+    ctx = AccountContext(str(ACCOUNT), Credentials("mock", "mock"), Decimal("0"))
+    return gate, venue, ready, ctx
+
+
+def planner_ports(stack: Stack):
+    return {"capital": stack.capital, "offers": stack.offers, "uncertainty": stack.uncertainties,
+            "scope": stack.scope, "session_factory": stack.factory}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["missing", "bound", "identity", "symbol", "sequence", "checksum", "future"])
-async def test_invalid_original_book_cannot_send(capital_db, fault):
-    factory, account = capital_db
-    gate, venue, ready, ctx, _, _ = await boundary(factory, account)
+async def test_invalid_original_book_cannot_send(stack, fault):
+    gate, venue, ready, ctx = await boundary(stack)
     snap = ready.market_snapshot
     if fault == "missing":
         snap = None
@@ -52,10 +150,10 @@ async def test_invalid_original_book_cannot_send(capital_db, fault):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delay", ["none", "lock", "transport_guard"])
 @pytest.mark.parametrize("expiring", ["book", "fx"])
-async def test_expired_decision_is_durable_not_sent(capital_db, delay, expiring):
-    factory, account = capital_db
-    gate, venue, base, ctx, _capital, _halt = await boundary(factory, account)
-    now = 1100
+async def test_expired_decision_is_durable_not_sent(stack, delay, expiring):
+    factory = stack.factory
+    gate, venue, base, ctx = await boundary(stack)
+    now = NOW
     gate._clock = lambda: now
     candidate = base.decision.model_copy(update={"offer_amount_usdt": Decimal(AMOUNT)})
     snap = book_store(-27900 if expiring == "book" else 1000).snapshot("fUST", now_ms=now)
@@ -65,8 +163,8 @@ async def test_expired_decision_is_durable_not_sent(capital_db, delay, expiring)
         audit=ExecutionDecisionRecorder(factory), readiness=_Readiness()).prepare(
             candidate, decision_id=str(uuid4()), reconcile_id="test", snapshot=snap,
             price=price, fill_evidence=None, safety=GuardResult(True, "test"),
-            audit_context=AuditContext(account_id=str(account), deployment_environment="ci",
-                reconcile_id="test", cell_id="a30", symbol="fUST",
+            audit_context=AuditContext(account_id=str(ACCOUNT), deployment_environment=ENVIRONMENT,
+                reconcile_id="test", cell_id=CELL, symbol="fUST",
                 signal_correlation_id=str(candidate.signal_correlation_id), service_version="test",
                 config_hash="test", strategy="mean_reversion"))
     assert isinstance(ready, ReadyToSubmit)
@@ -84,7 +182,7 @@ async def test_expired_decision_is_durable_not_sent(capital_db, delay, expiring)
                 now = 3100
         gate._guard = delayed_guard
     if delay == "lock":
-        lock = gate._account_locks.setdefault((str(account), "ci"), asyncio.Lock())
+        lock = gate._account_locks.setdefault((str(ACCOUNT), ENVIRONMENT), asyncio.Lock())
         await lock.acquire()
         task = asyncio.create_task(gate.submit(ready, ctx))
         await asyncio.sleep(0)  # let submit wait on the actual account lock
@@ -102,21 +200,22 @@ async def test_expired_decision_is_durable_not_sent(capital_db, delay, expiring)
         assert audited.snapshot_id == ready.market_snapshot_id
         assert audited.safety_result["book_validity"]["max_age_ms"] == 30000
         assert audited.safety_result["book_validity"]["captured_at_ms"] == snap.captured_at_ms
-        attempt = await session.scalar(select(SubmissionAttemptRow).where(
-            SubmissionAttemptRow.execution_decision_id == ready.decision_id))
+        attempt = await session.scalar(select(SubmissionAttemptJournalRow).where(
+            SubmissionAttemptJournalRow.execution_decision_id == ready.decision_id))
         assert attempt is not None
-        assert attempt.outcome_kind == ("acknowledged" if delay == "none" else "not_sent")
+        outcome = await session.scalar(select(TransportOutcomeJournalRow).where(
+            TransportOutcomeJournalRow.attempt_id == attempt.attempt_id))
+        assert outcome is not None
+        assert outcome.kind == ("ack" if delay == "none" else "not_sent")
 
 
 @pytest.mark.asyncio
-async def test_second_cell_uses_current_clock_for_its_book(capital_db):
+async def test_second_cell_uses_current_clock_for_its_book(stack):
     from tests.modules.execution.deployment.test_reconciler import _build, _post_quote
-    factory, account = capital_db
-    _, _, _, _, runtime, _ = await boundary(factory, account)
-    now = 1100
+    now = NOW
     rec, venue, *_ = _build(exposure=Decimal("0"),
         quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
-        capital_ports=planner_ports(runtime), book_provider=book_store())
+        capital_ports=planner_ports(stack), book_provider=book_store())
     rec._clock = lambda: now
     submit = venue.submit
     async def delayed_submit(*args, **kwargs):

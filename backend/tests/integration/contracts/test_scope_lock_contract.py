@@ -1,4 +1,4 @@
-"""``ScopeLock``: the lock serializes two sessions of one scope, on both stacks."""
+"""``ScopeLock``: the lock serializes two sessions of one scope."""
 
 from __future__ import annotations
 
@@ -47,11 +47,6 @@ async def test_another_scope_is_not_serialized_with_this_one(port_stack) -> None
         await first.begin()
         await port_stack.lock.lock(first, port_stack.scope)
         await second.begin()
-        if port_stack.name == "legacy":
-            # Intended divergence: the legacy lock is bound to one repository's scope.
-            with pytest.raises(ValueError, match="capital_scope_conflict"):
-                await port_stack.lock.lock(second, other)
-        else:
-            await asyncio.wait_for(port_stack.lock.lock(second, other), timeout=5)
+        await asyncio.wait_for(port_stack.lock.lock(second, other), timeout=5)
         await second.rollback()
         await first.rollback()

@@ -1,4 +1,4 @@
-"""build_daemon: AccountContext + executor + chain + conditional fill_tracker (Bitfinex venue)."""
+"""build_daemon: AccountContext + executor + chain + the auth WebSocket (Bitfinex venue)."""
 from __future__ import annotations
 
 from decimal import Decimal
@@ -8,8 +8,6 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
-from bfx_funding_bot.modules.execution.fill_tracker import RestPollingFillTracker
-from bfx_funding_bot.modules.execution.registry import ExecutorConfigError
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from tests.modules.marketfeed.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
@@ -27,7 +25,7 @@ async def test_build_daemon_wires_the_bitfinex_executor(
         assert daemon.account_ctx.account_id == str(TEST_EXCHANGE_ACCOUNT_ID)
         assert daemon.account_ctx.allocation_cap_usdt == Decimal("0")  # capital is the policy's
         assert isinstance(daemon.safety_chain, SafetyGuardChain)
-        assert daemon.fill_tracker is None
+        assert not hasattr(daemon, "fill_tracker")  # the REST fill tracker is gone
         assert daemon.writer_lock is not None
     finally:
         await engine.dispose()
@@ -44,19 +42,6 @@ async def test_a_set_bfx_executor_refuses_the_boot(
         await boot_live_construction(
             monkeypatch, tmp_path, httpx_mock, extra_env={"BFX_EXECUTOR": executor_env},
         )
-
-
-@pytest.mark.asyncio
-async def test_build_daemon_composes_the_fill_tracker_when_enabled(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
-) -> None:
-    daemon, engine = await boot_live_construction(
-        monkeypatch, tmp_path, httpx_mock, extra_env={"BFX_FILL_TRACKER_ENABLED": "true"},
-    )
-    try:
-        assert isinstance(daemon.fill_tracker, RestPollingFillTracker)
-    finally:
-        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -78,14 +63,18 @@ async def test_the_live_guard_chain_is_capital_policy_not_legacy_caps(
 
 
 @pytest.mark.asyncio
-async def test_build_daemon_without_the_ws_client_flag_raises(
+async def test_the_bitfinex_venue_always_composes_the_auth_websocket(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
-    """CC4: REST submit without the fill WS is stale exposure."""
-    with pytest.raises(ExecutorConfigError, match="BFX_WS_CLIENT_ENABLED"):
-        await boot_live_construction(
-            monkeypatch, tmp_path, httpx_mock, extra_env={"BFX_WS_CLIENT_ENABLED": "false"},
-        )
+    """CC4: REST submit without the fill WS is stale exposure, so the venue's capabilities
+    compose it; the removed flag cannot turn it off."""
+    daemon, engine = await boot_live_construction(
+        monkeypatch, tmp_path, httpx_mock, extra_env={"BFX_WS_CLIENT_ENABLED": "false"},
+    )
+    try:
+        assert daemon.auth_ws is not None and daemon.ws_dispatcher is not None
+    finally:
+        await engine.dispose()
 
 
 def _write_safety_yaml(tmp_path: Path, *, disable: set[str] | None = None) -> Path:

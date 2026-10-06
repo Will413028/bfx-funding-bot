@@ -1,14 +1,14 @@
 """PeriodicReconcile — runtime correctness backbone (spec 2026-05-27).
 
-Runs the venue snapshot reconcile (BootRecovery.run) on an interval. The WS
-stream is a latency optimization; this loop is what GUARANTEES the ledger
-converges to venue truth, so the bot can never get permanently stuck at the
-allocation cap when the stream silently breaks.
+Runs the ledger's observation cycle on an interval. The WS stream is a latency
+optimization; this loop is what GUARANTEES the ledger converges to venue truth, so
+the bot can never get permanently stuck at the allocation cap when the stream
+silently breaks.
 
-- Divergence: a release/claim on a periodic (non-boot) run means the stream
-  missed an event -> RECONCILE DEGRADED (self-clears on the next clean tick) +
-  WARN so the silent breakage surfaces. This loop FULLY OWNS HealthTarget.RECONCILE
-  and does NOT touch HealthTarget.BITFINEX_REST (owned by the daemon REST poller).
+- Non-accepted streak: a cycle the ledger does not accept marks RECONCILE DEGRADED
+  (cleared by the next accepted cycle) and alerts once the streak reaches the
+  failure bound. This loop FULLY OWNS HealthTarget.RECONCILE and does NOT touch
+  HealthTarget.BITFINEX_REST (owned by the daemon REST poller).
 - Fail-safe: consecutive venue-fetch failures -> EXECUTOR DOWN so AuthHealthGuard
   blocks new offers (never trade on a stale ledger). Cleared on recovery.
 """
@@ -19,24 +19,16 @@ import contextlib
 import logging
 import time
 from collections.abc import Callable
-from decimal import Decimal
 from typing import Protocol
 
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.execution.deployment_input import DeploymentInput
-from bfx_funding_bot.modules.execution.observation_sink import (
-    LegacyCycleResult,
-)
-from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import CycleResult, ObservationSink, Scope
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
-
-_DRIFT_EPSILON = Decimal("0.01")
-
 
 class _Probe(Protocol):
     def record_heartbeat(self, sub_task: str) -> None: ...
@@ -80,7 +72,6 @@ class PeriodicReconcile:
         self._non_accepted = 0  # consecutive cycles the ledger did not accept
         self._consecutive_failures = 0
         self._tripped_down = False  # this loop owns the EXECUTOR DOWN it sets
-        self._divergence_flagged = False  # this loop owns HealthTarget.RECONCILE
         self.resync = resync
         self._last_tick_mono = 0.0
 
@@ -184,49 +175,7 @@ class PeriodicReconcile:
                 HealthTarget.EXECUTOR, HealthStatus.HEALTHY,
                 error_message="venue reconcile recovered",
             )
-        # Drift health compares the legacy reconcile's ledger with the venue; the
-        # ledger authority's RECONCILE health is the non-accepted streak above.
-        result = cycle.legacy if isinstance(cycle, LegacyCycleResult) else None
-        if result is not None:
-            self._report_drift(result)
         await self._deploy(cycle)
-
-    def _report_drift(self, result: ReconcileResult) -> None:
-        drifted = (
-            result.realized_drift_usdt > _DRIFT_EPSILON
-            or result.reserved_drift_usdt > _DRIFT_EPSILON
-        )
-        if (
-            result.n_released > 0
-            or result.n_claimed > 0
-            or result.n_matched > 0
-            or drifted
-        ):
-            log.warning(
-                "periodic_reconcile_divergence released=%d claimed=%d failed=%d "
-                "matched=%d realized_drift=%s reserved_drift=%s "
-                "— WS lifecycle path missed events",
-                result.n_released, result.n_claimed, result.n_failed,
-                result.n_matched,
-                result.realized_drift_usdt, result.reserved_drift_usdt,
-            )
-            self._divergence_flagged = True
-            self._probe.update(
-                HealthTarget.RECONCILE, HealthStatus.DEGRADED,
-                error_message=(
-                    f"reconcile drift released={result.n_released} "
-                    f"claimed={result.n_claimed} "
-                    f"matched={result.n_matched} "
-                    f"realized_drift={result.realized_drift_usdt} "
-                    f"reserved_drift={result.reserved_drift_usdt}"
-                ),
-            )
-        elif self._divergence_flagged:
-            self._divergence_flagged = False
-            self._probe.update(
-                HealthTarget.RECONCILE, HealthStatus.HEALTHY,
-                error_message="reconcile drift cleared",
-            )
 
     async def _deploy(self, cycle: CycleResult) -> None:
         if self._deployment is None or self._deployment_input is None:

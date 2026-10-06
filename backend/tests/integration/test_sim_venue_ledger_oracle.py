@@ -284,9 +284,11 @@ async def rig_factory(ledger_db):  # noqa: F811
         factory = async_sessionmaker(engine, expire_on_commit=False)
         await seed_exchange_account(engine, capital_policies=False)
         async with engine.begin() as conn:
+            # A head database starts on the ledger (genesis); the switch row is appended anyway.
             await conn.execute(text(
                 "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
-                "VALUES (2, 'ledger', 2, 'test', 'oracle')"))
+                "SELECT max(epoch_seq) + 1, 'ledger', 2, 'test', 'oracle' "
+                "FROM capital_authority_epoch"))
         policies = build_policy_store(SCOPE)
         async with factory.begin() as session:
             await policies.apply_policy(session, symbol="fUST", policy=POLICY,

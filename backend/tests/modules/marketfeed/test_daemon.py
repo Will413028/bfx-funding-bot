@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from decimal import Decimal
 from pathlib import Path
 
 from pytest_httpx import HTTPXMock
 
 from bfx_funding_bot.core.telemetry import Phase
-from bfx_funding_bot.modules.execution.events import PositionReconciled
 from tests.modules.marketfeed.account_test_helpers import (
     boot_live_construction,
     go_offline,
-    paper_ledger_of,
 )
 
 
@@ -22,8 +19,8 @@ async def test_daemon_builds_and_runs_briefly(
     daemon.run() starts all sub-tasks, responds to _stop_event, and exits
     cleanly (TaskGroup pattern, Phase 4.2).
 
-    The Bitfinex-venue composition on file-based sqlite (the event-store tables must be
-    visible to the engine inside build_daemon). The WebSockets and the venue observation
+    The Bitfinex-venue composition on file-based sqlite (the tables must be visible to the
+    engine inside build_daemon). The WebSockets and the venue observation
     loops are detached (``go_offline``): nothing here may reach the network.
     """
     daemon, engine = await boot_live_construction(monkeypatch, tmp_path, httpx_mock)
@@ -85,39 +82,5 @@ async def test_daemon_engine_has_d3_pool_config_and_url_transform(
         # SQLite path doesn't apply pool config the same way; the key regression guard
         # is the make_async_engine_from_url call above with the real postgresql URL.
         assert daemon.db_engine is not None
-    finally:
-        await engine.dispose()
-
-
-async def test_ledger_subscribes_to_position_reconciled(
-    monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
-) -> None:
-    """Behavioral: bus.publish(PositionReconciled) must update ledger.realized_exposure().
-
-    Wires the same daemon as the smoke test, then publishes a PositionReconciled on the
-    daemon's bus and asserts the ledger reflects the authoritative venue snapshot. This
-    guards the atomicity requirement: both the subscription and the offer_registry routing
-    to BootRecovery must land in a single commit (see daemon.py wiring comment).
-    """
-    daemon, engine = await boot_live_construction(monkeypatch, tmp_path, httpx_mock, name="daemon_pr")
-    try:
-        # Publish an authoritative venue snapshot via PositionReconciled.
-        # The subscription bus.subscribe(PositionReconciled, ledger.on_position_reconciled)
-        # must route this to the ledger; without the wiring realized_exposure() stays 0.
-        event = PositionReconciled(
-            account_id=paper_ledger_of(daemon).account_id,
-            reserved_usdt=Decimal("0"),
-            realized_usdt=Decimal("450"),
-            available_usdt=Decimal("0"),
-            n_offers=0,
-            n_credits=3,
-            occurred_at_ms=1,
-        symbol="fUST")
-        await daemon.bus.publish(event)
-
-        assert paper_ledger_of(daemon).realized_exposure("fUST") == Decimal("450"), (
-            "ledger.realized_exposure('fUST') should reflect PositionReconciled.realized_usdt "
-            "after bus.publish — subscription missing or account_id mismatch"
-        )
     finally:
         await engine.dispose()

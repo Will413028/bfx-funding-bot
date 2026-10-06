@@ -6,9 +6,10 @@ the gate asked the boundary to do, as ordered transactions, so a test can say "t
 intent was durable before the venue saw data" or "an UNKNOWN opened the symbol's
 uncertainty before the next command ran".
 
-This is a test double, not an authority: what the real journals write is covered by
-``test_command_journal.py``, ``tests/integration/contracts/test_command_gate_ledger.py``
-and ``tests/integration/test_capital_command_boundary.py``.
+This is a test double, not an authority: what the ledger journal writes is covered by
+``tests/integration/contracts/test_command_gate_ledger.py`` and
+``tests/integration/test_capital_command_boundary.py``. The recording names outcomes with
+the domain events (``ReservationClaimed`` and friends) only as a readable trace.
 """
 from __future__ import annotations
 
@@ -33,12 +34,9 @@ from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, Reservati
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
+    ReservationFailed,
     ReservationIntent,
     ReservationUnknown,
-)
-from bfx_funding_bot.modules.execution.legacy_command_effects import (
-    _filled_event,
-    terminal_event,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
 from bfx_funding_bot.modules.ledger import (
@@ -189,6 +187,38 @@ class _Journal:
 
     async def admit_cancel(self, *args: object, **kwargs: object) -> object:
         raise NotImplementedError("the gate contract tests only submit")
+
+
+def _fields(facts: CommandFacts, outcome: CommandOutcome) -> dict[str, object]:
+    return {
+        "cid": facts.reference.cid, "size_usdt": facts.amount,
+        "signal_correlation_id": facts.signal_correlation_id,
+        "account_id": str(facts.scope.exchange_account_id),
+        "is_simulated": facts.is_simulated, "occurred_at_ms": outcome.completed_at_ms,
+        "symbol": facts.symbol, "reservation_ref": facts.reference,
+    }
+
+
+def terminal_event(
+    facts: CommandFacts, outcome: CommandOutcome,
+) -> ReservationClaimed | ReservationFailed | ReservationUnknown:
+    """The recording's own name for a terminal outcome (a readable trace, not a journal)."""
+    fields = _fields(facts, outcome)
+    if outcome.event_id is not None:
+        fields["event_id"] = outcome.event_id
+    if outcome.kind == "ack":
+        return ReservationClaimed(**fields, venue_offer_id=outcome.venue_offer_id or "")  # type: ignore[arg-type]
+    if outcome.kind == "unknown":
+        return ReservationUnknown(**fields, reason=outcome.reason or "submit_outcome_unknown")  # type: ignore[arg-type]
+    return ReservationFailed(**fields, reason=outcome.reason or "submit_rejected")  # type: ignore[arg-type]
+
+
+def _filled_event(facts: CommandFacts, outcome: CommandOutcome) -> OrderFilled:
+    return OrderFilled(
+        **_fields(facts, outcome),  # type: ignore[arg-type]
+        venue_offer_id=outcome.venue_offer_id or "", credit_id=None,
+        fill_rate=float(facts.offer_rate or 0),
+    )
 
 
 class _Effects:

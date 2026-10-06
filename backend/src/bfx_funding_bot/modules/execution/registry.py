@@ -1,19 +1,13 @@
-"""build_executor factory + per-venue invariant validation.
-
-Env vars:
-  BFX_FILL_TRACKER_ENABLED=false (default) | true
-  BFX_WS_CLIENT_ENABLED=false (default) | true
+"""build_executor factory.
 
 The executor is always the Bitfinex live executor: on the ``simulated`` venue it talks to
 the simulated venue's own ``httpx`` client, so the code that runs is the code that runs
 live. ``BFX_EXECUTOR`` is refused, not ignored.
 
-Venue invariants (CC4) come from the venue wiring's ``VenueCapabilities``, not from a venue
-name:
-  - ``auth_ws="required"`` (Bitfinex): without ``BFX_WS_CLIENT_ENABLED=true`` a REST submit
-    returns "submitted" but never fills -> stale exposure.
-  - ``auth_ws="forbidden"`` / no REST fill tracker (the simulated venue): the flags must be
-    off, so a process cannot be configured to expect a channel the venue does not have.
+Whether the authenticated WebSocket runs follows the venue wiring's ``VenueCapabilities``
+(CC4), never a flag or a venue name: Bitfinex (``auth_ws="required"``) delivers fills there,
+and a process without it would hold stale exposure; the simulated venue
+(``auth_ws="forbidden"``) has none, and its fills are found by the periodic reconcile.
 """
 from __future__ import annotations
 
@@ -44,15 +38,7 @@ class ExecutorConfigError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class ExecutorSpec:
     executor: ExecutorPort
-    fill_tracker_enabled: bool
     ws_client_enabled: bool
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    v = os.environ.get(name)
-    if v is None:
-        return default
-    return v.lower() in ("true", "1", "yes")
 
 
 def build_executor(
@@ -71,24 +57,6 @@ def build_executor(
 ) -> ExecutorSpec:
     if "BFX_EXECUTOR" in os.environ:
         raise ExecutorConfigError("BFX_EXECUTOR is removed: the venue follows BFX_PHASE")
-    fill_tracker_enabled = _env_bool("BFX_FILL_TRACKER_ENABLED", False)
-    ws_client_enabled = _env_bool("BFX_WS_CLIENT_ENABLED", False)
-
-    if capabilities.auth_ws == "required" and not ws_client_enabled:
-        raise ExecutorConfigError(
-            "the Bitfinex executor without BFX_WS_CLIENT_ENABLED=true "
-            "= stale exposure (REST submit returns 'submitted'; WS foc EXECUTED fills). "
-            "Set BFX_WS_CLIENT_ENABLED=true."
-        )
-    if capabilities.auth_ws == "forbidden" and ws_client_enabled:
-        raise ExecutorConfigError(
-            "this venue has no WebSocket: unset BFX_WS_CLIENT_ENABLED (fills are found by "
-            "the periodic reconcile)."
-        )
-    if fill_tracker_enabled and not capabilities.rest_fill_tracker:
-        raise ExecutorConfigError(
-            "this venue has no REST fill tracker: unset BFX_FILL_TRACKER_ENABLED."
-        )
     if http is None or bus is None:
         raise ExecutorConfigError("build_executor() requires http + bus deps")
     return ExecutorSpec(
@@ -101,6 +69,5 @@ def build_executor(
             clock=clock,
             date_provider=date_provider,
         ),
-        fill_tracker_enabled=fill_tracker_enabled,
-        ws_client_enabled=ws_client_enabled,
+        ws_client_enabled=capabilities.auth_ws == "required",
     )

@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import func, select, text
 
-from bfx_funding_bot.core.schema_head import build_head
+from bfx_funding_bot.core.schema_head import build_head, migration_scripts
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.serialization import serialize_event
@@ -190,7 +190,10 @@ async def test_cutover_seeds_historical_projection_cursor(pg_url_at_cursor_cutov
                     store=PostgresEventStore(deployment_environment=_ENV)
                 ).append(session, _claimed(account_id, cid=98, venue_seq=98))
             await session.rollback()
-        alembic(sync_url, "upgrade", "head")
+        # Up to the ledger genesis, not through it: this legacy history has no seed, which
+        # b1c2d3e4f5a6 refuses; the cursor contract is what this test is about.
+        before_genesis = str(migration_scripts().get_revision("b1c2d3e4f5a6").down_revision)
+        alembic(sync_url, "upgrade", before_genesis)
         with engine.connect() as connection:
             row = connection.execute(
                 text(

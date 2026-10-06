@@ -1,8 +1,9 @@
 """Account command gate ordering and fail-closed fault contracts.
 
 The gate always runs over a ``CommandBoundary``. The contract tests below use the
-in-memory boundary of ``fake_boundary``; the event-store tests at the end persist the
-events the legacy journal writes straight through ``EventStorePersister``.
+in-memory boundary of ``fake_boundary``. The event-store tests at the end cover the frozen
+legacy store's projections, which the DR replay still runs: they append the events the
+legacy journal wrote with the store's own writer.
 """
 from __future__ import annotations
 
@@ -20,10 +21,6 @@ from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
-from bfx_funding_bot.modules.execution.boot_recovery import (
-    LocalClaim,
-    compute_recovery_actions,
-)
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     CommandGateBlocked,
@@ -36,11 +33,9 @@ from bfx_funding_bot.modules.execution.contracts import (
     ReadyToSubmit,
     ReservationRef,
 )
-from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
-    OfferClaimRow,
     PositionStateRow,
 )
 from bfx_funding_bot.modules.execution.event_store.writer import ProjectionWriteError
@@ -48,7 +43,6 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationIntent,
     ReservationUnknown,
 )
-from bfx_funding_bot.modules.execution.legacy_ports import LegacyUncertaintyReader
 from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
     ReservationEmittingMiddleware,
 )
@@ -57,7 +51,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmissionAttemptPayload,
     SubmitAcknowledged,
@@ -71,6 +64,7 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
 )
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
+from tests.integration.legacy_history import append_legacy
 from tests.modules.execution.fake_boundary import (  # noqa: F401  (fixture)
     Recording,
     boundary_stubs,
@@ -468,7 +462,7 @@ async def test_one_attempt_per_decision_prevents_resubmit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_crash_after_intent_leaves_pending_for_boot_unknown_without_retry() -> None:
+async def test_crash_after_intent_leaves_the_attempt_open_without_retry() -> None:
     reader = _FakeUncertaintyReader(set())
     recording = _recording(reader)
     venue = _FakeVenue(crash=True)
@@ -483,28 +477,8 @@ async def test_crash_after_intent_leaves_pending_for_boot_unknown_without_retry(
     assert intent.submission_attempt is not None
     assert intent.submission_attempt.outcome_kind is None
     assert recording.outcomes == []
-    actions = compute_recovery_actions(
-        venue_offers=[],
-        local_claims=[
-            LocalClaim(
-                cid=intent.cid,
-                venue_offer_id=None,
-                state=RegistryState.PENDING,
-                size_usdt=Decimal("12.5"),
-                signal_correlation_id=intent.signal_correlation_id,
-                occurred_at_ms=100,
-                symbol=SYMBOL,
-                reservation_ref=intent.reservation_ref,
-            )
-        ],
-        account_id=str(ACCOUNT_ID),
-        now_ms=1_000,
-        grace_ms=100,
-        configured_symbols=frozenset({SYMBOL}),
-    )
-    assert [type(event) for event in actions] == [ReservationUnknown]
-    # No retry in this process: it exits (SubmitOutcomeLostError); the restarted
-    # daemon's recovery turns the PENDING into the UNKNOWN above.
+    # No retry in this process: it exits (SubmitOutcomeLostError); the restarted daemon's
+    # observation cycle finds the started attempt without an outcome and holds it UNKNOWN.
     assert venue.calls == 1
 
 
@@ -632,7 +606,7 @@ async def test_every_outcome_fact_is_marked_not_simulated() -> None:
 # ----------------------------------------------------- event store, no gate involved
 
 
-async def _persist_intent(persister: EventStorePersister, ready: ReadyToSubmit) -> ReservationIntent:
+async def _persist_intent(session_factory, ready: ReadyToSubmit) -> ReservationIntent:
     """The write-ahead intent the legacy journal commits before the venue call."""
     decision = ready.decision
     cid = generate_cid(decision.signal_correlation_id, date(2026, 9, 3))
@@ -648,17 +622,17 @@ async def _persist_intent(persister: EventStorePersister, ready: ReadyToSubmit) 
             normalized_payload=_normalized_venue_payload(decision), started_at_ms=100,
         ),
     )
-    await persister.persist(intent)
+    await append_legacy(session_factory, intent, environment=ENVIRONMENT)
     return intent
 
 
-async def _persist_unknown(persister: EventStorePersister, intent: ReservationIntent) -> None:
-    await persister.persist(ReservationUnknown(
+async def _persist_unknown(session_factory, intent: ReservationIntent) -> None:
+    await append_legacy(session_factory, ReservationUnknown(
         cid=intent.cid, size_usdt=intent.size_usdt,
         signal_correlation_id=intent.signal_correlation_id, account_id=intent.account_id,
         is_simulated=False, reason="transport_timeout", occurred_at_ms=101,
         symbol=SYMBOL, reservation_ref=intent.reservation_ref,
-    ))
+    ), environment=ENVIRONMENT)
 
 
 @pytest.mark.asyncio
@@ -697,9 +671,7 @@ async def test_serialized_writer_commits_unknown_attempt_event_and_block_atomica
         )
         await session.commit()
 
-    store = PostgresEventStore(deployment_environment=ENVIRONMENT)
-    persister = EventStorePersister(store=store, session_factory=session_factory)
-    await _persist_unknown(persister, await _persist_intent(persister, ready))
+    await _persist_unknown(session_factory, await _persist_intent(session_factory, ready))
 
 
     async with session_factory() as session:
@@ -760,8 +732,7 @@ async def test_full_rebuild_replays_attempt_and_uncertainty_with_stable_identity
         )
         await session.commit()
     store = PostgresEventStore(deployment_environment=ENVIRONMENT)
-    persister = EventStorePersister(store=store, session_factory=session_factory)
-    await _persist_unknown(persister, await _persist_intent(persister, ready))
+    await _persist_unknown(session_factory, await _persist_intent(session_factory, ready))
 
     async with session_factory() as session:
         original_attempt = (await session.execute(select(SubmissionAttemptRow))).scalar_one()
@@ -808,191 +779,6 @@ async def test_full_rebuild_replays_attempt_and_uncertainty_with_stable_identity
         second_uncertainty.correlation_key,
     )
     assert first_rebuild == second_rebuild == expected
-
-
-@pytest.mark.asyncio
-async def test_persisted_crash_recovery_closes_pending_attempt_as_unknown(
-    sqlite_engine,
-) -> None:
-    """Recovery must update the durable attempt and open the symbol's uncertainty."""
-    async with sqlite_engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
-    ready = _ready(decision_id="decision-crash-persisted")
-    async with session_factory() as session:
-        session.add(ExchangeAccount(id=ACCOUNT_ID, venue="bitfinex", label="ci"))
-        session.add(
-            ExecutionDecisionRow(
-                decision_id=ready.decision_id,
-                account_id=str(ACCOUNT_ID),
-                exchange_account_id=ACCOUNT_ID,
-                deployment_environment=ENVIRONMENT,
-                reconcile_id="reconcile-crash",
-                cell_id="cell-crash",
-                symbol=SYMBOL,
-                signal_correlation_id=str(ready.decision.signal_correlation_id),
-                outcome="ready",
-                signal_rate=Decimal("0.0001"),
-                applied_rate=Decimal("0.0001"),
-                amount_usdt=Decimal("12.5"),
-                duration_days=2,
-                model_evidence={},
-                safety_result={},
-                execution_policy="book_guarded",
-                service_version="test",
-                config_hash="config",
-                occurred_at_ms=99,
-                recorded_at_ms=99,
-            )
-        )
-        await session.commit()
-    store = PostgresEventStore(deployment_environment=ENVIRONMENT)
-    persister = EventStorePersister(store=store, session_factory=session_factory)
-    await _persist_intent(persister, ready)
-
-    async with session_factory() as session:
-        pending = (await session.execute(select(OfferClaimRow))).scalar_one()
-        attempt = (await session.execute(select(SubmissionAttemptRow))).scalar_one()
-    assert pending.state == RegistryState.PENDING.value
-    assert attempt.outcome_kind is None
-    actions = compute_recovery_actions(
-        venue_offers=[],
-        local_claims=[
-            LocalClaim(
-                cid=pending.cid,
-                venue_offer_id=None,
-                state=RegistryState.PENDING,
-                size_usdt=Decimal(str(pending.size_usdt)),
-                signal_correlation_id=UUID(pending.signal_correlation_id),
-                occurred_at_ms=pending.occurred_at_ms,
-                symbol=pending.symbol,
-                reservation_ref=ReservationRef(
-                    execution_decision_id=ready.decision_id,
-                    cid=pending.cid,
-                    signal_correlation_id=UUID(pending.signal_correlation_id),
-                ),
-            )
-        ],
-        account_id=str(ACCOUNT_ID),
-        now_ms=1_000,
-        grace_ms=100,
-        configured_symbols=frozenset({SYMBOL}),
-    )
-    await persister.persist(*actions)
-
-    async with session_factory() as session:
-        recovered_attempt = (
-            await session.execute(select(SubmissionAttemptRow))
-        ).scalar_one()
-        uncertainty = (
-            await session.execute(select(ExecutionUncertaintyRow))
-        ).scalar_one()
-    assert recovered_attempt.outcome_kind == "unknown"
-    assert uncertainty.attempt_id == recovered_attempt.attempt_id
-
-    # The restarted daemon's UncertaintyGuard reads this: the symbol is held open.
-    async with session_factory() as session:
-        assert await LegacyUncertaintyReader(session_factory).has_open(
-            session, Scope(ACCOUNT_ID, ENVIRONMENT), SYMBOL,
-        )
-
-
-@pytest.mark.asyncio
-async def test_registered_legacy_pending_without_attempt_recovers_to_unknown(
-    sqlite_engine,
-) -> None:
-    """Historical pending intents cannot be rejected or retried for lacking attempt rows."""
-    async with sqlite_engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
-    decision_id = "decision-legacy-pending"
-    signal_id = uuid4()
-    async with session_factory() as session:
-        session.add(ExchangeAccount(id=ACCOUNT_ID, venue="bitfinex", label="ci"))
-        session.add(
-            ExecutionDecisionRow(
-                decision_id=decision_id,
-                account_id=str(ACCOUNT_ID),
-                exchange_account_id=ACCOUNT_ID,
-                deployment_environment=ENVIRONMENT,
-                reconcile_id="reconcile-legacy",
-                cell_id="cell-legacy",
-                symbol=SYMBOL,
-                signal_correlation_id=str(signal_id),
-                outcome="ready",
-                signal_rate=Decimal("0.0001"),
-                applied_rate=Decimal("0.0001"),
-                amount_usdt=Decimal("12.5"),
-                duration_days=2,
-                model_evidence={},
-                safety_result={},
-                execution_policy="book_guarded",
-                service_version="test",
-                config_hash="config",
-                occurred_at_ms=99,
-                recorded_at_ms=99,
-            )
-        )
-        await session.commit()
-    store = PostgresEventStore(deployment_environment=ENVIRONMENT)
-    persister = EventStorePersister(store=store, session_factory=session_factory)
-    intent = ReservationIntent(
-        symbol=SYMBOL,
-        cid=77,
-        signal_correlation_id=signal_id,
-        account_id=str(ACCOUNT_ID),
-        is_simulated=False,
-        execution_decision_id=decision_id,
-        amount=Decimal("12.5"),
-        occurred_at_ms=100,
-    )
-    await persister.persist(intent)
-    actions = compute_recovery_actions(
-        venue_offers=[],
-        local_claims=[
-            LocalClaim(
-                cid=77,
-                venue_offer_id=None,
-                state=RegistryState.PENDING,
-                size_usdt=Decimal("12.5"),
-                signal_correlation_id=signal_id,
-                occurred_at_ms=100,
-                symbol=SYMBOL,
-                reservation_ref=intent.reservation_ref,
-            )
-        ],
-        account_id=str(ACCOUNT_ID),
-        now_ms=1_000,
-        grace_ms=100,
-        configured_symbols=frozenset({SYMBOL}),
-    )
-    await persister.persist(*actions)
-
-    async with session_factory() as session:
-        assert (await session.execute(select(SubmissionAttemptRow))).scalar_one_or_none() is None
-        uncertainty = (
-            await session.execute(select(ExecutionUncertaintyRow))
-        ).scalar_one()
-        claim = (await session.execute(select(OfferClaimRow))).scalar_one()
-    assert uncertainty.attempt_id is None
-    assert uncertainty.evidence["payload_sha256"] is None
-    assert uncertainty.correlation_key.startswith("legacy_submit_unknown:")
-    assert claim.state == RegistryState.UNKNOWN.value
-    legacy_identity = (
-        uncertainty.uncertainty_id,
-        uncertainty.correlation_key,
-    )
-
-    async with session_factory() as session:
-        await store.rebuild_snapshot_from_log(
-            session,
-            account_id=str(ACCOUNT_ID),
-            deployment_environment=ENVIRONMENT,
-        )
-        await session.commit()
-    async with session_factory() as session:
-        rebuilt = (await session.execute(select(ExecutionUncertaintyRow))).scalar_one()
-    assert (rebuilt.uncertainty_id, rebuilt.correlation_key) == legacy_identity
 
 
 @pytest.mark.asyncio
@@ -1065,10 +851,7 @@ async def test_attempt_rejects_cross_scope_execution_decision(
     )
 
     with pytest.raises(ProjectionWriteError, match="execution decision scope"):
-        await EventStorePersister(
-            store=PostgresEventStore(deployment_environment=ENVIRONMENT),
-            session_factory=session_factory,
-        ).persist(intent)
+        await append_legacy(session_factory, intent, environment=ENVIRONMENT)
 
     async with session_factory() as session:
         assert (await session.execute(select(SubmissionAttemptRow))).scalar_one_or_none() is None

@@ -1,4 +1,4 @@
-"""``UncertaintyReader``: UNKNOWN attempts and quarantines read the same on both stacks."""
+"""``UncertaintyReader``: UNKNOWN attempts and quarantines on the ledger stack."""
 
 from __future__ import annotations
 

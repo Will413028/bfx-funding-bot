@@ -375,7 +375,7 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
     """Run UNKNOWN persistence, two-candidate reconcile, then the blocked retry."""
     environment = "ci"
     open_scopes: set[tuple[UUID, str, str]] = set()
-    persister = _recording(open_scopes, environment)
+    recording = _recording(open_scopes, environment)
     reader = _UncertaintyReader(open_scopes)
     transport = FakeBitfinexTransport(ACCEPT_DROP)
     async with httpx.AsyncClient(transport=transport) as http:
@@ -395,16 +395,16 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
             uncertainty_reader=reader,
             safety_evaluator=_SafetyEvaluator(reader, environment),
             deployment_environment=environment,
-            boundary=persister.boundary(),
-            managed_offers=persister.offers,
+            boundary=recording.boundary(),
+            managed_offers=recording.offers,
             clock=iter(range(100, 200)).__next__,
             date_provider=lambda: date(2026, 9, 3),
         )
         ready = _ready(decision_id="multiple-candidate")
         result = await gate.submit(ready, _context())
         assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
-        intent = next(event for event in persister.events if isinstance(event, ReservationIntent))
-        unknown = next(event for event in persister.events if isinstance(event, ReservationUnknown))
+        intent = next(event for event in recording.events if isinstance(event, ReservationIntent))
+        unknown = next(event for event in recording.events if isinstance(event, ReservationUnknown))
         assert intent.submission_attempt is not None
         assert intent.reservation_ref is not None
         payload = intent.submission_attempt.normalized_payload
@@ -446,7 +446,7 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
         retry_count = transport.request_count - request_count_before_retry
         return MultipleCandidateEvidence(
             durable_intent_count=sum(
-                isinstance(event, ReservationIntent) for event in persister.events
+                isinstance(event, ReservationIntent) for event in recording.events
             ),
             transport_request_count=transport.request_count,
             retry_count=retry_count,
@@ -462,7 +462,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
     """Run one real executor/gate submit without any automatic retry path."""
     open_scopes: set[tuple[UUID, str, str]] = set()
     environment = "ci"
-    persister = _recording(open_scopes, environment)
+    recording = _recording(open_scopes, environment)
     uncertainty_reader = _UncertaintyReader(open_scopes)
     transport = FakeBitfinexTransport(scenario)
     http = httpx.AsyncClient(transport=transport)
@@ -486,8 +486,8 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             uncertainty_reader=uncertainty_reader,
             safety_evaluator=_SafetyEvaluator(uncertainty_reader, "ci"),
             deployment_environment="ci",
-            boundary=persister.boundary(),
-            managed_offers=persister.offers,
+            boundary=recording.boundary(),
+            managed_offers=recording.offers,
             clock=iter(range(100, 200)).__next__,
             date_provider=lambda: date(2026, 9, 3),
         )
@@ -518,7 +518,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
 
         retry_count = transport.request_count - transport_count_before_retry_check
         unknown_events = tuple(
-            event for event in persister.events if isinstance(event, ReservationUnknown)
+            event for event in recording.events if isinstance(event, ReservationUnknown)
         )
         unknown_event = unknown_events[0] if unknown_events else None
         if unknown_event is not None:
@@ -534,7 +534,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
                 safety_evaluator=_SafetyEvaluator(uncertainty_reader, "staging"),
                 deployment_environment="staging",
                 boundary=_recording(open_scopes, "staging").boundary(),
-                managed_offers=persister.offers,
+                managed_offers=recording.offers,
                 clock=iter(range(300, 400)).__next__,
                 date_provider=lambda: date(2026, 9, 3),
             )
@@ -546,8 +546,8 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
         else:
             adjacent_scope_allowed = False
         uncertainty_state = "open" if open_scopes else "pending_recovery" if outcome_kind == "crashed" else "closed"
-        event_seqs = tuple(range(1, len(persister.events) + 1))
-        intent = next(event for event in persister.events if isinstance(event, ReservationIntent))
+        event_seqs = tuple(range(1, len(recording.events) + 1))
+        intent = next(event for event in recording.events if isinstance(event, ReservationIntent))
         assert intent.submission_attempt is not None
         reconcile_delivery_seqs: tuple[int, ...] = ()
         reconcile_final_status: str | None = None
@@ -555,7 +555,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             reconcile_delivery_seqs, reconcile_final_status = _deliver_out_of_order_reconcile()
         return FaultEvidence(
             durable_intent_count=sum(
-                isinstance(event, ReservationIntent) for event in persister.events
+                isinstance(event, ReservationIntent) for event in recording.events
             ),
             transport_request_count=transport.request_count,
             outcome_kind=outcome_kind,
@@ -678,7 +678,7 @@ async def test_durable_outcome_reason_redacts_credentials_and_authorization(
     event_type: type[ReservationUnknown] | type[ReservationFailed],
 ) -> None:
     open_scopes: set[tuple[UUID, str, str]] = set()
-    persister = _recording(open_scopes, "ci")
+    recording = _recording(open_scopes, "ci")
     executor = _TypedOutcomeExecutor(outcome)
     reader = _UncertaintyReader(open_scopes)
     gate = AccountCommandGate(
@@ -686,15 +686,15 @@ async def test_durable_outcome_reason_redacts_credentials_and_authorization(
         uncertainty_reader=reader,
         safety_evaluator=_SafetyEvaluator(reader, "ci"),
         deployment_environment="ci",
-        boundary=persister.boundary(),
-        managed_offers=persister.offers,
+        boundary=recording.boundary(),
+        managed_offers=recording.offers,
         clock=iter(range(100, 200)).__next__,
         date_provider=lambda: date(2026, 9, 3),
     )
 
     await gate.submit(_ready(decision_id=f"redaction-{outcome.kind.value}"), _context())
 
-    persisted = persister.events[-1]
+    persisted = recording.events[-1]
     assert isinstance(persisted, event_type)
     assert _API_KEY not in persisted.reason
     assert _API_SECRET not in persisted.reason

@@ -1,12 +1,10 @@
-"""What the periodic deployment may reprice: the offers this bot owns, per authority.
+"""What the periodic deployment may reprice: the offers this bot owns.
 
-``PeriodicReconcile`` deploys from an accepted cycle without knowing which
-authority produced it. This port is the one place that differs: the legacy
-cycle carries the venue snapshot it reconciled; under the ledger the managed
-offers are read from the live offer mirror of the cycle's accepted snapshot.
-Either way only *managed* offers are the bot's to reprice (D2): a foreign offer
-is never cancelled, an UNKNOWN's candidate has no claim a cancel could be
-admitted against, and an offer whose provenance contradicts itself is neither.
+``PeriodicReconcile`` deploys from an accepted cycle; the managed offers are read from
+the ledger's live offer mirror of the cycle's accepted snapshot. Only *managed* offers
+are the bot's to reprice (D2): a foreign offer is never cancelled, an UNKNOWN's candidate
+has no claim a cancel could be admitted against, and an offer whose provenance
+contradicts itself is neither.
 """
 from __future__ import annotations
 
@@ -16,7 +14,6 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
-from bfx_funding_bot.modules.execution.observation_sink import LegacyCycleResult
 from bfx_funding_bot.modules.ledger import (
     CycleResult,
     LedgerManagedOffers,
@@ -29,19 +26,6 @@ class DeploymentInput(Protocol):
     async def offers(self, cycle: CycleResult) -> tuple[ActiveFundingOffer, ...]:
         """The accepted ``cycle``'s offers the deployment may reprice."""
         ...
-
-
-class LegacyDeploymentInput:
-    """The reconcile snapshot's offers minus those the bot does not own."""
-
-    async def offers(self, cycle: CycleResult) -> tuple[ActiveFundingOffer, ...]:
-        if not isinstance(cycle, LegacyCycleResult):
-            raise TypeError(f"legacy deployment input got {type(cycle).__name__}")
-        result = cycle.legacy
-        return tuple(
-            offer for offer in result.venue_offers
-            if offer.venue_offer_id not in result.unmanaged_offer_ids
-        )
 
 
 class LedgerDeploymentInput:
@@ -82,4 +66,4 @@ def _active_offer(offer: ManagedOffer) -> ActiveFundingOffer | None:
     )
 
 
-__all__ = ["DeploymentInput", "LedgerDeploymentInput", "LegacyDeploymentInput"]
+__all__ = ["DeploymentInput", "LedgerDeploymentInput"]

@@ -29,11 +29,9 @@ class VenueCapabilities:
 
     ``auth_ws``: Bitfinex fills arrive on the authenticated WebSocket and a process without
     it holds stale exposure (``required``); the simulated venue has none (``forbidden``).
-    ``rest_fill_tracker``: whether the REST fill tracker may be enabled.
     """
 
     auth_ws: Literal["required", "forbidden"]
-    rest_fill_tracker: bool
 
 
 __all__ = ["Venue", "VenueCapabilities", "venue_for_phase"]

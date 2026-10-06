@@ -1,115 +1,47 @@
 """Integration: a resync trigger (as auth_ws fires on reconnect / seq-gap) makes
-PeriodicReconcile run a reconcile OFF the interval — far sooner than the timer.
-Real DomainEventBus + ledger + OfferRegistry + BootRecovery + PeriodicReconcile.
+PeriodicReconcile run a ledger cycle OFF the interval -- far sooner than the timer.
+The real ledger cycle over a fake venue, on migrated PostgreSQL.
 """
 from __future__ import annotations
 
-from decimal import Decimal
-from typing import Any
-from uuid import uuid4
-
 import pytest
 
-from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
-from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
-from bfx_funding_bot.modules.execution.events import ReservationClaimed
-from bfx_funding_bot.modules.execution.observation_sink import LegacyObservationSink
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
-from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
-from bfx_funding_bot.modules.execution.reconcile_result import ReconcileResult
-from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
-from bfx_funding_bot.modules.ledger import Scope
+from bfx_funding_bot.modules.ledger import OfferHistory
 from tests.async_wait import running, until, yield_loop
 
-# Reuse the stub session/store/auth-rest shapes from the WS-dead integration test.
-from tests.integration.test_reconcile_converges_without_ws import (
-    _EmptyAuthRest,
-    _FakeProbe,
-    _OneClaimSessionFactory,
-    _StubStore,
+from .test_ledger_capital_reader import book  # noqa: F401 - fixture re-export
+from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-export
+from .test_ledger_unknown_resolver_pg import CYCLE_1, CYCLE_2, SCOPE, Clock, FakeVenue, cycle
+from .test_reconcile_converges_without_ws import (
+    CountingSink,
+    FakeProbe,
+    cell_exposure,
+    placed_and_live,
 )
 
-from .conftest import make_reservation_ref
-
-_NOW = 2_000_000
-_ACCOUNT = "default"
-_ENV = "ci"
-_VOI = "777"
-_CID = 777
-_SIZE = Decimal("150")
-_ACTION_GRACE_MS = 120_000
-_CLAIM_OCCURRED_MS = _NOW - 600_000
+pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 
-class _CountingRecovery:
-    """Wraps a real BootRecovery, recording each run() so we can assert the
-    trigger produced an off-interval reconcile (independent of dedup)."""
-
-    def __init__(self, inner: BootRecovery) -> None:
-        self._inner = inner
-        self.calls = 0
-
-    async def run(self) -> ReconcileResult:
-        self.calls += 1
-        return await self._inner.run()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_resync_request_reconciles_off_interval(
-    domain_chain: dict[str, Any],
-) -> None:
-    bus = domain_chain["bus"]
-    ledger = domain_chain["ledger"]
-    scid = uuid4()
-
-    await bus.publish(ReservationClaimed(
-        cid=_CID, venue_offer_id=_VOI, size_usdt=_SIZE,
-        signal_correlation_id=scid, account_id=_ACCOUNT, is_simulated=False,
-        occurred_at_ms=_CLAIM_OCCURRED_MS,
-        symbol="fUST",
-        reservation_ref=make_reservation_ref(_CID, scid, _VOI),
-    ))
-    assert ledger.current_exposure("fUST") == Decimal("150")
-
-    claim_row = OfferClaimRow(
-        cid=_CID, account_id=_ACCOUNT, deployment_environment=_ENV,
-        state=RegistryState.CLAIMED.value, venue_offer_id=_VOI, size_usdt=_SIZE,
-        signal_correlation_id=str(scid), occurred_at_ms=_CLAIM_OCCURRED_MS,
-        last_updated_ms=_CLAIM_OCCURRED_MS, last_event_seq=1, symbol="fUST",
-        execution_decision_id=f"reconcile-test-{_CID}",
+async def test_resync_request_reconciles_off_interval(book) -> None:  # noqa: F811
+    clock = Clock()
+    live = await placed_and_live(book, clock)
+    gone = FakeVenue(clock, past=(OfferHistory(live, "canceled", CYCLE_1 + 5_000),))
+    sink = CountingSink(cycle(book, gone, clock))
+    clock.now = CYCLE_2
+    # Huge interval: only an off-interval resync can produce a second cycle.
+    reconcile = PeriodicReconcile(
+        resync=ResyncChannel(), recovery=sink, scope=SCOPE, probe=FakeProbe(),
+        interval_s=3600.0, max_consecutive_failures=3, min_resync_interval_s=0.0,
     )
-    inner = BootRecovery(
-        store=_StubStore(),  # type: ignore[arg-type]
-        session_factory=_OneClaimSessionFactory(claim_row),  # type: ignore[arg-type]
-        auth_rest=_EmptyAuthRest(),
-        account_ctx=AccountContext(
-            account_id=_ACCOUNT,
-            credentials=Credentials(api_key="k", api_secret="s"),
-            allocation_cap_usdt=Decimal("450"),
-        ),
-        deployment_environment=_ENV, bus=bus,
-        action_grace_ms=_ACTION_GRACE_MS, max_attempts=1, backoff_base_s=0,
-        clock=lambda: _NOW, symbol="fUST",
-    )
-    recovery = _CountingRecovery(inner)
-
-    # Huge interval: only an off-interval resync can produce a second reconcile.
-    scope = Scope(uuid4(), _ENV)
-    pr = PeriodicReconcile(resync=ResyncChannel(),
-        recovery=LegacyObservationSink(recovery, scope), scope=scope, probe=_FakeProbe(), interval_s=3600.0,
-        max_consecutive_failures=3, min_resync_interval_s=0.0,
-    )
-
-    async with running(pr.run_loop):
-        # Tick 1 (loop start) is done once the stuck reservation has been released;
-        # the hour-long interval means nothing else can tick before the trigger.
-        await until(
-            lambda: ledger.current_exposure("fUST") == Decimal("0"), what="tick 1 to converge",
-        )
+    async with running(reconcile.run_loop):
+        # Tick 1 (loop start) only; the hour-long interval means nothing else can tick
+        # before the trigger.
+        await until(lambda: len(sink.results) == 1, what="tick 1")
         await yield_loop(50)
-        assert recovery.calls == 1                       # tick 1 (loop start) only
-        pr.resync.request("reconnect")                   # the trigger under test
-        await until(lambda: recovery.calls >= 2, what="the off-interval reconcile")
-        assert recovery.calls >= 2                        # off-interval reconcile ran
+        assert len(sink.results) == 1
+        assert await cell_exposure(book, clock) == 0
+        reconcile.resync.request("reconnect")  # the trigger under test
+        await until(lambda: len(sink.results) >= 2, what="the off-interval cycle")
+    assert all(result.decision == "accepted" for result in sink.results)

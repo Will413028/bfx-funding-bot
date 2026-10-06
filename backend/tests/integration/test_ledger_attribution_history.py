@@ -1,10 +1,8 @@
-"""S1-6: the weekly attribution across the legacy -> ledger switch.
+"""S1-6: the weekly attribution of an offer only the ledger journal knows.
 
-Pre-switch data keeps its numbers once the seed has run, the epoch flipped and migration
-a0b1c2d3e4f5 copied the legacy offer -> cell out of the frozen tables (the weekly from that copy
-equals the pre-S1-8 weekly read of the legacy tables; the ledger holds the seeded provenance of
-the same offers and agrees), and an offer a ledger process places after the switch, which exists only in the journal, is
-attributed to its cell instead of 'unattributed'.
+An offer the ledger places exists only in the journal (no legacy claim); it is attributed to
+its cell instead of 'unattributed'. (How pre-switch data kept its numbers across the switch
+was checked by booting the legacy runtime, which S1-8 removed.)
 """
 from __future__ import annotations
 
@@ -15,7 +13,6 @@ import pytest
 from sqlalchemy import func, select, text
 
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
-from bfx_funding_bot.modules.live_validation import attribution_loader
 from bfx_funding_bot.modules.live_validation.attribution_loader import (
     AttributionResult,
     load_and_compute,
@@ -25,45 +22,27 @@ from bfx_funding_bot.modules.live_validation.tables import (
     FundingTradeRow,
 )
 
-from .bot_e2e import CELL, SCOPE, T0, BotEnv, bot_env, ledger_db  # noqa: F401 - fixtures
-from .legacy_attribution_links import materialize, reference_legacy_offer_cells
-from .seed_e2e import (
-    CELL_B,
-    acked,
-    boot_as_epoch,
-    flip_epoch,
-    run_seed,
-    seed_command,
-    submit,
+from .contracts.stacks import ACCOUNT as ACCOUNT_ID
+from .contracts.stacks import NOW as PLACED_AT
+from .test_capital_command_boundary import (
+    boundary,
+    gate_stack,  # noqa: F401 - fixture re-export
 )
-from .test_ledger_schema_roles import ledger_db as roles_db  # noqa: F401 - fixture
-from .test_ledger_seed_e2e import (
-    FILLED,
-    FILLED_AT,
-    RUNNER_AT,
-    SEED_AT,
-    halt_moves,
-    run_legacy,
-)
+from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-export
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-ACCOUNT = str(SCOPE.exchange_account_id)
+ACCOUNT = str(ACCOUNT_ID)
+T0 = PLACED_AT
 NOW = T0 + 3 * 86_400_000
 RATE = Decimal("0.0001")
-NEW_OFFER = 9001
-NEW_AMOUNT = Decimal("210.00000111")
-NEW_AT = RUNNER_AT + 20_000
-
-
-@pytest.fixture
-def authority() -> str:
-    return "legacy"
+OFFER = 101  # what the rig's venue acknowledges
+CELL = "a30"
 
 
 def _history(credit_id: int, amount: Decimal, opening: int, closed: int) -> FundingCreditHistoryRow:
     return FundingCreditHistoryRow(
-        exchange_account_id=SCOPE.exchange_account_id, kind="credit", credit_id=credit_id,
+        exchange_account_id=ACCOUNT_ID, kind="credit", credit_id=credit_id,
         deployment_environment="ci", symbol="fUST", side=1, mts_create=opening,
         mts_update=closed, amount=amount, status="CLOSED", rate=RATE, period_days=2,
         mts_opening=opening, mts_last_payout=closed,
@@ -72,13 +51,13 @@ def _history(credit_id: int, amount: Decimal, opening: int, closed: int) -> Fund
 
 def _trade(trade_id: int, offer_id: int, amount: Decimal, at: int) -> FundingTradeRow:
     return FundingTradeRow(
-        exchange_account_id=SCOPE.exchange_account_id, trade_id=trade_id,
+        exchange_account_id=ACCOUNT_ID, trade_id=trade_id,
         deployment_environment="ci", symbol="fUST", mts_create=at, offer_id=offer_id,
         amount=amount, rate=RATE, period_days=2, maker=True)
 
 
-async def weekly(env: BotEnv) -> AttributionResult:
-    return await load_and_compute(env.factory, account_id=ACCOUNT, deployment_environment="ci",
+async def weekly(factory: Any) -> AttributionResult:
+    return await load_and_compute(factory, account_id=ACCOUNT, deployment_environment="ci",
                                   now_ms=NOW)
 
 
@@ -95,58 +74,32 @@ def numbers(result: AttributionResult) -> dict[str, Any]:
     }
 
 
-async def test_weekly_is_unchanged_by_the_switch_and_attributes_journal_only_offers(
-    bot_env: BotEnv, ledger_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Any,  # noqa: F811
-) -> None:
-    env = bot_env
-    await run_legacy(env, unknown=False)
-    async with env.factory.begin() as session:
+async def test_an_offer_only_the_journal_knows_is_attributed_to_its_cell(gate_stack) -> None:  # noqa: F811
+    """No legacy claim exists for an offer the ledger placed: the journal alone names its cell."""
+    rig = await boundary(gate_stack)
+    await rig.gate.submit(rig.ready, rig.ctx)  # acknowledged as offer 101, cell a30
+    amount = rig.ready.decision.offer_amount_usdt
+    async with gate_stack.factory.begin() as session:
         session.add_all([
-            # 7004's credit, ended: trade 9004 (inserted by run_legacy) -> offer 7004 -> CELL
-            _history(8003, FILLED, FILLED_AT, FILLED_AT + 60_000),
+            _trade(9901, OFFER, amount, T0 + 100),
+            _history(9902, amount, T0 + 100, T0 + 60_000),
             # a credit with no funding trade, and one whose trade's offer is not ours
-            _history(8801, Decimal("50"), T0 + 20_000, T0 + 80_000),
-            _history(8802, Decimal("70"), T0 + 30_000, T0 + 90_000),
-            _trade(9802, 99_999, Decimal("70"), T0 + 30_000),
+            _history(8801, Decimal("50"), T0 + 200, T0 + 80_000),
+            _history(8802, Decimal("70"), T0 + 300, T0 + 90_000),
+            _trade(9802, 99_999, Decimal("70"), T0 + 300),
         ])
-    code, lines = await run_seed(seed_command(env, tmp_path, url=ledger_db.url), now_ms=SEED_AT)
-    assert code == 0, lines
-    await flip_epoch(env, at=SEED_AT + 1_000)
-    with monkeypatch.context() as patched:  # the pre-S1-8 weekly: legacy tables read directly
-        patched.setattr(attribution_loader, "legacy_offer_cells", reference_legacy_offer_cells)
-        before = numbers(await weekly(env))
-    assert "8802" in before["foreign_offer"] and "8801" in before["without_trade"]
-    assert any(cell == CELL and fills == 1 for cell, _w, fills, *_ in before["rows"])
-    # The migration's copy, taken once the switch froze the legacy tables (on the VM the
-    # migration ran after the switch). The seeded journal also knows the pre-switch offers,
-    # with legacy provenance: the same offers map to the same cells, no conflict, and the
-    # numbers do not move.
-    await materialize(env.factory)
-    assert numbers(await weekly(env)) == before
+        assert await session.scalar(select(func.count()).select_from(OfferClaimRow).where(
+            OfferClaimRow.venue_offer_id == str(OFFER))) == 0
 
-    boot_as_epoch(env)
-    halt_moves(env)
-    ledger = await env.build()
-    await env.boot(ledger, RUNNER_AT)
-    env.clock.now = RUNNER_AT + 10_000
-    await submit(env, ledger, NEW_AMOUNT, acked(NEW_OFFER), cell=CELL_B)
-    async with env.factory.begin() as session:
-        legacy_claims = await session.scalar(select(func.count()).select_from(OfferClaimRow).where(
-            OfferClaimRow.venue_offer_id == str(NEW_OFFER)))
-        session.add_all([_trade(9901, NEW_OFFER, NEW_AMOUNT, NEW_AT),
-                         _history(9902, NEW_AMOUNT, NEW_AT, NEW_AT + 60_000)])
-    assert legacy_claims == 0  # post-switch: the journal is the only record of the offer
-
-    after = await weekly(env)
-    assert after.offer_conflicts == ()
-    assert after.cells is not None and str(NEW_OFFER) not in after.cells.foreign_offer
-    assert after.cells.cell_by_credit["9902"] == CELL_B
-    assert set(after.cells.foreign_offer) == set(before["foreign_offer"])
-    assert any(r.cell == CELL_B and r.n_fills >= 1 for r in after.rows)
-    assert after.cells.cell_by_credit["8003"] == CELL
+    result = await weekly(gate_stack.factory)
+    assert result.offer_conflicts == ()
+    assert result.cells is not None and str(OFFER) not in result.cells.foreign_offer
+    assert result.cells.cell_by_credit["9902"] == CELL
+    assert "8802" in result.cells.foreign_offer and "8801" in result.cells.without_trade
+    assert any(r.cell == CELL and r.n_fills >= 1 for r in result.rows)
 
 
-def test_the_weekly_job_role_reads_the_ledger_columns_the_port_selects(roles_db: Any) -> None:  # noqa: F811
+def test_the_weekly_job_role_reads_the_ledger_columns_the_port_selects(ledger_db: Any) -> None:  # noqa: F811
     """The weekly connects as ``bfx_bot``: the port's columns are granted, no migration needed."""
     reads = {
         "submission_attempt_journal": ("exchange_account_id", "deployment_environment", "cell_id",
@@ -158,7 +111,7 @@ def test_the_weekly_job_role_reads_the_ledger_columns_the_port_selects(roles_db:
                                 "period_days", "mts_created", "mts_opening", "terminal_kind",
                                 "present_in_latest_accepted_snapshot"),
     }
-    with roles_db.connect() as conn:
+    with ledger_db.connect() as conn:
         for table, columns in reads.items():
             for column in columns:
                 assert conn.scalar(

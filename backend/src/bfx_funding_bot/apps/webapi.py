@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-from bfx_funding_bot.apps.authority_support import WEBAPI_SUPPORTED
+from bfx_funding_bot.apps.authority_support import SUPPORTED
 from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.core.authority import read_authority
 from bfx_funding_bot.core.db import make_engine, make_session_factory
@@ -36,13 +36,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.session_factory = None
     factory = app.state.session_factory
     if factory is not None:
-        # Read once: an authority this build does not support (or cannot read)
-        # refuses to start, so /health never reports a build on the wrong one.
+        # Read once: a database not on the ledger (or an unreadable epoch) refuses to
+        # start, so /health never reports a build on the wrong authority.
         try:
             async with factory() as session:
-                authority = await read_authority(session, supported=WEBAPI_SUPPORTED)
+                authority = await read_authority(session, supported=SUPPORTED)
             app.state.authority = authority
-            app.state.read_models = select_read_models(authority)
+            app.state.read_models = select_read_models()
         except Exception:
             logging.critical("Startup refused: capital authority unreadable or unsupported")
             await app.state.engine.dispose()

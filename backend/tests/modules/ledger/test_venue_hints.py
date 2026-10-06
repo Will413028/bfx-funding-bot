@@ -1,4 +1,4 @@
-"""Dormant sink contract: no persistence capability, one resync per window."""
+"""Ledger venue hint sink contract: no persistence capability, one resync per window."""
 
 from dataclasses import asdict, replace
 from decimal import Decimal
@@ -9,7 +9,6 @@ from uuid import UUID
 import pytest
 
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.fill_tracker import RestPollingFillTracker
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.ledger import (
     CreditCloseHint,
@@ -119,7 +118,7 @@ async def test_expired_hint_keys_are_pruned():
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_injected_port_bypasses_legacy_authority():
+async def test_dispatcher_hands_ws_events_to_the_injected_sink():
     from bfx_funding_bot.external.bitfinex.auth_ws import FccEvent, FcnEvent, FocEvent
 
     sink = SimpleNamespace(offer_closed=AsyncMock(), credit_closed=AsyncMock())
@@ -140,25 +139,3 @@ async def test_dispatcher_injected_port_bypasses_legacy_authority():
         81, "fUST", 1000, 2000, Decimal(100), "ACTIVE", 0.0005, 2, 18,
     ))
     assert sink.offer_closed.await_count == sink.credit_closed.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_fill_tracker_injected_port_retains_failed_hint_and_checks_paper_id():
-    from bfx_funding_bot.core.health import HealthProbe
-    from bfx_funding_bot.core.telemetry import Phase
-    from bfx_funding_bot.modules.execution.fill_tracker import InvariantError
-    from bfx_funding_bot.modules.strategy import StrategyName
-
-    sink = SimpleNamespace(offer_gone=AsyncMock(side_effect=[False, True]))
-    tracker = RestPollingFillTracker(
-        http=SimpleNamespace(), event_sink=SimpleNamespace(), probe=HealthProbe(), phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
-        cell="C-1", account_id=str(SCOPE.exchange_account_id),
-        venue_hint_sink=sink)
-    tracker._last_state = {"42": {}}
-    assert await tracker._diff_and_emit({}) == {"42"}
-    assert await tracker._diff_and_emit({}) == set()
-    assert sink.offer_gone.await_count == 2
-    tracker._last_state = {"paper_42": {}}
-    with pytest.raises(InvariantError, match="paper venue_offer_id"):
-        await tracker._diff_and_emit({})
-    assert sink.offer_gone.await_count == 2

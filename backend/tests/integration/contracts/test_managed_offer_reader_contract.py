@@ -1,4 +1,4 @@
-"""``ManagedOfferReader``: managed vs manual offers and fingerprints on both stacks."""
+"""``ManagedOfferReader``: managed vs manual offers and fingerprints on the ledger stack."""
 
 from __future__ import annotations
 
