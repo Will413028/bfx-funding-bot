@@ -442,6 +442,6 @@ class G3Report:
     data_threshold: DataThreshold
     gate_weeks: list[int]               # week starts the reconciliation gate considers
     acknowledgements: dict[int, str]    # operator-acknowledged week start -> reason
-    # venue offers legacy records and the ledger journal place in different cells (their
+    # venue offers the legacy records and/or the ledger journal place in more than one cell (their
     # credits are 'unattributed'): "offer: legacy=..., journal=..."
     offer_conflicts: tuple[str, ...] = ()

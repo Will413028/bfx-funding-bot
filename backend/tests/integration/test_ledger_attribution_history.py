@@ -1,8 +1,9 @@
 """S1-6: the weekly attribution across the legacy -> ledger switch.
 
-Pre-switch data keeps its numbers once the seed has run and the epoch flipped (the legacy
-projections stay readable; the ledger holds the seeded provenance of the same offers), and an
-offer a ledger process places after the switch, which exists only in the journal, is
+Pre-switch data keeps its numbers once the seed has run, the epoch flipped and migration
+a0b1c2d3e4f5 copied the legacy offer -> cell out of the frozen tables (the weekly from that copy
+equals the pre-S1-8 weekly read of the legacy tables; the ledger holds the seeded provenance of
+the same offers and agrees), and an offer a ledger process places after the switch, which exists only in the journal, is
 attributed to its cell instead of 'unattributed'.
 """
 from __future__ import annotations
@@ -14,6 +15,7 @@ import pytest
 from sqlalchemy import func, select, text
 
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
+from bfx_funding_bot.modules.live_validation import attribution_loader
 from bfx_funding_bot.modules.live_validation.attribution_loader import (
     AttributionResult,
     load_and_compute,
@@ -24,7 +26,7 @@ from bfx_funding_bot.modules.live_validation.tables import (
 )
 
 from .bot_e2e import CELL, SCOPE, T0, BotEnv, bot_env, ledger_db  # noqa: F401 - fixtures
-from .legacy_attribution_links import materialize
+from .legacy_attribution_links import materialize, reference_legacy_offer_cells
 from .seed_e2e import (
     CELL_B,
     acked,
@@ -98,9 +100,6 @@ async def test_weekly_is_unchanged_by_the_switch_and_attributes_journal_only_off
 ) -> None:
     env = bot_env
     await run_legacy(env, unknown=False)
-    # The legacy rows exist now; the weekly reads them through the migration's copy (on the VM
-    # the copy ran after the switch froze them).
-    await materialize(env.factory)
     async with env.factory.begin() as session:
         session.add_all([
             # 7004's credit, ended: trade 9004 (inserted by run_legacy) -> offer 7004 -> CELL
@@ -110,15 +109,19 @@ async def test_weekly_is_unchanged_by_the_switch_and_attributes_journal_only_off
             _history(8802, Decimal("70"), T0 + 30_000, T0 + 90_000),
             _trade(9802, 99_999, Decimal("70"), T0 + 30_000),
         ])
-    before = numbers(await weekly(env))
-    assert "8802" in before["foreign_offer"] and "8801" in before["without_trade"]
-    assert any(cell == CELL and fills == 1 for cell, _w, fills, *_ in before["rows"])
-
     code, lines = await run_seed(seed_command(env, tmp_path, url=ledger_db.url), now_ms=SEED_AT)
     assert code == 0, lines
     await flip_epoch(env, at=SEED_AT + 1_000)
-    # The seeded journal now also knows the pre-switch offers, with legacy provenance: the
-    # same offers map to the same cells, no conflict, and the numbers do not move.
+    with monkeypatch.context() as patched:  # the pre-S1-8 weekly: legacy tables read directly
+        patched.setattr(attribution_loader, "legacy_offer_cells", reference_legacy_offer_cells)
+        before = numbers(await weekly(env))
+    assert "8802" in before["foreign_offer"] and "8801" in before["without_trade"]
+    assert any(cell == CELL and fills == 1 for cell, _w, fills, *_ in before["rows"])
+    # The migration's copy, taken once the switch froze the legacy tables (on the VM the
+    # migration ran after the switch). The seeded journal also knows the pre-switch offers,
+    # with legacy provenance: the same offers map to the same cells, no conflict, and the
+    # numbers do not move.
+    await materialize(env.factory)
     assert numbers(await weekly(env)) == before
 
     boot_as_epoch(env)

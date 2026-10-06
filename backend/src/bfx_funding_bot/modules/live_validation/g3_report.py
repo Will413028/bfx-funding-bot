@@ -31,7 +31,7 @@ def _methodology_section(report: G3Report) -> list[str]:
         " its own weekly series is consistent.",
         "- Interest (active arm): was ORDER_FILL size × fill rate × assumed"
         " held-to-term (2 days, capped by CREDIT_CLOSED), booked to the week of the"
-        " fill. Now: venue credits (funding_credit_history + open venue_credit_state)"
+        " fill. Now: venue credits (funding_credit_history + venue_credit_mirror)"
         " × credit rate × actual held time MTS_OPENING..MTS_LAST_PAYOUT (..now while"
         " open), split across the UTC calendar weeks it spans. The old model overstated"
         " early repayments: two 150.77 fUST credits repaid after 14 min were booked as 2 days.",
@@ -162,8 +162,9 @@ def render_markdown(*, report: G3Report, fee_rate: Decimal) -> str:
 
     if report.offer_conflicts:
         honesty.append(
-            f"- **{len(report.offer_conflicts)} offer cell conflict(s)**: legacy records and the"
-            " ledger journal place these venue offers in different cells, so their credits are"
+            f"- **{len(report.offer_conflicts)} offer cell conflict(s)**: the legacy records"
+            " and/or the ledger journal place these venue offers in more than one cell, so their"
+            " credits are"
             " unattributed and excluded: " + "; ".join(report.offer_conflicts)
         )
 

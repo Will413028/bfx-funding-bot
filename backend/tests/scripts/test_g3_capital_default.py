@@ -21,7 +21,7 @@ from bfx_funding_bot.modules.live_validation.g3 import build_g3_report
 from bfx_funding_bot.modules.live_validation.interest_ledger import wallet_balance_basis
 from bfx_funding_bot.modules.live_validation.live_attribution import VerdictState
 from bfx_funding_bot.modules.live_validation.tables import (
-    AttributionLegacyOfferLinkRow,
+    AttributionLegacyOfferCellRow,
     FundingCreditHistoryRow,
     FundingInterestPaymentRow,
     FundingTradeRow,
@@ -85,10 +85,9 @@ def _ours(credit_id: int, opened: int) -> list[object]:
             symbol="fUST", mts_create=opened, offer_id=credit_id, amount=Decimal("150.76884612"),
             rate=Decimal("0.00019999"), period_days=2, maker=None,
         ),
-        AttributionLegacyOfferLinkRow(
-            exchange_account_id=ACCOUNT, deployment_environment="prod", source="claim",
-            venue_offer_id=str(credit_id), execution_decision_id=f"d{credit_id}",
-            signal_correlation_id="s",
+        AttributionLegacyOfferCellRow(
+            exchange_account_id=ACCOUNT, deployment_environment="prod",
+            venue_offer_id=str(credit_id), cell="fUST_p2",
         ),
         ExecutionDecisionRow(
             decision_id=f"d{credit_id}", account_id=str(ACCOUNT), exchange_account_id=ACCOUNT,

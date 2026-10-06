@@ -39,7 +39,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     reconciliation_status,
 )
 from bfx_funding_bot.modules.live_validation.tables import (
-    AttributionLegacyOfferLinkRow,
+    AttributionLegacyOfferCellRow,
     FundingCreditHistoryRow,
     FundingTradeRow,
 )
@@ -426,10 +426,9 @@ def _ours(credit_id: int, opened: int, cell: str, rate: Decimal = RATE) -> list[
             symbol="fUST", mts_create=opened, offer_id=credit_id, amount=AMOUNT,
             rate=rate, period_days=2, maker=None,
         ),
-        AttributionLegacyOfferLinkRow(
-            exchange_account_id=_ACCOUNT, deployment_environment="prod", source="claim",
-            venue_offer_id=str(credit_id), execution_decision_id=f"d{credit_id}",
-            signal_correlation_id=f"s{credit_id}",
+        AttributionLegacyOfferCellRow(
+            exchange_account_id=_ACCOUNT, deployment_environment="prod",
+            venue_offer_id=str(credit_id), cell=cell,
         ),
         ExecutionDecisionRow(
             decision_id=f"d{credit_id}", account_id=str(_ACCOUNT), exchange_account_id=_ACCOUNT,
@@ -519,10 +518,9 @@ async def test_build_verdict_reads_credits_through_trade_offer_and_decision(g3_f
                 symbol="fUST", mts_create=CREATED, offer_id=5123273052, amount=AMOUNT,
                 rate=RATE, period_days=2, maker=None,
             ),
-            AttributionLegacyOfferLinkRow(
-                exchange_account_id=_ACCOUNT, deployment_environment="prod", source="claim",
-                venue_offer_id="5123273052", execution_decision_id="d1",
-                signal_correlation_id="scid-x",
+            AttributionLegacyOfferCellRow(
+                exchange_account_id=_ACCOUNT, deployment_environment="prod",
+                venue_offer_id="5123273052", cell=CELL,
             ),
             ExecutionDecisionRow(
                 decision_id="d1", account_id=str(_ACCOUNT), exchange_account_id=_ACCOUNT,
