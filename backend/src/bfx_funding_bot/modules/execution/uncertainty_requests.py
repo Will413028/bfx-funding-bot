@@ -72,20 +72,11 @@ class ResolutionScope:
     environment: str
 
 
-def request_evidence_ref(row: UncertaintyResolutionRequestRow) -> str:
-    """The opaque reference the operator cited, rebuilt from whichever column the row carries."""
-    if row.observation_id is not None:
-        return observation_evidence_ref(row.observation_id)
-    if row.reconcile_event_seq is None:
-        raise ValueError("request has no evidence column")
-    return str(row.reconcile_event_seq)
-
-
 def intent_from_request(row: UncertaintyResolutionRequestRow) -> ResolutionIntent:
     return ResolutionIntent(
         uncertainty_id=row.uncertainty_id,
         action=row.action,  # type: ignore[arg-type]  # CHECK constraint bounds it
-        evidence_ref=request_evidence_ref(row),
+        evidence_ref=observation_evidence_ref(row.observation_id),
         operator_id=row.requested_by,
         reason=row.reason,
         venue_offer_id=row.venue_offer_id,
@@ -105,7 +96,6 @@ def _same_intent(
 ) -> bool:
     return (
         row.action == intent.action
-        and row.reconcile_event_seq is None
         and RequestColumns(row.observation_id) == columns
         and row.requested_by == intent.operator_id
         and row.venue_offer_id == intent.venue_offer_id

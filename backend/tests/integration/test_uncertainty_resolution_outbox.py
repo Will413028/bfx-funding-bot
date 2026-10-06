@@ -32,6 +32,9 @@ from tests.pg_templates import stamp_realm
 
 from .test_ledger_capital_reader import book  # noqa: F401 - fixture re-export
 from .test_ledger_operator_resolution_pg import open_unknown
+from .test_ledger_schema_roles import _A as _SEEDED_ACCOUNT
+from .test_ledger_schema_roles import _O as _SEEDED_OBSERVATION
+from .test_ledger_schema_roles import _seed as _seed_ledger
 from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-export
 from .test_ledger_unknown_resolver_pg import SCOPE as LEDGER_SCOPE
 
@@ -74,10 +77,11 @@ _LEDGER_AND_PROJECTIONS = (
 )
 _REQUEST_COLUMNS = (
     "request_id", "exchange_account_id", "deployment_environment", "uncertainty_id", "action",
-    "reconcile_event_seq", "observation_id", "venue_offer_id", "decision", "reason",
-    "requested_by", "created_at_ms",
+    "observation_id", "venue_offer_id", "decision", "reason", "requested_by", "created_at_ms",
 )
-_WORKER_COLUMNS = ("state", "processed_at_ms", "resolved_event_seq", "outcome_reason")
+_WORKER_COLUMNS = ("state", "processed_at_ms", "outcome_reason")
+# Pre-switch evidence: still in the table, written by no role (e4f5a6b7c8d9).
+_CLOSED_COLUMNS = ("reconcile_event_seq", "resolved_event_seq")
 
 
 def _build_migrated(url: str) -> None:
@@ -204,35 +208,33 @@ def test_outbox_grants_are_column_scoped_per_role(migrated) -> None:
                 conn, "SELECT has_column_privilege('bfx_bot', :t, :c, 'UPDATE')", t=table, c=column
             ), column
         assert not _privilege(conn, "SELECT has_any_column_privilege('bfx_bot', :t, 'INSERT')", t=table)
+        for column in _CLOSED_COLUMNS:
+            for role in ("bfx_webapi", "bfx_bot"):
+                assert not _privilege(
+                    conn, f"SELECT has_column_privilege('{role}', :t, :c, 'INSERT, UPDATE')",
+                    t=table, c=column,
+                ), (role, column)
 
 
-_ACCOUNT_SQL = """INSERT INTO exchange_accounts(id,venue,label,lifecycle_status)
-    VALUES ('00000000-0000-0000-0000-00000000d401','bitfinex','outbox','active')"""
-_LEGACY_EPOCH_SQL = """INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason)
-    SELECT max(epoch_seq) + 1, 'legacy', 0, 'test', 'pre-switch request shape'
-    FROM capital_authority_epoch"""
-_REQUEST_SQL = """INSERT INTO uncertainty_resolution_requests(
+_REQUEST_SQL = f"""INSERT INTO uncertainty_resolution_requests(
     request_id,exchange_account_id,deployment_environment,uncertainty_id,action,
-    reconcile_event_seq,requested_by,created_at_ms)
-    VALUES (:id,'00000000-0000-0000-0000-00000000d401','ci',:u,'mark_not_accepted',7,'op',1000)"""
+    observation_id,requested_by,created_at_ms)
+    VALUES (:id,'{_SEEDED_ACCOUNT}','ci',:u,'mark_not_accepted','{_SEEDED_OBSERVATION}','op',1000)"""
 
 
-def test_request_is_immutable_and_its_outcome_terminal(migrated) -> None:
-    _url, engine = migrated
+def test_request_is_immutable_and_its_outcome_terminal(ledger_db) -> None:  # noqa: F811
+    engine = ledger_db
     uncertainty = uuid4()
     first, second = uuid4(), uuid4()
     with engine.begin() as conn:
-        conn.exec_driver_sql(_ACCOUNT_SQL)
-        # The outbox rules hold under either epoch; a request citing an event sequence is the
-        # pre-switch shape (the ledger epoch closes it: test_ledger_operator_resolution_pg).
-        conn.exec_driver_sql(_LEGACY_EPOCH_SQL)
+        _seed_ledger(conn)  # the account and the observation a request cites
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         conn.execute(text(_REQUEST_SQL), {"id": first, "u": uncertainty})
     denied = (
         ("bfx_webapi", "INSERT INTO uncertainty_resolution_requests(request_id,exchange_account_id,"
-         "deployment_environment,uncertainty_id,action,reconcile_event_seq,requested_by,"
-         f"created_at_ms,state) VALUES ('{uuid4()}','00000000-0000-0000-0000-00000000d401','ci',"
-         f"'{uuid4()}','mark_not_accepted',7,'op',1000,'applied')"),
+         "deployment_environment,uncertainty_id,action,observation_id,requested_by,"
+         f"created_at_ms,state) VALUES ('{uuid4()}','{_SEEDED_ACCOUNT}','ci',"
+         f"'{uuid4()}','mark_not_accepted','{_SEEDED_OBSERVATION}','op',1000,'applied')"),
         ("bfx_webapi", "UPDATE uncertainty_resolution_requests SET state='rejected'"),
         ("bfx_bot", "UPDATE uncertainty_resolution_requests SET reason='rewritten'"),
         ("bfx_webapi", "DELETE FROM uncertainty_resolution_requests"),

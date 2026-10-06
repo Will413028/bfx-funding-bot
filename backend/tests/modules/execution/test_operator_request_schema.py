@@ -96,3 +96,17 @@ def test_currency_toggle_actions_match_the_migration_and_the_web_api() -> None:
 
     migration = _migration("7d2a9c4e6b13_capital_policy_requests.py")
     assert migration.ACTIONS == POLICY_REQUEST_ACTIONS == get_args(CurrencyAction)
+
+
+def test_closed_evidence_columns_are_in_the_table_but_never_read_or_written() -> None:
+    """The next release drops them while this one runs: nothing this image sends may name them."""
+    from sqlalchemy import insert, inspect, select
+
+    model = UncertaintyResolutionRequestRow
+    closed = set(model.CLOSED_COLUMNS)
+    assert closed == set(_migration("e4f5a6b7c8d9_close_pre_switch_request_evidence.py").CLOSED_COLUMNS)
+    assert closed <= {column.name for column in model.__table__.columns}
+    assert closed.isdisjoint(column.key for column in inspect(model).columns)
+    assert all(not hasattr(model, column) for column in closed)
+    for statement in (select(model), insert(model).values(**dict.fromkeys(model.REQUEST_COLUMNS))):
+        assert closed.isdisjoint(str(statement).replace(",", " ").replace(".", " ").split())

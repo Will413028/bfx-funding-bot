@@ -288,11 +288,7 @@ def _request_model(row: UncertaintyResolutionRequestRow) -> ResolutionRequestRes
         uncertainty_id=str(row.uncertainty_id),
         action=row.action,
         state=row.state,
-        evidence_ref=(
-            observation_evidence_ref(row.observation_id)
-            if row.observation_id is not None
-            else str(row.reconcile_event_seq)
-        ),
+        evidence_ref=observation_evidence_ref(row.observation_id),
         created_at_ms=row.created_at_ms,
         processed_at_ms=row.processed_at_ms,
         outcome_reason=row.outcome_reason,

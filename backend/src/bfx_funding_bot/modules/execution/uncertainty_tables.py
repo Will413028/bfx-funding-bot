@@ -15,11 +15,13 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
+    Column,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
     Numeric,
+    Table,
     Text,
     func,
     text,
@@ -287,10 +289,11 @@ class UncertaintyResolutionRequestRow(Base):
     WORKER_COLUMNS: ClassVar[tuple[str, ...]] = (
         "state", "processed_at_ms", "outcome_reason",
     )
-    # Pre-switch evidence: values of requests made under the legacy authority. No code writes
-    # them any more; the grants 1c435a35dcb4 gave (web API INSERT, bot UPDATE) stay until the
-    # contract migration drops the columns, so an image from before this split keeps working
-    # while a deploy runs.
+    # Pre-switch evidence columns: in the table, not mapped (appended below the class, after
+    # the mapper has taken its columns). No role may write them and every row has them NULL
+    # (e4f5a6b7c8d9). They stay one release because the image before this one maps them, and
+    # its web API's reads of this model name every mapped column while a deploy migrates; the
+    # next release drops them.
     CLOSED_COLUMNS: ClassVar[tuple[str, ...]] = ("reconcile_event_seq", "resolved_event_seq")
 
     request_id: Mapped[UUID] = mapped_column(_UUID, primary_key=True)
@@ -306,17 +309,15 @@ class UncertaintyResolutionRequestRow(Base):
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     uncertainty_id: Mapped[UUID] = mapped_column(_UUID, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
-    # Exactly one evidence column is set (ck_..._evidence): the legacy reconcile
-    # event, or the ledger observation.
-    reconcile_event_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    observation_id: Mapped[UUID | None] = mapped_column(
+    # The ledger observation the operator cited.
+    observation_id: Mapped[UUID] = mapped_column(
         _UUID,
         ForeignKey(
             "ledger_observation.id",
             ondelete="RESTRICT",
             name="fk_uncertainty_resolution_requests_observation",
         ),
-        nullable=True,
+        nullable=False,
     )
     venue_offer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     decision: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -328,10 +329,6 @@ class UncertaintyResolutionRequestRow(Base):
         Text, nullable=False, server_default=text("'requested'")
     )
     processed_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # Pre-switch rows only: the legacy event their resolution appended. No foreign key since
-    # the event log moved to the archive (c2d3e4f5a6b7); the outcome-shape CHECK keeps it NULL
-    # for every ledger request.
-    resolved_event_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     outcome_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
@@ -381,3 +378,9 @@ class UncertaintyResolutionRequestRow(Base):
             "created_at_ms",
         ),
     )
+
+
+_REQUESTS_TABLE = UncertaintyResolutionRequestRow.__table__
+assert isinstance(_REQUESTS_TABLE, Table)
+for _closed in UncertaintyResolutionRequestRow.CLOSED_COLUMNS:
+    _REQUESTS_TABLE.append_column(Column(_closed, BigInteger, nullable=True))

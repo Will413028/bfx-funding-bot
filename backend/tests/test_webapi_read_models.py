@@ -5,7 +5,7 @@ Mutation checks (one at a time; revert after each):
 * ``build_read_models`` returns another reader than the ledger's: ``test_build_read_models_*``.
 * The lifespan stops requiring the ``ledger`` epoch: ``test_lifespan_*``.
 * The lifespan stops storing ``app.state.read_models``: ``test_lifespan_*``.
-* ``_request_model`` keeps ``str(reconcile_event_seq)`` for ledger rows: ``test_request_*``.
+* ``_request_model`` stops citing the row's observation: ``test_request_*``.
 """
 
 from __future__ import annotations
@@ -92,14 +92,13 @@ async def test_get_read_models_is_a_503_until_booted() -> None:
 def _row(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "request_id": uuid4(), "uncertainty_id": uuid4(), "action": "mark_not_accepted",
-        "state": "requested", "reconcile_event_seq": None, "observation_id": None,
+        "state": "requested", "observation_id": uuid4(),
         "created_at_ms": 1, "processed_at_ms": None, "outcome_reason": None,
     }
     return SimpleNamespace(**{**values, **overrides})
 
 
-def test_request_evidence_ref_is_the_event_seq_for_legacy_and_the_observation_for_ledger() -> None:
-    assert _request_model(_row(reconcile_event_seq=42)).evidence_ref == "42"  # type: ignore[arg-type]
+def test_request_evidence_ref_is_the_observation() -> None:
     observation = uuid4()
     assert (
         _request_model(_row(observation_id=observation)).evidence_ref  # type: ignore[arg-type]
