@@ -165,10 +165,7 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
         "bfx_funding_bot.modules.trading", "bfx_funding_bot.modules.marketfeed",
         "bfx_funding_bot.apps",
     } <= set(independent["forbidden_modules"])
-    legacy_authority = {
-        f"bfx_funding_bot.modules.execution.{name}"
-        for name in ("event_store.tables", "uncertainty_tables")
-    }
+    legacy_authority = {"bfx_funding_bot.modules.execution.uncertainty_tables"}
     consumers = contracts_by_id["capital-consumers-via-ports"]
     assert set(consumers["source_modules"]) == {
         "bfx_funding_bot.modules.accounts.capital_amendment",
@@ -190,15 +187,15 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     for contract in (consumers, planner):
         assert contract["type"] == "forbidden"
         assert contract["allow_indirect_imports"] is True
-    # What is left of the legacy authority (the archived tables' ORM) stays out of the
-    # processes that lend and serve.
+    # The processes that lend and serve reach the archived legacy tables only through the
+    # archived execution history, never the archive's schema module directly.
     runtime = contracts_by_id["runtime-not-legacy-authority"]
     assert {
         "bfx_funding_bot.apps.bot", "bfx_funding_bot.apps.bot_ports",
         "bfx_funding_bot.apps.webapi", "bfx_funding_bot.apps.read_models",
         "bfx_funding_bot.modules.ledger", "bfx_funding_bot.modules.api",
     } <= set(runtime["source_modules"])
-    assert runtime["forbidden_modules"] == ["bfx_funding_bot.modules.execution.event_store.tables"]
+    assert runtime["forbidden_modules"] == ["bfx_funding_bot.modules.execution.legacy_archive"]
 
 
 def test_research_scripts_obtain_strategy_wiring_through_apps() -> None:

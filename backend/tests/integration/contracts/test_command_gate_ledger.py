@@ -13,7 +13,6 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
@@ -24,7 +23,6 @@ from bfx_funding_bot.modules.execution.command_boundary import (
 )
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate, CommandGateBlocked
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -96,9 +94,6 @@ class _Rig:
     seen: list[object]
     stack: Stack
 
-    async def event_log_rows(self) -> int:
-        async with self.stack.factory() as session:
-            return await session.scalar(select(func.count()).select_from(EventLogRow))
 
 
 async def _rig(stack: Stack, order: SubmittedOrder | None, *, journal=None) -> _Rig:
@@ -175,12 +170,10 @@ async def test_ledger_outcome_is_journaled_and_announced_once_with_no_legacy_tra
     ledger_stack, kind, wire_kind, offer, reason
 ) -> None:
     rig = await _rig(ledger_stack, _order(kind))
-    before = await rig.event_log_rows()
 
     await rig.gate.submit(rig.ready, rig.ctx)
 
     assert rig.venue.calls == 1
-    assert await rig.event_log_rows() == before == 0  # no legacy event_log row, ever
     assert [type(event) for event in rig.seen] == [CommandOutcomeNotice]
     notice = rig.seen[0]
     assert (notice.scope, notice.kind, notice.symbol, notice.venue_offer_id, notice.amount,
@@ -240,4 +233,3 @@ async def test_a_refused_admission_announces_nothing_and_never_reaches_the_venue
         await rig.gate.submit(stale, rig.ctx)
     assert rig.venue.calls == 0
     assert rig.seen == []
-    assert await rig.event_log_rows() == 0

@@ -35,9 +35,9 @@ JSON_DOCUMENT = JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "
 @event.listens_for(Column, "after_parent_attach")
 def _refuse_the_json_literal(column: Column[object], table: object) -> None:
     """Every written ``JSON_DOCUMENT`` column of ``public`` also refuses a stored JSON ``null``
-    (raw SQL can still write one): ``ck_<table>_<column>_json``, added by a6c7e8f9b0d1. Not the
-    frozen ``legacy_archive`` (no role writes it) nor a generated column. PostgreSQL only;
-    sqlite has no ``jsonb_typeof``."""
+    (raw SQL can still write one): ``ck_<table>_<column>_json``, added by a6c7e8f9b0d1. Not a
+    table of another schema nor a generated column. PostgreSQL only; sqlite has no
+    ``jsonb_typeof``."""
     if column.type is not JSON_DOCUMENT or column.computed is not None:
         return
     assert isinstance(table, Table)

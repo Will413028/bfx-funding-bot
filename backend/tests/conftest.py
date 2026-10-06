@@ -15,44 +15,9 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.pool import Pool, StaticPool
+from sqlalchemy.pool import StaticPool
 
 from tests import pg_local
-
-
-# The frozen legacy tables live in their own schema (migration c2d3e4f5a6b7, ORM
-# ``schema=legacy_archive``). ``Base.metadata.create_all`` creates no schema: on PostgreSQL it
-# is created first, and every SQLite connection attaches a database of that name (in memory,
-# or a file beside the main one) so the unit fixtures keep building the whole metadata.
-def _attach_legacy_archive(dbapi_connection, _record) -> None:
-    if "sqlite" not in type(dbapi_connection).__module__:
-        return
-    from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA
-
-    cursor = dbapi_connection.cursor()
-    try:
-        cursor.execute("PRAGMA database_list")
-        attached = {row[1]: row[2] for row in cursor.fetchall()}
-        if SCHEMA not in attached:
-            main = attached.get("main") or ""
-            cursor.execute(f"ATTACH DATABASE ? AS {SCHEMA}",
-                           (f"{main}.{SCHEMA}" if main else ":memory:",))
-    finally:
-        cursor.close()
-
-
-def _register_legacy_archive_schema() -> None:
-    from sqlalchemy import DDL, event
-
-    from bfx_funding_bot.core.db import Base
-    from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA
-
-    event.listen(Pool, "connect", _attach_legacy_archive)
-    event.listen(Base.metadata, "before_create",
-                 DDL(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}").execute_if(dialect="postgresql"))
-
-
-_register_legacy_archive_schema()
 
 
 async def ensure_auth_user(session: AsyncSession, user_id: str) -> None:
@@ -298,7 +263,6 @@ async def pg_engine(pg_container, pg_templates) -> AsyncIterator[AsyncEngine]:
     import bfx_funding_bot.modules.accounts.tables
     import bfx_funding_bot.modules.candles.tables
     import bfx_funding_bot.modules.execution.diagnostics.tables
-    import bfx_funding_bot.modules.execution.event_store.tables
     import bfx_funding_bot.modules.external_signals.tables
     import bfx_funding_bot.modules.funding_stats.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base

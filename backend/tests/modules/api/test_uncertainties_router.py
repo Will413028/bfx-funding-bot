@@ -32,7 +32,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.accounts.tables
 import bfx_funding_bot.modules.execution.audit.tables
-import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.execution.uncertainty_tables
 import bfx_funding_bot.modules.ledger.tables  # noqa: F401
 from bfx_funding_bot.core.auth import Principal, require_operator

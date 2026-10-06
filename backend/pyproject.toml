@@ -115,12 +115,11 @@ include_external_packages = true
 
 [[tool.importlinter.contracts]]
 id = "trading-is-pure"
-name = "Trading does not import I/O, runtime settings, or the event store"
+name = "Trading does not import I/O, runtime settings, or execution"
 type = "forbidden"
 source_modules = ["bfx_funding_bot.modules.trading"]
 forbidden_modules = [
-    "sqlalchemy", "httpx", "bfx_funding_bot.core.settings",
-    "bfx_funding_bot.modules.execution.event_store", "bfx_funding_bot.modules.execution",
+    "sqlalchemy", "httpx", "bfx_funding_bot.core.settings", "bfx_funding_bot.modules.execution",
 ]
 ignore_imports = []
 broken_contract_guidance = "Keep the capital contracts and fold pure; do not add ignores."
@@ -555,7 +554,6 @@ source_modules = [
     "bfx_funding_bot.modules.execution.safety.pre_trade",
 ]
 forbidden_modules = [
-    "bfx_funding_bot.modules.execution.event_store.tables",
     "bfx_funding_bot.modules.execution.uncertainty_tables",
 ]
 allow_indirect_imports = true
@@ -566,11 +564,10 @@ broken_contract_guidance = "Read through the ledger facade's ports (apps injects
 id = "runtime-not-legacy-authority"
 name = "The ledger runtime never imports what is left of the legacy capital authority"
 type = "forbidden"
-# S1-8 PR-D deleted the legacy authority's writer, store, projector and readers. The processes
-# that lend and serve must not grow back into what is left: the archived tables'
-# ORM (event_store.tables, schema legacy_archive) is read at runtime only by the archived
-# execution history (modules.execution.archived_execution_history), which declares its own
-# table and imports none of it.
+# What is left of the legacy capital authority is its frozen tables in schema legacy_archive,
+# which migrations own and no ORM maps. The processes that lend and serve reach them only
+# through the archived execution history (modules.execution.archived_execution_history),
+# never by naming the schema module directly.
 source_modules = [
     "bfx_funding_bot.apps.authority_support",
     "bfx_funding_bot.apps.bot",
@@ -583,7 +580,7 @@ source_modules = [
     "bfx_funding_bot.modules.marketfeed",
 ]
 forbidden_modules = [
-    "bfx_funding_bot.modules.execution.event_store.tables",
+    "bfx_funding_bot.modules.execution.legacy_archive",
 ]
 allow_indirect_imports = true
 ignore_imports = []
@@ -597,7 +594,6 @@ source_modules = ["bfx_funding_bot.modules.execution.deployment.reconciler"]
 # The planner imports only the pure amount codec (deployment.fingerprinted_amount and
 # trading.fingerprint_of); fingerprints in use come from ManagedOfferReader.
 forbidden_modules = [
-    "bfx_funding_bot.modules.execution.event_store.tables",
     "bfx_funding_bot.modules.execution.uncertainty_tables",
 ]
 allow_indirect_imports = true

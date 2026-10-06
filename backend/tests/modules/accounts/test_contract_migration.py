@@ -3,10 +3,6 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-from bfx_funding_bot.modules.execution.event_store.tables import (
-    OfferClaimRow,
-    PositionStateRow,
-)
 from bfx_funding_bot.modules.execution.safety.tables import NavPeakRow
 from bfx_funding_bot.modules.live_validation.tables import (
     AttributionWeeklyRow,
@@ -88,16 +84,6 @@ def test_contract_declares_uuid_rekey_collision_groups() -> None:
 
 
 def test_runtime_orm_primary_keys_match_post_cutover_uuid_contract() -> None:
-    assert {column.name for column in OfferClaimRow.__table__.primary_key} == {
-        "exchange_account_id",
-        "deployment_environment",
-        "cid",
-    }
-    assert {column.name for column in PositionStateRow.__table__.primary_key} == {
-        "exchange_account_id",
-        "deployment_environment",
-        "symbol",
-    }
     assert {column.name for column in NavPeakRow.__table__.primary_key} == {
         "exchange_account_id",
         "deployment_environment",

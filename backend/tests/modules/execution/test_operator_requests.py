@@ -13,7 +13,6 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import select
 
-import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
 from bfx_funding_bot.modules.execution.operator_requests import (
     APPLIED,
     NeedsPreparation,

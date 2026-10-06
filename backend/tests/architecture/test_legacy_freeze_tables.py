@@ -46,12 +46,13 @@ def test_every_execution_table_is_frozen_or_shared() -> None:
     migration = _migration()
     frozen, shared = set(migration.FROZEN), set(migration.SHARED)
     assert not frozen & shared
-    # The frozen ones live in the archive since c2d3e4f5a6b7 (the ORM names its schema).
-    assert _execution_tables() == {f"{legacy_archive.SCHEMA}.{name}" for name in frozen} | shared
+    # The frozen ones live in the archive since c2d3e4f5a6b7, owned by migrations: no ORM maps
+    # them, so every mapped execution table is a shared one.
+    assert _execution_tables() == shared
 
 
 def test_the_archive_holds_exactly_the_frozen_tables() -> None:
-    """The archive migration, the ORM's archive module and the freeze name the same twelve."""
+    """The archive migration, the archive's schema module and the freeze name the same twelve."""
     spec = importlib.util.spec_from_file_location("legacy_archive_schema", _ARCHIVE_MIGRATION)
     assert spec is not None and spec.loader is not None
     archive = importlib.util.module_from_spec(spec)

@@ -27,7 +27,6 @@ from tests.modules.marketfeed.account_test_helpers import (
 
 
 async def _database(monkeypatch, tmp_path: Path, **env: str) -> AsyncEngine:
-    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 
     url = f"sqlite+aiosqlite:///{tmp_path / 'phase.db'}"

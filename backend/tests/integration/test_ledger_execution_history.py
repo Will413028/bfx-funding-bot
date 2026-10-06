@@ -28,6 +28,7 @@ Mutation checks (one at a time; revert after each):
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
@@ -43,9 +44,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
-from bfx_funding_bot.modules.api.deps import get_session
+from bfx_funding_bot.modules.api.deps import ReadModels, get_session
 from bfx_funding_bot.modules.api.projections import build_projections_router
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+from bfx_funding_bot.modules.execution.archived_execution_history import (
+    ArchivedExecutionHistory,
+)
 from bfx_funding_bot.modules.ledger import CreditHistory, OfferHistory, Scope
 from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL, OPEN_LEGACY_ARCHIVE_SQL
 
@@ -58,18 +61,30 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 WATERMARK = 1_000
 
 
-async def _scenario(book: Book) -> dict[str, UUID]:
-    """Two legacy events, a seeded attempt, then the switch and three runtime journal facts."""
+async def _plant_archive(
+    book: Book, *events: tuple[str, int], environment: str = SCOPE.deployment_environment
+) -> None:
+    """Pre-switch ``event_log`` rows ``(event_type, occurred_at_ms)`` of SCOPE's account, planted
+    in the frozen archive opened on this clone (another environment with the realm trigger off)."""
     async with book.factory.begin() as session:
         await session.execute(text(OPEN_LEGACY_ARCHIVE_SQL))
-        for at, etype in ((100, "RESERVATION_INTENT"), (200, "ORDER_FILL")):
-            session.add(EventLogRow(
-                account_id="account", exchange_account_id=SCOPE.exchange_account_id,
-                deployment_environment=SCOPE.deployment_environment, event_type=etype,
-                venue_offer_id="legacy-1", cid=7,
-                payload={"symbol": "fUST", "amount": "50", "fill_rate": 0.0002},
-                occurred_at_ms=at,
-            ))
+        if environment != SCOPE.deployment_environment:
+            await session.execute(text(DISABLE_REALM_TRIGGERS_SQL))
+        for etype, at in events:
+            await session.execute(text(
+                "INSERT INTO legacy_archive.event_log (account_id, exchange_account_id, "
+                "deployment_environment, event_type, venue_offer_id, cid, payload, occurred_at_ms) "
+                "VALUES ('account', :account, :environment, :etype, 'legacy-1', 7, :payload, :at)"
+            ), {
+                "account": SCOPE.exchange_account_id, "environment": environment, "etype": etype,
+                "payload": json.dumps({"symbol": "fUST", "amount": "50", "fill_rate": 0.0002}),
+                "at": at,
+            })
+
+
+async def _scenario(book: Book) -> dict[str, UUID]:
+    """Two legacy events, a seeded attempt, then the switch and three runtime journal facts."""
+    await _plant_archive(book, ("RESERVATION_INTENT", 100), ("ORDER_FILL", 200))
     await book.accept()
     seeded = await book.attempt("40", outcome="ack", venue_offer_id="seeded-1",
                                 started_at_ms=500, completed_at_ms=600)
@@ -87,7 +102,9 @@ async def _scenario(book: Book) -> dict[str, UUID]:
     return {"seeded": seeded, "acked": acked, "unknown": unknown}
 
 
-async def _client(book: Book, monkeypatch: pytest.MonkeyPatch) -> httpx.AsyncClient:
+async def _client(
+    book: Book, monkeypatch: pytest.MonkeyPatch, read_models: ReadModels | None = None
+) -> httpx.AsyncClient:
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", SCOPE.deployment_environment)
     async with book.factory.begin() as session:
         await grant_membership(session, exchange_account_id=SCOPE.exchange_account_id,
@@ -100,7 +117,7 @@ async def _client(book: Book, monkeypatch: pytest.MonkeyPatch) -> httpx.AsyncCli
 
     app = FastAPI()
     app.include_router(build_projections_router())
-    app.state.read_models = build_read_models()
+    app.state.read_models = read_models or build_read_models()
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
     app.dependency_overrides[get_session] = restricted
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
@@ -307,3 +324,53 @@ async def test_the_web_api_cannot_read_the_credit_history_payload(book) -> None:
         async with book.factory() as session, session.begin():
             await session.execute(text("SET LOCAL ROLE bfx_webapi"))
             await session.execute(text("SELECT raw FROM ledger_observation_credit_history"))
+
+
+# --- the archive alone: ``ArchivedExecutionHistory`` behind the router ---------------------------
+
+
+async def _archive_client(book: Book, monkeypatch: pytest.MonkeyPatch) -> httpx.AsyncClient:
+    """SCOPE's four archived events and another environment's fill, served by the archive alone."""
+    await _plant_archive(book, ("RESERVATION_INTENT", 10_000), ("RESERVATION_CLAIMED", 10_001),
+                         ("ORDER_FILL", 10_002), ("CREDIT_CLOSED", 10_003))
+    await _plant_archive(book, ("ORDER_FILL", 99_999), environment="canary")
+    unused = object()
+    return await _client(book, monkeypatch, ReadModels(
+        unused, unused, unused, ArchivedExecutionHistory(), unused))  # type: ignore[arg-type]
+
+
+async def test_the_archive_pages_newest_first_within_its_scope(book, monkeypatch) -> None:
+    async with await _archive_client(book, monkeypatch) as client:
+        response = await client.get(_path(), params={"limit": 2})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        data = body["data"]
+        assert [row["eventType"] for row in data] == ["CREDIT_CLOSED", "ORDER_FILL"]  # no canary
+        assert (data[0]["amount"], data[0]["rate"], data[0]["cid"]) == ("50", 0.0002, 7)
+        assert body["pagination"]["hasMore"] is True
+        before = body["pagination"]["nextBefore"]
+        # Opaque string tokens (ADR 2026-10-02 D4); in the archive the event_seq as text.
+        assert isinstance(before, str) and before == data[-1]["eventKey"]
+
+        response = await client.get(_path(), params={"limit": 2, "before": before})
+        body = response.json()
+    assert int(body["data"][0]["eventKey"]) < int(before)
+    assert [row["eventType"] for row in body["data"]] == [
+        "RESERVATION_CLAIMED", "RESERVATION_INTENT"]
+    assert (body["pagination"]["hasMore"], body["pagination"]["nextBefore"]) == (False, None)
+
+
+async def test_the_archive_filters_by_event_type_within_its_scope(book, monkeypatch) -> None:
+    async with await _archive_client(book, monkeypatch) as client:
+        body = (await client.get(_path(), params={"event_type": "ORDER_FILL"})).json()
+    assert [(row["eventType"], row["occurredAtMs"]) for row in body["data"]] == [
+        ("ORDER_FILL", 10_002)]  # the canary fill excluded
+    assert body["pagination"]["hasMore"] is False
+
+
+async def test_the_archive_refuses_a_cursor_it_did_not_issue(book, monkeypatch) -> None:
+    async with await _archive_client(book, monkeypatch) as client:
+        for cursor in ("j.MTox", "abc", "-1"):
+            response = await client.get(_path(), params={"before": cursor})
+            assert (response.status_code, response.json()["detail"]) == (
+                422, "invalid_cursor"), cursor

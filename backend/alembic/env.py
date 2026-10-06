@@ -24,7 +24,6 @@ import bfx_funding_bot.modules.deployments.tables
 import bfx_funding_bot.modules.execution.audit.tables
 import bfx_funding_bot.modules.execution.capital_tables
 import bfx_funding_bot.modules.execution.diagnostics.tables
-import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.execution.safety.tables
 import bfx_funding_bot.modules.execution.uncertainty_tables
 import bfx_funding_bot.modules.external_signals.tables
@@ -39,7 +38,6 @@ from bfx_funding_bot.core import database_realm
 from bfx_funding_bot.core.alembic_compare import compare_server_default, include_object
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.core.settings import Settings
-from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA as LEGACY_ARCHIVE
 from bfx_funding_bot.modules.execution.projection_cutover.tables import ArchiveBase
 
 config = context.config
@@ -56,8 +54,14 @@ target_metadata = [Base.metadata, ArchiveBase.metadata]
 
 
 def include_name(name, type_, parent_names):
-    """Reflect only schemas owned by these migrations, never third-party schemas."""
-    return type_ != "schema" or name in {None, "public", "projection_audit", LEGACY_ARCHIVE}
+    """Reflect only schemas owned by these migrations and described by the metadata.
+
+    Deliberately absent: ``legacy_archive``, the legacy authority's twelve tables that migration
+    c2d3e4f5a6b7 moved there and froze. Migrations own them and no metadata describes them, so
+    reflecting the schema would report every one as ``remove_table`` drift.
+    """
+    return type_ != "schema" or name in {None, "public", "projection_audit"}
+
 
 # Session-level advisory lock that serializes concurrent `alembic upgrade` runs
 # (e.g. during VM cutover). Distinct namespace from the daemon writer lock so the

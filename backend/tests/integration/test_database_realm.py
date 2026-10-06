@@ -212,7 +212,10 @@ def test_the_orm_realm_tables_are_the_migrations_list() -> None:
         for metadata in (Base.metadata, ArchiveBase.metadata) for table in metadata.tables.values()
         if "deployment_environment" in table.c
     }
-    assert orm == _realm_tables(), sorted(orm ^ _realm_tables())
+    # The archived legacy tables are migration-owned: no ORM maps them.
+    archive = _load(_ARCHIVE_MIGRATION)
+    mapped = _realm_tables() - {f"{archive.SCHEMA}.{name}" for name in archive.TABLES}
+    assert orm == mapped, sorted(orm ^ mapped)
 
 
 # -- the stamp's derivation ----------------------------------------------------------
