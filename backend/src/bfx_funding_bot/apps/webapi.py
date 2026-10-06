@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-from bfx_funding_bot.apps.read_models import select_read_models
+from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.core.authority import require_ledger_authority
 from bfx_funding_bot.core.db import make_engine, make_session_factory
 from bfx_funding_bot.core.settings import Settings
@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             async with factory() as session:
                 await require_ledger_authority(session)
             app.state.authority = "ledger"
-            app.state.read_models = select_read_models()
+            app.state.read_models = build_read_models()
         except Exception:
             logging.critical("Startup refused: capital authority unreadable or unsupported")
             await app.state.engine.dispose()

@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from bfx_funding_bot.apps.read_models import select_read_models
+from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
@@ -47,7 +47,7 @@ async def test_migration_grants_allow_scoped_uncertainty_reads_without_ledger_wr
 
     app = FastAPI()
     app.include_router(build_uncertainties_router())
-    app.state.read_models = select_read_models()
+    app.state.read_models = build_read_models()
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
     app.dependency_overrides[get_session] = restricted_session
     path = f"/api/v1/exchange-accounts/{account}/uncertainties"

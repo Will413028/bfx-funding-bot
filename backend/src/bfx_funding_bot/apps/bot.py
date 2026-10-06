@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from bfx_funding_bot.apps.authority_support import require_ledger_epoch
-from bfx_funding_bot.apps.bot_ports import ObservationVenue, select_bot_ports
+from bfx_funding_bot.apps.bot_ports import ObservationVenue, build_capital_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
 from bfx_funding_bot.apps.venue import VenueSeam, build_venue
 from bfx_funding_bot.core.database_realm import assert_database_realm
@@ -230,14 +230,13 @@ async def build_daemon(
     account_id = account_bootstrap.account_id
     bus = DomainEventBus()
     resync = ResyncChannel()
-    ports = select_bot_ports(
+    capital = build_capital_ports(
         session_factory=session_factory, scope=capital_scope, account_id=account_id,
         bus=bus, resync=resync, clock=now_ms_utc,
         max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS,
     )
-    capital = ports.capital
-    uncertainty_reader = ports.uncertainty_reader
-    managed_offers = ports.managed_offers
+    uncertainty_reader = capital.uncertainty_reader
+    managed_offers = capital.managed_offers
     try:
         # Before anything can trade: every configured currency has an
         # applied capital policy.
@@ -964,7 +963,7 @@ async def build_daemon(
         ws_dispatcher = BitfinexLiveWSDispatcher(
             ws_client=auth_ws,
             event_sink=stdout_sink,
-            venue_hint_sink=ports.venue_hint_sink,
+            venue_hint_sink=capital.venue_hint_sink,
         )
         bus.subscribe(CancelRequested, ws_dispatcher.handle_cancel_requested)
         # Saturation signal: queue depth read live at scrape time (replaces the

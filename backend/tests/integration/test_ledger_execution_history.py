@@ -40,7 +40,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.apps.read_models import select_read_models
+from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.api.deps import get_session
@@ -100,7 +100,7 @@ async def _client(book: Book, monkeypatch: pytest.MonkeyPatch) -> httpx.AsyncCli
 
     app = FastAPI()
     app.include_router(build_projections_router())
-    app.state.read_models = select_read_models()
+    app.state.read_models = build_read_models()
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
     app.dependency_overrides[get_session] = restricted
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")

@@ -44,7 +44,7 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.apps.bot_ports import select_policy_ports
+from bfx_funding_bot.apps.bot_ports import build_policy_ports
 from bfx_funding_bot.core.authority import AUTHORITY_TABLE
 from bfx_funding_bot.core.database_realm import DatabaseRealmMismatch, read_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
@@ -126,7 +126,7 @@ async def _ensure_policy(
     session: AsyncSession, *, scope: Scope, symbol: str, target: CapitalPolicy,
 ) -> str:
     """Write ``target`` as the next revision unless it is already what is applied."""
-    policy = select_policy_ports(scope)
+    policy = build_policy_ports(scope)
     await policy.scope_lock.lock(session, scope)
     try:
         applied = await policy.store.read_applied(session, symbol=symbol)

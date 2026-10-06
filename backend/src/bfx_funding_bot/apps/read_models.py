@@ -15,7 +15,7 @@ from bfx_funding_bot.modules.ledger.wiring import (
 )
 
 
-def select_read_models() -> ReadModels:
+def build_read_models() -> ReadModels:
     """The web API boots only on the ``ledger`` authority (``apps/authority_support.py``)."""
     return ReadModels(
         build_operator_reads(), build_operator_evidence(), build_operator_resolution(),

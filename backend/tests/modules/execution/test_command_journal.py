@@ -103,7 +103,7 @@ async def test_gate_port_guard_transaction_and_transport_after_commit(command):
             assert isinstance(attempt, CommandAttempt) and not hasattr(attempt, "cid")
             assert session is sessions and sessions.active
             if command == "snapshot_changed":
-                return CommandRefused("snapshot_changed")
+                return CommandRefused("capital_snapshot_changed")
             await locked_guard(session)
             sessions.trace.append("write")
             return Authorized(attempt.attempt_id, 1, "digest")
