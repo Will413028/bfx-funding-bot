@@ -12,9 +12,9 @@ Mutation checks (one at a time; revert after each):
 * Drop the early return on a ``ledger`` latest epoch: ``test_a_switched_database_is_left_as_it_is``
   and the re-upgrade in ``test_a_database_without_legacy_history_starts_on_the_ledger`` fail
   (a second ``ledger`` row is appended).
-* Drop the ``event_log`` check from ``downgrade``:
-  ``test_downgrade_keeps_the_genesis_once_history_exists`` fails (the epoch a database with
-  history ran under is deleted).
+* Drop the ``LEDGER_WRITTEN`` check from ``downgrade``:
+  ``test_downgrade_refuses_once_the_ledger_was_written`` fails (the epoch a written ledger ran
+  under is deleted).
 """
 from __future__ import annotations
 
@@ -97,11 +97,14 @@ def test_downgrade_keeps_the_genesis_under_a_later_epoch(previous_db) -> None:
     assert [row[2] for row in _epochs(engine)][1:] == [f"migration {_REVISION} genesis", "switch"]
 
 
-def test_downgrade_keeps_the_genesis_once_history_exists(previous_db) -> None:
+def test_downgrade_refuses_once_the_ledger_was_written(previous_db) -> None:
     url, engine = previous_db
     alembic(url, "upgrade", _REVISION)
-    _legacy_history(engine)
-    alembic(url, "downgrade", _PREVIOUS)
+    with engine.begin() as conn:
+        _seed(conn)  # one row per ledger table, as a ledger process would leave behind
+    with pytest.raises(RuntimeError, match="the ledger was written since"):
+        alembic(url, "downgrade", _PREVIOUS)
+    assert _head(engine) == _REVISION
     assert [row[1] for row in _epochs(engine)] == ["legacy", "ledger"]
 
 

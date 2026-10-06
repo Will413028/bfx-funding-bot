@@ -22,6 +22,7 @@ from .test_ledger_schema_roles import (  # noqa: F401 - fixtures
     _seed,
     append_epoch,
     ledger_db,
+    pre_switch_url,
     seeded,
 )
 
@@ -91,6 +92,7 @@ def test_upgrade_backfills_baseline_and_leaves_no_default(ledger_db) -> None:  #
 def test_downgrade_drops_baseline_only_rows_and_round_trips(seeded) -> None:  # noqa: F811
     url = seeded.url.render_as_string(hide_password=False)
     seeded.dispose()
+    pre_switch_url(url)  # the downgrade below the genesis starts pre-switch
     alembic(url, "downgrade", _PARENT)
     engine = create_engine(url)
     try:
@@ -110,6 +112,7 @@ def test_downgrade_refuses_to_drop_stored_verdicts(seeded) -> None:  # noqa: F81
         _insert(conn, "conserved", "0", "0")
     url = seeded.url.render_as_string(hide_password=False)
     seeded.dispose()
+    pre_switch_url(url)  # the downgrade below the genesis starts pre-switch
     with pytest.raises(Exception, match="refuse downgrade of populated ledger"):
         alembic(url, "downgrade", _PARENT)
     engine = create_engine(url)

@@ -679,8 +679,10 @@ def test_r6_populated_downgrade_preserves_facts(seeded) -> None:
             ),
             {"id": uuid4(), "a": _A, "source": _T},
         )
+    url = seeded.url.render_as_string(hide_password=False)
+    pre_switch_url(url)  # the downgrade below the genesis starts pre-switch
     with pytest.raises(Exception, match="refuse downgrade with R6 quarantine facts"):
-        alembic(seeded.url.render_as_string(hide_password=False), "downgrade", "f6a7b8c9d0e1")
+        alembic(url, "downgrade", "f6a7b8c9d0e1")
 
 
 def test_immutable_rows_reject_update_delete_truncate(seeded) -> None:
