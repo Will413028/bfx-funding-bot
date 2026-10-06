@@ -29,7 +29,7 @@ legacy ``basis``            ledger             why
 ==========================  =================  ==============================================
 
 Any other value refuses (``attribution_basis_unknown``); nothing is defaulted. Deleted with
-the legacy authority in S1-8.
+the switch scaffolding in PR-D.
 """
 
 from __future__ import annotations

@@ -3,7 +3,8 @@
 The in-memory offer registry that drove these transitions is gone with the legacy runtime
 (S1-8). The enum stays for the readers of the frozen ``offer_claims`` table: the event-store
 replay that the baseline restore drill runs, and the switch scaffolding (the capital
-comparison closure, the seed); it goes with them.
+comparison closure, the seed); it goes with the later of PR-D (the scaffolding) and D4b (the
+baseline drill verified on the ledger).
 """
 from __future__ import annotations
 

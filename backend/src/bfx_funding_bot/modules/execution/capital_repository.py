@@ -385,7 +385,7 @@ class CapitalRepository:
     ) -> ObservedAcceptance:
         """What ``begin_snapshot`` + ``accept_snapshot`` would accept now, without writing.
 
-        Cutover comparison only (F3 (i'), deleted with the legacy authority): no
+        Cutover comparison only (F3 (i'), deleted with the switch scaffolding in PR-D): no
         query row, no event, no prefix link, no snapshot row, no account lock. The
         fence is the stream head in the caller's snapshot -- what ``begin_snapshot``
         would record with no writer running, which acceptance then requires to be

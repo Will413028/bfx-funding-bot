@@ -1,9 +1,11 @@
-"""The capital authority this build runs under, read once at boot.
+"""The capital authority a database is under, read once at boot.
 
-``capital_authority_epoch`` is insert-only; its latest row by ``epoch_seq`` names
-the authority (``legacy`` or ``ledger``). Only the owner appends a row -- the
-S1-7 switch -- and a process refuses to run on an authority it does not support,
-so a switched database never meets a process that would write the other one.
+``capital_authority_epoch`` is insert-only; its latest row by ``epoch_seq`` names the
+authority. ``ledger`` is the only one a build since S1-8 runs on; ``legacy`` is still a value
+the table holds (the seed row, a database restored from before the switch), so it must be
+named to be refused. Only the owner appends a row -- the S1-7 switch, or the genesis
+migration on a database without legacy history -- and every process refuses an authority
+outside the set it passes (``apps/authority_support.SUPPORTED``).
 """
 
 from __future__ import annotations

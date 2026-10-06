@@ -4,7 +4,8 @@ The legacy boot and runtime reconcile (``BootRecovery``) is gone with the legacy
 (S1-8); the ledger's observation cycle replaced it. ``convert_pending_to_unknown`` stays
 for the one reader that still replays the legacy stream with it: the baseline restore drill's
 replay (``scripts/verify_projection_replay.py``, run by
-``deploy/vm/pgbackrest/restore_commands.py``). It goes with that drill.
+``deploy/vm/pgbackrest/restore_commands.py``). It goes in D4b, when that drill verifies the
+ledger instead.
 """
 from __future__ import annotations
 

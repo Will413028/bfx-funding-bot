@@ -483,8 +483,8 @@ class QuarantineMember:
 # execution produces from the final legacy accepted snapshot, and ``ledger.seed.write_seed``
 # turns into the one ``legacy_seed`` observation, its basis, journals, mirrors and quarantines.
 # Every value here is a legacy fact as stored (F7: no re-derivation); vocabularies are the
-# ledger's, mapped by the reader. Deleted with the legacy authority in S1-8 (the DTOs and
-# ``write_seed`` stay as the record of how the seed rows were made).
+# ledger's, mapped by the reader. The reader goes with the switch scaffolding in PR-D (the DTOs
+# and ``write_seed`` stay as the record of how the seed rows were made).
 # ---------------------------------------------------------------------------
 
 type SeedClassification = Literal["reflected", "settled", "unresolved"]
