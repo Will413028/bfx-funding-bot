@@ -103,7 +103,7 @@ async def test_run_hands_a_closing_offer_from_the_stream_to_the_sink() -> None:
 
 @pytest.mark.asyncio
 async def test_a_cancel_requested_on_the_bus_rides_on_the_closing_hint() -> None:
-    bus = DomainEventBus(clock=lambda: 2200)
+    bus = DomainEventBus()
     sink = _RecordingSink()
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=_FakeWSClient([_foc("42", "CANCELED", 7)]),

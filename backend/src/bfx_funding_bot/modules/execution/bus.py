@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -22,13 +20,8 @@ EventHandler = Callable[[Any], Awaitable[None]]
 
 
 class DomainEventBus:
-    def __init__(
-        self,
-        clock: Callable[[], int] | None = None,
-    ) -> None:
+    def __init__(self) -> None:
         self._handlers: dict[type, list[EventHandler]] = {}
-        self._seq: int = 0
-        self._clock = clock if clock is not None else lambda: int(time.time() * 1000)
 
     def subscribe(self, event_type: type, handler: EventHandler) -> None:
         """Register handler for given event type.
@@ -44,32 +37,13 @@ class DomainEventBus:
         existing.append(handler)
 
     async def publish(self, event: Any) -> None:
-        """Fan out event to all subscribers of its concrete type.
-
-        If event has event_seq and recorded_at_ms attributes, attaches monotonic
-        event_seq (1-indexed) and recorded_at_ms from clock, preserving caller-set
-        values (for replay paths).
+        """Fan out event, unchanged, to all subscribers of its concrete type.
 
         Handlers run concurrently via asyncio.gather(return_exceptions=True).
         A failing handler is logged but does not affect siblings or raise to
-        caller. Caller treats publish() as best-effort fire; replay uses the
-        PG event_log for durable state recovery at boot.
+        caller. Caller treats publish() as best-effort fire; durable state lives
+        in the ledger, never on the bus.
         """
-        # Attach event_seq and recorded_at_ms if event supports them.
-        if hasattr(event, "event_seq") and hasattr(event, "recorded_at_ms"):
-            self._seq += 1
-            new_event_seq = event.event_seq if event.event_seq is not None else self._seq
-            new_recorded_at_ms = (
-                event.recorded_at_ms
-                if event.recorded_at_ms is not None
-                else self._clock()
-            )
-            event = replace(
-                event,
-                event_seq=new_event_seq,
-                recorded_at_ms=new_recorded_at_ms,
-            )
-
         handlers = self._handlers.get(type(event), [])
         if not handlers:
             return

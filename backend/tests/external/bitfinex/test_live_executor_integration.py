@@ -365,7 +365,7 @@ async def test_cancel_publishes_cancel_requested() -> None:
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=cancel_success_resp)
     ))
-    bus = DomainEventBus(clock=lambda: 5000)
+    bus = DomainEventBus()
     captured: list = []
 
     async def capture(ev: CancelRequested) -> None:

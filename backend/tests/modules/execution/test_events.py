@@ -9,8 +9,6 @@ from bfx_funding_bot.modules.execution.events import (
     CancelRequested,
     OrderFilled,
     ReservationClaimed,
-    ReservationFailed,
-    ReservationIntent,
     ReservationReleased,
 )
 
@@ -37,24 +35,11 @@ def _reservation_ref(*, cid: int, scid: UUID, voi: str | None = None) -> Reserva
         reason="venue_cancel", signal_correlation_id=scid, account_id="default",
         is_simulated=False,
     ),
-    lambda scid: ReservationFailed(
-        cid=42, size_usdt=Decimal("100"), symbol="fUST", reason="submit_failed",
-        signal_correlation_id=scid, account_id="default", is_simulated=False,
-    ),
 ])
 def test_new_lifecycle_event_requires_reservation_reference(make: object) -> None:
     scid = uuid4()
     with pytest.raises(TypeError, match="reservation_ref"):
         make(scid)  # type: ignore[operator]
-
-
-def test_public_constructor_cannot_forge_legacy_uncorrelated_lifecycle_event() -> None:
-    with pytest.raises(TypeError, match="unexpected keyword argument 'is_legacy_uncorrelated'"):
-        ReservationClaimed(
-            cid=42, venue_offer_id="v1", size_usdt=Decimal("100"), symbol="fUST",
-            signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
-            is_legacy_uncorrelated=True,
-        )
 
 
 def test_public_constructor_does_not_accept_historical_replay_provenance() -> None:
@@ -90,9 +75,7 @@ def test_reservation_claimed_optional_fields_default_none() -> None:
         reservation_ref=_reservation_ref(cid=42, scid=_SCID_T1, voi="v1"),
     )
     assert e.venue_seq is None
-    assert e.event_seq is None
     assert e.occurred_at_ms is None
-    assert e.recorded_at_ms is None
 
 
 def test_order_filled_optional_fields_default_none() -> None:
@@ -109,9 +92,7 @@ def test_order_filled_optional_fields_default_none() -> None:
         reservation_ref=_reservation_ref(cid=42, scid=_SCID_T1, voi="v1"),
     )
     assert e.venue_seq is None
-    assert e.event_seq is None
     assert e.occurred_at_ms is None
-    assert e.recorded_at_ms is None
 
 
 def test_reservation_released_optional_fields_default_none() -> None:
@@ -127,7 +108,6 @@ def test_reservation_released_optional_fields_default_none() -> None:
         reservation_ref=_reservation_ref(cid=42, scid=_SCID_T1, voi="v1"),
     )
     assert e.venue_seq is None
-    assert e.event_seq is None
 
 
 def test_cancel_requested_minimal() -> None:
@@ -142,9 +122,7 @@ def test_cancel_requested_minimal() -> None:
     assert e.requested_at_ms == 1000
     assert e.signal_correlation_id == cid_uuid
     assert e.venue_seq is None
-    assert e.event_seq is None
     assert e.occurred_at_ms is None
-    assert e.recorded_at_ms is None
 
 
 def test_cancel_acknowledged_constructs_with_required_fields() -> None:
@@ -160,9 +138,7 @@ def test_cancel_acknowledged_constructs_with_required_fields() -> None:
     assert event.rest_status == "success"
     assert event.venue_response_text is None  # default
     assert event.venue_seq is None  # default (never WS-sourced)
-    assert event.event_seq is None
     assert event.occurred_at_ms is None
-    assert event.recorded_at_ms is None
 
 
 def test_cancel_acknowledged_already_terminal_status() -> None:
@@ -212,62 +188,6 @@ def test_events_are_frozen() -> None:
 
 
 _SCID_T1 = UUID("11111111-1111-1111-1111-111111111111")
-
-
-def test_reservation_intent_fields() -> None:
-    ev = ReservationIntent(
-        execution_decision_id="d-events",
-        cid=42,
-        size_usdt=Decimal("100"),
-        symbol="fUST",
-        signal_correlation_id=_SCID_T1,
-        account_id="acct",
-        is_simulated=True,
-        occurred_at_ms=1000,
-    )
-    assert ev.cid == 42
-    assert ev.execution_decision_id == "d-events"
-    assert ev.size_usdt == Decimal("100")
-    assert ev.account_id == "acct"
-    # uniform bitemporal optionals default None
-    assert ev.event_seq is None
-    assert ev.recorded_at_ms is None
-    # INTENT carries no venue_offer_id (PENDING — voi unknown until CLAIMED)
-    assert not hasattr(ev, "venue_offer_id")
-
-
-def test_reservation_failed_fields() -> None:
-    ev = ReservationFailed(
-        cid=42,
-        size_usdt=Decimal("100"),
-        symbol="fUST",
-        signal_correlation_id=_SCID_T1,
-        account_id="acct",
-        is_simulated=False,
-        reason="submit_failed",
-        occurred_at_ms=2000,
-        reservation_ref=_reservation_ref(cid=42, scid=_SCID_T1),
-    )
-    assert ev.reason == "submit_failed"
-    assert ev.is_simulated is False
-
-
-def test_reservation_intent_has_symbol_and_amount() -> None:
-    e = ReservationIntent(
-        execution_decision_id="d-events", cid=1, size_usdt=Decimal("100"), symbol="fUST",
-        signal_correlation_id=uuid4(), account_id="default", is_simulated=False)
-    assert e.symbol == "fUST"
-    assert e.amount == Decimal("100")      # mirrored from size_usdt
-    assert e.size_usdt == Decimal("100")
-
-
-def test_reservation_failed_has_symbol_and_amount() -> None:
-    e = ReservationFailed(
-        cid=1, size_usdt=Decimal("100"), symbol="fUST",
-        signal_correlation_id=_SCID_T1, account_id="default", is_simulated=False,
-        reason="submit_failed", reservation_ref=_reservation_ref(cid=1, scid=_SCID_T1))
-    assert e.symbol == "fUST"
-    assert e.amount == Decimal("100")
 
 
 def test_reservation_claimed_has_symbol_and_amount() -> None:
@@ -483,11 +403,6 @@ def test_position_reconciled_rejects_conflicting_canonical_and_usdt() -> None:
 
 
 @pytest.mark.parametrize("make", [
-    lambda s: ReservationIntent(cid=1, amount=Decimal("100"), symbol=s,
-        execution_decision_id="d-events", signal_correlation_id=uuid4(), account_id="a", is_simulated=False),
-    lambda s: ReservationFailed(cid=1, amount=Decimal("100"), symbol=s,
-        signal_correlation_id=_SCID_T1, account_id="a", is_simulated=False, reason="x",
-        reservation_ref=_reservation_ref(cid=1, scid=_SCID_T1)),
     lambda s: ReservationClaimed(cid=1, venue_offer_id="v1", amount=Decimal("100"), symbol=s,
         signal_correlation_id=_SCID_T1, account_id="a", is_simulated=False,
         reservation_ref=_reservation_ref(cid=1, scid=_SCID_T1, voi="v1")),

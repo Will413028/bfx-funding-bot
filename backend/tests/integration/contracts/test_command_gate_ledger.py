@@ -25,13 +25,6 @@ from bfx_funding_bot.modules.execution.command_boundary import (
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate, CommandGateBlocked
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-from bfx_funding_bot.modules.execution.events import (
-    OrderFilled,
-    ReservationClaimed,
-    ReservationFailed,
-    ReservationIntent,
-    ReservationUnknown,
-)
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -52,8 +45,18 @@ from .stacks import ACCOUNT, CELL, ENVIRONMENT, NOW, SCOPE, Stack, build_stack, 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 AMOUNT = Decimal("200.00000500")
-LEGACY_EVENTS = (ReservationIntent, ReservationClaimed, ReservationFailed, ReservationUnknown,
-                 OrderFilled)
+
+
+class _CapturingBus(DomainEventBus):
+    """Records every publication whatever its type, so "only the notice" is a real check."""
+
+    def __init__(self, seen: list[object]) -> None:
+        super().__init__()
+        self._seen = seen
+
+    async def publish(self, event: object) -> None:
+        self._seen.append(event)
+        await super().publish(event)
 
 
 @pytest_asyncio.fixture
@@ -98,7 +101,7 @@ class _Rig:
             return await session.scalar(select(func.count()).select_from(EventLogRow))
 
 
-async def _rig(stack: Stack, order: SubmittedOrder | None, *, journal=None, bus=None) -> _Rig:
+async def _rig(stack: Stack, order: SubmittedOrder | None, *, journal=None) -> _Rig:
     from tests.external.bitfinex.test_funding_rules import evidence
     from tests.modules.execution.deployment.test_reconciler import _valid_snapshot
 
@@ -128,14 +131,8 @@ async def _rig(stack: Stack, order: SubmittedOrder | None, *, journal=None, bus=
         market_snapshot=replace(_valid_snapshot(), snapshot_id="book", max_age_ms=30000),
         funding_amount_evidence=evidence(),
     )
-    bus = bus or DomainEventBus()
     seen: list[object] = []
-
-    async def capture(event) -> None:
-        seen.append(event)
-
-    for event_type in (*LEGACY_EVENTS, CommandOutcomeNotice):
-        bus.subscribe(event_type, capture)
+    bus = _CapturingBus(seen)
     boundary = stack.boundary(LedgerCommandEffects(bus))
     if journal is not None:
         boundary = replace(boundary, journal=journal(boundary.journal, seen))

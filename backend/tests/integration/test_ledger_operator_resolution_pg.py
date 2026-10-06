@@ -534,10 +534,8 @@ async def test_resolution_context_without_an_accepted_observation_or_with_a_quar
     assert cited.unavailable_reason is None and cited.candidate_count is None
 
 
-def test_the_manual_decisions_equal_the_legacy_ones() -> None:
-    from bfx_funding_bot.modules.execution.events import MANUAL_UNCERTAINTY_RESOLUTION_ACTIONS
-
-    assert MANUAL_RESOLUTION_DECISIONS == MANUAL_UNCERTAINTY_RESOLUTION_ACTIONS
+def test_the_manual_decisions_are_the_two_operator_actions() -> None:
+    assert {"accepted_external_exposure", "closed_at_venue"} == MANUAL_RESOLUTION_DECISIONS
 
 
 # --- atomicity ---------------------------------------------------------------------------------------
