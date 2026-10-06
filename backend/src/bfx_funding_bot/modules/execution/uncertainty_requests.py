@@ -250,8 +250,6 @@ def request_values(
         "deployment_environment": scope.environment,
         "uncertainty_id": intent.uncertainty_id,
         "action": intent.action,
-        # Pre-switch evidence only; the epoch trigger refuses it under the ledger.
-        "reconcile_event_seq": None,
         "observation_id": columns.observation_id,
         "venue_offer_id": intent.venue_offer_id,
         "decision": intent.decision,

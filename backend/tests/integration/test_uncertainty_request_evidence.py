@@ -7,7 +7,9 @@ Mutation checks (one at a time; revert after each):
 * Drop ``observation_id`` from the guard's immutable list. The UPDATE succeeds.
 * Drop the applied-requires-journal rule from the guard. The journal-less apply succeeds.
 * Drop ``uq_execution_resolution_operator_request``. Two journal rows share a request.
-* Drop the ``uncertainty_request_evidence_epoch`` trigger. The webapi epoch cases insert.
+* Drop the ``uncertainty_request_evidence_epoch`` trigger. The webapi legacy-epoch case inserts.
+* Skip e4f5a6b7c8d9's revoke of ``bfx_webapi``'s INSERT (``reconcile_event_seq``). The webapi
+  reconcile-evidence cases insert (under the legacy epoch) or fail on the trigger instead.
 * Make the downgrade skip its refusal. The populated downgrade succeeds.
 """
 
@@ -49,12 +51,13 @@ def _request(
     *, seq: int | None = 7, observation: str | None = None, request_id=None, uncertainty=None,
     extra: str = "", extra_values: str = "",
 ) -> str:
-    seq_sql = "NULL" if seq is None else str(seq)
+    # The reconcile event is named only when set: no role but the owner may write it.
+    seq_column, seq_sql = ("", "") if seq is None else (" reconcile_event_seq,", f" {seq},")
     obs_sql = "NULL" if observation is None else f"'{observation}'"
     return f"""INSERT INTO {_TABLE}(request_id, exchange_account_id, deployment_environment,
-      uncertainty_id, action, reconcile_event_seq, observation_id, requested_by, created_at_ms{extra})
+      uncertainty_id, action,{seq_column} observation_id, requested_by, created_at_ms{extra})
       VALUES ('{request_id or uuid4()}', '{_A}', 'ci', '{uncertainty or uuid4()}',
-      'mark_not_accepted', {seq_sql}, {obs_sql}, 'op', 1000{extra_values})"""
+      'mark_not_accepted',{seq_sql} {obs_sql}, 'op', 1000{extra_values})"""
 
 
 def _ledger_request(conn, request_id=None) -> str:
@@ -85,11 +88,17 @@ def _journal(conn, request_id: str | None, *, quarantine: str | None = None) -> 
     )
 
 
-def _apply_as_bot(conn, request_id: str, *, resolved_event_seq: str = "NULL") -> None:
-    conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
+def _apply_as_bot(conn, request_id: str, *, resolved_event_seq: str | None = None) -> None:
+    """The worker's apply. A ``resolved_event_seq`` is written by the owner, behind the grants
+    (the bot may not write it since e4f5a6b7c8d9), so only the CHECKs and triggers judge it."""
+    resolved = ""
+    if resolved_event_seq is None:
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
+    else:
+        resolved = f", resolved_event_seq={resolved_event_seq}"
     conn.exec_driver_sql(
-        f"UPDATE {_TABLE} SET state='applied', processed_at_ms=2000, "
-        f"resolved_event_seq={resolved_event_seq} WHERE request_id='{request_id}'"
+        f"UPDATE {_TABLE} SET state='applied', processed_at_ms=2000{resolved} "
+        f"WHERE request_id='{request_id}'"
     )
 
 
@@ -110,8 +119,8 @@ def test_insert_request_swallows_an_evidence_violation_as_slot_taken(seeded) -> 
     url = seeded.url.render_as_string(hide_password=False)
     values = {
         "request_id": uuid4(), "exchange_account_id": _A, "deployment_environment": "ci",
-        "uncertainty_id": uuid4(), "action": "mark_not_accepted", "reconcile_event_seq": 7,
-        "observation_id": _O, "venue_offer_id": None, "decision": None, "reason": None,
+        "uncertainty_id": uuid4(), "action": "mark_not_accepted",
+        "observation_id": None, "venue_offer_id": None, "decision": None, "reason": None,
         "requested_by": "op", "created_at_ms": 1,
     }
 
@@ -124,11 +133,11 @@ def test_insert_request_swallows_an_evidence_violation_as_slot_taken(seeded) -> 
             await engine.dispose()
 
     values["exchange_account_id"] = UUID(str(_A))
-    values["observation_id"] = UUID(str(_O))
+    # No evidence column (the request columns no longer include the reconcile event).
     # Known behaviour: every IntegrityError reads as "pending slot taken".
     assert asyncio.run(run(values)) is False
     # Same values with one evidence column is accepted, so the False above is the XOR CHECK.
-    assert asyncio.run(run({**values, "observation_id": None})) is True
+    assert asyncio.run(run({**values, "observation_id": UUID(str(_O))})) is True
 
 
 def test_outcome_shape_follows_the_evidence_kind(seeded) -> None:
@@ -211,14 +220,16 @@ def test_webapi_insert_follows_the_authority_epoch(seeded) -> None:
     # Legacy epoch.
     with pytest.raises(Exception, match="requires ledger authority"):
         as_webapi(_request(seq=None, observation=_O))
-    as_webapi(_request(seq=7))
+    # The reconcile event is closed to the web API under either epoch (e4f5a6b7c8d9).
+    with pytest.raises(Exception, match="permission denied"):
+        as_webapi(_request(seq=7))
     # The owner is exempt under either epoch.
     with seeded.begin() as conn:
         conn.exec_driver_sql(_request(seq=None, observation=_O))
         _set_epoch(conn, "ledger")
         conn.exec_driver_sql(_request(seq=7))
     # Ledger epoch.
-    with pytest.raises(Exception, match="closed under ledger authority"):
+    with pytest.raises(Exception, match="permission denied"):
         as_webapi(_request(seq=7))
     as_webapi(_request(seq=None, observation=_O))
 

@@ -1,36 +1,39 @@
-"""d0e1f2a3b4c6 / e1f2a3b4c5d7 / f9a0b1c2d3e4 / c2d3e4f5a6b7: ``bfx_webapi``'s privileges in
-``public`` and ``legacy_archive`` are an exact allowlist.
+"""``bfx_webapi``'s privileges in ``public`` and ``legacy_archive`` are an exact allowlist.
 
-``EXPECTED_*`` below is written out here, not imported from the migration: the
-test is the second opinion. A later migration that grants the web API anything
-must update this list in the same change, or ``test_effective_privileges_equal_the_allowlist``
-fails. ``MATCH_COLUMNS`` is the allowlist e1f2a3b4c5d7 left, which a downgrade of f9a0b1c2d3e4
-must restore exactly; ``PREVIOUS_*`` is the one d0e1f2a3b4c6 left, which a downgrade of
-e1f2a3b4c5d7 must restore exactly. ``PRE_ARCHIVE_TABLES`` is the table list before
-c2d3e4f5a6b7 archived five of them (``ARCHIVED_READS``), which its downgrade must restore; at
-head the web API reads only ``ARCHIVE_COLUMNS`` of ``legacy_archive.event_log`` there.
+``EXPECTED_*`` below is that allowlist at head, written out here and checked against the
+EFFECTIVE privileges of three builds (worst-case default privileges, production's host setup,
+stray grants at an earlier revision): a migration that grants or revokes anything for the web
+API must update it in the same change, or ``test_effective_privileges_equal_the_allowlist``
+fails. Each downgrade step must restore the previous revision's allowlist exactly
+(``test_round_trip_keeps_the_allowlist``): ``PRE_CLOSE_COLUMNS`` is the one before
+e4f5a6b7c8d9 revoked the pre-switch evidence column (``CLOSED_COLUMNS``); ``PRE_ARCHIVE_TABLES``
+the table list before c2d3e4f5a6b7 archived five of them (``ARCHIVED_READS``; at head the web
+API reads only ``ARCHIVE_COLUMNS`` of ``legacy_archive.event_log`` there); ``MATCH_COLUMNS``
+the one e1f2a3b4c5d7 left, which a downgrade of f9a0b1c2d3e4 restores; ``PREVIOUS_*`` the one
+d0e1f2a3b4c6 left, which a downgrade of e1f2a3b4c5d7 restores.
+
+Convention (since e4f5a6b7c8d9): a migration states only the grants it changes. It no longer
+carries a ``WEBAPI_*`` copy of the whole allowlist, and no test compares the newest migration's
+copy with this one: the effective privileges at head and after each downgrade step are the
+check. The copies d0e1f2a3b4c6 through c2d3e4f5a6b7 carry stay as they were (their upgrades
+and downgrades still use them).
 
 Mutation checks (one at a time; revert after each):
 
-* Drop a table from ``WEBAPI_TABLE_PRIVILEGES``: the effective-privilege and the
-  migration-constants tests fail.
-* Add ``execution_decisions`` SELECT: the same tests, and ``test_execution_decisions_are_unreadable``.
+* Drop a table from c2d3e4f5a6b7's ``WEBAPI_TABLE_PRIVILEGES``: the effective-privilege test fails.
+* Add ``execution_decisions`` SELECT: the same test, and ``test_execution_decisions_are_unreadable``.
 * Widen a column grant to the whole table: the effective-privilege test fails.
-* Remove the REVOKE steps from ``upgrade``: the worst-case build and
-  ``test_stray_grants_are_revoked`` fail.
-* Grant ``raw`` (offer tables), ``evidence`` or ``normalized_payload`` in e1f2a3b4c5d7: the
-  effective-privilege and constants tests fail.
-* Leave the allowlist copy in e1f2a3b4c5d7 unchanged while granting: the same two tests fail.
-* Grant ``raw`` on ``ledger_observation_credit_history`` in f9a0b1c2d3e4: the effective-privilege,
-  payload-column and constants tests fail.
+* Remove the REVOKE steps from d0e1f2a3b4c6's ``upgrade``: the effective-privilege test fails
+  on the worst-case and stray builds.
+* Grant ``raw`` on ``ledger_observation_credit_history`` in f9a0b1c2d3e4: the effective-privilege
+  and payload-column tests fail.
 * Skip c2d3e4f5a6b7's revoke, or grant ``account_id`` of the archived event log: the
   effective-privilege test fails (table reads of the archive, or a column too many).
+* Skip e4f5a6b7c8d9's revoke, or its grant back on downgrade: the effective-privilege or the
+  round-trip test fails.
 """
 
 from __future__ import annotations
-
-import importlib.util
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -42,11 +45,11 @@ from .test_trading_state_migration import _reset
 
 pytestmark = pytest.mark.integration
 
-_VERSIONS = Path(__file__).resolve().parents[2] / "alembic/versions"
 _PREVIOUS = "c9d0e1f2a3b5"
 _PREVIOUS_HEAD = "d0e1f2a3b4c6"
 _MATCH_HEAD = "e8f9a0b1c2d3"  # e1f2a3b4c5d7's allowlist, unchanged up to here
 _PRE_ARCHIVE = "b1c2d3e4f5a6"  # f9a0b1c2d3e4's allowlist, unchanged up to here
+_PRE_CLOSE = "d3e4f5a6b7c8"  # c2d3e4f5a6b7's allowlist, unchanged up to here
 _ARCHIVE = "legacy_archive"
 _CREDIT_ENDS = ("ledger_observation_credit_history", "SELECT")
 _RW = {"DELETE", "INSERT", "SELECT", "UPDATE"}
@@ -156,7 +159,7 @@ EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("uncertainty_resolution_requests", "INSERT"): {
         "request_id", "exchange_account_id", "deployment_environment", "uncertainty_id",
         "venue_offer_id", "action", "decision", "reason", "requested_by", "created_at_ms",
-        "reconcile_event_seq", "observation_id",
+        "observation_id",
     },
     ("venue_offer_mirror", "SELECT"): {
         "exchange_account_id", "deployment_environment", "venue_offer_id", "symbol",
@@ -164,6 +167,12 @@ EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
         "present_in_latest_accepted_snapshot",
     },
 }
+# Revoked by e4f5a6b7c8d9: the pre-switch evidence column of an uncertainty request.
+CLOSED_COLUMNS: dict[tuple[str, str], set[str]] = {
+    ("uncertainty_resolution_requests", "INSERT"): {"reconcile_event_seq"},
+}
+PRE_CLOSE_COLUMNS = {key: cols | CLOSED_COLUMNS.get(key, set())
+                     for key, cols in EXPECTED_COLUMNS.items()}
 PREVIOUS_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("accepted_capital_basis", "SELECT"): {
         "id", "exchange_account_id", "deployment_environment", "observation_id",
@@ -236,10 +245,11 @@ def _held(columns: dict[tuple[str, str], set[str]], *, archived: bool = False) -
     )
 
 
-# e1f2a3b4c5d7's allowlist: the head's without f9a0b1c2d3e4's credit-history grant.
-MATCH_COLUMNS = {key: cols for key, cols in EXPECTED_COLUMNS.items() if key != _CREDIT_ENDS}
+# e1f2a3b4c5d7's allowlist: c2d3e4f5a6b7's without f9a0b1c2d3e4's credit-history grant.
+MATCH_COLUMNS = {key: cols for key, cols in PRE_CLOSE_COLUMNS.items() if key != _CREDIT_ENDS}
 EXPECTED = _held(EXPECTED_COLUMNS, archived=True)
-PRE_ARCHIVE = _held(EXPECTED_COLUMNS)
+PRE_CLOSE = _held(PRE_CLOSE_COLUMNS, archived=True)
+PRE_ARCHIVE = _held(PRE_CLOSE_COLUMNS)
 MATCH = _held(MATCH_COLUMNS)
 PREVIOUS = _held(PREVIOUS_COLUMNS)
 
@@ -384,7 +394,11 @@ def test_execution_decisions_are_unreadable(head_db) -> None:
 
 def test_round_trip_keeps_the_allowlist(head_db) -> None:
     url, engine, _ = head_db
-    # c2d3e4f5a6b7's downgrade restores f9a0b1c2d3e4's allowlist exactly...
+    # e4f5a6b7c8d9's downgrade restores c2d3e4f5a6b7's allowlist exactly...
+    alembic(url, "downgrade", _PRE_CLOSE)
+    with engine.connect() as conn:
+        assert _diff(_effective(conn), PRE_CLOSE) == {"unexpected": [], "missing": []}
+    # ...c2d3e4f5a6b7's restores f9a0b1c2d3e4's...
     alembic(url, "downgrade", _PRE_ARCHIVE)
     with engine.connect() as conn:
         assert _diff(_effective(conn), PRE_ARCHIVE) == {"unexpected": [], "missing": []}
@@ -425,44 +439,3 @@ def test_the_match_grants_never_reach_the_payload_columns(head_db) -> None:
         assert not any(c in {"raw", "evidence", "normalized_payload", "scope_block"}
                        for (t, p), cols in EXPECTED_COLUMNS.items() for c in cols), "allowlist names a payload column"
 
-
-def _load(name: str):
-    spec = importlib.util.spec_from_file_location(name, _VERSIONS / f"{name}.py")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _added(
-    after: dict[tuple[str, str], set[str]], before: dict[tuple[str, str], set[str]],
-) -> dict[tuple[str, str], set[str]]:
-    return {
-        key: columns - before.get(key, set())
-        for key, columns in after.items()
-        if columns - before.get(key, set())
-    }
-
-
-def test_the_migration_constants_are_the_allowlist() -> None:
-    archive = _load("c2d3e4f5a6b7_legacy_archive_schema")
-    assert {t: set(p) for t, p in archive.WEBAPI_TABLE_PRIVILEGES.items()} == EXPECTED_TABLES
-    assert {k: set(c) for k, c in archive.WEBAPI_COLUMN_PRIVILEGES.items()} == EXPECTED_COLUMNS
-    assert {k: set(c) for k, c in archive.WEBAPI_ARCHIVE_PRIVILEGES.items()} == ARCHIVE_COLUMNS
-    assert set(ARCHIVED_READS) <= set(archive.TABLES)
-    newest = _load("f9a0b1c2d3e4_webapi_credit_history_columns")
-    assert {t: set(p) for t, p in newest.WEBAPI_TABLE_PRIVILEGES.items()} == PRE_ARCHIVE_TABLES
-    assert {k: set(c) for k, c in newest.WEBAPI_COLUMN_PRIVILEGES.items()} == EXPECTED_COLUMNS
-    assert all(len(set(c)) == len(c) for c in newest.WEBAPI_COLUMN_PRIVILEGES.values())
-    # What f9a0b1c2d3e4 grants is exactly the difference to e1f2a3b4c5d7's copy.
-    assert _added(EXPECTED_COLUMNS, MATCH_COLUMNS) == {
-        k: set(v) for k, v in newest._GRANTED.items()}
-    module = _load("e1f2a3b4c5d7_webapi_match_columns")
-    assert {t: set(p) for t, p in module.WEBAPI_TABLE_PRIVILEGES.items()} == PRE_ARCHIVE_TABLES
-    assert {k: set(c) for k, c in module.WEBAPI_COLUMN_PRIVILEGES.items()} == MATCH_COLUMNS
-    # What e1f2a3b4c5d7 grants is exactly the difference to d0e1f2a3b4c6's copy.
-    previous = _load("d0e1f2a3b4c6_webapi_privileges_exact_allowlist")
-    assert {t: set(p) for t, p in previous.WEBAPI_TABLE_PRIVILEGES.items()} == PRE_ARCHIVE_TABLES
-    assert {k: set(c) for k, c in previous.WEBAPI_COLUMN_PRIVILEGES.items()} == PREVIOUS_COLUMNS
-    assert _added(MATCH_COLUMNS, PREVIOUS_COLUMNS) == {
-        k: set(v) for k, v in module._GRANTED.items()}

@@ -281,12 +281,15 @@ class UncertaintyResolutionRequestRow(Base):
     # column-scoped INSERT grant, and the daemon's UPDATE grant.
     REQUEST_COLUMNS: ClassVar[tuple[str, ...]] = (
         "request_id", "exchange_account_id", "deployment_environment", "uncertainty_id",
-        "action", "reconcile_event_seq", "observation_id", "venue_offer_id", "decision",
-        "reason", "requested_by", "created_at_ms",
+        "action", "observation_id", "venue_offer_id", "decision", "reason", "requested_by",
+        "created_at_ms",
     )
     WORKER_COLUMNS: ClassVar[tuple[str, ...]] = (
-        "state", "processed_at_ms", "resolved_event_seq", "outcome_reason",
+        "state", "processed_at_ms", "outcome_reason",
     )
+    # Pre-switch evidence: values of requests made under the legacy authority, which no role
+    # writes any more (e4f5a6b7c8d9 revoked both grants).
+    CLOSED_COLUMNS: ClassVar[tuple[str, ...]] = ("reconcile_event_seq", "resolved_event_seq")
 
     request_id: Mapped[UUID] = mapped_column(_UUID, primary_key=True)
     exchange_account_id: Mapped[UUID] = mapped_column(
@@ -302,7 +305,7 @@ class UncertaintyResolutionRequestRow(Base):
     uncertainty_id: Mapped[UUID] = mapped_column(_UUID, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
     # Exactly one evidence column is set (ck_..._evidence): the legacy reconcile
-    # event, or the ledger observation.
+    # event (pre-switch rows only; CLOSED_COLUMNS), or the ledger observation.
     reconcile_event_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     observation_id: Mapped[UUID | None] = mapped_column(
         _UUID,

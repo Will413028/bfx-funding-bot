@@ -74,10 +74,11 @@ _LEDGER_AND_PROJECTIONS = (
 )
 _REQUEST_COLUMNS = (
     "request_id", "exchange_account_id", "deployment_environment", "uncertainty_id", "action",
-    "reconcile_event_seq", "observation_id", "venue_offer_id", "decision", "reason",
-    "requested_by", "created_at_ms",
+    "observation_id", "venue_offer_id", "decision", "reason", "requested_by", "created_at_ms",
 )
-_WORKER_COLUMNS = ("state", "processed_at_ms", "resolved_event_seq", "outcome_reason")
+_WORKER_COLUMNS = ("state", "processed_at_ms", "outcome_reason")
+# Pre-switch evidence: no role writes it since e4f5a6b7c8d9.
+_CLOSED_COLUMNS = ("reconcile_event_seq", "resolved_event_seq")
 
 
 def _build_migrated(url: str) -> None:
@@ -204,6 +205,13 @@ def test_outbox_grants_are_column_scoped_per_role(migrated) -> None:
                 conn, "SELECT has_column_privilege('bfx_bot', :t, :c, 'UPDATE')", t=table, c=column
             ), column
         assert not _privilege(conn, "SELECT has_any_column_privilege('bfx_bot', :t, 'INSERT')", t=table)
+        for column in _CLOSED_COLUMNS:
+            for role in ("bfx_webapi", "bfx_bot"):
+                for privilege in ("INSERT", "UPDATE"):
+                    assert not _privilege(
+                        conn, f"SELECT has_column_privilege('{role}', :t, :c, :p)",
+                        t=table, c=column, p=privilege,
+                    ), (role, column, privilege)
 
 
 _ACCOUNT_SQL = """INSERT INTO exchange_accounts(id,venue,label,lifecycle_status)
@@ -223,10 +231,9 @@ def test_request_is_immutable_and_its_outcome_terminal(migrated) -> None:
     first, second = uuid4(), uuid4()
     with engine.begin() as conn:
         conn.exec_driver_sql(_ACCOUNT_SQL)
-        # The outbox rules hold under either epoch; a request citing an event sequence is the
-        # pre-switch shape (the ledger epoch closes it: test_ledger_operator_resolution_pg).
+        # The outbox rules hold under either epoch. A request citing an event sequence is the
+        # pre-switch shape, which no role may write since e4f5a6b7c8d9: the owner writes it here.
         conn.exec_driver_sql(_LEGACY_EPOCH_SQL)
-        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         conn.execute(text(_REQUEST_SQL), {"id": first, "u": uncertainty})
     denied = (
         ("bfx_webapi", "INSERT INTO uncertainty_resolution_requests(request_id,exchange_account_id,"
@@ -260,9 +267,8 @@ def test_request_is_immutable_and_its_outcome_terminal(migrated) -> None:
             conn.exec_driver_sql(sql)
     with engine.begin() as conn, pytest.raises(Exception, match="immutable uncertainty resolution history"):
         conn.exec_driver_sql("DELETE FROM uncertainty_resolution_requests")
-    # Once the first has an outcome, the operator may ask again.
+    # Once the first has an outcome, the subject's pending slot is free again.
     with engine.begin() as conn:
-        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         conn.execute(text(_REQUEST_SQL), {"id": second, "u": uncertainty})
 
 
