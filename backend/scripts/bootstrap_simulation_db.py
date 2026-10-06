@@ -6,7 +6,8 @@ table, are the single authority on what a database holds: this script refuses a 
 is unstamped or stamped any other realm, and checks nothing else about its content. Then, in
 ONE transaction, it:
 
-  1. appends the authority epoch ``ledger`` unless the latest epoch already is;
+  1. refuses a database whose latest authority epoch is not ``ledger`` (the genesis migration
+     puts a fresh database on the ledger; this script never writes an epoch);
   2. creates the simulation exchange account (the UUID you pass; the label is descriptive;
      NO credential row -- a simulated boot generates its own throwaway keys);
   3. writes the target CapitalPolicy of every symbol under the scope lock, a revision only
@@ -81,18 +82,11 @@ async def _refuse_unless_simulation_database(
     return realm
 
 
-async def _ensure_ledger_epoch(session: AsyncSession, now_ms: int) -> bool:
-    latest = (await session.execute(text(
-        f"SELECT epoch_seq, authority FROM {AUTHORITY_TABLE} "
-        "ORDER BY epoch_seq DESC LIMIT 1"))).first()
-    if latest is not None and latest.authority == "ledger":
-        return False
-    await session.execute(text(
-        f"INSERT INTO {AUTHORITY_TABLE} (epoch_seq, authority, set_at_ms, actor, reason, evidence) "
-        "VALUES (:seq, 'ledger', :now, :actor, 'simulation database', NULL)"),
-        {"seq": (latest.epoch_seq if latest is not None else 0) + 1, "now": now_ms,
-         "actor": _ACTOR})
-    return True
+async def _refuse_unless_ledger(session: AsyncSession) -> None:
+    latest = await session.scalar(text(
+        f"SELECT authority FROM {AUTHORITY_TABLE} ORDER BY epoch_seq DESC LIMIT 1"))
+    if latest != "ledger":
+        raise BootstrapRefused(f"authority_epoch_not_ledger latest={latest}")
 
 
 async def _ensure_account(session: AsyncSession, account_id: UUID) -> bool:
@@ -158,7 +152,7 @@ async def run(
         async with factory() as session:
             try:
                 realm = await _refuse_unless_simulation_database(session, allowed_realms)
-                epoch_appended = await _ensure_ledger_epoch(session, int(time.time() * 1000))
+                await _refuse_unless_ledger(session)
                 account_created = await _ensure_account(session, args.exchange_account_id)
                 enabled = CapitalPolicy(
                     enabled=True, max_offer_amount=args.max_offer_amount,
@@ -184,7 +178,7 @@ async def run(
             await session.commit()
         return {
             "status": "ready", "realm": realm, "account_id": str(args.exchange_account_id),
-            "authority_epoch_appended": epoch_appended, "account_created": account_created,
+            "account_created": account_created,
             "policies": policies, "trading_state": trading,
         }
     finally:

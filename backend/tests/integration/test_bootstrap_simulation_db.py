@@ -1,8 +1,8 @@
 """``scripts/bootstrap_simulation_db.py`` on migrated PostgreSQL, run as the owner.
 
 Mutations (one at a time; revert after each): skip the realm check (``test_it_refuses_*``
-realm cases), append the epoch on every run (``test_a_second_run_changes_nothing``) or
-over a ledger latest epoch (``test_it_prepares_a_simulation_database``), create the account again or write a revision on an unchanged second run
+realm cases), accept a latest ``legacy`` epoch (``test_it_refuses_a_legacy_latest_epoch``),
+create the account again or write a revision on an unchanged second run
 (``test_a_second_run_changes_nothing``),
 leave the envelope out of the policy (``test_the_policy_carries_the_ledger_envelope``),
 let ``--activate`` append over an existing HALT (``test_activate_never_resumes_a_halt``) or on a
@@ -83,7 +83,7 @@ async def test_it_prepares_a_simulation_database(db) -> None:
     report = await script.run(_args(), database_url=url, allowed_realms=REALMS)
     assert report["status"] == "ready" and report["realm"] == "ci"
     # A migrated database is on the ledger already (the genesis, b1c2d3e4f5a6).
-    assert report["authority_epoch_appended"] is False and report["account_created"] is True
+    assert report["account_created"] is True
     assert report["policies"] == {"fUSD": "applied", "fUST": "applied"}
     state = await _snapshot(engine)
     assert state["epochs"] == [(1, "legacy"), (2, "ledger")]
@@ -91,17 +91,18 @@ async def test_it_prepares_a_simulation_database(db) -> None:
     assert state["credentials"] == 0  # a simulated boot generates its own throwaway keys
 
 
-async def test_it_appends_the_ledger_epoch_over_a_legacy_latest_epoch(db) -> None:
+async def test_it_refuses_a_legacy_latest_epoch(db) -> None:
     """A simulation database whose latest epoch is ``legacy`` again (restored from before the
-    switch) is put back on the ledger by the owner's bootstrap."""
+    switch) is refused: no script writes an epoch, and nothing else is written."""
     url, engine = db
     async with engine.begin() as conn:
         await conn.execute(text(
             "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
             "VALUES (3, 'legacy', 3, 'test', 'restored')"))
-    report = await script.run(_args(), database_url=url, allowed_realms=REALMS)
-    assert report["authority_epoch_appended"] is True
-    assert (await _snapshot(engine))["epochs"][-2:] == [(3, "legacy"), (4, "ledger")]
+    with pytest.raises(script.BootstrapRefused, match="authority_epoch_not_ledger latest=legacy"):
+        await script.run(_args(), database_url=url, allowed_realms=REALMS)
+    state = await _snapshot(engine)
+    assert state["epochs"][-1] == (3, "legacy") and state["accounts"] == []
 
 
 async def test_the_policy_carries_the_ledger_envelope(db) -> None:
@@ -125,7 +126,7 @@ async def test_a_second_run_changes_nothing(db) -> None:
     await script.run(_args(), database_url=url, allowed_realms=REALMS)
     before = await _snapshot(engine)
     report = await script.run(_args(), database_url=url, allowed_realms=REALMS)
-    assert report["authority_epoch_appended"] is False and report["account_created"] is False
+    assert report["account_created"] is False
     assert report["policies"] == {"fUSD": "unchanged", "fUST": "unchanged"}
     assert await _snapshot(engine) == before
 
