@@ -604,7 +604,7 @@ RESULT_SCHEMA_VERSION = 1
 def result_document(
     criteria: Sequence[Criterion], *, account: UUID, window: Window, image_digest: str | None,
 ) -> dict[str, Any]:
-    """The final verdict as a file the authority switch checks (``bfx_ledger_switch.py``).
+    """The final verdict as a file (the S1-7 authority switch read it before it switched).
 
     ``last_service_version`` is the source revision of the window's last generation (the
     deploy-restart criterion's newest revision); ``image_digest`` is the digest the report ran

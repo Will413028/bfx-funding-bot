@@ -294,11 +294,11 @@ docker run --rm --name bfx-sim-report --pull=never --read-only \
 - 事件數會隨時間成長（約每個已驗證請求一筆 `NonceAdvanced`）：報告尾端的 `sim_venue_event` 列數接近 200 000，
   或 boot replay 超過 5 秒，就是 `modules/simulated_venue/__init__.py` 寫的 snapshot 觸發條件。
 
-### 最終判定（寫結果檔，ledger 切換會讀）
+### 最終判定（寫結果檔）
 
-視窗滿足條件後再跑一次報告，加 `--result-out` 與報告所用 image 的 digest，結果檔就是
-[ledger-switch.md](ledger-switch.md) P-check 讀的那一份（verdict、視窗、最後一代的 `service_version`、image digest、
-報告 sha256）：
+視窗滿足條件後再跑一次報告，加 `--result-out` 與報告所用 image 的 digest，寫出結果檔（verdict、視窗、
+最後一代的 `service_version`、image digest、報告 sha256；2026-10-05 的 ledger 切換由它把關，切換工具已於
+S1-8 PR-D 刪除）：
 
 ```bash
 R=/home/ubuntu/bfx/reports/sim-soak
