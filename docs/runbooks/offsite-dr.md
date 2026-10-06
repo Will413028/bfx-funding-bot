@@ -560,11 +560,11 @@ The wrapper and the unit call only `--restore-test --output ...`, and every dril
 D3 accepts that, so a deploy (target drill, installed wrapper) and a revert to any release
 since D3 need no bridge; a revert to a release from before D3 is not supported (its drill
 has no `--restore-test`; the transitional `--prefix` paths were removed in S1-8 PR-D). The
-drill runs the deployed image's own boot check entry, which every image since S1-8 PR-C has.
-If installing a release's tooling stops after `current` points at the new wrapper but
-before `systemctl daemon-reload`, a unit from before PR-D still passes `--legacy-config`:
-the wrapper refuses that argument (exit 2, alert, heartbeat not refreshed). Rerun the
-tooling install or `sudo systemctl daemon-reload` and start the test again.
+drill runs the deployed image's own boot check entry, which every image since S1-8 PR-C has,
+and reads its JSON by required keys (keys a newer image adds are ignored). The unit passes
+only `--drill`; the receipt and heartbeat paths are the wrapper's defaults, so a tooling
+install that stops between the wrapper and the unit leaves a pair that still works (an older
+unit's `--legacy-*` arguments are accepted and ignored).
 
 Each production and restored-copy read is bounded on the server
 (`statement_timeout` and `transaction_timeout` at the drill's remaining budget,

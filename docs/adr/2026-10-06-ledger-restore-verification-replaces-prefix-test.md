@@ -85,15 +85,17 @@ prior state：每月與變更觸發的還原測試（[2026-09-04-pgbackrest-in-p
 
 - **刪除**：drill 的 `--prefix`（含 `--account-id`／`--environment`／`--projector-version`）、
   `restore_prefix` receipt kind、`--rehearsal`（comparison rehearsal，隨切換工具刪除）；wrapper 的
-  `--help` 探測與反向 fallback、`--legacy-*`／`--config`、heartbeat 的 `legacy_drill`；unit 的
-  `--legacy-*` 參數；`deploy/vm/pgbackrest/ledger_boot_check.py`。drill 直接在部署中的 image 跑
+  `--help` 探測與反向 fallback、heartbeat 的 `legacy_drill`（`--legacy-*`／`--config` 只剩接受後忽略，
+  見下）；`deploy/vm/pgbackrest/ledger_boot_check.py`。drill 直接在部署中的 image 跑
   `python -m bfx_funding_bot.apps.restore_boot_check`（無 `-i`、不 pipe）。
 - **跨版本**：PR-D 本身的部署 gate 是 d44fc7ab 的 wrapper／unit 跑 PR-D 的 drill（wrapper 探測到
   `--restore-test`，走無 mode 的呼叫；image 有入口）；revert 到 D3 之後任一版本時，PR-D 的
   wrapper／unit 只呼叫 `--restore-test --output`，那些 drill 都接受。`tests/scripts/
   test_dr_restore_test_cross_version.py` 以 d44fc7ab wrapper 的原檔驗證兩個方向（PR-D 部署後刪除）。
   revert 到 D3 之前的版本不再支援。
-- **安裝中斷的視窗**（取代上面「工具安裝中斷的視窗」的正向那半）：`current` 已指向新 wrapper、
-  `systemctl daemon-reload` 尚未跑時，舊 unit 仍帶 `--legacy-config`，新 wrapper 拒絕（exit 2、告警、
-  heartbeat 不更新、擋下需要 restore test 的部署，不碰交易狀態）。重跑工具安裝或 daemon-reload 即恢復。
+- **安裝中斷的視窗不再存在**（取代上面「工具安裝中斷的視窗」）：視窗來自 unit 傳了 wrapper 的
+  參數。unit 現在只傳 `--drill`，receipt 與 heartbeat 路徑由 wrapper 自己的預設決定（與舊 unit 傳的值相同）；
+  `--evidence`／`--heartbeat` 仍是可選的覆寫，舊 unit 的 `--legacy-*`／`--config` 接受後忽略。所以
+  「新 wrapper、舊 unit」與「舊（d44fc7ab）wrapper、新 unit」都照常通過（`test_dr_restore_test_cross_version`），
+  之後換 wrapper 參數也不必再經過 unit。
 - **VM**：`/home/ubuntu/bfx/restore-test.json` 與 `restore-prefix.json` 不再被讀取，operator 可刪除。

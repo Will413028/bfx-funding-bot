@@ -10,14 +10,15 @@ boot check's stdin fallback, and the wrapper's reverse fallback and ``--legacy-*
   CLI, a faked Docker) and accepts the receipt;
 * reverting to d44fc7ab after PR-D: THIS wrapper with THIS unit's arguments runs a drill with
   d44fc7ab's argparse surface and accepts its ``--restore-test`` receipt;
-* the install window (``current`` already points at this wrapper, systemd not yet reloaded, so
-  the old unit's ``--legacy-*`` arguments reach it) fails closed: argparse exits 2, the
-  heartbeat is not refreshed and OnFailure alerts. Rerunning the tooling install
-  (``systemctl daemon-reload``) recovers.
+* the install windows: the unit now passes only ``--drill`` (the wrapper owns its paths), so
+  d44fc7ab's wrapper under this unit and this wrapper under d44fc7ab's unit (its
+  ``--evidence``/``--heartbeat`` are the defaults, its ``--legacy-*`` are accepted and ignored)
+  both pass.
 
 The image side: the drill now runs ``python -m bfx_funding_bot.apps.restore_boot_check`` in the
-deployed image; every image since PR-C has it, and the module is unchanged since d44fc7ab but
-for its docstring (``test_ledger_restore_verification`` runs it, as the drill does, on a
+deployed image and parses its JSON by required keys and types, ignoring keys a newer image
+adds at any level (the last two tests); every image since PR-C has it, and the module is
+unchanged since d44fc7ab but for its docstring (``test_ledger_restore_verification`` runs it, as the drill does, on a
 restored clone with the drill's grants only).
 
 Delete this file and ``cross_version/`` once PR-D is deployed (a revert past it then reaches a
@@ -25,7 +26,10 @@ drill with the same contract on both sides).
 
 Mutations (one at a time): give the verifier back ``-i`` or rename the drill's
 ``--restore-test``: the first test fails; drop ``--restore-test`` from the wrapper's argv: the
-second fails; make the wrapper accept ``--legacy-config``/``--legacy-evidence``: the third fails.
+second fails; stop ignoring ``--legacy-config``/``--legacy-evidence`` in the wrapper:
+``test_the_previous_unit_runs_this_wrapper`` fails; give the unit ``--evidence`` again:
+``test_this_unit_runs_the_previous_wrapper`` fails; compare the boot check's key sets for
+equality again: the extra-keys test fails.
 """
 from __future__ import annotations
 
@@ -133,7 +137,7 @@ def test_the_deployed_wrapper_and_unit_pass_with_this_drill(
 _D44_DRILL_STUB = """#!{python}
 # d44fc7ab's restore_drill.py argparse surface (--restore-test, the acceptance drill, and the
 # transitional --prefix/--rehearsal); for --restore-test writes a fresh measured receipt.
-import argparse, json, sys, time
+import argparse, json, os, sys, time
 parser = argparse.ArgumentParser()
 for flag in ("--account-id", "--environment", "--projector-version", "--backup-label",
              "--target-time", "--output", "--backend-image", "--cells", "--scope",
@@ -144,35 +148,97 @@ for flag in ("--restore-test", "--prefix", "--rehearsal"):
 args = parser.parse_args()
 if not args.restore_test or args.output is None or args.prefix:
     sys.exit(2)
+os.makedirs(os.path.dirname(args.output), exist_ok=True)
 with open(args.output, "w") as handle:
     json.dump({{"measured": True, "kind": "restore_ledger", "restore_test": True,
                "observed_at_ms": int(time.time() * 1000), "ledger": {{"scopes": [{{}}]}}}}, handle)
 """
 
 
-def test_this_wrapper_and_unit_pass_with_a_reverted_d44fc7ab_drill(tmp_path: Path) -> None:
+def test_this_wrapper_and_unit_pass_with_a_reverted_d44fc7ab_drill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Reverting to d44fc7ab after PR-D: this wrapper and unit, d44fc7ab's drill surface."""
     drill = tmp_path / "restore-drill.sh"
     drill.write_text(_D44_DRILL_STUB.format(python=sys.executable))
     drill.chmod(0o755)
+    monkeypatch.setattr(this_wrapper.Path, "home", staticmethod(lambda: tmp_path))
     argv = _unit_argv(_this_unit_exec_start(), tmp_path, drill)
-    assert "--legacy-config" not in argv and "--legacy-evidence" not in argv
+    assert argv == ["--drill", str(drill)]
     assert this_wrapper.main(argv) == 0
-    heartbeat = json.loads((tmp_path / "restore-heartbeat.json").read_text())
+    heartbeat = json.loads((tmp_path / "bfx/dr-evidence/restore-heartbeat.json").read_text())
     assert heartbeat["ledger_scopes"] == 1 and "legacy_drill" not in heartbeat
     assert 0 <= int(time.time() * 1000) - heartbeat["restore_observed_at_ms"] < 600_000
 
 
-def test_the_previous_units_arguments_fail_closed_on_this_wrapper(tmp_path: Path) -> None:
-    """The install window (new wrapper, old unit still loaded): refused before any drill runs."""
+def _d44_surface_drill(tmp_path: Path) -> Path:
     drill = tmp_path / "restore-drill.sh"
-    drill.write_text("#!/bin/sh\ntouch \"$0.ran\"\n")
+    drill.write_text(_D44_DRILL_STUB.format(python=sys.executable))
     drill.chmod(0o755)
+    return drill
+
+
+def test_the_previous_unit_runs_this_wrapper(tmp_path: Path) -> None:
+    """Install window one way: ``current`` points at this wrapper, systemd still has d44fc7ab's
+    unit loaded (``--evidence``/``--heartbeat`` with the defaults, ``--legacy-*`` ignored)."""
+    drill = _d44_surface_drill(tmp_path)
     completed = subprocess.run(
         [sys.executable, str(ROOT / "deploy/vm/ops/bfx_restore_test.py"),
          *_unit_argv(D44_UNIT_EXEC_START, tmp_path, drill)],
         capture_output=True, text=True, check=False, timeout=60)
-    assert completed.returncode == 2
-    assert "--legacy-config" in completed.stderr
-    assert not Path(f"{drill}.ran").exists()
-    assert not (tmp_path / "restore-heartbeat.json").exists()
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((tmp_path / "restore-heartbeat.json").read_text())["ledger_scopes"] == 1
+    assert not (tmp_path / "restore-prefix.json").exists()
+
+
+def test_this_unit_runs_the_previous_wrapper(tmp_path: Path,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install window the other way: this unit (only ``--drill``) with d44fc7ab's wrapper, whose
+    default receipt and heartbeat paths are the ones this unit no longer passes."""
+    drill = _d44_surface_drill(tmp_path)
+    monkeypatch.setattr(d44_wrapper.Path, "home", staticmethod(lambda: tmp_path))
+    argv = _unit_argv(_this_unit_exec_start(), tmp_path, drill)
+    assert argv == ["--drill", str(drill)]
+    assert d44_wrapper.main(argv) == 0
+    heartbeat = json.loads((tmp_path / "bfx/dr-evidence/restore-heartbeat.json").read_text())
+    assert (heartbeat["ledger_scopes"], heartbeat["legacy_drill"]) == (1, False)
+    assert (tmp_path / "bfx/dr-evidence/restore-ledger.json").is_file()
+
+
+# -- the boot check's output: produced by the DEPLOYED image, parsed by the TARGET drill ------
+
+def _boot_payload() -> dict[str, Any]:
+    return json.loads(dr._boot())
+
+
+def test_a_newer_images_extra_keys_at_every_level_parse_and_stay_out_of_the_receipt() -> None:
+    payload = _boot_payload()
+    payload["image_note"] = "top"
+    payload["boot"]["checks"] = ["schema_head", "realm"]
+    [scope] = payload["boot"]["scopes"]
+    scope["seed_actor"] = "ledger_seed:switch-x"
+    [read] = scope["reads"]
+    read["max_snapshot_age_ms"] = 600_000
+    boot = dr.ledger.parse_boot(json.dumps(payload) + "\n", dr._bounds())
+    assert boot == dr.ledger.parse_boot(dr._boot(), dr._bounds())
+    assert set(boot) == {"schema_head", "realm", "authority", "scopes"}
+    assert set(boot["scopes"][0]) == {"exchange_account_id", "deployment_environment",
+                                      "basis_id", "reads"}
+    assert set(boot["scopes"][0]["reads"][0]) == {"symbol", "cell_id", "basis_id", "result"}
+
+
+@pytest.mark.parametrize(("level", "key", "value"), [
+    ("boot", "realm", None), ("boot", "scopes", "x"), ("boot", "authority", ...),
+    ("scope", "basis_id", None), ("scope", "reads", ...), ("scope", "exchange_account_id", 1),
+    ("read", "result", ...), ("read", "basis_id", 7), ("read", "symbol", None),
+])
+def test_a_missing_or_mistyped_required_key_still_refuses(level: str, key: str, value: Any) -> None:
+    payload = _boot_payload()
+    target = {"boot": payload["boot"], "scope": payload["boot"]["scopes"][0],
+              "read": payload["boot"]["scopes"][0]["reads"][0]}[level]
+    if value is ...:
+        del target[key]
+    else:
+        target[key] = value
+    with pytest.raises(dr.ledger.LedgerVerificationError, match="restore_output_invalid"):
+        dr.ledger.parse_boot(json.dumps(payload) + "\n", dr._bounds())
