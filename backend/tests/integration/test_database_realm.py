@@ -42,12 +42,28 @@ _ACCOUNT = "00000000-0000-0000-0000-0000000000a1"
 _VERSIONS = Path(__file__).resolve().parents[2] / "alembic/versions"
 
 
-def _migration() -> Any:
-    spec = importlib.util.spec_from_file_location("realm_migration", _VERSIONS / f"{_REVISION}_database_realm.py")
+# Later revisions that add realm tables declare them in their own ``REALM_TABLES`` and attach
+# the same trigger; the coverage tests check the union.
+_LATER_REALM_MIGRATIONS = ("a0b1c2d3e4f5_attribution_legacy_links.py",)
+
+
+def _load(filename: str) -> Any:
+    spec = importlib.util.spec_from_file_location(f"realm_migration_{filename[:12]}", _VERSIONS / filename)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _migration() -> Any:
+    return _load(f"{_REVISION}_database_realm.py")
+
+
+def _realm_tables() -> set[str]:
+    tables = set(_migration().REALM_TABLES)
+    for filename in _LATER_REALM_MIGRATIONS:
+        tables |= set(_load(filename).REALM_TABLES)
+    return tables
 
 
 def _reset_with_roles(url: str) -> None:
@@ -149,7 +165,6 @@ def _refused(engine: Any, sql: str, match: str, *, role: str | None = None) -> N
 # -- coverage ------------------------------------------------------------------------
 
 def test_every_realm_column_has_the_trigger(ci_db: Any) -> None:
-    migration = _migration()
     with ci_db.connect() as conn:
         columns = {
             f"{schema}.{table}" for schema, table in conn.execute(text(
@@ -169,7 +184,7 @@ def test_every_realm_column_has_the_trigger(ci_db: Any) -> None:
         }
     assert columns, "the scan found no realm table"
     assert columns == set(triggered), sorted(columns ^ set(triggered))
-    assert columns == set(migration.REALM_TABLES)
+    assert columns == _realm_tables()
     for table, (definition, enabled) in triggered.items():
         assert enabled == "O", table
         assert "BEFORE INSERT OR UPDATE OF deployment_environment ON" in definition, table
@@ -181,13 +196,12 @@ def test_the_orm_realm_tables_are_the_migrations_list() -> None:
     from bfx_funding_bot.core.db import Base
     from bfx_funding_bot.modules.execution.projection_cutover.tables import ArchiveBase
 
-    migration = _migration()
     orm = {
         f"{table.schema or 'public'}.{table.name}"
         for metadata in (Base.metadata, ArchiveBase.metadata) for table in metadata.tables.values()
         if "deployment_environment" in table.c
     }
-    assert orm == set(migration.REALM_TABLES), sorted(orm ^ set(migration.REALM_TABLES))
+    assert orm == _realm_tables(), sorted(orm ^ _realm_tables())
 
 
 # -- the stamp's derivation ----------------------------------------------------------
@@ -397,4 +411,4 @@ def test_alembic_check_is_clean_and_the_downgrade_round_trips(ci_db: Any) -> Non
     assert _stamp_of(url) == [("ci", f"migration {_REVISION}")]  # derived again from the data
     with ci_db.connect() as conn:
         assert conn.scalar(text("SELECT count(*) FROM pg_trigger WHERE tgname = :n"), {"n": _TRIGGER}) == len(
-            _migration().REALM_TABLES)
+            _realm_tables())

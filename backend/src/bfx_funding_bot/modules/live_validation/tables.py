@@ -178,3 +178,30 @@ class FundingTradeRow(Base):
             "exchange_account_id", "deployment_environment", "symbol", "mts_create",
         ),
     )
+
+
+
+class AttributionLegacyOfferCellRow(Base):
+    """The cell that placed one of our pre-switch venue offers, per the legacy authority (S1-8).
+
+    Resolved once by migration ``a0b1c2d3e4f5`` from the frozen legacy offer records
+    (``offer_claims``, ``venue_offer_state``, ``ORDER_FILL``) through ``execution_decisions`` /
+    ``diagnostics``, so the weekly attribution reads neither those tables nor the prunable
+    diagnostics. One row per (scope, offer, cell): an offer with several rows is a conflict
+    (reported, its credits unattributed). Offers placed after the switch are in the ledger
+    journal instead. Owner-written only; the weekly (``bfx_bot``) reads it.
+    """
+
+    __tablename__ = "attribution_legacy_offer_cells"
+
+    exchange_account_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
+    venue_offer_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    cell: Mapped[str] = mapped_column(Text, primary_key=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "venue_offer_id <> '' AND cell <> ''",
+            name="ck_attribution_legacy_offer_cells_not_empty",
+        ),
+    )

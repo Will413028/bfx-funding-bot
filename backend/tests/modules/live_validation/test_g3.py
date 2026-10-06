@@ -14,13 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 import bfx_funding_bot.modules.accounts.tables
 import bfx_funding_bot.modules.execution.audit.tables
+import bfx_funding_bot.modules.execution.uncertainty_tables  # the ledger tables' FK target
 import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.auth_rest import InterestPayment
 from bfx_funding_bot.modules.candles.repository import upsert_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
-from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
 from bfx_funding_bot.modules.live_validation.credit_attribution import (
     CreditCells,
     CreditLifetime,
@@ -39,6 +39,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     reconciliation_status,
 )
 from bfx_funding_bot.modules.live_validation.tables import (
+    AttributionLegacyOfferCellRow,
     FundingCreditHistoryRow,
     FundingTradeRow,
 )
@@ -425,12 +426,9 @@ def _ours(credit_id: int, opened: int, cell: str, rate: Decimal = RATE) -> list[
             symbol="fUST", mts_create=opened, offer_id=credit_id, amount=AMOUNT,
             rate=rate, period_days=2, maker=None,
         ),
-        OfferClaimRow(
-            cid=credit_id, account_id=str(_ACCOUNT), exchange_account_id=_ACCOUNT,
-            deployment_environment="prod", state="FILLED", venue_offer_id=str(credit_id),
-            symbol="fUST", size_usdt=AMOUNT, signal_correlation_id=f"s{credit_id}",
-            execution_decision_id=f"d{credit_id}", occurred_at_ms=opened,
-            last_updated_ms=opened, last_event_seq=1,
+        AttributionLegacyOfferCellRow(
+            exchange_account_id=_ACCOUNT, deployment_environment="prod",
+            venue_offer_id=str(credit_id), cell=cell,
         ),
         ExecutionDecisionRow(
             decision_id=f"d{credit_id}", account_id=str(_ACCOUNT), exchange_account_id=_ACCOUNT,
@@ -520,12 +518,9 @@ async def test_build_verdict_reads_credits_through_trade_offer_and_decision(g3_f
                 symbol="fUST", mts_create=CREATED, offer_id=5123273052, amount=AMOUNT,
                 rate=RATE, period_days=2, maker=None,
             ),
-            OfferClaimRow(
-                cid=1, account_id=str(_ACCOUNT), exchange_account_id=_ACCOUNT,
-                deployment_environment="prod", state="FILLED", venue_offer_id="5123273052",
-                symbol="fUST", size_usdt=AMOUNT, signal_correlation_id="scid-x",
-                execution_decision_id="d1", occurred_at_ms=CREATED, last_updated_ms=CREATED,
-                last_event_seq=1,
+            AttributionLegacyOfferCellRow(
+                exchange_account_id=_ACCOUNT, deployment_environment="prod",
+                venue_offer_id="5123273052", cell=CELL,
             ),
             ExecutionDecisionRow(
                 decision_id="d1", account_id=str(_ACCOUNT), exchange_account_id=_ACCOUNT,

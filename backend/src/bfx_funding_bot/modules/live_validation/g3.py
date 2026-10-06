@@ -133,7 +133,7 @@ async def build_g3_report(
             payments = inputs.payments if inputs is not None else []
             offer_conflicts = [
                 f"{c.venue_offer_id}: legacy={','.join(c.legacy_cells) or '-'}, "
-                f"journal={','.join(c.journal_cells)}"
+                f"journal={','.join(c.journal_cells) or '-'}"
                 for c in (inputs.offer_conflicts if inputs is not None else ())
             ]
 
