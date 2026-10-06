@@ -4,7 +4,8 @@ SIMULATION NOTE: pgBackRest + R2 cannot run here. The restore point is simulated
 one seeded template twice: the "restored" clone stays at the restore point, the "production"
 clone keeps writing afterwards. Everything after that is the production code path: the bounds
 script and the bounded COPY script through `psql` (the drill's own streaming runner), the
-comparison, the drill's ledger bootstrap grants, and ledger_boot_check.py fed to `python -`.
+comparison, the drill's ledger bootstrap grants, and the image's boot check entry
+(`python -m bfx_funding_bot.apps.restore_boot_check`).
 
 Mutations, each applied alone to deploy/vm/pgbackrest/ledger_digest.py and reverted:
 
@@ -319,16 +320,16 @@ def _verifier_url(restored: str) -> str:
 
     bootstrap = drill.RestoreDrill(command_runner=runner)
     bootstrap._deadline = drill.time.monotonic() + 600
-    bootstrap._bootstrap_role(resources, password, ledger=True)
+    bootstrap._bootstrap_role(resources, password)
     return make_url(restored).set(
         drivername="postgresql+asyncpg", username=resources.verify_role, password=password,
     ).render_as_string(hide_password=False)
 
 
 def _boot_check(database_url: str) -> subprocess.CompletedProcess[str]:
-    """Exactly how the drill runs it: the script on stdin to `python -`, cwd = the app root."""
+    """Exactly how the drill runs it: the image's module, only the verifier's DATABASE_URL."""
     return subprocess.run(
-        [sys.executable, "-"], input=(PGBACKREST / "ledger_boot_check.py").read_text(),
+        [sys.executable, "-m", drill._commands.BOOT_CHECK_MODULE],
         cwd=ROOT / "backend", env={**os.environ, "DATABASE_URL": database_url},
         capture_output=True, text=True, check=False, timeout=300,
     )

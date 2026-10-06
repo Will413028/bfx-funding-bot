@@ -121,12 +121,11 @@ def test_restore_test_runs_the_drill_of_the_release_it_is_instantiated_for() -> 
     for name in ("bfx-pgbackrest-backup.service", "bfx-pgbackrest-status.service"):
         assert _unit(name).one("Service", "ExecStart").startswith(
             "/home/ubuntu/bfx-releases/current/deploy/vm/pgbackrest/")
-    assert "--heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json" in exec_start
-    # Ledger receipts never overwrite the baseline drill's restore.json; no scope config.
-    assert "--evidence /home/ubuntu/bfx/dr-evidence/restore-ledger.json" in exec_start
-    # A drill from before --restore-test (a revert) still finds its scope config and receipt.
-    assert "--legacy-config /home/ubuntu/bfx/restore-test.json" in exec_start
-    assert "--legacy-evidence /home/ubuntu/bfx/dr-evidence/restore-prefix.json" in exec_start
+    # Only --drill: the wrapper owns its receipt and heartbeat paths (S1-8 PR-D), so a unit and a
+    # wrapper from different releases cannot disagree on arguments.
+    assert exec_start.split()[2:] == [
+        "--drill", "/home/ubuntu/bfx-releases/%i/deploy/vm/pgbackrest/restore-drill.sh"]
+    assert "HOME=/home/ubuntu" in unit["Service"]["Environment"]
     check = _unit("bfx-backup-check.service").one("Service", "ExecStart")
     assert "--evidence /home/ubuntu/bfx/dr-evidence/backup.json" in check
     assert "--restore-heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json" in check
@@ -155,3 +154,25 @@ def test_weekly_report_runs_the_deployed_tooling_never_the_vm_checkout() -> None
     assert unit.one("Service", "TimeoutStartSec") == "5400"  # the whole chain's budget
     assert (ROOT / "deploy/vm/ops/bfx_weekly_report.py").is_file()
     assert _unit("bfx-weekly-report.timer").one("Timer", "OnCalendar") == "Mon *-*-* 04:17:00 UTC"
+
+
+def test_the_wrappers_default_paths_are_what_the_backup_check_watches(monkeypatch) -> None:
+    """With the unit's HOME, the wrapper writes the receipt next to (never over) restore.json and
+    the heartbeat bfx-backup-check reads."""
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "units_restore_wrapper", ROOT / "deploy/vm/ops/bfx_restore_test.py")
+    assert spec is not None and spec.loader is not None
+    wrapper = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = wrapper
+    spec.loader.exec_module(wrapper)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(wrapper.Path, "home", staticmethod(lambda: Path("/home/ubuntu")))
+    monkeypatch.setattr(wrapper, "run_restore_test", lambda **kwargs: seen.update(kwargs) or 0)
+    assert wrapper.main(["--drill", "/x/restore-drill.sh"]) == 0
+    assert seen["evidence"] == Path("/home/ubuntu/bfx/dr-evidence/restore-ledger.json")
+    assert seen["heartbeat"] == Path("/home/ubuntu/bfx/dr-evidence/restore-heartbeat.json")
+    check = _unit("bfx-backup-check.service").one("Service", "ExecStart")
+    assert f"--restore-heartbeat {seen['heartbeat']}" in check

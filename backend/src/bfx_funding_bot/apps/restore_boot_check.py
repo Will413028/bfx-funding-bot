@@ -16,8 +16,8 @@ transaction:
    query is still pending (the restore point fell inside an observation cycle).
 
 Prints one JSON line {"boot": {...}}; exit 3 with {"error": <bounded code>} on a refusal. The
-drill's ``deploy/vm/pgbackrest/ledger_boot_check.py`` delegates here when the image has it, so
-the checks always run against the API of the image they judge.
+drill runs this module of the deployed image directly (``restore_commands.ledger_verifier_command``),
+so the checks always run against the API of the image they judge.
 """
 from __future__ import annotations
 

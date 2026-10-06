@@ -70,8 +70,9 @@ def clean_default_config_boundary(monkeypatch: pytest.MonkeyPatch):
 
 
 def _is_verifier(command):
-    """The ledger boot check: the bot image on the isolated network, script on stdin."""
-    return command[:2] == ("docker", "run") and command[-1] == "-"
+    """The ledger boot check: the bot image's own entry on the isolated network."""
+    return command[:2] == ("docker", "run") and command[-2:] == (
+        "-m", "bfx_funding_bot.apps.restore_boot_check")
 
 
 def _boot_report() -> str:

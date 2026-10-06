@@ -180,16 +180,8 @@ image 內 migrations 推導出的唯一 head（`core/schema_head.build_head`）�
 2. 把 migration 前的備份還原到**隔離**資料庫比對，再決定。**不要把舊備份蓋回 production**
    ——venue 可能已有寫入，見 [rollback after a venue write](rollback-after-venue-write.md)。
 
-唯一例外（Will 2026-10-05 核准）：legacy → ledger 切換的 halt 備份，只能用
-`bfx_ledger_switch.py restore-halt-backup --run-id <id>` 原地還原，而且只在**第一筆新 authority 寫入之前**
-（還沒有任何 `origin <> 'legacy_seed'` 的 `ledger_observation`；工具會檢查，有就拒絕）。還原完立刻補一份新的
-full 備份。其他任何備份、任何時點都照上一段，不蓋回 production。見 [ledger-switch.md](ledger-switch.md) §5。
-
 bot 停下時 venue 上的掛單不會自己消失：停 bot 之前，若有掛單而且停機會超過幾分鐘，先在 UI 或
 `/admin/halt` 執行 kill（見 operations）。bot 停著時兩者都不可用，改在 Bitfinex 網頁手動撤單並記錄。
-
-計畫中的 ledger 切換 halt（[ledger-switch.md](ledger-switch.md)）不 kill、不撤單：resting offers 留在簿上
-（Will 已接受），曝險＝halt 開始時的 resting 總額，由切換工具記進 evidence 並寫進每一則失敗通知。
 
 ## 6. Rollback drill（刻意走一次回滾路徑）
 

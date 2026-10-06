@@ -32,7 +32,7 @@ pytestmark = pytest.mark.integration
 _PREVIOUS = "a3b4c5d6e7f8"
 _TABLE = "sim_venue_event"
 _FUNCTION = "reject_sim_venue_mutation"
-_ROLES = ("bfx_bot", "bfx_webapi", "bfx_webauth", "bfx_cutover_reader")
+_ROLES = ("bfx_bot", "bfx_webapi", "bfx_webauth")  # the cutover reader is retired at head
 _ALL_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 _ACCOUNT = "sim-account-1"
 
@@ -204,7 +204,7 @@ def test_bfx_bot_writes_while_the_authority_epoch_is_legacy(db: Any) -> None:
     _as("bfx_bot", engine, _row("ci"))
 
 
-@pytest.mark.parametrize("role", ["bfx_webapi", "bfx_webauth", "bfx_cutover_reader"])
+@pytest.mark.parametrize("role", ["bfx_webapi", "bfx_webauth"])
 def test_other_runtime_roles_hold_nothing(db: Any, role: str) -> None:
     _, engine = db
     with engine.connect() as conn:

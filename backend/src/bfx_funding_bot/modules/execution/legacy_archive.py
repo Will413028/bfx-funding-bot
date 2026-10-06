@@ -3,9 +3,8 @@
 The ledger has been the only capital authority since the switch. The twelve tables only the
 legacy authority wrote (frozen by ``e8f9a0b1c2d3``) moved out of ``public`` into ``SCHEMA``:
 no role writes them (``archive_frozen`` refuses the owner too), and only the web API's archived execution history reads
-them at runtime (``bfx_webapi``, column-scoped ``event_log``). The switch scaffolding reads
-them too until PR-D deletes it. End state: dumped to offsite and dropped once Will drops the
-pre-switch History.
+them at runtime (``bfx_webapi``, column-scoped ``event_log``). End state: dumped to offsite
+and dropped once Will drops the pre-switch History.
 """
 
 from __future__ import annotations

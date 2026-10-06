@@ -1,4 +1,5 @@
-"""D3a amount fingerprints: bounds, determinism and collision probing."""
+"""D3a amount fingerprints (the live codec in deployment/fingerprinted_amount.py): bounds,
+determinism and collision probing."""
 from __future__ import annotations
 
 from decimal import Decimal

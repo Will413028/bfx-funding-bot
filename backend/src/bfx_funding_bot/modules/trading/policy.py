@@ -192,8 +192,8 @@ class PolicyRejectedError(ValueError):
 class Blocked:
     """Unavailable evidence, distinct from a valid view with a zero budget.
 
-    Reasons preserve authority failure codes, including loader integrity faults
-    (capital_repository.py:263-274,302-350,826-883,943-1006). Evidence is an
+    Reasons preserve the capital authority's failure codes, including loader integrity
+    faults (malformed policy, basis or attempt evidence). Evidence is an
     immutable tuple of diagnostic key/value pairs, never mutable ORM/JSON data.
     """
 

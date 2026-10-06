@@ -107,12 +107,12 @@ def test_epoch_rows_are_immutable(ledger_db) -> None:
 
 def test_only_the_owner_appends_an_epoch(ledger_db) -> None:
     with ledger_db.connect() as conn:
-        for role in ("bfx_bot", "bfx_webapi", "bfx_cutover_reader"):
+        for role in ("bfx_bot", "bfx_webapi"):
             assert conn.scalar(
                 text("SELECT has_any_column_privilege(:r,'capital_authority_epoch','SELECT')"),
                 {"r": role},
             )
-        for role in ("bfx_bot", "bfx_webapi", "bfx_webauth", "bfx_cutover_reader"):
+        for role in ("bfx_bot", "bfx_webapi", "bfx_webauth"):
             for privilege in ("INSERT", "UPDATE"):
                 assert not conn.scalar(
                     text("SELECT has_any_column_privilege(:r,'capital_authority_epoch',:p)"),
@@ -126,12 +126,6 @@ def test_only_the_owner_appends_an_epoch(ledger_db) -> None:
         assert not conn.scalar(
             text(
                 "SELECT has_any_column_privilege('bfx_webauth','capital_authority_epoch','SELECT')"
-            )
-        )
-        # The reader group keeps column grants only.
-        assert not conn.scalar(
-            text(
-                "SELECT has_table_privilege('bfx_cutover_reader','capital_authority_epoch','SELECT')"
             )
         )
     for role in ("bfx_bot", "bfx_webapi"):
@@ -156,7 +150,7 @@ def test_guard_is_on_every_ledger_fact_table(ledger_db) -> None:
         assert (
             conn.scalar(
                 text(
-                    "SELECT has_function_privilege('bfx_cutover_reader',"
+                    "SELECT has_function_privilege('bfx_webapi',"
                     "'public.guard_ledger_authority()','EXECUTE')"
                 )
             )

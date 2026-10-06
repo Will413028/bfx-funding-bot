@@ -9,7 +9,6 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     VenueOfferStateRow,
 )
 from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA
-from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 
 
 def test_event_store_tables_registered_in_the_legacy_archive() -> None:
@@ -97,10 +96,6 @@ def test_projection_head_is_account_environment_projection_scoped() -> None:
 def test_position_state_pk_is_uuid_env_symbol() -> None:
     pk = {c.name for c in Base.metadata.tables[f"{SCHEMA}.position_state"].primary_key.columns}
     assert pk == {"exchange_account_id", "deployment_environment", "symbol"}
-
-
-def test_registry_state_has_failed() -> None:
-    assert RegistryState("failed") is RegistryState.FAILED
 
 
 def test_offer_claims_composite_pk() -> None:

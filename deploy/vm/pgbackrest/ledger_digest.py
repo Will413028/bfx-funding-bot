@@ -47,6 +47,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID
 
 DIGEST_VERSION = 1
@@ -138,9 +139,9 @@ _CORE_TABLES = frozenset({
     "capital_authority_epoch", "venue_offer_mirror", "venue_credit_mirror",
 })
 LEDGER_TABLES = (*RULES, *MUTABLE_TABLES)
-# What the image's boot check (ledger_boot_check.py) reads besides the ledger: the schema head,
-# the realm stamp and the capital policy the capital reader folds. The drill's per-run verifier
-# role gets SELECT on exactly these and the ledger tables, nothing else.
+# What the image's boot check (``apps/restore_boot_check.py``) reads besides the ledger: the
+# schema head, the realm stamp and the capital policy the capital reader folds. The drill's
+# per-run verifier role gets SELECT on exactly these and the ledger tables, nothing else.
 BOOT_CHECK_EXTRA_TABLES = (
     "alembic_version", "database_realm", "capital_policy_heads", "capital_policy_revisions",
 )
@@ -546,8 +547,25 @@ def boot_failure_code(stdout: str) -> str:
     return code if code in BOOT_ERROR_CODES else "boot_check_failed"
 
 
+# The boot check's output contract. The JSON comes from the DEPLOYED image and is parsed by the
+# TARGET release's drill, so each level is validated by its required keys and their types and
+# unknown keys are ignored (a newer image may report more); the receipt keeps the known keys.
+_BOOT_KEYS = {"schema_head": str, "realm": str, "authority": str, "scopes": list}
+_BOOT_SCOPE_KEYS = {"exchange_account_id": str, "deployment_environment": str, "basis_id": str,
+                    "reads": list}
+_BOOT_READ_KEYS = {"symbol": str, "cell_id": str, "basis_id": (str, type(None)), "result": str}
+
+
+def _known(value: object, keys: Mapping[str, type | tuple[type, ...]]) -> dict[str, Any]:
+    """``value``'s required keys, each of its type; anything else in it is ignored."""
+    if not isinstance(value, dict) or any(
+            key not in value or not isinstance(value[key], kind) for key, kind in keys.items()):
+        _fail("restore_output_invalid")
+    return {key: value[key] for key in keys}
+
+
 def parse_boot(output: str, bounds: Bounds) -> dict[str, object]:
-    """Validate ledger_boot_check.py's single JSON line against the restored bounds."""
+    """Validate the image boot check's single JSON line against the restored bounds."""
     lines = [line for line in output.splitlines() if line.strip()] if isinstance(output, str) else []
     if len(lines) != 1 or len(lines[0]) > 65_536:
         _fail("restore_output_invalid")
@@ -555,38 +573,29 @@ def parse_boot(output: str, bounds: Bounds) -> dict[str, object]:
         payload = json.loads(lines[0])
     except ValueError:
         _fail("restore_output_invalid")
-    boot = payload.get("boot") if isinstance(payload, dict) and set(payload) == {"boot"} else None
-    if (not isinstance(boot, dict)
-            or set(boot) != {"schema_head", "realm", "authority", "scopes"}
-            or boot["authority"] != "ledger"
-            or not isinstance(boot["realm"], str) or _ENVIRONMENT.fullmatch(boot["realm"]) is None
-            or not isinstance(boot["scopes"], list)):
+    boot = _known(payload.get("boot") if isinstance(payload, dict) else None, _BOOT_KEYS)
+    if boot["authority"] != "ledger" or _ENVIRONMENT.fullmatch(boot["realm"]) is None:
         _fail("restore_output_invalid")
     if (boot["schema_head"],) != tuple(bounds.migration_heads):
         _fail("boot_schema_head_mismatch")
     seen: list[tuple[str, str]] = []
-    reads = 0
-    for scope in boot["scopes"]:
-        if (not isinstance(scope, dict)
-                or set(scope) != {"exchange_account_id", "deployment_environment", "basis_id",
-                                  "reads"}
-                or not isinstance(scope["reads"], list)):
-            _fail("restore_output_invalid")
+    scopes: list[dict[str, Any]] = []
+    for raw_scope in boot["scopes"]:
+        scope = _known(raw_scope, _BOOT_SCOPE_KEYS)
         seen.append((scope["exchange_account_id"], scope["deployment_environment"]))
-        _canonical_uuid(str(scope["basis_id"]))
-        for read in scope["reads"]:
-            if (not isinstance(read, dict)
-                    or set(read) != {"symbol", "cell_id", "basis_id", "result"}
-                    or not isinstance(read["result"], str)
-                    or not (read["result"] == "available" or read["result"].startswith("blocked:"))
+        _canonical_uuid(scope["basis_id"])
+        reads = [_known(read, _BOOT_READ_KEYS) for read in scope["reads"]]
+        for read in reads:
+            if (not (read["result"] == "available" or read["result"].startswith("blocked:"))
                     or (read["basis_id"] is None
                         and read["result"] != "blocked:snapshot_query_pending")):
                 _fail("restore_output_invalid")
-            reads += 1
+        scopes.append({**scope, "reads": reads})
     expected = sorted((scope.account, scope.environment) for scope in bounds.scopes)
-    if len(seen) != len(set(seen)) or sorted(seen) != expected or reads == 0:
+    if (len(seen) != len(set(seen)) or sorted(seen) != expected
+            or not any(scope["reads"] for scope in scopes)):
         _fail("restore_output_invalid")
-    return boot
+    return {**boot, "scopes": scopes}
 
 
 def validate_tables(names: Iterable[str]) -> None:

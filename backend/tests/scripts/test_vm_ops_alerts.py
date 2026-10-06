@@ -232,11 +232,7 @@ class DrillHarness:
         self.evidence = tmp_path / "restore-ledger.json"
         self.heartbeat = tmp_path / "restore-heartbeat.json"
         self.drill = tmp_path / "restore-drill.sh"
-        self.legacy_config = tmp_path / "restore-test.json"
-        self.legacy_evidence = tmp_path / "restore-prefix.json"
         self.calls: list[list[str]] = []
-        self.probes: list[list[str]] = []
-        self.help = (0, "usage: restore_drill.py [-h] [--restore-test] [--output OUTPUT]\n")
         self.exit = 0
         self.report: dict[str, Any] | None = {
             "measured": True, "kind": "restore_ledger", "restore_test": True,
@@ -250,19 +246,12 @@ class DrillHarness:
         def runner(argv: Sequence[str], timeout: float) -> int:
             self.calls.append(list(argv))
             if self.report is not None:
-                target = self.legacy_evidence if "--prefix" in argv else self.evidence
-                target.write_text(json.dumps(self.report))
+                self.evidence.write_text(json.dumps(self.report))
             return self.exit
-
-        def probe(argv: Sequence[str], timeout: float) -> tuple[int, str]:
-            self.probes.append(list(argv))
-            return self.help
 
         return int(restore.run_restore_test(drill=self.drill, evidence=self.evidence,
                                             heartbeat=self.heartbeat, timeout=7000,
-                                            legacy_config=self.legacy_config,
-                                            legacy_evidence=self.legacy_evidence,
-                                            runner=runner, probe=probe, clock=lambda: NOW))
+                                            runner=runner, clock=lambda: NOW))
 
 
 def test_restore_test_runs_the_drill_without_a_mode_or_configuration(tmp_path: Path) -> None:
@@ -274,7 +263,7 @@ def test_restore_test_runs_the_drill_without_a_mode_or_configuration(tmp_path: P
     assert (beat["observed_at_ms"], beat["restore_run_id"], beat["rto_seconds"]) == (
         NOW_MS, "20261001T091700Z-abc", 212)
     assert (beat["ledger_scopes"], beat["ledger_rows_compared"]) == (1, 4_321)
-    assert "event_seq" not in beat
+    assert "event_seq" not in beat and "legacy_drill" not in beat
 
 
 def test_failed_drill_keeps_the_old_heartbeat(tmp_path: Path) -> None:
@@ -303,114 +292,3 @@ def test_success_exit_without_fresh_measured_restore_test_evidence_is_a_failure(
     assert not h.heartbeat.exists()
 
 
-# ------------------------------------------------- reverse transition (a revert to a pre-D3 drill)
-
-LEGACY_REQUEST = {"account_id": "00000000-0000-0000-0000-0000000000c1", "environment": "prod",
-                  "projector_version": "execution-state-v1"}
-LEGACY_HELP = (0, "usage: restore_drill.py [-h] [--account-id ACCOUNT_ID] [--prefix]\n")
-LEGACY_REPORT = {"measured": True, "kind": "restore_prefix", "observed_at_ms": NOW_MS - 5_000,
-                 "restore_run_id": "r", "rto_seconds": 200, "target_backup_label": "l",
-                 "prefix": {"event_seq": 1}}
-
-
-def test_a_drill_without_restore_test_runs_in_its_own_prefix_form(tmp_path: Path) -> None:
-    h = DrillHarness(tmp_path)
-    h.help, h.report = LEGACY_HELP, LEGACY_REPORT
-    h.legacy_config.write_text(json.dumps(LEGACY_REQUEST))
-    assert h.run() == 0
-    assert h.probes == [[str(h.drill), "--help"]]
-    assert h.calls == [[str(h.drill), "--prefix", "--account-id", LEGACY_REQUEST["account_id"],
-                        "--environment", "prod", "--projector-version", "execution-state-v1"]]
-    beat = json.loads(h.heartbeat.read_text())
-    assert (beat["observed_at_ms"], beat["legacy_drill"]) == (NOW_MS, True)
-    assert not h.evidence.exists()
-
-
-@pytest.mark.parametrize(("config", "report", "help_output"), [
-    (None, LEGACY_REPORT, LEGACY_HELP),                                     # no scope config
-    ({**LEGACY_REQUEST, "account_id": "x"}, LEGACY_REPORT, LEGACY_HELP),
-    (LEGACY_REQUEST, {**LEGACY_REPORT, "kind": "restore"}, LEGACY_HELP),    # not its receipt
-    (LEGACY_REQUEST, {**LEGACY_REPORT, "observed_at_ms": NOW_MS - 2 * 3_600_000}, LEGACY_HELP),
-    (LEGACY_REQUEST, LEGACY_REPORT, (2, "")),                               # probe failed
-    (LEGACY_REQUEST, LEGACY_REPORT, (0, "no usage line")),
-])
-def test_the_reverse_transition_fails_closed(
-    tmp_path: Path, config: dict[str, Any] | None, report: dict[str, Any],
-    help_output: tuple[int, str],
-) -> None:
-    h = DrillHarness(tmp_path)
-    h.help, h.report = help_output, report
-    if config is not None:
-        h.legacy_config.write_text(json.dumps(config))
-    assert h.run() == 2
-    assert not h.heartbeat.exists()
-
-
-_BASE_DRILL_STUB = """#!{python}
-# The base (2c1bc87a) restore_drill.py argparse surface; writes the base --prefix receipt.
-import argparse, json, os, sys
-parser = argparse.ArgumentParser()
-for flag in ("--account-id", "--environment", "--projector-version", "--backup-label",
-             "--target-time", "--baseline", "--target-run-id", "--backend-image", "--cells",
-             "--scope", "--database-name", "--production-container"):
-    parser.add_argument(flag)
-for flag in ("--archive-only", "--prefix", "--rehearsal"):
-    parser.add_argument(flag, action="store_true")
-args = parser.parse_args()
-if not args.prefix or None in (args.account_id, args.environment, args.projector_version):
-    sys.exit(2)
-with open(os.environ["STUB_EVIDENCE"], "w") as handle:
-    json.dump({{"measured": True, "kind": "restore_prefix", "schema_version": 1,
-               "observed_at_ms": int(os.environ["STUB_OBSERVED_MS"]),
-               "prefix": {{"event_seq": 7, "production_event_head": 9}}}}, handle)
-"""
-
-
-def test_new_wrapper_with_the_base_drill_surface_passes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The real probe and runner against a drill with the base release's arguments only."""
-    drill = tmp_path / "restore-drill.sh"
-    drill.write_text(_BASE_DRILL_STUB.format(python=sys.executable))
-    drill.chmod(0o755)
-    legacy_evidence = tmp_path / "restore-prefix.json"
-    config = tmp_path / "restore-test.json"
-    config.write_text(json.dumps(LEGACY_REQUEST))
-    monkeypatch.setenv("STUB_EVIDENCE", str(legacy_evidence))
-    monkeypatch.setenv("STUB_OBSERVED_MS", str(NOW_MS - 1_000))
-    heartbeat = tmp_path / "restore-heartbeat.json"
-    assert restore.run_restore_test(
-        drill=drill, evidence=tmp_path / "restore-ledger.json", heartbeat=heartbeat,
-        timeout=60, legacy_config=config, legacy_evidence=legacy_evidence,
-        clock=lambda: NOW) == 0
-    assert json.loads(heartbeat.read_text())["legacy_drill"] is True
-
-
-_NEW_DRILL_STUB = """#!{python}
-# This release's restore_drill.py surface for the restore test; writes a fresh receipt.
-import argparse, json, sys, time
-parser = argparse.ArgumentParser()
-parser.add_argument("--restore-test", action="store_true")
-parser.add_argument("--output")
-parser.add_argument("--prefix", action="store_true")
-args = parser.parse_args()
-if not args.restore_test or args.output is None:
-    sys.exit(2)
-with open(args.output, "w") as handle:
-    json.dump({{"measured": True, "kind": "restore_ledger", "restore_test": True,
-               "observed_at_ms": int(time.time() * 1000), "ledger": {{"scopes": []}}}}, handle)
-"""
-
-
-def test_the_previous_units_arguments_still_run_this_wrapper(tmp_path: Path) -> None:
-    """Tooling install stopped after the wrapper, before the unit: the old ExecStart reaches it."""
-    drill = tmp_path / "restore-drill.sh"
-    drill.write_text(_NEW_DRILL_STUB.format(python=sys.executable))
-    drill.chmod(0o755)
-    evidence = tmp_path / "restore-prefix.json"
-    heartbeat = tmp_path / "restore-heartbeat.json"
-    # The base (2c1bc87a) bfx-restore-test@.service ExecStart arguments, with tmp paths.
-    assert restore.main(["--config", str(tmp_path / "restore-test.json"), "--drill", str(drill),
-                         "--evidence", str(evidence), "--heartbeat", str(heartbeat)]) == 0
-    assert json.loads(evidence.read_text())["restore_test"] is True
-    assert json.loads(heartbeat.read_text())["legacy_drill"] is False

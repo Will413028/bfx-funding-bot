@@ -8,7 +8,11 @@ from typing import Any
 import httpx
 import pytest
 
-from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
+from bfx_funding_bot.external.bitfinex.auth_rest import (
+    ActiveFundingCredit,
+    ActiveFundingOffer,
+    BitfinexAuthREST,
+)
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.external.bitfinex.observations import (
     ObservationRequestBudget,
@@ -496,3 +500,16 @@ async def test_offer_by_id_request_failure_marks_the_unasked_ids_and_stops() -> 
             ctx=_ctx(), symbol="fUST", offer_ids=[str(i) for i in range(1, 30)])
     assert len(calls) == 1  # no hammering a failing endpoint
     assert lookup.failed == {str(i): "request_failed" for i in range(1, 30)}
+
+
+def test_active_wire_models_expose_normalized_observation_fields() -> None:
+    offer = ActiveFundingOffer(
+        venue_offer_id="1", symbol="fUST", amount=Decimal("2"), rate=0.0003, period_days=2,
+        mts_created=1, status="ACTIVE", amount_original=Decimal("3"), mts_updated=2)
+    credit = ActiveFundingCredit(
+        credit_id="2", symbol="fUST", amount=Decimal("4"), rate=0.0004, period_days=2,
+        status="ACTIVE", mts_created=3, mts_updated=4)
+    assert offer.amount_original == Decimal("3")
+    assert offer.mts_updated == 2
+    assert credit.mts_created == 3
+    assert credit.mts_updated == 4

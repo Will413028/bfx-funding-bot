@@ -163,16 +163,9 @@ async def test_the_selection_subscribes_nothing(factory) -> None:
 
 
 @pytest.mark.asyncio
-async def test_policy_ports_are_the_ledgers_and_never_replay(factory, monkeypatch) -> None:
-    from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
+async def test_policy_ports_are_the_ledgers(factory) -> None:
     from bfx_funding_bot.modules.trading import CapitalPolicy
 
-    replays: list[object] = []
-
-    async def prepare(self, session, *, account_id):
-        replays.append(account_id)
-
-    monkeypatch.setattr(AccountEventWriter, "prepare_locked", prepare)
     policy = select_policy_ports(SCOPE)
     assert type(policy.store).__name__ == "LedgerPolicyStore"
     assert type(policy.scope_lock).__name__ == "LedgerScopeLock"
@@ -182,7 +175,6 @@ async def test_policy_ports_are_the_ledgers_and_never_replay(factory, monkeypatc
             session, symbol="fUST", policy=CapitalPolicy(enabled=True), expected_revision=0,
             source={})
         assert (await policy.store.read_applied(session, symbol="fUST")).revision == written.revision
-    assert replays == []
 
 
 @pytest.mark.asyncio

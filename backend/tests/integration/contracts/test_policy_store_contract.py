@@ -16,7 +16,6 @@ import pytest
 from sqlalchemy import func, select
 
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
 from bfx_funding_bot.modules.ledger import PolicyRefused, PolicyStore
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store
 from bfx_funding_bot.modules.trading import CapitalPolicy
@@ -75,11 +74,7 @@ async def test_a_lost_update_and_an_unsupported_policy_are_refused(port_stack) -
         assert (await store.read_applied(session, symbol="fUST")).revision == 1
 
 
-async def test_the_ledger_store_never_touches_the_event_stream(port_stack, monkeypatch) -> None:
-    async def forbidden(*_args, **_kwargs):
-        raise AssertionError("event stream touched")
-
-    monkeypatch.setattr(AccountEventWriter, "prepare_locked", forbidden)
+async def test_the_ledger_store_never_touches_the_event_stream(port_stack) -> None:
     store = _store(port_stack)
     async with port_stack.factory.begin() as session:
         await store.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),

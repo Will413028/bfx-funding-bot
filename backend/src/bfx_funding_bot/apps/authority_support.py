@@ -36,8 +36,9 @@ from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger.tables import LedgerObservationRow
 
 SUPPORTED: Final[frozenset[Authority]] = frozenset({"ledger"})
-# The epoch writers this build knows (``apps/ledger_seed.SWITCH_ACTOR_PREFIX`` and the genesis
-# migration's ``ACTOR``; tests pin both).
+# The epoch writers this build knows: the S1-7 switch (its tool, deleted in S1-8 PR-D, wrote
+# ``ledger_seed:<run>-a<n>`` in prod on 2026-10-05) and the genesis migration's ``ACTOR``;
+# tests pin both.
 SWITCH_ACTOR_PREFIX: Final = "ledger_seed:"
 GENESIS_ACTOR: Final = "migration b1c2d3e4f5a6 genesis"
 

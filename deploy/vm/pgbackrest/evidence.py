@@ -58,13 +58,12 @@ RESTORE_ERROR_CODES = frozenset(
 # Every restore drill (restore_drill.py: the --restore-test and the operator's acceptance
 # drill) verifies the ledger: no operator baseline. The restored copy's append-only ledger
 # rows must equal production's within the restored copy's own boundary, and the image's
-# boot guards must accept it (ledger_digest.py, ledger_boot_check.py).
+# boot guards must accept it (ledger_digest.py, the image's apps/restore_boot_check.py).
 LEDGER_ERROR_CODES = RESTORE_ERROR_CODES | _ledger.ERROR_CODES | frozenset(
     {"production_read_failed", "backup_label_unavailable"}
 )
-# The restore receipt kinds: `restore_ledger`, and `restore_prefix` only while the installed
-# restore-test wrapper of the previous release still calls `--prefix`.
-LEDGER_KINDS = frozenset({"restore_ledger", "restore_prefix"})
+# The restore receipt's kind (the recurring restore test and the acceptance drill alike).
+LEDGER_KIND = "restore_ledger"
 
 _BACKUP_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _NETWORK_NAME = re.compile(r"bfx-dr-[a-z0-9-]+")
@@ -298,7 +297,7 @@ def render_ledger_restore_evidence(
     ``restore_test`` is true for the recurring restore test (the newest backup, no target)
     and false for the operator's acceptance drill at ``target_backup_label``/``target_time``.
     """
-    if kind not in LEDGER_KINDS:
+    if kind != LEDGER_KIND:
         _raise("restore_output_invalid")
     if isinstance(elapsed_seconds, bool) or not isinstance(elapsed_seconds, int) or elapsed_seconds < 0:
         _raise("rto_invalid")
@@ -350,7 +349,7 @@ def render_ledger_restore_evidence(
 
 def render_failure_evidence(
     *,
-    kind: Literal["backup", "restore_ledger", "restore_prefix"],
+    kind: Literal["backup", "restore_ledger"],
     error_code: str,
     observed_at_ms: int,
     cause: str | None = None,
@@ -358,9 +357,9 @@ def render_failure_evidence(
     """Return a measured=false report with only a bounded error code (and, for a failed
     ledger-mode cluster read, a bounded cause such as ``statement_timeout``)."""
     allowlist = BACKUP_ERROR_CODES if kind == "backup" else LEDGER_ERROR_CODES
-    if kind not in {"backup", *LEDGER_KINDS} or error_code not in allowlist:
+    if kind not in {"backup", LEDGER_KIND} or error_code not in allowlist:
         _raise("archiver_output_invalid" if kind == "backup" else "restore_output_invalid")
-    if cause is not None and (kind not in LEDGER_KINDS or cause not in _ledger.READ_FAILURE_CAUSES):
+    if cause is not None and (kind != LEDGER_KIND or cause not in _ledger.READ_FAILURE_CAUSES):
         _raise("restore_output_invalid")
     observed = _nonnegative_int(observed_at_ms, code="archiver_output_invalid")
     return {

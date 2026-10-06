@@ -12,12 +12,13 @@ Type=oneshot
 # %i is a revision (bfx-deploy runs the target release's scripts before it ships)
 # or `current` (the monthly timer: the deployed release). Each is a clean git
 # worktree of the mirror under /home/ubuntu/bfx-releases, kept by bfx-deploy.
-# The --legacy-* paths serve only a drill from before --restore-test (a revert to
-# such a release); see bfx_restore_test.py.
 User=ubuntu
 Environment=HOME=/home/ubuntu
 Environment=PYTHONDONTWRITEBYTECODE=1
 WorkingDirectory=/home/ubuntu/bfx-releases/%i
+# Only --drill: the receipt and heartbeat paths are the wrapper's own defaults
+# (/home/ubuntu/bfx/dr-evidence/restore-ledger.json, restore-heartbeat.json), so a unit and a
+# wrapper from different releases never disagree on arguments.
 # The drill's own RTO deadline is 3600s plus a 30s cleanup budget.
 TimeoutStartSec=7200
-ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_restore_test.py --drill /home/ubuntu/bfx-releases/%i/deploy/vm/pgbackrest/restore-drill.sh --evidence /home/ubuntu/bfx/dr-evidence/restore-ledger.json --heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json --legacy-config /home/ubuntu/bfx/restore-test.json --legacy-evidence /home/ubuntu/bfx/dr-evidence/restore-prefix.json
+ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_restore_test.py --drill /home/ubuntu/bfx-releases/%i/deploy/vm/pgbackrest/restore-drill.sh

@@ -19,7 +19,6 @@ import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
 from bfx_funding_bot.core.authority import AuthorityMismatch
 from bfx_funding_bot.core.database_realm import DatabaseRealmMismatch, DatabaseRealmRow
 from bfx_funding_bot.core.db import Base, make_async_engine_from_url, make_session_factory
-from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger.policy_write import write_policy_revision
 from bfx_funding_bot.modules.trading import CapitalPolicy
@@ -65,12 +64,7 @@ async def database(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_script_amends_through_the_ledger_store(database, monkeypatch) -> None:
-    async def prepare(self, session, *, account_id):
-        raise AssertionError("the ledger must not replay the event stream")
-
-    monkeypatch.setattr(AccountEventWriter, "prepare_locked", prepare)
-
+async def test_the_script_amends_through_the_ledger_store(database) -> None:
     report = await script.run(_args())
     assert report["status"] == "dry_run" and report["new_policy"]["enabled"] is False
     applied = await script.run(_args(apply_digest=report["amendment_digest"]))

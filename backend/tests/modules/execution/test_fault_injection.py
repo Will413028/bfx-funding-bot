@@ -38,10 +38,6 @@ from bfx_funding_bot.modules.execution.contracts import (
     ReadyToSubmit,
     ReservationRef,
 )
-from bfx_funding_bot.modules.execution.event_store.projector import (
-    InvalidVenueOfferTransition,
-    apply_offer_transition,
-)
 from bfx_funding_bot.modules.execution.events import (
     ReservationFailed,
     ReservationIntent,
@@ -107,7 +103,6 @@ CRASH_AFTER_INTENT = FaultScenario("crash_after_intent", "crash", False, False, 
 CRASH_AFTER_SIDE_EFFECT = FaultScenario(
     "crash_after_side_effect", "crash", True, True, "during_send",
 )
-OUT_OF_ORDER_RECONCILE = FaultScenario("out_of_order_reconcile", "drop", True, True)
 
 FAULT_SCENARIOS = (
     ACCEPT_DROP,
@@ -118,7 +113,6 @@ FAULT_SCENARIOS = (
     FIVE_XX_AFTER_SIDE_EFFECT,
     CRASH_AFTER_INTENT,
     CRASH_AFTER_SIDE_EFFECT,
-    OUT_OF_ORDER_RECONCILE,
 )
 
 
@@ -132,8 +126,6 @@ class FaultEvidence:
     venue_object_count: int
     retry_count: int
     normalized_payload_hash: str | None
-    reconcile_delivery_seqs: tuple[int, ...]
-    reconcile_final_status: str | None
     unknown_exposure_usdt: Decimal | None
     unknown_scope: tuple[UUID, str, str] | None
     adjacent_scope_allowed: bool
@@ -340,37 +332,6 @@ def _matching_offer(venue_offer_id: str, *, mts_created: int = 1_000) -> ActiveF
     )
 
 
-def _deliver_out_of_order_reconcile() -> tuple[tuple[int, ...], str]:
-    """Deliver two real projection observations in reverse event order."""
-    deliveries: list[int] = []
-    projected = apply_offer_transition(
-        None,
-        venue_offer_id="venue-1",
-        symbol="fUST",
-        amount_original=Decimal("150"),
-        amount_remaining=Decimal("150"),
-        rate=Decimal("0.0001"),
-        period_days=2,
-        mts_created=101,
-        mts_updated=102,
-        status="active",
-        event_seq=2,
-        offer_type="LIMIT",
-        flags={"raw": 0},
-    )
-    deliveries.append(2)
-    with pytest.raises(InvalidVenueOfferTransition, match="precedes last seen"):
-        apply_offer_transition(
-            projected,
-            status="cancelled",
-            event_seq=1,
-            mts_updated=101,
-            amount_remaining=Decimal("0"),
-        )
-    deliveries.append(1)
-    return tuple(deliveries), projected.status
-
-
 async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
     """Run UNKNOWN persistence, two-candidate reconcile, then the blocked retry."""
     environment = "ci"
@@ -549,10 +510,6 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
         event_seqs = tuple(range(1, len(recording.events) + 1))
         intent = next(event for event in recording.events if isinstance(event, ReservationIntent))
         assert intent.submission_attempt is not None
-        reconcile_delivery_seqs: tuple[int, ...] = ()
-        reconcile_final_status: str | None = None
-        if scenario is OUT_OF_ORDER_RECONCILE:
-            reconcile_delivery_seqs, reconcile_final_status = _deliver_out_of_order_reconcile()
         return FaultEvidence(
             durable_intent_count=sum(
                 isinstance(event, ReservationIntent) for event in recording.events
@@ -567,8 +524,6 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
                 transport.normalized_payload_hash
                 or intent.submission_attempt.payload_fingerprint
             ),
-            reconcile_delivery_seqs=reconcile_delivery_seqs,
-            reconcile_final_status=reconcile_final_status,
             unknown_exposure_usdt=(unknown_event.size_usdt if unknown_event else None),
             unknown_scope=(
                 (UUID(unknown_event.account_id), environment, unknown_event.symbol)
@@ -596,12 +551,7 @@ async def test_fault_matrix_never_automatically_retries_ambiguous_submit(
     assert _API_KEY not in str(asdict(evidence))
     assert _API_SECRET not in str(asdict(evidence))
     assert "authorization" not in str(asdict(evidence)).lower()
-    if scenario is OUT_OF_ORDER_RECONCILE:
-        assert evidence.outcome_kind == SubmitOutcomeKind.UNKNOWN.value
-        assert evidence.uncertainty_state == "open"
-        assert evidence.reconcile_delivery_seqs == (2, 1)
-        assert evidence.reconcile_final_status == "active"
-    elif scenario.process_crash_at in {"after_intent", "during_send"}:
+    if scenario.process_crash_at in {"after_intent", "during_send"}:
         assert evidence.outcome_kind == "crashed"
         assert evidence.uncertainty_state == "pending_recovery"
         assert evidence.event_seqs == (1,)
@@ -632,37 +582,6 @@ async def test_multiple_candidate_reconcile_stays_unknown_and_preserves_exposure
     assert evidence.unknown_exposure_usdt == Decimal("150")
     assert evidence.candidate_exposure_usdt == Decimal("300")
     assert evidence.unknown_scope == (_ACCOUNT_ID, "ci", "fUST")
-
-
-def test_out_of_order_reconcile_projection_rejects_stale_delivery() -> None:
-    """The real projector retains the newer observed offer, never reopening it."""
-    newer = apply_offer_transition(
-        None,
-        venue_offer_id="venue-1",
-        symbol="fUST",
-        amount_original=Decimal("150"),
-        amount_remaining=Decimal("150"),
-        rate=Decimal("0.0001"),
-        period_days=2,
-        mts_created=101,
-        mts_updated=102,
-        status="active",
-        event_seq=2,
-        offer_type="LIMIT",
-        flags={"raw": 0},
-    )
-
-    with pytest.raises(InvalidVenueOfferTransition, match="precedes last seen"):
-        apply_offer_transition(
-            newer,
-            status="cancelled",
-            event_seq=1,
-            mts_updated=101,
-            amount_remaining=Decimal("0"),
-        )
-
-    assert newer.status == "active"
-    assert newer.last_seen_event_seq == 2
 
 
 @pytest.mark.asyncio

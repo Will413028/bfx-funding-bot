@@ -12,6 +12,11 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+# Every table the shared metadata may reach by foreign key, whatever was imported first.
+import bfx_funding_bot.modules.accounts.tables
+import bfx_funding_bot.modules.execution.audit.tables
+import bfx_funding_bot.modules.execution.uncertainty_tables
+import bfx_funding_bot.modules.ledger.tables
 import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.auth_rest import (
@@ -21,8 +26,6 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
 )
 from bfx_funding_bot.external.bitfinex.errors import BitfinexShapeError
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
-from bfx_funding_bot.modules.execution.event_store.serialization import deserialize_event
-from bfx_funding_bot.modules.execution.events import CreditClosed
 from bfx_funding_bot.modules.live_validation.interest_ledger import (
     MS_PER_DAY,
     InterestLedgerSync,
@@ -164,21 +167,6 @@ def test_funding_currency() -> None:
     assert funding_currency("fUST") == "UST"
     with pytest.raises(ValueError):
         funding_currency("UST")
-
-
-def test_credit_closed_written_before_the_parser_fix_is_marked_unreliable() -> None:
-    """A stored 2026-09-25 payload: rate held the period, period_days mts_opening."""
-    payload = {
-        "rate": 2.0, "amount": "150.76884612", "symbol": "fUST",
-        "event_id": "d019142b-3fe0-465f-b1e5-144f4e888590", "credit_id": 466642177,
-        "event_seq": None, "venue_seq": 588, "account_id": str(ACCOUNT),
-        "mts_create": 1790350246000, "period_days": 1790350246000, "is_simulated": False,
-        "__event_type__": "CREDIT_CLOSED", "occurred_at_ms": 1790350246000,
-        "recorded_at_ms": None, "__schema_version__": 3,
-    }
-    event = deserialize_event("CREDIT_CLOSED", payload)
-    assert isinstance(event, CreditClosed)
-    assert event.mts_last_payout is None and not event.venue_fields_reliable
 
 
 @pytest.mark.asyncio

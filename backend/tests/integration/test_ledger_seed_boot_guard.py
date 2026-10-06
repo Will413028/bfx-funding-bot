@@ -23,7 +23,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from bfx_funding_bot.apps import ledger_seed
 from bfx_funding_bot.apps.authority_support import (
     GENESIS_ACTOR,
     SWITCH_ACTOR_PREFIX,
@@ -93,7 +92,8 @@ def _guard(engine: Engine, *, venue: Venue = "bitfinex",
 
 
 def test_the_writers_are_the_ones_that_append_epochs() -> None:
-    assert SWITCH_ACTOR_PREFIX == ledger_seed.SWITCH_ACTOR_PREFIX
+    # The prefix the S1-7 switch wrote in prod (2026-10-05; the tool is deleted, the epoch stays).
+    assert SWITCH_ACTOR_PREFIX == "ledger_seed:"
     [path] = (ALEMBIC_DIR / "versions").glob("b1c2d3e4f5a6_*.py")
     spec = importlib.util.spec_from_file_location("genesis_migration", path)
     assert spec is not None and spec.loader is not None

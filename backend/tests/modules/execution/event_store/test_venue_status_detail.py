@@ -1,19 +1,18 @@
-"""An offer that filled must be recognised as finished.
+"""An offer's status is its leading phrase, whatever narrative the venue appends.
 
 Bitfinex reports offer state with narrative appended -- "EXECUTED at 0.0148%
 (150.78)" is what it returned for the canary filled on 2026-09-23. Normalising
 by lower-casing and replacing spaces turned that into the unknown status
-"executed_at_0.0148%_(150.78)", so the capital classifier could never read the
-offer as terminal and refused to account for the money.
+"executed_at_0.0148%_(150.78)". The observations the live executor publishes in
+``VenueSnapshotObserved`` normalise their status on construction.
 """
+from decimal import Decimal
+
 import pytest
 
 from bfx_funding_bot.modules.execution.event_store.entities import (
-    is_terminal_offer_status,
-    normalize_venue_status,
-)
-from bfx_funding_bot.modules.execution.event_store.projector import (
-    _normalize_status as projector_normalize,
+    VenueCreditObservation,
+    VenueOfferObservation,
 )
 
 
@@ -28,18 +27,11 @@ from bfx_funding_bot.modules.execution.event_store.projector import (
     ("  Active  ", "active"),
 ])
 def test_the_state_is_the_leading_phrase(raw: str, state: str) -> None:
-    assert normalize_venue_status(raw) == state
-
-
-def test_a_filled_offer_reads_as_terminal() -> None:
-    assert is_terminal_offer_status("EXECUTED at 0.0148% (150.78)")
-
-
-def test_a_partial_fill_does_not() -> None:
-    assert not is_terminal_offer_status("PARTIALLY FILLED at 0.02% (50.0)")
-
-
-def test_the_projector_and_the_entities_agree() -> None:
-    """Two copies of this rule disagreed once; there is now one."""
-    for raw in ("EXECUTED at 0.0148% (150.78)", "CANCELED was: PARTIALLY FILLED at x", "ACTIVE"):
-        assert projector_normalize(raw) == normalize_venue_status(raw)
+    offer = VenueOfferObservation(
+        venue_offer_id="1", symbol="fUST", amount_original=Decimal("1"),
+        amount_remaining=Decimal("0"), rate=None, period_days=2, status=raw,
+        mts_created=1, mts_updated=2)
+    credit = VenueCreditObservation(
+        credit_id="2", symbol="fUST", amount=Decimal("1"), rate=None, period_days=2,
+        status=raw)
+    assert (offer.status, credit.status) == (state, state)
