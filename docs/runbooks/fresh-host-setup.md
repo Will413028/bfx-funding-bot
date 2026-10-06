@@ -214,7 +214,7 @@ Restore test 不需要設定檔（ledger mode 驗證 restored copy 內的每個 
 
 ```bash
 sudo docker run --rm --pull=never --entrypoint "" bfx-bot:local /app/.venv/bin/python -c \
-  "from bfx_funding_bot.apps.authority_support import require_ledger_seed; from bfx_funding_bot.modules.ledger.wiring import build_ledger_capital_reader; print('ok')"
+  "import bfx_funding_bot.apps.restore_boot_check, bfx_funding_bot.apps.authority_support, bfx_funding_bot.modules.ledger.wiring; print('ok')"
 sudo systemctl start --no-block bfx-restore-test@current.service
 journalctl -fu bfx-restore-test@current.service
 ```

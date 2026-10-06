@@ -75,7 +75,7 @@ class SqlVenueEventStore:
         """The raw latest authority epoch, read on a connection of this store's engine.
 
         Raw on purpose: the venue reports the true value in its own refusal, independent of
-        the support set the bot's `core.authority.read_authority` checks against.
+        the bot's `core.authority.require_ledger_authority` check.
         """
         try:
             async with self._engine.connect() as conn:

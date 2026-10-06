@@ -9,8 +9,8 @@ transaction:
 
 1. schema at the image's single migration head (``assert_schema_head``);
 2. the stamped realm, and every ledger scope in it;
-3. the capital authority is ``ledger`` (``read_authority``);
-4. the seed guard a Bitfinex bot boots through (``require_ledger_seed``) for every scope;
+3. the capital authority is ``ledger`` (``require_ledger_authority``);
+4. the epoch guard a Bitfinex bot boots through (``require_ledger_epoch``: a known writer);
 5. the ledger capital reader (``read_capital``) for every (symbol, cell) of each scope's newest
    accepted basis, as of that scope's newest query: it must fold a basis, or say the newest
    query is still pending (the restore point fell inside an observation cycle).
@@ -121,8 +121,8 @@ async def _check(database_url: str) -> dict[str, object]:
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-    from bfx_funding_bot.apps.authority_support import require_ledger_seed
-    from bfx_funding_bot.core.authority import AuthorityMismatch, read_authority
+    from bfx_funding_bot.apps.authority_support import require_ledger_epoch
+    from bfx_funding_bot.core.authority import AuthorityMismatch, require_ledger_authority
     from bfx_funding_bot.core.database_realm import DatabaseRealmMismatch, read_database_realm
     from bfx_funding_bot.core.schema_head import (
         SchemaHeadMismatch,
@@ -143,18 +143,18 @@ async def _check(database_url: str) -> dict[str, object]:
             except DatabaseRealmMismatch:
                 raise RefusedError("boot_realm_mismatch") from None
             try:
-                authority = await read_authority(session, supported=frozenset({"ledger"}))
+                await require_ledger_authority(session)
             except AuthorityMismatch:
                 raise RefusedError("boot_authority_not_ledger") from None
+            try:
+                await require_ledger_epoch(session, venue=VENUE)
+            except AuthorityMismatch:
+                raise RefusedError("boot_epoch_writer_unknown") from None
             scopes = await _scopes(session)
             if not scopes:
                 raise RefusedError("boot_ledger_empty")
             if any(scope.deployment_environment != realm for scope in scopes):
                 raise RefusedError("boot_realm_mismatch")
-            try:
-                await require_ledger_seed(session, venue=VENUE, scopes=tuple(scopes))
-            except AuthorityMismatch:
-                raise RefusedError("boot_seed_missing") from None
             checked: list[dict[str, object]] = []
             for scope in scopes:
                 basis_id, reads = await _reads(session, scope)
@@ -167,7 +167,7 @@ async def _check(database_url: str) -> dict[str, object]:
                 raise RefusedError("boot_capital_unread")
     finally:
         await engine.dispose()
-    return {"boot": {"schema_head": build_head(), "realm": realm, "authority": authority,
+    return {"boot": {"schema_head": build_head(), "realm": realm, "authority": "ledger",
                      "scopes": checked}}
 
 

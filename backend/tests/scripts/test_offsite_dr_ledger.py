@@ -295,6 +295,8 @@ def test_boot_output_fails_closed(output: str, code: str) -> None:
 
 
 @pytest.mark.parametrize(("stdout", "code"), [
+    ('{"error": "boot_epoch_writer_unknown"}\n', "boot_epoch_writer_unknown"),
+    # The deployed image up to e4e699c4 still refuses with its per-scope seed code.
     ('{"error": "boot_seed_missing"}\n', "boot_seed_missing"),
     ('{"error": "boot_check_failed", "type": "OSError"}\n', "boot_check_failed"),
     ('{"error": "anything else"}\n', "boot_check_failed"),

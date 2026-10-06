@@ -3,7 +3,7 @@
 Mutation checks (one at a time; revert after each):
 
 * ``select_read_models`` returns another reader than the ledger's: ``test_select_read_models_*``.
-* The lifespan reads the epoch against a set with ``legacy``: ``test_lifespan_*``.
+* The lifespan stops requiring the ``ledger`` epoch: ``test_lifespan_*``.
 * The lifespan stops storing ``app.state.read_models``: ``test_lifespan_*``.
 * ``/ready`` ignores the epoch: ``test_ready_refuses_*``.
 * ``_request_model`` keeps ``str(reconcile_event_seq)`` for ledger rows: ``test_request_*``.
@@ -18,7 +18,6 @@ import pytest
 from fastapi import FastAPI, HTTPException
 
 from bfx_funding_bot.apps import webapi
-from bfx_funding_bot.apps.authority_support import SUPPORTED
 from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.core import authority as authority_module
 from bfx_funding_bot.modules.api import deps
@@ -32,11 +31,6 @@ def test_select_read_models_are_the_ledgers() -> None:
     assert type(models.operator_reads).__name__ == "LedgerOperatorReads"
     assert type(models.operator_evidence).__name__ == "LedgerOperatorEvidence"
     assert type(models.operator_resolution).__name__ == "LedgerOperatorResolution"
-
-
-def test_the_web_api_supports_only_the_ledger() -> None:
-    """The ledger is the only capital authority (S1-8): a legacy epoch refuses the boot."""
-    assert frozenset({"ledger"}) == SUPPORTED
 
 
 class _Engine:
@@ -54,29 +48,32 @@ class _Session:
 
 @pytest.mark.asyncio
 async def test_lifespan_stores_the_authority_and_its_read_models(monkeypatch) -> None:
-    async def read_authority(_session: object, *, supported: object) -> str:
-        assert supported == SUPPORTED
-        return "ledger"
+    required: list[object] = []
+
+    async def require_ledger_authority(session: object) -> str:
+        required.append(session)
+        return "migration b1c2d3e4f5a6 genesis"
 
     monkeypatch.setattr(webapi, "Settings", lambda: SimpleNamespace(log_level="WARNING"))
     monkeypatch.setattr(webapi, "make_engine", lambda _settings: _Engine())
     monkeypatch.setattr(webapi, "make_session_factory", lambda _engine: _Session)
-    monkeypatch.setattr(webapi, "read_authority", read_authority)
+    monkeypatch.setattr(webapi, "require_ledger_authority", require_ledger_authority)
     app = FastAPI()
     async with webapi.lifespan(app):
+        assert len(required) == 1
         assert app.state.authority == "ledger"
         assert type(app.state.read_models.operator_reads).__name__ == "LedgerOperatorReads"
 
 
 @pytest.mark.asyncio
 async def test_lifespan_still_refuses_an_unreadable_authority(monkeypatch) -> None:
-    async def read_authority(_session: object, *, supported: object) -> str:
+    async def require_ledger_authority(_session: object) -> str:
         raise authority_module.AuthorityMismatch("authority_unsupported")
 
     monkeypatch.setattr(webapi, "Settings", lambda: SimpleNamespace(log_level="WARNING"))
     monkeypatch.setattr(webapi, "make_engine", lambda _settings: _Engine())
     monkeypatch.setattr(webapi, "make_session_factory", lambda _engine: _Session)
-    monkeypatch.setattr(webapi, "read_authority", read_authority)
+    monkeypatch.setattr(webapi, "require_ledger_authority", require_ledger_authority)
     app = FastAPI()
     with pytest.raises(authority_module.AuthorityMismatch):
         async with webapi.lifespan(app):
