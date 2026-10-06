@@ -4,20 +4,18 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
 COMPOSE_PATH = Path(__file__).resolve().parents[3] / "docker-compose.dr.yml"
 _ENVIRONMENTS = frozenset({"prod", "shadow", "ci"})
-_PROJECTOR_VERSION = re.compile(r"[A-Za-z0-9._-]+")
 _BACKUP_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _RUN_ID = re.compile(r"[0-9TZ-]+-[a-f0-9]{16}")
 _TARGET_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _GENERATED_NAME = re.compile(r"bfx-dr-[a-z0-9-]+")
 _VERIFY_ROLE = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 _DATABASE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
-_EVENT_HASH = re.compile(r"[0-9a-f]{64}")
 _BACKEND_IMAGE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
 _REVISION = re.compile(r"[0-9a-f]{40}")
 
@@ -44,50 +42,17 @@ class RestoreResources:
     cleanup_commands: tuple[tuple[str, ...], ...]
 
 
-@dataclass(frozen=True, slots=True)
-class RestorePlan(RestoreResources):
-    """The legacy single-scope baseline verifier layered on the restore resources."""
-
-    account_id: str
-    environment: str
-    projector_version: str
-    expected_event_hash: str
-
-
 def _invalid() -> None:
     raise RestoreInputError("invalid_restore_input")
-
-
-def verifier_command(
-    plan: RestorePlan, *, image: str, env_path: Path, input_path: Path | None = None,
-    input_digest: str | None = None, archive_only: bool = False,
-) -> tuple[str, ...]:
-    """Pin both verifiers to the observed bot image on the isolated network."""
-    if re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None or not env_path.is_absolute():
-        _invalid()
-    command = ("docker", "run", "--rm", "--name", plan.verifier_container_name,
-               "--user", f"{os.getuid()}:{os.getgid()}",
-               "--network", plan.network_name, "--env-file", str(env_path), "--entrypoint", "python")
-    if input_path is not None:
-        if (not input_path.is_absolute() or any(c in str(input_path) for c in ":,\n\r")
-                or input_digest is None or _EVENT_HASH.fullmatch(input_digest) is None):
-            _invalid()
-        return (*command, "--volume", f"{input_path}:/run/archive-input.json:ro", image,
-                "scripts/verify_projection_archive.py", "--input", "/run/archive-input.json",
-                "--input-digest", input_digest, "--account-id", plan.account_id,
-                "--environment", plan.environment, *(("--archive-only",) if archive_only else ()))
-    return (*command, image, "scripts/verify_projection_replay.py", "replay",
-            "--account-id", plan.account_id, "--environment", plan.environment,
-            "--projector-version", plan.projector_version, "--expected-event-hash", plan.expected_event_hash)
 
 
 def ledger_verifier_command(
     resources: RestoreResources, *, image: str, env_path: Path,
 ) -> tuple[str, ...]:
-    """Ledger mode: run ledger_boot_check.py (fed on stdin) in the observed bot image.
+    """Run ledger_boot_check.py (fed on stdin) in the observed bot image.
 
-    Same container name, user, isolated network and env file as the baseline
-    verifier, so cleanup and isolation are unchanged; `-i` carries the script.
+    The generated verifier container name (cleaned up by name), the caller's uid, the
+    isolated network and the env file; `-i` carries the script.
     """
     if re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None or not env_path.is_absolute():
         _invalid()
@@ -247,44 +212,4 @@ def build_restore_resources(
             ("docker", "network", "rm", network_name),
             ("docker", "container", "rm", "--force", verifier_container_name),
         ),
-    )
-
-
-def build_restore_plan(
-    *,
-    account_id: str,
-    environment: str,
-    projector_version: str,
-    backup_label: str,
-    target_time: str | None,
-    run_id: str,
-    database_name: str,
-    expected_event_hash: str,
-) -> RestorePlan:
-    """Layer the legacy single-scope verifier on generated restore resources."""
-    canonical_account_id = _canonical_account_id(account_id)
-    if environment not in _ENVIRONMENTS or not isinstance(projector_version, str) \
-            or _PROJECTOR_VERSION.fullmatch(projector_version) is None:
-        _invalid()
-    if not isinstance(expected_event_hash, str) or _EVENT_HASH.fullmatch(expected_event_hash) is None:
-        _invalid()
-    resources = build_restore_resources(
-        backup_label=backup_label, target_time=target_time,
-        run_id=run_id, database_name=database_name,
-    )
-    compose_prefix = (
-        "docker", "compose", "--project-name", resources.project_name,
-        "--file", str(COMPOSE_PATH),
-    )
-    verifier_run = (
-        *compose_prefix, "run", "--rm", "--no-deps", "--name",
-        resources.verifier_container_name, "verifier", "replay",
-        "--account-id", canonical_account_id, "--environment", environment,
-        "--projector-version", projector_version, "--expected-event-hash", expected_event_hash,
-    )
-    values = {field.name: getattr(resources, field.name) for field in fields(RestoreResources)}
-    values["run_commands"] = (*resources.run_commands, verifier_run)
-    return RestorePlan(
-        **values, account_id=canonical_account_id, environment=environment,
-        projector_version=projector_version, expected_event_hash=expected_event_hash,
     )

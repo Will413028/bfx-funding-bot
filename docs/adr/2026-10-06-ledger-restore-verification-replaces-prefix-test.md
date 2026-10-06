@@ -47,10 +47,31 @@ prior state：每月與變更觸發的還原測試（[2026-09-04-pgbackrest-in-p
 ## Revocation Triggers
 
 - PR-D（D3 的 docs／cleanup PR）→ 移除 drill 的 `--prefix` 過渡呼叫、wrapper 的反向 fallback 與 `--legacy-*` 參數，並刪除 VM 上的 `/home/ubuntu/bfx/restore-test.json`。
-- D4b（legacy 表移到 archive schema）→ 完整 baseline 演練（Halt 2、事故驗收）也改驗 ledger；在那之前它仍比對已凍結的 legacy event chain。
+- ~~D4b（legacy 表移到 archive schema）→ 完整 baseline 演練（Halt 2、事故驗收）也改驗 ledger~~：已在 D4b 執行，見下方 Amendment。
 - 改用 logical 或部分還原（不再是 physical restore）→ 重評「W 與 scope 清單取自還原副本」，加上 production 端的 scope／尾端完整性比對。
 - 出現第二個交易所帳戶或 scope → 重評 boot check 要求每個 scope 都通過（bot 只看自己的 scope）。
 
 - 單次 production 讀取時間逼近 RTO 預算，或長 snapshot 影響 vacuum → 改為增量比對（上次驗證的 W 與 digest 存入 evidence，只讀 (W_prev, W]）或從 standby 讀。
 - ledger 表新增共同 commit stamp → 以它作為唯一邊界。
 - S1-8 PR-C 起 image 內建入口 `python -m bfx_funding_bot.apps.restore_boot_check`；drill 的 `ledger_boot_check.py` 先以 `find_spec` 探測，有入口就交給它，沒有（PR-C 之前的 image，只在部署 PR-C 那一次）才跑 stdin 腳本自帶的舊 API 版檢查。**PR-C 部署後的第一個 release** → 刪除該 fallback，drill 直接對 image 跑 `python -m`。
+
+## Amendment 2026-10-06（S1-8 D4b）
+
+完整 baseline 演練改驗 ledger，legacy 部分刪除。prior state：operator 在停寫時擷取 `baseline.json`
+（event count／head／hash），drill 還原指定 backup 後跑 `verify_projection_replay`／
+`verify_projection_archive` 比對凍結的 legacy event chain。D4b 把 12 張 legacy 表移到 `legacy_archive`
+並撤銷權限後，這條路只會再驗一次凍結資料。
+
+- **基準**同上：append-only 資料以單調鍵為界、跟來源比對，加上 app 自己的啟動檢查。上面的 A 已經是
+  這個做法，差別只在 backup 與 recovery target 是誰選的。
+- **採用**：驗收演練成為 ledger 模式的一個參數：`restore_drill.py --backup-label L [--target-time T]`。
+  W 仍取自還原副本，production 在 W 以內的 append-only 列就是 baseline，所以不再需要 operator 擷取
+  baseline 檔，也不需要停寫。receipt 寫到 `restore.json`（`kind: restore_ledger`、`restore_test: false`、
+  帶 target）。`--restore-test` 與 wrapper 的契約不變。
+- **刪除**：`DrillRequest`、baseline 載入、legacy receipt（`restore`／`archive_restore`）、
+  `archive_evidence.py`、compose 的 `verifier` service、`scripts/verify_projection_replay.py`、
+  `verify_projection_archive.py`，以及只有它們（和已完成的 projection／identity cutover）用到的
+  `boot_recovery`、`event_store.replay_verification`、`projection_cutover/*`（`tables.py` 保留給
+  alembic 比對）、`cutover_projection`、`cutover_identity`／`identity_cutover`。
+- **限制**：production 必須還在而且讀得到。production 已經不在時要做的是事故還原，不是這個演練；
+  還原副本必須在部署中 release 的 schema head，比 head 舊的 backup 會被 boot check 拒絕。

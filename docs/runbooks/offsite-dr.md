@@ -21,7 +21,7 @@ policy in force throughout the procedure.
 - The restore drill uses generated resources only. It never restores or removes
   production `bfx_pgdata`, never joins a production network, and makes no Bitfinex request.
 
-Stop on every nonzero exit, malformed result, stale report, baseline mismatch,
+Stop on every nonzero exit, malformed result, stale report, ledger mismatch,
 or cleanup failure. Timers remain disabled until every real-R2 and isolated
 restore gate below has passed.
 
@@ -175,7 +175,7 @@ section, wrong/extra/repeated sections and ambiguous parser syntax are rejected.
 
 The deployed cluster's existing SQL admin role is `bfx`, distinct from OS user
 `postgres` (UID/GID 70). The stanza sets `pg1-user=bfx`; status, DR health,
-recovery, bootstrap, schema queries and baseline capture use SQL role `bfx`.
+recovery, bootstrap and the ledger reads (restored copy and production) use SQL role `bfx`.
 Container execs retain `--user postgres`. Verify that the existing role/database
 match this contract before a drill; DR Compose never initializes `POSTGRES_*`.
 
@@ -337,212 +337,38 @@ unmeasured. If atomic persistence fails (including ENOSPC), remove the old
 artifact or truncate it if unlink is denied. `bfx-backup-check` treats that
 missing/empty artifact as a problem. Wrappers never print old output after persistence failure.
 
-### 6. Capture the same-target bounded baseline.json
+### 6. Select the backup and recovery target
 
-This procedure requires the canonical UUID account schema and verified account
-identity. A legacy-schema-compatible backup or pre-identity restore artifact
-cannot satisfy this UUID baseline. If recovering historical data that needs
-identity migration, complete and verify that migration first, then capture fresh
-evidence for the resulting schema and account scope.
+Pick the backup set to accept (`pgbackrest --stanza=bfx info` in step 4 lists the
+labels) and, if the acceptance is for a point in time, an exact UTC recovery target
+covered by that set's WAL. Omitting `--target-time` does not set a recovery cutoff;
+pgBackRest replays through the available archive stream (`--type=default`, without
+`--target-action`). An explicit target uses `--type=time --target=... --target-action=promote`.
+Do not use `--type=immediate`: that changes the recovery boundary.
 
-While writes remain halted, select the exact backup label and recovery boundary
-for the drill. Capture `baseline.json` for the same database state that restore
-must verify: the database must not advance between the selected target and
-baseline capture. Omitting `--target-time` and using `target_time: null` does
-not set a recovery cutoff; pgBackRest may replay through the available archive
-stream (`--type=default`, without `--target-action`). Explicit time recovery
-uses `--type=time --target=... --target-action=promote`. Do not replace the
-null-target workflow with `--type=immediate`: that changes the recovery boundary.
-That null-target workflow is safe only when all database writers remain
-stopped until `restore-db` has completed recovery. If writers must resume after
-baseline capture, select an explicit PITR target while the database is still
-quiescent, pass explicit `--target-time`, and record the same non-null
-`target_time` value in the baseline. The same-target rule requires the same backup/PITR target
-identity (label plus nullable or non-null time) in the request and baseline,
-and both must represent the same database state. The artifact is an
-absolute-path, non-symlink regular JSON file of at most 64 KiB with exactly the
-following fields and no extras:
+No baseline file is captured and writers need not stop. Production's own append-only
+ledger, bounded by what the restored copy holds, is the baseline: the drill reads the
+boundary from the restored copy, then compares production's rows within it (the same
+verification as the monthly restore test below). A target in the past is therefore
+compared with production's rows up to that point, whatever production wrote since. The
+restored copy must be at the deployed release's schema: a backup taken before its
+migrations (a legacy-schema-compatible or older-head copy) fails the boot check's
+schema-head gate. Production must be reachable; a restore whose production is gone is
+an incident restore, not this drill.
 
-| Field | Bounded contract |
-|---|---|
-| `target_backup_label` | Selected pgBackRest label, matching the drill request byte-for-byte. |
-| `target_time` | JSON null only for the no-cutoff workflow that keeps all writers stopped through restore recovery; otherwise the selected UTC `YYYY-MM-DDTHH:MM:SSZ` PITR time, matching `--target-time` exactly. |
-| `database_name` | Existing restored database; PostgreSQL identifier of at most 63 characters. |
-| `account_id` | Canonical lowercase UUID selected for replay. |
-| `environment` | Exact drill realm: `prod`, `shadow`, or `ci`. |
-| `projector_version` | Exact bounded projector identifier used by the verifier. |
-| `migration_heads` | One to 32 unique migration identifiers, each at most 128 characters. |
-| `event_count` | Strict non-negative JSON integer; booleans and floats are invalid. |
-| `event_head` | Strict non-negative JSON integer, or null only when `event_count` is zero. |
-| `event_hash` | Lowercase 64-hex SHA-256 of the selected account/environment event chain. |
-
-The baseline is operator-supplied. The two bounded steps below use existing
-`psql`, canonical event/replay functions, and the baseline loader; this is
-not an automatic production baseline generator or a runner-side capture.
-Do not hand-edit derived count/head/hash/migration fields. Missing or mismatched baseline
-fails the drill. A baseline for a different label, target time, account,
-environment, projector, or database state cannot be reused.
-
-Before selecting a fresh backup, quiesce **all database writers**, including
-bot, webapi, jobs and migrations, through the separately approved maintenance
-procedure. A trading halt alone does not stop event or schema writes. Maintain
-that quiescence from before the selected backup starts until capture finishes.
-For a null target, extend it until `restore-db` has completed recovery; do not
-resume a writer after baseline capture while a no-cutoff restore is still able
-to consume newer archived WAL. If writers must resume after baseline capture,
-use the explicit-PITR workflow above. Retain the backup `info` label/start/stop,
-selected recovery boundary, and maintenance interval in the operator evidence
-bundle. For PITR, the selected UTC target must fall after that backup's
-completion, within the same unchanged interval, with archived WAL coverage
-confirmed. Do not approximate PITR by filtering `occurred_at_ms`:
-event time is not commit time. If the target predates quiescence or any writer
-advanced state, stop and select a fresh backup, or use independently approved
-read-only tooling against an isolated copy restored to that exact target.
-Never derive the expected baseline from the drill being accepted.
-If step 5's backups predate this quiescent interval, repeat its full/diff
-backups and preflight within the interval and select the new label.
-
-First, capture only the selected account UUID and exact environment from the
-existing database in one read-only snapshot. `CAPTURE_CONTAINER` identifies
-the approved source cluster; `DATABASE_NAME` is its existing database, not a
-new database. Enter the non-secret scope/target fields from the approved drill
-request. Use `prod` only for that exact production account; never aggregate
-legacy `account_id` strings, other accounts, or other environments.
-
-```bash
-umask 077
-BASELINE_WORK_DIR=$(mktemp -d)
-read -r -p 'Approved source container: ' CAPTURE_CONTAINER
-read -r -p 'Existing database: ' DATABASE_NAME
-read -r -p 'Canonical account UUID: ' ACCOUNT_ID
-read -r -p 'Exact environment (prod/shadow/ci): ' DR_ENVIRONMENT
-read -r -p 'Selected backup label: ' BACKUP_LABEL
-read -r -p 'UTC PITR target (empty only while writers stay stopped through restore recovery): ' TARGET_TIME
-read -r -p 'Projector version: ' PROJECTOR_VERSION
-docker exec --user postgres --interactive "$CAPTURE_CONTAINER" \
-  psql -X -qAt --no-password --host /var/run/postgresql --username bfx \
-  --dbname "$DATABASE_NAME" --set ON_ERROR_STOP=1 \
-  --set account_id="$ACCOUNT_ID" --set environment="$DR_ENVIRONMENT" \
-  > "$BASELINE_WORK_DIR/capture.json" <<'SQL'
-BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
-SET LOCAL statement_timeout = '60s';
-WITH scoped AS (
-  SELECT * FROM public.event_log
-  WHERE exchange_account_id = :'account_id'::uuid
-    AND deployment_environment = :'environment'
-)
-SELECT json_build_object(
-  'database_name', current_database(),
-  'account_id', :'account_id', 'environment', :'environment',
-  'migration_heads', (SELECT json_agg(version_num ORDER BY version_num) FROM public.alembic_version),
-  'event_count', (SELECT count(*) FROM scoped),
-  'event_head', (SELECT max(event_seq) FROM scoped),
-  'events', COALESCE((SELECT json_agg(scoped ORDER BY event_seq) FROM scoped), '[]'::json)
-);
-ROLLBACK;
-SQL
-```
-
-Keep the raw capture private, outside git/logs/evidence reports; it contains
-account event payloads. An empty/partial capture or query failure is a hard
-stop. The following offline assembly accepts at most 64 MiB of capture; larger
-streams need a separately reviewed bounded export procedure. It imports the
-existing canonical hash (including historical UUID derivation) and replay
-identity validation instead of hashing SQL/JSON text or using a different
-serialization. It opens no database connection and makes no venue request.
-
-Run from `backend/` using its existing Python 3.13 environment:
-
-The current verifier registry supports `execution-state-v1`; use that exact
-value for `PROJECTOR_VERSION` and the drill request. A label such as
-`projector-v3` passes identifier syntax but is not a supported implementation.
-
-```bash
-uv run python - "$BASELINE_WORK_DIR" "$DATABASE_NAME" "$ACCOUNT_ID" \
-  "$DR_ENVIRONMENT" "$BACKUP_LABEL" "$TARGET_TIME" "$PROJECTOR_VERSION" <<'PY'
-import json
-import sys
-from dataclasses import asdict
-from pathlib import Path
-from uuid import UUID
-
-sys.path.insert(0, str(Path.cwd().parent / "deploy/vm/pgbackrest"))
-from evidence import RestoreBaseline, load_restore_baseline
-from scripts.verify_projection_replay import replay_event_log
-from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_hash
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-
-directory, database, account, environment, label, target, projector = sys.argv[1:]
-source = Path(directory) / "capture.json"
-assert source.is_file() and not source.is_symlink()
-assert source.stat().st_size <= 64 * 1024 * 1024
-capture = json.loads(source.read_text())
-assert capture["database_name"] == database
-assert capture["account_id"] == account == str(UUID(account))
-assert capture["environment"] == environment
-assert type(capture["event_count"]) is int and capture["event_count"] >= 0
-assert capture["event_head"] is None or type(capture["event_head"]) is int
-rows = []
-for values in capture["events"]:
-    values["exchange_account_id"] = UUID(values["exchange_account_id"])
-    if values["event_id"] is not None:
-        values["event_id"] = UUID(values["event_id"])
-    rows.append(EventLogRow(**values))
-report = replay_event_log(rows, account_id=UUID(account), environment=environment,
-                          projector_version=projector)
-assert capture["event_count"] == len(rows)
-assert capture["event_head"] == report.event_head
-baseline = RestoreBaseline(
-    target_backup_label=label, target_time=target or None,
-    database_name=database, account_id=account, environment=environment,
-    projector_version=projector, migration_heads=tuple(capture["migration_heads"]),
-    event_count=capture["event_count"], event_head=capture["event_head"],
-    event_hash=canonical_event_hash(rows),
-)
-payload = json.dumps(asdict(baseline), sort_keys=True).encode()
-assert len(payload) <= 64 * 1024
-output = Path(directory) / "baseline.json"
-assert output.is_absolute()
-with output.open("xb") as handle:
-    handle.write(payload)
-output.chmod(0o600)
-load_restore_baseline(
-    output, target_backup_label=label, target_time=target or None,
-    account_id=account, environment=environment, projector_version=projector,
-)
-PY
-```
-
-Require exit zero, record the capture/baseline digests and exact backup/PITR
-association in the private operator bundle, and supply the generated absolute
-`$BASELINE_WORK_DIR/baseline.json` path to the drill. Loader success checks
-shape and request identity; it cannot prove the operator's quiescence/target
-association. That independent evidence is mandatory. Return to the repository
-root for step 7. If capture makes backup evidence older than 900 seconds,
-refresh the archive/status preflight before final evidence acceptance.
-
-### 7. Run the staged isolated restore with --baseline
+### 7. Run the isolated acceptance drill
 
 Invoke the drill with the approved command shape:
 
 ```bash
 deploy/vm/pgbackrest/restore-drill.sh \
-  --account-id <canonical-uuid> \
-  --environment prod \
-  --projector-version execution-state-v1 \
-  --backup-label <label> \
-  --baseline /absolute/path/baseline.json
+  --backup-label <label>
 ```
 
-If a PITR time is selected, add `--target-time` and require it to match the same
-non-null `target_time` in the baseline. This explicit cutoff is required when
-writers resume after baseline capture. If `--target-time` is omitted, the
-baseline must contain `target_time: null`; this is not a selected-backup cutoff,
-and all database writers must stay stopped until `restore-db` has completed
-recovery. In both workflows, the selected label/time, baseline, and recovered
-cluster must represent the same database state. The runner rejects a relative,
-missing, oversized, malformed, or mismatched artifact before creating DR
-resources.
+Add `--target-time <YYYY-MM-DDTHH:MM:SSZ>` for a PITR target, and `--output <absolute path>`
+to write the receipt elsewhere than `$HOME/bfx/dr-evidence/restore.json`. There are no
+scope arguments: every scope of the restored copy is verified. The runner rejects a
+malformed label, target or output before creating DR resources.
 
 `restore-data` is the Compose logical volume key; `DR_VOLUME_NAME` supplies a
 generated external Docker volume. Neither name may be production
@@ -550,10 +376,10 @@ generated external Docker volume. Neither name may be production
 generated egress network. restore-db alone has temporary R2 egress during
 restore/recovery. `pg_isready` only proves connections are accepted. Before
 disconnect, the runner polls `SELECT pg_is_in_recovery();` on the existing
-baseline database as SQL role `bfx` and requires `f` within the same global
+restored database as SQL role `bfx` and requires `f` within the same global
 deadline. True retries; invalid output, command failure or timeout fails closed.
 Only then disconnect egress, prove membership is exactly the generated internal network,
-bootstrap, and start verifier.
+bootstrap, and start the verifier.
 
 After restore-db has completed recovery and egress is disconnected, the runner uses the local PostgreSQL socket as OS user `postgres`
 via `docker exec --user postgres --interactive`, validates the
@@ -576,10 +402,11 @@ shares the independent 30-second deadline; failures invalidate success.
 The verifier remains on the generated internal network only. The isolated
 verifier has no R2 or application secrets, no production env file, no application port,
 and no Bitfinex credential. It receives only the ephemeral least-privilege
-database URL and bounded replay identity, then checks migration heads, event
-count/head/hash, and all fixed empty-projector counts/hashes against the
-same-target baseline. Any command, network, baseline, replay, image, deadline,
-or cleanup failure exits nonzero and writes `measured: false`.
+database URL (`SELECT` on the ledger tables and the boot check's extras,
+`default_transaction_read_only`) and runs the image's read-only boot check; the ledger
+rows are compared by the runner's bounded `COPY` reads of the restored copy and of
+production (see the monthly restore test below). Any command, network, ledger, boot,
+image, deadline, or cleanup failure exits nonzero and writes `measured: false`.
 
 The runner also writes a non-authoritative stage diagnostic beside the receipt:
 `restore-timing.json` for the default `restore.json` output. It contains only
@@ -609,8 +436,10 @@ errors, database URLs, credentials, or arbitrary labels to it.
 Review `$HOME/bfx/dr-evidence/backup.json` and `restore.json` only after the
 drill has finished cleanup. Both reports must be bounded, `measured: true`, and
 no older than 900 seconds by strict integer `observed_at_ms`. Require
-`rpo_seconds <= 300`, operational `rto_seconds <= 3600`, the selected target
-label/time, the baseline event identity, immutable local image ID and pinned
+`rpo_seconds <= 300`, operational `rto_seconds <= 3600`, `kind: restore_ledger` with
+`restore_test: false`, the selected `target_backup_label`/`target_time`, the
+`ledger` comparison (rows compared, per-table digests, no mismatch) and the `boot`
+result for every scope, immutable local image ID and pinned
 labels, `network_internal: true`, `egress_disconnected: true`, and verifier
 exit status zero.
 
@@ -643,68 +472,6 @@ Declare this foundation DR-ready only after the enabled timers are visible and
 the fresh backup/restore evidence bundle satisfies every gate above. Offline
 tests, image build, systemd syntax, or timer scheduling alone do not establish
 R2 reachability, restore success, production rollout acceptance, or RPO/RTO.
-
-## Projection cutover archive verification
-
-Use the [projection audit cutover runbook](projection-audit-cutover.md) for the
-ordered diagnose → prepare/archive → archive-only restore → fresh snapshot →
-atomic apply → repeat → independent new baseline → complete restore procedure.
-Production schema, role grants, archive and apply each remain behind explicit
-operator approval. Actual runtime role denial and controlled writers must be
-proven; a superuser runtime role is an unresolved gate, not a test exemption.
-
-Cutover diagnostic/classification inputs are private **v2 directories** with
-`manifest`, `COMPLETE`, and `chunks/`, modes `0700`/`0600`. Limits are 1 MiB per
-record, 4 MiB per part, 2 GiB per artifact and 4096 parts; manifest limit is
-16 MiB. Keep these outside git and shared logs. Their manifest digests are
-semantic pins, not file SHA-256. The small `projection-cutover-prepared-v1`
-codec envelope still carries the archive manifest and the two v2 digest pins.
-This evidence format is distinct from the DB `projection_audit` archive.
-
-Step 6's default schema-v1 baseline example is for scopes without completed
-archives. A scope with archives requires `RestoreBaseline(schema_version=2, …)`
-with `verifier_image_digest` and an `archives` tuple containing the **entire**
-completed inventory. Each reference has exactly `run_id`, `manifest_digest`,
-`prepared_path` (absolute private file), and `prepared_digest` (file SHA-256).
-Retain independently pinned original codec bytes; do not derive the expected
-inventory from the restored DB being accepted. The runner consumes these files
-with the existing `archive_evidence.transport` helper, bounded to 32 runs and
-1 MiB total transport; archive verifier reports are bounded to 64 KiB.
-
-For a prepared-only cutover, add `--archive-only --target-run-id "$RUN_ID"` to
-step 7's exact `restore-drill.sh` command. The selected target must appear in
-the baseline references. Archive-only uses schema-v2 transport with that
-`target_run_id`, verifies archive bytes/inventory and each original event prefix,
-and requires the target's event count/head/hash/schema to equal the restored
-state. Older archives may have earlier heads. It deliberately skips old active
-projection parity and emits `kind=archive_restore`; this is **not** complete DR
-acceptance and cannot replace a `kind=restore` result or authorize trading.
-`scripts.verify_projection_archive` also supports `--archive-only` with
-`--account-id`, `--environment`, `--input`, and `--input-digest`; it is the
-SELECT-only verifier, not the resource runner or receipt generator.
-
-After apply, capture a fresh source baseline tied to a new backup/PITR target,
-including both old and applied archive expectations. Do not copy the apply
-receipt's derived event identity into the baseline. Run step 7 without
-`--archive-only` or `--target-run-id`: complete restore uses schema-v1 archive
-transport (no target) with the schema-v2 baseline, verifies all archives and
-prefixes, then checks the independent new baseline and active/replay parity.
-The ordinary schema-v1 baseline must not silently hide a completed archive.
-
-Keep exact generated-resource and local artifact inventories. The runner's
-independent 30-second cleanup deadline and absence checks remain mandatory;
-local v2 directories need separately bounded cleanup of that run's owned paths.
-There is no cutover cleanup command. Preserve independent manifests/receipts
-until handoff acceptance; never prune a shared temp root, backup repository,
-production volume or immutable DB archive to make a rehearsal appear clean.
-
-Apply performs caller-owned atomic DB work after bounded file verification;
-before-commit rollback does not undo a committed prepare archive. After commit,
-lost output requires a pinned identical retry and DB receipt verification, not
-an old-DB restore. Stale historical projection heads can still make strict
-serialized append reject reused CID cycles; prove the exact private source in
-rehearsal and keep that gate open until resolved. No automatic DB rollback is
-safe after a venue write; retain halt and follow the forward-repair policy.
 
 ## Capital comparison on an isolated restore (S0-R-C)
 
@@ -771,10 +538,10 @@ production path.
 
 ## Monthly and change-triggered ledger restore test
 
-The baseline drill above stays the provisioning and incident acceptance path. The recurring
-check is the baseline-free restore test, which needs no writer pause, no operator baseline
-and no scope configuration. Its caller names no verification mode; the drill of the
-release under test picks it (today: ledger mode):
+The acceptance drill above (steps 6-8) runs this same verification at an operator-chosen
+backup and target. The recurring check is the restore test, which needs no writer pause,
+no operator baseline and no scope configuration. Its caller names no verification mode;
+the drill of the release under test picks it (today: ledger mode):
 
 ```bash
 deploy/vm/pgbackrest/restore-drill.sh --restore-test
@@ -814,7 +581,8 @@ resources, then verifies the restored copy two ways:
 
 The receipt is `$HOME/bfx/dr-evidence/restore-ledger.json` (or `--output`;
 `kind: restore_ledger`, `restore_test: true`, with the per-scope bounds, per-table
-digests and the boot result); it never replaces `restore.json`. The wrapper accepts a
+digests and the boot result); it never replaces the acceptance drill's `restore.json`
+(`restore_test: false`). The wrapper accepts a
 fresh `measured: true` receipt with `restore_test: true`, whatever the mode. Production is only read, after the restored copy is isolated.
 
 `bfx-restore-test@<release>.service` runs this. The monthly timer

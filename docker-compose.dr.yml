@@ -21,19 +21,6 @@ services:
       retries: 60
       start_period: 10s
 
-  verifier:
-    image: bfx-bot:local
-    working_dir: /app
-    entrypoint: ["python", "scripts/verify_projection_replay.py"]
-    command: ["replay"]
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      BFX_DEPLOYMENT_ENV: ${BFX_DEPLOYMENT_ENV}
-    depends_on:
-      restore-db:
-        condition: service_healthy
-    networks: [dr]
-
 volumes:
   restore-data:
     external: true

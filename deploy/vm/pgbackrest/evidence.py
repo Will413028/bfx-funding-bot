@@ -9,25 +9,14 @@ import importlib.util
 import json
 import os
 import re
-import stat
 import sys
 import tempfile
 import time
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass, fields
-from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Literal
-from uuid import UUID
-
-_archive_spec = importlib.util.spec_from_file_location(
-    "_bfx_archive_evidence", Path(__file__).with_name("archive_evidence.py")
-)
-assert _archive_spec is not None and _archive_spec.loader is not None
-_archive = importlib.util.module_from_spec(_archive_spec)
-_archive_spec.loader.exec_module(_archive)
 
 
 def _load_ledger_digest() -> ModuleType:
@@ -59,9 +48,6 @@ BACKUP_ERROR_CODES = frozenset(
 RESTORE_ERROR_CODES = frozenset(
     {
         "restore_output_invalid",
-        "schema_output_invalid",
-        "event_hash_invalid",
-        "projection_replay_mismatch",
         "network_not_internal",
         "rto_invalid",
         "restore_command_failed",
@@ -69,35 +55,21 @@ RESTORE_ERROR_CODES = frozenset(
     }
 )
 
-# Ledger mode (restore_drill.py --restore-test): no operator baseline. The restored copy's
-# append-only ledger rows must equal production's within the restored copy's own boundary,
-# and the image's boot guards must accept it (ledger_digest.py, ledger_boot_check.py).
+# Every restore drill (restore_drill.py: the --restore-test and the operator's acceptance
+# drill) verifies the ledger: no operator baseline. The restored copy's append-only ledger
+# rows must equal production's within the restored copy's own boundary, and the image's
+# boot guards must accept it (ledger_digest.py, ledger_boot_check.py).
 LEDGER_ERROR_CODES = RESTORE_ERROR_CODES | _ledger.ERROR_CODES | frozenset(
     {"production_read_failed", "backup_label_unavailable"}
 )
-# The receipt kinds of ledger mode: `restore_ledger`, and `restore_prefix` only while the
-# installed restore-test wrapper of the previous release still calls `--prefix`.
+# The restore receipt kinds: `restore_ledger`, and `restore_prefix` only while the installed
+# restore-test wrapper of the previous release still calls `--prefix`.
 LEDGER_KINDS = frozenset({"restore_ledger", "restore_prefix"})
 
 _BACKUP_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _NETWORK_NAME = re.compile(r"bfx-dr-[a-z0-9-]+")
-_IDENTIFIER = re.compile(r"[A-Za-z0-9._-]{1,128}")
-_SHA256 = re.compile(r"(?:sha256:)?[0-9a-f]{64}")
 _WAL_NAME = re.compile(r"[A-Za-z0-9._-]{1,128}")
-_PROJECTION_NAMES = (
-    "offer_claims",
-    "position_state",
-    "venue_offer_state",
-    "venue_credit_state",
-    "projection_heads",
-    "reconcile_observation",
-    "submission_attempts",
-    "execution_uncertainties",
-)
-_REPORT_TABLE_NAMES = ("event_log", *_PROJECTION_NAMES)
-_DATABASE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
 _TARGET_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
-_BASELINE_MAX_BYTES = 64 * 1024
 _MAX_EVIDENCE_AGE_MS = 900_000
 _IMAGE_LABELS = {
     "org.bfx.postgresql.base-digest": "sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
@@ -114,75 +86,8 @@ def _raise(code: str) -> None:
     raise EvidenceError(code)
 
 
-@dataclass(frozen=True, slots=True)
-class RestoreBaseline:
-    target_backup_label: str
-    target_time: str | None
-    database_name: str
-    account_id: str
-    environment: str
-    projector_version: str
-    migration_heads: tuple[str, ...]
-    event_count: int
-    event_head: int | None
-    event_hash: str
-    schema_version: int = 1
-    archives: tuple[dict[str, str], ...] | None = None
-    verifier_image_digest: str | None = None
-
-    def __post_init__(self) -> None:
-        code = "restore_output_invalid"
-        if type(self.schema_version) is not int or self.schema_version not in {1, 2}:
-            _raise(code)
-        if self.schema_version == 1:
-            if self.archives is not None or self.verifier_image_digest is not None:
-                _raise(code)
-        else:
-            try:
-                _archive.validate_references(self.archives)
-                if not _archive.image_digest(self.verifier_image_digest):
-                    _raise(code)
-            except (ValueError, TypeError):
-                _raise(code)
-        for value, pattern in (
-            (self.target_backup_label, _BACKUP_LABEL),
-            (self.database_name, _DATABASE_NAME),
-            (self.environment, _IDENTIFIER),
-            (self.projector_version, _IDENTIFIER),
-        ):
-            if not isinstance(value, str) or pattern.fullmatch(value) is None:
-                _raise(code)
-        if self.environment not in {"prod", "shadow", "ci"}:
-            _raise(code)
-        if self.target_time is not None:
-            if not isinstance(self.target_time, str) or _TARGET_TIME.fullmatch(self.target_time) is None:
-                _raise(code)
-            try:
-                datetime.strptime(self.target_time, "%Y-%m-%dT%H:%M:%SZ")
-            except ValueError:
-                _raise(code)
-        try:
-            if not isinstance(self.account_id, str) or str(UUID(self.account_id)) != self.account_id:
-                _raise(code)
-        except ValueError:
-            _raise(code)
-        if (
-            not isinstance(self.migration_heads, tuple)
-            or not 1 <= len(self.migration_heads) <= 32
-            or any(not isinstance(head, str) or _IDENTIFIER.fullmatch(head) is None
-                   for head in self.migration_heads)
-            or len(set(self.migration_heads)) != len(self.migration_heads)
-        ):
-            _raise(code)
-        if type(self.event_count) is not int or self.event_count < 0:
-            _raise(code)
-        if self.event_head is None:
-            if self.event_count != 0:
-                _raise(code)
-        elif type(self.event_head) is not int or self.event_head < 0 or self.event_count == 0:
-            _raise(code)
-        if not _is_sha256(self.event_hash):
-            _raise("event_hash_invalid")
+def is_image_digest(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -192,60 +97,6 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             _raise("restore_output_invalid")
         result[key] = value
     return result
-
-
-def load_restore_baseline(
-    path: Path, *, target_backup_label: str, target_time: str | None,
-    account_id: str, environment: str, projector_version: str,
-) -> RestoreBaseline:
-    """Read only a bounded regular JSON file and require exact request identity."""
-    code = "restore_output_invalid"
-    if not path.is_absolute():
-        _raise(code)
-    try:
-        # O_NONBLOCK prevents FIFOs from hanging; fstat checks the opened artifact.
-        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
-            metadata = os.fstat(handle.fileno())
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _BASELINE_MAX_BYTES:
-                _raise(code)
-            raw = handle.read(_BASELINE_MAX_BYTES + 1)
-        if len(raw) > _BASELINE_MAX_BYTES:
-            _raise(code)
-        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_json_object)
-    except (OSError, UnicodeError, ValueError, RecursionError):
-        _raise(code)
-    all_fields = {field.name for field in fields(RestoreBaseline)}
-    legacy_fields = all_fields - {"schema_version", "archives", "verifier_image_digest"}
-    if not isinstance(payload, dict):
-        _raise(code)
-    if set(payload) == legacy_fields:
-        pass
-    elif (set(payload) == all_fields and type(payload["schema_version"]) is int
-          and payload["schema_version"] == 1 and payload["archives"] is None
-          and payload["verifier_image_digest"] is None):
-        # Existing runbook serializes the legacy constructor with asdict().
-        # This is explicit legacy input, never an inferred v2 empty inventory.
-        pass
-    elif set(payload) == all_fields and type(payload["schema_version"]) is int and payload["schema_version"] == 2:
-        if not isinstance(payload["archives"], list):
-            _raise(code)
-        if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
-            _raise(code)
-        payload["archives"] = tuple(payload["archives"])
-    else:
-        _raise(code)
-    if not isinstance(payload["migration_heads"], list):
-        _raise(code)
-    payload["migration_heads"] = tuple(payload["migration_heads"])
-    baseline = RestoreBaseline(**payload)
-    for name, expected in (
-        ("target_backup_label", target_backup_label), ("target_time", target_time),
-        ("account_id", account_id), ("environment", environment),
-        ("projector_version", projector_version),
-    ):
-        if getattr(baseline, name) != expected:
-            _raise(code)
-    return baseline
 
 
 def _nonnegative_int(value: object, *, code: str) -> int:
@@ -405,146 +256,6 @@ def render_backup_evidence(
     }
 
 
-def _parse_schema(schema_tsv: str) -> tuple[int, list[str], int]:
-    row = schema_tsv.rstrip("\r\n")
-    if "\n" in row or "\r" in row:
-        _raise("schema_output_invalid")
-    fields = row.split("\t")
-    if len(fields) != 3:
-        _raise("schema_output_invalid")
-    server_version_num = _nonnegative_int(fields[0], code="schema_output_invalid")
-    event_count = _nonnegative_int(fields[2], code="schema_output_invalid")
-    migration_heads = fields[1].split(",")
-    if (
-        server_version_num == 0
-        or not migration_heads
-        or len(migration_heads) > 32
-        or any(_IDENTIFIER.fullmatch(head) is None for head in migration_heads)
-    ):
-        _raise("schema_output_invalid")
-    return server_version_num, migration_heads, event_count
-
-
-def _is_sha256(value: object) -> bool:
-    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
-
-
-def _parse_replay(replay_json: str, *, event_count: int) -> dict[str, object]:
-    if not isinstance(replay_json, str) or len(replay_json.encode()) > 65536:
-        _raise("restore_output_invalid")
-    try:
-        payload = json.loads(replay_json, object_pairs_hook=_unique_json_object)
-    except (ValueError, TypeError, RecursionError):
-        _raise("restore_output_invalid")
-    if not isinstance(payload, dict):
-        _raise("restore_output_invalid")
-
-    account_id = payload.get("account_id")
-    environment = payload.get("environment")
-    projector_version = payload.get("projector_version")
-    try:
-        canonical_account_id = str(UUID(account_id)) if isinstance(account_id, str) else ""
-    except ValueError:
-        canonical_account_id = ""
-    if (
-        account_id != canonical_account_id
-        or not isinstance(environment, str)
-        or _IDENTIFIER.fullmatch(environment) is None
-        or not isinstance(projector_version, str)
-        or _IDENTIFIER.fullmatch(projector_version) is None
-    ):
-        _raise("restore_output_invalid")
-
-    event_hash = payload.get("event_hash")
-    if not _is_sha256(event_hash):
-        _raise("event_hash_invalid")
-    event_head_raw = payload.get("event_head")
-    if event_head_raw is None and event_count == 0:
-        event_head: int | None = None
-    else:
-        if type(event_head_raw) is not int:
-            _raise("restore_output_invalid")
-        event_head = _nonnegative_int(event_head_raw, code="restore_output_invalid")
-
-    row_counts_raw = payload.get("row_counts")
-    hashes_raw = payload.get("content_hashes")
-    diagnostic_raw = payload.get("diagnostic_diff")
-    if not all(isinstance(value, dict) for value in (row_counts_raw, hashes_raw, diagnostic_raw)):
-        _raise("restore_output_invalid")
-    row_counts = row_counts_raw
-    hashes = hashes_raw
-    diagnostics = diagnostic_raw
-    bounded_counts: dict[str, int] = {}
-    bounded_hashes: dict[str, str] = {}
-    for name in _REPORT_TABLE_NAMES:
-        count = row_counts.get(name)
-        digest = hashes.get(name)
-        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-            _raise("restore_output_invalid")
-        if not _is_sha256(digest):
-            _raise("event_hash_invalid")
-        bounded_counts[name] = count
-        bounded_hashes[name] = digest
-    if bounded_counts["event_log"] != event_count or bounded_hashes["event_log"] != event_hash:
-        _raise("event_hash_invalid")
-
-    for name in _PROJECTION_NAMES:
-        diagnostic = diagnostics.get(name)
-        if not isinstance(diagnostic, dict) or diagnostic.get("matches") is not True:
-            _raise("projection_replay_mismatch")
-        old_count = diagnostic.get("old_count")
-        replayed_count = diagnostic.get("replayed_count")
-        old_hash = diagnostic.get("old_hash")
-        replayed_hash = diagnostic.get("replayed_hash")
-        if (
-            isinstance(old_count, bool)
-            or not isinstance(old_count, int)
-            or type(replayed_count) is not int
-            or old_count < 0
-            or old_count != replayed_count
-            or replayed_count != bounded_counts[name]
-            or not _is_sha256(old_hash)
-            or old_hash != replayed_hash
-            or replayed_hash != bounded_hashes[name]
-        ):
-            _raise("projection_replay_mismatch")
-
-    return {
-        "account_id": account_id,
-        "environment": environment,
-        "projector_version": projector_version,
-        "event_head": event_head,
-        "event_hash": event_hash,
-        "row_counts": bounded_counts,
-        "projection_hashes": {
-            name: bounded_hashes[name] for name in _PROJECTION_NAMES
-        },
-    }
-
-
-def validate_restore_state(
-    *, schema_tsv: str, replay_json: str, baseline: RestoreBaseline,
-) -> dict[str, object]:
-    """Validate verifier/schema against the baseline before dating a measurement."""
-    baseline.__post_init__()
-    server_version_num, migration_heads, event_count = _parse_schema(schema_tsv)
-    replay = _parse_replay(replay_json, event_count=event_count)
-    if (
-        sorted(migration_heads) != sorted(baseline.migration_heads)
-        or event_count != baseline.event_count
-        or any(replay[name] != getattr(baseline, name) for name in (
-            "account_id", "environment", "projector_version", "event_head", "event_hash"
-        ))
-    ):
-        _raise("restore_output_invalid")
-    return {
-        "server_version_num": server_version_num,
-        "migration_heads": migration_heads,
-        "event_count": event_count,
-        **replay,
-    }
-
-
 def validate_image_labels(image_labels: Mapping[str, str]) -> dict[str, str]:
     """Keep only the three exact pinned labels; arbitrary metadata is never evidence."""
     if not isinstance(image_labels, Mapping) or any(
@@ -562,87 +273,6 @@ def _parse_image_labels(raw: str) -> dict[str, str]:
     return validate_image_labels(labels)
 
 
-def render_restore_evidence(
-    *,
-    schema_tsv: str,
-    replay_json: str,
-    baseline: RestoreBaseline,
-    elapsed_seconds: int,
-    observed_at_ms: int,
-    config_path: Path,
-    image_digest: str,
-    image_labels: Mapping[str, str],
-    network_name: str,
-    network_internal: bool,
-    egress_disconnected: bool,
-    now_ms: int | None = None,
-    archive_json: str | None = None,
-    archive_only: bool = False,
-    verifier_image_digest: str | None = None,
-    target_run_id: str | None = None,
-) -> dict[str, object]:
-    """Return bounded measured restore evidence or raise EvidenceError."""
-    if (
-        isinstance(elapsed_seconds, bool)
-        or not isinstance(elapsed_seconds, int)
-        or elapsed_seconds < 0
-    ):
-        _raise("rto_invalid")
-    if (
-        network_internal is not True
-        or len(network_name) > 128
-        or _NETWORK_NAME.fullmatch(network_name) is None
-    ):
-        _raise("network_not_internal")
-    if type(observed_at_ms) is not int or observed_at_ms < 0 or egress_disconnected is not True:
-        _raise("restore_output_invalid")
-    now = time.time_ns() // 1_000_000 if now_ms is None else now_ms
-    if type(now) is not int or not 0 <= now - observed_at_ms <= _MAX_EVIDENCE_AGE_MS:
-        _raise("restore_output_invalid")
-    if not isinstance(image_digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None:
-        _raise("restore_output_invalid")
-    labels = validate_image_labels(image_labels)
-    try:
-        archives = _archive.validate_report(archive_json, baseline=baseline, archive_only=archive_only,
-                                            target_run_id=target_run_id)
-    except (ValueError, TypeError, RecursionError):
-        _raise("restore_output_invalid")
-    if not _archive.image_digest(verifier_image_digest) or (
-        baseline.verifier_image_digest is not None and baseline.verifier_image_digest != verifier_image_digest
-    ):
-        _raise("restore_output_invalid")
-    if archive_only:
-        server_version_num, migration_heads, event_count = _parse_schema(schema_tsv)
-        if migration_heads != sorted(baseline.migration_heads) or event_count != baseline.event_count:
-            _raise("restore_output_invalid")
-        state = {"server_version_num": server_version_num, "migration_heads": migration_heads,
-                 "event_count": event_count, "event_head": baseline.event_head,
-                 "event_hash": baseline.event_hash, "account_id": baseline.account_id,
-                 "environment": baseline.environment, "projector_version": baseline.projector_version}
-    else:
-        state = validate_restore_state(schema_tsv=schema_tsv, replay_json=replay_json, baseline=baseline)
-    return {
-        "schema_version": 2 if archive_only else 1,
-        **({"target_run_id": target_run_id} if archive_only else {}),
-        "measured": True,
-        "rto_seconds": elapsed_seconds,
-        "kind": "archive_restore" if archive_only else "restore",
-        "archive_verification": archives,
-        "verifier_image_digest": verifier_image_digest,
-        "target_backup_label": baseline.target_backup_label,
-        "target_time": baseline.target_time,
-        "observed_at_ms": observed_at_ms,
-        "egress_disconnected": True,
-        **state,
-        "network_name": network_name,
-        "network_internal": True,
-        "verifier_exit_status": 0,
-        "config_digest": _config_digest(config_path, code="restore_output_invalid"),
-        "image_digest": image_digest,
-        "image_labels": labels,
-    }
-
-
 def render_ledger_restore_evidence(
     *,
     kind: str,
@@ -654,6 +284,8 @@ def render_ledger_restore_evidence(
     observed_at_ms: int,
     config_path: Path,
     image_digest: str,
+    target_time: str | None = None,
+    restore_test: bool = True,
     image_labels: Mapping[str, str],
     network_name: str,
     network_internal: bool,
@@ -661,7 +293,11 @@ def render_ledger_restore_evidence(
     verifier_image_digest: str,
     now_ms: int | None = None,
 ) -> dict[str, object]:
-    """Bounded evidence for a baseline-free restore verified against production's ledger."""
+    """Bounded evidence for a restore verified against production's ledger.
+
+    ``restore_test`` is true for the recurring restore test (the newest backup, no target)
+    and false for the operator's acceptance drill at ``target_backup_label``/``target_time``.
+    """
     if kind not in LEDGER_KINDS:
         _raise("restore_output_invalid")
     if isinstance(elapsed_seconds, bool) or not isinstance(elapsed_seconds, int) or elapsed_seconds < 0:
@@ -675,9 +311,14 @@ def render_ledger_restore_evidence(
         _raise("restore_output_invalid")
     if not isinstance(image_digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None:
         _raise("restore_output_invalid")
-    if not _archive.image_digest(verifier_image_digest):
+    if not is_image_digest(verifier_image_digest):
         _raise("restore_output_invalid")
     if not isinstance(target_backup_label, str) or _BACKUP_LABEL.fullmatch(target_backup_label) is None:
+        _raise("restore_output_invalid")
+    if type(restore_test) is not bool or (restore_test and target_time is not None) or (
+        target_time is not None and (not isinstance(target_time, str)
+                                     or _TARGET_TIME.fullmatch(target_time) is None)
+    ):
         _raise("restore_output_invalid")
     if not isinstance(bounds, _ledger.Bounds):
         _raise("restore_output_invalid")
@@ -687,10 +328,10 @@ def render_ledger_restore_evidence(
         "measured": True,
         "kind": kind,
         # The recurring restore test's mode-free contract with its caller (the wrapper).
-        "restore_test": True,
+        "restore_test": restore_test,
         "rto_seconds": elapsed_seconds,
         "target_backup_label": target_backup_label,
-        "target_time": None,
+        "target_time": target_time,
         "observed_at_ms": observed_at_ms,
         "egress_disconnected": True,
         "server_version_num": bounds.server_version_num,
@@ -709,17 +350,15 @@ def render_ledger_restore_evidence(
 
 def render_failure_evidence(
     *,
-    kind: Literal["backup", "restore", "archive_restore", "restore_ledger", "restore_prefix"],
+    kind: Literal["backup", "restore_ledger", "restore_prefix"],
     error_code: str,
     observed_at_ms: int,
     cause: str | None = None,
 ) -> dict[str, object]:
     """Return a measured=false report with only a bounded error code (and, for a failed
     ledger-mode cluster read, a bounded cause such as ``statement_timeout``)."""
-    allowlist = BACKUP_ERROR_CODES if kind == "backup" else (
-        LEDGER_ERROR_CODES if kind in LEDGER_KINDS else RESTORE_ERROR_CODES
-    )
-    if kind not in {"backup", "restore", "archive_restore", *LEDGER_KINDS} or error_code not in allowlist:
+    allowlist = BACKUP_ERROR_CODES if kind == "backup" else LEDGER_ERROR_CODES
+    if kind not in {"backup", *LEDGER_KINDS} or error_code not in allowlist:
         _raise("archiver_output_invalid" if kind == "backup" else "restore_output_invalid")
     if cause is not None and (kind not in LEDGER_KINDS or cause not in _ledger.READ_FAILURE_CAUSES):
         _raise("restore_output_invalid")
@@ -807,33 +446,11 @@ def _parser() -> argparse.ArgumentParser:
     backup_failure.add_argument("--error-code", required=True)
     backup_failure.add_argument("--output", type=Path, required=True)
 
-    restore = subparsers.add_parser("restore")
-    restore.add_argument("--schema-tsv", type=Path, required=True)
-    restore.add_argument("--replay-json", type=Path, required=True)
-    restore.add_argument("--target-backup-label", required=True)
-    restore.add_argument("--target-time")
-    restore.add_argument("--baseline", type=Path, required=True)
-    restore.add_argument("--archive-json", type=Path, required=True)
-    restore.add_argument("--archive-only", action="store_true")
-    restore.add_argument("--target-run-id")
-    restore.add_argument("--verifier-image-digest", required=True)
-    restore.add_argument("--account-id", required=True)
-    restore.add_argument("--environment", required=True)
-    restore.add_argument("--projector-version", required=True)
-    restore.add_argument("--observed-at-ms", type=int, required=True)
-    restore.add_argument("--egress-disconnected", action="store_true")
-    restore.add_argument("--elapsed-seconds", type=int, required=True)
-    restore.add_argument("--config", type=Path, required=True)
-    restore.add_argument("--image-digest", required=True)
-    restore.add_argument("--image-labels", required=True)
-    restore.add_argument("--network-name", required=True)
-    restore.add_argument("--network-internal", action="store_true")
-    restore.add_argument("--output", type=Path, required=True)
     return parser
 
 
 def _paths_are_absolute(args: argparse.Namespace) -> bool:
-    names = ("config", "output", "archiver_tsv", "info_json", "schema_tsv", "replay_json", "baseline", "archive_json")
+    names = ("config", "output", "archiver_tsv", "info_json")
     return all(
         not hasattr(args, name) or getattr(args, name).is_absolute()
         for name in names
@@ -865,45 +482,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        if args.kind == "backup":
-            archiver_tsv = _read_input(args.archiver_tsv, code="archiver_output_invalid")
-            observed_at_ms = _safe_observed_at_ms(archiver_tsv)
-            report = render_backup_evidence(
-                archiver_tsv=archiver_tsv,
-                info_json=_read_input(args.info_json, code="pgbackrest_info_invalid"),
-                config_path=args.config,
-                rpo_limit_seconds=args.rpo_limit_seconds,
-            )
-        else:
-            report = render_restore_evidence(
-                archive_json=_archive.read_private(args.archive_json).decode(),
-                archive_only=args.archive_only, verifier_image_digest=args.verifier_image_digest,
-                target_run_id=args.target_run_id,
-                schema_tsv=_read_input(args.schema_tsv, code="schema_output_invalid"),
-                replay_json=_read_input(args.replay_json, code="restore_output_invalid"),
-                baseline=load_restore_baseline(
-                    args.baseline, target_backup_label=args.target_backup_label,
-                    target_time=args.target_time, account_id=args.account_id,
-                    environment=args.environment, projector_version=args.projector_version,
-                ),
-                observed_at_ms=args.observed_at_ms,
-                egress_disconnected=args.egress_disconnected,
-                elapsed_seconds=args.elapsed_seconds,
-                config_path=args.config,
-                image_digest=args.image_digest,
-                image_labels=_parse_image_labels(args.image_labels),
-                network_name=args.network_name,
-                network_internal=args.network_internal,
-            )
+        archiver_tsv = _read_input(args.archiver_tsv, code="archiver_output_invalid")
+        observed_at_ms = _safe_observed_at_ms(archiver_tsv)
+        report = render_backup_evidence(
+            archiver_tsv=archiver_tsv,
+            info_json=_read_input(args.info_json, code="pgbackrest_info_invalid"),
+            config_path=args.config,
+            rpo_limit_seconds=args.rpo_limit_seconds,
+        )
     except (EvidenceError, ValueError, OSError) as exc:
         code = str(exc)
-        allowlist = BACKUP_ERROR_CODES if args.kind == "backup" else RESTORE_ERROR_CODES
-        if code not in allowlist:
-            code = "archiver_output_invalid" if args.kind == "backup" else "restore_output_invalid"
-        report = render_failure_evidence(
-            kind="archive_restore" if args.kind == "restore" and args.archive_only else args.kind,
-            error_code=code, observed_at_ms=observed_at_ms
-        )
+        if code not in BACKUP_ERROR_CODES:
+            code = "archiver_output_invalid"
+        report = render_failure_evidence(kind="backup", error_code=code,
+                                         observed_at_ms=observed_at_ms)
         with suppress(OSError):
             _atomic_write_json(args.output, report)
         return 2

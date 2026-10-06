@@ -25,62 +25,6 @@ wizard_text = WIZARD_PATH.read_text(encoding="utf-8")
 installer_text = INSTALLER_PATH.read_text(encoding="utf-8")
 
 
-@pytest.mark.integration
-async def test_real_generated_role_verifies_archive_with_select_only_and_missing_select_fails(archive_db):
-    from uuid import uuid4
-
-    import psycopg
-    from sqlalchemy import event, text
-    from sqlalchemy.exc import DBAPIError
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-    from scripts.verify_projection_archive import verify_archives
-    from tests.integration.test_projection_cutover_archive import SCOPE, capture
-    from tests.scripts.test_offsite_dr_restore import RestoreDrill, build_restore_plan
-
-    factory, engine = archive_db
-    expected = await capture(factory)
-    plan = build_restore_plan(account_id=str(SCOPE.account_id), environment="ci",
-        projector_version="execution-state-v1", backup_label="20260904031700-F", target_time=None,
-        run_id="20260904T031700Z-" + uuid4().hex[:16], database_name=engine.url.database,
-        expected_event_hash=expected.stream.digest)
-    # psycopg expects the driver-neutral URL; command runner executes actual generated SQL.
-    url = engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
-    def runner(command, *, input_text=None, **kwargs):
-        with psycopg.connect(url, autocommit=True) as conn:
-            conn.execute(input_text, prepare=False)
-        return subprocess.CompletedProcess(command, 0, "", "")
-    drill = RestoreDrill(command_runner=runner)
-    drill._deadline = drill._clock() + 60
-    drill._bootstrap_role(plan, "synthetic-password-only")
-    verifier = create_async_engine(engine.url.set(drivername="postgresql+asyncpg",
-        username=plan.verify_role, password="synthetic-password-only"))
-    try:
-        async with async_sessionmaker(verifier)() as session:
-            await session.execute(text("SET TRANSACTION READ ONLY"))
-            statements = []
-            def observe(conn, cursor, statement, parameters, context, executemany):
-                statements.append(statement.strip())
-            event.listen(verifier.sync_engine, "before_cursor_execute", observe)
-            report = await verify_archives(session, scope=SCOPE, expected=(expected,))
-            event.remove(verifier.sync_engine, "before_cursor_execute", observe)
-            assert report[0]["verified_counts"]["position_state"] == 1
-            assert statements and all(s.upper().startswith("SELECT") for s in statements)
-            assert await session.scalar(text("SELECT has_table_privilege(current_user, 'projection_audit.rows', 'INSERT,UPDATE,DELETE')")) is False
-            assert await session.scalar(text("SELECT has_schema_privilege(current_user, 'projection_audit', 'CREATE')")) is False
-            assert await session.scalar(text("SELECT has_table_privilege(current_user, 'exchange_account_credentials', 'SELECT')")) is False
-        with engine.begin() as conn:
-            conn.exec_driver_sql(f'REVOKE SELECT ON projection_audit.rows FROM "{plan.verify_role}"')
-        async with async_sessionmaker(verifier)() as session:
-            with pytest.raises(DBAPIError):
-                await verify_archives(session, scope=SCOPE, expected=(expected,))
-    finally:
-        await verifier.dispose()
-        with engine.begin() as conn:
-            conn.exec_driver_sql(f'DROP OWNED BY "{plan.verify_role}"')
-            conn.exec_driver_sql(f'DROP ROLE "{plan.verify_role}"')
-
-
 def test_secret_wizard_captures_only_vm_secret_fragment() -> None:
     """The wizard stores only the approved fragment under the VM boundary."""
     stage_text = wizard_text.split("# STAGES", 1)[1]
