@@ -65,10 +65,9 @@ class AppliedPolicy:
 class SymbolCapital:
     """Accepted A/O/C and cell totals, not venue payloads to classify again.
 
-    O is managed *remaining* amount (capital_repository.py:483-525). C is
-    deduplicated credits/loans; each candidate cell carries the full ambiguous
-    credit, while U is in C only (530-546). Foreign offers are diagnostic and
-    excluded from O, C and cells (488-501). ``cells`` already includes attributed
+    O is managed *remaining* amount. C is deduplicated credits/loans; each
+    candidate cell carries the full ambiguous credit, while U is in C only.
+    Foreign offers are diagnostic and excluded from O, C and cells. ``cells`` already includes attributed
     credits; these totals must never be summed to reconstruct C or T. ``block``
     is an acceptance-time fact that makes this symbol, and only it, unusable.
     """
@@ -101,10 +100,9 @@ class AcceptedCapitalBasis:
     ``observation_id`` and ``query_id`` identify the accepted observation;
     attempts with ``attempt_seq <= attempt_seq_high_water`` were classified by
     this acceptance. Reflected, settled, unresolved and quarantined identities are accounted
-    at acceptance (capital_repository.py:547-599,797-804). A resolution recorded
-    after acceptance cannot clear this basis's unresolved attempts (880-883) or
-    quarantines; only a new acceptance does. ``scope_block`` is an
-    acceptance-time fact that blocks every symbol (849-852).
+    at acceptance. A resolution recorded after acceptance cannot clear this
+    basis's unresolved attempts or quarantines; only a new acceptance does.
+    ``scope_block`` is an acceptance-time fact that blocks every symbol.
     """
 
     account_id: UUID
@@ -131,8 +129,7 @@ class AttemptFact:
     ``attempt_seq`` is the attempt's per-scope monotonic position, compared
     with the basis high water. PENDING is a durable intent without an outcome.
     An UNKNOWN remains immutable; ``resolution`` records separately proven
-    not-accepted or matched/bound acknowledgment evidence
-    (capital_repository.py:302-350). The old authority reads matched/bound as
+    not-accepted or matched/bound acknowledgment evidence. The old (legacy) authority read matched/bound as
     acknowledged; this contract preserves the original transport outcome
     instead of reproducing that projection's overwrite.
     """
@@ -218,19 +215,19 @@ def derive_capital(
     Check order: policy for this symbol, current open uncertainty for this
     symbol, loader integrity, basis presence, query head, scope block, symbol
     block, freshness, symbol presence, basis-unresolved attempts/quarantines
-    for this symbol, then the tail. L and same-cell exposure follow
-    capital_repository.py:793-824. T=A+O+C excludes L. UNKNOWN is symbol-local
-    (281-300), including an acceptance that still names it (880-883).
-    Freshness uses query *start* and inclusive bounds (455-462). Budget
-    evaluation shares the live authority's pure evaluator (822-824).
+    for this symbol, then the tail. L (the tail's committed attempt amounts, not
+    yet in the basis) and same-cell exposure are added on top of the basis; T=A+O+C excludes L.
+    UNKNOWN is symbol-local, including an acceptance that still names it.
+    Freshness uses query *start* and inclusive bounds. Budget evaluation uses
+    the same pure evaluator as the live authority.
     """
     identity = (scope.account_id, scope.environment)
-    # capital_repository.py:766-768 applies policy before entering _snapshot_basis.
+    # Policy first: a blocked or foreign policy decides before any basis is read.
     if isinstance(policy, Blocked):
         return policy
     if (policy.account_id, policy.environment, policy.symbol) != (*identity, scope.symbol):
         return Blocked("inconsistent_policy_pointer", (("scope", "policy"),))
-    # capital_repository.py:833 checks open symbol-local uncertainty first.
+    # Then open uncertainty of this symbol, before the basis.
     for uncertainty in uncertainties:
         if (uncertainty.account_id, uncertainty.environment) != identity:
             return Blocked("uncertainty_scope_conflict", (("id", str(uncertainty.uncertainty_id)),))
@@ -242,10 +239,10 @@ def derive_capital(
         return Blocked("snapshot_unavailable", ())
     if (accepted.account_id, accepted.environment) != identity:
         return Blocked("snapshot_evidence_conflict", (("scope", "accepted"),))
-    # capital_repository.py:838-839.
+    # A newer query than the accepted one is still being observed.
     if read_context.latest_query_id != accepted.query_id:
         return Blocked("snapshot_query_pending", (("query", str(accepted.query_id)),))
-    # capital_repository.py:850-853: acceptance already decided this.
+    # A scope block is an acceptance-time fact: acceptance already decided this.
     if accepted.scope_block is not None:
         return accepted.scope_block
     symbols = {values.symbol: values for values in accepted.symbols}
@@ -259,10 +256,10 @@ def derive_capital(
         and accepted.query_started_at_ms <= accepted.query_finished_at_ms <= read_context.now_ms
     ):
         return Blocked("snapshot_stale", ())
-    # capital_repository.py:878-879.
+    # The basis must carry this symbol.
     if values is None:
         return Blocked("snapshot_symbol_missing", (("symbol", scope.symbol),))
-    # capital_repository.py:880-883: accepted unresolved survives current resolution.
+    # An unresolved attempt the basis accepted survives any later resolution.
     if scope.symbol in (symbol for _, symbol in accepted.unresolved_attempts):
         return Blocked("execution_unknown", (("basis", "unresolved"),))
     for quarantine_id, symbol in accepted.unresolved_quarantines:
