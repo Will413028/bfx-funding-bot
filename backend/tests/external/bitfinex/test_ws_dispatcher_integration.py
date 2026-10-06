@@ -13,11 +13,7 @@ import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_ws import BfxWSEvent, FcnEvent, FocEvent
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.events import (
-    CancelRequested,
-    OrderFilled,
-    ReservationReleased,
-)
+from bfx_funding_bot.modules.execution.events import CancelRequested
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.ledger import (
     CreditCloseHint,
@@ -103,7 +99,7 @@ async def test_run_hands_a_closing_offer_from_the_stream_to_the_sink() -> None:
 
 @pytest.mark.asyncio
 async def test_a_cancel_requested_on_the_bus_rides_on_the_closing_hint() -> None:
-    bus = DomainEventBus(clock=lambda: 2200)
+    bus = DomainEventBus()
     sink = _RecordingSink()
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=_FakeWSClient([_foc("42", "CANCELED", 7)]),
@@ -125,14 +121,16 @@ async def test_a_foreign_offer_closing_only_asks_the_ledger_to_reconcile() -> No
     # Regression: cancelling a foreign offer (no claim) once raised out of the TaskGroup
     # and stopped the bot. Under the ledger it is a hint: a resync request and a
     # notification, never a capital event.
-    bus = DomainEventBus()
     published: list[object] = []
 
-    async def capture(event: object) -> None:
-        published.append(event)
+    class _CapturingBus(DomainEventBus):
+        """Records every publication whatever its type."""
 
-    for event_type in (OrderFilled, ReservationReleased, VenueHintNotification):
-        bus.subscribe(event_type, capture)
+        async def publish(self, event: object) -> None:
+            published.append(event)
+            await super().publish(event)
+
+    bus = _CapturingBus()
     requests: list[str] = []
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=_FakeWSClient([]), event_sink=_EventCapture(), clock=lambda: 5000,

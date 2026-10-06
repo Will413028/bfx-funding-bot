@@ -307,8 +307,8 @@ class BitfinexLiveExecutor:
     """Bitfinex REST funding offer executor.
 
     Pure REST — no WS, no Registry dependency. An acknowledged submit returns
-    typed ``SubmitAcknowledged`` (compatibility status="submitted"); WS foc
-    EXECUTED (handled by BitfinexLiveWSDispatcher) publishes OrderFilled later.
+    typed ``SubmitAcknowledged`` (compatibility status="submitted"); a later fill
+    is observed by the ledger (BitfinexLiveWSDispatcher turns WS foc into a hint).
 
     cancel publishes CancelRequested event (first-class) — replaces former
     _pending_cancels dict pattern.
@@ -562,8 +562,8 @@ class BitfinexLiveExecutor:
           2. POST /v2/auth/w/funding/offer/cancel with HMAC-SHA384 sign
           3. publish CancelAcknowledged (REST ack audit) on success or already-terminal
              — ledger/registry do NOT subscribe to this (audit-only)
-          4. ws_dispatcher publishes ReservationReleased on WS `foc` (state mutation,
-             owned by ws_dispatcher per single-SoT invariant — see spec §D2.5)
+          4. the close itself is observed by the ledger; ws_dispatcher only turns
+             the WS `foc` into a venue hint
 
         Errors:
           - 401/403 → raise ExecutorAuthError → daemon exit 78

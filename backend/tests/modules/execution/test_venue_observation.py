@@ -56,6 +56,7 @@ def credit_row(status: str = "ACTIVE", *, symbol: str = "fUST", opening: int | N
 @pytest.mark.parametrize("status,expected", [
     ("ACTIVE", "active"), ("PARTIALLY FILLED", "partially_filled"),
     ("PARTIALLY FILLED @ 0.03", "partially_filled"),
+    ("PARTIALLY FILLED at 0.02% (50.0)", "partially_filled"),
 ])
 def test_active_offer_status_table(status: str, expected: str) -> None:
     row = parse_offer_observations([offer_row(status)])[0]
@@ -74,6 +75,10 @@ def test_active_offer_status_table(status: str, expected: str) -> None:
     ("EXECUTED", "executed", "active"),
     ("EXECUTED @ 0.03", "executed", "active"),
     ("EXECUTED (was: PARTIALLY FILLED @ 0.03)", "executed", "partially_filled"),
+    # The venue appends narrative: verbatim from the canary filled on 2026-09-23.
+    ("EXECUTED at 0.0148% (150.78)", "executed", "active"),
+    ("EXECUTED at 0.0178% (392.3)", "executed", "active"),
+    ("CANCELED was: PARTIALLY FILLED at 0.02% (50.0)", "canceled", "partially_filled"),
     ("CANCELED", "canceled", "active"),
     ("CANCELED @ 0.03", "canceled", "active"),
     ("CANCELED (was: PARTIALLY FILLED)", "canceled", "partially_filled"),

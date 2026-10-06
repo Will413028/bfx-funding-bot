@@ -1,9 +1,8 @@
 """Account command gate ordering and fail-closed fault contracts.
 
 The gate always runs over a ``CommandBoundary``. The contract tests below use the
-in-memory boundary of ``fake_boundary``. The event-store tests at the end cover the frozen
-legacy store's projections, which the DR replay still runs: they append the events the
-legacy journal wrote with the store's own writer.
+in-memory boundary of ``fake_boundary``, which records the journal transactions the gate
+asked for (the authorised attempt, then its outcome).
 """
 from __future__ import annotations
 
@@ -25,10 +24,6 @@ from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
     ReadyToSubmit,
 )
-from bfx_funding_bot.modules.execution.events import (
-    ReservationIntent,
-    ReservationUnknown,
-)
 from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
     ReservationEmittingMiddleware,
 )
@@ -46,8 +41,12 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from tests.modules.execution.fake_boundary import (  # noqa: F401  (fixture)
+    AttemptAuthorized,
+    OutcomeRecorded,
+    Record,
     Recording,
     boundary_stubs,
+    label,
     with_capital,
 )
 
@@ -104,7 +103,7 @@ class _FakeVenue:
         self.outcome = outcome or SubmitAcknowledged("venue-1")
         self.crash = crash
         self.calls = 0
-        self.txns_seen_at_call: list[tuple[object, ...]] | None = None
+        self.txns_seen_at_call: list[tuple[Record, ...]] | None = None
         self.recording: Recording | None = None
 
     async def submit(
@@ -187,11 +186,11 @@ class _MismatchedCidVenue(_FakeVenue):
 
 def _recording(reader: _FakeUncertaintyReader) -> Recording:
     """A boundary whose committed UNKNOWN opens the reader's scope, as the real one does."""
-    def opened(event: object) -> None:
-        if isinstance(event, ReservationUnknown):
-            reader.open_scopes.add((ACCOUNT_ID, ENVIRONMENT, event.symbol))
+    def opened(record: Record) -> None:
+        if isinstance(record, OutcomeRecorded) and record.outcome.kind == "unknown":
+            reader.open_scopes.add((ACCOUNT_ID, ENVIRONMENT, record.attempt.symbol))
 
-    return Recording(environment=ENVIRONMENT, account_id=ACCOUNT_ID, on_event=opened)
+    return Recording(environment=ENVIRONMENT, account_id=ACCOUNT_ID, on_record=opened)
 
 
 def _gate(
@@ -273,9 +272,7 @@ async def test_the_middleware_submits_through_its_command_gate() -> None:
     assert isinstance(middleware.command_gate, AccountCommandGate)
     await middleware.submit(_ready(), _context())
     assert venue.calls == 1
-    assert [type(event).__name__ for event in recording.events] == [
-        "ReservationIntent", "ReservationClaimed",
-    ]
+    assert recording.labels == ["authorized", "ack"]
 
 
 # ------------------------------------------------------------- uncertainty scope
@@ -336,10 +333,8 @@ async def test_the_intent_is_durable_before_the_venue_sees_data() -> None:
     await _gate(venue, reader, recording).submit(_ready(), _context())
 
     assert venue.txns_seen_at_call is not None
-    assert [type(event) for txn in venue.txns_seen_at_call for event in txn] == [ReservationIntent]
-    assert [type(event).__name__ for event in recording.events] == [
-        "ReservationIntent", "ReservationClaimed",
-    ]
+    assert [label(record) for txn in venue.txns_seen_at_call for record in txn] == ["authorized"]
+    assert recording.labels == ["authorized", "ack"]
 
 
 @pytest.mark.asyncio
@@ -353,8 +348,8 @@ async def test_unknown_is_durable_and_blocks_next_command_without_retry() -> Non
     assert result.outcome_kind.value == "unknown"
     assert venue.calls == 1
     assert venue.txns_seen_at_call is not None
-    assert [type(event) for event in venue.txns_seen_at_call[0]] == [ReservationIntent]
-    assert [type(event) for event in recording.txns[1]] == [ReservationUnknown]
+    assert [label(record) for record in venue.txns_seen_at_call[0]] == ["authorized"]
+    assert [label(record) for record in recording.txns[1]] == ["unknown"]
     assert reader.open_scopes == {(ACCOUNT_ID, ENVIRONMENT, SYMBOL)}
 
     with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
@@ -452,10 +447,10 @@ async def test_crash_after_intent_leaves_the_attempt_open_without_retry() -> Non
     with pytest.raises(SubmitOutcomeLostError, match="submit ended without durable outcome"):
         await gate.submit(ready, _context())
 
-    intent = recording.txns[0][0]
-    assert isinstance(intent, ReservationIntent)
-    assert intent.submission_attempt is not None
-    assert intent.submission_attempt.outcome_kind is None
+    (intent,) = recording.txns[0]
+    assert isinstance(intent, AttemptAuthorized)
+    assert intent.attempt.execution_decision_id == ready.decision_id
+    assert recording.txns == [(intent,)]  # no outcome transaction
     assert recording.outcomes == []
     # No retry in this process: it exits (SubmitOutcomeLostError); the restarted daemon's
     # observation cycle finds the started attempt without an outcome and holds it UNKNOWN.
@@ -526,8 +521,9 @@ async def test_submit_cancelled_before_transport_closes_intent_as_not_sent() -> 
     with pytest.raises(asyncio.CancelledError):
         await _gate(venue, reader, recording).submit(_ready(), _context())
 
-    assert [type(event).__name__ for event in recording.txns[1]] == ["ReservationFailed"]
-    assert recording.txns[1][0].reason == "local_pre_transport"
+    (closed,) = recording.txns[1]
+    assert isinstance(closed, OutcomeRecorded)
+    assert (closed.outcome.kind, closed.outcome.reason) == ("not_sent", "local_pre_transport")
     assert [outcome.kind for _, outcome in recording.outcomes] == ["not_sent"]
     assert not reader.open_scopes
 
@@ -543,7 +539,7 @@ async def test_executor_cid_mismatch_becomes_durable_unknown_and_blocks_scope() 
     result = await gate.submit(_ready(), _context())
 
     assert result.outcome_kind.value == "unknown"
-    assert [type(event) for event in recording.txns[1]] == [ReservationUnknown]
+    assert [label(record) for record in recording.txns[1]] == ["unknown"]
     with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
         await gate.submit(_ready(decision_id="decision-2"), _context())
     assert venue.calls == 1
@@ -557,15 +553,16 @@ async def test_executor_cid_mismatch_becomes_durable_unknown_and_blocks_scope() 
         (SubmitRejected("venue_rejected"), "rejected", "venue_rejected"),
     ],
 )
-async def test_non_ack_outcomes_persist_one_terminal_event(outcome, kind, reason) -> None:
+async def test_non_ack_outcomes_persist_one_terminal_outcome(outcome, kind, reason) -> None:
     reader = _FakeUncertaintyReader(set())
     recording = _recording(reader)
     venue = _FakeVenue(outcome)
 
     await _gate(venue, reader, recording).submit(_ready(), _context())
 
-    assert len(recording.txns[1]) == 1
-    assert recording.txns[1][0].reason == reason
+    (terminal,) = recording.txns[1]
+    assert isinstance(terminal, OutcomeRecorded)
+    assert (terminal.outcome.kind, terminal.outcome.reason) == (kind, reason)
     assert [(recorded.kind, recorded.reason) for _, recorded in recording.outcomes] == [
         (kind, reason)
     ]
@@ -580,4 +577,3 @@ async def test_every_outcome_fact_is_marked_not_simulated() -> None:
     await _gate(_FakeVenue(), reader, recording).submit(_ready(), _context())
 
     assert [facts.is_simulated for facts, _ in recording.outcomes] == [False]
-    assert all(getattr(event, "is_simulated", False) is False for event in recording.events)

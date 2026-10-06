@@ -16,12 +16,6 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import func, select, text
 
-from bfx_funding_bot.modules.execution.contracts import ReservationRef
-from bfx_funding_bot.modules.execution.unknown_matching import (
-    UnknownSubmitAttempt,
-    amount_seen_since_start,
-    match_attempt_to_snapshot,
-)
 from bfx_funding_bot.modules.ledger import (
     RUNTIME_GRACE_MS,
     Attempt,
@@ -322,14 +316,9 @@ async def test_a_terminal_history_offer_binds_with_its_terminal_status(book) -> 
 async def test_prod_sequences_9502_9539_and_9849_9859_resolve_not_accepted_in_a_row(book) -> None:  # noqa: F811
     """Synthetic stand-ins (labels only): two consecutive fUST LIMIT UNKNOWNs, history complete.
 
-    Legacy resolves each as ``zero_match`` -> UncertaintyMarkedNotAccepted (the same
-    evidence is asserted through the legacy matcher); the ledger resolves them
-    NOT_ACCEPTED too. No divergence in what is read after the resolution: both read
-    ``execution_unknown`` until the next acceptance (the legacy ``BootRecovery`` accepts the
-    snapshot before it resolves, in one transaction; ``snapshot_superseded...`` appears only
-    in the hand-appended shadow fixture of test_trading_shadow_unknown_cycles.py). The
-    composed legacy and ledger processes run both sequences in
-    test_unknown_sequences_e2e.py.
+    The legacy store resolved each as ``zero_match`` (not accepted); the ledger resolves
+    them NOT_ACCEPTED too, and reads ``execution_unknown`` until the next acceptance. The
+    composed processes run both sequences in test_unknown_sequences_e2e.py.
     """
     await start(book)
     clock = Clock()
@@ -339,25 +328,6 @@ async def test_prod_sequences_9502_9539_and_9849_9859_resolve_not_accepted_in_a_
         cycle_at, next_at = CYCLE_1 + base, CYCLE_2 + base
         await seed_unknown(book, amount, started=started, unknown_at=unknown_at)
         assert _reason(await book.read(now=cycle_at, max_age=10**9)) == "execution_unknown"
-
-        signal = UUID("11111111-1111-1111-1111-111111111111")
-        legacy_attempt = UnknownSubmitAttempt(
-            attempt_id=uuid4(), execution_decision_id="d", account_id="a", symbol="fUST", cid=1,
-            amount=Decimal(amount), rate=Decimal("0.0003"), period_days=2, offer_type="LIMIT",
-            flags=0, started_at_ms=started, signal_correlation_id=signal,
-            reservation_ref=ReservationRef(execution_decision_id="d", cid=1,
-                                           signal_correlation_id=signal),
-        )
-        legacy_payload = {
-            "query_started_at_ms": cycle_at, "query_finished_at_ms": cycle_at + 100,
-            "offers": [], "offer_history": [],
-            "coverage": {"offer_history_start_ms": started - 60_000,
-                         "offer_history_end_ms": cycle_at + 50, "offer_history_pages": 1,
-                         "offer_history_complete": True, "offer_history_oldest_mts": None,
-                         "offer_history_newest_mts": None},
-        }
-        assert match_attempt_to_snapshot(legacy_attempt, legacy_payload).kind == "zero_match"
-        assert not amount_seen_since_start(legacy_attempt, legacy_payload)
         assert cycle_at >= started + 120_000 and cycle_at > unknown_at
 
         result = await run_cycle(book, FakeVenue(clock), clock, cycle_at)

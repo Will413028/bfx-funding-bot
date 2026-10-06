@@ -172,7 +172,5 @@ async def test_end_to_end_records_the_command_and_fires_the_heartbeat() -> None:
     result = await executor.submit(_ready(), _ctx())
 
     assert result.outcome_kind.value == "acknowledged"
-    assert [type(event).__name__ for event in recording.events] == [
-        "ReservationIntent", "ReservationClaimed",
-    ]
+    assert recording.labels == ["authorized", "ack"]
     assert probe.last_active_ts.get("executor") is not None

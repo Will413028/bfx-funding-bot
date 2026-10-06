@@ -8,6 +8,7 @@ test_capital_command_boundary.
 """
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import asdict, dataclass
 from datetime import date
@@ -20,10 +21,6 @@ import httpx
 import pytest
 
 from bfx_funding_bot.core.telemetry import Phase
-from bfx_funding_bot.external.bitfinex.auth_rest import (
-    ActiveFundingOffer,
-    FundingOfferHistoryCoverage,
-)
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
@@ -38,11 +35,6 @@ from bfx_funding_bot.modules.execution.contracts import (
     ReadyToSubmit,
     ReservationRef,
 )
-from bfx_funding_bot.modules.execution.events import (
-    ReservationFailed,
-    ReservationIntent,
-    ReservationUnknown,
-)
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -53,13 +45,19 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmitOutcomeUnknown,
     SubmitRejected,
 )
-from bfx_funding_bot.modules.execution.unknown_matching import (
-    UnknownSubmitAttempt,
-    match_unknown_attempt,
+from bfx_funding_bot.modules.ledger import (
+    Coverage,
+    MatchEvidence,
+    Offer,
+    Scope,
+    UnknownTerms,
+    match_unknown,
 )
-from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
 from tests.modules.execution.fake_boundary import (  # noqa: F401  (fixture)
+    AttemptAuthorized,
+    OutcomeRecorded,
+    Record,
     Recording,
     boundary_stubs,
     with_capital,
@@ -122,7 +120,7 @@ class FaultEvidence:
     transport_request_count: int
     outcome_kind: str
     uncertainty_state: str
-    event_seqs: tuple[int, ...]
+    journal_labels: tuple[str, ...]
     venue_object_count: int
     retry_count: int
     normalized_payload_hash: str | None
@@ -187,11 +185,22 @@ class _EventSink:
 
 def _recording(open_scopes: set[tuple[UUID, str, str]], environment: str) -> Recording:
     """A boundary whose committed UNKNOWN opens the symbol's uncertainty scope."""
-    def opened(event: object) -> None:
-        if isinstance(event, ReservationUnknown):
-            open_scopes.add((UUID(event.account_id), environment, event.symbol))
+    def opened(record: Record) -> None:
+        if isinstance(record, OutcomeRecorded) and record.outcome.kind == "unknown":
+            open_scopes.add((record.scope.exchange_account_id, environment, record.attempt.symbol))
 
-    return Recording(environment=environment, account_id=_ACCOUNT_ID, on_event=opened)
+    return Recording(environment=environment, account_id=_ACCOUNT_ID, on_record=opened)
+
+
+def _authorized(recording: Recording) -> list[AttemptAuthorized]:
+    return [record for record in recording.records if isinstance(record, AttemptAuthorized)]
+
+
+def _unknowns(recording: Recording) -> list[OutcomeRecorded]:
+    return [
+        record for record in recording.records
+        if isinstance(record, OutcomeRecorded) and record.outcome.kind == "unknown"
+    ]
 
 
 class _UncertaintyReader:
@@ -293,42 +302,36 @@ def _success_response() -> list[object]:
     ]
 
 
-def _unknown_attempt() -> UnknownSubmitAttempt:
-    ready = _ready(decision_id="candidate-ambiguity")
-    return UnknownSubmitAttempt(
-        attempt_id=UUID("22222222-2222-2222-2222-222222222222"),
-        execution_decision_id=ready.decision_id,
-        account_id=str(_ACCOUNT_ID),
-        symbol="fUST",
-        cid=7,
-        amount=Decimal("150"),
-        rate=Decimal("0.0001"),
-        period_days=2,
-        offer_type="LIMIT",
-        flags=0,
-        started_at_ms=1_000,
-        signal_correlation_id=ready.decision.signal_correlation_id,
-        reservation_ref=ReservationRef(
-            execution_decision_id=ready.decision_id,
-            cid=7,
-            signal_correlation_id=ready.decision.signal_correlation_id,
-        ),
+def _payload_digest(payload: dict[str, Any]) -> str:
+    return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _matching_offer(venue_offer_id: str, terms: UnknownTerms) -> Offer:
+    """An active venue offer carrying exactly the UNKNOWN attempt's terms."""
+    return Offer(
+        venue_offer_id, terms.symbol, terms.amount, terms.amount, terms.rate, True,
+        terms.period_days, terms.offer_type, terms.flags, "active",
+        terms.started_at_ms, terms.started_at_ms,
     )
 
 
-def _matching_offer(venue_offer_id: str, *, mts_created: int = 1_000) -> ActiveFundingOffer:
-    return ActiveFundingOffer(
-        venue_offer_id=venue_offer_id,
-        symbol="fUST",
-        amount=Decimal("150"),
-        amount_original=Decimal("150"),
-        rate=0.0001,
-        rate_decimal=Decimal("0.0001"),
-        period_days=2,
-        mts_created=mts_created,
-        status="ACTIVE",
-        offer_type="LIMIT",
-        flags=0,
+def _complete_evidence(terms: UnknownTerms, offers: tuple[Offer, ...]) -> MatchEvidence:
+    """One observation, begun after the UNKNOWN, whose offer history covers the submit."""
+    observed_at = terms.unknown_recorded_at_ms + 1
+    return MatchEvidence(
+        UUID("33333333-3333-3333-3333-333333333333"), observed_at, observed_at + 1,
+        Coverage(
+            wallets_complete=True, offers_complete=True, credits_complete=True,
+            loans_complete=True, offer_history_complete=True, credit_history_complete=True,
+            wallet_pages=1, offer_pages=1, credit_pages=1, loan_pages=1,
+            offer_history_pages=1, credit_history_pages=1,
+            history_requested_start_ms=terms.started_at_ms,
+            history_requested_end_ms=observed_at + 1,
+            history_oldest_mts_created=terms.started_at_ms,
+            history_newest_mts_created=terms.started_at_ms,
+            trades_complete=True, history_symbols=frozenset({terms.symbol}),
+        ),
+        offers, (),
     )
 
 
@@ -364,58 +367,36 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
         ready = _ready(decision_id="multiple-candidate")
         result = await gate.submit(ready, _context())
         assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
-        intent = next(event for event in recording.events if isinstance(event, ReservationIntent))
-        unknown = next(event for event in recording.events if isinstance(event, ReservationUnknown))
-        assert intent.submission_attempt is not None
-        assert intent.reservation_ref is not None
-        payload = intent.submission_attempt.normalized_payload
-        attempt = UnknownSubmitAttempt(
-            attempt_id=intent.submission_attempt.attempt_id,
-            execution_decision_id=intent.submission_attempt.execution_decision_id,
-            account_id=str(intent.submission_attempt.account_id),
-            symbol=intent.submission_attempt.symbol,
-            cid=intent.submission_attempt.cid,
-            amount=Decimal(str(payload["amount"])),
-            rate=Decimal(str(payload["rate"])),
-            period_days=int(payload["period"]),
-            offer_type=str(payload["type"]),
-            flags=payload["flags"],
-            started_at_ms=intent.submission_attempt.started_at_ms,
-            signal_correlation_id=intent.signal_correlation_id,
-            reservation_ref=intent.reservation_ref,
+        (unknown,) = _unknowns(recording)
+        attempt = unknown.attempt
+        payload = attempt.normalized_payload
+        terms = UnknownTerms(
+            attempt.attempt_id, attempt.symbol,
+            Decimal(str(payload["amount"])), Decimal(str(payload["rate"])),
+            int(payload["period"]), str(payload["type"]), payload["flags"],
+            attempt.started_at_ms, unknown.outcome.completed_at_ms,
         )
-        candidates = (
-            _matching_offer("venue-a", mts_created=attempt.started_at_ms),
-            _matching_offer("venue-b", mts_created=attempt.started_at_ms),
-        )
-        matched = match_unknown_attempt(
-            attempt,
-            candidates,
-            (),
-            FundingOfferHistoryCoverage(
-                requested_start_ms=attempt.started_at_ms,
-                requested_end_ms=attempt.started_at_ms,
-                oldest_mts_created=attempt.started_at_ms,
-                newest_mts_created=attempt.started_at_ms,
-                pages=1,
-                complete=True,
-            ),
-        )
+        candidates = {
+            offer.venue_offer_id: offer
+            for offer in (_matching_offer("venue-a", terms), _matching_offer("venue-b", terms))
+        }
+        matched = match_unknown(terms, _complete_evidence(terms, tuple(candidates.values())))
         request_count_before_retry = transport.request_count
         with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
             await gate.submit(_ready(decision_id="multiple-candidate-retry"), _context())
         retry_count = transport.request_count - request_count_before_retry
         return MultipleCandidateEvidence(
-            durable_intent_count=sum(
-                isinstance(event, ReservationIntent) for event in recording.events
-            ),
+            durable_intent_count=len(_authorized(recording)),
             transport_request_count=transport.request_count,
             retry_count=retry_count,
             match_kind=matched.kind,
-            candidate_ids=tuple(candidate.venue_offer_id for candidate in matched.candidates),
-            unknown_exposure_usdt=unknown.size_usdt,
-            candidate_exposure_usdt=sum(candidate.amount for candidate in matched.candidates),
-            unknown_scope=(UUID(unknown.account_id), environment, unknown.symbol),
+            candidate_ids=matched.candidate_venue_offer_ids,
+            unknown_exposure_usdt=attempt.amount,
+            candidate_exposure_usdt=sum(
+                candidates[venue_offer_id].amount_remaining
+                for venue_offer_id in matched.candidate_venue_offer_ids
+            ),
+            unknown_scope=(unknown.scope.exchange_account_id, environment, attempt.symbol),
         )
 
 
@@ -478,14 +459,12 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
                 raise AssertionError("ambiguous submit was allowed to retry")
 
         retry_count = transport.request_count - transport_count_before_retry_check
-        unknown_events = tuple(
-            event for event in recording.events if isinstance(event, ReservationUnknown)
-        )
-        unknown_event = unknown_events[0] if unknown_events else None
-        if unknown_event is not None:
-            assert unknown_event.size_usdt == Decimal("150")
-            assert unknown_event.account_id == str(_ACCOUNT_ID)
-            assert unknown_event.symbol == "fUST"
+        unknowns = _unknowns(recording)
+        unknown = unknowns[0] if unknowns else None
+        if unknown is not None:
+            assert unknown.attempt.amount == Decimal("150")
+            assert unknown.scope.exchange_account_id == _ACCOUNT_ID
+            assert unknown.attempt.symbol == "fUST"
             assert (_ACCOUNT_ID, environment, "fUST") in open_scopes
             await gate.check(_ready(decision_id=f"fault-{scenario.name}-other-symbol", symbol="fUSD"), context)
             await gate.check(_ready(decision_id=f"fault-{scenario.name}-other-account"), _context(_ADJACENT_ACCOUNT_ID))
@@ -507,27 +486,23 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
         else:
             adjacent_scope_allowed = False
         uncertainty_state = "open" if open_scopes else "pending_recovery" if outcome_kind == "crashed" else "closed"
-        event_seqs = tuple(range(1, len(recording.events) + 1))
-        intent = next(event for event in recording.events if isinstance(event, ReservationIntent))
-        assert intent.submission_attempt is not None
+        authorized = _authorized(recording)
         return FaultEvidence(
-            durable_intent_count=sum(
-                isinstance(event, ReservationIntent) for event in recording.events
-            ),
+            durable_intent_count=len(authorized),
             transport_request_count=transport.request_count,
             outcome_kind=outcome_kind,
             uncertainty_state=uncertainty_state,
-            event_seqs=event_seqs,
+            journal_labels=tuple(recording.labels),
             venue_object_count=len(transport.venue_objects),
             retry_count=retry_count,
             normalized_payload_hash=(
                 transport.normalized_payload_hash
-                or intent.submission_attempt.payload_fingerprint
+                or _payload_digest(authorized[0].attempt.normalized_payload)
             ),
-            unknown_exposure_usdt=(unknown_event.size_usdt if unknown_event else None),
+            unknown_exposure_usdt=(unknown.attempt.amount if unknown is not None else None),
             unknown_scope=(
-                (UUID(unknown_event.account_id), environment, unknown_event.symbol)
-                if unknown_event is not None
+                (unknown.scope.exchange_account_id, environment, unknown.attempt.symbol)
+                if unknown is not None
                 else None
             ),
             adjacent_scope_allowed=adjacent_scope_allowed,
@@ -554,11 +529,11 @@ async def test_fault_matrix_never_automatically_retries_ambiguous_submit(
     if scenario.process_crash_at in {"after_intent", "during_send"}:
         assert evidence.outcome_kind == "crashed"
         assert evidence.uncertainty_state == "pending_recovery"
-        assert evidence.event_seqs == (1,)
+        assert evidence.journal_labels == ("authorized",)
     else:
         assert evidence.outcome_kind == SubmitOutcomeKind.UNKNOWN.value
         assert evidence.uncertainty_state == "open"
-        assert evidence.event_seqs == (1, 2)
+        assert evidence.journal_labels == ("authorized", "unknown")
         assert evidence.unknown_exposure_usdt == Decimal("150")
         assert evidence.unknown_scope == (_ACCOUNT_ID, "ci", "fUST")
         assert evidence.adjacent_scope_allowed is True
@@ -586,15 +561,15 @@ async def test_multiple_candidate_reconcile_stays_unknown_and_preserves_exposure
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("outcome", "event_type"),
+    ("outcome", "kind"),
     [
-        (SubmitOutcomeUnknown(f"{_API_KEY} Authorization: Bearer {_API_SECRET}", True), ReservationUnknown),
-        (SubmitRejected(f"{_API_KEY} Authorization: Bearer {_API_SECRET}"), ReservationFailed),
+        (SubmitOutcomeUnknown(f"{_API_KEY} Authorization: Bearer {_API_SECRET}", True), "unknown"),
+        (SubmitRejected(f"{_API_KEY} Authorization: Bearer {_API_SECRET}"), "rejected"),
     ],
 )
 async def test_durable_outcome_reason_redacts_credentials_and_authorization(
     outcome: SubmitOutcomeUnknown | SubmitRejected,
-    event_type: type[ReservationUnknown] | type[ReservationFailed],
+    kind: str,
 ) -> None:
     open_scopes: set[tuple[UUID, str, str]] = set()
     recording = _recording(open_scopes, "ci")
@@ -613,10 +588,13 @@ async def test_durable_outcome_reason_redacts_credentials_and_authorization(
 
     await gate.submit(_ready(decision_id=f"redaction-{outcome.kind.value}"), _context())
 
-    persisted = recording.events[-1]
-    assert isinstance(persisted, event_type)
-    assert _API_KEY not in persisted.reason
-    assert _API_SECRET not in persisted.reason
-    assert "authorization=[redacted]" in persisted.reason.lower()
-    assert len(persisted.reason) <= 256
+    persisted = recording.records[-1]
+    assert isinstance(persisted, OutcomeRecorded)
+    assert persisted.outcome.kind == kind
+    reason = persisted.outcome.reason
+    assert reason is not None
+    assert _API_KEY not in reason
+    assert _API_SECRET not in reason
+    assert "authorization=[redacted]" in reason.lower()
+    assert len(reason) <= 256
     assert executor.calls == 1

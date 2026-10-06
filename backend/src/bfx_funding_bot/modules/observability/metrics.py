@@ -7,8 +7,9 @@ text exposition via prometheus_client).
 Signal → metric map:
 - Traffic:    bfx_operational_events_total{event_type,level} (SIGNAL / DECISION /
               ORDER_SUBMIT / HEALTH_CHECK rates via StdoutEventSink hook),
-              bfx_domain_events_total{event_type} (bus: submit/fill/release/
-              reconcile), bfx_executor_submits_total{status},
+              bfx_domain_events_total{event_type} (bus: command outcome,
+              cancel request/ack, reconcile, unknown resolution, venue hint),
+              bfx_executor_submits_total{status},
               bfx_venue_rest_requests_total{method,status_class}
 - Latency:    bfx_executor_submit_duration_seconds (submit→ack incl. persist),
               bfx_reconcile_tick_duration_seconds,

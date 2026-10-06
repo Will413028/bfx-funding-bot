@@ -26,9 +26,8 @@ from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
-    ReservationRef,
 )
-from bfx_funding_bot.modules.execution.events import OrderFilled, ReservationClaimed
+from bfx_funding_bot.modules.execution.events import CancelAcknowledged, CancelRequested
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -188,41 +187,20 @@ def test_observe_methods_fail_open_when_backend_broken() -> None:
 async def test_domain_event_handler_counts_by_class() -> None:
     m = DaemonMetrics()
     handler = m.domain_event_handler()
-    first_scid = uuid4()
-    await handler(ReservationClaimed(
-        symbol="fUST", cid=1, venue_offer_id="1",
-        signal_correlation_id=first_scid, account_id="default",
-        is_simulated=True, amount=Decimal("100"),
-        reservation_ref=ReservationRef(
-            execution_decision_id="d-metrics-1", cid=1,
-            signal_correlation_id=first_scid, venue_offer_id="1",
-        ),
+    await handler(CancelRequested(
+        venue_offer_id="1", requested_at_ms=1000, signal_correlation_id=uuid4(),
+        account_id="default",
     ))
-    fill_scid = uuid4()
-    await handler(OrderFilled(
-        symbol="fUST", cid=1, venue_offer_id="1", credit_id=None,
-        fill_rate=0.0005, signal_correlation_id=fill_scid, account_id="default",
-        is_simulated=True, amount=Decimal("100"),
-        reservation_ref=ReservationRef(
-            execution_decision_id="d-metrics-fill-1", cid=1,
-            signal_correlation_id=fill_scid, venue_offer_id="1",
-        ),
-    ))
-    second_scid = uuid4()
-    await handler(OrderFilled(
-        symbol="fUST", cid=2, venue_offer_id="2", credit_id=None,
-        fill_rate=0.0005, signal_correlation_id=second_scid, account_id="default",
-        is_simulated=True, amount=Decimal("100"),
-        reservation_ref=ReservationRef(
-            execution_decision_id="d-metrics-2", cid=2,
-            signal_correlation_id=second_scid, venue_offer_id="2",
-        ),
-    ))
+    for venue_offer_id in ("1", "2"):
+        await handler(CancelAcknowledged(
+            venue_offer_id=venue_offer_id, acknowledged_at_ms=1001,
+            signal_correlation_id=uuid4(), account_id="default", rest_status="success",
+        ))
     assert m.registry.get_sample_value(
-        "bfx_domain_events_total", {"event_type": "ReservationClaimed"},
+        "bfx_domain_events_total", {"event_type": "CancelRequested"},
     ) == 1.0
     assert m.registry.get_sample_value(
-        "bfx_domain_events_total", {"event_type": "OrderFilled"},
+        "bfx_domain_events_total", {"event_type": "CancelAcknowledged"},
     ) == 2.0
 
 

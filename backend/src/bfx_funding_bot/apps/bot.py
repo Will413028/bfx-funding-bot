@@ -70,11 +70,7 @@ from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
     CancelRequested,
-    CreditClosed,
-    OrderFilled,
     PositionReconciled,
-    ReservationClaimed,
-    ReservationReleased,
 )
 from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.middleware import (
@@ -565,8 +561,7 @@ async def build_daemon(
     # handler failure is already isolated by the bus's per-handler gather).
     domain_event_counter = metrics.domain_event_handler()
     for _domain_event_type in (
-        ReservationClaimed, OrderFilled, ReservationReleased,
-        CancelRequested, CancelAcknowledged, PositionReconciled, CreditClosed,
+        CancelRequested, CancelAcknowledged, PositionReconciled,
         # What the ledger authority publishes after its transactions committed.
         CommandOutcomeNotice, UnknownResolutionNotice, VenueHintNotification,
     ):

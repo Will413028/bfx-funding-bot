@@ -296,8 +296,8 @@ def test_boot_output_fails_closed(output: str, code: str) -> None:
 
 @pytest.mark.parametrize(("stdout", "code"), [
     ('{"error": "boot_epoch_writer_unknown"}\n', "boot_epoch_writer_unknown"),
-    # The deployed image up to e4e699c4 still refuses with its per-scope seed code.
-    ('{"error": "boot_seed_missing"}\n', "boot_seed_missing"),
+    # A code outside the set (here one only images up to e4e699c4 emitted) still fails closed.
+    ('{"error": "boot_seed_missing"}\n', "boot_check_failed"),
     ('{"error": "boot_check_failed", "type": "OSError"}\n', "boot_check_failed"),
     ('{"error": "anything else"}\n', "boot_check_failed"),
     ("not json\n", "boot_check_failed"),
@@ -536,7 +536,7 @@ def test_acceptance_drill_restores_the_named_backup_and_target(tmp_path: Path) -
                                                                        "o1\tfunding\tBTC\t0\t0"]}),
      "ledger_digest_mismatch"),
     (FakeDocker(production_status=3), "production_read_failed"),
-    (FakeDocker(boot=(3, '{"error": "boot_seed_missing"}\n')), "boot_seed_missing"),
+    (FakeDocker(boot=(3, '{"error": "boot_epoch_writer_unknown"}\n')), "boot_epoch_writer_unknown"),
     (FakeDocker(boot=(3, '{"error": "boot_check_failed", "type": "ImportError"}\n')),
      "boot_check_failed"),
     (FakeDocker(boot=(125, "")), "restore_command_failed"),

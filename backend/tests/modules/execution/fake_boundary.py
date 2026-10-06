@@ -8,37 +8,29 @@ uncertainty before the next command ran".
 
 This is a test double, not an authority: what the ledger journal writes is covered by
 ``tests/integration/contracts/test_command_gate_ledger.py`` and
-``tests/integration/test_capital_command_boundary.py``. The recording names outcomes with
-the domain events (``ReservationClaimed`` and friends) only as a readable trace.
+``tests/integration/test_capital_command_boundary.py``. The recording keeps exactly what
+the gate handed the journal: the authorised ``CommandAttempt`` (``AttemptAuthorized``) and
+the attempt's ``CommandOutcome`` (``OutcomeRecorded``).
 """
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 
-from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.execution import command_gate
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.command_boundary import (
     CommandBoundary,
     CommandFacts,
 )
-from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
-from bfx_funding_bot.modules.execution.events import (
-    OrderFilled,
-    ReservationClaimed,
-    ReservationFailed,
-    ReservationIntent,
-    ReservationUnknown,
-)
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.ledger import (
     Authorized,
     CommandAttempt,
@@ -108,33 +100,63 @@ class _Offers:
         return frozenset()
 
 
+@dataclass(frozen=True, slots=True)
+class AttemptAuthorized:
+    """The admission transaction: the attempt the journal authorised before any venue call."""
+
+    scope: Scope
+    attempt: CommandAttempt
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomeRecorded:
+    """The outcome transaction: the attempt's durable outcome, as the gate handed it over."""
+
+    scope: Scope
+    attempt: CommandAttempt
+    outcome: CommandOutcome
+
+
+Record = AttemptAuthorized | OutcomeRecorded
+
+
+def label(record: Record) -> str:
+    """``authorized`` for an admission, else the outcome kind (ack / unknown / rejected / not_sent)."""
+    return "authorized" if isinstance(record, AttemptAuthorized) else record.outcome.kind
+
+
 class Recording:
-    """What the gate made durable, as the ordered transactions it asked for."""
+    """What the gate made durable, as the ordered journal transactions it asked for."""
 
     def __init__(self, *, environment: str, account_id: UUID,
-                 on_event: Callable[[object], None] | None = None) -> None:
+                 on_record: Callable[[Record], None] | None = None) -> None:
         self.scope = Scope(account_id, environment)
-        self.txns: list[tuple[object, ...]] = []
+        self.txns: list[tuple[Record, ...]] = []
         self.attempts: dict[str, CommandAttempt] = {}
+        # What the effects were told after each outcome committed.
         self.outcomes: list[tuple[CommandFacts, CommandOutcome]] = []
         self.fail_on_call: int | None = None
         self.unknown_started: asyncio.Event | None = None
         self.allow_unknown_commit: asyncio.Event | None = None
-        self._on_event = on_event
+        self._on_record = on_record
         self.offers = _Offers()
 
     @property
-    def events(self) -> list[object]:
-        return [event for txn in self.txns for event in txn]
+    def records(self) -> list[Record]:
+        return [record for txn in self.txns for record in txn]
 
-    def _commit(self, *events: object) -> None:
+    @property
+    def labels(self) -> list[str]:
+        return [label(record) for record in self.records]
+
+    def _commit(self, *records: Record) -> None:
         call_number = len(self.txns) + 1
         if self.fail_on_call == call_number:
             raise RuntimeError(f"persistence failed on call {call_number}")
-        self.txns.append(events)
-        if self._on_event is not None:
-            for event in events:
-                self._on_event(event)
+        self.txns.append(records)
+        if self._on_record is not None:
+            for record in records:
+                self._on_record(record)
 
     def boundary(self) -> CommandBoundary:
         return CommandBoundary(
@@ -156,69 +178,24 @@ class _Journal:
         if attempt.execution_decision_id in r.attempts:
             raise ValueError("one submission attempt per execution decision")
         r.attempts[attempt.execution_decision_id] = attempt
-        ready = _READIES[attempt.execution_decision_id]
-        decision = ready.decision
-        assert attempt.command_date is not None
-        cid = generate_cid(decision.signal_correlation_id, attempt.command_date)
-        r._commit(ReservationIntent(
-            cid=cid, size_usdt=attempt.amount,
-            signal_correlation_id=decision.signal_correlation_id,
-            account_id=str(scope.exchange_account_id), is_simulated=False,
-            occurred_at_ms=attempt.started_at_ms, symbol=attempt.symbol,
-            execution_decision_id=attempt.execution_decision_id,
-            reservation_ref=ReservationRef(
-                attempt.execution_decision_id, cid, decision.signal_correlation_id),
-            submission_attempt=SubmissionAttemptPayload(
-                attempt_id=attempt.attempt_id,
-                execution_decision_id=attempt.execution_decision_id,
-                account_id=scope.exchange_account_id,
-                environment=scope.deployment_environment, symbol=attempt.symbol, cid=cid,
-                normalized_payload=attempt.normalized_payload,
-                started_at_ms=attempt.started_at_ms,
-            ),
-        ))
+        r._commit(AttemptAuthorized(scope, attempt))
         return Authorized(attempt.attempt_id, 1, "digest")
 
     async def record_outcome(self, scope: Scope, attempt_id: UUID, outcome: CommandOutcome) -> None:
-        return None
+        r = self._r
+        (attempt,) = [a for a in r.attempts.values() if a.attempt_id == attempt_id]
+        if outcome.kind == "unknown":
+            if r.unknown_started is not None:
+                r.unknown_started.set()
+            if r.allow_unknown_commit is not None:
+                await r.allow_unknown_commit.wait()
+        r._commit(OutcomeRecorded(scope, attempt, outcome))
 
     async def read_back_outcome(self, scope: Scope, attempt_id: UUID) -> CommandOutcome | None:
         return None
 
     async def admit_cancel(self, *args: object, **kwargs: object) -> object:
         raise NotImplementedError("the gate contract tests only submit")
-
-
-def _fields(facts: CommandFacts, outcome: CommandOutcome) -> dict[str, object]:
-    return {
-        "cid": facts.reference.cid, "size_usdt": facts.amount,
-        "signal_correlation_id": facts.signal_correlation_id,
-        "account_id": str(facts.scope.exchange_account_id),
-        "is_simulated": facts.is_simulated, "occurred_at_ms": outcome.completed_at_ms,
-        "symbol": facts.symbol, "reservation_ref": facts.reference,
-    }
-
-
-def terminal_event(
-    facts: CommandFacts, outcome: CommandOutcome,
-) -> ReservationClaimed | ReservationFailed | ReservationUnknown:
-    """The recording's own name for a terminal outcome (a readable trace, not a journal)."""
-    fields = _fields(facts, outcome)
-    if outcome.event_id is not None:
-        fields["event_id"] = outcome.event_id
-    if outcome.kind == "ack":
-        return ReservationClaimed(**fields, venue_offer_id=outcome.venue_offer_id or "")  # type: ignore[arg-type]
-    if outcome.kind == "unknown":
-        return ReservationUnknown(**fields, reason=outcome.reason or "submit_outcome_unknown")  # type: ignore[arg-type]
-    return ReservationFailed(**fields, reason=outcome.reason or "submit_rejected")  # type: ignore[arg-type]
-
-
-def _filled_event(facts: CommandFacts, outcome: CommandOutcome) -> OrderFilled:
-    return OrderFilled(
-        **_fields(facts, outcome),  # type: ignore[arg-type]
-        venue_offer_id=outcome.venue_offer_id or "", credit_id=None,
-        fill_rate=float(facts.offer_rate or 0),
-    )
 
 
 class _Effects:
@@ -229,20 +206,4 @@ class _Effects:
         return None
 
     async def outcome_recorded(self, facts: CommandFacts, outcome: CommandOutcome) -> None:
-        r = self._r
-        r.outcomes.append((facts, outcome))
-        event = terminal_event(facts, outcome)
-        if isinstance(event, ReservationUnknown):
-            if r.unknown_started is not None:
-                r.unknown_started.set()
-            if r.allow_unknown_commit is not None:
-                await r.allow_unknown_commit.wait()
-            r._commit(event)
-            return
-        filled: OrderFilled | None = None
-        if isinstance(event, ReservationClaimed) and facts.filled:
-            filled = _filled_event(facts, outcome)
-        if filled is None:
-            r._commit(event)
-        else:
-            r._commit(event, filled)
+        self._r.outcomes.append((facts, outcome))

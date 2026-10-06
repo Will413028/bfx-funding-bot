@@ -14,12 +14,6 @@ from bfx_funding_bot.modules.execution.command_boundary import (
     LedgerCommandEffects,
 )
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
-from bfx_funding_bot.modules.execution.events import (
-    OrderFilled,
-    ReservationClaimed,
-    ReservationFailed,
-    ReservationUnknown,
-)
 from bfx_funding_bot.modules.ledger import CommandOutcome, Scope
 
 SCOPE = Scope(uuid4(), "ci")
@@ -42,18 +36,18 @@ def _outcome(kind: str, offer: str | None = None, reason: str | None = None,
 
 
 class _Trace:
-    """One ordered record of bus publications."""
+    """One ordered record of every bus publication, whatever its type."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
-        self.bus = DomainEventBus()
+        trace = self
 
-        async def on(event) -> None:
-            self.calls.append(("publish", type(event).__name__))
+        class _Bus(DomainEventBus):
+            async def publish(self, event: object) -> None:
+                trace.calls.append(("publish", type(event).__name__))
+                await super().publish(event)
 
-        for event_type in (ReservationClaimed, OrderFilled, CommandOutcomeNotice,
-                           ReservationFailed, ReservationUnknown):
-            self.bus.subscribe(event_type, on)
+        self.bus = _Bus()
 
 
 @pytest.mark.asyncio
