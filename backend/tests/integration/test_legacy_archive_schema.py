@@ -170,8 +170,8 @@ def test_the_twelve_live_in_the_archive_and_nowhere_else(ledger_db) -> None:  # 
 
 
 def test_no_live_table_references_the_archive(ledger_db) -> None:  # noqa: F811
-    """The request outbox's foreign key into the event log is gone (its column stays); only the
-    equally frozen release archive still points in."""
+    """The request outbox's foreign key into the event log is gone (and, since f5a6b7c8d9e0, its
+    column); only the equally frozen release archive still points in."""
     with ledger_db.connect() as conn:
         inbound = set(conn.execute(text(
             "SELECT n.nspname || '.' || src.relname || ':' || con.conname FROM pg_constraint con "
@@ -185,7 +185,7 @@ def test_no_live_table_references_the_archive(ledger_db) -> None:  # noqa: F811
             "AND table_name = 'uncertainty_resolution_requests' "
             "AND column_name = 'resolved_event_seq'"))
     assert inbound == {"release_archive.canary_command_permits:fk_canary_permits_attempt"}
-    assert column == 1
+    assert column == 0
 
 
 # -- writes ---------------------------------------------------------------------------------

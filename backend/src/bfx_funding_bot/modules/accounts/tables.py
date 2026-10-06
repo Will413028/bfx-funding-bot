@@ -3,7 +3,6 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
-    JSON,
     BigInteger,
     CheckConstraint,
     DateTime,
@@ -18,11 +17,10 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.db import JSON_DOCUMENT, Base
 
 
 class User(Base):
@@ -197,7 +195,7 @@ class ExchangeAccountCredential(Base):
     )
 
 
-_ACCOUNT_JSON = JSON().with_variant(JSONB, "postgresql")
+_ACCOUNT_JSON = JSON_DOCUMENT
 
 
 class AccountConfigDraft(Base):
@@ -330,11 +328,7 @@ class UserConfig(Base):
     exchange_account_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), nullable=True
     )
-    # JSONB on Postgres, generic JSON on sqlite for tests — bare-class variant
-    # matches the event_store / diagnostics JSON columns' house style.
-    config: Mapped[dict[str, Any]] = mapped_column(
-        JSON().with_variant(JSONB, "postgresql"), nullable=False
-    )
+    config: Mapped[dict[str, Any]] = mapped_column(_ACCOUNT_JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )

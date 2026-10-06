@@ -5,7 +5,6 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
-    JSON,
     BigInteger,
     DateTime,
     Index,
@@ -13,16 +12,14 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.db import JSON_DOCUMENT, Base
 
-# JSONB on Postgres, generic JSON on sqlite (unit tests). Mirrors
-# event_store/tables.py — a bare JSONB column poisons Base.metadata.create_all
-# on sqlite (global metadata, surfaces only in test ordering).
-_JSON = JSON().with_variant(JSONB, "postgresql")
+# Never a bare JSONB: it poisons Base.metadata.create_all on sqlite (global metadata,
+# surfaces only in test ordering).
+_JSON = JSON_DOCUMENT
 # now() on Postgres, CURRENT_TIMESTAMP on sqlite. ANSI, works on both.
 _NOW = func.current_timestamp()
 # SQLite requires INTEGER (not BIGINT) for autoincrement PKs.

@@ -15,23 +15,20 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    Column,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
     Numeric,
-    Table,
     Text,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.types import JSON, Uuid
+from sqlalchemy.types import Uuid
 
-from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.db import JSON_DOCUMENT, Base
 from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA as ARCHIVE
 from bfx_funding_bot.modules.execution.operator_requests import REQUEST_STATES
 
@@ -40,7 +37,7 @@ from bfx_funding_bot.modules.execution.operator_requests import REQUEST_STATES
 # FK is real and must remain visible to SQLAlchemy's create_all as well as
 # Alembic's complete metadata import.
 
-_JSON = JSON().with_variant(JSONB, "postgresql")
+_JSON = JSON_DOCUMENT
 _UUID = PG_UUID(as_uuid=True).with_variant(Uuid(as_uuid=True), "sqlite")
 _NOW = func.current_timestamp()
 
@@ -289,13 +286,6 @@ class UncertaintyResolutionRequestRow(Base):
     WORKER_COLUMNS: ClassVar[tuple[str, ...]] = (
         "state", "processed_at_ms", "outcome_reason",
     )
-    # Pre-switch evidence columns: in the table, not mapped (appended below the class, after
-    # the mapper has taken its columns). No role may write them and every row has them NULL
-    # (e4f5a6b7c8d9). They stay one release because the image before this one maps them, and
-    # its web API's reads of this model name every mapped column while a deploy migrates; the
-    # next release drops them.
-    CLOSED_COLUMNS: ClassVar[tuple[str, ...]] = ("reconcile_event_seq", "resolved_event_seq")
-
     request_id: Mapped[UUID] = mapped_column(_UUID, primary_key=True)
     exchange_account_id: Mapped[UUID] = mapped_column(
         _UUID,
@@ -348,18 +338,11 @@ class UncertaintyResolutionRequestRow(Base):
             name="ck_uncertainty_resolution_requests_action_shape",
         ),
         CheckConstraint(
-            "(state = 'requested' AND processed_at_ms IS NULL AND resolved_event_seq IS NULL "
-            "AND outcome_reason IS NULL) OR "
-            "(state = 'applied' AND processed_at_ms IS NOT NULL "
-            "AND (reconcile_event_seq IS NOT NULL) = (resolved_event_seq IS NOT NULL) "
-            "AND outcome_reason IS NULL) OR "
+            "(state = 'requested' AND processed_at_ms IS NULL AND outcome_reason IS NULL) OR "
+            "(state = 'applied' AND processed_at_ms IS NOT NULL AND outcome_reason IS NULL) OR "
             "(state IN ('rejected', 'failed') AND processed_at_ms IS NOT NULL "
-            "AND resolved_event_seq IS NULL AND outcome_reason IS NOT NULL)",
+            "AND outcome_reason IS NOT NULL)",
             name="ck_uncertainty_resolution_requests_outcome_shape",
-        ),
-        CheckConstraint(
-            "(reconcile_event_seq IS NULL) <> (observation_id IS NULL)",
-            name="ck_uncertainty_resolution_requests_evidence",
         ),
         Index(
             "uq_uncertainty_resolution_requests_pending",
@@ -379,8 +362,3 @@ class UncertaintyResolutionRequestRow(Base):
         ),
     )
 
-
-_REQUESTS_TABLE = UncertaintyResolutionRequestRow.__table__
-assert isinstance(_REQUESTS_TABLE, Table)
-for _closed in UncertaintyResolutionRequestRow.CLOSED_COLUMNS:
-    _REQUESTS_TABLE.append_column(Column(_closed, BigInteger, nullable=True))

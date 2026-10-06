@@ -5,14 +5,13 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import JSON, BigInteger, Index, Integer, Numeric, Text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import BigInteger, Index, Integer, Numeric, Text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.db import JSON_DOCUMENT, Base
 
-_JSON = JSON().with_variant(JSONB, "postgresql")
+_JSON = JSON_DOCUMENT
 
 
 class ExecutionDecisionRow(Base):
