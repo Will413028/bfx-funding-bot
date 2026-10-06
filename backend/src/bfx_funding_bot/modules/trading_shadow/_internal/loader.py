@@ -10,6 +10,7 @@ from typing import Any, cast
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA as _ARCHIVE
 from bfx_funding_bot.modules.trading import CapitalReadContext, CapitalScope
 from bfx_funding_bot.modules.trading_shadow._internal.evidence import (
     EvidenceError,
@@ -86,7 +87,7 @@ async def _event_set(
     sizes = await _rows(
         session,
         "SELECT event_seq, octet_length(CAST(payload AS text)) AS payload_bytes "
-        f"FROM event_log WHERE {predicate} ORDER BY event_seq LIMIT :row_limit",
+        f"FROM {_ARCHIVE}.event_log WHERE {predicate} ORDER BY event_seq LIMIT :row_limit",
         typed_params,
     )
     require(
@@ -104,7 +105,7 @@ async def _event_set(
     )
     rows = await _rows(
         session,
-        f"SELECT {_EVENT_COLUMNS} FROM event_log WHERE {predicate} "
+        f"SELECT {_EVENT_COLUMNS} FROM {_ARCHIVE}.event_log WHERE {predicate} "
         "ORDER BY event_seq LIMIT :row_limit",
         typed_params,
     )
@@ -184,7 +185,7 @@ class CandidateLoader:
         }
         watermark = int(
             await session.scalar(
-                text(f"SELECT COALESCE(MAX(event_seq), 0) FROM event_log WHERE {_SCOPE}"), params
+                text(f"SELECT COALESCE(MAX(event_seq), 0) FROM {_ARCHIVE}.event_log WHERE {_SCOPE}"), params
             )
             or 0
         )
@@ -209,14 +210,14 @@ class CandidateLoader:
             session,
             "SELECT event_seq, query_id, exchange_account_id, deployment_environment, schema_version, "
             "command_fence, classification, covered_prefix_hash, authorization_blocked_reason "
-            f"FROM capital_snapshots WHERE {_SCOPE} AND event_seq <= :watermark "
+            f"FROM {_ARCHIVE}.capital_snapshots WHERE {_SCOPE} AND event_seq <= :watermark "
             "ORDER BY event_seq DESC LIMIT 1",
             params,
             "snapshot_unavailable",
         )
         latest_query = await _one(
             session,
-            f"SELECT {_QUERY_COLUMNS} FROM capital_snapshot_queries WHERE {_SCOPE} "
+            f"SELECT {_QUERY_COLUMNS} FROM {_ARCHIVE}.capital_snapshot_queries WHERE {_SCOPE} "
             "ORDER BY query_revision DESC LIMIT 1",
             params,
             "snapshot_evidence_missing",
@@ -224,14 +225,14 @@ class CandidateLoader:
         params["query_id"] = accepted_row["query_id"]
         query = await _one(
             session,
-            f"SELECT {_QUERY_COLUMNS} FROM capital_snapshot_queries WHERE {_SCOPE} AND id = :query_id",
+            f"SELECT {_QUERY_COLUMNS} FROM {_ARCHIVE}.capital_snapshot_queries WHERE {_SCOPE} AND id = :query_id",
             params,
             "snapshot_evidence_missing",
         )
         params["accepted_seq"] = accepted_row["event_seq"]
         prefixes = await _rows(
             session,
-            f"SELECT event_seq, prefix_hash FROM event_prefix_hashes WHERE {_SCOPE} "
+            f"SELECT event_seq, prefix_hash FROM {_ARCHIVE}.event_prefix_hashes WHERE {_SCOPE} "
             "AND event_seq IN (:watermark, :accepted_seq) ORDER BY event_seq",
             params,
         )
@@ -287,7 +288,7 @@ class CandidateLoader:
             return row
 
         accepted_event_row = await point(
-            f"SELECT {_EVENT_COLUMNS} FROM event_log WHERE {_SCOPE} "
+            f"SELECT {_EVENT_COLUMNS} FROM {_ARCHIVE}.event_log WHERE {_SCOPE} "
             "AND event_seq = :accepted_seq AND event_seq <= :watermark",
             params,
             "snapshot_evidence_missing",
@@ -315,7 +316,7 @@ class CandidateLoader:
         )
         for decision_id in historical_decisions:
             intent_row = await point(
-                f"SELECT {_EVENT_COLUMNS} FROM event_log WHERE {_SCOPE} "
+                f"SELECT {_EVENT_COLUMNS} FROM {_ARCHIVE}.event_log WHERE {_SCOPE} "
                 "AND event_type = 'RESERVATION_INTENT' AND event_seq <= :watermark "
                 "AND payload->>'execution_decision_id' = :decision_id "
                 "ORDER BY event_seq LIMIT 2",
@@ -351,14 +352,14 @@ class CandidateLoader:
             reconcile_seq = row["payload"]["reconcile_event_seq"]
             if reconcile_seq not in point_rows:
                 await point(
-                    f"SELECT {_EVENT_COLUMNS} FROM event_log WHERE {_SCOPE} "
+                    f"SELECT {_EVENT_COLUMNS} FROM {_ARCHIVE}.event_log WHERE {_SCOPE} "
                     "AND event_seq = :reconcile_seq AND event_seq <= :watermark",
                     {**params, "reconcile_seq": reconcile_seq},
                     "unknown_match_evidence_gap",
                 )
             latest = await _rows(
                 session,
-                "SELECT event_seq FROM event_log WHERE "
+                f"SELECT event_seq FROM {_ARCHIVE}.event_log WHERE "
                 + _SCOPE
                 + " AND event_type = 'VENUE_SNAPSHOT_OBSERVED' "
                 "AND event_seq < :resolution_seq AND event_seq <= :watermark "
@@ -371,7 +372,7 @@ class CandidateLoader:
             )
         latest_observation_rows = await _rows(
             session,
-            "SELECT event_seq FROM event_log WHERE "
+            f"SELECT event_seq FROM {_ARCHIVE}.event_log WHERE "
             + _SCOPE
             + " AND event_type = 'VENUE_SNAPSHOT_OBSERVED' AND event_seq <= :watermark "
             "ORDER BY event_seq DESC LIMIT 1",

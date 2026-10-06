@@ -11,9 +11,10 @@
 LOG=/home/ubuntu/bfx/reports/halt-watch.log
 TS=$(date -u '+%Y-%m-%d %H:%M UTC')
 
-# Outcome that matters most: did anything actually get reserved recently?
+# Outcome that matters most: did the bot start a venue submit recently? The ledger journal
+# records every attempt before it is sent (the legacy event_log is archived and frozen).
 N_INTENT=$(docker exec --user postgres bfx-postgres psql -U bfx -d bfx -tAc \
-  "SELECT count(*) FROM event_log WHERE event_type='RESERVATION_INTENT' AND occurred_at_ms >= (EXTRACT(EPOCH FROM now())*1000)::bigint - 20*60*1000" \
+  "SELECT count(*) FROM public.submission_attempt_journal WHERE seed_provenance IS NULL AND started_at_ms >= (EXTRACT(EPOCH FROM now())*1000)::bigint - 20*60*1000" \
   2>/dev/null </dev/null | tr -d '[:space:]')
 
 MSG=$(docker exec bfx-bot python -c "
@@ -39,7 +40,7 @@ funded = sorted(
 detail = 'funded=' + (','.join(funded) or 'none')
 
 if n_intent > 0 and halted:
-    print(f'HALT FAILED - {n_intent} RESERVATION_INTENT in 20m while halted ({detail})')
+    print(f'HALT FAILED - {n_intent} submit attempts in 20m while halted ({detail})')
 elif halted and would:
     # The guards do not stop a synthetic offer even though the halt reads as on.
     print(f'HALT INEFFECTIVE - halted=true but dry-run would submit ({detail})')

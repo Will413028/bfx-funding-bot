@@ -28,6 +28,7 @@ from bfx_funding_bot.modules.execution.events import (
     UncertaintyMarkedNotAccepted,
     VenueOfferQuarantined,
 )
+from bfx_funding_bot.modules.execution.legacy_archive import qualified
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
@@ -249,17 +250,19 @@ async def test_select_only_authority_role_can_load(candidate_db, pg_engine):
     # This role is local to the isolated testcontainer database; no host auth changes.
     async with pg_engine.begin() as conn:
         await conn.execute(text(f'CREATE ROLE "{role}" NOLOGIN'))
-        await conn.execute(text(f'GRANT USAGE ON SCHEMA public TO "{role}"'))
-        await conn.execute(text(f'GRANT SELECT ON {", ".join(sorted(ALLOWLIST))} TO "{role}"'))
+        await conn.execute(text(f'GRANT USAGE ON SCHEMA public, legacy_archive TO "{role}"'))
+        await conn.execute(text(
+            f'GRANT SELECT ON {", ".join(sorted(map(qualified, ALLOWLIST)))} TO "{role}"'))
     try:
         async with factory.begin() as session:
             await begin_read(session)
             await session.execute(text(f'SET LOCAL ROLE "{role}"'))
             assert not await session.scalar(
-                text("SELECT has_table_privilege(current_user, 'submission_attempts', 'SELECT')")
+                text("SELECT has_table_privilege(current_user, 'legacy_archive.submission_attempts', "
+                     "'SELECT')")
             )
             assert not await session.scalar(
-                text("SELECT has_table_privilege(current_user, 'event_log', 'INSERT')")
+                text("SELECT has_table_privilege(current_user, 'legacy_archive.event_log', 'INSERT')")
             )
             assert isinstance(await load(factory, repo, session=session), LoadedInputs)
     finally:

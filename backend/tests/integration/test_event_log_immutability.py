@@ -71,7 +71,7 @@ async def test_appending_a_capital_event_never_mutates_the_ledger(pg_head_url) -
         assert chain is not None, "the append must seal its prefix"
         assert chain.prefix_hash, "a sealed link cannot be empty"
         payload = await session.scalar(text(
-            "SELECT payload->>'capital_query_id' FROM event_log WHERE event_seq = :seq"
+            "SELECT payload->>'capital_query_id' FROM legacy_archive.event_log WHERE event_seq = :seq"
         ), {"seq": result.event_seq})
         assert payload == capital_bearing.capital_query_id, (
             "the fixture must be capital-bearing, or the trigger never fires and "

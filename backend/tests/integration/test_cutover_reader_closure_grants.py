@@ -15,7 +15,13 @@ from sqlalchemy import create_engine
 
 from bfx_funding_bot.apps.capital_comparison_guard import READER_ROLE
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.execution.legacy_archive import qualified
 from tests.pg_templates import alembic
+
+
+def _orm_key(table: str) -> str:
+    """The metadata key of ``table``: archived tables carry their schema (c2d3e4f5a6b7)."""
+    return qualified(table).removeprefix("public.")
 
 pytestmark = pytest.mark.integration
 
@@ -40,18 +46,18 @@ def _privileges(url: str) -> tuple[set[tuple[str, str]], list[str], list[tuple[s
                 "SELECT c.relname, a.attname FROM pg_class c "
                 "JOIN pg_namespace n ON n.oid = c.relnamespace "
                 "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
-                "WHERE n.nspname = 'public' AND c.relkind = 'r' "
+                "WHERE n.nspname IN ('public', 'legacy_archive') AND c.relkind = 'r' "
                 f"AND has_column_privilege('{READER_ROLE}', c.oid, a.attnum, 'SELECT')"
             ).all()
             tables = conn.exec_driver_sql(
                 "SELECT table_name FROM information_schema.role_table_grants "
-                f"WHERE grantee = '{READER_ROLE}' AND table_schema = 'public'"
+                f"WHERE grantee = '{READER_ROLE}' AND table_schema IN ('public', 'legacy_archive')"
             ).scalars().all()
             writes = conn.exec_driver_sql(
                 "SELECT c.relname, a.attname FROM pg_class c "
                 "JOIN pg_namespace n ON n.oid = c.relnamespace "
                 "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
-                "WHERE n.nspname = 'public' AND c.relkind = 'r' "
+                "WHERE n.nspname IN ('public', 'legacy_archive') AND c.relkind = 'r' "
                 f"AND has_column_privilege('{READER_ROLE}', c.oid, a.attnum, 'INSERT,UPDATE')"
             ).all()
     finally:
@@ -80,7 +86,7 @@ def test_the_legacy_arm_reads_whole_rows_of_claims_and_trades(pg_head_url: str) 
     holds every mapped column of both after this revision."""
     head, _, _ = _privileges(pg_head_url)
     for table in ("offer_claims", "funding_trades"):
-        mapped = {column.name for column in Base.metadata.tables[table].columns}
+        mapped = {column.name for column in Base.metadata.tables[_orm_key(table)].columns}
         assert {(table, column) for column in mapped} <= head, table
     for table, column in (
         ("submission_attempt_journal", "authorization_evidence"),

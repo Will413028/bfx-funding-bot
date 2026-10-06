@@ -40,6 +40,9 @@ _IDENTITY_CONTRACT_TABLES = frozenset(
 )
 _LEGACY_REMOVED_TABLES = frozenset({"users", "executions", "billing_records"})
 _RELEASE_ARCHIVE = "release_archive"
+# Migration c2d3e4f5a6b7's record of what it archived (counts, digests, revoked privileges):
+# migration-owned, no ORM model. The archived tables themselves stay in the ORM metadata.
+_LEGACY_ARCHIVE_MANIFEST = ("legacy_archive", "manifest")
 
 
 def _normalize_json_default(rendered_default: str) -> str:
@@ -89,6 +92,10 @@ def include_object(
     # migration c74d45a54e46: history, not application metadata.
     if (type_ == "table" and getattr(object_, "schema", None) == _RELEASE_ARCHIVE) or (
         schema == _RELEASE_ARCHIVE
+    ):
+        return False
+    if (type_ == "table" and (getattr(object_, "schema", None), name) == _LEGACY_ARCHIVE_MANIFEST) or (
+        (schema, table_name) == _LEGACY_ARCHIVE_MANIFEST
     ):
         return False
     # ``exchange_account_id`` is nullable in ORM metadata solely so the

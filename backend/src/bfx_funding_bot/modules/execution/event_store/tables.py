@@ -25,6 +25,7 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA as ARCHIVE
 
 # JSONB on Postgres, generic JSON on sqlite (unit tests).
 _JSON = JSON().with_variant(JSONB, "postgresql")
@@ -53,7 +54,8 @@ class EventPrefixHashRow(Base):
     __tablename__ = "event_prefix_hashes"
 
     event_seq: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("event_log.event_seq", ondelete="RESTRICT"), primary_key=True,
+        BigInteger, ForeignKey(f"{ARCHIVE}.event_log.event_seq", ondelete="RESTRICT"),
+        primary_key=True,
     )
     exchange_account_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), nullable=True
@@ -66,6 +68,7 @@ class EventPrefixHashRow(Base):
             "idx_event_prefix_scope_seq",
             "exchange_account_id", "deployment_environment", "event_seq",
         ),
+        {"schema": ARCHIVE},
     )
 
 
@@ -139,6 +142,7 @@ class EventLogRow(Base):
             "schema_version < 3 OR event_id IS NOT NULL",
             name="ck_event_log_v3_event_id",
         ),
+        {"schema": ARCHIVE},
     )
 
 
@@ -193,6 +197,7 @@ class OfferClaimRow(Base):
             sqlite_where=text("exchange_account_id IS NULL"),
             info={"identity_legacy_fixture": True},
         ),
+        {"schema": ARCHIVE},
     )
 
 
@@ -245,6 +250,7 @@ class PositionStateRow(Base):
 
     __table_args__ = (
         PrimaryKeyConstraint("exchange_account_id", "deployment_environment", "symbol"),
+        {"schema": ARCHIVE},
     )
 
 
@@ -291,6 +297,7 @@ class VenueOfferStateRow(Base):
             "idx_venue_offer_state_account_status",
             "exchange_account_id", "deployment_environment", "status",
         ),
+        {"schema": ARCHIVE},
     )
 
 
@@ -330,6 +337,7 @@ class VenueCreditStateRow(Base):
             "idx_venue_credit_state_account_status",
             "exchange_account_id", "deployment_environment", "status",
         ),
+        {"schema": ARCHIVE},
     )
 
 
@@ -355,6 +363,7 @@ class ProjectionHeadRow(Base):
         PrimaryKeyConstraint(
             "exchange_account_id", "deployment_environment", "projection_name"
         ),
+        {"schema": ARCHIVE},
     )
 
 
@@ -388,4 +397,5 @@ class ReconcileObservationRow(Base):
             "idx_reconcile_obs_acct_env_symbol_id",
             "exchange_account_id", "deployment_environment", "symbol", "id",
         ),
+        {"schema": ARCHIVE},
     )

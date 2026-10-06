@@ -45,6 +45,7 @@ def _reset(engine) -> None:
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
+        conn.exec_driver_sql("DROP SCHEMA IF EXISTS legacy_archive CASCADE")
         conn.exec_driver_sql("DROP SCHEMA public CASCADE")
         conn.exec_driver_sql("CREATE SCHEMA public")
         # Worst case, deliberately broader than production: default privileges hand every new
@@ -489,8 +490,11 @@ def test_the_web_api_baseline_is_granted_by_migration_not_by_hand(pg_templates, 
             "api_keys": {"SELECT", "INSERT", "UPDATE", "DELETE"},
             "user_configs": {"SELECT", "INSERT", "UPDATE", "DELETE"},
             "exchange_accounts": {"SELECT"}, "exchange_account_memberships": {"SELECT"},
-            "position_state": {"SELECT"}, "offer_claims": {"SELECT"}, "event_log": {"SELECT"},
-            "execution_uncertainties": {"SELECT"}, "submission_attempts": {"SELECT"},
+            # c2d3e4f5a6b7 archived the legacy tables: no table-level read of any of them
+            # (the archived history's column read of event_log is checked below).
+            "legacy_archive.position_state": set(), "legacy_archive.offer_claims": set(),
+            "legacy_archive.event_log": set(), "legacy_archive.execution_uncertainties": set(),
+            "legacy_archive.submission_attempts": set(),
             "attribution_weekly": {"SELECT"}, "funding_candles": {"SELECT"},
             "exchange_account_credentials": {"SELECT", "INSERT", "UPDATE"},
             "account_config_drafts": {"SELECT", "INSERT", "UPDATE", "DELETE"},
@@ -507,7 +511,11 @@ def test_the_web_api_baseline_is_granted_by_migration_not_by_hand(pg_templates, 
             for table, granted in expected.items():
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
                     has = conn.scalar(text("SELECT has_table_privilege('bfx_webapi', :t, :p)"),
-                                      {"t": f"public.{table}", "p": privilege})
+                                      {"t": table if "." in table else f"public.{table}",
+                                       "p": privilege})
                     assert has is (privilege in granted), (table, privilege)
+            assert conn.scalar(text(
+                "SELECT has_column_privilege('bfx_webapi', 'legacy_archive.event_log', "
+                "'payload', 'SELECT')"))
     finally:
         engine.dispose()

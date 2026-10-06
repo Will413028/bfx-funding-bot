@@ -19,6 +19,7 @@ from bfx_funding_bot.apps.read_models import select_read_models
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
+from bfx_funding_bot.modules.execution.legacy_archive import qualified
 from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
 from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionScope,
@@ -86,6 +87,7 @@ def _build_migrated(url: str) -> None:
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
+        conn.exec_driver_sql("DROP SCHEMA IF EXISTS legacy_archive CASCADE")
         conn.exec_driver_sql("DROP SCHEMA public CASCADE")
         conn.exec_driver_sql("CREATE SCHEMA public")
         for role in ("bfx_bot", "bfx_webapi"):
@@ -139,26 +141,32 @@ def test_migration_takes_back_every_web_api_ledger_write(migrated) -> None:
             for privilege in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
                 assert not _privilege(
                     conn, "SELECT has_table_privilege('bfx_webapi', :t, :p)",
-                    t=f"public.{table}", p=privilege,
+                    t=qualified(table), p=privilege,
                 ), (table, privilege)
             assert not _privilege(
                 conn, "SELECT has_any_column_privilege('bfx_webapi', :t, 'INSERT,UPDATE')",
-                t=f"public.{table}",
+                t=qualified(table),
             ), table
         for table in ("projection_heads", "event_prefix_hashes"):
             assert not _privilege(
-                conn, "SELECT has_table_privilege('bfx_webapi', :t, 'SELECT')", t=f"public.{table}"
+                conn, "SELECT has_table_privilege('bfx_webapi', :t, 'SELECT')", t=qualified(table)
             ), table
         for privilege in ("USAGE", "UPDATE", "SELECT"):
             assert not _privilege(
                 conn,
-                "SELECT has_sequence_privilege('bfx_webapi', 'public.event_log_event_seq_seq', :p)",
+                "SELECT has_sequence_privilege('bfx_webapi', "
+                "'legacy_archive.event_log_event_seq_seq', :p)",
                 p=privilege,
             ), privilege
-        # The read baseline the uncertainty console depends on is untouched.
+        # Since c2d3e4f5a6b7 the legacy tables are archived: the web API keeps only the
+        # archived execution history's column read of event_log.
+        assert _privilege(
+            conn, "SELECT has_column_privilege('bfx_webapi', :t, 'payload', 'SELECT')",
+            t=qualified("event_log"),
+        )
         for table in ("event_log", "execution_uncertainties", "submission_attempts", "position_state"):
-            assert _privilege(
-                conn, "SELECT has_table_privilege('bfx_webapi', :t, 'SELECT')", t=f"public.{table}"
+            assert not _privilege(
+                conn, "SELECT has_table_privilege('bfx_webapi', :t, 'SELECT')", t=qualified(table)
             ), table
 
 

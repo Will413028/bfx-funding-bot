@@ -50,9 +50,15 @@ from bfx_funding_bot.modules.execution.capital_observed_baseline import (
 from bfx_funding_bot.modules.execution.event_store.entities import VenueCreditObservation
 from bfx_funding_bot.modules.execution.event_store.serialization import serialize_event
 from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnapshotObserved
+from bfx_funding_bot.modules.execution.legacy_archive import qualified
 from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES
 from bfx_funding_bot.modules.trading import CapitalScope
 from tests.integration.test_capital_repository import repository, setup_policy, snapshot
+
+
+def _orm_key(table: str) -> str:
+    """The metadata key of ``table``: archived tables carry their schema (c2d3e4f5a6b7)."""
+    return qualified(table).removeprefix("public.")
 
 pytestmark = pytest.mark.integration
 
@@ -456,13 +462,13 @@ def _plant(world: World, table: str, account: UUID, state: str | None) -> None:
             conn.exec_driver_sql("SET session_replication_role = replica")
             for name in conn.exec_driver_sql(
                 "SELECT conname FROM pg_constraint WHERE contype = 'c' "
-                f"AND conrelid = 'public.{table}'::regclass"
+                f"AND conrelid = '{qualified(table)}'::regclass"
             ).scalars().all():
-                conn.exec_driver_sql(f'ALTER TABLE public.{table} DROP CONSTRAINT "{name}"')
+                conn.exec_driver_sql(f'ALTER TABLE {qualified(table)} DROP CONSTRAINT "{name}"')
             columns = conn.exec_driver_sql(
                 "SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a "
                 "LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum "
-                f"WHERE a.attrelid = 'public.{table}'::regclass AND a.attnum > 0 "
+                f"WHERE a.attrelid = '{qualified(table)}'::regclass AND a.attnum > 0 "
                 "AND NOT a.attisdropped AND a.attgenerated = '' AND a.attidentity = '' "
                 "AND (a.attnotnull AND d.adbin IS NULL "
                 "OR a.attname IN ('exchange_account_id', 'deployment_environment', 'state'))"
@@ -487,7 +493,7 @@ def _plant(world: World, table: str, account: UUID, state: str | None) -> None:
                 else:
                     values.append("'x'")
             conn.exec_driver_sql(
-                f"INSERT INTO public.{table} ({', '.join(f'\"{n}\"' for n in names)}) "
+                f"INSERT INTO {qualified(table)} ({', '.join(f'\"{n}\"' for n in names)}) "
                 f"VALUES ({', '.join(values)})"
             )
     finally:
@@ -497,7 +503,7 @@ def _plant(world: World, table: str, account: UUID, state: str | None) -> None:
 def _clear(world: World, table: str, account: UUID) -> None:
     world.exec(
         "SET session_replication_role = replica; "
-        f"DELETE FROM public.{table} WHERE exchange_account_id = '{account}'"
+        f"DELETE FROM {qualified(table)} WHERE exchange_account_id = '{account}'"
     )
 
 
@@ -578,19 +584,19 @@ def _reader_columns(world: World) -> dict[str, set[str]]:
                 "SELECT c.relname, a.attname FROM pg_class c "
                 "JOIN pg_namespace n ON n.oid = c.relnamespace "
                 "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
-                "WHERE n.nspname = 'public' AND c.relkind = 'r' "
+                "WHERE n.nspname IN ('public', 'legacy_archive') AND c.relkind = 'r' "
                 f"AND has_column_privilege('{READER_ROLE}', c.oid, a.attnum, 'SELECT')"
             ).all()
             tables = conn.exec_driver_sql(
                 "SELECT table_name FROM information_schema.role_table_grants "
-                f"WHERE grantee = '{READER_ROLE}' AND table_schema = 'public'"
+                f"WHERE grantee = '{READER_ROLE}' AND table_schema IN ('public', 'legacy_archive')"
             ).scalars().all()
             assert tables == [], "the group holds no table-level grant"
             writes = conn.exec_driver_sql(
                 "SELECT c.relname, a.attname FROM pg_class c "
                 "JOIN pg_namespace n ON n.oid = c.relnamespace "
                 "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
-                "WHERE n.nspname = 'public' AND c.relkind = 'r' "
+                "WHERE n.nspname IN ('public', 'legacy_archive') AND c.relkind = 'r' "
                 f"AND has_column_privilege('{READER_ROLE}', c.oid, a.attnum, 'INSERT,UPDATE')"
             ).all()
             assert writes == []
@@ -610,7 +616,7 @@ async def test_reader_grants_are_columns_only_and_exact(world) -> None:
     """
     found = _reader_columns(world)
     for table in _LEGACY_READ:
-        assert found[table] == {c.name for c in Base.metadata.tables[table].columns}, table
+        assert found[table] == {c.name for c in Base.metadata.tables[_orm_key(table)].columns}, table
     for table, columns in _INVENTORY_READ.items():
         assert found[table] == columns, table
     for table, column in _DENIED:

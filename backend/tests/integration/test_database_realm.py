@@ -61,11 +61,18 @@ def _migration() -> Any:
     return _load(f"{_REVISION}_database_realm.py")
 
 
+# Moves realm tables (with their trigger) out of public: c2d3e4f5a6b7 archives the legacy ones.
+_ARCHIVE_MIGRATION = "c2d3e4f5a6b7_legacy_archive_schema.py"
+
+
 def _realm_tables() -> set[str]:
     tables = set(_migration().REALM_TABLES)
     for filename in _LATER_REALM_MIGRATIONS:
         tables |= set(_load(filename).REALM_TABLES)
-    return tables
+    archive = _load(_ARCHIVE_MIGRATION)
+    moved = {f"public.{name}" for name in archive.TABLES}
+    assert moved <= tables, sorted(moved - tables)
+    return (tables - moved) | {f"{archive.SCHEMA}.{name}" for name in archive.TABLES}
 
 
 def _reset_with_roles(url: str) -> None:
