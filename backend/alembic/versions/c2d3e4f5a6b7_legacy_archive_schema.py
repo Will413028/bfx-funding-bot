@@ -16,9 +16,13 @@ archives them in place:
   privilege a role other than the owner held on the table, its columns and its owned
   sequences (``revoked_privileges``), which is what the downgrade grants back;
 * the twelve tables move unchanged (``ALTER TABLE ... SET SCHEMA``): rows, columns,
-  constraints, indexes, owned sequences, triggers -- the freeze trigger
-  (``legacy_authority_write``) included -- and the foreign keys among them and to
-  ``public`` (accounts, execution decisions);
+  constraints, indexes, owned sequences, their own triggers, and the foreign keys among them
+  and to ``public`` (accounts, execution decisions);
+* the epoch-gated, owner-exempt freeze of ``e8f9a0b1c2d3`` (``legacy_authority_write`` ->
+  ``public.guard_legacy_authority``, which nothing else uses) is replaced, as in
+  ``release_archive``, by ``archive_frozen``: a statement trigger refusing INSERT, UPDATE,
+  DELETE and TRUNCATE from every role, the owner included, on the twelve and the manifest
+  (``legacy_archive.reject_mutation``). A deliberate owner write disables it explicitly;
 * every privilege of every non-owner role (``PUBLIC`` included) on them and their sequences
   is revoked, writes and reads alike; the revision then grants back only what a remaining
   reader needs (``READERS``): the web API's archived execution history
@@ -27,9 +31,10 @@ archives them in place:
   had (comparison and seed, deleted in PR-D, which revokes them). USAGE on the schema goes
   to those two roles only.
 
-Downgrade refuses without the manifest, revokes every non-owner privilege again, moves the
-tables back to ``public``, grants back exactly ``revoked_privileges`` (to roles that still
-exist), drops the manifest and the schema, and restores the foreign key.
+Downgrade refuses without the manifest, drops ``archive_frozen``, revokes every non-owner
+privilege again, moves the tables back to ``public``, grants back exactly
+``revoked_privileges`` (to roles that still exist), restores ``e8f9a0b1c2d3``'s freeze
+function and triggers, drops the manifest and the schema, and restores the foreign key.
 
 Revision ID: c2d3e4f5a6b7
 Revises: b1c2d3e4f5a6
@@ -184,6 +189,22 @@ WEBAPI_ARCHIVE_PRIVILEGES: dict[tuple[str, str], tuple[str, ...]] = {
 # Roles that keep a read after the move: USAGE on the schema, and what ``_grant_readers`` gives.
 READERS: tuple[str, ...] = (WEBAPI, CUTOVER_READER)
 
+_FROZEN_TRIGGER = "archive_frozen"
+# e8f9a0b1c2d3's freeze, replaced here and restored by the downgrade, verbatim.
+_LEGACY_FUNCTION = "guard_legacy_authority"
+_LEGACY_TRIGGER = "legacy_authority_write"
+_LEGACY_FUNCTION_SQL = f"""CREATE FUNCTION public.{_LEGACY_FUNCTION}() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+        BEGIN
+          IF current_user IS DISTINCT FROM
+               (SELECT pg_get_userbyid(c.relowner) FROM pg_class c WHERE c.oid = TG_RELID)
+             AND (SELECT e.authority FROM public.capital_authority_epoch e
+                    ORDER BY e.epoch_seq DESC LIMIT 1) IS NOT DISTINCT FROM 'ledger' THEN
+            RAISE EXCEPTION 'legacy write after the authority switch: %', TG_TABLE_NAME;
+          END IF;
+          RETURN NULL;
+        END $$"""
+
 _LIVE_TABLE = "uncertainty_resolution_requests"
 _LIVE_FK = "fk_uncertainty_resolution_requests_event"
 
@@ -304,18 +325,22 @@ def upgrade() -> None:
         ), {"table": table, "privileges": json.dumps(privileges), "revision": revision})
 
     for table in TABLES:
+        op.execute(f"DROP TRIGGER {_LEGACY_TRIGGER} ON public.{table}")
         op.execute(f"ALTER TABLE public.{table} SET SCHEMA {SCHEMA}")
+    op.execute(f"DROP FUNCTION public.{_LEGACY_FUNCTION}()")
     _revoke_all(SCHEMA)
     _grant_readers()
 
-    op.execute(f"""CREATE FUNCTION {SCHEMA}.reject_manifest_mutation() RETURNS trigger
+    op.execute(f"""CREATE FUNCTION {SCHEMA}.reject_mutation() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog AS $$ BEGIN
-          RAISE EXCEPTION 'legacy_archive.manifest is frozen: %', TG_OP;
+          RAISE EXCEPTION 'legacy_archive is frozen: % on %', TG_OP, TG_TABLE_NAME;
         END $$""")
-    op.execute(f"REVOKE ALL ON FUNCTION {SCHEMA}.reject_manifest_mutation() FROM PUBLIC")
-    op.execute(f"CREATE TRIGGER manifest_frozen BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE "
-               f"ON {SCHEMA}.manifest FOR EACH STATEMENT "
-               f"EXECUTE FUNCTION {SCHEMA}.reject_manifest_mutation()")
+    op.execute(f"REVOKE ALL ON FUNCTION {SCHEMA}.reject_mutation() FROM PUBLIC")
+    # Statement-level, so even a write that would touch no row is refused.
+    for table in (*TABLES, "manifest"):
+        op.execute(f"CREATE TRIGGER {_FROZEN_TRIGGER} BEFORE INSERT OR UPDATE OR DELETE OR "
+                   f"TRUNCATE ON {SCHEMA}.{table} FOR EACH STATEMENT "
+                   f"EXECUTE FUNCTION {SCHEMA}.reject_mutation()")
 
 
 def downgrade() -> None:
@@ -326,12 +351,20 @@ def downgrade() -> None:
     if sorted(row.table_name for row in recorded) != sorted(TABLES):
         raise RuntimeError(f"refuse downgrade: {SCHEMA}.manifest does not list the twelve tables")
 
+    for table in (*TABLES, "manifest"):
+        op.execute(f"DROP TRIGGER {_FROZEN_TRIGGER} ON {SCHEMA}.{table}")
+    op.execute(f"DROP FUNCTION {SCHEMA}.reject_mutation()")
     _revoke_all(SCHEMA)
     for role in READERS:
         if _role_exists(role):
             op.execute(f"REVOKE ALL ON SCHEMA {SCHEMA} FROM {role}")
     for table in TABLES:
         op.execute(f"ALTER TABLE {SCHEMA}.{table} SET SCHEMA public")
+    op.execute(_LEGACY_FUNCTION_SQL)
+    op.execute(f"REVOKE ALL ON FUNCTION public.{_LEGACY_FUNCTION}() FROM PUBLIC")
+    for table in TABLES:
+        op.execute(f"CREATE TRIGGER {_LEGACY_TRIGGER} BEFORE INSERT OR UPDATE OR DELETE ON "
+                   f"public.{table} FOR EACH STATEMENT EXECUTE FUNCTION public.{_LEGACY_FUNCTION}()")
     roles = set(bind.execute(text("SELECT rolname FROM pg_roles")).scalars())
     for row in recorded:
         for entry in row.revoked_privileges:
@@ -345,7 +378,6 @@ def downgrade() -> None:
                        f'public."{entry["object"]}" TO {target}{option}')
 
     op.execute(f"DROP TABLE {SCHEMA}.manifest")
-    op.execute(f"DROP FUNCTION {SCHEMA}.reject_manifest_mutation()")
     op.execute(f"DROP SCHEMA {SCHEMA}")
     op.execute(
         f"ALTER TABLE public.{_LIVE_TABLE} ADD CONSTRAINT {_LIVE_FK} FOREIGN KEY "

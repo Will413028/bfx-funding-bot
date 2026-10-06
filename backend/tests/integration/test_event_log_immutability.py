@@ -16,6 +16,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnapshotObserved
+from tests.pg_templates import open_legacy_archive
 
 pytestmark = pytest.mark.integration
 
@@ -50,6 +51,7 @@ async def test_appending_a_capital_event_never_mutates_the_ledger(pg_head_url) -
     from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
 
     url = pg_head_url
+    open_legacy_archive(url)  # the legacy writer appends; the capital trigger stays on
     _seed(url)
     engine = create_async_engine(url.replace("+psycopg", "+asyncpg"))
     factory = async_sessionmaker(engine, expire_on_commit=False)

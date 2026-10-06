@@ -226,7 +226,7 @@ ROLLBACK;
 role 對這些表與其 sequence 的權限，只授回 `bfx_webapi` 讀 `event_log` 的 8 個欄位（archived
 execution history）與 `bfx_cutover_reader` 原有的欄位讀取（switch scaffolding，PR-D 移除），兩者各
 有 schema USAGE。`legacy_archive.manifest` 記錄每表的列數、內容 SHA-256 與被撤銷的權限（downgrade
-依此授回），只有 owner 能讀。全新主機的空資料庫照樣經舊 migration 在 public 建表，再由這個
+依此授回），只有 owner 能讀。12 張表與 manifest 對任何 role（含 owner）都拒絕寫入（`archive_frozen` trigger）。全新主機的空資料庫照樣經舊 migration 在 public 建表，再由這個
 migration 搬過去。
 
 ### 1d. 驗證隔離（留輸出當 evidence）

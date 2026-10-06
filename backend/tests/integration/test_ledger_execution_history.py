@@ -47,7 +47,7 @@ from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.projections import build_projections_router
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.ledger import CreditHistory, OfferHistory, Scope
-from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL
+from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL, OPEN_LEGACY_ARCHIVE_SQL
 
 from .test_ledger_basis import _credit, _observation, _offer
 from .test_ledger_capital_reader import SCOPE, Book
@@ -61,6 +61,7 @@ WATERMARK = 1_000
 async def _scenario(book: Book) -> dict[str, UUID]:
     """Two legacy events, a seeded attempt, then the switch and three runtime journal facts."""
     async with book.factory.begin() as session:
+        await session.execute(text(OPEN_LEGACY_ARCHIVE_SQL))
         for at, etype in ((100, "RESERVATION_INTENT"), (200, "ORDER_FILL")):
             session.add(EventLogRow(
                 account_id="account", exchange_account_id=SCOPE.exchange_account_id,

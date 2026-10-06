@@ -125,6 +125,27 @@ def disable_realm_triggers(engine: Engine) -> None:
         conn.exec_driver_sql(DISABLE_REALM_TRIGGERS_SQL)
 
 
+# The archived legacy tables refuse every write, the owner's too (c2d3e4f5a6b7,
+# ``archive_frozen``). A test that plants pre-switch history in a head database opens them on
+# its own clone, in this visible statement.
+OPEN_LEGACY_ARCHIVE_SQL = """DO $$ DECLARE r regclass; BEGIN
+  FOR r IN SELECT tgrelid::regclass FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+           WHERE t.tgname = 'archive_frozen' AND c.relnamespace = 'legacy_archive'::regnamespace
+             AND c.relname <> 'manifest' LOOP
+    EXECUTE 'ALTER TABLE ' || r::text || ' DISABLE TRIGGER archive_frozen';
+  END LOOP; END $$"""
+
+
+def open_legacy_archive(url: str) -> None:
+    """Let the owner write the twelve archived tables of this (per-test clone) database."""
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql(OPEN_LEGACY_ARCHIVE_SQL)
+    finally:
+        engine.dispose()
+
+
 def stamp_realm(url: str, realm: str = "ci") -> None:
     """The owner's one-time ``database_realm`` stamp on a migrated, still-empty database.
 

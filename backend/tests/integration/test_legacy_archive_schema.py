@@ -15,6 +15,8 @@ Mutation checks (one at a time; revert after each):
   fails.
 * Skip the manifest's privilege record (``revoked_privileges = '[]'``): the downgrade test fails
   (the pre-archive grants are not given back).
+* Skip creating ``archive_frozen`` on the twelve: ``test_the_archive_refuses_the_owner_too`` and
+  ``test_the_twelve_live_in_the_archive_and_nowhere_else`` fail.
 """
 from __future__ import annotations
 
@@ -98,9 +100,26 @@ def _acl(engine: Engine, schema: str) -> set[tuple[str, ...]]:
     return {tuple(row) for row in rows}
 
 
+def _freeze(engine: Engine) -> tuple[set[tuple[str, str]], str | None]:
+    """e8f9a0b1c2d3's freeze as it stands in public: triggers and the function's definition."""
+    with engine.connect() as conn:
+        triggers = {tuple(row) for row in conn.execute(text(
+            "SELECT c.relname, pg_get_triggerdef(t.oid) FROM pg_trigger t "
+            "JOIN pg_class c ON c.oid = t.tgrelid WHERE NOT t.tgisinternal "
+            "AND c.relnamespace = 'public'::regnamespace AND c.relname = ANY(:t)"),
+            {"t": list(TABLES)})}
+        function = conn.scalar(text(
+            "SELECT pg_get_functiondef(p.oid) || coalesce(array_to_string(p.proacl, ','), '') "
+            "FROM pg_proc p WHERE p.proname = 'guard_legacy_authority'"))
+    return triggers, function
+
+
 def _seed(engine: Engine, schema: str) -> None:
-    """The owner's legacy history (the freeze passes the owner): an account, two events."""
+    """The owner's legacy history: an account, two events. Below the archive the freeze passes
+    the owner; in the archive the owner opens ``archive_frozen`` explicitly, for this only."""
     with engine.begin() as conn:
+        if schema == "legacy_archive":
+            conn.exec_driver_sql("ALTER TABLE legacy_archive.event_log DISABLE TRIGGER archive_frozen")
         conn.exec_driver_sql(
             f"INSERT INTO exchange_accounts (id, venue, label) VALUES ('{_ACCOUNT}', 'bitfinex', "
             "'archive') ON CONFLICT DO NOTHING")
@@ -113,6 +132,8 @@ def _seed(engine: Engine, schema: str) -> None:
                 "deployment_environment, event_type, cid, venue_offer_id, payload, "
                 f"occurred_at_ms) VALUES ('{_ACCOUNT}', '{_ACCOUNT}', 'ci', '{event_type}', "
                 f"{seq}, 'offer-{seq}', '{payload}', {1000 + seq})")
+        if schema == "legacy_archive":
+            conn.exec_driver_sql("ALTER TABLE legacy_archive.event_log ENABLE TRIGGER archive_frozen")
 
 
 # -- the move -------------------------------------------------------------------------------
@@ -123,17 +144,25 @@ def test_the_twelve_live_in_the_archive_and_nowhere_else(ledger_db) -> None:  # 
             assert conn.scalar(text("SELECT to_regclass(:n)"), {"n": f"public.{table}"}) is None
             assert conn.scalar(text("SELECT to_regclass(:n)"),
                                {"n": f"legacy_archive.{table}"}) is not None, table
-        frozen = set(conn.execute(text(
-            "SELECT c.relname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
-            "WHERE t.tgname = 'legacy_authority_write' "
-            "AND c.relnamespace = 'legacy_archive'::regnamespace")).scalars())
+        frozen = {row.relname: tuple(row[1:]) for row in conn.execute(text(
+            "SELECT c.relname, (t.tgtype & 1) = 0 AS statement, (t.tgtype & 2) <> 0 AS before, "
+            "(t.tgtype & 4) <> 0 AS ins, (t.tgtype & 8) <> 0 AS del, (t.tgtype & 16) <> 0 AS upd, "
+            "(t.tgtype & 32) <> 0 AS trunc, t.tgenabled FROM pg_trigger t "
+            "JOIN pg_class c ON c.oid = t.tgrelid WHERE t.tgname = 'archive_frozen' "
+            "AND c.relnamespace = 'legacy_archive'::regnamespace"))}
+        gone = conn.scalar(text(
+            "SELECT count(*) FROM pg_trigger WHERE tgname = 'legacy_authority_write'"
+        )) + conn.scalar(text(
+            "SELECT count(*) FROM pg_proc WHERE proname = 'guard_legacy_authority'"))
         manifest = {row.table_name: row for row in conn.execute(text(
             "SELECT table_name, row_count, content_sha256, archived_by_revision "
             "FROM legacy_archive.manifest"))}
         assert set(conn.execute(text(
             "SELECT relname FROM pg_class WHERE relnamespace = 'legacy_archive'::regnamespace "
             "AND relkind = 'r'")).scalars()) == {*TABLES, "manifest"}
-    assert frozen == set(TABLES)  # the freeze moved with them
+    # Every archived table and the manifest refuse every write; e8f9a0b1c2d3's gated freeze is gone.
+    assert frozen == dict.fromkeys((*TABLES, "manifest"), (True, True, True, True, True, True, "O"))
+    assert gone == 0
     assert set(manifest) == set(TABLES)
     assert {row.archived_by_revision for row in manifest.values()} == {"c2d3e4f5a6b7"}
     assert set(_migration().TABLES) == set(TABLES)
@@ -186,9 +215,22 @@ def test_no_role_but_the_owner_can_write_the_archive(ledger_db) -> None:  # noqa
         conn.exec_driver_sql("DELETE FROM legacy_archive.event_log WHERE false")
 
 
+@pytest.mark.parametrize("statement", [
+    "INSERT INTO legacy_archive.event_log SELECT * FROM legacy_archive.event_log WHERE false",
+    "UPDATE legacy_archive.event_log SET cid = cid WHERE false",
+    "DELETE FROM legacy_archive.event_log WHERE false",
+    "TRUNCATE legacy_archive.event_log CASCADE",
+    "DELETE FROM legacy_archive.capital_snapshots WHERE false",
+    "DELETE FROM legacy_archive.manifest WHERE false",
+])
+def test_the_archive_refuses_the_owner_too(ledger_db, statement: str) -> None:  # noqa: F811
+    with pytest.raises(Exception, match="legacy_archive is frozen"), ledger_db.begin() as conn:
+        conn.exec_driver_sql(statement)
+
+
 def test_the_freeze_refuses_a_write_grant_given_back(ledger_db) -> None:  # noqa: F811
-    """Second layer: a hand GRANT does not reopen the archive while the epoch is ledger."""
-    with pytest.raises(Exception, match="legacy write after the authority switch: event_log"), \
+    """Second layer: a hand GRANT does not reopen the archive."""
+    with pytest.raises(Exception, match="legacy_archive is frozen: DELETE on event_log"), \
             ledger_db.begin() as conn:
         conn.exec_driver_sql("GRANT USAGE ON SCHEMA legacy_archive TO bfx_bot")
         conn.exec_driver_sql("GRANT DELETE ON legacy_archive.event_log TO bfx_bot")
@@ -275,14 +317,19 @@ def test_downgrade_restores_public_and_every_grant_exactly(
         "legacy_archive_pre_archive", _build_pre_archive)))
     try:
         expected = _acl(never_archived, "public")
+        expected_freeze = _freeze(never_archived)
     finally:
         never_archived.dispose()
+    assert expected_freeze[1] is not None
+    assert {name for name, _ in expected_freeze[0]} == set(TABLES)
     assert {("event_log", None, "bfx_bot", "INSERT", False),
+            ("event_log_event_seq_seq", None, "bfx_bot", "UPDATE", False),
             ("event_log", None, "bfx_webapi", "SELECT", False)} <= expected
     url = _url(ledger_db)
     ledger_db.dispose()
     alembic(url, "downgrade", _PRE_ARCHIVE)
     assert _acl(ledger_db, "public") == expected
+    assert _freeze(ledger_db) == expected_freeze
     with ledger_db.connect() as conn:
         assert conn.scalar(text("SELECT to_regnamespace('legacy_archive')")) is None
         assert conn.scalar(text(
@@ -293,6 +340,7 @@ def test_downgrade_restores_public_and_every_grant_exactly(
     alembic(url, "check")
     alembic(url, "downgrade", _PRE_ARCHIVE)  # a second round trip is as exact
     assert _acl(ledger_db, "public") == expected
+    assert _freeze(ledger_db) == expected_freeze
 
 
 def test_the_rows_move_unchanged_and_the_manifest_proves_it(ledger_db) -> None:  # noqa: F811
@@ -314,7 +362,7 @@ def test_the_rows_move_unchanged_and_the_manifest_proves_it(ledger_db) -> None: 
             text("SELECT table_name, row_count, content_sha256 FROM legacy_archive.manifest"))}
         recomputed = {table: tuple(conn.execute(text(digest("legacy_archive", table))).one())
                       for table in TABLES}
-        with pytest.raises(Exception, match="manifest is frozen"), conn.begin_nested():
+        with pytest.raises(Exception, match="legacy_archive is frozen: DELETE on manifest"), conn.begin_nested():
             conn.exec_driver_sql("DELETE FROM legacy_archive.manifest")
     assert len(before) == 2 and after == before
     assert recorded == recomputed

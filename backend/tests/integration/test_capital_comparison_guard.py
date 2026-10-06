@@ -54,6 +54,7 @@ from bfx_funding_bot.modules.execution.legacy_archive import qualified
 from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES
 from bfx_funding_bot.modules.trading import CapitalScope
 from tests.integration.test_capital_repository import repository, setup_policy, snapshot
+from tests.pg_templates import open_legacy_archive
 
 
 def _orm_key(table: str) -> str:
@@ -108,6 +109,7 @@ class World:
 
 @pytest_asyncio.fixture
 async def world(pg_head_url):  # type: ignore[no-untyped-def]
+    open_legacy_archive(pg_head_url)  # the legacy repository plants pre-switch history
     url = make_url(pg_head_url)
     engine = create_async_engine(url.set(drivername="postgresql+asyncpg"))
     factory = async_sessionmaker(engine, expire_on_commit=False)

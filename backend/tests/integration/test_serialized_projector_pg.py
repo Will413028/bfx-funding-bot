@@ -25,7 +25,7 @@ from bfx_funding_bot.modules.execution.event_store.writer import (
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
 from tests.async_wait import until
 from tests.modules.execution.event_store.test_historical_claim_cycles import seal_prefix_chain
-from tests.pg_templates import alembic
+from tests.pg_templates import alembic, open_legacy_archive
 
 pytestmark = pytest.mark.integration
 
@@ -35,10 +35,12 @@ _ENV = "ci"
 
 
 @pytest_asyncio.fixture
-async def pg_engine(pg_head_engine):
+async def pg_engine(pg_head_url, pg_head_engine):
     """Every test here runs on the migrated schema, not ``create_all``: a fresh
-    copy of the database Alembic migrated from empty to head (tests/conftest.py).
+    copy of the database Alembic migrated from empty to head (tests/conftest.py),
+    with the legacy archive opened for the event store's writes.
     ``pg_session_factory`` binds to this engine."""
+    open_legacy_archive(pg_head_url)
     return pg_head_engine
 
 

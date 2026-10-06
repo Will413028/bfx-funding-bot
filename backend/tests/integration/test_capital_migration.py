@@ -37,19 +37,28 @@ def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_templates, pg_c
                 f"SELECT has_table_privilege('bfx_bot','legacy_archive.capital_snapshots','{privilege}')"))
         assert not connection.scalar(text("SELECT has_table_privilege('bfx_bot','capital_policy_heads','UPDATE')"))
         connection.exec_driver_sql("INSERT INTO exchange_accounts (id,venue,label) VALUES ('00000000-0000-0000-0000-00000000ca01','bitfinex','migration')")
-        connection.exec_driver_sql("""INSERT INTO legacy_archive.capital_snapshot_queries
-            (id,exchange_account_id,deployment_environment,command_fence,query_revision,started_at_ms)
-            VALUES ('00000000-0000-0000-0000-00000000ca02','00000000-0000-0000-0000-00000000ca01','ci',0,1,1000)""")
-    for sql in ("UPDATE legacy_archive.capital_snapshot_queries SET command_fence=5",
+    # The archive refuses every write, the owner's included (c2d3e4f5a6b7).
+    for sql in ("INSERT INTO legacy_archive.capital_snapshot_queries SELECT * FROM "
+                "legacy_archive.capital_snapshot_queries WHERE false",
+                "UPDATE legacy_archive.capital_snapshot_queries SET command_fence=5",
                 "DELETE FROM legacy_archive.capital_snapshot_queries",
                 "TRUNCATE legacy_archive.capital_snapshot_queries CASCADE"):
-        with engine.begin() as connection, pytest.raises(Exception, match="immutable capital"):
+        with engine.begin() as connection, pytest.raises(Exception, match="legacy_archive is frozen"):
             connection.exec_driver_sql(sql)
     # The legacy runtime's write path, as it ran before the switch (the epoch freezes it after)
-    # and before c2d3e4f5a6b7 archived its tables away from the bot.
+    # and before c2d3e4f5a6b7 archived its tables away from the bot; the capital tables' own
+    # immutability is what held them then.
     from .test_ledger_schema_roles import pre_switch_url
     pre_switch_url(url)
     alembic(url, "downgrade", "b1c2d3e4f5a6")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("""INSERT INTO capital_snapshot_queries
+            (id,exchange_account_id,deployment_environment,command_fence,query_revision,started_at_ms)
+            VALUES ('00000000-0000-0000-0000-00000000ca02','00000000-0000-0000-0000-00000000ca01','ci',0,1,1000)""")
+    for sql in ("UPDATE capital_snapshot_queries SET command_fence=5",
+                "DELETE FROM capital_snapshot_queries", "TRUNCATE capital_snapshot_queries CASCADE"):
+        with engine.begin() as connection, pytest.raises(Exception, match="immutable capital"):
+            connection.exec_driver_sql(sql)
     asyncio.run(_migrated_runtime_roundtrip(url))
     for sql in ("UPDATE capital_policy_revisions SET digest='forged'",
                 "DELETE FROM capital_snapshots", "UPDATE event_log SET occurred_at_ms=0"):
