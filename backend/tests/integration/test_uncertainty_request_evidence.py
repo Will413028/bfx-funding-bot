@@ -2,28 +2,34 @@
 
 ``b8c9d0e1f2a4`` let a request cite a ledger observation instead of a reconcile event;
 ``e4f5a6b7c8d9`` closed the reconcile side: ``observation_id`` is NOT NULL, no role may write
-``reconcile_event_seq`` or ``resolved_event_seq``, and the epoch trigger is gone. Its round
-trip is compared, catalog object by catalog object, with a database built only to the
-revision before it.
+``reconcile_event_seq`` or ``resolved_event_seq``, and the epoch trigger is gone;
+``f5a6b7c8d9e0`` dropped the two columns, their CHECK branches and the guard's mention of
+them. Each contract step's round trip is compared, catalog object by catalog object, with a
+database built only to the revision before it.
 
 Mutation checks (one at a time; revert after each):
 
-* Drop ``ck_uncertainty_resolution_requests_evidence``. The both-set row inserts.
-* Skip ``e4f5a6b7c8d9``'s ``SET NOT NULL``. The reconcile-only row inserts (and ``alembic
+* Skip ``e4f5a6b7c8d9``'s ``SET NOT NULL``. The observation-less row inserts (and ``alembic
   check`` reports the model's NOT NULL).
-* Let the ledger branch of ``ck_..._outcome_shape`` accept a ``resolved_event_seq``.
+* Let ``ck_..._outcome_shape`` accept an applied request without ``processed_at_ms``.
 * Drop ``observation_id`` from the guard's immutable list. The UPDATE succeeds.
+* Keep ``reconcile_event_seq`` in ``f5a6b7c8d9e0``'s guard list. Every worker UPDATE fails
+  (``record "new" has no field``).
 * Drop the applied-requires-journal rule from the guard. The journal-less apply succeeds.
 * Drop ``uq_execution_resolution_operator_request``. Two journal rows share a request.
 * Skip ``e4f5a6b7c8d9``'s precondition. ``test_contract_refuses_a_request_with_pre_switch_
   evidence`` fails (the upgrade then fails on the NOT NULL instead, with another message).
 * Skip one grant, or the trigger, in ``e4f5a6b7c8d9``'s downgrade: the round trip differs.
+* Skip ``f5a6b7c8d9e0``'s precondition. ``test_drop_refuses_a_request_with_pre_switch_
+  evidence`` fails (the columns are dropped with the row's evidence).
+* Skip the evidence CHECK, or the guard, in ``f5a6b7c8d9e0``'s downgrade: the round trip differs.
 * Make b8c9d0e1f2a4's downgrade skip its refusal. The populated downgrade succeeds.
 """
 
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from uuid import UUID, uuid4
 
 import pytest
@@ -48,6 +54,7 @@ pytestmark = pytest.mark.integration
 
 _PREVIOUS = "a7b8c9d0e1f3"
 _BEFORE_CONTRACT = "d3e4f5a6b7c8"
+_CLOSED = "e4f5a6b7c8d9"
 _TABLE = "uncertainty_resolution_requests"
 
 
@@ -106,12 +113,10 @@ def _journal(conn, request_id: str | None, *, quarantine: str | None = None) -> 
     )
 
 
-def _apply_as_bot(conn, request_id: str, *, resolved_event_seq: str | None = None) -> None:
-    resolved = "" if resolved_event_seq is None else f", resolved_event_seq={resolved_event_seq}"
+def _apply_as_bot(conn, request_id: str) -> None:
     conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
     conn.exec_driver_sql(
-        f"UPDATE {_TABLE} SET state='applied', processed_at_ms=2000{resolved} "
-        f"WHERE request_id='{request_id}'"
+        f"UPDATE {_TABLE} SET state='applied', processed_at_ms=2000 WHERE request_id='{request_id}'"
     )
 
 
@@ -121,8 +126,7 @@ def test_a_request_cites_an_observation_and_never_a_reconcile_event(seeded) -> N
     # Even the owner, whom no grant limits.
     for sql, refusal in (
         (_request(seq=None), "observation_id"),
-        (_request(seq=7), "observation_id"),
-        (_request(seq=7, observation=_O), "_evidence"),
+        (_request(seq=7, observation=_O), 'column "reconcile_event_seq" .* does not exist'),
     ):
         with seeded.begin() as conn, pytest.raises(Exception, match=refusal):
             conn.exec_driver_sql(sql)
@@ -153,18 +157,15 @@ def test_insert_request_swallows_an_evidence_violation_as_slot_taken(seeded) -> 
     assert asyncio.run(run({**values, "observation_id": UUID(str(_O))})) is True
 
 
-def test_an_applied_request_carries_no_resolved_event(seeded) -> None:
+def test_an_applied_request_meets_the_outcome_shape(seeded) -> None:
     with seeded.begin() as conn:
         ledger = _ledger_request(conn)
         _journal(conn, ledger)
-    # The owner (no grant stops it) still meets the outcome-shape CHECK...
-    with seeded.begin() as conn, pytest.raises(Exception, match="outcome_shape"):
-        conn.exec_driver_sql(
-            f"UPDATE {_TABLE} SET state='applied', processed_at_ms=2000, resolved_event_seq=1 "
-            f"WHERE request_id='{ledger}'")
-    # ...and the account writer has no grant on the column at all.
-    with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
-        _apply_as_bot(conn, ledger, resolved_event_seq="1")
+    # The owner (no grant stops it) still meets the outcome-shape CHECK.
+    for assignments in ("processed_at_ms=NULL", "processed_at_ms=2000, outcome_reason='x'"):
+        with seeded.begin() as conn, pytest.raises(Exception, match="outcome_shape"):
+            conn.exec_driver_sql(
+                f"UPDATE {_TABLE} SET state='applied', {assignments} WHERE request_id='{ledger}'")
     with seeded.begin() as conn:
         _apply_as_bot(conn, ledger)
     with seeded.begin() as conn:
@@ -177,7 +178,7 @@ def test_guard_pins_observation_and_requires_a_journal_row(seeded) -> None:
     with seeded.begin() as conn:
         ledger = _ledger_request(conn)
     with seeded.begin() as conn, pytest.raises(Exception, match="immutable uncertainty resolution request"):
-        conn.exec_driver_sql(f"UPDATE {_TABLE} SET observation_id=NULL, reconcile_event_seq=7")
+        conn.exec_driver_sql(f"UPDATE {_TABLE} SET requested_by='someone else'")
     with seeded.begin() as conn, pytest.raises(Exception, match="immutable uncertainty resolution request"):
         conn.exec_driver_sql(f"UPDATE {_TABLE} SET observation_id='{uuid4()}'")
     with seeded.begin() as conn, pytest.raises(Exception, match="without a journal row"):
@@ -223,25 +224,18 @@ def test_only_the_observation_is_the_web_apis_to_write(seeded) -> None:
         assert conn.scalar(
             text(f"SELECT has_column_privilege('bfx_webapi','{_TABLE}','observation_id','INSERT')")
         )
-        for role, column in (
-            ("bfx_bot", "observation_id"), ("bfx_webapi", "reconcile_event_seq"),
-            ("bfx_bot", "reconcile_event_seq"), ("bfx_webapi", "resolved_event_seq"),
-            ("bfx_bot", "resolved_event_seq"),
-        ):
-            assert not conn.scalar(text(
-                f"SELECT has_column_privilege('{role}','{_TABLE}','{column}','INSERT, UPDATE')"
-            )), (role, column)
+        assert not conn.scalar(text(
+            f"SELECT has_column_privilege('bfx_bot','{_TABLE}','observation_id','INSERT, UPDATE')"
+        ))
         assert not conn.scalar(
             text(f"SELECT has_column_privilege('bfx_webapi','{_TABLE}','observation_id','UPDATE')")
         )
     # No epoch gates the observation any more: the epoch row is irrelevant (this clone's latest
     # is ``legacy``, which the evidence epoch trigger would have refused).
     as_role("bfx_webapi", _request(seq=None, observation=_O))
-    with pytest.raises(Exception, match="permission denied"):
-        as_role("bfx_webapi", _request(seq=7, observation=_O))
 
 
-# -- e4f5a6b7c8d9: the contract step against a database built only to the revision before -------
+# -- the contract steps, each against a database built only to the revision before it ----------
 
 _CATALOG = {
     "column": f"""SELECT att.attname, format_type(att.atttypid, att.atttypmod), att.attnotnull,
@@ -279,8 +273,8 @@ def _catalog(url: str) -> dict[str, set[tuple[object, ...]]]:
         engine.dispose()
 
 
-def _build_before_contract(url: str) -> None:
-    """``test_ledger_schema_roles._build``, stopped at the revision before the contract."""
+def _build_at(revision: str, url: str) -> None:
+    """``test_ledger_schema_roles._build``, stopped at ``revision``."""
     engine = create_engine(url)
     _reset(engine)
     with engine.begin() as conn:
@@ -291,21 +285,27 @@ def _build_before_contract(url: str) -> None:
         conn.exec_driver_sql(
             "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO bfx_webauth")
     engine.dispose()
-    alembic(url, "upgrade", _BEFORE_CONTRACT)
+    alembic(url, "upgrade", revision)
     stamp_realm(url, "ci")
+
+
+def _at(pg_templates, pg_clone, revision: str) -> str:
+    return pg_clone(pg_templates.template(f"request_evidence_{revision}", partial(_build_at, revision)))
 
 
 @pytest.fixture
 def before_contract(pg_templates, pg_clone) -> str:
-    return pg_clone(pg_templates.template(f"request_evidence_{_BEFORE_CONTRACT}",
-                                          _build_before_contract))
+    return _at(pg_templates, pg_clone, _BEFORE_CONTRACT)
 
 
-def test_contract_round_trip_restores_the_previous_catalog(before_contract, ledger_db) -> None:  # noqa: F811
+@pytest.fixture
+def closed(pg_templates, pg_clone) -> str:
+    return _at(pg_templates, pg_clone, _CLOSED)
+
+
+def test_contract_round_trip_restores_the_previous_catalog(before_contract, closed) -> None:
     before = _catalog(before_contract)
-    head_url = ledger_db.url.render_as_string(hide_password=False)
-    ledger_db.dispose()
-    head = _catalog(head_url)
+    head = _catalog(closed)
     # What the upgrade changes, and nothing else.
     epoch = "guard_uncertainty_request_evidence_epoch()"
     assert head["function"] < before["function"]
@@ -326,12 +326,11 @@ def test_contract_round_trip_restores_the_previous_catalog(before_contract, ledg
     assert columns_head["reconcile_event_seq"][2] == columns_head["resolved_event_seq"][2] == "{}"
     assert columns_before["reconcile_event_seq"][2] == "{bfx_webapi:INSERT:false}"
     assert columns_before["resolved_event_seq"][2] == "{bfx_bot:UPDATE:false}"
-    # The downgrade restores the previous revision exactly; upgrading again restores head.
-    alembic(head_url, "downgrade", _BEFORE_CONTRACT)
-    assert _catalog(head_url) == before
-    alembic(head_url, "upgrade", "head")
-    alembic(head_url, "check")
-    assert _catalog(head_url) == head
+    # The downgrade restores the previous revision exactly; upgrading again restores it.
+    alembic(closed, "downgrade", _BEFORE_CONTRACT)
+    assert _catalog(closed) == before
+    alembic(closed, "upgrade", _CLOSED)
+    assert _catalog(closed) == head
 
 
 def test_contract_refuses_a_request_with_pre_switch_evidence(before_contract) -> None:
@@ -352,6 +351,50 @@ def test_contract_refuses_a_request_with_pre_switch_evidence(before_contract) ->
             assert conn.scalar(text(
                 "SELECT count(*) FROM pg_trigger WHERE tgname = 'uncertainty_request_evidence_epoch'"
             )) == 1
+    finally:
+        engine.dispose()
+
+
+def test_drop_round_trip_restores_the_closed_catalog(closed, ledger_db) -> None:  # noqa: F811
+    before = _catalog(closed)
+    head_url = ledger_db.url.render_as_string(hide_password=False)
+    ledger_db.dispose()
+    head = _catalog(head_url)
+    dropped = {"reconcile_event_seq", "resolved_event_seq"}
+    shape = "ck_uncertainty_resolution_requests_outcome_shape"
+    # What the upgrade changes, and nothing else.
+    assert {row[0] for row in before["column"]} - {row[0] for row in head["column"]} == dropped
+    assert head["column"] < before["column"]
+    assert {row[0] for row in before["constraint"] - head["constraint"]} == {
+        shape, "ck_uncertainty_resolution_requests_evidence"}
+    assert {row[0] for row in head["constraint"] - before["constraint"]} == {shape}
+    assert {row[0] for row in before["function"] ^ head["function"]} == {
+        "guard_uncertainty_resolution_request()"}
+    assert not any(column in row[1] for row in head["function"] for column in dropped)
+    assert (head["table_acl"], head["index"], head["trigger"]) == (
+        before["table_acl"], before["index"], before["trigger"])
+    # The downgrade restores the previous revision exactly; upgrading again restores head.
+    alembic(head_url, "downgrade", _CLOSED)
+    assert _catalog(head_url) == before
+    alembic(head_url, "upgrade", "head")
+    alembic(head_url, "check")
+    assert _catalog(head_url) == head
+
+
+def test_drop_refuses_a_request_with_pre_switch_evidence(closed) -> None:
+    """Only a hand-changed schema lets a row carry the evidence; the drop still refuses it."""
+    engine = create_engine(closed)
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                f"INSERT INTO exchange_accounts(id,venue,label) VALUES ('{_A}','bitfinex','x')")
+            conn.exec_driver_sql(f"ALTER TABLE {_TABLE} ALTER COLUMN observation_id DROP NOT NULL")
+            conn.exec_driver_sql(_request(seq=7))
+        with pytest.raises(Exception, match="refuse to drop the pre-switch evidence columns: 1"):
+            alembic(closed, "upgrade", "head")
+        with engine.connect() as conn:
+            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == _CLOSED
+            assert conn.scalar(text(f"SELECT count(reconcile_event_seq) FROM {_TABLE}")) == 1
     finally:
         engine.dispose()
 

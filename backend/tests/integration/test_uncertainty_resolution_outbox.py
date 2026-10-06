@@ -80,8 +80,6 @@ _REQUEST_COLUMNS = (
     "observation_id", "venue_offer_id", "decision", "reason", "requested_by", "created_at_ms",
 )
 _WORKER_COLUMNS = ("state", "processed_at_ms", "outcome_reason")
-# Pre-switch evidence: still in the table, written by no role (e4f5a6b7c8d9).
-_CLOSED_COLUMNS = ("reconcile_event_seq", "resolved_event_seq")
 
 
 def _build_migrated(url: str) -> None:
@@ -208,12 +206,6 @@ def test_outbox_grants_are_column_scoped_per_role(migrated) -> None:
                 conn, "SELECT has_column_privilege('bfx_bot', :t, :c, 'UPDATE')", t=table, c=column
             ), column
         assert not _privilege(conn, "SELECT has_any_column_privilege('bfx_bot', :t, 'INSERT')", t=table)
-        for column in _CLOSED_COLUMNS:
-            for role in ("bfx_webapi", "bfx_bot"):
-                assert not _privilege(
-                    conn, f"SELECT has_column_privilege('{role}', :t, :c, 'INSERT, UPDATE')",
-                    t=table, c=column,
-                ), (role, column)
 
 
 _REQUEST_SQL = f"""INSERT INTO uncertainty_resolution_requests(

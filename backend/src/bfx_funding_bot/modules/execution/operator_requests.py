@@ -16,8 +16,7 @@ Every outbox table follows the same contract, enforced in its migration: the
 request columns are immutable, ``state`` leaves ``requested`` exactly once, a
 partial unique index allows one pending request per subject, rows are never
 deleted. The model declares its column split as ``REQUEST_COLUMNS`` and
-``WORKER_COLUMNS``, plus ``CLOSED_COLUMNS`` that are still in the table but no code maps,
-reads or writes any more (tests pin each migration's grants to them).
+``WORKER_COLUMNS`` (tests pin each migration's grants to them).
 
 The worker never holds a request hostage: a request whose outcome cannot be
 written is marked failed in its own transaction, and one that cannot even be

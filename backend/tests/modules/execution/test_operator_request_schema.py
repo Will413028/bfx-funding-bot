@@ -29,7 +29,7 @@ from bfx_funding_bot.modules.ledger import RequestColumns
 
 _VERSIONS = Path(__file__).resolve().parents[3] / "alembic/versions"
 _MIGRATION = "1c435a35dcb4_trading_governance.py"
-_UNCERTAINTY_MIGRATION = "b8c9d0e1f2a4_uncertainty_request_observation_evidence.py"
+_UNCERTAINTY_MIGRATION = "f5a6b7c8d9e0_drop_pre_switch_request_evidence.py"
 # The migration that last (re)created each outbox, and its constants' prefix.
 _OUTBOXES = [
     (UncertaintyResolutionRequestRow, _UNCERTAINTY_MIGRATION, "UNCERTAINTY_"),
@@ -46,26 +46,18 @@ def _migration(name: str = _MIGRATION):
     return module
 
 
-def _open(columns: str, model) -> tuple[str, ...]:
-    """A migration's column list without the columns no code writes any more."""
-    closed = getattr(model, "CLOSED_COLUMNS", ())
-    return tuple(column for column in columns.split(",") if column not in closed)
-
-
 @pytest.mark.parametrize(("model", "migration_file", "prefix"), _OUTBOXES)
 def test_migration_grants_exactly_the_declared_column_split(model, migration_file, prefix) -> None:
     migration = _migration(migration_file)
-    assert _open(getattr(migration, f"{prefix}REQUEST_COLUMNS"), model) == model.REQUEST_COLUMNS
-    assert _open(getattr(migration, f"{prefix}WORKER_COLUMNS"), model) == model.WORKER_COLUMNS
+    assert tuple(getattr(migration, f"{prefix}REQUEST_COLUMNS").split(",")) == model.REQUEST_COLUMNS
+    assert tuple(getattr(migration, f"{prefix}WORKER_COLUMNS").split(",")) == model.WORKER_COLUMNS
 
 
 @pytest.mark.parametrize(("model", "migration_file", "prefix"), _OUTBOXES)
 def test_every_column_belongs_to_exactly_one_writer(model, migration_file, prefix) -> None:
     columns = {column.name for column in model.__table__.columns}
-    closed = set(getattr(model, "CLOSED_COLUMNS", ()))
     assert set(model.REQUEST_COLUMNS).isdisjoint(model.WORKER_COLUMNS)
-    assert closed.isdisjoint(set(model.REQUEST_COLUMNS) | set(model.WORKER_COLUMNS))
-    assert columns == set(model.REQUEST_COLUMNS) | set(model.WORKER_COLUMNS) | closed
+    assert columns == set(model.REQUEST_COLUMNS) | set(model.WORKER_COLUMNS)
     # The shared worker records these on every outcome.
     assert {"state", "processed_at_ms", "outcome_reason"} <= set(model.WORKER_COLUMNS)
 
@@ -98,15 +90,9 @@ def test_currency_toggle_actions_match_the_migration_and_the_web_api() -> None:
     assert migration.ACTIONS == POLICY_REQUEST_ACTIONS == get_args(CurrencyAction)
 
 
-def test_closed_evidence_columns_are_in_the_table_but_never_read_or_written() -> None:
-    """The next release drops them while this one runs: nothing this image sends may name them."""
-    from sqlalchemy import insert, inspect, select
-
+def test_the_contract_drops_exactly_the_columns_its_first_step_closed() -> None:
     model = UncertaintyResolutionRequestRow
-    closed = set(model.CLOSED_COLUMNS)
-    assert closed == set(_migration("e4f5a6b7c8d9_close_pre_switch_request_evidence.py").CLOSED_COLUMNS)
-    assert closed <= {column.name for column in model.__table__.columns}
-    assert closed.isdisjoint(column.key for column in inspect(model).columns)
-    assert all(not hasattr(model, column) for column in closed)
-    for statement in (select(model), insert(model).values(**dict.fromkeys(model.REQUEST_COLUMNS))):
-        assert closed.isdisjoint(str(statement).replace(",", " ").replace(".", " ").split())
+    closed = _migration("e4f5a6b7c8d9_close_pre_switch_request_evidence.py").CLOSED_COLUMNS
+    dropped = _migration(_UNCERTAINTY_MIGRATION).DROPPED_COLUMNS
+    assert dropped == closed
+    assert set(dropped).isdisjoint(column.name for column in model.__table__.columns)

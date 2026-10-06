@@ -393,7 +393,11 @@ def test_execution_decisions_are_unreadable(head_db) -> None:
 
 def test_round_trip_keeps_the_allowlist(head_db) -> None:
     url, engine, _ = head_db
-    # e4f5a6b7c8d9's downgrade gives back the pre-switch evidence INSERT...
+    # f5a6b7c8d9e0 (dropping the closed columns) changes no web API privilege...
+    alembic(url, "downgrade", "e4f5a6b7c8d9")
+    with engine.connect() as conn:
+        assert _diff(_effective(conn)) == {"unexpected": [], "missing": []}
+    # ...e4f5a6b7c8d9's downgrade gives back the pre-switch evidence INSERT...
     alembic(url, "downgrade", _PRE_CONTRACT)
     with engine.connect() as conn:
         assert _diff(_effective(conn), PRE_CONTRACT) == {"unexpected": [], "missing": []}
