@@ -126,7 +126,6 @@ from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionScope,
     UncertaintyResolutionWorker,
 )
-from bfx_funding_bot.modules.execution.venue_normalization_shadow import VenueNormalizationShadow
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.ledger import (
     ObservationSink,
@@ -526,10 +525,7 @@ async def build_daemon(
 
     # 3a-recovery: venue reconciliation against the real venue.
     book_snapshot_writer: BookSnapshotWriter | None = None
-    auth_rest = BitfinexAuthREST(
-        http=venue_wiring.auth_http, auth_gate=bfx_auth_gate,
-        response_observer=VenueNormalizationShadow(),
-    )
+    auth_rest = BitfinexAuthREST(http=venue_wiring.auth_http, auth_gate=bfx_auth_gate)
     # Realized income truth (ledger category 28), read-only: see interest_ledger.
     interest_ledger_sync = InterestLedgerSync(
         rest=auth_rest, ctx=account_ctx, session_factory=session_factory,
