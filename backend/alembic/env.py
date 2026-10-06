@@ -92,10 +92,6 @@ def do_run_migrations(connection: Connection) -> None:
     ).scalar()
     if not got:
         raise RuntimeError("another migration is already running (advisory lock held)")
-    # Read here, outside the migration's transaction (see the schema map below).
-    archived = connection.exec_driver_sql(
-        f"SELECT to_regnamespace('{LEGACY_ARCHIVE}') IS NOT NULL"
-    ).scalar()
     try:
         # Clear the SQLAlchemy-level logical transaction that autobegan on the
         # setup statements above; isolation level may not be altered while a
@@ -104,14 +100,6 @@ def do_run_migrations(connection: Connection) -> None:
         # mid-migration failure). The session SET timeouts + advisory lock survive.
         connection.rollback()
         connection.execution_options(isolation_level=original_isolation)
-        # The legacy tables' ORM names schema ``legacy_archive`` (c2d3e4f5a6b7 moved them);
-        # c3f5a1d7e204 reads and writes them through that ORM long before the move, while they
-        # are in ``public``. On a database without the schema yet, render them unqualified so
-        # they resolve on the search path. Only then: the map also redirects reflection, so a
-        # database that has the archive (``alembic check`` at head) must not get it. No
-        # migration after c3f5a1d7e204 goes through that ORM.
-        if not archived:
-            connection.execution_options(schema_translate_map={LEGACY_ARCHIVE: None})
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
