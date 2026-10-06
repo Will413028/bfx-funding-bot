@@ -43,18 +43,19 @@ venue's truth. Follow this sequence and do not skip a step:
 2. Run a fresh full-account reconcile and record the event fence, timestamp,
    account-local projection hash, bounded venue IDs, and venue-vs-DB exposure
    diff.
-3. Inspect the durable `submission_attempts` and `execution_uncertainties`
-   rows. Bind an UNKNOWN submit to a venue object only through the audited
+3. Inspect the durable ledger attempts (`submission_attempt_journal` with their
+   `transport_outcome_journal` outcomes) and open quarantines (`quarantine_opening`);
+   the legacy `submission_attempts` / `execution_uncertainties` are archived
+   (`legacy_archive`, read-only) and hold only pre-switch history. Bind an UNKNOWN submit to a venue object only through the audited
    `bind-to-venue` request when exactly one candidate matches; zero or multiple
    candidates remain UNKNOWN.
 4. Use `mark-not-accepted` or `manual-resolution` only after complete, fresh
    reconcile evidence proves the chosen resolution. Do not retry, silently delete, or synthesize a venue
    reference.
-5. Apply a forward-fix that preserves the append-only event chain and rebuild
-   the projection from events with `uv run python scripts/verify_projection_replay.py
-   replay ...`; require exit 0, then repeat reconcile and the final verification
-   gates. The replay command is read-only; conversion/quarantine commands are
-   separate explicit writes and each must return exit 0.
+5. Apply a forward-fix that preserves the append-only ledger journal (never edit or
+   delete journal rows), then repeat reconcile and the final verification gates.
+   Conversion/quarantine commands are separate explicit writes and each must return
+   exit 0.
 
 **Operator confirmation:** the named operator must sign the classification
 (matched/adopted, still UNKNOWN, orphan quarantined, or manually resolved) and
