@@ -38,7 +38,9 @@ pytestmark = pytest.mark.integration
 _REVISION = "a7c3e9f1b2d4"
 _PREVIOUS = "e6b1d4a7c9f3"
 _TRIGGER = "database_realm_write"
-_ROLES = ("bfx_bot", "bfx_webapi", "bfx_webauth", "bfx_cutover_reader")
+# Runtime roles at head (the cutover reader is retired by d3e4f5a6b7c8; the builds still
+# create it, with default privileges, so its retirement runs on this worst case too).
+_ROLES = ("bfx_bot", "bfx_webapi", "bfx_webauth")
 _ACCOUNT = "00000000-0000-0000-0000-0000000000a1"
 _BEFORE_GENESIS = str(migration_scripts().get_revision("b1c2d3e4f5a6").down_revision)
 _VERSIONS = Path(__file__).resolve().parents[2] / "alembic/versions"
@@ -373,7 +375,7 @@ def test_runtime_roles_cannot_write_the_stamp_and_only_the_bot_reads_it(ci_db: A
                 assert not conn.scalar(
                     text("SELECT has_table_privilege(:r, 'public.database_realm', :p)"), {"r": role, "p": privilege})
         assert conn.scalar(text("SELECT has_table_privilege('bfx_bot', 'public.database_realm', 'SELECT')"))
-        for role in ("bfx_webapi", "bfx_webauth", "bfx_cutover_reader"):
+        for role in ("bfx_webapi", "bfx_webauth"):
             assert not conn.scalar(
                 text("SELECT has_any_column_privilege(:r, 'public.database_realm', 'SELECT')"), {"r": role})
         owner = conn.scalar(text("SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.database_realm'::regclass"))

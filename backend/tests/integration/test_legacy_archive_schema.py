@@ -2,8 +2,9 @@
 writes them, and only the remaining readers read them.
 
 On the production-shaped clone of ``test_ledger_schema_roles`` (default privileges hand every
-new table and sequence to ``bfx_bot`` and ``bfx_webapi``; ``bfx_webauth`` and
-``bfx_cutover_reader`` exist).
+new table and sequence to ``bfx_bot`` and ``bfx_webapi``; ``bfx_webauth`` exists). At head the
+switch scaffolding's ``bfx_cutover_reader`` holds nothing (``d3e4f5a6b7c8``,
+``test_cutover_reader_retirement``); the round trips below pass through its downgrade.
 
 Mutation checks (one at a time; revert after each):
 
@@ -43,7 +44,7 @@ pytestmark = pytest.mark.integration
 _VERSIONS = Path(__file__).resolve().parents[2] / "alembic/versions"
 _PRE_ARCHIVE = "b1c2d3e4f5a6"
 _ACCOUNT = "00000000-0000-0000-0000-0000000ac001"
-_ROLES = ("bfx_bot", "bfx_webapi", "bfx_webauth", "bfx_cutover_reader", "public")
+_ROLES = ("bfx_bot", "bfx_webapi", "bfx_webauth", "public")
 # Written out, not imported from the migration: shrinking its list must fail here.
 TABLES = (
     "event_log", "event_prefix_hashes", "projection_heads", "position_state",
@@ -257,19 +258,15 @@ def test_each_reader_holds_exactly_its_reads(ledger_db) -> None:  # noqa: F811
             "SELECT has_schema_privilege(:r, 'legacy_archive', 'USAGE')"), {"r": role})
             for role in _ROLES}
         webapi = _column_reads(conn, "bfx_webapi")
-        reader = _column_reads(conn, "bfx_cutover_reader")
         table_reads = {role: [t for t in (*TABLES, "manifest") if conn.scalar(text(
             "SELECT has_table_privilege(:r, :t, 'SELECT')"),
             {"r": role, "t": f"legacy_archive.{t}"})] for role in _ROLES}
         nobody = {role: _column_reads(conn, role) for role in ("bfx_bot", "bfx_webauth", "public")}
     assert usage == {"bfx_bot": False, "bfx_webapi": True, "bfx_webauth": False,
-                     "bfx_cutover_reader": True, "public": False}
+                     "public": False}
     assert webapi == {"event_log": WEBAPI_EVENT_COLUMNS}
     assert table_reads == {role: [] for role in _ROLES}
     assert nobody == {role: {} for role in ("bfx_bot", "bfx_webauth", "public")}
-    # The switch scaffolding's reader keeps the column reads it had (PR-D takes them back).
-    assert set(reader) <= set(TABLES) and "manifest" not in reader
-    assert reader["event_log"] >= WEBAPI_EVENT_COLUMNS
 
 
 def test_the_web_api_reads_the_archived_history(ledger_db) -> None:  # noqa: F811

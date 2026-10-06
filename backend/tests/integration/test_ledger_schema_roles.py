@@ -601,12 +601,6 @@ def test_r6_source_attempt_unique_fk_and_nulls(seeded) -> None:
                 ),
                 {"p": privilege},
             )
-        assert conn.scalar(
-            text(
-                "SELECT has_column_privilege('bfx_cutover_reader','quarantine_opening',"
-                "'source_attempt_id','SELECT')"
-            )
-        )
 
 
 @pytest.mark.parametrize("field", ["account", "environment", "symbol"])
@@ -1098,11 +1092,7 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
     with seeded.connect() as conn:
         for table in LEDGER_TABLES:
             name = table.name
-            assert conn.scalar(
-                text("SELECT has_any_column_privilege('bfx_cutover_reader',:t,'SELECT')"),
-                {"t": name},
-            )
-            for role in ("bfx_webapi", "bfx_webauth", "bfx_cutover_reader"):
+            for role in ("bfx_webapi", "bfx_webauth"):
                 assert not conn.scalar(
                     text("SELECT has_any_column_privilege(:r,:t,'INSERT')"), {"r": role, "t": name}
                 )
@@ -1125,42 +1115,11 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
             assert conn.scalar(
                 text("SELECT has_table_privilege('bfx_bot',:t,'INSERT')"), {"t": name}
             )
-        for table, column in (
-            ("ledger_observation_query", "start_revision"),
-            ("ledger_observation", "query_id"),
-            ("ledger_observation", "offer_history_pages"),
-            ("ledger_observation", "credit_history_pages"),
-            ("ledger_observation_offer", "amount_original"),
-            ("ledger_observation_offer", "rate_observed"),
-            ("accepted_capital_basis", "digest"),
-            ("accepted_capital_basis", "attempt_seq_high_water"),
-            ("accepted_capital_basis", "scope_block"),
-            ("accepted_capital_basis_symbol", "block"),
-            ("ledger_observation", "trades_complete"),
-            ("ledger_observation", "trades_requested_start_ms"),
-            ("ledger_observation_wallet", "symbol"),
-            ("submission_attempt_journal", "cell_id"),
-            ("accepted_capital_basis_symbol", "offered"),
-            ("accepted_capital_basis_attempt", "classification"),
-            ("quarantine_member", "source_kind"),
-            ("quarantine_member", "venue_object_id"),
-            ("quarantine_opening", "opened_revision"),
-            ("quarantine_opening", "source_attempt_id"),
-        ):
-            assert conn.scalar(
-                text("SELECT has_column_privilege('bfx_cutover_reader',:t,:c,'SELECT')"),
-                {"t": table, "c": column},
-            )
         for table in (
             "accepted_capital_basis_credit",
             "accepted_capital_basis_credit_cell",
             "ledger_observation_trade",
         ):
-            for column in inspect(conn).get_columns(table):
-                assert conn.scalar(
-                    text("SELECT has_column_privilege('bfx_cutover_reader',:t,:c,'SELECT')"),
-                    {"t": table, "c": column["name"]},
-                )
             for privilege in ("SELECT", "INSERT"):
                 assert conn.scalar(
                     text("SELECT has_table_privilege('bfx_bot',:t,:p)"),
@@ -1171,26 +1130,7 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
                     text("SELECT has_table_privilege('bfx_bot',:t,:p)"),
                     {"t": table, "p": privilege},
                 )
-        # ``normalized_payload`` became readable with d7e8f9a0b1c2 (the closure verifier calls
-        # the ledger's own fingerprint read, which reads the submitted amount).
-        for table, column in (
-            ("ledger_observation", "evidence"),
-            ("ledger_observation_offer", "raw"),
-            ("submission_attempt_journal", "authorization_evidence"),
-        ):
-            assert not conn.scalar(
-                text("SELECT has_column_privilege('bfx_cutover_reader',:t,:c,'SELECT')"),
-                {"t": table, "c": column},
-            )
-        assert not conn.scalar(
-            text("SELECT has_table_privilege('bfx_cutover_reader','ledger_observation','SELECT')")
-        )
-        assert not conn.scalar(
-            text(
-                "SELECT has_sequence_privilege('bfx_cutover_reader','trading_state_id_seq','USAGE')"
-            )
-        )
-    for role in ("bfx_bot", "bfx_webapi", "bfx_webauth", "bfx_cutover_reader"):
+    for role in ("bfx_bot", "bfx_webapi", "bfx_webauth"):
         for statement in (
             "UPDATE ledger_observation SET accepted=false",
             "DELETE FROM ledger_observation",
@@ -1198,12 +1138,6 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
             with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
                 conn.exec_driver_sql(f"SET LOCAL ROLE {role}")
                 conn.exec_driver_sql(statement)
-    with seeded.begin() as conn:
-        conn.exec_driver_sql("SET LOCAL ROLE bfx_cutover_reader")
-        assert conn.scalar(text("SELECT count(id) FROM ledger_observation")) == 1
-        for table in LEDGER_TABLES:
-            column = next(iter(table.primary_key.columns)).name
-            conn.exec_driver_sql(f"SELECT {column} FROM {table.name} LIMIT 1")
     # The grants hold as written once the ledger is the authority (f6a7b8c9d0e1).
     with seeded.begin() as conn:
         append_epoch(conn, "ledger", "role grants")
@@ -1227,9 +1161,6 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
             with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
                 conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
                 conn.exec_driver_sql(statement)
-    with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
-        conn.exec_driver_sql("SET LOCAL ROLE bfx_cutover_reader")
-        conn.exec_driver_sql("SELECT evidence FROM ledger_observation")
     # The web API reads an allowlisted column set (c9d0e1f2a3b5); evidence stays denied.
     with seeded.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
@@ -1244,6 +1175,12 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
 
 def test_downgrade_removes_only_its_objects(ledger_db) -> None:
     url = ledger_db.url.render_as_string(hide_password=False)
+    with ledger_db.connect() as conn:
+        # d3e4f5a6b7c8 dropped the group at head unless another database still granted it
+        # something (roles are cluster-wide); its downgrade recreates a missing group as this
+        # database's own.
+        survives = conn.scalar(
+            text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='bfx_cutover_reader')"))
     ledger_db.dispose()
     pre_switch_url(url)
     alembic(url, "downgrade", "9a4d6e2c7b18")
@@ -1258,10 +1195,10 @@ def test_downgrade_removes_only_its_objects(ledger_db) -> None:
             assert not conn.scalar(
                 text("SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname=:n)"), {"n": function}
             )
-        # The group was created by the template database, not this clone.
+        # A group another database created survives; one this database created does not.
         assert conn.scalar(
             text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='bfx_cutover_reader')")
-        )
+        ) is survives
 
 
 def test_populated_ledger_refuses_downgrade(seeded) -> None:
