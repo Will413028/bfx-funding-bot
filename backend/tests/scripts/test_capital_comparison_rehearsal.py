@@ -167,8 +167,8 @@ def test_rehearsal_uses_only_restored_copy_and_hardened_comparison(
     assert runner.cells == "cells: []\n"
     assert runner.private_modes == [0o600] * 3
     assert runner.env_mode == 0o600
-    assert "DR_ACCOUNT_ID=\n" in runner.env_text
-    assert "DR_PROJECTOR_VERSION=\n" in runner.env_text
+    assert "DR_ACCOUNT_ID" not in runner.env_text  # no legacy scope variables at all
+    assert "DR_PROJECTOR_VERSION" not in runner.env_text
     assert command[command.index("--network") + 1] == f"bfx-dr-{RESOURCE_ID}-net"
     for flag in ("--rm", "--read-only", "--tmpfs", "--cap-drop", "--security-opt", "--pids-limit"):
         assert flag in command

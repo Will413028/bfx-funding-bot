@@ -1,5 +1,10 @@
 """The legacy freeze trigger (``e8f9a0b1c2d3``) on clone PostgreSQL with prod default grants.
 
+The cases run on the schema just below ``c2d3e4f5a6b7`` (``_PRE_ARCHIVE``), where the frozen
+tables are still in ``public`` and ``bfx_bot`` still holds its default write grants, so the
+trigger is the only thing in the way. At head the archive revokes those grants and moves the
+tables; ``test_legacy_archive_schema.py`` checks both layers there.
+
 Each write is a zero-row statement as ``bfx_bot`` (``INSERT ... SELECT ... WHERE false``,
 ``UPDATE ... WHERE false``, ``DELETE ... WHERE false``): a statement trigger fires on it, so
 the statement shows the trigger's decision without any table's row constraints. A write the
@@ -17,20 +22,17 @@ Mutation checks (one at a time; revert after each):
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, Engine
 
 from tests.pg_templates import alembic
 
-from .test_ledger_schema_roles import (
-    append_epoch,
-    ledger_db,  # noqa: F401 - fixture
-    pre_switch,
-)
+from .test_ledger_schema_roles import _build, append_epoch, pre_switch
 
 pytestmark = pytest.mark.integration
 
 _PREVIOUS = "d7e8f9a0b1c2"
+_PRE_ARCHIVE = "b1c2d3e4f5a6"
 # Written out, not imported from the migration: shrinking the migration's list must fail here.
 FROZEN = (
     "event_log", "event_prefix_hashes", "projection_heads", "position_state",
@@ -92,8 +94,24 @@ def _epoch(engine: Engine, authority: str) -> None:
         append_epoch(conn, authority, "switch")
 
 
+def _build_pre_archive(url: str) -> None:
+    _build(url)
+    alembic(url, "downgrade", _PRE_ARCHIVE)
+
+
+@pytest.fixture
+def ledger_db(pg_templates, pg_clone):
+    """The prod-shaped head database (ledger_schema_roles) taken back below the archive."""
+    url = pg_clone(pg_templates.template("ledger_s1_roles_pre_archive", _build_pre_archive))
+    engine = create_engine(url)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
 @pytest.fixture(autouse=True)
-def _before_the_switch(ledger_db) -> None:  # noqa: F811
+def _before_the_switch(ledger_db) -> None:
     """Each case starts on a head database the switch has not happened on (latest legacy)."""
     with ledger_db.begin() as conn:
         pre_switch(conn)
@@ -103,7 +121,7 @@ def _cases(tables: tuple[str, ...]) -> list[tuple[str, str]]:
     return [(table, op) for table in tables for op in _OPERATIONS]
 
 
-def test_the_trigger_is_on_exactly_the_frozen_tables(ledger_db) -> None:  # noqa: F811
+def test_the_trigger_is_on_exactly_the_frozen_tables(ledger_db) -> None:
     with ledger_db.connect() as conn:
         rows = conn.execute(text(
             "SELECT c.relname, (t.tgtype & 1) = 0 AS statement, (t.tgtype & 2) <> 0 AS before, "
@@ -119,7 +137,7 @@ def test_the_trigger_is_on_exactly_the_frozen_tables(ledger_db) -> None:  # noqa
 
 @pytest.mark.parametrize(("table", "operation"), _cases(FROZEN))
 def test_frozen_tables_refuse_the_bot_under_ledger_and_pass_it_under_legacy(
-    ledger_db, table: str, operation: str,  # noqa: F811
+    ledger_db, table: str, operation: str,
 ) -> None:
     if operation not in _held(ledger_db, table):
         pytest.skip(f"bfx_bot holds no {operation} on {table}: the privilege check refuses first")
@@ -132,14 +150,14 @@ def test_frozen_tables_refuse_the_bot_under_ledger_and_pass_it_under_legacy(
     _write(ledger_db, table, operation)
 
 
-def test_every_frozen_table_is_writable_by_the_bot_under_legacy(ledger_db) -> None:  # noqa: F811
+def test_every_frozen_table_is_writable_by_the_bot_under_legacy(ledger_db) -> None:
     """Each frozen table has at least INSERT for bfx_bot, so its refusal case above ran."""
     for table in FROZEN:
         assert "INSERT" in _held(ledger_db, table), table
 
 
 @pytest.mark.parametrize("table", SHARED + OUTSIDE)
-def test_shared_tables_stay_writable_after_the_switch(ledger_db, table: str) -> None:  # noqa: F811
+def test_shared_tables_stay_writable_after_the_switch(ledger_db, table: str) -> None:
     held = _held(ledger_db, table)
     assert held, f"bfx_bot writes {table} at runtime"
     _epoch(ledger_db, "ledger")
@@ -151,7 +169,7 @@ def test_shared_tables_stay_writable_after_the_switch(ledger_db, table: str) -> 
             "WHERE t.tgname = 'legacy_authority_write' AND c.relname = :t"), {"t": table})
 
 
-def test_downgrade_drops_the_trigger_and_upgrade_restores_it(ledger_db) -> None:  # noqa: F811
+def test_downgrade_drops_the_trigger_and_upgrade_restores_it(ledger_db) -> None:
     url = ledger_db.url.render_as_string(hide_password=False)
     _epoch(ledger_db, "ledger")
     ledger_db.dispose()
@@ -161,7 +179,9 @@ def test_downgrade_drops_the_trigger_and_upgrade_restores_it(ledger_db) -> None:
         assert not conn.scalar(text(
             "SELECT count(*) FROM pg_proc WHERE proname = 'guard_legacy_authority'"))
     ledger_db.dispose()
-    alembic(url, "upgrade", "head")
-    alembic(url, "check")
+    alembic(url, "upgrade", _PRE_ARCHIVE)
     with pytest.raises(Exception, match="legacy write after the authority switch: event_log"):
         _write(ledger_db, "event_log", "INSERT")
+    ledger_db.dispose()
+    alembic(url, "upgrade", "head")
+    alembic(url, "check")

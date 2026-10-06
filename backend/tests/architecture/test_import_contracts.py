@@ -203,7 +203,7 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     for contract in (consumers, planner):
         assert contract["type"] == "forbidden"
         assert contract["allow_indirect_imports"] is True
-    # What is left of the legacy authority (DR replay, switch scaffolding) stays out of the
+    # What is left of the legacy authority (switch scaffolding) stays out of the
     # processes that lend and serve.
     runtime = contracts_by_id["runtime-not-legacy-authority"]
     assert {
@@ -213,7 +213,6 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     } <= set(runtime["source_modules"])
     assert {
         "bfx_funding_bot.modules.execution.capital_repository",
-        "bfx_funding_bot.modules.execution.boot_recovery",
         "bfx_funding_bot.modules.execution.event_store.store",
         "bfx_funding_bot.modules.execution.event_store.writer",
     } <= set(runtime["forbidden_modules"])

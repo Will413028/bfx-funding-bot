@@ -91,9 +91,17 @@ def sync_engine(parent_url: str) -> Iterator[Any]:
     engine.dispose()
 
 
+# The migration's copy (a0b1c2d3e4f5) is re-run below c2d3e4f5a6b7, which then archives its
+# legacy sources out of public.
+PRE_ARCHIVE = "b1c2d3e4f5a6"
+
+
 @pytest_asyncio.fixture
 async def factory(parent_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = create_async_engine(parent_url)
+    # Rows are planted (and the reference read runs) at PARENT, where the legacy tables are
+    # still in public; the ORM names the archive schema they move to later.
+    engine = create_async_engine(
+        parent_url, execution_options={"schema_translate_map": {"legacy_archive": None}})
     yield async_sessionmaker(engine, expire_on_commit=False)
     await engine.dispose()
 
@@ -284,7 +292,7 @@ async def test_the_copy_holds_each_offers_resolved_cell(
 ) -> None:
     await _plant(factory)
     _switch(sync_engine)
-    alembic(parent_url, "upgrade", "head")
+    alembic(parent_url, "upgrade", PRE_ARCHIVE)
     rows = _copied(sync_engine)
     assert rows == {
         (ACCOUNT, "1001", "fUST_p2"),    # claim and venue offer, by decision
@@ -295,6 +303,8 @@ async def test_the_copy_holds_each_offers_resolved_cell(
     }
 
     await materialize(factory)           # idempotent
+    assert _copied(sync_engine) == rows
+    alembic(parent_url, "upgrade", "head")   # archiving the sources keeps the copy
     assert _copied(sync_engine) == rows
     alembic(parent_url, "downgrade", PARENT)
     with sync_engine.connect() as conn:
@@ -346,10 +356,11 @@ async def test_the_copy_refuses_a_source_that_is_not_frozen(
 async def test_the_migration_is_a_no_op_on_empty_legacy_tables(
     factory: async_sessionmaker[AsyncSession], parent_url: str, sync_engine: Any,
 ) -> None:
-    alembic(parent_url, "upgrade", "head")   # epoch 'legacy': nothing to copy, no refusal
+    alembic(parent_url, "upgrade", PRE_ARCHIVE)  # epoch 'legacy': nothing to copy, no refusal
     assert _copied(sync_engine) == set()
     await materialize(factory)
     assert _copied(sync_engine) == set()
+    alembic(parent_url, "upgrade", "head")
     alembic(parent_url, "check")
 
 

@@ -1,9 +1,11 @@
-"""Baseline-free restore drill (`restore_drill.py --restore-test`), offline contracts.
+"""The ledger restore drill (`restore_drill.py`), offline contracts.
 
-The restored copy's append-only ledger rows must equal production's within the restored
-copy's own boundary, and the image's boot check must accept the copy. The baseline drill
-keeps its evidence file, allowlists and commands unchanged. The SQL itself runs against
-PostgreSQL in tests/integration/test_ledger_restore_verification.py.
+Both modes verify the ledger: the recurring restore test (`--restore-test`: the newest
+backup, end of archive) and the operator's acceptance drill (`--backup-label L
+[--target-time T]`: Halt 2, incident acceptance). The restored copy's append-only ledger rows
+must equal production's within the restored copy's own boundary, and the image's boot check
+must accept the copy. There is no operator baseline and no legacy event-chain drill. The SQL
+itself runs against PostgreSQL in tests/integration/test_ledger_restore_verification.py.
 """
 from __future__ import annotations
 
@@ -301,15 +303,16 @@ def test_boot_refusal_codes_are_bounded(stdout: str, code: str) -> None:
     assert code in evidence.LEDGER_ERROR_CODES
 
 
-def test_ledger_failure_codes_do_not_leak_into_baseline_receipts() -> None:
+def test_only_ledger_receipt_kinds_remain() -> None:
     for kind in ("restore_ledger", "restore_prefix"):
         report = evidence.render_failure_evidence(kind=kind, error_code="ledger_digest_mismatch",
                                                   observed_at_ms=1)
         assert report["kind"] == kind and report["error_code"] == "ledger_digest_mismatch"
+    # The legacy baseline drill's kinds are retired: refused whatever the code.
     for kind in ("restore", "archive_restore"):
-        with pytest.raises(evidence.EvidenceError):
-            evidence.render_failure_evidence(kind=kind, error_code="ledger_digest_mismatch",
-                                             observed_at_ms=1)
+        for code in ("ledger_digest_mismatch", "restore_output_invalid"):
+            with pytest.raises(evidence.EvidenceError):
+                evidence.render_failure_evidence(kind=kind, error_code=code, observed_at_ms=1)
 
 
 # --------------------------------------------------------------------------- drill orchestration
@@ -465,6 +468,27 @@ def test_ledger_drill_restores_the_newest_backup_and_compares_with_production(tm
                    and c[-1].endswith(suffix) for c in fake.calls)
 
 
+def test_acceptance_drill_restores_the_named_backup_and_target(tmp_path: Path) -> None:
+    fake = FakeDocker()
+    target = "2026-10-01T04:00:00Z"
+    request = drill_module.LedgerRequest(backup_label=LABEL_FULL, target_time=target)
+    assert _ledger_drill(tmp_path, fake, name="acceptance.json").run(request) == 0
+
+    report = json.loads((tmp_path / "acceptance.json").read_text())
+    assert (report["kind"], report["measured"], report["restore_test"]) == (
+        "restore_ledger", True, False)
+    assert (report["target_backup_label"], report["target_time"]) == (LABEL_FULL, target)
+    assert report["ledger"]["rows_compared"] == 9
+    assert f"DR_TARGET_BACKUP_LABEL={LABEL_FULL}\n" in fake.env_text
+    assert f"DR_TARGET_TIME={target}\n" in fake.env_text
+    # The operator named the backup: the catalog is not consulted.
+    assert not any("pgbackrest" in call and "info" in call for call in fake.calls)
+    # Production is still read only after isolation, bounded by the restored copy.
+    production = fake.find(_is_production)
+    disconnect = fake.find(lambda c: c[:3] == ("docker", "network", "disconnect"))
+    assert fake.calls.index(disconnect) < fake.calls.index(production)
+
+
 @pytest.mark.parametrize(("fake", "code"), [
     (FakeDocker(production_rows={**ROWS, "ledger_observation_wallet": ["o1\tfunding\tUST\t9\t9",
                                                                        "o1\tfunding\tBTC\t0\t0"]}),
@@ -547,16 +571,18 @@ def test_bootstrap_grants_are_per_mode() -> None:
 
     drill = drill_module.RestoreDrill(command_runner=runner)
     drill._deadline = drill_module.time.monotonic() + 60
-    plan = commands.build_restore_plan(
-        account_id=ACCOUNT, environment="prod", projector_version="execution-state-v1",
-        backup_label=LABEL_DIFF, target_time=None, run_id=RUN_ID, database_name="bfx",
-        expected_event_hash="a" * 64)
-    drill._bootstrap_role(plan, "DATABASE-PASSWORD-SENTINEL")
+    plan = commands.build_restore_resources(
+        backup_label=LABEL_DIFF, target_time=None, run_id=RUN_ID, database_name="bfx")
+    # No mode, no role: the legacy event-chain grant is gone.
+    with pytest.raises(drill_module.DrillFailureError, match="restore_output_invalid"):
+        drill._bootstrap_role(plan, "DATABASE-PASSWORD-SENTINEL")
+    assert seen == []
     drill._bootstrap_role(plan, "DATABASE-PASSWORD-SENTINEL", ledger=True)
-    assert 'public."event_log"' in seen[0] and "ALL TABLES" not in seen[0]
-    assert "ALL TABLES" not in seen[1] and "event_log" not in seen[1]
+    drill._bootstrap_role(plan, "DATABASE-PASSWORD-SENTINEL", rehearsal=True)
+    assert "ALL TABLES" not in seen[0] and "event_log" not in seen[0]
+    assert "GRANT bfx_cutover_reader TO" in seen[1] and "GRANT SELECT" not in seen[1]
     # The ledger grant is exactly the verifier list, derived from the digest rules.
-    granted = re.search(r"ARRAY\[(.*?)\] LOOP", seen[1])
+    granted = re.search(r"ARRAY\[(.*?)\] LOOP", seen[0])
     assert granted is not None
     assert tuple(re.findall(r"'([a-z_]+)'", granted.group(1))) == ledger.VERIFIER_TABLES
 
@@ -588,11 +614,12 @@ def test_ledger_verifier_command_runs_the_script_on_the_isolated_network() -> No
     assert command[command.index("--network") + 1] == NET
     with pytest.raises(commands.RestoreInputError):
         commands.ledger_verifier_command(resources, image="bfx-bot:local", env_path=Path("/tmp/x.env"))
-    with pytest.raises(commands.RestoreInputError):  # the baseline replay always pins a hash
-        commands.build_restore_plan(
-            account_id=ACCOUNT, environment="prod", projector_version="execution-state-v1",
-            backup_label=LABEL_DIFF, target_time=None, run_id=RUN_ID, database_name="bfx",
-            expected_event_hash=None)
+    with pytest.raises(commands.RestoreInputError):
+        commands.ledger_verifier_command(resources, image="sha256:" + "b" * 64,
+                                         env_path=Path("relative.env"))
+    # The legacy replay/archive verifiers are gone with the baseline drill.
+    assert not hasattr(commands, "verifier_command")
+    assert not hasattr(commands, "build_restore_plan")
 
 
 # --------------------------------------------------------------------------- CLI
@@ -627,10 +654,48 @@ def test_cli_routes_the_restore_test_and_the_transitional_prefix_call_to_ledger_
     assert request == drill_module.LedgerRequest(kind=kind)
 
 
+@pytest.mark.parametrize(("argv", "target_time", "output"), [
+    (["--backup-label", LABEL_FULL], None, "DEFAULT_OUTPUT_PATH"),
+    (["--backup-label", LABEL_FULL, "--target-time", "2026-10-01T04:00:00Z"],
+     "2026-10-01T04:00:00Z", "DEFAULT_OUTPUT_PATH"),
+    (["--backup-label", LABEL_FULL, "--output", "/srv/evidence/acceptance.json"], None,
+     Path("/srv/evidence/acceptance.json")),
+])
+def test_cli_routes_the_acceptance_drill_to_ledger_mode_at_the_named_target(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], target_time: str | None, output: str | Path,
+) -> None:
+    built: list[tuple[Path, Any]] = []
+
+    class Capture:
+        def __init__(self, *, output_path: Path = drill_module.DEFAULT_OUTPUT_PATH) -> None:
+            self.output_path = output_path
+
+        def run(self, request: Any) -> int:
+            built.append((self.output_path, request))
+            return 0
+
+    monkeypatch.setattr(drill_module, "RestoreDrill", Capture)
+    assert drill_module.main(argv) == 0
+    [(path, request)] = built
+    assert path == (output if isinstance(output, Path) else getattr(drill_module, output))
+    assert request == drill_module.LedgerRequest(backup_label=LABEL_FULL, target_time=target_time)
+
+
 @pytest.mark.parametrize("argv", [
     ["--restore-test", "--account-id", ACCOUNT],
-    ["--restore-test", "--baseline", "/tmp/b.json"],
     ["--restore-test", "--target-time", "2026-10-01T04:00:00Z"],
+    ["--restore-test", "--backup-label", LABEL_FULL],
+    # Retired flags of the legacy baseline drill are unknown arguments now.
+    ["--backup-label", LABEL_FULL, "--baseline", "/tmp/b.json"],
+    ["--backup-label", LABEL_FULL, "--archive-only"],
+    ["--backup-label", LABEL_FULL, "--target-run-id", "x"],
+    # The acceptance drill names no scope (every scope is verified) and needs a backup.
+    ["--backup-label", LABEL_FULL, "--account-id", ACCOUNT],
+    ["--backup-label", LABEL_FULL, "--account-id", ACCOUNT, "--environment", "prod",
+     "--projector-version", "v"],
+    ["--target-time", "2026-10-01T04:00:00Z"],
+    ["--backup-label", LABEL_FULL, "--output", "relative.json"],
+    [],
     ["--restore-test", "--output", "relative.json"],
     ["--prefix", "--account-id", ACCOUNT, "--environment", "prod", "--projector-version", "v",
      "--output", "/tmp/x.json"],
@@ -641,7 +706,7 @@ def test_cli_routes_the_restore_test_and_the_transitional_prefix_call_to_ledger_
      "--backup-label", LABEL_DIFF],
     ["--account-id", ACCOUNT, "--environment", "prod", "--projector-version", "v"],
 ])
-def test_cli_keeps_baseline_and_restore_test_modes_apart(argv: list[str]) -> None:
+def test_cli_keeps_the_modes_apart(argv: list[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         drill_module.main(argv)
     assert exc.value.code == 2

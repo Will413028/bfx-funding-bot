@@ -29,6 +29,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON, Uuid
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA as ARCHIVE
 
 _JSON = JSON().with_variant(JSONB, "postgresql")
 
@@ -45,19 +46,23 @@ class CapitalQueryRow(Base):
     query_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     started_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
-    __table_args__ = (UniqueConstraint("exchange_account_id", "deployment_environment",
-                                     "query_revision", name="uq_capital_query_revision"),)
+    __table_args__ = (
+        UniqueConstraint("exchange_account_id", "deployment_environment", "query_revision",
+                         name="uq_capital_query_revision"),
+        {"schema": ARCHIVE},
+    )
 
 
 class CapitalSnapshotRow(Base):
     __tablename__ = "capital_snapshots"
 
     event_seq: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("event_log.event_seq", ondelete="RESTRICT"), primary_key=True,
+        BigInteger, ForeignKey(f"{ARCHIVE}.event_log.event_seq", ondelete="RESTRICT"),
+        primary_key=True,
     )
     query_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("capital_snapshot_queries.id", ondelete="RESTRICT"), unique=True,
-        nullable=False,
+        Uuid, ForeignKey(f"{ARCHIVE}.capital_snapshot_queries.id", ondelete="RESTRICT"),
+        unique=True, nullable=False,
     )
     exchange_account_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("exchange_accounts.id", ondelete="RESTRICT"), nullable=False,
@@ -78,6 +83,8 @@ class CapitalSnapshotRow(Base):
     # records reality: refusing to record an observation because history is
     # unsettled would also remove the observations needed to settle it.
     authorization_blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = ({"schema": ARCHIVE},)
 
 
 PolicyRequestAction = Literal["enable", "disable"]

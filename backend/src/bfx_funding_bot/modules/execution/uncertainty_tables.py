@@ -30,6 +30,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON, Uuid
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA as ARCHIVE
 from bfx_funding_bot.modules.execution.operator_requests import REQUEST_STATES
 
 # Register the referenced safety table whenever this module is imported.  A
@@ -85,7 +86,7 @@ class SubmissionAttemptRow(Base):
     last_event_seq: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey(
-            "event_log.event_seq",
+            f"{ARCHIVE}.event_log.event_seq",
             ondelete="RESTRICT",
             name="fk_submission_attempts_last_event",
         ),
@@ -116,6 +117,7 @@ class SubmissionAttemptRow(Base):
             "deployment_environment",
             "symbol",
         ),
+        {"schema": ARCHIVE},
     )
 
 
@@ -149,7 +151,7 @@ class ExecutionUncertaintyRow(Base):
     attempt_id: Mapped[UUID | None] = mapped_column(
         _UUID,
         ForeignKey(
-            "submission_attempts.attempt_id",
+            f"{ARCHIVE}.submission_attempts.attempt_id",
             ondelete="RESTRICT",
             name="fk_execution_uncertainties_attempt",
         ),
@@ -159,7 +161,7 @@ class ExecutionUncertaintyRow(Base):
     opened_event_seq: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey(
-            "event_log.event_seq",
+            f"{ARCHIVE}.event_log.event_seq",
             ondelete="RESTRICT",
             name="fk_execution_uncertainties_opened_event",
         ),
@@ -168,7 +170,7 @@ class ExecutionUncertaintyRow(Base):
     reconcile_event_seq: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey(
-            "event_log.event_seq",
+            f"{ARCHIVE}.event_log.event_seq",
             ondelete="RESTRICT",
             name="fk_execution_uncertainties_reconcile_event",
         ),
@@ -177,7 +179,7 @@ class ExecutionUncertaintyRow(Base):
     resolved_event_seq: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey(
-            "event_log.event_seq",
+            f"{ARCHIVE}.event_log.event_seq",
             ondelete="RESTRICT",
             name="fk_execution_uncertainties_resolved_event",
         ),
@@ -228,9 +230,9 @@ class ExecutionUncertaintyRow(Base):
         ForeignKeyConstraint(
             ["exchange_account_id", "deployment_environment", "venue_offer_id"],
             [
-                "venue_offer_state.exchange_account_id",
-                "venue_offer_state.deployment_environment",
-                "venue_offer_state.venue_offer_id",
+                f"{ARCHIVE}.venue_offer_state.exchange_account_id",
+                f"{ARCHIVE}.venue_offer_state.deployment_environment",
+                f"{ARCHIVE}.venue_offer_state.venue_offer_id",
             ],
             name="fk_execution_uncertainties_venue_offer",
             ondelete="RESTRICT",
@@ -254,6 +256,7 @@ class ExecutionUncertaintyRow(Base):
             postgresql_where=text("state = 'open'"),
             sqlite_where=text("state = 'open'"),
         ),
+        {"schema": ARCHIVE},
     )
 
 
@@ -320,15 +323,10 @@ class UncertaintyResolutionRequestRow(Base):
         Text, nullable=False, server_default=text("'requested'")
     )
     processed_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    resolved_event_seq: Mapped[int | None] = mapped_column(
-        BigInteger,
-        ForeignKey(
-            "event_log.event_seq",
-            ondelete="RESTRICT",
-            name="fk_uncertainty_resolution_requests_event",
-        ),
-        nullable=True,
-    )
+    # Pre-switch rows only: the legacy event their resolution appended. No foreign key since
+    # the event log moved to the archive (c2d3e4f5a6b7); the outcome-shape CHECK keeps it NULL
+    # for every ledger request.
+    resolved_event_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     outcome_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (

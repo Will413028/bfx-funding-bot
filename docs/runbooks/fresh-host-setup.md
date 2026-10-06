@@ -153,9 +153,10 @@ UNION ALL SELECT 'schema', nspname FROM pg_namespace
 SELECT extname FROM pg_extension WHERE extname IN ('dblink', 'postgres_fdw');  -- 空
 -- 群組只有欄位授權：table grants 必須為空；column grants 與下列清單完全一致
 SELECT table_name, privilege_type FROM information_schema.role_table_grants
-  WHERE grantee = 'bfx_cutover_reader' AND table_schema = 'public' ORDER BY table_name, privilege_type;
+  WHERE grantee = 'bfx_cutover_reader' AND table_schema IN ('public', 'legacy_archive')
+  ORDER BY table_name, privilege_type;
 SELECT table_name, column_name, privilege_type FROM information_schema.role_column_grants
-  WHERE grantee = 'bfx_cutover_reader' AND table_schema = 'public'
+  WHERE grantee = 'bfx_cutover_reader' AND table_schema IN ('public', 'legacy_archive')
   ORDER BY table_name, column_name, privilege_type;
 ```
 
@@ -165,7 +166,8 @@ SELECT table_name, column_name, privilege_type FROM information_schema.role_colu
 
 - legacy 十張表 `event_log`、`event_prefix_hashes`、`capital_policy_heads`、`capital_policy_revisions`、
   `capital_snapshots`、`capital_snapshot_queries`、`execution_decisions`、`projection_heads`、
-  `submission_attempts`、`execution_uncertainties`：baseline 讀整列，所以是 ORM 全部欄位。
+  `submission_attempts`、`execution_uncertainties`：baseline 讀整列，所以是 ORM 全部欄位（其中
+  凍結的表自 `c2d3e4f5a6b7` 在 `legacy_archive`，欄位授權隨表搬過去）。
 - inventory 掃描欄位：`offer_claims`（scope、`state`、`symbol`）、`trading_state`（scope）、
   `uncertainty_resolution_requests`／`capital_policy_requests`／`trading_control_requests`（scope、`state`）。
 - ledger 讀取補充：`accepted_capital_basis_symbol` 的 `conservation`、`lent_unexplained`、
@@ -215,17 +217,32 @@ ROLLBACK;
 再用 LOGIN 本身（未 `SET ROLE`）確認不能讀 ledger；它只因成員資格能明確 `SET ROLE`
 為 reader。此 role 只供 cutover／rehearsal reader 使用，不放進 bot 或 webapi 的連線設定。
 
+### 1c-2. `legacy_archive`（migration `c2d3e4f5a6b7` 建立，不需手動 grant）
+
+切換前 legacy authority 的 12 張凍結表（`event_log`、`event_prefix_hashes`、`projection_heads`、
+`position_state`、`venue_offer_state`、`venue_credit_state`、`reconcile_observation`、`offer_claims`、
+`submission_attempts`、`execution_uncertainties`、`capital_snapshot_queries`、`capital_snapshots`）
+在 `legacy_archive` schema。public 的 default privileges 不作用於它：migration 撤銷所有非 owner
+role 對這些表與其 sequence 的權限，只授回 `bfx_webapi` 讀 `event_log` 的 8 個欄位（archived
+execution history）與 `bfx_cutover_reader` 原有的欄位讀取（switch scaffolding，PR-D 移除），兩者各
+有 schema USAGE。`legacy_archive.manifest` 記錄每表的列數、內容 SHA-256 與被撤銷的權限（downgrade
+依此授回），只有 owner 能讀。12 張表與 manifest 對任何 role（含 owner）都拒絕寫入（`archive_frozen` trigger）。全新主機的空資料庫照樣經舊 migration 在 public 建表，再由這個
+migration 搬過去。
+
 ### 1d. 驗證隔離（留輸出當 evidence）
 
 ```sql
 SET ROLE bfx_webauth;
 SELECT count(*) FROM auth."user";                 -- OK
-SELECT 1 FROM public.position_state LIMIT 1;      -- permission denied
+SELECT 1 FROM public.trading_state LIMIT 1;       -- permission denied
 RESET ROLE;
 
 SET ROLE bfx_webapi;
-SELECT has_table_privilege(current_user, 'public.position_state', 'SELECT') AS can_read_position,
-       has_table_privilege(current_user, 'public.event_log', 'INSERT') AS can_write_event;  -- true, false
+SELECT has_table_privilege(current_user, 'public.trading_state', 'SELECT') AS can_read_state,
+       has_column_privilege(current_user, 'legacy_archive.event_log', 'payload', 'SELECT')
+         AS can_read_archived_history,
+       has_table_privilege(current_user, 'legacy_archive.event_log', 'INSERT')
+         AS can_write_archive;  -- true, true, false
 RESET ROLE;
 ```
 

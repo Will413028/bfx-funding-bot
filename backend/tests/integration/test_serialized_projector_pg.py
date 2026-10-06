@@ -25,7 +25,7 @@ from bfx_funding_bot.modules.execution.event_store.writer import (
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
 from tests.async_wait import until
 from tests.modules.execution.event_store.test_historical_claim_cycles import seal_prefix_chain
-from tests.pg_templates import alembic
+from tests.pg_templates import alembic, open_legacy_archive
 
 pytestmark = pytest.mark.integration
 
@@ -35,10 +35,12 @@ _ENV = "ci"
 
 
 @pytest_asyncio.fixture
-async def pg_engine(pg_head_engine):
+async def pg_engine(pg_head_url, pg_head_engine):
     """Every test here runs on the migrated schema, not ``create_all``: a fresh
-    copy of the database Alembic migrated from empty to head (tests/conftest.py).
+    copy of the database Alembic migrated from empty to head (tests/conftest.py),
+    with the legacy archive opened for the event store's writes.
     ``pg_session_factory`` binds to this engine."""
+    open_legacy_archive(pg_head_url)
     return pg_head_engine
 
 
@@ -94,7 +96,8 @@ async def test_serialized_projector_schema_contract(pg_engine, monkeypatch) -> N
     try:
         with engine.connect() as connection:
             inspector = inspect(connection)
-            tables = set(inspector.get_table_names(schema="public"))
+            # Archived since c2d3e4f5a6b7, unchanged.
+            tables = set(inspector.get_table_names(schema="legacy_archive"))
             assert {"projection_heads", "venue_offer_state", "venue_credit_state"} <= tables
 
             revision = connection.execute(
@@ -103,17 +106,17 @@ async def test_serialized_projector_schema_contract(pg_engine, monkeypatch) -> N
             assert revision == _REVISION
 
             event_columns = {
-                column["name"]: column for column in inspector.get_columns("event_log")
+                column["name"]: column for column in inspector.get_columns("event_log", schema="legacy_archive")
             }
             assert event_columns["event_id"]["nullable"] is True
             assert event_columns["schema_version"]["nullable"] is False
             event_indexes = {
-                index["name"]: index for index in inspector.get_indexes("event_log")
+                index["name"]: index for index in inspector.get_indexes("event_log", schema="legacy_archive")
             }
             assert event_indexes["uq_event_log_event_id"]["unique"] is True
 
             position_columns = {
-                column["name"] for column in inspector.get_columns("position_state")
+                column["name"] for column in inspector.get_columns("position_state", schema="legacy_archive")
             }
             assert {
                 "offered_amount",
@@ -123,7 +126,7 @@ async def test_serialized_projector_schema_contract(pg_engine, monkeypatch) -> N
                 "last_venue_snapshot_at",
             } <= position_columns
             offer_columns = {
-                column["name"] for column in inspector.get_columns("venue_offer_state")
+                column["name"] for column in inspector.get_columns("venue_offer_state", schema="legacy_archive")
             }
             assert "offer_type" in offer_columns
 
@@ -131,21 +134,21 @@ async def test_serialized_projector_schema_contract(pg_engine, monkeypatch) -> N
                 ("venue_offer_state", {"exchange_account_id", "deployment_environment", "venue_offer_id"}),
                 ("venue_credit_state", {"exchange_account_id", "deployment_environment", "credit_id"}),
             ):
-                pk = set(inspector.get_pk_constraint(table)["constrained_columns"])
+                pk = set(inspector.get_pk_constraint(table, schema="legacy_archive")["constrained_columns"])
                 assert pk == identity
-                foreign_keys = inspector.get_foreign_keys(table)
+                foreign_keys = inspector.get_foreign_keys(table, schema="legacy_archive")
                 assert foreign_keys
                 assert all(
                     fk["options"].get("ondelete") == "RESTRICT"
                     for fk in foreign_keys
                 )
                 columns = {
-                    column["name"]: column for column in inspector.get_columns(table)
+                    column["name"]: column for column in inspector.get_columns(table, schema="legacy_archive")
                 }
                 assert columns["flags"]["default"] is not None
                 assert columns["is_terminal"]["default"] is not None
 
-            check_constraints = inspector.get_check_constraints("event_log")
+            check_constraints = inspector.get_check_constraints("event_log", schema="legacy_archive")
             assert any(
                 constraint["name"] == "ck_event_log_v3_event_id"
                 for constraint in check_constraints

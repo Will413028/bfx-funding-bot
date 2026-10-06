@@ -9,7 +9,6 @@ import json
 import subprocess
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
@@ -25,16 +24,6 @@ IMAGE_LABELS = {
     "org.bfx.pgbackrest.version": "2.59.1",
     "org.bfx.pgbackrest.source-sha256": "1cd522afc33b8ff846ef88c55dc238717c9c8817a4f6ca7c9f64887de9c7402d",
 }
-PROJECTION_NAMES = (
-    "offer_claims",
-    "position_state",
-    "venue_offer_state",
-    "venue_credit_state",
-    "projection_heads",
-    "reconcile_observation",
-    "submission_attempts",
-    "execution_uncertainties",
-)
 
 
 def _load_evidence() -> ModuleType:
@@ -51,94 +40,6 @@ evidence = _load_evidence()
 EvidenceError = evidence.EvidenceError
 render_backup_evidence = evidence.render_backup_evidence
 render_failure_evidence = evidence.render_failure_evidence
-def render_restore_evidence(**kwargs):
-    return evidence.render_restore_evidence(**{
-        "archive_json": _archive_report(), "verifier_image_digest": "sha256:" + "b" * 64,
-        **kwargs,
-    })
-
-
-def _archive_report():
-    return json.dumps({"schema_version": 1,
-        "scope": {"account_id": "3f19d046-5030-494c-9a0a-9573bb890c1f", "environment": "prod"},
-        "event_count": 9, "event_head": 42, "event_hash": "a" * 64,
-        "migration_heads": ["head-a", "head-b"], "archives": [], "archive_only": False})
-
-
-def _baseline_payload() -> dict[str, object]:
-    return {
-        "target_backup_label": "20260904031700-F",
-        "target_time": None,
-        "database_name": "bfx",
-        "account_id": "3f19d046-5030-494c-9a0a-9573bb890c1f",
-        "environment": "prod",
-        "projector_version": "projector-v3",
-        "migration_heads": ["head-a", "head-b"],
-        "event_count": 9,
-        "event_head": 42,
-        "event_hash": "a" * 64,
-    }
-
-
-def _load_baseline(path: Path, **identity: object):
-    request = {key: value for key, value in _baseline_payload().items() if key in (
-        "target_backup_label", "target_time", "account_id", "environment", "projector_version"
-    )}
-    return evidence.load_restore_baseline(path, **(request | identity))
-
-
-def _baseline():
-    return evidence.RestoreBaseline(**(_baseline_payload() | {"migration_heads": ("head-a", "head-b")}))
-
-
-def test_archive_baseline_version_two_requires_explicit_inventory_and_bot_image(tmp_path):
-    path = tmp_path / "baseline.json"
-    payload = _baseline_payload() | {"schema_version": 2, "archives": [],
-                                   "verifier_image_digest": "sha256:" + "c" * 64}
-    path.write_text(json.dumps(payload))
-    path.chmod(0o600)
-    baseline = _load_baseline(path)
-    assert baseline.archives == ()
-    assert baseline.schema_version == 2
-    for field in ("archives", "verifier_image_digest"):
-        path.write_text(json.dumps({k: v for k, v in payload.items() if k != field}))
-        with pytest.raises(EvidenceError):
-            _load_baseline(path)
-
-
-def test_legacy_dataclass_serialization_remains_explicit_and_compatible(tmp_path):
-    from dataclasses import asdict
-    path = tmp_path / "baseline.json"
-    payload = asdict(_baseline())
-    path.write_text(json.dumps(payload))
-    assert _load_baseline(path).schema_version == 1
-    assert _load_baseline(path).archives is None
-    path.write_text(json.dumps(payload | {"archives": []}))
-    with pytest.raises(EvidenceError):
-        _load_baseline(path)
-
-
-def test_render_restore_requires_explicit_archive_inventory_observation(tmp_path):
-    with pytest.raises(EvidenceError, match="restore_output_invalid"):
-        _render_baseline(tmp_path, archive_json=None)
-
-
-def test_render_restore_rejects_nonboolean_archive_mode(tmp_path):
-    with pytest.raises(EvidenceError):
-        _render_baseline(tmp_path, archive_only=0)
-
-
-@pytest.mark.parametrize("mutation", ["duplicate", "oversized"])
-def test_full_restore_replay_evidence_is_bounded_and_unambiguous(tmp_path, mutation):
-    raw = _replay_report()
-    if mutation == "duplicate":
-        raw = raw[:-1] + ', "event_hash":"' + "a" * 64 + '"}'
-    else:
-        raw += " " * 65536
-    with pytest.raises(EvidenceError):
-        _render_baseline(tmp_path, replay_json=raw)
-
-
 @pytest.mark.parametrize("script", ["evidence.py", "restore_drill.py"])
 def test_host_entrypoint_remains_standalone_stdlib(script):
     result = subprocess.run((sys.executable, "-I", "-S", str(EVIDENCE_PATH.with_name(script)), "--help"),
@@ -146,243 +47,77 @@ def test_host_entrypoint_remains_standalone_stdlib(script):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("mutation", ["pin", "public", "symlink", "oversized", "duplicate-run"])
-def test_opaque_transport_requires_private_pinned_bounded_inputs(tmp_path, mutation):
-    path = tmp_path / "prepared.json"
-    path.write_bytes(b"opaque bytes preserved without host decoding")
-    path.chmod(0o600)
-    ref = {"run_id": "00000000-0000-0000-0000-000000000123", "manifest_digest": "b" * 64,
-           "prepared_path": str(path), "prepared_digest": hashlib.sha256(path.read_bytes()).hexdigest()}
-    if mutation == "pin":
-        path.write_bytes(b"changed")
-    elif mutation == "public":
-        path.chmod(0o644)
-    elif mutation == "symlink":
-        link = tmp_path / "link"
-        link.symlink_to(path)
-        ref["prepared_path"] = str(link)
-    elif mutation == "oversized":
-        path.write_bytes(b"x" * 1048577)
-        ref["prepared_digest"] = hashlib.sha256(path.read_bytes()).hexdigest()
-    with pytest.raises((ValueError, OSError)):
-        evidence._archive.transport((ref, ref) if mutation == "duplicate-run" else (ref,))
+ACCOUNT = "3f19d046-5030-494c-9a0a-9573bb890c1f"
+NOW_MS = 1756961300000
 
 
-@pytest.mark.parametrize("target", [None, "00000000-0000-0000-0000-000000000123"])
-def test_opaque_transport_preserves_exact_prepared_file_bytes(tmp_path, target):
-    import base64
-    path = tmp_path / "prepared.json"
-    raw = b'not decoded by host\x00\xff'
-    path.write_bytes(raw)
-    path.chmod(0o600)
-    ref = {"run_id": "00000000-0000-0000-0000-000000000123", "manifest_digest": "b" * 64,
-           "prepared_path": str(path), "prepared_digest": hashlib.sha256(raw).hexdigest()}
-    envelope = json.loads(evidence._archive.transport((ref,), target_run_id=target))
-    assert envelope["schema_version"] == (1 if target is None else 2)
-    assert envelope.get("target_run_id") == target
-    assert base64.b64decode(envelope["prepared"][0]["payload"]) == raw
-    assert envelope["prepared"][0]["sha256"] == ref["prepared_digest"]
+def _bounds():
+    ledger = evidence._ledger
+    lines = ["schema\t180000\thead-a", *(f"table\t{name}" for name in ledger.LEDGER_TABLES),
+             f"scope\t{ACCOUNT}\tprod\t5\t5\t4\t3\t1\t7", "epoch\t2\tledger",
+             "inconsistent\tclock_behind\t0", "inconsistent\tvenue_offer_mirror_orphans\t0",
+             "inconsistent\tvenue_credit_mirror_orphans\t0"]
+    return ledger.parse_bounds("\n".join(lines) + "\n")
 
 
-@pytest.mark.parametrize(("field", "value"), [
-    ("target_backup_label", "bad;label"), ("target_time", "2026-02-30T00:00:00Z"),
-    ("target_time", 0), ("database_name", "bfx;DROP"), ("database_name", "x" * 64),
-    ("database_name", None), ("account_id", "not-a-uuid"),
-    ("account_id", "3F19D046-5030-494C-9A0A-9573BB890C1F"),
-    ("environment", "prod\n"), ("environment", []), ("projector_version", ""),
-    ("projector_version", "x" * 129), ("migration_heads", []),
-    ("migration_heads", ["head-a", "head-a"]), ("migration_heads", ["bad;head"]),
-    ("migration_heads", [None]), ("migration_heads", "head-a"),
-    ("event_count", True), ("event_count", 9.0), ("event_count", "9"),
-    ("event_count", -1), ("event_count", None), ("event_head", False),
-    ("event_head", 42.0), ("event_head", "42"), ("event_head", -1),
-    ("event_head", None), ("event_hash", "A" * 64), ("event_hash", "a" * 63),
-    ("event_hash", "sha256:" + "a" * 64), ("event_hash", None),
-])
-def test_baseline_rejects_malformed_values(tmp_path: Path, field: str, value: object) -> None:
-    payload = _baseline_payload() | {field: value}
-    path = tmp_path / "baseline.json"
-    path.write_text(json.dumps(payload))
-    # Match malformed identity to prove validation does not rely on mismatch alone.
-    identity = {field: value} if field in {
-        "target_backup_label", "target_time", "account_id", "environment", "projector_version"
-    } else {}
-    with pytest.raises(EvidenceError):
-        _load_baseline(path, **identity)
-
-
-@pytest.mark.parametrize(("field", "value"), [
-    ("target_backup_label", "20260903031700-F"), ("target_time", "2026-09-04T04:00:00Z"),
-    ("account_id", "3f19d046-5030-494c-9a0a-9573bb890c2f"),
-    ("environment", "shadow"), ("projector_version", "v4"),
-])
-def test_baseline_requires_exact_request_identity(tmp_path: Path, field: str, value: str) -> None:
-    path = tmp_path / "baseline.json"
-    path.write_text(json.dumps(_baseline_payload()))
-    with pytest.raises(EvidenceError):
-        _load_baseline(path, **{field: value})
-
-
-@pytest.mark.parametrize("kind", ["relative", "large", "directory", "symlink", "fifo", "missing", "extra", "missing-field", "duplicate", "invalid-json", "invalid-utf8"])
-def test_baseline_requires_bounded_regular_json(tmp_path: Path, kind: str) -> None:
-    import os
-
-    path = tmp_path / "baseline.json"
-    payload = _baseline_payload()
-    if kind == "relative":
-        path = Path("baseline.json")
-    elif kind == "directory":
-        path.mkdir()
-    elif kind == "fifo":
-        os.mkfifo(path)
-    elif kind == "symlink":
-        target = tmp_path / "target.json"
-        target.write_text(json.dumps(payload))
-        path.symlink_to(target)
-    elif kind == "invalid-utf8":
-        path.write_bytes(b"\xff")
-    elif kind != "missing":
-        if kind == "extra":
-            payload["raw"] = TOKEN_SENTINEL
-        elif kind == "missing-field":
-            del payload["target_time"]
-        content = json.dumps(payload)
-        if kind == "large":
-            content += " " * 65536
-        elif kind == "duplicate":
-            content = content[:-1] + ', "event_count": 9}'
-        elif kind == "invalid-json":
-            content = "[]"
-        path.write_text(content)
-    with pytest.raises(EvidenceError):
-        _load_baseline(path)
-
-
-def test_baseline_accepts_exact_size_and_empty_event_stream(tmp_path: Path) -> None:
-    path = tmp_path / "baseline.json"
-    content = json.dumps(_baseline_payload() | {"event_count": 0, "event_head": None})
-    path.write_text(content + " " * (65536 - len(content)))
-    baseline = _load_baseline(path)
-    assert baseline.event_count == 0
-    assert baseline.event_head is None
-    assert baseline.migration_heads == ("head-a", "head-b")
-
-
-@pytest.mark.parametrize(("field", "value"), [
-    ("migration_heads", ("head-a",)), ("event_count", 10), ("event_head", 43),
-    ("event_hash", "b" * 64), ("account_id", "3f19d046-5030-494c-9a0a-9573bb890c2f"),
-    ("environment", "shadow"), ("projector_version", "v4"),
-])
-def test_evidence_rejects_baseline_state_mismatch(tmp_path: Path, field: str, value: object) -> None:
-    with pytest.raises(EvidenceError):
-        _render_baseline(tmp_path, baseline=replace(_baseline(), **{field: value}))
-
-
-def _render_baseline(tmp_path: Path, **overrides: object):
+def _render_ledger(tmp_path: Path, **overrides: object):
     kwargs = {
-        "schema_tsv": "180000\thead-a,head-b\t9", "replay_json": _replay_report(),
-        "baseline": _baseline(), "elapsed_seconds": 37, "observed_at_ms": 1756961300000,
-        "config_path": _config(tmp_path), "image_digest": f"sha256:{'b' * 64}",
+        "kind": "restore_ledger", "bounds": _bounds(), "ledger": {"rows_compared": 9},
+        "boot": {"authority": "ledger"}, "target_backup_label": "20260904031700-F",
+        "elapsed_seconds": 37, "observed_at_ms": NOW_MS, "config_path": _config(tmp_path),
+        "image_digest": f"sha256:{'b' * 64}",
         "network_name": "bfx-dr-20260904t031700z-a1b2c3d4e5f60718", "network_internal": True,
-        "egress_disconnected": True, "image_labels": IMAGE_LABELS, "now_ms": 1756961300000,
+        "egress_disconnected": True, "image_labels": IMAGE_LABELS,
+        "verifier_image_digest": f"sha256:{'c' * 64}", "now_ms": NOW_MS,
     }
-    return render_restore_evidence(**(kwargs | overrides))
-
-
-@pytest.mark.parametrize(("field", "value"), [
-    ("event_head", "42"), ("event_head", 42.0),
-    ("replayed_count", 1.0), ("replayed_count", True),
-])
-def test_baseline_replay_rejects_noninteger_observations(tmp_path: Path, field: str, value: object) -> None:
-    replay = json.loads(_replay_report())
-    if field == "event_head":
-        replay[field] = value
-    else:
-        replay["diagnostic_diff"]["offer_claims"][field] = value
-    with pytest.raises(EvidenceError):
-        _render_baseline(tmp_path, replay_json=json.dumps(replay))
-
-
-@pytest.mark.parametrize("mutation", ["baseline", "missing", "mode", "utf8"])
-@pytest.mark.parametrize("persist_failure", [False, True])
-@pytest.mark.parametrize("archive_only", [False, True])
-def test_baseline_restore_cli_requires_matching_state(tmp_path: Path, monkeypatch, capsys,
-                                                     mutation, persist_failure, archive_only) -> None:
-    baseline = tmp_path / "baseline.json"
-    schema = tmp_path / "schema.tsv"
-    replay = tmp_path / "replay.json"
-    output = tmp_path / "restore.json"
-    archives = tmp_path / "archives.json"
-    archives.write_text(_archive_report())
-    archives.chmod(0o600)
-    baseline.write_text(json.dumps(_baseline_payload()))
-    schema.write_text("180000\thead-a,head-b\t9")
-    replay.write_text(_replay_report())
-    argv = (
-        sys.executable, str(EVIDENCE_PATH), "restore", "--baseline", str(baseline),
-        "--schema-tsv", str(schema), "--replay-json", str(replay),
-        "--target-backup-label", "20260904031700-F", "--account-id",
-        "3f19d046-5030-494c-9a0a-9573bb890c1f", "--environment", "prod",
-        "--projector-version", "projector-v3", "--elapsed-seconds", "37",
-        "--observed-at-ms", str(time.time_ns() // 1_000_000), "--egress-disconnected",
-        "--image-labels", json.dumps(IMAGE_LABELS),
-        "--config", str(_config(tmp_path)), "--image-digest", f"sha256:{'b' * 64}",
-        "--network-name", "bfx-dr-20260904t031700z-a1b2c3d4e5f60718",
-        "--network-internal", "--output", str(output),
-        "--archive-json", str(archives), "--verifier-image-digest", "sha256:" + "b" * 64,
-    )
-    completed = subprocess.run(argv, capture_output=True, text=True, check=False)
-    assert completed.returncode == 0
-    assert json.loads(output.read_text())["measured"] is True
-    assert read_measurement(output, key="rto_seconds") == 37
-    if mutation == "baseline":
-        baseline.write_text(json.dumps(_baseline_payload() | {"event_head": 43}))
-    elif mutation == "missing":
-        archives.unlink()
-    elif mutation == "mode":
-        archives.chmod(0o644)
-    else:
-        archives.write_bytes(b"\xff" + TOKEN_SENTINEL.encode())
-    if persist_failure:
-        def fail_replace(*args):
-            raise OSError(errno.ENOSPC, TOKEN_SENTINEL)
-        monkeypatch.setattr(evidence.os, "replace", fail_replace)
-    assert evidence.main([*argv[2:], *(["--archive-only"] if archive_only else [])]) == 2
-    with pytest.raises(ValueError):
-        read_measurement(output, key="rto_seconds")
-    if output.exists():
-        assert json.loads(output.read_text())["measured"] is False
-        assert json.loads(output.read_text())["kind"] == ("archive_restore" if archive_only else "restore")
-        assert TOKEN_SENTINEL not in output.read_text()
-    captured = capsys.readouterr()
-    assert TOKEN_SENTINEL not in captured.out + captured.err
+    return evidence.render_ledger_restore_evidence(**(kwargs | overrides))
 
 
 @pytest.mark.parametrize(("field", "value"), [
     ("observed_at_ms", True), ("observed_at_ms", 1.0), ("observed_at_ms", "1"),
     ("observed_at_ms", -1), ("egress_disconnected", False), ("egress_disconnected", 1),
+    ("verifier_image_digest", "sha256:short"), ("target_backup_label", "bad;label"),
+    ("elapsed_seconds", -1), ("network_internal", False), ("restore_test", 1),
 ])
-def test_baseline_evidence_rejects_unvalidated_metadata(tmp_path: Path, field: str, value: object) -> None:
+def test_restore_evidence_rejects_unvalidated_metadata(tmp_path: Path, field: str, value: object) -> None:
     with pytest.raises(EvidenceError):
-        _render_baseline(tmp_path, **{field: value})
+        _render_ledger(tmp_path, **{field: value})
 
 
-def test_baseline_evidence_emits_validated_target_and_observation(tmp_path: Path) -> None:
-    result = _render_baseline(tmp_path, baseline=replace(_baseline(), target_time="2026-09-04T04:00:00Z"))
-    assert result["target_time"] == "2026-09-04T04:00:00Z"
-    assert result["observed_at_ms"] == 1756961300000
+def test_restore_test_receipt_has_no_target_time(tmp_path: Path) -> None:
+    result = _render_ledger(tmp_path)
+    assert (result["restore_test"], result["target_time"]) == (True, None)
+    with pytest.raises(EvidenceError, match="restore_output_invalid"):
+        _render_ledger(tmp_path, target_time="2026-09-04T04:00:00Z")
+
+
+def test_acceptance_receipt_carries_its_target(tmp_path: Path) -> None:
+    result = _render_ledger(tmp_path, restore_test=False, target_time="2026-09-04T04:00:00Z")
+    assert result["kind"] == "restore_ledger"
+    assert (result["restore_test"], result["target_time"]) == (False, "2026-09-04T04:00:00Z")
+    assert result["target_backup_label"] == "20260904031700-F"
+    assert result["observed_at_ms"] == NOW_MS
     assert result["egress_disconnected"] is True
+    assert result["config_digest"] == hashlib.sha256(_config(tmp_path).read_bytes()).hexdigest()
+    no_target = _render_ledger(tmp_path, restore_test=False)
+    assert (no_target["restore_test"], no_target["target_time"]) == (False, None)
+
+
+@pytest.mark.parametrize("target_time", ["2026-09-04 04:00:00", "0", "2026-09-04T04:00:00", 1756961300])
+def test_acceptance_receipt_rejects_a_malformed_target_time(tmp_path: Path, target_time: object) -> None:
+    with pytest.raises(EvidenceError, match="restore_output_invalid"):
+        _render_ledger(tmp_path, restore_test=False, target_time=target_time)
 
 
 @pytest.mark.parametrize("age_ms", [-1, 900001])
 def test_restore_freshness_rejects_future_and_stale_evidence(tmp_path: Path, age_ms: int) -> None:
     with pytest.raises(EvidenceError, match="restore_output_invalid"):
-        _render_baseline(tmp_path, now_ms=1756961300000 + age_ms)
+        _render_ledger(tmp_path, now_ms=NOW_MS + age_ms)
 
 
 @pytest.mark.parametrize("age_ms", [0, 900000])
 def test_restore_freshness_accepts_window_boundaries(tmp_path: Path, age_ms: int) -> None:
-    report = _render_baseline(tmp_path, now_ms=1756961300000 + age_ms, image_labels=IMAGE_LABELS)
+    report = _render_ledger(tmp_path, now_ms=NOW_MS + age_ms, image_labels=IMAGE_LABELS)
     assert report["measured"] is True
     assert report["image_labels"] == IMAGE_LABELS
 
@@ -390,11 +125,11 @@ def test_restore_freshness_accepts_window_boundaries(tmp_path: Path, age_ms: int
 @pytest.mark.parametrize("labels", [None, {}, [], {**IMAGE_LABELS, "org.bfx.pgbackrest.version": "2.60.0"}])
 def test_renderer_image_labels_fail_closed(tmp_path: Path, labels: object) -> None:
     with pytest.raises(EvidenceError, match="restore_output_invalid"):
-        _render_baseline(tmp_path, image_labels=labels)
+        _render_ledger(tmp_path, image_labels=labels)
 
 
 def test_renderer_image_labels_drop_unbounded_extra_metadata(tmp_path: Path) -> None:
-    report = _render_baseline(tmp_path, image_labels={**IMAGE_LABELS, "raw": TOKEN_SENTINEL})
+    report = _render_ledger(tmp_path, image_labels={**IMAGE_LABELS, "raw": TOKEN_SENTINEL})
     assert report["image_labels"] == IMAGE_LABELS
     assert TOKEN_SENTINEL not in json.dumps(report)
 
@@ -597,86 +332,6 @@ def test_backup_evidence_rejects_json_float_epoch(tmp_path: Path) -> None:
         )
 
 
-def _replay_report(*, matches: bool = True) -> str:
-    row_counts = {"event_log": 9}
-    content_hashes = {"event_log": "a" * 64}
-    diagnostic_diff: dict[str, dict[str, int | str | bool]] = {}
-    for index, name in enumerate(PROJECTION_NAMES, start=1):
-        digest = f"{index:x}" * 64
-        row_counts[name] = index
-        content_hashes[name] = digest
-        diagnostic_diff[name] = {
-            "old_count": index,
-            "replayed_count": index,
-            "old_hash": digest,
-            "replayed_hash": digest,
-            "matches": matches if name == PROJECTION_NAMES[0] else True,
-        }
-    return json.dumps(
-        {
-            "account_id": "3f19d046-5030-494c-9a0a-9573bb890c1f",
-            "environment": "prod",
-            "projector_version": "projector-v3",
-            "event_head": 42,
-            "event_hash": "a" * 64,
-            "row_counts": row_counts,
-            "content_hashes": content_hashes,
-            "diagnostic_diff": diagnostic_diff,
-            "raw": TOKEN_SENTINEL,
-        }
-    )
-
-
-def test_restore_evidence_keeps_only_stable_bounded_fields(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-
-    result = render_restore_evidence(
-        schema_tsv="180000\thead-a,head-b\t9",
-        replay_json=_replay_report(),
-        baseline=_baseline(),
-        observed_at_ms=1756961300000,
-        now_ms=1756961300000,
-        image_labels=IMAGE_LABELS,
-        egress_disconnected=True,
-        elapsed_seconds=37,
-        config_path=config,
-        image_digest=f"sha256:{'b' * 64}",
-        network_name="bfx-dr-20260904t031700z-a1b2c3d4e5f60718",
-        network_internal=True,
-    )
-
-    assert result["measured"] is True
-    assert result["rto_seconds"] == 37
-    assert result["kind"] == "restore"
-    assert result["event_hash"] == "a" * 64
-    assert result["event_count"] == 9
-    assert result["row_counts"]["offer_claims"] == 1
-    assert result["projection_hashes"]["offer_claims"] == "1" * 64
-    assert result["network_internal"] is True
-    assert result["network_name"].startswith("bfx-dr-")
-    assert result["config_digest"] == hashlib.sha256(config.read_bytes()).hexdigest()
-    assert result["image_digest"] == f"sha256:{'b' * 64}"
-    assert TOKEN_SENTINEL not in json.dumps(result)
-
-
-def test_restore_evidence_rejects_projection_mismatch(tmp_path: Path) -> None:
-    with pytest.raises(EvidenceError, match=r"^projection_replay_mismatch$"):
-        render_restore_evidence(
-            schema_tsv="180000\thead-a\t9",
-            replay_json=_replay_report(matches=False),
-            baseline=_baseline(),
-            observed_at_ms=1756961300000,
-            now_ms=1756961300000,
-            image_labels=IMAGE_LABELS,
-            egress_disconnected=True,
-            elapsed_seconds=37,
-            config_path=_config(tmp_path),
-            image_digest=f"sha256:{'b' * 64}",
-            network_name="bfx-dr-20260904t031700z-a1b2c3d4e5f60718",
-            network_internal=True,
-        )
-
-
 def test_failure_evidence_rejects_unbounded_error_codes() -> None:
     result = render_failure_evidence(
         kind="backup", error_code="archiver_output_invalid", observed_at_ms=1234
@@ -691,6 +346,12 @@ def test_failure_evidence_rejects_unbounded_error_codes() -> None:
     with pytest.raises(EvidenceError):
         render_failure_evidence(kind="backup", error_code=TOKEN_SENTINEL, observed_at_ms=1234)
     assert TOKEN_SENTINEL not in json.dumps(result)
+
+
+@pytest.mark.parametrize("kind", ["restore", "archive_restore"])
+def test_failure_evidence_refuses_the_retired_baseline_kinds(kind: str) -> None:
+    with pytest.raises(EvidenceError):
+        render_failure_evidence(kind=kind, error_code="restore_output_invalid", observed_at_ms=1)
 
 
 def test_backup_cli_writes_atomic_bounded_failure(tmp_path: Path) -> None:

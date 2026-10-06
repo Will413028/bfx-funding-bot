@@ -25,6 +25,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.modules.execution.legacy_archive import qualified
 from bfx_funding_bot.modules.trading import CapitalScope
 
 _OPEN_CLAIMS: Final = "state IN ('pending', 'unknown', 'claimed')"
@@ -81,7 +82,7 @@ def live_symbols(classification: Any) -> set[str]:
 
 
 async def _exists(session: AsyncSession, table: str) -> bool:
-    return bool(await session.scalar(text("SELECT to_regclass(:name) IS NOT NULL"), {"name": f"public.{table}"}))
+    return bool(await session.scalar(text("SELECT to_regclass(:name) IS NOT NULL"), {"name": qualified(table)}))
 
 
 async def reverse_inventory(
@@ -101,7 +102,7 @@ async def reverse_inventory(
         clause = f" WHERE {where}" if where else ""
         rows = await session.execute(
             text(
-                f"SELECT DISTINCT exchange_account_id, deployment_environment FROM public.{table}{clause}"
+                f"SELECT DISTINCT exchange_account_id, deployment_environment FROM {qualified(table)}{clause}"
             )
         )
         violations.extend(
@@ -136,7 +137,8 @@ async def reverse_inventory(
     latest = await session.execute(
         text(
             "SELECT DISTINCT ON (exchange_account_id, deployment_environment) "
-            "exchange_account_id, deployment_environment, classification FROM public.capital_snapshots "
+            "exchange_account_id, deployment_environment, classification "
+            f"FROM {qualified('capital_snapshots')} "
             "ORDER BY exchange_account_id, deployment_environment, event_seq DESC"
         )
     )
@@ -155,7 +157,7 @@ async def reverse_inventory(
     claims = await session.execute(
         text(
             "SELECT DISTINCT exchange_account_id, deployment_environment, symbol "
-            f"FROM public.offer_claims WHERE {_OPEN_CLAIMS}"
+            f"FROM {qualified('offer_claims')} WHERE {_OPEN_CLAIMS}"
         )
     )
     live.update((account, environment, symbol) for account, environment, symbol in claims.all())

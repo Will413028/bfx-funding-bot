@@ -15,9 +15,44 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import Pool, StaticPool
 
 from tests import pg_local
+
+
+# The frozen legacy tables live in their own schema (migration c2d3e4f5a6b7, ORM
+# ``schema=legacy_archive``). ``Base.metadata.create_all`` creates no schema: on PostgreSQL it
+# is created first, and every SQLite connection attaches a database of that name (in memory,
+# or a file beside the main one) so the unit fixtures keep building the whole metadata.
+def _attach_legacy_archive(dbapi_connection, _record) -> None:
+    if "sqlite" not in type(dbapi_connection).__module__:
+        return
+    from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA
+
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA database_list")
+        attached = {row[1]: row[2] for row in cursor.fetchall()}
+        if SCHEMA not in attached:
+            main = attached.get("main") or ""
+            cursor.execute(f"ATTACH DATABASE ? AS {SCHEMA}",
+                           (f"{main}.{SCHEMA}" if main else ":memory:",))
+    finally:
+        cursor.close()
+
+
+def _register_legacy_archive_schema() -> None:
+    from sqlalchemy import DDL, event
+
+    from bfx_funding_bot.core.db import Base
+    from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA
+
+    event.listen(Pool, "connect", _attach_legacy_archive)
+    event.listen(Base.metadata, "before_create",
+                 DDL(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}").execute_if(dialect="postgresql"))
+
+
+_register_legacy_archive_schema()
 
 
 async def ensure_auth_user(session: AsyncSession, user_id: str) -> None:
@@ -346,106 +381,6 @@ def _reset_rate_limits():
 
 
 # ---------------------------------------------------------------------------
-# Projection-archive fixtures (PostgreSQL 18).
-#
-# Building the archive schema means migrating to e7b1c2d3e4f5, seeding legacy
-# rows, then migrating to head -- seconds per test, across ~100 test cases. It is
-# done once into a template database; each test gets a byte-identical copy via
-# CREATE DATABASE ... TEMPLATE. Roles are cluster-wide and so shared, as they
-# already were between tests of one module.
-# ---------------------------------------------------------------------------
-
-_ARCHIVE_TEMPLATE = "archive_template"
-# Matches ACCOUNT in tests/integration/test_projection_cutover_archive.py.
-_ARCHIVE_ACCOUNT = "00000000-0000-0000-0000-000000000064"
-
-
-def _build_archive_database(url: str) -> None:
-    """Migrate, seed and verify one database exactly as each test used to."""
-    from sqlalchemy import create_engine
-
-    from tests.pg_templates import alembic
-
-    engine = create_engine(url)
-    try:
-        alembic(url, "upgrade", "e7b1c2d3e4f5")
-        with engine.begin() as conn:
-            conn.execute(
-                text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','synthetic')"),
-                {"id": _ARCHIVE_ACCOUNT},
-            )
-            conn.execute(
-                text(
-                    "INSERT INTO position_state(account_id,exchange_account_id,deployment_environment,symbol,reserved,last_updated_ms) VALUES (:s,:id,'ci','fUST',1.2300,123)"
-                ),
-                {"s": _ARCHIVE_ACCOUNT, "id": _ARCHIVE_ACCOUNT},
-            )
-            conn.execute(
-                text(
-                    "INSERT INTO reconcile_observation(account_id,exchange_account_id,deployment_environment,reserved_usdt,realized_usdt,n_offers,n_credits,observed_at_ms,event_seq_fence,recorded_at) VALUES (:s,:id,'ci',1.2300,0.000,2,3,123,0,'2001-02-03T04:05:06.123456Z')"
-                ),
-                {"s": _ARCHIVE_ACCOUNT, "id": _ARCHIVE_ACCOUNT},
-            )
-            before = conn.execute(text("SELECT to_jsonb(p) FROM position_state p ORDER BY symbol")).all()
-        alembic(url, "upgrade", "head")
-        with engine.begin() as conn:
-            after = conn.execute(text("SELECT to_jsonb(p) FROM position_state p ORDER BY symbol")).all()
-            assert after == before
-            # The migration stamped the database `ci` from the seeded rows. The archive tests
-            # also need one foreign-realm row (to prove the archive scopes by realm); the
-            # realm trigger forbids it, so it is planted with the trigger visibly disabled.
-            conn.exec_driver_sql("ALTER TABLE position_state DISABLE TRIGGER database_realm_write")
-            conn.execute(
-                text(
-                    "INSERT INTO position_state(account_id,exchange_account_id,deployment_environment,symbol,reserved,last_updated_ms) VALUES (:s,:id,'shadow','fUSD',9.000,999)"
-                ),
-                {"s": _ARCHIVE_ACCOUNT, "id": _ARCHIVE_ACCOUNT},
-            )
-            conn.exec_driver_sql("ALTER TABLE position_state ENABLE TRIGGER database_realm_write")
-            conn.exec_driver_sql("CREATE SCHEMA unrelated")
-            conn.exec_driver_sql("CREATE TABLE unrelated.keep_me(id integer)")
-        alembic(url, "check")
-    finally:
-        engine.dispose()
-
-
-@pytest.fixture(scope="session")
-def archive_pg(pg_server: pg_local.LocalPostgres) -> str:
-    """The former postgres:18 testcontainer: the same per-process server, psycopg URL."""
-    return pg_server.get_connection_url().replace("+psycopg2", "+psycopg")
-
-
-@pytest.fixture(scope="session")
-def archive_templates(pg_templates):
-    """One template registry per cluster: a template is built once whoever asks for it."""
-    return pg_templates
-
-
-@pytest.fixture(scope="session")
-def _archive_template(archive_templates) -> str:
-    return archive_templates.template(_ARCHIVE_TEMPLATE, _build_archive_database)
-
-
-@pytest_asyncio.fixture
-async def archive_db(
-    archive_pg: str, archive_templates, _archive_template: str, monkeypatch: pytest.MonkeyPatch
-):
-    """A fresh copy of the migrated, seeded archive database for one test."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.engine import make_url
-
-    archive_templates.recreate(make_url(archive_pg).database, _archive_template)
-    monkeypatch.setenv("DATABASE_URL", archive_pg)
-    engine = create_engine(archive_pg)
-    async_engine = create_async_engine(archive_pg.replace("+psycopg", "+asyncpg"))
-    try:
-        yield async_sessionmaker(async_engine, expire_on_commit=False), engine
-    finally:
-        await async_engine.dispose()
-        engine.dispose()
-
-
-# ---------------------------------------------------------------------------
 # Migrated governance database (PostgreSQL 18).
 #
 # The trading-state, deployment and operator-request rules live in PostgreSQL
@@ -458,20 +393,20 @@ _GOVERNANCE_TEMPLATE = "governance_template"
 
 
 @pytest.fixture(scope="session")
-def _governance_template(archive_templates) -> str:
+def _governance_template(pg_templates) -> str:
     from tests.pg_templates import upgrade_head
 
-    return archive_templates.template(_GOVERNANCE_TEMPLATE, upgrade_head)
+    return pg_templates.template(_GOVERNANCE_TEMPLATE, upgrade_head)
 
 
 @pytest_asyncio.fixture
-async def migrated_db(archive_templates, _governance_template: str):
+async def migrated_db(pg_templates, _governance_template: str):
     """A fresh migrated database with one exchange account: (session factory, account)."""
     from uuid import uuid4
 
     from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 
-    sync_url = archive_templates.clone(_governance_template, f"governance_{uuid4().hex[:12]}")
+    sync_url = pg_templates.clone(_governance_template, f"governance_{uuid4().hex[:12]}")
     engine = create_async_engine(sync_url.replace("+psycopg", "+asyncpg"))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account = uuid4()
@@ -481,4 +416,4 @@ async def migrated_db(archive_templates, _governance_template: str):
         yield factory, account
     finally:
         await engine.dispose()
-        archive_templates.drop(sync_url)
+        pg_templates.drop(sync_url)

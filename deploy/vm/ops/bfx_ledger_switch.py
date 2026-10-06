@@ -252,8 +252,8 @@ SELECT coalesce((SELECT json_build_object(
   'event_seq', s.event_seq, 'started_at_ms', q.started_at_ms,
   'blocked', s.authorization_blocked_reason IS NOT NULL,
   'symbols', s.classification -> 'symbols', 'offers', s.classification -> 'offers')
-  FROM public.capital_snapshots s
-  JOIN public.capital_snapshot_queries q ON q.id = s.query_id
+  FROM legacy_archive.capital_snapshots s
+  JOIN legacy_archive.capital_snapshot_queries q ON q.id = s.query_id
   WHERE s.exchange_account_id = :'account'::uuid AND s.deployment_environment = :'env'
   ORDER BY s.event_seq DESC LIMIT 1), 'null'::json);
 """

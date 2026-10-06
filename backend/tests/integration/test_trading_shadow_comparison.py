@@ -136,7 +136,7 @@ async def test_repeatable_read_hides_second_connection_commit(candidate_db):
     admitted = await authorize(factory, repo, policy, seq)
     async with factory.begin() as reader:
         await begin_read(reader)
-        await reader.execute(text("SELECT 1 FROM event_log LIMIT 1"))
+        await reader.execute(text("SELECT 1 FROM legacy_archive.event_log LIMIT 1"))
         first = await comparison(factory, repo, session=reader)
         await outcome(factory, repo, admitted.intent, "not_sent")
         second = await comparison(factory, repo, session=reader)

@@ -39,6 +39,7 @@ from bfx_funding_bot.core import database_realm
 from bfx_funding_bot.core.alembic_compare import compare_server_default, include_object
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA as LEGACY_ARCHIVE
 from bfx_funding_bot.modules.execution.projection_cutover.tables import ArchiveBase
 
 config = context.config
@@ -56,7 +57,7 @@ target_metadata = [Base.metadata, ArchiveBase.metadata]
 
 def include_name(name, type_, parent_names):
     """Reflect only schemas owned by these migrations, never third-party schemas."""
-    return type_ != "schema" or name in {None, "public", "projection_audit"}
+    return type_ != "schema" or name in {None, "public", "projection_audit", LEGACY_ARCHIVE}
 
 # Session-level advisory lock that serializes concurrent `alembic upgrade` runs
 # (e.g. during VM cutover). Distinct namespace from the daemon writer lock so the

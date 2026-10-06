@@ -797,7 +797,7 @@ def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement(
             "./scripts/setup-pgbackrest-r2.sh",
             "Build and validate bfx-postgres:local",
             "`stanza-create`",
-            "Run the staged isolated restore with --baseline",
+            "Run the isolated acceptance drill",
             "Accept only fresh measured evidence",
             "Enable, start, and list the timers",
         ),
@@ -812,8 +812,8 @@ def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement(
             "`info --output=json`",
             "`verify`",
             "pgbackrest --stanza=bfx expire",
-            "Capture the same-target bounded baseline.json",
-            "Run the staged isolated restore with --baseline",
+            "Select the backup and recovery target",
+            "Run the isolated acceptance drill",
             "Accept only fresh measured evidence",
             "Enable, start, and list the timers",
             "Declare DR ready",
@@ -838,8 +838,8 @@ def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement(
         "`verify`",
         "pgbackrest --stanza=bfx expire",
         "preflight.sh --output",
-        "load_restore_baseline(",
-        "--baseline /absolute/path/baseline.json",
+        "--backup-label <label>",
+        "restore_test: false",
         "egress_disconnected: true",
         "Never edit\nJSON to manufacture acceptance.",
     )
@@ -933,38 +933,20 @@ def test_offsite_runbook_disposable_expire_proves_inventory_deletion() -> None:
         assert marker in text
 
 
-def test_offsite_runbook_baseline_has_read_only_capture_and_offline_assembly() -> None:
-    text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
-    for marker in (
-        "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;",
-        "exchange_account_id = :'account_id'::uuid",
-        "deployment_environment = :'environment'",
-        "FROM public.alembic_version",
-        "ORDER BY event_seq",
-        "canonical_event_hash(rows)",
-        'type(capture["event_count"]) is int',
-        'type(capture["event_head"]) is int',
-        "load_restore_baseline(",
-        "operator-supplied",
-        "all database writers",
-        "not an automatic production baseline generator",
-    ):
-        assert marker in text
-
-
-def test_offsite_runbook_null_target_requires_quiescence_or_matching_pitr() -> None:
+def test_offsite_runbook_acceptance_needs_no_baseline_or_writer_pause() -> None:
     text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
     normalized = " ".join(text.split())
 
     assert "or empty for backup end" not in normalized
+    assert "baseline.json" not in text
     for marker in (
         "does not set a recovery cutoff",
         "available archive stream",
-        "all database writers remain stopped until `restore-db` has completed recovery",
-        "If writers must resume after baseline capture",
-        "explicit `--target-time`",
-        "same non-null `target_time`",
-        "same database state",
+        "No baseline file is captured and writers need not stop",
+        "bounded by what the restored copy holds, is the baseline",
+        "`--target-time <YYYY-MM-DDTHH:MM:SSZ>`",
+        "Do not use `--type=immediate`",
+        "every scope of the restored copy is verified",
     ):
         assert marker in normalized
 
@@ -1003,55 +985,6 @@ def test_runbook_inventory_assertions_reject_noop_and_retained_data_loss(
     assert (completed.returncode == 0) is (remaining == "retained")
 
 
-@pytest.mark.parametrize("invalid", (None, "scope", "count", "head", "migrations"))
-def test_runbook_baseline_assembly_uses_existing_canonical_and_loader_contract(
-    tmp_path: Path, invalid: str | None,
-) -> None:
-    account = "00000000-0000-0000-0000-000000000001"
-    capture = {
-        "database_name": "bfx", "account_id": account, "environment": "prod",
-        "migration_heads": ["abc123"], "event_count": 1, "event_head": 7,
-        "events": [{
-            "event_seq": 7, "account_id": "legacy-account",
-            "exchange_account_id": account, "deployment_environment": "prod",
-            "event_type": "fixture", "cid": None, "venue_offer_id": None,
-            "venue_seq": None, "event_id": None, "schema_version": 2,
-            "payload": {}, "occurred_at_ms": 1,
-        }],
-    }
-    if invalid == "scope":
-        capture["events"][0]["deployment_environment"] = "shadow"
-    elif invalid == "count":
-        capture["event_count"] = True
-    elif invalid == "head":
-        capture["event_head"] = 7.0
-    elif invalid == "migrations":
-        capture["migration_heads"] = []
-    (tmp_path / "capture.json").write_text(json.dumps(capture))
-    completed = subprocess.run(
-        [sys.executable, "-", str(tmp_path), "bfx", account, "prod",
-         "20260905-000000F", "", "execution-state-v1"],
-        input=_runbook_python_snippet('uv run python - "$BASELINE_WORK_DIR"'),
-        cwd=ROOT / "backend", capture_output=True, text=True, check=False,
-    )
-    assert (completed.returncode == 0) is (invalid is None), completed.stderr
-    output = tmp_path / "baseline.json"
-    if invalid is None:
-        from uuid import UUID
-
-        from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_hash
-        from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-
-        row = EventLogRow(**{**capture["events"][0], "exchange_account_id": UUID(account)})
-        baseline = json.loads(output.read_text())
-        assert baseline["event_hash"] == canonical_event_hash([row])
-        assert baseline["event_count"] == 1 and baseline["event_head"] == 7
-        assert baseline["target_time"] is None
-        assert output.stat().st_mode & 0o777 == 0o600
-    else:
-        assert not output.exists()
-
-
 @pytest.mark.parametrize("verb", ("enable", "start", "enable --now", "--now enable"))
 @pytest.mark.parametrize("gate", (4, 5, 6, 7, 8, 9))
 def test_offsite_runbook_rejects_timer_command_moved_before_gates(
@@ -1077,25 +1010,12 @@ def test_offsite_runbook_rejects_timer_command_moved_before_gates(
         test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement()
 
 
-def test_offsite_runbook_documents_same_target_baseline_and_staged_restore() -> None:
+def test_offsite_runbook_documents_the_acceptance_drill_and_staged_restore() -> None:
     text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
 
-    for field in (
-        "target_backup_label",
-        "target_time",
-        "database_name",
-        "account_id",
-        "environment",
-        "projector_version",
-        "migration_heads",
-        "event_count",
-        "event_head",
-        "event_hash",
-    ):
+    for field in ("target_backup_label", "target_time", "restore_test: false", "ledger", "boot"):
         assert f"`{field}`" in text
     for marker in (
-        "same backup/PITR target",
-        "Missing or mismatched baseline",
         "`restore-data`",
         "restore-db alone has temporary R2 egress",
         "Only then disconnect egress",
@@ -1107,12 +1027,11 @@ def test_offsite_runbook_documents_same_target_baseline_and_staged_restore() -> 
         assert marker in text
 
     command = """deploy/vm/pgbackrest/restore-drill.sh \\
-  --account-id <canonical-uuid> \\
-  --environment prod \\
-  --projector-version execution-state-v1 \\
-  --backup-label <label> \\
-  --baseline /absolute/path/baseline.json"""
+  --backup-label <label>"""
     assert command in text
+    for retired in ("--baseline", "--account-id", "--projector-version", "--archive-only",
+                    "verify_projection"):
+        assert retired not in text, retired
     assert "docker volume rm bfx_pgdata" not in text
     assert "docker compose down -v" not in text
     assert "no Bitfinex request" in text
@@ -1136,7 +1055,6 @@ def test_architecture_documents_staged_dr_and_fresh_evidence() -> None:
 
 def test_runbook_broad_runtime_contracts_match_current_consumers() -> None:
     runbook = (ROOT / "docs/runbooks/offsite-dr.md").read_text()
-    assert "--username bfx" in runbook
     assert "--username postgres" not in runbook
     for marker in ("pg1-user=bfx", "pg_is_in_recovery()", "SQL admin role",
                    "sanitized", "COMPOSE_*", "exactly the generated internal network",

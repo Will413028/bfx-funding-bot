@@ -246,7 +246,7 @@ sequenceDiagram
 
 關鍵差異：**WS 是增量（delta）**（`reserved -= / realized +=`，floor at 0）；**REST reconcile 是絕對覆寫**（直接 set venue 真相）。即使 WS 完全靜默，90s reconcile 仍把 ledger 拉回正確值——這就是「reconcile 即正確性骨幹」的含義。
 
-### 3d. Reconcile 骨幹規則（`execution/periodic_reconcile.py`、`execution/boot_recovery.py`）
+### 3d. Reconcile 骨幹規則（`execution/periodic_reconcile.py`）
 
 - **Grace 時間**：`compute_recovery_actions` 有兩個窗口。`grace_ms`（boot 與 runtime 皆 120 s）決定 PENDING intent 多老才轉 UNKNOWN；`action_grace_ms` 決定 local CLAIMED 在 venue 缺席多久才發 `ReservationReleased(missing_from_venue)`——boot 為 0（立即），runtime reconcile 為 120 s（`apps/bot.py` 的 `runtime_recovery`），避免 venue snapshot 落後於剛掛出的 offer 而誤釋放。
 - **EXECUTOR DOWN**：`PeriodicReconcile` 連續 3 次（`max_consecutive_failures=3`）venue fetch 失敗 → `HealthTarget.EXECUTOR=DOWN`，由 `AuthHealthGuard` 擋新單（不在過期 ledger 上交易）；下一次成功即自行清除。reconcile 迴圈絕不讓例外打掛 daemon。
@@ -258,8 +258,9 @@ sequenceDiagram
 ledger 是唯一的 capital authority（S1-8）。`capital_authority_epoch` 仍記錄它：每個行程（兩個 venue 的 bot、web API、`scripts/amend_capital_policy.py`）以 `read_authority(session, supported=SUPPORTED)`（`apps/authority_support.SUPPORTED = {ledger}`）在開機時讀一次，最新 epoch 不是 `ledger`（從未切換或還原到切換前）就拒絕。沒有 legacy 歷史（`event_log` 為空）的資料庫在 migration `b1c2d3e4f5a6`（genesis）直接取得 `ledger` epoch；有歷史的只經 S1-7 switch。`select_bot_ports(...)` 組出 bot 行程每個 consumer 綁定的 ledger adapter（web API 對應 `apps/read_models.select_read_models()`）。
 
 - **Seed 開機規則（H-1，`require_ledger_seed`）**：只讀 epoch 與 ledger，不讀凍結的 legacy 表。真實 venue 的 bot 看最新 `ledger` epoch 的寫入者：S1-7 switch（actor `ledger_seed:<run>-a<n>`，seed 與 epoch 同一 transaction）→ 每個 scope 都要有 `origin='legacy_seed'` 的 `ledger_observation`；genesis migration（actor `migration b1c2d3e4f5a6 genesis`，只在 `event_log` 全空時寫）→ 不需要 seed，venue 上原有的 offer 對 ledger 是 foreign；其他寫入者 → 拒絕（`ledger_epoch_writer_unknown`，fail closed）。在 account bootstrap 之後、`select_bot_ports` 之前執行，拒絕走 `_refuse_live_boot`。沒有 seed 的第一筆 basis 會是 `baseline`，resting offer 變 foreign、open credit 失去歸屬，而 seed 之後再也跑不了（ledger 非空就拒絕）。simulated venue 不套用（它的 offer 在自己的 log）；web API 只讀，也不套用。
-- **Legacy 凍結（H-2 (ii)，migration `e8f9a0b1c2d3`）**：`guard_ledger_authority` 的鏡像。最新 epoch 為 `ledger` 時，非 owner 對 12 張只有 legacy authority 寫的表（`event_log`、`event_prefix_hashes`、`projection_heads`、`position_state`、`venue_offer_state`、`venue_credit_state`、`reconcile_observation`、`offer_claims`、`submission_attempts`、`execution_uncertainties`、`capital_snapshot_queries`、`capital_snapshots`）的 INSERT／UPDATE／DELETE 由 statement trigger 拒絕；`legacy` 下不作用。execution module 其餘的表（`execution_decisions`、`trading_state`、`funding_cancel_all_audit`、NAV、`diagnostics`、三個 request outbox、`projection_audit`）共用、不凍結（`tests/architecture/test_legacy_freeze_tables.py` 要求每張 execution 表都已分類）。搬到 archive schema 與 REVOKE 留到 D4b。
-- **`GET /executions`**：`ReadModels.execution_history` 讀 ledger journal（attempt → `RESERVATION_INTENT`，outcome → `RESERVATION_CLAIMED`／`RESERVATION_FAILED`／`SUBMIT_OUTCOME_UNKNOWN`，resolution → `UNCERTAINTY_*`），只取切換 epoch 的 `set_at_ms` 之後的列（seed 複製的 attempt 帶 legacy 時間，不重複），之後接凍結的 `event_log`（`execution.archived_execution_history.ArchivedExecutionHistory`，plan Q4）。cursor 與 `eventKey` 都是不透明字串（ADR 2026-10-02 D4）。fill 與 credit 結束不是 journal 事實：watermark 之後取自 ledger observation 存下的 venue 終態歷史，沿用 archive 的事件名——`ledger_observation_offer_history` 的 `executed` 列為 `ORDER_FILL`（amount＝`amount_original`，FRR 的 rate 為 NULL；只限本 scope 的 transport outcome 或 resolution 提到的 offer，與 archive 只記自己 claim 的 offer 一致，手動／外部／auto-renew 不顯示），`ledger_observation_credit_history` 中 `source_kind='credit'` 的 `closed` 列為 `CREDIT_CLOSED`（loan 不顯示，archive 也只有 fcc credit），時間都是 venue 的 `mts_update`；observation 互相重疊且 fenced 的也有存，所以讀該 scope 全部 observation、每個 venue key（offer id；`source_kind`＋credit id）只出一次，取最早 observation 的值。watermark 之前的留給 archive。web API 讀 credit history 的欄位授權見 migration `f9a0b1c2d3e4`（不含 `raw`）。
+- **Legacy 凍結（H-2 (ii)，migration `e8f9a0b1c2d3`）**：`guard_ledger_authority` 的鏡像。最新 epoch 為 `ledger` 時，非 owner 對 12 張只有 legacy authority 寫的表（`event_log`、`event_prefix_hashes`、`projection_heads`、`position_state`、`venue_offer_state`、`venue_credit_state`、`reconcile_observation`、`offer_claims`、`submission_attempts`、`execution_uncertainties`、`capital_snapshot_queries`、`capital_snapshots`）的 INSERT／UPDATE／DELETE 由 statement trigger 拒絕；`legacy` 下不作用。execution module 其餘的表（`execution_decisions`、`trading_state`、`funding_cancel_all_audit`、NAV、`diagnostics`、三個 request outbox、`projection_audit`）共用、不凍結（`tests/architecture/test_legacy_freeze_tables.py` 要求每張 execution 表都已分類）。
+- **Legacy archive（S1-8 D4b，migration `c2d3e4f5a6b7`）**：這 12 張表整張搬到 `legacy_archive` schema（列、索引、sequence 與表間 FK 跟著搬；`uncertainty_resolution_requests.resolved_event_seq` 指向 `event_log` 的 FK 先拆掉，欄位留給切換前的請求紀錄），非 owner 的權限全部撤銷（`legacy_archive.manifest` 記列數、內容 SHA-256 與撤銷的權限，downgrade 依此授回）。runtime 只剩 web API 的 archived history 讀 `event_log` 的 8 個欄位（`bfx_webapi`，欄位授權）；bot 不讀也不寫。switch scaffolding（seed、capital comparison、trading shadow）經 `bfx_cutover_reader` 保留原欄位讀取到 PR-D。`e8f9a0b1c2d3` 那個依 epoch、放過 owner 的 freeze 換成與 `release_archive` 相同的 `archive_frozen`：12 張表與 manifest 對任何 role（含 owner）的 INSERT／UPDATE／DELETE／TRUNCATE 一律拒絕，是 REVOKE 之外的第二層；要寫只能明確 DISABLE TRIGGER。終局：dump 到 offsite 後 DROP（trigger：Will 放棄切換前的 History）。
+- **`GET /executions`**：`ReadModels.execution_history` 讀 ledger journal（attempt → `RESERVATION_INTENT`，outcome → `RESERVATION_CLAIMED`／`RESERVATION_FAILED`／`SUBMIT_OUTCOME_UNKNOWN`，resolution → `UNCERTAINTY_*`），只取切換 epoch 的 `set_at_ms` 之後的列（seed 複製的 attempt 帶 legacy 時間，不重複），之後接 `legacy_archive.event_log`（`execution.archived_execution_history.ArchivedExecutionHistory`，plan Q4；它自帶只含 8 個授權欄位的 table 宣告，不經 legacy ORM）。cursor 與 `eventKey` 都是不透明字串（ADR 2026-10-02 D4）。fill 與 credit 結束不是 journal 事實：watermark 之後取自 ledger observation 存下的 venue 終態歷史，沿用 archive 的事件名——`ledger_observation_offer_history` 的 `executed` 列為 `ORDER_FILL`（amount＝`amount_original`，FRR 的 rate 為 NULL；只限本 scope 的 transport outcome 或 resolution 提到的 offer，與 archive 只記自己 claim 的 offer 一致，手動／外部／auto-renew 不顯示），`ledger_observation_credit_history` 中 `source_kind='credit'` 的 `closed` 列為 `CREDIT_CLOSED`（loan 不顯示，archive 也只有 fcc credit），時間都是 venue 的 `mts_update`；observation 互相重疊且 fenced 的也有存，所以讀該 scope 全部 observation、每個 venue key（offer id；`source_kind`＋credit id）只出一次，取最早 observation 的值。watermark 之前的留給 archive。web API 讀 credit history 的欄位授權見 migration `f9a0b1c2d3e4`（不含 `raw`）。
 
 - **`BotPorts`**：`uncertainty_reader`、`managed_offers`、`venue_hint_sink`（一個實例；`select_bot_ports` 收到先建好的 `ResyncChannel`，`PeriodicReconcile`、auth WS 與 ledger hint sink 共用它）、`capital: CapitalPorts`（`select_bot_ports` 沒有 `live` 參數，venue 由 `apps/venue.py` 另外決定，兩個 venue 共用同一組 ports）。`CapitalPorts`：`capital_authority`、`scope_lock`、`policy_store`、`command_boundary`（journal + effects）、`operator_resolution`、`deployment_input`、`observation`（取得 venue 連線後建出 boot 與 runtime 兩個 sink，時間常數為 `ledger.BOOT_GRACE_MS`=0 / `RUNTIME_GRACE_MS`=120 000，attempt 與 foreign-offer grace 共用）。auth WS 是否組裝由 venue wiring 的 `VenueCapabilities.auth_ws` 決定，沒有 env flag。
 - **沒有 legacy 物件**：bot 不建立 `CapitalRepository`、`PostgresEventStore`、persister、paper-position projection、offer registry 或 legacy hint sink（S1-8 已刪除 legacy runtime）。唯一紀錄是 ledger 自己的表；bus 只在寫入 transaction commit 之後承載通知（`CommandOutcomeNotice`、`UnknownResolutionNotice`、`VenueHintNotification`、`PositionReconciled`）。observation sink 是 `ledger.wiring` 的 cycle 外包 `LedgerCycleEffects`（保護、NAV、告警）。import contract `runtime-not-legacy-authority` 禁止 runtime 模組直接 import 剩下的 legacy 模組（含 `event_store.tables`）。
@@ -514,6 +515,17 @@ trading_state          (append-only 交易狀態；帳戶層停機的唯一權�
   -- trigger 只准 operator 結束 HALTED，並拒絕 UPDATE/DELETE/TRUNCATE；bfx_bot SELECT/INSERT，bfx_webapi 只有 SELECT。
   -- legacy_halt_id 指向 release_archive.trading_halt 的來源列（無 FK）。
 
+legacy_archive.*      (切換前 legacy authority 的 12 張凍結表；migration c2d3e4f5a6b7)
+  event_log, event_prefix_hashes, projection_heads, position_state, venue_offer_state,
+  venue_credit_state, reconcile_observation, offer_claims, submission_attempts,
+  execution_uncertainties, capital_snapshot_queries, capital_snapshots（欄位見上方各表）
+  -- 整張 SET SCHEMA（列、約束、索引、owned sequence、表間與指向 public 的 FK）；statement trigger
+  -- archive_frozen 拒絕任何人（含 owner）的 INSERT/UPDATE/DELETE/TRUNCATE；
+  -- 非 owner 權限全部撤銷：bfx_webapi 只有 USAGE＋event_log 8 欄 SELECT（archived history），
+  -- bfx_cutover_reader 保留原欄位讀取到 PR-D，bfx_bot 什麼都沒有。
+  -- manifest：每表列數、to_jsonb 排序後的 SHA-256、撤銷的權限（downgrade 依此授回）；拒絕寫入。
+  -- 終局：dump 到 offsite 後 DROP（trigger：Will 放棄切換前的 History）。
+
 release_archive.*     (已退役 release ceremony 的真錢紀錄；migration c74d45a54e46)
   trading_halt, canary_command_permits, release_sessions, release_session_audit（c74d45a54e46）;
   deployment_approvals, trading_control_requests_v1, trading_state_probation（5b1e7c9d2a40）
@@ -612,8 +624,8 @@ projection_audit.runs / rows / receipts (projection cutover 的不可變 archive
 ```
 
 **Alembic**：遷移在 `backend/alembic/versions/`。Halt 1 先套用 additive
-revision `8a1b2c3d4e5f`，完成 `cutover_identity.py --dry-run/--apply/--verify`
-後才套用 contract revision `9b2c3d4e5f6a`。一般部署仍使用
+revision `8a1b2c3d4e5f`，完成 identity cutover（一次性工具 `cutover_identity.py`，已用畢並在 S1-8 D4b
+刪除）後才套用 contract revision `9b2c3d4e5f6a`。一般部署仍使用
 `cd backend && uv run alembic upgrade head`；`alembic/env.py` 在套用前設
 `lock_timeout=5s`、`statement_timeout=60s`，並以 `pg_try_advisory_lock` 序列化 migration
 （已有另一個 migration 持鎖就立刻失敗，不排隊）；驗證無 drift 使用
@@ -623,60 +635,20 @@ snapshot 被 replay double-count。contract revision 會在 DDL 前拒絕 NULL U
 realm、孤兒 FK 或非零 legacy scaffold，且為 forward-only（rollback 使用
 verified backup/PITR + venue reconcile，不使用 downgrade）。
 
-### Projection audit cutover release boundary
+### Projection audit archive
 
-Archive 驗證、證據格式與再次執行限制見 [projection archive 契約](../docs/runbooks/projection-audit-cutover.md)。
-已完成的 cutover 流程為：
-diagnose → immutable archive → independently verified archive-only restore → fresh
-snapshot → atomic apply → identical repeat → independent new baseline → archive+active verify。
-`cutover_projection` 只有 `diagnose/prepare/verify-archive/apply` commands；沒有
-classify、snapshot、cleanup 或 resume command。Prepare CLI 會讀 vault/venue，即使
-`--dry-run` 亦然；apply 只消費 digest-pinned serialized snapshot，不做 HTTP。
-每次 recovery 以 `--managed-symbols` 明確宣告 scope；已完成的 production cutover 使用
-`--managed-symbols fUST`，prepared artifact 會 pin 該 scope。snapshot 必須完整覆蓋
-scope；任何 scope 外的 active offer/credit/position 都 fail closed，不能把遺漏的幣別
-默認當成零。CLI recovery default 為 fUST；library `apply_cutover` 未指定 scope 時僅
-維持既有 fUST/fUSD compatibility default，production operator 仍必須明確傳入 scope。
-scope 外若只剩所有 exposure/ledger buckets 與 `n_credits` 都為零的 supported-symbol
-legacy scaffold，才可由同一個 atomic rebuild 清掉；任何非零值仍 fail closed。
-
-Diagnostic/classification 使用 v2 local evidence directories（`manifest/COMPLETE/chunks`），
-directories/files 為 `0700`/`0600`，拒絕 symlink、extra/incomplete content。固定 bounds：
-record 1 MiB、part 4 MiB、artifact 2 GiB、4096 parts、manifest 16 MiB。
-`EvidenceWriter` 串流寫入，`verify_cutover_evidence` 驗 identity/digests 與逐筆分類完整性，
-runtime 只接收 compact `VerifiedCutoverEvidence`。Prepared-v1 小 envelope 維持 kind 與
-archive codec，但現在 required `managed_symbols` 會 pin operator scope；舊 envelope
-可供 archive verifier 讀取，不能直接作為新的 apply authority，也不能冒充新 scope。
-不接受 v1 diagnostic 作為 cutover authority。Local artifact cleanup
-只作用於本次產生的 exact paths，需 deadline/absence evidence，不清 immutable DB archive。
-
-Apply 要求 caller-owned READ COMMITTED transaction；先取 account advisory lock，
-再查 completed receipt，並以 SHARE ROW EXCLUSIVE table locks fence direct writers。
-在同一 transaction 完成 snapshot append、genesis rebuild、event prefix/new head、
-fresh DB parity、舊 archive preservation、applied archive 與 receipt。CLI 將 bounded
-外部 file/evidence 驗證置於 engine/lock 前，lock_timeout=2s、statement_timeout=30s；
-不宣稱整個 apply 都是 constant memory 或具有同等 global deadline。
-Before-commit failure 撤銷本次 DB row writes；sequence gaps 與先前 committed prepare
-archive 可保留。After-commit output failure 不撤銷 DB；相同 request 的 repeat 驗證
-receipt/current state 後回原結果，可接受已過期的原 snapshot，不 append 第二次。
-新 apply 的 snapshot 則必須完整且自 query start 起 ≤300 秒，包含執行耗時。
-
-實際 runtime roles（含 reachable roles/PUBLIC/column grants/ownership）必須證明無
-archive 寫入能力；superuser 是未解 operator gate。Persistent halt、controlled
-Docker/systemd writers 與 DB session inventory 必須同時成立，不能將 lock 當成永久
-禁止外部 admin 啟動 writer。歷史 CID cycles 的 genesis replay 不等於 strict append
-可補齊落後 head；這個 source-specific seam 必須在 private rehearsal 驗證，失敗保留
-halt，不改 event/head 來繞過。Production schema/grants/archive/apply 各須 explicit
-operator approval；runtime identity/KEK/auth denial、fresh exposure、no uncertainty、
-RPO/RTO、two fresh reconciles 仍是另外的 gates。
+`projection_audit.runs` / `rows` / `receipts` 是 2026-09 projection cutover（Halt 2）的不可變
+archive（ADR 2026-09-10）。產生與驗證它的一次性工具（`cutover_projection`、
+`verify_projection_archive`、`projection_cutover/*`）已在 S1-8 D4b 隨 baseline drill 的 legacy
+驗證刪除；表、trigger 與 ORM（`projection_cutover/tables.py`，alembic 比對用）保留。
 
 ### Offsite DR source of truth
 
 PostgreSQL WAL archive 與 base backup 以 **pgBackRest** 寫入 private Cloudflare
 R2 repository；tracked config 不含 endpoint、bucket、credential 或 cipher
 passphrase。`status.sh`、`preflight.sh` 與 isolated restore drill 只產生 bounded、
-redacted、`measured: true|false` evidence，供營運者與 freshness 告警核對 RPO、RTO、
-event head/hash 與 empty-projector replay，而不是用設定存在或檔案存在推定可恢復。
+redacted、`measured: true|false` evidence，供營運者與 freshness 告警核對 RPO、RTO 與
+ledger 驗證（還原副本對 production 的有界 digest＋唯讀 boot check），而不是用設定存在或檔案存在推定可恢復。
 DR 狀態不擋交易或 resume（ADR 2026-09-25 D6）。
 
 Isolated restore 的 staged boundary 固定如下：Compose 只以 `restore-data` 作為
@@ -702,21 +674,15 @@ pgBackRest 2.59.1 info 的 `timestamp.start/stop` 是 strict integer epoch；
 stanza/repository `status.code` 必須為 integer 0。Smoke raw stdout/stderr 只進
 trap-cleaned private temp，輸出固定 markers。Backup refresh 先失效舊 evidence；
 atomic persistence 遇 ENOSPC 亦須 remove/truncate 舊綠燈，wrapper 失敗不得 cat 舊報告。
-Canonical UUID baseline/staged replay 要求已驗證的 account identity 與相符 schema；
-pre-identity 的 legacy-schema-compatible backup/restore evidence 不可沿用。
-Baseline 操作見 [offsite DR](../docs/runbooks/offsite-dr.md#6-capture-the-same-target-bounded-baselinejson)。
 
-每次 measured restore 都綁定同一 backup/PITR target 的 bounded baseline，逐欄
-核對 migration heads、event count/head/hash 與 account/environment/projector。
-Completed projection archives 要求 schema-v2 baseline 的完整 manifest/prepared-file
-references 與 verifier image pin。`restore-drill.sh --archive-only --target-run-id`
-使用 v2 archive transport，驗 target 與舊 prefixes/bytes，略過舊 active parity，產生
-`kind=archive_restore`；它只解除 prepare 與舊 parity 的依賴，不放寬 full DR。
-Apply 後以 source 獨立建立新 baseline、配對新 backup/PITR，complete restore 不帶這兩個
-flags，使用無 target 的 v1 transport 驗所有舊/applied archives 與 active replay。
-不得從待驗 restored DB 或 apply receipt 倒算 expected event baseline。
+每次 measured restore 都驗 ledger（ADR 2026-10-06-ledger-restore-verification-replaces-prefix-test）：
+W 取自還原副本，production 在 W 以內的 append-only ledger 列就是 baseline，不需要 operator
+擷取 baseline 檔，也不需要停寫。每月與變更觸發的 `--restore-test` 還原最新 backup 到 archive
+尾端；operator 的驗收演練（Halt 2、事故驗收）以 `--backup-label`（可加 `--target-time`）指定
+backup 與 PITR target，跑同一套驗證，receipt 為 `restore.json`（`restore_test: false`）。操作見
+[offsite DR](../docs/runbooks/offsite-dr.md#7-run-the-isolated-acceptance-drill)。
 backup/restore evidence 必須有 strict `observed_at_ms`，讀取時不得在未來且不得
-超過 900 seconds；missing、stale、baseline mismatch、egress 未斷開或 cleanup
+超過 900 seconds；missing、stale、ledger mismatch、egress 未斷開或 cleanup
 failure 一律是 `measured: false`，舊 green report 不得沿用。只有完成真實 R2
 stanza/check/full/diff/info/verify、disposable expire 與 staged isolated restore 的
 新鮮量測，才能宣告 DR ready；offline green 不代表 R2、systemd 或 production

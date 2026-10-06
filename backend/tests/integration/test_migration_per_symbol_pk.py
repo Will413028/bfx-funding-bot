@@ -23,7 +23,7 @@ async def test_position_state_per_symbol_pk_after_upgrade(pg_head_url) -> None:
     verify_eng = create_engine(sync_url)
     try:
         with verify_eng.connect() as verify_conn:
-            pk = inspect(verify_conn).get_pk_constraint("position_state")[
+            pk = inspect(verify_conn).get_pk_constraint("position_state", schema="legacy_archive")[
                 "constrained_columns"
             ]
     finally:
