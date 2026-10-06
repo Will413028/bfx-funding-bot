@@ -16,7 +16,8 @@ code, so nothing reads as the group any more. This revision:
   environment's own grant (the test suite's worst-case builds hand every new table to every
   role by default privileges): revoked too, and not given back;
 * drops the group, unless another database of the cluster still holds a privilege for it (a
-  production cluster has one application database; the test clusters have many). Dropping it
+  production cluster has one application database; the test clusters have many): then the
+  group stays, holding nothing here, and a NOTICE names those databases. Dropping it
   also ends every membership in it: the operator's LOGIN ``bfx_cutover_attest`` stays, with no
   membership, and is dropped by the operator (docs/runbooks/fresh-host-setup.md §1c-1).
 
@@ -229,11 +230,14 @@ GROUP BY 1, 2, 3
 _DEFAULT_OBJECTS = {"r": "TABLES", "S": "SEQUENCES", "f": "FUNCTIONS", "T": "TYPES",
                     "n": "SCHEMAS", "L": "LARGE OBJECTS"}
 
-# What keeps the group from being dropped: a dependency in another database of the cluster.
+# What keeps the group from being dropped: a dependency in another database of the cluster
+# (``dbid`` 0 is a shared object, such as another database's own ACL).
 _ELSEWHERE = f"""
-SELECT count(*) FROM pg_shdepend d
+SELECT DISTINCT coalesce(db.datname, '(shared object)') FROM pg_shdepend d
+LEFT JOIN pg_database db ON db.oid = d.dbid
 WHERE d.refclassid = 'pg_authid'::regclass
   AND d.refobjid = (SELECT oid FROM pg_roles WHERE rolname = '{READER}')
+ORDER BY 1
 """
 
 
@@ -271,10 +275,15 @@ def upgrade() -> None:
                    f"REVOKE ALL ON {_DEFAULT_OBJECTS[objtype]} FROM {READER}")
     if _held() or bind.execute(text(_OTHER)).all() or bind.execute(text(_DEFAULTS)).all():
         raise RuntimeError(f"refuse: a privilege of {READER} survived the revoke")
-    if bind.execute(text(_ELSEWHERE)).scalar() == 0:
+    elsewhere = list(bind.execute(text(_ELSEWHERE)).scalars())
+    if not elsewhere:
         op.execute(f"DROP ROLE {READER}")
-    # Otherwise another database of this cluster still grants it something: the group stays,
-    # holding nothing here (a test cluster's other databases; never production's one).
+        return
+    # Another database of this cluster still grants it something (a test cluster's other
+    # databases; never production's one): the group stays, holding nothing here, and says why.
+    listed = ", ".join(elsewhere).replace("'", "''")
+    op.execute(f"DO $notice$ BEGIN RAISE NOTICE '{READER} kept: still referenced by %', "
+               f"'{listed}'; END $notice$")
 
 
 def downgrade() -> None:

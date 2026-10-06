@@ -21,6 +21,7 @@ Mutation checks (one at a time; revert after each):
 * drop one column from ``READER_PUBLIC_COLUMNS``: the upgrade refuses
   (``test_upgrade_takes_everything_back_and_downgrade_gives_it_back`` fails);
 * skip ``DROP ROLE``: ``test_on_its_own_cluster_the_group_is_dropped`` fails;
+* drop the NOTICE: ``test_a_group_another_database_still_grants_stays_and_says_where`` fails;
 * skip the archive grants in the downgrade: the first test fails (the archive rows differ);
 * drop the ``_OTHER`` refusal: ``test_a_dependency_it_does_not_handle_refuses`` fails;
 * revoke only the column privileges: ``test_an_environment_grant_is_revoked_and_not_given_back``
@@ -36,8 +37,9 @@ from typing import Any
 import psycopg
 import pytest
 from pytest_postgresql.factories import postgresql_proc
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.pool import Pool
 
 from tests import pg_local
 from tests.pg_templates import alembic, stamp_realm
@@ -215,6 +217,7 @@ def own_cluster_db(retire_pg_proc) -> Iterator[Engine]:
                          user=retire_pg_proc.user, password=retire_pg_proc.password,
                          dbname="postgres", autocommit=True) as conn:
         conn.execute("DROP DATABASE IF EXISTS retire")
+        conn.execute("DROP DATABASE IF EXISTS retire_other")
         for role in (LOGIN, READER, "bfx_webauth", "bfx_bot", "bfx_webapi"):
             conn.execute(f"DROP ROLE IF EXISTS {role}")
         conn.execute("CREATE DATABASE retire")
@@ -256,3 +259,29 @@ def test_on_its_own_cluster_the_group_is_dropped(own_cluster_db) -> None:
 
     alembic(url, "upgrade", _RETIRE)
     assert not _reader_exists(own_cluster_db)
+
+
+def test_a_group_another_database_still_grants_stays_and_says_where(
+    own_cluster_db, retire_pg_proc,
+) -> None:
+    with psycopg.connect(host=retire_pg_proc.host, port=retire_pg_proc.port,
+                         user=retire_pg_proc.user, password=retire_pg_proc.password,
+                         dbname="postgres", autocommit=True) as conn:
+        conn.execute("DROP DATABASE IF EXISTS retire_other")
+        conn.execute("CREATE DATABASE retire_other")
+    with psycopg.connect(host=retire_pg_proc.host, port=retire_pg_proc.port,
+                         user=retire_pg_proc.user, password=retire_pg_proc.password,
+                         dbname="retire_other", autocommit=True) as conn:
+        conn.execute(f"GRANT USAGE ON SCHEMA public TO {READER}")
+    notices: list[str] = []
+
+    def listen(dbapi_connection: Any, _record: Any) -> None:
+        dbapi_connection.add_notice_handler(lambda diag: notices.append(diag.message_primary))
+
+    event.listen(Pool, "connect", listen)
+    try:
+        alembic(_url(own_cluster_db), "upgrade", _RETIRE)
+    finally:
+        event.remove(Pool, "connect", listen)
+    assert _reader_exists(own_cluster_db) and _held(own_cluster_db) == set()
+    assert f"{READER} kept: still referenced by retire_other" in notices
