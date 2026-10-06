@@ -1,4 +1,4 @@
-"""Move the frozen legacy authority's tables into ``legacy_archive``; only the owner writes them.
+"""Move the frozen legacy authority's tables into ``legacy_archive``; no role writes them.
 
 S1-8 D4 (Will, 2026-10-06). Since the switch the ledger is the only capital authority and
 ``e8f9a0b1c2d3`` freezes the twelve tables only the legacy authority wrote. This revision
