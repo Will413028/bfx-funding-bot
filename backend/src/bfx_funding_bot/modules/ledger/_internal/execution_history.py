@@ -12,7 +12,34 @@ of the ``ledger`` epoch the switch appended -- with a tagged cursor. Above it, t
 The seed copies legacy attempts with their legacy times, all before the watermark: they are
 already in the archive and are not shown twice. Below the watermark the frozen ``event_log``
 continues the history through the injected archive (``ExecutionHistory``), so one cursor walks
-both. Fills and credit ends are not journal facts; the archive keeps the legacy ones.
+both.
+
+Fills and credit ends are not journal facts; above the watermark they come from the venue's own
+terminal history as the ledger's observations stored it, under the archive's names:
+
+* an offer history row with ``terminal_kind='executed'`` is ``ORDER_FILL`` (symbol, the offer's
+  ``amount_original``, its rate -- NULL for an FRR offer -- and ``venue_offer_id``), only for
+  the bot's own offers, as the archive wrote fills only for offers it had claimed: the offer id
+  is named for the scope by a transport outcome or a resolution (seeded attempts included, so
+  an offer placed before the switch and filled after it counts); a manual, foreign or
+  auto-renewed offer is not shown;
+* a credit history row with ``terminal_kind='closed'`` and ``source_kind='credit'`` is
+  ``CREDIT_CLOSED`` (symbol, amount, rate; no offer id, as in the archive, whose credit ends
+  came from ``fcc`` credits only -- a closed loan is not shown).
+
+Both are timed by the venue (``occurred_at_ms`` = ``mts_update``). Observations overlap, and a
+fenced (non-accepted) one is stored too, so every observation of the scope is read and each venue
+key -- ``venue_offer_id`` for a fill, ``(source_kind, venue_credit_id)`` for a credit end -- is
+shown once, with its earliest observation's values. Rows timed before the watermark are not
+shown (dropped before the dedupe, which is the same as after it while every observation reports
+one end at the same venue time). The archive's fills and credit ends stop where the legacy bot
+stopped, so ends between that stop and the watermark are shown by neither side, by design: the
+switch is one-time, and in production's (2026-10-05) that gap (~72 s) held no executed offer and
+no closed credit in the ledger's observations.
+
+Cursor ranks break ties within one millisecond: 0 attempt, 1 outcome, 2 resolution, 3 fill,
+4 credit end. A fill's id is its ``venue_offer_id``, a credit end's ``source_kind:venue_credit_id``
+(always ``credit:...``; the prefix keeps the ids cursors already carry).
 
 Runs as the web API's role, so every statement names only granted columns (never
 ``normalized_payload`` or ``evidence``).
@@ -38,6 +65,9 @@ from bfx_funding_bot.modules.ledger import (
 from bfx_funding_bot.modules.ledger.tables import (
     CapitalAuthorityEpochRow,
     ExecutionResolutionJournalRow,
+    LedgerObservationCreditHistoryRow,
+    LedgerObservationOfferHistoryRow,
+    LedgerObservationRow,
     QuarantineOpeningRow,
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
@@ -48,6 +78,11 @@ _A = SubmissionAttemptJournalRow
 _O = TransportOutcomeJournalRow
 _R = ExecutionResolutionJournalRow
 _Q = QuarantineOpeningRow
+_OBS = LedgerObservationRow
+_OH = LedgerObservationOfferHistoryRow
+_CH = LedgerObservationCreditHistoryRow
+# Tie-break rank within one millisecond; a cursor names one, so a rank never changes meaning.
+_RANKS = ("0", "1", "2", "3", "4")
 
 
 def _token(tag: str, body: str) -> str:
@@ -67,7 +102,7 @@ def _untoken(token: str) -> tuple[str, str]:
 
 def _journal_position(token: str, body: str) -> tuple[int, int, str]:
     at, rank, row_id = [*body.split(":", 2), "", ""][:3]
-    if not (at.isascii() and at.isdigit() and rank in ("0", "1", "2") and row_id):
+    if not (at.isascii() and at.isdigit() and rank in _RANKS and row_id):
         raise ExecutionCursorError(token)
     return int(at), int(rank), row_id
 
@@ -210,7 +245,9 @@ class LedgerExecutionHistory:
                 _R.resolved_at_ms >= since,
             )
         )
-        history = union_all(attempts, outcomes, resolutions).subquery()
+        history = union_all(
+            attempts, outcomes, resolutions, _fills(scope, since), _credit_ends(scope, since)
+        ).subquery()
         stmt = select(history)
         if event_type is not None:
             stmt = stmt.where(history.c.event_type == event_type)
@@ -221,3 +258,91 @@ class LedgerExecutionHistory:
         stmt = stmt.order_by(
             history.c.at.desc(), history.c.rank.desc(), history.c.id.desc()).limit(limit)
         return list((await session.execute(stmt)).all())
+
+
+def _observed(scope: Scope) -> Any:
+    """Every stored observation of the scope, accepted or fenced."""
+    return (
+        _OBS.exchange_account_id == scope.exchange_account_id,
+        _OBS.deployment_environment == scope.deployment_environment,
+    )
+
+
+def _own_offers(scope: Scope) -> Any:
+    """The venue offer ids the scope's journal names: its outcomes and its resolutions."""
+    return union_all(
+        select(_O.venue_offer_id).join(_A, _A.attempt_id == _O.attempt_id).where(
+            _A.exchange_account_id == scope.exchange_account_id,
+            _A.deployment_environment == scope.deployment_environment,
+            _O.venue_offer_id.is_not(None),
+        ),
+        select(_R.venue_offer_id).where(
+            _R.exchange_account_id == scope.exchange_account_id,
+            _R.deployment_environment == scope.deployment_environment,
+            _R.venue_offer_id.is_not(None),
+        ),
+    )
+
+
+def _fills(scope: Scope, since: int) -> Any:
+    """One ``ORDER_FILL`` per executed offer of the bot's, its earliest observation's values."""
+    first = (
+        select(
+            _OH.occurred_at_ms, _OH.venue_offer_id, _OH.symbol, _OH.amount_original, _OH.rate,
+        )
+        .join(_OBS, _OBS.id == _OH.observation_id)
+        .where(
+            *_observed(scope),
+            _OH.terminal_kind == "executed",
+            _OH.occurred_at_ms >= since,
+            _OH.venue_offer_id.in_(_own_offers(scope)),
+        )
+        .distinct(_OH.venue_offer_id)
+        .order_by(
+            _OH.venue_offer_id, _OBS.query_finished_at_ms, _OBS.id, _OH.occurred_at_ms,
+        )
+        .subquery()
+    )
+    return select(
+        first.c.occurred_at_ms,
+        literal(3, Integer),
+        first.c.venue_offer_id,
+        _text("ORDER_FILL"),
+        first.c.symbol,
+        first.c.venue_offer_id,
+        first.c.amount_original,
+        first.c.rate,
+    )
+
+
+def _credit_ends(scope: Scope, since: int) -> Any:
+    """One ``CREDIT_CLOSED`` per closed venue credit (not loan), its earliest observation's values."""
+    first = (
+        select(
+            _CH.occurred_at_ms, _CH.source_kind, _CH.venue_credit_id, _CH.symbol, _CH.amount,
+            _CH.rate,
+        )
+        .join(_OBS, _OBS.id == _CH.observation_id)
+        .where(
+            *_observed(scope),
+            _CH.terminal_kind == "closed",
+            _CH.source_kind == "credit",
+            _CH.occurred_at_ms >= since,
+        )
+        .distinct(_CH.source_kind, _CH.venue_credit_id)
+        .order_by(
+            _CH.source_kind, _CH.venue_credit_id, _OBS.query_finished_at_ms, _OBS.id,
+            _CH.occurred_at_ms,
+        )
+        .subquery()
+    )
+    return select(
+        first.c.occurred_at_ms,
+        literal(4, Integer),
+        first.c.source_kind + _text(":") + first.c.venue_credit_id,
+        _text("CREDIT_CLOSED"),
+        first.c.symbol,
+        cast(null(), Text),
+        first.c.amount,
+        first.c.rate,
+    )

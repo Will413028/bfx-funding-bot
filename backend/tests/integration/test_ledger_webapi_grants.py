@@ -49,6 +49,11 @@ ALLOWED: dict[str, set[str]] = {
     },
     "ledger_observation_offer": _OBSERVED_OFFER,
     "ledger_observation_offer_history": {*_OBSERVED_OFFER, "terminal_kind", "occurred_at_ms"},
+    # f9a0b1c2d3e4 (the execution history's credit ends)
+    "ledger_observation_credit_history": {
+        "observation_id", "venue_credit_id", "source_kind", "symbol", "amount", "rate",
+        "terminal_kind", "occurred_at_ms",
+    },
     "accepted_capital_basis": {
         "id", "exchange_account_id", "deployment_environment", "observation_id",
         "accept_revision", "attempt_seq_high_water", "accepted_at_ms",
@@ -86,7 +91,6 @@ ALLOWED: dict[str, set[str]] = {
 # Ledger tables the web API must not read at all.
 UNGRANTED = (
     "ledger_observation_wallet", "ledger_observation_credit",
-    "ledger_observation_credit_history",
     "ledger_observation_trade", "venue_credit_mirror", "quarantine_member",
     "accepted_capital_basis_cell", "accepted_capital_basis_credit_cell",
 )
@@ -98,6 +102,9 @@ DENIED = (
     ("ledger_observation_offer", "id"),
     ("ledger_observation_offer_history", "raw"),
     ("ledger_observation_offer_history", "id"),
+    ("ledger_observation_credit_history", "raw"),
+    ("ledger_observation_credit_history", "id"),
+    ("ledger_observation_credit_history", "period_days"),
     ("accepted_capital_basis", "scope_block"),
     ("accepted_capital_basis", "digest"),
     ("accepted_capital_basis_symbol", "block"),

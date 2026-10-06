@@ -2,7 +2,10 @@
 
 The journal above the switch's watermark, newest first, then the frozen legacy event log below
 it, behind one opaque cursor (plan Q4). A seeded attempt (legacy times, before the watermark)
-is not shown twice.
+is not shown twice. Above the watermark the venue's fills and credit ends come from the
+ledger's observations, once per venue key however many observations (fenced ones too) saw them:
+fills of the bot's own offers only (named by an outcome or a resolution), credit ends of credits
+only (not loans), as the archive has them.
 
 Mutation checks (one at a time; revert after each):
 
@@ -11,18 +14,30 @@ Mutation checks (one at a time; revert after each):
 * drop the watermark filter: the seeded attempt appears.
 * the archive continuation is dropped: the last page misses the event-log rows.
 * the journal reads ``normalized_payload``: every request fails under the column grant.
+* drop a ``DISTINCT ON`` (fills or credit ends): ``test_venue_ends_are_shown_once_above_the_watermark``.
+* drop the fills' watermark filter: the same test (the pre-switch fill appears).
+* drop the fills' own-offer filter: the same test (the foreign fill appears).
+* drop the resolutions from the own offers: the same test (the bound FRR fill is missing).
+* drop the credit-only filter: the same test (the closed loan appears).
+* drop the scope predicate of ``_own_offers`` or ``_observed``:
+  ``test_another_scopes_observations_and_journal_add_nothing``.
+* own offers only from outcomes completed after the watermark:
+  ``test_a_seeded_offer_filled_after_the_switch_is_a_fill``.
+* read the credit history's ``raw``: every request fails under the column grant.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from fastapi import FastAPI
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.apps.read_models import select_read_models
@@ -31,7 +46,10 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.projections import build_projections_router
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+from bfx_funding_bot.modules.ledger import CreditHistory, OfferHistory, Scope
+from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL
 
+from .test_ledger_basis import _credit, _observation, _offer
 from .test_ledger_capital_reader import SCOPE, Book
 from .test_ledger_capital_reader import book as book
 from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture dependency
@@ -146,3 +164,144 @@ async def test_a_foreign_cursor_is_refused(book, monkeypatch) -> None:
             response = await client.get(_path(), params={"before": cursor})
             assert (response.status_code, response.json()["detail"]) == (
                 422, "invalid_cursor"), cursor
+
+
+async def _venue_ends(book: Book) -> None:
+    """``_scenario``, an UNKNOWN attempt bound to a venue offer, then two overlapping observations
+    of the venue's terminal history: the first fenced (a newer query began), the second accepted.
+    """
+    await _scenario(book)
+    bound = await book.attempt("25", outcome="unknown", started_at_ms=2_200,
+                               completed_at_ms=2_300)
+    await book.resolve("bound_to_venue", attempt_id=bound, venue_offer_id="f-bound",
+                       resolved_at_ms=2_400)
+    # o-1: acked after the switch; f-bound: named only by the resolution (an FRR offer).
+    fill = OfferHistory(_offer("o-1", "60", "0", created=2_000), "executed", 2_500)
+    early = OfferHistory(_offer("seeded-1", "70", "0", created=800), "executed", 900)
+    canceled = OfferHistory(_offer("c-1", "80", created=2_000), "canceled", 2_550)
+    foreign = OfferHistory(_offer("foreign-1", "85", "0", created=2_000), "executed", 2_600)
+    frr = _offer("f-bound", "90", "0", created=2_000)
+    frr_fill = OfferHistory(replace(frr, rate=None, rate_observed=False), "executed", 2_800)
+    closed = CreditHistory(_credit("77", "60", opening=2_500), "closed", 2_700)
+    loan = CreditHistory(_credit("88", "40", opening=2_500, kind="loan"), "closed", 2_650)
+    fenced = await book.begin(3_300)
+    current = await book.begin(3_310)
+    assert await book.accept(
+        _observation(history=(early, fill), credit_history=(closed,)),
+        handle=fenced, started=3_300, finished=3_320, confirmed=3_330,
+    ) == "fenced"
+    assert await book.accept(
+        _observation(history=(fill, fill, canceled, foreign, frr_fill),
+                     credit_history=(closed, loan)),
+        handle=current, started=3_310, finished=3_340, confirmed=3_350,
+    ) == "accepted"
+
+
+async def test_venue_ends_are_shown_once_above_the_watermark(book, monkeypatch) -> None:
+    await _venue_ends(book)
+    async with await _client(book, monkeypatch) as client:
+        (page,) = await _pages(client, limit=50)
+        walked = await _pages(client, limit=1)
+    assert [(row["eventType"], row["occurredAtMs"], row["venueOfferId"], row["amount"])
+            for row in page] == [
+        ("UNCERTAINTY_MARKED_NOT_ACCEPTED", 3_200, None, "20"),
+        ("SUBMIT_OUTCOME_UNKNOWN", 3_100, None, "20"),
+        ("RESERVATION_INTENT", 3_000, None, "20"),
+        ("ORDER_FILL", 2_800, "f-bound", "90"),
+        # The closed loan (2_650) is not a credit end; the foreign offer's fill (2_600) and
+        # the canceled offer (2_550) are no fills of the bot's.
+        ("CREDIT_CLOSED", 2_700, None, "60"),
+        # Seen by both observations (and twice in the second): one fill. The seeded offer's
+        # fill before the switch (900) is the archive's, which lacks it.
+        ("ORDER_FILL", 2_500, "o-1", "60"),
+        ("UNCERTAINTY_BOUND_TO_VENUE_OFFER", 2_400, "f-bound", "25"),
+        ("SUBMIT_OUTCOME_UNKNOWN", 2_300, None, "25"),
+        ("RESERVATION_INTENT", 2_200, None, "25"),
+        ("RESERVATION_CLAIMED", 2_100, "o-1", "30"),
+        ("RESERVATION_INTENT", 2_000, None, "30"),
+        ("ORDER_FILL", 200, "legacy-1", "50"),
+        ("RESERVATION_INTENT", 100, "legacy-1", "50"),
+    ], page
+    # The archive's fields: symbol, rate (an FRR fill has none, none is invented), no cid.
+    assert [(row["symbol"], row["rate"], row["cid"]) for row in page[3:6]] == [
+        ("fUST", None, None), ("fUST", 0.0001, None), ("fUST", 0.0001, None)]
+    assert len({row["eventKey"] for row in page}) == len(page)
+    # One row per page: every cursor, the fill (3) and credit-end (4) ranks included, resumes
+    # exactly after its row.
+    assert [row for p in walked for row in p] == page
+
+
+async def test_the_fill_filter_walks_from_the_observations_into_the_archive(
+    book, monkeypatch,
+) -> None:
+    await _venue_ends(book)
+    async with await _client(book, monkeypatch) as client:
+        fills = await _pages(client, limit=1, event_type="ORDER_FILL")
+        ends = await _pages(client, limit=1, event_type="CREDIT_CLOSED")
+    assert [[(row["occurredAtMs"], row["venueOfferId"]) for row in p] for p in fills] == [
+        [(2_800, "f-bound")], [(2_500, "o-1")], [(200, "legacy-1")]]
+    assert [[row["occurredAtMs"] for row in p] for p in ends] == [[2_700]]
+
+
+async def _observe(
+    book: Book, at: int, *, history: tuple[OfferHistory, ...] = (),
+    credit_history: tuple[CreditHistory, ...] = (),
+) -> None:
+    assert await book.accept(
+        _observation(history=history, credit_history=credit_history),
+        started=at, finished=at + 10, confirmed=at + 20,
+    ) == "accepted"
+
+
+def _fill(venue_offer_id: str, at: int) -> OfferHistory:
+    return OfferHistory(_offer(venue_offer_id, "10", "0", created=2_000), "executed", at)
+
+
+async def _history(book: Book, monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, ...]]:
+    async with await _client(book, monkeypatch) as client:
+        (page,) = await _pages(client, limit=50)
+    return [(row["eventType"], row["occurredAtMs"], row["venueOfferId"]) for row in page]
+
+
+async def test_a_seeded_offer_filled_after_the_switch_is_a_fill(book, monkeypatch) -> None:
+    """Day one: the offer was acked before the watermark (a seeded attempt), filled after it."""
+    await _scenario(book)
+    await _observe(book, 3_300, history=(_fill("seeded-1", 2_900),))
+    assert ("ORDER_FILL", 2_900, "seeded-1") in await _history(book, monkeypatch)
+
+
+async def test_another_scopes_observations_and_journal_add_nothing(book, monkeypatch) -> None:
+    """Another exchange account and another deployment environment: their observations hold
+    SCOPE's offer and a closed credit, their journal names an offer SCOPE observed executed."""
+    await _scenario(book)
+    own = await _history(book, monkeypatch)
+    async with book.factory.begin() as session:
+        # Foreign realms in one database: plant them with the realm trigger off.
+        await session.execute(text(DISABLE_REALM_TRIGGERS_SQL))
+        account = uuid4()
+        await session.execute(
+            text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
+            {"id": account})
+    for other in (Book(book.factory, Scope(account, SCOPE.deployment_environment)),
+                  Book(book.factory, Scope(SCOPE.exchange_account_id, "ci2"))):
+        await other.accept()
+        await other.attempt("11", outcome="ack", venue_offer_id="theirs", started_at_ms=2_000,
+                            completed_at_ms=2_010)
+        await _observe(other, 3_300, history=(_fill("o-1", 2_900),), credit_history=(
+            CreditHistory(_credit("99", "10", opening=2_000), "closed", 2_900),))
+    # SCOPE's own observation sees the offer only the other scopes' journals name.
+    await _observe(book, 3_400, history=(_fill("theirs", 2_950),))
+    assert await _history(book, monkeypatch) == own
+
+
+async def test_the_web_api_cannot_read_the_credit_history_payload(book) -> None:
+    await _venue_ends(book)
+    async with book.factory() as session, session.begin():
+        await session.execute(text("SET LOCAL ROLE bfx_webapi"))
+        assert await session.scalar(text(
+            "SELECT count(*) FROM ledger_observation_credit_history "
+            "WHERE terminal_kind = 'closed'")) == 3
+    with pytest.raises(ProgrammingError, match="permission denied"):
+        async with book.factory() as session, session.begin():
+            await session.execute(text("SET LOCAL ROLE bfx_webapi"))
+            await session.execute(text("SELECT raw FROM ledger_observation_credit_history"))

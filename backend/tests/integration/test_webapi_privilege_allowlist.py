@@ -1,9 +1,11 @@
-"""d0e1f2a3b4c6 / e1f2a3b4c5d7: ``bfx_webapi``'s privileges in ``public`` are an exact allowlist.
+"""d0e1f2a3b4c6 / e1f2a3b4c5d7 / f9a0b1c2d3e4: ``bfx_webapi``'s privileges in ``public`` are an
+exact allowlist.
 
 ``EXPECTED_*`` below is written out here, not imported from the migration: the
 test is the second opinion. A later migration that grants the web API anything
 must update this list in the same change, or ``test_effective_privileges_equal_the_allowlist``
-fails. ``PREVIOUS_*`` is the allowlist d0e1f2a3b4c6 left, which a downgrade of
+fails. ``MATCH_COLUMNS`` is the allowlist e1f2a3b4c5d7 left, which a downgrade of f9a0b1c2d3e4
+must restore exactly; ``PREVIOUS_*`` is the one d0e1f2a3b4c6 left, which a downgrade of
 e1f2a3b4c5d7 must restore exactly.
 
 Mutation checks (one at a time; revert after each):
@@ -17,6 +19,8 @@ Mutation checks (one at a time; revert after each):
 * Grant ``raw`` (offer tables), ``evidence`` or ``normalized_payload`` in e1f2a3b4c5d7: the
   effective-privilege and constants tests fail.
 * Leave the allowlist copy in e1f2a3b4c5d7 unchanged while granting: the same two tests fail.
+* Grant ``raw`` on ``ledger_observation_credit_history`` in f9a0b1c2d3e4: the effective-privilege,
+  payload-column and constants tests fail.
 """
 
 from __future__ import annotations
@@ -37,6 +41,8 @@ pytestmark = pytest.mark.integration
 _VERSIONS = Path(__file__).resolve().parents[2] / "alembic/versions"
 _PREVIOUS = "c9d0e1f2a3b5"
 _PREVIOUS_HEAD = "d0e1f2a3b4c6"
+_MATCH_HEAD = "e8f9a0b1c2d3"  # e1f2a3b4c5d7's allowlist, unchanged up to here
+_CREDIT_ENDS = ("ledger_observation_credit_history", "SELECT")
 _RW = {"DELETE", "INSERT", "SELECT", "UPDATE"}
 _R = {"SELECT"}
 
@@ -104,6 +110,10 @@ EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
         "history_newest_mts_created", "offer_history_pages", "credit_history_pages",
         "trades_requested_start_ms", "trades_requested_end_ms", "history_symbols",
         "first_page_counts",
+    },
+    _CREDIT_ENDS: {
+        "observation_id", "venue_credit_id", "source_kind", "symbol", "amount", "rate",
+        "terminal_kind", "occurred_at_ms",
     },
     ("ledger_observation_offer", "SELECT"): _OBSERVED_OFFER,
     ("ledger_observation_offer_history", "SELECT"): {
@@ -208,7 +218,10 @@ def _held(columns: dict[tuple[str, str], set[str]]) -> set[tuple[str, ...]]:
     )
 
 
+# e1f2a3b4c5d7's allowlist: the head's without f9a0b1c2d3e4's credit-history grant.
+MATCH_COLUMNS = {key: cols for key, cols in EXPECTED_COLUMNS.items() if key != _CREDIT_ENDS}
 EXPECTED = _held(EXPECTED_COLUMNS)
+MATCH = _held(MATCH_COLUMNS)
 PREVIOUS = _held(PREVIOUS_COLUMNS)
 
 _TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
@@ -343,7 +356,11 @@ def test_execution_decisions_are_unreadable(head_db) -> None:
 
 def test_round_trip_keeps_the_allowlist(head_db) -> None:
     url, engine, _ = head_db
-    # e1f2a3b4c5d7's downgrade restores d0e1f2a3b4c6's allowlist exactly...
+    # f9a0b1c2d3e4's downgrade restores e1f2a3b4c5d7's allowlist exactly...
+    alembic(url, "downgrade", _MATCH_HEAD)
+    with engine.connect() as conn:
+        assert _diff(_effective(conn), MATCH) == {"unexpected": [], "missing": []}
+    # ...e1f2a3b4c5d7's restores d0e1f2a3b4c6's...
     alembic(url, "downgrade", _PREVIOUS_HEAD)
     with engine.connect() as conn:
         assert _diff(_effective(conn), PREVIOUS) == {"unexpected": [], "missing": []}
@@ -362,6 +379,7 @@ def test_the_match_grants_never_reach_the_payload_columns(head_db) -> None:
     _, engine, _ = head_db
     never = (
         ("ledger_observation_offer", "raw"), ("ledger_observation_offer_history", "raw"),
+        ("ledger_observation_credit_history", "raw"),
         ("ledger_observation", "evidence"), ("submission_attempt_journal", "normalized_payload"),
         ("submission_attempt_journal", "payload_sha256"),
         ("accepted_capital_basis", "scope_block"),
@@ -384,18 +402,30 @@ def _load(name: str):
     return module
 
 
+def _added(
+    after: dict[tuple[str, str], set[str]], before: dict[tuple[str, str], set[str]],
+) -> dict[tuple[str, str], set[str]]:
+    return {
+        key: columns - before.get(key, set())
+        for key, columns in after.items()
+        if columns - before.get(key, set())
+    }
+
+
 def test_the_migration_constants_are_the_allowlist() -> None:
+    newest = _load("f9a0b1c2d3e4_webapi_credit_history_columns")
+    assert {t: set(p) for t, p in newest.WEBAPI_TABLE_PRIVILEGES.items()} == EXPECTED_TABLES
+    assert {k: set(c) for k, c in newest.WEBAPI_COLUMN_PRIVILEGES.items()} == EXPECTED_COLUMNS
+    assert all(len(set(c)) == len(c) for c in newest.WEBAPI_COLUMN_PRIVILEGES.values())
+    # What f9a0b1c2d3e4 grants is exactly the difference to e1f2a3b4c5d7's copy.
+    assert _added(EXPECTED_COLUMNS, MATCH_COLUMNS) == {
+        k: set(v) for k, v in newest._GRANTED.items()}
     module = _load("e1f2a3b4c5d7_webapi_match_columns")
     assert {t: set(p) for t, p in module.WEBAPI_TABLE_PRIVILEGES.items()} == EXPECTED_TABLES
-    assert {k: set(c) for k, c in module.WEBAPI_COLUMN_PRIVILEGES.items()} == EXPECTED_COLUMNS
-    assert all(len(set(c)) == len(c) for c in module.WEBAPI_COLUMN_PRIVILEGES.values())
+    assert {k: set(c) for k, c in module.WEBAPI_COLUMN_PRIVILEGES.items()} == MATCH_COLUMNS
     # What e1f2a3b4c5d7 grants is exactly the difference to d0e1f2a3b4c6's copy.
     previous = _load("d0e1f2a3b4c6_webapi_privileges_exact_allowlist")
     assert {t: set(p) for t, p in previous.WEBAPI_TABLE_PRIVILEGES.items()} == EXPECTED_TABLES
     assert {k: set(c) for k, c in previous.WEBAPI_COLUMN_PRIVILEGES.items()} == PREVIOUS_COLUMNS
-    added = {
-        key: columns - PREVIOUS_COLUMNS.get(key, set())
-        for key, columns in EXPECTED_COLUMNS.items()
-        if columns - PREVIOUS_COLUMNS.get(key, set())
-    }
-    assert added == {k: set(v) for k, v in module._GRANTED.items()}
+    assert _added(MATCH_COLUMNS, PREVIOUS_COLUMNS) == {
+        k: set(v) for k, v in module._GRANTED.items()}
