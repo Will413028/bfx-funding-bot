@@ -1099,7 +1099,7 @@ class Deployer:
     def _restore_test(self, revision: str, reason: str) -> None:
         """Run the isolated restore test with <revision>'s DR scripts and wait.
 
-        bfx-restore-test@<revision>.service (User=ubuntu) runs the prefix-mode
+        bfx-restore-test@<revision>.service (User=ubuntu) runs the ledger-mode
         drill from dr_root/<revision>, refreshes the heartbeat on success and
         alerts on failure itself; `systemctl start` on a oneshot blocks until it
         finishes.

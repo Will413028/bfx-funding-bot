@@ -17,7 +17,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
 SRC = REPO / "backend" / "src" / "bfx_funding_bot"
-NAME = re.compile(r"ledger[_-]seed")
+# The seed tool and facade, not the read-only boot guard ``require_ledger_seed`` that every bot
+# boots through (and the restore test's boot check calls on a restored copy).
+NAME = re.compile(r"(?<!require_)ledger[_-]seed")
 SWITCH_TOOL = "deploy/vm/ops/bfx_ledger_switch.py"
 SWITCH_NAME = re.compile(r"ledger[_-]switch")
 SEED_IMPORT = re.compile(

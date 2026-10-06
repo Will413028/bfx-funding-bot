@@ -10,6 +10,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tempfile
 import time
 from collections.abc import Mapping
@@ -17,6 +18,7 @@ from contextlib import suppress
 from dataclasses import dataclass, fields
 from datetime import datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Literal
 from uuid import UUID
 
@@ -26,6 +28,21 @@ _archive_spec = importlib.util.spec_from_file_location(
 assert _archive_spec is not None and _archive_spec.loader is not None
 _archive = importlib.util.module_from_spec(_archive_spec)
 _archive_spec.loader.exec_module(_archive)
+
+
+def _load_ledger_digest() -> ModuleType:
+    """ledger_digest.py, registered so its dataclasses resolve and every loader shares it."""
+    name = "_bfx_ledger_digest"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name("ledger_digest.py"))
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+_ledger = _load_ledger_digest()
 
 BACKUP_ERROR_CODES = frozenset(
     {
@@ -52,18 +69,15 @@ RESTORE_ERROR_CODES = frozenset(
     }
 )
 
-# Prefix mode (restore_drill.py --prefix): no operator baseline. The restored
-# cluster's newest event_prefix_hashes link for the scope must equal production's
-# link at the same event_seq, and the restored chain must recompute exactly.
-PREFIX_ERROR_CODES = RESTORE_ERROR_CODES | frozenset(
-    {
-        "prefix_hash_mismatch",
-        "prefix_ahead_of_production",
-        "prefix_chain_invalid",
-        "production_read_failed",
-        "backup_label_unavailable",
-    }
+# Ledger mode (restore_drill.py --restore-test): no operator baseline. The restored copy's
+# append-only ledger rows must equal production's within the restored copy's own boundary,
+# and the image's boot guards must accept it (ledger_digest.py, ledger_boot_check.py).
+LEDGER_ERROR_CODES = RESTORE_ERROR_CODES | _ledger.ERROR_CODES | frozenset(
+    {"production_read_failed", "backup_label_unavailable"}
 )
+# The receipt kinds of ledger mode: `restore_ledger`, and `restore_prefix` only while the
+# installed restore-test wrapper of the previous release still calls `--prefix`.
+LEDGER_KINDS = frozenset({"restore_ledger", "restore_prefix"})
 
 _BACKUP_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _NETWORK_NAME = re.compile(r"bfx-dr-[a-z0-9-]+")
@@ -629,78 +643,12 @@ def render_restore_evidence(
     }
 
 
-def parse_prefix_verification(
-    verification_json: str, *, event_count: int, account_id: str, environment: str,
-    projector_version: str,
-) -> tuple[dict[str, object], dict[str, int | str]]:
-    """Validate prefix_verify.py output: the existing replay plus the recomputed chain head."""
-    if not isinstance(verification_json, str) or len(verification_json.encode()) > 65536:
-        _raise("restore_output_invalid")
-    try:
-        payload = json.loads(verification_json, object_pairs_hook=_unique_json_object)
-    except (ValueError, TypeError, RecursionError):
-        _raise("restore_output_invalid")
-    if not isinstance(payload, dict) or set(payload) != {"replay", "prefix"}:
-        _raise("restore_output_invalid")
-    replay = _parse_replay(json.dumps(payload["replay"]), event_count=event_count)
-    if (replay["account_id"], replay["environment"], replay["projector_version"]) != (
-        account_id, environment, projector_version,
-    ):
-        _raise("restore_output_invalid")
-    prefix = payload["prefix"]
-    if not isinstance(prefix, dict) or set(prefix) != {"event_seq", "prefix_hash", "chain_length"}:
-        _raise("prefix_chain_invalid")
-    event_seq, prefix_hash, chain_length = (
-        prefix["event_seq"], prefix["prefix_hash"], prefix["chain_length"],
-    )
-    if (
-        type(event_seq) is not int
-        or event_seq <= 0
-        or not _is_sha256(prefix_hash)
-        or type(chain_length) is not int
-        or chain_length != event_count
-        or chain_length <= 0
-        or event_seq != replay["event_head"]
-    ):
-        _raise("prefix_chain_invalid")
-    return replay, {"event_seq": event_seq, "prefix_hash": prefix_hash,
-                    "chain_length": chain_length}
-
-
-def compare_prefix_heads(
-    *, restored_seq: int, restored_hash: str, production_tsv: str,
-) -> dict[str, int | str]:
-    """Production's link at the restored head must exist and be byte-identical.
-
-    `production_tsv` is `<prefix_hash at restored_seq>\t<production head seq>` for the
-    same scope; an empty hash means production has no such link (the restore is
-    ahead of, or diverged from, production). Production normally has moved on --
-    its head may exceed the restored one; that lag is recorded, not judged here
-    (RPO is bfx-backup-check's job).
-    """
-    row = production_tsv.rstrip("\r\n")
-    fields = row.split("\t")
-    if "\n" in row or "\r" in row or len(fields) != 2:
-        _raise("production_read_failed")
-    production_hash, head_text = fields
-    production_head = _optional_nonnegative_int(head_text, code="production_read_failed")
-    if production_hash and not _is_sha256(production_hash):
-        _raise("production_read_failed")
-    if not production_hash or production_head is None or production_head < restored_seq:
-        _raise("prefix_ahead_of_production")
-    if production_hash != restored_hash:
-        _raise("prefix_hash_mismatch")
-    return {"production_event_head": production_head, "production_prefix_hash": production_hash}
-
-
-def render_prefix_restore_evidence(
+def render_ledger_restore_evidence(
     *,
-    schema_tsv: str,
-    verification_json: str,
-    production_tsv: str,
-    account_id: str,
-    environment: str,
-    projector_version: str,
+    kind: str,
+    bounds: object,
+    ledger: Mapping[str, object],
+    boot: Mapping[str, object],
     target_backup_label: str,
     elapsed_seconds: int,
     observed_at_ms: int,
@@ -713,7 +661,9 @@ def render_prefix_restore_evidence(
     verifier_image_digest: str,
     now_ms: int | None = None,
 ) -> dict[str, object]:
-    """Bounded evidence for a baseline-free restore verified by prefix-hash comparison."""
+    """Bounded evidence for a baseline-free restore verified against production's ledger."""
+    if kind not in LEDGER_KINDS:
+        _raise("restore_output_invalid")
     if isinstance(elapsed_seconds, bool) or not isinstance(elapsed_seconds, int) or elapsed_seconds < 0:
         _raise("rto_invalid")
     if network_internal is not True or len(network_name) > 128 or _NETWORK_NAME.fullmatch(network_name) is None:
@@ -729,30 +679,24 @@ def render_prefix_restore_evidence(
         _raise("restore_output_invalid")
     if not isinstance(target_backup_label, str) or _BACKUP_LABEL.fullmatch(target_backup_label) is None:
         _raise("restore_output_invalid")
+    if not isinstance(bounds, _ledger.Bounds):
+        _raise("restore_output_invalid")
     labels = validate_image_labels(image_labels)
-    server_version_num, migration_heads, event_count = _parse_schema(schema_tsv)
-    replay, prefix = parse_prefix_verification(
-        verification_json, event_count=event_count, account_id=account_id,
-        environment=environment, projector_version=projector_version,
-    )
-    production = compare_prefix_heads(
-        restored_seq=int(prefix["event_seq"]), restored_hash=str(prefix["prefix_hash"]),
-        production_tsv=production_tsv,
-    )
     return {
         "schema_version": 1,
         "measured": True,
-        "kind": "restore_prefix",
+        "kind": kind,
+        # The recurring restore test's mode-free contract with its caller (the wrapper).
+        "restore_test": True,
         "rto_seconds": elapsed_seconds,
         "target_backup_label": target_backup_label,
         "target_time": None,
         "observed_at_ms": observed_at_ms,
         "egress_disconnected": True,
-        "server_version_num": server_version_num,
-        "migration_heads": migration_heads,
-        "event_count": event_count,
-        **replay,
-        "prefix": {**prefix, **production},
+        "server_version_num": bounds.server_version_num,
+        "migration_heads": sorted(bounds.migration_heads),
+        "ledger": dict(ledger),
+        "boot": dict(boot),
         "network_name": network_name,
         "network_internal": True,
         "verifier_exit_status": 0,
@@ -765,15 +709,15 @@ def render_prefix_restore_evidence(
 
 def render_failure_evidence(
     *,
-    kind: Literal["backup", "restore", "archive_restore", "restore_prefix"],
+    kind: Literal["backup", "restore", "archive_restore", "restore_ledger", "restore_prefix"],
     error_code: str,
     observed_at_ms: int,
 ) -> dict[str, object]:
     """Return a measured=false report with only a bounded error code."""
-    allowlist = {"backup": BACKUP_ERROR_CODES, "restore_prefix": PREFIX_ERROR_CODES}.get(
-        kind, RESTORE_ERROR_CODES
+    allowlist = BACKUP_ERROR_CODES if kind == "backup" else (
+        LEDGER_ERROR_CODES if kind in LEDGER_KINDS else RESTORE_ERROR_CODES
     )
-    if kind not in {"backup", "restore", "archive_restore", "restore_prefix"} or error_code not in allowlist:
+    if kind not in {"backup", "restore", "archive_restore", *LEDGER_KINDS} or error_code not in allowlist:
         _raise("archiver_output_invalid" if kind == "backup" else "restore_output_invalid")
     observed = _nonnegative_int(observed_at_ms, code="archiver_output_invalid")
     return {

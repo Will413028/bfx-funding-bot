@@ -46,13 +46,12 @@ class RestoreResources:
 
 @dataclass(frozen=True, slots=True)
 class RestorePlan(RestoreResources):
-    """A scoped archive/prefix verifier layered on the restore resources."""
+    """The legacy single-scope baseline verifier layered on the restore resources."""
 
     account_id: str
     environment: str
     projector_version: str
-    # None only in prefix mode, which has no baseline hash.
-    expected_event_hash: str | None
+    expected_event_hash: str
 
 
 def _invalid() -> None:
@@ -77,27 +76,25 @@ def verifier_command(
                 "scripts/verify_projection_archive.py", "--input", "/run/archive-input.json",
                 "--input-digest", input_digest, "--account-id", plan.account_id,
                 "--environment", plan.environment, *(("--archive-only",) if archive_only else ()))
-    if plan.expected_event_hash is None:
-        _invalid()
     return (*command, image, "scripts/verify_projection_replay.py", "replay",
             "--account-id", plan.account_id, "--environment", plan.environment,
             "--projector-version", plan.projector_version, "--expected-event-hash", plan.expected_event_hash)
 
 
-def prefix_verifier_command(plan: RestorePlan, *, image: str, env_path: Path) -> tuple[str, ...]:
-    """Prefix mode: run prefix_verify.py (fed on stdin) in the observed bot image.
+def ledger_verifier_command(
+    resources: RestoreResources, *, image: str, env_path: Path,
+) -> tuple[str, ...]:
+    """Ledger mode: run ledger_boot_check.py (fed on stdin) in the observed bot image.
 
-    Same container name, user, isolated network and env file as the replay
+    Same container name, user, isolated network and env file as the baseline
     verifier, so cleanup and isolation are unchanged; `-i` carries the script.
     """
-    if (re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None or not env_path.is_absolute()
-            or plan.expected_event_hash is not None):
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None or not env_path.is_absolute():
         _invalid()
-    return ("docker", "run", "--rm", "-i", "--name", plan.verifier_container_name,
+    return ("docker", "run", "--rm", "-i", "--name", resources.verifier_container_name,
             "--user", f"{os.getuid()}:{os.getgid()}",
-            "--network", plan.network_name, "--env-file", str(env_path), "--entrypoint", "python",
-            image, "-", "--account-id", plan.account_id, "--environment", plan.environment,
-            "--projector-version", plan.projector_version)
+            "--network", resources.network_name, "--env-file", str(env_path),
+            "--entrypoint", "python", image, "-")
 
 
 def rehearsal_command(
@@ -262,16 +259,14 @@ def build_restore_plan(
     target_time: str | None,
     run_id: str,
     database_name: str,
-    expected_event_hash: str | None,
+    expected_event_hash: str,
 ) -> RestorePlan:
     """Layer the legacy single-scope verifier on generated restore resources."""
     canonical_account_id = _canonical_account_id(account_id)
     if environment not in _ENVIRONMENTS or not isinstance(projector_version, str) \
             or _PROJECTOR_VERSION.fullmatch(projector_version) is None:
         _invalid()
-    if expected_event_hash is not None and (
-        not isinstance(expected_event_hash, str) or _EVENT_HASH.fullmatch(expected_event_hash) is None
-    ):
+    if not isinstance(expected_event_hash, str) or _EVENT_HASH.fullmatch(expected_event_hash) is None:
         _invalid()
     resources = build_restore_resources(
         backup_label=backup_label, target_time=target_time,
@@ -285,9 +280,7 @@ def build_restore_plan(
         *compose_prefix, "run", "--rm", "--no-deps", "--name",
         resources.verifier_container_name, "verifier", "replay",
         "--account-id", canonical_account_id, "--environment", environment,
-        "--projector-version", projector_version,
-        *(("--expected-event-hash", expected_event_hash)
-          if expected_event_hash is not None else ()),
+        "--projector-version", projector_version, "--expected-event-hash", expected_event_hash,
     )
     values = {field.name: getattr(resources, field.name) for field in fields(RestoreResources)}
     values["run_commands"] = (*resources.run_commands, verifier_run)

@@ -733,8 +733,8 @@ R2 egress, creates a per-run LOGIN on the restored copy that is only a member of
 `bfx_cutover_reader` (the production shape: the tool does `SET LOCAL ROLE`, and the
 restored backup must already carry the reader's column grants), then
 runs the comparison in a hardened one-shot container on the internal DR network.
-No production prefix or stanza query is part of this mode. The existing monthly
-prefix test and heartbeat are separate.
+No production ledger read or stanza query is part of this mode. The monthly
+ledger restore test and its heartbeat are separate.
 
 The process exits **0** for a complete comparison pass, **1** for differences or
 inconclusive coverage, and **3** for operational failure (including restore,
@@ -769,28 +769,53 @@ production **only during the S2 halt**, using a separately verified READ ONLY
 production role and cutover manifest. This launcher does not implement that
 production path.
 
-## Monthly and change-triggered prefix restore test
+## Monthly and change-triggered ledger restore test
 
 The baseline drill above stays the provisioning and incident acceptance path. The recurring
-check is the baseline-free prefix mode, which needs no writer pause and no
-operator baseline:
+check is the baseline-free restore test, which needs no writer pause, no operator baseline
+and no scope configuration. Its caller names no verification mode; the drill of the
+release under test picks it (today: ledger mode):
 
 ```bash
-deploy/vm/pgbackrest/restore-drill.sh --prefix \
-  --account-id <canonical-uuid> --environment prod \
-  --projector-version execution-state-v1
+deploy/vm/pgbackrest/restore-drill.sh --restore-test
 ```
 
 It restores the newest backup set (read from the production stanza with
 `pgbackrest info`) to the end of the archive into the same generated, isolated
-resources, then runs `deploy/vm/pgbackrest/prefix_verify.py` on stdin inside the
-`bfx-bot:local` image: the existing event-only replay plus a recomputation of
-the restored `event_prefix_hashes` chain. Finally it reads, in a read-only
-transaction, production's link at the restored head's `event_seq` for the same
-scope and requires it to be identical (`prefix_hash_mismatch` or
-`prefix_ahead_of_production` otherwise). The receipt is
-`$HOME/bfx/dr-evidence/restore-prefix.json` (`kind: restore_prefix`); it never
-replaces `restore.json`.
+resources, then verifies the restored copy two ways:
+
+1. **Ledger rows against production.** A read-only `psql` on the restored copy
+   (`deploy/vm/pgbackrest/ledger_digest.py`) takes the boundary W of every scope from
+   the restored copy itself: the newest `query_revision`, the newest observation and
+   accepted observation, the newest `attempt_seq` and `opened_revision`, the attempts
+   still without an outcome, and the newest `epoch_seq`. The same generated
+   `COPY` script then runs on the restored copy and on production (`docker exec ... psql`
+   as the admin role on the container's own socket, one `REPEATABLE READ READ ONLY`
+   transaction), and each append-only ledger table's rows within W must be identical
+   (count plus an order-free sha256 multiset digest of the COPY text). The bounds are
+   commit-ordered per scope: every ledger writer holds the scope's advisory lock until
+   commit, the tables are append-only by trigger, and each table is bounded by its own
+   lock-allocated key or by the observation it was accepted with (resolutions: only
+   those naming an older accepted observation than the restored latest one; outcomes:
+   only for attempts that already had one). Production's later rows are outside W and
+   never compared. The clock and the venue mirrors are updated in place: they are only
+   checked on the restored copy (clock not behind its openings and accepts, every mirror
+   row names an accepted observation of its scope) and the restored clock must not be
+   ahead of production's. The restored copy's bounded rows must equal its whole tables,
+   so a wrong bound fails (`ledger_bound_invalid`) instead of hiding rows. A difference is
+   `ledger_digest_mismatch`; the journal names the tables (never row data).
+2. **Read-only boot check.** `deploy/vm/pgbackrest/ledger_boot_check.py` runs on stdin
+   inside the `bfx-bot:local` image on the internal network, as a per-run LOGIN that
+   has `SELECT` on the schema and `default_transaction_read_only`: schema at the image's
+   migration head, the stamped realm, epoch `ledger`, the Bitfinex seed guard, and the
+   ledger capital reader for every (symbol, cell) of each scope's newest accepted basis,
+   which must fold a basis (or report that the newest query was still pending at the
+   restore point). It contacts no venue.
+
+The receipt is `$HOME/bfx/dr-evidence/restore-ledger.json` (or `--output`;
+`kind: restore_ledger`, `restore_test: true`, with the per-scope bounds, per-table
+digests and the boot result); it never replaces `restore.json`. The wrapper accepts a
+fresh `measured: true` receipt with `restore_test: true`, whatever the mode. Production is only read, after the restored copy is isolated.
 
 `bfx-restore-test@<release>.service` runs this. The monthly timer
 (`bfx-restore-test.timer`, 1st of the month 09:17 UTC) starts
@@ -800,15 +825,14 @@ checkout `/home/ubuntu/bfx-releases/current`. bfx-deploy starts
 whenever it is about to apply a migration or
 ship a change under `deploy/vm/pgbackrest/`, `deploy/vm/postgres/`,
 `docker-compose.bot.yml` or `docker-compose.dr.yml` (or when the diff cannot be
-read); a failure alerts and blocks that deploy. Its config is
-`/home/ubuntu/bfx/restore-test.json` with exactly `account_id`, `environment`
-and `projector_version`, for example
-`{"account_id": "<canonical-uuid>", "environment": "prod", "projector_version": "execution-state-v1"}`.
+read); a failure alerts and blocks that deploy. The test needs no config file; the
+old `/home/ubuntu/bfx/restore-test.json` is still read by the previous release's
+wrapper during the first deploy of this one, so remove it only after that deploy
+succeeded.
 bfx-deploy creates those checkouts (git worktrees of the mirror, owned by
 `ubuntu`) and points `current` at each release it deploys, so a DR change is
 tested with its own scripts before it ships and runs on schedule after it
-deploys. To re-run the test by hand, for example after changing the config or
-the secrets:
+deploys. To re-run the test by hand, for example after changing the secrets:
 
 ```bash
 sudo systemctl start --no-block bfx-restore-test@current.service
@@ -825,6 +849,14 @@ test is stopped. Enable the timer after the first successful manual run:
 sudo systemctl enable bfx-restore-test.timer
 sudo systemctl start bfx-restore-test.timer
 ```
+
+The first deploy of the release that introduced ledger mode runs its restore test
+through the restore-test unit and wrapper installed by the previous release; those
+call the drill with `--prefix ...` and read `restore-prefix.json`. The drill still
+accepts that call, runs ledger mode and writes that receipt with
+`kind: restore_prefix`. Once that release is deployed its own unit and wrapper call
+`--restore-test --output ...`; the transitional `--prefix` call is then removed from
+the drill, and a later change of verification needs no such bridge.
 
 ## Rotation and incident posture
 

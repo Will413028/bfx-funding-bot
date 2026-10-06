@@ -153,7 +153,7 @@ def test_rehearsal_uses_only_restored_copy_and_hardened_comparison(
         raise AssertionError("production read in rehearsal")
 
     monkeypatch.setattr(drill, "_latest_backup_label", forbidden)
-    monkeypatch.setattr(drill, "_production_prefix", forbidden)
+    monkeypatch.setattr(drill, "_ledger_stream", forbidden)
     assert drill.run_rehearsal(request) == 0
 
     command = _comparison_command(runner)

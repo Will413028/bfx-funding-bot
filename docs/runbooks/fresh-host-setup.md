@@ -304,18 +304,14 @@ ls -l /usr/local/lib/bfx-ops/current /home/ubuntu/bfx-releases/current
   `BFX_OPERATOR_USER_ID`；不沿用舊 launcher 的 `BFX_RELEASE_*`。
 - 告警所需 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` 同時配置到 `notify.env` 與
   `bot.env`；GHCR 憑證只需 `read:packages`。設定方式見 [operations](operations.md#6-告警)。
-- `/home/ubuntu/bfx/restore-test.json` 由 DR operator（`ubuntu`）擁有，欄位固定為：
 
-```json
-{"account_id": "<canonical UUID>", "environment": "prod", "projector_version": "execution-state-v1"}
-```
-
-Restore test 使用本機 `bfx-bot:local` verifier。先核對它對應的 image 與模組；
-缺少 image 或下列檢查失敗時，先處理 verifier 來源，不可隨意重 tag：
+Restore test 不需要設定檔（ledger mode 驗證 restored copy 內的每個 scope），使用本機
+`bfx-bot:local` 跑唯讀 boot check。先核對它對應的 image 與模組；缺少 image 或下列檢查
+失敗時，先處理 verifier 來源，不可隨意重 tag：
 
 ```bash
 sudo docker run --rm --pull=never --entrypoint "" bfx-bot:local /app/.venv/bin/python -c \
-  "from bfx_funding_bot.modules.execution.event_store.canonical import rolling_prefix_hash; import scripts.verify_projection_replay; print('ok')"
+  "from bfx_funding_bot.apps.authority_support import require_ledger_seed; from bfx_funding_bot.modules.ledger.wiring import build_ledger_capital_reader; print('ok')"
 sudo systemctl start --no-block bfx-restore-test@current.service
 journalctl -fu bfx-restore-test@current.service
 ```

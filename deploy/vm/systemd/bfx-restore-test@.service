@@ -1,5 +1,5 @@
 [Unit]
-Description=Isolated restore test with the DR scripts of release %i (prefix-hash verification)
+Description=Isolated restore test with the DR scripts of release %i (ledger verification)
 Documentation=file:///home/ubuntu/bfx-releases/%i/docs/runbooks/offsite-dr.md
 Requires=docker.service
 After=docker.service
@@ -18,4 +18,4 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 WorkingDirectory=/home/ubuntu/bfx-releases/%i
 # The drill's own RTO deadline is 3600s plus a 30s cleanup budget.
 TimeoutStartSec=7200
-ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_restore_test.py --config /home/ubuntu/bfx/restore-test.json --drill /home/ubuntu/bfx-releases/%i/deploy/vm/pgbackrest/restore-drill.sh --evidence /home/ubuntu/bfx/dr-evidence/restore-prefix.json --heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json
+ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_restore_test.py --drill /home/ubuntu/bfx-releases/%i/deploy/vm/pgbackrest/restore-drill.sh --evidence /home/ubuntu/bfx/dr-evidence/restore-ledger.json --heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json

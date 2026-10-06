@@ -41,7 +41,7 @@ prior state：production PostgreSQL 18 在單一 VM 的 `postgres:18-alpine` con
 - **D2 = spec §pgBackRest configuration**：`archive_mode=on`＋`archive_timeout=60s`（低寫入量也有上限的 archive 延遲）＋`archive-async`；每週日 03:17 UTC full、其餘日 diff，保留 4 組 full × 各 6 組 diff；repository client-side `aes-256-cbc`，cipher passphrase 與 R2 key 分開保存並離線 escrow；pgBackRest 的 file/console/stderr log 全關，只留 allowlisted error code。
 - **D3 = spec §Scheduling**：R2／archive 失敗只經 status 與告警呈現，**不接 autoheal**，避免反覆重啟資料庫；排程用 `docker exec --user postgres`，不用繼承 app healthcheck 的 `compose run`。
 - **D4 = hardening revision 1–6**：採 S2。還原後的非空 PGDATA 不靠 `POSTGRES_*` 初始化，改以 local socket、SQL role `bfx` 建臨時 verifier role；每次 measured 還原都要同一 backup／PITR target 的 baseline（migration heads、event count/head/hash、account/environment/projector）逐欄吻合；整個生命週期共用 3600 秒單調 deadline，cleanup 另有 30 秒；任何失敗以 `measured:false` 原子取代舊的綠燈（含 ENOSPC）。
-- **D5 = 後續（2026-09-25，`d75b288`）**：每月與變更觸發的還原測試改用 `event_prefix_hashes` 前綴比對，不需 baseline、不必停寫入者；baseline 模式留給完整演練。
+- **D5 = 後續（2026-09-25，`d75b288`）**：每月與變更觸發的還原測試改用 `event_prefix_hashes` 前綴比對，不需 baseline、不必停寫入者；baseline 模式留給完整演練。（2026-10-06 由 [2026-10-06-ledger-restore-verification-replaces-prefix-test](2026-10-06-ledger-restore-verification-replaces-prefix-test.md) 取代：資本權威改為 ledger 後 event_log 凍結，前綴比對只驗證凍結資料。）
 
 ## Rationale
 
