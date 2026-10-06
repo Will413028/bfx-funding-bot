@@ -6,18 +6,14 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import UUID
 
 COMPOSE_PATH = Path(__file__).resolve().parents[3] / "docker-compose.dr.yml"
-_ENVIRONMENTS = frozenset({"prod", "shadow", "ci"})
 _BACKUP_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _RUN_ID = re.compile(r"[0-9TZ-]+-[a-f0-9]{16}")
 _TARGET_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _GENERATED_NAME = re.compile(r"bfx-dr-[a-z0-9-]+")
 _VERIFY_ROLE = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 _DATABASE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
-_BACKEND_IMAGE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
-_REVISION = re.compile(r"[0-9a-f]{40}")
 
 
 class RestoreInputError(ValueError):
@@ -46,80 +42,25 @@ def _invalid() -> None:
     raise RestoreInputError("invalid_restore_input")
 
 
+# The image's own read-only boot check (``apps/restore_boot_check.py``; every deployed image has
+# it since S1-8 PR-C), so the checks always match the API of the image they judge.
+BOOT_CHECK_MODULE = "bfx_funding_bot.apps.restore_boot_check"
+
+
 def ledger_verifier_command(
     resources: RestoreResources, *, image: str, env_path: Path,
 ) -> tuple[str, ...]:
-    """Run ledger_boot_check.py (fed on stdin) in the observed bot image.
+    """Run the image's boot check module in the observed bot image.
 
     The generated verifier container name (cleaned up by name), the caller's uid, the
-    isolated network and the env file; `-i` carries the script.
+    isolated network and the env file (the restored cluster's read-only DATABASE_URL).
     """
     if re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None or not env_path.is_absolute():
         _invalid()
-    return ("docker", "run", "--rm", "-i", "--name", resources.verifier_container_name,
+    return ("docker", "run", "--rm", "--name", resources.verifier_container_name,
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--network", resources.network_name, "--env-file", str(env_path),
-            "--entrypoint", "python", image, "-")
-
-
-def rehearsal_command(
-    plan: RestoreResources, *, image: str, code_revision: str, dsn_path: Path,
-    manifest_path: Path, cells_path: Path, scopes: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Run the fixed comparison command with only three read-only input files."""
-    validate_rehearsal_image(image)
-    if _REVISION.fullmatch(code_revision) is None:
-        _invalid()
-    validate_rehearsal_scopes(scopes)
-    for path in (dsn_path, manifest_path, cells_path):
-        if not path.is_absolute() or any(character in str(path) for character in ":\n\r"):
-            _invalid()
-    run_id = plan.project_name.removeprefix("bfx-dr-")
-    return (
-        "docker", "run", "--rm", "--pull", "never", "--name", plan.verifier_container_name,
-        "--label", "autoheal=false", "--user", f"{os.getuid()}:{os.getgid()}",
-        "--network", plan.network_name, "--read-only",
-        "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m", "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges:true", "--pids-limit", "256",
-        "--volume", f"{dsn_path}:/run/bfx-comparison/dsn:ro",
-        "--volume", f"{manifest_path}:/run/bfx-comparison/manifest.json:ro",
-        "--volume", f"{cells_path}:/run/bfx-comparison/cells.yaml:ro",
-        "--workdir", "/app", "--entrypoint", "python", image,
-        "-m", "bfx_funding_bot.apps.capital_comparison", "--mode", "rehearsal",
-        "--dsn-file", "/run/bfx-comparison/dsn", "--manifest", "/run/bfx-comparison/manifest.json",
-        "--run-id", run_id, "--code-revision", code_revision,
-        "--cells", "/run/bfx-comparison/cells.yaml",
-        *(part for scope in scopes for part in ("--scope", scope)),
-    )
-
-
-def validate_rehearsal_image(image: str) -> None:
-    if not isinstance(image, str) or _BACKEND_IMAGE.fullmatch(image) is None:
-        _invalid()
-
-
-def validate_rehearsal_scopes(scopes: tuple[str, ...]) -> None:
-    if not scopes:
-        _invalid()
-    for scope in scopes:
-        if not isinstance(scope, str):
-            _invalid()
-        try:
-            account, environment = scope.split(":")
-        except ValueError:
-            _invalid()
-        if _canonical_account_id(account) != account or environment not in _ENVIRONMENTS:
-            _invalid()
-
-
-def _canonical_account_id(account_id: str) -> str:
-    try:
-        canonical = str(UUID(account_id))
-    except (TypeError, ValueError):
-        _invalid()
-    if account_id != canonical:
-        _invalid()
-    return canonical
+            "--entrypoint", "python", image, "-m", BOOT_CHECK_MODULE)
 
 
 def _generated_name(value: str) -> str:

@@ -138,9 +138,9 @@ _CORE_TABLES = frozenset({
     "capital_authority_epoch", "venue_offer_mirror", "venue_credit_mirror",
 })
 LEDGER_TABLES = (*RULES, *MUTABLE_TABLES)
-# What the image's boot check (ledger_boot_check.py) reads besides the ledger: the schema head,
-# the realm stamp and the capital policy the capital reader folds. The drill's per-run verifier
-# role gets SELECT on exactly these and the ledger tables, nothing else.
+# What the image's boot check (``apps/restore_boot_check.py``) reads besides the ledger: the
+# schema head, the realm stamp and the capital policy the capital reader folds. The drill's
+# per-run verifier role gets SELECT on exactly these and the ledger tables, nothing else.
 BOOT_CHECK_EXTRA_TABLES = (
     "alembic_version", "database_realm", "capital_policy_heads", "capital_policy_revisions",
 )
@@ -547,7 +547,7 @@ def boot_failure_code(stdout: str) -> str:
 
 
 def parse_boot(output: str, bounds: Bounds) -> dict[str, object]:
-    """Validate ledger_boot_check.py's single JSON line against the restored bounds."""
+    """Validate the image boot check's single JSON line against the restored bounds."""
     lines = [line for line in output.splitlines() if line.strip()] if isinstance(output, str) else []
     if len(lines) != 1 or len(lines[0]) > 65_536:
         _fail("restore_output_invalid")

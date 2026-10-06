@@ -473,69 +473,6 @@ the fresh backup/restore evidence bundle satisfies every gate above. Offline
 tests, image build, systemd syntax, or timer scheduling alone do not establish
 R2 reachability, restore success, production rollout acceptance, or RPO/RTO.
 
-## Capital comparison on an isolated restore (S0-R-C)
-
-Run this manually on the VM as the DR operator after the release containing
-`bfx_funding_bot.apps.capital_comparison` is deployed. Select an explicit retained
-backup label and an exact UTC recovery target covered by its WAL. Supply every
-live `ACCOUNT_UUID:ENVIRONMENT` scope; repeat `--scope` for additional accounts
-or environments. Use the deployed backend's full repository digest reference:
-
-```bash
-cd /home/ubuntu/bfx-releases/current
-IMAGE=$(docker inspect bfx-bot --format '{{.Config.Image}}')
-deploy/vm/pgbackrest/restore-drill.sh --rehearsal \
-  --backup-label '<selected-backup-label>' \
-  --target-time '2026-09-29T00:00:00Z' \
-  --backend-image "$IMAGE" \
-  --cells /home/ubuntu/bfx-releases/current/backend/configs/cells.live.yaml \
-  --scope '<canonical-account-uuid>:prod'
-```
-
-Replace the example recovery target with the selected point; the launcher uses
-that instant as comparison `now_ms`. It refuses an image reference that differs
-from the deployed `bfx-bot` image and takes `--code-revision` from that pinned
-image's revision label. It creates a private restored database, disconnects its
-R2 egress, creates a per-run LOGIN on the restored copy that is only a member of
-`bfx_cutover_reader` (the production shape: the tool does `SET LOCAL ROLE`, and the
-restored backup must already carry the reader's column grants), then
-runs the comparison in a hardened one-shot container on the internal DR network.
-No production ledger read or stanza query is part of this mode. The monthly
-ledger restore test and its heartbeat are separate.
-
-The process exits **0** for a complete comparison pass, **1** for differences or
-inconclusive coverage, and **3** for operational failure (including restore,
-container, evidence, or cleanup failure). Each run that passes input preflight has a fresh private directory
-under `$HOME/bfx/dr-evidence/capital-comparison-rehearsals/<run-id>/`:
-
-- `result.json` is the final launcher status after cleanup; check its `exit_code`
-  and `cleanup_complete` first. It records the digest of the exact copied cells
-  bytes (`cells_sha256`) alongside the pinned image and code revision.
-- `summary.json` is the comparison command's summary, including coverage,
-  counts, and `inconclusive`.
-- `comparison.jsonl` contains the reverse scope inventory record, the per-scope
-  comparison records, then the command summary. It is present only when the command produced valid output.
-
-For the most recent run, inspect the final status before the command summary:
-
-```bash
-RUN_DIR=$(ls -dt "$HOME"/bfx/dr-evidence/capital-comparison-rehearsals/* | head -n 1)
-cat "$RUN_DIR/result.json"
-cat "$RUN_DIR/summary.json"
-```
-
-The temporary 0600 DSN, manifest, cells copy, and restore Compose env file are
-removed in the same cleanup path as the container, networks, and volume. The
-rehearsal directory contains no DSN or password; keep its financial results
-private. An operator must confirm the retained backup/WAL selection, actual VM
-isolation and grants, and the comparison result there; local tests do not run
-Docker or query the VM.
-
-Later cutover (C) uses the same comparison command with `--mode cutover` against
-production **only during the S2 halt**, using a separately verified READ ONLY
-production role and cutover manifest. This launcher does not implement that
-production path.
-
 ## Monthly and change-triggered ledger restore test
 
 The acceptance drill above (steps 6-8) runs this same verification at an operator-chosen
@@ -571,8 +508,9 @@ resources, then verifies the restored copy two ways:
    ahead of production's. The restored copy's bounded rows must equal its whole tables,
    so a wrong bound fails (`ledger_bound_invalid`) instead of hiding rows. A difference is
    `ledger_digest_mismatch`; the journal names the tables (never row data).
-2. **Read-only boot check.** `deploy/vm/pgbackrest/ledger_boot_check.py` runs on stdin
-   inside the `bfx-bot:local` image on the internal network, as a per-run LOGIN that
+2. **Read-only boot check.** The image's own entry,
+   `python -m bfx_funding_bot.apps.restore_boot_check`, runs in the `bfx-bot:local` image
+   (the deployed one) on the internal network, as a per-run LOGIN that
    has `SELECT` on exactly the ledger tables plus `alembic_version`, `database_realm` and the capital policy tables, and `default_transaction_read_only`: schema at the image's
    migration head, the stamped realm, epoch `ledger`, the Bitfinex seed guard, and the
    ledger capital reader for every (symbol, cell) of each scope's newest accepted basis,
@@ -594,8 +532,9 @@ whenever it is about to apply a migration or
 ship a change under `deploy/vm/pgbackrest/`, `deploy/vm/postgres/`,
 `docker-compose.bot.yml` or `docker-compose.dr.yml` (or when the diff cannot be
 read); a failure alerts and blocks that deploy. The test needs no config file of
-its own; keep `/home/ubuntu/bfx/restore-test.json` until the D3 cleanup release
-removes the transitions below (it says when to delete it).
+its own. `/home/ubuntu/bfx/restore-test.json` (the scope file of the retired prefix test)
+and `$HOME/bfx/dr-evidence/restore-prefix.json` are no longer read by anything since S1-8
+PR-D; the operator may delete them.
 bfx-deploy creates those checkouts (git worktrees of the mirror, owned by
 `ubuntu`) and points `current` at each release it deploys, so a DR change is
 tested with its own scripts before it ships and runs on schedule after it
@@ -617,17 +556,15 @@ sudo systemctl enable bfx-restore-test.timer
 sudo systemctl start bfx-restore-test.timer
 ```
 
-The first deploy of the release that introduced ledger mode runs its restore test
-through the restore-test unit and wrapper installed by the previous release; those
-call the drill with `--prefix ...` and read `restore-prefix.json`. The drill still
-accepts that call, runs ledger mode and writes that receipt with
-`kind: restore_prefix`. Once that release is deployed its own unit and wrapper call
-`--restore-test --output ...`, and a later change of verification needs no such bridge.
-The reverse also works: after a revert to a release from before `--restore-test`, the
-installed wrapper finds no `--restore-test` in that drill's `--help`, runs it in its own
-`--prefix` form with the scope in `/home/ubuntu/bfx/restore-test.json`, and accepts its
-`restore-prefix.json` as the old wrapper did. Both transitions and that file are removed
-by the D3 cleanup release.
+The wrapper and the unit call only `--restore-test --output ...`, and every drill since S1-8
+D3 accepts that, so a deploy (target drill, installed wrapper) and a revert to any release
+since D3 need no bridge; a revert to a release from before D3 is not supported (its drill
+has no `--restore-test`; the transitional `--prefix` paths were removed in S1-8 PR-D). The
+drill runs the deployed image's own boot check entry, which every image since S1-8 PR-C has.
+If installing a release's tooling stops after `current` points at the new wrapper but
+before `systemctl daemon-reload`, a unit from before PR-D still passes `--legacy-config`:
+the wrapper refuses that argument (exit 2, alert, heartbeat not refreshed). Rerun the
+tooling install or `sudo systemctl daemon-reload` and start the test again.
 
 Each production and restored-copy read is bounded on the server
 (`statement_timeout` and `transaction_timeout` at the drill's remaining budget,

@@ -124,9 +124,9 @@ def test_restore_test_runs_the_drill_of_the_release_it_is_instantiated_for() -> 
     assert "--heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json" in exec_start
     # Ledger receipts never overwrite the baseline drill's restore.json; no scope config.
     assert "--evidence /home/ubuntu/bfx/dr-evidence/restore-ledger.json" in exec_start
-    # A drill from before --restore-test (a revert) still finds its scope config and receipt.
-    assert "--legacy-config /home/ubuntu/bfx/restore-test.json" in exec_start
-    assert "--legacy-evidence /home/ubuntu/bfx/dr-evidence/restore-prefix.json" in exec_start
+    # No scope config and no prefix receipt: the reverse fallback is gone (S1-8 PR-D).
+    assert "restore-test.json" not in exec_start and "restore-prefix" not in exec_start
+    assert "--legacy" not in exec_start and "--config" not in exec_start
     check = _unit("bfx-backup-check.service").one("Service", "ExecStart")
     assert "--evidence /home/ubuntu/bfx/dr-evidence/backup.json" in check
     assert "--restore-heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json" in check

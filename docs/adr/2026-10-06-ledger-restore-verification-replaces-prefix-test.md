@@ -46,14 +46,14 @@ prior state：每月與變更觸發的還原測試（[2026-09-04-pgbackrest-in-p
 
 ## Revocation Triggers
 
-- PR-D（D3 的 docs／cleanup PR）→ 移除 drill 的 `--prefix` 過渡呼叫、wrapper 的反向 fallback 與 `--legacy-*` 參數，並刪除 VM 上的 `/home/ubuntu/bfx/restore-test.json`。
+- ~~PR-D（D3 的 docs／cleanup PR）→ 移除 drill 的 `--prefix` 過渡呼叫、wrapper 的反向 fallback 與 `--legacy-*` 參數，並刪除 VM 上的 `/home/ubuntu/bfx/restore-test.json`~~：已在 S1-8 PR-D 執行，見下方 Amendment（VM 上的檔案由 operator 刪除）。
 - ~~D4b（legacy 表移到 archive schema）→ 完整 baseline 演練（Halt 2、事故驗收）也改驗 ledger~~：已在 D4b 執行，見下方 Amendment。
 - 改用 logical 或部分還原（不再是 physical restore）→ 重評「W 與 scope 清單取自還原副本」，加上 production 端的 scope／尾端完整性比對。
 - 出現第二個交易所帳戶或 scope → 重評 boot check 要求每個 scope 都通過（bot 只看自己的 scope）。
 
 - 單次 production 讀取時間逼近 RTO 預算，或長 snapshot 影響 vacuum → 改為增量比對（上次驗證的 W 與 digest 存入 evidence，只讀 (W_prev, W]）或從 standby 讀。
 - ledger 表新增共同 commit stamp → 以它作為唯一邊界。
-- S1-8 PR-C 起 image 內建入口 `python -m bfx_funding_bot.apps.restore_boot_check`；drill 的 `ledger_boot_check.py` 先以 `find_spec` 探測，有入口就交給它，沒有（PR-C 之前的 image，只在部署 PR-C 那一次）才跑 stdin 腳本自帶的舊 API 版檢查。**PR-C 部署後的第一個 release** → 刪除該 fallback，drill 直接對 image 跑 `python -m`。
+- ~~S1-8 PR-C 起 image 內建入口 `python -m bfx_funding_bot.apps.restore_boot_check`；drill 的 `ledger_boot_check.py` 先以 `find_spec` 探測，有入口就交給它，沒有（PR-C 之前的 image，只在部署 PR-C 那一次）才跑 stdin 腳本自帶的舊 API 版檢查。**PR-C 部署後的第一個 release** → 刪除該 fallback，drill 直接對 image 跑 `python -m`。~~：已在 S1-8 PR-D 執行，見下方 Amendment。
 
 ## Amendment 2026-10-06（S1-8 D4b）
 
@@ -75,3 +75,25 @@ prior state：每月與變更觸發的還原測試（[2026-09-04-pgbackrest-in-p
   alembic 比對）、`cutover_projection`、`cutover_identity`／`identity_cutover`。
 - **限制**：production 必須還在而且讀得到。production 已經不在時要做的是事故還原，不是這個演練；
   還原副本必須在部署中 release 的 schema head，比 head 舊的 backup 會被 boot check 拒絕。
+
+## Amendment 2026-10-06（S1-8 PR-D）
+
+上面兩個 PR-D 觸發條件執行。prior state：drill 接受上一版 wrapper 的 `--prefix ...` 呼叫並寫
+`restore-prefix.json`；wrapper 以 `--help` 探測 drill、對 D3 之前的 drill 走 `--prefix` 並讀
+`/home/ubuntu/bfx/restore-test.json`；`--legacy-config`／`--config`／`--legacy-evidence` 讓安裝中斷時
+新 wrapper 仍接受舊 unit；drill 把 `ledger_boot_check.py` 經 stdin 餵給 image，image 沒有入口時跑舊 API 版。
+
+- **刪除**：drill 的 `--prefix`（含 `--account-id`／`--environment`／`--projector-version`）、
+  `restore_prefix` receipt kind、`--rehearsal`（comparison rehearsal，隨切換工具刪除）；wrapper 的
+  `--help` 探測與反向 fallback、`--legacy-*`／`--config`、heartbeat 的 `legacy_drill`；unit 的
+  `--legacy-*` 參數；`deploy/vm/pgbackrest/ledger_boot_check.py`。drill 直接在部署中的 image 跑
+  `python -m bfx_funding_bot.apps.restore_boot_check`（無 `-i`、不 pipe）。
+- **跨版本**：PR-D 本身的部署 gate 是 d44fc7ab 的 wrapper／unit 跑 PR-D 的 drill（wrapper 探測到
+  `--restore-test`，走無 mode 的呼叫；image 有入口）；revert 到 D3 之後任一版本時，PR-D 的
+  wrapper／unit 只呼叫 `--restore-test --output`，那些 drill 都接受。`tests/scripts/
+  test_dr_restore_test_cross_version.py` 以 d44fc7ab wrapper 的原檔驗證兩個方向（PR-D 部署後刪除）。
+  revert 到 D3 之前的版本不再支援。
+- **安裝中斷的視窗**（取代上面「工具安裝中斷的視窗」的正向那半）：`current` 已指向新 wrapper、
+  `systemctl daemon-reload` 尚未跑時，舊 unit 仍帶 `--legacy-config`，新 wrapper 拒絕（exit 2、告警、
+  heartbeat 不更新、擋下需要 restore test 的部署，不碰交易狀態）。重跑工具安裝或 daemon-reload 即恢復。
+- **VM**：`/home/ubuntu/bfx/restore-test.json` 與 `restore-prefix.json` 不再被讀取，operator 可刪除。

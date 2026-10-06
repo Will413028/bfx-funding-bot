@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from bfx_funding_bot.modules.ledger import table_digest as td
+from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES, CapitalAuthorityEpochRow
 
 ROOT = Path(__file__).resolve().parents[3]
 PGBACKREST = ROOT / "deploy/vm/pgbackrest"
@@ -125,8 +125,11 @@ def _boot(**scope: Any) -> str:
 def test_every_ledger_table_has_exactly_one_rule_or_is_mutable() -> None:
     """A new ledger table needs a conscious boundary here (or the drill cannot compare it)."""
     assert set(ledger.RULES).isdisjoint(ledger.MUTABLE_TABLES)
-    assert set(ledger.RULES) | set(ledger.MUTABLE_TABLES) == set(td.DIGEST_TABLES)
-    assert set(ledger.MUTABLE_TABLES) == td.MUTABLE_TABLES
+    every_table = {table.name for table in LEDGER_TABLES} | {CapitalAuthorityEpochRow.__tablename__}
+    assert set(ledger.RULES) | set(ledger.MUTABLE_TABLES) == every_table
+    # The clock and the mirrors are rewritten in place; everything else is append-only.
+    assert set(ledger.MUTABLE_TABLES) == {"capital_command_clock", "venue_offer_mirror",
+                                          "venue_credit_mirror"}
     assert ledger.PARTIAL_TABLES.issubset(ledger.RULES)
 
 
@@ -303,13 +306,12 @@ def test_boot_refusal_codes_are_bounded(stdout: str, code: str) -> None:
     assert code in evidence.LEDGER_ERROR_CODES
 
 
-def test_only_ledger_receipt_kinds_remain() -> None:
-    for kind in ("restore_ledger", "restore_prefix"):
-        report = evidence.render_failure_evidence(kind=kind, error_code="ledger_digest_mismatch",
-                                                  observed_at_ms=1)
-        assert report["kind"] == kind and report["error_code"] == "ledger_digest_mismatch"
-    # The legacy baseline drill's kinds are retired: refused whatever the code.
-    for kind in ("restore", "archive_restore"):
+def test_only_the_ledger_receipt_kind_remains() -> None:
+    report = evidence.render_failure_evidence(kind="restore_ledger",
+                                              error_code="ledger_digest_mismatch", observed_at_ms=1)
+    assert report["kind"] == "restore_ledger" and report["error_code"] == "ledger_digest_mismatch"
+    # The legacy baseline drill's kinds and the transitional prefix receipt are retired.
+    for kind in ("restore", "archive_restore", "restore_prefix"):
         for code in ("ledger_digest_mismatch", "restore_output_invalid"):
             with pytest.raises(evidence.EvidenceError):
                 evidence.render_failure_evidence(kind=kind, error_code=code, observed_at_ms=1)
@@ -368,7 +370,7 @@ class FakeDocker:
             return ok(f"sha256:{'e' * 64}\n")
         if command[:4] == ("docker", "image", "inspect", "--format={{json .Config.Labels}}"):
             return ok(json.dumps(IMAGE_LABELS))
-        if command[:2] == ("docker", "run") and command[-1] == "-":
+        if command[:2] == ("docker", "run") and command[-2:] == ("-m", commands.BOOT_CHECK_MODULE):
             code, stdout = self.boot
             return ok(stdout, code)
         if command[:2] == ("docker", "exec") and input_text is not None:
@@ -442,10 +444,12 @@ def test_ledger_drill_restores_the_newest_backup_and_compares_with_production(tm
     assert fake.calls[0] == ("docker", "exec", "--user", "postgres", "bfx-postgres", "pgbackrest",
                              "--stanza=bfx", "info", "--output=json")
     assert not any("--expected-event-hash" in call for call in fake.calls)
-    verifier = fake.find(lambda c: c[:2] == ("docker", "run") and c[-1] == "-")
-    assert verifier[:4] == ("docker", "run", "--rm", "-i")
+    verifier = fake.find(lambda c: c[:2] == ("docker", "run")
+                         and c[-2:] == ("-m", "bfx_funding_bot.apps.restore_boot_check"))
+    assert verifier[:3] == ("docker", "run", "--rm") and "-i" not in verifier
     assert verifier[verifier.index("--network") + 1] == NET
-    assert fake.inputs[verifier] == (PGBACKREST / "ledger_boot_check.py").read_text()
+    # The image's own entry: nothing is piped into the verifier.
+    assert verifier not in fake.inputs
     bootstrap = next(sql for sql in fake.inputs.values() if "CREATE ROLE" in sql)
     assert "ALL TABLES" not in bootstrap and "GRANT SELECT ON TABLE public.%I" in bootstrap
     assert "SET default_transaction_read_only = on" in bootstrap
@@ -550,18 +554,7 @@ def test_unreadable_backup_catalog_fails_before_any_resource_exists(tmp_path: Pa
                    for c in fake.calls)
 
 
-def test_transitional_prefix_receipt_satisfies_the_previous_wrapper(tmp_path: Path) -> None:
-    """The release before this one installed a wrapper that runs `--prefix ...` and accepts
-    only a fresh, measured `restore_prefix` receipt; it still gets one, from ledger mode."""
-    fake = FakeDocker()
-    request = drill_module.LedgerRequest(kind="restore_prefix")
-    assert _ledger_drill(tmp_path, fake, name="restore-prefix.json").run(request) == 0
-    report = json.loads((tmp_path / "restore-prefix.json").read_text())
-    assert (report["measured"], report["kind"]) == (True, "restore_prefix")
-    assert type(report["observed_at_ms"]) is int and "ledger" in report and "boot" in report
-
-
-def test_bootstrap_grants_are_per_mode() -> None:
+def test_bootstrap_grants_only_the_verifier_tables() -> None:
     seen: list[str] = []
 
     def runner(command: tuple[str, ...], *, input_text: str | None = None,
@@ -573,16 +566,13 @@ def test_bootstrap_grants_are_per_mode() -> None:
     drill._deadline = drill_module.time.monotonic() + 60
     plan = commands.build_restore_resources(
         backup_label=LABEL_DIFF, target_time=None, run_id=RUN_ID, database_name="bfx")
-    # No mode, no role: the legacy event-chain grant is gone.
-    with pytest.raises(drill_module.DrillFailureError, match="restore_output_invalid"):
-        drill._bootstrap_role(plan, "DATABASE-PASSWORD-SENTINEL")
-    assert seen == []
-    drill._bootstrap_role(plan, "DATABASE-PASSWORD-SENTINEL", ledger=True)
-    drill._bootstrap_role(plan, "DATABASE-PASSWORD-SENTINEL", rehearsal=True)
-    assert "ALL TABLES" not in seen[0] and "event_log" not in seen[0]
-    assert "GRANT bfx_cutover_reader TO" in seen[1] and "GRANT SELECT" not in seen[1]
+    drill._bootstrap_role(plan, "DATABASE-PASSWORD-SENTINEL")
+    [sql] = seen
+    assert "ALL TABLES" not in sql and "event_log" not in sql
+    # The comparison rehearsal's cutover reader group is gone with the role.
+    assert "bfx_cutover_reader" not in sql
     # The ledger grant is exactly the verifier list, derived from the digest rules.
-    granted = re.search(r"ARRAY\[(.*?)\] LOOP", seen[0])
+    granted = re.search(r"ARRAY\[(.*?)\] LOOP", sql)
     assert granted is not None
     assert tuple(re.findall(r"'([a-z_]+)'", granted.group(1))) == ledger.VERIFIER_TABLES
 
@@ -605,12 +595,14 @@ def test_every_read_is_bounded_on_the_server() -> None:
             ledger.digest_script(_bounds(), restored=False, timeout_ms=bad)
 
 
-def test_ledger_verifier_command_runs_the_script_on_the_isolated_network() -> None:
+def test_ledger_verifier_command_runs_the_image_entry_on_the_isolated_network() -> None:
     resources = commands.build_restore_resources(
         backup_label=LABEL_DIFF, target_time=None, run_id=RUN_ID, database_name="bfx")
     command = commands.ledger_verifier_command(resources, image="sha256:" + "b" * 64,
                                                env_path=Path("/tmp/x.env"))
-    assert command[-3:] == ("python", "sha256:" + "b" * 64, "-")
+    assert command[-4:] == ("python", "sha256:" + "b" * 64, "-m",
+                            "bfx_funding_bot.apps.restore_boot_check")
+    assert "-i" not in command and "--interactive" not in command
     assert command[command.index("--network") + 1] == NET
     with pytest.raises(commands.RestoreInputError):
         commands.ledger_verifier_command(resources, image="bfx-bot:local", env_path=Path("/tmp/x.env"))
@@ -620,20 +612,20 @@ def test_ledger_verifier_command_runs_the_script_on_the_isolated_network() -> No
     # The legacy replay/archive verifiers are gone with the baseline drill.
     assert not hasattr(commands, "verifier_command")
     assert not hasattr(commands, "build_restore_plan")
+    # So is the capital comparison rehearsal (S1-8 PR-D).
+    assert not hasattr(commands, "rehearsal_command")
 
 
 # --------------------------------------------------------------------------- CLI
 
 
-@pytest.mark.parametrize(("argv", "kind", "output"), [
-    (["--restore-test"], "restore_ledger", "DEFAULT_LEDGER_OUTPUT_PATH"),
-    (["--restore-test", "--output", "/srv/evidence/receipt.json"], "restore_ledger",
+@pytest.mark.parametrize(("argv", "output"), [
+    (["--restore-test"], "DEFAULT_LEDGER_OUTPUT_PATH"),
+    (["--restore-test", "--output", "/srv/evidence/receipt.json"],
      Path("/srv/evidence/receipt.json")),
-    (["--prefix", "--account-id", ACCOUNT, "--environment", "prod", "--projector-version", "v"],
-     "restore_prefix", "LEGACY_PREFIX_OUTPUT_PATH"),
 ])
-def test_cli_routes_the_restore_test_and_the_transitional_prefix_call_to_ledger_mode(
-    monkeypatch: pytest.MonkeyPatch, argv: list[str], kind: str, output: str | Path,
+def test_cli_routes_the_restore_test_to_ledger_mode(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], output: str | Path,
 ) -> None:
     assert drill_module.DEFAULT_LEDGER_OUTPUT_PATH.name == "restore-ledger.json"
     assert drill_module.DEFAULT_OUTPUT_PATH.name == "restore.json"
@@ -651,7 +643,7 @@ def test_cli_routes_the_restore_test_and_the_transitional_prefix_call_to_ledger_
     assert drill_module.main(argv) == 0
     [(path, request)] = built
     assert path == (output if isinstance(output, Path) else getattr(drill_module, output))
-    assert request == drill_module.LedgerRequest(kind=kind)
+    assert request == drill_module.LedgerRequest()
 
 
 @pytest.mark.parametrize(("argv", "target_time", "output"), [
@@ -697,14 +689,13 @@ def test_cli_routes_the_acceptance_drill_to_ledger_mode_at_the_named_target(
     ["--backup-label", LABEL_FULL, "--output", "relative.json"],
     [],
     ["--restore-test", "--output", "relative.json"],
-    ["--prefix", "--account-id", ACCOUNT, "--environment", "prod", "--projector-version", "v",
-     "--output", "/tmp/x.json"],
-    ["--restore-test", "--prefix", "--account-id", ACCOUNT, "--environment", "prod",
-     "--projector-version", "v"],
-    ["--prefix"],
-    ["--prefix", "--account-id", ACCOUNT, "--environment", "prod", "--projector-version", "v",
-     "--backup-label", LABEL_DIFF],
+    # The transitional prefix call and the comparison rehearsal are gone (S1-8 PR-D).
+    ["--prefix", "--account-id", ACCOUNT, "--environment", "prod", "--projector-version", "v"],
+    ["--restore-test", "--prefix"],
     ["--account-id", ACCOUNT, "--environment", "prod", "--projector-version", "v"],
+    ["--rehearsal", "--backup-label", LABEL_FULL, "--target-time", "2026-10-01T04:00:00Z",
+     "--backend-image", "ghcr.io/x/bfx@sha256:" + "a" * 64, "--cells", "/tmp/cells.yaml",
+     "--scope", f"{ACCOUNT}:prod"],
 ])
 def test_cli_keeps_the_modes_apart(argv: list[str]) -> None:
     with pytest.raises(SystemExit) as exc:

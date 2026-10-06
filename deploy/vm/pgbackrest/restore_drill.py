@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
-import hashlib
 import importlib.util
 import json
 import math
@@ -31,11 +29,6 @@ DEFAULT_SECRET_DIR = Path.home() / "bfx/pgbackrest/conf.d"
 DEFAULT_OUTPUT_PATH = Path.home() / "bfx/dr-evidence/restore.json"
 # The operator's acceptance drill writes restore.json; the recurring restore test its own receipt.
 DEFAULT_LEDGER_OUTPUT_PATH = Path.home() / "bfx/dr-evidence/restore-ledger.json"
-# Transitional: the restore-test wrapper installed by the previous release calls `--prefix`
-# and reads this path with kind `restore_prefix` (see main()).
-LEGACY_PREFIX_OUTPUT_PATH = Path.home() / "bfx/dr-evidence/restore-prefix.json"
-DEFAULT_REHEARSAL_EVIDENCE_ROOT = Path.home() / "bfx/dr-evidence/capital-comparison-rehearsals"
-LEDGER_CHECK_PATH = SCRIPT_DIR / "ledger_boot_check.py"
 _CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _MAX_RTO_SECONDS = 3600
@@ -98,21 +91,10 @@ class LedgerRequest:
     (Halt 2, incident acceptance) at that exact backup and recovery target; production's
     append-only ledger bounded by the restored copy is its baseline."""
 
-    kind: str = "restore_ledger"
     database_name: str = "bfx"
     production_container: str = "bfx-postgres"
     backup_label: str | None = None
     target_time: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class RehearsalRequest:
-    backup_label: str
-    target_time: str
-    database_name: str
-    image: str
-    cells_path: Path
-    scopes: tuple[str, ...]
 
 
 @dataclass(slots=True)
@@ -277,34 +259,6 @@ def _write_json(path: Path, report: dict[str, object]) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
-            suffix=".tmp", delete=False,
-        ) as handle:
-            temporary = Path(handle.name)
-            os.chmod(temporary, 0o600)
-            for record in records:
-                json.dump(record, handle, sort_keys=True, separators=(",", ":"))
-                handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        temporary = None
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-
-
-def _write_private_file(path: Path, contents: bytes) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(contents)
-
-
 def _write_timing_json(path: Path, report: dict[str, object]) -> None:
     """Persist non-authoritative timing separately from acceptance evidence."""
     _write_json(path, report)
@@ -410,7 +364,6 @@ class RestoreDrill:
         config_path: Path = CONFIG_PATH,
         secret_dir: Path = DEFAULT_SECRET_DIR,
         output_path: Path = DEFAULT_OUTPUT_PATH,
-        rehearsal_evidence_root: Path = DEFAULT_REHEARSAL_EVIDENCE_ROOT,
         run_id_factory: Callable[[], str] = _new_run_id,
         password_factory: Callable[[], str] = _new_password,
         clock: Callable[[], float] = time.monotonic,
@@ -423,7 +376,6 @@ class RestoreDrill:
         self._config_path = config_path
         self._secret_dir = secret_dir
         self._output_path = output_path
-        self._rehearsal_evidence_root = rehearsal_evidence_root
         self._run_id_factory = run_id_factory
         self._password_factory = password_factory
         self._clock = clock
@@ -599,32 +551,23 @@ class RestoreDrill:
         return elapsed_seconds
 
     def _bootstrap_role(
-        self, plan: RestoreResources, password: str, *, ledger: bool = False, rehearsal: bool = False,
+        self, plan: RestoreResources, password: str,
     ) -> None:
         # Connecting to the baseline database validates it exists before any SQL.
         # Send separate statements via psql stdin, with logging disabled before
         # the password-bearing statement is parsed/executed (including on error).
         role = f'"{plan.verify_role}"'
-        if rehearsal:
-            # The capital comparison runs in the production shape: this LOGIN is a member of
-            # the cutover reader group and the tool does SET LOCAL ROLE to it. The group's
-            # column grants come from the restored database's migrations, so no table-level
-            # grant is made here (and a backup older than those migrations fails the drill).
-            access = f"GRANT bfx_cutover_reader TO {role};\n"
-        elif ledger:
-            # Exactly the tables the boot check reads (ledger_digest.VERIFIER_TABLES), those the
-            # restored schema has (a newer release may know more); read-only by default too.
-            names = ", ".join(f"'{name}'" for name in _ledger.VERIFIER_TABLES)
-            access = (
-                "DO $grant$ DECLARE name text; BEGIN "
-                f"FOREACH name IN ARRAY ARRAY[{names}] LOOP "
-                "IF to_regclass(format('public.%I', name)) IS NOT NULL THEN "
-                f"EXECUTE format('GRANT SELECT ON TABLE public.%I TO %I', name, '{plan.verify_role}'); "
-                "END IF; END LOOP; END $grant$;\n"
-                f"ALTER ROLE {role} SET default_transaction_read_only = on;\n"
-            )
-        else:
-            _failure("restore_output_invalid")
+        # Exactly the tables the boot check reads (ledger_digest.VERIFIER_TABLES), those the
+        # restored schema has (a newer release may know more); read-only by default too.
+        names = ", ".join(f"'{name}'" for name in _ledger.VERIFIER_TABLES)
+        access = (
+            "DO $grant$ DECLARE name text; BEGIN "
+            f"FOREACH name IN ARRAY ARRAY[{names}] LOOP "
+            "IF to_regclass(format('public.%I', name)) IS NOT NULL THEN "
+            f"EXECUTE format('GRANT SELECT ON TABLE public.%I TO %I', name, '{plan.verify_role}'); "
+            "END IF; END LOOP; END $grant$;\n"
+            f"ALTER ROLE {role} SET default_transaction_read_only = on;\n"
+        )
         sql = (
             "SET log_statement = 'none';\n"
             "SET log_min_error_statement = 'panic';\n"
@@ -672,7 +615,6 @@ class RestoreDrill:
         volume_created: bool,
         egress_network_created: bool,
         network_created: bool,
-        private_dir: Path | None = None,
     ) -> bool:
         # Cleanup is independent of the restore budget, including after timeout.
         self._deadline = self._clock() + 30
@@ -693,17 +635,6 @@ class RestoreDrill:
                         failed = True
                 self._remaining()
             except DrillFailureError:
-                failed = True
-        if private_dir is not None:
-            for name in ("dsn", "manifest.json", "cells.yaml"):
-                try:
-                    _unlink_env_file(private_dir / name, timeout=self._remaining())
-                    self._remaining()
-                except (OSError, subprocess.SubprocessError, DrillFailureError):
-                    failed = True
-            try:
-                private_dir.rmdir()
-            except OSError:
                 failed = True
         # Compose needs the env file. Reserve a second for unlink, then spend
         # the rest of this same cleanup budget on the known-created resources.
@@ -756,8 +687,6 @@ class RestoreDrill:
             _failure("backup_label_unavailable")
 
     def _ledger_plan(self, request: LedgerRequest, backup_label: str) -> RestoreResources:
-        if request.kind not in _evidence.LEDGER_KINDS:
-            _failure("restore_output_invalid")
         try:
             plan = build_restore_resources(
                 backup_label=backup_label, target_time=request.target_time,
@@ -766,8 +695,7 @@ class RestoreDrill:
         except RestoreInputError:
             _failure("restore_output_invalid")
         _validate_plan_resources(plan)
-        if (not _config_is_clean_tracked(self._config_path) or not COMPOSE_PATH.is_file()
-                or not LEDGER_CHECK_PATH.is_file()):
+        if not _config_is_clean_tracked(self._config_path) or not COMPOSE_PATH.is_file():
             _failure("restore_output_invalid")
         try:
             validate_secret_dir(
@@ -789,7 +717,6 @@ class RestoreDrill:
     def _ledger_boot(self, plan: RestoreResources, image: str, env_path: Path) -> str:
         completed = self._call(
             _commands.ledger_verifier_command(plan, image=image, env_path=env_path),
-            input_text=LEDGER_CHECK_PATH.read_text(encoding="utf-8"),
         )
         if completed.returncode == 3:
             _failure(_ledger.boot_failure_code(completed.stdout))
@@ -820,158 +747,6 @@ class RestoreDrill:
             raise DrillFailureError(failure_code, _ledger.classify_read_failure(status, stderr))
         self._remaining()
         return round(max(0.0, self._clock() - started), 3)
-
-    def _rehearsal_plan(self, request: RehearsalRequest) -> tuple[RestoreResources, int]:
-        if not request.scopes or not request.target_time or not request.cells_path.is_absolute():
-            _failure("restore_output_invalid")
-        if request.cells_path.is_symlink() or not request.cells_path.is_file():
-            _failure("restore_output_invalid")
-        try:
-            _commands.validate_rehearsal_image(request.image)
-            _commands.validate_rehearsal_scopes(request.scopes)
-            plan = build_restore_resources(
-                backup_label=request.backup_label, target_time=request.target_time,
-                run_id=self._run_id_factory(), database_name=request.database_name,
-            )
-            recovery_target = datetime.strptime(request.target_time, "%Y-%m-%dT%H:%M:%SZ")
-        except (RestoreInputError, ValueError, TypeError):
-            _failure("restore_output_invalid")
-        _validate_plan_resources(plan)
-        if not _config_is_clean_tracked(self._config_path) or not COMPOSE_PATH.is_file():
-            _failure("restore_output_invalid")
-        try:
-            validate_secret_dir(
-                self._secret_dir, postgres_uid=self._postgres_uid,
-                postgres_gid=self._postgres_gid,
-            )
-        except SecretConfigError:
-            _failure("restore_output_invalid")
-        now_ms = int(recovery_target.replace(tzinfo=timezone.utc).timestamp() * 1000)
-        return plan, now_ms
-
-    def _rehearsal_evidence_dir(self, plan: RestoreResources) -> Path:
-        root = self._rehearsal_evidence_root
-        if not root.is_absolute() or root.is_symlink():
-            _failure("restore_output_invalid")
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        run_dir = root / plan.project_name.removeprefix("bfx-dr-")
-        run_dir.mkdir(mode=0o700)
-        return run_dir
-
-    def _deployed_backend_revision(self, image: str) -> str:
-        deployed = self._require_success(
-            ("docker", "inspect", "--format={{.Config.Image}}", "bfx-bot")
-        ).stdout.strip()
-        if deployed != image:
-            _failure("rehearsal_image_mismatch")
-        revision = self._require_success((
-            "docker", "image", "inspect",
-            '--format={{index .Config.Labels "org.opencontainers.image.revision"}}', image,
-        )).stdout.strip()
-        if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
-            _failure("restore_output_invalid")
-        return revision
-
-    def _comparison_records(
-        self, completed: subprocess.CompletedProcess[str], password: str,
-    ) -> list[dict[str, object]]:
-        if (type(completed.returncode) is not int or completed.returncode not in {0, 1, 3}
-                or not isinstance(completed.stdout, str) or len(completed.stdout) > 16_000_000
-                or password in completed.stdout):
-            _failure("comparison_output_invalid")
-        try:
-            records = [json.loads(line) for line in completed.stdout.splitlines()]
-        except (ValueError, TypeError):
-            _failure("comparison_output_invalid")
-        if (not records or any(not isinstance(record, dict) for record in records)
-                or any(record.get("kind") == "summary" for record in records[:-1])
-                or records[-1].get("kind") != "summary"
-                or type(records[-1].get("exit_code")) is not int
-                or records[-1]["exit_code"] != completed.returncode):
-            _failure("comparison_output_invalid")
-        return records
-
-    def run_rehearsal(self, request: RehearsalRequest) -> int:
-        """Compare on one isolated PITR copy; keep its result outside DR receipts."""
-        plan: RestoreResources | None = None
-        run_dir: Path | None = None
-        private_dir: Path | None = None
-        env_path: Path | None = None
-        code_revision: str | None = None
-        cells_digest: str | None = None
-        created = _CreatedResources()
-        comparison_started = False
-        result_code = 3
-        failure_code: str | None = None
-        cleanup_failed = False
-        try:
-            plan, now_ms = self._rehearsal_plan(request)
-            run_dir = self._rehearsal_evidence_dir(plan)
-            private_dir = Path(tempfile.mkdtemp(prefix="bfx-rehearsal-"))
-            password = self._password_factory()
-            if not isinstance(password, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", password) is None:
-                _failure("restore_output_invalid")
-            env_path = self._write_env_file(plan, password)
-            run_id = plan.project_name.removeprefix("bfx-dr-")
-            dsn = (f"postgresql+asyncpg://{plan.verify_role}:{password}"
-                   f"@{plan.container_name}:5432/{plan.database_name}\n")
-            manifest = {
-                "mode": "rehearsal", "host": plan.container_name, "port": 5432,
-                "database": plan.database_name, "user": plan.verify_role,
-                "run_id": run_id, "now_ms": now_ms,
-            }
-            _write_private_file(private_dir / "dsn", dsn.encode("utf-8"))
-            _write_private_file(private_dir / "manifest.json", json.dumps(manifest).encode("utf-8"))
-            cells_bytes = request.cells_path.read_bytes()
-            cells_digest = hashlib.sha256(cells_bytes).hexdigest()
-            _write_private_file(private_dir / "cells.yaml", cells_bytes)
-            self._deadline = self._clock() + _MAX_RTO_SECONDS
-            code_revision = self._deployed_backend_revision(request.image)
-            command = _commands.rehearsal_command(
-                plan, image=request.image, code_revision=code_revision,
-                dsn_path=private_dir / "dsn", manifest_path=private_dir / "manifest.json",
-                cells_path=private_dir / "cells.yaml", scopes=request.scopes,
-            )
-            self._create_resources(plan, created)
-            self._recover_restore(plan, env_path, created)
-            self._isolate_restore(plan)
-            self._bootstrap_role(plan, password, rehearsal=True)
-            comparison_started = True
-            completed = self._call(command)
-            self._remaining()
-            records = self._comparison_records(completed, password)
-            _write_jsonl(run_dir / "comparison.jsonl", records)
-            _write_json(run_dir / "summary.json", records[-1])
-            result_code = completed.returncode
-        except DrillFailureError as exc:
-            failure_code = str(exc)
-        except (OSError, ValueError, TypeError):
-            failure_code = "restore_output_invalid"
-        finally:
-            if plan is not None:
-                cleanup_failed = self._cleanup(
-                    plan, env_path, container_started=created.container,
-                    verifier_started=comparison_started, volume_created=created.volume,
-                    egress_network_created=created.egress_network, network_created=created.network,
-                    private_dir=private_dir,
-                )
-            if cleanup_failed:
-                failure_code = "cleanup_failed"
-            if failure_code is not None:
-                result_code = 3
-            if run_dir is not None and plan is not None:
-                try:
-                    _write_json(run_dir / "result.json", {
-                        "kind": "capital_comparison_rehearsal", "run_id": plan.project_name.removeprefix("bfx-dr-"),
-                        "backup_label": plan.backup_label, "target_time": plan.target_time,
-                        "image": request.image, "code_revision": code_revision,
-                        "cells_sha256": cells_digest,
-                        "exit_code": result_code, "error_code": failure_code,
-                        "cleanup_complete": not cleanup_failed,
-                    })
-                except OSError:
-                    result_code = 3
-        return result_code
 
     def run(self, request: LedgerRequest) -> int:
         plan: RestoreResources | None = None
@@ -1048,7 +823,7 @@ class RestoreDrill:
                 end_timing("physical_and_wal_recovery")
                 begin_timing("isolation_bootstrap")
                 self._isolate_restore(plan)
-                self._bootstrap_role(plan, password, ledger=True)
+                self._bootstrap_role(plan, password)
                 end_timing("isolation_bootstrap")
                 begin_timing("verification")
                 # W comes from the restored copy; production is only read, after isolation.
@@ -1074,7 +849,7 @@ class RestoreDrill:
                 elapsed_seconds = self._elapsed_seconds(rto_started)
                 self._remaining()
                 success_report = _evidence.render_ledger_restore_evidence(
-                    kind=request.kind, bounds=bounds, ledger=ledger, boot=boot,
+                    kind=_evidence.LEDGER_KIND, bounds=bounds, ledger=ledger, boot=boot,
                     target_backup_label=label, target_time=request.target_time,
                     restore_test=request.backup_label is None, elapsed_seconds=elapsed_seconds,
                     observed_at_ms=time.time_ns() // 1_000_000, config_path=self._config_path,
@@ -1129,7 +904,7 @@ class RestoreDrill:
                     if not _revoke_after_failure(self._output_path):
                         failure_persist_failed = True
             if failure_code is not None:
-                failure_kind = request.kind
+                failure_kind = _evidence.LEDGER_KIND
                 try:
                     report = render_failure_evidence(
                         kind=failure_kind, error_code=failure_code,
@@ -1193,13 +968,9 @@ class RestoreDrill:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    # Only the transitional --prefix call passes these three (see below).
-    parser.add_argument("--account-id", help=argparse.SUPPRESS)
-    parser.add_argument("--environment", help=argparse.SUPPRESS)
-    parser.add_argument("--projector-version", help=argparse.SUPPRESS)
     parser.add_argument("--backup-label",
-                        help="the operator's acceptance drill (Halt 2, incident acceptance), or "
-                             "--rehearsal: restore this backup set instead of the newest")
+                        help="the operator's acceptance drill (Halt 2, incident acceptance): "
+                             "restore this backup set instead of the newest")
     parser.add_argument("--target-time", help="with --backup-label: PITR target (UTC, ...Z)")
     parser.add_argument(
         "--restore-test", action="store_true",
@@ -1212,17 +983,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path,
                         help="receipt path (default restore-ledger.json for --restore-test, "
                              "restore.json for the acceptance drill)")
-    # Transitional (remove once a release with --restore-test has been deployed): the restore-test
-    # wrapper installed by the previous release runs the TARGET release's drill as
-    # `--prefix --account-id A --environment E --projector-version P` and accepts only
-    # restore-prefix.json with kind `restore_prefix`. It now runs ledger mode; the scope
-    # arguments are not used (ledger mode verifies every scope).
-    parser.add_argument("--prefix", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--rehearsal", action="store_true",
-                        help="isolated capital comparison at an explicit backup and recovery target")
-    parser.add_argument("--backend-image", help="deployed repository@sha256 digest reference")
-    parser.add_argument("--cells", type=Path, help="absolute live cells YAML path")
-    parser.add_argument("--scope", action="append", help="canonical ACCOUNT_UUID:ENVIRONMENT; repeatable")
     parser.add_argument("--database-name", default="bfx")
     parser.add_argument("--production-container",
                         help="the production cluster's container (default bfx-postgres)")
@@ -1232,47 +992,24 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
-    target = (args.backup_label, args.target_time)
-    if args.rehearsal:
-        if (args.restore_test or args.prefix or args.output is not None
-                or args.production_container is not None
-                or any(value is not None for value in (args.account_id, args.environment, args.projector_version))
-                or any(value is None for value in (args.backup_label, args.target_time, args.backend_image,
-                                                   args.cells, args.scope))):
-            parser.error("--rehearsal requires backup, recovery time, backend image, cells and scopes only")
-        return RestoreDrill().run_rehearsal(RehearsalRequest(
-            backup_label=args.backup_label, target_time=args.target_time,
-            database_name=args.database_name, image=args.backend_image,
-            cells_path=args.cells, scopes=tuple(args.scope),
-        ))
-    if any(value is not None for value in (args.backend_image, args.cells, args.scope)):
-        parser.error("--backend-image, --cells and --scope require --rehearsal")
-    scope_args = (args.account_id, args.environment, args.projector_version)
     if args.output is not None and not args.output.is_absolute():
         parser.error("--output must be an absolute path")
-    if args.restore_test or args.prefix:
-        if (args.restore_test and args.prefix) \
-                or any(value is not None for value in target) \
-                or (args.restore_test and any(value is not None for value in scope_args)) \
-                or (args.prefix and (any(value is None for value in scope_args)
-                                     or args.output is not None)):
-            parser.error("--restore-test takes only --output/--database-name/--production-container "
-                         "(the transitional --prefix: exactly the old wrapper's scope arguments)")
-        kind, output = (("restore_prefix", LEGACY_PREFIX_OUTPUT_PATH) if args.prefix
-                        else ("restore_ledger", args.output or DEFAULT_LEDGER_OUTPUT_PATH))
-        return RestoreDrill(output_path=output).run(LedgerRequest(
-            kind=kind, database_name=args.database_name,
-            production_container=args.production_container or "bfx-postgres",
-        ))
+    production_container = args.production_container or "bfx-postgres"
+    if args.restore_test:
+        if args.backup_label is not None or args.target_time is not None:
+            parser.error("--restore-test takes only --output/--database-name/--production-container")
+        return RestoreDrill(output_path=args.output or DEFAULT_LEDGER_OUTPUT_PATH).run(
+            LedgerRequest(database_name=args.database_name,
+                          production_container=production_container))
     # The acceptance drill: the same ledger verification at the operator's backup and target.
-    if args.backup_label is None or any(value is not None for value in scope_args):
+    if args.backup_label is None:
         parser.error("name a mode: --restore-test, or --backup-label [--target-time] for the "
-                     "acceptance drill (no scope arguments: every scope is verified)")
+                     "acceptance drill (every scope is verified)")
     return RestoreDrill(output_path=args.output or DEFAULT_OUTPUT_PATH).run(LedgerRequest(
-        database_name=args.database_name,
-        production_container=args.production_container or "bfx-postgres",
+        database_name=args.database_name, production_container=production_container,
         backup_label=args.backup_label, target_time=args.target_time,
     ))
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
