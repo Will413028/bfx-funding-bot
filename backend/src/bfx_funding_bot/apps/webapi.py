@@ -40,7 +40,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             async with factory() as session:
                 await require_ledger_authority(session)
-            app.state.authority = "ledger"
             app.state.read_models = build_read_models()
         except Exception:
             logging.critical("Startup refused: capital authority unreadable or unsupported")
@@ -50,8 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         # Boot state belongs to this lifespan: a later run on the same app object
-        # (tests, reload) must not inherit an authority it did not read.
-        app.state.authority = None
+        # (tests, reload) must not inherit read models it did not build.
         app.state.read_models = None
         existing_engine = getattr(app.state, "engine", None)
         if existing_engine is not None:

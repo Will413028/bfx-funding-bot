@@ -114,18 +114,6 @@ async def database_is_ready(request: Request) -> bool:
                 expected_heads = _expected_alembic_heads()
                 if not expected_heads or versions != expected_heads:
                     return False
-                # The authority is read once at boot: a database that has since
-                # switched epoch must not keep serving the old read models.
-                booted = getattr(request.app.state, "authority", None)
-                if booted is not None:
-                    latest = await session.execute(
-                        text(
-                            "SELECT authority FROM capital_authority_epoch "
-                            "ORDER BY epoch_seq DESC LIMIT 1"
-                        )
-                    )
-                    if latest.scalars().all() != [booted]:
-                        return False
     # Readiness is a fail-closed gate.  This also covers malformed driver
     # results and an unreadable migration graph without turning /ready into a
     # 500 that a deployment health check could mistake for an app crash.
