@@ -3,6 +3,8 @@
 The gate itself runs only when a capital file changes (and nightly); these checks run
 in every unit job, so a refactor that moves a rule's text fails here first.
 """
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -34,3 +36,47 @@ def test_anchor_drift_is_an_error_not_a_skip(tmp_path: Path) -> None:
     target.write_text("# the rule moved elsewhere\n")
     with pytest.raises(gate.GateError, match="M1: anchor found 0 times"):
         gate.check_anchors([mutant], root=tmp_path)
+
+
+_BROKEN_FIXTURE = '''
+import pytest
+
+@pytest.fixture
+def database():
+    raise RuntimeError("PostgreSQL binaries not found")
+
+def test_owner(database):
+    assert False
+'''
+
+
+def _junit_run(tmp_path: Path, body: str) -> gate.Verdict:
+    """Run a real pytest session on ``body`` and judge it as the gate would."""
+    (tmp_path / "test_owner.py").write_text(body)
+    report = tmp_path / "junit.xml"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:xdist",
+         f"--junitxml={report}", "test_owner.py"],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    return gate.classify(result.returncode, report)
+
+
+def test_a_run_with_only_setup_errors_is_not_a_kill(tmp_path: Path) -> None:
+    # pytest exits 1 here too; the gate must not read that as "killed".
+    verdict = _junit_run(tmp_path, _BROKEN_FIXTURE)
+    assert verdict.status == "error"
+    assert "test_owner" in verdict.detail
+
+
+def test_a_failed_test_without_errors_is_a_kill(tmp_path: Path) -> None:
+    verdict = _junit_run(tmp_path, "def test_owner():\n    assert False\n")
+    assert verdict == gate.Verdict("killed", "test_owner::test_owner")
+
+
+def test_a_passing_run_is_a_survivor(tmp_path: Path) -> None:
+    assert _junit_run(tmp_path, "def test_owner():\n    pass\n").status == "survived"
+
+
+def test_a_missing_report_is_an_error(tmp_path: Path) -> None:
+    assert gate.classify(1, tmp_path / "absent.xml").status == "error"

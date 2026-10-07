@@ -21,19 +21,24 @@ Usage:
     uv run python scripts/capital_mutation_gate.py --include-integration  # all mutants
     uv run python scripts/capital_mutation_gate.py --only M10,M15
 
-Exit codes: 0 = every selected mutant killed; 1 = a mutant survived or its run errored;
-2 = the gate itself cannot run (anchor drift, baseline failing, copy not imported).
+A mutant counts as killed only when its run reports at least one failed test and no
+test errors (read from the run's JUnit report, not from pytest's exit code: pytest also
+exits 1 when a fixture fails to set up). A run with errors is an infrastructure fault.
+
+Exit codes: 0 = every selected mutant killed; 1 = a mutant survived;
+2 = the gate cannot judge (anchor drift, baseline failing, copy not imported, or a
+mutant run that errored instead of passing or failing).
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import os
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ElementTree
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,7 +154,7 @@ def _apply(src_copy: Path, path: Path, old: str, new: str) -> None:
 
 def _pytest(src_copy: Path, tests: Sequence[str], *extra: str) -> subprocess.CompletedProcess[str]:
     # -o pythonpath puts the copy ahead of the editable install; no cache is written.
-    command = [sys.executable, "-m", "pytest", "-q", "-x", "-rf", "-p", "no:cacheprovider",
+    command = [sys.executable, "-m", "pytest", "-q", "-x", "-rfE", "-p", "no:cacheprovider",
                "-o", f"pythonpath={src_copy} .", *extra, *tests]
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     return subprocess.run(command, cwd=BACKEND, env=env, capture_output=True, text=True,
@@ -172,9 +177,35 @@ def _verify_copy_is_imported(workdir: Path) -> None:
         raise GateError("the mutated copy is not what pytest imports; mutants would be untested")
 
 
-def _first_failure(output: str) -> str:
-    match = re.search(r"^FAILED (\S+)", output, re.MULTILINE)
-    return match.group(1) if match else "?"
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    status: str  # "killed" | "survived" | "error"
+    detail: str
+
+
+def classify(returncode: int, report: Path) -> Verdict:
+    """Judge one mutant run from its exit code and JUnit report.
+
+    Killed needs a failed test and no errored test: an error (fixture setup,
+    collection, a missing database) says nothing about the mutant.
+    """
+    if not report.is_file():
+        return Verdict("error", f"pytest exit {returncode}, no report")
+    failed: list[str] = []
+    errored: list[str] = []
+    for case in ElementTree.parse(report).getroot().iter("testcase"):
+        name = f"{case.get('classname', '')}::{case.get('name', '')}"
+        if case.find("error") is not None:
+            errored.append(name)
+        if case.find("failure") is not None:
+            failed.append(name)
+    if errored:
+        return Verdict("error", f"pytest exit {returncode}, errored: {errored[0]}")
+    if returncode == 1 and failed:
+        return Verdict("killed", failed[0])
+    if returncode == 0 and not failed:
+        return Verdict("survived", "no owning test failed")
+    return Verdict("error", f"pytest exit {returncode}, {len(failed)} failed")
 
 
 def _tree_digest() -> str:
@@ -189,6 +220,7 @@ def run(mutants: Sequence[Mutant]) -> int:
     check_anchors(mutants)
     before = _tree_digest()
     survivors: list[str] = []
+    errors: list[str] = []
     with tempfile.TemporaryDirectory(prefix="capital-mutation-gate-") as tmp:
         workdir = Path(tmp)
         _verify_copy_is_imported(workdir)
@@ -201,20 +233,19 @@ def run(mutants: Sequence[Mutant]) -> int:
         for mutant in mutants:
             copy = _fresh_copy(workdir, mutant.id)
             _apply(copy, mutant.path, mutant.old, mutant.new)
-            result = _pytest(copy, mutant.owners)
-            output = result.stdout + result.stderr
-            if result.returncode == 1:
-                status, detail = "killed", _first_failure(output)
-            elif result.returncode == 0:
-                status, detail = "SURVIVED", ", ".join(mutant.owners)
-            else:
-                status, detail = "ERROR", f"pytest exit {result.returncode}"
-            if status != "killed":
-                survivors.append(f"{mutant.id} ({mutant.description}): {status}")
-                print(output[-3000:])
-            print(f"{mutant.id:<6} {status:<8} {detail}  -- {mutant.description}")
+            report = copy.parent / "junit.xml"
+            result = _pytest(copy, mutant.owners, f"--junitxml={report}")
+            verdict = classify(result.returncode, report)
+            if verdict.status != "killed":
+                (survivors if verdict.status == "survived" else errors).append(
+                    f"{mutant.id} ({mutant.description}): {verdict.detail}")
+                print(result.stdout[-3000:], result.stderr[-1000:], sep="\n")
+            print(f"{mutant.id:<6} {verdict.status:<8} {verdict.detail}  -- {mutant.description}")
     if _tree_digest() != before:
         raise GateError("src/ changed while the gate ran")
+    if errors:
+        raise GateError("mutant runs errored instead of passing or failing:\n  "
+                        + "\n  ".join(errors))
     if survivors:
         print("\nNot killed by the owning layer:\n  " + "\n  ".join(survivors))
         return 1
