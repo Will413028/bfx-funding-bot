@@ -209,7 +209,7 @@ def test_state_drift_detected_even_when_direction_matches():
 
 
 @pytest.mark.property
-@settings(max_examples=100, deadline=None)
+@settings(deadline=None)
 @given(
     n=st.integers(min_value=20, max_value=40),
     seed=st.integers(min_value=0, max_value=2**31 - 1),

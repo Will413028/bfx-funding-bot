@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from hypothesis import is_hypothesis_test
 from hypothesis import settings as hypothesis_settings
 from pytest_postgresql.factories import postgresql_proc
 from sqlalchemy import text
@@ -20,9 +21,10 @@ from sqlalchemy.pool import StaticPool
 
 from tests import pg_local
 
-# Property-test budgets (the `property` marker in pyproject.toml): CI runs Hypothesis's
-# default profile (100 examples); the nightly workflow passes --hypothesis-profile=nightly.
-# Tests that pin max_examples in their own @settings keep their pinned budget.
+# Property-test budgets (the `property` marker in pyproject.toml) live only in profiles:
+# CI runs Hypothesis's default profile (100 examples), the nightly workflow passes
+# --hypothesis-profile=nightly. A test never pins max_examples (tests/test_property_budget.py),
+# or the nightly budget would not reach it.
 hypothesis_settings.register_profile("nightly", max_examples=1000)
 
 
@@ -158,7 +160,12 @@ def docker_available() -> bool:
     return completed.returncode == 0
 
 
+@pytest.hookimpl(tryfirst=True)  # mark before `-m property` selects
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    # Every Hypothesis test is a property test, so `-m property` (nightly) finds all of them.
+    for item in items:
+        if is_hypothesis_test(getattr(item, "obj", None)):
+            item.add_marker(pytest.mark.property)
     docker_items = [item for item in items if item.get_closest_marker("docker")]
     if not docker_items or docker_available():
         return

@@ -50,7 +50,7 @@ def hyp_sparse_candle_list(draw: st.DrawFn) -> list[FundingCandle]:
     budget_hours=st.integers(min_value=1, max_value=48),
     ref_offset=st.integers(min_value=0, max_value=350),
 )
-@settings(max_examples=100, deadline=None)
+@settings(deadline=None)
 def test_reindex_and_ffill_deterministic(candles: list[FundingCandle], budget_hours: int, ref_offset: int) -> None:
     """Same input → same output across 2 invocations."""
     ref_mts = 1_700_000_000_000 + ref_offset * HOUR_MS
@@ -84,7 +84,7 @@ def hyp_dense_hourly_candles(draw: st.DrawFn) -> list[FundingCandle]:
 
 @given(candles=hyp_dense_hourly_candles(),
        budget_hours=st.integers(min_value=1, max_value=48))
-@settings(max_examples=100, deadline=None)
+@settings(deadline=None)
 def test_dense_input_property_identity(candles: list[FundingCandle], budget_hours: int) -> None:
     """For 100% dense hourly candles, reindex_and_ffill output 1-to-1 wraps input.
 
@@ -104,7 +104,7 @@ def test_dense_input_property_identity(candles: list[FundingCandle], budget_hour
     candles=hyp_sparse_candle_list(),
     budget_hours=st.integers(min_value=1, max_value=48),
 )
-@settings(max_examples=100, deadline=None)
+@settings(deadline=None)
 def test_daemon_path_equivalent_to_backtest_path(candles: list[FundingCandle], budget_hours: int) -> None:
     """Both daemon (extract last row, check None) and backtest (unwrap all non-None
     candles) call reindex_and_ffill with same args → both see same FilledCandle list.

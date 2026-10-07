@@ -120,14 +120,14 @@ def test_the_driver_really_exercises_fills_expiry_interest_cancel_and_restart() 
 
 
 @pytest.mark.property
-@settings(max_examples=60, deadline=None)
+@settings(deadline=None)
 @given(st.lists(op, min_size=1, max_size=30))
 def test_random_operation_sequences_keep_venue_invariants(ops: list[Any]) -> None:
     asyncio.run(_run(ops))
 
 
 @pytest.mark.property
-@settings(max_examples=25, deadline=None)
+@settings(deadline=None)
 @given(st.lists(op, min_size=1, max_size=25), st.sampled_from([0, 3_000, 90_000]))
 def test_invariants_hold_with_history_lag_once_it_has_passed(ops: list[Any], lag: int) -> None:
     async def run() -> None:

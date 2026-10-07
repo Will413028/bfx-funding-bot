@@ -53,7 +53,7 @@ def test_a_long_deterministic_run_uses_five_disjoint_id_spaces() -> None:
 
 
 @pytest.mark.property
-@settings(max_examples=25, deadline=None)
+@settings(deadline=None)
 @given(st.lists(st.tuples(st.integers(150, 400), st.integers(1, 9), st.integers(1, 3000)),
                 min_size=1, max_size=25))
 def test_random_runs_never_collide_ids_across_kinds(steps: list[Any]) -> None:
