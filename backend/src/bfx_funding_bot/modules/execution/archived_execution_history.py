@@ -14,13 +14,15 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.execution.legacy_archive import SCHEMA
 from bfx_funding_bot.modules.ledger import (
     ExecutionCursorError,
     ExecutionEventView,
     ExecutionPage,
     Scope,
 )
+
+# The frozen legacy tables' schema (migration ``c2d3e4f5a6b7``); migrations own it.
+SCHEMA = "legacy_archive"
 
 EVENT_LOG = Table(
     "event_log",
