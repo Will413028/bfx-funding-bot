@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -44,13 +44,6 @@ class SafetyTriggerPayload(BaseModel):
     guard_name: str
     reason: str
     decision_snapshot: dict[str, Any]
-
-
-PayloadModel = Annotated[
-    SignalPayload | DecisionPayload | HealthCheckPayload
-    | OrderSubmitPayload | SafetyTriggerPayload | dict[str, Any],
-    Field(union_mode="left_to_right"),
-]
 
 
 class Envelope(BaseModel):
