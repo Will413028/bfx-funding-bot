@@ -13,7 +13,7 @@ record an API key, secret, Authorization header, or complete raw response.
 
 **Operator confirmation:** use the durable intent/outcome record and a fresh
 full-account venue observation to select exactly one branch. Do not infer a
-negative from a timeout, a missing response, or an old database projection.
+negative from a timeout, a missing response, or an old database observation.
 
 ### Before any venue write
 
@@ -21,12 +21,11 @@ This branch applies only with affirmative evidence that no submit request
 started and no later venue mutation occurred. Keep the persistent halt set,
 preserve the evidence bundle, and roll back the image through bfx-deploy
 (automatic when no migration ran; see the deploy runbook) if the release itself
-must be removed. Re-run read-only preflight, event-chain
-replay, and a fresh full-account venue diff before considering any later
-operator action.
+must be removed. Re-run read-only preflight and a fresh full-account venue diff before
+considering any later operator action.
 
 **Operator confirmation:** record the image digest being rolled back, the
-account-local event head/hash, the fresh snapshot fence, and the proof that no
+latest accepted observation id, and the proof that no
 venue write was attempted. Do not treat an image rollback as a resume. There
 is no automatic retry.
 
@@ -40,9 +39,9 @@ venue's truth. Follow this sequence and do not skip a step:
    the venue funding cancel-all; require every currency's cancel-all to be
    `acknowledged` (UI panel or `funding_cancel_all_audit`), and repeat the kill
    until it is. HALTED is never lifted except by an operator resume in the UI.
-2. Run a fresh full-account reconcile and record the event fence, timestamp,
-   account-local projection hash, bounded venue IDs, and venue-vs-DB exposure
-   diff.
+2. Run a fresh full-account reconcile and record the accepted observation id,
+   its query revision and timestamp, bounded venue IDs, and venue-vs-DB
+   exposure diff.
 3. Inspect the durable ledger attempts (`submission_attempt_journal` with their
    `transport_outcome_journal` outcomes) and open quarantines (`quarantine_opening`);
    the legacy `submission_attempts` / `execution_uncertainties` are archived
@@ -68,8 +67,8 @@ nonzero exposure difference. There is no automatic retry.
 DB restore is allowed only with proof that no later venue mutation occurred.
 That proof must be measured, account-scoped, and timestamped after the restore
 point: it includes the last known venue-write boundary, fresh full-account
-snapshot coverage, a reconciled venue-object inventory, event head/hash, and a
-recorded zero-mutation interval. An assumption that a restore point predates a
+snapshot coverage, a reconciled venue-object inventory, the ledger restore
+verification (`ledger_digest`), and a recorded zero-mutation interval. An assumption that a restore point predates a
 venue write is not proof.
 
 If a venue write may have happened after the candidate restore point, do not
@@ -80,13 +79,13 @@ operation.
 ## Required rollback evidence
 
 Record only bounded/redacted facts: account UUID and environment, operator ID,
-image/config/projector digests, backup and isolated-restore hashes, event
-head/hash, snapshot fence/timestamp, reconcile fences, projection hash, venue
+image/config digests, backup and isolated-restore evidence, accepted
+observation ids and timestamps, venue
 IDs, UNKNOWN/orphan classification, exposure diff, stop reason, and whether a
 later venue mutation was disproved. A mismatch, incomplete snapshot, unresolved
 UNKNOWN, orphan, missing proof, or nonzero diff is a stop condition.
 
-Before resuming after the post-write branch, re-check: event-chain replay, no
+Before resuming after the post-write branch, re-check: no
 open UNKNOWN or orphan, a fresh venue full-account diff of zero, and the
 cancel-all outcome of the current HALTED. There is no automatic retry.
 
