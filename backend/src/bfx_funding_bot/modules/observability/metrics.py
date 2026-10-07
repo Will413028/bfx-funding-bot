@@ -15,6 +15,7 @@ Signal → metric map:
               bfx_reconcile_tick_duration_seconds,
               bfx_venue_rest_request_duration_seconds (p95 via histogram_quantile)
 - Saturation: bfx_ws_dispatcher_queue_depth / _capacity (scrape-time callback),
+              bfx_event_loop_lag_seconds (loop watchdog re-arm overrun),
               bfx_subtask_heartbeat_age_seconds{sub_task} +
               bfx_subtask_heartbeat_threshold_seconds{sub_task,task_class}
               (alert expr: age > threshold — the explicit form of the old
@@ -388,6 +389,12 @@ class DaemonMetrics:
             "Whether trading business dependencies are currently ready.",
             registry=self.registry,
         )
+        self.event_loop_lag = Gauge(
+            "bfx_event_loop_lag_seconds",
+            "How late the loop watchdog's last re-arm wait woke up (0 = on time); "
+            "the watchdog ends the process once the loop stalls for BFX_LOOP_WATCHDOG_S.",
+            registry=self.registry,
+        )
 
     # ── fail-open observe methods ────────────────────────────────────────────
 
@@ -507,6 +514,12 @@ class DaemonMetrics:
             self.execution_gate_duration.observe(max(seconds, 0.0))
         except Exception:
             log.debug("metrics_observe_failed metric=execution_gate_duration", exc_info=True)
+
+    def observe_event_loop_lag(self, seconds: float) -> None:
+        try:
+            self.event_loop_lag.set(seconds)
+        except Exception:
+            log.debug("metrics_observe_failed metric=event_loop_lag", exc_info=True)
 
     def set_trading_ready(self, value: bool) -> None:
         try:

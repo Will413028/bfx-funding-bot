@@ -139,3 +139,23 @@ async def test_build_daemon_heartbeat_guard_watches_market_data_not_executor(
         assert "safety_chain" not in hbg.watched
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_build_daemon_feeds_dependency_freshness_to_readiness_and_takes_the_stop_event(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
+) -> None:
+    """The health scan reports ws_data/db freshness to the readiness /readyz serves,
+    and the daemon stops on the event the loop watchdog follows (``_run`` passes it)."""
+    import asyncio
+
+    stop = asyncio.Event()
+    daemon, engine = await boot_live_construction(
+        monkeypatch, tmp_path, httpx_mock, stop_event=stop,
+    )
+    try:
+        assert daemon.trading_readiness is not None
+        assert daemon.monitor._readiness is daemon.trading_readiness
+        assert daemon._stop_event is stop
+    finally:
+        await engine.dispose()

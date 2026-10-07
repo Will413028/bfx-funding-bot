@@ -615,13 +615,13 @@ class Daemon:
         log.info("sub_task_exit name=writer_lock")
 
     async def _healthz_server_loop(self) -> None:
-        """Container-level liveness HTTP endpoint (``GET /healthz``).
+        """Liveness/readiness HTTP endpoints (``GET /healthz``, ``GET /readyz``).
 
-        Independent of in-process scan_staleness (which can't catch
-        daemon-wide event-loop deadlock — if asyncio is blocked,
-        scan_staleness itself doesn't run): an external HTTP probe sees no
-        response. The deploy health gate (deploy/vm/ops/bfx_deploy.py) reads
-        it; the compose file defines no Docker healthcheck on it.
+        Served from this event loop, so a blocked loop answers nothing; an
+        external probe sees no response, and the process-level
+        ``core.loop_watchdog`` (armed in ``apps.bot._run``) ends the process.
+        The deploy health gate (deploy/vm/ops/bfx_deploy.py) reads /healthz;
+        the compose file defines no Docker healthcheck on it.
         """
         await run_healthz_server(
             probe=self.probe,

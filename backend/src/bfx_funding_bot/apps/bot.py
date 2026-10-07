@@ -30,6 +30,7 @@ from bfx_funding_bot.core.errors import (
     WriterLockUnacquired,
 )
 from bfx_funding_bot.core.health import MARKET_DATA_FRESHNESS, HealthProbe
+from bfx_funding_bot.core.loop_watchdog import LoopWatchdog, loop_watchdog_timeout_s
 from bfx_funding_bot.core.schema_head import assert_schema_head
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
@@ -188,9 +189,12 @@ async def build_daemon(
     cells_yaml_path: Path | None = None,
     skip_ws: bool = False,
     venue_seam: VenueSeam | None = None,
+    stop_event: asyncio.Event | None = None,
 ) -> Daemon:
     """Compose one bot process. ``venue_seam`` is for tests: production passes nothing, so
-    the simulated venue runs on the live market feed and without injected faults."""
+    the simulated venue runs on the live market feed and without injected faults.
+    ``stop_event`` becomes the daemon's stop event; ``_run`` passes the one its loop
+    watchdog already follows."""
     config = load_config(cells_yaml_path=cells_yaml_path)
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -1034,6 +1038,7 @@ async def build_daemon(
         venue_tasks=venue_wiring.tasks,
         venue_aclose=venue_wiring.aclose,
         venue_diagnostics=venue_wiring.simulated,
+        _stop_event=stop_event if stop_event is not None else asyncio.Event(),
     )
 
 
@@ -1064,15 +1069,35 @@ async def _run() -> None:
     # (said once) when TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set.
     alerts.install(alerts.AlertSink.from_environment(os.environ))
     try:
-        daemon = await build_daemon()
+        watchdog = LoopWatchdog(timeout_s=loop_watchdog_timeout_s(os.environ))
+    except Exception as exc:
+        alerts.emit(alerts.BOOT_REFUSED, error=_error_text([exc]))
+        await alerts.shutdown()
+        raise
+    # Armed before the build, so a loop wedged during the build or the boot observation
+    # also ends the process; it follows the daemon's stop event and disarms when a stop
+    # is requested, so the graceful drain is never cut short.
+    stop = asyncio.Event()
+    watchdog_task = asyncio.create_task(watchdog.run(stop), name="loop_watchdog")
+    try:
+        await _run_daemon(stop, watchdog)
+    finally:
+        watchdog_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watchdog_task
+
+
+async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
+    try:
+        daemon = await build_daemon(stop_event=stop)
     except Exception as exc:
         alerts.emit(alerts.BOOT_REFUSED, error=_error_text([exc]))
         await alerts.shutdown()
         raise
     if daemon.metrics is not None:
         alerts.current().observer = daemon.metrics.observe_alert
+        watchdog.on_lag = daemon.metrics.observe_event_loop_lag
 
-    stop = daemon._stop_event  # share with signal handler
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
