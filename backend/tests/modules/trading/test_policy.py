@@ -1,9 +1,11 @@
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from bfx_funding_bot.modules.trading import (
     Blocked,
@@ -117,6 +119,54 @@ def test_reflected_commitment_is_not_subtracted_twice() -> None:
     assert unreflected == reflected
     assert reflected.spendable == Decimal("700")
     assert reflected.max_new_offer == Decimal("570")
+
+
+_AMOUNT = st.decimals(min_value=0, max_value=1_000_000, places=8,
+                      allow_nan=False, allow_infinity=False)
+
+
+@st.composite
+def _policy_and_snapshot(draw: st.DrawFn) -> tuple[CapitalPolicy, CapitalSnapshot]:
+    available = draw(_AMOUNT)
+    policy = CapitalPolicy(
+        enabled=True, reserve_amount=draw(_AMOUNT),
+        max_cell_fraction=draw(st.decimals(min_value=Decimal("0.01"), max_value=1, places=2)),
+    )
+    snapshot = CapitalSnapshot(available, draw(_AMOUNT), available + draw(_AMOUNT), draw(_AMOUNT))
+    return policy, snapshot
+
+
+@pytest.mark.property
+@settings(deadline=None)
+@given(_policy_and_snapshot())
+def test_new_offer_is_bounded_by_both_cash_and_cell_limit(
+    case: tuple[CapitalPolicy, CapitalSnapshot],
+) -> None:
+    policy, snapshot = case
+    budget = evaluate_capital(policy, snapshot)
+    total, reserve = snapshot.total_capital, policy.reserve_amount
+    assert budget.max_new_offer == min(budget.spendable, budget.cell_headroom)
+    # I-SP: never more than the cash left after local commitments and the reserve.
+    assert budget.max_new_offer <= max(
+        Decimal("0"), snapshot.available_amount - snapshot.unreflected_commitments - reserve)
+    # I-CC: never more than the cell's share of total capital minus what it holds.
+    assert budget.max_new_offer <= max(
+        Decimal("0"), (total - reserve) * policy.max_cell_fraction - snapshot.cell_exposure)
+    for amount in (budget.spendable, budget.cell_limit, budget.cell_headroom,
+                   budget.max_new_offer):
+        assert amount >= 0
+
+
+@pytest.mark.property
+@settings(deadline=None)
+@given(_policy_and_snapshot(), _AMOUNT)
+def test_more_cell_exposure_never_allows_a_larger_offer(
+    case: tuple[CapitalPolicy, CapitalSnapshot], more: Decimal,
+) -> None:
+    policy, snapshot = case
+    fuller = replace(snapshot, cell_exposure=snapshot.cell_exposure + more)
+    assert (evaluate_capital(policy, fuller).max_new_offer
+            <= evaluate_capital(policy, snapshot).max_new_offer)
 
 
 INVALID_AMOUNTS = [
