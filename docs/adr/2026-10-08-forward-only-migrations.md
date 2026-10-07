@@ -46,7 +46,7 @@ tags: [bfx-funding-bot, decision, database, migration, testing]
 
 ## Followup
 
-- `tests/pg_templates.py` 補「升到指定 revision 的 template」helper，並在下一支需要升級前狀態的 migration 測試中使用（第一個使用者是 operator request outbox 重構的 R1）。
+- 已完成：`tests/pg_templates.py` 的 `template_at(revision, prepare=None)` 建「空庫升到指定 revision 並 stamp `ci`」的 template build；常數 `LAST_REVERSIBLE_REVISION` 見下方 Amendment。下一支需要升級前狀態的 migration 測試（第一個使用者是 operator request outbox 重構的 R1）用它。
 - `backend/ARCHITECTURE.md` 的 migration 段落加一句指向本 ADR。
 
 ## Revocation Triggers
@@ -55,6 +55,13 @@ tags: [bfx-funding-bot, decision, database, migration, testing]
 - 做 chain squash（新 baseline）→ 舊 downgrade 隨之移除，D3 結案。
 
 ## Review Notes
+
+## Amendment (2026-10-08): 從 head 降版的測試改從最後可逆 revision 起降
+
+- D3 原寫「既有逐步 downgrade 檢查維持原樣」；實際上只要 head 有一支 forward-only migration，所有「先升到 head 再 downgrade」的測試都會在它的 downgrade 失敗（在 head 加一支 downgrade 會 raise 的探針實測：22 檔約 110 個測試）。
+- 選 C（Will 2026-10-08）：這些測試改從 `tests/pg_templates.py` 的 `LAST_REVERSIBLE_REVISION`（`8ac3b44460fc`，forward-only 之前最後一支 migration）起降，保留原本的 downgrade 斷言；斷言 head 狀態的測試（權限白名單、`alembic check`、realm trigger 涵蓋）仍跑在 head，round trip 的 `alembic check` 移到升回 head 之後。
+- 不選 A（改成在上一版 seed 再升級）：斷言意圖會變，例如權限白名單不再驗證逐步 downgrade 的還原。不選 B（新 migration 例外寫 downgrade）：違反 D1。
+- 後果：這些測試只涵蓋 forward-only 之前的 migration；之後的 migration 的升級前狀態測試照 D2。
 
 ## Related
 
