@@ -56,9 +56,10 @@ target_metadata = [Base.metadata, ArchiveBase.metadata]
 def include_name(name, type_, parent_names):
     """Reflect only schemas owned by these migrations and described by the metadata.
 
-    Deliberately absent: ``legacy_archive``, the legacy authority's twelve tables that migration
-    c2d3e4f5a6b7 moved there and froze. Migrations own them and no metadata describes them, so
-    reflecting the schema would report every one as ``remove_table`` drift.
+    Deliberately absent, migration-owned and frozen with no metadata describing them (reflecting
+    either would report every table as ``remove_table`` drift): ``legacy_archive``, the legacy
+    authority's twelve tables (c2d3e4f5a6b7), and ``release_archive``, the retired release
+    ceremony's (c74d45a54e46).
     """
     return type_ != "schema" or name in {None, "public", "projection_audit"}
 

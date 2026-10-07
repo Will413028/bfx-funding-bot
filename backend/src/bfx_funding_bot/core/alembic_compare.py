@@ -35,7 +35,6 @@ _IDENTITY_CONTRACT_TABLES = frozenset(
     }
 )
 _LEGACY_REMOVED_TABLES = frozenset({"users", "executions", "billing_records"})
-_RELEASE_ARCHIVE = "release_archive"
 
 
 def _normalize_json_default(rendered_default: str) -> str:
@@ -81,12 +80,6 @@ def include_object(
     table = getattr(object_, "table", None)
     schema = getattr(table, "schema", None) or "public"
     table_name = getattr(table, "name", None)
-    # The retired release ceremony's tables, frozen in their own schema by
-    # migration c74d45a54e46: history, not application metadata.
-    if (type_ == "table" and getattr(object_, "schema", None) == _RELEASE_ARCHIVE) or (
-        schema == _RELEASE_ARCHIVE
-    ):
-        return False
     # ``exchange_account_id`` is nullable in ORM metadata solely so the
     # SQLite unit fixtures can continue to construct historical synthetic
     # realms.  PostgreSQL's forward-only Halt 1 contract migration owns the
