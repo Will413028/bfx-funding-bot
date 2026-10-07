@@ -163,6 +163,7 @@ from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
 from bfx_funding_bot.modules.observability import alerts
+from bfx_funding_bot.modules.observability.bot_runs import BotRunRecord
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
     MetricsSubmitMiddleware,
@@ -1109,6 +1110,19 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
+    # This run's row in bot_runs, written as the writer (the build acquired the lock).
+    # Reports a previous run of the scope that ended without a recorded end, once.
+    run_record = BotRunRecord(
+        daemon.session_factory,
+        exchange_account_id=daemon.account_bootstrap.exchange_account_id,
+        deployment_environment=daemon.account_bootstrap.deployment_environment,
+    )
+    await run_record.start()
+    # How this run ends, recorded after the drain. None (a BaseException other than
+    # those below) leaves the row open: the next boot reports it, as it does for the
+    # exits that never reach here (loop watchdog, OOM kill, SIGKILL).
+    end_reason: str | None = None
+
     log.info(
         "daemon_started phase=%s cells=%d",
         daemon.config.phase, len(daemon.config.cells),
@@ -1128,8 +1142,10 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
     try:
         await daemon.run()
         log.info("daemon_run_clean_exit")
+        end_reason = "clean_stop"
     except* asyncio.CancelledError:
         log.info("daemon_cancelled_via_signal")
+        end_reason = "clean_stop"
     except* ExecutorAuthError:
         # Auth failure means credentials are wrong / revoked — operator must
         # intervene. Exit with sysexits EX_CONFIG 78 (Google SRE Book ch. 22)
@@ -1140,6 +1156,7 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         )
         alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
                     error="ExecutorAuthError: venue credentials rejected")
+        end_reason = "fatal" if daemon.booted else "boot_refused"
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* Exception as eg:
         log.error(
@@ -1148,10 +1165,15 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         )
         alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
                     error=_error_text(eg.exceptions))
+        end_reason = "fatal" if daemon.booted else "boot_refused"
         raise
     finally:
         # Cleanup after TaskGroup completes (close http client)
         log.info("daemon_shutdown_complete")
+        # The drain is over: record how the run ended while still the writer (before
+        # the lock is released), bounded so a dead database cannot hold the exit.
+        if end_reason is not None:
+            await run_record.finish(end_reason)
         # Release the single-writer advisory lock so the next process can acquire
         # it without waiting for the server-side session to expire (PG only).
         if daemon.writer_lock is not None:

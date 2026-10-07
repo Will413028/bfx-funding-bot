@@ -48,7 +48,7 @@ _VERSIONS = Path(__file__).resolve().parents[2] / "alembic/versions"
 
 # Later revisions that add realm tables declare them in their own ``REALM_TABLES`` and attach
 # the same trigger; the coverage tests check the union.
-_LATER_REALM_MIGRATIONS = ("a0b1c2d3e4f5_attribution_legacy_links.py",)
+_LATER_REALM_MIGRATIONS = ("a0b1c2d3e4f5_attribution_legacy_links.py", "8ac3b44460fc_add_bot_runs.py")
 
 
 def _load(filename: str) -> Any:
