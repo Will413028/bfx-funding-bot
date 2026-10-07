@@ -12,7 +12,10 @@ refusal, a credential rejection, an invariant) still ends the boot.
 from __future__ import annotations
 
 import asyncio
+import errno
+import json
 import logging
+import socket
 from collections.abc import Callable
 
 import asyncpg
@@ -22,22 +25,33 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bfx_funding_bot.core.errors import FatalError, TransientError
-from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+from bfx_funding_bot.external.bitfinex.errors import (
+    TRANSIENT_VENUE_ERROR_CODES,
+    BitfinexAPIError,
+)
+from bfx_funding_bot.external.bitfinex.submit_wire import venue_error
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
 
 BOOT_RETRY_MAX_DELAY_S = 60.0
 
-# OSError covers refused connections, DNS failures and timeouts at connect; the asyncpg
-# pair is a server still starting up or a connection dropped mid-use.
+# The asyncpg pair is a server still starting up or a connection dropped mid-use.
 _UNREACHABLE = (
-    OSError,
     httpx.TransportError,
     TransientError,
     asyncpg.CannotConnectNowError,
     asyncpg.ConnectionDoesNotExistError,
 )
+# Connection-level OSErrors only: refused/reset (ConnectionError), DNS
+# (socket.gaierror), timeouts. Other OSError subclasses are answers about this
+# process's own setup (ssl.SSLCertVerificationError, PermissionError, ...) and
+# refuse the boot.
+_CONNECTION_OSERRORS = (ConnectionError, socket.gaierror, TimeoutError)
+_NETWORK_ERRNOS = frozenset({
+    errno.ENETUNREACH, errno.ENETDOWN, errno.EHOSTUNREACH, errno.EHOSTDOWN,
+    errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED, errno.ETIMEDOUT,
+})
 
 
 def boot_retry_delay_s(attempt: int) -> float:
@@ -46,7 +60,7 @@ def boot_retry_delay_s(attempt: int) -> float:
 
 
 def is_transient_dependency_error(exc: BaseException) -> bool:
-    """True only for "the venue or the database did not answer".
+    """True only for "the venue or the database did not answer" (or said "not now").
 
     Walks the explicit ``raise ... from`` chain (never the implicit context, so a
     refusal raised while handling a network error stays a refusal). Any
@@ -68,12 +82,45 @@ def is_transient_dependency_error(exc: BaseException) -> bool:
 
 def _is_unreachable(exc: BaseException) -> bool:
     if isinstance(exc, BitfinexAPIError):
-        # Status 0 is the client's transport error or deadline; 429/5xx are the
-        # venue declining for now. Other 4xx are answers (credentials, request).
-        return exc.status_code == 0 or exc.status_code == 429 or exc.status_code >= 500
+        return _venue_did_not_answer(exc)
     if isinstance(exc, sa_exc.DBAPIError):
         return bool(exc.connection_invalidated)
+    if isinstance(exc, OSError):
+        return _is_connection_failure(exc)
     return isinstance(exc, _UNREACHABLE)
+
+
+def _venue_did_not_answer(exc: BitfinexAPIError) -> bool:
+    """Status 0 is the client's transport error or deadline. A body shaped
+    ``["error", CODE, MESSAGE]`` is the venue answering -- Bitfinex sends its
+    refusals (``apikey: invalid``, ``nonce: small``) with HTTP 500 -- so only the
+    rate-limit and maintenance codes are "not now". Without such a body, 429 and
+    5xx (a gateway page, an empty body) are the venue declining for now; other
+    4xx are answers."""
+    if exc.status_code == 0:
+        return True
+    answer = _parsed_venue_error(exc.raw)
+    if answer is not None:
+        return answer[0] in TRANSIENT_VENUE_ERROR_CODES
+    return exc.status_code == 429 or exc.status_code >= 500
+
+
+def _parsed_venue_error(raw: str | None) -> tuple[int, str] | None:
+    if not raw:
+        return None
+    try:
+        return venue_error(json.loads(raw))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def _is_connection_failure(exc: OSError) -> bool:
+    if isinstance(exc, _CONNECTION_OSERRORS):
+        return True
+    # asyncio raises a plain OSError for "network unreachable" and, when every
+    # address of a host failed with different messages, a plain OSError with no
+    # errno ("Multiple exceptions"). Subclasses (SSL, permission, files) are not this.
+    return type(exc) is OSError and (exc.errno is None or exc.errno in _NETWORK_ERRNOS)
 
 
 class BootWait:

@@ -13,12 +13,16 @@ Mutation checks (one at a time; revert after each):
 * re-raise every exception in ``Daemon._boot_until_observed``:
   ``test_an_unreachable_venue_at_boot_is_retried_until_it_answers``.
 * drop the writer-lock check before a retry: ``test_a_lost_writer_lock_ends_the_wait``.
-* treat every ``BitfinexAPIError`` as transient: ``test_a_refusal_still_refuses_the_boot[401]``.
+* treat every ``BitfinexAPIError`` 5xx as transient (ignore its ``["error", CODE, ...]``
+  body): ``test_a_refusal_still_refuses_the_boot[500_10100]``.
 """
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
+import socket
+import ssl
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -119,7 +123,9 @@ async def test_nothing_trades_while_the_boot_waits_and_a_stop_ends_the_wait() ->
 @pytest.mark.parametrize(
     ("label", "error"),
     [
-        ("401", lambda: BitfinexAPIError(status_code=401, message="apikey: invalid")),
+        # Bitfinex refuses a revoked or wrong key with HTTP 500 and a parsed body.
+        ("500_10100", lambda: BitfinexAPIError(status_code=500, message="Internal Server Error",
+                                               raw='["error",10100,"apikey: invalid"]')),
         ("auth", lambda: ExecutorAuthError("auth_failed: HTTP 401")),
         ("invariant", lambda: BootInvariantError("boot observation refused query admission")),
         ("value", lambda: ValueError("boot observation scope is required")),
@@ -163,6 +169,15 @@ def _caused(outer: BaseException, cause: BaseException) -> BaseException:
         BitfinexAPIError(status_code=0, message="transport error"),
         BitfinexAPIError(status_code=429, message="rate limited"),
         BitfinexAPIError(status_code=503, message="maintenance"),
+        # A gateway page or empty body: no venue answer to read.
+        BitfinexAPIError(status_code=502, message="Bad Gateway", raw="<html>bad gateway</html>"),
+        BitfinexAPIError(status_code=500, message="Internal Server Error", raw=""),
+        # The venue's own "not now": rate limit and maintenance codes.
+        BitfinexAPIError(status_code=500, message="x", raw='["error",11010,"ratelimit: error"]'),
+        BitfinexAPIError(status_code=500, message="x", raw='["error",20060,"maintenance"]'),
+        socket.gaierror(-2, "Name or service not known"),
+        OSError(errno.ENETUNREACH, "Network is unreachable"),
+        OSError("Multiple exceptions: [Errno 61] refused, [Errno 61] refused"),
         ExecutorTransientError("venue_5xx: HTTP 502"),
         _caused(RuntimeError("cycle failed"), OSError("socket closed")),
         sa_exc.DBAPIError("SELECT 1", None, Exception("gone"), connection_invalidated=True),
@@ -177,6 +192,11 @@ def test_reachability_faults_are_transient(exc: BaseException) -> None:
     [
         BitfinexAPIError(status_code=401, message="invalid key"),
         BitfinexAPIError(status_code=400, message="bad request"),
+        BitfinexAPIError(status_code=500, message="x", raw='["error",10100,"apikey: invalid"]'),
+        BitfinexAPIError(status_code=500, message="x", raw='["error",10114,"nonce: small"]'),
+        # This process's own setup, not the other side being away.
+        ssl.SSLCertVerificationError(1, "certificate verify failed"),
+        PermissionError(13, "Permission denied"),
         ValueError("unknown active offer status"),
         sa_exc.DBAPIError("SELECT 1", None, Exception("syntax"), connection_invalidated=False),
         # A refusal caused by a network error stays a refusal.
@@ -234,5 +254,16 @@ async def test_boot_waits_for_a_database_that_is_down_or_starting() -> None:
 async def test_a_database_that_answers_with_an_error_refuses_the_boot() -> None:
     engine = _Engine([RuntimeError("password authentication failed")])
     with pytest.raises(RuntimeError, match="password"):
+        await wait_for_database(engine, delay_s=lambda _n: 0.0)  # type: ignore[arg-type]
+    assert engine.attempts == 1
+
+
+@pytest.mark.parametrize("error", [
+    ssl.SSLCertVerificationError(1, "certificate verify failed"),
+    PermissionError(13, "Permission denied"),
+])
+async def test_a_database_tls_or_permission_error_refuses_the_boot(error: OSError) -> None:
+    engine = _Engine([error])
+    with pytest.raises(type(error)):
         await wait_for_database(engine, delay_s=lambda _n: 0.0)  # type: ignore[arg-type]
     assert engine.attempts == 1
