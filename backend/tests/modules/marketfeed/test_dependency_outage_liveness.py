@@ -53,11 +53,11 @@ from bfx_funding_bot.modules.marketfeed.daemon import Daemon
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
 from bfx_funding_bot.modules.marketfeed.healthz import make_app
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
-from tests.modules.execution.deployment.test_eligibility import (
-    _candidate,
-    _context,
-    _price,
-    _snapshot,
+from tests.modules.execution.deployment.helpers import (
+    make_audit_context,
+    make_candidate,
+    make_price,
+    make_snapshot,
 )
 
 # Live HeartbeatGuard threshold (configs/safety.live.yaml).
@@ -99,17 +99,17 @@ def _fresh_liveness(probe: HealthProbe) -> None:
 
 async def _gate(safety_allowed: bool, guard_reason: str | None, *, audit: Any,
                 readiness: TradingReadiness) -> object:
-    candidate = _candidate()
+    candidate = make_candidate()
     gate = ExecutionGate(policy=ExecutionPolicy.BOOK_GUARDED, audit=audit, readiness=readiness)
     return await gate.prepare(
         candidate,
         decision_id="decision-outage",
         reconcile_id="reconcile-outage",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=None,
         safety=GuardResult(safety_allowed, "heartbeat", guard_reason),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
 
@@ -140,7 +140,7 @@ async def test_a_bitfinex_ws_outage_keeps_liveness_and_blocks_trading_through_re
 
     guard = HeartbeatGuard(probe=probe, threshold_seconds=_LIVE_GUARD_THRESHOLD_S,
                            watched_sub_tasks=[MARKET_DATA_FRESHNESS])
-    verdict = await guard.evaluate(_candidate(), None)  # type: ignore[arg-type]
+    verdict = await guard.evaluate(make_candidate(), None)  # type: ignore[arg-type]
     assert verdict.allowed is False
     result = await _gate(verdict.allowed, verdict.reason, audit=_AcceptingAudit(),
                          readiness=readiness)
@@ -152,7 +152,7 @@ async def test_a_bitfinex_ws_outage_keeps_liveness_and_blocks_trading_through_re
     Daemon._ws_freshness_tick(SimpleNamespace(probe=probe, ws_client=_FreshWS()))  # type: ignore[arg-type]
     await _monitor(probe, readiness).scan_staleness()
     assert readiness.snapshot().reason == BlockReason.SAFETY_GUARD_BLOCKED.value
-    assert (await guard.evaluate(_candidate(), None)).allowed is True  # type: ignore[arg-type]
+    assert (await guard.evaluate(make_candidate(), None)).allowed is True  # type: ignore[arg-type]
 
 
 class _UnreachableEngine:
