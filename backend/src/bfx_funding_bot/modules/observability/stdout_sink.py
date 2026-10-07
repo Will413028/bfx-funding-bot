@@ -10,7 +10,7 @@ meaning resource envelope fields win over any event-supplied keys with the same
 name. This is the drop-in behavioral parity contract.
 
 Operational events only (SIGNAL / HEALTH_CHECK / ORDER_SUBMIT / lifecycle).
-Forensic events go to DiagnosticsSink (PG); SoT events go to event_log.
+Forensic events go to DiagnosticsSink (PG); capital truth lives in the ledger tables.
 """
 from __future__ import annotations
 

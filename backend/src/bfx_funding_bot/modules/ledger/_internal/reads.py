@@ -1,4 +1,4 @@
-"""Dormant ledger reads: open uncertainties, managed live offers, fingerprints.
+"""Ledger reads: open uncertainties, managed live offers, fingerprints.
 
 Every read runs on the caller's session and is bounded by keys, the live
 mirror, or the latest accepted basis -- never by history:
