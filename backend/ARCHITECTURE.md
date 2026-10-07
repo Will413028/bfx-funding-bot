@@ -398,7 +398,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 **受管 offer 的收斂（`DeploymentReconciler._pull_if_stopped`）**：唯一撤受管 offer 的地方，level-triggered。每個 tick、每個幣別：帳戶 `HALTED`（任何 cause）或 policy `enabled=false` 時，這個幣別不規劃任何新單，並經 command gate 按 venue id 撤掉仍開著的受管 offer（`managed_cancel.ManagedOfferSweep`；受管＝有 provenance，§5）；某次撤單被拒或失敗，下一個 tick 再撤。外來 offer 與已成交借款從不碰。
 
-**撤單資格**：`AccountCommandGate.cancel` 走 `SafetyGuardChain.evaluate_cancel`，只跳過 `capital_policy` 與 trading-state guard；受管 provenance、同 scope 的新 UNKNOWN／讀取失敗仍在 admission 與每次 transport 前拒絕撤單。已寫入 attempt 的 submit 在 transport 前走 `evaluate_transport`，仍受 trading state 約束。
+**撤單資格**：`AccountCommandGate.cancel` 走 `SafetyGuardChain.evaluate_cancel`，只跳過 `chain._CANCEL_EXEMPT` 列名的 guard：`capital_policy`、trading-state guard、`offer_envelope` 與 `heartbeat`（market-data freshness：撤受管單不需要市場資料，WS 斷線或開機後尚未見過時，HALTED／policy 停用的 sweep 與 reprice 撤單照樣能做）；受管 provenance、同 scope 的新 UNKNOWN／讀取失敗仍在 admission 與每次 transport 前拒絕撤單。已寫入 attempt 的 submit 在 transport 前走 `evaluate_transport`，仍受 trading state 約束。
 
 **Kill switch（`safety/kill_switch.py`）**：operator 專用（UI kill 請求、`POST /admin/halt`），是唯一的 venue cancel-all。先 commit `HALTED`（寫不進去就不呼叫 venue），再對每個幣別呼叫 `POST /v2/auth/w/funding/offer/cancel/all`，**連手動掛的 offer 一起撤**；幣別＝設定的 symbols，加上有 open uncertainty 或 mirror 上仍有 live offer（受管、外來或 conflict）的 symbols；只需 writer lock，不經 command gate；每次呼叫在 `funding_cancel_all_audit` 留 `requested` 與一筆終態；venue 失敗不回滾 HALTED，再 kill 一次即重試（`/admin/halt` 在未全數完成時回 502）。不依賴資料庫的 break-glass 是停掉 bot container。
 
