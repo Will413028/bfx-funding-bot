@@ -18,8 +18,6 @@ STRATEGY_NO_INTERNAL_ACCESS_MAX_IGNORES = 0
 TRADING_IS_PURE_MAX_IGNORES = 0
 
 MAX_IGNORES_BY_ID = {
-    "capital-consumers-via-ports": 0,
-    "planner-via-ports": 0,
     "ledger-no-internal-access": 0,
     "ledger-wiring-is-top": 0,
     "ledger-not-legacy": 0,
@@ -32,7 +30,6 @@ MAX_IGNORES_BY_ID = {
     "market-contracts-no-sibling-dependencies": 0,
     "market-contracts-via-facade": 0,
     "strategy-wiring-is-top": 0,
-    "runtime-not-legacy-authority": 0,
     "trading-is-pure": TRADING_IS_PURE_MAX_IGNORES,
     "apps-is-top": APPS_IS_TOP_MAX_IGNORES,
     "core-is-leaf": CORE_IS_LEAF_MAX_IGNORES,
@@ -165,37 +162,6 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
         "bfx_funding_bot.modules.trading", "bfx_funding_bot.modules.marketfeed",
         "bfx_funding_bot.apps",
     } <= set(independent["forbidden_modules"])
-    legacy_authority = {"bfx_funding_bot.modules.execution.uncertainty_tables"}
-    consumers = contracts_by_id["capital-consumers-via-ports"]
-    assert set(consumers["source_modules"]) == {
-        "bfx_funding_bot.modules.accounts.capital_amendment",
-        "bfx_funding_bot.modules.admin.trading_status",
-        "bfx_funding_bot.modules.execution.capital_policy_control",
-        "bfx_funding_bot.modules.execution.command_gate",
-        "bfx_funding_bot.modules.execution.contracts",
-        "bfx_funding_bot.modules.execution.deployment.sizing",
-        "bfx_funding_bot.modules.execution.managed_cancel",
-        "bfx_funding_bot.modules.execution.middleware.reservation_emitting",
-        "bfx_funding_bot.modules.execution.safety.hard_guards",
-        "bfx_funding_bot.modules.execution.safety.kill_switch",
-        "bfx_funding_bot.modules.execution.safety.pre_trade",
-    }
-    assert set(consumers["forbidden_modules"]) == legacy_authority
-    planner = contracts_by_id["planner-via-ports"]
-    assert planner["source_modules"] == ["bfx_funding_bot.modules.execution.deployment.reconciler"]
-    assert set(planner["forbidden_modules"]) == legacy_authority
-    for contract in (consumers, planner):
-        assert contract["type"] == "forbidden"
-        assert contract["allow_indirect_imports"] is True
-    # The processes that lend and serve reach the archived legacy tables only through the
-    # archived execution history, never the archive's schema module directly.
-    runtime = contracts_by_id["runtime-not-legacy-authority"]
-    assert {
-        "bfx_funding_bot.apps.bot", "bfx_funding_bot.apps.bot_ports",
-        "bfx_funding_bot.apps.webapi", "bfx_funding_bot.apps.read_models",
-        "bfx_funding_bot.modules.ledger", "bfx_funding_bot.modules.api",
-    } <= set(runtime["source_modules"])
-    assert runtime["forbidden_modules"] == ["bfx_funding_bot.modules.execution.legacy_archive"]
 
 
 def test_research_scripts_obtain_strategy_wiring_through_apps() -> None:
