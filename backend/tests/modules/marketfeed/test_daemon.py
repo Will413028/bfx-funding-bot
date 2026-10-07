@@ -60,17 +60,12 @@ async def test_daemon_engine_has_d3_pool_config_and_url_transform(
     from bfx_funding_bot.core.db import make_async_engine_from_url
 
     # Verify URL transform + pool config via make_async_engine_from_url directly
-    # (the form chaos recovery accidentally produced — asyncpg scheme + libpq params).
-    bad_url = (
-        "postgresql+asyncpg://u:p@ep-foo-pooler.ap-southeast-1.aws.neon.tech/db"
-        "?sslmode=require&channel_binding=require"
-    )
+    # (the form chaos recovery accidentally produced — asyncpg scheme + a libpq param).
+    bad_url = "postgresql+asyncpg://u:p@db.example/db?sslmode=verify-full"
     transformed_engine = make_async_engine_from_url(bad_url)
     u = str(transformed_engine.url)
     assert u.startswith("postgresql+asyncpg://"), f"scheme not asyncpg: {u}"
     assert "sslmode" not in u, f"sslmode not stripped: {u}"
-    assert "channel_binding" not in u, f"channel_binding not stripped: {u}"
-    assert "-pooler." not in u, f"-pooler suffix not stripped: {u}"
     assert transformed_engine.pool._pre_ping is True, "pool_pre_ping missing (D3)"
     assert transformed_engine.pool._recycle == 600, "pool_recycle != 600 (D3.1)"
     await transformed_engine.dispose()

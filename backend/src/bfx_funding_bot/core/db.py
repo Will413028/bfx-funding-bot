@@ -50,59 +50,40 @@ def _refuse_the_json_literal(column: Column[object], table: object) -> None:
 
 
 def _prepare_engine_kwargs(raw_url: str) -> dict[str, object]:
-    """Convert a plain postgresql:// URL (Go/psycopg2-style) to asyncpg kwargs.
+    """Convert a libpq postgresql:// URL to asyncpg kwargs.
 
-    Transforms:
     - scheme postgresql:// → postgresql+asyncpg://
-    - host: strip `-pooler` suffix (asyncpg prepared stmt vs PgBouncer
-      transaction-mode incompatibility)
-    - sslmode: extracted to SSL context in connect_args
-    - channel_binding: removed (asyncpg does not support)
+    - sslmode (checked by `database_sslmode`) and sslrootcert become an SSL context, or
+      ``ssl=False``, in connect_args; asyncpg takes neither as a URL parameter
     """
+    import ssl
     from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
-    from bfx_funding_bot.core.settings import _strip_pooler_from_host
+    from bfx_funding_bot.core.settings import database_sslmode
 
-    # Normalise scheme.
     url = raw_url
     if url.startswith("postgresql://"):
         url = "postgresql+asyncpg://" + url[len("postgresql://"):]
     elif url.startswith("postgres://"):
         url = "postgresql+asyncpg://" + url[len("postgres://"):]
 
-    # Parse URL parts.
     parts = urlsplit(url)
     qs = parse_qs(parts.query, keep_blank_values=True)
-
-    # Detect SSL requirement.
-    sslmode = qs.pop("sslmode", ["prefer"])[0]
-    qs.pop("channel_binding", None)  # asyncpg does not accept this
-
-    # Strip -pooler from host.
-    new_host = _strip_pooler_from_host(parts.hostname)
-    userinfo = ""
-    if parts.username is not None:
-        userinfo = parts.username
-        if parts.password is not None:
-            userinfo += f":{parts.password}"
-        userinfo += "@"
-    port_suffix = f":{parts.port}" if parts.port is not None else ""
-    netloc = f"{userinfo}{new_host or ''}{port_suffix}"
-
-    new_query = urlencode({k: v[0] for k, v in qs.items()})
-    clean_url = urlunsplit((parts.scheme, netloc, parts.path, new_query, parts.fragment))
+    sslmode = database_sslmode(qs)
+    qs.pop("sslmode", None)
+    rootcert = qs.pop("sslrootcert", [None])[0]
+    clean_url = urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode({k: v[0] for k, v in qs.items()}),
+         parts.fragment)
+    )
 
     connect_args: dict[str, object] = {}
-    if sslmode in ("require", "verify-ca", "verify-full"):
-        import ssl as _ssl
-        ctx = _ssl.create_default_context()
-        if sslmode == "require":
-            # Matches psycopg2 semantics: encrypt the channel but do not verify
-            # the server cert. Adequate for personal-use Neon connections; for
-            # production / multi-tenant deployments switch the .env DATABASE_URL
-            # to sslmode=verify-full so the cert chain is validated.
-            ctx.check_hostname = False
-            ctx.verify_mode = _ssl.CERT_NONE
+    if sslmode == "disable":
+        connect_args["ssl"] = False
+    else:
+        # libpq semantics: both verify the chain; only verify-full also checks the host name.
+        ctx = ssl.create_default_context(cafile=rootcert)
+        ctx.check_hostname = sslmode == "verify-full"
         connect_args["ssl"] = ctx
 
     return {"url": clean_url, "connect_args": connect_args}
@@ -114,8 +95,7 @@ def make_async_engine_from_url(raw_url: str) -> AsyncEngine:
     Single source of truth shared by `make_engine` (Settings-driven) and
     `marketfeed.daemon.build_daemon` (MarketfeedConfig-driven). Both paths
     now apply `_prepare_engine_kwargs` (D2 URL transform: scheme rewrite,
-    sslmode/channel_binding stripping, -pooler removal, SSL context lift)
-    and the D3 pool config (`pool_pre_ping=True`, `pool_recycle=600`).
+    sslmode checked and lifted into connect_args) and the D3 pool config (`pool_pre_ping=True`, `pool_recycle=600`).
 
     Before unification daemon.py:614 was a raw `create_async_engine(url)`
     call from Phase 4.1 (`26b059d`); a DATABASE_URL in libpq form (with

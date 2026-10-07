@@ -1,3 +1,6 @@
+import pytest
+
+from bfx_funding_bot.core.db import _prepare_engine_kwargs
 from bfx_funding_bot.core.settings import Settings
 
 
@@ -40,43 +43,36 @@ class TestDatabaseUrlSync:
         s = _s("postgres://u:p@host.example/db")
         assert s.database_url_sync.startswith("postgresql+psycopg://")
 
-    def test_sslmode_preserved(self):
-        s = _s("postgresql://u:p@host.example/db?sslmode=require")
-        assert "sslmode=require" in s.database_url_sync
-
-    def test_channel_binding_preserved(self):
-        s = _s("postgresql://u:p@host.example/db?sslmode=require&channel_binding=require")
-        assert "channel_binding=require" in s.database_url_sync
-
-    def test_pooler_suffix_stripped(self):
-        """Neon -pooler endpoint stripped — alembic must use direct endpoint."""
-        s = _s(
-            "postgresql://u:p@ep-foo-bar-123-pooler.ap-southeast-1.aws.neon.tech/db"
-            "?sslmode=require"
-        )
-        out = s.database_url_sync
-        assert "-pooler." not in out
-        assert "ep-foo-bar-123.ap-southeast-1.aws.neon.tech" in out
-
-    def test_no_pooler_no_change(self):
-        """Already-direct endpoint unchanged."""
-        s = _s(
-            "postgresql://u:p@ep-foo-bar-123.ap-southeast-1.aws.neon.tech/db"
-            "?sslmode=require"
-        )
-        out = s.database_url_sync
-        assert "ep-foo-bar-123.ap-southeast-1.aws.neon.tech" in out
-
-    def test_ssl_translated_to_sslmode(self):
-        """Phase 4.1 asyncpg-pre-transformed URL has `ssl=require` — psycopg
-        needs `sslmode=require`. Accessor translates."""
-        s = _s("postgresql+asyncpg://u:p@host.example/db?ssl=require")
-        out = s.database_url_sync
-        assert "ssl=require" not in out
-        assert "sslmode=require" in out
-
-    def test_asyncpg_scheme_replaced_by_psycopg(self):
-        """Phase 4.1 asyncpg URL should also become psycopg for alembic."""
-        s = _s("postgresql+asyncpg://u:p@host.example/db?ssl=require")
+    def test_an_asyncpg_scheme_is_rewritten_to_psycopg(self):
+        s = _s("postgresql+asyncpg://u:p@host.example/db")
         assert s.database_url_sync.startswith("postgresql+psycopg://")
-        assert "+asyncpg" not in s.database_url_sync
+
+
+class TestDatabaseSslmode:
+    """Both drivers read the TLS mode through ``database_sslmode``: only modes that verify the
+    server, or an explicit plaintext one. Mutation: accept ``require`` again
+    (``test_a_mode_that_does_not_verify_is_refused``)."""
+
+    @pytest.mark.parametrize("mode", ["require", "prefer", "allow", "no-such-mode"])
+    def test_a_mode_that_does_not_verify_is_refused(self, mode: str) -> None:
+        url = f"postgresql://u:p@host.example/db?sslmode={mode}"
+        with pytest.raises(ValueError, match=f"sslmode={mode}"):
+            _ = _s(url).database_url_sync
+        with pytest.raises(ValueError, match=f"sslmode={mode}"):
+            _prepare_engine_kwargs(url)
+
+    def test_asyncpgs_own_ssl_parameter_is_refused(self) -> None:
+        url = "postgresql+asyncpg://u:p@host.example/db?ssl=require"
+        with pytest.raises(ValueError, match="sslmode=, not ssl="):
+            _ = _s(url).database_url_sync
+        with pytest.raises(ValueError, match="sslmode=, not ssl="):
+            _prepare_engine_kwargs(url)
+
+    @pytest.mark.parametrize(
+        ("query", "mode"),
+        [("", "disable"), ("?sslmode=disable", "disable"),
+         ("?sslmode=verify-ca", "verify-ca"), ("?sslmode=verify-full", "verify-full")],
+    )
+    def test_the_sync_url_always_names_the_mode(self, query: str, mode: str) -> None:
+        url = _s(f"postgresql://u:p@host.example:5432/db{query}").database_url_sync
+        assert url == f"postgresql+psycopg://u:p@host.example:5432/db?sslmode={mode}"
