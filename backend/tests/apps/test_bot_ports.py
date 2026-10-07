@@ -34,7 +34,7 @@ from bfx_funding_bot.modules.execution.ledger_cycle_effects import LedgerCycleEf
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
-from bfx_funding_bot.modules.ledger import BOOT_GRACE_MS, RUNTIME_GRACE_MS, Scope
+from bfx_funding_bot.modules.ledger import BOOT_GRACE_MS, RUNTIME_GRACE_MS, OfferCloseHint, Scope
 from tests.apps.walk import legacy_state
 
 ACCOUNT = UUID("550e8400-e29b-41d4-a716-446655440000")
@@ -140,8 +140,8 @@ async def test_venue_hint_sink_requests_resync_through_the_channel(factory) -> N
     sink = ports.venue_hint_sink
     assert sink._scope == SCOPE  # type: ignore[attr-defined]
     assert sink._request_resync == resync.request  # type: ignore[attr-defined]
-    await sink.offer_gone("42", occurred_at_ms=1)
-    assert resync.take() == "venue_hint:offer_gone:42"
+    await sink.offer_closed(OfferCloseHint("42", "fUST", "EXECUTED", 0.0005, 1, None, 1))
+    assert resync.take() == "venue_hint:offer_closed:42"
 
 
 def test_the_signature_names_no_authority_and_no_live_switch() -> None:

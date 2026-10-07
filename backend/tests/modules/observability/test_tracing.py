@@ -335,10 +335,6 @@ class _StubHintSink:
     async def credit_closed(self, hint: Any) -> None:
         await self._hint()
 
-    async def offer_gone(self, venue_offer_id: str, *, occurred_at_ms: int) -> bool:
-        await self._hint()
-        return True
-
 
 class _StubSink:
     async def emit(self, event: dict[str, Any]) -> None:  # pragma: no cover

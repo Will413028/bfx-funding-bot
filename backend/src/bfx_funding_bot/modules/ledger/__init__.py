@@ -1,4 +1,4 @@
-"""Dormant, transaction-scoped ledger journal, observation, and read contracts."""
+"""The capital authority's transaction-scoped ledger journal, observation, and read contracts."""
 
 from __future__ import annotations
 
@@ -288,14 +288,11 @@ class VenueHintSink(Protocol):
 
     The sink requests reconciliation and publishes only non-authoritative
     notifications, without any DB writes.
-    offer_gone returns False only when the caller should retry next poll.
     """
 
     async def offer_closed(self, hint: OfferCloseHint) -> None: ...
 
     async def credit_closed(self, hint: CreditCloseHint) -> None: ...
-
-    async def offer_gone(self, venue_offer_id: str, *, occurred_at_ms: int) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,7 +304,7 @@ class VenueHintNotification:
     """
 
     scope: Scope
-    kind: Literal["offer_closed", "credit_closed", "offer_gone"]
+    kind: Literal["offer_closed", "credit_closed"]
     occurred_at_ms: int
     venue_seq: int | None = None
     venue_offer_id: str | None = None
