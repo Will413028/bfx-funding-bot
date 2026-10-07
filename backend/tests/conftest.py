@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from hypothesis import settings as hypothesis_settings
 from pytest_postgresql.factories import postgresql_proc
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
@@ -18,6 +19,11 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import StaticPool
 
 from tests import pg_local
+
+# Property-test budgets (the `property` marker in pyproject.toml): CI runs Hypothesis's
+# default profile (100 examples); the nightly workflow passes --hypothesis-profile=nightly.
+# Tests that pin max_examples in their own @settings keep their pinned budget.
+hypothesis_settings.register_profile("nightly", max_examples=1000)
 
 
 async def ensure_auth_user(session: AsyncSession, user_id: str) -> None:

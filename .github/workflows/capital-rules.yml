@@ -1,0 +1,86 @@
+name: Capital rules
+
+# Each capital rule must be killed by the test layer that owns it
+# (backend/scripts/capital_mutation_gate.py). A separate workflow on purpose:
+# release.yml publishes only after the workflow named "CI" passes, so nothing
+# here changes what gates a release.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - backend/src/bfx_funding_bot/modules/trading/policy.py
+      - backend/src/bfx_funding_bot/modules/trading/capital.py
+      - backend/src/bfx_funding_bot/modules/execution/deployment/sizing.py
+      - backend/src/bfx_funding_bot/modules/execution/deployment/reconciler.py
+      - backend/scripts/capital_mutation_gate.py
+      - backend/tests/modules/trading/test_policy.py
+      - backend/tests/modules/trading/test_capital.py
+      - backend/tests/modules/execution/deployment/test_sizing.py
+      - backend/tests/modules/execution/deployment/test_reconciler.py
+      - .github/workflows/capital-rules.yml
+  schedule:
+    - cron: "17 19 * * *"  # nightly, 03:17 Asia/Taipei
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  mutation_gate:
+    name: Capital mutation gate (unit-owned)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      - run: uv run python scripts/capital_mutation_gate.py
+
+  nightly:
+    name: Nightly properties (1k) and full capital mutation gate
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      BFX_DEPLOYMENT_ENV: ci
+      # Integration-owned mutants run their owning tests on one local PostgreSQL 18
+      # per pytest process (tests/pg_local.py), as in ci.yml.
+      BFX_TEST_PG_BIN: /usr/lib/postgresql/18/bin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      - name: Install PostgreSQL 18 (PGDG)
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-common
+          sudo sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf
+          sudo apt-get install -y --no-install-recommends postgresql-18
+          "$BFX_TEST_PG_BIN/pg_ctl" --version
+      # The `property` marker's nightly budget (pyproject.toml): 1k examples.
+      - name: Property tests (nightly profile)
+        run: uv run pytest -m "property and not integration" --hypothesis-profile=nightly -q -n auto
+      - name: Capital mutation gate (all mutants)
+        run: uv run python scripts/capital_mutation_gate.py --include-integration
