@@ -11,7 +11,7 @@
 bfx-funding-bot 在 Bitfinex 的 funding（放貸）市場上自動掛單放貸閒置資金。系統不是「來一根 candle 就送一張單」的反應式 bot，而是把整條 pipeline 拆成兩個解耦的時間軸：
 
 - **訊號層（signal layer）**：每小時 candle boundary 觸發一次，由策略產生「該不該放、用什麼 rate、放幾天」的 **意圖（StandingQuote）**，寫進 in-memory store，**不送單**。
-- **部署層（deployment layer）**：每 ~90 秒一次，先用 REST 把 venue 真相抓回來校正 ledger，再依「目標曝險 − 目前曝險」的缺口（gap）把資金貪婪分配到各 cell，套用 safety chain 後才送單。
+- **部署層（deployment layer）**：每 ~90 秒一次，先跑 observation cycle（REST 讀 venue，被接受才繼續），再在 ledger 的 `spendable` 內、依各 cell 的 `max_new_offer` 決定新 offer 金額，套用 safety chain 後才送單。
 
 核心架構原則：
 
@@ -273,7 +273,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 3. `DivergenceReporter.check()` 用 `build_strategy_at_boundary`（LOCF 重建，觀察 `history[:-1]`）重算 reference signal，與 live 比對 `signal_score` / `signal_direction` / `strategy_attributes`（含 EMA 等累加器內部 state，累加器欄位走 `_REL_TOL=1e-4` 相對容忍，其餘精確比對）。有差則 emit `SIGNAL_DIVERGENCE` warn。I-CI 之後 live 與 replay 應 byte-match，**觸發率脫離 100% 是這條修復的驗收指標**。
 4. 結果寫成 `StandingQuote{cell_id, outcome=POST/SKIP, rate, period_days, signal_correlation_id, created_at_ms}` 進 `StandingQuoteStore`。**訊號層到此為止，零提交。**
 
-**部署（每 ~90s，由 PeriodicReconcile 在 venue reconcile 完成後呼叫）**
+**部署（每 ~90s，由 PeriodicReconcile 在 observation cycle 被接受後呼叫；cycle 失敗或未被接受則該 tick 不部署）**
 
 `DeploymentReconciler.deploy`（`deployment/reconciler.py`）對每個設定的 symbol 依序：
 
@@ -283,9 +283,9 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
    - **emptiest-first**：依各 cell 的 `cell_exposure` 由小到大，先填最空的；
    - 每筆上限是 `budget.max_new_offer`（policy 設了 `max_offer_amount` 時再取較小者），金額向下量化成 venue 金額；總分配 ≤ `spendable`；低於 `min_fill` 的丟棄。
 7. 定量後、送單前跑 reprice sweep（見 7b）；沒有 fill 則換下一個 symbol。
-7a. 逐 fill：（無 pre-sizing hook 時）重查 uncertainty → 重讀 `get_active(cell_id)`（過期則跳過）→ `choose_fingerprinted_amount` 選出不與使用中 fingerprint 衝突的金額（選不到則跳過）→ `SafetyGuardChain.evaluate` → 讀取該 symbol 的 book snapshot，以 `PeriodPricer` 對 **exact `period_days`** 定價（optimizer policy 另算候選，見 7c-ii）→ `ExecutionGate.prepare`（見 7c）→ `executor.submit`。只有 `acknowledged` 結果會 `tracker.record_deploy`；`CellDeploymentTracker` 不參與授權。scalar ticker 僅可作 telemetry，不能為 period-correct pricing 提供證據。
+7a. 逐 fill：（無 pre-sizing hook 時）重查 uncertainty，有 open UNKNOWN（或讀不到）即 `break`，該 symbol 剩下的 fill 都不送 → 重讀 `get_active(cell_id)`（過期則跳過）→ `choose_fingerprinted_amount` 選出不與使用中 fingerprint 衝突的金額（選不到則跳過）→ `SafetyGuardChain.evaluate` → 讀取該 symbol 的 book snapshot，以 `PeriodPricer` 對 **exact `period_days`** 定價（optimizer policy 另算候選，見 7c-ii）→ `ExecutionGate.prepare`（見 7c）→ `executor.submit`。只有 `acknowledged` 結果會 `tracker.record_deploy`；本 tick 得到 `unknown` 時記錄、emit 後 `continue`，之後的 fill 由 uncertainty guard 擋下（有 hook 時是 `SafetyGuardChain.evaluate` 內的 `uncertainty` guard，否則是上述重查）；`CellDeploymentTracker` 不參與授權。scalar ticker 僅可作 telemetry，不能為 period-correct pricing 提供證據。
 
-7b. **Reprice sweep（E1）**：定量後、送單前，對每個 symbol 比對 venue snapshot 的 resting offers 與現行 active quote：offer rate 高於最高 active quote rate ×(1+`BFX_REPRICE_TOLERANCE_PCT`) 且齡 ≥ `BFX_REPRICE_MIN_AGE_S` → `executor.cancel`（每 tick ≤ `BFX_REPRICE_MAX_CANCELS_PER_TICK` 筆；`BFX_REPRICE_ENABLED=false` 時僅 log `reprice_would_cancel`）。release 由 WS foc / 下次 reconcile 收斂，釋放資金下一 tick 以新 quote 重掛。無 active quote 的 symbol 不砍（resting 高價單留作 spike option）。**參考價**由 `BFX_REPRICE_REFERENCE` 決定：`quote`（預設）＝該 symbol active quote 最高 rate；`book`＝以 `PeriodPricer` 對當下 exact-period book、同期限、該 offer 剩餘金額重定價，多個 quote 取最高，book 或對應期限 quote 不可用時不砍——送單價本來就由 book 定，參考價用 signal quote 會在市場沒動時把合法價位砍掉（live 自 2026-09-27 起用 `book`，見 `deploy/vm/live.env`）。
+7b. **Reprice sweep（E1）**：只在設定了 reprice policy 且本 tick 帶有 venue offers 時執行；只有通過第 5 步與第 6 步讀取（funding rule、capital read）的 symbol 會跑到，被停止、有 UNKNOWN 或讀取失敗的 symbol 在此之前已 `continue`。在定量後、送單前（即使沒有 fill 也會跑），比對 venue snapshot 的 resting offers 與現行 active quote：offer rate 高於最高 active quote rate ×(1+`BFX_REPRICE_TOLERANCE_PCT`) 且齡 ≥ `BFX_REPRICE_MIN_AGE_S` → `executor.cancel`（每 tick ≤ `BFX_REPRICE_MAX_CANCELS_PER_TICK` 筆；`BFX_REPRICE_ENABLED=false` 時僅 log `reprice_would_cancel`）。release 由 WS foc / 下次 reconcile 收斂，釋放資金下一 tick 以新 quote 重掛。無 active quote 的 symbol 不砍（resting 高價單留作 spike option）。**參考價**由 `BFX_REPRICE_REFERENCE` 決定：`quote`（預設）＝該 symbol active quote 最高 rate；`book`＝以 `PeriodPricer` 對當下 exact-period book、同期限、該 offer 剩餘金額重定價，多個 quote 取最高，book 或對應期限 quote 不可用時不砍——送單價本來就由 book 定，參考價用 signal quote 會在市場沒動時把合法價位砍掉（live 自 2026-09-27 起用 `book`，見 `deploy/vm/live.env`）。
 
 7c. **Execution eligibility（fail-closed）**：snapshot 必須具備交易所交付的**完整 book baseline**（WS subscribe 時的 snapshot，或一次成功的 REST reconcile——兩者都是同一個交易所的整本 book，地位相同）、自該 baseline 以來**未偵測到 sequence gap 或 checksum mismatch**、交易所最後一次確認（update／`cs`／heartbeat）在 `BFX_BOOK_MAX_AGE_SECONDS` 內、symbol 相符、存在 exact period level，且該 side 的絕對 depth 足以覆蓋 amount。任一條件不足，或 model/safety/audit 不可用，皆產生 `BlockedExecution`／`NoRecommendation` 並不送單；book 不可用時 reason 必須指明是 `book_not_initialized`／`book_sequence_invalid`／`book_checksum_invalid`／`book_stale` 中的哪一種，不得塌縮成單一值（塌縮正是 checksum 缺陷被誤讀成過期的原因）。不得重用 signal quote、ticker 值或 linear estimate。`book_guarded` 以 exact-period book 價格送單；`optimizer_shadow` 只記錄候選與評分，仍送 book-guarded rate；`optimizer_live` 僅在 empirical evidence、fee 與其餘依賴全部有效時才可選擇 optimizer rate。
 
@@ -694,7 +694,7 @@ production 使用 prod，ci 僅供測試。shadow 禁止 prod（模擬不可污�
 `cells.experimental-p14.yaml` 鎖定 AdaptivePeriod `p_mid=7`、`p_long=14`、`t1=0.5`、
 `t2=1.5`，並且 profile 固定 `BFX_PHASE=shadow`、`BFX_DEPLOYMENT_ENV=shadow`、
 `optimizer_shadow`；live profile 不得選用它。單筆送單金額不在 yaml 設定——由
-deployment reconciler 依 gap 動態決定。
+deployment reconciler 在 ledger 的 `spendable` 內、依各 cell 的 `max_new_offer`（及 policy `max_offer_amount`）動態決定。
 
 **基礎設施**
 

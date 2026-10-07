@@ -44,9 +44,11 @@ def _resolve_position_fields(ev: object) -> None:
 
 @dataclass(frozen=True, slots=True)
 class CancelRequested:
-    """User-initiated cancel request on pending offer.
+    """The live executor is about to send a venue cancel for one offer (intent audit).
 
-    Ledger effect: dequeues offer from pending; signals venue cancel via API.
+    Audit-only event: its subscribers are the diagnostics sink (a ``cancel_audit``
+    row), the WS dispatcher (remembers the offer as recently cancelled) and the
+    domain-event counter; it changes no capital state.
     """
     venue_offer_id: str
     requested_at_ms: int
