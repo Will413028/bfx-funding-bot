@@ -146,3 +146,7 @@ D7'' 放棄 S2 前 live 新資料持續觀測的理由之一是 shadow 基礎設
   - 寬限後的 fallback 每週超過 1 次：量測 history 延遲，調整寬限。
   - trades 定不出量反覆出現（`offer_end_judged` 告警帶 `undeterminable`；結果可由已存的 observation 與 basis 重算）：重新評估隔離方案。
   - Bitfinex 改變 by-id 行為或歷史保留期。
+
+## Amendment (2026-10-08): operator outbox 也改成 insert-only
+
+D3' 的「operator outbox 維持現有『immutable request＋一次終態』機制」由 [2026-10-08-operator-requests-insert-only-with-insert-once-outcome](2026-10-08-operator-requests-insert-only-with-insert-once-outcome.md) 取代：請求列只准新增，終態另寫 insert-once outcome 表（PK＝`request_id`），與 attempt／outcome／resolution 同型。policy／trading state 的 head 指標不受影響。
