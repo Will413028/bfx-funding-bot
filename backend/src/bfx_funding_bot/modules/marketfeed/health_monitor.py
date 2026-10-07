@@ -13,7 +13,8 @@ from uuid import uuid4
 from bfx_funding_bot.core.errors import FatalError
 from bfx_funding_bot.core.health import (
     _DEFAULT_THRESHOLD_S,
-    ACTIVITY_THRESHOLDS,
+    DEPENDENCY_THRESHOLDS,
+    NON_FATAL_SUB_TASKS,
     SUB_TASK_THRESHOLDS,
     HealthProbe,
     _TargetState,
@@ -26,6 +27,11 @@ class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
+class _DependencyReadiness(Protocol):
+    def set_dependency_stale(self, dependency: str) -> None: ...
+    def clear_dependency(self, dependency: str) -> None: ...
+
+
 class HealthMonitor:
     def __init__(
         self,
@@ -34,17 +40,20 @@ class HealthMonitor:
         event_sink: _EventSink,
         probe: HealthProbe,
         heartbeat_interval_s: float = 300.0,
+        readiness: _DependencyReadiness | None = None,
     ) -> None:
         self.phase = phase
         self._events = event_sink
         self.probe = probe
         self.heartbeat_interval_s = heartbeat_interval_s
+        # Receives dependency freshness (DEPENDENCY_THRESHOLDS) on every scan.
+        self._readiness = readiness
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
-        # Last-emitted staleness severity per activity-class sub-task, for
-        # transition-only emit (see scan_staleness). Cleared on recovery so a
-        # later re-staleness re-emits the healthy→degraded transition.
-        self._last_activity_severity: dict[str, str] = {}
+        # Last-emitted staleness severity per non-fatal (activity or dependency)
+        # sub-task, for transition-only emit (see scan_staleness). Cleared on
+        # recovery so a later re-staleness re-emits the healthy→degraded transition.
+        self._last_nonfatal_severity: dict[str, str] = {}
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._loop())
@@ -98,8 +107,12 @@ class HealthMonitor:
     async def scan_staleness(self) -> list[dict[str, Any]]:
         """Check last_active_ts for each sub-task. Emit + return records for
         any stale. Raises FatalError on 3× threshold breach for liveness
-        sub-tasks; activity-class sub-tasks (executor, safety_chain) emit but
-        never escalate.
+        sub-tasks (and unknown keys); activity-class sub-tasks (executor,
+        safety_chain, writer_lock) and dependency-freshness sub-tasks (ws_data,
+        db) emit on a severity transition but never escalate. Each scan also
+        reports every recorded dependency's freshness to the readiness state:
+        stale → not ready, fresh again → cleared. A dependency never recorded
+        is left untouched (readiness starts not ready until a READY decision).
 
         SIGNAL_PIPELINE carve-out (Phase 4.3 Task 5):
         Per-cell pipeline state is tracked separately in
@@ -121,19 +134,23 @@ class HealthMonitor:
         stale: list[dict[str, Any]] = []
 
         # ── Existing per-sub-task heartbeat scan ──────────────────────────────
-        # FatalError CAN be raised here for connection_lost / db_unavailable /
-        # task_hung reasons. SIGNAL_PIPELINE keys are never inserted into
+        # FatalError CAN be raised here only for a hung liveness task (or an
+        # unknown key). SIGNAL_PIPELINE keys are never inserted into
         # last_active_ts so they are physically excluded from this path.
-        for sub_task, last_ts in self.probe.last_active_ts.items():
+        for sub_task, last_ts in list(self.probe.last_active_ts.items()):
             threshold = SUB_TASK_THRESHOLDS.get(sub_task, _DEFAULT_THRESHOLD_S)
             age_s = (now - last_ts).total_seconds()
-            is_activity = sub_task in ACTIVITY_THRESHOLDS
+            non_fatal = sub_task in NON_FATAL_SUB_TASKS
             if age_s <= threshold:
                 # Recovered (or never stale): reset transition state so a later
                 # re-staleness re-emits the healthy→degraded transition.
-                if is_activity:
-                    self._last_activity_severity.pop(sub_task, None)
+                if non_fatal:
+                    self._last_nonfatal_severity.pop(sub_task, None)
+                if sub_task in DEPENDENCY_THRESHOLDS and self._readiness is not None:
+                    self._readiness.clear_dependency(sub_task)
                 continue
+            if sub_task in DEPENDENCY_THRESHOLDS and self._readiness is not None:
+                self._readiness.set_dependency_stale(sub_task)
 
             severity = "down" if age_s > 2 * threshold else "degraded"
             stale.append({
@@ -142,16 +159,17 @@ class HealthMonitor:
                 "age_s": age_s,
             })
 
-            # Activity-class (reactive executor/safety_chain) sub-tasks emit only
+            # Non-fatal sub-tasks (activity and dependency freshness) emit only
             # on a severity TRANSITION. A persistently stale executor in an idle
-            # market would otherwise spam one WARN per scan (~30s) — pure noise,
-            # since these never escalate to FatalError. Liveness sub-tasks still
-            # emit every scan: they escalate at 3× threshold (restart), so the
-            # repeated emits are short-lived and show the climbing age.
-            if is_activity:
-                if self._last_activity_severity.get(sub_task) == severity:
+            # market, or a venue outage of hours, would otherwise spam one WARN
+            # per scan (~30s) — pure noise, since these never escalate to
+            # FatalError. Liveness sub-tasks still emit every scan: they escalate
+            # at 3× threshold (restart), so the repeated emits are short-lived and
+            # show the climbing age.
+            if non_fatal:
+                if self._last_nonfatal_severity.get(sub_task) == severity:
                     continue
-                self._last_activity_severity[sub_task] = severity
+                self._last_nonfatal_severity[sub_task] = severity
 
             # Emit BEFORE potential fatal escalation so the event is persisted before raise
             level = Level.ERROR if severity == "down" else Level.WARN
@@ -172,11 +190,12 @@ class HealthMonitor:
             })
 
             # Escalate to fatal AFTER emit, so the event is persisted before raise.
-            # Activity-class sub-tasks (reactive: executor / safety_chain) never
-            # escalate — a stale executor means "no trades flowed", not a stuck
-            # process. Liveness sub-tasks and unknown keys (default threshold)
-            # still escalate so a genuinely hung own-loop task triggers restart.
-            if age_s > 3 * threshold and sub_task not in ACTIVITY_THRESHOLDS:
+            # Activity-class sub-tasks never escalate — a stale executor means
+            # "no trades flowed", not a stuck process; dependency freshness never
+            # escalates — a restart cannot bring the venue or the database back.
+            # Liveness sub-tasks and unknown keys (default threshold) still
+            # escalate so a genuinely hung own-loop task triggers restart.
+            if age_s > 3 * threshold and not non_fatal:
                 raise FatalError(
                     f"sub_task={sub_task} stale {age_s:.0f}s > "
                     f"3× threshold ({3 * threshold}s) — escalating fatal"

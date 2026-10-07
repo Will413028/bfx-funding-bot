@@ -277,6 +277,42 @@ class TestStalenessScan:
         assert fake_sink.emitted[0]["payload"]["check_target"] == "writer_lock"
         assert fake_sink.emitted[0]["payload"]["status"] == "down"
 
+    @pytest.mark.parametrize("dependency", ["ws_data", "db"])
+    async def test_dependency_freshness_never_fatal_and_emits_on_transition(
+        self, monitor, fake_sink, dependency,
+    ):
+        """A venue or database outage of any length is not a stuck process:
+        dependency freshness emits its degraded/down transition once and never
+        raises (a restart cannot bring the dependency back)."""
+        monitor.probe.last_active_ts[dependency] = datetime.now(UTC) - timedelta(hours=6)
+        first = await monitor.scan_staleness()  # must NOT raise
+        second = await monitor.scan_staleness()
+        assert [r["severity"] for r in first] == ["down"]
+        assert [r["severity"] for r in second] == ["down"]
+        assert len(fake_sink.emitted) == 1
+        assert fake_sink.emitted[0]["payload"]["check_target"] == dependency
+
+    async def test_dependency_readiness_follows_freshness_and_ignores_the_unrecorded(
+        self, fake_sink,
+    ):
+        from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
+
+        probe = HealthProbe()
+        readiness = TradingReadiness()
+        readiness.set_ready()
+        monitor = HealthMonitor(phase=Phase.SHADOW, event_sink=fake_sink, probe=probe,
+                                readiness=readiness)
+        await monitor.scan_staleness()  # nothing recorded yet: readiness untouched
+        assert readiness.snapshot().trading_ready is True
+
+        probe.last_active_ts["db"] = datetime.now(UTC) - timedelta(hours=1)
+        await monitor.scan_staleness()
+        assert readiness.snapshot().dependency == "db"
+
+        probe.record_heartbeat("db")
+        await monitor.scan_staleness()
+        assert readiness.snapshot().trading_ready is True
+
     # ── Phase 4.3 Task 5: scan_staleness carve-out ───────────────────────────
 
     async def test_no_fatal_escalation_for_signal_pipeline_stale_exceeded(
@@ -385,6 +421,8 @@ class TestSubTaskThresholds:
         # Unknown sub-tasks fall back to _DEFAULT_THRESHOLD_S (60s).
         assert SUB_TASK_THRESHOLDS["health_check"] == 6 * 60
         assert SUB_TASK_THRESHOLDS["db_keepalive"] == 7 * 60
+        assert SUB_TASK_THRESHOLDS["ws_data"] == 90
+        assert SUB_TASK_THRESHOLDS["db"] == 7 * 60
 
     def test_periodic_reconcile_registered_as_liveness(self):
         from bfx_funding_bot.core.health import ACTIVITY_THRESHOLDS, LIVENESS_THRESHOLDS

@@ -11,6 +11,7 @@ from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.external.bitfinex.ws import CandleMessage
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
+from tests.async_wait import until
 
 
 async def test_candle_writer_upserts_from_queue(sqlite_engine: AsyncEngine):
@@ -154,3 +155,45 @@ async def test_writer_seals_previous_candle_when_the_period_advances(
         assert rows[first].finalized_at_ms is not None
         # the period now forming must stay open — it is still being re-pushed
         assert rows[second].is_final is False
+
+
+
+def _candle() -> CandleMessage:
+    return CandleMessage(
+        symbol="fUSD", timeframe="1h", period_agg="a30",
+        mts=1747584000000, open=0.0001, close=0.0001,
+        high=0.0001, low=0.0001, volume=100.0,
+    )
+
+
+def _broken_session() -> object:
+    raise ConnectionRefusedError("database is down")
+
+
+async def test_candle_writer_beats_after_a_failed_upsert() -> None:
+    """A database outage fails the upsert; the consumer loop still progressed, so
+    ``candle_writer`` (liveness) beats. The outage shows in the db freshness beat."""
+    probe = HealthProbe()
+    queue: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
+    writer = CandleWriter(queue=queue, session_factory=_broken_session,  # type: ignore[arg-type]
+                          probe=probe, idle_beat_s=3600.0)
+    await queue.put(_candle())
+    await queue.put(None)
+    with patch("bfx_funding_bot.modules.marketfeed.candle_writer.AsyncRetrying",
+               side_effect=ConnectionRefusedError("database is down")):
+        await writer.run()
+    assert "candle_writer" in probe.last_active_ts
+
+
+async def test_candle_writer_beats_while_the_queue_is_empty() -> None:
+    """A quiet market or a WS outage leaves the queue empty: not a stuck consumer."""
+    probe = HealthProbe()
+    queue: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
+    writer = CandleWriter(queue=queue, session_factory=_broken_session,  # type: ignore[arg-type]
+                          probe=probe, idle_beat_s=0.01)
+    task = asyncio.create_task(writer.run())
+    try:
+        await until(lambda: "candle_writer" in probe.last_active_ts, what="idle beat")
+    finally:
+        await queue.put(None)
+        await task

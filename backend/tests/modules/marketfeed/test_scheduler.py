@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.strategy import CellConfig
 from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
+from tests.async_wait import until
 
 # ── base reference time (aligned to 1h boundary) ──────────────────────────────
 _REF_MTS = 1747584000000  # 2025-05-18 12:00:00 UTC
@@ -369,3 +370,25 @@ async def test_emit_healthy_restore_on_transition_from_stale_exceeded() -> None:
     assert len(signal_events) >= 1, "Expected signal after HEALTHY restore"
     # Fresh candle → is_stale=False
     assert signal_events[0]["payload"]["is_stale"] is False
+
+
+async def test_scheduler_liveness_is_loop_progress_not_a_callback_success() -> None:
+    """A callback failing on a venue or database outage is not the scheduler being
+    stuck: the pass completes and ``scheduler`` beats anyway."""
+    cell = _cell()
+    calls: list[int] = []
+
+    async def failing(c: CellConfig, mts: int) -> None:
+        calls.append(mts)
+        raise ConnectionRefusedError("venue unreachable")
+
+    probe = HealthProbe()
+    sched = Scheduler(callback=failing, probe=probe, buffer_s=0.0)
+    sched.register(cell, fire_at_mts=now_ms_utc() - 100)
+    await sched.start()
+    try:
+        await until(lambda: calls and "scheduler" in probe.last_active_ts,
+                    what="a failed callback and a scheduler beat")
+    finally:
+        await sched.stop()
+    assert "scheduler" in probe.last_active_ts

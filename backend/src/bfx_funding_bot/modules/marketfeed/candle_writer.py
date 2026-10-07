@@ -38,6 +38,8 @@ _DB_FATAL = (
     asyncpg.InvalidPasswordError,
     asyncpg.InvalidCatalogNameError,
 )
+# With nothing queued, the consumer still beats once a minute (loop progress).
+IDLE_BEAT_S = 60.0
 
 
 class CandleWriter:
@@ -48,8 +50,10 @@ class CandleWriter:
         session_factory: Callable[[], AsyncSession] | Callable[[], Awaitable[AsyncSession]],
         probe: HealthProbe,
         clock: Callable[[], int] | None = None,
+        idle_beat_s: float = IDLE_BEAT_S,
     ) -> None:
         self._queue = queue
+        self._idle_beat_s = idle_beat_s
         self._session_factory = session_factory
         self._probe = probe
         # One clock for both the write and the seal, so a candle can never be
@@ -57,21 +61,32 @@ class CandleWriter:
         self._clock = clock or (lambda: int(time.time() * 1000))
 
     async def run(self) -> None:
+        """Consume the queue until the None sentinel.
+
+        The ``candle_writer`` liveness beat marks loop progress only: one per
+        dequeued candle whatever the upsert outcome, and one per idle
+        ``idle_beat_s`` with nothing queued. A quiet market or a WS outage leaves
+        the queue empty and a database outage fails the upsert; neither is this
+        loop being stuck, so neither may age the beat into a restart.
+        """
         while True:
-            msg = await self._queue.get()
+            try:
+                msg = await asyncio.wait_for(self._queue.get(), timeout=self._idle_beat_s)
+            except TimeoutError:
+                self._probe.record_heartbeat("candle_writer")
+                continue
             if msg is None:
                 return
             try:
                 await self._upsert(msg)
-                self._probe.record_heartbeat("candle_writer")
             except FatalError:
                 raise  # propagate to TaskGroup → daemon exit → container restart policy
             except Exception:
                 log.exception("candle_writer_upsert_failed mts=%d", msg.mts)
                 # Tenacity stop_after_attempt(5) re-raised → log + continue
-                # (next message gets fresh retry budget). For transient errors
-                # this means up to 25 retries per minute under sustained
-                # outage; heartbeat staleness still triggers health alert.
+                # (next message gets fresh retry budget). A database outage shows
+                # as the db freshness heartbeat going stale, not as this loop.
+            self._probe.record_heartbeat("candle_writer")
 
     async def _upsert(self, msg: CandleMessage) -> None:
         candle = FundingCandle(

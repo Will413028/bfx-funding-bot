@@ -29,7 +29,7 @@ from bfx_funding_bot.core.errors import (
     ExecutorAuthError,
     WriterLockUnacquired,
 )
-from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.health import MARKET_DATA_FRESHNESS, HealthProbe
 from bfx_funding_bot.core.schema_head import assert_schema_head
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
@@ -309,7 +309,8 @@ async def build_daemon(
         reconcile_interval_seconds=config.book_reconcile_interval_seconds,
     )
     registry = StrategyRegistry(build_strategy)
-    monitor = HealthMonitor(phase=config.phase, event_sink=stdout_sink, probe=probe)
+    monitor = HealthMonitor(phase=config.phase, event_sink=stdout_sink, probe=probe,
+                            readiness=trading_readiness)
     candle_q: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
 
     now_mts = now_ms_utc()
@@ -474,12 +475,14 @@ async def build_daemon(
             probe=probe,
             threshold_seconds=hg.heartbeat.sub_task_stale_threshold_seconds,
             # Readiness gate: block POST only when our MARKET VIEW is stale.
-            # Watch market-data own-loop liveness ("ws"), not the reactive
-            # executor/safety_chain — those are bumped only by trading itself,
-            # so watching them self-suppresses trades in quiet markets and was
-            # part of the 2026-05-26 canary restart loop. ws stays fresh in
-            # quiet markets via _ws_heartbeat_poll_loop (Bitfinex hb ~15s).
-            watched_sub_tasks=["ws"],
+            # Watch market-data freshness ("ws_data": a public WS frame seen),
+            # not the reactive executor/safety_chain — those are bumped only by
+            # trading itself, so watching them self-suppresses trades in quiet
+            # markets and was part of the 2026-05-26 canary restart loop. ws_data
+            # stays fresh in quiet markets via Daemon._ws_freshness_tick
+            # (Bitfinex hb ~15s); a venue outage ages it and blocks here, with
+            # no restart.
+            watched_sub_tasks=[MARKET_DATA_FRESHNESS],
         ))
     guards.append(CapitalPolicyGuard(authority=capital.capital_authority, scope=capital_scope,
                                      clock=now_ms_utc))

@@ -55,7 +55,12 @@ from prometheus_client import (
 from prometheus_client.core import GaugeMetricFamily, Metric
 from prometheus_client.registry import Collector
 
-from bfx_funding_bot.core.health import ACTIVITY_THRESHOLDS, LIVENESS_THRESHOLDS, HealthProbe
+from bfx_funding_bot.core.health import (
+    ACTIVITY_THRESHOLDS,
+    DEPENDENCY_THRESHOLDS,
+    LIVENESS_THRESHOLDS,
+    HealthProbe,
+)
 from bfx_funding_bot.core.telemetry import HealthStatus
 
 if TYPE_CHECKING:
@@ -131,13 +136,16 @@ class _ProbeCollector(Collector):
             threshold = GaugeMetricFamily(
                 "bfx_subtask_heartbeat_threshold_seconds",
                 "Staleness threshold per sub-task; task_class=liveness drives "
-                "/healthz 503, task_class=activity is observe-only (idle != dead).",
+                "/healthz 503, task_class=activity is observe-only (idle != dead), "
+                "task_class=dependency drives /readyz only (venue/db freshness).",
                 labels=["sub_task", "task_class"],
             )
             for sub_task, thr in LIVENESS_THRESHOLDS.items():
                 threshold.add_metric([sub_task, "liveness"], float(thr))
             for sub_task, thr in ACTIVITY_THRESHOLDS.items():
                 threshold.add_metric([sub_task, "activity"], float(thr))
+            for sub_task, thr in DEPENDENCY_THRESHOLDS.items():
+                threshold.add_metric([sub_task, "dependency"], float(thr))
             health = GaugeMetricFamily(
                 "bfx_health_status",
                 "Last known status per health target: 0=healthy 1=degraded 2=down.",

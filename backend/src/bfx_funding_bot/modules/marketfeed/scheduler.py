@@ -88,7 +88,6 @@ class Scheduler:
             for e in due:
                 try:
                     await self._cb(e.cell, e.next_fire_mts)
-                    self._probe.record_heartbeat("scheduler")
                 except Exception:
                     log.exception(
                         "scheduler_cb_exception cell=%s mts=%d",
@@ -97,4 +96,9 @@ class Scheduler:
                 e.next_fire_mts = next_candle_close_mts(
                     timeframe=e.cell.timeframe, now_ms=e.next_fire_mts + 1,
                 )
+            # Liveness = this loop completed a pass, whatever the callbacks
+            # answered: a callback failing on a venue or database outage is not
+            # the scheduler being stuck. Only a callback that never returns
+            # stops the beat.
+            self._probe.record_heartbeat("scheduler")
             await asyncio.sleep(0.05)

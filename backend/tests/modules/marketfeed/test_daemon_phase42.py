@@ -122,7 +122,8 @@ async def test_build_daemon_heartbeat_guard_watches_market_data_not_executor(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
     """HeartbeatGuard is a readiness gate ('don't trade on a stale market
-    view'), so it watches market-data own-loop liveness (ws), NOT the reactive
+    view'), so it watches market-data freshness (ws_data: a public WS frame was
+    seen), NOT the poller's own liveness beat (ws) and NOT the reactive
     executor/safety_chain — watching those self-suppresses trading in quiet
     markets (the 2026-05-26 canary restart bug) and is a reactive mismatch."""
     from bfx_funding_bot.modules.execution.safety.hard_guards import HeartbeatGuard
@@ -133,7 +134,7 @@ async def test_build_daemon_heartbeat_guard_watches_market_data_not_executor(
     )
     try:
         hbg = next(g for g in daemon.safety_chain.guards if isinstance(g, HeartbeatGuard))
-        assert hbg.watched == ["ws"]
+        assert hbg.watched == ["ws_data"]
         assert "executor" not in hbg.watched
         assert "safety_chain" not in hbg.watched
     finally:
