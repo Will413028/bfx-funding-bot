@@ -222,10 +222,10 @@ class _FakeExecutor:
         self.submitted: list = []
         self.ready_submissions: list[ReadyToSubmit] = []
 
-    async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
+    async def submit(self, decision, ctx) -> SubmittedOrder:
         self.ready_submissions.append(decision)
         self.submitted.append(decision.decision)
-        return SubmittedOrder(cid=1, venue_offer_id="x", status="submitted", raw_response=None)
+        return SubmittedOrder(venue_offer_id="x", status="submitted", raw_response=None)
 
 
 class _Audit:
@@ -577,19 +577,18 @@ async def test_unknown_opens_gate_for_remaining_cells_in_same_tick() -> None:
             super().__init__()
             self.calls = 0
 
-        async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
+        async def submit(self, decision, ctx) -> SubmittedOrder:
             self.calls += 1
             self.ready_submissions.append(decision)
             self.submitted.append(decision.decision)
             if self.calls == 1:
                 uncertain_symbols.add("fUST")
                 return SubmittedOrder(
-                    cid=1,
                     venue_offer_id=None,
                     outcome=SubmitOutcomeUnknown("timeout", True),
                 )
             return SubmittedOrder(
-                cid=1, venue_offer_id="unexpected", status="submitted", raw_response=None,
+                venue_offer_id="unexpected", status="submitted", raw_response=None,
             )
 
     executor = _UnknownThenAck()
@@ -647,11 +646,11 @@ async def test_reconciler_releases_only_audited_ready_to_executor_and_event():
     sink = _CapturingSink()
 
     class _AuditAwareExecutor(_FakeExecutor):
-        async def submit(self, ready, ctx, *, cid=None) -> SubmittedOrder:
+        async def submit(self, ready, ctx) -> SubmittedOrder:
             assert isinstance(ready, ReadyToSubmit)
             assert audit.last is not None
             assert audit.last.outcome is ExecutionDecisionOutcome.READY
-            return await super().submit(ready, ctx, cid=cid)
+            return await super().submit(ready, ctx)
 
     executor = _AuditAwareExecutor()
     rec, _executor, _tracker, _safety = _build(
@@ -928,7 +927,7 @@ async def test_full_gap_no_action():
 
 async def test_submit_failure_does_not_record_intent():
     class _Boom(_FakeExecutor):
-        async def submit(self, decision, ctx, *, cid=None):
+        async def submit(self, decision, ctx):
             raise RuntimeError("venue 500")
 
     rec, _ex, tracker, _ = _build(
@@ -976,15 +975,14 @@ class _RejectingExecutor:
     def __init__(self) -> None:
         self.submitted: list = []
 
-    async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
+    async def submit(self, decision, ctx) -> SubmittedOrder:
         self.submitted.append(decision)
-        return SubmittedOrder(cid=1, venue_offer_id=None, status="failed", raw_response=None)
+        return SubmittedOrder(venue_offer_id=None, status="failed", raw_response=None)
 
 
 class _UnknownExecutor:
-    async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
+    async def submit(self, decision, ctx) -> SubmittedOrder:
         return SubmittedOrder(
-            cid=1,
             venue_offer_id=None,
             outcome=SubmitOutcomeUnknown("timeout", True),
             raw_response=None,
@@ -1044,7 +1042,8 @@ async def test_successful_submit_emits_order_submit_structured_event():
     assert payload["is_simulated"] is False  # live deploy, distinguishes from paper
     assert payload["status"] == "submitted"
     assert _planned(payload["offer_amount_usdt"], "200")
-    assert payload["cid"] == 1
+    assert "cid" not in payload
+    assert payload["execution_decision_id"] == ex.ready_submissions[0].decision_id
     assert payload["offer_id"] == "x"
     assert [name for name, _ in sink.execution_events] == [
         "funding.execution.submitted",
@@ -1536,7 +1535,7 @@ async def test_venue_rejection_is_recorded_as_rejected_not_blocked():
 
 async def test_submit_exception_is_recorded_as_error():
     class _Boom(_FakeExecutor):
-        async def submit(self, decision, ctx, *, cid=None):
+        async def submit(self, decision, ctx):
             raise RuntimeError("venue 500")
 
     rec_att = _recorder()

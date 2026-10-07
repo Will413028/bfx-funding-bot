@@ -79,10 +79,10 @@ class _Venue:
         self.order = order
         self.calls = 0
 
-    async def submit(self, ready, ctx, *, cid, reservation_ref):
+    async def submit(self, ready, ctx, *, reservation_ref):
         self.calls += 1
         assert self.order is not None
-        return replace(self.order, cid=cid, reservation_ref=reservation_ref)
+        return replace(self.order, reservation_ref=reservation_ref)
 
 
 @dataclass
@@ -148,15 +148,15 @@ async def _rig(stack: Stack, order: SubmittedOrder | None, *, journal=None) -> _
 
 def _order(kind: str) -> SubmittedOrder:
     if kind == "ack":
-        return SubmittedOrder(cid=0, venue_offer_id="m-1", outcome=SubmitAcknowledged("m-1"))
+        return SubmittedOrder(venue_offer_id="m-1", outcome=SubmitAcknowledged("m-1"))
     if kind == "filled":
-        return SubmittedOrder(cid=0, venue_offer_id="m-1", status="filled")
+        return SubmittedOrder(venue_offer_id="m-1", status="filled")
     if kind == "unknown":
-        return SubmittedOrder(cid=0, venue_offer_id=None,
+        return SubmittedOrder(venue_offer_id=None,
                               outcome=SubmitOutcomeUnknown("timeout", transport_started=True))
     if kind == "rejected":
-        return SubmittedOrder(cid=0, venue_offer_id=None, outcome=SubmitRejected("venue_rejected"))
-    return SubmittedOrder(cid=0, venue_offer_id=None, outcome=SubmitNotSent("local_guard"))
+        return SubmittedOrder(venue_offer_id=None, outcome=SubmitRejected("venue_rejected"))
+    return SubmittedOrder(venue_offer_id=None, outcome=SubmitNotSent("local_guard"))
 
 
 @pytest.mark.parametrize(("kind", "wire_kind", "offer", "reason"), [

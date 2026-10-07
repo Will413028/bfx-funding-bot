@@ -5,7 +5,6 @@ the full sign_request + nonce handling on the wire.
 """
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -71,7 +70,6 @@ async def test_cancel_success_full_chain_sends_signed_post() -> None:
             configured_symbols=frozenset({"fUSD"}),
             cell="fUSD_p2",
             auth_gate=AuthRequestGate(lambda: 1700000000_000_000),
-            date_provider=lambda: date(2026, 5, 23),
         )
 
         with respx.mock(base_url=BITFINEX_REST_BASE) as router:

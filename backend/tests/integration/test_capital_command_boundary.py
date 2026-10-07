@@ -146,12 +146,13 @@ class Venue:
         self.received: list[Any] = []
         self.cancel_clock: list[int] = []
 
-    async def submit(self, ready, ctx, *, cid, reservation_ref):
+    async def submit(self, ready, ctx, *, reservation_ref):
         async with self.stack.factory() as session:
             assert await session.scalar(select(SubmissionAttemptJournalRow.attempt_id).where(
                 SubmissionAttemptJournalRow.execution_decision_id == ready.decision_id)) is not None
         self.received.append(ready)
-        return SubmittedOrder(cid=cid, venue_offer_id="101", outcome=SubmitAcknowledged("101"))
+        return SubmittedOrder(venue_offer_id="101", outcome=SubmitAcknowledged("101"),
+                              reservation_ref=reservation_ref)
 
     async def cancel(self, **kwargs):
         self.cancel_clock.append(await clock_revision(self.stack))
@@ -784,9 +785,9 @@ async def test_the_attempt_is_committed_without_an_outcome_when_the_venue_is_cal
     seen = []
 
     class Asserting(Venue):
-        async def submit(self, ready, ctx, *, cid, reservation_ref):
+        async def submit(self, ready, ctx, *, reservation_ref):
             seen.append((await attempts(gate_stack), await outcomes(gate_stack)))
-            return await super().submit(ready, ctx, cid=cid, reservation_ref=reservation_ref)
+            return await super().submit(ready, ctx, reservation_ref=reservation_ref)
 
     rig.gate._inner = Asserting(gate_stack)
     await rig.gate.submit(rig.ready, rig.ctx)
@@ -806,8 +807,9 @@ async def test_a_rejected_submit_records_the_rejection_and_charges_nothing(gate_
     rig = await boundary(gate_stack)
 
     class Rejecting(Venue):
-        async def submit(self, ready, ctx, *, cid, reservation_ref):
-            return SubmittedOrder(cid=cid, venue_offer_id=None, outcome=SubmitRejected("no_funds"))
+        async def submit(self, ready, ctx, *, reservation_ref):
+            return SubmittedOrder(outcome=SubmitRejected("no_funds"),
+                                  reservation_ref=reservation_ref)
 
     rig.gate._inner = Rejecting(gate_stack)
     await rig.gate.submit(rig.ready, rig.ctx)
@@ -821,7 +823,7 @@ async def test_a_crash_between_attempt_and_outcome_leaves_the_attempt_open(gate_
     rig = await boundary(gate_stack)
 
     class Crashing(Venue):
-        async def submit(self, ready, ctx, *, cid, reservation_ref):
+        async def submit(self, ready, ctx, *, reservation_ref):
             raise RuntimeError("crash between the attempt and its outcome")
 
     rig.gate._inner = Crashing(gate_stack)

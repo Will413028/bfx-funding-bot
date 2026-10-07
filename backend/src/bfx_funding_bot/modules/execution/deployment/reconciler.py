@@ -813,7 +813,6 @@ class DeploymentReconciler:
             cell=cell_id,
             ready=ready,
             ctx=self._ctx,
-            cid=result.cid,
             offer_id=result.venue_offer_id,
             is_simulated=False,
             status=result.status,

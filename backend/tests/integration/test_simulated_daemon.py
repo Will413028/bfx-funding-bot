@@ -210,19 +210,17 @@ async def test_an_injected_unknown_resolves_by_itself(
 
 
 async def test_every_time_source_follows_the_composition_clock(sim: SimEnv) -> None:
-    """Mutations: the signal engine, the gate's date, or the executor's clock/date back on the
+    """Mutations: the signal engine, the gate's clock, or the executor's clock back on the
     wall (the composition clock sits in 2024; the wall is not)."""
-    from datetime import date
-
     daemon = await sim.build()
     assert daemon.signal_engine._clock() == T0
     gate = daemon.command_gate
-    assert gate._clock() == T0 and gate._date_provider() == date(2024, 1, 1)
+    assert gate._clock() == T0
     executor = daemon.executor
-    assert executor._clock() == T0 and executor._date_provider() == date(2024, 1, 1)  # type: ignore[attr-defined]
+    assert executor._clock() == T0  # type: ignore[attr-defined]
     sim.clock.advance(DAY)
-    assert gate._date_provider() == date(2024, 1, 2)
-    assert executor._date_provider() == date(2024, 1, 2)  # type: ignore[attr-defined]
+    assert gate._clock() == T0 + DAY
+    assert executor._clock() == T0 + DAY  # type: ignore[attr-defined]
 
 
 async def test_an_internal_failure_of_the_simulator_fails_the_harness_check(sim: SimEnv) -> None:

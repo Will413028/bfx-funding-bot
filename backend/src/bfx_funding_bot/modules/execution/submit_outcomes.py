@@ -199,7 +199,6 @@ class SubmissionAttemptPayload:
     account_id: UUID | str
     environment: str
     symbol: str
-    cid: int
     normalized_payload: Mapping[str, Any]
     attempt_id: UUID | str | None = None
     payload_sha256: str | None = None
@@ -226,8 +225,6 @@ class SubmissionAttemptPayload:
             raise ValueError("environment must be non-empty")
         if not self.symbol.strip():
             raise ValueError("symbol must be non-empty")
-        if self.cid < 0:
-            raise ValueError("cid must be non-negative")
         if self.started_at_ms < 0:
             raise ValueError("started_at_ms must be non-negative")
         if self.completed_at_ms is not None and self.completed_at_ms < self.started_at_ms:
@@ -252,7 +249,6 @@ class SubmissionAttemptPayload:
                     str(canonical_account_id),
                     self.environment,
                     self.symbol,
-                    str(self.cid),
                     expected_digest,
                 )
             )
@@ -308,7 +304,6 @@ class SubmissionAttemptPayload:
             "account_id": str(self.account_id),
             "environment": self.environment,
             "symbol": self.symbol,
-            "cid": self.cid,
             "normalized_payload": _thaw_value(self.normalized_payload),
             "payload_sha256": self.payload_sha256,
             "started_at_ms": self.started_at_ms,

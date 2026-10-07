@@ -56,10 +56,11 @@ async def test_an_unknown_submit_blocks_its_symbol_but_never_halts(gate_stack) -
     cancel_venue = FakeVenue(gate_stack.factory, ACCOUNT, {"UST": set()})
     protection.bind(rig.halt)
 
-    async def unknown(ready_, ctx_, *, cid, reservation_ref):
+    async def unknown(ready_, ctx_, *, reservation_ref):
         rig.venue.received.append(ready_)
-        return SubmittedOrder(cid=cid, venue_offer_id=None,
-            outcome=SubmitOutcomeUnknown(reason="transport_timeout", transport_started=True))
+        return SubmittedOrder(
+            outcome=SubmitOutcomeUnknown(reason="transport_timeout", transport_started=True),
+            reservation_ref=reservation_ref)
 
     rig.venue.submit = unknown
     result = await asyncio.wait_for(rig.gate.submit(rig.ready, rig.ctx), timeout=10)

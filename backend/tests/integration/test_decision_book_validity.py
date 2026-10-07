@@ -79,9 +79,9 @@ class Venue:
     def __init__(self):
         self.received = []
 
-    async def submit(self, ready, ctx, *, cid, reservation_ref):
+    async def submit(self, ready, ctx, *, reservation_ref):
         self.received.append(ready)
-        return SubmittedOrder(cid=cid, venue_offer_id="101", outcome=SubmitAcknowledged("101"),
+        return SubmittedOrder(venue_offer_id="101", outcome=SubmitAcknowledged("101"),
                               reservation_ref=reservation_ref)
 
 

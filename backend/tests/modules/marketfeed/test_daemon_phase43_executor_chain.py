@@ -1,7 +1,6 @@
 """Phase 4.3 executor-middleware integration: chain composition and the no-retry contract."""
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -53,13 +52,11 @@ class _UncertaintyNeverOpen:
 
 class _AckInner:
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *,
         reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder:
-        assert cid is not None
         assert reservation_ref is not None
         return SubmittedOrder(
-            cid=cid,
             venue_offer_id="venue-xyz",
             outcome=SubmitAcknowledged("venue-xyz"),
             raw_response=None,
@@ -75,7 +72,7 @@ class _TransientInner:
         self.calls = 0
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *,
         reservation_ref: object | None = None,
     ) -> SubmittedOrder:
         self.calls += 1
@@ -125,7 +122,6 @@ def _build_chain(
             uncertainty_reader=_UncertaintyNeverOpen(),  # type: ignore[arg-type]
             managed_offers=recording.offers,
             clock=iter(range(100, 1000)).__next__,
-            date_provider=lambda: date(2026, 9, 3),
         ),
         probe=probe,
     )

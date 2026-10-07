@@ -8,7 +8,7 @@ Contract under test:
    instrument_ws_dispatcher) are transparent: results and exceptions pass
    through byte-identical; spans move on the side only.
 4. Enabled path (InMemorySpanExporter): spans exported with the agreed names,
-   attrs (symbol/cid/status …) and Resource attrs (service.name=bfx-bot,
+   attrs (symbol/execution_decision_id/status …) and Resource attrs (service.name=bfx-bot,
    service.version, deployment.environment).
 """
 from __future__ import annotations
@@ -25,6 +25,7 @@ from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
+    ReservationRef,
 )
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -100,14 +101,14 @@ class _StubExecutor:
     def __init__(self, order: SubmittedOrder | None = None, exc: Exception | None = None) -> None:
         self.order = order
         self.exc = exc
-        self.calls: list[int | None] = []
+        self.calls: list[object | None] = []
         self.readies: list[ReadyToSubmit] = []
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *,
         reservation_ref: object | None = None,
     ) -> SubmittedOrder:
-        self.calls.append(cid)
+        self.calls.append(reservation_ref)
         self.readies.append(ready)
         if self.exc is not None:
             raise self.exc
@@ -232,20 +233,26 @@ def test_span_fail_open_when_tracer_broken() -> None:
 async def test_submit_middleware_passthrough_and_span() -> None:
     exporter = InMemorySpanExporter()
     t = _enabled_tracing(exporter)
-    order = SubmittedOrder(cid=7, venue_offer_id="x", status="filled", raw_response=None)
+    order = SubmittedOrder(venue_offer_id="x", status="filled", raw_response=None)
     inner = _StubExecutor(order=order)
     mw = TracingSubmitMiddleware(inner, tracing=t)
     ready = _ready()
-    got = await mw.submit(ready, _ctx(), cid=7)
+    ref = ReservationRef(
+        execution_decision_id=ready.decision_id,
+        signal_correlation_id=ready.decision.signal_correlation_id,
+    )
+    got = await mw.submit(ready, _ctx(), reservation_ref=ref)
     assert got is order                 # byte-identical passthrough
-    assert inner.calls == [7]           # cid threaded down unchanged
+    assert inner.calls == [ref]         # reference threaded down unchanged
     assert inner.readies == [ready]      # immutable boundary object is not rebuilt
     (span,) = exporter.get_finished_spans()
     assert span.name == "executor.submit"
     assert span.attributes is not None
     assert span.attributes["bfx.symbol"] == "fUST"
     assert span.attributes["bfx.execution_decision_id"] == "d-trace"
-    assert span.attributes["bfx.cid"] == 7
+    assert set(span.attributes) == {
+        "bfx.symbol", "bfx.execution_decision_id", "bfx.submit.status",
+    }
     assert span.attributes["bfx.submit.status"] == "filled"
     t.shutdown()
 
@@ -256,7 +263,7 @@ async def test_submit_middleware_exception_passthrough() -> None:
     boom = RuntimeError("venue down")
     mw = TracingSubmitMiddleware(_StubExecutor(exc=boom), tracing=t)
     with pytest.raises(RuntimeError) as exc_info:
-        await mw.submit(_ready(), _ctx(), cid=3)
+        await mw.submit(_ready(), _ctx())
     assert exc_info.value is boom       # the SAME exception object, unchanged
     (span,) = exporter.get_finished_spans()
     assert span.status.status_code is StatusCode.ERROR
@@ -265,7 +272,7 @@ async def test_submit_middleware_exception_passthrough() -> None:
 
 async def test_submit_middleware_transparent_when_disabled() -> None:
     t = DaemonTracing(enabled=False, endpoint=DEFAULT_OTLP_ENDPOINT, event_resource=None)
-    order = SubmittedOrder(cid=1, venue_offer_id="x", status="submitted", raw_response=None)
+    order = SubmittedOrder(venue_offer_id="x", status="submitted", raw_response=None)
     inner = _StubExecutor(order=order)
     mw = TracingSubmitMiddleware(inner, tracing=t)
     got = await mw.submit(_ready(), _ctx())

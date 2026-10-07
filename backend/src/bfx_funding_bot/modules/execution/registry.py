@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
 from typing import Any, Protocol
 
 import httpx
@@ -44,7 +43,6 @@ def build_executor(
     strategy: StrategyName,
     cell: str,
     clock: Callable[[], int],
-    date_provider: Callable[[], date],
     configured_symbols: frozenset[str] | None = None,
     http: httpx.AsyncClient | None = None,
     bus: Any | None = None,  # DomainEventBus typed via Any to avoid circular ref
@@ -62,6 +60,5 @@ def build_executor(
             cell=cell,
             auth_gate=auth_gate,
             clock=clock,
-            date_provider=date_provider,
         ),
     )

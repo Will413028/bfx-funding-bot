@@ -51,9 +51,10 @@ async def test_gate_refuses_a_fingerprint_an_open_commitment_holds(gate_stack) -
         await rig.gate.submit(clash, rig.ctx)
     distinct = await second_ready(rig, amount="199.99990501")
 
-    async def another_offer(ready_, ctx_, *, cid, reservation_ref):
+    async def another_offer(ready_, ctx_, *, reservation_ref):
         rig.venue.received.append(ready_)
-        return SubmittedOrder(cid=cid, venue_offer_id="102", outcome=SubmitAcknowledged("102"))
+        return SubmittedOrder(venue_offer_id="102", outcome=SubmitAcknowledged("102"),
+                              reservation_ref=reservation_ref)
 
     rig.venue.submit = another_offer
     await rig.gate.submit(distinct, rig.ctx)

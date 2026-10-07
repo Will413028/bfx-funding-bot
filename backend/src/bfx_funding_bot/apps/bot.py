@@ -7,7 +7,7 @@ import os
 import signal
 import sys
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -436,7 +436,6 @@ async def build_daemon(
         bus=bus,
         auth_gate=bfx_auth_gate,
         clock=now_ms_utc,
-        date_provider=_composition_date,
     )
 
     # Single-writer advisory lock (A1). ACQUIRE only on Postgres: sqlite wiring
@@ -584,7 +583,6 @@ async def build_daemon(
         uncertainty_reader=uncertainty_reader,
         managed_offers=managed_offers,
         clock=now_ms_utc,
-        date_provider=_composition_date,
     )
     reservation_executor: ExecutorPort = reservation_middleware
 
@@ -1031,11 +1029,6 @@ async def build_daemon(
         venue_aclose=venue_wiring.aclose,
         venue_diagnostics=venue_wiring.simulated,
     )
-
-
-def _composition_date() -> date:
-    """The UTC date of the composition clock, so ids and rules never mix in wall time."""
-    return datetime.fromtimestamp(now_ms_utc() / 1000, UTC).date()
 
 
 def main() -> None:

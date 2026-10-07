@@ -165,13 +165,11 @@ def test_payload_fingerprint_changes_when_economic_field_changes() -> None:
 
 def test_submitted_order_derives_compatibility_status_from_typed_outcome() -> None:
     acknowledged = SubmittedOrder(
-        cid=1,
         venue_offer_id="42",
         outcome=SubmitAcknowledged("42"),
         raw_response=None,
     )
     unknown = SubmittedOrder(
-        cid=2,
         venue_offer_id=None,
         outcome=SubmitOutcomeUnknown("timeout", True),
         raw_response=None,
@@ -187,14 +185,12 @@ def test_submitted_order_derives_compatibility_status_from_typed_outcome() -> No
 def test_typed_outcome_rejects_contradictory_legacy_status() -> None:
     with pytest.raises(ValueError, match="status"):
         SubmittedOrder(
-            cid=2,
             venue_offer_id=None,
             status="filled",
             outcome=SubmitOutcomeUnknown("timeout", True),
         )
     with pytest.raises(ValueError, match="status"):
         SubmittedOrder(
-            cid=3,
             venue_offer_id="42",
             status="failed",
             outcome=SubmitAcknowledged("42"),
@@ -203,7 +199,6 @@ def test_typed_outcome_rejects_contradictory_legacy_status() -> None:
 
 def test_legacy_filled_status_remains_a_compatibility_view() -> None:
     order = SubmittedOrder(
-        cid=3,
         venue_offer_id="paper_3",
         status="filled",
         raw_response=None,
@@ -215,7 +210,6 @@ def test_legacy_filled_status_remains_a_compatibility_view() -> None:
 
 def test_legacy_filled_without_venue_id_fails_closed_to_unknown() -> None:
     order = SubmittedOrder(
-        cid=4,
         venue_offer_id=None,
         status="filled",
         raw_response=None,
@@ -228,7 +222,6 @@ def test_legacy_filled_without_venue_id_fails_closed_to_unknown() -> None:
 def test_non_acknowledged_legacy_status_cannot_carry_venue_id() -> None:
     with pytest.raises(ValueError, match="venue_offer_id"):
         SubmittedOrder(
-            cid=5,
             venue_offer_id="42",
             status="unknown",
             raw_response=None,
@@ -237,7 +230,6 @@ def test_non_acknowledged_legacy_status_cannot_carry_venue_id() -> None:
 
 def test_legacy_unknown_status_survives_dataclass_replacement() -> None:
     legacy = SubmittedOrder(
-        cid=6,
         venue_offer_id=None,
         status="weird_venue_string",
         raw_response=None,
@@ -258,7 +250,6 @@ def test_submission_attempt_payload_freezes_normalized_identity_and_digest() -> 
         account_id=account_id,
         environment="ci",
         symbol="fUST",
-        cid=123,
         normalized_payload=normalized,
         payload_sha256=fingerprint_submit_payload(normalized),
         started_at_ms=100,
@@ -282,7 +273,6 @@ def test_submission_attempt_payload_rejects_fingerprint_mismatch() -> None:
             account_id=uuid4(),
             environment="ci",
             symbol="fUST",
-            cid=123,
             normalized_payload={"amount": "100.0"},
             payload_sha256="0" * 64,
             started_at_ms=100,
@@ -299,7 +289,6 @@ def test_submission_attempt_payload_enforces_outcome_identity_invariants() -> No
         "account_id": uuid4(),
         "environment": "ci",
         "symbol": "fUST",
-        "cid": 123,
         "normalized_payload": {"amount": "100.0"},
         "started_at_ms": 100,
     }
@@ -325,7 +314,6 @@ def test_submission_attempt_payload_exposes_json_safe_storage_shape() -> None:
         account_id=uuid4(),
         environment="ci",
         symbol="fUST",
-        cid=123,
         normalized_payload={"amount": Decimal("100.0"), "levels": [Decimal("1.2")]},
         started_at_ms=100,
         outcome_kind=SubmitOutcomeKind.REJECTED,
@@ -346,7 +334,6 @@ def test_submission_attempt_missing_identity_uses_deterministic_legacy_fallback(
         "account_id": UUID("5f598835-95c6-446e-8252-df3caeef5b9b"),
         "environment": "ci",
         "symbol": "fUST",
-        "cid": 123,
         "normalized_payload": {"amount": "100.0", "type": "LIMIT"},
         "started_at_ms": 100,
     }

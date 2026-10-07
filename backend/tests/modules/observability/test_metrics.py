@@ -26,6 +26,7 @@ from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
+    ReservationRef,
 )
 from bfx_funding_bot.modules.execution.events import CancelAcknowledged, CancelRequested
 from bfx_funding_bot.modules.execution.protocols import (
@@ -212,14 +213,14 @@ class _StubExecutor:
                  exc: Exception | None = None) -> None:
         self._order = order
         self._exc = exc
-        self.calls: list[int | None] = []
+        self.calls: list[object | None] = []
         self.readies: list[ReadyToSubmit] = []
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *,
         reservation_ref: object | None = None,
     ) -> SubmittedOrder:
-        self.calls.append(cid)
+        self.calls.append(reservation_ref)
         self.readies.append(ready)
         if self._exc is not None:
             raise self._exc
@@ -230,13 +231,17 @@ class _StubExecutor:
 @pytest.mark.asyncio
 async def test_submit_middleware_passes_result_and_records() -> None:
     m = DaemonMetrics()
-    order = SubmittedOrder(cid=7, venue_offer_id="paper_x", status="filled", raw_response=None)
+    order = SubmittedOrder(venue_offer_id="paper_x", status="filled", raw_response=None)
     inner = _StubExecutor(order=order)
     mw = MetricsSubmitMiddleware(inner, metrics=m)
     ready = _ready()
-    got = await mw.submit(ready, _ctx(), cid=7)
+    ref = ReservationRef(
+        execution_decision_id=ready.decision_id,
+        signal_correlation_id=ready.decision.signal_correlation_id,
+    )
+    got = await mw.submit(ready, _ctx(), reservation_ref=ref)
     assert got is order                       # byte-identical passthrough
-    assert inner.calls == [7]                 # cid threaded down unchanged
+    assert inner.calls == [ref]               # reference threaded down unchanged
     assert inner.readies == [ready]            # immutable boundary object is not rebuilt
     assert m.registry.get_sample_value(
         "bfx_executor_submits_total", {"status": "filled"},
@@ -260,7 +265,7 @@ async def test_submit_middleware_reraises_and_counts_exception() -> None:
 @pytest.mark.asyncio
 async def test_submit_middleware_unknown_status_bounded_to_other() -> None:
     m = DaemonMetrics()
-    order = SubmittedOrder(cid=1, venue_offer_id=None, status="weird_venue_string", raw_response=None)
+    order = SubmittedOrder(venue_offer_id=None, status="weird_venue_string", raw_response=None)
     mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
     await mw.submit(_ready(), _ctx())
     assert m.registry.get_sample_value(
@@ -272,7 +277,6 @@ async def test_submit_middleware_unknown_status_bounded_to_other() -> None:
 async def test_submit_middleware_keeps_unknown_as_first_class_metric() -> None:
     m = DaemonMetrics()
     order = SubmittedOrder(
-        cid=2,
         venue_offer_id=None,
         outcome=SubmitOutcomeUnknown("timeout", True),
         raw_response=None,
@@ -294,7 +298,7 @@ async def test_submit_middleware_fail_open_when_metrics_broken() -> None:
         raise RuntimeError("metrics down")
 
     m.observe_submit = _boom  # type: ignore[method-assign]
-    order = SubmittedOrder(cid=1, venue_offer_id="x", status="submitted", raw_response=None)
+    order = SubmittedOrder(venue_offer_id="x", status="submitted", raw_response=None)
     mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
     got = await mw.submit(_ready(), _ctx())   # must NOT raise
     assert got is order

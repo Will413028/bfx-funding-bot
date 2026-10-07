@@ -27,11 +27,11 @@ class HeartbeatMiddleware:
         self._probe = probe
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *,
         reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder:
         try:
-            return await self._inner.submit(ready, ctx, cid=cid, reservation_ref=reservation_ref)
+            return await self._inner.submit(ready, ctx, reservation_ref=reservation_ref)
         finally:
             try:
                 self._probe.record_heartbeat("executor")

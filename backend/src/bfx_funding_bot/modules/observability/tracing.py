@@ -2,7 +2,8 @@
 
 Coarse-grained span coverage (wired in build_daemon, observe-only):
 - executor.submit        (TracingSubmitMiddleware — outermost executor wrapper;
-                          attrs: bfx.symbol / bfx.cid / bfx.submit.status)
+                          attrs: bfx.symbol / bfx.execution_decision_id /
+                          bfx.submit.status)
 - reconcile.tick         (TracedReconcileRecovery — around the reconcile
                           backbone's recovery.run(); attrs: bfx.reconcile.result)
 - ws_dispatcher.process  (instrument_ws_dispatcher — per WS event translate +
@@ -237,7 +238,7 @@ class TracingSubmitMiddleware:
         self._tracing = tracing
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *,
         reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder:
         attrs: dict[str, Any] = {}
@@ -245,11 +246,9 @@ class TracingSubmitMiddleware:
         with contextlib.suppress(Exception):
             attrs["bfx.symbol"] = ready.decision.symbol
             attrs["bfx.execution_decision_id"] = ready.decision_id
-            if cid is not None:
-                attrs["bfx.cid"] = cid
         with self._tracing.span("executor.submit", attributes=attrs) as span:
             order = await self._inner.submit(
-                ready, ctx, cid=cid, reservation_ref=reservation_ref,
+                ready, ctx, reservation_ref=reservation_ref,
             )
             span.set_attribute("bfx.submit.status", order.status)
             return order

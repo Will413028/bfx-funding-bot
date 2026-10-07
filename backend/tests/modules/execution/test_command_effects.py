@@ -25,7 +25,7 @@ def _facts(*, filled: bool = False) -> CommandFacts:
     return CommandFacts(
         scope=SCOPE, attempt_id=ATTEMPT, symbol="fUST", amount=Decimal("200.000005"),
         signal_correlation_id=CORRELATION,
-        reference=ReservationRef("decision", 7, CORRELATION, venue_offer_id="m-1"),
+        reference=ReservationRef("decision", CORRELATION, venue_offer_id="m-1"),
         offer_rate=Decimal("0.0001"), is_simulated=False, filled=filled,
     )
 

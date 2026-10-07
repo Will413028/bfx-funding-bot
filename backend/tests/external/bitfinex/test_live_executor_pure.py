@@ -81,8 +81,8 @@ def test_build_offer_payload_structure() -> None:
 
 
 def test_build_offer_payload_has_no_cid_field() -> None:
-    # Bitfinex funding offers have no cid field — the internal cid must never
-    # leak into the venue payload (would imply a venue dedup that doesn't exist).
+    # Bitfinex funding offers have no cid field — no client id may appear in
+    # the venue payload (it would imply a venue dedup that doesn't exist).
     payload = build_offer_payload(symbol="fUSD", amount_usdt=Decimal("100"),
                                   rate=Decimal("0.0005"), period_days=2)
     assert "cid" not in payload

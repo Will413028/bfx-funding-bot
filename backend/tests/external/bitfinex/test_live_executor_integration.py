@@ -1,6 +1,5 @@
 import json
 import time
-from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -128,7 +127,6 @@ async def test_submit_returns_submitted_on_success() -> None:
         phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         auth_gate=AuthRequestGate(lambda: 1000),
-        date_provider=lambda: date(2026, 5, 22),
     )
 
     result = await executor.submit(_ready(_make_decision()), _make_ctx())
@@ -148,7 +146,6 @@ async def test_submit_returns_unknown_on_http_5xx() -> None:
         phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         auth_gate=AuthRequestGate(lambda: 1000),
-        date_provider=lambda: date(2026, 5, 22),
     )
     result = await executor.submit(_ready(_make_decision()), _make_ctx())
     assert result.status == "unknown"
@@ -169,7 +166,7 @@ async def test_submit_returns_unbound_failure_on_http_200_error() -> None:
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
-        auth_gate=AuthRequestGate(lambda: 1000), date_provider=lambda: date(2026, 5, 22),
+        auth_gate=AuthRequestGate(lambda: 1000),
     )
 
     result = await executor.submit(_ready(_make_decision()), _make_ctx())
@@ -205,7 +202,7 @@ async def test_submit_fixed_point_rate_serialization() -> None:
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
         configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
-        auth_gate=AuthRequestGate(lambda: 1000), date_provider=lambda: date(2026, 5, 22),
+        auth_gate=AuthRequestGate(lambda: 1000),
     )
     decision = DecisionPayload(
         decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
@@ -286,7 +283,7 @@ async def test_submit_routes_by_decision_symbol_not_constructor() -> None:
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
         cell="fUST_a30", configured_symbols=frozenset({"fUST"}),
-        auth_gate=AuthRequestGate(lambda: 1000), date_provider=lambda: date(2026, 5, 22),
+        auth_gate=AuthRequestGate(lambda: 1000),
     )
     decision = _make_decision(symbol="fUST")
     result = await ex.submit(_ready(decision), _make_ctx())
@@ -304,7 +301,7 @@ async def test_submit_marks_unconfigured_symbol_not_sent() -> None:
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30",
         configured_symbols=frozenset({"fUST"}),
-        auth_gate=AuthRequestGate(lambda: 1), date_provider=lambda: date(2026, 5, 22),
+        auth_gate=AuthRequestGate(lambda: 1),
     )
     result = await ex.submit(_ready(_make_decision(symbol="fUSD")), _make_ctx())
     assert result.status == "not_sent"
@@ -321,7 +318,6 @@ async def test_submit_marks_malformed_success_response_unknown() -> None:
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30",
         configured_symbols=frozenset({"fUST"}), auth_gate=AuthRequestGate(lambda: 1),
-        date_provider=lambda: date(2026, 5, 22),
     )
 
     result = await ex.submit(_ready(_make_decision()), _make_ctx())
@@ -342,7 +338,7 @@ async def test_submit_failure_keeps_only_bounded_response_evidence() -> None:
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
         configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
-        auth_gate=AuthRequestGate(lambda: 1000), date_provider=lambda: date(2026, 5, 22),
+        auth_gate=AuthRequestGate(lambda: 1000),
     )
     result = await executor.submit(_ready(_make_decision()), _make_ctx())
     assert result.status == "unknown"
@@ -377,7 +373,6 @@ async def test_cancel_publishes_cancel_requested() -> None:
         phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         auth_gate=AuthRequestGate(lambda: 1000),
-        date_provider=lambda: date(2026, 5, 22),
     )
 
     sig_id = uuid4()

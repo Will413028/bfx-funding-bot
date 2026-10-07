@@ -78,7 +78,6 @@ class SubmittedOrder:
     the old ``"failed"`` value.
     """
 
-    cid: int
     venue_offer_id: str | None
     outcome: SubmitOutcome
     raw_response: Any | None
@@ -87,8 +86,7 @@ class SubmittedOrder:
 
     def __init__(
         self,
-        cid: int,
-        venue_offer_id: str | None,
+        venue_offer_id: str | None = None,
         status: str | None = None,
         raw_response: Any | None = None,
         reservation_ref: ReservationRef | None = None,
@@ -147,7 +145,6 @@ class SubmittedOrder:
                 f"{outcome.kind.value} outcome cannot carry venue_offer_id"
             )
 
-        object.__setattr__(self, "cid", cid)
         object.__setattr__(self, "venue_offer_id", venue_offer_id)
         object.__setattr__(self, "outcome", outcome)
         object.__setattr__(self, "raw_response", raw_response)
@@ -233,12 +230,12 @@ class WriterLockHandle(Protocol):
 class ExecutorPort(Protocol):
     """Venue executor (Bitfinex live).
 
-    cid is centralized by ReservationEmittingMiddleware (A2: same cid for INTENT
-    + outcome). It is threaded down through the chain; executors use it when
-    provided and fall back to deterministic generation only for direct callers.
+    ``reservation_ref`` is created by the account command gate and passed only
+    to the venue executor behind it; a result must echo it back so the gate can
+    attribute the outcome to its own intent.
     """
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *,
         reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder: ...
 

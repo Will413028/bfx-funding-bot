@@ -13,7 +13,6 @@ One migrated database per test and one clock: snapshots start at 1000 and finish
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -139,7 +138,7 @@ class Stack:
             uuid4(), decision_id, symbol,
             {"symbol": symbol, "amount": amount, "rate": "0.0001", "period": 2},
             Decimal(amount), NOW, read.applied.revision, read.applied.digest,
-            read.applied.revision_id, command_date=date(2026, 10, 3), cell_id=CELL,
+            read.applied.revision_id, cell_id=CELL,
         )
 
     async def written(self) -> tuple[int, int]:
