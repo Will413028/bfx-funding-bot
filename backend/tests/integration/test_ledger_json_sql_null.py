@@ -1,6 +1,7 @@
 """``a6c7e8f9b0d1``: stored JSON ``null`` becomes SQL NULL, and the literal is refused after.
 
-The database is seeded at head, taken back to the revision before, and given the JSON literals
+The database is seeded at the last reversible revision (``tests/pg_templates.py``), taken back to
+the revision before, and given the JSON literals
 the old writer stored (the owner, with the row triggers off, as only a test may).
 
 Mutation checks (one at a time; revert after each):
@@ -21,9 +22,14 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
-from tests.pg_templates import alembic
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic
 
-from .test_ledger_schema_roles import ledger_db, seeded  # noqa: F401 - fixture re-exports
+from .test_ledger_schema_roles import (  # noqa: F401 - fixture re-exports
+    ledger_db,
+    reversible_ledger_db,
+    reversible_seeded,
+    seeded,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -68,11 +74,11 @@ def _store_literals(engine) -> set[str]:
 
 
 @pytest.fixture
-def before(seeded):  # noqa: F811
-    url = seeded.url.render_as_string(hide_password=False)
-    seeded.dispose()
+def before(reversible_seeded):  # noqa: F811
+    url = reversible_seeded.url.render_as_string(hide_password=False)
+    reversible_seeded.dispose()
     alembic(url, "downgrade", _PREVIOUS)
-    return url, seeded
+    return url, reversible_seeded
 
 
 def test_the_upgrade_rewrites_every_literal(before) -> None:
@@ -81,8 +87,8 @@ def test_the_upgrade_rewrites_every_literal(before) -> None:
     # The seed covers append-only tables (the case the trigger toggle exists for).
     assert {"ledger_observation_credit.flags", "capital_authority_epoch.evidence"} <= stored
     engine.dispose()
-    alembic(url, "upgrade", "head")
-    alembic(url, "check")
+    # Up to where the downgrade below starts; the drift check runs at head at the end.
+    alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)
     with engine.connect() as conn:
         assert set(_literals(conn).values()) == {0}
         disabled = conn.scalar(text(
@@ -106,6 +112,9 @@ def test_the_upgrade_rewrites_every_literal(before) -> None:
         assert not conn.scalar(text(
             "SELECT count(*) FROM pg_constraint WHERE conname LIKE 'ck\\_%\\_json'"))
         assert set(_literals(conn).values()) == {0}
+    engine.dispose()
+    alembic(url, "upgrade", "head")
+    alembic(url, "check")
 
 
 def test_the_upgrade_refuses_a_table_with_a_disabled_trigger(before) -> None:

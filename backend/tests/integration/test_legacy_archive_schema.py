@@ -4,7 +4,8 @@ writes them, and only the remaining readers read them.
 On the production-shaped clone of ``test_ledger_schema_roles`` (default privileges hand every
 new table and sequence to ``bfx_bot`` and ``bfx_webapi``; ``bfx_webauth`` exists). At head the
 switch scaffolding's ``bfx_cutover_reader`` holds nothing (``d3e4f5a6b7c8``,
-``test_cutover_reader_retirement``); the round trips below pass through its downgrade.
+``test_cutover_reader_retirement``); the round trips below pass through its downgrade, starting
+from the last reversible revision (``tests/pg_templates.py``).
 
 Mutation checks (one at a time; revert after each):
 
@@ -34,9 +35,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.modules.execution.archived_execution_history import ArchivedExecutionHistory
 from bfx_funding_bot.modules.ledger import Scope
-from tests.pg_templates import alembic, stamp_realm
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, stamp_realm
 
-from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture
+from .test_ledger_schema_roles import ledger_db, reversible_ledger_db  # noqa: F401 - fixtures
 from .test_trading_state_migration import _reset
 
 pytestmark = pytest.mark.integration
@@ -346,7 +347,7 @@ def test_no_later_migration_alters_the_archive(
 
 
 def test_downgrade_restores_public_and_every_grant_exactly(
-    ledger_db, pg_templates, pg_clone,  # noqa: F811
+    reversible_ledger_db, pg_templates, pg_clone,  # noqa: F811
 ) -> None:
     never_archived = create_engine(pg_clone(pg_templates.template(
         "legacy_archive_pre_archive", _build_pre_archive)))
@@ -360,36 +361,38 @@ def test_downgrade_restores_public_and_every_grant_exactly(
     assert {("event_log", None, "bfx_bot", "INSERT", False),
             ("event_log_event_seq_seq", None, "bfx_bot", "UPDATE", False),
             ("event_log", None, "bfx_webapi", "SELECT", False)} <= expected
-    url = _url(ledger_db)
-    ledger_db.dispose()
+    url = _url(reversible_ledger_db)
+    reversible_ledger_db.dispose()
     alembic(url, "downgrade", _PRE_ARCHIVE)
-    assert _acl(ledger_db, "public") == expected
-    assert _freeze(ledger_db) == expected_freeze
-    with ledger_db.connect() as conn:
+    assert _acl(reversible_ledger_db, "public") == expected
+    assert _freeze(reversible_ledger_db) == expected_freeze
+    with reversible_ledger_db.connect() as conn:
         assert conn.scalar(text("SELECT to_regnamespace('legacy_archive')")) is None
         assert conn.scalar(text(
             "SELECT count(*) FROM pg_constraint WHERE conname = "
             "'fk_uncertainty_resolution_requests_event'")) == 1
-    ledger_db.dispose()
+    reversible_ledger_db.dispose()
+    alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)
+    alembic(url, "downgrade", _PRE_ARCHIVE)  # a second round trip is as exact
+    assert _acl(reversible_ledger_db, "public") == expected
+    assert _freeze(reversible_ledger_db) == expected_freeze
+    reversible_ledger_db.dispose()
     alembic(url, "upgrade", "head")
     alembic(url, "check")
-    alembic(url, "downgrade", _PRE_ARCHIVE)  # a second round trip is as exact
-    assert _acl(ledger_db, "public") == expected
-    assert _freeze(ledger_db) == expected_freeze
 
 
-def test_the_rows_move_unchanged_and_the_manifest_proves_it(ledger_db) -> None:  # noqa: F811
-    url = _url(ledger_db)
-    ledger_db.dispose()
+def test_the_rows_move_unchanged_and_the_manifest_proves_it(reversible_ledger_db) -> None:  # noqa: F811
+    url = _url(reversible_ledger_db)
+    reversible_ledger_db.dispose()
     alembic(url, "downgrade", _PRE_ARCHIVE)
-    _seed(ledger_db, "public")
-    with ledger_db.connect() as conn:
+    _seed(reversible_ledger_db, "public")
+    with reversible_ledger_db.connect() as conn:
         before = conn.execute(text(
             "SELECT to_jsonb(t)::text FROM public.event_log t ORDER BY event_seq")).scalars().all()
-    ledger_db.dispose()
+    reversible_ledger_db.dispose()
     alembic(url, "upgrade", "head")
     digest = _migration()._digest
-    with ledger_db.connect() as conn:
+    with reversible_ledger_db.connect() as conn:
         after = conn.execute(text(
             "SELECT to_jsonb(t)::text FROM legacy_archive.event_log t ORDER BY event_seq"
         )).scalars().all()

@@ -20,7 +20,12 @@ from sqlalchemy import create_engine, text
 
 from tests.pg_templates import alembic
 
-from .test_ledger_schema_roles import _O, _seed, ledger_db  # noqa: F401 - fixture
+from .test_ledger_schema_roles import (  # noqa: F401 - fixtures
+    _O,
+    _seed,
+    ledger_db,
+    reversible_ledger_db,
+)
 from .test_ledger_webapi_grants import _attempt_with_payload, _columns, _rewrite_payload
 
 pytestmark = pytest.mark.integration
@@ -112,9 +117,9 @@ _UNREADABLE = [
 
 
 @pytest.mark.parametrize("payload", _UNREADABLE)
-def test_upgrade_refuses_an_unreadable_rate_or_period(ledger_db, payload) -> None:  # noqa: F811
-    url = ledger_db.url.render_as_string(hide_password=False)
-    ledger_db.dispose()
+def test_upgrade_refuses_an_unreadable_rate_or_period(reversible_ledger_db, payload) -> None:  # noqa: F811
+    url = reversible_ledger_db.url.render_as_string(hide_password=False)
+    reversible_ledger_db.dispose()
     alembic(url, "downgrade", _PREVIOUS)
     engine = create_engine(url)
     try:
@@ -144,9 +149,9 @@ def test_an_unreadable_term_is_refused_at_write(ledger_db, payload) -> None:  # 
 # --- upgrade from the previous head on a database with rows -------------------------------------------
 
 
-def test_upgrade_from_the_previous_head_fills_existing_rows(ledger_db) -> None:  # noqa: F811
-    url = ledger_db.url.render_as_string(hide_password=False)
-    ledger_db.dispose()
+def test_upgrade_from_the_previous_head_fills_existing_rows(reversible_ledger_db) -> None:  # noqa: F811
+    url = reversible_ledger_db.url.render_as_string(hide_password=False)
+    reversible_ledger_db.dispose()
     alembic(url, "downgrade", _PREVIOUS)
     engine = create_engine(url)
     try:
@@ -215,9 +220,9 @@ def _objects(conn) -> dict[str, bool]:
     }
 
 
-def test_round_trip_drops_and_restores_the_objects(ledger_db) -> None:  # noqa: F811
-    url = ledger_db.url.render_as_string(hide_password=False)
-    ledger_db.dispose()
+def test_round_trip_drops_and_restores_the_objects(reversible_ledger_db) -> None:  # noqa: F811
+    url = reversible_ledger_db.url.render_as_string(hide_password=False)
+    reversible_ledger_db.dispose()
     engine = create_engine(url)
     try:
         with engine.connect() as conn:

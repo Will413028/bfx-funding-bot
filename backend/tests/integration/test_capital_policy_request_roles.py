@@ -21,7 +21,7 @@ from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store, build_scope_lock
 from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
-from tests.pg_templates import stamp_realm
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, stamp_realm, template_at
 
 from .test_ledger_schema_roles import pre_switch_url
 from .test_trading_state_migration import _alembic, _alembic_cli, _reset
@@ -37,10 +37,14 @@ _POLICY = CapitalPolicy(
                            rate_floor_ratio=Decimal("0.5"), min_rate_apr=Decimal("0.01")))
 
 
-def _build_migrated(url: str) -> None:
+def _prepare(url: str) -> None:
     engine = create_engine(url)
     _reset(engine)
     engine.dispose()
+
+
+def _build_migrated(url: str) -> None:
+    _prepare(url)
     _alembic(url, "upgrade", "head")
     _alembic(url, "check")
     stamp_realm(url, "ci")
@@ -49,7 +53,18 @@ def _build_migrated(url: str) -> None:
 @pytest.fixture
 def migrated(pg_templates, pg_clone):
     """A fresh copy of the upgraded database; the upgrade runs once per session."""
-    url = pg_clone(pg_templates.template("capital_policy_roles_migrated", _build_migrated))
+    yield from _migrated(pg_clone(pg_templates.template("capital_policy_roles_migrated",
+                                                        _build_migrated)))
+
+
+@pytest.fixture
+def migrated_reversible(pg_templates, pg_clone):
+    """``migrated`` at LAST_REVERSIBLE_REVISION, for the test that downgrades from it."""
+    yield from _migrated(pg_clone(pg_templates.template(
+        "capital_policy_roles_reversible", template_at(LAST_REVERSIBLE_REVISION, _prepare))))
+
+
+def _migrated(url: str):
     engine = create_engine(url)
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO exchange_accounts(id, venue, label) VALUES (:a, 'bitfinex', 'x')"),
@@ -278,8 +293,8 @@ def test_the_runtime_role_may_toggle_enabled_and_nothing_else(migrated):
                                       number=3, request=None))
 
 
-def test_downgrade_round_trip_and_refusal(migrated):
-    url, engine = migrated
+def test_downgrade_round_trip_and_refusal(migrated_reversible):
+    url, engine = migrated_reversible
     pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     _alembic(url, "downgrade", _BEFORE)
     with engine.connect() as conn:
@@ -288,8 +303,9 @@ def test_downgrade_round_trip_and_refusal(migrated):
         assert not _has(conn, "SELECT has_any_column_privilege('bfx_bot', 'capital_policy_heads', "
                         "'UPDATE')")
         assert conn.scalar(text("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'runtime_policy_%'")) == 0
-    _alembic(url, "upgrade", "head")
-    _alembic(url, "check")
+    # Back to where the downgrade started, so the second downgrade starts there too; the drift
+    # check runs at head at the end.
+    _alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)
     stamp_realm(url, "ci")  # the downgrade dropped the stamp; the tables hold no rows to derive it from
     with engine.begin() as conn:
         conn.exec_driver_sql(_request_sql())
@@ -297,3 +313,5 @@ def test_downgrade_round_trip_and_refusal(migrated):
     result = _alembic_cli(url, "downgrade", _BEFORE)
     assert result.returncode != 0
     assert "refuse downgrade of recorded capital policy requests" in result.stdout + result.stderr
+    _alembic(url, "upgrade", "head")
+    _alembic(url, "check")

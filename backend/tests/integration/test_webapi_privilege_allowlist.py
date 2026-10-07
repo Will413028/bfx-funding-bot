@@ -34,11 +34,13 @@ Mutation checks (one at a time; revert after each):
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import ProgrammingError
 
-from tests.pg_templates import alembic
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic
 
 from .test_trading_state_migration import _reset
 
@@ -308,15 +310,15 @@ def _effective(conn) -> set[tuple[str, ...]]:
     return found
 
 
-def _build_worst_case(url: str) -> None:
+def _build_worst_case(url: str, target: str = "head") -> None:
     """``_reset``'s worst case: default privileges hand every new table and sequence to the role."""
     engine = create_engine(url)
     _reset(engine)
     engine.dispose()
-    alembic(url, "upgrade", "head")
+    alembic(url, "upgrade", target)
 
 
-def _build_prod_faithful(url: str) -> None:
+def _build_prod_faithful(url: str, target: str = "head") -> None:
     """Production's host setup: no default privileges and no schema grant for the web API."""
     engine = create_engine(url)
     _reset(engine)
@@ -325,10 +327,10 @@ def _build_prod_faithful(url: str) -> None:
         conn.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM bfx_webapi")
         conn.exec_driver_sql("REVOKE ALL ON SCHEMA public FROM bfx_webapi")
     engine.dispose()
-    alembic(url, "upgrade", "head")
+    alembic(url, "upgrade", target)
 
 
-def _build_stray(url: str) -> None:
+def _build_stray(url: str, target: str = "head") -> None:
     """Grants outside the allowlist that exist at the previous revision (column, sequence,
     function, table), as a host's hand-run GRANT could leave them."""
     engine = create_engine(url)
@@ -349,7 +351,7 @@ def _build_stray(url: str) -> None:
             "ORDER BY 1 LIMIT 1"))
         conn.exec_driver_sql(f"GRANT EXECUTE ON FUNCTION {signature} TO bfx_webapi")
     engine.dispose()
-    alembic(url, "upgrade", "head")
+    alembic(url, "upgrade", target)
 
 
 _BUILDS = {
@@ -357,11 +359,27 @@ _BUILDS = {
     "webapi_allowlist_prod_faithful": _build_prod_faithful,
     "webapi_allowlist_stray": _build_stray,
 }
+# The round trip downgrades, so it starts from the last reversible revision, not head.
+_REVERSIBLE_BUILDS = {
+    f"{name}_reversible": partial(build, target=LAST_REVERSIBLE_REVISION)
+    for name, build in _BUILDS.items()
+}
 
 
 @pytest.fixture(params=sorted(_BUILDS))
 def head_db(request, pg_templates, pg_clone):
-    url = pg_clone(pg_templates.template(request.param, _BUILDS[request.param]))
+    yield from _db(request, pg_templates.template(request.param, _BUILDS[request.param]), pg_clone)
+
+
+@pytest.fixture(params=sorted(_REVERSIBLE_BUILDS))
+def reversible_db(request, pg_templates, pg_clone):
+    yield from _db(request,
+                   pg_templates.template(request.param, _REVERSIBLE_BUILDS[request.param]),
+                   pg_clone)
+
+
+def _db(request, template: str, pg_clone):
+    url = pg_clone(template)
     engine = create_engine(url)
     try:
         yield url, engine, request.param
@@ -391,8 +409,8 @@ def test_execution_decisions_are_unreadable(head_db) -> None:
         conn.exec_driver_sql("SELECT count(*) FROM public.execution_decisions")
 
 
-def test_round_trip_keeps_the_allowlist(head_db) -> None:
-    url, engine, _ = head_db
+def test_round_trip_keeps_the_allowlist(reversible_db) -> None:
+    url, engine, _ = reversible_db
     # f5a6b7c8d9e0 (dropping the closed columns) changes no web API privilege...
     alembic(url, "downgrade", "e4f5a6b7c8d9")
     with engine.connect() as conn:

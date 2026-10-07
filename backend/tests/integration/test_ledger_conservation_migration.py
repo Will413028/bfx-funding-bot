@@ -23,6 +23,8 @@ from .test_ledger_schema_roles import (  # noqa: F401 - fixtures
     append_epoch,
     ledger_db,
     pre_switch_url,
+    reversible_ledger_db,
+    reversible_seeded,
     seeded,
 )
 
@@ -50,9 +52,9 @@ def _insert(
     )
 
 
-def test_upgrade_backfills_baseline_and_leaves_no_default(ledger_db) -> None:  # noqa: F811
-    url = ledger_db.url.render_as_string(hide_password=False)
-    ledger_db.dispose()
+def test_upgrade_backfills_baseline_and_leaves_no_default(reversible_ledger_db) -> None:  # noqa: F811
+    url = reversible_ledger_db.url.render_as_string(hide_password=False)
+    reversible_ledger_db.dispose()
     alembic(url, "downgrade", _PARENT)
     engine = create_engine(url)
     try:
@@ -89,9 +91,9 @@ def test_upgrade_backfills_baseline_and_leaves_no_default(ledger_db) -> None:  #
         engine.dispose()
 
 
-def test_downgrade_drops_baseline_only_rows_and_round_trips(seeded) -> None:  # noqa: F811
-    url = seeded.url.render_as_string(hide_password=False)
-    seeded.dispose()
+def test_downgrade_drops_baseline_only_rows_and_round_trips(reversible_seeded) -> None:  # noqa: F811
+    url = reversible_seeded.url.render_as_string(hide_password=False)
+    reversible_seeded.dispose()
     pre_switch_url(url)  # the downgrade below the genesis starts pre-switch
     alembic(url, "downgrade", _PARENT)
     engine = create_engine(url)
@@ -107,11 +109,11 @@ def test_downgrade_drops_baseline_only_rows_and_round_trips(seeded) -> None:  # 
         engine.dispose()
 
 
-def test_downgrade_refuses_to_drop_stored_verdicts(seeded) -> None:  # noqa: F811
-    with seeded.begin() as conn:
+def test_downgrade_refuses_to_drop_stored_verdicts(reversible_seeded) -> None:  # noqa: F811
+    with reversible_seeded.begin() as conn:
         _insert(conn, "conserved", "0", "0")
-    url = seeded.url.render_as_string(hide_password=False)
-    seeded.dispose()
+    url = reversible_seeded.url.render_as_string(hide_password=False)
+    reversible_seeded.dispose()
     pre_switch_url(url)  # the downgrade below the genesis starts pre-switch
     with pytest.raises(Exception, match="refuse downgrade of populated ledger"):
         alembic(url, "downgrade", _PARENT)

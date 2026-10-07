@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, text
 
-from tests.pg_templates import stamp_realm
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, stamp_realm
 
 from .test_ledger_schema_roles import pre_switch_url
 
@@ -45,6 +45,16 @@ def _alembic(url: str, *args: str) -> None:
 
 @pytest.fixture
 def migrated(pg_templates: Any, pg_clone: Any) -> Any:
+    yield from _migrated(pg_templates, pg_clone, "head")
+
+
+@pytest.fixture
+def migrated_reversible(pg_templates: Any, pg_clone: Any) -> Any:
+    """``migrated`` at LAST_REVERSIBLE_REVISION, for the test that downgrades from it."""
+    yield from _migrated(pg_templates, pg_clone, LAST_REVERSIBLE_REVISION)
+
+
+def _migrated(pg_templates: Any, pg_clone: Any, revision: str) -> Any:
     # A database of its own: the container's default one exists only after a pg_engine test.
     url = pg_clone(pg_templates.template("empty_database", lambda _url: None))
     engine = create_engine(url)
@@ -60,7 +70,7 @@ def migrated(pg_templates: Any, pg_clone: Any) -> Any:
             conn.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {role}")
             conn.exec_driver_sql(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {role}")
     try:
-        _alembic(url, "upgrade", "head")
+        _alembic(url, "upgrade", revision)
         stamp_realm(url, "ci")
         yield url, engine
     finally:
@@ -100,9 +110,8 @@ def test_credit_history_kind_is_constrained(migrated: Any) -> None:
         conn.exec_driver_sql(INSERTS["funding_credit_history"].replace("'credit'", "'offer'"))
 
 
-def test_migration_is_reversible_and_leaves_no_drift(migrated: Any) -> None:
-    url, engine = migrated
-    _alembic(url, "check")
+def test_migration_is_reversible_and_leaves_no_drift(migrated_reversible: Any) -> None:
+    url, engine = migrated_reversible
     pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     _alembic(url, "downgrade", PARENT)
     with engine.connect() as conn:
@@ -110,3 +119,4 @@ def test_migration_is_reversible_and_leaves_no_drift(migrated: Any) -> None:
             assert conn.scalar(text(f"SELECT to_regclass('public.{table}')")) is None
         assert conn.scalar(text("SELECT to_regclass('public.funding_interest_payments')")) is not None
     _alembic(url, "upgrade", "head")
+    _alembic(url, "check")  # no drift at head, after the round trip

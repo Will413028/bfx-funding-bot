@@ -2,7 +2,7 @@
 import pytest
 from sqlalchemy import create_engine, inspect, text
 
-from tests.pg_templates import alembic, stamp_realm
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, stamp_realm
 
 pytestmark = pytest.mark.integration
 
@@ -22,8 +22,9 @@ def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_templates, pg_c
         connection.exec_driver_sql("GRANT USAGE ON SCHEMA public TO bfx_bot")
         connection.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO bfx_bot")
         connection.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO bfx_bot")
-    alembic(url, "upgrade", "head")
-    alembic(url, "check")
+    # The downgrade below starts at the last reversible revision; the drift check runs at head
+    # at the end.
+    alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)
     stamp_realm(url, "ci")
     with engine.begin() as connection:
         # The legacy capital tables live in the archive since c2d3e4f5a6b7; the bot holds nothing there.
@@ -56,3 +57,5 @@ def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_templates, pg_c
         with engine.begin() as connection, pytest.raises(Exception, match="immutable capital"):
             connection.exec_driver_sql(sql)
     engine.dispose()
+    alembic(url, "upgrade", "head")
+    alembic(url, "check")

@@ -30,7 +30,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.modules.observability.bot_runs import BotRunRecord
-from tests.pg_templates import alembic
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic
 
 pytestmark = pytest.mark.integration
 
@@ -209,8 +209,9 @@ def test_the_runtime_role_inserts_runs_and_updates_only_their_end(pg_templates, 
             conn.exec_driver_sql("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE "
                                  "rolname='bfx_bot') THEN CREATE ROLE bfx_bot; END IF; END $$")
             conn.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO bfx_bot")
-        alembic(url, "upgrade", "head")
-        alembic(url, "check")
+        # bot_runs is LAST_REVERSIBLE_REVISION itself; its downgrade below starts there. The
+        # drift check runs at head, after the round trip.
+        alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)
         with engine.connect() as conn:
             def table(privilege: str) -> bool:
                 return bool(conn.scalar(text(
@@ -225,7 +226,7 @@ def test_the_runtime_role_inserts_runs_and_updates_only_their_end(pg_templates, 
             assert not table("UPDATE") and not table("DELETE") and not table("TRUNCATE")
             assert column("end_reason") and column("end_recorded_at_ms")
             assert not column("started_at_ms") and not column("run_id")
-        alembic(url, "downgrade", "-1")
+        alembic(url, "downgrade", "a6c7e8f9b0d1")
         with engine.connect() as conn:
             assert conn.scalar(text("SELECT to_regclass('public.bot_runs')")) is None
         alembic(url, "upgrade", "head")
