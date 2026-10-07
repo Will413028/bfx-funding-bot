@@ -1,0 +1,238 @@
+"""An unreachable venue or database delays the boot in-process; it never crash-loops.
+
+Before: a venue fetch failure in the boot observation raised out of
+``Daemon.run`` and the process exited; the restarted process met the same
+outage and exited again. Now a transient reachability failure is retried with a
+capped backoff, nothing that can trade runs meanwhile, and a stop request ends
+the wait cleanly. Refusals still refuse.
+
+The backoff is injected as zero, so no test waits on a clock.
+
+Mutation checks (one at a time; revert after each):
+
+* re-raise every exception in ``Daemon._boot_until_observed``:
+  ``test_an_unreachable_venue_at_boot_is_retried_until_it_answers``.
+* drop the writer-lock check before a retry: ``test_a_lost_writer_lock_ends_the_wait``.
+* treat every ``BitfinexAPIError`` as transient: ``test_a_refusal_still_refuses_the_boot[401]``.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Callable
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
+
+import httpx
+import pytest
+from sqlalchemy import exc as sa_exc
+
+from bfx_funding_bot.core.errors import (
+    BootInvariantError,
+    ExecutorAuthError,
+    ExecutorTransientError,
+)
+from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+from bfx_funding_bot.modules.execution.safety.protection import WriterLockLostError
+from bfx_funding_bot.modules.ledger import CycleResult, Scope
+from bfx_funding_bot.modules.marketfeed.boot_wait import (
+    boot_retry_delay_s,
+    is_transient_dependency_error,
+    wait_for_database,
+)
+from bfx_funding_bot.modules.marketfeed.daemon import Daemon
+
+
+class _Venue:
+    """The boot observation: unreachable for the first ``failures`` calls."""
+
+    def __init__(self, failures: int, error: Callable[[], BaseException]) -> None:
+        self.failures = failures
+        self.error = error
+        self.calls = 0
+
+    async def run(self, scope: Scope) -> CycleResult:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.error()
+        return CycleResult("accepted", uuid4())
+
+
+def _unreachable() -> BaseException:
+    return BitfinexAPIError(status_code=0, message="transport error: connect failed")
+
+
+def _daemon(venue: _Venue, *, delay: Callable[[int], float] = lambda _n: 0.0,
+            lock_watch: Any = None) -> Any:
+    executor = MagicMock()
+    executor.submit = AsyncMock()
+    fake = SimpleNamespace(
+        boot_recovery=venue, observation_scope=Scope(uuid4(), "ci"),
+        protection=SimpleNamespace(run_pending=AsyncMock()), periodic_reconcile=None,
+        writer_lock_watch=lock_watch, boot_retry_delay_s=delay,
+        _stop_event=asyncio.Event(), booted=False,
+        config=SimpleNamespace(cells=[]), scheduler=MagicMock(), executor=executor,
+    )
+    fake._run_boot_recovery = lambda: Daemon._run_boot_recovery(fake)  # type: ignore[arg-type]
+    fake._boot_until_observed = lambda: Daemon._boot_until_observed(fake)  # type: ignore[arg-type]
+    return fake
+
+
+async def test_an_unreachable_venue_at_boot_is_retried_until_it_answers(caplog) -> None:
+    lock_watch = SimpleNamespace(check=AsyncMock(return_value=True))
+    venue = _Venue(3, _unreachable)
+    fake = _daemon(venue, lock_watch=lock_watch)
+
+    with caplog.at_level(logging.WARNING):
+        assert await Daemon._boot_until_observed(fake) is True
+
+    assert venue.calls == 4
+    # The observation only reruns as the single writer.
+    assert lock_watch.check.await_count == 3
+    assert caplog.text.count("boot_waiting_for_dependency step=venue observation") == 3
+    # One operator alert per wait, not per attempt.
+    assert caplog.text.count("boot waiting for an unreachable venue observation") == 1
+
+
+async def test_nothing_trades_while_the_boot_waits_and_a_stop_ends_the_wait() -> None:
+    venue = _Venue(10**6, _unreachable)
+    stop_after = 3
+
+    def delay(attempt: int) -> float:
+        if attempt == stop_after:
+            fake._stop_event.set()
+        return 0.0
+
+    fake = _daemon(venue, delay=delay)
+    # A SimpleNamespace daemon has none of the sub-task wiring: reaching the
+    # TaskGroup (anything that could trade) would raise AttributeError here.
+    await Daemon.run(fake)
+
+    assert venue.calls == stop_after
+    assert fake.booted is False
+    fake.scheduler.start.assert_not_called()
+    fake.executor.submit.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("label", "error"),
+    [
+        ("401", lambda: BitfinexAPIError(status_code=401, message="apikey: invalid")),
+        ("auth", lambda: ExecutorAuthError("auth_failed: HTTP 401")),
+        ("invariant", lambda: BootInvariantError("boot observation refused query admission")),
+        ("value", lambda: ValueError("boot observation scope is required")),
+    ],
+)
+async def test_a_refusal_still_refuses_the_boot(label: str, error: Callable[[], BaseException]) -> None:
+    venue = _Venue(1, error)
+    fake = _daemon(venue)
+
+    with pytest.raises(type(error())):
+        await Daemon._boot_until_observed(fake)
+    assert venue.calls == 1
+
+
+async def test_a_lost_writer_lock_ends_the_wait() -> None:
+    lock_watch = SimpleNamespace(
+        check=AsyncMock(side_effect=WriterLockLostError("writer lock not held after refresh")),
+    )
+    venue = _Venue(1, _unreachable)
+    fake = _daemon(venue, lock_watch=lock_watch)
+
+    with pytest.raises(WriterLockLostError):
+        await Daemon._boot_until_observed(fake)
+    assert venue.calls == 1
+
+
+# ── classification ────────────────────────────────────────────────────────────
+
+
+def _caused(outer: BaseException, cause: BaseException) -> BaseException:
+    outer.__cause__ = cause
+    return outer
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ConnectionRefusedError("refused"),
+        TimeoutError("deadline"),
+        httpx.ConnectError("no route"),
+        BitfinexAPIError(status_code=0, message="transport error"),
+        BitfinexAPIError(status_code=429, message="rate limited"),
+        BitfinexAPIError(status_code=503, message="maintenance"),
+        ExecutorTransientError("venue_5xx: HTTP 502"),
+        _caused(RuntimeError("cycle failed"), OSError("socket closed")),
+        sa_exc.DBAPIError("SELECT 1", None, Exception("gone"), connection_invalidated=True),
+    ],
+)
+def test_reachability_faults_are_transient(exc: BaseException) -> None:
+    assert is_transient_dependency_error(exc) is True
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        BitfinexAPIError(status_code=401, message="invalid key"),
+        BitfinexAPIError(status_code=400, message="bad request"),
+        ValueError("unknown active offer status"),
+        sa_exc.DBAPIError("SELECT 1", None, Exception("syntax"), connection_invalidated=False),
+        # A refusal caused by a network error stays a refusal.
+        _caused(BootInvariantError("refused"), OSError("socket closed")),
+    ],
+)
+def test_answers_and_refusals_are_not_transient(exc: BaseException) -> None:
+    assert is_transient_dependency_error(exc) is False
+
+
+def test_a_refusal_raised_while_handling_a_network_error_is_not_transient() -> None:
+    try:
+        try:
+            raise OSError("socket closed")
+        except OSError:
+            raise ValueError("refused") from None
+    except ValueError as exc:
+        assert is_transient_dependency_error(exc) is False
+
+
+def test_the_backoff_doubles_up_to_a_minute() -> None:
+    assert [boot_retry_delay_s(n) for n in (1, 2, 3, 6, 7, 50)] == [1, 2, 4, 32, 60, 60]
+
+
+# ── database ─────────────────────────────────────────────────────────────────
+
+
+class _Engine:
+    def __init__(self, errors: list[BaseException]) -> None:
+        self.errors = errors
+        self.attempts = 0
+
+    def connect(self) -> Any:
+        engine = self
+
+        class _Conn:
+            async def __aenter__(self) -> Any:
+                engine.attempts += 1
+                if engine.errors:
+                    raise engine.errors.pop(0)
+                return SimpleNamespace(execute=AsyncMock())
+
+            async def __aexit__(self, *exc: object) -> None:
+                return None
+
+        return _Conn()
+
+
+async def test_boot_waits_for_a_database_that_is_down_or_starting() -> None:
+    engine = _Engine([ConnectionRefusedError("refused"), OSError("name not known")])
+    await wait_for_database(engine, delay_s=lambda _n: 0.0)  # type: ignore[arg-type]
+    assert engine.attempts == 3
+
+
+async def test_a_database_that_answers_with_an_error_refuses_the_boot() -> None:
+    engine = _Engine([RuntimeError("password authentication failed")])
+    with pytest.raises(RuntimeError, match="password"):
+        await wait_for_database(engine, delay_s=lambda _n: 0.0)  # type: ignore[arg-type]
+    assert engine.attempts == 1

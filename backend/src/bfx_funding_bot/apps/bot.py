@@ -135,6 +135,7 @@ from bfx_funding_bot.modules.live_validation.interest_ledger import (
 )
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
+from bfx_funding_bot.modules.marketfeed.boot_wait import wait_for_database
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.daemon import (
     Daemon,
@@ -201,6 +202,9 @@ async def build_daemon(
     # (``apps/authority_support.py``), before any ledger write. Any refusal stops the boot and
     # alerts (``_refuse_live_boot``: alert routing is configuration, the sink prefixes the realm).
     try:
+        # A database that is down or still starting delays the boot instead of failing
+        # it (a failed boot only restarts into the same outage); other errors refuse.
+        await wait_for_database(db_engine)
         async with session_factory() as boot_session:
             await assert_schema_head(boot_session)
             await assert_database_realm(boot_session, config.deployment_environment.value)

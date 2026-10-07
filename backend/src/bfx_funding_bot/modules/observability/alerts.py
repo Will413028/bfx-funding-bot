@@ -52,6 +52,8 @@ TRADING_STATE_CHANGED: Final = "trading_state_changed"
 PROTECTION_TRIPPED: Final = "protection_tripped"
 KILL_SWITCH_ENGAGED: Final = "kill_switch_engaged"
 BOOT_REFUSED: Final = "boot_refused"
+# The boot is waiting in-process for an unreachable venue or database (one per wait).
+BOOT_WAITING: Final = "boot_waiting"
 DAEMON_FATAL: Final = "daemon_fatal"
 # An active venue offer no durable intent traces to (lending envelope D2):
 # never cancelled or counted as managed, reported once per venue offer id.
@@ -345,6 +347,8 @@ def title(event: str, fields: Mapping[str, object]) -> str:
         return "cancel-all complete" if fields.get("complete") is True else "cancel-all INCOMPLETE"
     if event == BOOT_REFUSED:
         return "bot refused to boot"
+    if event == BOOT_WAITING:
+        return f"boot waiting for an unreachable {fields.get('step', '?')} (retrying, not trading)"
     if event == AUTO_RESUME_LIMIT_REACHED:
         return "automatic HALT stays: auto-resume limit reached, resume by hand"
     if event == DAEMON_FATAL:
@@ -407,6 +411,7 @@ async def shutdown(*, timeout_s: float = 5.0) -> None:
 __all__ = [
     "AUTO_RESUME_LIMIT_REACHED",
     "BOOT_REFUSED",
+    "BOOT_WAITING",
     "CRITICAL",
     "DAEMON_FATAL",
     "DEDUP_FIELDS",

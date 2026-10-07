@@ -83,6 +83,11 @@ from bfx_funding_bot.modules.live_validation.interest_ledger import (
     InterestLedgerSync,
 )
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
+from bfx_funding_bot.modules.marketfeed.boot_wait import (
+    BootWait,
+    boot_retry_delay_s,
+    is_transient_dependency_error,
+)
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
 from bfx_funding_bot.modules.marketfeed.funding_book import (
@@ -329,6 +334,8 @@ class Daemon:
     venue_tasks: tuple[VenueTask, ...] = ()
     venue_aclose: Callable[[], Awaitable[None]] | None = None
     venue_diagnostics: VenueDiagnostics | None = None
+    # Backoff between boot observation attempts while the venue is unreachable.
+    boot_retry_delay_s: Callable[[int], float] = boot_retry_delay_s
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def _run_boot_recovery(self) -> None:
@@ -358,6 +365,38 @@ class Daemon:
                 await self.protection.run_pending()
             raise
 
+    async def _boot_until_observed(self) -> bool:
+        """Run the boot observation until it completes; False if stopped while waiting.
+
+        A transient reachability failure (venue or database did not answer, see
+        ``boot_wait.is_transient_dependency_error``) is retried in-process with a
+        capped backoff instead of exiting: a restart would meet the same outage
+        and crash-loop. Nothing trades meanwhile — no sub-task exists yet. Every
+        other failure (a refusal, rejected credentials, an invariant) propagates
+        and refuses the boot. Before each retry the writer lock is re-checked
+        (``WriterLockWatch.check``: re-acquire if its connection dropped, exit if
+        another writer holds it), so the observation only ever runs as the
+        single writer, as it does on the first attempt right after the acquire.
+        """
+        wait = BootWait("venue observation", delay_s=self.boot_retry_delay_s)
+        while True:
+            if wait.failures and self.writer_lock_watch is not None:
+                await self.writer_lock_watch.check()
+            try:
+                await self._run_boot_recovery()
+            except Exception as exc:
+                if not is_transient_dependency_error(exc):
+                    raise
+                delay = wait.failed(exc)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+                if self._stop_event.is_set():
+                    log.info("boot_stopped_while_waiting_for_dependency")
+                    return False
+                continue
+            wait.succeeded()
+            return True
+
     async def run(self) -> None:
         """Main entry — sub-task supervision via TaskGroup.
 
@@ -371,9 +410,11 @@ class Daemon:
             self.scheduler.register_from_now(cell)
 
         # 3a-recovery: reconcile against venue + resolve crash-mid-flight PENDING
-        # BEFORE any sub-task starts (None only in unit compositions). A venue
-        # fetch failure raises here -> daemon fails to start (fail-safe).
-        await self._run_boot_recovery()
+        # BEFORE any sub-task starts (None only in unit compositions). An
+        # unreachable venue is waited out in-process; a refusal raises here and
+        # the daemon fails to start (fail-safe).
+        if not await self._boot_until_observed():
+            return
         self.booted = True
 
         async with asyncio.TaskGroup() as tg:
