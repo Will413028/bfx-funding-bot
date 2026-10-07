@@ -18,6 +18,8 @@ from typing import Any
 import websockets
 from websockets.asyncio.client import ClientConnection
 
+from bfx_funding_bot.external.bitfinex.errors import INFO_MAINTENANCE_END, INFO_SERVER_RESTART
+
 log = logging.getLogger(__name__)
 
 BITFINEX_WS_URL = "wss://api-pub.bitfinex.com/ws/2"
@@ -275,10 +277,10 @@ class BitfinexWSClient:
             # 20051: server restarting. 20061: maintenance over, and Bitfinex
             # advises resubscribing. Both mean: start a fresh connection.
             code = msg.get("code")
-            if code == 20051:
+            if code == INFO_SERVER_RESTART:
                 log.warning("bitfinex_ws_server_restart %s", msg)
                 self._reconnect_reason = "venue_restart"
-            elif code == 20061:
+            elif code == INFO_MAINTENANCE_END:
                 log.warning("bitfinex_ws_maintenance_ended %s", msg)
                 self._reconnect_reason = "venue_maintenance_ended"
             else:

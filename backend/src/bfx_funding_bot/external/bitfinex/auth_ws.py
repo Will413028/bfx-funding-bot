@@ -29,7 +29,7 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 from bfx_funding_bot.external.bitfinex.credentials import Credentials
-from bfx_funding_bot.external.bitfinex.errors import BitfinexShapeError
+from bfx_funding_bot.external.bitfinex.errors import RECONNECT_INFO_CODES, BitfinexShapeError
 from bfx_funding_bot.external.bitfinex.funding_offer_row import parse_funding_offer_row
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 
@@ -508,9 +508,8 @@ class BitfinexAuthWSClient:
                                 event.status, event.raw,
                             )
                             return
-                    if isinstance(event, ChannelInfo) and event.raw.get("code") in (
-                        20051, 20061,
-                    ):
+                    if (isinstance(event, ChannelInfo)
+                            and event.raw.get("code") in RECONNECT_INFO_CODES):
                         # Server restart / maintenance over: Bitfinex asks for a
                         # fresh connection. Returning closes this one; events()
                         # reconnects and the reconnect fires a ledger resync.

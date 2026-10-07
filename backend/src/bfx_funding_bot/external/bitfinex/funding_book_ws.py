@@ -14,6 +14,11 @@ from typing import Any
 import websockets
 from websockets.asyncio.client import ClientConnection
 
+from bfx_funding_bot.external.bitfinex.errors import (
+    INFO_MAINTENANCE,
+    INFO_MAINTENANCE_END,
+    INFO_SERVER_RESTART,
+)
 from bfx_funding_bot.external.bitfinex.ws import BITFINEX_WS_URL
 
 log = logging.getLogger(__name__)
@@ -229,15 +234,15 @@ class FundingBookWSClient:
         """
         code = frame.get("code")
         platform = frame.get("platform")
-        if code == 20060 or (isinstance(platform, dict) and platform.get("status") == 0):
+        if code == INFO_MAINTENANCE or (isinstance(platform, dict) and platform.get("status") == 0):
             log.warning("bitfinex_funding_book_maintenance_started %s", frame)
             self._set_maintenance(True)
             self.mark_disconnected()
-        elif code == 20061:
+        elif code == INFO_MAINTENANCE_END:
             log.warning("bitfinex_funding_book_maintenance_ended %s", frame)
             self._set_maintenance(False)
             self._reconnect_requested = True
-        elif code == 20051:
+        elif code == INFO_SERVER_RESTART:
             log.warning("bitfinex_funding_book_server_restart %s", frame)
             self._reconnect_requested = True
         elif isinstance(platform, dict) and platform.get("status") == 1:

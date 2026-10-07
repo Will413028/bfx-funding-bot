@@ -1,11 +1,25 @@
-# Venue error codes (``["error", CODE, MESSAGE]``) that mean "not now" rather than a
-# refusal. 11010 is the rate limit (modules/external_signals/client.py meets it as
-# ``["error", 11010, "ratelimit: error"]``); 20060 is the maintenance notice
-# (external/bitfinex/funding_book_ws.py). Every other code is the venue's answer,
-# for example 10100 "apikey: invalid" or 10114 "nonce: small".
+# Bitfinex v2 codes this code base decides on (docs.bitfinex.com, "Abbreviations
+# Glossary"). Every retry, reconnect or refuse decision on a code goes through
+# these names; nothing compares a literal code elsewhere.
+#
+# Errors, answered as ``["error", CODE, MESSAGE]`` (REST: often with HTTP 500).
+# ERR_AUTH_FAIL: the request's key or signature was refused. Observed in
+# production as ``["error",10100,"apikey: digest invalid"]`` from the authenticated
+# REST endpoints (2026-05-27 smoke with fake credentials; 2026-08-05 key and
+# secret swapped). An answer, never "try again".
+ERR_AUTH_FAIL = 10100
+# ERR_RATE_LIMIT: ``["error", 11010, "ratelimit: error"]``, with HTTP 429 or 200
+# (tests/modules/external_signals/test_client.py, tests/external/bitfinex/test_rest.py).
 ERR_RATE_LIMIT = 11010
-INFO_MAINTENANCE = 20060
+# Info events on a WebSocket (``{"event": "info", "code": CODE}``).
+INFO_SERVER_RESTART = 20051     # the server is restarting: reconnect
+INFO_MAINTENANCE = 20060        # maintenance begins
+INFO_MAINTENANCE_END = 20061    # maintenance is over: Bitfinex advises resubscribing
+# Codes that mean "not now" rather than a refusal; every other venue error code is
+# the venue's answer (ERR_AUTH_FAIL, or 10114 "nonce: small").
 TRANSIENT_VENUE_ERROR_CODES = frozenset({ERR_RATE_LIMIT, INFO_MAINTENANCE})
+# Info codes asking the client for a fresh connection.
+RECONNECT_INFO_CODES = frozenset({INFO_SERVER_RESTART, INFO_MAINTENANCE_END})
 
 
 class BitfinexError(Exception):
