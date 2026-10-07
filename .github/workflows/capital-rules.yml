@@ -9,16 +9,24 @@ on:
   pull_request:
     branches: [main]
     paths:
+      # Unit-owned rules and their owning tests.
       - backend/src/bfx_funding_bot/modules/trading/policy.py
       - backend/src/bfx_funding_bot/modules/trading/capital.py
       - backend/src/bfx_funding_bot/modules/execution/deployment/sizing.py
       - backend/src/bfx_funding_bot/modules/execution/deployment/reconciler.py
-      - backend/scripts/capital_mutation_gate.py
       - backend/tests/modules/trading/test_policy.py
       - backend/tests/modules/trading/test_capital.py
       - backend/tests/modules/execution/deployment/test_sizing.py
       - backend/tests/modules/execution/deployment/test_reconciler.py
+      # Integration-owned rules (M12 guard, M13 command gate) and their owning tests.
+      - backend/src/bfx_funding_bot/modules/execution/safety/hard_guards.py
+      - backend/src/bfx_funding_bot/modules/ledger/_internal/journal.py
+      - backend/tests/integration/test_capital_command_boundary.py
+      - backend/tests/integration/test_ledger_command_authorize.py
+      # The gate itself.
+      - backend/scripts/capital_mutation_gate.py
       - .github/workflows/capital-rules.yml
+      - .github/actions/postgres-18/action.yml
   schedule:
     - cron: "17 19 * * *"  # nightly, 03:17 Asia/Taipei
   workflow_dispatch:
@@ -32,20 +40,40 @@ concurrency:
 
 jobs:
   mutation_gate:
-    name: Capital mutation gate (unit-owned)
+    name: Capital mutation gate
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: backend
+    env:
+      BFX_DEPLOYMENT_ENV: ci
+      BFX_TEST_PG_BIN: /usr/lib/postgresql/18/bin
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2  # the PR merge commit and its base parent
+      # Integration-owned mutants need PostgreSQL; run them when their code, their
+      # owning tests or the gate changed.
+      - name: Which mutants does this change touch?
+        id: scope
+        run: |
+          changed="$(git diff --name-only HEAD^1 HEAD)"
+          echo "$changed"
+          pattern='^(backend/src/bfx_funding_bot/modules/execution/safety/hard_guards\.py|backend/src/bfx_funding_bot/modules/ledger/_internal/journal\.py|backend/tests/integration/test_capital_command_boundary\.py|backend/tests/integration/test_ledger_command_authorize\.py|backend/scripts/capital_mutation_gate\.py|\.github/workflows/capital-rules\.yml|\.github/actions/postgres-18/action\.yml)$'
+          if grep -qE "$pattern" <<< "$changed"; then
+            echo "args=--include-integration" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
       - run: uv sync --all-groups
-      - run: uv run python scripts/capital_mutation_gate.py
+      - if: steps.scope.outputs.args != ''
+        uses: ./.github/actions/postgres-18
+      - run: uv run python scripts/capital_mutation_gate.py ${{ steps.scope.outputs.args }}
 
   nightly:
     name: Nightly properties (1k) and full capital mutation gate
@@ -57,8 +85,6 @@ jobs:
         working-directory: backend
     env:
       BFX_DEPLOYMENT_ENV: ci
-      # Integration-owned mutants run their owning tests on one local PostgreSQL 18
-      # per pytest process (tests/pg_local.py), as in ci.yml.
       BFX_TEST_PG_BIN: /usr/lib/postgresql/18/bin
     steps:
       - uses: actions/checkout@v7
@@ -66,19 +92,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --all-groups
-      - name: Install PostgreSQL 18 (PGDG)
-        run: |
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-            https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          . /etc/os-release
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-common
-          sudo sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf
-          sudo apt-get install -y --no-install-recommends postgresql-18
-          "$BFX_TEST_PG_BIN/pg_ctl" --version
+      - uses: ./.github/actions/postgres-18
       # The `property` marker's nightly budget (pyproject.toml): 1k examples.
       - name: Property tests (nightly profile)
         run: uv run pytest -m "property and not integration" --hypothesis-profile=nightly -q -n auto
