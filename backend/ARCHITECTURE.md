@@ -277,11 +277,11 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 **部署（每 ~90s，由 PeriodicReconcile 在 venue reconcile 完成後呼叫）**
 
 5. `tracker.reconcile_to_total(ledger.reserved_exposure())`：把各 cell 的 in-memory 部署意圖等比例 rescale 到 **reserved（不含 realized）** 總量。
-6. `allocate_gap(target=cap, current=current_exposure)`：
-   - gap = cap − current_exposure（current_exposure = reserved + realized）；
-   - **greedy emptiest-first**：依目前各 cell 已部署量由小到大排序，先填最空的；
-   - simulation helper 每 cell 上限固定 `concentration_pct * target`，預設70%；live 則讀 canonical CapitalBudget，不使用此 target/cap helper；
-   - 低於 `effective_min_usdt = ceil(150 * 1.02) = 153` USDT 的零頭（dust）丟棄；總分配 ≤ gap，全域 cap 永不超過。
+6. `allocate_capital(views=..., min_fill=...)`（`deployment/sizing.py`）：
+   - `views` 是同一 symbol 每個 active cell 在同一 session 讀出的 `CapitalAvailable`；applied policy、basis token 或 `spendable` 不一致即整個 symbol 不分配；
+   - **emptiest-first**：依各 cell 的 `cell_exposure` 由小到大，先填最空的；
+   - 每筆上限是 `budget.max_new_offer`（policy 設了 `max_offer_amount` 時再取較小者），金額向下量化成 venue 金額；總分配 ≤ `spendable`；
+   - `min_fill` 取自 funding rule 的 `submit_amount`，低於它的丟棄。
 7. 逐 fill：讀 `get_active(cell_id)`（須 POST 且未過 ~65min TTL，過期則跳過）→ 讀取同一 symbol、**exact `period_days`** 與所需 amount 的 `MarketSnapshot` → `SafetyGuardChain.evaluate` → `ExecutionEligibility.prepare`。scalar ticker 僅可作 telemetry，不能為 period-correct pricing 提供證據。
 
 7b. **Reprice sweep（E1）**：allocation 前，對每個 symbol 比對 venue snapshot 的 resting offers 與現行 active quote：offer rate 高於最高 active quote rate ×(1+`BFX_REPRICE_TOLERANCE_PCT`) 且齡 ≥ `BFX_REPRICE_MIN_AGE_S` → `executor.cancel`（每 tick ≤ `BFX_REPRICE_MAX_CANCELS_PER_TICK` 筆；`BFX_REPRICE_ENABLED=false` 時僅 log `reprice_would_cancel`）。release 由 WS foc / 下次 reconcile 收斂，釋放資金下一 tick 以新 quote 重掛。無 active quote 的 symbol 不砍（resting 高價單留作 spike option）。**參考價**由 `BFX_REPRICE_REFERENCE` 決定：`quote`（預設）＝該 symbol active quote 最高 rate；`book`＝以 `PeriodPricer` 對當下 exact-period book、同期限、該 offer 剩餘金額重定價，多個 quote 取最高，book 或對應期限 quote 不可用時不砍——送單價本來就由 book 定，參考價用 signal quote 會在市場沒動時把合法價位砍掉（live 自 2026-09-27 起用 `book`，見 `deploy/vm/live.env`）。
@@ -767,7 +767,7 @@ credential vault 解密。public read model 另以明確的
 - **I-CAP canonical capital authority**：每 account/environment/symbol 獨立計算。A=venue available，L=尚未證明反映於 snapshot 的 durable commitments，R=applied reserve，T=canonical available+offers+lent（去重），E_cell=該 cell 的 offers + unreflected commitments + 歸屬該 cell 的 active credits。credit 的歸屬在觀測接受時決定並寫進 basis（`accepted_capital_basis_credit_cell`），authorization read 只查表、不問 venue（`ledger/_internal/basis.py`）：以 (symbol, period, MTS_OPENING) 分組 active credits/loans（rate 精度與 trade 不同，loan 會轉成新 id／拆分金額的 credits，但 MTS_OPENING 不變）：(1) **trade**——該觀測自己的 funding trades 中 MTS_CREATE 等於該 opening（同 symbol/period）者，OFFER_ID → provenance → attempt 的 cell，組內每筆都計入所有這些 cell；(2) **carry**——上一個 accepted basis 已歸屬的同一組沿用（按組而非 id）；(3) **recent fill**——尚無 trade 也無 carry 的新 credit，歸給本觀測可見、可能產生它的我方成交（同 symbol、金額 ≤ 成交量、offer 建立不晚於 opening），候選有多個 cell 就每個都計入。新 opening 沒有 trades 涵蓋時該 symbol 以 `trades_range_uncovered` block。都不成立的是 unattributed credits（U）：只在 T 算一次、不計入任何 cell；外來 offer（D2）不進 T 也不進 E_cell；未知 attribution 不捏造 ownership。
 - **I-SP spendable**：`spendable=max(0,A-L-R)`；每 tick 多 cells 共用此 pool。planner、command admission、status 共用 evaluator；command gate 在 scope lock 與同一 transaction 內以 CAS 重驗 query、clock、basis 與 policy head、重算預算並跑 guard，才 insert attempt，不靠 in-memory tracker 授權。
 - **I-CC concentration**：`cell_limit=max(0,T-R)*0.70`，`cell_headroom=max(0,cell_limit-E_cell)`，`new_offer_amount≤min(spendable,cell_headroom)`；單一 active cell 也固定70%。reserve 增加或資金下降不召回貸款，只阻擋超限新單。金額向下量化並通過 adapter minimum/precision；不足 minimum 就 block，不增加金額跨越 headroom。
-- **歷史／simulation 說明**：舊 `allocate_gap`、reserved-only tracker rescale、固定 cap 與153 dust threshold 不是 live authority；`0d29fc8` 的單 active cell100% relaxation 已移除。相關歷史及 G3 未通過結果保留，不作新命令授權。
+- **歷史／simulation 說明**：舊 `allocate_gap`（已刪除）、reserved-only tracker rescale、固定 cap 與153 dust threshold 不是 live authority；`0d29fc8` 的單 active cell100% relaxation 已移除。相關歷史及 G3 未通過結果保留，不作新命令授權。
 - **I-BOOK original decision validity**：READY 綁定定價所用 immutable book snapshot、symbol、sequence/checksum consistency 與 provider freshness bound。account lock／identity hash／guard 等待完成後以 current clock 重查，adapter 在 request 前再檢查；失效落 durable `not_sent`，保留 attempt，不用另一份新 book 偷換原價格，不自動重送。
 - **I-WAI write-ahead attempt**：transaction 1 insert attempt → REST（唯一非事務邊界）→ transaction 2 insert transport outcome；crash 於中間留下無 outcome 的 attempt，下一個 cycle 的 `close_dangling` 記成 `unknown`，絕不重送。transaction 永不跨 REST call。
 - **I-IDEM insert-once**：journal 與觀測表由 trigger 拒絕 UPDATE／DELETE；outcome 與 resolution 以 PK／unique 限首次寫入，重複寫入擲 `OutcomeAlreadyRecorded`／`ResolutionAlreadyRecorded` 而不是當成冪等。

@@ -40,8 +40,8 @@ class CellDeploymentTracker:
         Realized credits are committed to the venue and cannot be attributed to
         any specific cell. Including them in the rescale factor (reserved+realized
         / sum) would produce factor > 1, inflating per-cell intent past
-        cap_per_cell and causing allocate_gap to compute negative headroom —
-        silently starving that cell until the next boot.
+        cap_per_cell and leaving that cell negative headroom — silently
+        starving it until the next boot.
 
         When our offer fills: reserved drops (offer consumed), so the cell's
         tracked intent shrinks proportionally — correct behaviour.

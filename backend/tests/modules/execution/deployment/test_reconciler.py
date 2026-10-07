@@ -1290,7 +1290,7 @@ async def test_independent_per_symbol_gap_pools():
 
 # ---------------------------------------------------------------------------
 # E1: stale-offer reprice sweep (execution layer). Cancel wiring runs BEFORE
-# allocate_gap so freed exposure is visible to the reconciler's own reserved
+# allocation so freed exposure is visible to the reconciler's own reserved
 # read next tick (release is reconciled elsewhere — WS foc / next reconcile —
 # single-writer ledger; this sweep never touches ledger/tracker/position).
 # ---------------------------------------------------------------------------
