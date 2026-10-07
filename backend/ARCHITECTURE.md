@@ -261,7 +261,6 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 **無聲地**變成「全部擋掉」——2026-09-20 即如此（`capital_policy` 2.31s vs 2.0s 預算，
 每張單被擋，第一個訊號就是全面阻斷）。因此 guard 用掉 `GUARD_EVAL_WARN_FRACTION`
 預算即記錄 `guard_slow` 並**仍放行**；timeout 是病態偵測，不是正確性邊界。
-以下舊 gap/tracker 步驟僅說明 simulation helper／歷史演算法，不是 live 金額權限。
 
 逐步流程（一個完整 decision-to-redeploy 週期）：
 
@@ -276,15 +275,17 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 **部署（每 ~90s，由 PeriodicReconcile 在 venue reconcile 完成後呼叫）**
 
-5. `tracker.reconcile_to_total(ledger.reserved_exposure())`：把各 cell 的 in-memory 部署意圖等比例 rescale 到 **reserved（不含 realized）** 總量。
-6. `allocate_capital(views=..., min_fill=...)`（`deployment/sizing.py`）：
-   - `views` 是同一 symbol 每個 active cell 在同一 session 讀出的 `CapitalAvailable`；applied policy、basis token 或 `spendable` 不一致即整個 symbol 不分配；
-   - **emptiest-first**：依各 cell 的 `cell_exposure` 由小到大，先填最空的；
-   - 每筆上限是 `budget.max_new_offer`（policy 設了 `max_offer_amount` 時再取較小者），金額向下量化成 venue 金額；總分配 ≤ `spendable`；
-   - `min_fill` 取自 funding rule 的 `submit_amount`，低於它的丟棄。
-7. 逐 fill：讀 `get_active(cell_id)`（須 POST 且未過 ~65min TTL，過期則跳過）→ 讀取同一 symbol、**exact `period_days`** 與所需 amount 的 `MarketSnapshot` → `SafetyGuardChain.evaluate` → `ExecutionEligibility.prepare`。scalar ticker 僅可作 telemetry，不能為 period-correct pricing 提供證據。
+`DeploymentReconciler.deploy`（`deployment/reconciler.py`）對每個設定的 symbol 依序：
 
-7b. **Reprice sweep（E1）**：allocation 前，對每個 symbol 比對 venue snapshot 的 resting offers 與現行 active quote：offer rate 高於最高 active quote rate ×(1+`BFX_REPRICE_TOLERANCE_PCT`) 且齡 ≥ `BFX_REPRICE_MIN_AGE_S` → `executor.cancel`（每 tick ≤ `BFX_REPRICE_MAX_CANCELS_PER_TICK` 筆；`BFX_REPRICE_ENABLED=false` 時僅 log `reprice_would_cancel`）。release 由 WS foc / 下次 reconcile 收斂，釋放資金下一 tick 以新 quote 重掛。無 active quote 的 symbol 不砍（resting 高價單留作 spike option）。**參考價**由 `BFX_REPRICE_REFERENCE` 決定：`quote`（預設）＝該 symbol active quote 最高 rate；`book`＝以 `PeriodPricer` 對當下 exact-period book、同期限、該 offer 剩餘金額重定價，多個 quote 取最高，book 或對應期限 quote 不可用時不砍——送單價本來就由 book 定，參考價用 signal quote 會在市場沒動時把合法價位砍掉（live 自 2026-09-27 起用 `book`，見 `deploy/vm/live.env`）。
+5. **停止與不確定**：account HALTED 或該幣別 applied policy `enabled=false` → 撤掉本 bot 在該 symbol 的受管 offer，不送單（`_pull_if_stopped`）。有 open UNKNOWN（`SafetyGuardChain.evaluate_before_sizing`，或沒有該 hook 時讀 uncertainty reader）→ 不送單。
+6. **定量**：active cell ＝ 該 symbol 中 `get_active(cell_id)` 有 quote 的 cell（須 POST 且未過 TTL）。讀 funding rule；在同一個 session 為每個 active cell 讀 `CapitalAvailable`（任一 `CapitalBlocked` → 該 symbol 不送單，可對應的 reason 會 trip protection）與使用中的金額 fingerprint；`min_fill = submit_amount(...)`；`allocate_capital(views=..., min_fill=...)`（`deployment/sizing.py`）：
+   - 各 view 的 applied policy、basis token 與 `spendable` 必須一致，否則該 symbol 不分配；
+   - **emptiest-first**：依各 cell 的 `cell_exposure` 由小到大，先填最空的；
+   - 每筆上限是 `budget.max_new_offer`（policy 設了 `max_offer_amount` 時再取較小者），金額向下量化成 venue 金額；總分配 ≤ `spendable`；低於 `min_fill` 的丟棄。
+7. 定量後、送單前跑 reprice sweep（見 7b）；沒有 fill 則換下一個 symbol。
+7a. 逐 fill：（無 pre-sizing hook 時）重查 uncertainty → 重讀 `get_active(cell_id)`（過期則跳過）→ `choose_fingerprinted_amount` 選出不與使用中 fingerprint 衝突的金額（選不到則跳過）→ `SafetyGuardChain.evaluate` → 讀取該 symbol 的 book snapshot，以 `PeriodPricer` 對 **exact `period_days`** 定價（optimizer policy 另算候選，見 7c-ii）→ `ExecutionGate.prepare`（見 7c）→ `executor.submit`。只有 `acknowledged` 結果會 `tracker.record_deploy`；`CellDeploymentTracker` 不參與授權。scalar ticker 僅可作 telemetry，不能為 period-correct pricing 提供證據。
+
+7b. **Reprice sweep（E1）**：定量後、送單前，對每個 symbol 比對 venue snapshot 的 resting offers 與現行 active quote：offer rate 高於最高 active quote rate ×(1+`BFX_REPRICE_TOLERANCE_PCT`) 且齡 ≥ `BFX_REPRICE_MIN_AGE_S` → `executor.cancel`（每 tick ≤ `BFX_REPRICE_MAX_CANCELS_PER_TICK` 筆；`BFX_REPRICE_ENABLED=false` 時僅 log `reprice_would_cancel`）。release 由 WS foc / 下次 reconcile 收斂，釋放資金下一 tick 以新 quote 重掛。無 active quote 的 symbol 不砍（resting 高價單留作 spike option）。**參考價**由 `BFX_REPRICE_REFERENCE` 決定：`quote`（預設）＝該 symbol active quote 最高 rate；`book`＝以 `PeriodPricer` 對當下 exact-period book、同期限、該 offer 剩餘金額重定價，多個 quote 取最高，book 或對應期限 quote 不可用時不砍——送單價本來就由 book 定，參考價用 signal quote 會在市場沒動時把合法價位砍掉（live 自 2026-09-27 起用 `book`，見 `deploy/vm/live.env`）。
 
 7c. **Execution eligibility（fail-closed）**：snapshot 必須具備交易所交付的**完整 book baseline**（WS subscribe 時的 snapshot，或一次成功的 REST reconcile——兩者都是同一個交易所的整本 book，地位相同）、自該 baseline 以來**未偵測到 sequence gap 或 checksum mismatch**、交易所最後一次確認（update／`cs`／heartbeat）在 `BFX_BOOK_MAX_AGE_SECONDS` 內、symbol 相符、存在 exact period level，且該 side 的絕對 depth 足以覆蓋 amount。任一條件不足，或 model/safety/audit 不可用，皆產生 `BlockedExecution`／`NoRecommendation` 並不送單；book 不可用時 reason 必須指明是 `book_not_initialized`／`book_sequence_invalid`／`book_checksum_invalid`／`book_stale` 中的哪一種，不得塌縮成單一值（塌縮正是 checksum 缺陷被誤讀成過期的原因）。不得重用 signal quote、ticker 值或 linear estimate。`book_guarded` 以 exact-period book 價格送單；`optimizer_shadow` 只記錄候選與評分，仍送 book-guarded rate；`optimizer_live` 僅在 empirical evidence、fee 與其餘依賴全部有效時才可選擇 optimizer rate。
 
