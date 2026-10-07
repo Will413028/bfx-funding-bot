@@ -62,7 +62,6 @@ from bfx_funding_bot.modules.execution.deployment.standing_quote import (
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
-from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.emit import emit_order_submit
 from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.protocols import (
@@ -160,7 +159,6 @@ class DeploymentReconciler:
         self,
         *,
         store: StandingQuoteStore,
-        tracker: CellDeploymentTracker,
         safety_chain: _SafetyChainProtocol,
         executor: ExecutorPort,
         account_ctx: AccountContext,
@@ -195,7 +193,6 @@ class DeploymentReconciler:
         # disabled, the managed offers there converge to none (lending envelope
         # D3/D4); None on paper/shadow.
         self._managed_sweep = managed_sweep
-        self._tracker = tracker
         self._safety = safety_chain
         self._executor = executor
         self._ctx = account_ctx
@@ -618,11 +615,11 @@ class DeploymentReconciler:
                             cell=cell_id, symbol=symbol, amount=amount, reason=repr(exc),
                         )
                     continue
-                # Only an explicit ACK may advance the in-memory deployment
-                # tracker.  REJECTED/NOT_SENT are capital-neutral; UNKNOWN is
-                # pessimistic and must remain blocked until reconcile evidence
-                # resolves it.  In particular, UNKNOWN must never fall through
-                # the old string-status success branch.
+                # Only an explicit ACK is recorded as submitted.  REJECTED/NOT_SENT
+                # are capital-neutral; UNKNOWN is pessimistic and must remain
+                # blocked until reconcile evidence resolves it.  In particular,
+                # UNKNOWN must never fall through the old string-status success
+                # branch.
                 if result.outcome_kind is SubmitOutcomeKind.UNKNOWN:
                     log.error(
                         "deployment_submit_unknown cell=%s amount=%s reason=%s",
@@ -659,7 +656,6 @@ class DeploymentReconciler:
                             )
                     await self._emit_submit(cell_id, outcome, result, reconcile_id)
                     continue
-                self._tracker.record_deploy(cell_id, amount)
                 log.info("deployment_submitted cell=%s amount=%s", cell_id, amount)
                 if self._attempts is not None:
                     self._attempts.record_submitted(

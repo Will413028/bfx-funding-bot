@@ -65,7 +65,6 @@ from bfx_funding_bot.modules.execution.deployment.standing_quote import Standing
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
-from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
@@ -633,7 +632,6 @@ async def build_daemon(
         scope=capital_scope,
         session_factory=session_factory,
         store=quote_store,
-        tracker=CellDeploymentTracker(),
         safety_chain=safety_chain,
         executor=wrapped_executor,
         account_ctx=account_ctx,
