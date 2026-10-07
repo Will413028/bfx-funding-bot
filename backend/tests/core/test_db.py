@@ -1,38 +1,61 @@
 """Tests for db._prepare_engine_kwargs — D2 async URL transform."""
+import ssl
+from datetime import UTC, datetime, timedelta
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+
 from bfx_funding_bot.core.db import _prepare_engine_kwargs
+
+
+def _self_signed_ca_pem() -> bytes:
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "bfx-test-ca")])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name).issuer_name(name).public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now).not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM)
 
 
 class TestAsyncUrlTransform:
     def test_scheme_rewritten(self):
-        kw = _prepare_engine_kwargs("postgresql://u:p@h/db?sslmode=require")
-        assert str(kw["url"]).startswith("postgresql+asyncpg://")
+        kw = _prepare_engine_kwargs("postgresql://u:p@h/db")
+        assert str(kw["url"]) == "postgresql+asyncpg://u:p@h/db"
 
-    def test_sslmode_removed_from_url(self):
-        kw = _prepare_engine_kwargs("postgresql://u:p@h/db?sslmode=require")
-        assert "sslmode" not in str(kw["url"])
-        assert "ssl" in kw["connect_args"]  # SSL context lives in connect_args
+    def test_no_sslmode_is_plaintext_not_opportunistic_tls(self):
+        assert _prepare_engine_kwargs("postgresql://u:p@h/db")["connect_args"] == {"ssl": False}
+        kw = _prepare_engine_kwargs("postgresql://u:p@h/db?sslmode=disable")
+        assert (str(kw["url"]), kw["connect_args"]) == ("postgresql+asyncpg://u:p@h/db", {"ssl": False})
 
-    def test_channel_binding_removed(self):
-        kw = _prepare_engine_kwargs(
-            "postgresql://u:p@h/db?sslmode=require&channel_binding=require"
-        )
-        assert "channel_binding" not in str(kw["url"])
+    def test_verify_full_checks_the_chain_and_the_host_name(self):
+        kw = _prepare_engine_kwargs("postgresql://u:p@h/db?sslmode=verify-full&application_name=x")
+        ctx = kw["connect_args"]["ssl"]
+        assert isinstance(ctx, ssl.SSLContext)
+        assert (ctx.verify_mode, ctx.check_hostname) == (ssl.CERT_REQUIRED, True)
+        assert str(kw["url"]) == "postgresql+asyncpg://u:p@h/db?application_name=x"
 
-    def test_pooler_suffix_stripped(self):
-        """Neon -pooler endpoint stripped — asyncpg prepared stmt vs PgBouncer."""
-        kw = _prepare_engine_kwargs(
-            "postgresql://u:p@ep-foo-123-pooler.ap-southeast-1.aws.neon.tech/db"
-            "?sslmode=require"
-        )
-        url = str(kw["url"])
-        assert "-pooler." not in url
-        assert "ep-foo-123.ap-southeast-1.aws.neon.tech" in url
+    def test_verify_ca_checks_the_chain_but_not_the_host_name(self):
+        ctx = _prepare_engine_kwargs("postgresql://u:p@h/db?sslmode=verify-ca")["connect_args"]["ssl"]
+        assert isinstance(ctx, ssl.SSLContext)
+        assert (ctx.verify_mode, ctx.check_hostname) == (ssl.CERT_REQUIRED, False)
 
-    def test_no_pooler_no_change_to_host(self):
-        kw = _prepare_engine_kwargs(
-            "postgresql://u:p@ep-foo-123.ap-southeast-1.aws.neon.tech/db?sslmode=require"
-        )
-        assert "ep-foo-123.ap-southeast-1.aws.neon.tech" in str(kw["url"])
+    def test_sslrootcert_is_the_trust_anchor(self, tmp_path):
+        """A private CA's certificate, as libpq's sslrootcert=. Mutation: ignore the parameter."""
+        ca = tmp_path / "root.crt"
+        ca.write_bytes(_self_signed_ca_pem())
+        kw = _prepare_engine_kwargs(f"postgresql://u:p@h/db?sslmode=verify-full&sslrootcert={ca}")
+        ctx = kw["connect_args"]["ssl"]
+        assert isinstance(ctx, ssl.SSLContext)
+        assert [c["subject"] for c in ctx.get_ca_certs()] == [((("commonName", "bfx-test-ca"),),)]
+        assert "sslrootcert" not in str(kw["url"])
 
 
 class TestEnginePoolConfig:
@@ -57,33 +80,10 @@ class TestMakeAsyncEngineFromUrl:
     engine construction path so daemon + make_engine share one source of truth.
     """
 
-    def test_handles_raw_neon_libpq_url(self):
-        """Raw Neon dashboard URL: scheme rewritten, sslmode + channel_binding
-        stripped, -pooler suffix removed, pool config applied."""
+    def test_a_libpq_url_gets_the_transform_and_the_pool_config(self):
         from bfx_funding_bot.core.db import make_async_engine_from_url
-        url = (
-            "postgresql://u:p@ep-foo-pooler.ap-southeast-1.aws.neon.tech/db"
-            "?sslmode=require&channel_binding=require"
-        )
-        engine = make_async_engine_from_url(url)
-        u = str(engine.url)
-        assert u.startswith("postgresql+asyncpg://")
-        assert "sslmode" not in u
-        assert "channel_binding" not in u
-        assert "-pooler." not in u
+        engine = make_async_engine_from_url("postgresql://u:p@h/db?sslmode=disable")
+        assert str(engine.url).startswith("postgresql+asyncpg://")
+        assert "sslmode" not in str(engine.url)
         assert engine.pool._pre_ping is True
         assert engine.pool._recycle == 600
-
-    def test_handles_asyncpg_scheme_with_libpq_query(self):
-        """Phase 4.1 partially-transformed URL: asyncpg scheme already set
-        but query still carries libpq sslmode/channel_binding. Helper still
-        strips them so asyncpg connect() doesn't crash on unknown kwargs."""
-        from bfx_funding_bot.core.db import make_async_engine_from_url
-        url = (
-            "postgresql+asyncpg://u:p@ep-foo.region.aws.neon.tech/db"
-            "?sslmode=require&channel_binding=require"
-        )
-        engine = make_async_engine_from_url(url)
-        u = str(engine.url)
-        assert "sslmode" not in u
-        assert "channel_binding" not in u
