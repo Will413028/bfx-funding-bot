@@ -118,9 +118,8 @@ def make_async_engine_from_url(raw_url: str) -> AsyncEngine:
     and the D3 pool config (`pool_pre_ping=True`, `pool_recycle=600`).
 
     Before unification daemon.py:614 was a raw `create_async_engine(url)`
-    call from Phase 4.1 (`26b059d`); 5/21 chaos recovery rebuilt the Koyeb
-    DATABASE_URL from Neon dashboard libpq form and asyncpg crashed at
-    connect time with `TypeError(sslmode)`.
+    call from Phase 4.1 (`26b059d`); a DATABASE_URL in libpq form (with
+    `sslmode`) crashed asyncpg at connect time with `TypeError(sslmode)`.
 
     Non-Postgres URLs (e.g. `sqlite+aiosqlite://` used by tests) bypass the
     transform — `_prepare_engine_kwargs` is Postgres-specific and would

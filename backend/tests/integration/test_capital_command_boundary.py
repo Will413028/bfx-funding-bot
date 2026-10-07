@@ -593,7 +593,7 @@ async def test_stopped_reconcile_never_reposts(gate_stack, stop):
     rig.venue.received.clear()
     await rig.halt.transition(stop, cause="operator", reason="retained startup halt", actor="test")
     before = await clock_revision(gate_stack)
-    rec, _, _, _ = _build(exposure=Decimal("0"), quotes=[_post_quote("fUST_a30")],
+    rec, _, _ = _build(exposure=Decimal("0"), quotes=[_post_quote("fUST_a30")],
         executor=rig.gate, safety=stop_chain(rig.halt), capital_ports=planner_ports(gate_stack),
         canceller=rig.gate, reprice=_REPRICE)
     rec._ctx = rig.ctx

@@ -31,7 +31,6 @@ from bfx_funding_bot.modules.execution.deployment.standing_quote import (
     StandingQuote,
     StandingQuoteStore,
 )
-from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -74,11 +73,12 @@ async def test_planner_requires_current_adapter_amount_evidence(fault):
     assert venue.ready_submissions == []
 
 
-def _simulated_capital(ledger, tracker, *, totals=None, reserves=None):
+def _simulated_capital(ledger, *, cell_exposure=None, totals=None, reserves=None):
     """Explicit simulated policies/snapshots; never installed by application code.
 
     One object answers the planner's capital, managed-offer and uncertainty
     reads (``_capital_ports``); uncertainty is the fake ledger's.
+    ``cell_exposure`` is each cell's existing exposure (absent cells hold 0).
     """
     from bfx_funding_bot.modules.ledger import CapitalAvailable
     from bfx_funding_bot.modules.trading import (
@@ -89,6 +89,7 @@ def _simulated_capital(ledger, tracker, *, totals=None, reserves=None):
     )
     totals = totals or {"fUST": D("570")}
     reserves = reserves or {"fUST": D("3")}
+    cell_exposure = cell_exposure or {}
 
     @asynccontextmanager
     async def transaction():
@@ -108,7 +109,7 @@ def _simulated_capital(ledger, tracker, *, totals=None, reserves=None):
             shared = max(D("0"), exposure - ledger.reserved_exposure(symbol))
             # Unattributed credits (shared) are in T only, never in a cell's exposure.
             snapshot = CapitalSnapshot(available, D("0"), max(total + reserve, available),
-                                       tracker.deployed(cell_id))
+                                       cell_exposure.get(cell_id, D("0")))
             applied = AppliedPolicy(scope.account_id, scope.environment, symbol, 1,
                                     "explicit-test-policy", UUID(int=1), policy)
             return CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot), shared,
@@ -225,11 +226,21 @@ class _FakeExecutor:
     def __init__(self) -> None:
         self.submitted: list = []
         self.ready_submissions: list[ReadyToSubmit] = []
+        self.cell_ids: list[str | None] = []
 
     async def submit(self, decision, ctx) -> SubmittedOrder:
         self.ready_submissions.append(decision)
         self.submitted.append(decision.decision)
+        self.cell_ids.append(ctx.capital_cell_id)
         return SubmittedOrder(outcome=SubmitAcknowledged("x"))
+
+    def acknowledged(self, cell_id: str) -> Decimal:
+        """Sum of the acknowledged amounts submitted for ``cell_id``."""
+        return sum(
+            (d.offer_amount_usdt for d, c in zip(self.submitted, self.cell_ids, strict=True)
+             if c == cell_id),
+            D("0"),
+        )
 
 
 class _Audit:
@@ -476,7 +487,6 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
         store.update(q)
-    tracker = CellDeploymentTracker()
     ex = executor or _FakeExecutor()
     safety = safety if safety is not None else _FakeSafety(allowed=safety_allowed)
     # cap override: only the ladder observe-log test needs a gap large enough
@@ -495,8 +505,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
     )
     rec = DeploymentReconciler(
         **(capital_ports or _capital_ports(_simulated_capital(
-            fixture_ledger, tracker, totals={"fUST": cap if cap is not None else D("570")}))),
-        store=store, tracker=tracker,
+            fixture_ledger, totals={"fUST": cap if cap is not None else D("570")}))),
+        store=store,
         safety_chain=safety, executor=ex, account_ctx=ctx, cells=cells,
         funding_rules=FixedRules(),
         clock=lambda: 1_000,
@@ -517,7 +527,7 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         optimizer_fee_rate=optimizer_fee_rate,
         **optimizer_kwargs,
     )
-    return rec, ex, tracker, safety
+    return rec, ex, safety
 
 
 def _fill_evidence() -> FillModelEvidence:
@@ -544,7 +554,7 @@ def test_reconciler_rejects_mismatched_execution_gate_policy() -> None:
 
 
 async def test_unknown_symbol_is_fail_closed_and_never_resubmitted(caplog) -> None:
-    rec, executor, _tracker, _safety = _build(
+    rec, executor, _safety = _build(
         exposure=D("0"),
         quotes=[_post_quote("fUST_a30")],
         uncertain_symbols={"fUST"},
@@ -561,7 +571,7 @@ async def test_db_pre_sizing_allow_is_authoritative_over_the_uncertainty_reader(
     """Once the durable pre-sizing guard allows, the planner submits: it never second-guesses
     PostgreSQL with another uncertainty read in the same tick."""
     ledger = _FakeLedger(D("0"), uncertain_symbols={"fUST"})
-    rec, executor, _tracker, _safety = _build(
+    rec, executor, _safety = _build(
         exposure=D("0"),
         quotes=[_post_quote("fUST_a30")],
         safety=_AuthoritativePreSizingSafety(),
@@ -594,7 +604,7 @@ async def test_unknown_opens_gate_for_remaining_cells_in_same_tick() -> None:
             return SubmittedOrder(outcome=SubmitAcknowledged("unexpected"))
 
     executor = _UnknownThenAck()
-    rec, _executor, _tracker, _safety = _build(
+    rec, _executor, _safety = _build(
         exposure=D("0"),
         quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
         executor=executor,
@@ -618,7 +628,7 @@ async def test_unknown_opens_gate_for_remaining_cells_in_same_tick() -> None:
 async def test_block_reason_names_which_book_fault_stopped_the_candidate(unavailable, expected):
     """One collapsed reason is what hid a permanent checksum fault as staleness."""
     audit = _Audit()
-    rec, executor, _tracker, _safety = _build(
+    rec, executor, _safety = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")],
         book_provider=_SnapshotProvider(None, unavailable), audit=audit,
     )
@@ -631,7 +641,7 @@ async def test_block_reason_names_which_book_fault_stopped_the_candidate(unavail
 
 async def test_book_failure_never_submits_original_quote():
     audit = _Audit()
-    rec, executor, _tracker, _safety = _build(
+    rec, executor, _safety = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")],
         book_provider=_SnapshotProvider(None), audit=audit,
     )
@@ -655,7 +665,7 @@ async def test_reconciler_releases_only_audited_ready_to_executor_and_event():
             return await super().submit(ready, ctx)
 
     executor = _AuditAwareExecutor()
-    rec, _executor, _tracker, _safety = _build(
+    rec, _executor, _safety = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")],
         executor=executor, event_sink=sink, audit=audit,
     )
@@ -674,7 +684,7 @@ async def test_optimizer_shadow_records_unavailable_model_without_blocking_book_
     """Shadow model failure is observable but cannot change deploy eligibility or rate."""
     audit = _Audit()
     sink = _CapturingSink()
-    rec, executor, _tracker, _safety = _build(
+    rec, executor, _safety = _build(
         exposure=D("370"),
         quotes=[_post_quote("fUST_p2")],
         book_provider=_SnapshotProvider(_ask_snapshot()),
@@ -704,7 +714,7 @@ async def test_optimizer_shadow_emits_unavailable_event_for_canonical_reason(
 ) -> None:
     audit = _Audit()
     sink = _CapturingSink()
-    rec, executor, _tracker, _safety = _build(
+    rec, executor, _safety = _build(
         exposure=D("370"),
         quotes=[_post_quote("fUST_p2")],
         book_provider=_SnapshotProvider(_ask_snapshot()),
@@ -730,7 +740,7 @@ async def test_optimizer_shadow_emits_unavailable_event_for_canonical_reason(
 async def test_optimizer_live_uses_selected_exact_period_rate_only_after_audit():
     """Live optimizer selection remains behind the existing audit-before-submit gate."""
     audit = _Audit()
-    rec, executor, _tracker, _safety = _build(
+    rec, executor, _safety = _build(
         exposure=D("370"),
         quotes=[_post_quote("fUST_p2")],
         book_provider=_SnapshotProvider(_ask_snapshot()),
@@ -759,7 +769,7 @@ async def test_optimizer_live_optimizer_failure_is_audited_blocked_without_submi
 ) -> None:
     """Valid fill evidence cannot turn an optimizer failure into signal fallback."""
     audit = _Audit()
-    rec, executor, _tracker, _safety = _build(
+    rec, executor, _safety = _build(
         exposure=D("370"),
         quotes=[_post_quote("fUST_p2")],
         book_provider=_SnapshotProvider(_ask_snapshot()),
@@ -786,7 +796,7 @@ async def test_optimizer_live_optimizer_failure_is_audited_blocked_without_submi
 async def test_optimizer_live_structural_evidence_is_blocked_without_submit() -> None:
     """Gate-shaped non-canonical evidence cannot become a live optimizer fallback."""
     audit = _Audit()
-    rec, executor, _tracker, _safety = _build(
+    rec, executor, _safety = _build(
         exposure=D("370"),
         quotes=[_post_quote("fUST_p2")],
         book_provider=_SnapshotProvider(_ask_snapshot()),
@@ -809,7 +819,7 @@ async def test_optimizer_live_structural_evidence_is_blocked_without_submit() ->
 async def test_optimizer_shadow_keeps_book_guarded_rate_when_optimizer_selects() -> None:
     """A valid shadow result is observational; the existing book price is submitted."""
     audit = _Audit()
-    rec, executor, _tracker, _safety = _build(
+    rec, executor, _safety = _build(
         exposure=D("370"),
         quotes=[_post_quote("fUST_p2")],
         book_provider=_SnapshotProvider(_ask_snapshot()),
@@ -831,7 +841,7 @@ async def test_optimizer_shadow_keeps_book_guarded_rate_when_optimizer_selects()
 async def test_optimizer_reconciler_passes_exact_period_taker_candidate() -> None:
     """TAKER is a real exact-period candidate and is never relabeled as maker."""
     audit = _Audit()
-    rec, executor, _tracker, _safety = _build(
+    rec, executor, _safety = _build(
         exposure=D("370"),
         quotes=[_post_quote("fUST_p2")],
         book_provider=_SnapshotProvider(_bid_snapshot()),
@@ -873,7 +883,7 @@ async def test_optimizer_live_does_not_fabricate_maker_for_signal_semantics(
 ) -> None:
     """Raise and signal-floor pricing have no exact-period maker candidate."""
     audit = _Audit()
-    rec, executor, _tracker, _safety = _build(
+    rec, executor, _safety = _build(
         exposure=D("370"),
         quotes=[_post_quote("fUST_p2")],
         book_provider=_SnapshotProvider(snapshot),
@@ -894,7 +904,7 @@ async def test_optimizer_live_does_not_fabricate_maker_for_signal_semantics(
 
 
 async def test_deploys_gap_to_active_cell():
-    rec, ex, tracker, _ = _build(exposure=D("370"), quotes=[_post_quote("fUST_a30")])
+    rec, ex, _ = _build(exposure=D("370"), quotes=[_post_quote("fUST_a30")])
     await rec.deploy()
     assert len(ex.submitted) == 1
     d = ex.submitted[0]
@@ -902,54 +912,59 @@ async def test_deploys_gap_to_active_cell():
     assert _planned(d.offer_amount_usdt, "200")   # gap 200, single active, under cap
     assert d.offer_rate == Decimal("0.00012")
     assert d.offer_duration_days == 2
-    assert _planned(tracker.deployed("fUST_a30"), "200")
+    assert _planned(ex.acknowledged("fUST_a30"), "200")
 
 
 async def test_no_active_quote_no_submit():
-    rec, ex, _, _ = _build(exposure=D("0"), quotes=[])  # no quotes
+    rec, ex, _ = _build(exposure=D("0"), quotes=[])  # no quotes
     await rec.deploy()
     assert ex.submitted == []
 
 
 async def test_safety_block_skips_submit():
-    rec, ex, tracker, safety = _build(
+    rec, ex, safety = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")], safety_allowed=False,
     )
     await rec.deploy()
     assert ex.submitted == []
     assert len(safety.calls) == 1            # guard was consulted
-    assert tracker.deployed("fUST_a30") == D("0")  # not recorded on block
+    assert ex.acknowledged("fUST_a30") == D("0")  # nothing sent on block
 
 
 async def test_full_gap_no_action():
-    rec, ex, _, _ = _build(exposure=D("570"), quotes=[_post_quote("fUST_a30")])
+    rec, ex, _ = _build(exposure=D("570"), quotes=[_post_quote("fUST_a30")])
     await rec.deploy()
     assert ex.submitted == []
 
 
-async def test_submit_failure_does_not_record_intent():
+async def test_submit_exception_does_not_escape_deploy():
     class _Boom(_FakeExecutor):
+        calls = 0
+
         async def submit(self, decision, ctx):
+            self.calls += 1
             raise RuntimeError("venue 500")
 
-    rec, _ex, tracker, _ = _build(
-        exposure=D("370"), quotes=[_post_quote("fUST_a30")], executor=_Boom(),
+    boom = _Boom()
+    rec, _ex, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")], executor=boom,
     )
     await rec.deploy()  # must not raise
-    assert tracker.deployed("fUST_a30") == D("0")
+    assert boom.calls == 1
+    assert boom.acknowledged("fUST_a30") == D("0")
 
 
 async def test_two_active_cells_split_when_gap_exceeds_cap():
     # gap=570, cap_per_cell=0.70*570=399; greedy emptiest-first (tiebreak cell_id):
     # a30 -> 399 (hits cap), p2 -> 171 (remainder)
-    rec, ex, tracker, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("0"),
         quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
     )
     await rec.deploy()
     assert len(ex.submitted) == 2
-    assert _planned(tracker.deployed("fUST_a30"), "399")
-    assert _planned(tracker.deployed("fUST_p2"), "171")
+    assert _planned(ex.acknowledged("fUST_a30"), "399")
+    assert _planned(ex.acknowledged("fUST_p2"), "171")
     amounts = sorted(d.offer_amount_usdt for d in ex.submitted)
     assert len(amounts) == 2 and _planned(amounts[0], "171") and _planned(amounts[1], "399")
 
@@ -957,7 +972,7 @@ async def test_two_active_cells_split_when_gap_exceeds_cap():
 async def test_per_cell_safety_block_does_not_stop_other_cell():
     # gap=570 -> a30=399 (blocked), p2=171 (allowed); exactly one submit
     seq_safety = _SeqSafety([False, True])
-    rec, ex, tracker, safety = _build(
+    rec, ex, safety = _build(
         exposure=D("0"),
         quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
         safety=seq_safety,
@@ -965,8 +980,8 @@ async def test_per_cell_safety_block_does_not_stop_other_cell():
     await rec.deploy()
     assert len(ex.submitted) == 1
     assert _planned(ex.submitted[0].offer_amount_usdt, "171")
-    assert tracker.deployed("fUST_a30") == D("0")
-    assert _planned(tracker.deployed("fUST_p2"), "171")
+    assert ex.acknowledged("fUST_a30") == D("0")
+    assert _planned(ex.acknowledged("fUST_p2"), "171")
     assert len(safety.calls) == 2  # both cells consulted
 
 
@@ -991,20 +1006,20 @@ class _UnknownExecutor:
         )
 
 
-async def test_venue_rejected_submit_not_recorded_as_deployed():
-    # status="failed" (venue reject, no exception) must NOT record intent and
-    # must NOT count as a deployment_submitted success.
-    rec, ex, tracker, _ = _build(
+async def test_venue_rejected_submit_is_attempted_once():
+    # status="failed" (venue reject, no exception) is attempted once and must
+    # NOT count as a deployment_submitted success (see the recorder and
+    # ORDER_SUBMIT event tests below).
+    rec, ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")], executor=_RejectingExecutor(),
     )
     await rec.deploy()
     assert len(ex.submitted) == 1            # attempted once
-    assert tracker.deployed("fUST_a30") == D("0")  # but not recorded as deployed
 
 
-async def test_ambiguous_submit_not_recorded_as_deployed_or_success():
+async def test_ambiguous_submit_not_reported_as_success():
     sink = _CapturingSink()
-    rec, _ex, tracker, _ = _build(
+    rec, _ex, _ = _build(
         exposure=D("370"),
         quotes=[_post_quote("fUST_a30")],
         executor=_UnknownExecutor(),
@@ -1013,7 +1028,6 @@ async def test_ambiguous_submit_not_recorded_as_deployed_or_success():
 
     await rec.deploy()
 
-    assert tracker.deployed("fUST_a30") == D("0")
     submits = [e for e in sink.events if e["event_type"] == EventType.ORDER_SUBMIT.value]
     assert len(submits) == 1
     assert submits[0]["payload"]["status"] == "unknown"
@@ -1030,7 +1044,7 @@ async def test_ambiguous_submit_not_recorded_as_deployed_or_success():
 
 async def test_successful_submit_emits_order_submit_structured_event():
     sink = _CapturingSink()
-    rec, ex, _, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")], event_sink=sink,
     )
     await rec.deploy()
@@ -1054,7 +1068,7 @@ async def test_successful_submit_emits_order_submit_structured_event():
 
 async def test_venue_rejected_submit_emits_failed_order_submit_event():
     sink = _CapturingSink()
-    rec, _ex, tracker, _ = _build(
+    rec, _ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")],
         executor=_RejectingExecutor(), event_sink=sink,
     )
@@ -1064,7 +1078,6 @@ async def test_venue_rejected_submit_emits_failed_order_submit_event():
     assert len(submits) == 1
     assert submits[0]["payload"]["status"] == "failed"
     assert submits[0]["payload"]["is_simulated"] is False
-    assert tracker.deployed("fUST_a30") == D("0")  # reject still not deployed
 
 
 # ---------------------------------------------------------------------------
@@ -1074,18 +1087,18 @@ async def test_venue_rejected_submit_emits_failed_order_submit_event():
 async def test_clamps_deploy_to_available_minus_buffer():
     # cap gap = 570 - 406.89 = 163.11; available 150, buffer 3 -> headroom 147
     # < min_fill 153 -> sleep (the incident scenario).
-    rec, ex, tracker, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("406.89"), quotes=[_post_quote("fUST_a30")], available=D("150"),
     )
     await rec.deploy()
     assert ex.submitted == []
-    assert tracker.deployed("fUST_a30") == D("0")
+    assert ex.acknowledged("fUST_a30") == D("0")
 
 
 async def test_deploys_when_available_sufficient():
     # cap gap = 570 - 370 = 200; available 250, buffer 3 -> headroom 247 >= 200
     # -> deploy full cap gap 200.
-    rec, ex, _, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")], available=D("250"),
     )
     await rec.deploy()
@@ -1095,7 +1108,7 @@ async def test_deploys_when_available_sufficient():
 
 async def test_available_headroom_binds_below_cap_gap():
     # cap gap = 570 - 200 = 370; available 320, buffer 3 -> headroom 317 -> deploy 317.
-    rec, ex, _, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("200"), quotes=[_post_quote("fUST_a30")], available=D("320"),
     )
     await rec.deploy()
@@ -1110,7 +1123,7 @@ async def test_available_headroom_binds_below_cap_gap():
 
 async def test_canonical_spendable_limits_total_planned_amount(caplog):
     # Synthetic policy reserve=3, available=203: spendable=200 binds sizing.
-    rec, _ex, _, _ = _build(
+    rec, _ex, _ = _build(
         exposure=D("0"), quotes=[_post_quote("fUST_a30")], available=D("203"),
     )
     with caplog.at_level(logging.INFO):
@@ -1124,8 +1137,6 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     store.update(_post_quote("fUST_a30"))  # only "a30" active; "p2" idle
-    tracker = CellDeploymentTracker()
-    tracker.record_deploy("fUST_a30", D("9500"))
     ledger = _FakeLedger(
         exposure=D("8000"), reserved=D("9500"), available=D("1000000"),
     )
@@ -1135,9 +1146,10 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
         allocation_cap_usdt=D("10000"),
     )
     rec = DeploymentReconciler(
-        store=store, tracker=tracker,
+        store=store,
         safety_chain=_FakeSafety(allowed=True), executor=_FakeExecutor(),
-        **_capital_ports(_simulated_capital(ledger, tracker, totals={"fUST": D("10000")})),
+        **_capital_ports(_simulated_capital(
+            ledger, cell_exposure={"fUST_a30": D("9500")}, totals={"fUST": D("10000")})),
         account_ctx=ctx, cells=cells, funding_rules=FixedRules(),
         clock=lambda: 1_000,
         event_sink=_CapturingSink(), phase=Phase.LIVE,
@@ -1152,38 +1164,36 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
 # C1 regression: orphan realized credits must not inflate/starve cells
 # ---------------------------------------------------------------------------
 
-def _build_with_split_ledger(*, reserved, realized, quotes):
+def _build_with_split_ledger(*, reserved, realized, quotes, cell_exposure):
     """Build reconciler with explicit reserved / realized split."""
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
         store.update(q)
-    tracker = CellDeploymentTracker()
     exposure = reserved + realized
     ledger = _FakeLedger(exposure=exposure, reserved=reserved)
     ex = _FakeExecutor()
     safety = _FakeSafety(allowed=True)
     rec = DeploymentReconciler(
-        store=store, tracker=tracker,
+        store=store,
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
         funding_rules=FixedRules(),
         clock=lambda: 1_000,
-        **_capital_ports(_simulated_capital(ledger, tracker)),
+        **_capital_ports(_simulated_capital(ledger, cell_exposure=cell_exposure)),
         event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
-    return rec, ex, tracker, safety
+    return rec, ex, safety
 
 
 async def test_unattributed_credits_do_not_consume_cell_headroom():
     """Unattributed U=300 counts in T only; the cell keeps its own headroom."""
-    # Pre-seed the tracker with the open offer we own
-    rec, ex, tracker, _ = _build_with_split_ledger(
+    # The cell already owns a $100 open offer.
+    rec, ex, _ = _build_with_split_ledger(
         reserved=D("100"), realized=D("300"),
         quotes=[_post_quote("fUST_a30")],
+        cell_exposure={"fUST_a30": D("100")},
     )
-    # Simulate the tracker already recorded our $100 open offer
-    tracker.record_deploy("fUST_a30", D("100"))
     await rec.deploy()
     # E_cell is only the owned 100: headroom 399-100=299, so cash (173-3=170)
     # binds. Under the old rule 100+U=400 > 399 left the 170 idle.
@@ -1198,7 +1208,7 @@ async def test_unattributed_credits_do_not_consume_cell_headroom():
 
 async def test_decision_carries_cell_symbol():
     safety = _FakeSafety(allowed=True)
-    rec, ex, _, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")], safety=safety,
     )
     await rec.deploy()
@@ -1215,16 +1225,15 @@ async def test_headroom_uses_cell_symbol_available():
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     store.update(_post_quote("fUST_a30"))
-    tracker = CellDeploymentTracker()
     ledger = _FakeLedger(
         exposure=D("370"), available=D("0"),
         available_by_symbol={"fUST": D("250")},
     )
     ex = _FakeExecutor()
     rec = DeploymentReconciler(
-        store=store, tracker=tracker,
+        store=store,
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=_ctx(),
-        **_capital_ports(_simulated_capital(ledger, tracker)),
+        **_capital_ports(_simulated_capital(ledger)),
         cells=cells, funding_rules=FixedRules(),
         clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
@@ -1248,7 +1257,6 @@ def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
         quotes = [_post_quote(c.cell_id) for c in cells]
     for q in quotes:
         store.update(q)
-    tracker = CellDeploymentTracker()
     ex = executor or _FakeExecutor()
     safety = safety if safety is not None else _FakeSafety(allowed=True)
     ledger = _FakeLedger(
@@ -1257,21 +1265,21 @@ def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
         available_by_symbol=available_by_symbol,
     )
     rec = DeploymentReconciler(
-        store=store, tracker=tracker,
+        store=store,
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
         funding_rules=FixedRules(),
-        **_capital_ports(_simulated_capital(ledger, tracker, totals=caps, reserves=buffers)),
+        **_capital_ports(_simulated_capital(ledger, totals=caps, reserves=buffers)),
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
         phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
-    return rec, ex, tracker, safety
+    return rec, ex, safety
 
 
 async def test_independent_per_symbol_gap_pools():
     cells = [_cell("fUST", "a30"), _cell("fUSD", "a30")]   # TWO symbols
-    rec, ex, _tracker, _ = _build_multi(
+    rec, ex, _ = _build_multi(
         cells=cells,
         exposures={"fUST": D("0"), "fUSD": D("0")},
         available_by_symbol={"fUST": D("5000"), "fUSD": D("5000")},
@@ -1292,7 +1300,7 @@ async def test_independent_per_symbol_gap_pools():
 # E1: stale-offer reprice sweep (execution layer). Cancel wiring runs BEFORE
 # allocation so freed exposure is visible to the reconciler's own reserved
 # read next tick (release is reconciled elsewhere — WS foc / next reconcile —
-# single-writer ledger; this sweep never touches ledger/tracker/position).
+# single-writer ledger; this sweep never touches ledger/position).
 # ---------------------------------------------------------------------------
 
 
@@ -1321,7 +1329,7 @@ _REPRICE = RepricePolicy(
 
 async def test_sweep_cancels_stale_offer_when_enabled():
     canc = _FakeCanceller()
-    rec, _ex, _, _ = _build(
+    rec, _ex, _ = _build(
         exposure=D("570"), quotes=[_post_quote("fUST_a30")],
         canceller=canc, reprice=_REPRICE,
     )
@@ -1332,7 +1340,7 @@ async def test_sweep_cancels_stale_offer_when_enabled():
 
 async def test_sweep_observe_mode_logs_but_does_not_cancel():
     canc = _FakeCanceller()
-    rec, ex, _, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")],
         canceller=canc,
         reprice=RepricePolicy(
@@ -1347,7 +1355,7 @@ async def test_sweep_observe_mode_logs_but_does_not_cancel():
 
 async def test_sweep_no_active_quote_no_cancel():
     canc = _FakeCanceller()
-    rec, _, _, _ = _build(
+    rec, _, _ = _build(
         exposure=D("570"), quotes=[], canceller=canc, reprice=_REPRICE,
     )
     await rec.deploy(venue_offers=(_venue_offer("42", 0.001),))
@@ -1356,7 +1364,7 @@ async def test_sweep_no_active_quote_no_cancel():
 
 async def test_sweep_respects_per_tick_budget():
     canc = _FakeCanceller()
-    rec, _, _, _ = _build(
+    rec, _, _ = _build(
         exposure=D("570"), quotes=[_post_quote("fUST_a30")],
         canceller=canc,
         reprice=RepricePolicy(
@@ -1375,7 +1383,7 @@ async def test_sweep_cancel_error_does_not_block_deploy():
         async def cancel(self, **kwargs) -> None:
             raise RuntimeError("venue 500")
 
-    rec, ex, _, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")],
         canceller=_BoomCanceller(), reprice=_REPRICE,
     )
@@ -1388,7 +1396,7 @@ async def test_sweep_auth_error_propagates():
         async def cancel(self, **kwargs) -> None:
             raise ExecutorAuthError("digest invalid")
 
-    rec, _, _, _ = _build(
+    rec, _, _ = _build(
         exposure=D("570"), quotes=[_post_quote("fUST_a30")],
         canceller=_AuthBoom(), reprice=_REPRICE,
     )
@@ -1399,7 +1407,7 @@ async def test_sweep_auth_error_propagates():
 async def test_no_reprice_config_is_noop():
     # reprice=None（預設）→ 與現狀 byte-identical
     canc = _FakeCanceller()
-    rec, ex, _, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")], canceller=canc,
     )
     await rec.deploy(venue_offers=(_venue_offer("42", 0.001),))
@@ -1408,17 +1416,15 @@ async def test_no_reprice_config_is_noop():
 
 
 # ---------------------------------------------------------------------------
-# Diagnostic tracker never rescales or overrides canonical exposure.
+# A lone active cell over its canonical limit gets no relaxation.
 # ---------------------------------------------------------------------------
 
 
-async def test_tracker_is_diagnostic_and_cannot_relax_canonical_cell_limit():
-    """Recorded intent stays diagnostic; an over-limit cell cannot submit."""
+async def test_lone_cell_over_canonical_limit_cannot_submit():
+    """An over-limit cell cannot submit, even as the only active cell."""
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     store.update(_post_quote("fUST_p2"))  # only one of the two cells POSTs
-    tracker = CellDeploymentTracker()
-    tracker.record_deploy("fUST_p2", D("9000"))  # lone cell's venue-true intent
     ledger = _FakeLedger(
         exposure=D("10000"), reserved=D("9000"), available=D("100000"),
     )
@@ -1429,16 +1435,17 @@ async def test_tracker_is_diagnostic_and_cannot_relax_canonical_cell_limit():
     )
     ex = _FakeExecutor()
     rec = DeploymentReconciler(
-        store=store, tracker=tracker,
+        store=store,
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=ctx,
-        **_capital_ports(_simulated_capital(ledger, tracker, totals={"fUST": D("10000")})),
+        **_capital_ports(_simulated_capital(
+            ledger, cell_exposure={"fUST_p2": D("9000")},  # lone cell's exposure
+            totals={"fUST": D("10000")})),
         cells=cells, funding_rules=FixedRules(),
         clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
     await rec.deploy()
     assert ex.submitted == []
-    assert tracker.deployed("fUST_p2") == D("9000")
 
 
 # ---------------------------------------------------------------------------
@@ -1453,7 +1460,7 @@ _LADDER = LadderPolicy(spike_fraction=0.15, rung_multipliers=(1.5, 3.0), min_run
 async def test_ladder_observe_logs_rungs_without_touching_submits(caplog):
     # One cell remains bounded to 7000. Observe-only rung budget=7000*0.15
     # yields two 525 rungs, each above the 153 minimum.
-    rec, ex, _, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("0"), quotes=[_post_quote("fUST_p2")],
         cap=D("10000"), book_provider=_SnapshotProvider(_ask_snapshot()), ladder=_LADDER,
     )
@@ -1469,7 +1476,7 @@ async def test_ladder_observe_logs_rungs_without_touching_submits(caplog):
 async def test_no_ladder_config_never_computes_rungs(caplog):
     # ladder=None (default) -> byte-identical to pre-Task-6: same submit, no
     # ladder_would_post log line, even with an identical exact-period ask/cap setup.
-    rec, ex, _, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("0"), quotes=[_post_quote("fUST_p2")],
         cap=D("10000"), book_provider=_SnapshotProvider(_ask_snapshot()),
     )
@@ -1498,7 +1505,7 @@ def _recorder():
 
 async def test_guard_block_is_recorded_as_the_last_attempt():
     rec_att = _recorder()
-    rec, ex, _, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")], safety_allowed=False,
         attempt_recorder=rec_att,
     )
@@ -1515,7 +1522,7 @@ async def test_guard_block_is_recorded_as_the_last_attempt():
 
 async def test_successful_submit_is_recorded():
     rec_att = _recorder()
-    rec, _ex, _, _ = _build(
+    rec, _ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")], attempt_recorder=rec_att,
     )
     await rec.deploy()
@@ -1526,7 +1533,7 @@ async def test_successful_submit_is_recorded():
 
 async def test_venue_rejection_is_recorded_as_rejected_not_blocked():
     rec_att = _recorder()
-    rec, _ex, _, _ = _build(
+    rec, _ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")],
         executor=_RejectingExecutor(), attempt_recorder=rec_att,
     )
@@ -1541,7 +1548,7 @@ async def test_submit_exception_is_recorded_as_error():
             raise RuntimeError("venue 500")
 
     rec_att = _recorder()
-    rec, _ex, _, _ = _build(
+    rec, _ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")], executor=_Boom(),
         attempt_recorder=rec_att,
     )
@@ -1554,12 +1561,12 @@ async def test_submit_exception_is_recorded_as_error():
 async def test_recorder_is_optional_and_absent_changes_nothing():
     # Default construction (attempt_recorder=None) must stay byte-identical:
     # every pre-existing test above builds without one.
-    rec, ex, tracker, _ = _build(
+    rec, ex, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")],
     )
     await rec.deploy()
     assert len(ex.submitted) == 1
-    assert _planned(tracker.deployed("fUST_a30"), "200")
+    assert _planned(ex.acknowledged("fUST_a30"), "200")
 
 
 # ── E1 reprice reference = book (2026-09-22 strategy-correctness plan, item 2) ──
@@ -1586,7 +1593,7 @@ async def test_book_reference_keeps_an_offer_the_book_would_price_today():
     # Signal quote 0.00012, but the exact-period book asks 0.0011: E2 itself would
     # post ~0.0011, so a resting 0.001 offer is not stale although it is 8x the quote.
     canc = _FakeCanceller()
-    rec, _, _, _ = _build(
+    rec, _, _ = _build(
         exposure=D("570"), quotes=[_post_quote("fUST_a30")], canceller=canc,
         reprice=_REPRICE_BOOK, book_provider=_SnapshotProvider(_book_with_ask(0.0011)),
     )
@@ -1596,7 +1603,7 @@ async def test_book_reference_keeps_an_offer_the_book_would_price_today():
 
 async def test_quote_reference_cancels_that_same_offer_although_the_market_did_not_move():
     canc = _FakeCanceller()
-    rec, _, _, _ = _build(
+    rec, _, _ = _build(
         exposure=D("570"), quotes=[_post_quote("fUST_a30")], canceller=canc,
         reprice=_REPRICE, book_provider=_SnapshotProvider(_book_with_ask(0.0011)),
     )
@@ -1606,7 +1613,7 @@ async def test_quote_reference_cancels_that_same_offer_although_the_market_did_n
 
 async def test_book_reference_still_cancels_a_truly_stale_offer():
     canc = _FakeCanceller()
-    rec, _, _, _ = _build(
+    rec, _, _ = _build(
         exposure=D("570"), quotes=[_post_quote("fUST_a30")], canceller=canc,
         reprice=_REPRICE_BOOK, book_provider=_SnapshotProvider(_book_with_ask(0.0011)),
     )
@@ -1616,7 +1623,7 @@ async def test_book_reference_still_cancels_a_truly_stale_offer():
 
 async def test_book_reference_without_a_book_never_cancels():
     canc = _FakeCanceller()
-    rec, _, _, _ = _build(
+    rec, _, _ = _build(
         exposure=D("570"), quotes=[_post_quote("fUST_a30")], canceller=canc,
         reprice=_REPRICE_BOOK, book_provider=_SnapshotProvider(None),
     )
@@ -1645,7 +1652,7 @@ async def test_planner_fingerprints_the_amount_the_guards_audit_and_executor_all
     from bfx_funding_bot.modules.trading import fingerprint_of
     quote = _post_quote("fUST_a30")
     safety = _FakeSafety(allowed=True)
-    rec, ex, tracker, _ = _build(exposure=D("370"), quotes=[quote], safety=safety)
+    rec, ex, _ = _build(exposure=D("370"), quotes=[quote], safety=safety)
     seed = fingerprint_seed(f"reconcile:1000:fUST_a30:{quote.signal_correlation_id}")
     _fingerprinting(rec, {seed})  # the seed is held by a live commitment: probe on
     await rec.deploy()
@@ -1657,12 +1664,12 @@ async def test_planner_fingerprints_the_amount_the_guards_audit_and_executor_all
     assert D("199.9999") < sent < D("200")
     assert safety.calls[0].offer_amount_usdt == sent
     assert ex.ready_submissions[0].decision.offer_amount_usdt == sent
-    assert tracker.deployed("fUST_a30") == sent
+    assert ex.acknowledged("fUST_a30") == sent
 
 
 async def test_planner_skips_the_submit_when_no_fingerprint_fits():
     from bfx_funding_bot.modules.execution.deployment.fingerprinted_amount import FINGERPRINT_SPACE
-    rec, ex, _, _ = _build(exposure=D("370"), quotes=[_post_quote("fUST_a30")])
+    rec, ex, _ = _build(exposure=D("370"), quotes=[_post_quote("fUST_a30")])
     _fingerprinting(rec, range(1, FINGERPRINT_SPACE + 1))
     await rec.deploy()
     assert ex.submitted == []

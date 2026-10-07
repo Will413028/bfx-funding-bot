@@ -65,7 +65,7 @@ class CandleWriter:
                 await self._upsert(msg)
                 self._probe.record_heartbeat("candle_writer")
             except FatalError:
-                raise  # propagate to TaskGroup → daemon exit → Koyeb restart
+                raise  # propagate to TaskGroup → daemon exit → container restart policy
             except Exception:
                 log.exception("candle_writer_upsert_failed mts=%d", msg.mts)
                 # Tenacity stop_after_attempt(5) re-raised → log + continue

@@ -1,10 +1,11 @@
-"""External HTTP liveness endpoint — `GET /healthz` for Koyeb / k8s probe.
+"""External HTTP liveness endpoint — `GET /healthz` for external probes.
 
 Phase 4.2.1+ best-practice item: daemon-internal HealthMonitor.scan_staleness
 can detect a stalled sub-task, but cannot detect a daemon-wide deadlock
 (asyncio event loop blocked → scan_staleness itself never runs). An external
-HTTP probe escapes that failure mode — the platform's health checker
-sees no response and restarts the container.
+HTTP probe escapes that failure mode: it sees no response. The deploy
+health gate (deploy/vm/ops/bfx_deploy.py) reads this endpoint; the compose
+file defines no Docker healthcheck on it.
 
 This module exposes a small FastAPI app and a `run_healthz_server`
 coroutine; the daemon adds it as one task in its TaskGroup. Reads from the
