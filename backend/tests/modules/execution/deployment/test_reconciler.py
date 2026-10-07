@@ -79,6 +79,8 @@ def _simulated_capital(ledger, *, cell_exposure=None, totals=None, reserves=None
     One object answers the planner's capital, managed-offer and uncertainty
     reads (``_capital_ports``); uncertainty is the fake ledger's.
     ``cell_exposure`` is each cell's existing exposure (absent cells hold 0).
+    It owns no capital rule: the real ``evaluate_capital`` sizes each snapshot,
+    and E_cell/U attribution is derive_capital's (tests/modules/trading/test_capital.py).
     """
     from bfx_funding_bot.modules.ledger import CapitalAvailable
     from bfx_funding_bot.modules.trading import (
@@ -106,13 +108,11 @@ def _simulated_capital(ledger, *, cell_exposure=None, totals=None, reserves=None
                                    max_cell_fraction=D("0.70"))
             exposure = ledger.current_exposure(symbol)
             available = min(max(D("0"), total - exposure + reserve), ledger.available_balance(symbol))
-            shared = max(D("0"), exposure - ledger.reserved_exposure(symbol))
-            # Unattributed credits (shared) are in T only, never in a cell's exposure.
             snapshot = CapitalSnapshot(available, D("0"), max(total + reserve, available),
                                        cell_exposure.get(cell_id, D("0")))
             applied = AppliedPolicy(scope.account_id, scope.environment, symbol, 1,
                                     "explicit-test-policy", UUID(int=1), policy)
-            return CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot), shared,
+            return CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot), D("0"),
                                     "1", {})
 
         async def fingerprints_in_use(self, session, scope, symbol):
@@ -160,24 +160,19 @@ class _CapturingSink:
 
 class _FakeLedger:
     def __init__(
-        self, exposure: Decimal, reserved: Decimal | None = None,
+        self, exposure: Decimal,
         available: Decimal | None = None,
         available_by_symbol: dict[str, Decimal] | None = None,
         exposures: dict[str, Decimal] | None = None,
-        reserved_by_symbol: dict[str, Decimal] | None = None,
         uncertain_symbols: set[str] | None = None,
     ) -> None:
         self._e = exposure
-        # Default: reserved == exposure (all capital is reserved / open offers).
-        # Pass reserved explicitly when simulating realized-only or mixed scenarios.
-        self._reserved = reserved if reserved is not None else exposure
         # Default: effectively unbounded so existing cap-driven tests are unaffected.
         self._available = available if available is not None else Decimal("1000000")
         self._available_by_symbol = available_by_symbol or {}
-        # Phase 2 multi-symbol: per-symbol exposure / reserved buckets. When a
-        # symbol is absent these fall back to the scalar (single-symbol parity).
+        # Phase 2 multi-symbol: per-symbol exposure. When a symbol is absent it
+        # falls back to the scalar (single-symbol parity).
         self._exposures = exposures or {}
-        self._reserved_by_symbol = reserved_by_symbol or {}
         self._uncertain_symbols = (
             uncertain_symbols if uncertain_symbols is not None else set()
         )
@@ -186,14 +181,6 @@ class _FakeLedger:
         if symbol in self._exposures:
             return self._exposures[symbol]
         return self._e
-
-    def reserved_exposure(self, symbol: str) -> Decimal:
-        if symbol in self._reserved_by_symbol:
-            return self._reserved_by_symbol[symbol]
-        # Default reserved tracks per-symbol exposure when only exposures given.
-        if symbol in self._exposures:
-            return self._exposures[symbol]
-        return self._reserved
 
     def available_balance(self, symbol: str) -> Decimal:
         if symbol in self._available_by_symbol:
@@ -954,21 +941,6 @@ async def test_submit_exception_does_not_escape_deploy():
     assert boom.acknowledged("fUST_a30") == D("0")
 
 
-async def test_two_active_cells_split_when_gap_exceeds_cap():
-    # gap=570, cap_per_cell=0.70*570=399; greedy emptiest-first (tiebreak cell_id):
-    # a30 -> 399 (hits cap), p2 -> 171 (remainder)
-    rec, ex, _ = _build(
-        exposure=D("0"),
-        quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
-    )
-    await rec.deploy()
-    assert len(ex.submitted) == 2
-    assert _planned(ex.acknowledged("fUST_a30"), "399")
-    assert _planned(ex.acknowledged("fUST_p2"), "171")
-    amounts = sorted(d.offer_amount_usdt for d in ex.submitted)
-    assert len(amounts) == 2 and _planned(amounts[0], "171") and _planned(amounts[1], "399")
-
-
 async def test_per_cell_safety_block_does_not_stop_other_cell():
     # gap=570 -> a30=399 (blocked), p2=171 (allowed); exactly one submit
     seq_safety = _SeqSafety([False, True])
@@ -1095,40 +1067,11 @@ async def test_clamps_deploy_to_available_minus_buffer():
     assert ex.acknowledged("fUST_a30") == D("0")
 
 
-async def test_deploys_when_available_sufficient():
-    # cap gap = 570 - 370 = 200; available 250, buffer 3 -> headroom 247 >= 200
-    # -> deploy full cap gap 200.
-    rec, ex, _ = _build(
-        exposure=D("370"), quotes=[_post_quote("fUST_a30")], available=D("250"),
-    )
-    await rec.deploy()
-    assert len(ex.submitted) == 1
-    assert _planned(ex.submitted[0].offer_amount_usdt, "200")
-
-
-async def test_available_headroom_binds_below_cap_gap():
-    # cap gap = 570 - 200 = 370; available 320, buffer 3 -> headroom 317 -> deploy 317.
-    rec, ex, _ = _build(
-        exposure=D("200"), quotes=[_post_quote("fUST_a30")], available=D("320"),
-    )
-    await rec.deploy()
-    assert len(ex.submitted) == 1
-    assert _planned(ex.submitted[0].offer_amount_usdt, "317")
-
-
 # ---------------------------------------------------------------------------
-# Canonical spendable and fixed per-cell limits
+# Capital wiring. The rules are owned below: evaluate_capital (test_policy.py),
+# derive_capital (test_capital.py) and allocate_capital (test_sizing.py);
+# scripts/capital_mutation_gate.py checks each layer kills its own mutants.
 # ---------------------------------------------------------------------------
-
-
-async def test_canonical_spendable_limits_total_planned_amount(caplog):
-    # Synthetic policy reserve=3, available=203: spendable=200 binds sizing.
-    rec, _ex, _ = _build(
-        exposure=D("0"), quotes=[_post_quote("fUST_a30")], available=D("203"),
-    )
-    with caplog.at_level(logging.INFO):
-        await rec.deploy()
-    assert _planned(sum(D(str(d.offer_amount_usdt)) for d in _ex.submitted), "200")
 
 
 async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
@@ -1137,9 +1080,7 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     store.update(_post_quote("fUST_a30"))  # only "a30" active; "p2" idle
-    ledger = _FakeLedger(
-        exposure=D("8000"), reserved=D("9500"), available=D("1000000"),
-    )
+    ledger = _FakeLedger(exposure=D("8000"), available=D("1000000"))
     ctx = AccountContext(
         account_id="default",
         credentials=Credentials(api_key="k", api_secret="s"),
@@ -1160,49 +1101,73 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
     assert rec._executor.submitted == []
 
 
-# ---------------------------------------------------------------------------
-# C1 regression: orphan realized credits must not inflate/starve cells
-# ---------------------------------------------------------------------------
+class _RecordingCapital:
+    """A capital port whose cells hold different exposures; it records every read."""
 
-def _build_with_split_ledger(*, reserved, realized, quotes, cell_exposure):
-    """Build reconciler with explicit reserved / realized split."""
-    cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
-    store = StandingQuoteStore(ttl_ms=3_900_000)
-    for q in quotes:
-        store.update(q)
-    exposure = reserved + realized
-    ledger = _FakeLedger(exposure=exposure, reserved=reserved)
-    ex = _FakeExecutor()
-    safety = _FakeSafety(allowed=True)
-    rec = DeploymentReconciler(
-        store=store,
-        safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
-        funding_rules=FixedRules(),
-        clock=lambda: 1_000,
-        **_capital_ports(_simulated_capital(ledger, cell_exposure=cell_exposure)),
-        event_sink=_CapturingSink(), phase=Phase.LIVE,
-        **_eligibility_kwargs(),
-    )
-    return rec, ex, safety
+    def __init__(self, exposures: dict[str, Decimal]) -> None:
+        from bfx_funding_bot.modules.trading import AppliedPolicy, CapitalPolicy
+        self._exposures = exposures
+        self._policy = CapitalPolicy(enabled=True, max_cell_fraction=D("0.5"))
+        self._applied = AppliedPolicy(UUID(int=7), "test", "fUST", 1, "digest", UUID(int=1),
+                                      self._policy)
+        self.reads: list = []
+        self.returned: dict = {}
+
+    @staticmethod
+    @asynccontextmanager
+    async def session_factory():
+        yield None
+
+    async def read(self, scope, *, now_ms, session=None):
+        from bfx_funding_bot.modules.ledger import CapitalAvailable
+        from bfx_funding_bot.modules.trading import CapitalSnapshot, evaluate_capital
+        self.reads.append(scope)
+        snapshot = CapitalSnapshot(D("1000"), D("0"), D("1000"), self._exposures[scope.cell_id])
+        view = CapitalAvailable(self._applied, snapshot, evaluate_capital(self._policy, snapshot),
+                                D("0"), "1")
+        self.returned[scope.cell_id] = view
+        return view
+
+    async def fingerprints_in_use(self, session, scope, symbol):
+        return frozenset()
+
+    async def has_open(self, session, scope, symbol):
+        return False
 
 
-async def test_unattributed_credits_do_not_consume_cell_headroom():
-    """Unattributed U=300 counts in T only; the cell keeps its own headroom."""
-    # The cell already owns a $100 open offer.
-    rec, ex, _ = _build_with_split_ledger(
-        reserved=D("100"), realized=D("300"),
-        quotes=[_post_quote("fUST_a30")],
-        cell_exposure={"fUST_a30": D("100")},
-    )
+async def test_each_active_cell_reads_its_own_capital_and_sends_the_allocation(monkeypatch):
+    """Wiring only: the rules belong to evaluate_capital and allocate_capital."""
+    from bfx_funding_bot.modules.execution.deployment import reconciler
+    from bfx_funding_bot.modules.trading import CapitalScope
+    capital = _RecordingCapital({"fUST_a30": D("100"), "fUST_p2": D("0")})
+    allocate = reconciler.allocate_capital
+    allocations: list = []
+
+    def recording_allocate(*, views, min_fill):
+        result = allocate(views=views, min_fill=min_fill)
+        allocations.append((dict(views), result))
+        return result
+
+    monkeypatch.setattr(reconciler, "allocate_capital", recording_allocate)
+    rec, ex, _ = _build(exposure=D("0"), quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
+                        capital_ports=_capital_ports(capital))
     await rec.deploy()
-    # E_cell is only the owned 100: headroom 399-100=299, so cash (173-3=170)
-    # binds. Under the old rule 100+U=400 > 399 left the 170 idle.
-    assert len(ex.submitted) == 1
-    assert D("169.99") < ex.submitted[0].offer_amount_usdt <= D("170")
+
+    assert sorted(capital.reads, key=lambda scope: scope.cell_id) == [
+        CapitalScope(UUID(int=7), "test", "fUST", "fUST_a30"),
+        CapitalScope(UUID(int=7), "test", "fUST", "fUST_p2"),
+    ]
+    [(views, fills)] = allocations
+    assert views == capital.returned  # each cell sized on the view read for that cell
+    # Headroom 500-100 and 500-0 differ, so a wrong-cell read changes these amounts.
+    assert fills == {"fUST_p2": D("500"), "fUST_a30": D("400")}
+    assert sorted(ex.cell_ids) == sorted(fills)
+    for cell, amount in fills.items():
+        assert _planned(ex.acknowledged(cell), str(amount))
 
 
 # ---------------------------------------------------------------------------
-# Cluster D: decision carries the cell symbol; headroom is per-symbol
+# Cluster D: decision carries the cell symbol
 # ---------------------------------------------------------------------------
 
 
@@ -1216,31 +1181,6 @@ async def test_decision_carries_cell_symbol():
     # both the decision handed to safety AND to the executor carry the symbol
     assert safety.calls[0].symbol == "fUST"
     assert ex.submitted[0].symbol == "fUST"
-
-
-async def test_headroom_uses_cell_symbol_available():
-    # cap gap = 570 - 370 = 200. The cell symbol fUST has available 250 (buffer 3
-    # → headroom 247 >= 200), while the global default is starved (0). Reading the
-    # per-symbol balance is what lets the deploy proceed.
-    cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
-    store = StandingQuoteStore(ttl_ms=3_900_000)
-    store.update(_post_quote("fUST_a30"))
-    ledger = _FakeLedger(
-        exposure=D("370"), available=D("0"),
-        available_by_symbol={"fUST": D("250")},
-    )
-    ex = _FakeExecutor()
-    rec = DeploymentReconciler(
-        store=store,
-        safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=_ctx(),
-        **_capital_ports(_simulated_capital(ledger)),
-        cells=cells, funding_rules=FixedRules(),
-        clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.LIVE,
-        **_eligibility_kwargs(),
-    )
-    await rec.deploy()
-    assert len(ex.submitted) == 1
-    assert _planned(ex.submitted[0].offer_amount_usdt, "200")
 
 
 # ---------------------------------------------------------------------------
@@ -1413,39 +1353,6 @@ async def test_no_reprice_config_is_noop():
     await rec.deploy(venue_offers=(_venue_offer("42", 0.001),))
     assert canc.cancelled == []
     assert len(ex.submitted) == 1
-
-
-# ---------------------------------------------------------------------------
-# A lone active cell over its canonical limit gets no relaxation.
-# ---------------------------------------------------------------------------
-
-
-async def test_lone_cell_over_canonical_limit_cannot_submit():
-    """An over-limit cell cannot submit, even as the only active cell."""
-    cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
-    store = StandingQuoteStore(ttl_ms=3_900_000)
-    store.update(_post_quote("fUST_p2"))  # only one of the two cells POSTs
-    ledger = _FakeLedger(
-        exposure=D("10000"), reserved=D("9000"), available=D("100000"),
-    )
-    ctx = AccountContext(
-        account_id="default",
-        credentials=Credentials(api_key="k", api_secret="s"),
-        allocation_cap_usdt=D("10000"),
-    )
-    ex = _FakeExecutor()
-    rec = DeploymentReconciler(
-        store=store,
-        safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=ctx,
-        **_capital_ports(_simulated_capital(
-            ledger, cell_exposure={"fUST_p2": D("9000")},  # lone cell's exposure
-            totals={"fUST": D("10000")})),
-        cells=cells, funding_rules=FixedRules(),
-        clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.LIVE,
-        **_eligibility_kwargs(),
-    )
-    await rec.deploy()
-    assert ex.submitted == []
 
 
 # ---------------------------------------------------------------------------
