@@ -122,6 +122,12 @@ bot 自己停著時不可用：到 Bitfinex 網頁撤單並記錄。不依賴資
 - **不會**觸發任何反應：借款到期造成 lent 減少、reconcile 補回 WS 漏掉的成交或撤單。
 - writer lock 遺失不是交易決策：bot 直接退出、container 重啟、開機時重新等 lock（Telegram 收到
   `daemon_fatal`）。
+- Bitfinex 連不上不會重啟 bot：由 heartbeat guard 與 book 過期擋單，`/readyz` 轉成 not ready（reason
+  `dependency_stale`），連線回來就恢復。資料庫斷線時 audit 寫不進去而擋單；斷線若撐過一次 writer lock
+  refresh（30 秒），仍會因上一條的 writer lock 遺失而退出。開機時 Bitfinex 或資料庫連不上則在 process 內
+  重試等待（Telegram 收到一次 `boot_waiting`），不會反覆重啟。
+- event loop 卡住超過 `BFX_LOOP_WATCHDOG_S`（預設 120 秒）：bot 把所有 thread 的 traceback 寫到 container
+  log 後直接退出、container 重啟；這條路徑來不及發 Telegram，看 container log 的 `Timeout` 段落。
 - 拒絕開機（schema 與 build 不符、policy 讀不到）：只發 `venue_offers_may_remain` 然後退出，
   不寫交易狀態、不碰 venue；修好後的下一版會照常開機。venue 上已有的受管 offer 仍在包絡內；要撤就用 kill。
 - 第 3 級自動恢復：衝突類（`offer_amount_mismatch`、`identity_conflict`、`unclassifiable_commitment`）條件還在就一直
