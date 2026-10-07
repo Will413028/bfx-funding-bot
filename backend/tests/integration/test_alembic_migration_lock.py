@@ -53,6 +53,7 @@ async def test_do_run_migrations_sets_timeouts_and_takes_lock(pg_engine, monkeyp
     from alembic import command
 
     cfg = Config(str(_ALEMBIC_INI))
+    cfg.attributes["configure_logger"] = False  # in-process: keep pytest's logging
     command.upgrade(cfg, "head")
 
     joined = " | ".join(captured)
@@ -126,6 +127,7 @@ async def test_migration_is_atomic_on_failure(pg_engine, monkeypatch) -> None:
     from alembic import command
 
     cfg = Config(str(_ALEMBIC_INI))
+    cfg.attributes["configure_logger"] = False  # in-process: keep pytest's logging
     with pytest.raises(_InjectedFailureError):
         command.upgrade(cfg, "head")
 

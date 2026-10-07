@@ -38,7 +38,8 @@ def test_a_window_must_run_forwards() -> None:
 
 
 def test_an_unreachable_database_is_a_refusal_that_leaks_nothing(
-        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        restore_logging: None) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:secret@127.0.0.1:1/none")
     code = report.main(["--exchange-account-id", ACCOUNT, "--since", "2024-01-01T00:00:00Z",
                         "--until", "2024-01-05T00:00:00Z"])
