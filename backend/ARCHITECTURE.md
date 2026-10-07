@@ -426,6 +426,8 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 ## 7. DB Schema（key tables）
 
+migration 只往前走：新 migration 的 `downgrade()` 預設拒絕，需要升級前狀態的測試在上一版 schema 上 seed 再升級（[ADR 2026-10-08](../docs/adr/2026-10-08-forward-only-migrations.md)）。
+
 ```
 -- ledger（modules/ledger/tables.py；journal 與觀測表由 trigger 拒絕 UPDATE/DELETE/TRUNCATE）
 capital_authority_epoch (insert-only；最新 epoch_seq 決定 authority ∈ {legacy, ledger})
