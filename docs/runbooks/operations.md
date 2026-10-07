@@ -20,7 +20,7 @@ UNKNOWN 與金額指紋、自動保護、Kill switch）。決策來源：ADR 202
 
 **資金權威（`capital_authority_epoch`）**：只增不改的表，最新一列（`epoch_seq` 最大）決定資金事實由誰負責。
 現行唯一支援的值是 `ledger`：最新 epoch 不是 `ledger` 時，非 owner（`bfx_bot`）對 ledger 表的
-INSERT（以及 clock／mirror 的 UPDATE）一律被 DB trigger 拒絕。`legacy` 只留在切換前的歷史列。
+INSERT（以及 clock／mirror 的 UPDATE）一律被 DB trigger 拒絕。`legacy` 只是 epoch 的歷史列（每個資料庫都由 `f6a7b8c9d0e1` 先種下 `legacy`，genesis migration 再追加 `ledger`）。
 新資料庫由 genesis migration 取得 `ledger`；prod 由 S1-7 的切換追加，不要手動改。
 bot、webapi 與 owner 腳本開機時各讀一次：表或列缺失、值不是 `ledger` 就拒絕開機；真實 venue 的 bot
 另要求最新 epoch 的寫入者是切換或 genesis migration（`ledger_epoch_writer_unknown`），拒絕走
