@@ -132,3 +132,7 @@ halted 下運作；每一步都要 900 秒內的 DR 收據（`halt2_cutover._MEA
   [2026-09-23-operator-renews-spent-canary-epoch](2026-09-23-operator-renews-spent-canary-epoch.md)、[2026-09-04-offsite-dr-cloudflare-r2](2026-09-04-offsite-dr-cloudflare-r2.md) 的 Halt 2 DR 收據綁定。
 - 同批：[2026-09-25-ci-registry-digest-deploy](2026-09-25-ci-registry-digest-deploy.md)；[2026-08-31-account-isolated-execution-target-architecture](2026-08-31-account-isolated-execution-target-architecture.md)（D4' outbox）。
 - 實作 plan（T1–T12，含 Phase 0 盤點後的任務表與進度 SHA）：`2026-09-25-release-governance-refactor.md`。落地後同日被取代：分級、核准、限額期、REDUCING 由 PR #19 刪除；仍存活的是 D6（每月＋變更觸發 prefix 還原測試 `d75b288`、先停 bot→備份→還原測試→migrate）、D7 key 權限、Telegram 告警 `da63b6f`、ceremony 資料封存 `8422d13`（`release_archive`）（原文已不在 repo，本 ADR 即紀錄）。
+
+## Amendment (2026-10-08): 演練失敗時不停 bot
+
+D6 的「失敗維持停機」改為：部署前的 migration 演練（隔離還原副本上跑新 image 的 `alembic upgrade head`）失敗時 prod schema 未動，bfx-deploy 重啟舊 bot；備份、還原或 prod migration 本身失敗仍維持停止。見 [2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them](2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them.md)。
