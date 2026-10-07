@@ -6,8 +6,8 @@ adds the only test that actually exercises daemon._run's
 `except* ExecutorAuthError → sys.exit(78)` end-to-end via a
 real subprocess so we can observe the OS-level returncode.
 
-Koyeb's crash-loop-backoff contract depends on the daemon exiting with
-sysexits EX_CONFIG=78 (not 1, not -SIGKILL). In-process tests can't
+The auth-failure contract is the daemon exiting with sysexits EX_CONFIG=78
+(not 1, not -SIGKILL), so the exit code names the cause. In-process tests can't
 validate sys.exit() because it would terminate pytest itself.
 """
 from __future__ import annotations

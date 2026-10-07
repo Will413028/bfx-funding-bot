@@ -9,8 +9,8 @@ from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 
 # ── Liveness sub-tasks (own-loop, event-loop-driven) ──────────────────────────
 # A stale heartbeat means the loop is stuck or the event loop is deadlocked →
-# restarting the process can recover. These DRIVE /healthz 503 (Koyeb restart)
-# and scan_staleness FatalError. Per spec D4 heartbeat threshold table.
+# restarting the process can recover. These DRIVE /healthz 503 and
+# scan_staleness FatalError. Per spec D4 heartbeat threshold table.
 LIVENESS_THRESHOLDS: dict[str, int] = {
     "ws": 90,                    # Phase 4.2.0 lesson v2: poll ws_client.last_msg_age_ms()
                                  # every 15s; threshold 90s covers 4-5 missed Bitfinex

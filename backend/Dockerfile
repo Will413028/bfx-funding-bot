@@ -31,7 +31,7 @@ USER appuser
 # GIT_SHA → BFX_SERVICE_VERSION: build arg surfaces the deployed commit as
 # the EventResource service.version envelope field. Declared here (late) so a
 # per-commit SHA change doesn't invalidate the apt / uv sync layer cache.
-# Koyeb build pipeline must pass --build-arg GIT_SHA=$KOYEB_GIT_COMMIT.
+# .github/workflows/release.yml passes GIT_SHA=<the CI run's head_sha>.
 ARG GIT_SHA=unknown
 
 # BFX_CELLS_YAML — explicit image-baked default. D1 fix in 4.2.0 also

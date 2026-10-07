@@ -566,12 +566,13 @@ class Daemon:
         log.info("sub_task_exit name=writer_lock")
 
     async def _healthz_server_loop(self) -> None:
-        """Container-level liveness HTTP endpoint for Koyeb / k8s probes.
+        """Container-level liveness HTTP endpoint (``GET /healthz``).
 
         Independent of in-process scan_staleness (which can't catch
         daemon-wide event-loop deadlock — if asyncio is blocked,
-        scan_staleness itself doesn't run). External HTTP probe sees no
-        response → platform restarts container.
+        scan_staleness itself doesn't run): an external HTTP probe sees no
+        response. The deploy health gate (deploy/vm/ops/bfx_deploy.py) reads
+        it; the compose file defines no Docker healthcheck on it.
         """
         await run_healthz_server(
             probe=self.probe,

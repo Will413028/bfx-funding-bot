@@ -40,7 +40,8 @@ def _resolve_service_version() -> str:
 
 
 def _resolve_host_name() -> str | None:
-    """Koyeb sets HOSTNAME to instance ID; None locally is fine."""
+    """Under Docker, HOSTNAME defaults to the short container ID (the compose
+    files set no ``hostname:``); None locally is fine."""
     return os.environ.get("HOSTNAME")
 
 

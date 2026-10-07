@@ -1093,9 +1093,9 @@ async def _run() -> None:
         log.info("daemon_cancelled_via_signal")
     except* ExecutorAuthError:
         # Auth failure means credentials are wrong / revoked — operator must
-        # intervene. Avoid auto-retry loop (Google SRE Book ch. 22 — auth
-        # crash-loop-backoff via sysexits EX_CONFIG 78 lets Koyeb stagger
-        # restarts instead of tight crash-on-boot retries.)
+        # intervene. Exit with sysexits EX_CONFIG 78 (Google SRE Book ch. 22)
+        # so the exit is distinguishable from a crash; restarts are left to
+        # the container restart policy (deploy/vm/docker-compose.app.yml).
         log.critical(
             "executor_auth_failed — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )

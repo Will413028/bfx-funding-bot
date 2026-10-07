@@ -85,12 +85,13 @@ async def test_daemon_shutdown_does_not_hang_on_normal_stop(
     """SIGTERM-equivalent stop_event.set() → daemon.run() returns within 10s.
 
     Weak assertion: our TaskGroup design relies on (1) each sub-task self-exits
-    on stop_event, (2) TaskGroup waits for siblings to drain, (3) Koyeb container
-    grace force-exits if anything hangs. No daemon-level wait_for enforcement
-    (no "55s timeout" wrapper) — that's delegated to Koyeb.
+    on stop_event, (2) TaskGroup waits for siblings to drain, (3) Docker's
+    stop grace period (`stop_grace_period: 30s` in
+    deploy/vm/docker-compose.app.yml) force-kills if anything hangs. No
+    daemon-level wait_for enforcement — that's delegated to the container stop.
 
     The test verifies happy-path no-hang under normal stop. Hung sub-tasks are
-    covered by Koyeb-grade SIGKILL (not unit-tested here).
+    covered by the container's SIGKILL after the grace period (not tested here).
     """
     await _set_daemon_env(monkeypatch, pg_engine, httpx_mock)
 

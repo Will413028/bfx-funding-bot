@@ -3,7 +3,7 @@
 TransientError: tenacity should retry; eventually re-raises after
 stop_after_attempt cap → escalates to FatalError handling by TaskGroup.
 
-FatalError: daemon should exit non-zero → Koyeb container restart.
+FatalError: daemon should exit non-zero → the container restart policy restarts it.
 Authentication, config, schema, and similar root-cause-elsewhere errors.
 """
 
@@ -36,7 +36,8 @@ class ExecutorAuthError(ExecutorFatalError):
     """Credentials rejected by venue. Needs operator — NOT auto-retry.
 
     daemon._run catches this distinctly → flush + sys.exit(EXIT_CODE_AUTH_FAILED)
-    so Koyeb restart policy enters crash-loop-backoff instead of tight retry.
+    so the exit code names the cause; restarts are left to the container
+    restart policy (deploy/vm/docker-compose.app.yml).
     See spec Path E + Google SRE Book ch. 22.
     """
 

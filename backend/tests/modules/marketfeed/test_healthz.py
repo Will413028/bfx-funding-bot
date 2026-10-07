@@ -2,7 +2,7 @@
 
 FastAPI TestClient drives the route handler against a HealthProbe with
 synthesized last_active_ts values. Confirms the 200/503 branching contract
-Koyeb / k8s liveness probes depend on.
+external liveness probes depend on.
 """
 from __future__ import annotations
 

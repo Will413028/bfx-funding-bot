@@ -85,7 +85,7 @@ async def test_candles_terminates_when_connection_drops(unused_tcp_port: int):
     closes the socket, candles() MUST terminate so the daemon's reconnect loop
     (which is driven by the iterator raising/returning) can run. Before the fix
     candles() blocked forever on the empty queue -> 5 hb_timeout / 0 reconnect,
-    WS hung until a Koyeb restart.
+    WS hung until the process restarted.
 
     The server sends one candle + hb then goes silent; the watchdog fires at
     hb_timeout_s and drops the connection. The consumer must end ON ITS OWN

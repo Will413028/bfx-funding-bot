@@ -49,8 +49,8 @@ async def test_daemon_engine_has_d3_pool_config_and_url_transform(
     create_async_engine since Phase 4.1 (`26b059d`), bypassing
     _prepare_engine_kwargs (D2 URL transform) and the pool_pre_ping +
     pool_recycle=600 settings added by D3 (`7a826d8`). It only "worked"
-    because Koyeb DATABASE_URL secret was pre-transformed manually. Chaos
-    recovery rebuilt the secret from Neon dashboard libpq form and crashed.
+    because the DATABASE_URL secret was pre-transformed manually. Chaos
+    recovery rebuilt the secret in libpq form and crashed.
 
     Phase 4.4c: build_daemon now calls from_snapshot at boot, so it needs a
     real DB. This test uses a file-based sqlite for build_daemon, and separately
