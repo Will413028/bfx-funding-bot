@@ -131,7 +131,9 @@ bot 自己停著時不可用：到 Bitfinex 網頁撤單並記錄。不依賴資
   開機觀測進行中才斷，會因 writer lock 遺失退出一次（`daemon_fatal`、`boot_refused`），重啟後再於第一次連線處等待。
   Bitfinex 明確拒絕（例如 API key 無效，HTTP 500 帶 `["error", 10100, ...]`）不會等待，直接拒絕開機。
 - event loop 卡住超過 `BFX_LOOP_WATCHDOG_S`（預設 120 秒）：bot 把所有 thread 的 traceback 寫到 container
-  log 後直接退出、container 重啟；這條路徑來不及發 Telegram，看 container log 的 `Timeout` 段落。
+  log 後直接退出、container 重啟。退出當下來不及發 Telegram；重啟後的開機會發現上一個 run 沒有結束紀錄，
+  發一次 `previous_run_unclean`（附 run id、開始時間、發現時間），在 container log 的這段時間找 `Timeout`
+  段落（watchdog）；沒有 `Timeout` 則多半是 OOM kill 或 SIGKILL（`docker inspect` 的 `OOMKilled`）。
 - 拒絕開機（schema 與 build 不符、policy 讀不到）：只發 `venue_offers_may_remain` 然後退出，
   不寫交易狀態、不碰 venue；修好後的下一版會照常開機。venue 上已有的受管 offer 仍在包絡內；要撤就用 kill。
 - 第 3 級自動恢復：衝突類（`offer_amount_mismatch`、`identity_conflict`、`unclassifiable_commitment`）條件還在就一直
