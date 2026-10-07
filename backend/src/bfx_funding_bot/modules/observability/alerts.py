@@ -52,6 +52,11 @@ TRADING_STATE_CHANGED: Final = "trading_state_changed"
 PROTECTION_TRIPPED: Final = "protection_tripped"
 KILL_SWITCH_ENGAGED: Final = "kill_switch_engaged"
 BOOT_REFUSED: Final = "boot_refused"
+# The boot is waiting in-process for an unreachable venue or database (one per wait).
+BOOT_WAITING: Final = "boot_waiting"
+# The previous run of this scope ended without recording an end (loop watchdog, OOM kill,
+# SIGKILL, crash); reported once by the next boot (observability/bot_runs.py).
+PREVIOUS_RUN_UNCLEAN: Final = "previous_run_unclean"
 DAEMON_FATAL: Final = "daemon_fatal"
 # An active venue offer no durable intent traces to (lending envelope D2):
 # never cancelled or counted as managed, reported once per venue offer id.
@@ -83,6 +88,7 @@ DEDUP_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     KILL_SWITCH_ENGAGED: ("state_id", "complete"),  # retries of the same kill
     BOOT_REFUSED: ("error",),
     DAEMON_FATAL: ("error",),
+    PREVIOUS_RUN_UNCLEAN: ("run_id",),
     FOREIGN_EXPOSURE: ("venue_offer_id",),
     UNKNOWN_QUARANTINE_AGED: ("attempt_id", "minutes"),
     PROVENANCE_CONFLICT: ("symbol", "venue_offer_id"),
@@ -345,6 +351,10 @@ def title(event: str, fields: Mapping[str, object]) -> str:
         return "cancel-all complete" if fields.get("complete") is True else "cancel-all INCOMPLETE"
     if event == BOOT_REFUSED:
         return "bot refused to boot"
+    if event == PREVIOUS_RUN_UNCLEAN:
+        return "previous bot run ended uncleanly (loop watchdog, OOM or kill)"
+    if event == BOOT_WAITING:
+        return f"boot waiting for an unreachable {fields.get('step', '?')} (retrying, not trading)"
     if event == AUTO_RESUME_LIMIT_REACHED:
         return "automatic HALT stays: auto-resume limit reached, resume by hand"
     if event == DAEMON_FATAL:
@@ -407,12 +417,14 @@ async def shutdown(*, timeout_s: float = 5.0) -> None:
 __all__ = [
     "AUTO_RESUME_LIMIT_REACHED",
     "BOOT_REFUSED",
+    "BOOT_WAITING",
     "CRITICAL",
     "DAEMON_FATAL",
     "DEDUP_FIELDS",
     "FOREIGN_EXPOSURE",
     "INFO",
     "KILL_SWITCH_ENGAGED",
+    "PREVIOUS_RUN_UNCLEAN",
     "PROTECTION_TRIPPED",
     "TRADING_STATE_CHANGED",
     "TRIGGER_TITLES",

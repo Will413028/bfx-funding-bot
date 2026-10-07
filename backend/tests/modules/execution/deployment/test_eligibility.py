@@ -1,10 +1,8 @@
 from dataclasses import dataclass
 from decimal import Decimal
-from uuid import uuid4
 
 import pytest
 
-from bfx_funding_bot.modules.execution.audit.model import AuditContext
 from bfx_funding_bot.modules.execution.audit.recorder import ExecutionAuditUnavailable
 from bfx_funding_bot.modules.execution.contracts import (
     BlockedExecution,
@@ -16,17 +14,16 @@ from bfx_funding_bot.modules.execution.contracts import (
 )
 from bfx_funding_bot.modules.execution.deployment import eligibility
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
-from bfx_funding_bot.modules.execution.deployment.period_pricing import (
-    PriceBranch,
-    PriceDecision,
-)
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
     FillModelUnavailable,
 )
-from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
-from bfx_funding_bot.modules.strategy import DecisionOutcome as PayloadOutcome
-from bfx_funding_bot.modules.strategy import DecisionPayload
+from tests.modules.execution.deployment.helpers import (
+    make_audit_context,
+    make_candidate,
+    make_price,
+    make_snapshot,
+)
 
 
 class _Audit:
@@ -74,60 +71,8 @@ class _ExecutionMetrics:
         pass
 
 
-def _candidate() -> DecisionPayload:
-    return DecisionPayload(
-        decision_outcome=PayloadOutcome.POST,
-        signal_correlation_id=uuid4(),
-        offer_rate=0.00020,
-        offer_amount_usdt=100.0,
-        offer_duration_days=14,
-        symbol="fUST",
-    )
-
-
-def _context(candidate: DecisionPayload) -> AuditContext:
-    return AuditContext(
-        account_id="acct",
-        deployment_environment="test",
-        reconcile_id="reconcile-1",
-        cell_id="cell-1",
-        symbol=candidate.symbol,
-        signal_correlation_id=str(candidate.signal_correlation_id),
-        service_version="test",
-        config_hash="config",
-    )
-
-
-def _price() -> PriceDecision:
-    return PriceDecision(
-        rate=Decimal("0.00021"),
-        branch=PriceBranch.UNDERCUT,
-        evidence={"period_days": 14},
-    )
-
-
-def _snapshot(
-    *,
-    symbol: str = "fUST",
-    sequence_valid: bool = True,
-    checksum_valid: bool = True,
-) -> MarketSnapshot:
-    return MarketSnapshot(
-        snapshot_id="book-1",
-        symbol=symbol,
-        bids=(),
-        asks=(),
-        captured_at_ms=1_000,
-        received_at_ms=1_000,
-        source="ws",
-        sequence_valid=sequence_valid,
-        checksum_valid=checksum_valid,
-        sequence=2,
-    )
-
-
 async def test_ready_candidate_is_audited_before_becoming_submit_ready() -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     audit = _Audit()
     readiness = _Readiness()
     gate = ExecutionGate(
@@ -140,11 +85,11 @@ async def test_ready_candidate_is_audited_before_becoming_submit_ready() -> None
         candidate,
         decision_id="decision-1",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=None,
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, ReadyToSubmit)
@@ -156,7 +101,7 @@ async def test_ready_candidate_is_audited_before_becoming_submit_ready() -> None
 
 
 async def test_safety_block_is_audited_with_stable_reason() -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     audit = _Audit()
     gate = ExecutionGate(
         policy=ExecutionPolicy.BOOK_GUARDED,
@@ -168,11 +113,11 @@ async def test_safety_block_is_audited_with_stable_reason() -> None:
         candidate,
         decision_id="decision-2",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=None,
         safety=GuardResult(False, "risk", "limit"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, BlockedExecution)
@@ -182,7 +127,7 @@ async def test_safety_block_is_audited_with_stable_reason() -> None:
 
 
 async def test_blocked_candidate_emits_bounded_execution_events_and_metrics() -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     events = _ExecutionEvents()
     metrics = _ExecutionMetrics()
     gate = ExecutionGate(
@@ -197,11 +142,11 @@ async def test_blocked_candidate_emits_bounded_execution_events_and_metrics() ->
         candidate,
         decision_id="decision-observed",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=None,
         safety=GuardResult(False, "risk", "limit"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, BlockedExecution)
@@ -216,7 +161,7 @@ async def test_blocked_candidate_emits_bounded_execution_events_and_metrics() ->
 
 
 async def test_audit_failure_blocks_and_updates_readiness_without_ready_value() -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     readiness = _Readiness()
     gate = ExecutionGate(
         policy=ExecutionPolicy.BOOK_GUARDED,
@@ -228,11 +173,11 @@ async def test_audit_failure_blocks_and_updates_readiness_without_ready_value() 
         candidate,
         decision_id="decision-3",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=None,
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, BlockedExecution)
@@ -243,7 +188,7 @@ async def test_audit_failure_blocks_and_updates_readiness_without_ready_value() 
 async def test_audit_failure_does_not_construct_ready_to_submit(
     monkeypatch,
 ) -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     constructed = False
 
     class _ReadySpy:
@@ -262,11 +207,11 @@ async def test_audit_failure_does_not_construct_ready_to_submit(
         candidate,
         decision_id="decision-3a",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=None,
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, BlockedExecution)
@@ -275,7 +220,7 @@ async def test_audit_failure_does_not_construct_ready_to_submit(
 
 
 async def test_other_symbol_snapshot_blocks_before_ready_with_symbol_evidence() -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     audit = _Audit()
     gate = ExecutionGate(
         policy=ExecutionPolicy.BOOK_GUARDED,
@@ -287,11 +232,11 @@ async def test_other_symbol_snapshot_blocks_before_ready_with_symbol_evidence() 
         candidate,
         decision_id="decision-symbol",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(symbol="fUSD"),
-        price=_price(),
+        snapshot=make_snapshot(symbol="fUSD"),
+        price=make_price(),
         fill_evidence=None,
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, BlockedExecution)
@@ -303,7 +248,7 @@ async def test_other_symbol_snapshot_blocks_before_ready_with_symbol_evidence() 
 
 
 async def test_optimizer_live_without_fill_evidence_is_blocked_and_audited() -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     audit = _Audit()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_LIVE,
@@ -315,11 +260,11 @@ async def test_optimizer_live_without_fill_evidence_is_blocked_and_audited() -> 
         candidate,
         decision_id="decision-4",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=None,
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, BlockedExecution)
@@ -329,7 +274,7 @@ async def test_optimizer_live_without_fill_evidence_is_blocked_and_audited() -> 
 
 async def test_optimizer_live_typed_missing_model_evidence_is_blocked_and_audited() -> None:
     """The optimizer-live gate must not convert a model outage into a signal fallback."""
-    candidate = _candidate()
+    candidate = make_candidate()
     audit = _Audit()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_LIVE,
@@ -341,11 +286,11 @@ async def test_optimizer_live_typed_missing_model_evidence_is_blocked_and_audite
         candidate,
         decision_id="decision-model-missing",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=FillModelUnavailable("missing"),
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, BlockedExecution)
@@ -355,7 +300,7 @@ async def test_optimizer_live_typed_missing_model_evidence_is_blocked_and_audite
 
 async def test_optimizer_shadow_keeps_book_guarded_rate_when_model_is_unavailable() -> None:
     """Shadow telemetry is observational and cannot change the submitted price."""
-    candidate = _candidate()
+    candidate = make_candidate()
     audit = _Audit()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_SHADOW,
@@ -367,11 +312,11 @@ async def test_optimizer_shadow_keeps_book_guarded_rate_when_model_is_unavailabl
         candidate,
         decision_id="decision-shadow-model-missing",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=FillModelUnavailable("missing"),
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, ReadyToSubmit)
@@ -388,7 +333,7 @@ async def test_optimizer_live_scope_mismatch_is_fail_closed(
     expected_horizon_h: int,
 ) -> None:
     """A model from another exact period or horizon cannot become ReadyToSubmit."""
-    candidate = _candidate()
+    candidate = make_candidate()
     audit = _Audit()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_LIVE,
@@ -400,8 +345,8 @@ async def test_optimizer_live_scope_mismatch_is_fail_closed(
         candidate,
         decision_id="decision-scope-mismatch",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=FillModelEvidence(
             fill_prob=Decimal("0.8"),
             expected_ttf_ms=30_000,
@@ -414,7 +359,7 @@ async def test_optimizer_live_scope_mismatch_is_fail_closed(
             cutoff_ms=1_000,
         ),
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
         expected_period_agg=expected_period_agg,
         expected_horizon_h=expected_horizon_h,
     )
@@ -425,7 +370,7 @@ async def test_optimizer_live_scope_mismatch_is_fail_closed(
 
 
 async def test_optimizer_live_accepts_canonical_task7_fill_evidence() -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_LIVE,
         audit=_Audit(),
@@ -436,8 +381,8 @@ async def test_optimizer_live_accepts_canonical_task7_fill_evidence() -> None:
         candidate,
         decision_id="decision-canonical-evidence",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=FillModelEvidence(
             fill_prob=Decimal("0.8"),
             expected_ttf_ms=30_000,
@@ -450,7 +395,7 @@ async def test_optimizer_live_accepts_canonical_task7_fill_evidence() -> None:
             cutoff_ms=1_000,
         ),
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
         expected_period_agg="p2",
         expected_horizon_h=1,
     )
@@ -463,7 +408,7 @@ async def test_optimizer_live_accepts_canonical_task7_fill_evidence() -> None:
 async def test_typed_unavailable_reason_is_preserved_for_live_and_audit(
     reason: str,
 ) -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     audit = _Audit()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_LIVE,
@@ -475,11 +420,11 @@ async def test_typed_unavailable_reason_is_preserved_for_live_and_audit(
         candidate,
         decision_id=f"decision-{reason}",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=FillModelUnavailable(reason=reason),  # type: ignore[arg-type]
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, BlockedExecution)
@@ -488,7 +433,7 @@ async def test_typed_unavailable_reason_is_preserved_for_live_and_audit(
 
 
 async def test_shadow_preserves_typed_unavailable_reason_without_blocking() -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     audit = _Audit()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_SHADOW,
@@ -500,11 +445,11 @@ async def test_shadow_preserves_typed_unavailable_reason_without_blocking() -> N
         candidate,
         decision_id="decision-shadow-scope-mismatch",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=FillModelUnavailable(reason="scope_mismatch"),
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, ReadyToSubmit)
@@ -553,7 +498,7 @@ def _fill_evidence(**overrides: object) -> _FillModelEvidence:
 
 
 async def test_optimizer_live_accepts_only_structural_fill_model_evidence() -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_LIVE,
         audit=_Audit(),
@@ -564,11 +509,11 @@ async def test_optimizer_live_accepts_only_structural_fill_model_evidence() -> N
         candidate,
         decision_id="decision-evidence",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=_fill_evidence(),
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, ReadyToSubmit)
@@ -576,7 +521,7 @@ async def test_optimizer_live_accepts_only_structural_fill_model_evidence() -> N
 
 
 async def test_optimizer_live_other_symbol_fill_evidence_is_blocked() -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     audit = _Audit()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_LIVE,
@@ -588,11 +533,11 @@ async def test_optimizer_live_other_symbol_fill_evidence_is_blocked() -> None:
         candidate,
         decision_id="decision-evidence-symbol",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=_fill_evidence(symbol="fUSD"),
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, BlockedExecution)
@@ -618,7 +563,7 @@ async def test_optimizer_live_invalid_fill_evidence_numbers_are_blocked(
     field: str,
     value: object,
 ) -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_LIVE,
         audit=_Audit(),
@@ -629,11 +574,11 @@ async def test_optimizer_live_invalid_fill_evidence_numbers_are_blocked(
         candidate,
         decision_id=f"decision-invalid-{field}",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=_fill_evidence(**{field: value}),
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, BlockedExecution)
@@ -642,7 +587,7 @@ async def test_optimizer_live_invalid_fill_evidence_numbers_are_blocked(
 
 
 async def test_optimizer_live_low_confidence_unavailable_evidence_is_blocked() -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     audit = _Audit()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_LIVE,
@@ -654,11 +599,11 @@ async def test_optimizer_live_low_confidence_unavailable_evidence_is_blocked() -
         candidate,
         decision_id="decision-low-confidence",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=_FillModelUnavailable(reason="low_confidence"),
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, BlockedExecution)
@@ -667,7 +612,7 @@ async def test_optimizer_live_low_confidence_unavailable_evidence_is_blocked() -
 
 
 async def test_optimizer_live_bool_style_low_confidence_is_blocked() -> None:
-    candidate = _candidate()
+    candidate = make_candidate()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_LIVE,
         audit=_Audit(),
@@ -678,11 +623,11 @@ async def test_optimizer_live_bool_style_low_confidence_is_blocked() -> None:
         candidate,
         decision_id="decision-bool-low-confidence",
         reconcile_id="reconcile-1",
-        snapshot=_snapshot(),
-        price=_price(),
+        snapshot=make_snapshot(),
+        price=make_price(),
         fill_evidence=_BoolStyleLowConfidence(low_confidence=True),
         safety=GuardResult(True, "risk"),
-        audit_context=_context(candidate),
+        audit_context=make_audit_context(candidate),
     )
 
     assert isinstance(result, BlockedExecution)

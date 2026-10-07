@@ -374,6 +374,21 @@ def test_probe_collector_exports_heartbeat_age_and_thresholds() -> None:
         "bfx_subtask_heartbeat_threshold_seconds",
         {"sub_task": "executor", "task_class": "activity"},
     ) == 360.0
+    # dependency freshness: drives /readyz, never a restart
+    assert m.registry.get_sample_value(
+        "bfx_subtask_heartbeat_threshold_seconds",
+        {"sub_task": "ws_data", "task_class": "dependency"},
+    ) == 90.0
+    assert m.registry.get_sample_value(
+        "bfx_subtask_heartbeat_threshold_seconds",
+        {"sub_task": "db", "task_class": "dependency"},
+    ) == 420.0
+
+
+def test_event_loop_lag_gauge_records_the_last_overrun() -> None:
+    m = DaemonMetrics()
+    m.observe_event_loop_lag(0.25)
+    assert m.registry.get_sample_value("bfx_event_loop_lag_seconds") == 0.25
 
 
 def test_probe_collector_exports_health_status() -> None:

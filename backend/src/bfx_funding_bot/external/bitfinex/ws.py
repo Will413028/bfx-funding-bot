@@ -18,6 +18,8 @@ from typing import Any
 import websockets
 from websockets.asyncio.client import ClientConnection
 
+from bfx_funding_bot.external.bitfinex.errors import INFO_MAINTENANCE_END, INFO_SERVER_RESTART
+
 log = logging.getLogger(__name__)
 
 BITFINEX_WS_URL = "wss://api-pub.bitfinex.com/ws/2"
@@ -115,6 +117,9 @@ class BitfinexWSClient:
         self._recv_task: asyncio.Task[None] | None = None
         self._hb_task: asyncio.Task[None] | None = None
         self._connected_at: float | None = None
+        # Monotonic time of the newest frame (candle or hb) on a subscribed channel;
+        # None until this client has received one.
+        self._last_frame_ts: float | None = None
 
     async def candles(self) -> AsyncIterator[CandleMessage]:
         await self._ensure_connected()
@@ -136,6 +141,17 @@ class BitfinexWSClient:
             return 0
         newest = max((s.last_msg_ts for s in self.channels.values()), default=time.monotonic())
         return int((time.monotonic() - newest) * 1000)
+
+    def last_frame_age_ms(self) -> int | None:
+        """Age of the newest frame actually received, or None if none yet.
+
+        Unlike ``last_msg_age_ms`` (whose per-channel clocks start at construction,
+        a grace the hb watchdog needs), this proves the venue delivered data: the
+        market-data freshness beat is taken only from it.
+        """
+        if self._last_frame_ts is None:
+            return None
+        return int((time.monotonic() - self._last_frame_ts) * 1000)
 
     def maybe_reset_backoff(self) -> None:
         """Reset reconnect_attempts if connection has been stable for >= 5 minutes.
@@ -246,6 +262,7 @@ class BitfinexWSClient:
             if state is None:
                 return
             state.last_msg_ts = time.monotonic()
+            self._last_frame_ts = state.last_msg_ts
             if payload == "hb":
                 return
             self._handle_candle_payload(state, payload)
@@ -260,10 +277,10 @@ class BitfinexWSClient:
             # 20051: server restarting. 20061: maintenance over, and Bitfinex
             # advises resubscribing. Both mean: start a fresh connection.
             code = msg.get("code")
-            if code == 20051:
+            if code == INFO_SERVER_RESTART:
                 log.warning("bitfinex_ws_server_restart %s", msg)
                 self._reconnect_reason = "venue_restart"
-            elif code == 20061:
+            elif code == INFO_MAINTENANCE_END:
                 log.warning("bitfinex_ws_maintenance_ended %s", msg)
                 self._reconnect_reason = "venue_maintenance_ended"
             else:

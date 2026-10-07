@@ -372,3 +372,36 @@ async def test_a_halt_pulls_managed_offers_every_tick_until_none_is_left(gate_st
     canceller.fail.clear()
     assert await planner._pull_if_stopped("fUST") is True
     assert canceller.cancelled == ["101"]
+
+
+@pytest.mark.asyncio
+async def test_a_halt_sweep_cancels_while_market_data_was_never_seen(gate_stack):  # noqa: F811
+    """The public WS down or not yet seen since boot blocks every new offer, but
+    the HALTED sweep still pulls managed offers through the real command gate:
+    a cancel needs no market view (chain._CANCEL_EXEMPT)."""
+    from bfx_funding_bot.core.health import HealthProbe
+    from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
+    from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
+    from bfx_funding_bot.modules.execution.safety.hard_guards import HeartbeatGuard
+
+    rig = await boundary(gate_stack)
+    await rig.gate.submit(rig.ready, rig.ctx)  # managed offer 101 while the market was seen
+    await gate_stack.snapshot("1000", offers=(Venue("101", "499.99990500"), Venue("555", "200")))
+    rig.venue.received.clear()
+    market_data = HealthProbe()  # a restarted process: ws_data never recorded
+    rig.gate._safety_evaluator = stop_chain(
+        rig.halt, HeartbeatGuard(probe=market_data, watched_sub_tasks=["ws_data"]))
+    with pytest.raises(CommandGateBlocked, match="ws_data never recorded since boot"):
+        await rig.gate.submit(await second_ready(rig), rig.ctx)
+    assert rig.venue.received == []
+
+    await rig.halt.transition("HALTED", cause="auto", actor="auto:identity_conflict", reason="x")
+    planner = object.__new__(DeploymentReconciler)
+    planner._conflict_alerted = set()
+    for name, port in planner_ports(gate_stack).items():
+        setattr(planner, f"_{name}", port)
+    planner._managed_sweep = ManagedOfferSweep(
+        session_factory=gate_stack.factory, account_id=ACCOUNT, environment="ci",
+        canceller=rig.gate, ctx=rig.ctx, offers=gate_stack.offers)
+    assert await planner._pull_if_stopped("fUST") is True
+    assert rig.venue.received == ["101"]

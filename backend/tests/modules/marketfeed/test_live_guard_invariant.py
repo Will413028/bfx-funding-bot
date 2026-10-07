@@ -29,7 +29,6 @@ hard_guards:
     enabled: {b("auth_health")}
   heartbeat:
     enabled: {b("heartbeat")}
-    sub_task_stale_threshold_seconds: 300
 nav_alerts:
   realized_loss_24h_pct: null
   drawdown_pct: null

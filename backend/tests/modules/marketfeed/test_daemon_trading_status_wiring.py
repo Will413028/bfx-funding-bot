@@ -57,9 +57,10 @@ async def test_service_is_wired_and_reads_the_daemons_own_chain(
         g.name for g in daemon.safety_chain.guards
     ]
     assert "manual_kill" in [g["name"] for g in snap["guards"]]
+    # Before its first answer the database is a never-seen dependency (fail-closed).
     assert snap["trading_readiness"] == {
         "trading_ready": False,
-        "reason": "startup_not_ready",
+        "reason": "dependency_stale",
     }
 
 

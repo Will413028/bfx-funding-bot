@@ -356,7 +356,7 @@ async def test_daemon_reports_a_refused_boot_before_it_exits(
 ) -> None:
     from bfx_funding_bot.apps import bot as daemon_module
 
-    async def refuse() -> None:
+    async def refuse(**_: object) -> None:
         raise ValueError("config_fatal: BFX_EXCHANGE_ACCOUNT_ID missing")
 
     previous = alerts.current()

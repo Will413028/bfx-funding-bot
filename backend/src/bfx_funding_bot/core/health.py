@@ -7,26 +7,55 @@ from typing import Any
 
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 
-# ── Liveness sub-tasks (own-loop, event-loop-driven) ──────────────────────────
-# A stale heartbeat means the loop is stuck or the event loop is deadlocked →
-# restarting the process can recover. These DRIVE /healthz 503 and
-# scan_staleness FatalError. Per spec D4 heartbeat threshold table.
+# ── Liveness sub-tasks (own-loop progress only) ───────────────────────────────
+# Each beat means "this task's own loop completed an iteration", never "an
+# external dependency answered": a Bitfinex or database outage must not restart
+# the process (a restart cannot fix the venue, and boot would then wait on it).
+# A stale beat means the task is stuck on an await that never returns, which a
+# restart can recover. These DRIVE /healthz 503 and scan_staleness FatalError.
+# A loop blocked by synchronous code is caught by core.loop_watchdog instead:
+# with the loop stopped, neither /healthz nor scan_staleness can run.
 LIVENESS_THRESHOLDS: dict[str, int] = {
-    "ws": 90,                    # Phase 4.2.0 lesson v2: poll ws_client.last_msg_age_ms()
-                                 # every 15s; threshold 90s covers 4-5 missed Bitfinex
-                                 # `hb` frames (which arrive ~15s on subscribed channels).
-    "candle_writer": 65 * 60,    # Phase 4.2.0 d90363fa lesson v1: 1h funding cells
-                                 # publish candle only on tick — can be silent
-                                 # >5min in quiet markets. ws heartbeat poller is
-                                 # the fast-zombie detector now; candle_writer
-                                 # only catches truly stuck queues (>3hr).
-    "scheduler": 65 * 60,        # hourly boundary + buffer
-    "health_check": 6 * 60,      # 5min hb + buffer
-    "db_keepalive": 7 * 60,      # 5min interval + 2min buffer
+    "ws": 90,                    # the WS freshness poller iterates every 15s
+                                 # (Daemon._ws_freshness_tick)
+    "candle_writer": 65 * 60,    # per dequeued candle and per idle minute, whatever
+                                 # the upsert outcome (CandleWriter.run)
+    "scheduler": 65 * 60,        # per loop pass, whatever the callback outcome; a
+                                 # callback that never returns stalls it
+    "health_check": 6 * 60,      # per 30s staleness scan
+    "db_keepalive": 7 * 60,      # per 5min ping attempt, success or not
     "periodic_reconcile": 3 * 90,  # BFX_RECONCILE_INTERVAL_S default 90s x 3 missed
-                                    # (proactive: beats unconditionally each interval, so a
-                                    # stale beat means the reconcile backbone is stuck → restart)
+                                    # (beats after every tick, venue reachable or not)
 }
+
+# ── Dependency freshness (readiness, never restart) ───────────────────────────
+# Beaten only when the dependency answered. Stale → a degraded/down observability
+# event (transition-only) and /readyz not ready (TradingReadiness), never
+# FatalError or /healthz 503. What blocks a submit while a dependency is stale
+# is the per-submit gates: HeartbeatGuard watches MARKET_DATA_FRESHNESS, the
+# book freshness gate covers the order book, and a database outage fails the
+# audit commit that every READY decision needs.
+MARKET_DATA_FRESHNESS = "ws_data"
+DB_FRESHNESS = "db"
+DEPENDENCY_THRESHOLDS: dict[str, int] = {
+    MARKET_DATA_FRESHNESS: 90,   # public WS frame (candle or Bitfinex `hb`, ~15s)
+                                 # seen within 60s at a 15s poll: 4-5 missed hb frames
+    DB_FRESHNESS: 7 * 60,        # keepalive SELECT 1 succeeded (5min interval + 2min)
+}
+
+
+def dependency_is_stale(sub_task: str, last: datetime | None, now: datetime) -> bool:
+    """The one staleness rule for a dependency, shared by HeartbeatGuard (blocks
+    the submit) and the health scan (flips /readyz), so the two never disagree.
+
+    Never seen since boot counts as stale (fail-closed): nothing proves the
+    dependency answered yet. Age is truncated to whole seconds so "exactly at
+    the threshold" is fresh whatever the microsecond drift between the beat and
+    the check.
+    """
+    if last is None:
+        return True
+    return int((now - last).total_seconds()) > DEPENDENCY_THRESHOLDS[sub_task]
 
 # ── Activity sub-tasks (reactive middleware) ──────────────────────────────────
 # executor/safety_chain are bumped ONLY when a POST decision flows through the
@@ -56,17 +85,24 @@ ACTIVITY_THRESHOLDS: dict[str, int] = {
     "writer_lock": 90,
 }
 
-# Merged view: scan_staleness needs a threshold for both classes to emit. The
-# liveness/fatal gating is keyed on LIVENESS_THRESHOLDS membership, not on this.
-SUB_TASK_THRESHOLDS: dict[str, int] = {**LIVENESS_THRESHOLDS, **ACTIVITY_THRESHOLDS}
+# Merged view: scan_staleness needs a threshold for every class to emit. The
+# fatal gating is keyed on class membership (NON_FATAL_SUB_TASKS), not on this.
+SUB_TASK_THRESHOLDS: dict[str, int] = {
+    **LIVENESS_THRESHOLDS, **ACTIVITY_THRESHOLDS, **DEPENDENCY_THRESHOLDS,
+}
+NON_FATAL_SUB_TASKS: frozenset[str] = frozenset(ACTIVITY_THRESHOLDS) | frozenset(
+    DEPENDENCY_THRESHOLDS
+)
 _DEFAULT_THRESHOLD_S = 60
 
-# A sub-task is EITHER liveness OR activity, never both. Overlap would make the
-# merged dict silently take the ACTIVITY value and the scan_staleness gate would
-# suppress fatal escalation for a task meant to be liveness — enforce at import.
-assert not (LIVENESS_THRESHOLDS.keys() & ACTIVITY_THRESHOLDS.keys()), (
-    "sub-task threshold keys must not overlap between LIVENESS and ACTIVITY"
-)
+# A sub-task belongs to exactly one class. Overlap would make the merged dict
+# silently take one class's value and the scan_staleness gate would suppress
+# fatal escalation for a task meant to be liveness — enforce at import.
+assert not (
+    LIVENESS_THRESHOLDS.keys() & ACTIVITY_THRESHOLDS.keys()
+    or LIVENESS_THRESHOLDS.keys() & DEPENDENCY_THRESHOLDS.keys()
+    or ACTIVITY_THRESHOLDS.keys() & DEPENDENCY_THRESHOLDS.keys()
+), "sub-task threshold keys must not overlap between liveness, activity and dependency"
 
 
 # auth WS reconnects/hour at/above which we call it "flapping" (still authing
@@ -83,7 +119,7 @@ def assess_auth_ws_health(
     the socket opens but never authenticates (the 2026-07 µs/ms nonce bug, dead
     for months because nothing looked). Returns a status for the HEALTH_CHECK
     emit path only; the caller MUST NOT record a liveness heartbeat off this, so
-    a DOWN never drives /healthz 503 or autoheal restart — a systemic auth/nonce
+    a DOWN never drives /healthz 503 or a restart — a systemic auth/nonce
     fault won't heal on restart, it would just flap-restart.
     """
     if connection_count == 0:

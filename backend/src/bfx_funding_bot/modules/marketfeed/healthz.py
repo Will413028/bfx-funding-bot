@@ -1,11 +1,11 @@
 """External HTTP liveness endpoint — `GET /healthz` for external probes.
 
-Phase 4.2.1+ best-practice item: daemon-internal HealthMonitor.scan_staleness
-can detect a stalled sub-task, but cannot detect a daemon-wide deadlock
-(asyncio event loop blocked → scan_staleness itself never runs). An external
-HTTP probe escapes that failure mode: it sees no response. The deploy
-health gate (deploy/vm/ops/bfx_deploy.py) reads this endpoint; the compose
-file defines no Docker healthcheck on it.
+This server runs on the daemon's event loop: a blocked loop answers nothing
+here and runs no scan_staleness either. That case is handled out of the loop by
+core.loop_watchdog, which ends the process. An external probe of /healthz sees
+the missing response (an alert, not a restart trigger). The deploy health gate
+(deploy/vm/ops/bfx_deploy.py) reads this endpoint; the compose file defines no
+Docker healthcheck on it.
 
 This module exposes a small FastAPI app and a `run_healthz_server`
 coroutine; the daemon adds it as one task in its TaskGroup. Reads from the
@@ -73,7 +73,7 @@ def make_app(
         # Liveness probe: ONLY own-loop, event-loop-driven sub-tasks count.
         # Reactive activity (executor / safety_chain) and unknown keys are
         # excluded — "no trading activity" must never trigger a restart
-        # (k8s liveness anti-pattern). See health_monitor.LIVENESS_THRESHOLDS.
+        # (k8s liveness anti-pattern), and so is dependency freshness (core.health).
         now = datetime.now(UTC)
         liveness = {
             t: ts for t, ts in probe.last_active_ts.items()

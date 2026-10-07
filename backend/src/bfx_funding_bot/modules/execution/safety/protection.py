@@ -505,7 +505,9 @@ class WriterLockWatch:
     holds it; only a lock still not held afterwards (another writer has it, or
     re-acquisition failed) is a loss. That is process fencing, not a trading
     decision: raising takes the daemon's task group down, the container
-    restarts, and boot waits for the lock again. No trading state is written.
+    restarts. A boot that still finds the lock held by another writer exits 75
+    (``EXIT_CODE_WRITER_LOCKED``) and the restart policy tries again; the boot itself
+    never waits for the lock. No trading state is written.
     """
 
     def __init__(self, *, lock: _WriterLock) -> None:

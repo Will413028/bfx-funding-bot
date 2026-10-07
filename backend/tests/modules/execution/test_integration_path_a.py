@@ -36,7 +36,7 @@ class _EventCapture:
 async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
     diagnostics = _EventCapture()
     probe = HealthProbe()
-    probe.record_heartbeat("ws")
+    probe.record_heartbeat("ws_data")
 
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
 
@@ -44,11 +44,7 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
         guards=[
             ManualKillGuard(),
             AuthHealthGuard(probe=probe),
-            HeartbeatGuard(
-                probe=probe,
-                threshold_seconds=300,
-                watched_sub_tasks=["ws"],
-            ),
+            HeartbeatGuard(probe=probe, watched_sub_tasks=["ws_data"]),
         ],
         probe=probe,
         diagnostics=diagnostics,

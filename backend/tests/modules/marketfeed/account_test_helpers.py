@@ -163,6 +163,7 @@ phase3b_wfo_results_ref: x
 async def boot_live_construction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock, *, cells_yaml: Path | None = None,
     name: str = "daemon", extra_env: dict[str, str] | None = None, before_boot=None,
+    stop_event=None, skip_ws: bool = True,
 ):  # type: ignore[no-untyped-def]
     """Construct (not run) a Bitfinex-venue daemon on file-based sqlite; public GETs are mocked.
 
@@ -187,7 +188,8 @@ async def boot_live_construction(
         url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
         method="GET", status_code=200, json=[], is_reusable=True, is_optional=True,
     )
-    daemon = await build_daemon(cells_yaml_path=cells_yaml or write_cells_yaml(tmp_path), skip_ws=True)
+    daemon = await build_daemon(cells_yaml_path=cells_yaml or write_cells_yaml(tmp_path),
+                                skip_ws=skip_ws, stop_event=stop_event)
     return daemon, engine
 
 

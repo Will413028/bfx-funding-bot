@@ -39,7 +39,7 @@ prior state：真錢 canary 跑在 Koyeb（Docker-from-GitHub、隱含單一實�
 
 - **D1 = spec #1＋plan 決策 1–7**：單一寫入者用 **session-level advisory lock**，放在**專用 NullPool 連線**（pool 回收會釋放鎖；`-pooler` 會被剝掉，txn-mode pooler 上 advisory lock 無效）；只在 live 路徑取得（paper／shadow 不搶鎖）；拿不到 → `WriterLockUnacquired` → exit 75（EX_TEMPFAIL）；`WriterLockGuard` 每筆真錢送單前**實際在該連線 `SELECT 1` 驗證**，不讀快取旗標；背景 30s liveness 只做重取與觀測。lock key = `blake2b("bfx-writer:{account}:{env}")` 取 signed int64，**禁用內建 `hash()`**（PYTHONHASHSEED 會加鹽）。
 - **D2 = spec #4＋plan 決策 8**：migrate 拆成 one-shot service；`alembic/env.py` 另用**不同 namespace** 的 advisory lock 序列化並發 migration，`lock_timeout=5s`／`statement_timeout=60s`；**永不自動 `alembic downgrade`**，回滾靠 DB 還原。
-- **D3 = spec #5**：`restart: unless-stopped`＋`autoheal`，healthcheck 90s 連續失敗才重啟、`start_period` 180s 防開機抖動；8080 不對外 publish。
+- **D3 = spec #5**（已被 [2026-10-07-loop-watchdog-and-dependency-readiness-replace-autoheal](2026-10-07-loop-watchdog-and-dependency-readiness-replace-autoheal.md) 取代）：`restart: unless-stopped`＋`autoheal`，healthcheck 90s 連續失敗才重啟、`start_period` 180s 防開機抖動；8080 不對外 publish。
 - **D4 = spec #2/#3/#6/#7**：遷移時 cap 維持不變、`realized_loss_24h` 由舊的絕對額重算為 cap 的 10%、保留 Tokyo VM＋Neon Singapore（60–80ms，DB 不在下單關鍵路徑）、canary 不帶 Redis（`src/` 無 consumer）。
 - **D5 = spec §B2/§C**：每個 phase 一份 env 檔，canary 專屬變數在 paper／shadow **不存在而非空白**；cutover 順序 paper（ci realm）→ shadow（shadow realm，可與 Koyeb 並行）→ **Koyeb scale 到 0 並在 Bitfinex 確認無掛單** → 起 VM canary；任一時刻只有一個 prod 寫入者。
 
@@ -56,7 +56,7 @@ prior state：真錢 canary 跑在 Koyeb（Docker-from-GitHub、隱含單一實�
 
 - `git log --oneline ca34e65^1..ca34e65`（hardening：writer lock、migration lock、limiter）與 `git log --oneline 7cee591^1..7cee591`（compose、per-phase env、`deploy-vm.sh`），`9dd1077` 修 healthcheck（slim image 無 wget → python）。
 - 2026-05-31 cutover 完成（ARCHITECTURE §8：「Koyeb 已於 2026-05-31 cutover 至 VM」）。
-- 仍在 main：`core/writer_lock.py`、`WriterLockGuard`、`WriterLockWatch`、`alembic/env.py` 的 migration lock、compose `autoheal`。
+- 仍在 main：`core/writer_lock.py`、`WriterLockGuard`、`WriterLockWatch`、`alembic/env.py` 的 migration lock。compose `autoheal` 在 2026-09-25 改寫 `docker-compose.app.yml` 時未帶入；D3 由 [2026-10-07-loop-watchdog-and-dependency-readiness-replace-autoheal](2026-10-07-loop-watchdog-and-dependency-readiness-replace-autoheal.md) 取代。
 - 已被取代：D4 的 cap 與絕對額 limiter（`0b90763` 改 % of NAV，後由 [2026-09-25-lending-envelope-replaces-probation-and-account-halt](2026-09-25-lending-envelope-replaces-probation-and-account-halt.md) 取代）；D5 的 `canary` phase 已移除；Neon 於 2026-06-23 退役（見 [2026-06-07-web-tier-hosting-funnel-scoped-roles](2026-06-07-web-tier-hosting-funnel-scoped-roles.md)）；`deploy-vm.sh` 在 VM 上 build 的方式由 [2026-09-25-ci-registry-digest-deploy](2026-09-25-ci-registry-digest-deploy.md) 取代。
 
 ## Invariants

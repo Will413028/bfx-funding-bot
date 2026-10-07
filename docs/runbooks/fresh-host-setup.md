@@ -53,8 +53,9 @@ Better Auth 的表。
 ### 1b-1. 蓋 database realm（migration 之後，以 `<owner>` 執行一次）
 
 每個資料庫只屬於一個 realm。`database_realm` 是單列、只能插入的表（migration `a7c3e9f1b2d4`），
-39 張帶 `deployment_environment` 的表有 trigger，寫入的 realm 與這一列不同、或這一列不存在時一律拒絕
-（owner 也一樣）；bot 開機時也會拒絕 `BFX_DEPLOYMENT_ENV` 與這一列不同的資料庫，任何 phase 都適用。
+每張帶 `deployment_environment` 的表都有 `database_realm_write` trigger（實際清單可查：
+`SELECT tgrelid::regclass FROM pg_trigger WHERE tgname = 'database_realm_write' ORDER BY 1;`），
+寫入的 realm 與這一列不同、或這一列不存在時一律拒絕（owner 也一樣）；bot 開機時也會拒絕 `BFX_DEPLOYMENT_ENV` 與這一列不同的資料庫，任何 phase 都適用。
 
 - 已有資料的資料庫（例如 prod）：migration 從現有資料推導並蓋章（只有一種 realm 時），不用手動做；
   有多種 realm 時 migration 失敗，schema 維持原狀。

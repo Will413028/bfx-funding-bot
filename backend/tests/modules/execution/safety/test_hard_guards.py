@@ -81,10 +81,9 @@ async def test_auth_health_allows_when_target_never_set() -> None:
 @pytest.mark.asyncio
 async def test_heartbeat_allows_when_all_fresh() -> None:
     probe = HealthProbe()
-    probe.record_heartbeat("safety_chain")
-    probe.record_heartbeat("executor")
-    g = HeartbeatGuard(probe=probe, threshold_seconds=300,
-                       watched_sub_tasks=["safety_chain", "executor"])
+    probe.record_heartbeat("ws_data")
+    probe.record_heartbeat("db")
+    g = HeartbeatGuard(probe=probe, watched_sub_tasks=["ws_data", "db"])
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is True
 
@@ -92,34 +91,41 @@ async def test_heartbeat_allows_when_all_fresh() -> None:
 @pytest.mark.asyncio
 async def test_heartbeat_blocks_when_any_stale() -> None:
     probe = HealthProbe()
-    probe.last_active_ts["safety_chain"] = datetime.now(UTC)
-    probe.last_active_ts["executor"] = datetime.now(UTC) - timedelta(seconds=400)
-    g = HeartbeatGuard(probe=probe, threshold_seconds=300,
-                       watched_sub_tasks=["safety_chain", "executor"])
+    probe.last_active_ts["ws_data"] = datetime.now(UTC)
+    probe.last_active_ts["db"] = datetime.now(UTC) - timedelta(seconds=7 * 60 + 60)
+    g = HeartbeatGuard(probe=probe, watched_sub_tasks=["ws_data", "db"])
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is False
-    assert "executor" in (r.reason or "")
+    assert "db" in (r.reason or "")
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_allows_when_target_never_recorded() -> None:
-    # Day-1 boot: heartbeat dict may not have the key yet.
+async def test_heartbeat_blocks_until_the_first_beat_since_boot() -> None:
+    """Fail-closed: a dependency never seen since boot has not proven it answers.
+    The first beat lifts the block; nothing else is waited for."""
     probe = HealthProbe()
-    g = HeartbeatGuard(probe=probe, threshold_seconds=300,
-                       watched_sub_tasks=["safety_chain"])
-    r = await g.evaluate(_post(), _ctx())
-    assert r.allowed is True
+    g = HeartbeatGuard(probe=probe, watched_sub_tasks=["ws_data"])
+    blocked = await g.evaluate(_post(), _ctx())
+    assert blocked.allowed is False
+    assert blocked.reason == "sub_task=ws_data never recorded since boot"
+
+    probe.record_heartbeat("ws_data")
+    assert (await g.evaluate(_post(), _ctx())).allowed is True
 
 
 @pytest.mark.asyncio
 async def test_heartbeat_edge_at_exactly_threshold() -> None:
     probe = HealthProbe()
-    probe.last_active_ts["x"] = datetime.now(UTC) - timedelta(seconds=300)
-    g = HeartbeatGuard(probe=probe, threshold_seconds=300,
-                       watched_sub_tasks=["x"])
+    probe.last_active_ts["ws_data"] = datetime.now(UTC) - timedelta(seconds=90)
+    g = HeartbeatGuard(probe=probe, watched_sub_tasks=["ws_data"])
     r = await g.evaluate(_post(), _ctx())
     # Exactly at threshold = still allowed; strictly greater blocks.
     assert r.allowed is True
+
+
+def test_heartbeat_watches_dependency_freshness_only() -> None:
+    with pytest.raises(ValueError, match="dependency freshness only"):
+        HeartbeatGuard(probe=HealthProbe(), watched_sub_tasks=["executor"])
 
 
 class _FakeLock:

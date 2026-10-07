@@ -94,7 +94,6 @@ hard_guards:
     enabled: {b("auth_health")}
   heartbeat:
     enabled: {b("heartbeat")}
-    sub_task_stale_threshold_seconds: 300
 nav_alerts:
   realized_loss_24h_pct: null
   drawdown_pct: null
@@ -122,7 +121,8 @@ async def test_build_daemon_heartbeat_guard_watches_market_data_not_executor(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
     """HeartbeatGuard is a readiness gate ('don't trade on a stale market
-    view'), so it watches market-data own-loop liveness (ws), NOT the reactive
+    view'), so it watches market-data freshness (ws_data: a public WS frame was
+    seen), NOT the poller's own liveness beat (ws) and NOT the reactive
     executor/safety_chain — watching those self-suppresses trading in quiet
     markets (the 2026-05-26 canary restart bug) and is a reactive mismatch."""
     from bfx_funding_bot.modules.execution.safety.hard_guards import HeartbeatGuard
@@ -130,11 +130,51 @@ async def test_build_daemon_heartbeat_guard_watches_market_data_not_executor(
     safety_yaml = _write_safety_yaml(tmp_path)
     daemon, engine = await boot_live_construction(
         monkeypatch, tmp_path, httpx_mock, extra_env={"BFX_SAFETY_CONFIG": str(safety_yaml)},
+        skip_ws=False,
     )
     try:
         hbg = next(g for g in daemon.safety_chain.guards if isinstance(g, HeartbeatGuard))
-        assert hbg.watched == ["ws"]
+        assert hbg.watched == ["ws_data"]
         assert "executor" not in hbg.watched
         assert "safety_chain" not in hbg.watched
+        # Fail-closed from boot: market data and the database start not ready.
+        assert daemon.trading_readiness._stale_dependencies == {"ws_data", "db"}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_composition_without_the_public_ws_watches_no_market_data(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
+) -> None:
+    """skip_ws (tests only) runs no public WS, so nothing would ever beat ws_data:
+    watching it would block forever. Only the database is a boot dependency there."""
+    from bfx_funding_bot.modules.execution.safety.hard_guards import HeartbeatGuard
+
+    daemon, engine = await boot_live_construction(monkeypatch, tmp_path, httpx_mock)
+    try:
+        hbg = next(g for g in daemon.safety_chain.guards if isinstance(g, HeartbeatGuard))
+        assert hbg.watched == []
+        assert daemon.trading_readiness._stale_dependencies == {"db"}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_build_daemon_feeds_dependency_freshness_to_readiness_and_takes_the_stop_event(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
+) -> None:
+    """The health scan reports ws_data/db freshness to the readiness /readyz serves,
+    and the daemon stops on the event the loop watchdog follows (``_run`` passes it)."""
+    import asyncio
+
+    stop = asyncio.Event()
+    daemon, engine = await boot_live_construction(
+        monkeypatch, tmp_path, httpx_mock, stop_event=stop,
+    )
+    try:
+        assert daemon.trading_readiness is not None
+        assert daemon.monitor._readiness is daemon.trading_readiness
+        assert daemon._stop_event is stop
     finally:
         await engine.dispose()

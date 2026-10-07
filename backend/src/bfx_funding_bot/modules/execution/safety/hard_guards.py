@@ -13,7 +13,11 @@ from decimal import Decimal
 from typing import Literal, Protocol
 from uuid import UUID
 
-from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.health import (
+    DEPENDENCY_THRESHOLDS,
+    HealthProbe,
+    dependency_is_stale,
+)
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -166,21 +170,23 @@ class AuthHealthGuard:
 
 
 class HeartbeatGuard:
-    """Block when any watched sub-task heartbeat is older than threshold.
+    """Block while any watched dependency-freshness beat is stale.
 
-    Day-1 / never-recorded sub-tasks allow by default (booting state).
-    Threshold strictly greater (> threshold) blocks; exactly equal allows.
+    Watched keys must be dependency-freshness sub-tasks (core.health
+    DEPENDENCY_THRESHOLDS); their threshold and the staleness rule come from
+    ``core.health.dependency_is_stale``, the same rule that flips /readyz. A key
+    never recorded since boot is stale: trading stays blocked until the first
+    beat proves the dependency answered (fail-closed).
     """
 
     name = "heartbeat"
 
-    def __init__(
-        self, *, probe: HealthProbe, threshold_seconds: int,
-        watched_sub_tasks: list[str],
-    ) -> None:
+    def __init__(self, *, probe: HealthProbe, watched_sub_tasks: Sequence[str]) -> None:
+        unknown = [t for t in watched_sub_tasks if t not in DEPENDENCY_THRESHOLDS]
+        if unknown:
+            raise ValueError(f"HeartbeatGuard watches dependency freshness only, got {unknown}")
         self.probe = probe
-        self.threshold_seconds = threshold_seconds
-        self.watched = watched_sub_tasks
+        self.watched = list(watched_sub_tasks)
 
     async def evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,
@@ -188,17 +194,15 @@ class HeartbeatGuard:
         now = datetime.now(UTC)
         for sub_task in self.watched:
             last = self.probe.last_active_ts.get(sub_task)
-            if last is None:
+            if not dependency_is_stale(sub_task, last, now):
                 continue
-            # Truncate to integer seconds so "exactly at threshold" semantics
-            # are deterministic — microsecond drift from datetime.now() between
-            # heartbeat record and evaluate must not flip the boundary case.
-            age = int((now - last).total_seconds())
-            if age > self.threshold_seconds:
-                return GuardResult(
-                    allowed=False, guard_name=self.name,
-                    reason=f"sub_task={sub_task} stale {age}s > {self.threshold_seconds}s",
-                )
+            threshold = DEPENDENCY_THRESHOLDS[sub_task]
+            reason = (
+                f"sub_task={sub_task} never recorded since boot" if last is None
+                else f"sub_task={sub_task} stale {int((now - last).total_seconds())}s"
+                     f" > {threshold}s"
+            )
+            return GuardResult(allowed=False, guard_name=self.name, reason=reason)
         return GuardResult(allowed=True, guard_name=self.name)
 
 

@@ -21,6 +21,7 @@ from bfx_funding_bot.apps.authority_support import require_ledger_epoch
 from bfx_funding_bot.apps.bot_ports import ObservationVenue, build_capital_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
 from bfx_funding_bot.apps.venue import VenueSeam, build_venue
+from bfx_funding_bot.core.bounded import run_bounded
 from bfx_funding_bot.core.database_realm import assert_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
@@ -29,7 +30,8 @@ from bfx_funding_bot.core.errors import (
     ExecutorAuthError,
     WriterLockUnacquired,
 )
-from bfx_funding_bot.core.health import HealthProbe
+from bfx_funding_bot.core.health import DB_FRESHNESS, MARKET_DATA_FRESHNESS, HealthProbe
+from bfx_funding_bot.core.loop_watchdog import LoopWatchdog, loop_watchdog_timeout_s
 from bfx_funding_bot.core.schema_head import assert_schema_head
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
@@ -135,6 +137,7 @@ from bfx_funding_bot.modules.live_validation.interest_ledger import (
 )
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
+from bfx_funding_bot.modules.marketfeed.boot_wait import wait_for_database
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.daemon import (
     Daemon,
@@ -161,6 +164,7 @@ from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
 from bfx_funding_bot.modules.observability import alerts
+from bfx_funding_bot.modules.observability.bot_runs import BotRunRecord
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
     MetricsSubmitMiddleware,
@@ -187,9 +191,12 @@ async def build_daemon(
     cells_yaml_path: Path | None = None,
     skip_ws: bool = False,
     venue_seam: VenueSeam | None = None,
+    stop_event: asyncio.Event | None = None,
 ) -> Daemon:
     """Compose one bot process. ``venue_seam`` is for tests: production passes nothing, so
-    the simulated venue runs on the live market feed and without injected faults."""
+    the simulated venue runs on the live market feed and without injected faults.
+    ``stop_event`` becomes the daemon's stop event; ``_run`` passes the one its loop
+    watchdog already follows."""
     config = load_config(cells_yaml_path=cells_yaml_path)
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -201,6 +208,9 @@ async def build_daemon(
     # (``apps/authority_support.py``), before any ledger write. Any refusal stops the boot and
     # alerts (``_refuse_live_boot``: alert routing is configuration, the sink prefixes the realm).
     try:
+        # A database that is down or still starting delays the boot instead of failing
+        # it (a failed boot only restarts into the same outage); other errors refuse.
+        await wait_for_database(db_engine)
         async with session_factory() as boot_session:
             await assert_schema_head(boot_session)
             await assert_database_realm(boot_session, config.deployment_environment.value)
@@ -251,7 +261,13 @@ async def build_daemon(
     metrics = DaemonMetrics()
     metrics.register_probe(probe)  # heartbeat age/threshold + health_status
     install_log_metrics_handler(metrics)  # WARNING+ error-rate, idempotent
-    trading_readiness = TradingReadiness(on_change=metrics.set_trading_ready)
+    # Dependency freshness this process reports: the public WS's market data (when it
+    # runs one) and the database. Each starts not ready until its first beat.
+    market_data_dependencies = [] if skip_ws else [MARKET_DATA_FRESHNESS]
+    trading_readiness = TradingReadiness(
+        on_change=metrics.set_trading_ready,
+        dependencies=(*market_data_dependencies, DB_FRESHNESS),
+    )
     # deployment_environment comes from config (BFX_DEPLOYMENT_ENV via load_config).
     event_resource = EventResource(
         deployment_environment=config.deployment_environment,
@@ -309,7 +325,8 @@ async def build_daemon(
         reconcile_interval_seconds=config.book_reconcile_interval_seconds,
     )
     registry = StrategyRegistry(build_strategy)
-    monitor = HealthMonitor(phase=config.phase, event_sink=stdout_sink, probe=probe)
+    monitor = HealthMonitor(phase=config.phase, event_sink=stdout_sink, probe=probe,
+                            readiness=trading_readiness)
     candle_q: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
 
     now_mts = now_ms_utc()
@@ -472,14 +489,17 @@ async def build_daemon(
     if hg.heartbeat.enabled:
         guards.append(HeartbeatGuard(
             probe=probe,
-            threshold_seconds=hg.heartbeat.sub_task_stale_threshold_seconds,
             # Readiness gate: block POST only when our MARKET VIEW is stale.
-            # Watch market-data own-loop liveness ("ws"), not the reactive
-            # executor/safety_chain — those are bumped only by trading itself,
-            # so watching them self-suppresses trades in quiet markets and was
-            # part of the 2026-05-26 canary restart loop. ws stays fresh in
-            # quiet markets via _ws_heartbeat_poll_loop (Bitfinex hb ~15s).
-            watched_sub_tasks=["ws"],
+            # Watch market-data freshness ("ws_data": a public WS frame seen),
+            # not the reactive executor/safety_chain — those are bumped only by
+            # trading itself, so watching them self-suppresses trades in quiet
+            # markets and was part of the 2026-05-26 canary restart loop. ws_data
+            # stays fresh in quiet markets via Daemon._ws_freshness_tick
+            # (Bitfinex hb ~15s); a venue outage ages it and blocks here, with
+            # no restart. Never seen since boot also blocks, until the first
+            # frame. A composition without the public WS (skip_ws, tests only)
+            # has no such dependency to watch.
+            watched_sub_tasks=market_data_dependencies,
         ))
     guards.append(CapitalPolicyGuard(authority=capital.capital_authority, scope=capital_scope,
                                      clock=now_ms_utc))
@@ -1027,6 +1047,7 @@ async def build_daemon(
         venue_tasks=venue_wiring.tasks,
         venue_aclose=venue_wiring.aclose,
         venue_diagnostics=venue_wiring.simulated,
+        _stop_event=stop_event if stop_event is not None else asyncio.Event(),
     )
 
 
@@ -1057,18 +1078,51 @@ async def _run() -> None:
     # (said once) when TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set.
     alerts.install(alerts.AlertSink.from_environment(os.environ))
     try:
-        daemon = await build_daemon()
+        watchdog = LoopWatchdog(timeout_s=loop_watchdog_timeout_s(os.environ))
+    except Exception as exc:
+        alerts.emit(alerts.BOOT_REFUSED, error=_error_text([exc]))
+        await alerts.shutdown()
+        raise
+    # Armed before the build, so a loop wedged during the build or the boot observation
+    # also ends the process; it follows the daemon's stop event and disarms when a stop
+    # is requested, so the graceful drain is never cut short.
+    stop = asyncio.Event()
+    watchdog_task = asyncio.create_task(watchdog.run(stop), name="loop_watchdog")
+    try:
+        await _run_daemon(stop, watchdog)
+    finally:
+        watchdog_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watchdog_task
+
+
+async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
+    try:
+        daemon = await build_daemon(stop_event=stop)
     except Exception as exc:
         alerts.emit(alerts.BOOT_REFUSED, error=_error_text([exc]))
         await alerts.shutdown()
         raise
     if daemon.metrics is not None:
         alerts.current().observer = daemon.metrics.observe_alert
+        watchdog.on_lag = daemon.metrics.observe_event_loop_lag
 
-    stop = daemon._stop_event  # share with signal handler
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
+
+    # This run's row in bot_runs, written as the writer (the build acquired the lock).
+    # Reports a previous run of the scope that ended without a recorded end, once.
+    run_record = BotRunRecord(
+        daemon.session_factory,
+        exchange_account_id=daemon.account_bootstrap.exchange_account_id,
+        deployment_environment=daemon.account_bootstrap.deployment_environment,
+    )
+    await run_record.start()
+    # How this run ends, recorded after the drain. None (a BaseException other than
+    # those below) leaves the row open: the next boot reports it, as it does for the
+    # exits that never reach here (loop watchdog, OOM kill, SIGKILL).
+    end_reason: str | None = None
 
     log.info(
         "daemon_started phase=%s cells=%d",
@@ -1089,8 +1143,10 @@ async def _run() -> None:
     try:
         await daemon.run()
         log.info("daemon_run_clean_exit")
+        end_reason = "clean_stop"
     except* asyncio.CancelledError:
         log.info("daemon_cancelled_via_signal")
+        end_reason = "clean_stop"
     except* ExecutorAuthError:
         # Auth failure means credentials are wrong / revoked — operator must
         # intervene. Exit with sysexits EX_CONFIG 78 (Google SRE Book ch. 22)
@@ -1101,6 +1157,7 @@ async def _run() -> None:
         )
         alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
                     error="ExecutorAuthError: venue credentials rejected")
+        end_reason = "fatal" if daemon.booted else "boot_refused"
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* Exception as eg:
         log.error(
@@ -1109,15 +1166,24 @@ async def _run() -> None:
         )
         alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
                     error=_error_text(eg.exceptions))
+        end_reason = "fatal" if daemon.booted else "boot_refused"
         raise
     finally:
         # Cleanup after TaskGroup completes (close http client)
         log.info("daemon_shutdown_complete")
+        # The drain is over: record how the run ended while still the writer (before
+        # the lock is released). Returns within FINISH_TIMEOUT_S even when the database
+        # stops answering (the write is abandoned, not awaited).
+        if end_reason is not None:
+            await run_record.finish(end_reason)
         # Release the single-writer advisory lock so the next process can acquire
-        # it without waiting for the server-side session to expire (PG only).
+        # it without waiting for the server-side session to expire (PG only). Bounded
+        # like the run's end: a database that stopped answering must not hold the exit;
+        # the server drops the session lock when the abandoned connection dies.
         if daemon.writer_lock is not None:
             with contextlib.suppress(Exception):
-                await daemon.writer_lock.release()
+                await run_bounded(daemon.writer_lock.release(), timeout_s=_RELEASE_TIMEOUT_S,
+                                  what="writer_lock_release")
         await daemon.bitfinex_http.aclose()
         if daemon.venue_aclose is not None:
             with contextlib.suppress(Exception):
@@ -1128,6 +1194,12 @@ async def _run() -> None:
                 daemon.tracing.shutdown()
         # Deliver queued alerts (a refused boot, a fatal error) before exiting.
         await alerts.shutdown()
+
+
+# Exit-path bounds: the run's end (bot_runs.FINISH_TIMEOUT_S, 5s), the writer-lock release
+# (5s) and alerts.shutdown (5s) stay well inside the 30s stop_grace_period of
+# deploy/vm/docker-compose.app.yml.
+_RELEASE_TIMEOUT_S = 5.0
 
 
 def _error_text(exceptions: Sequence[BaseException]) -> str:

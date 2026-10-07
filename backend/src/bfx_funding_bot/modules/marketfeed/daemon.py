@@ -30,7 +30,12 @@ from bfx_funding_bot.core.errors import (
     BootInvariantError,
     ConfigurationError,
 )
-from bfx_funding_bot.core.health import HealthProbe, assess_auth_ws_health
+from bfx_funding_bot.core.health import (
+    DB_FRESHNESS,
+    MARKET_DATA_FRESHNESS,
+    HealthProbe,
+    assess_auth_ws_health,
+)
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
 from bfx_funding_bot.core.writer_lock import WriterLock
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
@@ -78,6 +83,11 @@ from bfx_funding_bot.modules.live_validation.interest_ledger import (
     InterestLedgerSync,
 )
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
+from bfx_funding_bot.modules.marketfeed.boot_wait import (
+    BootWait,
+    boot_retry_delay_s,
+    is_transient_dependency_error,
+)
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
 from bfx_funding_bot.modules.marketfeed.funding_book import (
@@ -324,6 +334,8 @@ class Daemon:
     venue_tasks: tuple[VenueTask, ...] = ()
     venue_aclose: Callable[[], Awaitable[None]] | None = None
     venue_diagnostics: VenueDiagnostics | None = None
+    # Backoff between boot observation attempts while the venue is unreachable.
+    boot_retry_delay_s: Callable[[int], float] = boot_retry_delay_s
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def _run_boot_recovery(self) -> None:
@@ -353,6 +365,38 @@ class Daemon:
                 await self.protection.run_pending()
             raise
 
+    async def _boot_until_observed(self) -> bool:
+        """Run the boot observation until it completes; False if stopped while waiting.
+
+        A transient reachability failure (venue or database did not answer, see
+        ``boot_wait.is_transient_dependency_error``) is retried in-process with a
+        capped backoff instead of exiting: a restart would meet the same outage
+        and crash-loop. Nothing trades meanwhile — no sub-task exists yet. Every
+        other failure (a refusal, rejected credentials, an invariant) propagates
+        and refuses the boot. Before each retry the writer lock is re-checked
+        (``WriterLockWatch.check``: re-acquire if its connection dropped, exit if
+        another writer holds it), so the observation only ever runs as the
+        single writer, as it does on the first attempt right after the acquire.
+        """
+        wait = BootWait("venue observation", delay_s=self.boot_retry_delay_s)
+        while True:
+            if wait.failures and self.writer_lock_watch is not None:
+                await self.writer_lock_watch.check()
+            try:
+                await self._run_boot_recovery()
+            except Exception as exc:
+                if not is_transient_dependency_error(exc):
+                    raise
+                delay = wait.failed(exc)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+                if self._stop_event.is_set():
+                    log.info("boot_stopped_while_waiting_for_dependency")
+                    return False
+                continue
+            wait.succeeded()
+            return True
+
     async def run(self) -> None:
         """Main entry — sub-task supervision via TaskGroup.
 
@@ -366,9 +410,11 @@ class Daemon:
             self.scheduler.register_from_now(cell)
 
         # 3a-recovery: reconcile against venue + resolve crash-mid-flight PENDING
-        # BEFORE any sub-task starts (None only in unit compositions). A venue
-        # fetch failure raises here -> daemon fails to start (fail-safe).
-        await self._run_boot_recovery()
+        # BEFORE any sub-task starts (None only in unit compositions). An
+        # unreachable venue is waited out in-process; a refusal raises here and
+        # the daemon fails to start (fail-safe).
+        if not await self._boot_until_observed():
+            return
         self.booted = True
 
         async with asyncio.TaskGroup() as tg:
@@ -439,7 +485,7 @@ class Daemon:
                 )
             # Observe-only auth-WS health poll (2026-07 nonce-flap fix): surfaces
             # "enabled but never authenticates" in the HEALTH_CHECK stream. NOT a
-            # liveness task → never drives /healthz 503 / autoheal restart.
+            # liveness task → never drives /healthz 503 or a restart.
             if self.auth_ws is not None:
                 tg.create_task(
                     self._auth_ws_health_poll_loop(), name="auth_ws_health",
@@ -521,11 +567,17 @@ class Daemon:
             await self.monitor.scan_staleness()  # may raise FatalError
 
     async def _db_keepalive_loop(self) -> None:
+        """Ping the database at start and then every 5 min. ``db_keepalive``
+        (liveness) beats per attempt; ``db`` (dependency freshness, readiness
+        only) per success, which also clears it in /readyz at once. A recovered
+        database therefore shows ready again at the next ping, at most one
+        keepalive interval later."""
         from bfx_funding_bot.core.keepalive import keepalive_loop
         await keepalive_loop(
             self.db_engine,
             stop=self._stop_event,
-            on_tick=lambda _ts: self.probe.record_heartbeat("db_keepalive"),
+            on_tick=lambda _ts: self._dependency_answered(DB_FRESHNESS),
+            on_attempt=lambda: self.probe.record_heartbeat("db_keepalive"),
         )
         log.info("sub_task_exit name=db_keepalive")
 
@@ -566,13 +618,13 @@ class Daemon:
         log.info("sub_task_exit name=writer_lock")
 
     async def _healthz_server_loop(self) -> None:
-        """Container-level liveness HTTP endpoint (``GET /healthz``).
+        """Liveness/readiness HTTP endpoints (``GET /healthz``, ``GET /readyz``).
 
-        Independent of in-process scan_staleness (which can't catch
-        daemon-wide event-loop deadlock — if asyncio is blocked,
-        scan_staleness itself doesn't run): an external HTTP probe sees no
-        response. The deploy health gate (deploy/vm/ops/bfx_deploy.py) reads
-        it; the compose file defines no Docker healthcheck on it.
+        Served from this event loop, so a blocked loop answers nothing; an
+        external probe sees no response, and the process-level
+        ``core.loop_watchdog`` (armed in ``apps.bot._run``) ends the process.
+        The deploy health gate (deploy/vm/ops/bfx_deploy.py) reads /healthz;
+        the compose file defines no Docker healthcheck on it.
         """
         await run_healthz_server(
             probe=self.probe,
@@ -592,7 +644,7 @@ class Daemon:
 
         Deliberately does NOT record a liveness heartbeat: a DOWN here (auth WS
         connected but never authenticated) must stay observable-only — a nonce/
-        auth fault won't heal on restart, so wiring it to /healthz 503 / autoheal
+        auth fault won't heal on restart, so wiring it to /healthz 503
         would just flap-restart the real-money bot. Transition-only update()
         (like BITFINEX_WS) avoids emitting every 60s.
         """
@@ -616,21 +668,15 @@ class Daemon:
                     error_message=msg,
                 )
 
+    def _dependency_answered(self, dependency: str) -> None:
+        """A dependency answered: beat its freshness and clear it in /readyz now,
+        not at the next staleness scan (which only ever marks it stale)."""
+        self.probe.record_heartbeat(dependency)
+        if self.trading_readiness is not None:
+            self.trading_readiness.clear_dependency(dependency)
+
     async def _ws_heartbeat_poll_loop(self) -> None:
-        """Poll ws_client.last_msg_age_ms() and record heartbeat when fresh.
-
-        Bitfinex public WS sends `hb` frames every ~15s on subscribed channels
-        when idle (quiet markets). `_handle_raw` in ws.py updates
-        state.last_msg_ts on any frame (candle or hb), but candles() yields
-        only candle data — so the daemon's main WS loop sees long gaps in
-        quiet 1h funding markets even though the connection is alive.
-
-        Solution: poll every 15s and check ws_client.last_msg_age_ms(). If
-        < 60s, the connection is alive → record heartbeat for "ws" sub-task,
-        and restore BITFINEX_WS state to HEALTHY (Bug B fix 5/20: nothing
-        else flips ws→healthy after a disconnect set DEGRADED, so the state
-        was sticky and health_monitor kept emitting warn every 5min).
-        """
+        """Run ``_ws_freshness_tick`` every 15s until stop."""
         assert self.ws_client is not None
         while not self._stop_event.is_set():
             try:
@@ -639,19 +685,43 @@ class Daemon:
                 return  # stop requested
             except TimeoutError:
                 pass
-            # Only record if WS is connected and recently saw any frame
-            if self.ws_client is not None and self.ws_client.last_msg_age_ms() < 60_000:
-                self.probe.record_heartbeat("ws")
-                # Bug B fix: only emit transition (degraded/down → healthy
-                # or first-ever set) — don't spam every 15s with new
-                # last_msg_age_ms values.
-                if self.probe.current_status(HealthTarget.BITFINEX_WS) != HealthStatus.HEALTHY:
-                    self.probe.update(
-                        HealthTarget.BITFINEX_WS,
-                        HealthStatus.HEALTHY,
-                        last_msg_age_ms=self.ws_client.last_msg_age_ms(),
-                        reconnect_count_last_hour=self.ws_client.reconnect_count_last_hour(),
-                    )
+            self._ws_freshness_tick()
+
+    def _ws_freshness_tick(self) -> None:
+        """One poll of the public WS: liveness always, data freshness if fresh.
+
+        ``ws`` (liveness) beats on every tick: it says this poller is iterating,
+        nothing about Bitfinex, so a venue outage can never age it into a restart.
+        ``ws_data`` (dependency freshness) beats only when this client actually
+        received a frame within 60s (``last_frame_age_ms``; a client that has not
+        received one yet proves nothing). Bitfinex sends `hb` frames every ~15s on subscribed channels when
+        idle; `_handle_raw` in ws.py updates state.last_msg_ts on any frame
+        (candle or hb), while candles() yields only candle data — so the frame
+        age, not the candle stream, is the freshness signal. A stale ``ws_data``
+        flips readiness and blocks submits through HeartbeatGuard; reconnecting
+        is the WS client's own job (its hb watchdog and
+        ``_ws_consume_with_reconnect``).
+
+        A fresh tick also restores BITFINEX_WS to HEALTHY (Bug B fix 5/20:
+        nothing else flips ws→healthy after a disconnect set DEGRADED, so the
+        state was sticky and health_monitor kept emitting warn every 5min).
+        """
+        self.probe.record_heartbeat("ws")
+        if self.ws_client is None:
+            return
+        frame_age_ms = self.ws_client.last_frame_age_ms()
+        if frame_age_ms is None or frame_age_ms >= 60_000:
+            return  # no frame yet from this client, or none for 60s: not fresh
+        self._dependency_answered(MARKET_DATA_FRESHNESS)
+        # Bug B fix: only emit transition (degraded/down → healthy or
+        # first-ever set) — don't spam every 15s with new last_msg_age_ms values.
+        if self.probe.current_status(HealthTarget.BITFINEX_WS) != HealthStatus.HEALTHY:
+            self.probe.update(
+                HealthTarget.BITFINEX_WS,
+                HealthStatus.HEALTHY,
+                last_msg_age_ms=self.ws_client.last_msg_age_ms(),
+                reconnect_count_last_hour=self.ws_client.reconnect_count_last_hour(),
+            )
 
     async def _ws_consume_with_reconnect(self) -> None:
         """WS recv + reconnect loop. Never exits unless daemon shuts down.
@@ -696,7 +766,7 @@ class Daemon:
                         # successful message → connection is alive; reset failure counter
                         consecutive_failures = 0
                         self.ws_client.maybe_reset_backoff()
-                        # ws heartbeat is recorded by _ws_heartbeat_poll_loop based on
+                        # ws freshness is recorded by _ws_freshness_tick based on
                         # ws_client.last_msg_age_ms() (which counts both candle frames
                         # and Bitfinex `hb` frames), not here — yielded candles are
                         # sparse on 1h cells.

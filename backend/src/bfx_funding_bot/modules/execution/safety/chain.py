@@ -45,7 +45,12 @@ _TRANSPORT_EXEMPT = frozenset({_CAPITAL_POLICY})
 # The offer envelope (safety/pre_trade.py) judges a NEW offer's terms; a cancel's
 # probe carries the managed offer's old terms and must never be refused by them.
 _PRE_TRADE_LIMITS = frozenset({"offer_envelope"})
-_CANCEL_EXEMPT = frozenset({_CAPITAL_POLICY, _TRADING_STATE}) | _PRE_TRADE_LIMITS
+# Market-data freshness (hard_guards.HeartbeatGuard, ws_data) prices a NEW offer;
+# pulling a managed one needs no market view. Blocking it would stop the HALTED /
+# policy-disabled sweep and reprice cancels exactly while the public WS is down
+# or not yet seen since boot.
+_MARKET_DATA = frozenset({"heartbeat"})
+_CANCEL_EXEMPT = frozenset({_CAPITAL_POLICY, _TRADING_STATE}) | _PRE_TRADE_LIMITS | _MARKET_DATA
 
 
 class _DiagnosticsProtocol(Protocol):
@@ -173,8 +178,8 @@ class SafetyGuardChain:
         """Write eligibility for cancelling one managed offer.
 
         A cancel spends nothing and is the one venue write HALTED
-        exists to allow, so the capital check and the trading-state gate are
-        skipped. Everything else still runs on the write-shaped probe: a new
+        exists to allow, so the capital check, the trading-state gate, the offer
+        envelope and market-data freshness are skipped. Everything else still runs on the write-shaped probe: a new
         UNKNOWN or an unreadable uncertainty projection for the offer's scope,
         a lost writer lock or a down executor still refuse the cancel. The
         kill switch's venue cancel-all is a separate path that needs only the

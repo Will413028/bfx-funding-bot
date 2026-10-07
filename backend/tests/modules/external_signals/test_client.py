@@ -157,3 +157,20 @@ async def test_binance_funding_url_and_parse() -> None:
     assert seen[0].url.params["startTime"] == "0"
     assert recs[0].venue == "binance-usdm"
     assert recs[0].mark_price is None
+
+
+@pytest.mark.asyncio
+async def test_an_auth_failure_body_is_an_answer_and_is_not_retried() -> None:
+    """10100 is ERR_AUTH_FAIL (seen in production as "apikey: digest invalid"),
+    not a rate limit: retrying it for minutes would only hide the refusal."""
+    n = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        n["count"] += 1
+        return httpx.Response(200, json=["error", 10100, "apikey: digest invalid"])
+
+    client, http = _client(httpx.MockTransport(handler))
+    async with http:
+        with pytest.raises(RuntimeError, match="refused by the venue: 10100"):
+            await client.get_liquidations_hist(end=1, limit=10)
+    assert n["count"] == 1
