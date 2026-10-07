@@ -249,6 +249,29 @@ async def test_the_envelope_never_refuses_a_cancel() -> None:
     assert not (await chain.evaluate(post(), CTX)).allowed
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seen", ["never", "stale"])
+async def test_stale_market_data_blocks_a_submit_but_never_a_cancel(seen: str) -> None:
+    """Pulling a managed offer needs no market view: the real HeartbeatGuard
+    blocks the submit (and the transport) while ws_data is stale or not yet
+    seen since boot, and lets the cancel through."""
+    from datetime import UTC, datetime, timedelta
+
+    from bfx_funding_bot.modules.execution.safety.hard_guards import HeartbeatGuard
+
+    probe = HealthProbe()
+    if seen == "stale":
+        probe.last_active_ts["ws_data"] = datetime.now(UTC) - timedelta(minutes=10)
+    chain = SafetyGuardChain(
+        guards=[HeartbeatGuard(probe=probe, watched_sub_tasks=["ws_data"])], probe=probe,
+        diagnostics=SimpleNamespace(emit=lambda event: _noop()), phase=Phase.LIVE,  # type: ignore[arg-type]
+        strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=CTX.account_id)
+    submit = await chain.evaluate(post(), CTX)
+    assert not submit.allowed and "ws_data" in (submit.reason or "")
+    assert not (await chain.evaluate_transport(post(), CTX)).allowed
+    assert (await chain.evaluate_cancel(post(), CTX)).allowed
+
+
 async def _noop() -> None:
     return None
 

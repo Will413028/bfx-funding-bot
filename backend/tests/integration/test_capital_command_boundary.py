@@ -832,3 +832,37 @@ async def test_a_crash_between_attempt_and_outcome_leaves_the_attempt_open(gate_
     assert isinstance(lost.value.__cause__, RuntimeError)
     # Open for the observation cycle's dangling-attempt closure.
     assert (await attempts(gate_stack), await outcomes(gate_stack)) == (1, [])
+
+
+async def test_reprice_cancels_while_market_data_is_stale(gate_stack):
+    """A stale ws_data blocks a new offer, never the reprice cancel of a managed
+    one: both go through the real command gate and its guard chain."""
+    from datetime import UTC, datetime, timedelta
+
+    from bfx_funding_bot.core.health import HealthProbe
+    from bfx_funding_bot.modules.execution.safety.hard_guards import HeartbeatGuard
+    from tests.integration.contracts.stacks import Venue as Offer
+    from tests.modules.execution.deployment.test_reconciler import (
+        _REPRICE,
+        _build,
+        _post_quote,
+        _venue_offer,
+    )
+    rig = await boundary(gate_stack)
+    await rig.gate.submit(rig.ready, rig.ctx)  # managed offer 101, market data fresh
+    await gate_stack.snapshot("1000", offers=(Offer("101", AMOUNT),))  # the venue shows it
+    rig.venue.received.clear()
+    market_data = HealthProbe()
+    market_data.last_active_ts["ws_data"] = datetime.now(UTC) - timedelta(minutes=10)
+    chain = stop_chain(rig.halt, HeartbeatGuard(probe=market_data, watched_sub_tasks=["ws_data"]))
+    rig.gate._safety_evaluator = chain
+    with pytest.raises(CommandGateBlocked, match="ws_data stale"):
+        await rig.gate.submit(await second_ready(rig), rig.ctx)
+    assert rig.venue.received == []
+    rec, _, _ = _build(exposure=Decimal("0"), quotes=[_post_quote("fUST_a30")],
+        executor=rig.gate, safety=chain, capital_ports=planner_ports(gate_stack),
+        canceller=rig.gate, reprice=_REPRICE)
+    rec._ctx = rig.ctx
+    rec._clock = lambda: NOW  # the planner reads capital at its own clock
+    await rec.deploy(venue_offers=(_venue_offer("101", 0.001),))
+    assert rig.venue.received == ["101"]  # the reprice cancel reached the venue
