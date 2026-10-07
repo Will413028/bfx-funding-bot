@@ -1,0 +1,43 @@
+name: Benchmark
+
+# Wall-clock budgets (the `benchmark` marker in pyproject.toml), run serially on a
+# runner of their own: under the unit job's `-n auto` they share the CPU with every
+# other worker and measure the contention. A separate workflow on purpose:
+# release.yml publishes only after the workflow named "CI" passes, so runner timing
+# noise never gates a release.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - backend/src/bfx_funding_bot/modules/marketfeed/divergence_reporter.py
+      - backend/src/bfx_funding_bot/modules/marketfeed/strategy_registry.py
+      - backend/src/bfx_funding_bot/modules/strategy/**
+      - backend/tests/benchmark/**
+      - .github/workflows/benchmark.yml
+  schedule:
+    - cron: "47 19 * * *"  # nightly, 03:47 Asia/Taipei
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  benchmark:
+    name: Benchmark budgets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      - run: uv run pytest -m benchmark -q

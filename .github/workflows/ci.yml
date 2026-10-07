@@ -115,8 +115,9 @@ jobs:
       - run: uv run ruff check
       - run: uv run mypy --strict src
       - run: uv run lint-imports
-      # Pure CPU and no shared state: one worker per core.
-      - run: uv run pytest -m "not integration and not gate" -q -n auto
+      # Pure CPU and no shared state: one worker per core. Wall-clock budgets run
+      # serially in benchmark.yml.
+      - run: uv run pytest -m "not integration and not gate and not benchmark" -q -n auto
 
   backend_gate:
     name: Backend (Python) — deploy gate
