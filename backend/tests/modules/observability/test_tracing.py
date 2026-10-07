@@ -25,7 +25,6 @@ from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
-    ReservationRef,
 )
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -102,14 +101,11 @@ class _StubExecutor:
     def __init__(self, order: SubmittedOrder | None = None, exc: Exception | None = None) -> None:
         self.order = order
         self.exc = exc
-        self.calls: list[object | None] = []
         self.readies: list[ReadyToSubmit] = []
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: object | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext,
     ) -> SubmittedOrder:
-        self.calls.append(reservation_ref)
         self.readies.append(ready)
         if self.exc is not None:
             raise self.exc
@@ -238,13 +234,8 @@ async def test_submit_middleware_passthrough_and_span() -> None:
     inner = _StubExecutor(order=order)
     mw = TracingSubmitMiddleware(inner, tracing=t)
     ready = _ready()
-    ref = ReservationRef(
-        execution_decision_id=ready.decision_id,
-        signal_correlation_id=ready.decision.signal_correlation_id,
-    )
-    got = await mw.submit(ready, _ctx(), reservation_ref=ref)
+    got = await mw.submit(ready, _ctx())
     assert got is order                 # byte-identical passthrough
-    assert inner.calls == [ref]         # reference threaded down unchanged
     assert inner.readies == [ready]      # immutable boundary object is not rebuilt
     (span,) = exporter.get_finished_spans()
     assert span.name == "executor.submit"
@@ -278,7 +269,6 @@ async def test_submit_middleware_transparent_when_disabled() -> None:
     mw = TracingSubmitMiddleware(inner, tracing=t)
     got = await mw.submit(_ready(), _ctx())
     assert got is order
-    assert inner.calls == [None]
 
 
 # ── TracedReconcileRecovery ──────────────────────────────────────────────────

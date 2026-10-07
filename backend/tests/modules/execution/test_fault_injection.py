@@ -246,7 +246,7 @@ class _TypedOutcomeExecutor:
         ready: ReadyToSubmit,
         context: AccountContext,
         *,
-        reservation_ref: ReservationRef | None = None,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder:
         del ready, context
         self.calls += 1

@@ -84,6 +84,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     ExecutorPort,
     FundingCancelAllPort,
     GuardRule,
+    VenueExecutorPort,
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
@@ -507,7 +508,7 @@ async def build_daemon(
         ttl_ms=int(os.environ.get("BFX_QUOTE_TTL_MS", "3900000")),
     )
 
-    executor: ExecutorPort = spec.executor
+    executor: VenueExecutorPort = spec.executor
 
     # 3a-recovery: venue reconciliation against the real venue.
     book_snapshot_writer: BookSnapshotWriter | None = None

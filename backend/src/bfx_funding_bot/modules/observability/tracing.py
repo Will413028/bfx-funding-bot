@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     )
     from bfx_funding_bot.modules.observability.resource import EventResource
 
-from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 
 log = logging.getLogger(__name__)
 
@@ -238,8 +238,7 @@ class TracingSubmitMiddleware:
         self._tracing = tracing
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: ReservationRef | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext,
     ) -> SubmittedOrder:
         attrs: dict[str, Any] = {}
         # Defense-in-depth on the money path: even attr harvesting must not raise.
@@ -247,9 +246,7 @@ class TracingSubmitMiddleware:
             attrs["bfx.symbol"] = ready.decision.symbol
             attrs["bfx.execution_decision_id"] = ready.decision_id
         with self._tracing.span("executor.submit", attributes=attrs) as span:
-            order = await self._inner.submit(
-                ready, ctx, reservation_ref=reservation_ref,
-            )
+            order = await self._inner.submit(ready, ctx)
             span.set_attribute("bfx.submit.status", order.status)
             return order
 

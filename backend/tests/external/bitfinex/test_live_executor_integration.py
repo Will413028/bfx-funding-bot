@@ -11,11 +11,18 @@ from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
+from bfx_funding_bot.modules.execution.contracts import (
+    ExecutionPolicy,
+    GuardResult,
+    ReadyToSubmit,
+    ReservationRef,
+)
+from bfx_funding_bot.modules.execution.errors import InvariantViolation
 from bfx_funding_bot.modules.execution.events import CancelRequested
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
+    SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
@@ -50,6 +57,20 @@ def _ready(decision: DecisionPayload) -> ReadyToSubmit:
     )
 
 
+def _ref(ready: ReadyToSubmit) -> ReservationRef:
+    """The reference the command gate derives for ``ready``."""
+    return ReservationRef(
+        execution_decision_id=ready.decision_id,
+        signal_correlation_id=ready.decision.signal_correlation_id,
+    )
+
+
+async def _submit(
+    executor: BitfinexLiveExecutor, ready: ReadyToSubmit, ctx: AccountContext,
+) -> SubmittedOrder:
+    return await executor.submit(ready, ctx, reservation_ref=_ref(ready))
+
+
 class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
         pass
@@ -75,7 +96,7 @@ async def test_submit_without_authoritative_amount_rule_is_not_sent(fault):
         elif fault == "changed":
             ready = replace(ready, funding_amount_evidence=replace(ready.funding_amount_evidence,
                                                                   rule_digest="old"))
-        result = await executor.submit(ready, _make_ctx())
+        result = await _submit(executor, ready, _make_ctx())
     assert result.outcome_kind is SubmitOutcomeKind.NOT_SENT
     assert requests == []
 
@@ -102,7 +123,7 @@ async def test_submit_rechecks_original_book_after_local_signing_work(expiring):
             configured_symbols=frozenset({"fUST"}), cell="C-1", auth_gate=AuthRequestGate(nonce), clock=lambda: now)
         ready = replace(_ready(_make_decision()),
                         funding_amount_evidence=evidence(now=-27900 if expiring == "fx" else 1000))
-        result = await executor.submit(ready,
+        result = await _submit(executor, ready,
             replace(_make_ctx(), before_submit_transport=lambda: expiring == "fx" or now <= 2100))
     assert result.outcome_kind is SubmitOutcomeKind.NOT_SENT
     assert requests == []
@@ -129,7 +150,7 @@ async def test_submit_returns_submitted_on_success() -> None:
         auth_gate=AuthRequestGate(lambda: 1000),
     )
 
-    result = await executor.submit(_ready(_make_decision()), _make_ctx())
+    result = await _submit(executor, _ready(_make_decision()), _make_ctx())
     assert result.status == "submitted"
     assert result.venue_offer_id == "42"
 
@@ -147,7 +168,7 @@ async def test_submit_returns_unknown_on_http_5xx() -> None:
         configured_symbols=frozenset({"fUST"}), cell="C-1",
         auth_gate=AuthRequestGate(lambda: 1000),
     )
-    result = await executor.submit(_ready(_make_decision()), _make_ctx())
+    result = await _submit(executor, _ready(_make_decision()), _make_ctx())
     assert result.status == "unknown"
     assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
     assert result.venue_offer_id is None
@@ -169,7 +190,7 @@ async def test_submit_returns_unbound_failure_on_http_200_error() -> None:
         auth_gate=AuthRequestGate(lambda: 1000),
     )
 
-    result = await executor.submit(_ready(_make_decision()), _make_ctx())
+    result = await _submit(executor, _ready(_make_decision()), _make_ctx())
 
     assert result.status == "failed"  # compatibility view for explicit rejection
     assert result.outcome_kind is SubmitOutcomeKind.REJECTED
@@ -209,7 +230,7 @@ async def test_submit_fixed_point_rate_serialization() -> None:
         offer_rate=5.531e-05, offer_amount_usdt=150.0, offer_duration_days=2,
         symbol="fUST",
     )
-    result = await executor.submit(_ready(decision), _make_ctx())
+    result = await _submit(executor, _ready(decision), _make_ctx())
 
     assert result.status == "submitted"
     assert captured["body"]["rate"] == "0.00005531"
@@ -261,7 +282,7 @@ async def test_planned_amount_reaches_the_venue_body_unchanged(planned, fingerpr
             phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
         )
-        result = await executor.submit(_ready(decision), _make_ctx())
+        result = await _submit(executor, _ready(decision), _make_ctx())
 
     assert result.status == "submitted"
     assert captured["body"]["amount"] == wire
@@ -286,7 +307,7 @@ async def test_submit_routes_by_decision_symbol_not_constructor() -> None:
         auth_gate=AuthRequestGate(lambda: 1000),
     )
     decision = _make_decision(symbol="fUST")
-    result = await ex.submit(_ready(decision), _make_ctx())
+    result = await _submit(ex, _ready(decision), _make_ctx())
     assert captured[0]["symbol"] == "fUST" == decision.symbol
     assert result.status == "submitted"
 
@@ -303,7 +324,7 @@ async def test_submit_marks_unconfigured_symbol_not_sent() -> None:
         configured_symbols=frozenset({"fUST"}),
         auth_gate=AuthRequestGate(lambda: 1),
     )
-    result = await ex.submit(_ready(_make_decision(symbol="fUSD")), _make_ctx())
+    result = await _submit(ex, _ready(_make_decision(symbol="fUSD")), _make_ctx())
     assert result.status == "not_sent"
     assert result.outcome_kind is SubmitOutcomeKind.NOT_SENT
     assert isinstance(result.outcome.reason, str)
@@ -320,7 +341,7 @@ async def test_submit_marks_malformed_success_response_unknown() -> None:
         configured_symbols=frozenset({"fUST"}), auth_gate=AuthRequestGate(lambda: 1),
     )
 
-    result = await ex.submit(_ready(_make_decision()), _make_ctx())
+    result = await _submit(ex, _ready(_make_decision()), _make_ctx())
 
     assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
     assert result.status == "unknown"
@@ -340,7 +361,7 @@ async def test_submit_failure_keeps_only_bounded_response_evidence() -> None:
         configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
         auth_gate=AuthRequestGate(lambda: 1000),
     )
-    result = await executor.submit(_ready(_make_decision()), _make_ctx())
+    result = await _submit(executor, _ready(_make_decision()), _make_ctx())
     assert result.status == "unknown"
     assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
     assert result.venue_offer_id is None
@@ -420,7 +441,7 @@ async def test_submit_waits_for_the_shared_gate_and_rechecks_after_it(
         )
         ctx = replace(_make_ctx(), before_submit_transport=predicate)
         async with gate.nonce("read") as held_nonce:
-            task = asyncio.ensure_future(executor.submit(_ready(_make_decision()), ctx))
+            task = asyncio.ensure_future(_submit(executor, _ready(_make_decision()), ctx))
             for _ in range(20):
                 await asyncio.sleep(0)
             assert requests == []
@@ -459,7 +480,7 @@ async def test_submit_cancelled_while_waiting_for_the_gate_is_not_sent() -> None
             configured_symbols=frozenset({"fUST"}), cell="C-1", auth_gate=gate,
         )
         async with gate.nonce("read"):
-            task = asyncio.ensure_future(executor.submit(_ready(_make_decision()), _make_ctx()))
+            task = asyncio.ensure_future(_submit(executor, _ready(_make_decision()), _make_ctx()))
             for _ in range(20):
                 await asyncio.sleep(0)
             task.cancel()
@@ -470,3 +491,58 @@ async def test_submit_cancelled_while_waiting_for_the_gate_is_not_sent() -> None
         assert requests == []
         assert not gate.busy
         assert gate.waiting("order") == 0
+
+
+def _echo_executor(response: httpx.Response) -> BitfinexLiveExecutor:
+    return BitfinexLiveExecutor(
+        http=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response)),
+        event_sink=_EventCapture(), bus=DomainEventBus(),
+        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
+        configured_symbols=frozenset({"fUST"}), cell="C-1",
+        auth_gate=AuthRequestGate(lambda: 1000),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    httpx.Response(500),
+    httpx.Response(200, json=[1716383500000, "fon-req", None, None,
+                              None, None, "ERROR", "Funds insufficient"]),
+], ids=["unknown", "rejected"])
+async def test_submit_echoes_the_given_reference_unbound(response: httpx.Response) -> None:
+    """The executor returns the gate's own reference object, never one it made."""
+    ready = _ready(_make_decision())
+    given = _ref(ready)
+
+    result = await _echo_executor(response).submit(ready, _make_ctx(), reservation_ref=given)
+
+    assert result.reservation_ref is given
+
+
+@pytest.mark.asyncio
+async def test_submit_echoes_the_given_reference_bound_to_the_acknowledged_offer() -> None:
+    success = [
+        1716383500000, "fon-req", None, None,
+        [42, "fUST", 0, 0, 150.0, 0, "REQ", None, None, 0, "ACTIVE",
+         None, None, None, 0.0005, 2, 0, 0, None, 0, None, None, None, 12345],
+        None, "SUCCESS", "Submitting",
+    ]
+    ready = _ready(_make_decision())
+    given = _ref(ready)
+
+    result = await _echo_executor(httpx.Response(200, json=success)).submit(
+        ready, _make_ctx(), reservation_ref=given)
+
+    assert result.venue_offer_id == "42"
+    assert result.reservation_ref == given.bind_venue_offer("42")
+
+
+@pytest.mark.asyncio
+async def test_submit_refuses_a_reference_for_another_request() -> None:
+    ready = _ready(_make_decision())
+    other = ReservationRef(execution_decision_id="another-decision",
+                           signal_correlation_id=ready.decision.signal_correlation_id)
+
+    with pytest.raises(InvariantViolation, match="reservation_ref conflicts"):
+        await _echo_executor(httpx.Response(500)).submit(
+            ready, _make_ctx(), reservation_ref=other)

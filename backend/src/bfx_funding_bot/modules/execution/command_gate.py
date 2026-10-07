@@ -36,8 +36,8 @@ from bfx_funding_bot.modules.execution.contracts import (
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     CancelPort,
-    ExecutorPort,
     SubmittedOrder,
+    VenueExecutorPort,
 )
 from bfx_funding_bot.modules.execution.safety.protection import ProtectionPort
 from bfx_funding_bot.modules.execution.submit_outcomes import (
@@ -101,7 +101,7 @@ class AccountCommandGate:
 
     def __init__(
         self,
-        inner: ExecutorPort,
+        inner: VenueExecutorPort,
         *,
         uncertainty_reader: UncertaintyReader,
         safety_evaluator: AuthoritativeSafetyEvaluator,
@@ -172,14 +172,7 @@ class AccountCommandGate:
         self,
         ready: ReadyToSubmit,
         context: AccountContext,
-        *,
-        reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder:
-        # This boundary is the sole authority for a submit's reservation
-        # reference: it derives one from ``ready`` and requires the venue
-        # executor to echo it. A caller-supplied reference is a wiring error.
-        if reservation_ref is not None:
-            raise ValueError("reservation_ref is created by the command gate, not its caller")
         account_id = _canonical_account_id(context.account_id)
         lock_key = (str(account_id), self._deployment_environment)
         lock = self._account_locks.setdefault(lock_key, asyncio.Lock())
@@ -194,6 +187,8 @@ class AccountCommandGate:
     ) -> SubmittedOrder:
         decision = ready.decision
         account_id = _canonical_account_id(context.account_id)
+        # This boundary is the sole authority for a submit's reservation
+        # reference; the venue executor must echo it (see _bind_result).
         reference = ReservationRef(
             execution_decision_id=ready.decision_id,
             signal_correlation_id=decision.signal_correlation_id,

@@ -26,7 +26,6 @@ from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
-    ReservationRef,
 )
 from bfx_funding_bot.modules.execution.events import CancelAcknowledged, CancelRequested
 from bfx_funding_bot.modules.execution.protocols import (
@@ -216,14 +215,11 @@ class _StubExecutor:
                  exc: Exception | None = None) -> None:
         self._order = order
         self._exc = exc
-        self.calls: list[object | None] = []
         self.readies: list[ReadyToSubmit] = []
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: object | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext,
     ) -> SubmittedOrder:
-        self.calls.append(reservation_ref)
         self.readies.append(ready)
         if self._exc is not None:
             raise self._exc
@@ -238,13 +234,8 @@ async def test_submit_middleware_passes_result_and_records() -> None:
     inner = _StubExecutor(order=order)
     mw = MetricsSubmitMiddleware(inner, metrics=m)
     ready = _ready()
-    ref = ReservationRef(
-        execution_decision_id=ready.decision_id,
-        signal_correlation_id=ready.decision.signal_correlation_id,
-    )
-    got = await mw.submit(ready, _ctx(), reservation_ref=ref)
+    got = await mw.submit(ready, _ctx())
     assert got is order                       # byte-identical passthrough
-    assert inner.calls == [ref]               # reference threaded down unchanged
     assert inner.readies == [ready]            # immutable boundary object is not rebuilt
     assert m.registry.get_sample_value(
         "bfx_executor_submits_total", {"status": "submitted"},

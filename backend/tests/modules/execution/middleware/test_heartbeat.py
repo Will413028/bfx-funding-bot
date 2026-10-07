@@ -51,14 +51,12 @@ def _ctx() -> AccountContext:
 
 
 class _InnerOk:
-    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *,
-                     reservation_ref: object | None = None) -> SubmittedOrder:
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext) -> SubmittedOrder:
         return SubmittedOrder(outcome=SubmitAcknowledged("x"))
 
 
 class _InnerRaises:
-    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *,
-                     reservation_ref: object | None = None) -> SubmittedOrder:
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext) -> SubmittedOrder:
         raise ExecutorTransientError("network_blip")
 
 

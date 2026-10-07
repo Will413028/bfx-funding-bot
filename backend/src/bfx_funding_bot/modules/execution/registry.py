@@ -19,7 +19,7 @@ import httpx
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
-from bfx_funding_bot.modules.execution.protocols import ExecutorPort
+from bfx_funding_bot.modules.execution.protocols import VenueExecutorPort
 from bfx_funding_bot.modules.strategy import StrategyName
 
 
@@ -33,7 +33,7 @@ class ExecutorConfigError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ExecutorSpec:
-    executor: ExecutorPort
+    executor: VenueExecutorPort
 
 
 def build_executor(

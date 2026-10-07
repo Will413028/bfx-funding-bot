@@ -53,9 +53,8 @@ class _UncertaintyNeverOpen:
 class _AckInner:
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: ReservationRef | None = None,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder:
-        assert reservation_ref is not None
         return SubmittedOrder(
             venue_offer_id="venue-xyz",
             outcome=SubmitAcknowledged("venue-xyz"),
@@ -73,7 +72,7 @@ class _TransientInner:
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: object | None = None,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder:
         self.calls += 1
         raise ExecutorTransientError("network_blip")

@@ -15,11 +15,11 @@ from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     AuthoritativeSafetyEvaluator,
 )
-from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
-    ExecutorPort,
     SubmittedOrder,
+    VenueExecutorPort,
 )
 from bfx_funding_bot.modules.ledger import ManagedOfferReader, UncertaintyReader
 
@@ -29,7 +29,7 @@ class ReservationEmittingMiddleware:
 
     def __init__(
         self,
-        inner: ExecutorPort,
+        inner: VenueExecutorPort,
         *,
         safety_evaluator: AuthoritativeSafetyEvaluator,
         boundary: CommandBoundary,
@@ -58,8 +58,5 @@ class ReservationEmittingMiddleware:
         await self._command_gate.cancel(venue_offer_id=venue_offer_id,
             signal_correlation_id=signal_correlation_id, account_id=account_id, ctx=ctx)
 
-    async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: ReservationRef | None = None,
-    ) -> SubmittedOrder:
-        return await self._command_gate.submit(ready, ctx, reservation_ref=reservation_ref)
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext) -> SubmittedOrder:
+        return await self._command_gate.submit(ready, ctx)

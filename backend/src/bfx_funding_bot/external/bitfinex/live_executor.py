@@ -337,15 +337,11 @@ class BitfinexLiveExecutor:
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: ReservationRef | None = None,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder:
         decision = ready.decision
-        # The command gate supplies the reference; a direct caller gets one
-        # derived from the same request.
-        reference = reservation_ref or ReservationRef(
-            execution_decision_id=ready.decision_id,
-            signal_correlation_id=decision.signal_correlation_id,
-        )
+        # The command gate's reference for this intent; every result echoes it.
+        reference = reservation_ref
         if (
             reference.execution_decision_id != ready.decision_id
             or reference.signal_correlation_id != decision.signal_correlation_id

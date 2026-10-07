@@ -109,7 +109,7 @@ class _FakeVenue:
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref=None,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder:
         self.calls += 1
         if self.recording is not None:
@@ -156,7 +156,7 @@ class _BlockingAckVenue(_FakeVenue):
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref=None,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder:
         self.started.set()
         await self.release.wait()
@@ -172,10 +172,9 @@ class _MisattributingVenue(_FakeVenue):
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref=None,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder:
         self.calls += 1
-        assert reservation_ref is not None
         return SubmittedOrder(
             outcome=SubmitAcknowledged("venue-untrusted"),
             reservation_ref=self.returned_ref(reservation_ref),
@@ -558,25 +557,6 @@ async def test_executor_identity_mismatch_becomes_durable_unknown_and_blocks_sco
     with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
         await gate.submit(_ready(decision_id="decision-2"), _context())
     assert venue.calls == 1
-
-
-@pytest.mark.asyncio
-async def test_gate_refuses_a_caller_supplied_reservation_reference() -> None:
-    """The gate derives the reference itself; a caller cannot choose the identity."""
-    reader = _FakeUncertaintyReader(set())
-    recording = _recording(reader)
-    venue = _FakeVenue()
-    gate = _gate(venue, reader, recording)
-    ready = _ready()
-    supplied = ReservationRef(
-        execution_decision_id=ready.decision_id,
-        signal_correlation_id=ready.decision.signal_correlation_id,
-    )
-
-    with pytest.raises(ValueError, match="created by the command gate"):
-        await gate.submit(ready, _context(), reservation_ref=supplied)
-    assert venue.calls == 0
-    assert recording.txns == []
 
 
 @pytest.mark.asyncio

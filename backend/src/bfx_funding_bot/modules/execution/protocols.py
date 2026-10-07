@@ -46,6 +46,7 @@ __all__ = [
     "SubmitOutcome",
     "SubmitOutcomeKind",
     "SubmittedOrder",
+    "VenueExecutorPort",
     "WriterLockHandle",
 ]
 
@@ -132,15 +133,25 @@ class WriterLockHandle(Protocol):
 
 
 class ExecutorPort(Protocol):
-    """Venue executor (Bitfinex live).
+    """The submit path as its caller (the deployment reconciler) sees it.
 
-    ``reservation_ref`` is created by the account command gate and passed only
-    to the venue executor behind it; a result must echo it back so the gate can
-    attribute the outcome to its own intent.
+    Implemented by the observe-only middlewares and by the account command gate
+    at their core. The caller hands over only the request: the gate derives the
+    submit's reservation reference itself, so none can be supplied here.
+    """
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext) -> SubmittedOrder: ...
+
+
+class VenueExecutorPort(Protocol):
+    """The venue transport behind the account command gate (Bitfinex live).
+
+    The gate passes the reservation reference it derived for the durable
+    intent; the result must echo exactly that reference (bound to the venue
+    offer on an acknowledgement) so the gate can attribute it to its intent.
     """
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: ReservationRef | None = None,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder: ...
 
 
