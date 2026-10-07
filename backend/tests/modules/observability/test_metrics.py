@@ -179,7 +179,7 @@ def test_observe_methods_fail_open_when_backend_broken() -> None:
     # None of these may raise:
     m.observe_operational_event({"event_type": "signal", "level": "info"})
     m.observe_diagnostic_event({"event_type": "safety_trigger", "level": "warn"})
-    m.observe_submit(status="filled", duration_s=0.1)
+    m.observe_submit(status="submitted", duration_s=0.1)
     m.observe_reconcile_tick(result="ok", duration_s=0.1)
     m.observe_log_record(level="warning", logger="x")
 
