@@ -181,21 +181,8 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
       - run: uv sync --all-groups
-      # PostgreSQL 18 server binaries from PGDG (not started as a service: each pytest process
-      # initialises and runs its own throwaway cluster).
-      - name: Install PostgreSQL 18 (PGDG)
-        run: |
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-            https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          . /etc/os-release
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-common
-          sudo sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf
-          sudo apt-get install -y --no-install-recommends postgresql-18
-          "$BFX_TEST_PG_BIN/pg_ctl" --version
+      # PostgreSQL 18 server binaries only (each pytest process runs its own throwaway cluster).
+      - uses: ./.github/actions/postgres-18
       # Keep third-party live smoke tests out of deterministic CI; run them
       # explicitly with `uv run pytest -m 'integration and live'`.
       # --durations: the suite is near its timeout; each run lists the slowest tests.
