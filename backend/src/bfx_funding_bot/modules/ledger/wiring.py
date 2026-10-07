@@ -1,4 +1,4 @@
-"""Construct the dormant ledger ports; apps select them in S1-3."""
+"""Construct the ledger ports; ``apps/bot_ports.py`` and ``apps/read_models.py`` bind them."""
 
 from __future__ import annotations
 

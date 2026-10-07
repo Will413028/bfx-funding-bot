@@ -9,8 +9,6 @@ from pydantic import ValidationError
 from bfx_funding_bot.core.telemetry import EventType, HealthTarget, Level, Phase
 from bfx_funding_bot.modules.marketfeed.schemas import (
     Envelope,
-    OrderFillPayload,
-    OrderStatusChangePayload,
     OrderSubmitPayload,
     SafetyTriggerPayload,
 )
@@ -90,26 +88,6 @@ def test_order_submit_payload_rejects_blank_execution_decision_id() -> None:
             offer_amount_usdt=100.0, offer_duration_days=2,
             is_simulated=True, status="submitted",
         )
-
-
-def test_order_fill_payload_minimal() -> None:
-    p = OrderFillPayload(
-        cid=12345, offer_id="paper_abc",
-        signal_correlation_id=uuid4(),
-        fill_size_usdt=100.0, fill_price=0.0001,
-        is_simulated=True,
-    )
-    assert p.fill_size_usdt == 100.0
-
-
-def test_order_status_change_payload() -> None:
-    p = OrderStatusChangePayload(
-        cid=1, offer_id="x",
-        signal_correlation_id=uuid4(),
-        status="cancelled", reason="user_cancelled",
-        is_simulated=False,
-    )
-    assert p.status == "cancelled"
 
 
 def test_safety_trigger_payload() -> None:

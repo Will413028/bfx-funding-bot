@@ -59,9 +59,6 @@ class _RecordingSink:
         self.credits.append(hint)
         self.received.set()
 
-    async def offer_gone(self, venue_offer_id: str, *, occurred_at_ms: int) -> bool:
-        return True
-
 
 def _foc(voi: str, status: str, raw_seq: int) -> FocEvent:
     return FocEvent(

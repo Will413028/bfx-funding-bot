@@ -172,8 +172,8 @@ class OfferClaimResponse(BaseModel):
 
 
 class ExecutionEventResponse(BaseModel):
-    """One execution-history row: an event_log row under legacy, a journal row (or the frozen
-    event_log below the switch) under the ledger. ``eventKey`` is opaque (ADR 2026-10-02 D4)."""
+    """One execution-history row: a ledger journal row, or below the switch a row of the frozen
+    ``legacy_archive.event_log``. ``eventKey`` is opaque (ADR 2026-10-02 D4)."""
 
     event_key: str = Field(serialization_alias="eventKey")
     event_type: str = Field(serialization_alias="eventType")

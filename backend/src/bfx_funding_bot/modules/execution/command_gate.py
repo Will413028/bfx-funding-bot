@@ -2,7 +2,7 @@
 
 The in-process lock spans guard evaluation, two durable database boundaries,
 and the venue call. Database transactions never span the venue call: the
-persister commits the intent and terminal outcome in two separate calls.
+command journal commits the intent and terminal outcome in two separate transactions.
 """
 from __future__ import annotations
 

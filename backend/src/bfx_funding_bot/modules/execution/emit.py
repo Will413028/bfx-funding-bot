@@ -18,11 +18,10 @@ from bfx_funding_bot.modules.execution.protocols import (
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
     Envelope,
-    OrderFillPayload,
     OrderSubmitPayload,
     SafetyTriggerPayload,
 )
-from bfx_funding_bot.modules.strategy import DecisionPayload, StrategyName
+from bfx_funding_bot.modules.strategy import StrategyName
 
 
 class _EventSink(Protocol):
@@ -77,42 +76,6 @@ async def emit_order_submit(
         strategy=strategy,
         cell=cell,
         event_type=EventType.ORDER_SUBMIT,
-        correlation_id=decision.signal_correlation_id,
-        account_id=ctx.account_id,
-        payload=payload.model_dump(mode="json"),
-    )
-    await event_sink.emit(env.model_dump(mode="json"))
-
-
-async def emit_order_fill(
-    *,
-    event_sink: _EventSink,
-    phase: Phase,
-    strategy: StrategyName,
-    cell: str,
-    decision: DecisionPayload,
-    ctx: AccountContext,
-    cid: int,
-    offer_id: str,
-    fill_size_usdt: float,
-    fill_price: float,
-    is_simulated: bool,
-) -> None:
-    payload = OrderFillPayload(
-        cid=cid,
-        offer_id=offer_id,
-        signal_correlation_id=decision.signal_correlation_id,
-        fill_size_usdt=fill_size_usdt,
-        fill_price=fill_price,
-        is_simulated=is_simulated,
-    )
-    env = Envelope(
-        timestamp=_now_iso(),
-        level=Level.INFO,
-        phase=phase,
-        strategy=strategy,
-        cell=cell,
-        event_type=EventType.ORDER_FILL,
         correlation_id=decision.signal_correlation_id,
         account_id=ctx.account_id,
         payload=payload.model_dump(mode="json"),

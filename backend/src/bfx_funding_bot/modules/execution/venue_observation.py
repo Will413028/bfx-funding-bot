@@ -1,4 +1,4 @@
-"""Dormant Bitfinex observation adapter; not wired into the bot.
+"""Bitfinex observation adapter: the venue reads behind the ledger's observation cycle.
 
 One budget covers both active reads and every symbol's four history streams.
 The default 48 slots allow eight active requests plus 4 * 5 pages * 2 symbols.

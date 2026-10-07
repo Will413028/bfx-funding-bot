@@ -44,9 +44,11 @@ def _resolve_position_fields(ev: object) -> None:
 
 @dataclass(frozen=True, slots=True)
 class CancelRequested:
-    """User-initiated cancel request on pending offer.
+    """The live executor is about to send a venue cancel for one offer (intent audit).
 
-    Ledger effect: dequeues offer from pending; signals venue cancel via API.
+    Audit-only event: its subscribers are the diagnostics sink (a ``cancel_audit``
+    row), the WS dispatcher (remembers the offer as recently cancelled) and the
+    domain-event counter; it changes no capital state.
     """
     venue_offer_id: str
     requested_at_ms: int
@@ -95,12 +97,10 @@ class PositionReconciled:
 class CancelAcknowledged:
     """Bitfinex REST cancel API returned (success OR already-terminal).
 
-    Audit-only event — ledger/registry NOT subscribers. The offer's close is
-    observed by the ledger (the WS `foc` only becomes a venue hint). Provides a
-    REST-leg debug breadcrumb separable from the intent (CancelRequested).
-
-    Ledger effect: none (audit).
-    Registry effect: none (audit).
+    Audit-only event: its subscribers are the diagnostics sink (a ``cancel_audit``
+    row) and the domain-event counter; it changes no capital state. The offer's
+    close is observed by the ledger (the WS `foc` only becomes a venue hint).
+    Provides a REST-leg debug breadcrumb separable from the intent (CancelRequested).
     """
     venue_offer_id: str
     acknowledged_at_ms: int

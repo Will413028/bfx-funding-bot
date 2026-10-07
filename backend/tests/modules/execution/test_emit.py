@@ -14,7 +14,6 @@ from bfx_funding_bot.modules.execution.contracts import (
     ReadyToSubmit,
 )
 from bfx_funding_bot.modules.execution.emit import (
-    emit_order_fill,
     emit_order_submit,
     emit_safety_trigger,
 )
@@ -90,19 +89,6 @@ async def test_emit_order_submit_failed_requires_reason() -> None:
             offer_id=None, is_simulated=False, status="failed",
             failure_reason=None,
         )
-
-
-@pytest.mark.asyncio
-async def test_emit_order_fill_shape() -> None:
-    axiom = _EventCapture()
-    corr = uuid4()
-    await emit_order_fill(
-        event_sink=axiom, phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
-        cell="fUSD_a30", decision=_decision(corr), ctx=_ctx(),
-        cid=1, offer_id="paper_x", fill_size_usdt=100.0, fill_price=0.0001,
-        is_simulated=True,
-    )
-    assert axiom.events[0]["event_type"] == EventType.ORDER_FILL.value
 
 
 @pytest.mark.asyncio

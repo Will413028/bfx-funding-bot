@@ -535,11 +535,10 @@ class BitfinexLiveExecutor:
     ) -> None:
         """Cancel an offer at Bitfinex.
 
-        Event flow (3-event audit model — Phase 4.4b prework):
+        Event flow (audit events; neither changes capital state):
           1. publish CancelRequested (intent audit)
           2. POST /v2/auth/w/funding/offer/cancel with HMAC-SHA384 sign
           3. publish CancelAcknowledged (REST ack audit) on success or already-terminal
-             — ledger/registry do NOT subscribe to this (audit-only)
           4. the close itself is observed by the ledger; ws_dispatcher only turns
              the WS `foc` into a venue hint
 

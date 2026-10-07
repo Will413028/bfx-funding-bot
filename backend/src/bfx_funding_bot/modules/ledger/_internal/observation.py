@@ -1,4 +1,4 @@
-"""Dormant two-read observation acceptance; an accepted one writes its capital basis."""
+"""Two-read observation acceptance; an accepted one writes its capital basis."""
 
 from __future__ import annotations
 

@@ -12,7 +12,7 @@ running daemon, and it must stay answerable when the database is the thing
 that's unhealthy. ``started_at`` is therefore part of the contract — a null
 attempt means "nothing tried since this process started", never "never traded".
 
-Only the latest attempt is kept. History belongs in event_log; this is the
+Only the latest attempt is kept. History belongs in the ledger journals; this is the
 "what is happening now" view, and a bounded history here would invite reading
 it as an audit trail it is not.
 """

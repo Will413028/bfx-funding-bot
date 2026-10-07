@@ -3,7 +3,7 @@
 Bitfinex serves NO historical funding-book data; book-aware strategies
 (spike-rung ladder, E2-class pricing) can only ever be backtested on data we
 record ourselves, starting the day this table went live (2026-07-19). Rows are
-append-only snapshots; NOT part of the event-sourced ledger.
+append-only snapshots; NOT part of the capital ledger.
 """
 from __future__ import annotations
 

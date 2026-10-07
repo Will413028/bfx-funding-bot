@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -39,60 +39,11 @@ class OrderSubmitPayload(BaseModel):
         return self
 
 
-class OrderFillPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    cid: int
-    offer_id: str
-    signal_correlation_id: UUID
-    fill_size_usdt: float
-    fill_price: float
-    is_simulated: bool
-
-
-class OrderStatusChangePayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    cid: int
-    offer_id: str
-    signal_correlation_id: UUID
-    status: str  # "cancelled" / "expired" / "partially_filled"
-    reason: str | None = None
-    filled_size_delta_usdt: float | None = None
-    is_simulated: bool
-
-
-class ReservationClaimedPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    cid: int
-    venue_offer_id: str
-    size_usdt: float
-    signal_correlation_id: UUID
-    is_simulated: bool
-
-
-class ReservationReleasedPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    cid: int
-    venue_offer_id: str
-    size_usdt: float
-    reason: str  # "venue_cancel" / "user_cancel" / "expired" / "missing_from_venue"
-    signal_correlation_id: UUID
-    is_simulated: bool
-
-
 class SafetyTriggerPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     guard_name: str
     reason: str
     decision_snapshot: dict[str, Any]
-
-
-PayloadModel = Annotated[
-    SignalPayload | DecisionPayload | HealthCheckPayload
-    | OrderSubmitPayload | OrderFillPayload | OrderStatusChangePayload
-    | ReservationClaimedPayload | ReservationReleasedPayload
-    | SafetyTriggerPayload | dict[str, Any],
-    Field(union_mode="left_to_right"),
-]
 
 
 class Envelope(BaseModel):
@@ -131,14 +82,6 @@ class Envelope(BaseModel):
             HealthCheckPayload.model_validate(self.payload)
         elif self.event_type == EventType.ORDER_SUBMIT:
             OrderSubmitPayload.model_validate(self.payload)
-        elif self.event_type == EventType.ORDER_FILL:
-            OrderFillPayload.model_validate(self.payload)
-        elif self.event_type == EventType.ORDER_STATUS_CHANGE:
-            OrderStatusChangePayload.model_validate(self.payload)
-        elif self.event_type == EventType.RESERVATION_CLAIMED:
-            ReservationClaimedPayload.model_validate(self.payload)
-        elif self.event_type == EventType.RESERVATION_RELEASED:
-            ReservationReleasedPayload.model_validate(self.payload)
         elif self.event_type == EventType.SAFETY_TRIGGER:
             SafetyTriggerPayload.model_validate(self.payload)
         return self

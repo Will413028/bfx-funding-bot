@@ -21,16 +21,14 @@ from bfx_funding_bot.modules.ledger.wiring import build_venue_hint_sink
 SCOPE = Scope(UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"), "ci")
 OFFER = OfferCloseHint("42", "fUST", "EXECUTED", 0.0005, 8000, 17, 9000)
 CREDIT = CreditCloseHint(81, "fUST", Decimal("100.00"), 0.0005, 2, 1000, 8000, 17)
-KINDS = ("offer_closed", "credit_closed", "offer_gone")
+KINDS = ("offer_closed", "credit_closed")
 
 
 async def send(sink, kind):
     if kind == "offer_closed":
         await sink.offer_closed(OFFER)
-    elif kind == "credit_closed":
-        await sink.credit_closed(CREDIT)
     else:
-        assert await sink.offer_gone("42", occurred_at_ms=8000) is True
+        await sink.credit_closed(CREDIT)
 
 
 @pytest.mark.asyncio
@@ -63,7 +61,7 @@ async def test_ledger_hint_requests_resync_once_per_window(kind):
         assert notification.occurred_at_ms == 8000
         assert notification.venue_offer_id == (None if kind == "credit_closed" else "42")
         assert notification.credit_id == (81 if kind == "credit_closed" else None)
-        assert notification.venue_seq == (None if kind == "offer_gone" else 17)
+        assert notification.venue_seq == 17
         assert notification.status == ("EXECUTED" if kind == "offer_closed" else None)
         assert "cid" not in asdict(notification)
         assert "attempt_id" not in asdict(notification)
@@ -79,10 +77,9 @@ async def test_debounce_is_by_kind_and_venue_id_not_sequence_or_venue_time():
     await sink.offer_closed(OFFER)
     await sink.offer_closed(replace(OFFER, venue_seq=18, occurred_at_ms=999_999_999))
     await sink.offer_closed(replace(OFFER, venue_offer_id="43"))
-    await sink.offer_gone("42", occurred_at_ms=8000)
     await sink.credit_closed(replace(CREDIT, credit_id=42))
-    assert len(requests) == 4
-    assert bus.publish.await_count == 5
+    assert len(requests) == 3
+    assert bus.publish.await_count == 4
 
 
 @pytest.mark.asyncio

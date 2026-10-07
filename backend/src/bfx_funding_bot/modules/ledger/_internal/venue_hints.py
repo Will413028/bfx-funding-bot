@@ -1,4 +1,4 @@
-"""Dormant venue hints: reconciliation owns truth, never WS/REST deltas.
+"""Venue hints: reconciliation owns truth, never WS/REST deltas.
 
 Resync requests use a five-second leading-edge debounce per (kind, venue ID).
 The fixed window uses local monotonic receipt time, never venue timestamps or
@@ -57,10 +57,3 @@ class LedgerVenueHintSink:
             scope=self._scope, kind="credit_closed", credit_id=hint.credit_id,
             occurred_at_ms=hint.occurred_at_ms, venue_seq=hint.venue_seq,
         ))
-
-    async def offer_gone(self, venue_offer_id: str, *, occurred_at_ms: int) -> bool:
-        await self._notify(VenueHintNotification(
-            scope=self._scope, kind="offer_gone", venue_offer_id=venue_offer_id,
-            occurred_at_ms=occurred_at_ms,
-        ))
-        return True
