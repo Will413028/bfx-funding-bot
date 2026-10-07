@@ -1037,7 +1037,7 @@ class OfferView:
 class OperatorReads(Protocol):
     """Operator-console reads of one account scope on the caller's session.
 
-    The authority epoch picks the implementation at boot; callers never learn which.
+    Implemented by ``LedgerOperatorReads`` (``ledger.wiring.build_operator_reads``).
     """
 
     async def list_uncertainties(

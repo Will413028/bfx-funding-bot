@@ -30,11 +30,11 @@ class DiagnosticsRow(Base):
     """Forensic/audit records (DECISION / SAFETY_TRIGGER / CANCEL_AUDIT).
 
     Non-SoT, prunable (30-90d). Best-effort writes — a failure here NEVER
-    blocks trading (spec §240-241). SoT lives in event_log, not here.
+    blocks trading (spec §240-241). Capital truth lives in the ledger tables, not here.
 
     occurred_at uses a real TIMESTAMPTZ datetime for forensic readability,
-    intentionally NOT the epoch-millisecond BigInteger (*_ms) convention used
-    by event_log (which needs ms precision for strict event sequencing).
+    intentionally NOT the epoch-millisecond BigInteger (*_ms) convention of the
+    ledger tables.
     """
 
     __tablename__ = "diagnostics"

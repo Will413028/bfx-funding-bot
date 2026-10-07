@@ -1,8 +1,8 @@
 """StdoutEventSink — operational telemetry sink (3c, replaces AxiomClient).
 
 Drop-in for the `emit(dict)` port shared with the (removed) AxiomClient and the
-DiagnosticsSink. Writes one JSON line per event to a dedicated stdout logger so
-the deploy platform (Koyeb) can route/retain it. No background flush loop:
+DiagnosticsSink. Writes one JSON line per event to a dedicated stdout logger;
+the container's stdout is the log (Docker on the VM). No background flush loop:
 emit() is synchronous, so the daemon no longer needs an "axiom" sub-task.
 
 Merge direction mirrors AxiomClient: {**event, **resource.envelope_fields()},
@@ -21,7 +21,7 @@ from typing import Any, Protocol
 
 from bfx_funding_bot.modules.observability.resource import EventResource
 
-# Named (not __name__) so Koyeb can route this stream separately from app logs.
+# Named (not __name__) so this stream can be told apart from app logs.
 log = logging.getLogger("bfx_funding_bot.events")
 # Module logger for the sink's own failure paths (kept off the events stream).
 _module_log = logging.getLogger(__name__)

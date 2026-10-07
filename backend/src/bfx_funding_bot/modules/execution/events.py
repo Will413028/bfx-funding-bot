@@ -95,12 +95,10 @@ class PositionReconciled:
 class CancelAcknowledged:
     """Bitfinex REST cancel API returned (success OR already-terminal).
 
-    Audit-only event — ledger/registry NOT subscribers. The offer's close is
-    observed by the ledger (the WS `foc` only becomes a venue hint). Provides a
-    REST-leg debug breadcrumb separable from the intent (CancelRequested).
-
-    Ledger effect: none (audit).
-    Registry effect: none (audit).
+    Audit-only event: its subscribers are the diagnostics sink (a ``cancel_audit``
+    row) and the domain-event counter; it changes no capital state. The offer's
+    close is observed by the ledger (the WS `foc` only becomes a venue hint).
+    Provides a REST-leg debug breadcrumb separable from the intent (CancelRequested).
     """
     venue_offer_id: str
     acknowledged_at_ms: int
