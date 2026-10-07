@@ -15,11 +15,14 @@ Mutation checks (one at a time; revert after each):
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 from uuid import UUID, uuid4
 
 import pytest
@@ -231,3 +234,98 @@ def test_the_runtime_role_inserts_runs_and_updates_only_their_end(pg_templates, 
         with engine.begin() as conn:
             conn.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM bfx_bot")
         engine.dispose()
+
+
+# ── a database that stops answering without closing the socket ─────────────────
+
+
+@pytest.fixture
+def frozen_pg(tmp_path):  # type: ignore[no-untyped-def]
+    """A throwaway PG18 of this test's own, migrated to head with the account seeded.
+
+    Yields ``(async_url, freeze)``; ``freeze()`` SIGSTOPs the postmaster and every backend
+    (the reviewer's reproduction of an unresponsive database) and thaws them again after
+    15s, so an unbounded wait fails the elapsed-time assertion instead of hanging the
+    test. SIGCONT and an immediate stop always run on teardown."""
+    import shutil
+    import signal
+    import socket
+
+    from tests import pg_local
+    from tests.pg_templates import stamp_realm
+
+    bin_dir = pg_local.find_pg_bin()
+    assert bin_dir is not None, pg_local.missing_bin_message()
+    data = tmp_path / "pgdata"
+    sockets = pg_local.short_socket_directory()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    subprocess.run([str(bin_dir / "initdb"), "-D", str(data), "-U", "postgres", "-A", "trust",
+                    *pg_local.INITDB_LOCALE_OPTIONS], check=True, capture_output=True)
+    subprocess.run([str(bin_dir / "pg_ctl"), "-D", str(data), "-w", "-l", str(tmp_path / "pg.log"),
+                    "-o", f"-p {port} -k {sockets} -c listen_addresses=127.0.0.1", "start"],
+                   check=True, capture_output=True)
+    stopped: list[int] = []
+
+    def thaw() -> None:
+        for pid in stopped:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGCONT)
+
+    def freeze() -> None:
+        postmaster = int((data / "postmaster.pid").read_text().split()[0])
+        children = subprocess.run(["pgrep", "-P", str(postmaster)], capture_output=True,
+                                  text=True, check=False).stdout.split()
+        for pid in [*map(int, children), postmaster]:
+            os.kill(pid, signal.SIGSTOP)
+            stopped.append(pid)
+        timer = threading.Timer(15.0, thaw)
+        timer.daemon = True
+        timer.start()
+
+    try:
+        sync_url = f"postgresql+psycopg://postgres@127.0.0.1:{port}/postgres"
+        alembic(sync_url, "upgrade", "head")
+        stamp_realm(sync_url, "ci")
+        engine = create_engine(sync_url)
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO exchange_accounts (id, venue, label, lifecycle_status) "
+                              "VALUES (:id, 'bitfinex', 'frozen', 'active')"), {"id": ACCOUNT})
+        engine.dispose()
+        yield sync_url.replace("+psycopg", "+asyncpg"), freeze
+    finally:
+        thaw()
+        subprocess.run([str(bin_dir / "pg_ctl"), "-D", str(data), "-m", "immediate", "stop"],
+                       capture_output=True, check=False)
+        shutil.rmtree(sockets, ignore_errors=True)
+
+
+async def test_the_end_of_a_run_is_bounded_when_the_database_stops_answering(frozen_pg) -> None:
+    url, freeze = frozen_pg
+    engine = create_async_engine(url)
+    record = BotRunRecord(async_sessionmaker(engine, expire_on_commit=False),
+                          exchange_account_id=ACCOUNT, deployment_environment="ci")
+    await record.start()
+    freeze()
+    started = time.monotonic()
+    await record.finish("clean_stop", timeout_s=2.0)
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0 + 1.0, f"finish took {elapsed:.1f}s against a frozen database"
+
+
+async def test_the_writer_lock_release_is_bounded_when_the_database_stops_answering(
+    frozen_pg,
+) -> None:
+    from bfx_funding_bot.core.bounded import run_bounded
+    from bfx_funding_bot.core.writer_lock import WriterLock
+
+    url, freeze = frozen_pg
+    lock = WriterLock(database_url=url.replace("+asyncpg", ""), key=42)
+    await lock.acquire()
+    freeze()
+    started = time.monotonic()
+    released = await run_bounded(lock.release(), timeout_s=2.0, what="test_release")
+    elapsed = time.monotonic() - started
+    assert released is False
+    assert elapsed < 2.0 + 1.0, f"release took {elapsed:.1f}s against a frozen database"

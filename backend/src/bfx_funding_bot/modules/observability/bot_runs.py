@@ -16,7 +16,6 @@ as unclean, an extra alert rather than a missing one.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import socket
@@ -29,6 +28,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.core.bounded import run_bounded
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.observability.tables import END_REASONS, BotRunRow
 
@@ -129,21 +129,29 @@ class BotRunRecord:
         return closed
 
     async def finish(self, reason: str, *, timeout_s: float = FINISH_TIMEOUT_S) -> None:
-        """Record how this run ended; bounded, so a dead database cannot hold the exit."""
+        """Record how this run ended, returning within ``timeout_s`` whatever the database
+        does: a database that stops answering without closing the socket would otherwise
+        hold the exit past Docker's stop grace period (``core.bounded.run_bounded``)."""
         if reason not in END_REASONS or reason == UNCLEAN:
             raise ValueError(f"a run cannot end itself as {reason!r}")
         if not self.started:
             return
         try:
-            async with asyncio.timeout(timeout_s):
-                async with self._session_factory.begin() as session:
-                    await session.execute(
-                        update(BotRunRow)
-                        .where(BotRunRow.run_id == self.run_id, BotRunRow.end_reason.is_(None))
-                        .values(end_reason=reason, end_recorded_at_ms=self._clock_ms())
-                    )
+            finished = await run_bounded(self._finish(reason), timeout_s=timeout_s,
+                                         what="bot_run_finish")
         except Exception:
-            log.exception("bot_run_finish_failed run_id=%s reason=%s "
-                          "(the next boot will report this run as unclean)", self.run_id, reason)
+            finished = False
+            log.exception("bot_run_finish_failed run_id=%s reason=%s", self.run_id, reason)
+        if not finished:
+            log.error("bot_run_end_not_recorded run_id=%s reason=%s "
+                      "(the next boot will report this run as unclean)", self.run_id, reason)
             return
         log.info("bot_run_finished run_id=%s reason=%s", self.run_id, reason)
+
+    async def _finish(self, reason: str) -> None:
+        async with self._session_factory.begin() as session:
+            await session.execute(
+                update(BotRunRow)
+                .where(BotRunRow.run_id == self.run_id, BotRunRow.end_reason.is_(None))
+                .values(end_reason=reason, end_recorded_at_ms=self._clock_ms())
+            )

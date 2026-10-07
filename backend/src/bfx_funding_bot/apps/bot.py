@@ -21,6 +21,7 @@ from bfx_funding_bot.apps.authority_support import require_ledger_epoch
 from bfx_funding_bot.apps.bot_ports import ObservationVenue, build_capital_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
 from bfx_funding_bot.apps.venue import VenueSeam, build_venue
+from bfx_funding_bot.core.bounded import run_bounded
 from bfx_funding_bot.core.database_realm import assert_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
@@ -1171,14 +1172,18 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         # Cleanup after TaskGroup completes (close http client)
         log.info("daemon_shutdown_complete")
         # The drain is over: record how the run ended while still the writer (before
-        # the lock is released), bounded so a dead database cannot hold the exit.
+        # the lock is released). Returns within FINISH_TIMEOUT_S even when the database
+        # stops answering (the write is abandoned, not awaited).
         if end_reason is not None:
             await run_record.finish(end_reason)
         # Release the single-writer advisory lock so the next process can acquire
-        # it without waiting for the server-side session to expire (PG only).
+        # it without waiting for the server-side session to expire (PG only). Bounded
+        # like the run's end: a database that stopped answering must not hold the exit;
+        # the server drops the session lock when the abandoned connection dies.
         if daemon.writer_lock is not None:
             with contextlib.suppress(Exception):
-                await daemon.writer_lock.release()
+                await run_bounded(daemon.writer_lock.release(), timeout_s=_RELEASE_TIMEOUT_S,
+                                  what="writer_lock_release")
         await daemon.bitfinex_http.aclose()
         if daemon.venue_aclose is not None:
             with contextlib.suppress(Exception):
@@ -1189,6 +1194,12 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
                 daemon.tracing.shutdown()
         # Deliver queued alerts (a refused boot, a fatal error) before exiting.
         await alerts.shutdown()
+
+
+# Exit-path bounds: the run's end (bot_runs.FINISH_TIMEOUT_S, 5s), the writer-lock release
+# (5s) and alerts.shutdown (5s) stay well inside the 30s stop_grace_period of
+# deploy/vm/docker-compose.app.yml.
+_RELEASE_TIMEOUT_S = 5.0
 
 
 def _error_text(exceptions: Sequence[BaseException]) -> str:

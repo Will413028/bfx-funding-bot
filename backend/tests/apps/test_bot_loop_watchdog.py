@@ -165,3 +165,28 @@ async def test_the_run_is_recorded_after_the_build_and_its_end_after_the_drain(
         with pytest.raises(ExceptionGroup):
             await bot._run()
     assert _RunRecord.events == ["start", "run", "drained", f"finish:{reason}"]
+
+
+async def test_a_writer_lock_release_that_never_returns_does_not_hold_the_exit(
+    monkeypatch: pytest.MonkeyPatch, watchdogs: list[_Watchdog],
+) -> None:
+    """The release talks to the database; one that stopped answering must not keep the
+    process past Docker's stop grace period (the server drops the lock with the
+    connection anyway)."""
+    released: list[str] = []
+
+    class _HungLock:
+        async def release(self) -> None:
+            released.append("called")
+            await asyncio.Event().wait()  # never answers
+
+    async def build_daemon(*, stop_event: asyncio.Event) -> Any:
+        daemon = _fake_daemon(stop_event, [])
+        daemon.writer_lock = _HungLock()
+        return daemon
+
+    monkeypatch.setattr(bot, "build_daemon", build_daemon)
+    monkeypatch.setattr(bot, "_RELEASE_TIMEOUT_S", 0.05)
+    await asyncio.wait_for(bot._run(), timeout=10)
+    assert released == ["called"]
+    assert _RunRecord.events[-1] == "finish:clean_stop"
