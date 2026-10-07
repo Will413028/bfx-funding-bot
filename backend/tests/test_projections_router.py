@@ -3,8 +3,10 @@
 The router's own contract: the wire shape of the read models' views, the scope and states it
 asks them for, the cursor and limit validation, and the operator gate. Positions and offers
 come from a recording stand-in for the ledger's ``OperatorReads`` (its SQL is covered on
-PostgreSQL by ``tests/integration/test_ledger_positions_offers.py``); executions read the
-archived legacy ``event_log`` (the history below the switch) on SQLite.
+PostgreSQL by ``tests/integration/test_ledger_positions_offers.py``). Executions read the
+archived legacy ``event_log``, which only PostgreSQL has: their paging, scope, filter and cursor
+are covered by ``tests/integration/test_ledger_execution_history.py``; here only the limit cap
+and the operator gate.
 """
 from decimal import Decimal
 from uuid import UUID
@@ -16,7 +18,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 # Every table the shared metadata may reach by foreign key, whatever was imported first.
 import bfx_funding_bot.modules.execution.audit.tables
-import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
 from bfx_funding_bot.core.auth import Principal, require_operator, require_user
 from bfx_funding_bot.core.db import Base
@@ -25,14 +26,9 @@ from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.api.deps import ReadModels, get_session
 from bfx_funding_bot.modules.api.projections import _ACTIVE_CLAIM_STATES, build_projections_router
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
-from bfx_funding_bot.modules.execution.archived_execution_history import (
-    ArchivedExecutionHistory,
-)
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.ledger import OfferView, PositionView, Scope
 
 _ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
-_ACC = "default"
 _ENV = "prod"
 _POSITIONS_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/positions"
 _OFFERS_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/offers"
@@ -64,16 +60,6 @@ class _Reads:
         )
 
 
-def _event(etype: str, ts: int, account: str = _ACC, env: str = _ENV) -> EventLogRow:
-    return EventLogRow(
-        account_id=account, exchange_account_id=_ACCOUNT_ID,
-        deployment_environment=env, event_type=etype,
-        venue_offer_id="v1", cid=42,
-        payload={"symbol": "fUST", "amount": "123.5", "fill_rate": 0.0002},
-        occurred_at_ms=ts,
-    )
-
-
 @pytest_asyncio.fixture
 async def factory(sqlite_engine):
     async with sqlite_engine.begin() as conn:
@@ -95,18 +81,13 @@ async def factory(sqlite_engine):
             user_id="user_abc",
             role="owner",
         )
-        for i, etype in enumerate(
-            ["RESERVATION_INTENT", "RESERVATION_CLAIMED", "ORDER_FILL", "CREDIT_CLOSED"]
-        ):
-            s.add(_event(etype, ts=10_000 + i))
-        s.add(_event("ORDER_FILL", ts=99_999, env="canary"))  # other realm
         await s.commit()
     return factory
 
 
 def _models(reads: _Reads) -> ReadModels:
     unused = object()
-    return ReadModels(reads, unused, unused, ArchivedExecutionHistory(), unused)  # type: ignore[arg-type]
+    return ReadModels(reads, unused, unused, unused, unused)  # type: ignore[arg-type]
 
 
 @pytest_asyncio.fixture
@@ -196,45 +177,6 @@ def test_offers_state_filter(app_client, reads):
     resp = app_client.get(_OFFERS_PATH, params={"state": "released"})
     assert resp.status_code == 200
     assert reads.calls == [("offers", _SCOPE, ("released",))]
-
-
-def test_executions_desc_with_limit_and_cursor(app_client):
-    resp = app_client.get(_EXECUTIONS_PATH, params={"limit": 2})
-    assert resp.status_code == 200
-    body = resp.json()
-    data = body["data"]
-    assert len(data) == 2
-    assert data[0]["eventType"] == "CREDIT_CLOSED"  # newest first, canary excluded
-    assert data[0]["amount"] == "123.5"
-    assert data[0]["rate"] == 0.0002
-    # contract v2: pagination envelope
-    assert body["pagination"]["hasMore"] is True
-    before = body["pagination"]["nextBefore"]
-    # Opaque string tokens (ADR 2026-10-02 D4); in the archive the event_seq as text.
-    assert isinstance(before, str) and before == data[-1]["eventKey"]
-
-    resp2 = app_client.get(_EXECUTIONS_PATH, params={"limit": 2, "before": before})
-    body2 = resp2.json()
-    assert len(body2["data"]) == 2
-    assert int(body2["data"][0]["eventKey"]) < int(before)
-    assert [e["eventType"] for e in body2["data"]] == ["RESERVATION_CLAIMED", "RESERVATION_INTENT"]
-    # 4 realm rows total -> second page exhausts them
-    assert body2["pagination"]["hasMore"] is False
-    assert body2["pagination"]["nextBefore"] is None
-
-
-def test_executions_event_type_filter(app_client):
-    resp = app_client.get(_EXECUTIONS_PATH, params={"event_type": "ORDER_FILL"})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert [e["eventType"] for e in body["data"]] == ["ORDER_FILL"]  # canary row excluded
-    assert body["pagination"]["hasMore"] is False
-
-
-def test_executions_refuse_a_cursor_they_did_not_issue(app_client):
-    for cursor in ("j.MTox", "abc", "-1"):
-        resp = app_client.get(_EXECUTIONS_PATH, params={"before": cursor})
-        assert (resp.status_code, resp.json()["detail"]) == (422, "invalid_cursor"), cursor
 
 
 def test_executions_limit_capped(app_client):

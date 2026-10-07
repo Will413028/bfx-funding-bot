@@ -49,7 +49,6 @@ async def test_mark_not_accepted_resolves_the_subject(driver) -> None:
     uncertainty = await driver.open_unknown()
     ref = await driver.observe()
     assert (await driver.view(uncertainty)).state == "open"
-    before = await driver.event_log_rows()
 
     waiting = await driver.request(driver.intent(uncertainty, ref, reason="absent"))
     assert waiting.state == "requested" and waiting.requested_by == OPERATOR
@@ -59,9 +58,8 @@ async def test_mark_not_accepted_resolves_the_subject(driver) -> None:
     view = await driver.view(uncertainty)
     assert (view.state, view.resolved_by_operator_id, view.resolution_reason) == (
         "resolved", OPERATOR, "absent")
-    # Mutations 1, 2, 3, 6: the observation, no event_log, a journal row of this request.
+    # Mutations 2, 3, 6: the observation, a journal row of this request.
     assert waiting.observation_id == UUID(ref.rsplit(":", 1)[1])
-    assert await driver.event_log_rows() == before
     (stored,) = await journal(driver)
     assert (stored.attempt_id, stored.action, stored.operator_request_id) == (
         uncertainty, "not_accepted", waiting.request_id)

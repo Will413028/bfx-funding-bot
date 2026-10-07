@@ -40,7 +40,6 @@ from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyReques
 from bfx_funding_bot.modules.execution.command_boundary import CommandOutcomeNotice
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -275,7 +274,6 @@ async def test_an_accepted_boot_lets_a_submit_through_with_a_journal_row_and_a_n
     (notice,) = notices
     assert (notice.scope, notice.kind, notice.symbol, notice.venue_offer_id) == (
         SCOPE, "ack", "fUST", "m-1")
-    assert await env.count(EventLogRow) == 0  # nothing of the event log, from boot to submit
 
 
 async def test_boot_closes_a_young_dangling_attempt(env) -> None:
@@ -287,7 +285,6 @@ async def test_boot_closes_a_young_dangling_attempt(env) -> None:
     await daemon._run_boot_recovery()
 
     assert await _outcome_reason(env, attempt_id) == ("unknown", "unresolved_at_boot")
-    assert await env.count(EventLogRow) == 0
 
 
 async def test_admission_refusal_refuses_the_boot(env) -> None:
@@ -332,7 +329,6 @@ async def test_a_fenced_or_incomplete_boot_boots_with_trading_blocked(env, decis
     with pytest.raises(CommandGateBlocked):
         await gate.submit(ready, _ctx())
     assert venue.calls == 0
-    assert await env.count(EventLogRow) == 0
 
 
 async def test_the_policy_worker_amends_the_policy_without_the_event_stream(
@@ -358,5 +354,4 @@ async def test_the_policy_worker_amends_the_policy_without_the_event_stream(
         applied = await build_policy_store(SCOPE).read_applied(session, symbol="fUST")
     assert row.state == "applied" and row.policy_revision_id == applied.revision_id
     assert applied.revision == 2 and applied.policy.enabled is False
-    assert await env.count(EventLogRow) == 0
     assert CAPITAL_POLICY_REQUEST_APPLIED  # the alert name the worker emits

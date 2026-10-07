@@ -6,6 +6,8 @@ permissions without manual grants. Owner-only fixtures would pass whether or not
 the web API could still write the ledger.
 """
 import asyncio
+import importlib.util
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpx
@@ -19,7 +21,6 @@ from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
-from bfx_funding_bot.modules.execution.legacy_archive import qualified
 from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
 from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionScope,
@@ -41,6 +42,25 @@ from .test_ledger_unknown_resolver_pg import SCOPE as LEDGER_SCOPE
 pytestmark = pytest.mark.integration
 
 _PRIOR_HEAD = "a7f3c1d9e204"
+
+
+def _archive_migration():
+    spec = importlib.util.spec_from_file_location(
+        "legacy_archive_schema",
+        Path(__file__).resolve().parents[2] / "alembic/versions/c2d3e4f5a6b7_legacy_archive_schema.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_ARCHIVE = _archive_migration()
+
+
+def qualified(table: str) -> str:
+    """``table`` with the schema it lives in at head: c2d3e4f5a6b7's archive, else ``public``."""
+    return f"{_ARCHIVE.SCHEMA}.{table}" if table in _ARCHIVE.TABLES else f"public.{table}"
+
 # Fixed pre-outbox baseline from the retired Halt 1 runbook, not current policy.
 _LEGACY_WEBAPI_BASELINE = """
 GRANT USAGE ON SCHEMA public TO bfx_webapi;

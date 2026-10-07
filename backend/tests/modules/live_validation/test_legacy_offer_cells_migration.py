@@ -1,7 +1,8 @@
 """Migration a0b1c2d3e4f5's frozen copy of the legacy offer -> cell resolution (pure parts).
 
-The database side (copy, refusal, grants, equality with the pre-S1-8 loader) is in
-tests/integration/test_attribution_legacy_links_migration.py.
+Its database side (copy, refusal, grants, equality with the pre-S1-8 loader) was retired with
+tests/integration/test_attribution_legacy_links_migration.py: the migration has run in
+production and a fresh database's legacy tables are empty.
 """
 from __future__ import annotations
 

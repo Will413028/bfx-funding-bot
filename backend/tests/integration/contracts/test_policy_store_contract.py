@@ -1,11 +1,9 @@
 """``PolicyStore``: read and amend the applied policy on the ledger.
 
-The store never touches the frozen legacy event stream. What a caller observes: the
-revision a head names, the refusals, the lost-update guard.
+What a caller observes: the revision a head names, the refusals, the lost-update guard.
 
 Mutations (one at a time; revert after each): the ledger store skips the head check
-(``revision_changed``), enables fUSD, returns a revision other than the one written, or
-reads the event stream (``test_the_ledger_store_never_touches_the_event_stream``).
+(``revision_changed``), enables fUSD, or returns a revision other than the one written.
 """
 
 from __future__ import annotations
@@ -13,9 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import func, select
 
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.ledger import PolicyRefused, PolicyStore
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store
 from bfx_funding_bot.modules.trading import CapitalPolicy
@@ -73,12 +69,3 @@ async def test_a_lost_update_and_an_unsupported_policy_are_refused(port_stack) -
     async with port_stack.factory() as session:
         assert (await store.read_applied(session, symbol="fUST")).revision == 1
 
-
-async def test_the_ledger_store_never_touches_the_event_stream(port_stack) -> None:
-    store = _store(port_stack)
-    async with port_stack.factory.begin() as session:
-        await store.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
-                                 expected_revision=0, source={})
-    async with port_stack.factory() as session:
-        await store.read_applied(session, symbol="fUST")
-        assert await session.scalar(select(func.count()).select_from(EventLogRow)) == 0

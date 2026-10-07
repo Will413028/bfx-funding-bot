@@ -442,7 +442,6 @@ async def test_build_daemon_emit_and_query_env_symmetric(
 
     configure_live_wiring_env(monkeypatch, tmp_path)
 
-    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
@@ -505,7 +504,6 @@ async def test_build_daemon_reconcile_interval_zero_raises(
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
 
-    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
@@ -575,7 +573,6 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
 
-    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
@@ -641,7 +638,6 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
 
-    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 
     engine = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
@@ -770,7 +766,6 @@ async def test_canary_build_wires_writer_lock_and_guard(
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
 
-    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")

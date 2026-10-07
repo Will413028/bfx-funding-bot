@@ -14,11 +14,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import event, func, select, text
+from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session
 
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.operator_requests import FAILED, REJECTED
 from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionRejected as RequestRefused,
@@ -134,11 +133,6 @@ async def settle(factory: Any, request_id: UUID, resolution: Any = RESOLUTION) -
     return await make_worker(factory, resolution).process(request_id)
 
 
-async def events(factory: Any) -> int:
-    async with factory() as session:
-        return int(await session.scalar(select(func.count()).select_from(EventLogRow)) or 0)
-
-
 async def state_of(factory: Any, uncertainty: UUID) -> Any:
     async with factory() as session:
         return await READS.get_uncertainty(session, SCOPE, uncertainty)
@@ -149,20 +143,18 @@ async def state_of(factory: Any, uncertainty: UUID) -> Any:
 
 @pytest.mark.asyncio
 async def test_mark_not_accepted_resolves_through_the_worker_and_writes_only_the_journal(book) -> None:  # noqa: F811
-    """Mutations 1 (event_log), 2 and 3 (journal row, its request link), 6."""
+    """Mutations 2 and 3 (journal row, its request link), 6."""
     attempt, ref = await open_unknown(book)
     request_id = await queue(book.factory, intent(attempt, ref, reason=" confirmed absent "))
     waiting = await request_row(book.factory, request_id)
     # Mutation 6: the ledger ref lands in observation_id.
     assert waiting.observation_id == UUID(ref.rsplit(":", 1)[1])
     assert waiting.state == "requested"
-    before = await events(book.factory)
 
     assert await settle(book.factory, request_id) == "applied"
 
     done = await request_row(book.factory, request_id)
     assert (done.state, done.outcome_reason) == ("applied", None)
-    assert await events(book.factory) == before  # never the event log
     (stored,) = await resolutions(book)
     assert (stored.attempt_id, stored.quarantine_id) == (attempt, None)
     assert (stored.action, stored.venue_offer_id, stored.candidate_count) == (
@@ -691,6 +683,5 @@ async def test_the_web_api_role_refuses_a_wrong_bind_when_queueing(book, ledger_
             await queue(web_factory, intent(attempt, ref, "bind_to_venue", venue_offer_id="V1"))
         with pytest.raises(RequestRefused, match="venue_offer_match_not_zero"):
             await queue(web_factory, intent(attempt, ref))
-        assert await events(book.factory) == 0
     finally:
         await web.dispose()

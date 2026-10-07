@@ -25,10 +25,6 @@ _MIGRATION_MANAGED_FOREIGN_KEYS = frozenset(
 )
 _IDENTITY_CONTRACT_TABLES = frozenset(
     {
-        "event_log",
-        "offer_claims",
-        "position_state",
-        "reconcile_observation",
         "execution_decisions",
         "diagnostics",
         "nav_peak",
@@ -39,10 +35,6 @@ _IDENTITY_CONTRACT_TABLES = frozenset(
     }
 )
 _LEGACY_REMOVED_TABLES = frozenset({"users", "executions", "billing_records"})
-_RELEASE_ARCHIVE = "release_archive"
-# Migration c2d3e4f5a6b7's record of what it archived (counts, digests, revoked privileges):
-# migration-owned, no ORM model. The archived tables themselves stay in the ORM metadata.
-_LEGACY_ARCHIVE_MANIFEST = ("legacy_archive", "manifest")
 
 
 def _normalize_json_default(rendered_default: str) -> str:
@@ -88,16 +80,6 @@ def include_object(
     table = getattr(object_, "table", None)
     schema = getattr(table, "schema", None) or "public"
     table_name = getattr(table, "name", None)
-    # The retired release ceremony's tables, frozen in their own schema by
-    # migration c74d45a54e46: history, not application metadata.
-    if (type_ == "table" and getattr(object_, "schema", None) == _RELEASE_ARCHIVE) or (
-        schema == _RELEASE_ARCHIVE
-    ):
-        return False
-    if (type_ == "table" and (getattr(object_, "schema", None), name) == _LEGACY_ARCHIVE_MANIFEST) or (
-        (schema, table_name) == _LEGACY_ARCHIVE_MANIFEST
-    ):
-        return False
     # ``exchange_account_id`` is nullable in ORM metadata solely so the
     # SQLite unit fixtures can continue to construct historical synthetic
     # realms.  PostgreSQL's forward-only Halt 1 contract migration owns the
@@ -121,8 +103,6 @@ def include_object(
     # skipped; a missing or extra generated column still shows as drift, and
     # test_generated_columns_match_the_model compares the skipped shape.
     if type_ == "column" and compare_to is not None and getattr(object_, "computed", None):
-        return False
-    if type_ == "index" and getattr(object_, "info", {}).get("identity_legacy_fixture"):
         return False
     # These scaffold models remain importable by the pre-cutover application
     # migration, but their public tables are deliberately dropped at the

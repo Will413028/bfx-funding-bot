@@ -12,8 +12,6 @@ from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary, LedgerCommandEffects
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate, CommandGateBlocked
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
 from bfx_funding_bot.modules.ledger import (
     Authorized,
     CancelAdmitted,
@@ -34,8 +32,6 @@ class Sessions:
         self.active = False
         self.trace = []
         self.decision = decision
-        self.attempt = None
-        self.event = None
 
     @asynccontextmanager
     async def begin(self):
@@ -59,10 +55,6 @@ class Sessions:
     async def get(self, table, key, **kwargs):
         if table is ExecutionDecisionRow:
             return self.decision
-        if table is SubmissionAttemptRow:
-            return self.attempt
-        if table is EventLogRow:
-            return self.event
         raise AssertionError(table)
 
     async def scalar(self, query):

@@ -155,8 +155,7 @@ class DiagnosticsSink:
 
 
 class NoopDiagnosticsSink:
-    """Null object — chain tests / contexts that don't exercise diagnostics.
-    Mirrors NoopEventPersister (event_store/persister.py)."""
+    """Null object — chain tests / contexts that don't exercise diagnostics."""
 
     async def emit(self, event: dict[str, Any]) -> None:
         return None

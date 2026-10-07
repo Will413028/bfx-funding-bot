@@ -307,6 +307,44 @@ def _build_pre_archive(url: str) -> None:
     stamp_realm(url, "ci")
 
 
+def _build_at_archive(url: str) -> None:
+    """``_build_pre_archive``, then exactly the archive's own revision."""
+    _build_pre_archive(url)
+    alembic(url, "upgrade", "c2d3e4f5a6b7")
+
+
+def _catalog(engine: Engine) -> set[tuple[Any, ...]]:
+    """Every column of every table in ``legacy_archive``: its shape, nothing of its rows.
+
+    ``format_type`` carries length, precision, array and enum detail that
+    ``information_schema.columns.data_type`` drops (``numeric`` vs ``numeric(20,8)``).
+    """
+    with engine.connect() as conn:
+        return {tuple(row) for row in conn.execute(text(
+            "SELECT c.relname, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, "
+            "a.attnum, pg_get_expr(d.adbin, d.adrelid) "
+            "FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid "
+            "LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum "
+            "WHERE c.relnamespace = 'legacy_archive'::regnamespace AND c.relkind = 'r' "
+            "AND a.attnum > 0 AND NOT a.attisdropped"))}
+
+
+def test_no_later_migration_alters_the_archive(
+    ledger_db, pg_templates, pg_clone,  # noqa: F811
+) -> None:
+    """``alembic check`` does not reflect ``legacy_archive`` (alembic/env.py) and
+    ``archive_frozen`` refuses rows, not DDL: the archive's columns at head are exactly the ones
+    ``c2d3e4f5a6b7`` left."""
+    archived = create_engine(pg_clone(pg_templates.template(
+        "legacy_archive_at_archive", _build_at_archive)))
+    try:
+        expected = _catalog(archived)
+    finally:
+        archived.dispose()
+    assert {row[0] for row in expected} == {*TABLES, "manifest"}
+    assert _catalog(ledger_db) == expected
+
+
 def test_downgrade_restores_public_and_every_grant_exactly(
     ledger_db, pg_templates, pg_clone,  # noqa: F811
 ) -> None:

@@ -1,16 +1,13 @@
 """Zero-write ledger hints on PostgreSQL.
 
-Mutation: a ledger sink INSERT into event_log must fail
-test_ledger_hint_leaves_all_table_counts_unchanged.
+Mutation: a ledger sink INSERT into any mapped table (submission_attempt_journal, ...) must
+fail test_ledger_hint_leaves_all_table_counts_unchanged.
 """
 
 import pytest
 from sqlalchemy import func, select
 
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.execution.event_store import (
-    tables as event_store_tables,  # noqa: F401 - register the frozen legacy tables
-)
 from bfx_funding_bot.modules.ledger import (
     tables as ledger_tables,  # noqa: F401 - register all ledger tables
 )
@@ -31,7 +28,6 @@ async def test_ledger_hint_leaves_all_table_counts_unchanged(pg_session_factory,
             }
 
     before = await counts()
-    assert "event_log" in before
     assert "submission_attempt_journal" in before
     now = [0.0]
     requested = []

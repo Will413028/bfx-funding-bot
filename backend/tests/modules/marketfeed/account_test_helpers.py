@@ -172,7 +172,6 @@ async def boot_live_construction(
     """
     import re
 
-    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 

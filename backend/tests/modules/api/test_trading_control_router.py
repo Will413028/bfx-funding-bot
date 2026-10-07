@@ -10,8 +10,7 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy import select
 
-import bfx_funding_bot.modules.execution.audit.tables
-import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+import bfx_funding_bot.modules.execution.audit.tables  # noqa: F401
 from bfx_funding_bot.core import auth
 from bfx_funding_bot.core.auth import Principal
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccountMembership

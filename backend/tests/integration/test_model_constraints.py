@@ -11,7 +11,6 @@ import bfx_funding_bot.modules.accounts.tables
 import bfx_funding_bot.modules.deployments.tables
 import bfx_funding_bot.modules.execution.audit.tables
 import bfx_funding_bot.modules.execution.capital_tables
-import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.execution.safety.tables
 import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
 from bfx_funding_bot.core.db import Base

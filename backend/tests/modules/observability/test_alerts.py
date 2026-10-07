@@ -19,7 +19,6 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.execution.audit.tables
-import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.execution.safety.tables
 import bfx_funding_bot.modules.execution.uncertainty_tables
 import bfx_funding_bot.modules.ledger.tables  # noqa: F401

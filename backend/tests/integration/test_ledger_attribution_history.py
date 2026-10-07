@@ -10,9 +10,8 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import text
 
-from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
 from bfx_funding_bot.modules.live_validation.attribution_loader import (
     AttributionResult,
     load_and_compute,
@@ -88,8 +87,6 @@ async def test_an_offer_only_the_journal_knows_is_attributed_to_its_cell(gate_st
             _history(8802, Decimal("70"), T0 + 300, T0 + 90_000),
             _trade(9802, 99_999, Decimal("70"), T0 + 300),
         ])
-        assert await session.scalar(select(func.count()).select_from(OfferClaimRow).where(
-            OfferClaimRow.venue_offer_id == str(OFFER))) == 0
 
     result = await weekly(gate_stack.factory)
     assert result.offer_conflicts == ()

@@ -11,9 +11,6 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
-
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionScope,
     UncertaintyResolutionRequests,
@@ -83,10 +80,6 @@ class Driver:
     def another_ref(self) -> str:
         """A well-formed reference of this authority that is not the one observed."""
         raise NotImplementedError
-
-    async def event_log_rows(self) -> int:
-        async with self.factory() as session:
-            return int(await session.scalar(select(func.count()).select_from(EventLogRow)) or 0)
 
     def intent(
         self, uncertainty: UUID, ref: str, action: str = "mark_not_accepted", **changes: Any
