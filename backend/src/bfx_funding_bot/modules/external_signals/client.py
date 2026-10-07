@@ -13,7 +13,10 @@ Empirical rate-limit behaviour (probed 2026-07-19):
 - Binance /fapi/v1/fundingRate: generous (weight-based); 1 req/s is safe.
 
 429 appears both as HTTP 429 and as HTTP 200 with body
-["error", 11010, "ratelimit: error"] — both are handled as retryable.
+["error", 11010, "ratelimit: error"] — both are handled as retryable, as is the
+maintenance notice (TRANSIENT_VENUE_ERROR_CODES). Any other ["error", CODE, MESSAGE]
+body is the venue's answer and raises at once, without retrying (for example
+ERR_AUTH_FAIL 10100); the codes live in external/bitfinex/errors.py.
 """
 from __future__ import annotations
 
@@ -23,7 +26,9 @@ from typing import Any
 
 import httpx
 
+from bfx_funding_bot.external.bitfinex.errors import TRANSIENT_VENUE_ERROR_CODES
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
+from bfx_funding_bot.external.bitfinex.submit_wire import venue_error
 from bfx_funding_bot.modules.external_signals.schemas import (
     LiquidationRecord,
     PerpFundingRecord,
@@ -33,15 +38,6 @@ logger = logging.getLogger(__name__)
 
 _BITFINEX_BASE = "https://api-pub.bitfinex.com"
 _BINANCE_BASE = "https://fapi.binance.com"
-
-
-def _is_soft_ratelimit(payload: Any) -> bool:
-    return (
-        isinstance(payload, list)
-        and len(payload) >= 2
-        and payload[0] == "error"
-        and payload[1] in (11010, 10100)
-    )
 
 
 class ExternalSignalsClient:
@@ -108,7 +104,10 @@ class ExternalSignalsClient:
                 )
 
             payload = resp.json()
-            if _is_soft_ratelimit(payload):
+            answer = venue_error(payload)
+            if answer is not None and answer[0] not in TRANSIENT_VENUE_ERROR_CODES:
+                raise RuntimeError(f"GET {url} refused by the venue: {answer[0]} {answer[1]}")
+            if answer is not None:
                 last_reason = f"soft ratelimit body: {payload!r}"
                 logger.warning(
                     "GET %s soft-rate-limited (%r), sleeping %.0fs (attempt %d/%d)",
