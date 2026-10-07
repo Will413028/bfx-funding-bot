@@ -13,7 +13,7 @@ from tests.modules.marketfeed.account_test_helpers import (
 
 
 async def test_daemon_builds_and_runs_briefly(
-    monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock, restore_logging: None,
+    monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
     """Smoke: build_daemon() returns a Daemon with all components wired;
     daemon.run() starts all sub-tasks, responds to _stop_event, and exits

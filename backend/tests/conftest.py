@@ -238,7 +238,7 @@ def _logging_state() -> tuple[int, dict[str, tuple[int, bool, bool]]]:
 
 @pytest.fixture
 def restore_logging() -> Iterator[None]:
-    """For a test whose code configures logging by design (a CLI's ``main``, ``uvicorn.Config``)."""
+    """For a test whose code configures logging by design (a CLI's ``main``)."""
     disable = logging.root.manager.disable
     loggers = [
         (logger, logger.level, logger.disabled, logger.propagate)
@@ -263,8 +263,10 @@ def _logging_guard(request: pytest.FixtureRequest) -> Iterator[None]:
             f"logging.disable {logging.getLevelName(disable)} -> {logging.getLevelName(disable_after)}"
         )
     # Loggers that existed before the test: one a library creates mid-test is configured its way.
+    # uvicorn's own loggers are reset by every uvicorn.Config (healthz), always to the same state.
     changed = sorted(
-        name or "root" for name, before in loggers.items() if loggers_after[name] != before
+        name or "root" for name, before in loggers.items()
+        if loggers_after[name] != before and name.partition(".")[0] != "uvicorn"
     )
     if changed:
         problems.append(f"loggers changed (level/disabled/propagate): {', '.join(changed[:5])}")
