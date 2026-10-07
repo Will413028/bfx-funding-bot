@@ -4,8 +4,8 @@ Reads DATABASE_URL via Settings and transforms to psycopg-compatible URL
 via Settings.database_url_sync. Daemon runtime uses asyncpg via
 core.db._prepare_engine_kwargs (separate transform path).
 
-Side-effect imports register tables with Base.metadata so autogenerate
-sees a unified schema.
+Importing bfx_funding_bot.apps.schema registers every table with Base.metadata so
+autogenerate sees a unified schema.
 """
 # ruff: noqa: F401
 
@@ -15,25 +15,8 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import Connection
 
-# Side-effect imports: register tables with Base.metadata
-import bfx_funding_bot.modules.accounts.exchange_accounts
-import bfx_funding_bot.modules.accounts.tables
-import bfx_funding_bot.modules.accounts.user_profile
-import bfx_funding_bot.modules.candles.tables
-import bfx_funding_bot.modules.deployments.tables
-import bfx_funding_bot.modules.execution.audit.tables
-import bfx_funding_bot.modules.execution.capital_tables
-import bfx_funding_bot.modules.execution.diagnostics.tables
-import bfx_funding_bot.modules.execution.safety.tables
-import bfx_funding_bot.modules.execution.uncertainty_tables
-import bfx_funding_bot.modules.external_signals.tables
-import bfx_funding_bot.modules.funding_stats.tables
-import bfx_funding_bot.modules.ledger.tables
-import bfx_funding_bot.modules.lending.tracking.tables
-import bfx_funding_bot.modules.live_validation.tables
-import bfx_funding_bot.modules.marketfeed.tables
-import bfx_funding_bot.modules.observability.tables
-import bfx_funding_bot.modules.simulated_venue.tables
+# Side-effect import: registers every table with Base.metadata
+import bfx_funding_bot.apps.schema
 from alembic import context
 from bfx_funding_bot.core import database_realm
 from bfx_funding_bot.core.alembic_compare import compare_server_default, include_object

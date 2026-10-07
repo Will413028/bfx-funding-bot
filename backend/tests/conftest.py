@@ -19,6 +19,9 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 
+# Registers the whole schema on Base.metadata before any test module is collected, so a
+# create_all never sees a table whose foreign-key target another module owns go missing.
+import bfx_funding_bot.apps.schema  # noqa: F401
 from tests import pg_local
 
 # Property-test budgets (the `property` marker in pyproject.toml) live only in profiles:
@@ -217,32 +220,56 @@ def docker_pg_templates(docker_pg_container):
 
 # ---------------------------------------------------------------------------
 # Logging guard: alembic's fileConfig() once disabled every logger of the process, which made
-# an unrelated later caplog test fail. A test that leaves logging changed now fails by name.
+# an unrelated later caplog test fail. A test that leaves logging changed now fails by name:
+# the global disable level, and each logger's level, disabled flag and propagation (a caplog
+# record reaches the root handler only through all three).
 # ---------------------------------------------------------------------------
 
 
-def _logging_state() -> tuple[int, dict[str, bool]]:
-    disabled = {
-        name: logger.disabled
+def _logging_state() -> tuple[int, dict[str, tuple[int, bool, bool]]]:
+    loggers = {
+        name: (logger.level, logger.disabled, logger.propagate)
         for name, logger in list(logging.root.manager.loggerDict.items())
         if isinstance(logger, logging.Logger)
     }
-    return logging.getLogger().level, disabled
+    loggers[""] = (logging.root.level, logging.root.disabled, logging.root.propagate)
+    return logging.root.manager.disable, loggers
+
+
+@pytest.fixture
+def restore_logging() -> Iterator[None]:
+    """For a test whose code configures logging by design (a CLI's ``main``)."""
+    disable = logging.root.manager.disable
+    loggers = [
+        (logger, logger.level, logger.disabled, logger.propagate)
+        for logger in [logging.root, *logging.root.manager.loggerDict.values()]
+        if isinstance(logger, logging.Logger)
+    ]
+    yield
+    logging.disable(disable)
+    for logger, level, disabled, propagate in loggers:
+        logger.setLevel(level)
+        logger.disabled, logger.propagate = disabled, propagate
 
 
 @pytest.fixture(autouse=True)
 def _logging_guard(request: pytest.FixtureRequest) -> Iterator[None]:
-    level, disabled = _logging_state()
+    disable, loggers = _logging_state()
     yield
-    level_after, disabled_after = _logging_state()
+    disable_after, loggers_after = _logging_state()
     problems = []
-    if level_after != level:
-        problems.append(f"root level {logging.getLevelName(level)} -> {logging.getLevelName(level_after)}")
-    newly_disabled = sorted(
-        name for name, now in disabled_after.items() if now and not disabled.get(name, False)
+    if disable_after != disable:
+        problems.append(
+            f"logging.disable {logging.getLevelName(disable)} -> {logging.getLevelName(disable_after)}"
+        )
+    # Loggers that existed before the test: one a library creates mid-test is configured its way.
+    # uvicorn's own loggers are reset by every uvicorn.Config (healthz), always to the same state.
+    changed = sorted(
+        name or "root" for name, before in loggers.items()
+        if loggers_after[name] != before and name.partition(".")[0] != "uvicorn"
     )
-    if newly_disabled:
-        problems.append(f"loggers disabled: {', '.join(newly_disabled[:5])}")
+    if changed:
+        problems.append(f"loggers changed (level/disabled/propagate): {', '.join(changed[:5])}")
     if problems:
         pytest.fail(f"{request.node.nodeid} left logging changed ({'; '.join(problems)})", pytrace=False)
 
@@ -273,15 +300,10 @@ async def pg_engine(pg_container, pg_templates) -> AsyncIterator[AsyncEngine]:
     """
     import hashlib
 
-    import bfx_funding_bot.modules.accounts.tables
-    import bfx_funding_bot.modules.candles.tables
-    import bfx_funding_bot.modules.execution.diagnostics.tables
-    import bfx_funding_bot.modules.external_signals.tables
-    import bfx_funding_bot.modules.funding_stats.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base
 
-    # create_all builds whatever tables are registered right now; a test module
-    # importing more tables later gets a template of its own.
+    # Every process registers the whole schema at collection (apps.schema, imported
+    # above); the name still tracks the table set so a stale template is never reused.
     tables = hashlib.sha256("\n".join(sorted(Base.metadata.tables)).encode()).hexdigest()[:16]
     template = pg_templates.template(f"create_all_{tables}", _create_all)
     pg_templates.recreate(pg_container.dbname, template)

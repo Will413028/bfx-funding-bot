@@ -29,4 +29,5 @@ def test_only_apps_venue_imports_the_simulated_venue_wiring() -> None:
 def test_only_apps_and_the_module_itself_import_the_simulated_venue() -> None:
     outside = {p for p in _importers(FACADE, SRC)
                if "/modules/simulated_venue/" not in p}
-    assert outside == {"src/bfx_funding_bot/apps/venue.py"}
+    # apps/schema.py only registers the venue's table with Base.metadata.
+    assert outside == {"src/bfx_funding_bot/apps/venue.py", "src/bfx_funding_bot/apps/schema.py"}

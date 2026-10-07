@@ -9,13 +9,6 @@ from bfx_funding_bot.apps.webapi import app
 from bfx_funding_bot.core.authority import AuthorityMismatch
 
 
-def test_health_returns_200() -> None:
-    with TestClient(app) as client:
-        resp = client.get("/health")
-        assert resp.status_code == 200
-        assert resp.json() == {"status": "ok"}
-
-
 def _authority_db(path: Path, epoch: str) -> str:
     """A database at ``epoch``: the seeded legacy row, a switch, none, or no table."""
     url = f"sqlite+aiosqlite:///{path}"
@@ -48,9 +41,11 @@ def _authority_db(path: Path, epoch: str) -> str:
 def test_startup_reads_the_supported_authority(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # Never the ambient DATABASE_URL: a developer's .env names a real database.
     monkeypatch.setenv("DATABASE_URL", _authority_db(tmp_path / "ledger.db", "ledger"))
     with TestClient(app) as client:
-        assert client.get("/health").status_code == 200
+        resp = client.get("/health")
+        assert (resp.status_code, resp.json()) == (200, {"status": "ok"})
         assert app.state.session_factory is not None
 
 
