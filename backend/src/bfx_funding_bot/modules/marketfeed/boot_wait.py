@@ -16,6 +16,7 @@ import errno
 import json
 import logging
 import socket
+import ssl
 from collections.abc import Callable
 
 import asyncpg
@@ -62,22 +63,46 @@ def boot_retry_delay_s(attempt: int) -> float:
 def is_transient_dependency_error(exc: BaseException) -> bool:
     """True only for "the venue or the database did not answer" (or said "not now").
 
-    Walks the explicit ``raise ... from`` chain (never the implicit context, so a
-    refusal raised while handling a network error stays a refusal). Any
-    ``FatalError`` in the chain (boot invariant, credential rejection, writer
-    lock contention) makes it non-transient.
+    A definite refusal anywhere in the chain wins: walking both ``__cause__`` and
+    the implicit ``__context__`` -- even one suppressed with ``from None``, as
+    httpcore does when it turns ``ssl.SSLCertVerificationError`` into its
+    ``ConnectError`` -- any ``FatalError``, TLS certificate verification failure,
+    permission error or venue answer makes the failure non-transient. A wrapper that only says "no
+    answer" (``BitfinexAPIError`` status 0, ``httpx.ConnectError``) therefore cannot
+    hide the TLS failure underneath it. Otherwise the failure is transient only if
+    a link of the explicit ``raise ... from`` chain is a reachability fault: an
+    unrelated error raised while handling a network error stays a refusal.
     """
-    seen: set[int] = set()
-    found = False
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, FatalError):
+    for link in _links(exc, follow_context=True):
+        if _is_refusal(link):
             return False
-        if _is_unreachable(current):
-            found = True
-        current = current.__cause__
-    return found
+    return any(_is_unreachable(link) for link in _links(exc, follow_context=False))
+
+
+def _links(exc: BaseException, *, follow_context: bool) -> list[BaseException]:
+    links: list[BaseException] = []
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        links.append(current)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if follow_context and current.__context__ is not None:
+            pending.append(current.__context__)
+    return links
+
+
+def _is_refusal(exc: BaseException) -> bool:
+    """A definite answer about this process or its request: retrying cannot change it."""
+    if isinstance(exc, FatalError | ssl.SSLCertVerificationError | PermissionError):
+        return True
+    if isinstance(exc, BitfinexAPIError) and exc.status_code != 0:
+        return not _venue_did_not_answer(exc)
+    return False
 
 
 def _is_unreachable(exc: BaseException) -> bool:

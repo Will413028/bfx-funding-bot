@@ -24,6 +24,7 @@ import logging
 import socket
 import ssl
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -267,3 +268,112 @@ async def test_a_database_tls_or_permission_error_refuses_the_boot(error: OSErro
     with pytest.raises(type(error)):
         await wait_for_database(engine, delay_s=lambda _n: 0.0)  # type: ignore[arg-type]
     assert engine.attempts == 1
+
+
+# ── a TLS certificate the client does not trust, through the real clients ─────
+
+
+def _self_signed(directory: Path) -> tuple[Path, Path]:
+    from datetime import UTC, datetime, timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.now(UTC)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1)).not_valid_after(now + timedelta(days=1))
+            .sign(key, hashes.SHA256()))
+    cert_path, key_path = directory / "cert.pem", directory / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+                                           serialization.PrivateFormat.PKCS8,
+                                           serialization.NoEncryption()))
+    return cert_path, key_path
+
+
+@pytest.fixture
+async def untrusted_tls_url(tmp_path: Path) -> Any:
+    """A local HTTPS server whose self-signed certificate no client trusts."""
+    cert_path, key_path = _self_signed(tmp_path)
+    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    context.load_cert_chain(cert_path, key_path)
+
+    async def close(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+
+    server = await asyncio.start_server(close, "127.0.0.1", 0, ssl=context)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield f"https://127.0.0.1:{port}"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+def _has_cert_failure(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+async def test_an_untrusted_certificate_through_httpx_refuses_the_boot(untrusted_tls_url) -> None:
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(httpx.ConnectError) as caught:
+            await http.get(untrusted_tls_url)
+    assert _has_cert_failure(caught.value)  # the production shape: ConnectError over the TLS error
+    assert is_transient_dependency_error(caught.value) is False
+
+
+async def test_an_untrusted_certificate_through_the_public_rest_client_refuses_the_boot(
+    untrusted_tls_url,
+) -> None:
+    from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
+    from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
+
+    async with httpx.AsyncClient() as http:
+        rest = BitfinexREST(http=http, base_url=untrusted_tls_url, limiter=FundingRateLimiter())
+        with pytest.raises(BitfinexAPIError) as caught:
+            await rest.get_funding_book(symbol="fUST")
+    assert caught.value.status_code == 0 and _has_cert_failure(caught.value)
+    assert is_transient_dependency_error(caught.value) is False
+
+
+async def test_an_untrusted_certificate_through_the_auth_rest_client_ends_the_boot_wait(
+    untrusted_tls_url,
+) -> None:
+    """The boot observation's own path: the signed read wraps the TLS failure as
+    status 0 ("no answer"); the boot refuses at the first attempt, it does not wait."""
+    from decimal import Decimal
+
+    from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
+    from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+
+    ctx = AccountContext("acct", Credentials("k" * 43, "s" * 43), Decimal("0"))
+    async with httpx.AsyncClient() as http:
+        auth_rest = BitfinexAuthREST(http=http, base_url=untrusted_tls_url)
+
+        class _Observation:
+            calls = 0
+
+            async def run(self, scope: Scope) -> CycleResult:
+                _Observation.calls += 1
+                await auth_rest.fetch_wallet_observations(ctx=ctx)
+                raise AssertionError("unreachable")
+
+        def no_retry(attempt: int) -> float:
+            raise AssertionError(f"the boot waited on a TLS refusal (attempt {attempt})")
+
+        fake = _daemon(_Venue(0, _unreachable), delay=no_retry)
+        fake.boot_recovery = _Observation()
+        with pytest.raises(BitfinexAPIError) as caught:
+            await Daemon._boot_until_observed(fake)
+    assert caught.value.status_code == 0 and _has_cert_failure(caught.value)
+    assert _Observation.calls == 1
