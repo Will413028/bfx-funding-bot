@@ -57,3 +57,12 @@ def test_clearing_a_dependency_keeps_the_last_decision() -> None:
     snapshot = readiness.snapshot()
     assert snapshot.trading_ready is False
     assert snapshot.reason == BlockReason.BOOK_STALE.value
+
+
+def test_a_dependency_never_seen_since_boot_is_not_ready() -> None:
+    readiness = TradingReadiness(dependencies=["ws_data", "db"])
+    readiness.set_ready()
+    assert readiness.snapshot().reason == "dependency_stale"
+    readiness.clear_dependency("db")
+    readiness.clear_dependency("ws_data")
+    assert readiness.snapshot().trading_ready is True

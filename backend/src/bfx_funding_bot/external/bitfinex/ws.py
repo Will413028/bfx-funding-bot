@@ -115,6 +115,9 @@ class BitfinexWSClient:
         self._recv_task: asyncio.Task[None] | None = None
         self._hb_task: asyncio.Task[None] | None = None
         self._connected_at: float | None = None
+        # Monotonic time of the newest frame (candle or hb) on a subscribed channel;
+        # None until this client has received one.
+        self._last_frame_ts: float | None = None
 
     async def candles(self) -> AsyncIterator[CandleMessage]:
         await self._ensure_connected()
@@ -136,6 +139,17 @@ class BitfinexWSClient:
             return 0
         newest = max((s.last_msg_ts for s in self.channels.values()), default=time.monotonic())
         return int((time.monotonic() - newest) * 1000)
+
+    def last_frame_age_ms(self) -> int | None:
+        """Age of the newest frame actually received, or None if none yet.
+
+        Unlike ``last_msg_age_ms`` (whose per-channel clocks start at construction,
+        a grace the hb watchdog needs), this proves the venue delivered data: the
+        market-data freshness beat is taken only from it.
+        """
+        if self._last_frame_ts is None:
+            return None
+        return int((time.monotonic() - self._last_frame_ts) * 1000)
 
     def maybe_reset_backoff(self) -> None:
         """Reset reconnect_attempts if connection has been stable for >= 5 minutes.
@@ -246,6 +260,7 @@ class BitfinexWSClient:
             if state is None:
                 return
             state.last_msg_ts = time.monotonic()
+            self._last_frame_ts = state.last_msg_ts
             if payload == "hb":
                 return
             self._handle_candle_payload(state, payload)

@@ -18,6 +18,7 @@ from bfx_funding_bot.core.health import (
     SUB_TASK_THRESHOLDS,
     HealthProbe,
     _TargetState,
+    dependency_is_stale,
 )
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
 
@@ -29,7 +30,6 @@ class _EventSink(Protocol):
 
 class _DependencyReadiness(Protocol):
     def set_dependency_stale(self, dependency: str) -> None: ...
-    def clear_dependency(self, dependency: str) -> None: ...
 
 
 class HealthMonitor:
@@ -46,7 +46,7 @@ class HealthMonitor:
         self._events = event_sink
         self.probe = probe
         self.heartbeat_interval_s = heartbeat_interval_s
-        # Receives dependency freshness (DEPENDENCY_THRESHOLDS) on every scan.
+        # Told on every scan which dependencies (DEPENDENCY_THRESHOLDS) are stale.
         self._readiness = readiness
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -110,9 +110,11 @@ class HealthMonitor:
         sub-tasks (and unknown keys); activity-class sub-tasks (executor,
         safety_chain, writer_lock) and dependency-freshness sub-tasks (ws_data,
         db) emit on a severity transition but never escalate. Each scan also
-        reports every recorded dependency's freshness to the readiness state:
-        stale → not ready, fresh again → cleared. A dependency never recorded
-        is left untouched (readiness starts not ready until a READY decision).
+        marks every stale recorded dependency not ready in the readiness state
+        (``core.health.dependency_is_stale``, the rule HeartbeatGuard uses). It
+        never clears one: the dependency's next successful answer does that at
+        once (``Daemon._dependency_answered``), and a dependency never recorded
+        is already not ready from boot (TradingReadiness ``dependencies``).
 
         SIGNAL_PIPELINE carve-out (Phase 4.3 Task 5):
         Per-cell pipeline state is tracked separately in
@@ -141,13 +143,15 @@ class HealthMonitor:
             threshold = SUB_TASK_THRESHOLDS.get(sub_task, _DEFAULT_THRESHOLD_S)
             age_s = (now - last_ts).total_seconds()
             non_fatal = sub_task in NON_FATAL_SUB_TASKS
-            if age_s <= threshold:
+            # Dependencies use the one rule HeartbeatGuard applies, so /readyz and
+            # the submit gate flip on the same beat age.
+            fresh = (not dependency_is_stale(sub_task, last_ts, now)
+                     if sub_task in DEPENDENCY_THRESHOLDS else age_s <= threshold)
+            if fresh:
                 # Recovered (or never stale): reset transition state so a later
                 # re-staleness re-emits the healthy→degraded transition.
                 if non_fatal:
                     self._last_nonfatal_severity.pop(sub_task, None)
-                if sub_task in DEPENDENCY_THRESHOLDS and self._readiness is not None:
-                    self._readiness.clear_dependency(sub_task)
                 continue
             if sub_task in DEPENDENCY_THRESHOLDS and self._readiness is not None:
                 self._readiness.set_dependency_stale(sub_task)

@@ -567,13 +567,16 @@ class Daemon:
             await self.monitor.scan_staleness()  # may raise FatalError
 
     async def _db_keepalive_loop(self) -> None:
-        """Ping the database every 5 min. ``db_keepalive`` (liveness) beats per
-        attempt; ``db`` (dependency freshness, readiness only) per success."""
+        """Ping the database at start and then every 5 min. ``db_keepalive``
+        (liveness) beats per attempt; ``db`` (dependency freshness, readiness
+        only) per success, which also clears it in /readyz at once. A recovered
+        database therefore shows ready again at the next ping, at most one
+        keepalive interval later."""
         from bfx_funding_bot.core.keepalive import keepalive_loop
         await keepalive_loop(
             self.db_engine,
             stop=self._stop_event,
-            on_tick=lambda _ts: self.probe.record_heartbeat(DB_FRESHNESS),
+            on_tick=lambda _ts: self._dependency_answered(DB_FRESHNESS),
             on_attempt=lambda: self.probe.record_heartbeat("db_keepalive"),
         )
         log.info("sub_task_exit name=db_keepalive")
@@ -665,6 +668,13 @@ class Daemon:
                     error_message=msg,
                 )
 
+    def _dependency_answered(self, dependency: str) -> None:
+        """A dependency answered: beat its freshness and clear it in /readyz now,
+        not at the next staleness scan (which only ever marks it stale)."""
+        self.probe.record_heartbeat(dependency)
+        if self.trading_readiness is not None:
+            self.trading_readiness.clear_dependency(dependency)
+
     async def _ws_heartbeat_poll_loop(self) -> None:
         """Run ``_ws_freshness_tick`` every 15s until stop."""
         assert self.ws_client is not None
@@ -682,8 +692,9 @@ class Daemon:
 
         ``ws`` (liveness) beats on every tick: it says this poller is iterating,
         nothing about Bitfinex, so a venue outage can never age it into a restart.
-        ``ws_data`` (dependency freshness) beats only when a frame arrived within
-        60s. Bitfinex sends `hb` frames every ~15s on subscribed channels when
+        ``ws_data`` (dependency freshness) beats only when this client actually
+        received a frame within 60s (``last_frame_age_ms``; a client that has not
+        received one yet proves nothing). Bitfinex sends `hb` frames every ~15s on subscribed channels when
         idle; `_handle_raw` in ws.py updates state.last_msg_ts on any frame
         (candle or hb), while candles() yields only candle data — so the frame
         age, not the candle stream, is the freshness signal. A stale ``ws_data``
@@ -696,9 +707,12 @@ class Daemon:
         state was sticky and health_monitor kept emitting warn every 5min).
         """
         self.probe.record_heartbeat("ws")
-        if self.ws_client is None or self.ws_client.last_msg_age_ms() >= 60_000:
+        if self.ws_client is None:
             return
-        self.probe.record_heartbeat(MARKET_DATA_FRESHNESS)
+        frame_age_ms = self.ws_client.last_frame_age_ms()
+        if frame_age_ms is None or frame_age_ms >= 60_000:
+            return  # no frame yet from this client, or none for 60s: not fresh
+        self._dependency_answered(MARKET_DATA_FRESHNESS)
         # Bug B fix: only emit transition (degraded/down → healthy or
         # first-ever set) — don't spam every 15s with new last_msg_age_ms values.
         if self.probe.current_status(HealthTarget.BITFINEX_WS) != HealthStatus.HEALTHY:

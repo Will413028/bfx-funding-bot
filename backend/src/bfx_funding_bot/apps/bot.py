@@ -29,7 +29,7 @@ from bfx_funding_bot.core.errors import (
     ExecutorAuthError,
     WriterLockUnacquired,
 )
-from bfx_funding_bot.core.health import MARKET_DATA_FRESHNESS, HealthProbe
+from bfx_funding_bot.core.health import DB_FRESHNESS, MARKET_DATA_FRESHNESS, HealthProbe
 from bfx_funding_bot.core.loop_watchdog import LoopWatchdog, loop_watchdog_timeout_s
 from bfx_funding_bot.core.schema_head import assert_schema_head
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level
@@ -259,7 +259,13 @@ async def build_daemon(
     metrics = DaemonMetrics()
     metrics.register_probe(probe)  # heartbeat age/threshold + health_status
     install_log_metrics_handler(metrics)  # WARNING+ error-rate, idempotent
-    trading_readiness = TradingReadiness(on_change=metrics.set_trading_ready)
+    # Dependency freshness this process reports: the public WS's market data (when it
+    # runs one) and the database. Each starts not ready until its first beat.
+    market_data_dependencies = [] if skip_ws else [MARKET_DATA_FRESHNESS]
+    trading_readiness = TradingReadiness(
+        on_change=metrics.set_trading_ready,
+        dependencies=(*market_data_dependencies, DB_FRESHNESS),
+    )
     # deployment_environment comes from config (BFX_DEPLOYMENT_ENV via load_config).
     event_resource = EventResource(
         deployment_environment=config.deployment_environment,
@@ -481,7 +487,6 @@ async def build_daemon(
     if hg.heartbeat.enabled:
         guards.append(HeartbeatGuard(
             probe=probe,
-            threshold_seconds=hg.heartbeat.sub_task_stale_threshold_seconds,
             # Readiness gate: block POST only when our MARKET VIEW is stale.
             # Watch market-data freshness ("ws_data": a public WS frame seen),
             # not the reactive executor/safety_chain — those are bumped only by
@@ -489,8 +494,10 @@ async def build_daemon(
             # markets and was part of the 2026-05-26 canary restart loop. ws_data
             # stays fresh in quiet markets via Daemon._ws_freshness_tick
             # (Bitfinex hb ~15s); a venue outage ages it and blocks here, with
-            # no restart.
-            watched_sub_tasks=[MARKET_DATA_FRESHNESS],
+            # no restart. Never seen since boot also blocks, until the first
+            # frame. A composition without the public WS (skip_ws, tests only)
+            # has no such dependency to watch.
+            watched_sub_tasks=market_data_dependencies,
         ))
     guards.append(CapitalPolicyGuard(authority=capital.capital_authority, scope=capital_scope,
                                      clock=now_ms_utc))

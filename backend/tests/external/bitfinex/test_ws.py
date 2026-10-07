@@ -231,3 +231,20 @@ async def test_venue_restart_or_maintenance_end_reconnects(
         assert seen == 1
         assert reasons == [reason]
         await client.close()
+
+
+def test_last_frame_age_is_unknown_until_a_frame_arrives():
+    """The market-data freshness beat needs proof the venue delivered something;
+    ``last_msg_age_ms`` starts "fresh" at construction (the hb watchdog's grace)."""
+    spec = ChannelSpec(symbol="fUSD", timeframe="1h", period_agg="a30")
+    client = BitfinexWSClient(channels=[spec], url="ws://invalid")
+    assert client.last_msg_age_ms() < 60_000  # construction grace
+    assert client.last_frame_age_ms() is None
+
+    key = next(iter(client.channels))
+    client._handle_raw(json.dumps({"event": "subscribed", "channel": "candles",
+                                   "chanId": 7, "key": key}))
+    assert client.last_frame_age_ms() is None  # subscribing is not data
+    client._handle_raw(json.dumps([7, "hb"]))
+    age = client.last_frame_age_ms()
+    assert age is not None and 0 <= age < 60_000

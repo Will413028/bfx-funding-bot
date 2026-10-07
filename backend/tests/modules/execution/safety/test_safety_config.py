@@ -19,14 +19,13 @@ hard_guards:
     enabled: true
   heartbeat:
     enabled: true
-    sub_task_stale_threshold_seconds: 300
 nav_alerts:
   realized_loss_24h_pct: null
   drawdown_pct: null
 """)
     cfg = load_safety_config(yaml_path)
     assert cfg.hard_guards.manual_kill.enabled is True
-    assert cfg.hard_guards.heartbeat.sub_task_stale_threshold_seconds == 300
+    assert cfg.hard_guards.heartbeat.enabled is True
     assert cfg.nav_alerts.realized_loss_24h_pct is None
 
 
@@ -37,7 +36,7 @@ def test_retired_calibrated_guards_no_longer_load(tmp_path: Path) -> None:
 hard_guards:
   manual_kill: {enabled: true}
   auth_health: {enabled: true}
-  heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
+  heartbeat: {enabled: true}
 calibrated_guards:
   realized_loss_24h: {enabled: true, threshold_pct: 5}
 """)
@@ -50,18 +49,20 @@ def test_missing_yaml_raises(tmp_path: Path) -> None:
         load_safety_config(tmp_path / "nope.yaml")
 
 
-def test_negative_heartbeat_threshold_rejected(tmp_path: Path) -> None:
+def test_a_heartbeat_threshold_in_the_config_is_refused(tmp_path: Path) -> None:
+    """The threshold is core.health's, shared with /readyz; a config value would be a
+    second source of truth for "market data stale", so the old key no longer loads."""
     yaml_path = tmp_path / "bad_heartbeat.yaml"
     yaml_path.write_text("""
 hard_guards:
   manual_kill: {enabled: true}
   auth_health: {enabled: true}
-  heartbeat: {enabled: true, sub_task_stale_threshold_seconds: -1}
+  heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
 nav_alerts:
   realized_loss_24h_pct: null
   drawdown_pct: null
 """)
-    with pytest.raises(ValidationError, match="greater than 0"):
+    with pytest.raises(ValidationError, match="sub_task_stale_threshold_seconds"):
         load_safety_config(yaml_path)
 
 
@@ -79,7 +80,7 @@ def test_retired_cap_and_buffer_sections_are_refused(tmp_path: Path, section: st
 hard_guards:
   manual_kill: {{enabled: true}}
   auth_health: {{enabled: true}}
-  heartbeat: {{enabled: true, sub_task_stale_threshold_seconds: 300}}
+  heartbeat: {{enabled: true}}
   {section}
 nav_alerts:
   realized_loss_24h_pct: null

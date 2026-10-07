@@ -24,9 +24,10 @@ class _AuthHealthCfg(BaseModel):
 
 
 class _HeartbeatCfg(BaseModel):
+    """Only the switch: the staleness threshold is the dependency-freshness one in
+    core.health (DEPENDENCY_THRESHOLDS), shared with /readyz."""
     model_config = ConfigDict(extra="forbid")
     enabled: bool
-    sub_task_stale_threshold_seconds: Annotated[int, Field(gt=0)]
 
 
 class HardGuardsCfg(BaseModel):

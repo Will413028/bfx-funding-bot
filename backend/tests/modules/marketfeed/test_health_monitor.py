@@ -292,9 +292,9 @@ class TestStalenessScan:
         assert len(fake_sink.emitted) == 1
         assert fake_sink.emitted[0]["payload"]["check_target"] == dependency
 
-    async def test_dependency_readiness_follows_freshness_and_ignores_the_unrecorded(
-        self, fake_sink,
-    ):
+    async def test_the_scan_marks_a_stale_dependency_and_never_clears_one(self, fake_sink):
+        """The scan only marks staleness; clearing is the dependency's own answer
+        (``Daemon._dependency_answered``), so a recovery is not delayed to a scan."""
         from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 
         probe = HealthProbe()
@@ -302,16 +302,13 @@ class TestStalenessScan:
         readiness.set_ready()
         monitor = HealthMonitor(phase=Phase.SHADOW, event_sink=fake_sink, probe=probe,
                                 readiness=readiness)
-        await monitor.scan_staleness()  # nothing recorded yet: readiness untouched
-        assert readiness.snapshot().trading_ready is True
-
         probe.last_active_ts["db"] = datetime.now(UTC) - timedelta(hours=1)
         await monitor.scan_staleness()
         assert readiness.snapshot().dependency == "db"
 
-        probe.record_heartbeat("db")
+        probe.record_heartbeat("db")  # a beat alone, without the answer path
         await monitor.scan_staleness()
-        assert readiness.snapshot().trading_ready is True
+        assert readiness.snapshot().dependency == "db"
 
     # ── Phase 4.3 Task 5: scan_staleness carve-out ───────────────────────────
 

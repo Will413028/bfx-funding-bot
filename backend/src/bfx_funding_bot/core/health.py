@@ -43,6 +43,20 @@ DEPENDENCY_THRESHOLDS: dict[str, int] = {
     DB_FRESHNESS: 7 * 60,        # keepalive SELECT 1 succeeded (5min interval + 2min)
 }
 
+
+def dependency_is_stale(sub_task: str, last: datetime | None, now: datetime) -> bool:
+    """The one staleness rule for a dependency, shared by HeartbeatGuard (blocks
+    the submit) and the health scan (flips /readyz), so the two never disagree.
+
+    Never seen since boot counts as stale (fail-closed): nothing proves the
+    dependency answered yet. Age is truncated to whole seconds so "exactly at
+    the threshold" is fresh whatever the microsecond drift between the beat and
+    the check.
+    """
+    if last is None:
+        return True
+    return int((now - last).total_seconds()) > DEPENDENCY_THRESHOLDS[sub_task]
+
 # ── Activity sub-tasks (reactive middleware) ──────────────────────────────────
 # executor/safety_chain are bumped ONLY when a POST decision flows through the
 # chain (execution/middleware/heartbeat.py, signal_engine.py:290). A stale

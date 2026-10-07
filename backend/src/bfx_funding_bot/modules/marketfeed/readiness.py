@@ -1,7 +1,7 @@
 """Trading business-readiness state, deliberately separate from liveness."""
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from bfx_funding_bot.modules.execution.contracts import BlockReason
@@ -22,20 +22,25 @@ class TradingReadiness:
     """One daemon-owned readiness state shared by execution and operator views.
 
     Two inputs: the latest execution decision (``set_ready`` / ``set_blocked``,
-    from the execution gate) and the set of stale dependencies
-    (``set_dependency_stale`` / ``clear_dependency``, from the health scan). Any
-    stale dependency makes the snapshot not ready whatever the last decision was;
-    the per-submit guards, not this state, are what block a submit.
+    from the execution gate) and the set of stale dependencies. The health scan
+    marks a dependency stale (``set_dependency_stale``); the dependency's own
+    successful answer clears it at once (``clear_dependency``). Every dependency
+    passed to the constructor starts stale: never seen since boot is not ready.
+    Any stale dependency makes the snapshot not ready whatever the last decision
+    was; the per-submit guards, not this state, are what block a submit.
     """
 
-    def __init__(self, *, on_change: Callable[[bool], None] | None = None) -> None:
+    def __init__(
+        self, *, on_change: Callable[[bool], None] | None = None,
+        dependencies: Iterable[str] = (),
+    ) -> None:
         self._on_change = on_change
         self._decision = ReadinessSnapshot(
             trading_ready=False,
             reason="startup_not_ready",
             dependency="startup",
         )
-        self._stale_dependencies: set[str] = set()
+        self._stale_dependencies: set[str] = set(dependencies)
         self._notify()
 
     def set_ready(self) -> None:

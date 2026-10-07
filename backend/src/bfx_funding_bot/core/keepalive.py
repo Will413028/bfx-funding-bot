@@ -31,7 +31,7 @@ async def keepalive_loop(
     on_tick: Callable[[datetime], None] | None = None,
     on_attempt: Callable[[], None] | None = None,
 ) -> None:
-    """Run SELECT 1 every interval_s seconds until stop.set().
+    """Run SELECT 1 now and then every interval_s seconds until stop.set().
 
     Args:
         engine: AsyncEngine to ping.
@@ -43,12 +43,9 @@ async def keepalive_loop(
                  successful or not (the Daemon's own-loop liveness heartbeat).
     """
     while not stop.is_set():
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=interval_s)
-            return  # stop was set during the wait
-        except TimeoutError:
-            pass  # interval elapsed; proceed to ping
-
+        # Ping first, then wait: the first answer (the database freshness beat
+        # that lifts the boot-time "never seen" state) comes at start, not after
+        # a full interval.
         try:
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
@@ -61,3 +58,8 @@ async def keepalive_loop(
             # keepalive failures alone shouldn't kill daemon.
         if on_attempt is not None:
             on_attempt()
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+            return  # stop was set during the wait
+        except TimeoutError:
+            pass  # interval elapsed; ping again

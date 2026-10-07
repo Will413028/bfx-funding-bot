@@ -3,7 +3,9 @@
 hard_guards:
   manual_kill: {enabled: true}
   auth_health: {enabled: true}
-  heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
+  # Blocks while public WS market data is stale or not yet seen since boot; the
+  # threshold is core.health.DEPENDENCY_THRESHOLDS (the same one /readyz uses).
+  heartbeat: {enabled: true}
 
 # NAV-drop alerts (level 4): a Telegram alert, never a stop. Funding NAV only
 # falls through withdrawals, transfers or platform losses. null disables one.
