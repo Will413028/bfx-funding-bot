@@ -357,6 +357,19 @@ def _reset_rate_limits():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _fresh_alert_sink() -> Iterator[None]:
+    """Operator alerts go through one process-wide sink with a token bucket and a
+    10-minute de-duplication window; a test must never see the budget or the
+    de-duplication state an earlier test left. Each test starts on a fresh
+    log-only sink, and the previous sink is put back afterwards."""
+    from bfx_funding_bot.modules.observability import alerts
+
+    previous = alerts.install(alerts.AlertSink(transport=None))
+    yield
+    alerts.install(previous)
+
+
 # ---------------------------------------------------------------------------
 # Migrated governance database (PostgreSQL 18).
 #
