@@ -65,7 +65,7 @@ def test_ready_to_submit_rejects_blank_decision_id() -> None:
 
 def test_reservation_ref_binds_venue_offer_once() -> None:
     ref = contracts.ReservationRef(
-        execution_decision_id="d-1", cid=42,
+        execution_decision_id="d-1",
         signal_correlation_id=_decision().signal_correlation_id,
     )
     bound = ref.bind_venue_offer("voi-1")
@@ -79,7 +79,7 @@ def test_reservation_ref_binds_venue_offer_once() -> None:
 def test_reservation_ref_rejects_whitespace_venue_offer_id() -> None:
     with pytest.raises(ValueError, match="venue_offer_id"):
         contracts.ReservationRef(
-            execution_decision_id="d-1", cid=42,
+            execution_decision_id="d-1",
             signal_correlation_id=_decision().signal_correlation_id,
             venue_offer_id="  ",
         )
@@ -105,12 +105,22 @@ def test_protocol_annotations_are_runtime_resolvable() -> None:
     assert guard_hints["decision"] is schemas.DecisionPayload
     assert guard_hints["ctx"] is protocols.AccountContext
     assert guard_hints["return"] is contracts.GuardResult
-    assert list(signature.parameters) == ["self", "ready", "ctx", "cid", "reservation_ref"]
-    assert signature.parameters["cid"].kind is inspect.Parameter.KEYWORD_ONLY
-    assert signature.parameters["reservation_ref"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert list(signature.parameters) == ["self", "ready", "ctx"]
     assert submit_hints["ready"] is contracts.ReadyToSubmit
     assert submit_hints["ctx"] is protocols.AccountContext
     assert submit_hints["return"] is protocols.SubmittedOrder
+
+
+def test_only_the_venue_port_takes_a_reservation_reference_and_requires_it() -> None:
+    """Above the gate nobody can supply one; below it nobody can omit it."""
+    signature = inspect.signature(protocols.VenueExecutorPort.submit)
+    hints = get_type_hints(protocols.VenueExecutorPort.submit)
+
+    assert list(signature.parameters) == ["self", "ready", "ctx", "reservation_ref"]
+    ref = signature.parameters["reservation_ref"]
+    assert ref.kind is inspect.Parameter.KEYWORD_ONLY
+    assert ref.default is inspect.Parameter.empty
+    assert hints["reservation_ref"] is contracts.ReservationRef
 
 
 def test_execution_contract_enum_values_are_stable() -> None:

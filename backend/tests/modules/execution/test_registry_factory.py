@@ -1,5 +1,4 @@
 """build_executor factory: the Bitfinex executor build path on either venue."""
-from datetime import date
 from typing import Any
 
 import httpx
@@ -23,11 +22,7 @@ def _clock() -> int:
     return 1_700_000_000_000
 
 
-def _today() -> date:
-    return date(2023, 11, 14)
-
-
-_COMPOSITION = {"clock": _clock, "date_provider": _today}
+_COMPOSITION = {"clock": _clock}
 
 
 @pytest.fixture(autouse=True)
@@ -112,10 +107,10 @@ def test_bfx_executor_env_is_refused(monkeypatch: pytest.MonkeyPatch, value: str
         )
 
 
-def test_the_executor_gets_the_composition_clock_and_date(
+def test_the_executor_gets_the_composition_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mutation: the registry stops forwarding ``clock``/``date_provider`` (wall time again)."""
+    """Mutation: the registry stops forwarding ``clock`` (wall time again)."""
     from bfx_funding_bot.modules.execution.bus import DomainEventBus
 
     spec = build_executor(
@@ -125,7 +120,6 @@ def test_the_executor_gets_the_composition_clock_and_date(
         http=httpx.AsyncClient(), bus=DomainEventBus(),
     )
     assert spec.executor._clock is _clock  # type: ignore[attr-defined]
-    assert spec.executor._date_provider is _today  # type: ignore[attr-defined]
 
 
 def test_the_simulated_venue_builds_the_same_executor() -> None:

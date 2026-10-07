@@ -35,7 +35,6 @@ class CommandFacts:
     reference: ReservationRef
     offer_rate: Decimal | None
     is_simulated: bool
-    filled: bool
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from datetime import UTC, date, datetime
 from uuid import UUID
 
 from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary
@@ -16,11 +15,11 @@ from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     AuthoritativeSafetyEvaluator,
 )
-from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
-    ExecutorPort,
     SubmittedOrder,
+    VenueExecutorPort,
 )
 from bfx_funding_bot.modules.ledger import ManagedOfferReader, UncertaintyReader
 
@@ -30,17 +29,15 @@ class ReservationEmittingMiddleware:
 
     def __init__(
         self,
-        inner: ExecutorPort,
+        inner: VenueExecutorPort,
         *,
         safety_evaluator: AuthoritativeSafetyEvaluator,
         boundary: CommandBoundary,
         uncertainty_reader: UncertaintyReader,
         managed_offers: ManagedOfferReader,
         clock: Callable[[], int] | None = None,
-        date_provider: Callable[[], date] | None = None,
     ) -> None:
         self._clock = clock or (lambda: int(time.time() * 1000))
-        self._date_provider = date_provider or (lambda: datetime.now(UTC).date())
         self._command_gate = AccountCommandGate(
             inner,
             uncertainty_reader=uncertainty_reader,
@@ -49,7 +46,6 @@ class ReservationEmittingMiddleware:
             boundary=boundary,
             managed_offers=managed_offers,
             clock=self._clock,
-            date_provider=self._date_provider,
         )
 
     @property
@@ -62,10 +58,5 @@ class ReservationEmittingMiddleware:
         await self._command_gate.cancel(venue_offer_id=venue_offer_id,
             signal_correlation_id=signal_correlation_id, account_id=account_id, ctx=ctx)
 
-    async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-        reservation_ref: ReservationRef | None = None,
-    ) -> SubmittedOrder:
-        return await self._command_gate.submit(
-            ready, ctx, cid=cid, reservation_ref=reservation_ref,
-        )
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext) -> SubmittedOrder:
+        return await self._command_gate.submit(ready, ctx)

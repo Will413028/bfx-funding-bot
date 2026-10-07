@@ -19,6 +19,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 
@@ -50,14 +51,12 @@ def _ctx() -> AccountContext:
 
 
 class _InnerOk:
-    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-                     reservation_ref: object | None = None) -> SubmittedOrder:
-        return SubmittedOrder(cid=1, venue_offer_id="x", status="filled", raw_response=None)
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext) -> SubmittedOrder:
+        return SubmittedOrder(outcome=SubmitAcknowledged("x"))
 
 
 class _InnerRaises:
-    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-                     reservation_ref: object | None = None) -> SubmittedOrder:
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext) -> SubmittedOrder:
         raise ExecutorTransientError("network_blip")
 
 
@@ -88,4 +87,4 @@ async def test_heartbeat_record_failure_does_not_break_submit() -> None:
     probe = _BrokenProbe()
     mw = HeartbeatMiddleware(_InnerOk(), probe=probe)  # type: ignore[arg-type]
     result = await mw.submit(_ready(), _ctx())
-    assert result.status == "filled"
+    assert result.status == "submitted"

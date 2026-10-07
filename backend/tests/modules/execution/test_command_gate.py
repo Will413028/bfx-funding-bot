@@ -7,8 +7,8 @@ asked for (the authorised attempt, then its outcome).
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from datetime import date
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -23,6 +23,7 @@ from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
+    ReservationRef,
 )
 from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
     ReservationEmittingMiddleware,
@@ -107,8 +108,8 @@ class _FakeVenue:
         self.recording: Recording | None = None
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-        reservation_ref=None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder:
         self.calls += 1
         if self.recording is not None:
@@ -116,8 +117,6 @@ class _FakeVenue:
         if self.crash:
             raise RuntimeError("process crash after durable intent")
         return SubmittedOrder(
-            cid=cid or 0,
-            venue_offer_id=None,
             outcome=self.outcome,  # type: ignore[arg-type]
             reservation_ref=reservation_ref,
         )
@@ -156,31 +155,29 @@ class _BlockingAckVenue(_FakeVenue):
         self.release = asyncio.Event()
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-        reservation_ref=None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder:
         self.started.set()
         await self.release.wait()
-        return await super().submit(
-            ready,
-            ctx,
-            cid=cid,
-            reservation_ref=reservation_ref,
-        )
+        return await super().submit(ready, ctx, reservation_ref=reservation_ref)
 
 
-class _MismatchedCidVenue(_FakeVenue):
+class _MisattributingVenue(_FakeVenue):
+    """Acknowledges, but names an identity other than the reference it was given."""
+
+    def __init__(self, returned_ref: Callable[[ReservationRef], ReservationRef | None]) -> None:
+        super().__init__()
+        self.returned_ref = returned_ref
+
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-        reservation_ref=None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder:
         self.calls += 1
-        assert cid is not None
         return SubmittedOrder(
-            cid=cid + 1,
-            venue_offer_id="venue-untrusted",
             outcome=SubmitAcknowledged("venue-untrusted"),
-            reservation_ref=reservation_ref,
+            reservation_ref=self.returned_ref(reservation_ref),
         )
 
 
@@ -210,7 +207,6 @@ def _gate(
         boundary=recording.boundary(),
         managed_offers=recording.offers,
         clock=iter(clock_values).__next__,
-        date_provider=lambda: date(2026, 9, 3),
     )
 
 
@@ -267,7 +263,6 @@ async def test_the_middleware_submits_through_its_command_gate() -> None:
         uncertainty_reader=reader,
         managed_offers=recording.offers,
         clock=iter(range(100, 110)).__next__,
-        date_provider=lambda: date(2026, 9, 3),
     )
     assert isinstance(middleware.command_gate, AccountCommandGate)
     await middleware.submit(_ready(), _context())
@@ -529,16 +524,35 @@ async def test_submit_cancelled_before_transport_closes_intent_as_not_sent() -> 
 
 
 @pytest.mark.asyncio
-async def test_executor_cid_mismatch_becomes_durable_unknown_and_blocks_scope() -> None:
-    """Trusting a mismatched result CID would falsely claim another command's ACK."""
+@pytest.mark.parametrize(
+    "returned_ref",
+    [
+        pytest.param(
+            lambda ref: replace(ref, execution_decision_id="another-decision"),
+            id="other_decision",
+        ),
+        pytest.param(
+            lambda ref: replace(ref, signal_correlation_id=uuid4()), id="other_signal",
+        ),
+        pytest.param(lambda ref: None, id="no_reference"),
+        pytest.param(
+            lambda ref: ref.bind_venue_offer("venue-other"), id="bound_to_other_offer",
+        ),
+    ],
+)
+async def test_executor_identity_mismatch_becomes_durable_unknown_and_blocks_scope(
+    returned_ref: Callable[[ReservationRef], ReservationRef | None],
+) -> None:
+    """Trusting a result that names another intent would falsely claim its ACK."""
     reader = _FakeUncertaintyReader(set())
     recording = _recording(reader)
-    venue = _MismatchedCidVenue()
+    venue = _MisattributingVenue(returned_ref)
     gate = _gate(venue, reader, recording)
 
     result = await gate.submit(_ready(), _context())
 
     assert result.outcome_kind.value == "unknown"
+    assert result.venue_offer_id is None
     assert [label(record) for record in recording.txns[1]] == ["unknown"]
     with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
         await gate.submit(_ready(decision_id="decision-2"), _context())

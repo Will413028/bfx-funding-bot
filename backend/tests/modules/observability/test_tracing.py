@@ -8,7 +8,7 @@ Contract under test:
    instrument_ws_dispatcher) are transparent: results and exceptions pass
    through byte-identical; spans move on the side only.
 4. Enabled path (InMemorySpanExporter): spans exported with the agreed names,
-   attrs (symbol/cid/status …) and Resource attrs (service.name=bfx-bot,
+   attrs (symbol/execution_decision_id/status …) and Resource attrs (service.name=bfx-bot,
    service.version, deployment.environment).
 """
 from __future__ import annotations
@@ -31,6 +31,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.observability.resource import (
@@ -100,14 +101,11 @@ class _StubExecutor:
     def __init__(self, order: SubmittedOrder | None = None, exc: Exception | None = None) -> None:
         self.order = order
         self.exc = exc
-        self.calls: list[int | None] = []
         self.readies: list[ReadyToSubmit] = []
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-        reservation_ref: object | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext,
     ) -> SubmittedOrder:
-        self.calls.append(cid)
         self.readies.append(ready)
         if self.exc is not None:
             raise self.exc
@@ -232,21 +230,22 @@ def test_span_fail_open_when_tracer_broken() -> None:
 async def test_submit_middleware_passthrough_and_span() -> None:
     exporter = InMemorySpanExporter()
     t = _enabled_tracing(exporter)
-    order = SubmittedOrder(cid=7, venue_offer_id="x", status="filled", raw_response=None)
+    order = SubmittedOrder(outcome=SubmitAcknowledged("x"))
     inner = _StubExecutor(order=order)
     mw = TracingSubmitMiddleware(inner, tracing=t)
     ready = _ready()
-    got = await mw.submit(ready, _ctx(), cid=7)
+    got = await mw.submit(ready, _ctx())
     assert got is order                 # byte-identical passthrough
-    assert inner.calls == [7]           # cid threaded down unchanged
     assert inner.readies == [ready]      # immutable boundary object is not rebuilt
     (span,) = exporter.get_finished_spans()
     assert span.name == "executor.submit"
     assert span.attributes is not None
     assert span.attributes["bfx.symbol"] == "fUST"
     assert span.attributes["bfx.execution_decision_id"] == "d-trace"
-    assert span.attributes["bfx.cid"] == 7
-    assert span.attributes["bfx.submit.status"] == "filled"
+    assert set(span.attributes) == {
+        "bfx.symbol", "bfx.execution_decision_id", "bfx.submit.status",
+    }
+    assert span.attributes["bfx.submit.status"] == "submitted"
     t.shutdown()
 
 
@@ -256,7 +255,7 @@ async def test_submit_middleware_exception_passthrough() -> None:
     boom = RuntimeError("venue down")
     mw = TracingSubmitMiddleware(_StubExecutor(exc=boom), tracing=t)
     with pytest.raises(RuntimeError) as exc_info:
-        await mw.submit(_ready(), _ctx(), cid=3)
+        await mw.submit(_ready(), _ctx())
     assert exc_info.value is boom       # the SAME exception object, unchanged
     (span,) = exporter.get_finished_spans()
     assert span.status.status_code is StatusCode.ERROR
@@ -265,12 +264,11 @@ async def test_submit_middleware_exception_passthrough() -> None:
 
 async def test_submit_middleware_transparent_when_disabled() -> None:
     t = DaemonTracing(enabled=False, endpoint=DEFAULT_OTLP_ENDPOINT, event_resource=None)
-    order = SubmittedOrder(cid=1, venue_offer_id="x", status="submitted", raw_response=None)
+    order = SubmittedOrder(outcome=SubmitAcknowledged("x"))
     inner = _StubExecutor(order=order)
     mw = TracingSubmitMiddleware(inner, tracing=t)
     got = await mw.submit(_ready(), _ctx())
     assert got is order
-    assert inner.calls == [None]
 
 
 # ── TracedReconcileRecovery ──────────────────────────────────────────────────

@@ -68,14 +68,14 @@ async def test_emit_order_submit_paper_shape() -> None:
     await emit_order_submit(
         event_sink=axiom, phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
         cell="fUSD_a30", ready=_ready(corr, decision_id="d-emit-1"), ctx=_ctx(),
-        cid=42, offer_id="paper_abc", is_simulated=True, status="submitted",
+        offer_id="paper_abc", is_simulated=True, status="submitted",
     )
     assert len(axiom.events) == 1
     ev = axiom.events[0]
     assert ev["event_type"] == EventType.ORDER_SUBMIT.value
     assert ev["account_id"] == "default"
     assert ev["correlation_id"] == str(corr)
-    assert ev["payload"]["cid"] == 42
+    assert "cid" not in ev["payload"]
     assert ev["payload"]["execution_decision_id"] == "d-emit-1"
     assert ev["payload"]["is_simulated"] is True
 
@@ -87,7 +87,7 @@ async def test_emit_order_submit_failed_requires_reason() -> None:
         await emit_order_submit(
             event_sink=axiom, phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
             cell="fUSD_a30", ready=_ready(uuid4()), ctx=_ctx(),
-            cid=1, offer_id=None, is_simulated=False, status="failed",
+            offer_id=None, is_simulated=False, status="failed",
             failure_reason=None,
         )
 

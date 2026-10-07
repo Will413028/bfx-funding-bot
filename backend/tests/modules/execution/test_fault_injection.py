@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import asdict, dataclass
-from datetime import date
 from decimal import Decimal
 from hashlib import sha256
 from typing import Any, Literal
@@ -247,13 +246,11 @@ class _TypedOutcomeExecutor:
         ready: ReadyToSubmit,
         context: AccountContext,
         *,
-        cid: int | None = None,
-        reservation_ref: ReservationRef | None = None,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder:
         del ready, context
         self.calls += 1
         return SubmittedOrder(
-            cid=cid or 0,
             venue_offer_id=None,
             outcome=self.outcome,
             reservation_ref=reservation_ref,
@@ -352,7 +349,6 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
             configured_symbols=frozenset({"fUST"}),
             cell="fault-cell",
             auth_gate=AuthRequestGate(lambda: 1),
-            date_provider=lambda: date(2026, 9, 3),
         )
         gate = AccountCommandGate(
             executor,
@@ -362,7 +358,6 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
             boundary=recording.boundary(),
             managed_offers=recording.offers,
             clock=iter(range(100, 200)).__next__,
-            date_provider=lambda: date(2026, 9, 3),
         )
         ready = _ready(decision_id="multiple-candidate")
         result = await gate.submit(ready, _context())
@@ -421,7 +416,6 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
                 configured_symbols=frozenset({"fUST"}),
                 cell="fault-cell",
                 auth_gate=AuthRequestGate(lambda: 1),
-                date_provider=lambda: date(2026, 9, 3),
             )
         gate = AccountCommandGate(
             inner,  # type: ignore[arg-type]
@@ -431,7 +425,6 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             boundary=recording.boundary(),
             managed_offers=recording.offers,
             clock=iter(range(100, 200)).__next__,
-            date_provider=lambda: date(2026, 9, 3),
         )
         outcome_kind = "crashed"
         ready = _ready(decision_id=f"fault-{scenario.name}")
@@ -476,7 +469,6 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
                 boundary=_recording(open_scopes, "staging").boundary(),
                 managed_offers=recording.offers,
                 clock=iter(range(300, 400)).__next__,
-                date_provider=lambda: date(2026, 9, 3),
             )
             await other_environment_gate.check(
                 _ready(decision_id=f"fault-{scenario.name}-other-environment"),
@@ -583,7 +575,6 @@ async def test_durable_outcome_reason_redacts_credentials_and_authorization(
         boundary=recording.boundary(),
         managed_offers=recording.offers,
         clock=iter(range(100, 200)).__next__,
-        date_provider=lambda: date(2026, 9, 3),
     )
 
     await gate.submit(_ready(decision_id=f"redaction-{outcome.kind.value}"), _context())

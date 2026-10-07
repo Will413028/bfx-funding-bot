@@ -33,7 +33,10 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
+from bfx_funding_bot.modules.execution.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitOutcomeUnknown,
+)
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
@@ -175,7 +178,7 @@ def test_observe_methods_fail_open_when_backend_broken() -> None:
     # None of these may raise:
     m.observe_operational_event({"event_type": "signal", "level": "info"})
     m.observe_diagnostic_event({"event_type": "safety_trigger", "level": "warn"})
-    m.observe_submit(status="filled", duration_s=0.1)
+    m.observe_submit(status="submitted", duration_s=0.1)
     m.observe_reconcile_tick(result="ok", duration_s=0.1)
     m.observe_log_record(level="warning", logger="x")
 
@@ -212,14 +215,11 @@ class _StubExecutor:
                  exc: Exception | None = None) -> None:
         self._order = order
         self._exc = exc
-        self.calls: list[int | None] = []
         self.readies: list[ReadyToSubmit] = []
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-        reservation_ref: object | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext,
     ) -> SubmittedOrder:
-        self.calls.append(cid)
         self.readies.append(ready)
         if self._exc is not None:
             raise self._exc
@@ -230,16 +230,15 @@ class _StubExecutor:
 @pytest.mark.asyncio
 async def test_submit_middleware_passes_result_and_records() -> None:
     m = DaemonMetrics()
-    order = SubmittedOrder(cid=7, venue_offer_id="paper_x", status="filled", raw_response=None)
+    order = SubmittedOrder(outcome=SubmitAcknowledged("paper_x"))
     inner = _StubExecutor(order=order)
     mw = MetricsSubmitMiddleware(inner, metrics=m)
     ready = _ready()
-    got = await mw.submit(ready, _ctx(), cid=7)
+    got = await mw.submit(ready, _ctx())
     assert got is order                       # byte-identical passthrough
-    assert inner.calls == [7]                 # cid threaded down unchanged
     assert inner.readies == [ready]            # immutable boundary object is not rebuilt
     assert m.registry.get_sample_value(
-        "bfx_executor_submits_total", {"status": "filled"},
+        "bfx_executor_submits_total", {"status": "submitted"},
     ) == 1.0
     assert m.registry.get_sample_value("bfx_executor_submit_duration_seconds_count") == 1.0
 
@@ -258,11 +257,9 @@ async def test_submit_middleware_reraises_and_counts_exception() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_middleware_unknown_status_bounded_to_other() -> None:
+async def test_observe_submit_bounds_an_unrecognized_status_to_other() -> None:
     m = DaemonMetrics()
-    order = SubmittedOrder(cid=1, venue_offer_id=None, status="weird_venue_string", raw_response=None)
-    mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
-    await mw.submit(_ready(), _ctx())
+    m.observe_submit(status="weird_venue_string", duration_s=0.0)
     assert m.registry.get_sample_value(
         "bfx_executor_submits_total", {"status": "other"},
     ) == 1.0
@@ -272,7 +269,6 @@ async def test_submit_middleware_unknown_status_bounded_to_other() -> None:
 async def test_submit_middleware_keeps_unknown_as_first_class_metric() -> None:
     m = DaemonMetrics()
     order = SubmittedOrder(
-        cid=2,
         venue_offer_id=None,
         outcome=SubmitOutcomeUnknown("timeout", True),
         raw_response=None,
@@ -294,7 +290,7 @@ async def test_submit_middleware_fail_open_when_metrics_broken() -> None:
         raise RuntimeError("metrics down")
 
     m.observe_submit = _boom  # type: ignore[method-assign]
-    order = SubmittedOrder(cid=1, venue_offer_id="x", status="submitted", raw_response=None)
+    order = SubmittedOrder(outcome=SubmitAcknowledged("x"))
     mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
     got = await mw.submit(_ready(), _ctx())   # must NOT raise
     assert got is order

@@ -15,7 +15,6 @@ import logging
 import re
 import time
 from collections.abc import Callable
-from datetime import date
 from decimal import Decimal
 from typing import Any, Literal, Protocol
 from uuid import UUID
@@ -30,7 +29,6 @@ from bfx_funding_bot.core.errors import (
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.auth_rest import log_auth_http_error
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
-from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.external.bitfinex.funding_rules import RULE, validate_amount
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
@@ -108,8 +106,8 @@ def build_offer_payload(
 
     Per https://docs.bitfinex.com/reference/rest-auth-submit-funding-offer —
     the funding-offer submit API accepts only type/symbol/amount/rate/period/flags.
-    There is NO cid field (unlike trading-order submit), so no client-side dedup;
-    the internal cid lives only in our event log, never in this payload.
+    There is NO cid field (unlike trading-order submit), so no client-side dedup:
+    the submit's identity is its durable attempt and amount fingerprint.
     """
     return {
         "type": "LIMIT",
@@ -129,7 +127,7 @@ def parse_offer_response(raw: Any) -> SubmittedOrder:
     OFFER_ARRAY[0] = OFFER_ID (used as venue_offer_id).
     STATUS = "SUCCESS" / "ERROR" / "FAILURE".
 
-    Caller fills cid (this fn is pure parse).  Malformed/unrecognized payloads
+    Pure parse; no reservation reference.  Malformed/unrecognized payloads
     are returned as UNKNOWN so the submit boundary can persist ambiguity.
     """
     if not isinstance(raw, list) or len(raw) < 7:
@@ -152,7 +150,6 @@ def parse_offer_response(raw: Any) -> SubmittedOrder:
         if isinstance(raw, list) and len(raw) > 7 and isinstance(raw[7], str):
             bounded_response["error_text"] = raw[7][:256]
     return SubmittedOrder(
-        cid=0,
         venue_offer_id=venue_offer_id,
         outcome=outcome,
         raw_response=bounded_response,
@@ -275,7 +272,6 @@ def _response_json_or_text(response: httpx.Response) -> tuple[Any, str]:
 
 def _order_from_outcome(
     *,
-    cid: int,
     reference: ReservationRef,
     outcome: SubmitOutcome,
     raw_response: Any | None = None,
@@ -291,7 +287,6 @@ def _order_from_outcome(
         else reference
     )
     return SubmittedOrder(
-        cid=cid,
         venue_offer_id=venue_offer_id,
         outcome=outcome,
         raw_response=(
@@ -325,7 +320,6 @@ class BitfinexLiveExecutor:
         configured_symbols: frozenset[str],
         cell: str,
         auth_gate: AuthRequestGate | None = None,
-        date_provider: Callable[[], date] | None = None,
         base_url: str = BITFINEX_REST_BASE,
         clock: Callable[[], int] | None = None,
     ) -> None:
@@ -338,27 +332,18 @@ class BitfinexLiveExecutor:
         self._cell = cell
         # The daemon passes its one per-key gate; see nonce.AuthRequestGate.
         self._auth_gate = auth_gate or AuthRequestGate()
-        self._date_provider = date_provider or (lambda: date.today())
         self._base_url = base_url.rstrip("/")
         self._clock = clock or (lambda: int(time.time() * 1000))
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-        reservation_ref: ReservationRef | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder:
         decision = ready.decision
-        # cid centralized by ReservationEmittingMiddleware (A2); direct callers
-        # fall back to deterministic generation (CC2 capture-once date).
-        if cid is None:
-            cid = generate_cid(decision.signal_correlation_id, self._date_provider())
-        reference = reservation_ref or ReservationRef(
-            execution_decision_id=ready.decision_id,
-            cid=cid,
-            signal_correlation_id=decision.signal_correlation_id,
-        )
+        # The command gate's reference for this intent; every result echoes it.
+        reference = reservation_ref
         if (
             reference.execution_decision_id != ready.decision_id
-            or reference.cid != cid
             or reference.signal_correlation_id != decision.signal_correlation_id
             or reference.venue_offer_id is not None
         ):
@@ -366,13 +351,11 @@ class BitfinexLiveExecutor:
 
         if not decision.symbol:
             return _order_from_outcome(
-                cid=cid,
                 reference=reference,
                 outcome=SubmitNotSent("symbol_missing"),
             )
         if decision.symbol not in self._configured_symbols:
             return _order_from_outcome(
-                cid=cid,
                 reference=reference,
                 outcome=SubmitNotSent("symbol_not_configured"),
             )
@@ -388,7 +371,6 @@ class BitfinexLiveExecutor:
             or period <= 0
         ):
             return _order_from_outcome(
-                cid=cid,
                 reference=reference,
                 outcome=SubmitNotSent("invalid_submit_payload"),
             )
@@ -424,7 +406,6 @@ class BitfinexLiveExecutor:
                 # No request has been started, so this is a durable NOT_SENT result;
                 # the command gate may safely resolve the pre-transport intent.
                 return _order_from_outcome(
-                    cid=cid,
                     reference=reference,
                     outcome=SubmitNotSent("local_validation_failed"),
                 )
@@ -433,12 +414,12 @@ class BitfinexLiveExecutor:
                 validate_amount(amount, ready.funding_amount_evidence,
                                 symbol=decision.symbol, now_ms=self._clock())
             except (ValueError, ArithmeticError):
-                return _order_from_outcome(cid=cid, reference=reference,
+                return _order_from_outcome(reference=reference,
                     outcome=SubmitNotSent("funding_rule_or_amount_invalid"))
             # Final synchronous predicates after payload/signing work. No await may
             # separate the bound amount/book checks from starting the request.
             if ctx.before_submit_transport is not None and not ctx.before_submit_transport():
-                return _order_from_outcome(cid=cid, reference=reference,
+                return _order_from_outcome(reference=reference,
                     outcome=SubmitNotSent("decision_book_invalid_or_expired"))
             transport_started = True
             try:
@@ -488,7 +469,6 @@ class BitfinexLiveExecutor:
                     transport_started,
                 )
                 return _order_from_outcome(
-                    cid=cid,
                     reference=reference,
                     outcome=outcome,
                     raw_response={
@@ -500,13 +480,13 @@ class BitfinexLiveExecutor:
                 outcome = classify_submit_response(
                     None, None, transport_started, e,
                 )
-                return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
+                return _order_from_outcome(reference=reference, outcome=outcome)
             except httpx.HTTPError as e:
                 log.warning("bitfinex_submit_network_error symbol=%s err_type=%s", decision.symbol, type(e).__name__)
                 outcome = classify_submit_response(
                     None, None, transport_started, e,
                 )
-                return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
+                return _order_from_outcome(reference=reference, outcome=outcome)
             except Exception as e:
                 # A response parser/shape error after the request is sent is also
                 # UNKNOWN.  Never let it fall through to the old FAILED branch.
@@ -514,7 +494,7 @@ class BitfinexLiveExecutor:
                 outcome = classify_submit_response(
                     None, None, transport_started, e,
                 )
-                return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
+                return _order_from_outcome(reference=reference, outcome=outcome)
 
         finally:
             self._auth_gate.release()
@@ -528,7 +508,6 @@ class BitfinexLiveExecutor:
                 raw_response_digest=response_digest(resp.text[:1000]),
             )
             return _order_from_outcome(
-                cid=cid,
                 reference=reference,
                 outcome=outcome,
                 raw_response={
@@ -542,7 +521,6 @@ class BitfinexLiveExecutor:
             transport_started,
         )
         return _order_from_outcome(
-            cid=cid,
             reference=reference,
             outcome=outcome,
         )

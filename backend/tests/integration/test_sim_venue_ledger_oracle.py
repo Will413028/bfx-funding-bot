@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -311,18 +310,15 @@ async def rig_factory(ledger_db):  # noqa: F811
         observation = BitfinexVenueObservation(rest=rest, ctx=ctx, scope=SCOPE, clock_ms=clock)
         sink = build_observation_sink(factory, observation, now_ms=clock, grace_ms=RUNTIME_GRACE_MS)
 
-        def today() -> Any:
-            return datetime.fromtimestamp(clock() / 1000, UTC).date()
-
         bus = DomainEventBus()
         executor = BitfinexLiveExecutor(
             http=http, event_sink=_NullSink(), bus=bus, phase=Phase.LIVE,
             strategy=StrategyName.RATE_PERCENTILE, configured_symbols=frozenset({"fUST"}),
-            cell=CELL, auth_gate=auth_gate, date_provider=today, clock=clock)
+            cell=CELL, auth_gate=auth_gate, clock=clock)
         gate = AccountCommandGate(
             executor, uncertainty_reader=build_uncertainty_reader(factory),
             safety_evaluator=_Allow(), deployment_environment="ci",
-            clock=clock, date_provider=today,
+            clock=clock,
             boundary=CommandBoundary(
                 SCOPE, factory,
                 build_command_journal(factory, max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS),

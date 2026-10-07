@@ -27,12 +27,8 @@ from bfx_funding_bot.modules.execution.contracts import (
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmitAcknowledged,
-    SubmitNotSent,
     SubmitOutcome,
     SubmitOutcomeKind,
-    SubmitOutcomeUnknown,
-    SubmitRejected,
-    response_digest,
 )
 from bfx_funding_bot.modules.strategy import DecisionPayload
 
@@ -50,6 +46,7 @@ __all__ = [
     "SubmitOutcome",
     "SubmitOutcomeKind",
     "SubmittedOrder",
+    "VenueExecutorPort",
     "WriterLockHandle",
 ]
 
@@ -69,107 +66,40 @@ class AccountContext:
 
 @dataclass(frozen=True, slots=True, init=False)
 class SubmittedOrder:
-    """Result envelope with a typed outcome and a legacy status read view.
+    """Result envelope around one typed submit outcome.
 
-    New adapters should pass ``outcome``.  ``status=`` remains accepted for
-    paper/legacy adapters during the staged migration, but is converted into a
-    typed outcome at construction time.  In particular, an UNKNOWN outcome can
-    only expose ``status == "unknown"``; it is never silently collapsed into
-    the old ``"failed"`` value.
+    ``status`` is a read-only label derived from the outcome for metrics,
+    tracing and the ORDER_SUBMIT event; control flow reads ``outcome_kind``.
     """
 
-    cid: int
     venue_offer_id: str | None
     outcome: SubmitOutcome
     raw_response: Any | None
     reservation_ref: ReservationRef | None
-    _legacy_status: str | None
 
     def __init__(
         self,
-        cid: int,
-        venue_offer_id: str | None,
-        status: str | None = None,
+        *,
+        outcome: SubmitOutcome,
+        venue_offer_id: str | None = None,
         raw_response: Any | None = None,
         reservation_ref: ReservationRef | None = None,
-        *,
-        outcome: SubmitOutcome | None = None,
-        _legacy_status: str | None = None,
     ) -> None:
-        typed_outcome_supplied = outcome is not None
-        if outcome is None:
-            outcome = _outcome_from_legacy_status(
-                status,
-                venue_offer_id=venue_offer_id,
-                raw_response=raw_response,
-            )
-        else:
-            expected_statuses = {
-                SubmitOutcomeKind.ACKNOWLEDGED: {"submitted", "filled"},
-                SubmitOutcomeKind.REJECTED: {"failed"},
-                SubmitOutcomeKind.UNKNOWN: {"unknown"},
-                SubmitOutcomeKind.NOT_SENT: {"not_sent"},
-            }[outcome.kind]
-            if status is not None and status not in expected_statuses:
-                raise ValueError(
-                    f"typed {outcome.kind.value} outcome conflicts with status={status!r}"
-                )
-            replace_legacy_statuses = (
-                {"weird_venue_string"}
-                if outcome.kind is SubmitOutcomeKind.UNKNOWN
-                else set()
-            )
-            if (
-                _legacy_status is not None
-                and _legacy_status not in expected_statuses | replace_legacy_statuses
-            ):
-                # ``_legacy_status`` is populated only by dataclasses.replace on
-                # a legacy result.  Preserve the historical diagnostic string
-                # during replacement, while still rejecting success-shaped
-                # values on an UNKNOWN outcome.
-                raise ValueError(
-                    f"typed {outcome.kind.value} outcome conflicts with "
-                    f"legacy status={_legacy_status!r}"
-                )
-            if (
-                isinstance(outcome, SubmitAcknowledged)
-                and venue_offer_id is not None
-                and venue_offer_id != outcome.venue_offer_id
-            ):
+        if isinstance(outcome, SubmitAcknowledged):
+            if venue_offer_id is not None and venue_offer_id != outcome.venue_offer_id:
                 raise ValueError("venue_offer_id conflicts with acknowledged outcome")
-            if isinstance(outcome, SubmitAcknowledged) and venue_offer_id is None:
-                venue_offer_id = outcome.venue_offer_id
-            if raw_response is None and hasattr(outcome, "raw_response"):
-                raw_response = outcome.raw_response
-
-        if not isinstance(outcome, SubmitAcknowledged) and venue_offer_id is not None:
+            venue_offer_id = outcome.venue_offer_id
+        elif venue_offer_id is not None:
             raise ValueError(
                 f"{outcome.kind.value} outcome cannot carry venue_offer_id"
             )
+        if raw_response is None and hasattr(outcome, "raw_response"):
+            raw_response = outcome.raw_response
 
-        object.__setattr__(self, "cid", cid)
         object.__setattr__(self, "venue_offer_id", venue_offer_id)
         object.__setattr__(self, "outcome", outcome)
         object.__setattr__(self, "raw_response", raw_response)
         object.__setattr__(self, "reservation_ref", reservation_ref)
-        # ``filled`` is a paper-only compatibility value; all real submit
-        # outcomes derive to submitted/failed/unknown/not_sent below.
-        compatibility = (
-            _legacy_status
-            if _legacy_status is not None
-            else (
-                status
-                if (
-                    not typed_outcome_supplied
-                    and (
-                        status == "weird_venue_string"
-                        or (status == "filled" and isinstance(outcome, SubmitAcknowledged))
-                    )
-                )
-                else None
-            )
-        )
-        object.__setattr__(self, "_legacy_status", compatibility)
 
     @property
     def outcome_kind(self) -> SubmitOutcomeKind:
@@ -177,43 +107,15 @@ class SubmittedOrder:
 
     @property
     def status(self) -> str:
-        if self._legacy_status is not None:
-            return self._legacy_status
-        return {
-            SubmitOutcomeKind.ACKNOWLEDGED: "submitted",
-            SubmitOutcomeKind.REJECTED: "failed",
-            SubmitOutcomeKind.UNKNOWN: "unknown",
-            SubmitOutcomeKind.NOT_SENT: "not_sent",
-        }[self.outcome_kind]
+        return _STATUS_LABELS[self.outcome_kind]
 
 
-def _outcome_from_legacy_status(
-    status: str | None,
-    *,
-    venue_offer_id: str | None,
-    raw_response: Any | None,
-) -> SubmitOutcome:
-    """Upcast pre-typed executor values without losing ambiguity semantics."""
-    if status in {"submitted", "filled"} and venue_offer_id is not None:
-        return SubmitAcknowledged(venue_offer_id=venue_offer_id, raw_response=raw_response)
-    if status == "failed":
-        return SubmitRejected(reason="legacy_submit_failed", raw_response=raw_response)
-    if status == "not_sent":
-        return SubmitNotSent(reason="legacy_not_sent")
-    if status == "unknown":
-        return SubmitOutcomeUnknown(
-            reason="legacy_unknown",
-            transport_started=True,
-            raw_response_digest=(response_digest(raw_response) if raw_response is not None else None),
-        )
-    # Unknown legacy status values are themselves ambiguous.  Preserve the
-    # string only for observability compatibility, while exposing UNKNOWN to
-    # new control-flow code.
-    return SubmitOutcomeUnknown(
-        reason="legacy_unrecognized_status",
-        transport_started=True,
-        raw_response_digest=(response_digest(raw_response) if raw_response is not None else None),
-    )
+_STATUS_LABELS: dict[SubmitOutcomeKind, str] = {
+    SubmitOutcomeKind.ACKNOWLEDGED: "submitted",
+    SubmitOutcomeKind.REJECTED: "failed",
+    SubmitOutcomeKind.UNKNOWN: "unknown",
+    SubmitOutcomeKind.NOT_SENT: "not_sent",
+}
 
 
 class GuardRule(Protocol):
@@ -231,15 +133,25 @@ class WriterLockHandle(Protocol):
 
 
 class ExecutorPort(Protocol):
-    """Venue executor (Bitfinex live).
+    """The submit path as its caller (the deployment reconciler) sees it.
 
-    cid is centralized by ReservationEmittingMiddleware (A2: same cid for INTENT
-    + outcome). It is threaded down through the chain; executors use it when
-    provided and fall back to deterministic generation only for direct callers.
+    Implemented by the observe-only middlewares and by the account command gate
+    at their core. The caller hands over only the request: the gate derives the
+    submit's reservation reference itself, so none can be supplied here.
+    """
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext) -> SubmittedOrder: ...
+
+
+class VenueExecutorPort(Protocol):
+    """The venue transport behind the account command gate (Bitfinex live).
+
+    The gate passes the reservation reference it derived for the durable
+    intent; the result must echo exactly that reference (bound to the venue
+    offer on an acknowledgement) so the gate can attribute it to its intent.
     """
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-        reservation_ref: ReservationRef | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *,
+        reservation_ref: ReservationRef,
     ) -> SubmittedOrder: ...
 
 

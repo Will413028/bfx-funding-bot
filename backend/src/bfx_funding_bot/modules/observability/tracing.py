@@ -2,7 +2,8 @@
 
 Coarse-grained span coverage (wired in build_daemon, observe-only):
 - executor.submit        (TracingSubmitMiddleware — outermost executor wrapper;
-                          attrs: bfx.symbol / bfx.cid / bfx.submit.status)
+                          attrs: bfx.symbol / bfx.execution_decision_id /
+                          bfx.submit.status)
 - reconcile.tick         (TracedReconcileRecovery — around the reconcile
                           backbone's recovery.run(); attrs: bfx.reconcile.result)
 - ws_dispatcher.process  (instrument_ws_dispatcher — per WS event translate +
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
     )
     from bfx_funding_bot.modules.observability.resource import EventResource
 
-from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 
 log = logging.getLogger(__name__)
 
@@ -237,20 +238,15 @@ class TracingSubmitMiddleware:
         self._tracing = tracing
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-        reservation_ref: ReservationRef | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext,
     ) -> SubmittedOrder:
         attrs: dict[str, Any] = {}
         # Defense-in-depth on the money path: even attr harvesting must not raise.
         with contextlib.suppress(Exception):
             attrs["bfx.symbol"] = ready.decision.symbol
             attrs["bfx.execution_decision_id"] = ready.decision_id
-            if cid is not None:
-                attrs["bfx.cid"] = cid
         with self._tracing.span("executor.submit", attributes=attrs) as span:
-            order = await self._inner.submit(
-                ready, ctx, cid=cid, reservation_ref=reservation_ref,
-            )
+            order = await self._inner.submit(ready, ctx)
             span.set_attribute("bfx.submit.status", order.status)
             return order
 

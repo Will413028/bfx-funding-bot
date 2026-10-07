@@ -49,7 +49,6 @@ async def emit_order_submit(
     cell: str,
     ready: ReadyToSubmit,
     ctx: AccountContext,
-    cid: int,
     offer_id: str | None,
     is_simulated: bool,
     status: str,
@@ -59,7 +58,6 @@ async def emit_order_submit(
 ) -> None:
     decision = ready.decision
     payload = OrderSubmitPayload(
-        cid=cid,
         offer_id=offer_id,
         execution_decision_id=ready.decision_id,
         signal_correlation_id=decision.signal_correlation_id,

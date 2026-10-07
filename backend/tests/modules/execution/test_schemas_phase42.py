@@ -19,7 +19,6 @@ from bfx_funding_bot.modules.strategy import StrategyName
 
 def test_order_submit_payload_minimal() -> None:
     p = OrderSubmitPayload(
-        cid=12345,
         offer_id="paper_abc123",
         execution_decision_id="d-schema",
         signal_correlation_id=uuid4(),
@@ -29,7 +28,7 @@ def test_order_submit_payload_minimal() -> None:
         is_simulated=True,
         status="submitted",
     )
-    assert p.cid == 12345
+    assert "cid" not in OrderSubmitPayload.model_fields
     assert p.execution_decision_id == "d-schema"
     assert p.is_simulated is True
 
@@ -37,7 +36,7 @@ def test_order_submit_payload_minimal() -> None:
 def test_order_submit_failed_requires_failure_reason() -> None:
     with pytest.raises(ValidationError, match="failure_reason"):
         OrderSubmitPayload(
-            cid=1, offer_id=None, execution_decision_id="d-schema", signal_correlation_id=uuid4(),
+            offer_id=None, execution_decision_id="d-schema", signal_correlation_id=uuid4(),
             offer_rate=0.0001, offer_amount_usdt=100.0, offer_duration_days=2,
             is_simulated=False, status="failed",
         )
@@ -45,7 +44,6 @@ def test_order_submit_failed_requires_failure_reason() -> None:
 
 def test_order_submit_unknown_and_not_sent_require_failure_reason() -> None:
     common = {
-        "cid": 1,
         "offer_id": None,
         "execution_decision_id": "d-schema",
         "signal_correlation_id": uuid4(),
@@ -63,7 +61,6 @@ def test_order_submit_unknown_and_not_sent_require_failure_reason() -> None:
 
 def test_order_submit_status_is_closed_vocabulary() -> None:
     common = {
-        "cid": 1,
         "offer_id": None,
         "execution_decision_id": "d-schema",
         "signal_correlation_id": uuid4(),
@@ -79,7 +76,7 @@ def test_order_submit_status_is_closed_vocabulary() -> None:
 def test_order_submit_payload_requires_execution_decision_id() -> None:
     with pytest.raises(ValidationError, match="execution_decision_id"):
         OrderSubmitPayload(
-            cid=1, offer_id="paper_abc", signal_correlation_id=uuid4(),
+            offer_id="paper_abc", signal_correlation_id=uuid4(),
             offer_rate=0.0001, offer_amount_usdt=100.0, offer_duration_days=2,
             is_simulated=True, status="submitted",
         )
@@ -88,7 +85,7 @@ def test_order_submit_payload_requires_execution_decision_id() -> None:
 def test_order_submit_payload_rejects_blank_execution_decision_id() -> None:
     with pytest.raises(ValidationError, match="execution_decision_id"):
         OrderSubmitPayload(
-            cid=1, offer_id="paper_abc", execution_decision_id=" ",
+            offer_id="paper_abc", execution_decision_id=" ",
             signal_correlation_id=uuid4(), offer_rate=0.0001,
             offer_amount_usdt=100.0, offer_duration_days=2,
             is_simulated=True, status="submitted",

@@ -149,9 +149,9 @@ class GateVenue:
         self.calls = 0
         self.outcome = outcome
 
-    async def submit(self, ready: Any, ctx: Any, *, cid: Any, reservation_ref: Any) -> SubmittedOrder:
+    async def submit(self, ready: Any, ctx: Any, *, reservation_ref: Any) -> SubmittedOrder:
         self.calls += 1
-        return SubmittedOrder(cid=cid, venue_offer_id=None, outcome=self.outcome(None),
+        return SubmittedOrder(venue_offer_id=None, outcome=self.outcome(None),
                               reservation_ref=reservation_ref)
 
 
@@ -165,7 +165,7 @@ class ProcessDied(BaseException):
 
 
 class DyingVenue(GateVenue):
-    async def submit(self, ready: Any, ctx: Any, *, cid: Any, reservation_ref: Any) -> SubmittedOrder:
+    async def submit(self, ready: Any, ctx: Any, *, reservation_ref: Any) -> SubmittedOrder:
         self.calls += 1
         raise ProcessDied
 

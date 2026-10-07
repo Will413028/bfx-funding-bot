@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, field
-from datetime import date
 from decimal import Decimal
 from typing import Any, Literal, Protocol
 from uuid import UUID
@@ -1195,7 +1194,7 @@ class PolicyStore(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CommandAttempt:
-    """Consumer submit identity; legacy CID belongs exclusively to its adapter."""
+    """Consumer submit identity: the attempt id, 1:1 with its execution decision."""
 
     attempt_id: UUID
     execution_decision_id: str
@@ -1206,7 +1205,6 @@ class CommandAttempt:
     policy_revision: int
     policy_digest: str
     policy_revision_id: UUID
-    command_date: date | None = None  # freeze the legacy identity day across midnight
     event_id: UUID | None = None
     cell_id: str | None = None
 
@@ -1242,7 +1240,7 @@ class CommandJournal(Protocol):
     """Admission on the caller's txn; outcomes on an owned short transaction.
 
     The port locks the scope, validates, runs the guard, then writes. Transport
-    starts only after the caller has committed. No CID crosses this boundary.
+    starts only after the caller has committed.
     """
 
     async def authorize(

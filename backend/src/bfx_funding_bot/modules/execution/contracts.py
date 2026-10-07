@@ -67,7 +67,6 @@ class ReservationRef:
     """
 
     execution_decision_id: str
-    cid: int
     signal_correlation_id: UUID
     venue_offer_id: str | None = None
 
@@ -83,7 +82,6 @@ class ReservationRef:
         if self.venue_offer_id is None:
             return ReservationRef(
                 execution_decision_id=self.execution_decision_id,
-                cid=self.cid,
                 signal_correlation_id=self.signal_correlation_id,
                 venue_offer_id=venue_offer_id,
             )

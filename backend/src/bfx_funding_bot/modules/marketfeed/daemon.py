@@ -60,7 +60,7 @@ from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconci
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
-    ExecutorPort,
+    VenueExecutorPort,
 )
 from bfx_funding_bot.modules.execution.safety.boot_stop import report_refused_boot
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
@@ -281,7 +281,7 @@ class Daemon:
     session_factory: async_sessionmaker[AsyncSession]
     # Phase 4.2 Task 20: execution + safety wiring.
     account_bootstrap: AccountBootstrap
-    executor: ExecutorPort
+    executor: VenueExecutorPort
     safety_chain: SafetyGuardChain
     account_ctx: AccountContext
     bus: DomainEventBus

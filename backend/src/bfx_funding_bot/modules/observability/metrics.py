@@ -68,16 +68,16 @@ if TYPE_CHECKING:
 from bfx_funding_bot.modules.execution.contracts import (
     BlockReason,
     ReadyToSubmit,
-    ReservationRef,
 )
 
 log = logging.getLogger(__name__)
 
 # Bounded label values for bfx_executor_submits_total — SubmittedOrder.status is
-# a venue-fed string; anything outside the known set becomes "other" so a venue
-# quirk can never explode timeseries cardinality.  UNKNOWN/NOT_SENT remain
-# first-class labels because collapsing either into FAILED hides safety state.
-_KNOWN_SUBMIT_STATUSES = frozenset({"submitted", "filled", "failed", "unknown", "not_sent"})
+# derived from its typed outcome; anything else reaching observe_submit becomes
+# "other" so a caller bug can never explode timeseries cardinality.  UNKNOWN/
+# NOT_SENT remain first-class labels because collapsing either into FAILED hides
+# safety state.
+_KNOWN_SUBMIT_STATUSES = frozenset({"submitted", "failed", "unknown", "not_sent"})
 _KNOWN_EXECUTION_OUTCOMES = frozenset({"ready", "blocked", "no_recommendation"})
 _KNOWN_EXECUTION_REASONS = frozenset({"none", *(reason.value for reason in BlockReason)})
 _KNOWN_EXECUTION_POLICIES = frozenset({
@@ -583,14 +583,11 @@ class MetricsSubmitMiddleware:
             log.debug("metrics_submit_observe_failed", exc_info=True)
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-        reservation_ref: ReservationRef | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext,
     ) -> SubmittedOrder:
         start = time.perf_counter()
         try:
-            order = await self._inner.submit(
-                ready, ctx, cid=cid, reservation_ref=reservation_ref,
-            )
+            order = await self._inner.submit(ready, ctx)
         except BaseException:
             self._safe_observe("exception", start)
             raise

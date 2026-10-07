@@ -98,9 +98,9 @@ class _Venue:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def submit(self, ready, ctx, *, cid, reservation_ref):
+    async def submit(self, ready, ctx, *, reservation_ref):
         self.calls += 1
-        return SubmittedOrder(cid=cid, venue_offer_id="m-1", outcome=SubmitAcknowledged("m-1"),
+        return SubmittedOrder(venue_offer_id="m-1", outcome=SubmitAcknowledged("m-1"),
                               reservation_ref=reservation_ref)
 
 

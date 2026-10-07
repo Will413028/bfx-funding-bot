@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 
 from bfx_funding_bot.core.health import HealthProbe
-from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     ExecutorPort,
@@ -27,11 +27,10 @@ class HeartbeatMiddleware:
         self._probe = probe
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-        reservation_ref: ReservationRef | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext,
     ) -> SubmittedOrder:
         try:
-            return await self._inner.submit(ready, ctx, cid=cid, reservation_ref=reservation_ref)
+            return await self._inner.submit(ready, ctx)
         finally:
             try:
                 self._probe.record_heartbeat("executor")

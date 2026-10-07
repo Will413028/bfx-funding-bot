@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -305,7 +304,6 @@ def _make_executor(
         configured_symbols=frozenset({"fUSD"}),
         cell="fUSD_p2",
         auth_gate=AuthRequestGate(lambda: 1700000000_000_000),
-        date_provider=lambda: date(2026, 5, 23),
         **kwargs,
     )
 

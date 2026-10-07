@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
 from typing import Any, Protocol
 
 import httpx
@@ -20,7 +19,7 @@ import httpx
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
-from bfx_funding_bot.modules.execution.protocols import ExecutorPort
+from bfx_funding_bot.modules.execution.protocols import VenueExecutorPort
 from bfx_funding_bot.modules.strategy import StrategyName
 
 
@@ -34,7 +33,7 @@ class ExecutorConfigError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ExecutorSpec:
-    executor: ExecutorPort
+    executor: VenueExecutorPort
 
 
 def build_executor(
@@ -44,7 +43,6 @@ def build_executor(
     strategy: StrategyName,
     cell: str,
     clock: Callable[[], int],
-    date_provider: Callable[[], date],
     configured_symbols: frozenset[str] | None = None,
     http: httpx.AsyncClient | None = None,
     bus: Any | None = None,  # DomainEventBus typed via Any to avoid circular ref
@@ -62,6 +60,5 @@ def build_executor(
             cell=cell,
             auth_gate=auth_gate,
             clock=clock,
-            date_provider=date_provider,
         ),
     )

@@ -18,7 +18,6 @@ from bfx_funding_bot.modules.strategy import DecisionPayload, SignalPayload, Str
 
 class OrderSubmitPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    cid: int
     offer_id: str | None  # paper: "paper_<uuid12>"; real: stringified int from venue; None when no venue id exists
     execution_decision_id: str = Field(..., min_length=1)
     signal_correlation_id: UUID
