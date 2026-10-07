@@ -4,7 +4,7 @@ No I/O, no venue calls — deterministic given inputs (testable in isolation).
 """
 from __future__ import annotations
 
-from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, Decimal
 from math import nextafter
 
 from bfx_funding_bot.modules.ledger import CapitalAvailable
@@ -43,15 +43,4 @@ def allocate_capital(*, views: dict[str, CapitalAvailable], min_fill: Decimal) -
             fills[cell] = amount
             remaining -= amount
     return fills
-
-
-def effective_min_usdt(venue_floor_usd: Decimal, buffer_pct: Decimal) -> Decimal:
-    """Historical simulation helper, never live funding-rule authority.
-
-    v1: static — the buffer absorbs USDT de-peg + precision (assumes
-    USDT >= 1 - buffer). No USDT/USD ticker fetch (deferred, future venue-call).
-    ceil(150 * 1.02) = 153.
-    """
-    raw = venue_floor_usd * (Decimal("1") + buffer_pct)
-    return raw.quantize(Decimal("1"), rounding=ROUND_CEILING)
 
