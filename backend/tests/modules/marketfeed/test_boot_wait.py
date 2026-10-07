@@ -198,6 +198,10 @@ def test_reachability_faults_are_transient(exc: BaseException) -> None:
         # This process's own setup, not the other side being away.
         ssl.SSLCertVerificationError(1, "certificate verify failed"),
         PermissionError(13, "Permission denied"),
+        # Local resource and file errors are OSErrors too, but not the other side being away.
+        FileNotFoundError(2, "No such file or directory"),
+        IsADirectoryError(21, "Is a directory"),
+        OSError(errno.EMFILE, "Too many open files"),
         ValueError("unknown active offer status"),
         sa_exc.DBAPIError("SELECT 1", None, Exception("syntax"), connection_invalidated=False),
         # A refusal caused by a network error stays a refusal.
