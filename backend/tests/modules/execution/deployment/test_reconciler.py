@@ -38,7 +38,11 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
+from bfx_funding_bot.modules.execution.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitOutcomeUnknown,
+    SubmitRejected,
+)
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
     FillModelUnavailable,
@@ -225,7 +229,7 @@ class _FakeExecutor:
     async def submit(self, decision, ctx) -> SubmittedOrder:
         self.ready_submissions.append(decision)
         self.submitted.append(decision.decision)
-        return SubmittedOrder(venue_offer_id="x", status="submitted", raw_response=None)
+        return SubmittedOrder(outcome=SubmitAcknowledged("x"))
 
 
 class _Audit:
@@ -587,9 +591,7 @@ async def test_unknown_opens_gate_for_remaining_cells_in_same_tick() -> None:
                     venue_offer_id=None,
                     outcome=SubmitOutcomeUnknown("timeout", True),
                 )
-            return SubmittedOrder(
-                venue_offer_id="unexpected", status="submitted", raw_response=None,
-            )
+            return SubmittedOrder(outcome=SubmitAcknowledged("unexpected"))
 
     executor = _UnknownThenAck()
     rec, _executor, _tracker, _safety = _build(
@@ -970,14 +972,14 @@ async def test_per_cell_safety_block_does_not_stop_other_cell():
 
 class _RejectingExecutor:
     """Live-executor behaviour on a venue reject (e.g. 10001 not-enough-balance):
-    returns a SubmittedOrder with status="failed" rather than raising."""
+    returns a typed SubmitRejected rather than raising."""
 
     def __init__(self) -> None:
         self.submitted: list = []
 
     async def submit(self, decision, ctx) -> SubmittedOrder:
         self.submitted.append(decision)
-        return SubmittedOrder(venue_offer_id=None, status="failed", raw_response=None)
+        return SubmittedOrder(outcome=SubmitRejected("venue_rejected"))
 
 
 class _UnknownExecutor:

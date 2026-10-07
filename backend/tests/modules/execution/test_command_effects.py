@@ -21,12 +21,12 @@ ATTEMPT = uuid4()
 CORRELATION = uuid4()
 
 
-def _facts(*, filled: bool = False) -> CommandFacts:
+def _facts() -> CommandFacts:
     return CommandFacts(
         scope=SCOPE, attempt_id=ATTEMPT, symbol="fUST", amount=Decimal("200.000005"),
         signal_correlation_id=CORRELATION,
         reference=ReservationRef("decision", CORRELATION, venue_offer_id="m-1"),
-        offer_rate=Decimal("0.0001"), is_simulated=False, filled=filled,
+        offer_rate=Decimal("0.0001"), is_simulated=False,
     )
 
 
@@ -59,7 +59,7 @@ async def test_ledger_effects_only_announce_the_outcome(kind, offer, reason) -> 
     trace = _Trace()
     effects = LedgerCommandEffects(trace.bus)
     assert effects.new_event_id() is None
-    await effects.outcome_recorded(_facts(filled=kind == "ack"), _outcome(kind, offer, reason))
+    await effects.outcome_recorded(_facts(), _outcome(kind, offer, reason))
     assert trace.calls == [("publish", "CommandOutcomeNotice")]
 
 

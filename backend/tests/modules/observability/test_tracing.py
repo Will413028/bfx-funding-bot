@@ -32,6 +32,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.observability.resource import (
@@ -233,7 +234,7 @@ def test_span_fail_open_when_tracer_broken() -> None:
 async def test_submit_middleware_passthrough_and_span() -> None:
     exporter = InMemorySpanExporter()
     t = _enabled_tracing(exporter)
-    order = SubmittedOrder(venue_offer_id="x", status="filled", raw_response=None)
+    order = SubmittedOrder(outcome=SubmitAcknowledged("x"))
     inner = _StubExecutor(order=order)
     mw = TracingSubmitMiddleware(inner, tracing=t)
     ready = _ready()
@@ -253,7 +254,7 @@ async def test_submit_middleware_passthrough_and_span() -> None:
     assert set(span.attributes) == {
         "bfx.symbol", "bfx.execution_decision_id", "bfx.submit.status",
     }
-    assert span.attributes["bfx.submit.status"] == "filled"
+    assert span.attributes["bfx.submit.status"] == "submitted"
     t.shutdown()
 
 
@@ -272,7 +273,7 @@ async def test_submit_middleware_exception_passthrough() -> None:
 
 async def test_submit_middleware_transparent_when_disabled() -> None:
     t = DaemonTracing(enabled=False, endpoint=DEFAULT_OTLP_ENDPOINT, event_resource=None)
-    order = SubmittedOrder(venue_offer_id="x", status="submitted", raw_response=None)
+    order = SubmittedOrder(outcome=SubmitAcknowledged("x"))
     inner = _StubExecutor(order=order)
     mw = TracingSubmitMiddleware(inner, tracing=t)
     got = await mw.submit(_ready(), _ctx())

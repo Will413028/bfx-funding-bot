@@ -34,7 +34,10 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
+from bfx_funding_bot.modules.execution.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitOutcomeUnknown,
+)
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
@@ -231,7 +234,7 @@ class _StubExecutor:
 @pytest.mark.asyncio
 async def test_submit_middleware_passes_result_and_records() -> None:
     m = DaemonMetrics()
-    order = SubmittedOrder(venue_offer_id="paper_x", status="filled", raw_response=None)
+    order = SubmittedOrder(outcome=SubmitAcknowledged("paper_x"))
     inner = _StubExecutor(order=order)
     mw = MetricsSubmitMiddleware(inner, metrics=m)
     ready = _ready()
@@ -244,7 +247,7 @@ async def test_submit_middleware_passes_result_and_records() -> None:
     assert inner.calls == [ref]               # reference threaded down unchanged
     assert inner.readies == [ready]            # immutable boundary object is not rebuilt
     assert m.registry.get_sample_value(
-        "bfx_executor_submits_total", {"status": "filled"},
+        "bfx_executor_submits_total", {"status": "submitted"},
     ) == 1.0
     assert m.registry.get_sample_value("bfx_executor_submit_duration_seconds_count") == 1.0
 
@@ -263,11 +266,9 @@ async def test_submit_middleware_reraises_and_counts_exception() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_middleware_unknown_status_bounded_to_other() -> None:
+async def test_observe_submit_bounds_an_unrecognized_status_to_other() -> None:
     m = DaemonMetrics()
-    order = SubmittedOrder(venue_offer_id=None, status="weird_venue_string", raw_response=None)
-    mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
-    await mw.submit(_ready(), _ctx())
+    m.observe_submit(status="weird_venue_string", duration_s=0.0)
     assert m.registry.get_sample_value(
         "bfx_executor_submits_total", {"status": "other"},
     ) == 1.0
@@ -298,7 +299,7 @@ async def test_submit_middleware_fail_open_when_metrics_broken() -> None:
         raise RuntimeError("metrics down")
 
     m.observe_submit = _boom  # type: ignore[method-assign]
-    order = SubmittedOrder(venue_offer_id="x", status="submitted", raw_response=None)
+    order = SubmittedOrder(outcome=SubmitAcknowledged("x"))
     mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
     got = await mw.submit(_ready(), _ctx())   # must NOT raise
     assert got is order

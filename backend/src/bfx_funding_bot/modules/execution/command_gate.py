@@ -443,7 +443,6 @@ class AccountCommandGate:
             scope=scope, attempt_id=attempt_id, symbol=decision.symbol, amount=size,
             signal_correlation_id=decision.signal_correlation_id, reference=reference,
             offer_rate=decision.offer_rate, is_simulated=False,
-            filled=kind is SubmitOutcomeKind.ACKNOWLEDGED and result.status == "filled",
         )
         await boundary.journal.record_outcome(scope, attempt_id, outcome)
         await boundary.effects.outcome_recorded(facts, outcome)

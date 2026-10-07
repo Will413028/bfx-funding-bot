@@ -182,63 +182,40 @@ def test_submitted_order_derives_compatibility_status_from_typed_outcome() -> No
     assert unknown.status != "failed"
 
 
-def test_typed_outcome_rejects_contradictory_legacy_status() -> None:
-    with pytest.raises(ValueError, match="status"):
-        SubmittedOrder(
-            venue_offer_id=None,
-            status="filled",
-            outcome=SubmitOutcomeUnknown("timeout", True),
-        )
-    with pytest.raises(ValueError, match="status"):
-        SubmittedOrder(
-            venue_offer_id="42",
-            status="failed",
-            outcome=SubmitAcknowledged("42"),
-        )
+def test_submitted_order_takes_its_venue_id_from_the_acknowledgement() -> None:
+    order = SubmittedOrder(outcome=SubmitAcknowledged("42"))
 
-
-def test_legacy_filled_status_remains_a_compatibility_view() -> None:
-    order = SubmittedOrder(
-        venue_offer_id="paper_3",
-        status="filled",
-        raw_response=None,
-    )
-
-    assert order.outcome_kind is SubmitOutcomeKind.ACKNOWLEDGED
-    assert order.status == "filled"
-
-
-def test_legacy_filled_without_venue_id_fails_closed_to_unknown() -> None:
-    order = SubmittedOrder(
-        venue_offer_id=None,
-        status="filled",
-        raw_response=None,
-    )
-
-    assert order.outcome_kind is SubmitOutcomeKind.UNKNOWN
-    assert order.status == "unknown"
-
-
-def test_non_acknowledged_legacy_status_cannot_carry_venue_id() -> None:
+    assert order.venue_offer_id == "42"
     with pytest.raises(ValueError, match="venue_offer_id"):
-        SubmittedOrder(
-            venue_offer_id="42",
-            status="unknown",
-            raw_response=None,
-        )
+        SubmittedOrder(venue_offer_id="43", outcome=SubmitAcknowledged("42"))
 
 
-def test_legacy_unknown_status_survives_dataclass_replacement() -> None:
-    legacy = SubmittedOrder(
-        venue_offer_id=None,
-        status="weird_venue_string",
-        raw_response=None,
-    )
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        SubmitOutcomeUnknown("timeout", True),
+        SubmitRejected("venue_rejected"),
+        SubmitNotSent("local_guard"),
+    ],
+)
+def test_non_acknowledged_outcome_cannot_carry_venue_id(outcome: object) -> None:
+    with pytest.raises(ValueError, match="venue_offer_id"):
+        SubmittedOrder(venue_offer_id="42", outcome=outcome)  # type: ignore[arg-type]
 
-    replaced = replace(legacy, reservation_ref=None)
+
+def test_submitted_order_has_no_status_constructor() -> None:
+    """The status label is a read-only view of the outcome, never an input."""
+    with pytest.raises(TypeError):
+        SubmittedOrder(status="submitted", outcome=SubmitAcknowledged("42"))  # type: ignore[call-arg]
+
+
+def test_status_label_survives_dataclass_replacement() -> None:
+    order = SubmittedOrder(outcome=SubmitOutcomeUnknown("timeout", True))
+
+    replaced = replace(order, reservation_ref=None)
 
     assert replaced.outcome_kind is SubmitOutcomeKind.UNKNOWN
-    assert replaced.status == "weird_venue_string"
+    assert replaced.status == "unknown"
 
 
 def test_submission_attempt_payload_freezes_normalized_identity_and_digest() -> None:

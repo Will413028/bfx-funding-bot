@@ -149,8 +149,6 @@ async def _rig(stack: Stack, order: SubmittedOrder | None, *, journal=None) -> _
 def _order(kind: str) -> SubmittedOrder:
     if kind == "ack":
         return SubmittedOrder(venue_offer_id="m-1", outcome=SubmitAcknowledged("m-1"))
-    if kind == "filled":
-        return SubmittedOrder(venue_offer_id="m-1", status="filled")
     if kind == "unknown":
         return SubmittedOrder(venue_offer_id=None,
                               outcome=SubmitOutcomeUnknown("timeout", transport_started=True))
@@ -161,7 +159,6 @@ def _order(kind: str) -> SubmittedOrder:
 
 @pytest.mark.parametrize(("kind", "wire_kind", "offer", "reason"), [
     ("ack", "ack", "m-1", None),
-    ("filled", "ack", "m-1", None),
     ("unknown", "unknown", None, "timeout"),
     ("rejected", "rejected", None, "venue_rejected"),
     ("not_sent", "not_sent", None, "local_pre_transport"),
