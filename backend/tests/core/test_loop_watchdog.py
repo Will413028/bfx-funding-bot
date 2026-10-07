@@ -2,8 +2,8 @@
 
 The behaviour tests run a real interpreter: ``faulthandler`` keeps one process-wide
 timer and its expiry calls ``_exit``, so it cannot run inside the pytest process.
-Their only time bound is the watchdog's own timeout (T=1s) against a loop blocked
-for 3s or a drain that outlasts T; nothing else depends on wall-clock thresholds.
+Their only time bound is the watchdog's own timeout (T=2s) against a loop blocked
+for 5s or a drain of 4s, with at least 1s of margin either way; nothing else depends on wall-clock thresholds.
 
 Mutation checks (one at a time; revert after each):
 
@@ -46,11 +46,11 @@ def _run_script(body: str) -> subprocess.CompletedProcess[str]:
 def test_a_blocked_loop_dumps_the_blocking_frame_and_exits_non_zero() -> None:
     result = _run_script("""
         def block_the_loop() -> None:
-            time.sleep(3)
+            time.sleep(5)
 
         async def main() -> None:
             stop = asyncio.Event()
-            task = asyncio.create_task(LoopWatchdog(timeout_s=1.0).run(stop))
+            task = asyncio.create_task(LoopWatchdog(timeout_s=2.0).run(stop))
             await asyncio.sleep(0.05)  # the watchdog task has armed the timer
             block_the_loop()
             print("survived")
@@ -69,8 +69,10 @@ def test_a_loop_that_keeps_iterating_is_left_alone() -> None:
     result = _run_script("""
         async def main() -> None:
             stop = asyncio.Event()
-            task = asyncio.create_task(LoopWatchdog(timeout_s=1.0).run(stop))
-            for _ in range(10):  # ~5s in all, never blocked for more than 0.3s
+            task = asyncio.create_task(LoopWatchdog(timeout_s=2.0).run(stop))
+            # ~5s in all, never blocked for more than 0.3s: the timer is re-armed at
+            # least every 0.5s + 0.3s, leaving more than 1s of the 2s timeout unused.
+            for _ in range(10):
                 time.sleep(0.3)
                 await asyncio.sleep(0.2)
             stop.set()
@@ -88,11 +90,11 @@ def test_a_drain_after_stop_outlasting_the_timeout_exits_cleanly() -> None:
     result = _run_script("""
         async def main() -> None:
             stop = asyncio.Event()
-            task = asyncio.create_task(LoopWatchdog(timeout_s=1.0).run(stop))
+            task = asyncio.create_task(LoopWatchdog(timeout_s=2.0).run(stop))
             await asyncio.sleep(0.3)
             stop.set()
             await task           # the watchdog saw the stop request
-            time.sleep(2.5)      # a drain that blocks longer than the timeout
+            time.sleep(4)        # a drain that blocks longer than the timeout
             print("drained")
 
         asyncio.run(main())
