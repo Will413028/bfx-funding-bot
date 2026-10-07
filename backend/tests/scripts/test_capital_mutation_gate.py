@@ -19,7 +19,7 @@ def test_every_mutant_anchor_occurs_exactly_once() -> None:
 
 
 def test_the_mutant_list_is_complete_and_each_mutant_changes_the_source() -> None:
-    assert [m.id for m in gate.MUTANTS] == [f"M{n}" for n in range(1, 16)]
+    assert [m.id for m in gate.MUTANTS] == [f"M{n}" for n in range(1, 19)]
     for mutant in gate.MUTANTS:
         assert mutant.old != mutant.new
         assert mutant.owners

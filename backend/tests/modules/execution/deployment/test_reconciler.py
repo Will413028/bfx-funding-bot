@@ -1102,14 +1102,16 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
 
 
 class _RecordingCapital:
-    """A capital port whose cells hold different exposures; it records every read."""
+    """A capital port whose cells hold different exposures; it records every read.
 
-    def __init__(self, exposures: dict[str, Decimal]) -> None:
-        from bfx_funding_bot.modules.trading import AppliedPolicy, CapitalPolicy
+    Each symbol has its own policy (``ceilings`` sets its max_offer_amount); every
+    cell of a symbol sees the same cash, so the views of one symbol are consistent.
+    """
+
+    def __init__(self, exposures: dict[str, Decimal],
+                 ceilings: dict[str, Decimal] | None = None) -> None:
         self._exposures = exposures
-        self._policy = CapitalPolicy(enabled=True, max_cell_fraction=D("0.5"))
-        self._applied = AppliedPolicy(UUID(int=7), "test", "fUST", 1, "digest", UUID(int=1),
-                                      self._policy)
+        self._ceilings = ceilings or {}
         self.reads: list = []
         self.returned: dict = {}
 
@@ -1120,11 +1122,19 @@ class _RecordingCapital:
 
     async def read(self, scope, *, now_ms, session=None):
         from bfx_funding_bot.modules.ledger import CapitalAvailable
-        from bfx_funding_bot.modules.trading import CapitalSnapshot, evaluate_capital
+        from bfx_funding_bot.modules.trading import (
+            AppliedPolicy,
+            CapitalPolicy,
+            CapitalSnapshot,
+            evaluate_capital,
+        )
         self.reads.append(scope)
+        policy = CapitalPolicy(enabled=True, max_cell_fraction=D("0.5"),
+                               max_offer_amount=self._ceilings.get(scope.symbol))
+        applied = AppliedPolicy(scope.account_id, scope.environment, scope.symbol, 1, "digest",
+                                UUID(int=1), policy)
         snapshot = CapitalSnapshot(D("1000"), D("0"), D("1000"), self._exposures[scope.cell_id])
-        view = CapitalAvailable(self._applied, snapshot, evaluate_capital(self._policy, snapshot),
-                                D("0"), "1")
+        view = CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot), D("0"), "1")
         self.returned[scope.cell_id] = view
         return view
 
@@ -1135,35 +1145,93 @@ class _RecordingCapital:
         return False
 
 
-async def test_each_active_cell_reads_its_own_capital_and_sends_the_allocation(monkeypatch):
-    """Wiring only: the rules belong to evaluate_capital and allocate_capital."""
+class _PerSymbolBook(_SnapshotProvider):
+    """The valid book, answered under whichever symbol is asked for."""
+
+    def __init__(self) -> None:
+        super().__init__(_valid_snapshot())
+
+    def snapshot(self, symbol: str, *, now_ms: int) -> MarketSnapshot | None:
+        from dataclasses import replace
+        return replace(_valid_snapshot(), symbol=symbol)
+
+
+def _wired(capital, cells, *, executor=None):
+    """A reconciler over ``cells`` (every cell POSTs) reading ``capital``."""
+    store = StandingQuoteStore(ttl_ms=3_900_000)
+    for cell in cells:
+        store.update(_post_quote(cell.cell_id))
+    return DeploymentReconciler(
+        store=store, safety_chain=_FakeSafety(allowed=True),
+        executor=executor if executor is not None else _FakeExecutor(),
+        **_capital_ports(capital), account_ctx=_ctx(), cells=cells,
+        funding_rules=FixedRules(), clock=lambda: 1_000,
+        event_sink=_CapturingSink(), phase=Phase.LIVE,
+        **_eligibility_kwargs(book_provider=_PerSymbolBook()),
+    )
+
+
+def _recording_allocator(monkeypatch, *, replace_with=None) -> list:
+    """Record each allocate_capital call (views, min_fill, result) the reconciler makes."""
     from bfx_funding_bot.modules.execution.deployment import reconciler
-    from bfx_funding_bot.modules.trading import CapitalScope
-    capital = _RecordingCapital({"fUST_a30": D("100"), "fUST_p2": D("0")})
-    allocate = reconciler.allocate_capital
-    allocations: list = []
+    allocate = replace_with or reconciler.allocate_capital
+    calls: list = []
 
     def recording_allocate(*, views, min_fill):
         result = allocate(views=views, min_fill=min_fill)
-        allocations.append((dict(views), result))
+        calls.append((dict(views), min_fill, result))
         return result
 
     monkeypatch.setattr(reconciler, "allocate_capital", recording_allocate)
-    rec, ex, _ = _build(exposure=D("0"), quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
-                        capital_ports=_capital_ports(capital))
+    return calls
+
+
+async def test_each_active_cell_reads_its_own_capital_and_sends_the_allocation(monkeypatch):
+    """Wiring only: the rules belong to evaluate_capital and allocate_capital."""
+    from bfx_funding_bot.external.bitfinex.funding_rules import submit_amount
+    from bfx_funding_bot.modules.trading import CapitalScope
+    from tests.external.bitfinex.test_funding_rules import evidence
+    capital = _RecordingCapital({"fUST_a30": D("100"), "fUST_p2": D("0"), "fUSD_a30": D("50")})
+    calls = _recording_allocator(monkeypatch)
+    executor = _FakeExecutor()
+    rec = _wired(capital, [_cell("fUST", "a30"), _cell("fUST", "p2"), _cell("fUSD", "a30")],
+                 executor=executor)
     await rec.deploy()
 
+    # Every cell reads its own symbol and cell, once.
     assert sorted(capital.reads, key=lambda scope: scope.cell_id) == [
+        CapitalScope(UUID(int=7), "test", "fUSD", "fUSD_a30"),
         CapitalScope(UUID(int=7), "test", "fUST", "fUST_a30"),
         CapitalScope(UUID(int=7), "test", "fUST", "fUST_p2"),
     ]
-    [(views, fills)] = allocations
-    assert views == capital.returned  # each cell sized on the view read for that cell
-    # Headroom 500-100 and 500-0 differ, so a wrong-cell read changes these amounts.
-    assert fills == {"fUST_p2": D("500"), "fUST_a30": D("400")}
-    assert sorted(ex.cell_ids) == sorted(fills)
-    for cell, amount in fills.items():
-        assert _planned(ex.acknowledged(cell), str(amount))
+    # One allocation per symbol, over exactly that symbol's views as read, at the
+    # venue's submit minimum for that symbol.
+    by_symbol = {next(iter(views.values())).applied.symbol: (views, min_fill, fills)
+                 for views, min_fill, fills in calls}
+    assert set(by_symbol) == {"fUST", "fUSD"} and len(calls) == 2
+    for symbol, (views, min_fill, _fills) in by_symbol.items():
+        assert views == {cell: view for cell, view in capital.returned.items()
+                         if cell.startswith(symbol)}
+        assert min_fill == submit_amount(evidence(symbol=symbol), symbol=symbol, now_ms=1_000)
+    # Headrooms 500-100, 500-0 and 500-50 differ, so a wrong-cell read changes these.
+    assert by_symbol["fUST"][2] == {"fUST_p2": D("500"), "fUST_a30": D("400")}
+    assert by_symbol["fUSD"][2] == {"fUSD_a30": D("450")}
+    sent = {cell: amount for _views, _min, fills in calls for cell, amount in fills.items()}
+    assert sorted(executor.cell_ids) == sorted(sent)
+    for cell, amount in sent.items():
+        assert _planned(executor.acknowledged(cell), str(amount))
+
+
+async def test_the_sent_amount_never_exceeds_the_policy_ceiling(monkeypatch):
+    """The fingerprinted amount is bounded by max_offer_amount on its own, even if
+    an allocation came back above it (defence in depth for the T9 ceiling)."""
+    capital = _RecordingCapital({"fUST_a30": D("0")}, ceilings={"fUST": D("200")})
+    _recording_allocator(monkeypatch, replace_with=lambda *, views, min_fill: {
+        cell: D("200.5") for cell in views})
+    executor = _FakeExecutor()
+    await _wired(capital, [_cell("fUST", "a30")], executor=executor).deploy()
+    # Every fingerprint of 200.5 lies in (200.4, 200.5], above the 200 ceiling.
+    assert executor.submitted == []
 
 
 # ---------------------------------------------------------------------------

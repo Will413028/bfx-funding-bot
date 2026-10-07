@@ -127,6 +127,16 @@ MUTANTS: tuple[Mutant, ...] = (
     Mutant("M15", "reconciler reads every cell's capital with active[0]'s scope", RECONCILER,
            "self._scope.deployment_environment, symbol, cell),",
            "self._scope.deployment_environment, symbol, active[0]),", RECONCILER_TESTS),
+    Mutant("M16", "reconciler reads every cell's capital under the first cell's symbol",
+           RECONCILER, "self._scope.deployment_environment, symbol, cell),",
+           "self._scope.deployment_environment, self._cells[0].symbol, cell),",
+           RECONCILER_TESTS),
+    Mutant("M17", "reconciler allocates without the venue's submit minimum", RECONCILER,
+           "fills = allocate_capital(views=views, min_fill=min_fill)",
+           "fills = allocate_capital(views=views, min_fill=Decimal(0))", RECONCILER_TESTS),
+    Mutant("M18", "reconciler fingerprints without the per-offer ceiling", RECONCILER,
+           "maximum=views[cell_id].applied.policy.max_offer_amount,", "maximum=None,",
+           RECONCILER_TESTS),
 )
 
 _CANARY = 'raise ImportError("capital-mutation-gate canary")\n'
