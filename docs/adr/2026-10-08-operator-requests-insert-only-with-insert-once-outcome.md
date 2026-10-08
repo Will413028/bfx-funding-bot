@@ -36,7 +36,7 @@ prior state：三張 operator request 表（`trading_control_requests`、`capita
 - **D1**：採 B。outcome 一律普通 INSERT，衝突即錯，不用 `ON CONFLICT DO NOTHING`（與 D3'「衝突重複不當冪等」一致）。
 - **D2 產物連結**：outcome 帶產物 FK（trading `trading_state_id`、capital `policy_revision_id`）；uncertainty 維持 journal → 請求（`execution_resolution_journal.operator_request_id`）。capital 的 `source->>'request_id'` 保留為 G1 的授權鍵。
 - **D4 single-pending**：保留語意（trading 的 kill 與非 kill 各一格），改成 BEFORE INSERT trigger：先取對象的 `pg_advisory_xact_lock(hashtext('bfx_operator_request:<table>'), hashtext(<對象 key>))`，再檢查「無 outcome 的同對象請求」，違反時 `RAISE ... USING ERRCODE='unique_violation', CONSTRAINT='<既有 index 名>'`。`insert_request` 只把 23505 且 constraint 名屬於該表 pending 名集合者當成 pending，其餘 IntegrityError 往上拋。
-- **D5 outcome 的 CHECK**：依表沿用現行規則：uncertainty applied 的 reason 必須 NULL，其餘不限；trading applied 的 `trading_state_id` 在 prod 沒有 NULL 的 applied 列時才 NOT NULL。
+- **D5 outcome 的 CHECK**：依表沿用現行規則：uncertainty applied 的 reason 必須 NULL，其餘不限；trading applied 必須帶 `trading_state_id`（現行 CHECK 允許 NULL，但正式程式路徑一定會設）。
 - **D6 scope**：outcome 帶 `exchange_account_id`、`deployment_environment`，以複合 FK `(request_id, exchange_account_id, deployment_environment)` 指向請求（請求表加對應 UNIQUE），掛 `database_realm_write`。
 - 不做：client 產生的 `request_id`／idempotency key（保留 single-pending 就足以擋重送）。
 - `failed` 維持終態、worker 不重試（現行行為，草稿 2 亦同）；要重試由 operator 送新請求。
@@ -61,7 +61,7 @@ prior state：三張 operator request 表（`trading_control_requests`、`capita
 ## Followup
 
 - 實作分四個 release（R1 expand、R2 bot 直寫 outcome、R3 撤 UPDATE、R4 DROP 舊欄位），每個 release 部署成功後才 merge 下一個；計畫與盤點在本機 phase plan（gitignored）。
-- prod 資料形狀查詢（各 state 列數、applied 而產物為 NULL 的列）決定 D5 的 trading NOT NULL；結果回填本 ADR。
+- R1 migration 依 [2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them](2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them.md) 自帶前置斷言（`requested` 卻已有產物、applied 缺產物連結、scope 不符、終態缺 `processed_at_ms`）與後置斷言（終態列與 outcome 逐欄相等），在部署前的演練中先觸發；違規的歷史列由前置斷言擋下。
 - 收尾時更新 `backend/ARCHITECTURE.md` §7 與 `docs/runbooks/operations.md`。
 
 ## Invariants
