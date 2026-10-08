@@ -82,7 +82,7 @@ async def test_the_script_amends_through_the_ledger_store(database) -> None:
     assert {"amendment_digest", "changes"} <= set(written.source)
 
 
-def test_a_dry_run_needs_no_reason(monkeypatch, capsys) -> None:
+def test_a_dry_run_needs_no_reason(monkeypatch, capsys, restore_logging) -> None:
     argv = ["amend_capital_policy", "--exchange-account-id", str(ACCOUNT), "--environment", "ci",
             "--symbol", "fUST", "--enabled", "false"]
     monkeypatch.setattr("sys.argv", argv)
