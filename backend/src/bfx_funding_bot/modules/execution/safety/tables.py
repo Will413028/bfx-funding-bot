@@ -18,14 +18,12 @@ from uuid import UUID
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    Column,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
     PrimaryKeyConstraint,
-    Table,
     Text,
     UniqueConstraint,
     text,
@@ -201,13 +199,6 @@ class TradingControlRequestRow(Base):
         "reason", "requested_by", "created_at_ms",
     )
     WORKER_COLUMNS: ClassVar[tuple[str, ...]] = ("state", "processed_at_ms", "outcome_reason")
-    # Closed product column: in the table, not mapped (appended below the class, after the
-    # mapper has taken its columns). The trading state an applied request wrote names the
-    # request instead (``trading_state.operator_request_id``, 5e820d6dc7da); no role may write
-    # this one. It stays one release because the image before this one maps it, and its web
-    # API's reads of this model name every mapped column while a deploy migrates; the next
-    # release drops it.
-    CLOSED_COLUMNS: ClassVar[tuple[str, ...]] = ("trading_state_id",)
 
     @classmethod
     def pending_index(cls, values: Mapping[str, object]) -> str:
@@ -264,15 +255,6 @@ class TradingControlRequestRow(Base):
     )
 
 
-
-_REQUESTS_TABLE = TradingControlRequestRow.__table__
-assert isinstance(_REQUESTS_TABLE, Table)
-_REQUESTS_TABLE.append_column(Column(
-    "trading_state_id", BigInteger,
-    ForeignKey("trading_state.id", ondelete="RESTRICT",
-               name="fk_trading_control_requests_trading_state"),
-    nullable=True,
-))
 
 class NavWindowSampleRow(Base):
     """Loss-limiter 24h window samples, so a restart does not forget a recent loss (T9).

@@ -14,17 +14,14 @@ from uuid import UUID
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    Column,
     ForeignKey,
     Index,
-    Table,
     Text,
     UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.types import Uuid
 
 from bfx_funding_bot.core.db import Base
 
@@ -49,11 +46,6 @@ class CapitalPolicyRequestRow(Base):
         "reason", "requested_by", "created_at_ms",
     )
     WORKER_COLUMNS: ClassVar[tuple[str, ...]] = ("state", "processed_at_ms", "outcome_reason")
-    # Closed product column: in the table, not mapped (appended below the class). The revision
-    # an applied request wrote names the request instead
-    # (``capital_policy_revisions.operator_request_id``, 5e820d6dc7da); no role may write this
-    # one. It stays one release for the previous image's web API reads; the next drops it.
-    CLOSED_COLUMNS: ClassVar[tuple[str, ...]] = ("policy_revision_id",)
 
     @classmethod
     def pending_index(cls, values: Mapping[str, object]) -> str:
@@ -104,12 +96,3 @@ class CapitalPolicyRequestRow(Base):
                          name="uq_capital_policy_requests_scope"),
     )
 
-
-_REQUESTS_TABLE = CapitalPolicyRequestRow.__table__
-assert isinstance(_REQUESTS_TABLE, Table)
-_REQUESTS_TABLE.append_column(Column(
-    "policy_revision_id", Uuid,
-    ForeignKey("capital_policy_revisions.id", ondelete="RESTRICT",
-               name="fk_capital_policy_requests_revision"),
-    nullable=True,
-))

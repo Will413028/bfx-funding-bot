@@ -132,9 +132,6 @@ def test_grants_are_exactly_the_outbox_split_and_the_toggle(migrated):
                         t=table, c=column)
             assert not _has(conn, "SELECT has_column_privilege('bfx_webapi', :t, :c, 'INSERT')",
                             t=table, c=column)
-        for column in CapitalPolicyRequestRow.CLOSED_COLUMNS:  # its revision names the request
-            assert not _has(conn, "SELECT has_column_privilege('bfx_bot', :t, :c, 'UPDATE')",
-                            t=table, c=column)
         for role in ("bfx_bot", "bfx_webapi"):
             assert _has(conn, "SELECT has_table_privilege(:r, :t, 'SELECT')", r=role, t=table)
             for privilege in ("DELETE", "TRUNCATE"):

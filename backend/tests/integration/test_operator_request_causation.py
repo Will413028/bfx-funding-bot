@@ -31,9 +31,9 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, template_at
 
-from .test_ledger_schema_roles import _A, _O, _P, _T, _build, _build_reversible, _seed
+from .test_ledger_schema_roles import _A, _O, _P, _T, _build, _build_reversible, _prepare, _seed
 from .test_uncertainty_request_evidence import _quarantine
 
 pytestmark = pytest.mark.integration
@@ -72,6 +72,14 @@ _PREVIOUS_WEBAPI_COLUMNS = {
 def head(pg_templates, pg_clone):
     """Head with production-like grants and one row per ledger table."""
     yield from _seeded(pg_clone(pg_templates.template("ledger_s1_roles", _build)))
+
+
+@pytest.fixture
+def at_revision(pg_templates, pg_clone):
+    """5e820d6dc7da itself: the product columns are still in the table (41cec7caf291 drops
+    them), and this is the schema the previous web API image ran against."""
+    yield from _seeded(pg_clone(pg_templates.template(
+        "ledger_s1_roles_causation", template_at(_REVISION, _prepare))))
 
 
 @pytest.fixture
@@ -286,8 +294,8 @@ def test_the_request_guards_keep_the_transition_and_g2(head) -> None:
              f"WHERE request_id = '{unresolved}'", "applied without a journal row", role="bfx_bot")
 
 
-def test_the_product_columns_are_closed(head) -> None:
-    _, engine = head
+def test_the_product_columns_are_closed(at_revision) -> None:
+    _, engine = at_revision
     with engine.begin() as conn:
         state_id = _state(conn)
         trading = _trading(conn, action="kill")
@@ -313,10 +321,10 @@ def test_the_product_columns_are_closed(head) -> None:
                              f"outcome_reason='unchanged' WHERE request_id = '{capital}'")
 
 
-def test_the_previous_web_api_still_reads_what_it_maps(head) -> None:
+def test_the_previous_web_api_still_reads_what_it_maps(at_revision) -> None:
     """The compatibility window: the 6c775e3b web API runs against this schema until it is
     replaced, and ``select(Model)`` names every column it mapped."""
-    _, engine = head
+    _, engine = at_revision
     with engine.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         for table, columns in _PREVIOUS_WEBAPI_COLUMNS.items():

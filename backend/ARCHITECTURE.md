@@ -517,15 +517,15 @@ trading_control_requests (webapi→daemon 請求；webapi 只 INSERT 請求欄�
   outcome_reason
   -- 每個 scope 至多一筆 pending（kill 另有自己的一格）；runtime role 對請求欄位沒有 UPDATE 權（欄位級 grant），
   -- 每次 UPDATE 都必須是 state 從 requested 轉一次終態（trigger，owner 亦同）。
-  -- 結果的效果反向指回請求：trading_state.operator_request_id、funding_cancel_all_audit.operator_request_id。
-  -- trading_state_id 已關閉（不 map、bot 無 UPDATE 權、CHECK 不引用；5e820d6dc7da），下一個 release DROP。
+  -- 結果的效果反向指回請求：trading_state.operator_request_id、funding_cancel_all_audit.operator_request_id
+  -- （請求表原本的 trading_state_id 由 41cec7caf291 移除）。
 
 capital_policy_requests (webapi→daemon 幣別啟停請求；migration 7d2a9c4e6b13)
   request_id, exchange_account_id, deployment_environment, symbol, action{enable|disable},
   reason, requested_by, created_at_ms, state{requested|applied|rejected|failed},
   processed_at_ms, outcome_reason
   -- 同一幣別同一動作至多一筆 pending；套用寫出的 revision 以 operator_request_id 指回請求，
-  -- unchanged 不寫 revision、也沒有效果列。policy_revision_id 已關閉（同上），下一個 release DROP。
+  -- unchanged 不寫 revision、也沒有效果列（請求表原本的 policy_revision_id 由 41cec7caf291 移除）。
   -- 與 trading_control_requests 分表：kill 不與它共用佇列或 pending 格；kill 套用時把等待中的 enable 標
   -- superseded_by_kill，disable 照常套用。
 
