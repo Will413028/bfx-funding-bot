@@ -82,6 +82,21 @@ async def test_the_script_amends_through_the_ledger_store(database) -> None:
     assert {"amendment_digest", "changes"} <= set(written.source)
 
 
+def test_a_dry_run_needs_no_reason(monkeypatch, capsys) -> None:
+    argv = ["amend_capital_policy", "--exchange-account-id", str(ACCOUNT), "--environment", "ci",
+            "--symbol", "fUST", "--enabled", "false"]
+    monkeypatch.setattr("sys.argv", argv)
+    seen: list[argparse.Namespace] = []
+
+    async def run(args: argparse.Namespace) -> dict[str, str]:
+        seen.append(args)
+        return {"status": "dry_run"}
+
+    monkeypatch.setattr(script, "run", run)
+    assert script.main() == 0
+    assert seen and seen[0].reason is None
+
+
 @pytest.mark.parametrize("reason", [None, "", "   "])
 def test_applying_without_a_reason_is_refused_before_anything_runs(monkeypatch, capsys, reason) -> None:
     argv = ["amend_capital_policy", "--exchange-account-id", str(ACCOUNT), "--environment", "ci",
