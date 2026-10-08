@@ -70,6 +70,30 @@ PostgreSQL 與 Redis 在 `docker-compose.bot.yml`（project `bfx`），bfx-deplo
 app 只加入既有的 `bfx_default` network。`docker-compose.bot.yml` 的 `legacy-app` profile
 是歷史定義，**不要** `--profile legacy-app up`（它用同樣的 container name，會和 `bfx-app` 衝突）。
 
+### 套用資料服務的 compose 變更
+
+`bfx` project 的工作目錄是 VM 上的 `/home/ubuntu/bfx-funding-bot` checkout（`.env.runtime` 也在這裡），
+不是 release checkout；只改 `postgres` 會讓 DB 重啟，所以要在約好的維護窗口做，且先停 bot。
+`bfx-postgres:local` 會被 DR 流程從 release 重建，所以 `up` 一定會 recreate postgres，
+即使 compose 沒變；只能用 `--no-deps --no-build` 指名服務。
+
+```bash
+cd /home/ubuntu/bfx-funding-bot
+git pull --ff-only origin main             # 到已部署的 revision
+cmp docker-compose.bot.yml /home/ubuntu/bfx-releases/current/docker-compose.bot.yml
+docker compose -p bfx -f docker-compose.bot.yml up -d --no-deps --no-build --dry-run postgres
+sudo systemctl stop bfx-deploy.timer       # 窗口內不讓新 release 把 bot 拉起來
+docker stop bfx-bot
+docker compose -p bfx -f docker-compose.bot.yml up -d --no-deps --no-build postgres
+docker inspect -f '{{.State.Health.Status}} init={{.HostConfig.Init}}' bfx-postgres   # healthy init=true
+docker exec bfx-postgres ps -o pid,comm | sed -n 2p                                   # 1 docker-init
+docker exec --user postgres bfx-postgres pgbackrest --stanza=bfx check                # 推得出 WAL
+docker start bfx-bot && sudo systemctl start bfx-deploy.timer
+```
+
+dry run 只能列出 `bfx-postgres Recreate`；出現 redis 或其他服務就停下來查。`pgbackrest check`
+失敗時 bot 維持停止，先修 archive（RPO 由 `bfx-backup-check` 監看）。
+
 ## 2. 部署與交易狀態
 
 部署永遠不改變 trading state，也不需要任何核准：每筆單都由 DB 裡的 CapitalPolicy 包絡把關

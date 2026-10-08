@@ -42,6 +42,8 @@ def test_production_postgres_service_uses_archive_image_and_keeps_autoheal_separ
     postgres = compose["services"]["postgres"]
     assert postgres["image"] == "bfx-postgres:local"
     assert postgres["build"]["dockerfile"] == "deploy/vm/postgres/Dockerfile"
+    # archive-async's orphaned archive-push must not be the postmaster's child.
+    assert postgres["init"] is True
     assert "archive_mode=on" in " ".join(postgres["command"])
     assert "archive_timeout=60s" in postgres["command"]
     assert "archive_command=pgbackrest --stanza=bfx archive-push %p" in " ".join(postgres["command"])

@@ -604,6 +604,15 @@ preflight, and isolated restore, then revoke the old token only after fresh
 evidence passes. For cipher rotation, plan a separate repository migration and
 retain every old passphrase needed to read existing backups.
 
+`archive-push-queue-max` is deliberately unset. During an R2 outage PostgreSQL
+keeps every unarchived WAL segment in `pg_wal`, so PITR stays whole and
+`bfx-backup-check` alerts once the RPO passes 300 seconds. With
+`archive_timeout=60s` the backlog grows by at most one 16 MiB segment a minute
+(about 23 GiB a day), so the root disk's free space is the time left before
+PostgreSQL stops on a full disk. Setting the queue limit would instead have
+pgBackRest drop WAL while reporting success to PostgreSQL: `pg_stat_archiver`
+shows no failure, and PITR has a gap until the next full backup.
+
 A production database restore cannot undo a venue write. If a Bitfinex write
 may have occurred after a candidate restore point, do not restore production;
 retain halt, perform a fresh full-account reconcile, and use the

@@ -21,6 +21,11 @@ services:
     image: bfx-postgres:local
     container_name: bfx-postgres
     restart: unless-stopped
+    # archive-async=y forks a background archive-push that outlives its parent. With
+    # postgres as PID 1 the postmaster adopts it, and when it exits non-zero (an R2
+    # error) the postmaster treats it as a crashed backend and crash-restarts the
+    # whole database. docker-init as PID 1 reaps it instead.
+    init: true
     env_file: .env.runtime
     command:
       - postgres
