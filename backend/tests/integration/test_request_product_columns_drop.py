@@ -77,8 +77,10 @@ def test_the_upgrade_drops_the_columns_and_keeps_the_outcome_checks(before) -> N
         _applied(conn, enable, "policy_revision_id", f"'{revision}'", "capital_policy_requests")
         unchanged = _capital(conn, action="enable")
         _applied(conn, unchanged, "policy_revision_id", f"'{revision}'", "capital_policy_requests")
-        # A request applied since 5e820d6dc7da names nothing.
-        _trading(conn, settle="state='rejected', processed_at_ms=2, outcome_reason='x'")
+        # A resume applied since 5e820d6dc7da: its row names it, its own column stays NULL.
+        resume = _trading(conn, reason="r", created=130,
+                          settle="state='applied', processed_at_ms=131, outcome_reason='resumed'")
+        _state(conn, state="ACTIVE", reason="resumed: r", at=132, request=resume)
     alembic(url, "upgrade", "head")
     alembic(url, "check")
     with engine.connect() as conn:
