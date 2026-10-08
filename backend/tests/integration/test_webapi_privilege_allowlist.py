@@ -1,12 +1,14 @@
 """``bfx_webapi``'s privileges in ``public`` and ``legacy_archive`` are an exact allowlist.
 
-``EXPECTED_*`` below is that allowlist at head, written out here and checked against the
-EFFECTIVE privileges of three builds (worst-case default privileges, production's host setup,
-stray grants at an earlier revision): a migration that grants or revokes anything for the web
-API must update it in the same change, or ``test_effective_privileges_equal_the_allowlist``
-fails. Each downgrade step must restore the previous revision's allowlist exactly
+``REVERSIBLE_*`` below is that allowlist at ``LAST_REVERSIBLE_REVISION``, written out here;
+``EXPECTED_*`` is head's: ``REVERSIBLE_*`` plus what later, forward-only migrations change. Head's
+is checked against the EFFECTIVE privileges of three builds (worst-case default privileges,
+production's host setup, stray grants at an earlier revision): a migration that grants or revokes
+anything for the web API must update ``EXPECTED_*`` in the same change, or
+``test_effective_privileges_equal_the_allowlist`` fails. Each downgrade step from
+``LAST_REVERSIBLE_REVISION`` must restore the previous revision's allowlist exactly
 (``test_round_trip_keeps_the_allowlist``): ``PRE_CONTRACT_COLUMNS`` is the one d3e4f5a6b7c8
-left (the head's plus the pre-switch evidence INSERT e4f5a6b7c8d9 revoked, kept by every
+left (``REVERSIBLE_COLUMNS`` plus the pre-switch evidence INSERT e4f5a6b7c8d9 revoked, kept by every
 earlier revision below); ``PRE_ARCHIVE_TABLES`` is the table list before
 c2d3e4f5a6b7 archived five of them (``ARCHIVED_READS``; at head the web API reads only
 ``ARCHIVE_COLUMNS`` of ``legacy_archive.event_log`` there); ``MATCH_COLUMNS`` the one
@@ -56,7 +58,9 @@ _CREDIT_ENDS = ("ledger_observation_credit_history", "SELECT")
 _RW = {"DELETE", "INSERT", "SELECT", "UPDATE"}
 _R = {"SELECT"}
 
-EXPECTED_TABLES: dict[str, set[str]] = {
+# The allowlist at LAST_REVERSIBLE_REVISION, written out once: every older allowlist below derives
+# from it, and head's (EXPECTED_*) is it plus what later, forward-only migrations change.
+REVERSIBLE_TABLES: dict[str, set[str]] = {
     "account_config_drafts": _RW,
     "api_keys": _RW,
     "attribution_weekly": _R,
@@ -84,7 +88,7 @@ ARCHIVED_READS: dict[str, set[str]] = {
     "event_log": _R, "execution_uncertainties": _R, "offer_claims": _R, "position_state": _R,
     "submission_attempts": _R,
 }
-PRE_ARCHIVE_TABLES = EXPECTED_TABLES | ARCHIVED_READS
+PRE_ARCHIVE_TABLES = REVERSIBLE_TABLES | ARCHIVED_READS
 # The archived execution history's read (modules.execution.archived_execution_history).
 ARCHIVE_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("event_log", "SELECT"): {
@@ -96,7 +100,7 @@ _OBSERVED_OFFER = {
     "observation_id", "venue_offer_id", "symbol", "amount_original", "amount_remaining", "rate",
     "rate_observed", "period_days", "offer_type", "flags", "status", "mts_created", "mts_updated",
 }
-EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
+REVERSIBLE_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("accepted_capital_basis", "SELECT"): {
         "id", "exchange_account_id", "deployment_environment", "observation_id",
         "accept_revision", "attempt_seq_high_water", "accepted_at_ms",
@@ -168,11 +172,15 @@ EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
         "present_in_latest_accepted_snapshot",
     },
 }
+# Head's allowlist: a migration after LAST_REVERSIBLE_REVISION that changes a web API privilege
+# adds or removes it here, never in REVERSIBLE_*.
+EXPECTED_TABLES: dict[str, set[str]] = {**REVERSIBLE_TABLES}
+EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {**REVERSIBLE_COLUMNS}
 # Before e4f5a6b7c8d9 revoked it, the web API could still insert the pre-switch evidence column.
 _REQUEST_INSERT = ("uncertainty_resolution_requests", "INSERT")
 PRE_CONTRACT_COLUMNS = {
-    **EXPECTED_COLUMNS,
-    _REQUEST_INSERT: EXPECTED_COLUMNS[_REQUEST_INSERT] | {"reconcile_event_seq"},
+    **REVERSIBLE_COLUMNS,
+    _REQUEST_INSERT: REVERSIBLE_COLUMNS[_REQUEST_INSERT] | {"reconcile_event_seq"},
 }
 PREVIOUS_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("accepted_capital_basis", "SELECT"): {
@@ -235,8 +243,12 @@ PREVIOUS_COLUMNS: dict[tuple[str, str], set[str]] = {
 }
 # What the web API holds in schemas public and legacy_archive: tables, columns, sequences,
 # functions, schemas. An archived relation is named ``legacy_archive.<name>``.
-def _held(columns: dict[tuple[str, str], set[str]], *, archived: bool = False) -> set[tuple[str, ...]]:
-    tables = EXPECTED_TABLES if archived else PRE_ARCHIVE_TABLES
+def _held(
+    columns: dict[tuple[str, str], set[str]], *, archived: bool = False,
+    tables: dict[str, set[str]] | None = None,
+) -> set[tuple[str, ...]]:
+    if tables is None:
+        tables = REVERSIBLE_TABLES if archived else PRE_ARCHIVE_TABLES
     return (
         {("table", t, p) for t, ps in tables.items() for p in ps}
         | {("column", t, c, p) for (t, p), cs in columns.items() for c in cs}
@@ -248,15 +260,13 @@ def _held(columns: dict[tuple[str, str], set[str]], *, archived: bool = False) -
 
 # e1f2a3b4c5d7's allowlist: d3e4f5a6b7c8's without f9a0b1c2d3e4's credit-history grant.
 MATCH_COLUMNS = {key: cols for key, cols in PRE_CONTRACT_COLUMNS.items() if key != _CREDIT_ENDS}
-EXPECTED = _held(EXPECTED_COLUMNS, archived=True)
+EXPECTED = _held(EXPECTED_COLUMNS, archived=True, tables=EXPECTED_TABLES)
 PRE_CONTRACT = _held(PRE_CONTRACT_COLUMNS, archived=True)
 PRE_ARCHIVE = _held(PRE_CONTRACT_COLUMNS)
 MATCH = _held(MATCH_COLUMNS)
 PREVIOUS = _held(PREVIOUS_COLUMNS)
-# The allowlist at LAST_REVERSIBLE_REVISION, where the round trip starts. It equals head's until
-# a later migration changes a web API privilege; that migration writes it as head's minus its own
-# change (its downgrade raises, so the round trip cannot start from head).
-AT_LAST_REVERSIBLE = EXPECTED
+# Where the round trip starts (its downgrades cannot start from head once head is forward-only).
+AT_LAST_REVERSIBLE = _held(REVERSIBLE_COLUMNS, archived=True)
 
 _TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 _COLUMN_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "REFERENCES")

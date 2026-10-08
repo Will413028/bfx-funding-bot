@@ -212,25 +212,30 @@ def test_the_runtime_role_inserts_runs_and_updates_only_their_end(pg_templates, 
         # bot_runs is LAST_REVERSIBLE_REVISION itself; its downgrade below starts there. The
         # drift check runs at head, after the round trip.
         alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)
-        with engine.connect() as conn:
-            def table(privilege: str) -> bool:
-                return bool(conn.scalar(text(
-                    "SELECT has_table_privilege('bfx_bot', 'bot_runs', :p)"), {"p": privilege}))
 
-            def column(name: str) -> bool:
-                return bool(conn.scalar(text(
-                    "SELECT has_column_privilege('bfx_bot', 'bot_runs', :c, 'UPDATE')"),
-                    {"c": name}))
+        def assert_the_bot_inserts_and_updates_only_the_end() -> None:
+            with engine.connect() as conn:
+                def table(privilege: str) -> bool:
+                    return bool(conn.scalar(text(
+                        "SELECT has_table_privilege('bfx_bot', 'bot_runs', :p)"), {"p": privilege}))
 
-            assert table("SELECT") and table("INSERT")
-            assert not table("UPDATE") and not table("DELETE") and not table("TRUNCATE")
-            assert column("end_reason") and column("end_recorded_at_ms")
-            assert not column("started_at_ms") and not column("run_id")
+                def column(name: str) -> bool:
+                    return bool(conn.scalar(text(
+                        "SELECT has_column_privilege('bfx_bot', 'bot_runs', :c, 'UPDATE')"),
+                        {"c": name}))
+
+                assert table("SELECT") and table("INSERT")
+                assert not table("UPDATE") and not table("DELETE") and not table("TRUNCATE")
+                assert column("end_reason") and column("end_recorded_at_ms")
+                assert not column("started_at_ms") and not column("run_id")
+
+        assert_the_bot_inserts_and_updates_only_the_end()
         alembic(url, "downgrade", "a6c7e8f9b0d1")
         with engine.connect() as conn:
             assert conn.scalar(text("SELECT to_regclass('public.bot_runs')")) is None
         alembic(url, "upgrade", "head")
         alembic(url, "check")
+        assert_the_bot_inserts_and_updates_only_the_end()
     finally:
         with engine.begin() as conn:
             conn.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM bfx_bot")
