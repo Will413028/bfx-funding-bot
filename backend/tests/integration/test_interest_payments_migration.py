@@ -6,8 +6,8 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, text
 
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, stamp_realm, template_at
 from tests.pg_templates import alembic as _alembic
-from tests.pg_templates import stamp_realm
 
 from .test_ledger_schema_roles import pre_switch_url
 
@@ -21,7 +21,7 @@ INSERT = ("INSERT INTO funding_interest_payments (exchange_account_id, ledger_id
           "'Margin Funding Payment on wallet funding') ON CONFLICT DO NOTHING")
 
 
-def _build_migrated(url: str) -> None:
+def _prepare(url: str) -> None:
     engine = create_engine(url)
     with engine.begin() as conn:
         conn.exec_driver_sql("DROP SCHEMA public CASCADE")
@@ -33,6 +33,10 @@ def _build_migrated(url: str) -> None:
             conn.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {role}")
             conn.exec_driver_sql(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {role}")
     engine.dispose()
+
+
+def _build_migrated(url: str) -> None:
+    _prepare(url)
     _alembic(url, "upgrade", "head")
     stamp_realm(url, "ci")
 
@@ -40,7 +44,18 @@ def _build_migrated(url: str) -> None:
 @pytest.fixture
 def migrated(pg_templates: Any, pg_clone: Any) -> Any:
     """A fresh copy of the upgraded database; the upgrade runs once per session."""
-    url = pg_clone(pg_templates.template("interest_payments_migrated", _build_migrated))
+    yield from _migrated(pg_clone(pg_templates.template("interest_payments_migrated",
+                                                        _build_migrated)))
+
+
+@pytest.fixture
+def migrated_reversible(pg_templates: Any, pg_clone: Any) -> Any:
+    """``migrated`` at LAST_REVERSIBLE_REVISION, for the test that downgrades from it."""
+    yield from _migrated(pg_clone(pg_templates.template(
+        "interest_payments_reversible", template_at(LAST_REVERSIBLE_REVISION, _prepare))))
+
+
+def _migrated(url: str) -> Any:
     engine = create_engine(url)
     try:
         yield url, engine
@@ -72,11 +87,11 @@ def test_bot_appends_idempotently_and_web_api_only_reads(migrated: Any) -> None:
         conn.exec_driver_sql(INSERT)
 
 
-def test_migration_is_reversible_and_leaves_no_drift(migrated: Any) -> None:
-    url, engine = migrated
-    _alembic(url, "check")
+def test_migration_is_reversible_and_leaves_no_drift(migrated_reversible: Any) -> None:
+    url, engine = migrated_reversible
     pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     _alembic(url, "downgrade", "5b9e3d7a2f41")
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT to_regclass('public.funding_interest_payments')")) is None
     _alembic(url, "upgrade", "head")
+    _alembic(url, "check")  # no drift at head, after the round trip

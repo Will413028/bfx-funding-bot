@@ -43,6 +43,8 @@ from .test_ledger_schema_roles import (
     _query_sql,
     _seed,
     pre_switch_url,
+    reversible_ledger_db,  # noqa: F401 - fixture re-export
+    reversible_seeded,  # noqa: F401 - fixture re-export
 )
 
 pytestmark = pytest.mark.integration
@@ -441,9 +443,9 @@ def test_orm_matches_the_new_shape() -> None:
     assert policy.nullable is True
 
 
-def test_migration_round_trip_and_populated_downgrade(seeded) -> None:
-    url = seeded.url.render_as_string(hide_password=False)
-    seeded.dispose()
+def test_migration_round_trip_and_populated_downgrade(reversible_seeded) -> None:  # noqa: F811
+    url = reversible_seeded.url.render_as_string(hide_password=False)
+    reversible_seeded.dispose()
     pre_switch_url(url)  # the downgrade below the genesis starts pre-switch
     alembic(url, "downgrade", _PREVIOUS)
     engine = create_engine(url)
@@ -479,21 +481,21 @@ def test_migration_round_trip_and_populated_downgrade(seeded) -> None:
         engine.dispose()
 
 
-def test_downgrade_refuses_seed_rows(seeded) -> None:
-    with seeded.begin() as conn:
+def test_downgrade_refuses_seed_rows(reversible_seeded) -> None:  # noqa: F811
+    with reversible_seeded.begin() as conn:
         _owner_seed_observation(conn)
-    url = seeded.url.render_as_string(hide_password=False)
-    seeded.dispose()
+    url = reversible_seeded.url.render_as_string(hide_password=False)
+    reversible_seeded.dispose()
     pre_switch_url(url)  # the downgrade below the genesis starts pre-switch
     with pytest.raises(Exception, match="refuse downgrade with seed observations"):
         alembic(url, "downgrade", _PREVIOUS)
 
 
-def test_downgrade_refuses_policyless_attempts(seeded) -> None:
-    with seeded.begin() as conn:
+def test_downgrade_refuses_policyless_attempts(reversible_seeded) -> None:  # noqa: F811
+    with reversible_seeded.begin() as conn:
         _insert_attempt(conn, 6, policy=None, provenance="{}")
-    url = seeded.url.render_as_string(hide_password=False)
-    seeded.dispose()
+    url = reversible_seeded.url.render_as_string(hide_password=False)
+    reversible_seeded.dispose()
     pre_switch_url(url)  # the downgrade below the genesis starts pre-switch
     with pytest.raises(Exception, match="refuse downgrade with seeded attempts"):
         alembic(url, "downgrade", _PREVIOUS)

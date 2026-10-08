@@ -26,7 +26,13 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 
 from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES
-from tests.pg_templates import alembic, disable_realm_triggers, stamp_realm
+from tests.pg_templates import (
+    LAST_REVERSIBLE_REVISION,
+    alembic,
+    disable_realm_triggers,
+    stamp_realm,
+    template_at,
+)
 
 from .test_trading_state_migration import _reset
 
@@ -83,7 +89,8 @@ def pre_switch_url(url: str) -> None:
         engine.dispose()
 
 
-def _build(url: str) -> None:
+def _prepare(url: str) -> None:
+    """Production-like default grants on the empty database, before any migration."""
     engine = create_engine(url)
     _reset(engine)
     with engine.begin() as conn:
@@ -97,9 +104,17 @@ def _build(url: str) -> None:
             "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO bfx_webauth"
         )
     engine.dispose()
+
+
+def _build(url: str) -> None:
+    _prepare(url)
     alembic(url, "upgrade", "head")
     alembic(url, "check")
     stamp_realm(url, "ci")
+
+
+# The tests that downgrade start from the last reversible revision, not head.
+_build_reversible = template_at(LAST_REVERSIBLE_REVISION, _prepare)
 
 
 def _observation_sql(
@@ -188,6 +203,17 @@ def _member_sql(kind: str, venue_id: str, observation_id: str = _O) -> str:
 @pytest.fixture
 def ledger_db(pg_templates, pg_clone):
     url = pg_clone(pg_templates.template("ledger_s1_roles", _build))
+    engine = create_engine(url)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def reversible_ledger_db(pg_templates, pg_clone):
+    """``ledger_db`` at LAST_REVERSIBLE_REVISION, for the tests that downgrade from it."""
+    url = pg_clone(pg_templates.template("ledger_s1_roles_reversible", _build_reversible))
     engine = create_engine(url)
     try:
         yield engine
@@ -571,6 +597,13 @@ def seeded(ledger_db):
     return ledger_db
 
 
+@pytest.fixture
+def reversible_seeded(reversible_ledger_db):
+    with reversible_ledger_db.begin() as conn:
+        _seed(conn)
+    return reversible_ledger_db
+
+
 def test_r6_source_attempt_unique_fk_and_nulls(seeded) -> None:
     statement = (
         "INSERT INTO quarantine_opening(quarantine_id, exchange_account_id, "
@@ -634,10 +667,10 @@ def test_r6_source_opening_cannot_cross_scope_or_symbol(seeded, field: str) -> N
         )
 
 
-def test_r6_migration_round_trip(ledger_db) -> None:
-    url = ledger_db.url.render_as_string(hide_password=False)
+def test_r6_migration_round_trip(reversible_ledger_db) -> None:
+    url = reversible_ledger_db.url.render_as_string(hide_password=False)
     alembic(url, "downgrade", "f6a7b8c9d0e1")
-    with ledger_db.connect() as conn:
+    with reversible_ledger_db.connect() as conn:
         assert "source_attempt_id" not in {
             column["name"] for column in inspect(conn).get_columns("quarantine_opening")
         }
@@ -649,7 +682,7 @@ def test_r6_migration_round_trip(ledger_db) -> None:
         assert "quarantined" not in constraint["sqltext"]
     alembic(url, "upgrade", "head")
     alembic(url, "check")
-    with ledger_db.connect() as conn:
+    with reversible_ledger_db.connect() as conn:
         assert "source_attempt_id" in {
             column["name"] for column in inspect(conn).get_columns("quarantine_opening")
         }
@@ -662,8 +695,8 @@ def test_r6_migration_round_trip(ledger_db) -> None:
         assert "IS NOT NULL" in str(index["dialect_options"]["postgresql_where"])
 
 
-def test_r6_populated_downgrade_preserves_facts(seeded) -> None:
-    with seeded.begin() as conn:
+def test_r6_populated_downgrade_preserves_facts(reversible_seeded) -> None:
+    with reversible_seeded.begin() as conn:
         conn.execute(
             text(
                 "INSERT INTO quarantine_opening(quarantine_id, exchange_account_id, "
@@ -673,7 +706,7 @@ def test_r6_populated_downgrade_preserves_facts(seeded) -> None:
             ),
             {"id": uuid4(), "a": _A, "source": _T},
         )
-    url = seeded.url.render_as_string(hide_password=False)
+    url = reversible_seeded.url.render_as_string(hide_password=False)
     pre_switch_url(url)  # the downgrade below the genesis starts pre-switch
     with pytest.raises(Exception, match="refuse downgrade with R6 quarantine facts"):
         alembic(url, "downgrade", "f6a7b8c9d0e1")
@@ -1173,15 +1206,15 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
         conn.exec_driver_sql("SELECT id FROM ledger_observation")
 
 
-def test_downgrade_removes_only_its_objects(ledger_db) -> None:
-    url = ledger_db.url.render_as_string(hide_password=False)
-    with ledger_db.connect() as conn:
+def test_downgrade_removes_only_its_objects(reversible_ledger_db) -> None:
+    url = reversible_ledger_db.url.render_as_string(hide_password=False)
+    with reversible_ledger_db.connect() as conn:
         # d3e4f5a6b7c8 dropped the group at head unless another database still granted it
         # something (roles are cluster-wide); its downgrade recreates a missing group as this
         # database's own.
         survives = conn.scalar(
             text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='bfx_cutover_reader')"))
-    ledger_db.dispose()
+    reversible_ledger_db.dispose()
     pre_switch_url(url)
     alembic(url, "downgrade", "9a4d6e2c7b18")
     with create_engine(url).connect() as conn:
@@ -1201,17 +1234,17 @@ def test_downgrade_removes_only_its_objects(ledger_db) -> None:
         ) is survives
 
 
-def test_populated_ledger_refuses_downgrade(seeded) -> None:
-    url = seeded.url.render_as_string(hide_password=False)
-    seeded.dispose()
+def test_populated_ledger_refuses_downgrade(reversible_seeded) -> None:
+    url = reversible_seeded.url.render_as_string(hide_password=False)
+    reversible_seeded.dispose()
     pre_switch_url(url)
     with pytest.raises(Exception, match="refuse downgrade of populated ledger"):
         alembic(url, "downgrade", "9a4d6e2c7b18")
 
 
-def test_corrective_downgrade_restores_offer_member_guard(ledger_db) -> None:
-    url = ledger_db.url.render_as_string(hide_password=False)
-    ledger_db.dispose()
+def test_corrective_downgrade_restores_offer_member_guard(reversible_ledger_db) -> None:
+    url = reversible_ledger_db.url.render_as_string(hide_password=False)
+    reversible_ledger_db.dispose()
     pre_switch_url(url)
     alembic(url, "downgrade", "b1e2d3a4c5f6")
     engine = create_engine(url)

@@ -67,7 +67,13 @@ from tests.modules.simulated_venue.helpers import (
     make_world,
     trade,
 )
-from tests.pg_templates import alembic, disable_realm_triggers, stamp_realm
+from tests.pg_templates import (
+    LAST_REVERSIBLE_REVISION,
+    alembic,
+    disable_realm_triggers,
+    stamp_realm,
+    template_at,
+)
 
 from .test_ledger_schema_roles import pre_switch
 from .test_trading_state_migration import _reset
@@ -79,10 +85,14 @@ OTHER = SimAccount("aaaaaaaa-bbbb-4ccc-8ddd-000000000002", "ci")
 SHADOW = SimAccount(ACCOUNT.exchange_account_id, "shadow")
 
 
-def _build_unstamped(url: str) -> None:
+def _prepare(url: str) -> None:
     engine = create_engine(url)
     _reset(engine)
     engine.dispose()
+
+
+def _build_unstamped(url: str) -> None:
+    _prepare(url)
     alembic(url, "upgrade", "head")
 
 
@@ -111,7 +121,10 @@ def _engine(url: str, *, role: str | None = "bfx_bot") -> AsyncEngine:
 @pytest.fixture
 def legacy_url(pg_templates: Any, pg_clone: Any) -> str:
     """A head database before the switch (the genesis epoch taken back)."""
-    url = pg_clone(pg_templates.template("sim_store_migrated", _build_migrated))
+    return _pre_switch(pg_clone(pg_templates.template("sim_store_migrated", _build_migrated)))
+
+
+def _pre_switch(url: str) -> str:
     engine = create_engine(url)
     try:
         with engine.begin() as conn:
@@ -125,6 +138,15 @@ def legacy_url(pg_templates: Any, pg_clone: Any) -> str:
 def ledger_url(legacy_url: str) -> str:
     _set_epoch(legacy_url, "ledger")
     return legacy_url
+
+
+@pytest.fixture
+def reversible_ledger_url(pg_templates: Any, pg_clone: Any) -> str:
+    """``ledger_url`` at LAST_REVERSIBLE_REVISION, for the tests that downgrade from it."""
+    url = _pre_switch(pg_clone(pg_templates.template(
+        "sim_store_migrated_reversible", template_at(LAST_REVERSIBLE_REVISION, _prepare))))
+    _set_epoch(url, "ledger")
+    return url
 
 
 @pytest_asyncio.fixture
@@ -189,9 +211,9 @@ async def test_open_accepts_a_simulation_realm_and_the_trigger_binds_the_account
         await engine.dispose()
 
 
-async def test_open_refuses_a_database_without_the_realm_table(ledger_url: str) -> None:
-    alembic(ledger_url, "downgrade", "e6b1d4a7c9f3")
-    engine = _engine(ledger_url)
+async def test_open_refuses_a_database_without_the_realm_table(reversible_ledger_url: str) -> None:
+    alembic(reversible_ledger_url, "downgrade", "e6b1d4a7c9f3")
+    engine = _engine(reversible_ledger_url)
     try:
         with pytest.raises(RealmRefusedError, match="database_realm"):
             await SqlVenueEventStore.open(engine)
@@ -227,9 +249,9 @@ async def test_open_refuses_a_database_without_an_epoch_table(pg_templates: Any,
         await engine.dispose()
 
 
-async def test_open_refuses_a_database_without_the_event_table(ledger_url: str) -> None:
-    alembic(ledger_url, "downgrade", "a3b4c5d6e7f8")
-    engine = _engine(ledger_url)
+async def test_open_refuses_a_database_without_the_event_table(reversible_ledger_url: str) -> None:
+    alembic(reversible_ledger_url, "downgrade", "a3b4c5d6e7f8")
+    engine = _engine(reversible_ledger_url)
     try:
         with pytest.raises(RealmRefusedError, match="sim_venue_event"):
             await SqlVenueEventStore.open(engine)

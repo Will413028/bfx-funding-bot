@@ -2,9 +2,16 @@
 import pytest
 from sqlalchemy import create_engine, inspect, text
 
-from tests.pg_templates import alembic, stamp_realm
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, stamp_realm
 
 pytestmark = pytest.mark.integration
+
+
+def _assert_the_bot_holds_no_capital_write(connection) -> None:
+    for privilege in ("SELECT", "INSERT", "UPDATE"):
+        assert not connection.scalar(text(
+            f"SELECT has_table_privilege('bfx_bot','legacy_archive.capital_snapshots','{privilege}')"))
+    assert not connection.scalar(text("SELECT has_table_privilege('bfx_bot','capital_policy_heads','UPDATE')"))
 
 
 def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_templates, pg_clone):
@@ -22,17 +29,15 @@ def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_templates, pg_c
         connection.exec_driver_sql("GRANT USAGE ON SCHEMA public TO bfx_bot")
         connection.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO bfx_bot")
         connection.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO bfx_bot")
-    alembic(url, "upgrade", "head")
-    alembic(url, "check")
+    # The downgrade below starts at the last reversible revision; the drift check runs at head
+    # at the end.
+    alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)
     stamp_realm(url, "ci")
     with engine.begin() as connection:
         # The legacy capital tables live in the archive since c2d3e4f5a6b7; the bot holds nothing there.
         assert "capital_snapshots" in inspect(connection).get_table_names(schema="legacy_archive")
         assert connection.scalar(text("SELECT count(*) FROM capital_policy_revisions")) == 0
-        for privilege in ("SELECT", "INSERT", "UPDATE"):
-            assert not connection.scalar(text(
-                f"SELECT has_table_privilege('bfx_bot','legacy_archive.capital_snapshots','{privilege}')"))
-        assert not connection.scalar(text("SELECT has_table_privilege('bfx_bot','capital_policy_heads','UPDATE')"))
+        _assert_the_bot_holds_no_capital_write(connection)
         connection.exec_driver_sql("INSERT INTO exchange_accounts (id,venue,label) VALUES ('00000000-0000-0000-0000-00000000ca01','bitfinex','migration')")
     # The archive refuses every write, the owner's included (c2d3e4f5a6b7).
     for sql in ("INSERT INTO legacy_archive.capital_snapshot_queries SELECT * FROM "
@@ -55,4 +60,8 @@ def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_templates, pg_c
                 "DELETE FROM capital_snapshot_queries", "TRUNCATE capital_snapshot_queries CASCADE"):
         with engine.begin() as connection, pytest.raises(Exception, match="immutable capital"):
             connection.exec_driver_sql(sql)
+    alembic(url, "upgrade", "head")
+    alembic(url, "check")
+    with engine.begin() as connection:
+        _assert_the_bot_holds_no_capital_write(connection)
     engine.dispose()

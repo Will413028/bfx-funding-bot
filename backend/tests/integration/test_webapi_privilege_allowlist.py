@@ -1,12 +1,14 @@
 """``bfx_webapi``'s privileges in ``public`` and ``legacy_archive`` are an exact allowlist.
 
-``EXPECTED_*`` below is that allowlist at head, written out here and checked against the
-EFFECTIVE privileges of three builds (worst-case default privileges, production's host setup,
-stray grants at an earlier revision): a migration that grants or revokes anything for the web
-API must update it in the same change, or ``test_effective_privileges_equal_the_allowlist``
-fails. Each downgrade step must restore the previous revision's allowlist exactly
+``REVERSIBLE_*`` below is that allowlist at ``LAST_REVERSIBLE_REVISION``, written out here;
+``EXPECTED_*`` is head's: ``REVERSIBLE_*`` plus what later, forward-only migrations change. Head's
+is checked against the EFFECTIVE privileges of three builds (worst-case default privileges,
+production's host setup, stray grants at an earlier revision): a migration that grants or revokes
+anything for the web API must update ``EXPECTED_*`` in the same change, or
+``test_effective_privileges_equal_the_allowlist`` fails. Each downgrade step from
+``LAST_REVERSIBLE_REVISION`` must restore the previous revision's allowlist exactly
 (``test_round_trip_keeps_the_allowlist``): ``PRE_CONTRACT_COLUMNS`` is the one d3e4f5a6b7c8
-left (the head's plus the pre-switch evidence INSERT e4f5a6b7c8d9 revoked, kept by every
+left (``REVERSIBLE_COLUMNS`` plus the pre-switch evidence INSERT e4f5a6b7c8d9 revoked, kept by every
 earlier revision below); ``PRE_ARCHIVE_TABLES`` is the table list before
 c2d3e4f5a6b7 archived five of them (``ARCHIVED_READS``; at head the web API reads only
 ``ARCHIVE_COLUMNS`` of ``legacy_archive.event_log`` there); ``MATCH_COLUMNS`` the one
@@ -34,11 +36,13 @@ Mutation checks (one at a time; revert after each):
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import ProgrammingError
 
-from tests.pg_templates import alembic
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic
 
 from .test_trading_state_migration import _reset
 
@@ -54,7 +58,12 @@ _CREDIT_ENDS = ("ledger_observation_credit_history", "SELECT")
 _RW = {"DELETE", "INSERT", "SELECT", "UPDATE"}
 _R = {"SELECT"}
 
-EXPECTED_TABLES: dict[str, set[str]] = {
+# The public allowlist at LAST_REVERSIBLE_REVISION, written out once: the older allowlists below
+# take their table grants from it (PREVIOUS_COLUMNS is written out on its own), and head's
+# (EXPECTED_*) is it plus what later, forward-only migrations change in public. A later migration
+# that changes a legacy_archive or schema grant first splits ARCHIVE_COLUMNS and _held's schema
+# rows into a reversible and a head copy the same way.
+REVERSIBLE_TABLES: dict[str, set[str]] = {
     "account_config_drafts": _RW,
     "api_keys": _RW,
     "attribution_weekly": _R,
@@ -82,7 +91,7 @@ ARCHIVED_READS: dict[str, set[str]] = {
     "event_log": _R, "execution_uncertainties": _R, "offer_claims": _R, "position_state": _R,
     "submission_attempts": _R,
 }
-PRE_ARCHIVE_TABLES = EXPECTED_TABLES | ARCHIVED_READS
+PRE_ARCHIVE_TABLES = REVERSIBLE_TABLES | ARCHIVED_READS
 # The archived execution history's read (modules.execution.archived_execution_history).
 ARCHIVE_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("event_log", "SELECT"): {
@@ -94,7 +103,7 @@ _OBSERVED_OFFER = {
     "observation_id", "venue_offer_id", "symbol", "amount_original", "amount_remaining", "rate",
     "rate_observed", "period_days", "offer_type", "flags", "status", "mts_created", "mts_updated",
 }
-EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
+REVERSIBLE_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("accepted_capital_basis", "SELECT"): {
         "id", "exchange_account_id", "deployment_environment", "observation_id",
         "accept_revision", "attempt_seq_high_water", "accepted_at_ms",
@@ -166,11 +175,15 @@ EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
         "present_in_latest_accepted_snapshot",
     },
 }
+# Head's allowlist: a migration after LAST_REVERSIBLE_REVISION that changes a web API privilege
+# adds or removes it here, never in REVERSIBLE_*.
+EXPECTED_TABLES: dict[str, set[str]] = {**REVERSIBLE_TABLES}
+EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {**REVERSIBLE_COLUMNS}
 # Before e4f5a6b7c8d9 revoked it, the web API could still insert the pre-switch evidence column.
 _REQUEST_INSERT = ("uncertainty_resolution_requests", "INSERT")
 PRE_CONTRACT_COLUMNS = {
-    **EXPECTED_COLUMNS,
-    _REQUEST_INSERT: EXPECTED_COLUMNS[_REQUEST_INSERT] | {"reconcile_event_seq"},
+    **REVERSIBLE_COLUMNS,
+    _REQUEST_INSERT: REVERSIBLE_COLUMNS[_REQUEST_INSERT] | {"reconcile_event_seq"},
 }
 PREVIOUS_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("accepted_capital_basis", "SELECT"): {
@@ -233,8 +246,12 @@ PREVIOUS_COLUMNS: dict[tuple[str, str], set[str]] = {
 }
 # What the web API holds in schemas public and legacy_archive: tables, columns, sequences,
 # functions, schemas. An archived relation is named ``legacy_archive.<name>``.
-def _held(columns: dict[tuple[str, str], set[str]], *, archived: bool = False) -> set[tuple[str, ...]]:
-    tables = EXPECTED_TABLES if archived else PRE_ARCHIVE_TABLES
+def _held(
+    columns: dict[tuple[str, str], set[str]], *, archived: bool = False,
+    tables: dict[str, set[str]] | None = None,
+) -> set[tuple[str, ...]]:
+    if tables is None:
+        tables = REVERSIBLE_TABLES if archived else PRE_ARCHIVE_TABLES
     return (
         {("table", t, p) for t, ps in tables.items() for p in ps}
         | {("column", t, c, p) for (t, p), cs in columns.items() for c in cs}
@@ -246,11 +263,13 @@ def _held(columns: dict[tuple[str, str], set[str]], *, archived: bool = False) -
 
 # e1f2a3b4c5d7's allowlist: d3e4f5a6b7c8's without f9a0b1c2d3e4's credit-history grant.
 MATCH_COLUMNS = {key: cols for key, cols in PRE_CONTRACT_COLUMNS.items() if key != _CREDIT_ENDS}
-EXPECTED = _held(EXPECTED_COLUMNS, archived=True)
+EXPECTED = _held(EXPECTED_COLUMNS, archived=True, tables=EXPECTED_TABLES)
 PRE_CONTRACT = _held(PRE_CONTRACT_COLUMNS, archived=True)
 PRE_ARCHIVE = _held(PRE_CONTRACT_COLUMNS)
 MATCH = _held(MATCH_COLUMNS)
 PREVIOUS = _held(PREVIOUS_COLUMNS)
+# Where the round trip starts (its downgrades cannot start from head once head is forward-only).
+AT_LAST_REVERSIBLE = _held(REVERSIBLE_COLUMNS, archived=True)
 
 _TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 _COLUMN_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "REFERENCES")
@@ -308,15 +327,15 @@ def _effective(conn) -> set[tuple[str, ...]]:
     return found
 
 
-def _build_worst_case(url: str) -> None:
+def _build_worst_case(url: str, target: str = "head") -> None:
     """``_reset``'s worst case: default privileges hand every new table and sequence to the role."""
     engine = create_engine(url)
     _reset(engine)
     engine.dispose()
-    alembic(url, "upgrade", "head")
+    alembic(url, "upgrade", target)
 
 
-def _build_prod_faithful(url: str) -> None:
+def _build_prod_faithful(url: str, target: str = "head") -> None:
     """Production's host setup: no default privileges and no schema grant for the web API."""
     engine = create_engine(url)
     _reset(engine)
@@ -325,10 +344,10 @@ def _build_prod_faithful(url: str) -> None:
         conn.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM bfx_webapi")
         conn.exec_driver_sql("REVOKE ALL ON SCHEMA public FROM bfx_webapi")
     engine.dispose()
-    alembic(url, "upgrade", "head")
+    alembic(url, "upgrade", target)
 
 
-def _build_stray(url: str) -> None:
+def _build_stray(url: str, target: str = "head") -> None:
     """Grants outside the allowlist that exist at the previous revision (column, sequence,
     function, table), as a host's hand-run GRANT could leave them."""
     engine = create_engine(url)
@@ -349,7 +368,7 @@ def _build_stray(url: str) -> None:
             "ORDER BY 1 LIMIT 1"))
         conn.exec_driver_sql(f"GRANT EXECUTE ON FUNCTION {signature} TO bfx_webapi")
     engine.dispose()
-    alembic(url, "upgrade", "head")
+    alembic(url, "upgrade", target)
 
 
 _BUILDS = {
@@ -357,11 +376,27 @@ _BUILDS = {
     "webapi_allowlist_prod_faithful": _build_prod_faithful,
     "webapi_allowlist_stray": _build_stray,
 }
+# The round trip downgrades, so it starts from the last reversible revision, not head.
+_REVERSIBLE_BUILDS = {
+    f"{name}_reversible": partial(build, target=LAST_REVERSIBLE_REVISION)
+    for name, build in _BUILDS.items()
+}
 
 
 @pytest.fixture(params=sorted(_BUILDS))
 def head_db(request, pg_templates, pg_clone):
-    url = pg_clone(pg_templates.template(request.param, _BUILDS[request.param]))
+    yield from _db(request, pg_templates.template(request.param, _BUILDS[request.param]), pg_clone)
+
+
+@pytest.fixture(params=sorted(_REVERSIBLE_BUILDS))
+def reversible_db(request, pg_templates, pg_clone):
+    yield from _db(request,
+                   pg_templates.template(request.param, _REVERSIBLE_BUILDS[request.param]),
+                   pg_clone)
+
+
+def _db(request, template: str, pg_clone):
+    url = pg_clone(template)
     engine = create_engine(url)
     try:
         yield url, engine, request.param
@@ -391,12 +426,14 @@ def test_execution_decisions_are_unreadable(head_db) -> None:
         conn.exec_driver_sql("SELECT count(*) FROM public.execution_decisions")
 
 
-def test_round_trip_keeps_the_allowlist(head_db) -> None:
-    url, engine, _ = head_db
+def test_round_trip_keeps_the_allowlist(reversible_db) -> None:
+    url, engine, _ = reversible_db
+    with engine.connect() as conn:
+        assert _diff(_effective(conn), AT_LAST_REVERSIBLE) == {"unexpected": [], "missing": []}
     # f5a6b7c8d9e0 (dropping the closed columns) changes no web API privilege...
     alembic(url, "downgrade", "e4f5a6b7c8d9")
     with engine.connect() as conn:
-        assert _diff(_effective(conn)) == {"unexpected": [], "missing": []}
+        assert _diff(_effective(conn), AT_LAST_REVERSIBLE) == {"unexpected": [], "missing": []}
     # ...e4f5a6b7c8d9's downgrade gives back the pre-switch evidence INSERT...
     alembic(url, "downgrade", _PRE_CONTRACT)
     with engine.connect() as conn:

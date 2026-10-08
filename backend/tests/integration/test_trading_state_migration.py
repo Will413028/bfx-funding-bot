@@ -14,7 +14,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import create_engine, text
 
-from tests.pg_templates import alembic
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic
 
 pytestmark = pytest.mark.integration
 
@@ -81,8 +81,8 @@ def _insert(conn, account: str, state: str, cause: str, *, env: str = "prod",
                        {"a": account, "env": env, "state": state, "cause": cause, "id": explicit_id})
 
 
-def _build_migrated(url: str) -> dict[str, int]:
-    """Production's halt rows at _PREVIOUS, then the upgrade to head under test."""
+def _build_migrated(url: str, target: str = "head") -> dict[str, int]:
+    """Production's halt rows at _PREVIOUS, then the upgrade to ``target`` (head) under test."""
     engine = create_engine(url)
     _reset(engine)
     _alembic(url, "upgrade", _PREVIOUS)
@@ -100,15 +100,31 @@ def _build_migrated(url: str) -> dict[str, int]:
         ids["resumed"] = _halt(conn, _B, "prod", False, "safety", "release_promoted:x", "will", 600)
         ids["release"] = _halt(conn, _C, "prod", True, "release", "release_command_terminal", "worker", 700)
     engine.dispose()
-    _alembic(url, "upgrade", "head")
-    _alembic(url, "check")
+    _alembic(url, "upgrade", target)
+    if target == "head":
+        _alembic(url, "check")
     return ids
+
+
+def _build_migrated_reversible(url: str) -> dict[str, int]:
+    return _build_migrated(url, LAST_REVERSIBLE_REVISION)
 
 
 @pytest.fixture
 def migrated(pg_templates, pg_clone):
     """A fresh copy of the upgraded database; the upgrade itself runs once per session."""
-    template = pg_templates.template("trading_state_migrated", _build_migrated)
+    yield from _migrated(pg_templates, pg_clone, "trading_state_migrated", _build_migrated)
+
+
+@pytest.fixture
+def migrated_reversible(pg_templates, pg_clone):
+    """``migrated`` stopped at LAST_REVERSIBLE_REVISION, for the tests that downgrade from it."""
+    yield from _migrated(pg_templates, pg_clone, "trading_state_migrated_reversible",
+                         _build_migrated_reversible)
+
+
+def _migrated(pg_templates, pg_clone, name, build):
+    template = pg_templates.template(name, build)
     url = pg_clone(template)
     engine = create_engine(url)
     try:
@@ -270,8 +286,8 @@ def test_the_database_clock_decides_an_automatic_resume(migrated):
     asyncio.run(scenario())
 
 
-def test_downgrade_keeps_decisions_made_after_the_migration(migrated):
-    url, engine, _ = migrated
+def test_downgrade_keeps_decisions_made_after_the_migration(migrated_reversible):
+    url, engine, _ = migrated_reversible
     with engine.begin() as conn:
         _insert(conn, _B, "HALTED", "operator")
     from .test_ledger_schema_roles import pre_switch_url  # circular at module level
@@ -451,8 +467,8 @@ def test_the_release_ceremony_is_archived_whole_frozen_and_verifiable(migrated):
             conn.exec_driver_sql("SELECT count(*) FROM release_archive.trading_halt")
 
 
-def test_archiving_the_release_ceremony_is_lossless_both_ways(migrated):
-    url, engine, _ = migrated
+def test_archiving_the_release_ceremony_is_lossless_both_ways(migrated_reversible):
+    url, engine, _ = migrated_reversible
     with engine.begin() as conn:
         archived = {table: _content(conn, "release_archive", table, key) for table, key in _ARCHIVED}
     # Back to before the archive (5b1e7c9d2a40's own round trip has its own test).

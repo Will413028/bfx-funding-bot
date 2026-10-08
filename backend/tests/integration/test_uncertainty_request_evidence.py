@@ -38,15 +38,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.execution.uncertainty_tables import UncertaintyResolutionRequestRow
-from tests.pg_templates import alembic, stamp_realm
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, stamp_realm
 
 from .test_ledger_schema_roles import (
     _A,
     _O,
     _build,
+    _build_reversible,
     _seed,
-    ledger_db,  # noqa: F401 - fixture re-export
     pre_switch,
+    reversible_ledger_db,  # noqa: F401 - fixture re-export
 )
 from .test_trading_state_migration import _reset
 
@@ -60,7 +61,17 @@ _TABLE = "uncertainty_resolution_requests"
 
 @pytest.fixture
 def seeded(pg_templates, pg_clone):
-    url = pg_clone(pg_templates.template("ledger_s1_roles", _build))
+    yield from _seeded(pg_clone(pg_templates.template("ledger_s1_roles", _build)))
+
+
+@pytest.fixture
+def reversible_seeded(pg_templates, pg_clone):
+    """``seeded`` at LAST_REVERSIBLE_REVISION, for the test that downgrades from it."""
+    yield from _seeded(
+        pg_clone(pg_templates.template("ledger_s1_roles_reversible", _build_reversible)))
+
+
+def _seeded(url: str):
     engine = create_engine(url)
     with engine.begin() as conn:
         pre_switch(conn)  # the request evidence rule is tested across the switch
@@ -355,10 +366,10 @@ def test_contract_refuses_a_request_with_pre_switch_evidence(before_contract) ->
         engine.dispose()
 
 
-def test_drop_round_trip_restores_the_closed_catalog(closed, ledger_db) -> None:  # noqa: F811
+def test_drop_round_trip_restores_the_closed_catalog(closed, reversible_ledger_db) -> None:  # noqa: F811
     before = _catalog(closed)
-    head_url = ledger_db.url.render_as_string(hide_password=False)
-    ledger_db.dispose()
+    head_url = reversible_ledger_db.url.render_as_string(hide_password=False)
+    reversible_ledger_db.dispose()
     head = _catalog(head_url)
     dropped = {"reconcile_event_seq", "resolved_event_seq"}
     shape = "ck_uncertainty_resolution_requests_outcome_shape"
@@ -373,12 +384,14 @@ def test_drop_round_trip_restores_the_closed_catalog(closed, ledger_db) -> None:
     assert not any(column in row[1] for row in head["function"] for column in dropped)
     assert (head["table_acl"], head["index"], head["trigger"]) == (
         before["table_acl"], before["index"], before["trigger"])
-    # The downgrade restores the previous revision exactly; upgrading again restores head.
+    # The downgrade restores the previous revision exactly; upgrading again restores where it
+    # started (the last reversible revision; tests/pg_templates.py). The drift check runs at head.
     alembic(head_url, "downgrade", _CLOSED)
     assert _catalog(head_url) == before
+    alembic(head_url, "upgrade", LAST_REVERSIBLE_REVISION)
+    assert _catalog(head_url) == head
     alembic(head_url, "upgrade", "head")
     alembic(head_url, "check")
-    assert _catalog(head_url) == head
 
 
 def test_drop_refuses_a_request_with_pre_switch_evidence(closed) -> None:
@@ -399,20 +412,20 @@ def test_drop_refuses_a_request_with_pre_switch_evidence(closed) -> None:
         engine.dispose()
 
 
-def test_migration_round_trip_and_populated_downgrade(seeded) -> None:
-    url = seeded.url.render_as_string(hide_password=False)
-    with seeded.begin() as conn:
+def test_migration_round_trip_and_populated_downgrade(reversible_seeded) -> None:
+    url = reversible_seeded.url.render_as_string(hide_password=False)
+    with reversible_seeded.begin() as conn:
         _ledger_request(conn)
-    seeded.dispose()
+    reversible_seeded.dispose()
     with pytest.raises(Exception, match="refuse downgrade with ledger-evidence rows"):
         alembic(url, "downgrade", _PREVIOUS)
-    with seeded.begin() as conn:
+    with reversible_seeded.begin() as conn:
         conn.exec_driver_sql(f"ALTER TABLE {_TABLE} DISABLE TRIGGER uncertainty_resolution_request_no_delete")
         conn.exec_driver_sql(f"DELETE FROM {_TABLE}")
         conn.exec_driver_sql(f"ALTER TABLE {_TABLE} ENABLE TRIGGER uncertainty_resolution_request_no_delete")
-    seeded.dispose()
+    reversible_seeded.dispose()
     alembic(url, "downgrade", _PREVIOUS)
-    with seeded.connect() as conn:
+    with reversible_seeded.connect() as conn:
         columns = {c["name"]: c for c in inspect(conn).get_columns(_TABLE)}
         assert "observation_id" not in columns
         assert not columns["reconcile_event_seq"]["nullable"]
@@ -423,8 +436,8 @@ def test_migration_round_trip_and_populated_downgrade(seeded) -> None:
             i["name"] for i in inspect(conn).get_indexes("execution_resolution_journal")
         )
         conn.rollback()
-    seeded.dispose()
+    reversible_seeded.dispose()
     alembic(url, "upgrade", "head")
     alembic(url, "check")
-    with seeded.connect() as conn:
+    with reversible_seeded.connect() as conn:
         assert "observation_id" in {c["name"] for c in inspect(conn).get_columns(_TABLE)}

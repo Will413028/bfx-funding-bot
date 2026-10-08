@@ -29,7 +29,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError, InternalError, Programmin
 
 from bfx_funding_bot.core.database_realm import DATABASE_REALM_TABLE, KNOWN_REALMS
 from bfx_funding_bot.core.schema_head import migration_scripts
-from tests.pg_templates import alembic, stamp_realm
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, stamp_realm, template_at
 
 from .test_trading_state_migration import _reset
 
@@ -117,8 +117,19 @@ def unstamped(pg_templates: Any, pg_clone: Any) -> Iterator[Any]:
 @pytest.fixture
 def ci_db(pg_templates: Any, pg_clone: Any) -> Iterator[Any]:
     pg_templates.template("realm_unstamped", _build_unstamped)
-    name = pg_templates.template("realm_ci", _build_ci, base="realm_unstamped")
-    engine = create_engine(pg_clone(name))
+    yield from _with_account(pg_clone(pg_templates.template("realm_ci", _build_ci,
+                                                            base="realm_unstamped")))
+
+
+@pytest.fixture
+def reversible_ci_db(pg_templates: Any, pg_clone: Any) -> Iterator[Any]:
+    """``ci_db`` at LAST_REVERSIBLE_REVISION, for the test that downgrades from it."""
+    yield from _with_account(pg_clone(pg_templates.template(
+        "realm_ci_reversible", template_at(LAST_REVERSIBLE_REVISION, _reset_with_roles))))
+
+
+def _with_account(url: str) -> Iterator[Any]:
+    engine = create_engine(url)
     with engine.begin() as conn:
         conn.exec_driver_sql(f"INSERT INTO exchange_accounts(id, venue, label) VALUES ('{_ACCOUNT}', 'bitfinex', 'realm')")
     try:
@@ -413,12 +424,12 @@ def test_the_trigger_functions_are_hardened(ci_db: Any) -> None:
 
 # -- schema bookkeeping -----------------------------------------------------------------
 
-def test_alembic_check_is_clean_and_the_downgrade_round_trips(ci_db: Any) -> None:
-    url = ci_db.url.render_as_string(hide_password=False)
-    _run(ci_db, _nav_peak("ci"))
-    alembic(url, "check")
+def test_alembic_check_is_clean_and_the_downgrade_round_trips(reversible_ci_db: Any) -> None:
+    url = reversible_ci_db.url.render_as_string(hide_password=False)
+    _run(reversible_ci_db, _nav_peak("ci"))
+    # The downgrade starts at the last reversible revision; the check runs at head below.
     alembic(url, "downgrade", _PREVIOUS)
-    with ci_db.connect() as conn:
+    with reversible_ci_db.connect() as conn:
         assert conn.scalar(text("SELECT to_regclass('public.database_realm')")) is None
         assert conn.scalar(text("SELECT to_regproc('public.guard_database_realm()')")) is None
         assert conn.scalar(text("SELECT to_regproc('public.reject_database_realm_mutation()')")) is None
@@ -427,6 +438,6 @@ def test_alembic_check_is_clean_and_the_downgrade_round_trips(ci_db: Any) -> Non
     alembic(url, "upgrade", "head")
     alembic(url, "check")
     assert _stamp_of(url) == [("ci", f"migration {_REVISION}")]  # derived again from the data
-    with ci_db.connect() as conn:
+    with reversible_ci_db.connect() as conn:
         assert conn.scalar(text("SELECT count(*) FROM pg_trigger WHERE tgname = :n"), {"n": _TRIGGER}) == len(
             _realm_tables())

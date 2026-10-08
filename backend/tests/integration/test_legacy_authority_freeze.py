@@ -27,7 +27,7 @@ from sqlalchemy.engine import Connection, Engine
 
 from tests.pg_templates import alembic
 
-from .test_ledger_schema_roles import _build, append_epoch, pre_switch
+from .test_ledger_schema_roles import _build_reversible, append_epoch, pre_switch
 
 pytestmark = pytest.mark.integration
 
@@ -95,13 +95,14 @@ def _epoch(engine: Engine, authority: str) -> None:
 
 
 def _build_pre_archive(url: str) -> None:
-    _build(url)
+    _build_reversible(url)
     alembic(url, "downgrade", _PRE_ARCHIVE)
 
 
 @pytest.fixture
 def ledger_db(pg_templates, pg_clone):
-    """The prod-shaped head database (ledger_schema_roles) taken back below the archive."""
+    """The prod-shaped database (ledger_schema_roles, at LAST_REVERSIBLE_REVISION) taken back
+    below the archive."""
     url = pg_clone(pg_templates.template("ledger_s1_roles_pre_archive", _build_pre_archive))
     engine = create_engine(url)
     try:

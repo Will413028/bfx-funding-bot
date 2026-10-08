@@ -21,7 +21,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from tests.pg_templates import alembic
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic
 
 pytestmark = [pytest.mark.integration, pytest.mark.docker]
 
@@ -88,8 +88,9 @@ def _hostile_defaults(url: str) -> None:
 
 
 # Each test starts from the revision it exercises. The path empty -> a7f3c1d9e204
-# -> REVISION -> head is migrated once per session, one template per stop.
-_STOPS = ("a7f3c1d9e204", REVISION, "head")
+# -> REVISION -> LAST_REVERSIBLE_REVISION -> head is migrated once per session, one template per
+# stop. The test that downgrades starts from LAST_REVERSIBLE_REVISION, not head.
+_STOPS = ("a7f3c1d9e204", REVISION, LAST_REVERSIBLE_REVISION, "head")
 
 
 def _ledger_template(templates: Any, revision: str) -> str:
@@ -120,6 +121,11 @@ def _ledger_db(pg_container: Any, templates: Any, clone: Any, revision: str) -> 
 @pytest.fixture
 def ledger_db(pg_container: Any, pg_templates: Any, pg_clone: Any) -> Any:
     yield from _ledger_db(pg_container, pg_templates, pg_clone, "head")
+
+
+@pytest.fixture
+def ledger_db_reversible(pg_container: Any, pg_templates: Any, pg_clone: Any) -> Any:
+    yield from _ledger_db(pg_container, pg_templates, pg_clone, LAST_REVERSIBLE_REVISION)
 
 
 @pytest.fixture
@@ -281,16 +287,15 @@ def test_runtime_roles_can_only_read_the_ledger(ledger_db: Any) -> None:
             f"'{REV}', '{DIGEST_B}', '{DIGEST_F}', false, 'deployed', '')")
 
 
-def test_migration_is_reversible_and_leaves_no_drift(ledger_db: Any) -> None:
-    url, engine, ledger = ledger_db
-    _alembic(url, "upgrade", "head")
-    _alembic(url, "check")
+def test_migration_is_reversible_and_leaves_no_drift(ledger_db_reversible: Any) -> None:
+    url, engine, ledger = ledger_db_reversible
+    # The downgrades start at the last reversible revision; the drift check runs at head at the end.
     # Back across the retirement: the empty ledger downgrades, all the way.
     _alembic(url, "downgrade", "a7f3c1d9e204")
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT to_regclass('public.deployments')")) is None
         assert conn.scalar(text("SELECT count(*) FROM pg_proc WHERE proname = 'reject_deployment_mutation'")) == 0
-    _alembic(url, "upgrade", "head")
+    _alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)
     assert ledger.read().last_attempt is None
     # Classless rows: the downgrade refuses rather than invent a class that never
     # happened in an append-only ledger.
@@ -300,10 +305,10 @@ def test_migration_is_reversible_and_leaves_no_drift(ledger_db: Any) -> None:
                             env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
     assert result.returncode != 0
     assert "recorded without a change class" in result.stdout + result.stderr
-    # The refused run rolls back as a whole: still at head, both rows intact.
+    # The refused run rolls back as a whole: still where it started, both rows intact.
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT count(*) FROM deployments")) == 2
-    _alembic(url, "check")
+        assert conn.scalar(text("SELECT version_num FROM alembic_version")) == LAST_REVERSIBLE_REVISION
     # Back across the drop re-adds the column (NULL) and the pairing check still
     # accepts an attempt written the current way. Named, not "-1": later
     # migrations stack on top of the drop.
@@ -312,3 +317,5 @@ def test_migration_is_reversible_and_leaves_no_drift(ledger_db: Any) -> None:
     ledger.append(_entry(attempt_id=ATTEMPT.replace("0b8f", "2b8f")))
     with engine.connect() as conn:
         assert [row[0] for row in conn.execute(text("SELECT change_class FROM deployments"))] == [None] * 4
+    _alembic(url, "upgrade", "head")
+    _alembic(url, "check")

@@ -23,9 +23,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from bfx_funding_bot.core.authority import AuthorityMismatch, require_ledger_authority
 from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES
-from tests.pg_templates import alembic
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic
 
-from .test_ledger_schema_roles import _A, _B, _D2, _P, _build, _query_sql, _seed, pre_switch
+from .test_ledger_schema_roles import (
+    _A,
+    _B,
+    _D2,
+    _P,
+    _build,
+    _build_reversible,
+    _query_sql,
+    _seed,
+    pre_switch,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -42,7 +52,17 @@ _ATTEMPT = f"""INSERT INTO submission_attempt_journal(attempt_id, execution_deci
 @pytest.fixture
 def ledger_db(pg_templates, pg_clone):
     """A head database before the switch: this file tests the epoch the switch appended to."""
-    url = pg_clone(pg_templates.template("ledger_s1_roles", _build))
+    yield from _pre_switch_db(pg_clone(pg_templates.template("ledger_s1_roles", _build)))
+
+
+@pytest.fixture
+def reversible_ledger_db(pg_templates, pg_clone):
+    """``ledger_db`` at LAST_REVERSIBLE_REVISION, for the tests that downgrade from it."""
+    yield from _pre_switch_db(
+        pg_clone(pg_templates.template("ledger_s1_roles_reversible", _build_reversible)))
+
+
+def _pre_switch_db(url: str):
     engine = create_engine(url)
     with engine.begin() as conn:
         pre_switch(conn)
@@ -210,19 +230,19 @@ def test_require_ledger_authority_refuses_an_unknown_value(ledger_db) -> None:
         _read(ledger_db)
 
 
-def test_require_ledger_authority_refuses_a_missing_row_or_table(ledger_db) -> None:
-    with ledger_db.begin() as conn:
+def test_require_ledger_authority_refuses_a_missing_row_or_table(reversible_ledger_db) -> None:
+    with reversible_ledger_db.begin() as conn:
         conn.exec_driver_sql("ALTER TABLE capital_authority_epoch DISABLE TRIGGER USER")
         conn.exec_driver_sql("DELETE FROM capital_authority_epoch")
     with pytest.raises(AuthorityMismatch, match="authority_missing row"):
-        _read(ledger_db)
-    url = ledger_db.url.render_as_string(hide_password=False)
-    ledger_db.dispose()
-    with ledger_db.begin() as conn:
+        _read(reversible_ledger_db)
+    url = reversible_ledger_db.url.render_as_string(hide_password=False)
+    reversible_ledger_db.dispose()
+    with reversible_ledger_db.begin() as conn:
         _append(conn, 1, "legacy")
     alembic(url, "downgrade", _PREVIOUS)
     with pytest.raises(AuthorityMismatch, match="authority_missing table"):
-        _read(ledger_db)
+        _read(reversible_ledger_db)
 
 
 def _guard_state(conn) -> tuple[object, ...]:
@@ -252,40 +272,43 @@ def _guard_state(conn) -> tuple[object, ...]:
     )
 
 
-def test_downgrade_round_trip_restores_the_prior_state(ledger_db) -> None:
-    url = ledger_db.url.render_as_string(hide_password=False)
-    with ledger_db.connect() as conn:
-        at_head = _guard_state(conn)
-    ledger_db.dispose()
+def test_downgrade_round_trip_restores_the_prior_state(reversible_ledger_db) -> None:
+    url = reversible_ledger_db.url.render_as_string(hide_password=False)
+    with reversible_ledger_db.connect() as conn:
+        at_start = _guard_state(conn)
+    reversible_ledger_db.dispose()
     alembic(url, "downgrade", _PREVIOUS)
-    with ledger_db.connect() as conn:
+    with reversible_ledger_db.connect() as conn:
         before = _guard_state(conn)
         assert "capital_authority_epoch" not in inspect(conn).get_table_names()
         assert "guard_ledger_authority" not in before[1]
         assert "ledger_authority_write" not in before[0]
         conn.rollback()
-    ledger_db.dispose()
+    reversible_ledger_db.dispose()
     # Without the guard the prior build's bot writes as before.
-    with ledger_db.begin() as conn:
+    with reversible_ledger_db.begin() as conn:
         _seed(conn, pre_verdict=True)
-    with ledger_db.begin() as conn:
+    with reversible_ledger_db.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         conn.exec_driver_sql(_ATTEMPT.format(attempt=uuid4()))
-    ledger_db.dispose()
-    alembic(url, "upgrade", "head")
-    alembic(url, "check")
-    with ledger_db.connect() as conn:
-        assert _guard_state(conn) == at_head
+    reversible_ledger_db.dispose()
+    # Back to where the downgrade started, so the comparison sees only this round trip.
+    alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)
+    with reversible_ledger_db.connect() as conn:
+        assert _guard_state(conn) == at_start
         # Upgraded again without legacy history: the genesis (b1c2d3e4f5a6) appends ledger.
         assert conn.scalar(text(
             "SELECT authority FROM capital_authority_epoch ORDER BY epoch_seq DESC LIMIT 1"
         )) == "ledger"
+    reversible_ledger_db.dispose()
+    alembic(url, "upgrade", "head")
+    alembic(url, "check")
 
 
-def test_switched_authority_refuses_downgrade(ledger_db) -> None:
-    with ledger_db.begin() as conn:
+def test_switched_authority_refuses_downgrade(reversible_ledger_db) -> None:
+    with reversible_ledger_db.begin() as conn:
         _append(conn, 2, "ledger")
-    url = ledger_db.url.render_as_string(hide_password=False)
-    ledger_db.dispose()
+    url = reversible_ledger_db.url.render_as_string(hide_password=False)
+    reversible_ledger_db.dispose()
     with pytest.raises(Exception, match="refuse downgrade of switched authority"):
         alembic(url, "downgrade", _PREVIOUS)

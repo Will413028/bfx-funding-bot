@@ -158,3 +158,27 @@ def upgrade_head(url: str) -> None:
     """The plain build: an empty database migrated to head and stamped ``ci``."""
     alembic(url, "upgrade", "head")
     stamp_realm(url, "ci")
+
+
+# The last migration written before docs/adr/2026-10-08-forward-only-migrations.md: downgrades
+# from it down the chain still run, a downgrade from any later migration raises.
+LAST_REVERSIBLE_REVISION = "8ac3b44460fc"
+
+
+def template_at(
+    revision: str, prepare: Callable[[str], object] | None = None
+) -> Callable[[str], None]:
+    """The plain build stopped at ``revision``: ``prepare(url)`` on the empty database (roles,
+    default privileges), the upgrade to ``revision``, and the ``ci`` stamp.
+
+    A test that downgrades starts from :data:`LAST_REVERSIBLE_REVISION` this way, not from
+    head: ``pg_templates.template(name, template_at(LAST_REVERSIBLE_REVISION))``.
+    """
+
+    def build(url: str) -> None:
+        if prepare is not None:
+            prepare(url)
+        alembic(url, "upgrade", revision)
+        stamp_realm(url, "ci")
+
+    return build

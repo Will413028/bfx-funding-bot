@@ -13,6 +13,8 @@ from uuid import UUID
 import pytest
 from sqlalchemy import create_engine, text
 
+from tests.pg_templates import LAST_REVERSIBLE_REVISION
+
 from .test_ledger_schema_roles import pre_switch_url
 from .test_trading_state_migration import _alembic, _reset
 
@@ -132,7 +134,7 @@ def test_upgrade_archives_the_retired_rules_and_stops_the_current_pause(before):
 
 def test_downgrade_restores_every_recorded_row(before):
     url, engine, _ids, recorded = before
-    _alembic(url, "upgrade", "head")
+    _alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)  # the downgrade starts there, not at head
     with engine.begin() as conn:
         appended = conn.execute(text(
             "SELECT id, state, cause, reason FROM trading_state ORDER BY id DESC LIMIT 1")).one()
@@ -157,7 +159,7 @@ def test_downgrade_restores_every_recorded_row(before):
 
 def test_downgrade_refuses_while_new_requests_exist(before):
     url, engine, _ids, _recorded = before
-    _alembic(url, "upgrade", "head")
+    _alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)  # the downgrade starts there, not at head
     with engine.begin() as conn:
         conn.execute(text("""INSERT INTO trading_control_requests (request_id, exchange_account_id,
             deployment_environment, action, reason, requested_by, created_at_ms)

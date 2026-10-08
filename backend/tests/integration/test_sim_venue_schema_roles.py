@@ -15,14 +15,20 @@ Mutations (one at a time, revert after each, run this file):
 """
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError, InternalError, ProgrammingError
 
-from tests.pg_templates import alembic, disable_realm_triggers, stamp_realm
+from tests.pg_templates import (
+    LAST_REVERSIBLE_REVISION,
+    alembic,
+    disable_realm_triggers,
+    stamp_realm,
+    template_at,
+)
 
 from .test_ledger_schema_roles import pre_switch
 from .test_trading_state_migration import _reset
@@ -52,7 +58,7 @@ def _roles(conn: Any) -> None:
     conn.exec_driver_sql("GRANT USAGE ON SCHEMA public TO bfx_webauth")
 
 
-def _build_worst_case(url: str) -> None:
+def _prepare_worst_case(url: str) -> None:
     engine = create_engine(url)
     _reset(engine)
     with engine.begin() as conn:
@@ -60,12 +66,9 @@ def _build_worst_case(url: str) -> None:
         conn.exec_driver_sql(
             "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO bfx_webauth")
     engine.dispose()
-    alembic(url, "upgrade", "head")
-    alembic(url, "check")
-    stamp_realm(url, "ci")
 
 
-def _build_prod_faithful(url: str) -> None:
+def _prepare_prod_faithful(url: str) -> None:
     engine = create_engine(url)
     _reset(engine)
     with engine.begin() as conn:
@@ -78,17 +81,38 @@ def _build_prod_faithful(url: str) -> None:
         conn.exec_driver_sql(
             "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM bfx_webapi")
     engine.dispose()
-    alembic(url, "upgrade", "head")
-    alembic(url, "check")
-    stamp_realm(url, "ci")
 
 
-_BUILDS = {"sim_venue_worst_case": _build_worst_case, "sim_venue_prod_faithful": _build_prod_faithful}
+def _at_head(prepare: Callable[[str], None]) -> Callable[[str], None]:
+    def build(url: str) -> None:
+        prepare(url)
+        alembic(url, "upgrade", "head")
+        alembic(url, "check")
+        stamp_realm(url, "ci")
+
+    return build
+
+
+_PREPARES = {"sim_venue_worst_case": _prepare_worst_case,
+             "sim_venue_prod_faithful": _prepare_prod_faithful}
+_BUILDS = {name: _at_head(prepare) for name, prepare in _PREPARES.items()}
+# The test that downgrades starts from the last reversible revision, not head.
+_REVERSIBLE_BUILDS = {f"{name}_reversible": template_at(LAST_REVERSIBLE_REVISION, prepare)
+                      for name, prepare in _PREPARES.items()}
 
 
 @pytest.fixture(params=sorted(_BUILDS))
 def db(request: Any, pg_templates: Any, pg_clone: Any) -> Iterator[tuple[str, Any]]:
-    url = pg_clone(pg_templates.template(request.param, _BUILDS[request.param]))
+    yield from _db(pg_clone(pg_templates.template(request.param, _BUILDS[request.param])))
+
+
+@pytest.fixture(params=sorted(_REVERSIBLE_BUILDS))
+def reversible_db(request: Any, pg_templates: Any, pg_clone: Any) -> Iterator[tuple[str, Any]]:
+    yield from _db(pg_clone(pg_templates.template(request.param,
+                                                  _REVERSIBLE_BUILDS[request.param])))
+
+
+def _db(url: str) -> Iterator[tuple[str, Any]]:
     engine = create_engine(url)
     try:
         yield url, engine
@@ -250,14 +274,15 @@ def test_the_trigger_function_is_hardened(db: Any) -> None:
                                    {"r": role})
 
 
-def test_downgrade_round_trip_and_populated_refusal(db: Any) -> None:
-    url, engine = db
+def test_downgrade_round_trip_and_populated_refusal(reversible_db: Any) -> None:
+    url, engine = reversible_db
     alembic(url, "downgrade", _PREVIOUS)
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT to_regclass('public.sim_venue_event')")) is None
         assert conn.scalar(text(f"SELECT to_regproc('public.{_FUNCTION}')")) is None
-    alembic(url, "upgrade", "head")
-    alembic(url, "check")
+    # Back to where the downgrade started, so the second one starts there too; the drift check
+    # runs at head at the end.
+    alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)
     stamp_realm(url, "ci")
     with engine.begin() as conn:
         conn.exec_driver_sql(_row())
@@ -265,3 +290,5 @@ def test_downgrade_round_trip_and_populated_refusal(db: Any) -> None:
         alembic(url, "downgrade", _PREVIOUS)
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT count(*) FROM sim_venue_event")) == 1
+    alembic(url, "upgrade", "head")
+    alembic(url, "check")

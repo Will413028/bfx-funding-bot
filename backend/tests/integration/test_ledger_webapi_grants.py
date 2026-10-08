@@ -17,7 +17,12 @@ from sqlalchemy import create_engine, text
 
 from tests.pg_templates import alembic
 
-from .test_ledger_schema_roles import _D, _seed, ledger_db  # noqa: F401 - fixture
+from .test_ledger_schema_roles import (  # noqa: F401 - fixtures
+    _D,
+    _seed,
+    ledger_db,
+    reversible_ledger_db,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -294,9 +299,9 @@ def _rewrite_payload(conn, payload: str) -> None:
     ['{}', '{"amount": null}', '{"amount": "abc"}', '{"amount": "-1"}', '{"amount": "NaN"}',
      '{"amount": "Infinity"}', '{"amount": ""}'],
 )
-def test_upgrade_refuses_an_unusable_payload_amount(ledger_db, payload) -> None:  # noqa: F811
-    url = ledger_db.url.render_as_string(hide_password=False)
-    ledger_db.dispose()
+def test_upgrade_refuses_an_unusable_payload_amount(reversible_ledger_db, payload) -> None:  # noqa: F811
+    url = reversible_ledger_db.url.render_as_string(hide_password=False)
+    reversible_ledger_db.dispose()
     alembic(url, "downgrade", _PREVIOUS)
     engine = create_engine(url)
     try:
@@ -333,9 +338,9 @@ def _objects(conn) -> dict[str, bool]:
     }
 
 
-def test_round_trip_drops_and_restores_the_objects(ledger_db) -> None:  # noqa: F811
-    url = ledger_db.url.render_as_string(hide_password=False)
-    ledger_db.dispose()
+def test_round_trip_drops_and_restores_the_objects(reversible_ledger_db) -> None:  # noqa: F811
+    url = reversible_ledger_db.url.render_as_string(hide_password=False)
+    reversible_ledger_db.dispose()
     engine = create_engine(url)
     try:
         with engine.connect() as conn:
