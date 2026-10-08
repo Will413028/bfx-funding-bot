@@ -69,7 +69,7 @@ class AutoResumeLimitReached(IllegalTradingTransition):
 
 
 # The trigger's SQLSTATEs (migration 8e4b2f6a1c37), mapped back to these types. BX004, a
-# REPEATABLE READ writer (2e835b6f4c12), stays unmapped: it is a fault, not a rejection.
+# writer not on READ COMMITTED (2e835b6f4c12), stays unmapped: it is a fault, not a rejection.
 _SQLSTATE_ERRORS: Final[dict[str, type[IllegalTradingTransition]]] = {
     "BX001": IllegalTradingTransition,
     "BX002": AutoResumeTooSoon,

@@ -1,9 +1,12 @@
-"""2e835b6f4c12 on real PostgreSQL: the transition guard refuses REPEATABLE READ, one scope index.
+"""2e835b6f4c12 on real PostgreSQL: the transition guard admits only READ COMMITTED, one scope index.
 
 Mutation checks (one at a time; revert after each):
 
-* Drop the isolation check from the guard: ``test_a_repeatable_read_writer_is_refused``
-  inserts, and the upgrade's own postcondition raises.
+* Drop the isolation check from the guard: ``test_a_snapshot_writer_is_refused`` inserts,
+  and the upgrade's own postcondition raises.
+* Admit SERIALIZABLE (``= 'repeatable read'``): ``test_a_snapshot_writer_is_refused[SERIALIZABLE]``
+  inserts.
+* Drop the guard body precondition: ``test_the_upgrade_refuses_a_guard_that_drifted`` upgrades.
 * Keep ``uq_trading_state_scope`` (skip its DROP): the upgrade's index postcondition raises.
 * Drop the precondition on the scope indexes: ``test_the_upgrade_refuses_unexpected_scope_indexes``
   fails on a different error (the DROP of a missing index).
@@ -25,10 +28,10 @@ _BEFORE = "41cec7caf291"
 _REVISION = "2e835b6f4c12"
 _GUARD = ("SELECT prosrc FROM pg_proc "
           "WHERE oid = 'public.guard_trading_state_transition()'::regprocedure")
-_ADDED = """      -- The latest row is read after the lock below; a REPEATABLE READ snapshot predates
-      -- the lock and would judge the transition against a stale state.
-      IF current_setting('transaction_isolation') = 'repeatable read' THEN
-        RAISE EXCEPTION 'trading_state is written under READ COMMITTED or SERIALIZABLE'
+_ADDED = """      -- The latest row is read after the lock below; only a READ COMMITTED snapshot
+      -- is taken after it.
+      IF current_setting('transaction_isolation') <> 'read committed' THEN
+        RAISE EXCEPTION 'trading_state is written under READ COMMITTED only'
           USING ERRCODE = 'BX004';
       END IF;
 """
@@ -90,20 +93,34 @@ def test_the_upgrade_refuses_unexpected_scope_indexes(before) -> None:
     assert _version(engine) == _BEFORE
 
 
-@pytest.mark.parametrize("isolation", ["READ COMMITTED", "SERIALIZABLE"])
-def test_a_read_committed_or_serializable_writer_is_admitted(upgraded, isolation) -> None:
+def test_the_upgrade_refuses_a_guard_that_drifted(before) -> None:
+    url, engine = before
+    with engine.begin() as conn:
+        guard = conn.scalar(text(_GUARD))
+        conn.execute(text(
+            "CREATE OR REPLACE FUNCTION public.guard_trading_state_transition() RETURNS trigger "
+            "LANGUAGE plpgsql SET search_path=pg_catalog AS $guard$"
+            + guard.replace("900000", "60000").replace(":", r"\:") + "$guard$"))
+    with pytest.raises(Exception, match="is not 8e4b2f6a1c37's"):
+        alembic(url, "upgrade", _REVISION)
+    assert _version(engine) == _BEFORE
+
+
+def test_a_read_committed_writer_is_admitted(upgraded) -> None:
     _, engine = upgraded
     with engine.begin() as conn:
-        conn.exec_driver_sql(f"SET TRANSACTION ISOLATION LEVEL {isolation}")
-        assert _state(conn, state="HALTED", reason=isolation)
+        conn.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        assert _state(conn, state="HALTED", reason="read committed")
 
 
-def test_a_repeatable_read_writer_is_refused(upgraded) -> None:
+# SERIALIZABLE too: when the writer it waited for ran READ COMMITTED, SSI sees no conflict.
+@pytest.mark.parametrize("isolation", ["REPEATABLE READ", "SERIALIZABLE"])
+def test_a_snapshot_writer_is_refused(upgraded, isolation) -> None:
     _, engine = upgraded
     with engine.connect() as conn:
         before = conn.scalar(text("SELECT count(*) FROM trading_state"))
     with pytest.raises(DBAPIError) as refused, engine.begin() as conn:
-        conn.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        conn.exec_driver_sql(f"SET TRANSACTION ISOLATION LEVEL {isolation}")
         _state(conn, state="HALTED", reason="stale snapshot")
     assert refused.value.orig.sqlstate == "BX004"
     with engine.connect() as conn:

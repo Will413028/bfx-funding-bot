@@ -1,13 +1,15 @@
-"""Refuse a REPEATABLE READ writer of trading_state; one scope index instead of two.
+"""Admit only a READ COMMITTED writer of trading_state; one scope index instead of two.
 
 ``guard_trading_state_transition`` takes the scope's advisory lock and then reads the latest
 row to judge the transition. Under REPEATABLE READ the snapshot is fixed at the
 transaction's first statement, before the lock is granted, so a writer that waited for
 another sees the row before it and judges against a stale state (two concurrent automatic
-resumes would both pass the window count). READ COMMITTED takes a new snapshot per
-statement and SERIALIZABLE aborts one of the two, so the guard now refuses only REPEATABLE
-READ, first, with ``BX004``. The bot writes on READ COMMITTED; its REPEATABLE READ sessions
-are READ ONLY and never insert.
+resumes would both pass the window count). SERIALIZABLE is no better when the writer it
+waited for ran READ COMMITTED: SSI tracks only serializable transactions, so neither aborts.
+READ COMMITTED takes a new snapshot per statement, after the lock; the guard now refuses
+every other level, first, with ``BX004``. Every writer runs READ COMMITTED (the server
+default; no role or database overrides it); the bot's REPEATABLE READ sessions are READ
+ONLY and never insert.
 
 ``ix_trading_state_scope_id`` (account, environment, id) and ``uq_trading_state_scope``
 (id, account, environment) index the same columns; the unique one exists only for the
@@ -15,9 +17,9 @@ cancel-all audit's composite foreign key. The scope index becomes unique, the co
 goes, and the foreign key is rebuilt on it (a referenced key matches a unique index of the
 same columns in any order).
 
-Preconditions: the guard is still 8e4b2f6a1c37's (no isolation check yet), both keys and
+Preconditions: the guard's body is exactly 8e4b2f6a1c37's, both keys and
 the foreign key exist as 5e820d6dc7da left them. Postconditions: one unique valid index on
-the three columns, the foreign key validated on it, and the guard refusing REPEATABLE READ.
+the three columns, the foreign key validated on it, and the guard's body is the new one.
 
 Compatibility: the previous web API image names neither index and never writes
 ``trading_state``. Forward-only: the downgrade raises
@@ -41,21 +43,24 @@ ledger_contract = "preserved"
 SCOPE_INDEX = "ix_trading_state_scope_id"
 SCOPE_KEY = "uq_trading_state_scope"
 AUDIT_FK = "fk_funding_cancel_all_audit_trading_state"
-ISOLATION_CHECK = "current_setting('transaction_isolation') = 'repeatable read'"
+ISOLATION_CHECK = "current_setting('transaction_isolation') <> 'read committed'"
 
+# The latest row is read after the scope lock; only a READ COMMITTED statement's snapshot is
+# taken after it (a REPEATABLE READ or SERIALIZABLE one is fixed at the first statement).
+_ISOLATION_BLOCK = f"""      -- The latest row is read after the lock below; only a READ COMMITTED snapshot
+      -- is taken after it.
+      IF {ISOLATION_CHECK} THEN
+        RAISE EXCEPTION 'trading_state is written under READ COMMITTED only'
+          USING ERRCODE = 'BX004';
+      END IF;
+"""
 # 8e4b2f6a1c37's guard with the isolation check first.
 _TRANSITION_GUARD = f"""CREATE OR REPLACE FUNCTION public.guard_trading_state_transition()
     RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $$
     DECLARE prev public.trading_state%ROWTYPE;
             db_now bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
     BEGIN
-      -- The latest row is read after the lock below; a REPEATABLE READ snapshot predates
-      -- the lock and would judge the transition against a stale state.
-      IF {ISOLATION_CHECK} THEN
-        RAISE EXCEPTION 'trading_state is written under READ COMMITTED or SERIALIZABLE'
-          USING ERRCODE = 'BX004';
-      END IF;
-      PERFORM pg_advisory_xact_lock(hashtextextended(
+{_ISOLATION_BLOCK}      PERFORM pg_advisory_xact_lock(hashtextextended(
         'bfx-trading-state:' || NEW.exchange_account_id::text || ':' || NEW.deployment_environment, 0));
       -- Assigned under the scope lock: a row that waited here must not keep an
       -- id drawn before the row it waited for, or "highest id" would not be
@@ -90,6 +95,10 @@ _TRANSITION_GUARD = f"""CREATE OR REPLACE FUNCTION public.guard_trading_state_tr
       RETURN NEW;
     END $$"""
 
+# The function bodies (pg_proc.prosrc): the new one, and 8e4b2f6a1c37's, which is the new one
+# without the isolation block.
+_NEW_BODY = _TRANSITION_GUARD.split("AS $$", 1)[1].rsplit("$$", 1)[0]
+_OLD_BODY = _NEW_BODY.replace(_ISOLATION_BLOCK, "", 1)
 _GUARD_SOURCE = ("SELECT prosrc FROM pg_proc "
                  "WHERE oid = 'public.guard_trading_state_transition()'::regprocedure")
 # Every index of trading_state over exactly the scope columns, with its uniqueness and validity.
@@ -115,8 +124,7 @@ def _scalar(sql: str, **params: object) -> object:
 
 def upgrade() -> None:
     conn = op.get_bind()
-    source = _scalar(_GUARD_SOURCE)
-    if source is None or "transaction_isolation" in str(source) or "BX003" not in str(source):
+    if _scalar(_GUARD_SOURCE) != _OLD_BODY:
         raise RuntimeError("guard_trading_state_transition is not 8e4b2f6a1c37's; refuse to "
                            "replace it")
     before = conn.execute(text(_SCOPE_INDEXES)).all()
@@ -145,8 +153,8 @@ def upgrade() -> None:
         raise RuntimeError(f"trading_state scope indexes after the upgrade: {after}")
     if conn.execute(text(_AUDIT_FK), {"name": AUDIT_FK}).first() != (True, SCOPE_INDEX):
         raise RuntimeError(f"{AUDIT_FK} is not validated through {SCOPE_INDEX}")
-    if ISOLATION_CHECK not in str(_scalar(_GUARD_SOURCE)):
-        raise RuntimeError("guard_trading_state_transition does not refuse REPEATABLE READ")
+    if _scalar(_GUARD_SOURCE) != _NEW_BODY:
+        raise RuntimeError("guard_trading_state_transition is not the READ COMMITTED-only guard")
 
 
 def downgrade() -> None:
