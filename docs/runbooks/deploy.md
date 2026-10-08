@@ -44,8 +44,11 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    （`migrate.env`，owner role）比較 `alembic current` 與 `alembic heads`。
 6. **有待套用的 migration**（Will 2026-09-25）：先停 bot（唯一的 writer）→
    用 `<rev>` 的 `backup.sh --type diff` 備份 → 用 `<rev>` 的 DR 腳本跑 isolated restore test
-   （`bfx-restore-test@<rev>.service`）→ `alembic upgrade head`。**從停 bot 起任何一步失敗，
-   bot 都維持停止**，只能 roll forward（新 release）或 `--retry`。
+   （`bfx-restore-test@<rev>.service`；驗證還原之後，用 `<rev>` 的 backend image 在隔離副本上
+   演練 `alembic upgrade head` 與 boot check，[offsite-dr](offsite-dr.md)）→ `alembic upgrade head`。
+   **從停 bot 起任何一步失敗，bot 都維持停止**，只能 roll forward（新 release）或 `--retry`；
+   唯一例外是演練失敗（receipt `error_code: migration_rehearsal_failed`）：備份已證明可還原、
+   prod schema 沒動，bfx-deploy 把停下的 bot 重新啟動（D7'，Will 2026-10-08）。
    **沒有 migration 但 diff 碰到 DR 路徑**（`deploy/vm/pgbackrest/**`、`deploy/vm/postgres/**`、
    `docker-compose.bot.yml`、`docker-compose.dr.yml`，或 diff 讀不到）：bot 照跑，先跑 restore test。
 7. 寫入 ledger 的 `started` 列（attempt id、digest、revision、CI run；之後不可修改），
@@ -162,6 +165,8 @@ bfx-deploy 自己維護主機上的工具，不再依賴手動 `install.sh`（�
 | `failed`，`dr_checkout_failed` | 建不出目標的 DR checkout，現行 release 沒動 | 查 mirror／`/home/ubuntu/bfx-releases` 權限，再 `--retry` |
 | `failed`，`bot_stop_failed` | 有 migration 但停不了 bot，什麼都沒做 | 查 docker，再 `--retry` |
 | `failed`，`backup_failed` / `restore_test_failed(migration_pending)` / `migration_failed`，detail 含 `bot stopped until a release deploys` | schema 未變，**bot 已停** | 看 `journalctl -u 'bfx-restore-test@*'` 或 backup log；修好後 `--retry` 或出新 release |
+| `failed`，`restore_test_failed(migration_pending):…:migration_rehearsal_failed`，detail 含 `bot restarted on the running release` | 目標 release 的 migration 在隔離副本上失敗；prod schema 未變，**舊 bot 已重新啟動** | 看 `journalctl -u 'bfx-restore-test@*'` 的 `migration_rehearsal_failed: <step>`；修 migration 出新 release（不 `--retry` 同一 digest） |
+| 同上但 detail 含 `bot_restart_failed:<why>` | 演練失敗，重新啟動的 bot 起不來或不健康（含 settle 60 秒），bot 已停；`BOT_STOP_FAILED, bot may be running` 表示連停都停不了 | 查 `docker ps`、`docker logs bfx-bot`；修好後 `--recreate` 或出新 release |
 | `failed`，`restore_test_failed(dr_paths:…)` | 沒有 migration 的 DR 變更沒通過 restore test，現行 release 沒動 | 修 DR 變更出新 release |
 | `failed`，`migration_partial_or_unverified` | schema **已變**、狀態不明，bot 已停 | 見下方「migration 之後」 |
 | `failed`，`ledger_started_unrecorded` | `started` 列寫不進去，container 沒動（有 migration 時 bot 已停） | 查 postgres，再 `--retry` |

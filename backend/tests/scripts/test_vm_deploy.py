@@ -159,6 +159,12 @@ class FakeHost:
     upgrade_result: str = "ok"  # ok | fail_unchanged | fail_partial
     backup_ok: bool = True
     restore_test_ok: bool = True
+    # What a failing restore test's drill leaves as its receipt (None: nothing written).
+    restore_receipt: dict[str, Any] | None = None
+    restore_evidence: Path | None = None
+    start_ok: bool = True
+    stop_ok_after_start: bool = True
+    local_digests: dict[str, list[str]] = field(default_factory=dict)  # repository -> digests
     uv_ok: bool = True
     stop_ok: bool = True
     compose_fail: set[str] = field(default_factory=set)
@@ -167,6 +173,8 @@ class FakeHost:
     foreign: list[str] = field(default_factory=list)
     running: dict[str, tuple[str, str, str, str]] = field(default_factory=dict)
     stopped: list[str] = field(default_factory=list)
+    started: list[str] = field(default_factory=list)
+    stopped_bot: tuple[str, str, str, str] | None = None
     worktrees: dict[str, str] = field(default_factory=dict)
     docker_configs: list[dict[str, Any]] = field(default_factory=list)
 
@@ -204,7 +212,12 @@ class FakeHost:
             return ok if self.backup_ok else bfx.CommandResult(2, "", "backup_evidence_unavailable")
         if call[:2] == ("systemctl", "start"):
             assert call[2].startswith("bfx-restore-test@") and call[2].endswith(".service")
-            return ok if self.restore_test_ok else bfx.CommandResult(1, "", "Job failed")
+            if self.restore_test_ok:
+                return ok
+            if self.restore_receipt is not None and self.restore_evidence is not None:
+                self.restore_evidence.parent.mkdir(parents=True, exist_ok=True)
+                self.restore_evidence.write_text(json.dumps(self.restore_receipt))
+            return bfx.CommandResult(1, "", "Job failed")
         if call == ("systemctl", "daemon-reload"):
             return ok
         if call[:2] == ("uv", "sync"):
@@ -236,16 +249,23 @@ class FakeHost:
             healthy = service in self.running and self.running[service][1] not in self.unhealthy
             return bfx.CommandResult(0 if healthy else 1, "", "")
         if call[:2] == ("docker", "stop"):
-            if not self.stop_ok:
+            if not self.stop_ok or (self.started and not self.stop_ok_after_start):
                 return bfx.CommandResult(1, "", "daemon unreachable")
             if "bot" not in self.running:
                 return bfx.CommandResult(1, "", "Error response from daemon: No such container: bfx-bot")
-            del self.running["bot"]
+            self.stopped_bot = self.running.pop("bot")
             self.stopped.append(call[-1])
             return ok
-        if call[:2] in {("docker", "tag"), ("docker", "rm")} or call[:3] in {
-            ("docker", "image", "ls"), ("docker", "image", "rm")
-        }:
+        if call[:2] == ("docker", "start"):
+            assert call[2:] == ("bfx-bot",)
+            if not self.start_ok or self.stopped_bot is None:
+                return bfx.CommandResult(1, "", "Error response from daemon")
+            self.running["bot"] = self.stopped_bot
+            self.started.append(call[-1])
+            return ok
+        if call[:3] == ("docker", "image", "ls"):
+            return bfx.CommandResult(0, "\n".join(self.local_digests.get(call[-1], [])), "")
+        if call[:2] in {("docker", "tag"), ("docker", "rm")} or call[:3] == ("docker", "image", "rm"):
             return ok
         raise AssertionError(f"unexpected command: {call}")
 
@@ -414,11 +434,13 @@ def harness(tmp_path: Path) -> Harness:
         mirror=mirror, mirror_user="ubuntu", runtime_dir=runtime,
         state_dir=tmp_path / "state", lock_file=tmp_path / "deploy.lock",
         dr_root=tmp_path / "bfx-releases", ops_root=tmp_path / "bfx-ops", unit_dir=units,
-        uv="uv", backup_user="ubuntu",
+        uv="uv", backup_user="ubuntu", restore_evidence=tmp_path / "dr-evidence/restore-ledger.json",
     )
     ledger = FakeLedger()
     ledger.seed(REV_OLD, OLD_B, OLD_F, "deployed")
-    return Harness(host=FakeHost(mirror=mirror, dr_root=settings.dr_root), registry=FakeRegistry(),
+    host = FakeHost(mirror=mirror, dr_root=settings.dr_root,
+                    restore_evidence=settings.restore_evidence)
+    return Harness(host=host, registry=FakeRegistry(),
                    ledger=ledger, clock=FakeClock(), notices=[], settings=settings)
 
 
@@ -723,6 +745,154 @@ def test_any_failure_after_the_bot_stopped_keeps_it_stopped(
     assert (row.outcome, row.migrations_applied) == ("failed", migrated)
     assert code in row.detail and "bot stopped until a release deploys" in row.detail
     assert harness.notices[-1][0] == "critical"
+
+
+def _receipt(code: str = "migration_rehearsal_failed", *, observed_at_ms: int = 1_790_000_000_001,
+             **changes: Any) -> dict[str, Any]:
+    """A failed restore test's receipt, as restore_drill.py writes it (after FakeClock's now)."""
+    return {"schema_version": 1, "measured": False, "kind": "restore_ledger",
+            "observed_at_ms": observed_at_ms, "error_code": code, "source_revision": REV_NEW,
+            **changes}
+
+
+def test_a_failed_migration_rehearsal_starts_the_running_bot_again(harness: Harness) -> None:
+    """D7' (Will 2026-10-08): the backup restored and production's schema is untouched; only the
+    target's migrations failed on the isolated copy, so the release is refused and the bot
+    that was stopped for it runs on."""
+    host = harness.host
+    host.current = ("h1",)
+    host.restore_test_ok = False
+    host.restore_receipt = _receipt()
+    assert harness.run() == 1
+    assert host.stopped == ["bfx-bot"] and host.started == ["bfx-bot"]
+    assert host.running["bot"] == (f"{BACKEND}@{OLD_B}", OLD_B, REV_OLD, OLD_ATTEMPT)
+    assert host.count(_alembic("upgrade", "head")) == 0
+    assert host.count(COMPOSE_UP) == 0 and _started(harness) == []
+    assert host.index(BACKUP) < host.index(RESTORE_TEST) < host.index(_is(("docker", "start")))
+    row = harness.ledger.last
+    assert (row.outcome, row.migrations_applied, row.backend_digest) == ("failed", False, NEW_B)
+    assert row.detail == ("restore_test_failed(migration_pending):restore_test_unit_failed:"
+            "migration_rehearsal_failed; schema unchanged; bot restarted on the running release"
+            )
+    assert harness.notices[-1][0] == "critical"
+    # Refused like any failed digest: not retried every tick.
+    calls = len(host.calls)
+    assert harness.run() == 0 and len(host.calls) == calls
+
+
+@pytest.mark.parametrize("receipt", [
+    pytest.param(None, id="no-receipt"),
+    pytest.param(_receipt("ledger_digest_mismatch"), id="restore-failed"),
+    pytest.param(_receipt("restore_command_failed"), id="old-drill-without-rehearsal"),
+    pytest.param(_receipt(observed_at_ms=1_789_999_999_999), id="older-than-this-restore-test"),
+    pytest.param(_receipt(measured=True), id="measured"),
+    pytest.param(_receipt(kind="backup"), id="other-kind"),
+    pytest.param(_receipt(source_revision=REV_OLD), id="monthly-run-of-the-deployed-release"),
+    pytest.param({k: v for k, v in _receipt().items() if k != "source_revision"},
+                 id="no-revision"),
+    pytest.param(_receipt(observed_at_ms="1790000000001"), id="untyped-time"),
+])
+def test_any_other_restore_test_failure_keeps_the_bot_stopped(
+    harness: Harness, receipt: dict[str, Any] | None,
+) -> None:
+    host = harness.host
+    host.current = ("h1",)
+    host.restore_test_ok = False
+    host.restore_receipt = receipt
+    assert harness.run() == 1
+    assert host.stopped == ["bfx-bot"] and host.started == [] and "bot" not in host.running
+    row = harness.ledger.last
+    assert "restore_test_failed(migration_pending):restore_test_unit_failed; schema unchanged; " \
+        "bot stopped until a release deploys" in row.detail
+
+
+@pytest.mark.parametrize("planted", ["symlink", "directory", "garbage", "oversized"])
+def test_an_unusable_receipt_keeps_the_bot_stopped(harness: Harness, planted: str) -> None:
+    host, path = harness.host, harness.settings.restore_evidence
+    host.current = ("h1",)
+    host.restore_test_ok = False
+    path.parent.mkdir(parents=True)
+    if planted == "symlink":  # the unit's user owns the directory; root never follows a link
+        real = path.with_name("real.json")
+        real.write_text(json.dumps(_receipt()))
+        path.symlink_to(real)
+    elif planted == "directory":
+        path.mkdir()
+    elif planted == "garbage":
+        path.write_text("{not json")
+    else:
+        path.write_text(json.dumps(_receipt(padding="x" * bfx._MAX_EVIDENCE_BYTES)))
+    assert harness.run() == 1
+    assert host.started == [] and "bot" not in host.running
+
+
+def test_a_failed_backup_keeps_the_bot_stopped_even_beside_a_rehearsal_receipt(
+    harness: Harness,
+) -> None:
+    host, path = harness.host, harness.settings.restore_evidence
+    host.current = ("h1",)
+    host.backup_ok = False
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(_receipt()))
+    assert harness.run() == 1
+    assert host.started == [] and "bot" not in host.running and host.count(RESTORE_TEST) == 0
+    assert "backup_failed" in harness.ledger.last.detail
+
+
+@pytest.mark.parametrize(("setup", "detail"), [
+    ("start_fails", "bot_restart_failed:start_failed; bot stopped until a release deploys"),
+    ("unhealthy", "bot_restart_failed:unhealthy; bot stopped until a release deploys"),
+    ("unhealthy_and_unstoppable", "bot_restart_failed:unhealthy; BOT_STOP_FAILED, bot may be running"),
+])
+def test_a_bot_that_does_not_come_back_is_left_stopped(
+    harness: Harness, setup: str, detail: str,
+) -> None:
+    host = harness.host
+    host.current = ("h1",)
+    host.restore_test_ok = False
+    host.restore_receipt = _receipt()
+    if setup == "start_fails":
+        host.start_ok = False
+    else:
+        host.unhealthy = {OLD_B}
+    if setup == "unhealthy_and_unstoppable":
+        host.stop_ok_after_start = False
+    assert harness.run() == 1
+    assert detail in harness.ledger.last.detail
+    if setup == "unhealthy":
+        assert host.stopped == ["bfx-bot", "bfx-bot"] and "bot" not in host.running
+    if setup == "start_fails":
+        assert "bot" not in host.running
+
+
+def test_a_restore_test_first_drops_other_digests_so_the_candidate_is_unambiguous(
+    harness: Harness,
+) -> None:
+    """The drill finds its candidate by revision label; a stale digest of the same revision (a
+    CI re-run after a failed attempt) would make it ambiguous."""
+    host = harness.host
+    host.current = ("h1",)
+    stale = "sha256:" + "9" * 64
+    host.local_digests = {BACKEND: [OLD_B, NEW_B, stale], FRONTEND: [OLD_F, NEW_F]}
+    assert harness.run() == 0
+    removed = host.index(_is(("docker", "image", "rm", f"{BACKEND}@{stale}")))
+    assert removed < host.index(RESTORE_TEST)
+    assert not any(call[:3] == ("docker", "image", "rm") and call[-1].endswith(digest)
+                   for call in host.calls[:host.index(RESTORE_TEST)]
+                   for digest in (OLD_B, NEW_B, OLD_F, NEW_F))
+
+
+def test_a_failed_rehearsal_without_a_migration_leaves_the_running_release_alone(
+    harness: Harness,
+) -> None:
+    """A DR-path release without a migration never stopped the bot: nothing to start."""
+    host = harness.host
+    harness.host.diffs[(REV_OLD, REV_NEW)] = ["deploy/vm/pgbackrest/restore_drill.py"]
+    host.restore_test_ok = False
+    host.restore_receipt = _receipt()
+    assert harness.run() == 1
+    assert host.stopped == [] and host.started == [] and host.count(COMPOSE_UP) == 0
+    assert "nothing deployed; running release untouched" in harness.ledger.last.detail
 
 
 @pytest.mark.parametrize("path", [

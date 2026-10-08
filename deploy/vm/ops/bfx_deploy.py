@@ -21,8 +21,11 @@ One run:
   6. pull both images by digest, validate the env files, compare `alembic
      current` with `alembic heads` in a one-shot of the new image;
   7. migrations pending: stop the bot (the writer), back up with <rev>'s
-     backup.sh, run the isolated restore test with <rev>'s DR scripts, `alembic
-     upgrade head`. Any failure from here keeps the bot stopped: roll forward.
+     backup.sh, run the isolated restore test with <rev>'s DR scripts (which also
+     rehearses <rev>'s migrations on the restored copy), `alembic upgrade head`.
+     Any failure from here keeps the bot stopped: roll forward. The exception is
+     a failed rehearsal: the backup restored and production's schema is
+     untouched, so the stopped bot is started again on the running release.
      No migration but a DR-path change: restore test first, bot keeps running;
   8. append the `started` ledger row (the bot reads it at boot as its own
      deployment, BFX_DEPLOYMENT_ID), then `docker compose -p bfx-app up`, check
@@ -116,6 +119,13 @@ DR_TRIGGER_PATTERNS = (
     "docker-compose.dr.yml",
 )
 RESTORE_TEST_UNIT = "bfx-restore-test@{revision}.service"
+# The restore test's receipt (the wrapper's default --evidence, written by the drill as the
+# unit's user) and the one failure code after which the stopped bot is started again: the
+# backup restored and verified, only the target's migrations failed on the isolated copy
+# (ADR 2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them).
+RESTORE_EVIDENCE = Path("/home/ubuntu/bfx/dr-evidence/restore-ledger.json")
+REHEARSAL_FAILED = "migration_rehearsal_failed"
+_MAX_EVIDENCE_BYTES = 1_048_576
 CONTAINERS = {"bot": "bfx-bot", "webapi": "bfx-webapi", "frontend": "bfx-frontend"}
 RUNTIME_ENV_FILES = {"bot": "bot.env", "webapi": "webapi.env", "frontend": "frontend.env"}
 PROBE = (
@@ -564,6 +574,7 @@ class Settings:
     settle_seconds: float = 60.0
     discovery_alert_after: float = 1800.0
     local_alias: str | None = "bfx-bot:local"
+    restore_evidence: Path = RESTORE_EVIDENCE
     dry_run: bool = False
     retry: bool = False
     rollback_drill: bool = False
@@ -895,6 +906,10 @@ class Deployer:
             except DeployError as exc:
                 return self._finish(attempt, "failed", f"dr_checkout_failed:{exc.code}; "
                                     "running release untouched")
+            # The restore test's drill finds its candidate by revision label: an older digest
+            # of the same revision (a CI re-run after a failed attempt) would be ambiguous.
+            for warning in self._prune_images(view, target):
+                log(f"before the restore test: {warning}")
         if prepared.pending:
             assert dr_checkout is not None
             failure = self._migration_path(prepared, attempt, dr_checkout, reason or "migration_pending")
@@ -941,12 +956,96 @@ class Deployer:
             self._backup(dr_checkout)
         except DeployError as exc:
             return self._finish(attempt, "failed", f"backup_failed:{exc.code}; schema unchanged; {held}")
+        since_ms = int(self._clock() * 1000)
         try:
             self._restore_test(attempt.target.revision, reason)
         except DeployError as exc:
-            return self._finish(attempt, "failed", f"restore_test_failed({reason}):{exc.code}; "
-                                f"schema unchanged; {held}")
+            failed = f"restore_test_failed({reason}):{exc.code}"
+            if not self._rehearsal_failed(since_ms, attempt.target.revision):
+                return self._finish(attempt, "failed", f"{failed}; schema unchanged; {held}")
+            # Only the target's migrations failed, on the isolated copy: the running release
+            # goes on as if this release had never come (D7', Will 2026-10-08).
+            failed += f":{REHEARSAL_FAILED}"
+            if stopped != "bot stopped":
+                return self._finish(attempt, "failed", f"{failed}; schema unchanged; {stopped}; "
+                                    "nothing to restart")
+            restarted = self._restart_bot()
+            if restarted != "restarted":
+                return self._finish(attempt, "failed", f"{failed}; schema unchanged; "
+                                    f"bot_restart_failed:{restarted}")
+            attempt.bot_stopped = False
+            return self._finish(attempt, "failed", f"{failed}; schema unchanged; "
+                                "bot restarted on the running release")
         return self._migrate(prepared, attempt, held)
+
+    def _rehearsal_failed(self, since_ms: int, revision: str) -> bool:
+        """Whether this restore test's own receipt names a failed rehearsal of `revision`.
+
+        Anything else -- no receipt, an unreadable or older one (a drill that never ran, or one
+        from before the rehearsal existed), another code, another revision (the monthly run of
+        the deployed release writes the same path) -- counts as a failed restore.
+        """
+        try:
+            descriptor = os.open(self.settings.restore_evidence, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            return False
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return False
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                raw = stream.read(_MAX_EVIDENCE_BYTES + 1)
+        except OSError:
+            return False
+        finally:
+            os.close(descriptor)
+        try:
+            report = json.loads(raw) if len(raw) <= _MAX_EVIDENCE_BYTES else None
+        except ValueError:
+            return False
+        if not isinstance(report, dict):
+            return False
+        observed = report.get("observed_at_ms")
+        return (report.get("kind") == "restore_ledger" and report.get("measured") is False
+                and report.get("error_code") == REHEARSAL_FAILED
+                and report.get("source_revision") == revision
+                and type(observed) is int and observed >= since_ms)
+
+    def _restart_bot(self) -> str:
+        """Start the stopped bot container (the running release, unchanged); like a deploy,
+        healthy, then still the same running container and healthy after the settle window.
+
+        Returns `restarted`, or why not and what state the bot is left in.
+        """
+        log("migration rehearsal failed on the restored copy; starting the bot again")
+        started = self._run(["docker", "start", CONTAINERS["bot"]], timeout=90.0)
+        if started.returncode != 0:
+            log(f"docker start bfx-bot failed: {started.stderr.strip()[-500:]}")
+            return "start_failed; bot stopped until a release deploys"
+        began = self._clock()
+        healthy = True
+        while not self._probe("bot"):
+            if self._clock() - began >= self.settings.health_timeouts["bot"]:
+                healthy = False
+                break
+            self._sleep(self.settings.health_interval)
+        if healthy:
+            before = self._bot_state()
+            self._sleep(self.settings.settle_seconds)
+            healthy = before is not None and before == self._bot_state() and self._probe("bot")
+        if healthy:
+            return "restarted"
+        log("restarted bot is not healthy; stopping it again")
+        if self._stop_bot() == "BOT_STOP_FAILED":
+            return "unhealthy; BOT_STOP_FAILED, bot may be running"
+        return "unhealthy; bot stopped until a release deploys"
+
+    def _bot_state(self) -> str | None:
+        """The bot container's restart count and running flag, or None when unreadable."""
+        result = self._run(["docker", "inspect", "--type", "container", "--format",
+                            "{{.RestartCount}} {{.State.Running}}", CONTAINERS["bot"]], timeout=60.0)
+        if result.returncode != 0 or not result.stdout.strip().endswith("true"):
+            return None
+        return result.stdout.strip()
 
     def _prepare(self, view: LedgerView, attempt: Attempt) -> Prepared:
         target = attempt.target
@@ -1352,6 +1451,11 @@ class Deployer:
             warnings.append(f"tooling_install_failed:{code}")
         else:
             warnings += self._prune_releases(keep={target.revision, *([previous] if previous else [])})
+        return sorted(set(warnings + self._prune_images(view, target)))
+
+    def _prune_images(self, view: LedgerView, target: Target) -> list[str]:
+        """Remove local images other than the target's and the last successful release's."""
+        warnings = []
         keep = {target.backend_digest, target.frontend_digest}
         if view.last_success is not None:
             keep |= {view.last_success.backend_digest, view.last_success.frontend_digest}
@@ -1367,7 +1471,7 @@ class Deployer:
                                         timeout=120.0)
                     if removed.returncode != 0:
                         warnings.append("image_prune_failed")
-        return sorted(set(warnings))
+        return warnings
 
     def _install_tooling(self, revision: str) -> None:
         """Install <revision>'s host tooling and units; effective from the next run.
