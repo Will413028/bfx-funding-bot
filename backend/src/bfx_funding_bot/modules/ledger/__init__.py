@@ -1161,13 +1161,11 @@ class PolicyRefused(ValueError):  # noqa: N818 - a refusal, carrying the store's
 
 
 class PolicyStore(Protocol):
-    """The scope's applied capital policy: the shared policy heads and revisions.
+    """The scope's applied capital policy: the policy heads and revisions.
 
-    Both authorities keep these two tables and share the one writer
-    (``ledger.policy_write``); what differs is what a store does first (the legacy one
-    replays its event stream). Lock ownership: the caller holds the scope lock
-    (``ScopeLock.lock``) across ``read_applied`` and the ``apply_policy`` based on it; the
-    store never takes it for the caller. The caller owns the transaction.
+    Lock ownership: the caller holds the scope lock (``ScopeLock.lock``) across
+    ``read_applied`` and the ``apply_policy`` based on it; the store never takes it for the
+    caller. The caller owns the transaction.
     """
 
     @property

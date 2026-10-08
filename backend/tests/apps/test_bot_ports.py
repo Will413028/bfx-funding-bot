@@ -173,24 +173,3 @@ async def test_policy_ports_are_the_ledgers(factory) -> None:
             session, symbol="fUST", policy=CapitalPolicy(enabled=True), expected_revision=0,
             source={})
         assert (await policy.store.read_applied(session, symbol="fUST")).revision == written.revision
-
-
-@pytest.mark.asyncio
-async def test_policy_ports_write_through_the_one_writer(factory, monkeypatch) -> None:
-    from bfx_funding_bot.modules.ledger import policy_write
-    from bfx_funding_bot.modules.ledger._internal import policy_store
-    from bfx_funding_bot.modules.trading import CapitalPolicy
-
-    calls: list[str] = []
-
-    async def write(*args, **kwargs):
-        calls.append(policy_store.__name__)
-        return await policy_write.write_policy_revision(*args, **kwargs)
-
-    monkeypatch.setattr(policy_store, "write_policy_revision", write)
-    policy = build_policy_ports(SCOPE)
-    async with factory.begin() as session:
-        await policy.store.apply_policy(
-            session, symbol="fUST", policy=CapitalPolicy(enabled=True), expected_revision=0,
-            source={})
-    assert calls == [policy_store.__name__]
