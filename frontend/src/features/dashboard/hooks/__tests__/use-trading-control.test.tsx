@@ -48,7 +48,6 @@ function overview(requests: Partial<TradingControlRequest>[] = []) {
       state: "requested",
       processed_at_ms: null,
       outcome_reason: null,
-      trading_state_id: null,
       ...request,
     })),
   } as TradingControlOverview;

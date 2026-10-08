@@ -8,6 +8,7 @@ one writer both authorities share (``ledger.policy_write``).
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,8 +35,10 @@ class LedgerPolicyStore:
     async def apply_policy(
         self, session: AsyncSession, *, symbol: str, policy: CapitalPolicy,
         expected_revision: int, source: dict[str, Any],
+        operator_request_id: UUID | None = None,
     ) -> AppliedPolicy:
         return await write_policy_revision(
             session, self._scope, symbol=symbol, policy=policy,
             expected_revision=expected_revision, source=source,
+            operator_request_id=operator_request_id,
         )

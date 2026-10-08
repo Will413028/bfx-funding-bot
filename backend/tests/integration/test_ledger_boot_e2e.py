@@ -55,6 +55,7 @@ from bfx_funding_bot.modules.ledger import (
 )
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisRow,
+    CapitalPolicyRevisionRow,
     LedgerObservationRow,
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
@@ -352,6 +353,9 @@ async def test_the_policy_worker_amends_the_policy_without_the_event_stream(
     async with env.factory() as session:
         row = await session.get(CapitalPolicyRequestRow, request_id)
         applied = await build_policy_store(SCOPE).read_applied(session, symbol="fUST")
-    assert row.state == "applied" and row.policy_revision_id == applied.revision_id
+    assert row.state == "applied" and applied.revision_id is not None
+    async with env.factory() as session:
+        revision = await session.get(CapitalPolicyRevisionRow, applied.revision_id)
+    assert revision.operator_request_id == request_id
     assert applied.revision == 2 and applied.policy.enabled is False
     assert CAPITAL_POLICY_REQUEST_APPLIED  # the alert name the worker emits

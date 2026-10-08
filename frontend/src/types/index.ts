@@ -205,7 +205,6 @@ export interface TradingControlRequest {
   state: TradingControlRequestState;
   processed_at_ms: number | null;
   outcome_reason: string | null;
-  trading_state_id: number | null;
 }
 
 /** The latest venue cancel-all phase per currency for the HALTED in force. */
@@ -243,7 +242,6 @@ export interface CurrencyRequest {
   state: TradingControlRequestState;
   processed_at_ms: number | null;
   outcome_reason: string | null;
-  policy_revision_id: string | null;
 }
 
 /** The terms every new offer must stay inside; decimals stay strings. */

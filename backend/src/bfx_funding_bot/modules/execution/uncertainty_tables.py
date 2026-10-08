@@ -6,10 +6,11 @@ metadata describes them.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import ClassVar, Literal, get_args
 from uuid import UUID
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, Text, text
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import Uuid
@@ -47,6 +48,12 @@ class UncertaintyResolutionRequestRow(Base):
     WORKER_COLUMNS: ClassVar[tuple[str, ...]] = (
         "state", "processed_at_ms", "outcome_reason",
     )
+
+    @classmethod
+    def pending_index(cls, values: Mapping[str, object]) -> str:
+        """The partial unique index a new request takes its pending slot in (``insert_request``)."""
+        return "uq_uncertainty_resolution_requests_pending"
+
     request_id: Mapped[UUID] = mapped_column(_UUID, primary_key=True)
     exchange_account_id: Mapped[UUID] = mapped_column(
         _UUID,
@@ -120,6 +127,14 @@ class UncertaintyResolutionRequestRow(Base):
             "deployment_environment",
             "state",
             "created_at_ms",
+        ),
+        # What a journal row's composite foreign key references.
+        UniqueConstraint(
+            "request_id",
+            "exchange_account_id",
+            "deployment_environment",
+            "uncertainty_id",
+            name="uq_uncertainty_resolution_requests_scope",
         ),
     )
 

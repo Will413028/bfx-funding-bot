@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from bfx_funding_bot.modules.execution.operator_requests import (
     APPLIED,
@@ -108,6 +109,25 @@ async def test_the_web_api_inserts_exactly_the_request_columns_and_one_pending(o
             await insert_request(session, TradingControlRequestRow, values(account, state="applied"))
         assert await insert_request(session, TradingControlRequestRow, values(account))
         assert not await insert_request(session, TradingControlRequestRow, values(account))
+        # A kill waits beside a resume, never behind it.
+        assert await insert_request(session, TradingControlRequestRow, values(account, action="kill"))
+        assert not await insert_request(session, TradingControlRequestRow,
+                                        values(account, action="kill"))
+
+
+@pytest.mark.asyncio
+async def test_only_a_taken_pending_slot_is_refused_quietly(outbox: Any) -> None:
+    """The CHECK fires before the slot: a blank reason is an error, not a pending request.
+    A duplicate id with its slot free is an error too: only the slot's index is the arbiter."""
+    factory, account = outbox
+    resume = values(account)
+    async with factory.begin() as session:
+        assert await insert_request(session, TradingControlRequestRow, resume)
+    for refused in (values(account, reason="   "),
+                    values(account, request_id=resume["request_id"], action="kill")):
+        with pytest.raises(IntegrityError):
+            async with factory.begin() as session:
+                await insert_request(session, TradingControlRequestRow, refused)
 
 
 @pytest.mark.asyncio

@@ -70,6 +70,7 @@ async def test_resume_only_queues_a_request_with_the_operator_identity(migrated_
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("action", "body", "status"), [
     ("resume", {"reason": ""}, 422),
+    ("resume", {"reason": " \t "}, 422),                           # blank, not request_pending
     ("resume", {"reason": "x", "state": "applied"}, 422),
     ("resume", {"reason": "x", "backend_digest": DIGEST}, 422),   # no build is named any more
     ("approve", {"reason": "x"}, 422),                             # retired actions
@@ -265,6 +266,7 @@ async def test_a_currency_toggle_only_queues_a_request(migrated_db, monkeypatch)
     ("currencies/fust/disable", {"reason": "x"}, 422),       # not a funding symbol
     ("currencies/fUST/pause", {"reason": "x"}, 422),
     ("currencies/fUST/disable", {"reason": ""}, 422),        # a reason is required
+    ("currencies/fUST/disable", {"reason": "  "}, 422),      # blank, not request_pending
     ("currencies/fUST/disable", {"reason": "x", "state": "applied"}, 422),
 ])
 async def test_malformed_currency_requests_are_refused(migrated_db, monkeypatch, path, body, status):
@@ -292,3 +294,33 @@ async def test_only_the_operator_can_toggle_a_currency(migrated_db, monkeypatch,
             f"/api/v1/exchange-accounts/{account}/trading-control/currencies/fUST/disable",
             json={"reason": "x"}, headers=AUTH)
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_reads_list_newest_first_and_name_no_effect(migrated_db, monkeypatch):
+    """Requests created in the same millisecond list by request id, newest first. A request
+    names no effect: its effects name it (ADR 2026-10-08 D9)."""
+    from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
+    from bfx_funding_bot.modules.execution.operator_requests import insert_request
+    app, factory, account = await _app(migrated_db, monkeypatch)
+    await _seed_policies(factory, account)
+    low, high = sorted([uuid4(), uuid4()])
+    common = {"exchange_account_id": account, "deployment_environment": "ci", "reason": "r",
+              "requested_by": "operator", "created_at_ms": 7}
+    async with factory.begin() as session:
+        for request_id, action in ((low, "resume"), (high, "kill")):
+            assert await insert_request(session, TradingControlRequestRow,
+                                        {**common, "request_id": request_id, "action": action})
+        for request_id, action in ((low, "enable"), (high, "disable")):
+            assert await insert_request(session, CapitalPolicyRequestRow, {
+                **common, "request_id": request_id, "action": action, "symbol": "fUST"})
+    base = f"/api/v1/exchange-accounts/{account}/trading-control"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        overview = (await client.get(base, headers=AUTH)).json()["data"]
+        single = (await client.get(f"{base}/requests/{low}", headers=AUTH)).json()["data"]
+        currency = (await client.get(f"{base}/currency-requests/{low}", headers=AUTH)).json()["data"]
+    fust = next(c for c in overview["currencies"] if c["symbol"] == "fUST")
+    for listed in (overview["requests"], fust["requests"]):
+        assert [r["request_id"] for r in listed] == [str(high), str(low)]
+    for shown in (single, currency, *overview["requests"], *fust["requests"]):
+        assert not {"trading_state_id", "policy_revision_id"} & set(shown)

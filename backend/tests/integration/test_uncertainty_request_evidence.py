@@ -34,6 +34,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
@@ -102,8 +103,8 @@ def _ledger_request(conn, request_id=None) -> str:
     return request_id
 
 
-def _quarantine(conn) -> str:
-    quarantine = str(uuid4())
+def _quarantine(conn, quarantine: str | None = None) -> str:
+    quarantine = quarantine or str(uuid4())
     conn.exec_driver_sql(
         f"""INSERT INTO quarantine_opening(quarantine_id, exchange_account_id,
       deployment_environment, symbol, intended_amount, opened_at_ms, opened_revision, evidence)
@@ -113,6 +114,15 @@ def _quarantine(conn) -> str:
 
 
 def _journal(conn, request_id: str | None, *, quarantine: str | None = None) -> None:
+    """A journal row resolving ``quarantine``; by default the one ``request_id`` names (the
+    journal's foreign key to its request includes the subject, 5e820d6dc7da)."""
+    if quarantine is None and request_id is not None:
+        named = str(conn.scalar(text(
+            "SELECT uncertainty_id FROM uncertainty_resolution_requests WHERE request_id = :r"),
+            {"r": request_id}))
+        exists = conn.scalar(text("SELECT count(*) FROM quarantine_opening WHERE quarantine_id = :q"),
+                             {"q": named})
+        quarantine = named if exists else _quarantine(conn, named)
     quarantine = quarantine or _quarantine(conn)
     request_sql = "NULL" if request_id is None else f"'{request_id}'"
     conn.exec_driver_sql(
@@ -143,7 +153,7 @@ def test_a_request_cites_an_observation_and_never_a_reconcile_event(seeded) -> N
             conn.exec_driver_sql(sql)
 
 
-def test_insert_request_swallows_an_evidence_violation_as_slot_taken(seeded) -> None:
+def test_insert_request_raises_an_evidence_violation(seeded) -> None:
     url = seeded.url.render_as_string(hide_password=False)
     values = {
         "request_id": uuid4(), "exchange_account_id": _A, "deployment_environment": "ci",
@@ -161,10 +171,10 @@ def test_insert_request_swallows_an_evidence_violation_as_slot_taken(seeded) -> 
             await engine.dispose()
 
     values["exchange_account_id"] = UUID(str(_A))
-    # No observation (the request columns no longer name the reconcile event).
-    # Known behaviour: every IntegrityError reads as "pending slot taken".
-    assert asyncio.run(run(values)) is False
-    # Same values with the observation are accepted, so the False above is its NOT NULL.
+    # No observation (the request columns no longer name the reconcile event): an error, not
+    # a taken pending slot (only that slot's ON CONFLICT answers False).
+    with pytest.raises(IntegrityError, match="observation_id"):
+        asyncio.run(run(values))
     assert asyncio.run(run({**values, "observation_id": UUID(str(_O))})) is True
 
 
@@ -188,10 +198,14 @@ def test_an_applied_request_meets_the_outcome_shape(seeded) -> None:
 def test_guard_pins_observation_and_requires_a_journal_row(seeded) -> None:
     with seeded.begin() as conn:
         ledger = _ledger_request(conn)
-    with seeded.begin() as conn, pytest.raises(Exception, match="immutable uncertainty resolution request"):
+    # The owner's only UPDATE is the transition out of ``requested``; the bot has no grant on
+    # what the operator asked.
+    with seeded.begin() as conn, pytest.raises(Exception, match="invalid uncertainty resolution transition"):
         conn.exec_driver_sql(f"UPDATE {_TABLE} SET requested_by='someone else'")
-    with seeded.begin() as conn, pytest.raises(Exception, match="immutable uncertainty resolution request"):
-        conn.exec_driver_sql(f"UPDATE {_TABLE} SET observation_id='{uuid4()}'")
+    with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
+        conn.exec_driver_sql(f"UPDATE {_TABLE} SET observation_id='{uuid4()}', state='rejected', "
+                             "processed_at_ms=2, outcome_reason='x'")
     with seeded.begin() as conn, pytest.raises(Exception, match="without a journal row"):
         _apply_as_bot(conn, ledger)
     # A journal row citing a different request does not count.
@@ -222,7 +236,7 @@ def test_journal_operator_request_is_unique_but_nullable(seeded) -> None:
         _journal(conn, None)  # NULLs never collide
         _journal(conn, second)
     with seeded.begin() as conn, pytest.raises(Exception, match="uq_execution_resolution_operator_request"):
-        _journal(conn, first)
+        _journal(conn, first, quarantine=_quarantine(conn))
 
 
 def test_only_the_observation_is_the_web_apis_to_write(seeded) -> None:

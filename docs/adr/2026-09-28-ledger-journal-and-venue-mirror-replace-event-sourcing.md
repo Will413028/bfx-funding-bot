@@ -150,3 +150,5 @@ D7'' 放棄 S2 前 live 新資料持續觀測的理由之一是 shadow 基礎設
 ## Amendment (2026-10-08): operator outbox 也改成 insert-only
 
 D3' 的「operator outbox 維持現有『immutable request＋一次終態』機制」由 [2026-10-08-operator-requests-insert-only-with-insert-once-outcome](2026-10-08-operator-requests-insert-only-with-insert-once-outcome.md) 取代：請求列只准新增，終態另寫 insert-once outcome 表（PK＝`request_id`），與 attempt／outcome／resolution 同型。policy／trading state 的 head 指標不受影響。
+
+（2026-10-08 再修訂：上一段由 [2026-10-08-operator-requests-keep-state-effects-carry-request-id](2026-10-08-operator-requests-keep-state-effects-carry-request-id.md) 取代——outbox 保留請求列的狀態欄，bot 只有 worker 欄位的 UPDATE 權，不列欄位的 trigger 只准終態一次；效果列帶 typed `operator_request_id` 指回請求。）

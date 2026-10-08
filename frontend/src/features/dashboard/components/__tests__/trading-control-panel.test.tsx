@@ -57,7 +57,6 @@ function requestRow(
     state: "requested",
     processed_at_ms: null,
     outcome_reason: null,
-    trading_state_id: null,
     ...extra,
   };
 }
@@ -345,7 +344,6 @@ function currencyRequest(extra: Partial<CurrencyRequest>): CurrencyRequest {
     state: "requested",
     processed_at_ms: null,
     outcome_reason: null,
-    policy_revision_id: null,
     ...extra,
   };
 }

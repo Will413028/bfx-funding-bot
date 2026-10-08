@@ -7,15 +7,19 @@ frozen in ``legacy_archive``; migrations own them and no metadata describes them
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import ClassVar, Literal, get_args
 from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
+    Column,
     ForeignKey,
     Index,
+    Table,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -32,8 +36,8 @@ class CapitalPolicyRequestRow(Base):
     """An operator's request to enable or disable one currency's applied policy.
 
     The web API inserts only the request columns; the account daemon appends
-    the new policy revision and writes one outcome (``applied`` names the
-    revision in force afterwards, also when nothing had to change). A separate
+    the new policy revision, which names the request, and writes one outcome
+    (``applied``, also when nothing had to change: its reason says so). A separate
     outbox from ``trading_control_requests``: its subject is one currency's
     policy, not the account's trading state, so its pending slots are per
     currency and a kill never shares a queue with it.
@@ -44,9 +48,17 @@ class CapitalPolicyRequestRow(Base):
         "request_id", "exchange_account_id", "deployment_environment", "symbol", "action",
         "reason", "requested_by", "created_at_ms",
     )
-    WORKER_COLUMNS: ClassVar[tuple[str, ...]] = (
-        "state", "processed_at_ms", "outcome_reason", "policy_revision_id",
-    )
+    WORKER_COLUMNS: ClassVar[tuple[str, ...]] = ("state", "processed_at_ms", "outcome_reason")
+    # Closed product column: in the table, not mapped (appended below the class). The revision
+    # an applied request wrote names the request instead
+    # (``capital_policy_revisions.operator_request_id``, 5e820d6dc7da); no role may write this
+    # one. It stays one release for the previous image's web API reads; the next drops it.
+    CLOSED_COLUMNS: ClassVar[tuple[str, ...]] = ("policy_revision_id",)
+
+    @classmethod
+    def pending_index(cls, values: Mapping[str, object]) -> str:
+        """The partial unique index a new request takes its pending slot in (``insert_request``)."""
+        return "uq_capital_policy_requests_pending"
 
     request_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
     exchange_account_id: Mapped[UUID] = mapped_column(
@@ -64,12 +76,6 @@ class CapitalPolicyRequestRow(Base):
     state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'requested'"))
     processed_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     outcome_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    policy_revision_id: Mapped[UUID | None] = mapped_column(
-        Uuid,
-        ForeignKey("capital_policy_revisions.id", ondelete="RESTRICT",
-                   name="fk_capital_policy_requests_revision"),
-        nullable=True,
-    )
 
     __table_args__ = (
         CheckConstraint("action IN ('enable', 'disable')", name="ck_capital_policy_requests_action"),
@@ -79,11 +85,10 @@ class CapitalPolicyRequestRow(Base):
             name="ck_capital_policy_requests_evidence",
         ),
         CheckConstraint(
-            "(state = 'requested' AND processed_at_ms IS NULL AND outcome_reason IS NULL "
-            "AND policy_revision_id IS NULL) OR "
-            "(state = 'applied' AND processed_at_ms IS NOT NULL AND policy_revision_id IS NOT NULL) OR "
+            "(state = 'requested' AND processed_at_ms IS NULL AND outcome_reason IS NULL) OR "
+            "(state = 'applied' AND processed_at_ms IS NOT NULL) OR "
             "(state IN ('rejected', 'failed') AND processed_at_ms IS NOT NULL "
-            "AND outcome_reason IS NOT NULL AND policy_revision_id IS NULL)",
+            "AND outcome_reason IS NOT NULL)",
             name="ck_capital_policy_requests_outcome",
         ),
         # One waiting request per currency and action: a pending enable never
@@ -94,4 +99,17 @@ class CapitalPolicyRequestRow(Base):
               sqlite_where=text("state = 'requested'")),
         Index("ix_capital_policy_requests_queue", "exchange_account_id",
               "deployment_environment", "state", "created_at_ms"),
+        # What a revision's composite foreign key references.
+        UniqueConstraint("request_id", "exchange_account_id", "deployment_environment", "symbol",
+                         name="uq_capital_policy_requests_scope"),
     )
+
+
+_REQUESTS_TABLE = CapitalPolicyRequestRow.__table__
+assert isinstance(_REQUESTS_TABLE, Table)
+_REQUESTS_TABLE.append_column(Column(
+    "policy_revision_id", Uuid,
+    ForeignKey("capital_policy_revisions.id", ondelete="RESTRICT",
+               name="fk_capital_policy_requests_revision"),
+    nullable=True,
+))

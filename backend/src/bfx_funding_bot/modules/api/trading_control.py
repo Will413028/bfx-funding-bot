@@ -23,7 +23,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,13 +59,21 @@ class ControlBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reason: str = Field(min_length=1, max_length=500)
 
+    @field_validator("reason")
+    @classmethod
+    def _not_blank(cls, reason: str) -> str:
+        # The table refuses a blank reason too; refused here, it is a 422, not a database error.
+        if not reason.strip():
+            raise ValueError("reason must not be blank")
+        return reason
+
 
 def _request(row: TradingControlRequestRow) -> dict[str, Any]:
     return {
         "request_id": str(row.request_id), "action": row.action, "reason": row.reason,
         "requested_by": row.requested_by, "created_at_ms": row.created_at_ms,
         "state": row.state, "processed_at_ms": row.processed_at_ms,
-        "outcome_reason": row.outcome_reason, "trading_state_id": row.trading_state_id,
+        "outcome_reason": row.outcome_reason,
     }
 
 
@@ -75,7 +83,6 @@ def _currency_request(row: CapitalPolicyRequestRow) -> dict[str, Any]:
         "reason": row.reason, "requested_by": row.requested_by,
         "created_at_ms": row.created_at_ms, "state": row.state,
         "processed_at_ms": row.processed_at_ms, "outcome_reason": row.outcome_reason,
-        "policy_revision_id": None if row.policy_revision_id is None else str(row.policy_revision_id),
     }
 
 
@@ -112,7 +119,7 @@ async def _currencies(session: AsyncSession, scope: tuple[UUID, str],
             CapitalPolicyRequestRow.deployment_environment == scope[1],
             CapitalPolicyRequestRow.symbol == head.symbol,
         ).order_by(CapitalPolicyRequestRow.created_at_ms.desc(),
-                   CapitalPolicyRequestRow.request_id).limit(_CURRENCY_REQUESTS))).all()
+                   CapitalPolicyRequestRow.request_id.desc()).limit(_CURRENCY_REQUESTS))).all()
         entry["requests"] = [_currency_request(r) for r in requests]
         currencies.append(entry)
     return currencies
@@ -169,7 +176,8 @@ def build_trading_control_router() -> APIRouter:
         requests = (await session.scalars(select(TradingControlRequestRow).where(
             TradingControlRequestRow.exchange_account_id == scope[0],
             TradingControlRequestRow.deployment_environment == scope[1],
-        ).order_by(TradingControlRequestRow.created_at_ms.desc()).limit(10))).all()
+        ).order_by(TradingControlRequestRow.created_at_ms.desc(),
+                   TradingControlRequestRow.request_id.desc()).limit(10))).all()
         return {"data": {
             "trading_state": _state(state),
             "cancel_all": await _cancel_all(session, state),
