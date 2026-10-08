@@ -32,6 +32,12 @@ DEFAULT_LEDGER_OUTPUT_PATH = Path.home() / "bfx/dr-evidence/restore-ledger.json"
 _CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _MAX_RTO_SECONDS = 3600
+# The migration rehearsal's own budget, after the restore is verified (so it never eats into the
+# RTO): bfx-deploy's production `alembic upgrade head` gets 900s; the rest covers the grants,
+# the bounds read and the candidate's boot check.
+_REHEARSAL_SECONDS = 1200
+_MIGRATION_SECONDS = 900
+_REVISION = re.compile(r"[0-9a-f]{40}")
 _READ_FAILURE_CODES = frozenset({"production_read_failed", "restore_command_failed"})
 
 
@@ -95,6 +101,16 @@ class LedgerRequest:
     production_container: str = "bfx-postgres"
     backup_label: str | None = None
     target_time: str | None = None
+
+
+@dataclass(slots=True)
+class _Migrator:
+    """What the migration rehearsal created (its container and its env file) and the
+    revision it rehearsed, which a failure receipt names."""
+
+    started: bool = False
+    env_path: Path | None = None
+    revision: str | None = None
 
 
 @dataclass(slots=True)
@@ -194,6 +210,7 @@ def _validate_plan_resources(plan: RestoreResources) -> None:
             plan.egress_network_name,
             plan.container_name,
             plan.verifier_container_name,
+            plan.migrator_container_name,
         )
     ):
         _failure("restore_output_invalid")
@@ -550,40 +567,33 @@ class RestoreDrill:
             _failure("rto_invalid")
         return elapsed_seconds
 
-    def _bootstrap_role(
-        self, plan: RestoreResources, password: str,
-    ) -> None:
-        # Connecting to the baseline database validates it exists before any SQL.
-        # Send separate statements via psql stdin, with logging disabled before
-        # the password-bearing statement is parsed/executed (including on error).
-        role = f'"{plan.verify_role}"'
-        # Exactly the tables the boot check reads (ledger_digest.VERIFIER_TABLES), those the
-        # restored schema has (a newer release may know more); read-only by default too.
+    @staticmethod
+    def _verifier_grants(plan: RestoreResources) -> str:
+        """Exactly the tables the boot check reads (ledger_digest.VERIFIER_TABLES), those the
+        restored schema has (a newer release may know more). Run again after the migration
+        rehearsal, for the tables the candidate's migrations created."""
         names = ", ".join(f"'{name}'" for name in _ledger.VERIFIER_TABLES)
-        access = (
+        return (
             "DO $grant$ DECLARE name text; BEGIN "
             f"FOREACH name IN ARRAY ARRAY[{names}] LOOP "
             "IF to_regclass(format('public.%I', name)) IS NOT NULL THEN "
             f"EXECUTE format('GRANT SELECT ON TABLE public.%I TO %I', name, '{plan.verify_role}'); "
             "END IF; END LOOP; END $grant$;\n"
-            f"ALTER ROLE {role} SET default_transaction_read_only = on;\n"
         )
-        sql = (
-            "SET log_statement = 'none';\n"
-            "SET log_min_error_statement = 'panic';\n"
-            "SET log_min_duration_statement = -1;\n"
-            "SET log_min_duration_sample = -1;\n"
-            "SET log_statement_sample_rate = 0;\n"
-            "SET log_transaction_sample_rate = 0;\n"
-            "SET log_duration = off;\n"
-            "BEGIN;\n"
-            f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-            f"NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '{password}';\n"
-            f'GRANT CONNECT, TEMPORARY ON DATABASE "{plan.database_name}" TO {role};\n'
-            f"GRANT USAGE ON SCHEMA public TO {role};\n"
-            + access
-            + "COMMIT;\n"
-        )
+
+    # Logging is disabled before a password-bearing statement is parsed/executed (including
+    # on error).
+    _QUIET = (
+        "SET log_statement = 'none';\n"
+        "SET log_min_error_statement = 'panic';\n"
+        "SET log_min_duration_statement = -1;\n"
+        "SET log_min_duration_sample = -1;\n"
+        "SET log_statement_sample_rate = 0;\n"
+        "SET log_transaction_sample_rate = 0;\n"
+        "SET log_duration = off;\n"
+    )
+
+    def _admin_sql(self, plan: RestoreResources, sql: str) -> None:
         self._require_success(
             (
                 "docker", "exec", "--user", "postgres", "--interactive", plan.container_name,
@@ -592,6 +602,109 @@ class RestoreDrill:
             ),
             input_text=sql,
         )
+
+    def _bootstrap_role(
+        self, plan: RestoreResources, password: str,
+    ) -> None:
+        # Connecting to the baseline database validates it exists before any SQL.
+        # Send separate statements via psql stdin.
+        role = f'"{plan.verify_role}"'
+        # Read-only by default too.
+        access = (
+            self._verifier_grants(plan)
+            + f"ALTER ROLE {role} SET default_transaction_read_only = on;\n"
+        )
+        sql = (
+            self._QUIET
+            + "BEGIN;\n"
+            f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+            f"NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '{password}';\n"
+            f'GRANT CONNECT, TEMPORARY ON DATABASE "{plan.database_name}" TO {role};\n'
+            f"GRANT USAGE ON SCHEMA public TO {role};\n"
+            + access
+            + "COMMIT;\n"
+        )
+        self._admin_sql(plan, sql)
+
+    def _drill_revision(self) -> str:
+        revision = self._require_success(
+            ("git", "-C", str(ROOT), "rev-parse", "HEAD")).stdout.strip()
+        if _REVISION.fullmatch(revision) is None:
+            _failure("restore_output_invalid")
+        return revision
+
+    def _candidate_image(self, revision: str) -> str:
+        """The backend image of this drill's own checkout revision (its image id)."""
+        listed = self._require_success(_commands.candidate_images_command(revision)).stdout
+        images = set()
+        for line in listed.splitlines():
+            repository, _, image_id = line.strip().partition("\t")
+            if repository == _commands.BACKEND_REPOSITORY:
+                images.add(image_id)
+        if len(images) != 1 or not _evidence.is_image_digest(next(iter(images))):
+            _failure("candidate_image_unavailable")
+        return images.pop()
+
+    def _write_migrator_env(self, plan: RestoreResources, password: str) -> Path:
+        """Only the restored copy's owner DATABASE_URL, as migrate.env carries production's."""
+        path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", prefix="bfx-dr-", suffix=".env", delete=False,
+            ) as handle:
+                path = Path(handle.name)
+                os.chmod(path, 0o600)
+                handle.write(
+                    f"DATABASE_URL=postgresql://{plan.sql_admin_role}:{password}"
+                    f"@{plan.container_name}:5432/{plan.database_name}\n")
+            return path
+        except BaseException:
+            if path is not None:
+                path.unlink(missing_ok=True)
+            raise
+
+    def _rehearse(
+        self, plan: RestoreResources, env_path: Path, migrator: _Migrator,
+    ) -> dict[str, object]:
+        """Migrate the verified restored copy with the candidate image, then boot-check it.
+
+        Production's migration runs as the owner (migrate.env); so does this one: the owner's
+        password exists only inside the isolated copy, set here by the admin on the copy's own
+        socket and discarded with it. The current image's boot check already ran on the
+        unmigrated copy (it refuses a newer schema head); the candidate's runs on the migrated
+        one, bounded by the copy's bounds read after the migration. A candidate equal to the
+        current image (the monthly run) migrates nothing."""
+        started = self._clock()
+        revision = self._drill_revision()
+        migrator.revision = revision
+        image = self._candidate_image(revision)
+        before = _ledger.parse_bounds(self._require_success(
+            self._psql(plan.container_name, plan), input_text=_ledger.bounds_script()).stdout)
+        password = self._password_factory()
+        if not isinstance(password, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", password) is None:
+            _failure("restore_output_invalid")
+        self._admin_sql(plan, self._QUIET + f'ALTER ROLE "{plan.sql_admin_role}" PASSWORD '
+                        f"'{password}';\n")
+        migrator.env_path = self._write_migrator_env(plan, password)
+        migrator.started = True
+        completed = self._call(
+            _commands.migrator_command(plan, image=image, env_path=migrator.env_path),
+            timeout=_MIGRATION_SECONDS,
+        )
+        if completed.returncode != 0:
+            _failure("migration_failed")
+        self._admin_sql(plan, self._verifier_grants(plan))
+        after = _ledger.parse_bounds(self._require_success(
+            self._psql(plan.container_name, plan), input_text=_ledger.bounds_script()).stdout)
+        boot = _ledger.parse_boot(self._ledger_boot(plan, image, env_path), after)
+        return {
+            "source_revision": revision,
+            "candidate_image_digest": image,
+            "migration_heads_before": list(before.migration_heads),
+            "migration_heads_after": list(after.migration_heads),
+            "boot_scopes": len(boot["scopes"]),
+            "seconds": round(max(0.0, self._clock() - started), 3),
+        }
 
     def _image_metadata(self, plan: RestoreResources) -> tuple[str, dict[str, str]]:
         completed = self._require_success(
@@ -613,6 +726,7 @@ class RestoreDrill:
         container_started: bool,
         verifier_started: bool,
         volume_created: bool,
+        migrator: _Migrator | None = None,
         egress_network_created: bool,
         network_created: bool,
     ) -> bool:
@@ -621,15 +735,18 @@ class RestoreDrill:
         failed = False
         # A timed-out Compose client can leave its one-off container running.
         # The generated name is eligible before starting the client.
-        if verifier_started:
+        one_offs = [(plan.cleanup_commands[4], plan.verifier_container_name)] if verifier_started else []
+        if migrator is not None and migrator.started:
+            one_offs.append((plan.cleanup_commands[5], plan.migrator_container_name))
+        for command, name in one_offs:
             try:
-                result = self._call(plan.cleanup_commands[4], timeout=min(10, self._remaining() - 1))
+                result = self._call(command, timeout=min(10, self._remaining() - 1))
                 if result.returncode != 0:
                     # --rm may already have removed it. Confirm absence without
                     # interpreting or exposing Docker's raw error text.
                     remaining = self._require_success((
                         "docker", "container", "ls", "--all", "--filter",
-                        f"name=^/{plan.verifier_container_name}$", "--format={{.Names}}",
+                        f"name=^/{name}$", "--format={{.Names}}",
                     ))
                     if remaining.stdout.strip():
                         failed = True
@@ -645,9 +762,11 @@ class RestoreDrill:
                     failed = True
             except DrillFailureError:
                 failed = True
-        if env_path is not None:
+        for path in (env_path, migrator.env_path if migrator is not None else None):
+            if path is None:
+                continue
             try:
-                _unlink_env_file(env_path, timeout=self._remaining())
+                _unlink_env_file(path, timeout=self._remaining())
                 self._remaining()
             except (OSError, subprocess.SubprocessError, DrillFailureError):
                 failed = True
@@ -758,6 +877,7 @@ class RestoreDrill:
         timing_stage: str | None = None
         timing_usable = True
         created = _CreatedResources()
+        migrator = _Migrator()
         verifier_cleanup_eligible = False
         rto_started: float | None = None
         failure_code: str | None = None
@@ -860,6 +980,22 @@ class RestoreDrill:
                 success_report["rto_seconds"] = self._elapsed_seconds(rto_started)
                 success_report["restore_run_id"] = plan.project_name.removeprefix("bfx-dr-")
                 self._remaining()
+                if request.backup_label is None:
+                    # The restore test rehearses the release's migrations on the verified copy
+                    # (ADR 2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them),
+                    # on a budget of its own; the restore and its RTO are already settled.
+                    self._deadline = self._clock() + _REHEARSAL_SECONDS
+                    try:
+                        success_report["rehearsal"] = self._rehearse(plan, env_path, migrator)
+                    except Exception as exc:  # whatever fails here, the restore itself passed
+                        # Bounded codes only (never a command's output), for the journal.
+                        bounded = (DrillFailureError, EvidenceError, _ledger.LedgerVerificationError)
+                        code = str(exc) if isinstance(exc, bounded) else type(exc).__name__
+                        print(f"restore drill: migration_rehearsal_failed: {code}"[:200],
+                              file=sys.stderr)
+                        success_report = None
+                        raise DrillFailureError("migration_rehearsal_failed") from None
+                    self._remaining()
                 end_timing("verification")
         except DrillFailureError as exc:
             failure_code = str(exc)
@@ -883,7 +1019,7 @@ class RestoreDrill:
                 cleanup_failed = self._cleanup(
                     plan, env_path, container_started=created.container,
                     verifier_started=verifier_cleanup_eligible,
-                    volume_created=created.volume,
+                    volume_created=created.volume, migrator=migrator,
                     egress_network_created=created.egress_network,
                     network_created=created.network,
                 )
@@ -917,6 +1053,10 @@ class RestoreDrill:
                         kind=failure_kind, error_code="restore_output_invalid",
                         observed_at_ms=time.time_ns() // 1_000_000,
                     )
+                if report["error_code"] == "migration_rehearsal_failed" and migrator.revision:
+                    # bfx-deploy restarts the bot only for a rehearsal of its own target: the
+                    # monthly run of the deployed release writes the same receipt path.
+                    report["source_revision"] = migrator.revision
                 try:
                     _write_json(self._output_path, report)
                 except OSError:

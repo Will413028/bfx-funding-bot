@@ -28,6 +28,7 @@ class RestoreResources:
     egress_network_name: str
     container_name: str
     verifier_container_name: str
+    migrator_container_name: str
     sql_admin_role: str
     verify_role: str
     database_name: str
@@ -61,6 +62,39 @@ def ledger_verifier_command(
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--network", resources.network_name, "--env-file", str(env_path),
             "--entrypoint", "python", image, "-m", BOOT_CHECK_MODULE)
+
+
+# The candidate image of a restore test is the backend image of the drill's own revision (the
+# release under test; bfx-deploy pulls it by digest before the restore test, and keeps the
+# deployed one): the frontend image carries the same revision label, so the repository decides.
+BACKEND_REPOSITORY = "ghcr.io/will413028/bfx-funding-bot-backend"
+REVISION_LABEL = "org.opencontainers.image.revision"
+
+
+def candidate_images_command(revision: str) -> tuple[str, ...]:
+    """Local images labelled with ``revision``, one ``repository<TAB>image id`` per line."""
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        _invalid()
+    return ("docker", "image", "ls", "--no-trunc", "--filter", f"label={REVISION_LABEL}={revision}",
+            "--format", "{{.Repository}}\t{{.ID}}")
+
+
+def migrator_command(
+    resources: RestoreResources, *, image: str, env_path: Path,
+) -> tuple[str, ...]:
+    """Run the candidate image's ``alembic upgrade head`` against the isolated restored copy.
+
+    The same hardening as bfx-deploy's production migration one-shot, on the internal network
+    with the env file that carries only the copy's owner DATABASE_URL.
+    """
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None or not env_path.is_absolute():
+        _invalid()
+    return ("docker", "run", "--rm", "--name", resources.migrator_container_name,
+            "--pull=never", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            "--user", f"{os.getuid()}:{os.getgid()}", "--cap-drop=ALL",
+            "--security-opt=no-new-privileges", "--network", resources.network_name,
+            "--workdir", "/app", "--entrypoint", "", "--env-file", str(env_path),
+            "--env", "PYTHONDONTWRITEBYTECODE=1", image, "/app/.venv/bin/alembic", "upgrade", "head")
 
 
 def _generated_name(value: str) -> str:
@@ -97,6 +131,7 @@ def build_restore_resources(
     egress_network_name = _generated_name(f"bfx-dr-{resource_id}-egress")
     container_name = _generated_name(f"bfx-dr-{resource_id}-db")
     verifier_container_name = _generated_name(f"bfx-dr-{resource_id}-verifier")
+    migrator_container_name = _generated_name(f"bfx-dr-{resource_id}-migrator")
     verify_role = _verify_role(f"bfx_dr_{resource_id.replace('-', '_')}")
     compose_prefix = (
         "docker",
@@ -113,6 +148,7 @@ def build_restore_resources(
         egress_network_name=egress_network_name,
         container_name=container_name,
         verifier_container_name=verifier_container_name,
+        migrator_container_name=migrator_container_name,
         sql_admin_role="bfx",
         verify_role=verify_role,
         database_name=database_name,
@@ -152,5 +188,6 @@ def build_restore_resources(
             ("docker", "network", "rm", egress_network_name),
             ("docker", "network", "rm", network_name),
             ("docker", "container", "rm", "--force", verifier_container_name),
+            ("docker", "container", "rm", "--force", migrator_container_name),
         ),
     )

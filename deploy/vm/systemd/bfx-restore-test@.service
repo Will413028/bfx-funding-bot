@@ -19,6 +19,7 @@ WorkingDirectory=/home/ubuntu/bfx-releases/%i
 # Only --drill: the receipt and heartbeat paths are the wrapper's own defaults
 # (/home/ubuntu/bfx/dr-evidence/restore-ledger.json, restore-heartbeat.json), so a unit and a
 # wrapper from different releases never disagree on arguments.
-# The drill's own RTO deadline is 3600s plus a 30s cleanup budget.
+# The drill's own RTO deadline is 3600s, then the restore test's migration rehearsal
+# (1200s) and a 30s cleanup budget.
 TimeoutStartSec=7200
 ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_restore_test.py --drill /home/ubuntu/bfx-releases/%i/deploy/vm/pgbackrest/restore-drill.sh

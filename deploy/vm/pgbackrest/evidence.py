@@ -60,7 +60,10 @@ RESTORE_ERROR_CODES = frozenset(
 # rows must equal production's within the restored copy's own boundary, and the image's
 # boot guards must accept it (ledger_digest.py, the image's apps/restore_boot_check.py).
 LEDGER_ERROR_CODES = RESTORE_ERROR_CODES | _ledger.ERROR_CODES | frozenset(
-    {"production_read_failed", "backup_label_unavailable"}
+    {"production_read_failed", "backup_label_unavailable",
+     # The restore test's migration rehearsal on the verified copy (restore_drill._rehearse):
+     # the restore itself passed, production was not touched (bfx-deploy restarts the bot).
+     "migration_rehearsal_failed"}
 )
 # The restore receipt's kind (the recurring restore test and the acceptance drill alike).
 LEDGER_KIND = "restore_ledger"

@@ -519,6 +519,26 @@ resources, then verifies the restored copy two ways:
    ledger capital reader for every (symbol, cell) of each scope's newest accepted basis,
    which must fold a basis (or report that the newest query was still pending at the
    restore point). It contacts no venue.
+3. **Migration rehearsal** (the restore test only, not the acceptance drill; ADR
+   `2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them`). The candidate is
+   the backend image whose `org.opencontainers.image.revision` label is the drill
+   checkout's own `HEAD` (repository `ghcr.io/will413028/bfx-funding-bot-backend`; bfx-deploy
+   pulled it by digest before the test, and keeps the deployed one). After steps 1–2 pass,
+   on a budget of its own (1200 s, of which `alembic upgrade head` gets 900 s like
+   production's; the RTO is already settled), the drill sets a per-run password for the
+   owner role `bfx` inside the isolated copy only (admin on the copy's socket, logging off),
+   runs the candidate's `alembic upgrade head` as that owner -- the role production's
+   `migrate.env` migrates with -- on the internal network with the production one-shot's
+   hardening, grants the verifier the tables the migration created, re-reads the copy's
+   bounds and runs the candidate's boot check on the migrated copy. Any failure here is
+   `migration_rehearsal_failed` (the journal names the bounded step:
+   `migration_failed`, `candidate_image_unavailable`, a boot code). Monthly, the candidate
+   is the deployed image itself and nothing migrates. The success receipt carries
+   `rehearsal` (revision, candidate digest, heads before and after, seconds); the failure
+   receipt carries `source_revision`, the rehearsed revision, because the monthly run and a
+   deploy's run write the same receipt path and bfx-deploy acts only on its own target's.
+   Before the test bfx-deploy removes local images other than the target's and the last
+   successful release's, so the label lookup is unambiguous.
 
 The receipt is `$HOME/bfx/dr-evidence/restore-ledger.json` (or `--output`;
 `kind: restore_ledger`, `restore_test: true`, with the per-scope bounds, per-table
@@ -534,7 +554,8 @@ checkout `/home/ubuntu/bfx-releases/current`. bfx-deploy starts
 whenever it is about to apply a migration or
 ship a change under `deploy/vm/pgbackrest/`, `deploy/vm/postgres/`,
 `docker-compose.bot.yml` or `docker-compose.dr.yml` (or when the diff cannot be
-read); a failure alerts and blocks that deploy. The test needs no config file of
+read); a failure alerts and blocks that deploy (a failed migration rehearsal before a
+migration starts the stopped bot again, [deploy runbook](deploy.md) §5). The test needs no config file of
 its own. `/home/ubuntu/bfx/restore-test.json` (the scope file of the retired prefix test)
 and `$HOME/bfx/dr-evidence/restore-prefix.json` are no longer read by anything since S1-8
 PR-D; the operator may delete them.

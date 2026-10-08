@@ -18,9 +18,11 @@ Mutations, each applied alone to deploy/vm/pgbackrest/ledger_digest.py and rever
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -375,6 +377,79 @@ def test_boot_check_role_cannot_write(clusters) -> None:
     with (psycopg.connect(url.render_as_string(hide_password=False), autocommit=True) as conn,
           pytest.raises(psycopg.errors.ReadOnlySqlTransaction)):
         conn.execute("UPDATE capital_command_clock SET revision = revision")
+
+
+# --------------------------------------------------------------------------- migration rehearsal
+
+
+def test_the_rehearsal_migrates_the_copy_as_its_owner_and_boots_the_candidate_on_it(
+    clusters, tmp_path: Path,
+) -> None:
+    """``RestoreDrill._rehearse`` against the restored clone, with only docker simulated: the
+    owner password SQL and the regrant run on PostgreSQL, the "candidate image" is this
+    checkout's own ``alembic upgrade head`` (over TCP, with the DATABASE_URL the drill wrote for
+    the migrator) and its boot check module. The copy is at head, so nothing migrates: the
+    monthly case, and every release's plumbing."""
+    restored, _ = clusters
+    url = make_url(restored)
+    owner = f"bfx_rehearsal_owner_{drill.secrets.token_hex(4)}"
+    resources = drill.build_restore_resources(
+        backup_label="20261001-031700F", target_time=None, run_id=drill._new_run_id(),
+        database_name=url.database)
+    resources = dataclasses.replace(resources, sql_admin_role=owner)
+    candidate = f"sha256:{'c' * 64}"
+    verifier_password = drill._new_password()
+    seen: list[tuple[str, ...]] = []
+
+    def runner(command: tuple[str, ...], *, input_text: str | None = None,
+               timeout: float | None = None, env: Any = None) -> subprocess.CompletedProcess[str]:
+        seen.append(command)
+        if command[:3] == ("docker", "image", "ls"):
+            return subprocess.CompletedProcess(
+                command, 0, f"{drill._commands.BACKEND_REPOSITORY}\t{candidate}\n", "")
+        if command[:2] == ("docker", "exec") and "-F" in command:  # bounds: psql -At, tabs
+            return subprocess.run(_psql(restored), input=input_text, capture_output=True,
+                                  text=True, check=False, timeout=120)
+        if command[:2] == ("docker", "exec"):  # the admin on the copy's socket
+            with psycopg.connect(_libpq(restored), autocommit=True) as conn:
+                conn.execute(input_text)
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[-3:] == ("/app/.venv/bin/alembic", "upgrade", "head"):
+            env_file = Path(command[command.index("--env-file") + 1])
+            [line] = env_file.read_text().splitlines()
+            target = line.removeprefix("DATABASE_URL=").replace(
+                f"@{resources.container_name}:5432/", f"@{url.host}:{url.port}/")
+            assert make_url(target).username == owner
+            return subprocess.run(
+                [sys.executable, "-m", "alembic", "upgrade", "head"], cwd=ROOT / "backend",
+                env={**os.environ, "DATABASE_URL": target}, capture_output=True, text=True,
+                check=False, timeout=300)
+        if command[-2:] == ("-m", drill._commands.BOOT_CHECK_MODULE):
+            assert command[-3] == candidate
+            return _boot_check(url.set(drivername="postgresql+asyncpg",
+                                       username=resources.verify_role,
+                                       password=verifier_password).render_as_string(
+                                           hide_password=False))
+        return subprocess.run(command, capture_output=True, text=True, check=False,
+                              timeout=timeout)  # git rev-parse HEAD of this checkout
+
+    _superuser(restored, f'CREATE ROLE "{owner}" LOGIN SUPERUSER')
+    migrator = drill._Migrator()
+    try:
+        rehearsal_drill = drill.RestoreDrill(command_runner=runner)
+        rehearsal_drill._deadline = drill.time.monotonic() + 600
+        rehearsal_drill._bootstrap_role(resources, verifier_password)
+        rehearsal = rehearsal_drill._rehearse(resources, tmp_path / "verifier.env", migrator)
+    finally:
+        _superuser(restored, f'DROP ROLE IF EXISTS "{owner}"')
+        if migrator.env_path is not None:  # the drill's cleanup unlinks it after a run
+            migrator.env_path.unlink(missing_ok=True)
+    head = list(_bounds(restored).migration_heads)
+    assert rehearsal["migration_heads_before"] == rehearsal["migration_heads_after"] == head
+    assert (rehearsal["candidate_image_digest"], rehearsal["boot_scopes"]) == (candidate, 1)
+    assert re.fullmatch(r"[0-9a-f]{40}", str(rehearsal["source_revision"]))
+    assert migrator.started and migrator.env_path is not None
+    assert any(command[-3:] == ("/app/.venv/bin/alembic", "upgrade", "head") for command in seen)
 
 
 def _stalled_read(production: str, *, statement_ms: int, transaction_ms: int,

@@ -641,6 +641,9 @@ W 取自還原副本，production 在 W 以內的 append-only ledger 列就是 b
 尾端；operator 的驗收演練（Halt 2、事故驗收）以 `--backup-label`（可加 `--target-time`）指定
 backup 與 PITR target，跑同一套驗證，receipt 為 `restore.json`（`restore_test: false`）。操作見
 [offsite DR](../docs/runbooks/offsite-dr.md#7-run-the-isolated-acceptance-drill)。
+`--restore-test` 驗證通過後再演練 migration（ADR 2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them）：
+候選＝label revision 等於 drill checkout HEAD 的 backend image，在隔離副本上以 owner role（密碼只在副本內設定）
+跑 `alembic upgrade head`，再跑候選 image 的 boot check；失敗為 `migration_rehearsal_failed`。
 backup/restore evidence 必須有 strict `observed_at_ms`，讀取時不得在未來且不得
 超過 900 seconds；missing、stale、ledger mismatch、egress 未斷開或 cleanup
 failure 一律是 `measured: false`，舊 green report 不得沿用。只有完成真實 R2
@@ -721,6 +724,8 @@ recreate 後查健康，失敗就回到前一個 digest，每次結果寫進 app
 有 pending migration、diff 讀不到、或改到 DR 路徑（`DR_TRIGGER_PATTERNS`：`deploy/vm/pgbackrest/**`、
 `deploy/vm/postgres/**`、`docker-compose.bot.yml`、`docker-compose.dr.yml`，寫死在執行中的工具裡，commit
 無法關掉自己的觸發）時，先跑該版本 DR 腳本的 isolated restore test；有 migration 時先停 bot 並備份。
+停 bot 之後任何失敗都維持停止，唯一例外是 restore test 的 receipt 為 `migration_rehearsal_failed`
+（備份可還原、prod schema 沒動）：重新啟動舊 bot。
 health wait：bot `/healthz` 300 s、webapi 120 s、frontend `127.0.0.1:3001` 120 s，再 60 s settle。
 已套用 migration 後失敗不回滾（舊碼未必能跑新 schema），停 bot、roll forward。
 部署工具注入 `BFX_IMAGE_DIGEST`／`BFX_SOURCE_REVISION`／`BFX_DEPLOYMENT_ID`：只用來標示每筆

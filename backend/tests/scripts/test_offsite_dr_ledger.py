@@ -36,6 +36,10 @@ DB_CONTAINER = f"bfx-dr-{RUN_ID.lower()}-db"
 LABEL_FULL = "20260927-031700F"
 LABEL_DIFF = "20260927-031700F_20261001-031700D"
 HEAD = "f6a7b8c9d0e1"
+NEXT_HEAD = "a1b2c3d4e5f6"
+REVISION = "c" * 40  # the drill checkout's HEAD: the release under test
+CURRENT_IMAGE = f"sha256:{'b' * 64}"  # bfx-bot:local, the running release
+CANDIDATE_IMAGE = f"sha256:{'c' * 64}"
 IMAGE_LABELS = {
     "org.bfx.postgresql.base-digest": "sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
     "org.bfx.pgbackrest.version": "2.59.1",
@@ -66,8 +70,9 @@ def clean_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _bounds_output(*, scope: str | None = None, epoch: str = "2\tledger", pending: bool = True,
-                   tables: tuple[str, ...] = ledger.LEDGER_TABLES, clock_behind: int = 0) -> str:
-    lines = [f"schema\t180000\t{HEAD}", *(f"table\t{name}" for name in tables),
+                   tables: tuple[str, ...] = ledger.LEDGER_TABLES, clock_behind: int = 0,
+                   head: str = HEAD) -> str:
+    lines = [f"schema\t180000\t{head}", *(f"table\t{name}" for name in tables),
              scope if scope is not None else f"scope\t{ACCOUNT}\tprod\t5\t5\t4\t3\t1\t7",
              *((f"pending\t{PENDING}",) if pending else ()), f"epoch\t{epoch}",
              f"inconsistent\tclock_behind\t{clock_behind}",
@@ -111,11 +116,11 @@ def _digests(*, production_rows: dict[str, list[str]] = ROWS, production_clock: 
     return bounds, restored, production
 
 
-def _boot(**scope: Any) -> str:
+def _boot(*, head: str = HEAD, **scope: Any) -> str:
     item = {"exchange_account_id": ACCOUNT, "deployment_environment": "prod", "basis_id": BASIS,
             "reads": [{"symbol": "fUST", "cell_id": "c1", "basis_id": BASIS,
                        "result": "available"}], **scope}
-    return json.dumps({"boot": {"schema_head": HEAD, "realm": "prod", "authority": "ledger",
+    return json.dumps({"boot": {"schema_head": head, "realm": "prod", "authority": "ledger",
                                 "scopes": [item]}}) + "\n"
 
 
@@ -369,24 +374,42 @@ def _info_json() -> str:
 
 
 class FakeDocker:
+    """The VM's docker for one drill. The restored copy sits at HEAD; the candidate image
+    (the backend image labelled with the drill checkout's revision) migrates it to
+    ``candidate_head`` -- HEAD itself, a no-op, unless a test names a newer one."""
+
     def __init__(self, *, boot: tuple[int, str] | None = None, info_status: int = 0,
                  production_rows: dict[str, list[str]] = ROWS, production_status: int = 0,
-                 production_stderr: str = "") -> None:
+                 production_stderr: str = "", candidate_head: str = HEAD,
+                 migration_status: int = 0, candidate_boot: tuple[int, str] | None = None,
+                 images: str | None = None) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.inputs: dict[tuple[str, ...], str] = {}
+        self.scripts: list[str] = []  # every stdin, in order (one admin argv runs several)
+        self.stdin: list[str | None] = []  # aligned with calls
         self.env_text = ""
+        self.migrator_env_text = ""
         self.boot = boot or (0, _boot())
         self.info_status = info_status
         self.production_rows = production_rows
         self.production_status = production_status
         self.production_stderr = production_stderr
+        self.copy_head = HEAD
+        self.candidate_head = candidate_head
+        self.migration_status = migration_status
+        self.candidate_boot = candidate_boot
+        self.images = images if images is not None else (
+            f"{commands.BACKEND_REPOSITORY}\t{CANDIDATE_IMAGE}\n"
+            f"ghcr.io/will413028/bfx-funding-bot-frontend\tsha256:{'f' * 64}\n")
 
     def __call__(self, command: tuple[str, ...], *, timeout: float | None = None,
                  input_text: str | None = None, env: dict[str, str] | None = None,
                  ) -> subprocess.CompletedProcess[str]:
         self.calls.append(command)
+        self.stdin.append(input_text)
         if input_text is not None:
             self.inputs[command] = input_text
+            self.scripts.append(input_text)
 
         def ok(stdout: str = "", code: int = 0) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(command, code, stdout, "")
@@ -394,7 +417,19 @@ class FakeDocker:
         if "pgbackrest" in command and "info" in command:
             return ok(_info_json(), self.info_status)
         if command[:4] == ("docker", "image", "inspect", "--format={{.Id}}"):
-            return ok(f"sha256:{'b' * 64}\n")
+            return ok(f"{CURRENT_IMAGE}\n")
+        if command[:1] == ("git",) and command[-2:] == ("rev-parse", "HEAD"):
+            return ok(f"{REVISION}\n")
+        if command[:3] == ("docker", "image", "ls"):
+            assert f"label=org.opencontainers.image.revision={REVISION}" in command
+            return ok(self.images)
+        if command[:2] == ("docker", "run") and command[-3:] == (
+                "/app/.venv/bin/alembic", "upgrade", "head"):
+            env_file = Path(command[command.index("--env-file") + 1])
+            self.migrator_env_text = env_file.read_text()
+            if self.migration_status == 0:
+                self.copy_head = self.candidate_head
+            return ok("", self.migration_status)
         if "--env-file" in command and command[:2] == ("docker", "compose"):
             self.env_text = Path(command[command.index("--env-file") + 1]).read_text()
             return ok()
@@ -409,21 +444,26 @@ class FakeDocker:
         if command[:4] == ("docker", "image", "inspect", "--format={{json .Config.Labels}}"):
             return ok(json.dumps(IMAGE_LABELS))
         if command[:2] == ("docker", "run") and command[-2:] == ("-m", commands.BOOT_CHECK_MODULE):
-            code, stdout = self.boot
+            if command[-3] == CANDIDATE_IMAGE:
+                code, stdout = self.candidate_boot or (0, _boot(head=self.copy_head))
+            else:
+                code, stdout = self.boot
             return ok(stdout, code)
         if command[:2] == ("docker", "exec") and input_text is not None:
             if "pg_is_in_recovery" in input_text:
                 return ok("f\n")
             if "SELECT 'scope'" in input_text:
                 assert DB_CONTAINER in command  # W comes from the restored copy only
-                return ok(_bounds_output())
+                return ok(_bounds_output(head=self.copy_head))
             return ok()
         return ok()
 
     def stream(self, command: tuple[str, ...], *, input_text: str, timeout: float,
                consume: Callable[[bytes], None]) -> tuple[int, str]:
         self.calls.append(command)
+        self.stdin.append(input_text)
         self.inputs[command] = input_text
+        self.scripts.append(input_text)
         restored = DB_CONTAINER in command
         rows = ROWS if restored else self.production_rows
         for line in _stream_lines(clock=7 if restored else 9, rows=rows, restored=restored):
@@ -432,6 +472,11 @@ class FakeDocker:
 
     def find(self, predicate: Callable[[tuple[str, ...]], bool]) -> tuple[str, ...]:
         return next(call for call in self.calls if predicate(call))
+
+    def at(self, predicate: Callable[[tuple[str, ...], str], bool]) -> int:
+        """The index of the first call whose argv and stdin match."""
+        return next(i for i, (call, text) in enumerate(zip(self.calls, self.stdin, strict=True))
+                    if predicate(call, text or ""))
 
 
 def _ledger_drill(tmp_path: Path, fake: FakeDocker, *, name: str = "restore-ledger.json") -> Any:
@@ -488,7 +533,7 @@ def test_ledger_drill_restores_the_newest_backup_and_compares_with_production(tm
     assert verifier[verifier.index("--network") + 1] == NET
     # The image's own entry: nothing is piped into the verifier.
     assert verifier not in fake.inputs
-    bootstrap = next(sql for sql in fake.inputs.values() if "CREATE ROLE" in sql)
+    bootstrap = next(sql for sql in fake.scripts if "CREATE ROLE" in sql)
     assert "ALL TABLES" not in bootstrap and "GRANT SELECT ON TABLE public.%I" in bootstrap
     assert "SET default_transaction_read_only = on" in bootstrap
 
@@ -497,11 +542,11 @@ def test_ledger_drill_restores_the_newest_backup_and_compares_with_production(tm
     script = fake.inputs[production]
     assert "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;" in script
     assert script.rstrip().endswith("ROLLBACK;") and "'#count'" not in script
-    restored_copy = fake.find(lambda c: c[:2] == ("docker", "exec") and DB_CONTAINER in c
-                              and "'#count'" in fake.inputs.get(c, ""))
+    restored_copy = fake.at(lambda c, sql: c[:2] == ("docker", "exec") and DB_CONTAINER in c
+                            and "'#count'" in sql)
     disconnect = fake.find(lambda c: c[:3] == ("docker", "network", "disconnect"))
     assert fake.calls.index(disconnect) < fake.calls.index(verifier) < fake.calls.index(production)
-    assert fake.calls.index(restored_copy) < fake.calls.index(production)
+    assert restored_copy < fake.calls.index(production)
     assert production[production.index("-U") + 1] == "bfx"
     assert "DATABASE-PASSWORD-SENTINEL" not in repr(fake.calls)
     # Every generated resource is cleaned up.
@@ -590,6 +635,170 @@ def test_unreadable_backup_catalog_fails_before_any_resource_exists(tmp_path: Pa
     assert report["error_code"] == "backup_label_unavailable"
     assert not any(c[:3] in {("docker", "network", "create"), ("docker", "volume", "create")}
                    for c in fake.calls)
+
+
+# --------------------------------------------------------------------------- migration rehearsal
+
+
+def _migrator(call: tuple[str, ...]) -> bool:
+    return call[:2] == ("docker", "run") and call[-3:] == ("/app/.venv/bin/alembic", "upgrade", "head")
+
+
+def _boot_with(image: str) -> Callable[[tuple[str, ...]], bool]:
+    return lambda call: (call[:2] == ("docker", "run") and call[-2:] == ("-m", commands.BOOT_CHECK_MODULE)
+                         and call[-3] == image)
+
+
+def _production_only_read(fake: FakeDocker) -> None:
+    """Production: the backup catalog and the one read-only ledger snapshot, nothing else."""
+    touching = [(call, text) for call, text in zip(fake.calls, fake.stdin, strict=True)
+                if "bfx-postgres" in call]
+    assert [call[5:8] for call, _ in touching if "pgbackrest" in call] == [
+        ("pgbackrest", "--stanza=bfx", "info")]
+    [(_, script)] = [(call, text) for call, text in touching if "psql" in call]
+    assert script is not None and "READ ONLY" in script and script.rstrip().endswith("ROLLBACK;")
+
+
+def test_the_restore_test_rehearses_the_candidates_migrations_on_the_verified_copy(
+    tmp_path: Path,
+) -> None:
+    """ADR 2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them (D7'): after the
+    restore is verified and the running image booted on it, the backend image of the drill's
+    own revision migrates the isolated copy as its owner and must boot on the result."""
+    fake = FakeDocker(candidate_head=NEXT_HEAD)
+    assert _ledger_drill(tmp_path, fake).run(drill_module.LedgerRequest()) == 0
+    report = json.loads((tmp_path / "restore-ledger.json").read_text())
+    rehearsal = report["rehearsal"]
+    assert {key: rehearsal[key] for key in rehearsal if key != "seconds"} == {
+        "source_revision": REVISION, "candidate_image_digest": CANDIDATE_IMAGE,
+        "migration_heads_before": [HEAD], "migration_heads_after": [NEXT_HEAD], "boot_scopes": 1}
+    assert rehearsal["seconds"] >= 0
+    # The restore's own receipt is unchanged: the copy as restored, the running image's check.
+    assert report["migration_heads"] == [HEAD] and report["verifier_image_digest"] == CURRENT_IMAGE
+
+    current_boot = fake.calls.index(fake.find(_boot_with(CURRENT_IMAGE)))
+    production = fake.calls.index(fake.find(_is_production))
+    owner = fake.at(lambda c, sql: DB_CONTAINER in c and 'ALTER ROLE "bfx" PASSWORD' in sql)
+    migration = fake.calls.index(fake.find(_migrator))
+    regrant = fake.at(lambda c, sql: DB_CONTAINER in c and "GRANT SELECT" in sql
+                      and "CREATE ROLE" not in sql)
+    candidate_boot = fake.calls.index(fake.find(_boot_with(CANDIDATE_IMAGE)))
+    assert current_boot < production < owner < migration < regrant < candidate_boot
+    # The owner's password is set in the copy with logging off, and travels only in a file.
+    owner_sql = fake.stdin[owner] or ""
+    assert owner_sql.index("SET log_statement = 'none'") < owner_sql.index("ALTER ROLE")
+    assert fake.migrator_env_text == (
+        f"DATABASE_URL=postgresql://bfx:DATABASE-PASSWORD-SENTINEL@{DB_CONTAINER}:5432/bfx\n")
+    assert "DATABASE-PASSWORD-SENTINEL" not in repr(fake.calls)
+    # Production's migration one-shot hardening, on the internal network only.
+    command = fake.find(_migrator)
+    assert command[command.index("--network") + 1] == NET
+    assert {"--read-only", "--cap-drop=ALL", "--pull=never", "--rm"} <= set(command)
+    assert command[-4] == CANDIDATE_IMAGE
+    _production_only_read(fake)
+    # The migrator's container and env file are cleaned up with the rest.
+    env_file = Path(command[command.index("--env-file") + 1])
+    assert not env_file.exists()
+    assert ("docker", "container", "rm", "--force", f"bfx-dr-{RUN_ID.lower()}-migrator") in fake.calls
+
+
+def test_the_installed_wrapper_accepts_a_receipt_with_a_rehearsal(tmp_path: Path) -> None:
+    """Old wrapper x new drill: R0 does not change bfx_restore_test.py, so this is the wrapper
+    every host has installed; the receipt's new key is one it ignores."""
+    wrapper = _load("offsite_dr_ledger_wrapper", ROOT / "deploy/vm/ops/bfx_restore_test.py")
+    assert _ledger_drill(tmp_path, FakeDocker(candidate_head=NEXT_HEAD)).run(
+        drill_module.LedgerRequest()) == 0
+    evidence_path = tmp_path / "restore-ledger.json"
+    observed = json.loads(evidence_path.read_text())["observed_at_ms"]
+    heartbeat = wrapper.heartbeat_from_evidence(evidence_path, now_ms=observed + 1000)
+    assert heartbeat["restore_observed_at_ms"] == observed
+
+
+@pytest.mark.parametrize(("fake", "journal"), [
+    (FakeDocker(candidate_head=NEXT_HEAD, migration_status=1), "migration_failed"),
+    (FakeDocker(candidate_head=NEXT_HEAD,
+                candidate_boot=(3, '{"error": "boot_schema_head_mismatch"}\n')),
+     "boot_schema_head_mismatch"),
+    (FakeDocker(candidate_head=NEXT_HEAD, candidate_boot=(0, _boot(head=HEAD))),
+     "boot_schema_head_mismatch"),
+    (FakeDocker(images=""), "candidate_image_unavailable"),
+    (FakeDocker(images=f"{commands.BACKEND_REPOSITORY}\t{CANDIDATE_IMAGE}\n"
+                       f"{commands.BACKEND_REPOSITORY}\t{CURRENT_IMAGE}\n"),
+     "candidate_image_unavailable"),
+    (FakeDocker(images=f"ghcr.io/will413028/bfx-funding-bot-frontend\t{CANDIDATE_IMAGE}\n"),
+     "candidate_image_unavailable"),
+])
+def test_a_failed_rehearsal_fails_the_restore_test_with_its_own_code(
+    tmp_path: Path, fake: FakeDocker, journal: str, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """bfx-deploy restarts the bot on this code only (prod untouched); the restore itself passed."""
+    assert _ledger_drill(tmp_path, fake).run(drill_module.LedgerRequest()) == 2
+    report = json.loads((tmp_path / "restore-ledger.json").read_text())
+    assert (report["measured"], report["error_code"]) == (False, "migration_rehearsal_failed")
+    # The rehearsed revision: bfx-deploy restarts the bot only for its own target's.
+    assert report["source_revision"] == REVISION
+    assert "rehearsal" not in report
+    assert f"migration_rehearsal_failed: {journal}" in capsys.readouterr().err
+    _production_only_read(fake)
+    assert any(c[:3] == ("docker", "volume", "rm") for c in fake.calls)
+    if any(_migrator(call) for call in fake.calls):
+        command = fake.find(_migrator)
+        assert not Path(command[command.index("--env-file") + 1]).exists()
+
+
+def test_an_unexpected_error_in_the_rehearsal_is_a_failed_rehearsal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never a measured receipt without the rehearsal behind it."""
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise KeyError("x")
+
+    monkeypatch.setattr(drill_module.RestoreDrill, "_write_migrator_env", boom)
+    fake = FakeDocker(candidate_head=NEXT_HEAD)
+    assert _ledger_drill(tmp_path, fake).run(drill_module.LedgerRequest()) == 2
+    report = json.loads((tmp_path / "restore-ledger.json").read_text())
+    assert (report["measured"], report["error_code"]) == (False, "migration_rehearsal_failed")
+    assert not any(_migrator(call) for call in fake.calls)
+
+
+def test_other_failures_name_no_revision(tmp_path: Path) -> None:
+    assert _ledger_drill(tmp_path, FakeDocker(production_status=3)).run(
+        drill_module.LedgerRequest()) == 2
+    assert "source_revision" not in json.loads((tmp_path / "restore-ledger.json").read_text())
+
+
+def test_a_candidate_equal_to_the_running_image_rehearses_nothing(tmp_path: Path) -> None:
+    """The monthly restore test (`current`): the deployed release is its own candidate."""
+    fake = FakeDocker(images=f"{commands.BACKEND_REPOSITORY}\t{CURRENT_IMAGE}\n"
+                             f"bfx-bot\t{CURRENT_IMAGE}\n")
+    assert _ledger_drill(tmp_path, fake).run(drill_module.LedgerRequest()) == 0
+    rehearsal = json.loads((tmp_path / "restore-ledger.json").read_text())["rehearsal"]
+    assert rehearsal["candidate_image_digest"] == CURRENT_IMAGE
+    assert rehearsal["migration_heads_before"] == rehearsal["migration_heads_after"] == [HEAD]
+
+
+def test_the_acceptance_drill_does_not_rehearse(tmp_path: Path) -> None:
+    fake = FakeDocker(candidate_head=NEXT_HEAD)
+    request = drill_module.LedgerRequest(backup_label=LABEL_FULL)
+    assert _ledger_drill(tmp_path, fake, name="acceptance.json").run(request) == 0
+    assert "rehearsal" not in json.loads((tmp_path / "acceptance.json").read_text())
+    assert not any(_migrator(call) for call in fake.calls)
+    assert not any(c[:3] == ("docker", "image", "ls") for c in fake.calls)
+
+
+def test_the_migrator_runs_on_the_isolated_network_with_production_hardening() -> None:
+    plan = commands.build_restore_resources(backup_label=LABEL_FULL, target_time=None,
+                                            run_id=RUN_ID, database_name="bfx")
+    command = commands.migrator_command(plan, image=CANDIDATE_IMAGE, env_path=Path("/tmp/m.env"))
+    assert command[:5] == ("docker", "run", "--rm", "--name", plan.migrator_container_name)
+    assert plan.cleanup_commands[5] == ("docker", "container", "rm", "--force",
+                                        plan.migrator_container_name)
+    for bad in ({"image": "bfx-bot:local", "env_path": Path("/tmp/m.env")},
+                {"image": CANDIDATE_IMAGE, "env_path": Path("m.env")}):
+        with pytest.raises(commands.RestoreInputError):
+            commands.migrator_command(plan, **bad)
+    with pytest.raises(commands.RestoreInputError):
+        commands.candidate_images_command("main")
 
 
 def test_bootstrap_grants_only_the_verifier_tables() -> None:
