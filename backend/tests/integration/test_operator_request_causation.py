@@ -327,7 +327,10 @@ def test_the_previous_web_api_still_reads_what_it_maps(head) -> None:
 
 
 def _history(conn) -> dict[str, object]:
-    """Operator history with distinct clock reads for every row, on the revision before."""
+    """Operator history with distinct clock reads for every row, on the revision before.
+
+    The worker reads its clock for ``processed_at_ms`` before it writes the trading state, so
+    the state a request wrote is never older than its processing (here 1 ms or more later)."""
     ids: dict[str, object] = {}
 
     def applied(request: str, state_id: int, processed: int) -> None:
@@ -338,18 +341,18 @@ def _history(conn) -> dict[str, object]:
     # A kill writes its HALTED; its cancel-all covers two currencies.
     ids["k1"] = _trading(conn, action="kill", reason="a", created=90)
     ids["s1"] = _state(conn, reason="kill: a", at=100)
-    applied(ids["k1"], ids["s1"], 105)
+    applied(ids["k1"], ids["s1"], 99)
     ids["k1_ust"] = _audit(conn, state_id=ids["s1"], actor="operator", currency="UST", at=106)
     ids["k1_usd"] = _audit(conn, state_id=ids["s1"], actor="operator", currency="USD", at=108)
     # A resume.
     ids["r1"] = _trading(conn, reason="r", created=140)
     ids["s2"] = _state(conn, state="ACTIVE", reason="resumed: r", at=150)
-    applied(ids["r1"], ids["s2"], 155)
+    applied(ids["r1"], ids["s2"], 149)
     # An automatic halt, then a kill over it (an operator halt over an automatic one is written).
     ids["s3"] = _state(conn, cause="auto", actor="auto", reason="loss", at=160)
     ids["k4"] = _trading(conn, action="kill", reason="b", created=165)
     ids["s4"] = _state(conn, reason="kill: b", at=170)
-    applied(ids["k4"], ids["s4"], 175)
+    applied(ids["k4"], ids["s4"], 169)
     ids["k4_ust"] = _audit(conn, state_id=ids["s4"], actor="operator", currency="UST", at=176)
     # The same kill asked again: it restates s4 and retries the cancel-all.
     ids["k2"] = _trading(conn, action="kill", reason="b", created=180)
@@ -358,7 +361,7 @@ def _history(conn) -> dict[str, object]:
     # Resume, then /admin/halt, then a kill that restates it.
     ids["r2"] = _trading(conn, reason="q", created=188)
     ids["s5a"] = _state(conn, state="ACTIVE", reason="resumed: q", at=190)
-    applied(ids["r2"], ids["s5a"], 195)
+    applied(ids["r2"], ids["s5a"], 189)
     ids["s5"] = _state(conn, actor="admin-api", reason="manual", at=200)
     ids["admin_ust"] = _audit(conn, state_id=ids["s5"], actor="admin-api", currency="UST", at=201)
     ids["k3"] = _trading(conn, action="kill", reason="c", created=205)
@@ -368,7 +371,7 @@ def _history(conn) -> dict[str, object]:
     # kill, and the kill that restates it wrote nothing.
     ids["r3"] = _trading(conn, reason="z", created=212)
     ids["s6"] = _state(conn, state="ACTIVE", reason="resumed: z", at=214)
-    applied(ids["r3"], ids["s6"], 216)
+    applied(ids["r3"], ids["s6"], 213)
     ids["s7"] = _state(conn, reason="by hand", at=218)
     ids["k6"] = _trading(conn, action="kill", reason="d", created=219)
     applied(ids["k6"], ids["s7"], 221)

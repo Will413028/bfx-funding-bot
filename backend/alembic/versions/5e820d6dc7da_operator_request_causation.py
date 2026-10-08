@@ -34,7 +34,7 @@ environment and subject, and at most one trading state or revision names a reque
   in the kill's window (its ``processed_at_ms`` up to the scope's next applied kill);
 * postconditions, counted independently of the back-fill: a revision's typed column equals
   its ``source.request_id``; matching operator rows equal the trading rows that carry a
-  request, and each was written between its request's creation and processing; an attempt's
+  request, and none is older than its request's processing; an attempt's
   rows agree on their request; the three append-only triggers are enabled;
 * the request tables' guards drop their list of immutable columns: the runtime roles' column
   grants keep them (asserted here); the transition rule stays (``state`` leaves
@@ -271,12 +271,12 @@ POSTCONDITIONS: tuple[tuple[str, str], ...] = (
     ("operator rows written by an applied request, minus trading rows carrying a request",
      f"SELECT (SELECT count(DISTINCT s.id) {_TRADING_MATCH}) - "
      "(SELECT count(*) FROM trading_state WHERE operator_request_id IS NOT NULL)"),
-    # The writer wrote its row while it was being applied; a request that restated the row
-    # was created after it (one kill and one other request may wait at a time).
-    ("trading row outside its request's creation-to-processing interval",
+    # The worker reads its clock for processed_at_ms, then again for the row it writes
+    # (operator_requests._settle, then trading_control._decide), so the writer's row is no
+    # older than its processing. A request that only restated the row was processed after it.
+    ("trading row older than its request's processing",
      "SELECT count(*) FROM trading_state s JOIN trading_control_requests r "
-     "ON r.request_id = s.operator_request_id "
-     "WHERE NOT (r.created_at_ms <= s.created_at_ms AND s.created_at_ms <= r.processed_at_ms)"),
+     "ON r.request_id = s.operator_request_id WHERE s.created_at_ms < r.processed_at_ms"),
     ("cancel-all attempt whose rows name different requests",
      "SELECT count(*) FROM (SELECT attempt_id FROM funding_cancel_all_audit GROUP BY attempt_id "
      "HAVING count(DISTINCT operator_request_id) > 1 "

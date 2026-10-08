@@ -61,7 +61,7 @@ prior state：同日稍早的 [2026-10-08-operator-requests-insert-only-with-ins
 
 - 實作分兩個 release，第一個部署成功後才 merge 第二個；計畫在本機 phase plan（gitignored）步驟 9、10、12。
 - 未部署的 R1 migration `7daffbb42a81` 不出貨；新 migration 接在 `8ac3b44460fc` 之後。
-- trading 歷史列的配對鍵：請求的 `trading_state_id` 指到的列，且 `cause='operator'`、`actor` 等於 `requested_by`、`reason` 等於 `'kill: '`／`'resumed: '` 加請求的 reason；同一列有多筆符合時（同一操作者以相同 reason 重送 kill）取 `processed_at_ms` 最早者，其餘是 restate。後置斷言獨立檢查被選中的請求在自己的建立與處理時間之間寫下該列。
+- trading 歷史列的配對鍵：請求的 `trading_state_id` 指到的列，且 `cause='operator'`、`actor` 等於 `requested_by`、`reason` 等於 `'kill: '`／`'resumed: '` 加請求的 reason；同一列有多筆符合時（同一操作者以相同 reason 重送 kill）取 `processed_at_ms` 最早者，其餘是 restate。後置斷言獨立檢查被選中的請求所連的列不早於它的 `processed_at_ms`（worker 先讀時鐘記處理時間、再讀時鐘寫列；restate 的請求在該列之後才處理）。
 - 收尾時改寫 `backend/ARCHITECTURE.md` §7（分支上的 outcome 段落描述作廢）。
 
 ## Invariants
