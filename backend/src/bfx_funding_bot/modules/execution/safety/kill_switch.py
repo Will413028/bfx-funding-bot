@@ -132,7 +132,8 @@ class KillSwitch:
         self._clock = clock or (lambda: int(time.time() * 1000))
 
     async def engage(self, *, cause: str, actor: str, reason: str,
-                     when_already_halted: str = "retry") -> KillResult:
+                     when_already_halted: str = "retry",
+                     operator_request_id: UUID | None = None) -> KillResult:
         """Write HALTED, then cancel every funding offer at the venue.
 
         ``when_already_halted``: ``"retry"`` (an operator's /admin/halt) re-runs
@@ -141,6 +142,11 @@ class KillSwitch:
         nothing more when HALTED was already in force, so a condition that
         persists across reconcile ticks does not call the venue or write audit
         rows every tick; only the transition into HALTED does.
+
+        ``operator_request_id``: the kill request (``trading_control_requests``)
+        this cancel-all carries out, recorded on every audit row; None for
+        /admin/halt and automatic protections. The HALTED it restates was
+        written, and names the request, in the request's own transaction.
         """
         if cause not in KILL_CAUSES:
             raise ValueError(f"cause {cause!r} cannot halt trading")
@@ -168,12 +174,14 @@ class KillSwitch:
         outcomes: list[CancelAllOutcome] = []
         if skip is not None:
             for currency in currencies:
-                outcomes.append(await self._record_only(halted, currency, actor, "skipped", skip))
+                outcomes.append(await self._record_only(halted, currency, actor, "skipped", skip,
+                                                        operator_request_id))
         else:
             async with self._quiesced() as quiet:
                 note = None if quiet else "in_flight_command_not_quiesced"
                 for currency in currencies:
-                    outcomes.append(await self._cancel_all(halted, currency, actor, note))
+                    outcomes.append(await self._cancel_all(halted, currency, actor, note,
+                                                           operator_request_id))
         result = KillResult(state=halted, state_changed=transition.changed,
                             cancel_all=tuple(outcomes), scope_error=scope_error)
         level = logging.WARNING if result.complete else logging.CRITICAL
@@ -227,10 +235,11 @@ class KillSwitch:
         return tuple(sorted(currencies)), error
 
     async def _cancel_all(self, halted: TradingState, currency: str, actor: str,
-                          note: str | None) -> CancelAllOutcome:
+                          note: str | None, request: UUID | None) -> CancelAllOutcome:
         assert self._venue is not None
         attempt = uuid4()
-        requested = await self._append(halted, attempt, currency, "requested", actor, None, None)
+        requested = await self._append(halted, attempt, currency, "requested", actor, None, None,
+                                       request)
         detail: str | None
         status: str | None
         try:
@@ -246,19 +255,21 @@ class KillSwitch:
                 self._ctx.credentials.api_key, self._ctx.credentials.api_secret)) if answer.text else None
         if note is not None:
             detail = _bounded(f"{note}; {detail}" if detail else note)
-        recorded = await self._append(halted, attempt, currency, phase, actor, status, detail)
+        recorded = await self._append(halted, attempt, currency, phase, actor, status, detail,
+                                      request)
         return CancelAllOutcome(currency=currency, phase=phase, detail=detail, venue_status=status,
                                 attempt_id=attempt, recorded=requested and recorded)
 
     async def _record_only(self, halted: TradingState, currency: str, actor: str,
-                           phase: str, detail: str) -> CancelAllOutcome:
+                           phase: str, detail: str, request: UUID | None) -> CancelAllOutcome:
         attempt = uuid4()
-        recorded = await self._append(halted, attempt, currency, phase, actor, None, detail)
+        recorded = await self._append(halted, attempt, currency, phase, actor, None, detail, request)
         return CancelAllOutcome(currency=currency, phase=phase, detail=detail,
                                 attempt_id=attempt, recorded=recorded)
 
     async def _append(self, halted: TradingState, attempt: UUID, currency: str, phase: str,
-                      actor: str, venue_status: str | None, detail: str | None) -> bool:
+                      actor: str, venue_status: str | None, detail: str | None,
+                      request: UUID | None) -> bool:
         """Record one phase. A failed audit write never stops the kill itself."""
         try:
             async with self._sf.begin() as session:
@@ -273,6 +284,7 @@ class KillSwitch:
                     detail=detail,
                     actor=actor,
                     occurred_at_ms=self._clock(),
+                    operator_request_id=request,
                 ))
             return True
         except Exception:

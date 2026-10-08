@@ -94,10 +94,13 @@ async def test_disable_then_enable_append_one_revision_each(migrated_db):
     assert after.policy.envelope == before.policy.envelope
     assert after.policy.max_offer_amount == before.policy.max_offer_amount
     row = await row_of(factory, disable)
-    assert (row.state, row.policy_revision_id) == ("applied", after.revision_id)
+    assert row.state == "applied"
     assert row.outcome_reason == "disabled (revision 2)"
     async with factory() as session:
-        source = (await session.get(CapitalPolicyRevisionRow, after.revision_id)).source
+        written = await session.get(CapitalPolicyRevisionRow, after.revision_id)
+    # The revision names the request: typed, and as audit text in its source.
+    assert written.operator_request_id == disable
+    source = written.source
     assert source["request_id"] == str(disable) and source["requested_by"] == "operator"
     assert source["changes"] == {"enabled": "False"} and "amendment_digest" in source
 
@@ -115,9 +118,11 @@ async def test_asking_for_the_state_in_force_writes_no_revision(migrated_db):
     again = await request(factory, account, "disable")
     assert await worker(factory, account).process(again) == "applied"
     row = await row_of(factory, again)
-    assert (row.outcome_reason, row.policy_revision_id) == ("unchanged: already disabled",
-                                                            current.revision_id)
+    assert row.outcome_reason == "unchanged: already disabled"
     assert (await applied(factory, account)).revision == current.revision
+    async with factory() as session:  # nothing names a request that changed nothing
+        named = (await session.get(CapitalPolicyRevisionRow, current.revision_id)).operator_request_id
+    assert named is None
 
 
 @pytest.mark.asyncio
@@ -145,7 +150,7 @@ async def test_refusals_leave_the_policy_as_it_was(migrated_db, seeded, symbol, 
     request_id = await request(factory, account, action, symbol=symbol, by=by)
     assert await worker(factory, account).process(request_id) == "rejected"
     row = await row_of(factory, request_id)
-    assert (row.outcome_reason, row.policy_revision_id) == (code, None)
+    assert row.outcome_reason == code
     assert await applied(factory, account, seeded) == before
 
 

@@ -6,7 +6,9 @@ flag is the everyday stop. The web API only inserts an ``enable`` or
 the :class:`CapitalPolicyRequestWorker` applies it under the account lock after
 re-checking the operator, through the amendment path
 (``accounts.capital_amendment`` → the ``PolicyStore`` of the capital authority in force), and
-records the revision in force on the row.
+records one outcome on the row; the revision it appends names the request
+(``capital_policy_revisions.operator_request_id``). An ``unchanged`` request
+appends nothing.
 
 What follows a disable is not done here: ``DeploymentReconciler._pull_if_stopped``
 reads the applied policy every tick, plans nothing for a disabled currency and
@@ -93,23 +95,20 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
                                                 scope_lock=self.scope_lock, symbol=row.symbol,
                                                 changes=changes, apply_digest=None)
             if report["status"] == "unchanged":
-                current = await self.policy_store.read_applied(session, symbol=row.symbol)
-                return Outcome(APPLIED, f"unchanged: already {'enabled' if enabled else 'disabled'}",
-                               columns={"policy_revision_id": current.revision_id})
+                return Outcome(APPLIED, f"unchanged: already {'enabled' if enabled else 'disabled'}")
             written = await amend_capital_policy(
                 session, store=self.policy_store, scope_lock=self.scope_lock, symbol=row.symbol,
                 changes=changes,
                 apply_digest=report["amendment_digest"],
-                origin={"request_id": str(row.request_id), "requested_by": row.requested_by,
-                        "reason": row.reason})
+                origin={"requested_by": row.requested_by, "reason": row.reason},
+                operator_request_id=row.request_id)
         except PolicyRefused as exc:
             code = str(exc)
             raise RequestRejected(code, kind=_REJECTION_KINDS.get(code, "conflict")) from exc
         note = "enabled" if enabled else "disabled"
         if enabled and "envelope" not in written["new_policy"]:
             note = "enabled; envelope unset: offers are refused until it is set"
-        return Outcome(APPLIED, f"{note} (revision {written['new_revision']})",
-                       columns={"policy_revision_id": UUID(written["new_revision_id"])})
+        return Outcome(APPLIED, f"{note} (revision {written['new_revision']})")
 
     async def committed(self, row: CapitalPolicyRequestRow, outcome: Outcome) -> None:
         fields: dict[str, Any] = {"request_id": str(row.request_id), "symbol": row.symbol,

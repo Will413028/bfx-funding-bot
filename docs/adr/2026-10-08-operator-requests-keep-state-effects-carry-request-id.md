@@ -35,10 +35,10 @@ prior state：同日稍早的 [2026-10-08-operator-requests-insert-only-with-ins
 
 - **D8 = 取代 outcome ADR 的 D1、D2、D4（含 Amendment）、D5、D6**：採 E′。
   - 請求欄位不可變由 column grant 保證（runtime role）；不列欄位的 BEFORE UPDATE trigger 拒絕 `OLD.state <> 'requested'` 與 `NEW.state = 'requested'`（含 owner）。
-  - 單一 pending 維持四個既有 partial unique index；`insert_request` 只把 23505 且 constraint 名屬於 model `PENDING_CONSTRAINTS` 者當成 pending（outcome ADR 的這部分保留，名稱現在對應真的 index）。
-  - `trading_state`、`capital_policy_revisions` 加 `operator_request_id uuid NULL`；trading 以 `(operator_request_id, exchange_account_id, deployment_environment)`、capital 再加 `symbol`、journal 以 generated `subject_id = coalesce(attempt_id, quarantine_id)` 加入 FK，指向請求表對應的 UNIQUE；效果表 partial `UNIQUE (operator_request_id)`。
+  - 單一 pending 維持四個既有 partial unique index；`insert_request` 以 `INSERT … ON CONFLICT (<該 index 的欄位>) WHERE <其 predicate> DO NOTHING` 判斷 pending 已佔，其餘違規照常拋出（取代 outcome ADR 的 constraint 名比對：那是 trigger 擲合成名稱時才需要的做法）。
+  - `trading_state`、`capital_policy_revisions` 加 `operator_request_id uuid NULL`；trading 以 `(operator_request_id, exchange_account_id, deployment_environment)`、capital 再加 `symbol`、journal 以兩條 MATCH SIMPLE 複合 FK（`attempt_id`、`quarantine_id` 各一，`ck_execution_resolution_subject` 保證恰一條生效）指向請求表 `(request_id, …, uncertainty_id)`；以上都指向請求表對應的 UNIQUE；trading、capital 效果表 partial `UNIQUE (operator_request_id)`。
   - G1 改讀 typed `operator_request_id`；`source->>'request_id'` 只留作稽核文字。
-  - 請求表的 `trading_state_id`、`policy_revision_id` 先雙寫、再停寫並 unmap、最後 DROP。
+  - 請求表的 `trading_state_id`、`policy_revision_id` 在效果帶原因 ID 的同一個 release 停寫並 unmap，下一個 release DROP。
 - **D9 請求表產物欄不外露、cancel-all 也帶原因 ID**：`trading_state_id`／`policy_revision_id` 從 API 回應與前端型別移除（前端正式程式無人讀），不改由效果側取值；`funding_cancel_all_audit` 加 `operator_request_id`（複合 scope FK，`/admin/halt` 與 auto halt 為 NULL），kill 觸發 cancel-all 時寫入。
 - 保留 outcome ADR 的其餘部分：`failed` 為終態不重試、不做 idempotency key、空白 reason 回 422、`insert_request` 其餘 IntegrityError 往上拋。
 
@@ -48,20 +48,20 @@ prior state：同日稍早的 [2026-10-08-operator-requests-insert-only-with-ins
 - **效果 → 請求而非 outcome → 產物（推翻 D2）**：D2 為了避免在 migration 裡暫停 append-only 保護而選反方向，結果是三表方向不一致、capital 有 typed FK 與 JSON 兩份連結。效果帶原因 ID 才能用複合 FK 一次保證「同 scope、同對象、一個請求至多一個效果」。代價：三張效果表的歷史列要由 owner 在 migration 交易內暫停 append-only trigger 回填，前後斷言檢查；trading 一列可能對到多筆請求，由前置斷言擋下歧義。
 - **不選 A**：只補檢查不改方向，G1 的 JSON 授權鍵與 trigger 版 single-pending 都留下來，是 Will 明說不要的技術債。
 - **D9 移除而非保留欄位改取效果側**：保留會讓重送 kill 與 capital `unchanged` 的值悄悄變 NULL；移除欄位之後再補是 breaking、新增不是（[Google AIP-180](https://google.aip.dev/180)），所以趁沒有外部使用者時拿掉沒人讀的內部 FK，需要時以新增欄位補連結。重送 kill 不寫新 trading_state，卻在 commit 後另一筆交易重跑 venue cancel-all，所以 cancel-all 的稽核列要自己帶原因 ID，否則 DROP 請求產物欄後這條連結會斷。代價：capital `unchanged` 當時生效的 revision 在 DROP 後推不回來（revision 無時間欄），`unchanged` 的 reason 已表達無變化，接受。
-- release 數由四個降為三個（expand＋雙寫、停寫＋unmap、DROP），只受相容性窗口約束。
+- release 數由四個降為兩個（expand＋停寫＋unmap、DROP），只受相容性窗口約束：上一版 webapi 在窗口內只 SELECT 產物欄，所以 DROP 晚一個 release；這兩欄只有 bot 寫，而舊 bot 在新 schema 上拒絕開機，雙寫期沒有讀者也沒有回滾用途。
 
 ## Expected Outcome
 
 - 跨 scope、跨對象的效果列被 FK 拒絕；同一請求第二筆效果被 partial UNIQUE 拒絕。
 - 終態請求再 UPDATE 被拒（含 owner）；bot 改請求欄位被 grant 拒絕。
 - 兩個 connection 同時 INSERT 同對象請求只成功一筆，由原生 index 擲 23505，不依隔離等級。
-- `backend/src` 與 R2 之後的 migration 不再讀 `source->>'request_id'`。
+- `backend/src` 與本 ADR 第一個 release 之後的 migration 不再讀 `source->>'request_id'`（G1 起改讀 typed 欄）。
 
 ## Followup
 
-- 實作分三個 release，每個部署成功後才 merge 下一個；計畫在本機 phase plan（gitignored）步驟 9–12。
+- 實作分兩個 release，第一個部署成功後才 merge 第二個；計畫在本機 phase plan（gitignored）步驟 9、10、12。
 - 未部署的 R1 migration `7daffbb42a81` 不出貨；新 migration 接在 `8ac3b44460fc` 之後。
-- trading 歷史列的配對鍵在實作時讀碼決定，歧義由前置斷言擋下。
+- trading 歷史列的配對鍵：請求的 `trading_state_id` 指到的列，且 `cause='operator'`、`actor` 等於 `requested_by`、`reason` 等於 `'kill: '`／`'resumed: '` 加請求的 reason；同一列有多筆符合時（同一操作者以相同 reason 重送 kill）取 `processed_at_ms` 最早者，其餘是 restate。後置斷言獨立檢查被選中的請求在自己的建立與處理時間之間寫下該列。
 - 收尾時改寫 `backend/ARCHITECTURE.md` §7（分支上的 outcome 段落描述作廢）。
 
 ## Invariants
@@ -76,6 +76,8 @@ prior state：同日稍早的 [2026-10-08-operator-requests-insert-only-with-ins
 - 出現第四種 operator 請求，或三種請求的授權規則收斂 → 重評併表。
 
 ## Review Notes
+
+- 2026-10-08 實作前 design-review（獨立 agent）後修訂，ADR 尚未出貨：release 由三個併為兩個（Will 決定）；journal 改用兩條 MATCH SIMPLE FK 取代 generated 欄；`insert_request` 改用 `ON CONFLICT`；trading 配對的 tie-break 寫明。
 
 ## Related
 

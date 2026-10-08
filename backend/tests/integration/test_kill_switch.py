@@ -308,3 +308,30 @@ async def test_an_automatic_kill_skips_the_venue_when_already_halted_but_an_oper
     # written, so no automatic resume can lift it, and the venue part runs.
     assert retried.state_changed and retried.state.cause == "operator"
     assert len(venue.calls) == 6 and len(await audit(factory)) == 12
+
+
+@pytest.mark.asyncio
+async def test_a_kill_request_names_itself_on_every_cancel_all_row_and_admin_halt_names_none(capital_db, gate_stack):  # noqa: F811
+    """A re-sent kill writes no new trading state; its audit rows are its only link to the
+    venue call (ADR 2026-10-08 D9). The foreign key keeps the request in the audit's scope."""
+    from uuid import uuid4
+
+    from sqlalchemy import insert
+
+    from bfx_funding_bot.modules.execution.safety.tables import TradingControlRequestRow
+
+    factory, account = capital_db
+    _, ctx, trading, venue = await exposed_account(factory, account, gate_stack)
+    request_id = uuid4()
+    async with factory.begin() as session:
+        await session.execute(insert(TradingControlRequestRow).values(
+            request_id=request_id, exchange_account_id=account, deployment_environment="ci",
+            action="kill", reason="stop", requested_by="operator", created_at_ms=1))
+    switch = kill_switch(factory, trading, ctx, venue, stack=gate_stack)
+    await switch.engage(cause="operator", actor="operator", reason="kill: stop",
+                        operator_request_id=request_id)
+    await switch.engage(cause="operator", actor="admin-api", reason="retry by hand")
+    async with factory() as session:
+        named = [(row.actor, row.operator_request_id) for row in await session.scalars(
+            select(FundingCancelAllAuditRow).order_by(FundingCancelAllAuditRow.id))]
+    assert named == [("operator", request_id)] * 6 + [("admin-api", None)] * 6

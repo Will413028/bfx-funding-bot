@@ -255,7 +255,8 @@ def test_request_is_immutable_and_its_outcome_terminal(ledger_db) -> None:  # no
         with engine.begin() as conn, pytest.raises(Exception, match="permission denied"):
             conn.exec_driver_sql(f"SET LOCAL ROLE {role}")
             conn.exec_driver_sql(sql)
-    with engine.begin() as conn, pytest.raises(Exception, match="immutable uncertainty resolution request"):
+    # The owner, whom no grant limits: its only UPDATE is the transition out of ``requested``.
+    with engine.begin() as conn, pytest.raises(Exception, match="invalid uncertainty resolution transition"):
         conn.exec_driver_sql("UPDATE uncertainty_resolution_requests SET reason='rewritten'")
     with engine.begin() as conn, pytest.raises(Exception, match="uq_uncertainty_resolution_requests_pending"):
         conn.execute(text(_REQUEST_SQL), {"id": second, "u": uncertainty})

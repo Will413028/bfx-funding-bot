@@ -210,12 +210,14 @@ async def check_transition(
 
 async def append_transition(
     session: AsyncSession, *, account_id: UUID, environment: str, state: str, cause: str,
-    actor: str, reason: str, now_ms: int,
+    actor: str, reason: str, now_ms: int, operator_request_id: UUID | None = None,
 ) -> TransitionResult:
     """Validate and append one transition inside the caller's transaction.
 
     The caller must already hold the account/environment transaction lock, so
-    the state read here is the one the new row supersedes.
+    the state read here is the one the new row supersedes. ``operator_request_id``
+    names the operator request this transition applies (``trading_control_requests``,
+    same scope); a restated decision writes nothing and so names nothing.
     """
     current = await read_current(session, account_id=account_id, environment=environment)
     if restates(current, state=state, cause=cause):
@@ -235,6 +237,7 @@ async def append_transition(
         actor=actor,
         reason=reason,
         created_at_ms=now_ms,
+        operator_request_id=operator_request_id,
     )
     session.add(row)
     try:

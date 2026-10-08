@@ -8,7 +8,7 @@ transaction and holds the scope lock across the read it bases ``expected_revisio
 from __future__ import annotations
 
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,7 +28,7 @@ POLICY_SYMBOLS = frozenset({"fUST", "fUSD"})
 
 async def write_policy_revision(
     session: AsyncSession, scope: Scope, *, symbol: str, policy: CapitalPolicy,
-    expected_revision: int, source: dict[str, Any],
+    expected_revision: int, source: dict[str, Any], operator_request_id: UUID | None = None,
 ) -> AppliedPolicy:
     """Append revision ``expected_revision + 1`` and move the head, or raise ``PolicyRefused``.
 
@@ -50,6 +50,7 @@ async def write_policy_revision(
         id=uuid4(), exchange_account_id=account, deployment_environment=environment,
         symbol=symbol, revision=version + 1, schema_version=policy_schema_version(policy),
         policy=payload, digest=policy_digest(payload), source=source,
+        operator_request_id=operator_request_id,
     )
     session.add(row)
     await session.flush()

@@ -503,7 +503,8 @@ def _unrecordable(monkeypatch, request_id: str) -> None:
 
     async def apply(self, session, row, prepared):
         if str(row.request_id) == request_id:
-            return Outcome(APPLIED, columns={"state": None})  # NOT NULL: the flush fails
+            # An applied resolution carries no reason (ck_..._outcome_shape): the flush fails.
+            return Outcome(APPLIED, "unrecordable")
         return await original(self, session, row, prepared)
 
     monkeypatch.setattr(UncertaintyResolutionWorker, "apply", apply)

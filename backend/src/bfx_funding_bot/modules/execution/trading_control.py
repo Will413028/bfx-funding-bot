@@ -3,7 +3,9 @@
 Lending envelope ADR 2026-09-25 D4: the web API only inserts a ``resume`` or
 ``kill`` request (the operator-request outbox); the
 :class:`TradingControlWorker` applies it under the account lock after
-re-checking the operator, and records one outcome on the row. A resume ends a
+re-checking the operator, and records one outcome on the row; the trading
+state it writes and the kill's cancel-all audit name the request
+(``operator_request_id``). A resume ends a
 HALTED (whoever caused it) and never starts a probation: every offer is bounded
 by the CapitalPolicy envelope instead. A kill writes HALTED and, after that
 commit, runs the venue cancel-all; it rejects every request still waiting to
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Protocol
+from uuid import UUID
 
 from sqlalchemy import case, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,7 +54,8 @@ TRADING_CONTROL_FAILED = "trading_control_failed"
 
 class _Kill(Protocol):
     async def engage(self, *, cause: str, actor: str, reason: str,
-                     when_already_halted: str = "retry") -> Any: ...
+                     when_already_halted: str = "retry",
+                     operator_request_id: UUID | None = None) -> Any: ...
 
 
 class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]):
@@ -79,8 +83,7 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
             result, note = await self._decide(session, row)
         except IllegalTradingTransition as exc:
             raise RequestRejected(f"illegal_transition: {exc}") from exc
-        return Outcome(APPLIED, note, columns={"trading_state_id": result.state.id},
-                       detail=result)
+        return Outcome(APPLIED, note, detail=result)
 
     async def committed(self, row: TradingControlRequestRow, outcome: Outcome) -> None:
         """Tell the operator, then finish a kill at the venue (outside every lock)."""
@@ -109,7 +112,8 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
         # HALTED is already committed; the kill switch restates it and runs
         # the venue cancel-all, recording and alerting its outcome.
         await self.kill_switch.engage(cause=CAUSE_OPERATOR, actor=row.requested_by,
-                                      reason=f"kill: {row.reason}", when_already_halted="retry")
+                                      reason=f"kill: {row.reason}", when_already_halted="retry",
+                                      operator_request_id=row.request_id)
 
     async def _decide(self, session: AsyncSession,
                       row: TradingControlRequestRow) -> tuple[TransitionResult, str]:
@@ -118,7 +122,7 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
             result = await append_transition(
                 session, account_id=self.account_id, environment=self.environment, state=HALTED,
                 cause=CAUSE_OPERATOR, actor=row.requested_by, reason=f"kill: {row.reason}",
-                now_ms=now)
+                now_ms=now, operator_request_id=row.request_id)
             # Whatever else was waiting was asked before the stop; none of it
             # may undo the stop after it (a queued resume above all).
             superseded = (await session.execute(
@@ -151,7 +155,7 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
         result = await append_transition(
             session, account_id=self.account_id, environment=self.environment, state=ACTIVE,
             cause=CAUSE_OPERATOR, actor=row.requested_by, reason=f"resumed: {row.reason}",
-            now_ms=now)
+            now_ms=now, operator_request_id=row.request_id)
         return result, "resumed"
 
 

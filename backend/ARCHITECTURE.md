@@ -388,7 +388,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 **NAV-drop 告警（第 4 級，不擋單）**：`NavDropMonitor` 包住 `ReconcileNavTracker`（per-symbol，NAV＝available＋offered＋lent，原生單位），24h 虧損或 drawdown 超過 `nav_alerts` 門檻時發 `nav_drop` 告警一次。放貸只會少賺、不會讓 NAV 下降；會下降的是提領、轉帳、平台分攤損失，停止放貸補救不了，所以不再有 loss／drawdown guard。
 
-**Trading state（ADR D4）**：`trading_state` 是帳戶層的停機權威，append-only，只有 `ACTIVE`／`HALTED`，cause 為 `operator`｜`auto`；DB trigger 只允許 operator 結束 HALTED，唯一例外是 `HALTED/auto` → `ACTIVE/auto`（見「自動保護」；migration `8e4b2f6a1c37`）（2026-09-25 前的列可能是 REDUCING／`material_deploy`，CHECK 為 NOT VALID 保留原樣，遷移時目前是 REDUCING 的 scope 已補一列 operator HALTED）。日常的單幣別停止是 policy 的 `enabled=false`：不掛新單，reconciler 撤掉該幣別的受管 offer（見下方「受管 offer 的收斂」），已成交借款照常到期。`enabled` 由 webapi 的 TOTP enable/disable 請求切換（`capital_policy_requests`，`CapitalPolicyRequestWorker` 經 `capital_amendment` → ledger `PolicyStore.apply_policy`（`write_policy_revision`）寫新 revision）；停用只看 operator 驗證，不看 build、trading state 或包絡；沒有包絡也可啟用（guard 照擋）。bfx_bot 對 policy 表只有這一種寫法：DB trigger 只准它寫「目前 head 的下一個 revision、除 `enabled` 外完全相同、`source.request_id` 指向一筆仍在等待、同幣別同方向、且 `public.operator_authorized` 仍通過的請求」並把 head 前進一格；偽造的 request id 無法讓 runtime role 自行擴大交易；owner（script）不受限。恢復只經 webapi 的 TOTP resume 請求，不帶任何限額期；static token 只有 `/admin/halt`。部署不寫 trading state；change class 已移除（`deployments.change_class` 由 migration `5b9e3d7a2f41` drop，舊列的 class 仍留在 `detail`）。
+**Trading state（ADR D4）**：`trading_state` 是帳戶層的停機權威，append-only，只有 `ACTIVE`／`HALTED`，cause 為 `operator`｜`auto`；DB trigger 只允許 operator 結束 HALTED，唯一例外是 `HALTED/auto` → `ACTIVE/auto`（見「自動保護」；migration `8e4b2f6a1c37`）（2026-09-25 前的列可能是 REDUCING／`material_deploy`，CHECK 為 NOT VALID 保留原樣，遷移時目前是 REDUCING 的 scope 已補一列 operator HALTED）。日常的單幣別停止是 policy 的 `enabled=false`：不掛新單，reconciler 撤掉該幣別的受管 offer（見下方「受管 offer 的收斂」），已成交借款照常到期。`enabled` 由 webapi 的 TOTP enable/disable 請求切換（`capital_policy_requests`，`CapitalPolicyRequestWorker` 經 `capital_amendment` → ledger `PolicyStore.apply_policy`（`write_policy_revision`）寫新 revision）；停用只看 operator 驗證，不看 build、trading state 或包絡；沒有包絡也可啟用（guard 照擋）。bfx_bot 對 policy 表只有這一種寫法：DB trigger 只准它寫「目前 head 的下一個 revision、除 `enabled` 外完全相同、typed `operator_request_id` 指向一筆仍在等待、同幣別同方向、且 `public.operator_authorized` 仍通過的請求」並把 head 前進一格（`source.request_id` 只是稽核文字；migration `5e820d6dc7da`）；偽造的 request id 無法讓 runtime role 自行擴大交易；owner（script）不受限。恢復只經 webapi 的 TOTP resume 請求，不帶任何限額期；static token 只有 `/admin/halt`。部署不寫 trading state；change class 已移除（`deployments.change_class` 由 migration `5b9e3d7a2f41` drop，舊列的 class 仍留在 `detail`）。
 
 **受管與外來 offer（D2）**：有 provenance（點名它的 `ack` outcome 或 `bound_to_venue` resolution → attempt，§5）的才是受管。沒有的是外來（手動掛單、Bitfinex auto-renew）：capital classifier 記入 `foreign`、不算受管曝險（金額本來就不在 venue available 內），bot 不撤不重定價，`foreign_exposure` 告警一次。
 
@@ -400,7 +400,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 **撤單資格**：`AccountCommandGate.cancel` 走 `SafetyGuardChain.evaluate_cancel`，只跳過 `chain._CANCEL_EXEMPT` 列名的 guard：`capital_policy`、trading-state guard、`offer_envelope` 與 `heartbeat`（market-data freshness：撤受管單不需要市場資料，WS 斷線或開機後尚未見過時，HALTED／policy 停用的 sweep 與 reprice 撤單照樣能做）；受管 provenance、同 scope 的新 UNKNOWN／讀取失敗仍在 admission 與每次 transport 前拒絕撤單。已寫入 attempt 的 submit 在 transport 前走 `evaluate_transport`，仍受 trading state 約束。
 
-**Kill switch（`safety/kill_switch.py`）**：operator 專用（UI kill 請求、`POST /admin/halt`），是唯一的 venue cancel-all。先 commit `HALTED`（寫不進去就不呼叫 venue），再對每個幣別呼叫 `POST /v2/auth/w/funding/offer/cancel/all`，**連手動掛的 offer 一起撤**；幣別＝設定的 symbols，加上有 open uncertainty 或 mirror 上仍有 live offer（受管、外來或 conflict）的 symbols；只需 writer lock，不經 command gate；每次呼叫在 `funding_cancel_all_audit` 留 `requested` 與一筆終態；venue 失敗不回滾 HALTED，再 kill 一次即重試（`/admin/halt` 在未全數完成時回 502）。不依賴資料庫的 break-glass 是停掉 bot container。
+**Kill switch（`safety/kill_switch.py`）**：operator 專用（UI kill 請求、`POST /admin/halt`），是唯一的 venue cancel-all。先 commit `HALTED`（寫不進去就不呼叫 venue），再對每個幣別呼叫 `POST /v2/auth/w/funding/offer/cancel/all`，**連手動掛的 offer 一起撤**；幣別＝設定的 symbols，加上有 open uncertainty 或 mirror 上仍有 live offer（受管、外來或 conflict）的 symbols；只需 writer lock，不經 command gate；每次呼叫在 `funding_cancel_all_audit` 留 `requested` 與一筆終態，UI kill 觸發的列帶該請求的 `operator_request_id`（`/admin/halt` 與自動保護為 NULL；重送 kill 不寫新 trading state，這是它與 venue 呼叫的唯一連結）；venue 失敗不回滾 HALTED，再 kill 一次即重試（`/admin/halt` 在未全數完成時回 502）。不依賴資料庫的 break-glass 是停掉 bot container。
 
 **真錢 guard 不變式（`assert_live_guard_invariant`）**：`BFX_PHASE=live` 啟動時強制 trading-state/auth/heartbeat hard guards 全開，且必須有 `pre_trade_limits.command_rate`；每幣別的包絡在 DB policy，缺包絡的幣別由 `OfferEnvelopeGuard` 擋單。
 
@@ -460,6 +460,8 @@ transport_outcome_journal (每 attempt 至多一列)
 execution_resolution_journal (UNKNOWN 或 quarantine 的結案)
   PK id; attempt_id | quarantine_id; action{bound_to_venue|not_accepted|manual},
   venue_offer_id, observation_id, actor_kind, actor_id, operator_request_id, resolved_at_ms
+  -- operator_request_id 以兩條 MATCH SIMPLE 複合 FK（經 attempt_id、經 quarantine_id）指向請求的
+  -- (request_id, scope, uncertainty_id)：結案的對象必須是請求點名的那筆；每個請求至多一列。
 quarantine_opening / quarantine_member
   quarantine_id, symbol, intended_amount, opened_revision, source_attempt_id;
   member (source_kind{offer|credit|loan}, venue_object_id, observation_id, amount_at_join)
@@ -483,7 +485,10 @@ execution_decisions    (append-only pre-trade audit；不是 ledger 事實)
 trading_state          (append-only 交易狀態；帳戶層停機的唯一權威)
   PK id（insert trigger 在 scope lock 下指派，id 序即決策序）
   exchange_account_id (FK RESTRICT), deployment_environment,
-  state{ACTIVE|HALTED}, cause{operator|auto}, actor, reason, created_at_ms, legacy_halt_id
+  state{ACTIVE|HALTED}, cause{operator|auto}, actor, reason, created_at_ms, legacy_halt_id,
+  operator_request_id
+  -- operator_request_id：寫下這列的 operator 請求（NULL＝自動保護或 /admin/halt；restate 不寫列），
+  -- 複合 FK (operator_request_id, scope) → trading_control_requests，partial UNIQUE。
   -- state/cause CHECK 為 NOT VALID：5b1e7c9d2a40 之前的列保留原本的 REDUCING／material_deploy。
   -- trigger 只准 operator 結束 HALTED，並拒絕 UPDATE/DELETE/TRUNCATE；bfx_bot SELECT/INSERT，bfx_webapi 只有 SELECT。
   -- legacy_halt_id 指向 release_archive.trading_halt 的來源列（無 FK）。
@@ -509,27 +514,34 @@ release_archive.*     (已退役 release ceremony 的真錢紀錄；migration c7
 trading_control_requests (webapi→daemon 請求；webapi 只 INSERT 請求欄位)
   request_id, action{resume|kill}, reason, requested_by,
   created_at_ms, state{requested|applied|rejected|failed}, processed_at_ms,
-  outcome_reason, trading_state_id
-  -- 每個 scope 至多一筆 pending（kill 另有自己的一格）；請求欄位不可改，state 只能從 requested 轉一次終態。
+  outcome_reason
+  -- 每個 scope 至多一筆 pending（kill 另有自己的一格）；runtime role 對請求欄位沒有 UPDATE 權（欄位級 grant），
+  -- 每次 UPDATE 都必須是 state 從 requested 轉一次終態（trigger，owner 亦同）。
+  -- 結果的效果反向指回請求：trading_state.operator_request_id、funding_cancel_all_audit.operator_request_id。
+  -- trading_state_id 已關閉（不 map、bot 無 UPDATE 權、CHECK 不引用；5e820d6dc7da），下一個 release DROP。
 
 capital_policy_requests (webapi→daemon 幣別啟停請求；migration 7d2a9c4e6b13)
   request_id, exchange_account_id, deployment_environment, symbol, action{enable|disable},
   reason, requested_by, created_at_ms, state{requested|applied|rejected|failed},
-  processed_at_ms, outcome_reason, policy_revision_id (FK capital_policy_revisions)
-  -- 同一幣別同一動作至多一筆 pending；applied 必帶當下生效的 revision（unchanged 時為原 revision）。
+  processed_at_ms, outcome_reason
+  -- 同一幣別同一動作至多一筆 pending；套用寫出的 revision 以 operator_request_id 指回請求，
+  -- unchanged 不寫 revision、也沒有效果列。policy_revision_id 已關閉（同上），下一個 release DROP。
   -- 與 trading_control_requests 分表：kill 不與它共用佇列或 pending 格；kill 套用時把等待中的 enable 標
   -- superseded_by_kill，disable 照常套用。
 
 capital_policy_revisions / capital_policy_heads (append-only 版本化 CapitalPolicy；head 是唯一可變指標)
+  -- revisions.operator_request_id：套用的請求（NULL＝owner script），複合 FK
+  -- (operator_request_id, scope, symbol) → capital_policy_requests，partial UNIQUE（一個請求至多一個 revision）。
   -- bfx_bot：revisions SELECT/INSERT、heads SELECT + UPDATE(revision_id, revision)，trigger
   -- guard_runtime_policy_revision／guard_runtime_policy_head 把非 owner 的寫入限縮成只切 enabled；
   -- bfx_webapi 只有 SELECT（overview 列出 policy 與包絡）。
 
 funding_cancel_all_audit (append-only；kill switch 每次 venue cancel-all 的紀錄)
-  PK id, exchange_account_id, deployment_environment, trading_state_id (FK),
+  PK id, exchange_account_id, deployment_environment, trading_state_id, operator_request_id,
   attempt_id, currency, phase{requested|acknowledged|rejected|failed|skipped},
   venue_status, detail, actor, occurred_at_ms
-  -- 每個 attempt 一筆 requested、至多一筆終態（partial unique）。
+  -- 每個 attempt 一筆 requested、至多一筆終態（partial unique）。trading_state_id 與 operator_request_id
+  -- 都是含 scope 的複合 FK；operator_request_id 為 NULL＝/admin/halt 或自動保護。
 
 diagnostics            (非 SoT forensic, prunable)
   exchange_account_id, deployment_environment, kind, payload(JSONB),
@@ -745,12 +757,12 @@ account proxy/MFA，webapi 只需既有 membership/account SELECT grants，向 d
 uncertainty 裁決（bind-to-venue／mark-not-accepted／manual-resolution，`uncertainty_resolution_requests`）、
 resume／kill（`trading_control_requests`）與幣別 enable／disable（`capital_policy_requests`）——走同一套 outbox 合約：webapi 只以
 `insert_request` 寫該表的請求欄位（model 的 `REQUEST_COLUMNS`＝migration 的欄位級 INSERT grant）並回 202，
-不取帳戶鎖（單一 pending 由 partial unique index 保證）；daemon 的 `OperatorRequestWorker` 子類
+不取帳戶鎖（單一 pending 由 partial unique index 保證：`INSERT … ON CONFLICT (<該 index>) DO NOTHING`，只有這種衝突回 409，其他違規照常拋出）；daemon 的 `OperatorRequestWorker` 子類
 （`UncertaintyResolutionWorker`、`TradingControlWorker`、`CapitalPolicyRequestWorker`，各自一個 task）一次處理最舊的一筆，在帳戶鎖內的 savepoint 以
 `operator_authorized`（SQL `public.operator_authorized`）重驗權限後才 apply，結果（applied／rejected＋原因碼／
-failed＋根因）記回請求列；寫不進去的請求另以獨立交易標 failed，連這都失敗就由本 process 跳過，不擋佇列。
+failed＋根因）記回請求列，套用產生的效果列（trading state、policy revision、cancel-all audit、journal）帶 `operator_request_id` 指回請求；寫不進去的請求另以獨立交易標 failed，連這都失敗就由本 process 跳過，不擋佇列。
 需要在鎖外觀測的資料以 `NeedsPreparation` → `prepare` 取得後再 apply。清單列帶最新一筆請求，前端只在有 pending 時輪詢清單。webapi 對 ledger
-表零寫權限，授權與收回都在 migration（`1c435a35dcb4`、`5b1e7c9d2a40`、`7d2a9c4e6b13`）。
+表零寫權限，授權與收回都在 migration（`1c435a35dcb4`、`5b1e7c9d2a40`、`7d2a9c4e6b13`、`5e820d6dc7da`）。
 靜態 admin token 不能 resume live。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 

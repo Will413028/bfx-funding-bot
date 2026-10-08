@@ -10,6 +10,7 @@ release ceremony it served (``release_archive`` schema, migration c74d45a54e46);
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import ClassVar
 from uuid import UUID
@@ -17,12 +18,16 @@ from uuid import UUID
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
+    Column,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
     PrimaryKeyConstraint,
+    Table,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -85,6 +90,9 @@ class TradingStateRow(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     legacy_halt_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # The operator request this row applies; NULL for an automatic halt or resume and for
+    # /admin/halt. The foreign key carries the scope, so it names a request of this scope.
+    operator_request_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
 
     __table_args__ = (
         CheckConstraint("state IN ('ACTIVE', 'HALTED')", name="ck_trading_state_state"),
@@ -95,6 +103,18 @@ class TradingStateRow(Base):
             name="ck_trading_state_evidence",
         ),
         Index("ix_trading_state_scope_id", "exchange_account_id", "deployment_environment", "id"),
+        # What the cancel-all audit's composite foreign key references.
+        UniqueConstraint("id", "exchange_account_id", "deployment_environment",
+                         name="uq_trading_state_scope"),
+        ForeignKeyConstraint(
+            ["operator_request_id", "exchange_account_id", "deployment_environment"],
+            ["trading_control_requests.request_id", "trading_control_requests.exchange_account_id",
+             "trading_control_requests.deployment_environment"],
+            ondelete="RESTRICT", name="fk_trading_state_operator_request"),
+        # A request is applied by at most one row.
+        Index("uq_trading_state_operator_request", "operator_request_id", unique=True,
+              postgresql_where=text("operator_request_id IS NOT NULL"),
+              sqlite_where=text("operator_request_id IS NOT NULL")),
     )
 
 
@@ -118,12 +138,8 @@ class FundingCancelAllAuditRow(Base):
         nullable=False,
     )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
-    trading_state_id: Mapped[int] = mapped_column(
-        BigInteger,
-        ForeignKey("trading_state.id", ondelete="RESTRICT",
-                   name="fk_funding_cancel_all_audit_trading_state"),
-        nullable=False,
-    )
+    # The HALTED decision this cancel-all enforces, in the same scope.
+    trading_state_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     attempt_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
     currency: Mapped[str] = mapped_column(Text, nullable=False)
     phase: Mapped[str] = mapped_column(Text, nullable=False)
@@ -131,6 +147,9 @@ class FundingCancelAllAuditRow(Base):
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     actor: Mapped[str] = mapped_column(Text, nullable=False)
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # The kill request whose cancel-all this is; NULL for /admin/halt and automatic halts.
+    # A re-sent kill writes no new trading state, so this is its only link to the venue call.
+    operator_request_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -155,6 +174,16 @@ class FundingCancelAllAuditRow(Base):
         Index("uq_funding_cancel_all_audit_outcome", "attempt_id", unique=True,
               postgresql_where=text("phase <> 'requested'"),
               sqlite_where=text("phase <> 'requested'")),
+        ForeignKeyConstraint(
+            ["trading_state_id", "exchange_account_id", "deployment_environment"],
+            ["trading_state.id", "trading_state.exchange_account_id",
+             "trading_state.deployment_environment"],
+            ondelete="RESTRICT", name="fk_funding_cancel_all_audit_trading_state"),
+        ForeignKeyConstraint(
+            ["operator_request_id", "exchange_account_id", "deployment_environment"],
+            ["trading_control_requests.request_id", "trading_control_requests.exchange_account_id",
+             "trading_control_requests.deployment_environment"],
+            ondelete="RESTRICT", name="fk_funding_cancel_all_audit_operator_request"),
     )
 
 
@@ -171,9 +200,21 @@ class TradingControlRequestRow(Base):
         "request_id", "exchange_account_id", "deployment_environment", "action",
         "reason", "requested_by", "created_at_ms",
     )
-    WORKER_COLUMNS: ClassVar[tuple[str, ...]] = (
-        "state", "processed_at_ms", "outcome_reason", "trading_state_id",
-    )
+    WORKER_COLUMNS: ClassVar[tuple[str, ...]] = ("state", "processed_at_ms", "outcome_reason")
+    # Closed product column: in the table, not mapped (appended below the class, after the
+    # mapper has taken its columns). The trading state an applied request wrote names the
+    # request instead (``trading_state.operator_request_id``, 5e820d6dc7da); no role may write
+    # this one. It stays one release because the image before this one maps it, and its web
+    # API's reads of this model name every mapped column while a deploy migrates; the next
+    # release drops it.
+    CLOSED_COLUMNS: ClassVar[tuple[str, ...]] = ("trading_state_id",)
+
+    @classmethod
+    def pending_index(cls, values: Mapping[str, object]) -> str:
+        """The partial unique index a new request takes its pending slot in (``insert_request``)."""
+        if values["action"] == "kill":
+            return "uq_trading_control_requests_pending_kill"
+        return "uq_trading_control_requests_pending"
 
     request_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
     exchange_account_id: Mapped[UUID] = mapped_column(
@@ -190,12 +231,6 @@ class TradingControlRequestRow(Base):
     state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'requested'"))
     processed_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     outcome_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    trading_state_id: Mapped[int | None] = mapped_column(
-        BigInteger,
-        ForeignKey("trading_state.id", ondelete="RESTRICT",
-                   name="fk_trading_control_requests_trading_state"),
-        nullable=True,
-    )
 
     __table_args__ = (
         CheckConstraint("action IN ('resume', 'kill')", name="ck_trading_control_requests_action"),
@@ -205,11 +240,10 @@ class TradingControlRequestRow(Base):
             name="ck_trading_control_requests_evidence",
         ),
         CheckConstraint(
-            "(state = 'requested' AND processed_at_ms IS NULL AND outcome_reason IS NULL "
-            "AND trading_state_id IS NULL) OR "
+            "(state = 'requested' AND processed_at_ms IS NULL AND outcome_reason IS NULL) OR "
             "(state = 'applied' AND processed_at_ms IS NOT NULL) OR "
             "(state IN ('rejected', 'failed') AND processed_at_ms IS NOT NULL "
-            "AND outcome_reason IS NOT NULL AND trading_state_id IS NULL)",
+            "AND outcome_reason IS NOT NULL)",
             name="ck_trading_control_requests_outcome",
         ),
         # One waiting request per scope, plus one kill beside it: a pending
@@ -224,8 +258,21 @@ class TradingControlRequestRow(Base):
               sqlite_where=text("state = 'requested' AND action = 'kill'")),
         Index("ix_trading_control_requests_queue", "exchange_account_id",
               "deployment_environment", "state", "created_at_ms"),
+        # What an effect's composite foreign key references.
+        UniqueConstraint("request_id", "exchange_account_id", "deployment_environment",
+                         name="uq_trading_control_requests_scope"),
     )
 
+
+
+_REQUESTS_TABLE = TradingControlRequestRow.__table__
+assert isinstance(_REQUESTS_TABLE, Table)
+_REQUESTS_TABLE.append_column(Column(
+    "trading_state_id", BigInteger,
+    ForeignKey("trading_state.id", ondelete="RESTRICT",
+               name="fk_trading_control_requests_trading_state"),
+    nullable=True,
+))
 
 class NavWindowSampleRow(Base):
     """Loss-limiter 24h window samples, so a restart does not forget a recent loss (T9).

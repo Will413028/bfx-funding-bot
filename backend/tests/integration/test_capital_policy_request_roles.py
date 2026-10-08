@@ -91,10 +91,10 @@ def _has(conn, sql: str, **params) -> bool:
 
 
 def _request_sql(request_id: str = "00000000-0000-0000-0000-0000000000e1", action: str = "disable",
-                 extra: tuple[str, str] = ("", ""), by: str = "operator") -> str:
+                 extra: tuple[str, str] = ("", ""), by: str = "operator", symbol: str = "fUST") -> str:
     return (f"INSERT INTO capital_policy_requests (request_id, exchange_account_id, "
             f"deployment_environment, symbol, action, reason, requested_by, created_at_ms{extra[0]}) "
-            f"VALUES ('{request_id}', '{_A}', 'ci', 'fUST', '{action}', 'x', '{by}', 1{extra[1]})")
+            f"VALUES ('{request_id}', '{_A}', 'ci', '{symbol}', '{action}', 'x', '{by}', 1{extra[1]})")
 
 
 def _operator(engine) -> None:
@@ -131,6 +131,9 @@ def test_grants_are_exactly_the_outbox_split_and_the_toggle(migrated):
             assert _has(conn, "SELECT has_column_privilege('bfx_bot', :t, :c, 'UPDATE')",
                         t=table, c=column)
             assert not _has(conn, "SELECT has_column_privilege('bfx_webapi', :t, :c, 'INSERT')",
+                            t=table, c=column)
+        for column in CapitalPolicyRequestRow.CLOSED_COLUMNS:  # its revision names the request
+            assert not _has(conn, "SELECT has_column_privilege('bfx_bot', :t, :c, 'UPDATE')",
                             t=table, c=column)
         for role in ("bfx_bot", "bfx_webapi"):
             assert _has(conn, "SELECT has_table_privilege(:r, :t, 'SELECT')", r=role, t=table)
@@ -185,10 +188,10 @@ def test_the_web_api_queues_only_request_columns_and_the_rules_hold(migrated):
     with engine.begin() as conn, pytest.raises(Exception, match="permission denied"):
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         conn.exec_driver_sql("UPDATE capital_policy_requests SET reason = 'rewritten'")
-    with engine.begin() as conn, pytest.raises(Exception, match="applied"):
-        # An applied outcome must name the revision in force.
+    with engine.begin() as conn, pytest.raises(Exception, match="ck_capital_policy_requests_outcome"):
+        # An outcome says when it was recorded.
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
-        conn.exec_driver_sql("UPDATE capital_policy_requests SET state='applied', processed_at_ms=2")
+        conn.exec_driver_sql("UPDATE capital_policy_requests SET state='applied'")
     with engine.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         conn.exec_driver_sql("UPDATE capital_policy_requests SET state='rejected', processed_at_ms=2, "
@@ -204,7 +207,7 @@ def test_the_bot_applies_a_web_api_request_as_a_new_revision(migrated):
     asyncio.run(_seed(url))
     _operator(engine)
 
-    async def scenario() -> tuple[str, str | None, UUID | None]:
+    async def scenario() -> tuple[str, str | None, UUID]:
         web_engine, web = _async(url, "bfx_webapi")
         bot_engine, bot = _async(url, "bfx_bot")
         try:
@@ -225,20 +228,21 @@ def test_the_bot_applies_a_web_api_request_as_a_new_revision(migrated):
             assert await worker.tick() is True
             async with bot() as session:
                 row = await session.get(CapitalPolicyRequestRow, request_id)
-                return row.state, row.outcome_reason, row.policy_revision_id
+                return row.state, row.outcome_reason, request_id
         finally:
             await web_engine.dispose()
             await bot_engine.dispose()
 
-    state, reason, revision_id = asyncio.run(scenario())
+    state, reason, request_id = asyncio.run(scenario())
     assert (state, reason) == ("applied", "disabled (revision 2)")
     with engine.connect() as conn:
-        head = conn.execute(text("SELECT h.revision, r.id, r.policy->>'enabled', r.policy - 'enabled' "
+        head = conn.execute(text("SELECT h.revision, r.operator_request_id, r.source->>'request_id', "
+                                 "r.policy->>'enabled', r.policy - 'enabled' "
                                  "= p.policy - 'enabled' FROM capital_policy_heads h "
                                  "JOIN capital_policy_revisions r ON r.id = h.revision_id "
                                  "JOIN capital_policy_revisions p ON p.symbol = r.symbol "
                                  "AND p.revision = 1")).one()
-    assert tuple(head) == (2, revision_id, "false", True)
+    assert tuple(head) == (2, request_id, str(request_id), "false", True)
 
 
 def test_the_runtime_role_may_toggle_enabled_and_nothing_else(migrated):
@@ -246,16 +250,27 @@ def test_the_runtime_role_may_toggle_enabled_and_nothing_else(migrated):
     asyncio.run(_seed(url))
     _operator(engine)
     waiting = "00000000-0000-0000-0000-0000000000e1"
+    settled = "00000000-0000-0000-0000-0000000000e3"
+    other_currency = "00000000-0000-0000-0000-0000000000e4"
     with engine.begin() as conn:
+        conn.exec_driver_sql(_request_sql(settled, "disable"))
+        conn.exec_driver_sql("UPDATE capital_policy_requests SET state='rejected', processed_at_ms=2, "
+                             f"outcome_reason='x' WHERE request_id='{settled}'")
         conn.exec_driver_sql(_request_sql(waiting, "disable"))
         conn.exec_driver_sql(_request_sql("00000000-0000-0000-0000-0000000000e2", "enable", by="nobody"))
+        conn.exec_driver_sql(_request_sql(other_currency, "disable", symbol="fUSD"))
         first = conn.execute(text("SELECT id, policy::text, digest FROM capital_policy_revisions")).one()
 
-    def revision(policy_sql: str, *, number: int = 2, request: str | None = waiting) -> str:
-        source = "{}" if request is None else f'{{"request_id": "{request}"}}'
+    def revision(policy_sql: str, *, number: int = 2, request: str | None = waiting,
+                 source: str | None = None) -> str:
+        """G1 authorises by the typed request; ``source.request_id`` is audit text."""
+        if source is None:
+            source = "{}" if request is None else f'{{"request_id": "{request}"}}'
+        typed = "NULL" if request is None else f"'{request}'"
         return (f"INSERT INTO capital_policy_revisions (id, exchange_account_id, deployment_environment, "
-                f"symbol, revision, schema_version, policy, digest, source) VALUES (gen_random_uuid(), "
-                f"'{_A}', 'ci', 'fUST', {number}, 3, {policy_sql}, 'd', '{source}'::jsonb)")
+                f"symbol, revision, schema_version, policy, digest, source, operator_request_id) VALUES "
+                f"(gen_random_uuid(), '{_A}', 'ci', 'fUST', {number}, 3, {policy_sql}, 'd', "
+                f"'{source}'::jsonb, {typed})")
 
     base = f"'{first.policy}'::jsonb"
     disabled = f"jsonb_set({base}, '{{enabled}}', 'false')"
@@ -264,7 +279,12 @@ def test_the_runtime_role_may_toggle_enabled_and_nothing_else(migrated):
             (revision(f"{base} - 'envelope'"), "may only toggle"),
             (revision(f"jsonb_set({base}, '{{enabled}}', '\"yes\"')"), "may only toggle"),
             (revision(disabled, number=5), "may only toggle"),          # skips a revision
-            (revision(disabled, request=None), "may only toggle"),      # names no request
+            # Naming no request, even with the JSON key; a request already settled, or of
+            # another currency (the trigger refuses before the foreign key does).
+            (revision(disabled, request=None, source=f'{{"request_id": "{waiting}"}}'),
+             "must apply a waiting request"),
+            (revision(disabled, request=settled), "must apply a waiting request"),
+            (revision(disabled, request=other_currency), "must apply a waiting request"),
             # A forged request id, a request for the opposite change, or one by
             # someone who is not the operator: the bot cannot widen trading alone.
             (revision(disabled, request=str(uuid4())), "must apply a waiting request"),

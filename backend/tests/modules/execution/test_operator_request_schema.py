@@ -46,20 +46,47 @@ def _migration(name: str = _MIGRATION):
     return module
 
 
+# The migration that closed a product column (revoked its UPDATE, unmapped it).
+_CAUSATION = "5e820d6dc7da_operator_request_causation.py"
+
+
 @pytest.mark.parametrize(("model", "migration_file", "prefix"), _OUTBOXES)
 def test_migration_grants_exactly_the_declared_column_split(model, migration_file, prefix) -> None:
     migration = _migration(migration_file)
+    closed = _migration(_CAUSATION).CLOSED_COLUMNS.get(model.__tablename__)
+    granted = tuple(getattr(migration, f"{prefix}WORKER_COLUMNS").split(","))
     assert tuple(getattr(migration, f"{prefix}REQUEST_COLUMNS").split(",")) == model.REQUEST_COLUMNS
-    assert tuple(getattr(migration, f"{prefix}WORKER_COLUMNS").split(",")) == model.WORKER_COLUMNS
+    assert tuple(c for c in granted if c != closed) == model.WORKER_COLUMNS
+    assert getattr(model, "CLOSED_COLUMNS", ()) == (() if closed is None else (closed,))
 
 
 @pytest.mark.parametrize(("model", "migration_file", "prefix"), _OUTBOXES)
 def test_every_column_belongs_to_exactly_one_writer(model, migration_file, prefix) -> None:
     columns = {column.name for column in model.__table__.columns}
+    closed = set(getattr(model, "CLOSED_COLUMNS", ()))
     assert set(model.REQUEST_COLUMNS).isdisjoint(model.WORKER_COLUMNS)
-    assert columns == set(model.REQUEST_COLUMNS) | set(model.WORKER_COLUMNS)
+    assert columns == set(model.REQUEST_COLUMNS) | set(model.WORKER_COLUMNS) | closed
     # The shared worker records these on every outcome.
     assert {"state", "processed_at_ms", "outcome_reason"} <= set(model.WORKER_COLUMNS)
+
+
+@pytest.mark.parametrize("model", [model for model, _, _ in _OUTBOXES])
+def test_the_causation_migration_guards_the_declared_request_columns(model) -> None:
+    """Its grant assertion names exactly the columns no runtime role may UPDATE."""
+    assert _migration(_CAUSATION).REQUEST_COLUMNS[model.__tablename__] == model.REQUEST_COLUMNS
+
+
+@pytest.mark.parametrize("model", [TradingControlRequestRow, CapitalPolicyRequestRow])
+def test_closed_product_columns_are_in_the_table_but_never_read_or_written(model) -> None:
+    """The next release drops them while this one runs: nothing this image sends may name them."""
+    from sqlalchemy import insert, inspect, select
+
+    closed = set(model.CLOSED_COLUMNS)
+    assert closed <= {column.name for column in model.__table__.columns}
+    assert closed.isdisjoint(column.key for column in inspect(model).columns)
+    assert all(not hasattr(model, column) for column in closed)
+    for statement in (select(model), insert(model).values(**dict.fromkeys(model.REQUEST_COLUMNS))):
+        assert closed.isdisjoint(str(statement).replace(",", " ").replace(".", " ").split())
 
 
 def test_web_api_insert_names_only_the_granted_request_columns() -> None:

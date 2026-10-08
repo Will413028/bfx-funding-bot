@@ -110,11 +110,26 @@ class CapitalPolicyRevisionRow(Base):
     policy: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
     digest: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
+    # The operator request this revision applies (``capital_policy_requests``); NULL for the
+    # owner's amendment script and bootstrap. The foreign key carries the scope and currency.
+    operator_request_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
 
-    __table_args__ = (UniqueConstraint(
-        "exchange_account_id", "deployment_environment", "symbol", "revision",
-        name="uq_capital_policy_revision_scope",
-    ),)
+    __table_args__ = (
+        UniqueConstraint(
+            "exchange_account_id", "deployment_environment", "symbol", "revision",
+            name="uq_capital_policy_revision_scope",
+        ),
+        ForeignKeyConstraint(
+            ["operator_request_id", "exchange_account_id", "deployment_environment", "symbol"],
+            ["capital_policy_requests.request_id", "capital_policy_requests.exchange_account_id",
+             "capital_policy_requests.deployment_environment", "capital_policy_requests.symbol"],
+            ondelete="RESTRICT", name="fk_capital_policy_revisions_operator_request",
+        ),
+        # A request is applied by at most one revision.
+        Index("uq_capital_policy_revisions_operator_request", "operator_request_id", unique=True,
+              postgresql_where=text("operator_request_id IS NOT NULL"),
+              sqlite_where=text("operator_request_id IS NOT NULL")),
+    )
 
 
 class CapitalPolicyHeadRow(Base):
@@ -782,10 +797,7 @@ class ExecutionResolutionJournalRow(Base):
     )
     actor_kind: Mapped[str] = mapped_column(Text, nullable=False)
     actor_id: Mapped[str] = mapped_column(Text, nullable=False)
-    operator_request_id: Mapped[UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("uncertainty_resolution_requests.request_id", ondelete="RESTRICT"),
-    )
+    operator_request_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     resolved_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     candidate_count: Mapped[int | None] = mapped_column(Integer)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
@@ -828,6 +840,23 @@ class ExecutionResolutionJournalRow(Base):
             "operator_request_id",
             unique=True,
             postgresql_where=text("operator_request_id IS NOT NULL"),
+        ),
+        # The request's scope and subject: a journal row resolves the uncertainty it was asked
+        # to. One key per subject column; MATCH SIMPLE skips the NULL one, and
+        # ck_execution_resolution_subject leaves exactly one non-NULL.
+        *(
+            ForeignKeyConstraint(
+                ["operator_request_id", "exchange_account_id", "deployment_environment", subject],
+                [
+                    "uncertainty_resolution_requests.request_id",
+                    "uncertainty_resolution_requests.exchange_account_id",
+                    "uncertainty_resolution_requests.deployment_environment",
+                    "uncertainty_resolution_requests.uncertainty_id",
+                ],
+                ondelete="RESTRICT",
+                name=f"fk_execution_resolution_journal_request_{kind}",
+            )
+            for subject, kind in (("attempt_id", "attempt"), ("quarantine_id", "quarantine"))
         ),
         Index(
             "ix_execution_resolution_scope_resolved",

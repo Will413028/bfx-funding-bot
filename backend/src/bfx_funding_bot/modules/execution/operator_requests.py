@@ -8,13 +8,15 @@ worker applies the request inside the account's single writer, under the
 account lock, re-checks the operator in that same transaction, and records
 exactly one outcome on the row:
 
-- ``applied``  -- done; the table's own worker columns say what it produced;
+- ``applied``  -- done; what it produced names the request (``operator_request_id`` on the
+  trading state, policy revision, cancel-all audit or journal row);
 - ``rejected`` -- a bounded, operator-readable code (:class:`RequestRejected`);
 - ``failed``   -- a fault, named by its root exception type.
 
-Every outbox table follows the same contract, enforced in its migration: the
-request columns are immutable, ``state`` leaves ``requested`` exactly once, a
-partial unique index allows one pending request per subject, rows are never
+Every outbox table follows the same contract, enforced in its migration: no
+runtime role may UPDATE a request column (column grants), ``state`` leaves
+``requested`` exactly once (a trigger, the owner included), a partial unique
+index allows one pending request per subject (``pending_index``), rows are never
 deleted. The model declares its column split as ``REQUEST_COLUMNS`` and
 ``WORKER_COLUMNS`` (tests pin each migration's grants to them).
 
@@ -31,12 +33,12 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, Protocol, get_args
 from uuid import UUID
 
-from sqlalchemy import insert, select, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import Index, select, text, update
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
@@ -76,8 +78,6 @@ class NeedsPreparation(Exception):  # noqa: N818 - control flow, not a fault
 class Outcome:
     state: RequestState
     reason: str | None = None
-    # The table's own worker columns (what an applied request produced).
-    columns: Mapping[str, object] = field(default_factory=dict)
     # Kept for the subclass's post-commit hook (alerts, logs); never persisted.
     detail: object = None
 
@@ -109,19 +109,32 @@ async def operator_authorized(session: AsyncSession, *, account_id: UUID, user: 
 async def insert_request(session: AsyncSession, model: Any, values: Mapping[str, object]) -> bool:
     """Queue one request from the web API; False when its pending slot is taken.
 
-    An explicit column INSERT inside a savepoint: the web API's grant covers
-    exactly ``model.REQUEST_COLUMNS``, and an ORM flush would also send the
-    worker's columns. Takes no account lock -- that lock serialises the
-    daemon's writer, and the web API must never stall reconcile or submit.
+    An explicit column INSERT: the web API's grant covers exactly
+    ``model.REQUEST_COLUMNS``, and an ORM flush would also send the worker's
+    columns. ``ON CONFLICT DO NOTHING`` on the request's pending index
+    (``model.pending_index``) is the only refusal answered with False; any other
+    (a CHECK, a foreign key, the realm guard, a duplicate id) raises. Takes no
+    account lock -- that lock serialises the daemon's writer, and the web API
+    must never stall reconcile or submit.
     """
     if set(values) != set(model.REQUEST_COLUMNS):
         raise ValueError(f"request values must be exactly {model.REQUEST_COLUMNS}")
-    try:
-        async with session.begin_nested():
-            await session.execute(insert(model).values(**values))
-    except IntegrityError:
-        return False
-    return True
+    name = model.pending_index(values)
+    index = next(index for index in model.__table__.indexes if index.name == name)
+    bind = session.bind
+    dialect = bind.dialect.name if bind is not None else "postgresql"
+    statement = (sqlite.insert(model) if dialect == "sqlite" else postgresql.insert(model)).values(
+        **values).on_conflict_do_nothing(
+        index_elements=list(index.columns), index_where=_predicate(index, dialect),
+    ).returning(model.request_id)
+    return await session.scalar(statement) is not None
+
+
+def _predicate(index: Index, dialect: str) -> Any:
+    where = index.dialect_options[dialect]["where"]
+    if where is None:
+        raise ValueError(f"{index.name} is not a partial index on {dialect}")
+    return where
 
 
 def root_cause_name(exc: BaseException) -> str:
@@ -287,8 +300,6 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
                     outcome = Outcome(FAILED, reason)
                 row.state, row.processed_at_ms = outcome.state, now
                 row.outcome_reason = None if outcome.reason is None else outcome.reason[:500]
-                for column, value in outcome.columns.items():
-                    setattr(row, column, value)
                 await session.flush()
         except NeedsPreparation:
             raise

@@ -1180,8 +1180,13 @@ class PolicyStore(Protocol):
     async def apply_policy(
         self, session: AsyncSession, *, symbol: str, policy: CapitalPolicy,
         expected_revision: int, source: dict[str, Any],
+        operator_request_id: UUID | None = None,
     ) -> AppliedPolicy:
         """Append revision ``expected_revision + 1`` and move the head; the caller commits.
+
+        ``operator_request_id``: the operator request (``capital_policy_requests``, same
+        scope and currency) the revision applies; None for the owner's amendment script.
+        The runtime role's revision must name one (G1, ``guard_runtime_policy_revision``).
 
         ``PolicyRefused`` when the head moved (``revision_changed``) or the symbol may
         not be enabled (``unsupported_enabled_symbol``).

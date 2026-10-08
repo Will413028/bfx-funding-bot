@@ -48,6 +48,14 @@ async def outcome(factory, request_id):
         return row.state, row.outcome_reason
 
 
+async def written_by(factory, state_id):
+    """The operator request a trading state row names, if any."""
+    from bfx_funding_bot.modules.execution.safety.tables import TradingStateRow
+
+    async with factory() as session:
+        return (await session.get(TradingStateRow, state_id)).operator_request_id
+
+
 async def state_of(factory, account):
     return await TradingStateRepository(factory, account_id=account, deployment_environment="ci").current()
 
@@ -79,6 +87,7 @@ async def test_resume_ends_any_halt(migrated_db, setup, cause):
     assert (current.state, current.cause, current.actor) == ("ACTIVE", "operator", "operator")
     assert current.reason == "resumed: resume for test"
     assert await outcome(factory, request_id) == ("applied", "resumed")
+    assert await written_by(factory, current.id) == request_id
 
 
 @pytest.mark.asyncio
@@ -117,13 +126,15 @@ async def test_a_transition_the_rules_refuse_is_a_rejection_not_a_fault(migrated
 
 class KillSpy:
     def __init__(self, factory, account):
-        self.factory, self.account, self.calls = factory, account, []
+        self.factory, self.account, self.calls, self.requests = factory, account, [], []
 
-    async def engage(self, *, cause, actor, reason, when_already_halted="retry"):
+    async def engage(self, *, cause, actor, reason, when_already_halted="retry",
+                     operator_request_id=None):
         # Runs after the request committed, outside every lock: HALTED is
         # already what another reader sees.
         self.calls.append((cause, actor, reason, when_already_halted,
                            (await state_of(self.factory, self.account)).state))
+        self.requests.append(operator_request_id)
 
 
 @pytest.mark.asyncio
@@ -141,6 +152,40 @@ async def test_kill_writes_halted_then_runs_the_venue_cancel_all(migrated_db, se
     assert (current.state, current.cause, current.actor) == ("HALTED", "operator", "operator")
     # Asking again is how an incomplete cancel-all is retried, as /admin/halt.
     assert kill.calls == [("operator", "operator", "kill: kill for test", "retry", "HALTED")]
+    # The HALTED it wrote, and the cancel-all it runs, name the request.
+    assert await written_by(factory, current.id) == request_id
+    assert kill.requests == [request_id]
+
+
+@pytest.mark.asyncio
+async def test_a_kill_that_restates_a_halt_names_only_its_cancel_all(migrated_db):
+    """Over an operator HALTED the kill writes nothing: the row in force keeps naming whoever
+    wrote it, and the retried cancel-all names this request. The request row never records
+    an effect (its product column is closed)."""
+    factory, account = migrated_db
+    await start(factory, account, "HALTED", "operator")
+    before = await state_of(factory, account)
+    w = worker(factory, account)
+    w.kill_switch = kill = KillSpy(factory, account)
+    request_id = await request(factory, account, "kill")
+    statements: list[str] = []
+    from sqlalchemy import event
+
+    sync_engine = factory.kw["bind"].sync_engine
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(sync_engine, "before_cursor_execute", capture)
+    try:
+        assert await w.process(request_id) == "applied"
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", capture)
+    assert await state_of(factory, account) == before
+    assert await written_by(factory, before.id) is None
+    assert kill.requests == [request_id]
+    updates = [s for s in statements if s.lstrip().upper().startswith("UPDATE TRADING_CONTROL_REQUESTS")]
+    assert updates and not any("trading_state_id" in s for s in updates)
 
 
 @pytest.mark.asyncio
