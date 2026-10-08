@@ -31,7 +31,7 @@ def _args(**changes) -> argparse.Namespace:
         "exchange_account_id": ACCOUNT, "environment": "ci", "symbol": "fUST", "enabled": False,
         "max_offer_amount": None, "min_period_days": None, "max_period_days": None,
         "max_open_offers": None, "rate_floor_ratio": None, "min_rate_apr": None,
-        "apply_digest": None,
+        "apply_digest": None, "reason": None,
     }
     return argparse.Namespace(**{**base, **changes})
 
@@ -66,13 +66,49 @@ async def database(tmp_path, monkeypatch):
 async def test_the_script_amends_through_the_ledger_store(database) -> None:
     report = await script.run(_args())
     assert report["status"] == "dry_run" and report["new_policy"]["enabled"] is False
-    applied = await script.run(_args(apply_digest=report["amendment_digest"]))
+    applied = await script.run(_args(apply_digest=report["amendment_digest"],
+                                     reason="maintenance window"))
 
     assert applied["status"] == "applied" and applied["new_revision"] == 2
     async with database() as session:
+        from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow
         from bfx_funding_bot.modules.ledger.wiring import build_policy_store
         read = await build_policy_store(Scope(ACCOUNT, "ci")).read_applied(session, symbol="fUST")
+        written = await session.get(CapitalPolicyRevisionRow, read.revision_id)
     assert (read.revision, read.policy.enabled) == (2, False)
+    # No request stands behind an owner's revision: its source is where the reason lives.
+    assert written.operator_request_id is None
+    assert written.source["reason"] == "maintenance window"
+    assert {"amendment_digest", "changes"} <= set(written.source)
+
+
+def test_a_dry_run_needs_no_reason(monkeypatch, capsys, restore_logging) -> None:
+    argv = ["amend_capital_policy", "--exchange-account-id", str(ACCOUNT), "--environment", "ci",
+            "--symbol", "fUST", "--enabled", "false"]
+    monkeypatch.setattr("sys.argv", argv)
+    seen: list[argparse.Namespace] = []
+
+    async def run(args: argparse.Namespace) -> dict[str, str]:
+        seen.append(args)
+        return {"status": "dry_run"}
+
+    monkeypatch.setattr(script, "run", run)
+    assert script.main() == 0
+    assert seen and seen[0].reason is None
+
+
+@pytest.mark.parametrize("reason", [None, "", "   "])
+def test_applying_without_a_reason_is_refused_before_anything_runs(monkeypatch, capsys, reason) -> None:
+    argv = ["amend_capital_policy", "--exchange-account-id", str(ACCOUNT), "--environment", "ci",
+            "--symbol", "fUST", "--enabled", "false", "--apply-digest", "d"]
+    if reason is not None:
+        argv += ["--reason", reason]
+    monkeypatch.setattr("sys.argv", argv)
+    monkeypatch.setattr(script, "run", lambda args: pytest.fail("ran without a reason"))
+    with pytest.raises(SystemExit) as exit_:
+        script.main()
+    assert exit_.value.code == 2
+    assert "--reason" in capsys.readouterr().err
 
 
 @pytest.mark.asyncio

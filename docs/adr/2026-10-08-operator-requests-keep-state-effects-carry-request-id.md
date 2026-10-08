@@ -37,7 +37,7 @@ prior state：同日稍早的 [2026-10-08-operator-requests-insert-only-with-ins
   - 請求欄位不可變由 column grant 保證（runtime role）；不列欄位的 BEFORE UPDATE trigger 拒絕 `OLD.state <> 'requested'` 與 `NEW.state = 'requested'`（含 owner）。
   - 單一 pending 維持四個既有 partial unique index；`insert_request` 以 `INSERT … ON CONFLICT (<該 index 的欄位>) WHERE <其 predicate> DO NOTHING` 判斷 pending 已佔，其餘違規照常拋出（取代 outcome ADR 的 constraint 名比對：那是 trigger 擲合成名稱時才需要的做法）。
   - `trading_state`、`capital_policy_revisions` 加 `operator_request_id uuid NULL`；trading 以 `(operator_request_id, exchange_account_id, deployment_environment)`、capital 再加 `symbol`、journal 以兩條 MATCH SIMPLE 複合 FK（`attempt_id`、`quarantine_id` 各一，`ck_execution_resolution_subject` 保證恰一條生效）指向請求表 `(request_id, …, uncertainty_id)`；以上都指向請求表對應的 UNIQUE；trading、capital 效果表 partial `UNIQUE (operator_request_id)`。
-  - G1 改讀 typed `operator_request_id`；`source->>'request_id'` 只留作稽核文字。
+  - G1 改讀 typed `operator_request_id`；`source->>'request_id'` 只留作稽核文字（2026-10-09 Amendment：新 revision 不再寫，見下）。
   - 請求表的 `trading_state_id`、`policy_revision_id` 在效果帶原因 ID 的同一個 release 停寫並 unmap，下一個 release DROP。
 - **D9 請求表產物欄不外露、cancel-all 也帶原因 ID**：`trading_state_id`／`policy_revision_id` 從 API 回應與前端型別移除（前端正式程式無人讀），不改由效果側取值；`funding_cancel_all_audit` 加 `operator_request_id`（複合 scope FK，`/admin/halt` 與 auto halt 為 NULL），kill 觸發 cancel-all 時寫入。
 - 保留 outcome ADR 的其餘部分：`failed` 為終態不重試、不做 idempotency key、空白 reason 回 422、`insert_request` 其餘 IntegrityError 往上拋。
@@ -55,7 +55,7 @@ prior state：同日稍早的 [2026-10-08-operator-requests-insert-only-with-ins
 - 跨 scope、跨對象的效果列被 FK 拒絕；同一請求第二筆效果被 partial UNIQUE 拒絕。
 - 終態請求再 UPDATE 被拒（含 owner）；bot 改請求欄位被 grant 拒絕。
 - 兩個 connection 同時 INSERT 同對象請求只成功一筆，由原生 index 擲 23505，不依隔離等級。
-- `backend/src` 與本 ADR 第一個 release 之後的 migration 不再讀 `source->>'request_id'`（G1 起改讀 typed 欄）。
+- `backend/src` 不再讀 `source->>'request_id'`（G1 起改讀 typed 欄）；migration 只在資料斷言裡讀它，作為與 typed 欄無關的第二份證據（`41cec7caf291` 判斷 capital 請求是不是 revision 的造成者）。
 
 ## Followup
 
@@ -63,6 +63,14 @@ prior state：同日稍早的 [2026-10-08-operator-requests-insert-only-with-ins
 - 未部署的 R1 migration `7daffbb42a81` 不出貨；新 migration 接在 `8ac3b44460fc` 之後。
 - trading 歷史列的配對鍵：請求的 `trading_state_id` 指到的列，且 `cause='operator'`、`actor` 等於 `requested_by`、`reason` 等於 `'kill: '`／`'resumed: '` 加請求的 reason；同一列有多筆符合時（同一操作者以相同 reason 重送 kill）取 `processed_at_ms` 最早者，其餘是 restate。後置斷言獨立檢查被選中的請求所連的列不早於它的 `processed_at_ms`（worker 先讀時鐘記處理時間、再讀時鐘寫列；restate 的請求在該列之後才處理）。
 - 收尾時改寫 `backend/ARCHITECTURE.md` §7（分支上的 outcome 段落描述作廢）。
+- 結案（2026-10-09）：R1'（PR #153，migration `5e820d6dc7da`，deploy ledger #271）與 R2'（PR #154，`41cec7caf291`，#273）皆已部署，部署前的 migration 演練在還原副本上通過；`backend/ARCHITECTURE.md` §7 與 `docs/runbooks/operations.md` 已改寫。
+
+### Amendment Decision（2026-10-09）
+
+- **新 revision 的 `source` 不再複製請求資訊**（Will 2026-10-09，選 A）：runtime 套用請求寫的 revision，`source` 只留 `amendment_digest`、`changes`；`request_id`、`requested_by`、`reason` 只經 typed `operator_request_id` 的 FK 取得。owner 腳本沒有請求列可 join，apply 必須帶 `--reason`，記在 `source`。歷史列不改寫：它們的 `source.request_id` 已由 `5e820d6dc7da` 後置斷言證明等於 typed 欄，之後以 typed 欄為權威。
+- 不選「保留複本加約束」：`request_id` 可用本列 CHECK 綁，`requested_by`／`reason` 跨表只能靠 trigger，等於多一套機制守沒有讀者的資料。不選「維持現狀」：冗餘且無約束，D8 的「稽核文字」無從驗證。
+- 依據：event sourcing 的 causation metadata 只存 id（[Marten](https://martendb.io/events/metadata.html)、[EventStoreDB](https://docs.kurrent.io/server/v24.10/features/projections/system.html)）；[Kubernetes ownerReferences](https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/) 以 uid 為準。audit log 存快照的前提是來源會變或消失，請求列兩者皆否（欄位 grant、轉移 trigger、FK `RESTRICT`、不刪）。
+- 延後：owner revision 的 typed `actor`／`reason` 與 CHECK（無請求的寫入必帶原因）。觸發：出現第二個能寫 policy 的人，或稽核需要對所有 revision 機械地回答「誰、為什麼」。
 
 ## Invariants
 

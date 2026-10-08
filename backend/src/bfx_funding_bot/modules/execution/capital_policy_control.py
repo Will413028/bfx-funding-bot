@@ -100,7 +100,6 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
                 session, store=self.policy_store, scope_lock=self.scope_lock, symbol=row.symbol,
                 changes=changes,
                 apply_digest=report["amendment_digest"],
-                origin={"requested_by": row.requested_by, "reason": row.reason},
                 operator_request_id=row.request_id)
         except PolicyRefused as exc:
             code = str(exc)
