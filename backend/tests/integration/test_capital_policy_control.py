@@ -98,11 +98,10 @@ async def test_disable_then_enable_append_one_revision_each(migrated_db):
     assert row.outcome_reason == "disabled (revision 2)"
     async with factory() as session:
         written = await session.get(CapitalPolicyRevisionRow, after.revision_id)
-    # The revision names the request: typed, and as audit text in its source.
+    # The revision names the request; who asked and why stay the request's own columns.
     assert written.operator_request_id == disable
-    source = written.source
-    assert source["request_id"] == str(disable) and source["requested_by"] == "operator"
-    assert source["changes"] == {"enabled": "False"} and "amendment_digest" in source
+    assert set(written.source) == {"amendment_digest", "changes"}
+    assert written.source["changes"] == {"enabled": "False"}
 
     enable = await request(factory, account, "enable", at=T0 + 1)
     assert await worker(factory, account).process(enable) == "applied"

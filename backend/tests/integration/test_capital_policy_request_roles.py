@@ -233,13 +233,15 @@ def test_the_bot_applies_a_web_api_request_as_a_new_revision(migrated):
     state, reason, request_id = asyncio.run(scenario())
     assert (state, reason) == ("applied", "disabled (revision 2)")
     with engine.connect() as conn:
-        head = conn.execute(text("SELECT h.revision, r.operator_request_id, r.source->>'request_id', "
+        head = conn.execute(text("SELECT h.revision, r.operator_request_id, "
+                                 "(SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(r.source) k), "
                                  "r.policy->>'enabled', r.policy - 'enabled' "
                                  "= p.policy - 'enabled' FROM capital_policy_heads h "
                                  "JOIN capital_policy_revisions r ON r.id = h.revision_id "
                                  "JOIN capital_policy_revisions p ON p.symbol = r.symbol "
                                  "AND p.revision = 1")).one()
-    assert tuple(head) == (2, request_id, str(request_id), "false", True)
+    # Who asked and why stay the request's columns; the revision names the request only.
+    assert tuple(head) == (2, request_id, ["amendment_digest", "changes"], "false", True)
 
 
 def test_the_runtime_role_may_toggle_enabled_and_nothing_else(migrated):

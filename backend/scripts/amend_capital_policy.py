@@ -10,6 +10,7 @@ needs all five envelope options.
     --min-period-days 2 --max-period-days 2 --max-open-offers 6 \\
     --rate-floor-ratio 0.5 --min-rate-apr 0.01
   # review the complete report, then repeat with --apply-digest DIGEST
+  # --reason "why this change": required to apply, recorded in the revision's source
 
 On the VM run it as a one-shot of the deployed backend image with
 /opt/bfx/runtime/migrate.env (the owner role: the runtime role may not write
@@ -50,7 +51,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         async with factory() as session:
             report = await amend_capital_policy(
                 session, store=policy.store, scope_lock=policy.scope_lock, symbol=args.symbol,
-                changes=_changes(args), apply_digest=args.apply_digest)
+                changes=_changes(args), apply_digest=args.apply_digest,
+                origin=None if args.reason is None else {"reason": args.reason})
             if report["status"] == "applied":
                 await session.commit()
             else:
@@ -95,7 +97,12 @@ def main() -> int:
     parser.add_argument("--rate-floor-ratio", type=_amount)
     parser.add_argument("--min-rate-apr", type=_amount, help="annual fraction, 0.01 = 1%%")
     parser.add_argument("--apply-digest")
+    parser.add_argument("--reason", help="why: required with --apply-digest, kept in the revision")
     args = parser.parse_args()
+    if args.apply_digest is not None and not (args.reason or "").strip():
+        # No operator request stands behind an owner's revision: its source is the only place
+        # the reason can live.
+        parser.error("--apply-digest needs a non-blank --reason")
     logging.disable(sys.maxsize)
     try:
         print(json.dumps(asyncio.run(run(args)), sort_keys=True, indent=2))

@@ -87,11 +87,14 @@ async def amend_capital_policy(
 ) -> dict[str, Any]:
     """Return the dry-run report, or apply exactly that report. The caller commits.
 
-    ``origin`` is recorded in the new revision's ``source`` beside the digest
-    (who asked, and why); it is not part of the report. ``operator_request_id``
-    names the operator request the revision applies: the revision's typed
-    column, and ``source.request_id`` as audit text. None for the owner's script.
+    The new revision's ``source`` holds only what has no other home: the
+    amendment digest, the changes, and ``origin`` (the owner's script records
+    why). A revision that applies an operator request names it in its typed
+    ``operator_request_id``; who asked and why are the request's own columns,
+    reached through that foreign key, and are never copied into ``source``.
     """
+    if operator_request_id is not None and origin:
+        raise ValueError("a revision applying an operator request records no origin of its own")
     if not changes.as_dict():
         raise PolicyRefused("no_changes_requested")
     await scope_lock.lock(session, store.scope)
@@ -117,9 +120,7 @@ async def amend_capital_policy(
         raise PolicyRefused("amendment_changed")
     written = await store.apply_policy(
         session, symbol=symbol, policy=amended, expected_revision=applied.revision,
-        source={**(origin or {}),
-                **({} if operator_request_id is None else {"request_id": str(operator_request_id)}),
-                "amendment_digest": digest, "changes": changes.as_dict()},
+        source={**(origin or {}), "amendment_digest": digest, "changes": changes.as_dict()},
         operator_request_id=operator_request_id,
     )
     report.update(status="applied", new_revision=written.revision,

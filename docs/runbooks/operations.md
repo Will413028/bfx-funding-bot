@@ -36,7 +36,7 @@ Overview「交易狀態」面板的「幣別」區塊列出每個有 applied pol
 （未設定時明白標示）、最近的請求與結果。停用／啟用需要填原因，經 frontend BFF 的 MFA 閘門，
 webapi 只把請求排入 `capital_policy_requests`（回 202），由 bot 的 `CapitalPolicyRequestWorker`
 在 account lock 下重新驗證 operator 後，走與 script 相同的 amendment 路徑寫一個新 revision
-（`source` 記 `request_id`／`requested_by`／`reason`），結果顯示在該幣別下。
+（revision 的 `operator_request_id` 指回該請求；誰、為什麼是請求自己的欄位，不複製進 revision 的 `source`），結果顯示在該幣別下。
 
 - 停用：不掛新單，下一個 reconcile tick 撤掉該幣別的受管 offer；手動掛的單與已成交借款不動。
   不是停機，不寫 `trading_state`，恢復也不需要 resume。停用除了 operator 驗證之外不受任何條件
@@ -60,8 +60,10 @@ container，用 `/opt/bfx/runtime/migrate.env`（owner role）：
 python -m scripts.amend_capital_policy --exchange-account-id UUID --environment prod \
   --symbol fUST --max-offer-amount 200 --min-period-days 2 --max-period-days 2 \
   --max-open-offers 6 --rate-floor-ratio 0.5 --min-rate-apr 0.01
-# 看完整報告後，同一組參數加 --apply-digest DIGEST 再跑一次
+# 看完整報告後，同一組參數加 --apply-digest DIGEST --reason "為什麼改" 再跑一次
 ```
+
+- apply 必須帶非空白的 `--reason`（dry run 不用）：owner 的 revision 沒有對應請求，原因只能記在 revision 的 `source`。
 
 - 第一次設定包絡要五個欄位齊全（`envelope_incomplete` 會列出缺哪個）；之後可以只改其中一個。
 - 利率下限 ＝ max(`min_rate_apr`/365, 即時 bid 中位數 × `rate_floor_ratio`)。低於下限時該幣別閒置，
@@ -83,7 +85,7 @@ operator 後套用，結果顯示在面板上。
 | 恢復交易 | `HALTED` → `ACTIVE`（不論是誰停的）。不帶任何限額期：每筆單本來就在包絡內 |
 | Kill switch…（輸入 `KILL`） | `HALTED/operator` ＋ 每個幣別的 venue cancel-all，**連你在 Bitfinex 網頁手動掛的單也會撤**；已成交借款不受影響。等待中的其他請求標成 `superseded_by_kill`。kill 有自己的佇列、優先處理。已經 HALTED 時再按一次 ＝ 重試 cancel-all |
 
-面板的「本次停機的 venue 撤單」顯示 `funding_cancel_all_audit` 的結果；不完整時重試 kill 或到
+面板的「本次停機的 venue 撤單」顯示 `funding_cancel_all_audit` 的結果（UI kill 觸發的列帶該請求的 `operator_request_id`，`/admin/halt` 與自動保護為 NULL）；不完整時重試 kill 或到
 Bitfinex 手動撤單。**恢復只有 UI 這一條路**；static token 不能恢復。
 
 ### 緊急備用：static admin token（只能降低曝險）
