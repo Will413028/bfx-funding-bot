@@ -160,7 +160,7 @@ class KillSwitch:
         halted = transition.state
         if not transition.changed and when_already_halted == "skip":
             return KillResult(state=halted, state_changed=False, cancel_all=())
-        currencies, scope_error = await self._currencies()
+        currencies, scope_error = await self.currencies()
         if scope_error is not None:
             log.critical("kill_switch_scope_incomplete account=%s error=%s",
                          self._trading.account_id, scope_error)
@@ -217,7 +217,8 @@ class KillSwitch:
         async with context as quiet:
             yield quiet
 
-    async def _currencies(self) -> tuple[tuple[str, ...], str | None]:
+    async def currencies(self) -> tuple[tuple[str, ...], str | None]:
+        """The currencies a cancel-all covers now, and why that list may be incomplete."""
         symbols = set(self._configured)
         error = None
         try:

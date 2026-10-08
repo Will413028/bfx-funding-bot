@@ -11,6 +11,13 @@ by the CapitalPolicy envelope instead. A kill writes HALTED and, after that
 commit, runs the venue cancel-all; it rejects every request still waiting to
 resume, and every waiting currency enable (``capital_policy_requests``).
 Releases never touch the trading state.
+
+The cancel-all runs after the commit, in this process, so a crash or a stop
+there (or a failure before its first audit row) would leave a kill whose venue
+half never ran: the planner pulls only managed offers it may cancel, never a
+hand-placed or auto-renewed one, nor one in an uncertain scope. The durable
+rows are the work item: while that kill's HALTED is still in force, an idle
+worker sees no finished cancel-all since it and runs it (:meth:`idle`).
 """
 from __future__ import annotations
 
@@ -18,7 +25,7 @@ import logging
 from typing import Any, Protocol
 from uuid import UUID
 
-from sqlalchemy import case, update
+from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
@@ -30,7 +37,11 @@ from bfx_funding_bot.modules.execution.operator_requests import (
     Outcome,
     RequestRejected,
 )
-from bfx_funding_bot.modules.execution.safety.tables import TradingControlRequestRow
+from bfx_funding_bot.modules.execution.safety.tables import (
+    FundingCancelAllAuditRow,
+    TradingControlRequestRow,
+    TradingStateRow,
+)
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     ACTIVE,
     CAUSE_OPERATOR,
@@ -50,12 +61,17 @@ log = logging.getLogger(__name__)
 TRADING_CONTROL_APPLIED = "trading_control_applied"
 TRADING_CONTROL_REJECTED = "trading_control_rejected"
 TRADING_CONTROL_FAILED = "trading_control_failed"
+# An applied kill had no finished cancel-all (the process died or failed after the
+# commit); the idle worker runs it now.
+KILL_CANCEL_ALL_CAUGHT_UP = "kill_cancel_all_caught_up"
 
 
 class _Kill(Protocol):
     async def engage(self, *, cause: str, actor: str, reason: str,
                      when_already_halted: str = "retry",
                      operator_request_id: UUID | None = None) -> Any: ...
+
+    async def currencies(self) -> tuple[tuple[str, ...], str | None]: ...
 
 
 class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]):
@@ -72,6 +88,12 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
     # Bound by the daemon once the kill switch exists (it is built later).
     kill_switch: _Kill | None = None
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Kills whose cancel-all this process already caught up: once per
+        # process, so an audit that cannot be written never loops the venue.
+        self._caught_up: set[UUID] = set()
+
     def queue_order(self) -> tuple[Any, ...]:
         """A kill never waits behind another request."""
         return (case((TradingControlRequestRow.action == "kill", 0), else_=1),
@@ -84,6 +106,73 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
         except IllegalTradingTransition as exc:
             raise RequestRejected(f"illegal_transition: {exc}") from exc
         return Outcome(APPLIED, note, detail=result)
+
+    async def idle(self) -> None:
+        """Run the cancel-all of a kill whose venue half never finished."""
+        if self.kill_switch is None:
+            return
+        row = await self._kill_without_cancel_all()
+        if row is None or row.request_id in self._caught_up:
+            return
+        self._caught_up.add(row.request_id)
+        log.critical("kill_cancel_all_caught_up request=%s", row.request_id)
+        alerts.emit(KILL_CANCEL_ALL_CAUGHT_UP, level=alerts.CRITICAL,
+                    request_id=str(row.request_id), by=row.requested_by)
+        await self._cancel_all(row)
+
+    async def _kill_without_cancel_all(self) -> TradingControlRequestRow | None:
+        """The latest applied kill, if its HALTED is in force and no cancel-all finished since.
+
+        In force: the account is HALTED and no ACTIVE row follows the HALTED the
+        kill wrote, or restated (a later HALTED is then someone else's stop).
+        Finished: since the kill, every currency a cancel-all covers now has a
+        terminal audit row last, whoever ran it (/admin/halt counts); a
+        ``requested`` row left last means the venue call was cut off.
+        """
+        assert self.kill_switch is not None
+        async with self.session_factory() as session:
+            current = await read_current(session, account_id=self.account_id,
+                                         environment=self.environment)
+            # Fast path only: an ACTIVE account also fails the resume check below.
+            if current is None or current.state != HALTED:
+                return None
+            kill: TradingControlRequestRow | None = await session.scalar(self._scoped(
+                select(TradingControlRequestRow)).where(
+                TradingControlRequestRow.action == "kill",
+                TradingControlRequestRow.state == APPLIED,
+            ).order_by(TradingControlRequestRow.processed_at_ms.desc(),
+                       TradingControlRequestRow.request_id.desc()).limit(1))
+            if kill is None or kill.processed_at_ms is None:
+                return None
+            states = select(TradingStateRow.id).where(
+                TradingStateRow.exchange_account_id == self.account_id,
+                TradingStateRow.deployment_environment == self.environment)
+            # Ordered by id, not time: a resume may share the kill's millisecond.
+            halted_id = await session.scalar(states.where(
+                TradingStateRow.operator_request_id == kill.request_id))
+            if halted_id is None:  # a restated kill: the HALTED it found in force
+                halted_id = await session.scalar(states.where(
+                    TradingStateRow.state == HALTED,
+                    TradingStateRow.created_at_ms <= kill.processed_at_ms,
+                ).order_by(TradingStateRow.id.desc()).limit(1))
+            resumed = await session.scalar(states.where(
+                TradingStateRow.state == ACTIVE,
+                TradingStateRow.id > (halted_id or 0),
+            ).limit(1))
+            if resumed is not None:
+                return None
+            audit = (await session.execute(select(
+                FundingCancelAllAuditRow.currency, FundingCancelAllAuditRow.phase,
+            ).where(
+                FundingCancelAllAuditRow.exchange_account_id == self.account_id,
+                FundingCancelAllAuditRow.deployment_environment == self.environment,
+                FundingCancelAllAuditRow.occurred_at_ms >= kill.processed_at_ms,
+            ).order_by(FundingCancelAllAuditRow.id))).tuples().all()
+        last: dict[str, str] = dict(audit)  # each currency's latest phase
+        if "requested" in last.values():
+            return kill
+        covered, _ = await self.kill_switch.currencies()
+        return kill if set(covered) - last.keys() else None
 
     async def committed(self, row: TradingControlRequestRow, outcome: Outcome) -> None:
         """Tell the operator, then finish a kill at the venue (outside every lock)."""
@@ -160,6 +249,7 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
 
 
 __all__ = [
+    "KILL_CANCEL_ALL_CAUGHT_UP",
     "TRADING_CONTROL_APPLIED",
     "TRADING_CONTROL_FAILED",
     "TRADING_CONTROL_REJECTED",
