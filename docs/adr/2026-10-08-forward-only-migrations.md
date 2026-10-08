@@ -62,7 +62,7 @@ tags: [bfx-funding-bot, decision, database, migration, testing]
 - 改為（Will 2026-10-08）：這些測試改從 `tests/pg_templates.py` 的 `LAST_REVERSIBLE_REVISION`（`8ac3b44460fc`，forward-only 之前最後一支 migration）起降，保留原本的 downgrade 斷言；斷言 head 狀態的測試（權限白名單、`alembic check`、realm trigger 涵蓋）仍跑在 head，round trip 的 `alembic check` 移到升回 head 之後。
 - 不採「改成在上一版 seed 再升級」：斷言意圖會變，例如權限白名單不再驗證逐步 downgrade 的還原。不採「新 migration 例外寫可執行的 downgrade」：違反 D1。（此處的取捨與上方 Options 的 A–D 無關。）
 - 後果：這些測試只涵蓋 forward-only 之前的 migration；之後的 migration 的升級前狀態測試照 D2。
-- 權限白名單：`LAST_REVERSIBLE_REVISION` 的 web API 白名單寫成 `REVERSIBLE_*`，較舊版本的白名單都從它推導；之後改 web API 權限的 migration 只改 head 的 `EXPECTED_*`（`tests/integration/test_webapi_privilege_allowlist.py`）。
+- 權限白名單：`LAST_REVERSIBLE_REVISION` 的 public 白名單寫成 `REVERSIBLE_*`，較舊版本的表權限從它推導；之後改 public 表或欄位權限的 migration 只改 head 的 `EXPECTED_*`，改 `legacy_archive` 或 schema 權限的要先把那部分同樣拆成兩份（`tests/integration/test_webapi_privilege_allowlist.py`）。
 
 ## Related
 

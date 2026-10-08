@@ -58,8 +58,11 @@ _CREDIT_ENDS = ("ledger_observation_credit_history", "SELECT")
 _RW = {"DELETE", "INSERT", "SELECT", "UPDATE"}
 _R = {"SELECT"}
 
-# The allowlist at LAST_REVERSIBLE_REVISION, written out once: every older allowlist below derives
-# from it, and head's (EXPECTED_*) is it plus what later, forward-only migrations change.
+# The public allowlist at LAST_REVERSIBLE_REVISION, written out once: the older allowlists below
+# take their table grants from it (PREVIOUS_COLUMNS is written out on its own), and head's
+# (EXPECTED_*) is it plus what later, forward-only migrations change in public. A later migration
+# that changes a legacy_archive or schema grant first splits ARCHIVE_COLUMNS and _held's schema
+# rows into a reversible and a head copy the same way.
 REVERSIBLE_TABLES: dict[str, set[str]] = {
     "account_config_drafts": _RW,
     "api_keys": _RW,
