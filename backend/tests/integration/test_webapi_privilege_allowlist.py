@@ -253,6 +253,10 @@ PRE_CONTRACT = _held(PRE_CONTRACT_COLUMNS, archived=True)
 PRE_ARCHIVE = _held(PRE_CONTRACT_COLUMNS)
 MATCH = _held(MATCH_COLUMNS)
 PREVIOUS = _held(PREVIOUS_COLUMNS)
+# The allowlist at LAST_REVERSIBLE_REVISION, where the round trip starts. It equals head's until
+# a later migration changes a web API privilege; that migration writes it as head's minus its own
+# change (its downgrade raises, so the round trip cannot start from head).
+AT_LAST_REVERSIBLE = EXPECTED
 
 _TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 _COLUMN_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "REFERENCES")
@@ -411,10 +415,12 @@ def test_execution_decisions_are_unreadable(head_db) -> None:
 
 def test_round_trip_keeps_the_allowlist(reversible_db) -> None:
     url, engine, _ = reversible_db
+    with engine.connect() as conn:
+        assert _diff(_effective(conn), AT_LAST_REVERSIBLE) == {"unexpected": [], "missing": []}
     # f5a6b7c8d9e0 (dropping the closed columns) changes no web API privilege...
     alembic(url, "downgrade", "e4f5a6b7c8d9")
     with engine.connect() as conn:
-        assert _diff(_effective(conn)) == {"unexpected": [], "missing": []}
+        assert _diff(_effective(conn), AT_LAST_REVERSIBLE) == {"unexpected": [], "missing": []}
     # ...e4f5a6b7c8d9's downgrade gives back the pre-switch evidence INSERT...
     alembic(url, "downgrade", _PRE_CONTRACT)
     with engine.connect() as conn:
