@@ -39,6 +39,7 @@ prior state：同日稍早的 [2026-10-08-operator-requests-insert-only-with-ins
   - `trading_state`、`capital_policy_revisions` 加 `operator_request_id uuid NULL`；trading 以 `(operator_request_id, exchange_account_id, deployment_environment)`、capital 再加 `symbol`、journal 以 generated `subject_id = coalesce(attempt_id, quarantine_id)` 加入 FK，指向請求表對應的 UNIQUE；效果表 partial `UNIQUE (operator_request_id)`。
   - G1 改讀 typed `operator_request_id`；`source->>'request_id'` 只留作稽核文字。
   - 請求表的 `trading_state_id`、`policy_revision_id` 先雙寫、再停寫並 unmap、最後 DROP。
+- **D9 請求表產物欄不外露、cancel-all 也帶原因 ID**：`trading_state_id`／`policy_revision_id` 從 API 回應與前端型別移除（前端正式程式無人讀），不改由效果側取值；`funding_cancel_all_audit` 加 `operator_request_id`（複合 scope FK，`/admin/halt` 與 auto halt 為 NULL），kill 觸發 cancel-all 時寫入。
 - 保留 outcome ADR 的其餘部分：`failed` 為終態不重試、不做 idempotency key、空白 reason 回 422、`insert_request` 其餘 IntegrityError 往上拋。
 
 ## Rationale
@@ -46,6 +47,7 @@ prior state：同日稍早的 [2026-10-08-operator-requests-insert-only-with-ins
 - **E′ 而非 B**：outcome ADR 選 B 的理由是「bot 仍有 UPDATE 權，請求列終態可覆寫」。前一半早已由 column grant 擋住：bot 只能 UPDATE worker 欄位，新增的請求欄位預設沒有 UPDATE 權；剩下的「終態被覆寫」一支不列欄位的 trigger 就能擋。B 為了 insert-once 付出的代價是 single-pending 從宣告式 index 變成 trigger＋advisory lock＋拒絕 REPEATABLE READ＋合成的 constraint 名，這些正是 outcome ADR Amendment 與兩輪 review 一再修補的地方。insert-once 結果表在業界只出現在跨服務 idempotent consumer 的去重，那裡沒有 single-pending 的需求。代價：「至多結案一次」靠 trigger 而非 PK，且 owner 改請求欄位不再被 trigger 擋（只剩 grant 擋 runtime role）。
 - **效果 → 請求而非 outcome → 產物（推翻 D2）**：D2 為了避免在 migration 裡暫停 append-only 保護而選反方向，結果是三表方向不一致、capital 有 typed FK 與 JSON 兩份連結。效果帶原因 ID 才能用複合 FK 一次保證「同 scope、同對象、一個請求至多一個效果」。代價：三張效果表的歷史列要由 owner 在 migration 交易內暫停 append-only trigger 回填，前後斷言檢查；trading 一列可能對到多筆請求，由前置斷言擋下歧義。
 - **不選 A**：只補檢查不改方向，G1 的 JSON 授權鍵與 trigger 版 single-pending 都留下來，是 Will 明說不要的技術債。
+- **D9 移除而非保留欄位改取效果側**：保留會讓重送 kill 與 capital `unchanged` 的值悄悄變 NULL；移除欄位之後再補是 breaking、新增不是（[Google AIP-180](https://google.aip.dev/180)），所以趁沒有外部使用者時拿掉沒人讀的內部 FK，需要時以新增欄位補連結。重送 kill 不寫新 trading_state，卻在 commit 後另一筆交易重跑 venue cancel-all，所以 cancel-all 的稽核列要自己帶原因 ID，否則 DROP 請求產物欄後這條連結會斷。代價：capital `unchanged` 當時生效的 revision 在 DROP 後推不回來（revision 無時間欄），`unchanged` 的 reason 已表達無變化，接受。
 - release 數由四個降為三個（expand＋雙寫、停寫＋unmap、DROP），只受相容性窗口約束。
 
 ## Expected Outcome
