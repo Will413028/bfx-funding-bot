@@ -2,11 +2,13 @@
 title: operator 請求只准新增，處理結果另寫 insert-once outcome 表；single-pending 改由 BEFORE INSERT trigger 保證
 date: 2026-10-08
 review-date: 2027-01-08
-status: active
+status: "superseded-by: [2026-10-08-operator-requests-keep-state-effects-carry-request-id](2026-10-08-operator-requests-keep-state-effects-carry-request-id.md)"
 tags: [bfx-funding-bot, decision, database, operator-request, security]
 ---
 
 # operator 請求只准新增，結果另寫 insert-once outcome
+
+> 2026-10-08 由 [2026-10-08-operator-requests-keep-state-effects-carry-request-id](2026-10-08-operator-requests-keep-state-effects-carry-request-id.md)（D8）取代：D1、D2、D4（含 Amendment）、D5、D6 不再生效；保留的部分見該檔 Decision 末項。
 
 ## Context
 
@@ -67,7 +69,7 @@ prior state：三張 operator request 表（`trading_control_requests`、`capita
 ## Invariants
 
 - 請求表對所有 runtime role 只准 INSERT；outcome 表對任何 role 不得 UPDATE／DELETE／TRUNCATE。
-- 每個請求至多一筆 outcome；每個對象同時至多一筆無 outcome 的請求（trading 的 kill 與非 kill 各一格）。
+- 每個請求至多一筆 outcome；每個對象同時至多一筆無 outcome 的請求（trading 的 kill 與非 kill 各一格），由 AFTER INSERT constraint trigger 在對象 advisory lock 下檢查，REPEATABLE READ 的 INSERT 被拒（見 Amendment）。
 - capital 套用時 revision 先於 outcome 寫入（同一交易），G1 看的是「請求無 outcome」。
 
 ## Revocation Triggers
@@ -77,6 +79,13 @@ prior state：三張 operator request 表（`trading_control_requests`、`capita
 - journal 出現第二個寫入者 → 補 journal 與請求的範圍比對（盤點缺陷 6）。
 
 ## Review Notes
+
+## Amendment (2026-10-08): single-pending 在 AFTER INSERT 檢查，拒絕 REPEATABLE READ
+
+- D4 原寫「BEFORE INSERT trigger」，計畫並把它排在 `database_realm_write`、`ledger_seed_evidence` 之前先擲。R1 design review 指出這和被取代的 partial unique index 時機相反：index 在 row 寫入時才檢查，晚於所有 BEFORE guard、CHECK、NOT NULL；BEFORE 版會把「同對象已有待處理請求」時的內容錯誤（例如空白 reason 違反 `ck_*_evidence`）蓋成 23505，被拒的 INSERT 也先拿了鎖。
+- 改為（Will 2026-10-08，「採業界做法、治本」）：`CREATE CONSTRAINT TRIGGER single_pending AFTER INSERT ... NOT DEFERRABLE FOR EACH ROW`，檢查時排除 `NEW.request_id` 本身；鎖、檢查條件、23505 與沿用的 constraint 名都不變。好處來自 AFTER 時機（與 unique index 同一時點，CHECK、NOT NULL、FK 之後）；`CONSTRAINT` 只宣告意圖。PG18 實驗確認：兩個並行 INSERT 只成功一筆；CHECK 與 FK 違反先擲、且不取鎖；asyncpg／psycopg 收到的 SQLSTATE、constraint 名與 index 違反相同。
+- 新增：在 REPEATABLE READ 交易裡 INSERT 請求一律拒絕。鎖之後的檢查要看到鎖之前已 commit 的請求：READ COMMITTED（每個語句新 snapshot）與 SERIALIZABLE（SSI 中止其一）成立，REPEATABLE READ 的 snapshot 早於等鎖，不成立。原本這只是「呼叫端碰巧都用 READ COMMITTED」的未聲明前提。
+- 不採「改名排到最後（`zz_`）」：仍靠名稱字母序，FK 與 CHECK 也照樣排在 BEFORE trigger 之後。不採 pending slot 表（以 UNIQUE 鍵存待處理對象，業界常見、原生 23505、不受隔離等級影響）：結案時要 DELETE slot，等於把 D1 拿掉的可變列換一張表帶回來。
 
 ## Related
 

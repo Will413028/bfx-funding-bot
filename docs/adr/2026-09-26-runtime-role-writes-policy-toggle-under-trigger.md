@@ -70,3 +70,5 @@ prior state：migration `a9d3e5f7b102`（capital authority）對 `bfx_bot` 撤�
 ## Amendment (2026-10-08): G1 改以「請求無 outcome」判斷仍在等待
 
 D1 trigger（`guard_runtime_policy_revision()`）的「`source.request_id` 指向仍在等待的請求」，在 [2026-10-08-operator-requests-insert-only-with-insert-once-outcome](2026-10-08-operator-requests-insert-only-with-insert-once-outcome.md) 的 R1 起改為「該請求沒有 outcome 列」（原為 `state='requested'`）；bot 須在同一交易內先寫 revision、再寫 outcome。其餘條件（同 scope／幣別／方向、`operator_authorized`、只改 `enabled`、head 只前進一格）不變。D2 的 supersede 改成對無 outcome 的等待中 enable 寫 `rejected`／`superseded_by_kill` outcome。
+
+（2026-10-08 再修訂：上一段由 [2026-10-08-operator-requests-keep-state-effects-carry-request-id](2026-10-08-operator-requests-keep-state-effects-carry-request-id.md) 取代——G1 仍看 `state='requested'`，授權鍵改為 revision 的 typed `operator_request_id`（含 scope 與幣別的複合 FK），`source->>'request_id'` 只留作稽核文字；kill supersede 維持 UPDATE 狀態欄。）
