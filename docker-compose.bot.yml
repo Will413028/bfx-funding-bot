@@ -12,7 +12,8 @@ name: bfx
 services:
   # Self-hosted Postgres — replaces Neon. Internal-only (no published port);
   # the real-money DB must never be reachable from outside the docker network.
-  # POSTGRES_USER/PASSWORD/DB come from existing .env.runtime. bfx-deploy does NOT
+  # POSTGRES_USER/PASSWORD/DB come from .env.postgres.runtime (0600, those three keys
+  # only): the database never sees the application's secrets. bfx-deploy does NOT
   # rewrite that file or recreate this service.
   postgres:
     build:
@@ -26,7 +27,7 @@ services:
     # error) the postmaster treats it as a crashed backend and crash-restarts the
     # whole database. docker-init as PID 1 reaps it instead.
     init: true
-    env_file: .env.runtime
+    env_file: .env.postgres.runtime
     command:
       - postgres
       - -c

@@ -72,7 +72,7 @@ app 只加入既有的 `bfx_default` network。`docker-compose.bot.yml` 的 `leg
 
 ### 套用資料服務的 compose 變更
 
-`bfx` project 的工作目錄是 VM 上的 `/home/ubuntu/bfx-funding-bot` checkout（`.env.runtime` 也在這裡），
+`bfx` project 的工作目錄是 VM 上的 `/home/ubuntu/bfx-funding-bot` checkout（postgres 讀的 `.env.postgres.runtime` 也在這裡：只有 `POSTGRES_USER`／`POSTGRES_PASSWORD`／`POSTGRES_DB`，0600），
 不是 release checkout；只改 `postgres` 會讓 DB 重啟，所以要在約好的維護窗口做，且先停 bot。
 `bfx-postgres:local` 會被 DR 流程從 release 重建，所以 `up` 一定會 recreate postgres，
 即使 compose 沒變；只能用 `--no-deps --no-build` 指名服務。
