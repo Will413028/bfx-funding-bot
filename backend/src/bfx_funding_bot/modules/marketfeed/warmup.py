@@ -13,9 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.modules.candles.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.modules.candles.repository import (
-    get_candles_in_range,
+    get_up_to,
     seal_closed_periods,
 )
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.marketfeed.scheduler import last_candle_close_mts
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
@@ -59,6 +60,23 @@ def warmup_ref_mts(cell: CellConfig, *, now_mts: int) -> int:
     )
 
 
+async def read_warmup_history(
+    session: AsyncSession, cell: CellConfig, *, ref_mts: int,
+) -> list[FundingCandle]:
+    """The rows replay reads for the tick at `ref_mts`, so warmup starts from them.
+
+    `DivergenceReporter` rebuilds from the last `lookback + 1` sealed rows up to
+    the tick's candle (signal_engine). A time range ending at an unaligned boot
+    clock instead yields one row fewer, which leaves a bounded window (RP's deque)
+    unfilled for the first tick.
+    """
+    return await get_up_to(
+        session,
+        symbol=cell.symbol, timeframe=cell.timeframe, period_agg=cell.period_agg,
+        mts_inclusive=ref_mts, lookback=_lookback_for(cell) + 1,
+    )
+
+
 async def warmup_cell(
     *,
     cell: CellConfig,
@@ -67,9 +85,17 @@ async def warmup_cell(
     bitfinex: BitfinexREST,
     session: AsyncSession,
     now_mts: int,
+    ref_mts: int | None = None,
 ) -> WarmupResult:
+    """Warm `cell` so its next observe is the candle at `ref_mts`.
+
+    `ref_mts` defaults to `warmup_ref_mts`, the candle the boot rehydrate tick
+    takes; a caller rebuilding for a later tick passes that tick's candle.
+    """
     step = _TIMEFRAME_MS[cell.timeframe]
     lookback = _lookback_for(cell)
+    if ref_mts is None:
+        ref_mts = warmup_ref_mts(cell, now_mts=now_mts)
 
     # 1. Find last known DB candle
     db_max = await _get_last_mts(session, cell)
@@ -90,12 +116,7 @@ async def warmup_cell(
         symbol=cell.symbol, timeframe=cell.timeframe, period_agg=cell.period_agg,
         now_ms=now_mts,
     )
-    start_mts = now_mts - lookback * step
-    history = await get_candles_in_range(
-        session,
-        symbol=cell.symbol, timeframe=cell.timeframe, period_agg=cell.period_agg,
-        start_mts=start_mts, end_mts=now_mts,
-    )
+    history = await read_warmup_history(session, cell, ref_mts=ref_mts)
 
     # 4. Phase 4.3 LOCF symmetry: delegate to build_strategy_at_boundary —
     # single source of truth shared with divergence_reporter.py so the live
@@ -110,8 +131,7 @@ async def warmup_cell(
         )
     result = boundary_builder(
         cell=cell, history=history,
-        ref_mts=warmup_ref_mts(cell, now_mts=now_mts),
-        budget_hours=cell.staleness_budget_hours,
+        ref_mts=ref_mts, budget_hours=cell.staleness_budget_hours,
     )
     registry.put(cell, result.strategy)
     log.info(

@@ -31,9 +31,10 @@ from bfx_funding_bot.apps.config import load_cells_only
 from bfx_funding_bot.apps.research import build_strategy_at_boundary
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
-from bfx_funding_bot.modules.candles.repository import get_candles_in_range, get_up_to
+from bfx_funding_bot.modules.candles.repository import get_up_to
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import ExtractedSignal
+from bfx_funding_bot.modules.marketfeed.warmup import read_warmup_history
 from bfx_funding_bot.modules.strategy import CellConfig
 
 logger = logging.getLogger("parity")
@@ -79,11 +80,8 @@ async def _diagnose(session: AsyncSession, cell: CellConfig, ticks: int) -> None
     print(f"newest final candle: {newest_final}  boot: {boot_mts}  ticks: {ticks}")
 
     # ---- ARM A: warmup, exactly as warmup_cell does it -------------------------
-    warm_history = await get_candles_in_range(
-        session, symbol=cell.symbol, timeframe=cell.timeframe,
-        period_agg=cell.period_agg,
-        start_mts=boot_mts - _MR_LOOKBACK * step, end_mts=boot_mts,
-    )
+    # `boot_mts` plays warmup's ref_mts: the candle its first tick observes.
+    warm_history = await read_warmup_history(session, cell, ref_mts=boot_mts)
     warm = build_strategy_at_boundary(
         cell=cell, history=warm_history, ref_mts=boot_mts, budget_hours=budget,
     )

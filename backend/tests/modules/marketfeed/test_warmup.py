@@ -169,3 +169,47 @@ async def test_warmup_locf_dense_cell_no_change(
     # LOCF over slots 0..4 is identity; filled[:-1] drops slot 4, the candle
     # that just closed and that the boot rehydrate tick observes.
     assert result.observed_count == 4
+
+
+async def test_warmup_off_the_hour_fills_the_window_replay_fills(
+    sqlite_session: AsyncSession,
+) -> None:
+    """Replay rebuilds from the last `lookback + 1` sealed rows up to the tick's
+    candle. A warmup window keyed on an unaligned boot clock got one row fewer,
+    so RP's deque was short and the boot tick decided SKIP while replay posted."""
+    async with sqlite_session.bind.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    base_mts = 1747584000000
+    candles = [
+        FundingCandle(
+            symbol="fUSD", timeframe="1h", period_agg="a30",
+            mts=base_mts + i * 3600_000,
+            open=Decimal(f"0.000{i + 1}"), close=Decimal(f"0.000{i + 1}"),
+            high=Decimal(f"0.000{i + 1}"), low=Decimal(f"0.000{i + 1}"),
+            volume=Decimal("100"),
+        )
+        for i in range(10)
+    ]
+    await upsert_candles(sqlite_session, candles)
+    await sqlite_session.commit()
+
+    bfx = AsyncMock()
+    bfx.get_funding_candles = AsyncMock(return_value=[])
+    reg = StrategyRegistry(build_strategy)
+    cell = _cell()  # rate_percentile, lookback_hours=5
+    now_mts = base_mts + 10 * 3600_000 + 26 * 60_000  # 26 min past slot 10
+    await warmup_cell(
+        cell=cell, registry=reg, boundary_builder=build_strategy_at_boundary,
+        bitfinex=bfx, session=sqlite_session, now_mts=now_mts,
+    )
+
+    ref = warmup_ref_mts(cell, now_mts=now_mts)
+    assert ref == candles[-1].mts  # slot 9 closed at 10:00; the boot tick takes it
+    replay = build_strategy_at_boundary(
+        cell=cell, history=candles[-6:], ref_mts=ref, budget_hours=2,
+    ).strategy
+    live = reg.get(cell)
+    assert live is not None
+    assert list(live._window) == list(replay._window)  # type: ignore[attr-defined]
+    assert len(live._window) == 5  # type: ignore[attr-defined]

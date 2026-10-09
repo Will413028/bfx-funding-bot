@@ -215,6 +215,28 @@ async def test_scheduler_fires_callback_after_timeframe_plus_buffer():
     assert len(callbacks) >= 1
 
 
+
+async def test_boundary_passed_since_the_boot_clock_fires_instead_of_being_skipped():
+    """Boot warms up and replays the last boundary at one clock reading; if an
+    hour turns before the scheduler arms, arming from a fresh clock would skip
+    the boundary in between and live would never observe its candle."""
+    cell = _cell()
+    fired: list[int] = []
+
+    async def cb(c: CellConfig, mts: int) -> None:
+        fired.append(mts)
+
+    boot = now_ms_utc() - 2 * _1H_MS  # two hours "ago": one boundary since
+    missed = next_candle_close_mts(timeframe="1h", now_ms=boot)
+    sched = Scheduler(callback=cb, probe=HealthProbe(), buffer_s=0.0)
+    sched.register_from_now(cell, now_ms=boot)
+
+    await sched.start()
+    await until(lambda: len(fired) >= 1)
+    await sched.stop()
+
+    assert fired[0] == missed
+
 # ── Phase 4.3 LOCF: scheduler both-tier emit tests ───────────────────────────
 # mts fired by scheduler = _REF_MTS + 1h (boundary T+1);
 # candle_mts inside tick = T+1 - 1h = _REF_MTS (the just-closed candle).

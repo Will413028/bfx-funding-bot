@@ -886,6 +886,19 @@ async def build_daemon(
             log.exception(
                 "standing_quote_rehydrate_failed cell=%s mts=%d", cell.pair_id, boundary,
             )
+            # Warmup left this tick's candle for the tick, which may have failed
+            # before observing it. Rebuild the cell for the scheduler's first tick
+            # so the candle is neither lost nor counted twice.
+            try:
+                async with session_factory() as s:
+                    await warmup_cell(
+                        cell=cell, registry=registry,
+                        boundary_builder=build_strategy_at_boundary,
+                        bitfinex=bitfinex, session=s,
+                        now_mts=now_ms_utc(), ref_mts=boundary,
+                    )
+            except Exception:
+                log.exception("standing_quote_rewarm_failed cell=%s", cell.pair_id)
         else:
             log.info(
                 "standing_quote_rehydrated cell=%s boundary_mts=%d", cell.pair_id, boundary,
@@ -1047,6 +1060,7 @@ async def build_daemon(
         trading_control=trading_control,
         capital_policy_control=capital_policy_control,
         writer_lock_watch=WriterLockWatch(lock=writer_lock),
+        boot_mts=now_mts,
         venue_tasks=venue_wiring.tasks,
         venue_aclose=venue_wiring.aclose,
         venue_diagnostics=venue_wiring.simulated,
