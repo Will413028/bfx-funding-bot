@@ -10,7 +10,7 @@ from bfx_funding_bot.modules.candles.repository import upsert_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
-from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
+from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell, warmup_ref_mts
 from bfx_funding_bot.modules.strategy import CellConfig
 from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
@@ -54,7 +54,8 @@ async def test_warmup_feeds_strategy_with_db_candles(sqlite_session: AsyncSessio
         now_mts=1747584000000 + 5 * 3600_000,
     )
 
-    assert result.observed_count == 5
+    # Slot 4 just closed: the boot rehydrate tick observes it, so warmup stops at 3.
+    assert result.observed_count == 4
     assert reg.get(cell) is not None
 
 
@@ -106,11 +107,13 @@ async def test_warmup_locf_symmetry_for_sparse_cell(
         session=sqlite_session, now_mts=now_mts,
     )
 
-    # Construct the reference state replay would build at the first scheduler
-    # tick (boundary = now_mts). Apply LOCF with the SAME parameters warmup
-    # must use, then observe filled[:-1] — the last slot belongs to the tick
-    # boundary candle which the scheduler delivers to signal_engine.extract().
-    filled = reindex_and_ffill(sparse_candles, ref_mts=now_mts, max_gap_hours=12)
+    # Construct the reference state replay would build at the first tick, the
+    # boot rehydrate of the candle that just closed. Apply LOCF with the SAME
+    # parameters warmup must use, then observe filled[:-1] — the last slot is
+    # the candle that tick delivers to signal_engine.extract().
+    filled = reindex_and_ffill(
+        sparse_candles, ref_mts=warmup_ref_mts(cell, now_mts=now_mts), max_gap_hours=12,
+    )
     replay = build_strategy(cell)
     for fc in filled[:-1]:
         if fc.candle is not None:
@@ -131,8 +134,8 @@ async def test_warmup_locf_dense_cell_no_change(
     """Regression: LOCF on fully dense data is identity (1-to-1 wrap, no fill
     applied per reindex_and_ffill invariant). Warmup observed_count for dense
     p2/a30 cells must remain identical to pre-Phase-4.3 raw-observation
-    behavior — only the boundary slot is dropped (it belongs to the first
-    tick), not any historical slot.
+    behavior — only the slot of the candle that just closed is dropped (the
+    boot rehydrate tick observes it), not any other historical slot.
     """
     async with sqlite_session.bind.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -163,7 +166,6 @@ async def test_warmup_locf_dense_cell_no_change(
         session=sqlite_session, now_mts=base_mts + 5 * 3600_000,
     )
 
-    # Pre-fix: observed_count == 5 (all raw candles).
-    # Post-fix: LOCF produces 6 slots (0..5), filled[:-1] keeps slots 0..4
-    # — same 5 candles observed → observed_count == 5. Boundary slot dropped.
-    assert result.observed_count == 5
+    # LOCF over slots 0..4 is identity; filled[:-1] drops slot 4, the candle
+    # that just closed and that the boot rehydrate tick observes.
+    assert result.observed_count == 4

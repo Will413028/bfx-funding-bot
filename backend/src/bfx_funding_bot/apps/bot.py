@@ -873,8 +873,11 @@ async def build_daemon(
     #
     # The signal layer writes no ledger: its SIGNAL/DECISION events go to the
     # stdout sink. Replaying a boundary therefore adds telemetry, not history.
+    # The boundary comes from the warmup's `now_mts`, not a fresh clock read:
+    # warmup left exactly this tick's candle unobserved (warmup_ref_mts), and an
+    # hour rolling over between the two would skip a candle instead.
     for cell in config.cells:
-        boundary = last_candle_close_mts(timeframe=cell.timeframe, now_ms=now_ms_utc())
+        boundary = last_candle_close_mts(timeframe=cell.timeframe, now_ms=now_mts)
         try:
             await on_scheduler_tick(cell, boundary, quote_created_at_ms=boundary)
         except Exception:

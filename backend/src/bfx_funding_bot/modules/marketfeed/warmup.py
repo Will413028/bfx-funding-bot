@@ -17,6 +17,7 @@ from bfx_funding_bot.modules.candles.repository import (
     seal_closed_periods,
 )
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
+from bfx_funding_bot.modules.marketfeed.scheduler import last_candle_close_mts
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     BoundaryStrategyBuilder,
     StrategyRegistry,
@@ -42,6 +43,20 @@ def _lookback_for(cell: CellConfig) -> int:
     if cell.strategy == StrategyName.MEAN_REVERSION:
         return 200  # heuristic: EMA + sigma stabilize within ~200 candles
     raise ValueError(f"unsupported strategy {cell.strategy!r}")
+
+
+def warmup_ref_mts(cell: CellConfig, *, now_mts: int) -> int:
+    """The slot warmup leaves unobserved: the candle the boot rehydrate tick takes.
+
+    Boot replays `last_candle_close_mts(now_mts)` as a real tick, and that tick
+    observes the candle that just closed. Warming up to `now_mts` would observe it
+    here as well, so the rehydrate tick would count it twice -- an extra EMA step
+    that keeps live diverging from replay until the tail decays. Stopping one
+    candle short leaves live exactly where replay rebuilds for that tick.
+    """
+    return last_candle_close_mts(timeframe=cell.timeframe, now_ms=now_mts) - (
+        _TIMEFRAME_MS[cell.timeframe]
+    )
 
 
 async def warmup_cell(
@@ -95,7 +110,8 @@ async def warmup_cell(
         )
     result = boundary_builder(
         cell=cell, history=history,
-        ref_mts=now_mts, budget_hours=cell.staleness_budget_hours,
+        ref_mts=warmup_ref_mts(cell, now_mts=now_mts),
+        budget_hours=cell.staleness_budget_hours,
     )
     registry.put(cell, result.strategy)
     log.info(
