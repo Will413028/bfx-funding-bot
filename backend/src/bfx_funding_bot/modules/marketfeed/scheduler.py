@@ -65,8 +65,16 @@ class Scheduler:
     def register(self, cell: CellConfig, *, fire_at_mts: int) -> None:
         self._entries[cell.pair_id] = _Entry(cell=cell, next_fire_mts=fire_at_mts)
 
-    def register_from_now(self, cell: CellConfig) -> None:
-        nxt = next_candle_close_mts(timeframe=cell.timeframe, now_ms=now_ms_utc())
+    def register_from_now(self, cell: CellConfig, *, now_ms: int | None = None) -> None:
+        """Arm the next boundary after `now_ms` (default: the clock).
+
+        Boot passes the clock its warmup and rehydrate tick used: a boundary that
+        passed since then is armed overdue and fires at once instead of being
+        skipped, so no candle falls between the rehydrate tick and the first one.
+        """
+        if now_ms is None:
+            now_ms = now_ms_utc()
+        nxt = next_candle_close_mts(timeframe=cell.timeframe, now_ms=now_ms)
         self.register(cell, fire_at_mts=nxt)
 
     async def start(self) -> None:

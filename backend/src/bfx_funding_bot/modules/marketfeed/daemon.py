@@ -323,6 +323,8 @@ class Daemon:
     protection: AutomaticProtection | None = None
     # True once boot recovery passed; an exit before that is a refused boot (T8 alert).
     booted: bool = False
+    # Clock the warmup and boot rehydrate tick used; the scheduler arms from it.
+    boot_mts: int | None = None
     writer_lock_watch: WriterLockWatch | None = None
     # Applies operator resume/kill requests.
     trading_control: TradingControlWorker | None = None
@@ -407,7 +409,7 @@ class Daemon:
         """
         # Initial cell registration (was in startup)
         for cell in self.config.cells:
-            self.scheduler.register_from_now(cell)
+            self.scheduler.register_from_now(cell, now_ms=self.boot_mts)
 
         # 3a-recovery: reconcile against venue + resolve crash-mid-flight PENDING
         # BEFORE any sub-task starts (None only in unit compositions). An

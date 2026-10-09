@@ -157,12 +157,15 @@ from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     Scheduler,
-    last_candle_close_mts,
     now_ms_utc,
 )
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
-from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
+from bfx_funding_bot.modules.marketfeed.warmup import (
+    WarmupResult,
+    rehydrate_boot_boundary,
+    warmup_cell,
+)
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.observability.bot_runs import BotRunRecord
 from bfx_funding_bot.modules.observability.metrics import (
@@ -330,10 +333,11 @@ async def build_daemon(
     candle_q: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
 
     now_mts = now_ms_utc()
+    warmups: dict[str, WarmupResult] = {}
     async with session_factory() as session:
         for cell in config.cells:
             try:
-                await warmup_cell(
+                warmups[cell.pair_id] = await warmup_cell(
                     cell=cell,
                     registry=registry,
                     boundary_builder=build_strategy_at_boundary,
@@ -873,20 +877,13 @@ async def build_daemon(
     #
     # The signal layer writes no ledger: its SIGNAL/DECISION events go to the
     # stdout sink. Replaying a boundary therefore adds telemetry, not history.
-    for cell in config.cells:
-        boundary = last_candle_close_mts(timeframe=cell.timeframe, now_ms=now_ms_utc())
-        try:
-            await on_scheduler_tick(cell, boundary, quote_created_at_ms=boundary)
-        except Exception:
-            # Fail open: a quote that cannot be rebuilt is the cold start we
-            # already had, and is never a reason to refuse to boot.
-            log.exception(
-                "standing_quote_rehydrate_failed cell=%s mts=%d", cell.pair_id, boundary,
-            )
-        else:
-            log.info(
-                "standing_quote_rehydrated cell=%s boundary_mts=%d", cell.pair_id, boundary,
-            )
+    await rehydrate_boot_boundary(
+        cells=config.cells, now_mts=now_mts, warmups=warmups, registry=registry,
+        boundary_builder=build_strategy_at_boundary,
+        tick=lambda cell, boundary: on_scheduler_tick(
+            cell, boundary, quote_created_at_ms=boundary,
+        ),
+    )
     writer = CandleWriter(queue=candle_q, session_factory=session_factory, probe=probe)
 
     ws_client: BitfinexWSClient | None = None
@@ -1044,6 +1041,7 @@ async def build_daemon(
         trading_control=trading_control,
         capital_policy_control=capital_policy_control,
         writer_lock_watch=WriterLockWatch(lock=writer_lock),
+        boot_mts=now_mts,
         venue_tasks=venue_wiring.tasks,
         venue_aclose=venue_wiring.aclose,
         venue_diagnostics=venue_wiring.simulated,
