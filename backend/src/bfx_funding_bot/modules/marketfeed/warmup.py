@@ -5,6 +5,7 @@ Design basis: phase 4.1 paper/shadow infra design Section "Data Flow" Flow 1
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -35,6 +36,9 @@ class WarmupResult:
     cell_id: str
     observed_count: int
     gap_filled: int
+    # Rows read, ending at the candle warmup left unobserved; the boot rehydrate
+    # rebuilds from them without the database when its tick fails.
+    history: tuple[FundingCandle, ...] = ()
 
 
 def _lookback_for(cell: CellConfig) -> int:
@@ -85,17 +89,10 @@ async def warmup_cell(
     bitfinex: BitfinexREST,
     session: AsyncSession,
     now_mts: int,
-    ref_mts: int | None = None,
 ) -> WarmupResult:
-    """Warm `cell` so its next observe is the candle at `ref_mts`.
-
-    `ref_mts` defaults to `warmup_ref_mts`, the candle the boot rehydrate tick
-    takes; a caller rebuilding for a later tick passes that tick's candle.
-    """
     step = _TIMEFRAME_MS[cell.timeframe]
     lookback = _lookback_for(cell)
-    if ref_mts is None:
-        ref_mts = warmup_ref_mts(cell, now_mts=now_mts)
+    ref_mts = warmup_ref_mts(cell, now_mts=now_mts)
 
     # 1. Find last known DB candle
     db_max = await _get_last_mts(session, cell)
@@ -142,6 +139,7 @@ async def warmup_cell(
         cell_id=cell.pair_id,
         observed_count=result.observed_count,
         gap_filled=fill.candles_fetched,
+        history=tuple(history),
     )
 
 
@@ -160,3 +158,42 @@ async def _get_last_mts(session: AsyncSession, cell: CellConfig) -> int | None:
         )
     ).scalar_one_or_none()
     return int(row) if row is not None else None
+
+
+async def rehydrate_boot_boundary(
+    *,
+    cells: Sequence[CellConfig],
+    now_mts: int,
+    warmups: Mapping[str, WarmupResult],
+    registry: StrategyRegistry,
+    boundary_builder: BoundaryStrategyBuilder,
+    tick: Callable[[CellConfig, int], Awaitable[None]],
+) -> None:
+    """Run the real tick for the boundary a cold start skips, once per cell.
+
+    The boundary comes from warmup's `now_mts`, not a fresh clock read: warmup
+    left exactly this tick's candle unobserved (`warmup_ref_mts`), and an hour
+    turning between the two would skip a candle. A tick that fails may not have
+    observed that candle, so the cell is rebuilt for the scheduler's first tick
+    from the rows warmup already read -- no database, which is often what failed.
+    """
+    for cell in cells:
+        boundary = last_candle_close_mts(timeframe=cell.timeframe, now_ms=now_mts)
+        try:
+            await tick(cell, boundary)
+        except Exception:
+            # Fail open: a quote that cannot be rebuilt is the cold start we
+            # already had, and is never a reason to refuse to boot.
+            log.exception(
+                "standing_quote_rehydrate_failed cell=%s mts=%d", cell.pair_id, boundary,
+            )
+            warmed = warmups.get(cell.pair_id)
+            if warmed is not None and cell.staleness_budget_hours is not None:
+                registry.put(cell, boundary_builder(
+                    cell=cell, history=list(warmed.history), ref_mts=boundary,
+                    budget_hours=cell.staleness_budget_hours,
+                ).strategy)
+        else:
+            log.info(
+                "standing_quote_rehydrated cell=%s boundary_mts=%d", cell.pair_id, boundary,
+            )
