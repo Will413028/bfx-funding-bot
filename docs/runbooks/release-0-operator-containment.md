@@ -57,8 +57,7 @@ operator bootstrap 與 non-operator containment 這兩個 one-shot，以及它�
 ## 1. Approved-image one-shot boundary
 
 現行 frontend 是 read-only rootfs，且沒有 audit/tmp mount；**不得 `docker exec`
-進 runtime container 寫 evidence**。Legacy Compose app/run profile（`docker-compose.bot.yml`
-的 `legacy-app`）也不是部署路徑。Bootstrap 與後續 containment 都必須是 stack host 上的獨立
+進 runtime container 寫 evidence**。Bootstrap 與後續 containment 都必須是 stack host 上的獨立
 one-shot，使用目前部署的 frontend image（`deployments` ledger 最新 `deployed` 列的
 `frontend_digest`，或 `docker inspect bfx-frontend --format '{{.Image}}'`）、現行 protected
 `/opt/bfx/runtime/frontend.env`、既有 `bfx_default` network，以及 root-owned mode `0700`

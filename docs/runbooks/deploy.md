@@ -67,8 +67,8 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
     在變更任何 container 之前就失敗的嘗試只有結束列。
 
 PostgreSQL 與 Redis 在 `docker-compose.bot.yml`（project `bfx`），bfx-deploy 從不碰；
-app 只加入既有的 `bfx_default` network。`docker-compose.bot.yml` 的 `legacy-app` profile
-是歷史定義，**不要** `--profile legacy-app up`（它用同樣的 container name，會和 `bfx-app` 衝突）。
+app 只加入既有的 `bfx_default` network。這個檔只定義 `postgres` 與 `redis`
+（`test_offsite_dr_image.py` 守住）；app 的舊 compose 定義已刪除。
 
 ### 套用資料服務的 compose 變更
 

@@ -3,9 +3,8 @@ name: bfx
 # Infrastructure definition (PostgreSQL, Redis), NOT the application deployer.
 # bot/webapi/frontend are deployed by bfx-deploy as compose project `bfx-app`
 # (deploy/vm/docker-compose.app.yml, docs/runbooks/deploy.md). Never broad
-# `up --build`/`down`/`--remove-orphans` here. Existing PG18, Redis, runtime env files
-# and volumes must remain unchanged. The `legacy-app` profiles below are historical/
-# simulation only: never `--profile legacy-app up` (same container names as bfx-app).
+# `up --build`/`down`/`--remove-orphans` here. Existing PG18, Redis, env files and
+# volumes must remain unchanged.
 # The weekly-report job moved to the release-managed host tooling
 # (deploy/vm/ops/docker-compose.weekly-report.yml, bfx-weekly-report.service).
 
@@ -76,128 +75,6 @@ services:
       start_period: 10s
     labels:
       autoheal: "true"
-    # no ports: internal-only (Better Auth secondaryStorage on the compose network)
-
-  migrate:
-    profiles: ["legacy-app"]
-    image: bfx-bot:local
-    command: ["sh", "-c", "alembic upgrade head"]
-    working_dir: /app
-    # Migrations run as the operator principal; the daemon uses the restricted
-    # runtime URL from .env.runtime.
-    env_file:
-      - .env.runtime
-      - .env.migrate.runtime
-    restart: "no"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  bot:
-    profiles: ["legacy-app"]
-    build:
-      context: backend
-      dockerfile: Dockerfile
-      args:
-        GIT_SHA: ${GIT_SHA:-unknown}
-    image: bfx-bot:local
-    container_name: bfx-bot
-    command: ["bfx-shadow"]
-    env_file: .env.runtime
-    restart: unless-stopped
-    stop_grace_period: 30s
-    labels:
-      autoheal: "true"
-    healthcheck:
-      # python:3.13-slim ships no wget/curl — use the baked-in python (urlopen
-      # raises on non-200 / connection-refused → non-zero exit → unhealthy).
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz').status==200 else 1)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 180s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-
-  autoheal:
-    profiles: ["legacy-app"]
-    image: willfarrell/autoheal:latest
-    restart: unless-stopped
-    environment:
-      AUTOHEAL_CONTAINER_LABEL: autoheal
-      AUTOHEAL_INTERVAL: "30"
-      AUTOHEAL_START_PERIOD: "180"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-
-  webapi:
-    profiles: ["legacy-app"]
-    image: bfx-bot:local
-    container_name: bfx-webapi
-    command: ["uvicorn", "bfx_funding_bot.apps.webapi:app", "--host", "0.0.0.0", "--port", "8000"]
-    env_file: .env.webapi.runtime
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8000:8000"
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 512M
-    labels:
-      autoheal: "true"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-
-  frontend:
-    profiles: ["legacy-app"]
-    build:
-      context: frontend
-      dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://frontend.invalid}
-        NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-bfx-funding-bot}
-        NEXT_PUBLIC_BETTER_AUTH_URL: ${NEXT_PUBLIC_BETTER_AUTH_URL:-https://frontend.invalid}
-    image: bfx-frontend:local
-    container_name: bfx-frontend
-    env_file: .env.frontend.runtime
-    restart: unless-stopped
-    ports:
-      # host 3000 is taken by grafana (observability); FE host-binds 3001.
-      # Funnel 443 → 127.0.0.1:3001. Container still listens on 3000 internally.
-      - "127.0.0.1:3001:3000"
-    deploy:
-      resources:
-        limits:
-          cpus: "2"
-          memory: 2G
-    labels:
-      autoheal: "true"
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 40s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
 
 volumes:
   bfx_pgdata:

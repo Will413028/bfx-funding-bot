@@ -29,6 +29,5 @@ describe("Release 0 operator containment runbook", () => {
     expect(runbook).toContain("docker create --pull=never --read-only");
     expect(runbook).toContain("--env-file /opt/bfx/runtime/frontend.env");
     expect(runbook).toContain("docker start --attach");
-    expect(runbook).toContain("Legacy Compose app/run profile");
   });
 });
