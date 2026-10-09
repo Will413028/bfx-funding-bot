@@ -9,7 +9,7 @@ field; afterwards any subset may change.
 Same contract as the legacy conversion: a dry run returns a reviewable report
 and its digest; apply recomputes the report in the same transaction, refuses if
 anything moved (the policy revision, its digest or the requested value), and
-appends exactly one new revision through the ``PolicyStore`` of the capital authority in force.
+appends exactly one new revision through the ledger's ``PolicyStore``.
 Nothing here writes a trading state, talks to the venue or resumes trading.
 """
 from __future__ import annotations
