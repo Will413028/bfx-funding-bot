@@ -158,17 +158,18 @@ async def _seed_policies(factory, account):
     from decimal import Decimal
 
     from bfx_funding_bot.modules.ledger import Scope
-    from bfx_funding_bot.modules.ledger.policy_write import write_policy_revision
+    from bfx_funding_bot.modules.ledger.wiring import build_policy_store
     from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
     scope = Scope(account, "ci")
     envelope = OfferEnvelope(min_period_days=2, max_period_days=30, max_open_offers=6,
                              rate_floor_ratio=Decimal("0.5"), min_rate_apr=Decimal("0.01"))
+    store = build_policy_store(scope)
     async with factory.begin() as session:
-        await write_policy_revision(
-            session, scope, symbol="fUST", expected_revision=0, source={"t": 1},
+        await store.apply_policy(
+            session, symbol="fUST", expected_revision=0, source={"t": 1},
             policy=CapitalPolicy(enabled=True, max_offer_amount=Decimal("200"), envelope=envelope))
-        await write_policy_revision(session, scope, symbol="fUSD", expected_revision=0,
-                                    source={"t": 1}, policy=CapitalPolicy(enabled=False))
+        await store.apply_policy(session, symbol="fUSD", expected_revision=0,
+                                 source={"t": 1}, policy=CapitalPolicy(enabled=False))
 
 
 @pytest.mark.asyncio

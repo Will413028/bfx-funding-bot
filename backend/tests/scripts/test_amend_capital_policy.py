@@ -19,7 +19,7 @@ from bfx_funding_bot.core.authority import AuthorityMismatch
 from bfx_funding_bot.core.database_realm import DatabaseRealmMismatch, DatabaseRealmRow
 from bfx_funding_bot.core.db import Base, make_async_engine_from_url, make_session_factory
 from bfx_funding_bot.modules.ledger import Scope
-from bfx_funding_bot.modules.ledger.policy_write import write_policy_revision
+from bfx_funding_bot.modules.ledger.wiring import build_policy_store
 from bfx_funding_bot.modules.trading import CapitalPolicy
 from scripts import amend_capital_policy as script
 
@@ -55,8 +55,8 @@ async def database(tmp_path, monkeypatch):
         session.add(DatabaseRealmRow(realm="ci", stamped_at_ms=1, actor="test"))
         await _epoch(session, 1, "legacy")
         await _epoch(session, 2, "ledger")
-        await write_policy_revision(
-            session, Scope(ACCOUNT, "ci"), symbol="fUST", policy=CapitalPolicy(enabled=True),
+        await build_policy_store(Scope(ACCOUNT, "ci")).apply_policy(
+            session, symbol="fUST", policy=CapitalPolicy(enabled=True),
             expected_revision=0, source={"fixture": True})
     yield factory
     await engine.dispose()
@@ -72,7 +72,6 @@ async def test_the_script_amends_through_the_ledger_store(database) -> None:
     assert applied["status"] == "applied" and applied["new_revision"] == 2
     async with database() as session:
         from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow
-        from bfx_funding_bot.modules.ledger.wiring import build_policy_store
         read = await build_policy_store(Scope(ACCOUNT, "ci")).read_applied(session, symbol="fUST")
         written = await session.get(CapitalPolicyRevisionRow, read.revision_id)
     assert (read.revision, read.policy.enabled) == (2, False)

@@ -14,7 +14,7 @@ ONE transaction, it:
      where it differs from what is applied: --symbol policies are enabled, with the offer
      ceiling and all five envelope options (without them the envelope guard refuses every
      offer); --disabled-symbol policies are disabled. What may be enabled is the ledger's
-     rule (``write_policy_revision``), not this script's;
+     rule (``PolicyStore.apply_policy``), not this script's;
   4. with ``--activate``, appends ``ACTIVE`` (cause ``operator``, actor ``bootstrap_simulation_db``)
      to ``trading_state`` ONLY when the scope has no state row at all. A fresh scope is HALTED
      until someone says otherwise, so a bootstrapped database that never trades makes a soak

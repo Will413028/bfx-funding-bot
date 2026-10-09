@@ -5,7 +5,7 @@ flag is the everyday stop. The web API only inserts an ``enable`` or
 ``disable`` request (``capital_policy_requests``, the operator-request outbox);
 the :class:`CapitalPolicyRequestWorker` applies it under the account lock after
 re-checking the operator, through the amendment path
-(``accounts.capital_amendment`` → the ``PolicyStore`` of the capital authority in force), and
+(``accounts.capital_amendment`` → the ledger's ``PolicyStore``), and
 records one outcome on the row; the revision it appends names the request
 (``capital_policy_revisions.operator_request_id``). An ``unchanged`` request
 appends nothing.
