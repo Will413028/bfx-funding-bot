@@ -84,7 +84,7 @@ prior state：三張 operator request 表（`trading_control_requests`、`capita
 
 - D4 原寫「BEFORE INSERT trigger」，計畫並把它排在 `database_realm_write`、`ledger_seed_evidence` 之前先擲。R1 design review 指出這和被取代的 partial unique index 時機相反：index 在 row 寫入時才檢查，晚於所有 BEFORE guard、CHECK、NOT NULL；BEFORE 版會把「同對象已有待處理請求」時的內容錯誤（例如空白 reason 違反 `ck_*_evidence`）蓋成 23505，被拒的 INSERT 也先拿了鎖。
 - 改為（Will 2026-10-08，「採業界做法、治本」）：`CREATE CONSTRAINT TRIGGER single_pending AFTER INSERT ... NOT DEFERRABLE FOR EACH ROW`，檢查時排除 `NEW.request_id` 本身；鎖、檢查條件、23505 與沿用的 constraint 名都不變。好處來自 AFTER 時機（與 unique index 同一時點，CHECK、NOT NULL、FK 之後）；`CONSTRAINT` 只宣告意圖。PG18 實驗確認：兩個並行 INSERT 只成功一筆；CHECK 與 FK 違反先擲、且不取鎖；asyncpg／psycopg 收到的 SQLSTATE、constraint 名與 index 違反相同。
-- 新增：在 REPEATABLE READ 交易裡 INSERT 請求一律拒絕。鎖之後的檢查要看到鎖之前已 commit 的請求：READ COMMITTED（每個語句新 snapshot）與 SERIALIZABLE（SSI 中止其一）成立，REPEATABLE READ 的 snapshot 早於等鎖，不成立。原本這只是「呼叫端碰巧都用 READ COMMITTED」的未聲明前提。
+- 新增：在 REPEATABLE READ 交易裡 INSERT 請求一律拒絕。鎖之後的檢查要看到鎖之前已 commit 的請求：只有 READ COMMITTED（每個語句在鎖之後取新 snapshot）成立。REPEATABLE READ 的 snapshot 早於等鎖，不成立；SERIALIZABLE 只在雙方都是 SERIALIZABLE 時由 SSI 中止其一，持鎖者是 READ COMMITTED 時兩筆都會 commit，也不成立（更正 2026-10-09，見 migration `2e835b6f4c12` 的 review）。原本這只是「呼叫端碰巧都用 READ COMMITTED」的未聲明前提。
 - 不採「改名排到最後（`zz_`）」：仍靠名稱字母序，FK 與 CHECK 也照樣排在 BEFORE trigger 之後。不採 pending slot 表（以 UNIQUE 鍵存待處理對象，業界常見、原生 23505、不受隔離等級影響）：結案時要 DELETE slot，等於把 D1 拿掉的可變列換一張表帶回來。
 
 ## Related
