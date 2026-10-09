@@ -124,6 +124,26 @@ S1-2～S1-3 的契約選擇（basis 只存事實、epoch 表與 DB 強制休眠�
 
 D7'' 放棄 S2 前 live 新資料持續觀測的理由之一是 shadow 基礎設施用完即丟；模擬器改為永久保留後，S1-7 前以獨立 simulation DB 上的限時 soak 作入場條件（門檻與範圍見 [2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue](2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue.md) D3）。D7'' 的 B-lite＋C 不變。
 
+## Amendment (2026-10-03b): conservation 逐筆對帳、offer 狀態單一事實來源、ledger 開機規則
+
+S1-3e／S1-3e5 唯讀 pre-flight 發現：ledger 沒有 conservation（`rg -il 'conservation|lent_above|foreign_lending' modules/ledger` → 0）；保護熔斷、NAV 只有 legacy BootRecovery 會產生；bot 仍組 legacy 的 OfferRegistry／PaperPositionLedger。約束：`external` 系統未上線，Will 定「治本、照業界做法、不留技術債」（2026-10-03）。
+
+- **D-a conservation＝逐筆對帳，放在 ledger acceptance**。
+  - Options：(1) 照搬 legacy「掛單減少量」不等式（與 legacy 行為一致）；(2) 以成交為準的不等式；(3) 逐筆對帳——每筆餘額變動都對到一筆有紀錄的流量，這是業界基準（例：[Stripe payout reconciliation](https://docs.stripe.com/payouts/reconciliation) 逐筆 balance transaction 對 payout）。
+  - 決策：選 (3)。每個 symbol 的新增放貸（逐 credit key 的 Σmax(0, C−P)，含同區間開了又關的 credit 與 loan）必須等於逐 offer id 的成交，再用 funding trades 交叉核對；差異在 epsilon 內視為守恆（外來成交只告警 `FOREIGN_LENDING`），否則不論正負都判 `unexplained_lending` → 既有 HALT＋自動恢復。判定結果隨 basis 持久化（migration `a3b4c5d6e7f8`，不搬 legacy 的記憶體 carry）。
+  - Trade-off：(1) 會被觀測之間的撤單與 loan 結束掩蓋異常，實作時還需逐項補洞（`placed`、外來單重複計算）；(2) 仍會被 loan 結束掩蓋。(3) 的代價是要讀 credit history 與 trades、實作四輪，且與 legacy 的差分測試改為表格＋property test（已知行為分歧）。
+- **D-b offer 狀態單一事實來源**。
+  - Options：(1) 照計畫原規劃（D-e）由 ManagedOffers 建 OfferRegistry 給各消費者；(2) 不建記憶體 projection，需要 offer 狀態者各自在交易內讀 `ManagedOfferReader`，bus 只送 commit 後通知（metrics、告警、NAV、診斷）——業界基準為 [event notification](https://martinfowler.com/articles/201701-event-driven.html)：事件只通知、狀態向權威來源讀。
+  - 決策：選 (2)；ledger 下不建 OfferRegistry 與 PaperPositionLedger，兩者隨 legacy 路徑於 S1-8 刪除。
+  - Trade-off：每個讀者多一次 DB 讀取，換到不再有「projection 與 DB 不一致」這類 bug。
+- **D-c（O1）開機遇到未 accept 的觀測：照常開機、交易被結構性擋住**。
+  - Options：(1) legacy 做法：拒絕開機；(2) 開機，但由 `snapshot_query_pending` 擋住交易，等 periodic 收斂——基準為 [Kubernetes liveness／readiness 分離](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/)：process 活著但不 ready。
+  - 決策：選 (2)；連續 3 輪未 accept 時告警＋RECONCILE DEGRADED。開機時 sink 寬限為 0，此時遇到 `query_admission_refused` 視為不變式違反 → raise。
+  - Trade-off：(1) 會讓 venue 暫時異常變成重啟迴圈，違反放貸全自動；(2) 的代價是要多一個連續未 accept 的計數與告警，避免靜默卡住。
+- **O2／O3（排程與契約細節）**：UNKNOWN 中性 matcher 與自動 resolver 放進 3e，3c3c 只剩 R6 自動結案；ledger 的 `resolution_context` 回傳最新的 accepted observation ref。
+- 落地：PR #90–#100（S1-3e1～3e5e），prod `1fdeb90a`（deploy ledger #166）。來源：2026-10-03 Will 的決定與唯讀 pre-flight（計畫檔未進 repo，結論已收進本段）。paper／shadow 改接 ledger 另見 [2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue](2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue.md)。
+- 重新評估條件：`unexplained_lending` 的誤判每週超過 1 次（先查是否為 history 窗口問題，見下一段 Amendment）；出現外部使用者資金時，見 Revocation Triggers 的 double-entry 條款。
+
 ## Amendment (2026-10-04): 消失的 offer 依 id 查終態，查不到時以成交紀錄定量
 
 - **事實（prod 唯讀 probe，2026-10-04）**：`/v2/auth/r/funding/offers/{Symbol}/hist` 的 start/end 篩選的是 MTS_UPDATE，不是 MTS_CREATE；同一 endpoint 接受 `{"id": [...]}`，會回傳指定的已結束 offer；歷史保留期至少涵蓋整個帳號期間（≥130 天）。Bitfinex 文件兩者都沒寫，屬於觀察到的行為。
