@@ -100,10 +100,9 @@ class TradingStateRow(Base):
             "AND length(trim(deployment_environment)) > 0 AND created_at_ms >= 0",
             name="ck_trading_state_evidence",
         ),
-        Index("ix_trading_state_scope_id", "exchange_account_id", "deployment_environment", "id"),
-        # What the cancel-all audit's composite foreign key references.
-        UniqueConstraint("id", "exchange_account_id", "deployment_environment",
-                         name="uq_trading_state_scope"),
+        # Unique so that the cancel-all audit's composite foreign key can reference it.
+        Index("ix_trading_state_scope_id", "exchange_account_id", "deployment_environment", "id",
+              unique=True),
         ForeignKeyConstraint(
             ["operator_request_id", "exchange_account_id", "deployment_environment"],
             ["trading_control_requests.request_id", "trading_control_requests.exchange_account_id",

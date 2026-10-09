@@ -102,7 +102,7 @@ def test_the_upgrade_drops_the_columns_and_keeps_the_outcome_checks(before) -> N
 
 def test_the_previous_web_api_still_reads_what_it_maps(before) -> None:
     url, engine = before
-    alembic(url, "upgrade", "head")
+    alembic(url, "upgrade", _REVISION)
     with engine.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         for table, columns in _PREVIOUS_WEBAPI_COLUMNS.items():
@@ -140,7 +140,7 @@ def test_each_precondition_refuses_the_upgrade_and_names_the_count(before, preco
     with engine.begin() as conn:
         _VIOLATIONS[precondition](conn)
     with pytest.raises(RuntimeError, match=f"{precondition}: 1"):
-        alembic(url, "upgrade", "head")
+        alembic(url, "upgrade", _REVISION)
     assert _version(engine) == _BEFORE
 
 
@@ -153,7 +153,7 @@ def test_a_restated_or_unchanged_request_loses_nothing(before) -> None:
         _applied(conn, kill, "trading_state_id", admin, "trading_control_requests")
         unchanged = _capital(conn, action="disable")
         _applied(conn, unchanged, "policy_revision_id", f"'{_P}'", "capital_policy_requests")
-    alembic(url, "upgrade", "head")
+    alembic(url, "upgrade", _REVISION)
     assert _version(engine) == _REVISION
 
 
@@ -166,5 +166,5 @@ def test_a_check_naming_a_dropped_column_refuses_the_upgrade(before) -> None:
             "ADD CONSTRAINT ck_trading_control_requests_outcome CHECK "
             "(state <> 'requested' OR trading_state_id IS NULL)")
     with pytest.raises(RuntimeError, match="an outcome CHECK went with the dropped columns: 1 of 2"):
-        alembic(url, "upgrade", "head")
+        alembic(url, "upgrade", _REVISION)
     assert _version(engine) == _BEFORE
