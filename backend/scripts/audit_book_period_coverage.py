@@ -9,12 +9,9 @@ Run from backend/ (env: DATABASE_URL):
   uv run python -m scripts.audit_book_period_coverage [--symbols fUST,fUSD]
       [--since-ms N] [--periods 2,7,14,30,120] [--out /tmp/<date>-a0-book-period-coverage.md]
 
-VM (one-shot container, research clone mounted read-only, live bot untouched —
-same pattern as /strategy-research):
-  docker run --rm --label autoheal=false --network bfx_default \
-    --env-file ~/bfx-funding-bot/.env.runtime \
-    -v ~/bfx-research/backend/src:/app/src:ro -v ~/bfx-research/backend/scripts:/app/scripts:ro \
-    bfx-bot:local python -m scripts.audit_book_period_coverage
+VM: a one-shot container on the running bot's image with the bot's restricted
+DATABASE_URL, as in docs/runbooks/research-one-shot-jobs.md, with
+-m scripts.audit_book_period_coverage.
 """
 from __future__ import annotations
 

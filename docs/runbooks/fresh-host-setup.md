@@ -234,7 +234,7 @@ migration／restore 計畫、rollback target 與所有 blockers。
 
 若出現 `foreign_container_holds_name:bfx-*`，表示同名 container 不屬於 `bfx-app`。
 先記錄其 image、restart policy 與用途，安排停機並保留回復副本後才釋放名稱；
-bfx-deploy 不會替 operator 刪除它們。不要啟用 `legacy-app` profile。
+bfx-deploy 不會替 operator 刪除它們。
 
 ### 3c. 首次部署與排程
 
