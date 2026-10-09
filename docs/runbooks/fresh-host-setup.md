@@ -7,6 +7,13 @@ Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration �
 `<public-host>` 是 frontend 對外的 host name。實際值只寫在本機的 `AGENTS.local.md`
 或主機上的 secret 檔，不進 git。
 
+## 0. 資料服務的 env 檔
+
+`docker-compose.bot.yml` 的 postgres 只讀 `.env.postgres.runtime`（與 compose 檔同目錄，0600），
+內容只有 `POSTGRES_USER`（＝`<owner>`）、`POSTGRES_PASSWORD`、`POSTGRES_DB` 三行；
+`POSTGRES_PASSWORD` 只在空的 PGDATA 第一次 initdb 時用到。不要把 app 的 runtime env
+（KEK、連線字串、API key）放進這個檔：資料庫容器用不到它們，`docker inspect` 卻看得到。
+
 ## 1. Database roles 與 grants
 
 三個 runtime login role，各自只拿需要的權限：

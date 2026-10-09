@@ -197,6 +197,7 @@ def test_dr_compose_uses_generated_external_resources_without_production_inputs(
         "webapi.env",
         "frontend.env",
         ".env.runtime",
+        ".env.postgres.runtime",
         "BFX_VAULT_KEK",
     ):
         assert forbidden not in source
@@ -419,7 +420,7 @@ def test_sql_admin_matches_deployed_cluster() -> None:
     config = configparser.ConfigParser()
     config.read(CONFIG_PATH)
     production = yaml.safe_load((ROOT / "docker-compose.bot.yml").read_text())
-    assert production["services"]["postgres"]["env_file"] == ".env.runtime"
+    assert production["services"]["postgres"]["env_file"] == ".env.postgres.runtime"
     assert config["bfx"].get("pg1-user") == "bfx"
 
 
