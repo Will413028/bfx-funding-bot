@@ -750,6 +750,23 @@ def test_mirror_terminal_cannot_clear_or_reappear(seeded) -> None:
                 conn.exec_driver_sql(statement)
 
 
+def test_a_mirror_row_never_changes_scope(seeded) -> None:
+    # The realm and scope triggers would refuse first (another realm, no accepted observation in
+    # the new scope); this proves the mirror's own rule underneath them.
+    disable_realm_triggers(seeded)
+    with seeded.begin() as conn:
+        for table in ("venue_offer_mirror", "venue_credit_mirror"):
+            conn.exec_driver_sql(f"ALTER TABLE {table} DISABLE TRIGGER guard_ledger_mirror_scope")
+    for table in ("venue_offer_mirror", "venue_credit_mirror"):
+        for change in ("deployment_environment = 'other'",
+                       f"exchange_account_id = '{uuid4()}'"):
+            with (
+                seeded.begin() as conn,
+                pytest.raises(Exception, match="immutable ledger mirror scope"),
+            ):
+                conn.exec_driver_sql(f"UPDATE {table} SET {change}")
+
+
 def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
     # The scope mismatch needs a row of another realm; the realm trigger would refuse it first.
     disable_realm_triggers(seeded)
@@ -1024,6 +1041,13 @@ def test_observation_pair_and_accepted_basis_are_enforced(seeded) -> None:
     ):
         conn.exec_driver_sql(
             f"UPDATE venue_offer_mirror SET last_accepted_observation_id='{other}'"
+        )
+    with (
+        seeded.begin() as conn,
+        pytest.raises(Exception, match="ledger credit mirror scope mismatch"),
+    ):
+        conn.exec_driver_sql(
+            f"UPDATE venue_credit_mirror SET last_accepted_observation_id='{other}'"
         )
     with seeded.begin() as conn, pytest.raises(Exception, match="ledger basis scope mismatch"):
         conn.exec_driver_sql(_basis_sql(str(uuid4()), _O, environment="wrong"))
