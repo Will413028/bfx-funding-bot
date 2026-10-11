@@ -43,3 +43,6 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 5
+    groups:
+      docker-patch:
+        update-types: ["patch"]
