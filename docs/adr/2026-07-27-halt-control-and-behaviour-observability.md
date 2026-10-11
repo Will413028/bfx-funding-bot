@@ -115,6 +115,15 @@ Prior state：daemon 自 Phase 4.2 起只暴露**輸入**（env var、yaml、log
 - **O1**：這兩個端點上線後**第一次 live 執行就抓到自己的缺陷**（預設只探測 `symbols[0]`＝dark 的
   fUSD，會把人指向資金而非 halt，`09dbf7e` 修）。缺陷只有在「能查行為」之後才可見。
 
+## Amendment (2026-10-11): P3 結案，cap 只剩 CapitalPolicy 一個來源
+
+決策不變；Followup 的 P3 與 Invariants 第一條改寫如下：
+
+- 每個 symbol 的資金上限只來自已套用的 CapitalPolicy（`CapitalAuthority`），`/admin/trading-status` 讀的是同一個 authority。舊的三層解析（symbol map → env fallback → default）已經沒有呼叫者，`resolve_for_symbol_with_source` 隨之刪除。
+- 「設了卻不生效」在啟動時 fatal：`BFX_ALLOCATION_CAP_USDT` 等 legacy env 只要存在，`load_config` 就拒絕啟動（`575c7f32`）；safety yaml 全部是 `extra="forbid"`，再寫回 `caps:` 會驗證失敗。
+- 刪掉 `AccountContext.allocation_cap_usdt`：它恆為 `0`、沒有任何讀取者，形狀正是 07-27 那個「值看起來像停機、實際綁不到東西」的旋鈕。
+- Invariant 改寫：報告中的資金上限必須與 guard 讀同一個 `CapitalAuthority`，不得另寫第二份解析。
+
 ## Related
 
 - **來源（Provenance）**：本 ADR 即原始紀錄，與 Claude Code 討論當場拍板；觸發事件為同日

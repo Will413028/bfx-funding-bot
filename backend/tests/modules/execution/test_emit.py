@@ -1,7 +1,6 @@
 """Order / safety event emit helpers — assert payload shape + envelope discipline."""
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
@@ -36,7 +35,6 @@ def _ctx() -> AccountContext:
     return AccountContext(
         account_id="default",
         credentials=Credentials(api_key="k", api_secret="s"),
-        allocation_cap_usdt=Decimal("500"),
     )
 
 

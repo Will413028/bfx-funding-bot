@@ -227,7 +227,6 @@ async def build_daemon(
             account_bootstrap = await load_account_bootstrap(
                 bootstrap_session,
                 deployment_environment=config.deployment_environment.value,
-                allocation_cap_usdt=Decimal("0"),
                 phase=config.phase,
             )
     except Exception:

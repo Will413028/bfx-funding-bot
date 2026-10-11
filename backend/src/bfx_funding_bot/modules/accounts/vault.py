@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
 
@@ -255,7 +254,6 @@ async def verify_account_credential(
     ctx = AccountContext(
         account_id=str(exchange_account_id),
         credentials=Credentials(api_key=row.api_key, api_secret=secret),
-        allocation_cap_usdt=Decimal("0"),
     )
     try:
         perms = await client.get_key_permissions(ctx=ctx)
@@ -384,7 +382,6 @@ async def verify_api_key(
     ctx = AccountContext(
         account_id=str(row.id),
         credentials=Credentials(api_key=row.api_key, api_secret=secret),
-        allocation_cap_usdt=Decimal("0"),
     )
 
     try:

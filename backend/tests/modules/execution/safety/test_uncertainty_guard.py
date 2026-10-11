@@ -1,7 +1,6 @@
 """Fail-closed, account/environment/symbol-scoped uncertainty guard tests."""
 from __future__ import annotations
 
-from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
@@ -28,7 +27,6 @@ def _context() -> AccountContext:
     return AccountContext(
         account_id=str(ACCOUNT),
         credentials=Credentials("k", "s"),
-        allocation_cap_usdt=Decimal("500"),
     )
 
 

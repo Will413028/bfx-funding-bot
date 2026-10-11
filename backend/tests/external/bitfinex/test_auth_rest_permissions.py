@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from decimal import Decimal
-
 import httpx
 import pytest
 
@@ -28,7 +26,6 @@ def _ctx() -> AccountContext:
     return AccountContext(
         account_id="default",
         credentials=Credentials(api_key="KEY", api_secret="SECRET"),
-        allocation_cap_usdt=Decimal("0"),
     )
 
 

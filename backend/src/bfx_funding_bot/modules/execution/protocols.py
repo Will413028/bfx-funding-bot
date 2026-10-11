@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -56,7 +55,6 @@ class AccountContext:
     """Per-account context bound to one canonical ExchangeAccount identity."""
     account_id: str
     credentials: Credentials
-    allocation_cap_usdt: Decimal
     capital_cell_id: str | None = None
     # Only the command boundary supplies this; guards must reuse its replayed state.
     command_session: AsyncSession | None = None

@@ -1,7 +1,6 @@
 """Phase 4.3 executor-middleware integration: chain composition and the no-retry contract."""
 from __future__ import annotations
 
-from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
@@ -92,7 +91,6 @@ def _ctx() -> AccountContext:
     return AccountContext(
         account_id=str(_ACCOUNT),
         credentials=Credentials(api_key="k", api_secret="s"),
-        allocation_cap_usdt=Decimal("10000"),
     )
 
 

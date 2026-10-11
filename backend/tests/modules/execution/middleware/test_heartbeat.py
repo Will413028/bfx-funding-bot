@@ -1,7 +1,6 @@
 """HeartbeatMiddleware — record_heartbeat("executor") outcome-independent (I1)."""
 from __future__ import annotations
 
-from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -46,7 +45,6 @@ def _ctx() -> AccountContext:
     return AccountContext(
         account_id="default",
         credentials=Credentials(api_key="k", api_secret="s"),
-        allocation_cap_usdt=Decimal("10000"),
     )
 
 

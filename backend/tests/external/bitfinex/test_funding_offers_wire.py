@@ -64,7 +64,6 @@ async def test_live_contract():
     ctx = AccountContext(
         account_id="verify",
         credentials=Credentials(api_key=key, api_secret=secret),
-        allocation_cap_usdt=Decimal("0"),
     )
     async with httpx.AsyncClient() as http:
         client = BitfinexAuthREST(http=http)

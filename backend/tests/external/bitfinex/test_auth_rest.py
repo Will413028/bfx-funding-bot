@@ -67,7 +67,6 @@ def _ctx():
     return AccountContext(
         account_id="default",
         credentials=Credentials(api_key="KEY", api_secret="SECRET"),
-        allocation_cap_usdt=Decimal("1000"),
     )
 
 

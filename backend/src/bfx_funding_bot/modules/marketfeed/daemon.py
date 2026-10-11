@@ -14,7 +14,6 @@ import os
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
@@ -164,7 +163,6 @@ class AccountBootstrap:
 
     exchange_account_id: UUID
     deployment_environment: str
-    allocation_cap_usdt: Decimal
     config_draft: dict[str, object] | None
     config_revision: int | None
 
@@ -178,7 +176,6 @@ class AccountBootstrap:
         return AccountContext(
             account_id=self.account_id,
             credentials=credentials,
-            allocation_cap_usdt=self.allocation_cap_usdt,
         )
 
     @staticmethod
@@ -196,7 +193,6 @@ async def load_account_bootstrap(
     session: AsyncSession,
     *,
     deployment_environment: str,
-    allocation_cap_usdt: Decimal,
     phase: Phase | None = None,
 ) -> AccountBootstrap:
     """Resolve one explicit account row and its config draft at boot.
@@ -237,7 +233,6 @@ async def load_account_bootstrap(
     return AccountBootstrap(
         exchange_account_id=exchange_account_id,
         deployment_environment=deployment_environment,
-        allocation_cap_usdt=allocation_cap_usdt,
         config_draft=dict(draft.config) if draft is not None else None,
         config_revision=draft.revision if draft is not None else None,
     )

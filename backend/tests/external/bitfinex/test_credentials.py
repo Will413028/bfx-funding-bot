@@ -1,6 +1,5 @@
 """Regression coverage for credential values in object representations."""
 
-from decimal import Decimal
 
 from bfx_funding_bot.external.bitfinex.credentials import Credentials
 from bfx_funding_bot.modules.execution.protocols import AccountContext
@@ -13,7 +12,6 @@ def test_credentials_and_account_context_reprs_hide_api_values() -> None:
     context = AccountContext(
         account_id="fake-account-id",
         credentials=credentials,
-        allocation_cap_usdt=Decimal("1000"),
     )
 
     for obj in (credentials, context):

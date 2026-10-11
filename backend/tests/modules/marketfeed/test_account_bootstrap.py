@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
@@ -122,7 +121,6 @@ async def test_bootstrap_loads_account_credential_and_draft(
         bootstrap = await load_account_bootstrap(
             session,
             deployment_environment="ci",
-            allocation_cap_usdt=Decimal("500"),
         )
 
     assert isinstance(bootstrap, AccountBootstrap)
@@ -160,5 +158,4 @@ async def test_bootstrap_fails_closed_for_unusable_account(
             await load_account_bootstrap(
                 session,
                 deployment_environment="ci",
-                allocation_cap_usdt=Decimal("500"),
             )

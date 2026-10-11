@@ -99,7 +99,6 @@ async def test_a_provenance_conflict_stops_only_its_symbol(ledger: Book, monkeyp
 
     ctx = AccountContext(
         account_id=str(uuid4()), credentials=Credentials(api_key="k", api_secret="s"),
-        allocation_cap_usdt=Decimal("570"),
     )
     canceller = _Canceller()
     sized: list[str] = []
