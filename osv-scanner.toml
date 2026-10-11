@@ -4,31 +4,6 @@
 # Remove an entry when its fix merges; never extend a date without a written reason.
 
 [[IgnoredVulns]]
-id = "GHSA-82r6-8w77-94w6"
-ignoreUntil = 2026-10-18T00:00:00Z
-reason = "baseline critical: anyio@4.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-ffc3-869f-jxw9"
-ignoreUntil = 2026-10-18T00:00:00Z
-reason = "baseline critical: pyjwt@2.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-2xp9-vwfh-vxw4"
-ignoreUntil = 2026-10-18T00:00:00Z
-reason = "baseline critical: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-p293-qw3h-jr36"
-ignoreUntil = 2026-10-18T00:00:00Z
-reason = "baseline critical: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-5xrq-8626-4rwp"
-ignoreUntil = 2026-10-18T00:00:00Z
-reason = "baseline critical: vitest@4.0.18 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
 id = "GHSA-537c-gmf6-5ccf"
 ignoreUntil = 2026-11-10T00:00:00Z
 reason = "baseline high: cryptography@48.0.0 (backend/uv.lock)"
@@ -42,36 +17,6 @@ reason = "baseline high: cryptography@48.0.0 (backend/uv.lock)"
 id = "GHSA-jwv3-5hgf-82ww"
 ignoreUntil = 2026-11-10T00:00:00Z
 reason = "baseline high: cryptography@48.0.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-9j54-fg26-wv3r"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: pyjwt@2.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-9v7f-9g4p-ffgj"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: pyjwt@2.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-p4g4-x82p-q773"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: pyjwt@2.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-r6x4-923q-g947"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: pyjwt@2.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-w2cx-738m-mc7w"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: pyjwt@2.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-x33g-cr3x-6449"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: pyjwt@2.13.0 (backend/uv.lock)"
 
 [[IgnoredVulns]]
 id = "GHSA-82w8-qh3p-5jfq"
@@ -199,71 +144,6 @@ ignoreUntil = 2026-11-10T00:00:00Z
 reason = "baseline high: nanoid@3.3.11 (frontend/pnpm-lock.yaml)"
 
 [[IgnoredVulns]]
-id = "GHSA-267c-6grr-h53f"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-26hh-7cqf-hhc6"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-36qx-fr4f-26g5"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-492v-c6pp-mqqv"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-6gpp-xcg3-4w24"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-89xv-2m56-2m9x"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-8h8q-6873-q5fj"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-c4j6-fc7j-m34r"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-cjq9-62q9-8jv4"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-m99w-x7hq-7vfj"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-mg66-mrh9-m8jx"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-p9j2-gv94-2wf4"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-q4gf-8mx6-v5v3"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
 id = "GHSA-c2c7-rcm5-vvqj"
 ignoreUntil = 2026-11-10T00:00:00Z
 reason = "baseline high: picomatch@2.3.1, picomatch@4.0.3 (frontend/pnpm-lock.yaml)"
@@ -277,21 +157,6 @@ reason = "baseline high: postcss@8.4.31, postcss@8.5.8 (frontend/pnpm-lock.yaml)
 id = "GHSA-r28c-9q8g-f849"
 ignoreUntil = 2026-11-10T00:00:00Z
 reason = "baseline high: postcss@8.4.31, postcss@8.5.8 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-f88m-g3jw-g9cj"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: sharp@0.34.5 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-rgj7-g3m4-5g8c"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: sharp@0.34.5 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-wq5f-xc86-pv6w"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: sharp@0.34.5 (frontend/pnpm-lock.yaml)"
 
 [[IgnoredVulns]]
 id = "GHSA-7w5x-hrqm-74c2"
@@ -329,11 +194,6 @@ ignoreUntil = 2026-11-10T00:00:00Z
 reason = "baseline high: ws@8.20.0 (frontend/pnpm-lock.yaml)"
 
 [[IgnoredVulns]]
-id = "GHSA-5p39-cfhj-2xmp"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: anyio@4.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
 id = "GHSA-m2h6-j472-rp4c"
 ignoreUntil = 2027-01-09T00:00:00Z
 reason = "baseline medium: cryptography@48.0.0 (backend/uv.lock)"
@@ -352,41 +212,6 @@ reason = "baseline medium: mako@1.3.12 (backend/uv.lock)"
 id = "GHSA-4xgf-cpjx-pc3j"
 ignoreUntil = 2027-01-09T00:00:00Z
 reason = "baseline medium: pydantic-settings@2.14.1 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-2gx3-rcp4-g85q"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: pyjwt@2.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-42vr-xj54-vc7v"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: pyjwt@2.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-8wjv-2p76-3863"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: pyjwt@2.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-gvp8-978c-rx2q"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: pyjwt@2.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-hxm8-2xgr-2p9m"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: pyjwt@2.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-jwrc-g2q2-pq5p"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: pyjwt@2.13.0 (backend/uv.lock)"
-
-[[IgnoredVulns]]
-id = "GHSA-w6j9-cwv2-h6wq"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: pyjwt@2.13.0 (backend/uv.lock)"
 
 [[IgnoredVulns]]
 id = "GHSA-86qp-5c8j-p5mr"
@@ -417,11 +242,6 @@ reason = "baseline medium: @opentelemetry/core@2.5.0, @opentelemetry/core@2.6.0 
 id = "GHSA-qqmp-wf37-98f9"
 ignoreUntil = 2027-01-09T00:00:00Z
 reason = "baseline medium: @opentelemetry/instrumentation-knex@0.55.0, @opentelemetry/instrumentation-mongoose@0.57.0, @opentelemetry/instrumentation-mysql2@0.57.0, @opentelemetry/instrumentation-mysql@0.57.0, @opentelemetry/instrumentation-pg@0.63.0, @opentelemetry/instrumentation-tedious@0.30.0 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-82fw-gwwq-j7x9"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: @vitest/mocker@4.0.18, vitest@4.0.18 (frontend/pnpm-lock.yaml)"
 
 [[IgnoredVulns]]
 id = "GHSA-w5vr-8v7q-w6rv"
@@ -457,91 +277,6 @@ reason = "baseline medium: next-intl@4.8.3 (frontend/pnpm-lock.yaml)"
 id = "GHSA-8f24-v5vv-gm5j"
 ignoreUntil = 2027-01-09T00:00:00Z
 reason = "baseline medium: next-intl@4.8.3 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-39w2-rjm5-chcv"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-3x4c-7xq6-9pq8"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-4633-3j49-mh5q"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-4c39-4ccg-62r3"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-4jqv-mc3x-m676"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-68g3-v927-f742"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-955p-x3mx-jcvp"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-f87g-xv8r-7p7x"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-ffhc-5mcf-pf4q"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-ggv3-7p47-pfv8"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-gx5p-jg67-6x7h"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-h27x-g6w4-24gq"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-h64f-5h5j-jqjh"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-mcj8-r9mp-w47p"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-mq59-m269-xvcx"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-q8wf-6r8g-63ch"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-wfc6-r584-vfw7"
-ignoreUntil = 2027-01-09T00:00:00Z
-reason = "baseline medium: next@16.1.6 (frontend/pnpm-lock.yaml)"
 
 [[IgnoredVulns]]
 id = "GHSA-3v7f-55p6-f55p"
@@ -607,18 +342,3 @@ reason = "baseline low: esbuild@0.27.3 (frontend/pnpm-lock.yaml)"
 id = "GHSA-r27j-894h-3w3p"
 ignoreUntil = 2027-04-09T00:00:00Z
 reason = "baseline low: icu-minify@4.8.3 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-3g8h-86w9-wvmq"
-ignoreUntil = 2027-04-09T00:00:00Z
-reason = "baseline low: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-jcc7-9wpm-mj36"
-ignoreUntil = 2027-04-09T00:00:00Z
-reason = "baseline low: next@16.1.6 (frontend/pnpm-lock.yaml)"
-
-[[IgnoredVulns]]
-id = "GHSA-vfv6-92ff-j949"
-ignoreUntil = 2027-04-09T00:00:00Z
-reason = "baseline low: next@16.1.6 (frontend/pnpm-lock.yaml)"
