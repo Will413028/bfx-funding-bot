@@ -181,7 +181,7 @@ class Rig:
     def __init__(self, *, result: CycleResult | Exception | None = None,
                  refusals: dict[tuple[str, str], str] | None = None,
                  cells: tuple[tuple[str, str], ...] = (("fUST", "a30"),),
-                 book: AcceptedPositions | None | str = "default",
+                 book: AcceptedPositions | str | None = "default",
                  foreign: ForeignOffers | None = None,
                  conservation: AcceptedConservation | None = None,
                  views: tuple[UncertaintyView, ...] = (), now: int = 10_000_000,
