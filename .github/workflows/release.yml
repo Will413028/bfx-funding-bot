@@ -7,7 +7,10 @@ name: Release images
 # into the deployments ledger (ci_run).
 # See wiki ADR 2026-09-25-ci-registry-digest-deploy.
 
-on:
+# zizmor: workflow_run runs with the base repository's token. Safe here because the
+# job only runs for completed `push` runs on main (see `if:` below), never for a
+# pull_request run, so no fork-controlled code or ref reaches this workflow.
+on:  # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows: [CI]
     types: [completed]
@@ -34,8 +37,9 @@ jobs:
     env:
       REVISION: ${{ github.event.workflow_run.head_sha }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Resolve image names
@@ -81,17 +85,16 @@ jobs:
             echo "::notice::${REVISION} is no longer the head of main (${head}); publishing sha tags only"
           fi
 
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@v4
-
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build and push backend
         id: backend
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: backend
           platforms: linux/arm64
@@ -108,7 +111,7 @@ jobs:
 
       - name: Build and push frontend
         id: frontend
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: frontend
           platforms: linux/arm64
@@ -124,12 +127,18 @@ jobs:
           cache-to: type=gha,scope=frontend,mode=max
 
       - name: Record release
+        env:
+          MAIN_TAG: ${{ steps.head.outputs.main_tag }}
+          BACKEND_IMAGE: ${{ steps.names.outputs.backend }}
+          BACKEND_DIGEST: ${{ steps.backend.outputs.digest }}
+          FRONTEND_IMAGE: ${{ steps.names.outputs.frontend }}
+          FRONTEND_DIGEST: ${{ steps.frontend.outputs.digest }}
         run: |
           {
-            echo "### Release ${REVISION} (main tag: ${{ steps.head.outputs.main_tag }})"
+            echo "### Release ${REVISION} (main tag: ${MAIN_TAG})"
             echo ""
             echo "| image | digest |"
             echo "|---|---|"
-            echo "| ${{ steps.names.outputs.backend }} | \`${{ steps.backend.outputs.digest }}\` |"
-            echo "| ${{ steps.names.outputs.frontend }} | \`${{ steps.frontend.outputs.digest }}\` |"
+            echo "| ${BACKEND_IMAGE} | \`${BACKEND_DIGEST}\` |"
+            echo "| ${FRONTEND_IMAGE} | \`${FRONTEND_DIGEST}\` |"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -51,8 +51,9 @@ jobs:
       BFX_DEPLOYMENT_ENV: ci
       BFX_TEST_PG_BIN: /usr/lib/postgresql/18/bin
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 2  # the PR merge commit and its base parent
       # Integration-owned mutants need PostgreSQL; run them when their code, their
       # owning tests or the gate changed.
@@ -67,13 +68,18 @@ jobs:
           else
             echo "args=" >> "$GITHUB_OUTPUT"
           fi
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
+          version: "0.12.23"
+          # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz (all these jobs run on x64).
+          checksum: "9167d72b3319674b6303c4cbe071854bba13ebdf3d76b1a7cbdc175471fb66d6"
           enable-cache: true
       - run: uv sync --all-groups
       - if: steps.scope.outputs.args != ''
         uses: ./.github/actions/postgres-18
-      - run: uv run python scripts/capital_mutation_gate.py ${{ steps.scope.outputs.args }}
+      - env:
+          GATE_ARGS: ${{ steps.scope.outputs.args }}
+        run: uv run python scripts/capital_mutation_gate.py ${GATE_ARGS:+"$GATE_ARGS"}
 
   nightly:
     name: Nightly properties (1k) and full capital mutation gate
@@ -87,9 +93,14 @@ jobs:
       BFX_DEPLOYMENT_ENV: ci
       BFX_TEST_PG_BIN: /usr/lib/postgresql/18/bin
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.12.23"
+          # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz (all these jobs run on x64).
+          checksum: "9167d72b3319674b6303c4cbe071854bba13ebdf3d76b1a7cbdc175471fb66d6"
           enable-cache: true
       - run: uv sync --all-groups
       - uses: ./.github/actions/postgres-18

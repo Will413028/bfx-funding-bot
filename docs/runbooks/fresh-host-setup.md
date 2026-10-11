@@ -192,7 +192,7 @@ roles／連線設定，以及 [offsite DR](offsite-dr.md) 的備份與 restore �
 
 在 Linux VM 的乾淨 checkout `/home/ubuntu/bfx-funding-bot`，核對 HEAD 是要安裝的
 release revision；CI 與 Release images 必須已成功。主機需要 root 擁有的
-`/usr/local/bin/uv`、Docker buildx 與 Python 3.12 以上：
+`/usr/local/bin/uv`（版本與 CI 的 `setup-uv` `version` 相同，從 GitHub release 下載 `uv-aarch64-unknown-linux-gnu.tar.gz` 並核對 `.sha256` 後安裝）、Docker buildx 與 Python 3.12 以上：
 
 ```bash
 /usr/local/bin/uv --version

@@ -66,6 +66,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/bfx_funding_bot"]
 
+[tool.uv]
+# Supply-chain cooldown: resolve only distributions uploaded at least a week ago.
+exclude-newer = "7 days"
+
 [tool.ruff]
 line-length = 100
 target-version = "py313"
