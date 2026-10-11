@@ -282,7 +282,6 @@ def _context(account_id: UUID = _ACCOUNT_ID) -> AccountContext:
     return AccountContext(
         account_id=str(account_id),
         credentials=Credentials(api_key=_API_KEY, api_secret=_API_SECRET),
-        allocation_cap_usdt=Decimal("1000"),
     )
 
 

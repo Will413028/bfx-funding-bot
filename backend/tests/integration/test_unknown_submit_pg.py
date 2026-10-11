@@ -7,7 +7,6 @@ the store (S1-8 PR-D).
 from __future__ import annotations
 
 import json
-from decimal import Decimal
 from uuid import UUID
 
 import httpx
@@ -58,7 +57,6 @@ async def test_history_transport_pages_backward_and_records_complete_coverage_fe
             ctx=AccountContext(
                 account_id=str(_ACCOUNT),
                 credentials=Credentials(api_key="key", api_secret="secret"),
-                allocation_cap_usdt=Decimal("1000"),
             ),
             start_ms=1_000,
             end_ms=5_000,
@@ -93,7 +91,6 @@ async def test_history_row_stamped_before_the_fence_keeps_a_short_page_complete(
             ctx=AccountContext(
                 account_id=str(_ACCOUNT),
                 credentials=Credentials(api_key="key", api_secret="secret"),
-                allocation_cap_usdt=Decimal("1000"),
             ),
             start_ms=1_175,
             end_ms=5_000,
@@ -122,7 +119,6 @@ async def test_full_history_page_at_start_fence_remains_incomplete():
             ctx=AccountContext(
                 account_id=str(_ACCOUNT),
                 credentials=Credentials(api_key="key", api_secret="secret"),
-                allocation_cap_usdt=Decimal("1000"),
             ),
             start_ms=1_000,
             end_ms=5_000,

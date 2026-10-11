@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
@@ -81,7 +80,6 @@ def _context() -> AccountContext:
     return AccountContext(
         account_id=str(ACCOUNT_ID),
         credentials=Credentials(api_key="never-persist-key", api_secret="never-persist-secret"),
-        allocation_cap_usdt=Decimal("100"),
     )
 
 

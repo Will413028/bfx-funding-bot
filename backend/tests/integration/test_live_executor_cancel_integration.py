@@ -5,7 +5,6 @@ the full sign_request + nonce handling on the wire.
 """
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
@@ -57,7 +56,6 @@ async def test_cancel_success_full_chain_sends_signed_post() -> None:
     ctx = AccountContext(
         account_id="default",
         credentials=Credentials(api_key="test-key", api_secret="test-secret"),
-        allocation_cap_usdt=Decimal("500"),
     )
 
     async with httpx.AsyncClient() as http:

@@ -431,7 +431,6 @@ def _ctx() -> AccountContext:
     return AccountContext(
         account_id="default",
         credentials=Credentials(api_key="k", api_secret="s"),
-        allocation_cap_usdt=D("570"),
     )
 
 
@@ -478,12 +477,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
     safety = safety if safety is not None else _FakeSafety(allowed=safety_allowed)
     # cap override: only the ladder observe-log test needs a gap large enough
     # (>= min_rung_usdt / spike_fraction) to actually produce spike rungs; every
-    # other caller keeps the default _ctx() (allocation_cap_usdt=570).
-    ctx = _ctx() if cap is None else AccountContext(
-        account_id="default",
-        credentials=Credentials(api_key="k", api_secret="s"),
-        allocation_cap_usdt=cap,
-    )
+    # other caller keeps the default fUST capital total of 570.
+    ctx = _ctx()
     optimizer_kwargs: dict[str, object] = {}
     if optimizer_horizon_h is not None:
         optimizer_kwargs["optimizer_horizon_h"] = optimizer_horizon_h
@@ -1084,7 +1079,6 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
     ctx = AccountContext(
         account_id="default",
         credentials=Credentials(api_key="k", api_secret="s"),
-        allocation_cap_usdt=D("10000"),
     )
     rec = DeploymentReconciler(
         store=store,

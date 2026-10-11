@@ -279,7 +279,6 @@ def _make_ctx() -> AccountContext:
     return AccountContext(
         account_id="default",
         credentials=Credentials(api_key="test-key", api_secret="test-secret"),
-        allocation_cap_usdt=Decimal("500"),
     )
 
 

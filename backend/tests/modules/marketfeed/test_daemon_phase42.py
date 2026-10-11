@@ -1,7 +1,6 @@
 """build_daemon: AccountContext + executor + chain + the auth WebSocket (Bitfinex venue)."""
 from __future__ import annotations
 
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -23,7 +22,6 @@ async def test_build_daemon_wires_the_bitfinex_executor(
     try:
         assert isinstance(daemon.executor, BitfinexLiveExecutor)
         assert daemon.account_ctx.account_id == str(TEST_EXCHANGE_ACCOUNT_ID)
-        assert daemon.account_ctx.allocation_cap_usdt == Decimal("0")  # capital is the policy's
         assert isinstance(daemon.safety_chain, SafetyGuardChain)
         assert not hasattr(daemon, "fill_tracker")  # the REST fill tracker is gone
         assert daemon.writer_lock is not None
