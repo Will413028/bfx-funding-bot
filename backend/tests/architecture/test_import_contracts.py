@@ -1,6 +1,7 @@
-"""Ratchet import exceptions: lower a constant when ignores are removed.
+"""Ratchet import exceptions: each constant equals the current ignore count.
 
-Never raise a constant to make a new violation pass silently.
+Removing an ignore fails until its constant is lowered to match; never raise a
+constant to make a new violation pass silently.
 """
 
 import ast
@@ -8,9 +9,9 @@ import tomllib
 from pathlib import Path
 
 CORE_IS_LEAF_MAX_IGNORES = 0
-VENUE_BELOW_MODULES_MAX_IGNORES = 19
+VENUE_BELOW_MODULES_MAX_IGNORES = 11
 RUNTIME_NOT_RESEARCH_MAX_IGNORES = 0
-MODULES_ACYCLIC_MAX_IGNORES = 27
+MODULES_ACYCLIC_MAX_IGNORES = 16
 APPS_IS_TOP_MAX_IGNORES = 0
 STRATEGY_IS_PURE_MAX_IGNORES = 0
 STRATEGY_LOWER_ONLY_MAX_IGNORES = 0
@@ -48,9 +49,9 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
         contracts = tomllib.load(config_file)["tool"]["importlinter"]["contracts"]
 
     contracts_by_id = {contract["id"]: contract for contract in contracts}
-    assert MAX_IGNORES_BY_ID.keys() <= contracts_by_id.keys()
+    assert MAX_IGNORES_BY_ID.keys() == contracts_by_id.keys()
     for contract_id, max_ignores in MAX_IGNORES_BY_ID.items():
-        assert len(contracts_by_id[contract_id].get("ignore_imports", [])) <= max_ignores
+        assert len(contracts_by_id[contract_id].get("ignore_imports", [])) == max_ignores
 
     modules_dir = pyproject.parent / "src" / "bfx_funding_bot" / "modules"
     sibling_modules = {
