@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir uv==0.5.*
+    && pip install --no-cache-dir uv==0.12.23  # same uv as CI (setup-uv) and the VM host
 
 WORKDIR /app
 
