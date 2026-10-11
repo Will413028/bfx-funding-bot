@@ -1,4 +1,4 @@
-FROM postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2 AS pgbackrest-build
+FROM postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873 AS pgbackrest-build
 
 ARG PG_BACKREST_VERSION=2.59.1
 ARG PG_BACKREST_SHA256=1cd522afc33b8ff846ef88c55dc238717c9c8817a4f6ca7c9f64887de9c7402d
@@ -41,7 +41,7 @@ RUN install -D -m 0755 pgbackrest-build/src/pgbackrest /out/pgbackrest \
         | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^\//) {name = $i; sub(/^.*\//, "", name); sub(/\(.*/, "", name); if (name !~ /^ld-musl-.*\.so\.1$/) print name}}' \
         | sort -u > /out/runtime-libraries
 
-FROM postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+FROM postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
 
 ARG PG_BACKREST_VERSION=2.59.1
 ARG PG_BACKREST_SHA256=1cd522afc33b8ff846ef88c55dc238717c9c8817a4f6ca7c9f64887de9c7402d
