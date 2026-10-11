@@ -732,9 +732,15 @@ async def test_the_boot_smoke_surface_is_gone(
     daemon, engine = await boot_live_construction(monkeypatch, tmp_path, httpx_mock, name="no_smoke")
     await engine.dispose()
     assert not hasattr(daemon, "smoke_runner")
+    from fastapi.testclient import TestClient
+
     from bfx_funding_bot.modules.marketfeed.healthz import make_app
     app = make_app(daemon.probe, admin_token="secret", trading_status=daemon.trading_status)
-    assert "/admin/smoke-test" not in {route.path for route in app.routes}
+    # Ask the app, not its route table: included routers are not flat routes with a path.
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer secret"}
+    assert client.get("/admin/smoke-test", headers=headers).status_code == 404
+    assert client.post("/admin/smoke-test", headers=headers).status_code == 404
 
 
 @pytest.mark.asyncio
