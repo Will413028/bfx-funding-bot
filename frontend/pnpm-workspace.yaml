@@ -3,3 +3,5 @@ packages:
 ignoredBuiltDependencies:
   - sharp
   - unrs-resolver
+# Supply-chain cooldown: resolve only versions published at least 7 days ago (minutes).
+minimumReleaseAge: 10080

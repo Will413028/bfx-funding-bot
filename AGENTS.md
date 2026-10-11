@@ -68,6 +68,15 @@ Bitfinex 自動放貸 SaaS 平台。
 - 後端架構詳見 `backend/ARCHITECTURE.md`（runtime 架構/資料流/放貸演算法）；測試慣例與 SQLAlchemy/Alembic 工作流以各 module 註解與既有測試為準
 - 前端測試指令、架構慣例詳見 `frontend/AGENTS.md`
 
+### 供應鏈與依賴（強制）
+
+- **agent 不自己新增或升級依賴**：先列出套件名稱與版本，確認套件確實存在、不是剛註冊的（看發布時間與下載量），等 owner 同意才裝。Dependabot 的 PR 照常 review。
+- **冷卻期 7 天**：uv `exclude-newer = "7 days"`（`backend/`、`deploy/vm/ops/` 的 `pyproject.toml`）、pnpm `minimumReleaseAge: 10080`（`frontend/pnpm-workspace.yaml`）、Dependabot `cooldown`。工具本身（uv、pnpm、CI 掃描器）也選發布滿 7 天的版本。
+- **版本釘選**：GitHub Actions 用完整 commit SHA、行尾註明版本；Docker base image 釘 digest；pnpm 由 `frontend/package.json` 的 `packageManager` 釘版（CI 與 Dockerfile 都讀它）；CI 的 uv 由 `setup-uv` 的 `version` 釘版。workflow 預設 `permissions: contents: read`、checkout 一律 `persist-credentials: false`。
+- **漏洞修補期限**（依 CVSS）：critical 7 天、high 30 天、medium 90 天、low 180 天。尚未修的已知漏洞列在 `osv-scanner.toml`，`ignoreUntil` 等於期限；過期 CI 失敗。修好就刪條目；延期必須在 commit 訊息寫理由。
+- **檢查**（`.github/workflows/security.yml`，PR、main push、每週一排程重掃）：gitleaks（全歷史；已審過的誤報以 fingerprint 列在 `.gitleaksignore`）、actionlint、zizmor（設定 `.github/zizmor.yml`）、osv-scanner。本機：`gitleaks git --redact .`、`actionlint`、`zizmor .`、`osv-scanner scan source -r --config osv-scanner.toml .`（在沒有 `node_modules`／`.venv` 的乾淨 checkout 跑，否則會掃到安裝目錄）。
+- **擋下改動的點**：`main` 由 GitHub ruleset 保護：必須走 PR，CI 與 Security workflow 的 job 都是 required checks。
+
 ### Commit 訊息格式
 
 使用 [Conventional Commits](https://www.conventionalcommits.org/)：`<type>(<scope>)?: <subject>`

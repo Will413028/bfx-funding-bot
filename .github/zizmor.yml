@@ -1,0 +1,5 @@
+rules:
+  # `$/...` local-action syntax is not yet understood by actionlint, which also
+  # gates these workflows; keep `./...` until both tools accept it.
+  self-repository:
+    disable: true

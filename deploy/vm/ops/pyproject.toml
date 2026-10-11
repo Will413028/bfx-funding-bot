@@ -13,3 +13,5 @@ dependencies = [
 
 [tool.uv]
 package = false
+# Supply-chain cooldown: resolve only distributions uploaded at least a week ago.
+exclude-newer = "7 days"

@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
-FROM node:22-alpine AS base
-RUN corepack enable && corepack prepare pnpm@10 --activate
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS base
+# corepack installs the exact pnpm pinned by package.json "packageManager".
+RUN corepack enable
 WORKDIR /app
 
 FROM base AS deps

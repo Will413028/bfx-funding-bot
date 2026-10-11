@@ -1,11 +1,45 @@
 version: 2
+# Cooldown: version updates wait 7 days after a release (security updates do not),
+# matching uv exclude-newer and pnpm minimumReleaseAge. Patch bumps are grouped.
 updates:
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories: ["/", "/.github/actions/*"]
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       actions:
         patterns:
           - "*"
+
+  - package-ecosystem: "uv"
+    directories: ["/backend", "/deploy/vm/ops"]
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      python-patch:
+        update-types: ["patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      npm-patch:
+        update-types: ["patch"]
+
+  - package-ecosystem: "docker"
+    directories: ["/backend", "/frontend", "/deploy/vm/postgres"]
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5

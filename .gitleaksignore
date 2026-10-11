@@ -1,0 +1,18 @@
+# Reviewed false positives in git history (gitleaks fingerprint: commit:file:rule:line).
+# Add an entry only after confirming the match is not a credential; rotate real leaks instead.
+# `-----BEGIN ... -----` placeholder in the example env file
+905bb82de31786916012f206dbcd7fa857a47ba3:.env.example:private-key:10
+# placeholder secret in a Go test of the retired backend; file since removed
+f46b71a53e5d34bbda0545ad07abc89fd8e90817:backend/internal/handler/apikey_test.go:generic-api-key:109
+# migration checksum, not a credential; file since removed
+f46b71a53e5d34bbda0545ad07abc89fd8e90817:backend/migrations/atlas.sum:generic-api-key:3
+# placeholder secret in a Go test of the retired backend; file since removed
+84a2a56506121f6b546a09f37fe638f6a9d46efc:backend/internal/handler/apikey_test.go:generic-api-key:142
+# prose naming an env flag (`X=true`), not a credential; file since removed
+45b19242a1f76438a981a9217f5b7d1fa1035502:docs/runbooks/immutable-release.md:generic-api-key:331
+# offer UUID (offerKey) in a frontend test fixture, not a credential
+b445ebc6e8fca2bf9dbc66e0467cb2075c864bdd:frontend/src/features/dashboard/components/__tests__/offers-table.test.tsx:generic-api-key:10
+# offer UUID (offerKey) in a frontend test fixture, not a credential
+b445ebc6e8fca2bf9dbc66e0467cb2075c864bdd:frontend/src/features/dashboard/components/__tests__/offers-table.test.tsx:generic-api-key:19
+# offer UUID (offerKey) in a frontend test fixture, not a credential
+b445ebc6e8fca2bf9dbc66e0467cb2075c864bdd:frontend/src/features/dashboard/hooks/__tests__/use-offers.test.tsx:generic-api-key:17
