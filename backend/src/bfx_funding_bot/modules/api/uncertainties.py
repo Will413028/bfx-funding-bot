@@ -54,7 +54,7 @@ _MAX_CANDIDATE_VENUE_OFFER_IDS = 16
 _EvidenceValue = str | int | float | bool | None | dict[str, Any] | list[Any]
 _REJECTION_STATUS = {
     "conflict": status.HTTP_409_CONFLICT,
-    "invalid": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "invalid": status.HTTP_422_UNPROCESSABLE_CONTENT,
     "not_found": status.HTTP_404_NOT_FOUND,
 }
 
@@ -193,10 +193,10 @@ def _bounded_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
         decoded = json.loads(encoded)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise _http_error(
-            "invalid_resolution_evidence", status.HTTP_422_UNPROCESSABLE_ENTITY
+            "invalid_resolution_evidence", status.HTTP_422_UNPROCESSABLE_CONTENT
         ) from exc
     if not isinstance(decoded, dict):  # defensive: JSON object was required
-        raise _http_error("invalid_resolution_evidence", status.HTTP_422_UNPROCESSABLE_ENTITY)
+        raise _http_error("invalid_resolution_evidence", status.HTTP_422_UNPROCESSABLE_CONTENT)
     return decoded
 
 
@@ -328,7 +328,7 @@ async def _resolution_context(
 def _operator_id(context: ExchangeAccountContext, supplied: str | None) -> str:
     value = (supplied or context.user_id).strip()
     if not value:
-        raise _http_error("operator_required", status.HTTP_422_UNPROCESSABLE_ENTITY)
+        raise _http_error("operator_required", status.HTTP_422_UNPROCESSABLE_CONTENT)
     if value != context.user_id:
         # Do not allow an operator to write an audit event under another
         # immutable principal's identity, even if the request is otherwise
@@ -344,7 +344,7 @@ def _validate_request_evidence(
 ) -> dict[str, Any]:
     evidence = _bounded_evidence(supplied)
     if not set(evidence).issubset(allowed):
-        raise _http_error("invalid_resolution_evidence", status.HTTP_422_UNPROCESSABLE_ENTITY)
+        raise _http_error("invalid_resolution_evidence", status.HTTP_422_UNPROCESSABLE_CONTENT)
     return evidence
 
 
