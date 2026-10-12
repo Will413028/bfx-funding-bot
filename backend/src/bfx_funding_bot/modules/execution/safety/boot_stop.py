@@ -14,14 +14,12 @@ The caller then refuses the boot; the supervisor restarts the container.
 from __future__ import annotations
 
 import logging
-from typing import Final
 from uuid import UUID
 
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
 
-VENUE_OFFERS_MAY_REMAIN: Final = "venue_offers_may_remain"
 
 
 def report_refused_boot(*, account_id: UUID, environment: str, reason: str) -> None:
@@ -29,10 +27,10 @@ def report_refused_boot(*, account_id: UUID, environment: str, reason: str) -> N
     reason = reason[:500]
     log.critical("venue_offers_may_remain account=%s env=%s reason=%s", account_id,
                  environment, reason)
-    alerts.emit(VENUE_OFFERS_MAY_REMAIN, level=alerts.CRITICAL,
+    alerts.emit(alerts.VENUE_OFFERS_MAY_REMAIN, level=alerts.CRITICAL,
                 message="the bot refused to boot; its offers may still be at the venue "
                         "(the kill switch cancels them)",
                 account=str(account_id), environment=environment, reason=reason)
 
 
-__all__ = ["VENUE_OFFERS_MAY_REMAIN", "report_refused_boot"]
+__all__ = ["report_refused_boot"]

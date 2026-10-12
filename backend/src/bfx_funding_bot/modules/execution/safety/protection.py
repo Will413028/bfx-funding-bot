@@ -87,9 +87,6 @@ TRIGGERS = frozenset({
     COMMAND_RATE_EXCEEDED,
 })
 
-# Level 4 alerts (modules/observability/alerts).
-NAV_DROP = "nav_drop"
-FOREIGN_LENDING = "foreign_lending"
 
 # Capital classifier refusals that are protections, by the reason it raises.
 # Others (a pending query, an unstable or stale snapshot, a changed fence) are
@@ -486,7 +483,7 @@ class NavDropMonitor:
                 continue
             self._alerted.add((symbol, metric))
             log.warning("nav_drop symbol=%s %s=%.4f threshold=%s", symbol, metric, value, threshold)
-            alerts.emit(NAV_DROP, level=alerts.WARNING, symbol=symbol, metric=metric,
+            alerts.emit(alerts.NAV_DROP, level=alerts.WARNING, symbol=symbol, metric=metric,
                         value=f"{value:.4f}", threshold=threshold)
 
 
@@ -527,9 +524,7 @@ __all__ = [
     "CAPITAL_BLOCK_TRANSIENT",
     "CAPITAL_BLOCK_TRIGGERS",
     "COMMAND_RATE_EXCEEDED",
-    "FOREIGN_LENDING",
     "IDENTITY_CONFLICT",
-    "NAV_DROP",
     "OFFER_AMOUNT_MISMATCH",
     "TRIGGERS",
     "UNCLASSIFIABLE_COMMITMENT",

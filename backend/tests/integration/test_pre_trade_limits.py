@@ -34,13 +34,13 @@ from bfx_funding_bot.modules.execution.safety.pre_trade import (
 )
 from bfx_funding_bot.modules.execution.safety.protection import (
     COMMAND_RATE_EXCEEDED,
-    NAV_DROP,
     NavDropMonitor,
 )
 from bfx_funding_bot.modules.execution.safety.tables import NavWindowSampleRow
 from bfx_funding_bot.modules.ledger import PolicyRefused
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store
 from bfx_funding_bot.modules.observability import alerts
+from bfx_funding_bot.modules.observability.alerts import NAV_DROP
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from tests.modules.execution.safety.test_pre_trade import Book, book
 from tests.pg_templates import alembic

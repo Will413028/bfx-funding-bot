@@ -215,7 +215,7 @@ class CommandThrottle:
         self._blocks.append(now)
         blocked = len(self._blocks)
         log.warning("command_throttled kind=%s blocked_in_window=%d", kind, blocked)
-        alerts.emit("command_throttled", level=alerts.WARNING, kind=kind,
+        alerts.emit(alerts.COMMAND_THROTTLED, level=alerts.WARNING, kind=kind,
                     blocked_in_window=blocked, window_seconds=int(self._window))
         if blocked >= self._trip_blocks and not self._tripped and self._protection is not None:
             self._tripped = True

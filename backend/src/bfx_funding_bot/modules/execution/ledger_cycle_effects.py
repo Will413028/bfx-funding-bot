@@ -37,7 +37,6 @@ from bfx_funding_bot.modules.execution.reconcile_monitors import (
     QuarantineAgeMonitor,
 )
 from bfx_funding_bot.modules.execution.safety.protection import (
-    FOREIGN_LENDING,
     VENUE_LENT_ABOVE_LEDGER,
     ReconcileProtectionPort,
     capital_block_trigger,
@@ -247,7 +246,7 @@ class LedgerCycleEffects:
             detail = (f"symbol={verdict.symbol} lent_unexplained={verdict.lent_unexplained} "
                       f"foreign_executed={verdict.foreign_executed}")
             log.warning("foreign_lending %s", detail)
-            alerts.emit(FOREIGN_LENDING, detail=detail)
+            alerts.emit(alerts.FOREIGN_LENDING, detail=detail)
 
     async def _alert_foreign_exposure(self) -> None:
         async with self._sf() as session, session.begin():

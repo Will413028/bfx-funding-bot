@@ -12,10 +12,8 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.modules.execution.safety import boot_stop
-from bfx_funding_bot.modules.execution.safety.boot_stop import (
-    VENUE_OFFERS_MAY_REMAIN,
-    report_refused_boot,
-)
+from bfx_funding_bot.modules.execution.safety.boot_stop import report_refused_boot
+from bfx_funding_bot.modules.observability.alerts import VENUE_OFFERS_MAY_REMAIN
 
 
 @pytest.fixture

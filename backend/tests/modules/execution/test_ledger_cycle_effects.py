@@ -37,7 +37,6 @@ from bfx_funding_bot.modules.execution.reconcile_monitors import (
     QuarantineAgeMonitor,
 )
 from bfx_funding_bot.modules.execution.safety.protection import (
-    FOREIGN_LENDING,
     VENUE_LENT_ABOVE_LEDGER,
     AutomaticProtection,
 )
@@ -56,6 +55,7 @@ from bfx_funding_bot.modules.ledger import (
     observation_evidence_ref,
 )
 from bfx_funding_bot.modules.observability import alerts
+from bfx_funding_bot.modules.observability.alerts import FOREIGN_LENDING
 from tests.modules.execution.safety.test_protection import MIN_HALT, Clock, RuleState
 
 SCOPE = Scope(uuid4(), "ci")
