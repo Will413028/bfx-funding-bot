@@ -4,11 +4,6 @@
 # Remove an entry when its fix merges; never extend a date without a written reason.
 
 [[IgnoredVulns]]
-id = "GHSA-qq9h-g4jm-xgf3"
-ignoreUntil = 2026-11-10T00:00:00Z
-reason = "baseline high: better-auth@1.6.14 (frontend/pnpm-lock.yaml); not reachable (no magic-link / email-OTP plugin). The fix (>=1.6.22) adds twoFactor columns failedVerificationCount, lockedUntil, which need an auth-schema migration first"
-
-[[IgnoredVulns]]
 id = "GHSA-g7r4-m6w7-qqqr"
 ignoreUntil = 2027-04-09T00:00:00Z
 reason = "baseline low: esbuild@0.27.x (frontend/pnpm-lock.yaml); fix 0.28.1 is outside vite 7 esbuild ^0.27, clears with vitest 5 / vite 8"
