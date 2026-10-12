@@ -1,5 +1,5 @@
 [Unit]
-Description=Alert when backup evidence misses the RPO or restore tests go stale
+Description=Alert when backup evidence misses the RPO, restore tests or weekly reports go stale, or the disk fills
 Documentation=file:///usr/local/lib/bfx-ops/current/ops/bfx_backup_check.py
 
 [Service]

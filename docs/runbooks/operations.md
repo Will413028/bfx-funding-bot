@@ -176,7 +176,7 @@ Overview 的 uncertainty 明細提供請求（同樣經 MFA、排入 `uncertaint
 | 來源 | 設定檔 | 內容 |
 |---|---|---|
 | bot 內的 sink（`observability/alerts.py`，非阻塞） | `/opt/bfx/runtime/bot.env` 的 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` | 交易狀態轉換、自動保護、kill 結果、恢復結果、幣別啟停結果（`capital_policy_request_*`）、`foreign_exposure`、`foreign_lending`、`unknown_quarantine_aged`、`nav_drop`、`venue_offers_may_remain` |
-| host 工具 `bfx-notify` | `/opt/bfx/runtime/notify.env`（同樣兩個 key） | bfx-deploy 結果、bfx-backup-check（RPO>300s、evidence 超過 15 分鐘、restore heartbeat 超過 35 天）、`bfx-alert@` 的 unit 失敗（pgBackRest 備份、restore test） |
+| host 工具 `bfx-notify` | `/opt/bfx/runtime/notify.env`（同樣兩個 key） | bfx-deploy 結果、bfx-backup-check（RPO>300s、evidence 超過 15 分鐘、restore heartbeat 超過 35 天、磁碟 ≥95% 為 critical；restore timer 停用、weekly report 超過 8 天沒成功、磁碟 ≥85% 為 warning）、`bfx-alert@` 的 unit 失敗（pgBackRest 備份、restore test） |
 
 - 兩個都空 → bot 只記 log（開機時會說一次）；`bfx-notify` 永遠 exit 0，送不出去只記 journal。
 - **換 token 或 chat id 要兩個檔都改**：改 `notify.env` 立即生效；改 `bot.env` 後
@@ -188,6 +188,15 @@ Overview 的 uncertainty 明細提供請求（同樣經 MFA、排入 `uncertaint
   兩份都讀不到。
 - 測試：`sudo bfx-notify --level info "test"`。
 - Grafana 仍是第二條觀測路徑。
+- **停機後仍送單**（Grafana 規則 `bfx-trading-halted-submits`，critical）：bot 的 `/metrics` 匯出
+  `bfx_trading_halted`（與 `/admin/trading-status` 的 `halt.halted` 同一個 guard 判定），規則在它連續
+  6 分鐘為 1、且 `bfx_executor_submits_total{status!="not_sent"}` 最近 5 分鐘有增加、且這個狀況持續 2 分鐘時觸發（gauge 只在 scrape 時更新，2 分鐘避開恢復交易後的第一次送單）。`not_sent`
+  是 guard 擋下、沒送出的；其餘狀態代表送單已離開 bot。halt 要先持續過整個視窗，才不會把 halt 前
+  幾分鐘的正常送單當成違規；代價是 halt 後約一分鐘內的單筆送單不在偵測範圍（halt 若真的失效，之後
+  每一輪都會再送單而被抓到）。
+  - 系統自己會做的：command gate 在 halt 時拒絕新送單，這條告警只做事後偵測，不改交易狀態。
+  - operator 要判斷的：用 `/admin/trading-status` 看 `halt` 與 `last_submit_attempt`，確認送出的是哪一筆、
+    為什麼通過 gate；在找到原因前保持 halt。若 venue 上有不該存在的 offer，走 kill（§3）。
 
 ## 7. 改了 runtime env 之後重建 container
 
@@ -209,10 +218,9 @@ sudo bfx-deploy --recreate
 |---|---|---|
 | `bfx-deploy.timer` | 每 5 分鐘（`*:2/5`） | 部署最新綠燈 main |
 | `bfx-pgbackrest-backup.timer` / `bfx-pgbackrest-status.timer` | 見 unit | 備份與 RPO evidence（`OnFailure=bfx-alert@`） |
-| `bfx-backup-check.timer` | 每 5 分鐘（`*:1/5`） | evidence 與 restore heartbeat 檢查，連續兩次才告警，6 小時重發 |
+| `bfx-backup-check.timer` | 每 5 分鐘（`*:1/5`） | evidence、restore heartbeat、weekly report heartbeat 與磁碟使用率檢查，連續兩次才告警，6 小時重發（見下方「主機檢查」） |
 | `bfx-restore-test.timer` | 每月 1 日 09:17 UTC | `bfx-restore-test@current`：用已部署 release 的 DR 腳本做 isolated restore ＋ ledger 驗證（與 production 比對有界 digest、唯讀 boot check；[offsite DR](offsite-dr.md#monthly-and-change-triggered-ledger-restore-test)） |
 | `bfx-weekly-report.timer` | 每週一 04:17 UTC | 每週量測鏈：attribution／realized interest／G3 報告＋研究重驗（見下方「每週報告」；`OnFailure=bfx-alert@`） |
-| `bfx-halt-watch.timer` | 見 unit | 以 `/admin/dry-evaluate` 檢查停機是否真的生效 |
 
 `systemctl list-timers 'bfx-*'` 看實際啟用狀態。
 
@@ -257,6 +265,26 @@ sudo systemctl unmask bfx-weekly-report.timer
 sudo systemctl enable --now bfx-weekly-report.timer
 sudo systemctl disable --now bfx-weekly-report.timer   # 暫停
 ```
+
+成功（exit 0）的一次會寫 `/var/lib/bfx-ops/weekly-report-heartbeat.json`；timer 啟用時，
+`bfx-backup-check` 在它超過 8 天時發 warning。新主機在第一次成功之前沒有 heartbeat，不告警。
+
+### 主機檢查（`bfx-backup-check`）
+
+| 問題碼 | 級別 | 條件 |
+|---|---|---|
+| `rpo_exceeded`、`backup_evidence_*`、`backup_unmeasured` | critical | 見 [offsite DR](offsite-dr.md) |
+| `restore_test_no_heartbeat` | critical | restore timer 啟用但沒有 heartbeat |
+| `restore_test_stale` | critical | restore heartbeat 超過 35 天（不論 timer 是否啟用） |
+| `restore_timer_disabled` | warning | heartbeat 存在（這台跑過 restore test）但 timer 停用 |
+| `weekly_report_stale` | warning | weekly timer 啟用且最後一次成功超過 8 天 |
+| `disk_usage_high`／`disk_usage_critical` | warning／critical | `/` 使用率 ≥85%／≥95%（pgBackRest repo 與 Docker volume 都在這裡） |
+
+- 系統自己會做的：只通知，不擋部署、不改交易狀態；同一問題連續兩次才告警，6 小時重發，清除時發一則 recovered。
+- operator 要判斷的：磁碟告警先看 `docker system df`（舊 image 與 build cache 通常可回收）與
+  pgBackRest repo 是否因 R2 斷線而累積（[offsite DR](offsite-dr.md)）；restore timer 停用時判斷是刻意暫停還是漏開。
+- 試發：`sudo /usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_backup_check.py --state /tmp/backup-check-test.json --disk-warn-percent 1`
+  連跑兩次，第二次會送出 warning（用暫存 state，不影響正式的去重狀態）。
 
 ## 9. 同一把 API key 的其他使用者（nonce 衝突）
 

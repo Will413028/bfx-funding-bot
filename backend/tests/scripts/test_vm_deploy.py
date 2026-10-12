@@ -608,7 +608,6 @@ def test_successful_deploy_installs_its_own_tooling_for_the_next_run(harness: Ha
     managed = [line for line in TOOLING["deploy/vm/systemd/managed-units"].splitlines()
                if line and not line.startswith("#")]
     assert sorted(p.name for p in harness.settings.unit_dir.iterdir()) == sorted(managed)
-    assert "bfx-halt-watch.service" not in managed
     # The weekly job ships with the tooling: its steps, runner and unit follow each deploy,
     # its timer (an operator's schedule, possibly masked) is never overwritten.
     for path in ("ops/docker-compose.weekly-report.yml", "ops/bfx_weekly_report.py"):

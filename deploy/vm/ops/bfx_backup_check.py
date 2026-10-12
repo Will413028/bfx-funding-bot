@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Alert when backups miss the RPO or the monthly restore test stops succeeding.
+"""Alert when backups miss the RPO, scheduled host jobs stop succeeding, or the disk fills.
 
 Runs as root from bfx-backup-check.timer, one minute after each
 bfx-pgbackrest-status run. It only reads what already exists:
@@ -7,9 +7,18 @@ bfx-pgbackrest-status run. It only reads what already exists:
 - the evidence file that deploy/vm/pgbackrest/status.sh writes every five
   minutes: `measured: false`, `rpo_seconds` above 300, or a file older than 15
   minutes (the status timer itself stopped) is a problem;
-- the restore-test heartbeat, but only while bfx-restore-test.timer is enabled:
-  missing or older than 35 days is a problem (the timer is monthly; deploys with a
-  migration or a DR change also refresh it).
+- the restore-test heartbeat: older than 35 days is a problem whatever the timer
+  says (the timer is monthly; deploys with a migration or a DR change also
+  refresh it). While bfx-restore-test.timer is enabled a missing heartbeat is a
+  problem too; while it is disabled, an existing heartbeat means this host
+  already ran restore tests, so the disabled timer is a warning. A new host has
+  no heartbeat until its first manual run (offsite-dr.md) and gets no alert;
+- the weekly-report heartbeat (bfx_weekly_report.py writes it after a run that
+  exits 0), only while bfx-weekly-report.timer is enabled -- the operator decides
+  whether the report runs: older than 8 days is a warning. No heartbeat yet
+  (a new host, or before the first run) is not a problem;
+- disk usage of the filesystem holding the pgBackRest repo and Docker volumes:
+  at or above 85% is a warning, at or above 95% critical.
 
 A failed scheduled backup is alerted directly by bfx-pgbackrest-backup.service
 (OnFailure=bfx-alert@%n.service), not here. Nothing here gates a deploy or a
@@ -27,6 +36,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -56,6 +66,14 @@ bfx_notify = _load("_bfx_ops_notify", _HERE / "bfx_notify.py")
 # argv -> exit status (systemctl is-enabled --quiet ...)
 StatusRunner = Callable[[Sequence[str]], int]
 Notifier = Callable[[str, str], None]
+# path -> (total, used, free) bytes, as shutil.disk_usage
+DiskUsage = Callable[[Path], tuple[int, int, int]]
+
+# Problem kinds that page as a warning; every other kind is critical.
+WARNING_KINDS = frozenset({
+    "restore_timer_disabled", "weekly_report_stale", "weekly_report_heartbeat_invalid",
+    "disk_usage_high", "disk_usage_unavailable",
+})
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -103,14 +121,45 @@ def backup_problems(
     return problems
 
 
-def restore_problems(heartbeat: dict[str, Any] | None, *, now_ms: int, max_age_s: int) -> list[str]:
+def restore_problems(
+    heartbeat: dict[str, Any] | None, *, now_ms: int, max_age_s: int, timer_enabled: bool,
+) -> list[str]:
     if heartbeat is None:
-        return ["restore_test_no_heartbeat"]
+        return ["restore_test_no_heartbeat"] if timer_enabled else []
     observed = _int(heartbeat.get("observed_at_ms"))
     if observed is None:
         return ["restore_test_heartbeat_invalid"]
     if now_ms - observed > max_age_s * 1000:
         return [f"restore_test_stale:{(now_ms - observed) // 86_400_000}d"]
+    return [] if timer_enabled else ["restore_timer_disabled"]
+
+
+def weekly_report_problems(
+    heartbeat: dict[str, Any] | None, *, now_ms: int, max_age_s: int,
+) -> list[str]:
+    if heartbeat is None:
+        return []
+    observed = _int(heartbeat.get("observed_at_ms"))
+    if observed is None:
+        return ["weekly_report_heartbeat_invalid"]
+    if now_ms - observed > max_age_s * 1000:
+        return [f"weekly_report_stale:{(now_ms - observed) // 86_400_000}d"]
+    return []
+
+
+def disk_problems(
+    path: Path, *, warn_percent: int, critical_percent: int, usage: DiskUsage,
+) -> list[str]:
+    try:
+        _total, used, free = usage(path)
+        # df's Use%: used against what non-root users can still fill.
+        percent = used * 100 // (used + free)
+    except (OSError, ZeroDivisionError):
+        return ["disk_usage_unavailable"]
+    if percent >= critical_percent:
+        return [f"disk_usage_critical:{percent}%"]
+    if percent >= warn_percent:
+        return [f"disk_usage_high:{percent}%"]
     return []
 
 
@@ -131,7 +180,8 @@ def decide(
     if confirmed:
         if not confirmed <= alerted or now - alerted_at >= realert_s:
             shown = [problem for problem in problems if _kind(problem) in confirmed]
-            message = ("critical", "DR check: " + ", ".join(shown)
+            level = "critical" if confirmed - WARNING_KINDS else "warning"
+            message = (level, "DR check: " + ", ".join(shown)
                        + " (backups/restore tests do not gate trading; fix and watch the next run)")
             alerted, alerted_at = confirmed, now
     elif not kinds and alerted:
@@ -159,16 +209,26 @@ def _systemctl_status(argv: Sequence[str]) -> int:
 def run_check(
     *, evidence: Path, heartbeat: Path, restore_timer: str, state_path: Path,
     rpo_limit_s: int, max_age_s: int, restore_max_age_s: int, realert_s: float,
-    notify: Notifier, status: StatusRunner = _systemctl_status,
+    notify: Notifier, weekly_heartbeat: Path, weekly_timer: str, weekly_max_age_s: int,
+    disk_path: Path, disk_warn_percent: int, disk_critical_percent: int,
+    status: StatusRunner = _systemctl_status, disk_usage: DiskUsage = shutil.disk_usage,
     clock: Callable[[], float] = time.time,
 ) -> int:
     now = clock()
     now_ms = int(now * 1000)
+
+    def enabled(timer: str) -> bool:
+        return status(["systemctl", "is-enabled", "--quiet", timer]) == 0
+
     problems = backup_problems(_read_json(evidence), now_ms=now_ms, rpo_limit_s=rpo_limit_s,
                                max_age_s=max_age_s)
-    if status(["systemctl", "is-enabled", "--quiet", restore_timer]) == 0:
-        problems += restore_problems(_read_json(heartbeat), now_ms=now_ms,
-                                     max_age_s=restore_max_age_s)
+    problems += restore_problems(_read_json(heartbeat), now_ms=now_ms,
+                                 max_age_s=restore_max_age_s, timer_enabled=enabled(restore_timer))
+    if enabled(weekly_timer):
+        problems += weekly_report_problems(_read_json(weekly_heartbeat), now_ms=now_ms,
+                                           max_age_s=weekly_max_age_s)
+    problems += disk_problems(disk_path, warn_percent=disk_warn_percent,
+                              critical_percent=disk_critical_percent, usage=disk_usage)
     state = _read_json(state_path) or {}
     message, next_state = decide(state, problems, now=now, realert_s=realert_s)
     if message is not None:
@@ -194,6 +254,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-evidence-age-seconds", type=int, default=900)
     parser.add_argument("--restore-max-age-seconds", type=int, default=35 * 86_400)
     parser.add_argument("--realert-seconds", type=int, default=6 * 3600)
+    parser.add_argument("--weekly-heartbeat", type=Path,
+                        default=Path("/var/lib/bfx-ops/weekly-report-heartbeat.json"))
+    parser.add_argument("--weekly-timer", default="bfx-weekly-report.timer")
+    parser.add_argument("--weekly-max-age-seconds", type=int, default=8 * 86_400)
+    parser.add_argument("--disk-path", type=Path, default=Path("/"))
+    parser.add_argument("--disk-warn-percent", type=int, default=85)
+    parser.add_argument("--disk-critical-percent", type=int, default=95)
     args = parser.parse_args(argv)
 
     def notify(level: str, text: str) -> None:
@@ -204,7 +271,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         restore_timer=args.restore_timer, state_path=args.state,
         rpo_limit_s=args.rpo_seconds, max_age_s=args.max_evidence_age_seconds,
         restore_max_age_s=args.restore_max_age_seconds, realert_s=args.realert_seconds,
-        notify=notify,
+        notify=notify, weekly_heartbeat=args.weekly_heartbeat, weekly_timer=args.weekly_timer,
+        weekly_max_age_s=args.weekly_max_age_seconds, disk_path=args.disk_path,
+        disk_warn_percent=args.disk_warn_percent,
+        disk_critical_percent=args.disk_critical_percent,
     )
 
 

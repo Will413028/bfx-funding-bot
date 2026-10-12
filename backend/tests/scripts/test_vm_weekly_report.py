@@ -338,6 +338,25 @@ def test_steps_stay_with_the_installed_tooling_when_it_lags_the_deploy(
     assert "warning: steps from tooling release" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(("returncode", "beats"), [(0, True), (1, False)])
+def test_only_a_successful_run_refreshes_the_heartbeat_backup_check_reads(
+    host: dict[str, Path], tmp_path: Path, returncode: int, beats: bool,
+) -> None:
+    plan = _plan(host, FakeLedger([(REV, DIGEST, "deployed")]))
+    heartbeat = tmp_path / "state" / "weekly-report-heartbeat.json"
+    assert weekly.run(plan, execute=lambda argv, env: returncode, heartbeat=heartbeat,
+                      clock=lambda: 1_790_000_000.0) == returncode
+    if beats:
+        assert json.loads(heartbeat.read_text())["observed_at_ms"] == 1_790_000_000_000
+    else:
+        assert not heartbeat.exists()
+
+
+def test_heartbeat_path_is_the_one_backup_check_defaults_to() -> None:
+    assert f'default=Path("{weekly.HEARTBEAT}")' in (
+        ROOT / "deploy/vm/ops/bfx_backup_check.py").read_text()
+
+
 @pytest.mark.parametrize(("mutate", "code"), [
     (lambda h, ledger: setattr(ledger, "rows", [(REV, DIGEST, "failed")]), "no_deployed_release"),
     (lambda h, ledger: setattr(ledger, "exists", False), "no_deployed_release"),

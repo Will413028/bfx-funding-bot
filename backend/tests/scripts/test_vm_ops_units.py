@@ -182,3 +182,10 @@ def test_the_wrappers_default_paths_are_what_the_backup_check_watches(monkeypatc
     assert seen["heartbeat"] == Path("/home/ubuntu/bfx/dr-evidence/restore-heartbeat.json")
     check = _unit("bfx-backup-check.service").one("Service", "ExecStart")
     assert f"--restore-heartbeat {seen['heartbeat']}" in check
+
+
+def test_weekly_report_writes_its_heartbeat_where_backup_check_reads_it() -> None:
+    """bfx-backup-check warns when this heartbeat goes stale; both units own /var/lib/bfx-ops."""
+    for name in ("bfx-weekly-report.service", "bfx-backup-check.service"):
+        assert _unit(name).one("Service", "StateDirectory") == "bfx-ops"
+        assert _unit(name).one("Service", "StateDirectoryMode") == "0700"

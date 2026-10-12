@@ -81,9 +81,13 @@ Prior state：daemon 自 Phase 4.2 起只暴露**輸入**（env var、yaml、log
 ## Followup
 
 - 恢復交易（gate：24h L3 驗收，07-28 02:13 UTC）——手段是 `POST /admin/resume?confirm=true`
-- VM 上 `bfx-halt-watch` / `bfx-l3-verify-24h` 仍是 transient unit，重開機即消失；永久 unit
-  已在 `deploy/vm/systemd/`，待安裝
-- `/metrics` 尚未加 halted gauge；Prometheus 告警規則「halted=true 卻出現 `RESERVATION_INTENT`」未建
+- ~~VM 上 `bfx-halt-watch` / `bfx-l3-verify-24h` 仍是 transient unit~~ 已退役（2026-10-12）：
+  halt-watch 只寫 log、timer 已 masked，l3-verify 從未安裝；兩者的腳本與 unit 已從 repo 刪除，
+  偵測改由下一條負責
+- ~~`/metrics` 尚未加 halted gauge~~ 已完成（2026-10-12）：`/metrics` 匯出 `bfx_trading_halted`
+  （與 `halt.halted` 同一個 guard 判定），Grafana 規則 `bfx-trading-halted-submits` 在它持續為 1 時
+  `bfx_executor_submits_total{status!="not_sent"}` 仍增加即 critical（runbook `operations.md` §6）。
+  halt 的強制仍只在應用層的 command gate；這條規則是事後偵測
 - P3–P5 未做：cap 收斂成單一來源（設了不生效的值應在啟動時 fatal）、deploy 關鍵邏輯移出 shell
 
 ## Invariants

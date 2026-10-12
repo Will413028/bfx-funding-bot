@@ -20,6 +20,9 @@ Signal → metric map:
               bfx_subtask_heartbeat_threshold_seconds{sub_task,task_class}
               (alert expr: age > threshold — the explicit form of the old
               scan_staleness inference)
+- Safety:     bfx_trading_halted{exchange_account_id,deployment_environment}
+              (the manual_kill guard's verdict, refreshed per scrape; the
+              Grafana rule pages when it is 1 while submits still leave the bot)
 - Errors:     bfx_venue_rest_errors_total{kind}, bfx_venue_rest_rate_limited_total (429),
               bfx_diagnostic_events_total{event_type,level} (safety_trigger trips),
               bfx_log_messages_total{level,logger} (WARNING+ incl.
@@ -37,6 +40,7 @@ Invariants (observe-only contract):
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import time
@@ -90,6 +94,18 @@ _KNOWN_EXECUTION_POLICIES = frozenset({
     "book_guarded", "optimizer_shadow", "optimizer_live",
 })
 _KNOWN_BOOK_SNAPSHOT_RESULTS = frozenset({"valid", "invalid", "unavailable", "error"})
+
+# A scrape must not hang on the trading-state read behind the halt verdict.
+_HALT_REFRESH_TIMEOUT_S = 2.0
+
+
+class TradingHaltSource(Protocol):
+    """What the halt gauge reads (TradingStatusService) — kept narrow so the
+    observability module never imports the admin module."""
+
+    async def halted(self) -> bool | None: ...
+    def metric_scope(self) -> dict[str, str]: ...
+
 
 _HEALTH_STATUS_CODE: dict[HealthStatus, float] = {
     HealthStatus.HEALTHY: 0.0,
@@ -389,6 +405,14 @@ class DaemonMetrics:
             "Whether trading business dependencies are currently ready.",
             registry=self.registry,
         )
+        self.trading_halted = Gauge(
+            "bfx_trading_halted",
+            "1 when the installed manual_kill guard would block a new offer now "
+            "(the same verdict as /admin/trading-status halt.halted), else 0. "
+            "Refreshed at each scrape; absent when no guard is installed.",
+            ["exchange_account_id", "deployment_environment"],
+            registry=self.registry,
+        )
         self.event_loop_lag = Gauge(
             "bfx_event_loop_lag_seconds",
             "How late the loop watchdog's last re-arm wait woke up (0 = on time); "
@@ -526,6 +550,22 @@ class DaemonMetrics:
             self.trading_ready.set(1.0 if value else 0.0)
         except Exception:
             log.debug("metrics_observe_failed metric=trading_ready", exc_info=True)
+
+    async def refresh_trading_halted(self, source: TradingHaltSource) -> None:
+        """Ask the halt source for its verdict and set the gauge; fail-open.
+
+        Called from the async /metrics route, never from the submit path. A read
+        that fails or times out leaves the last value in place.
+        """
+        try:
+            async with asyncio.timeout(_HALT_REFRESH_TIMEOUT_S):
+                halted = await source.halted()
+            if halted is None:
+                return
+            self.trading_halted.labels(**source.metric_scope()).set(1.0 if halted else 0.0)
+        except Exception:
+            # Warning, not debug: a stale value can hold or miss the halt page.
+            log.warning("metrics_observe_failed metric=trading_halted", exc_info=True)
 
     # ── binding / registration ───────────────────────────────────────────────
 

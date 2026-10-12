@@ -42,6 +42,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     validate_transition,
 )
 from bfx_funding_bot.modules.ledger import CapitalBlocked, Scope
+from bfx_funding_bot.modules.observability.metrics import DaemonMetrics
 from bfx_funding_bot.modules.strategy import CellConfig, DecisionOutcome, StrategyName
 
 D = Decimal
@@ -227,6 +228,32 @@ async def test_uninstalled_kill_guard_is_not_reported_as_running_normally(
     assert snap["halt"]["guard_installed"] is False
     assert snap["halt"]["halted"] is False
     assert "not installed" in (snap["halt"]["note"] or "")
+
+
+@pytest.mark.parametrize(("state", "expected"), [
+    (_trading("HALTED"), True), (_trading("ACTIVE"), False), (None, True),
+])
+@pytest.mark.asyncio
+async def test_halt_gauge_carries_the_guard_verdict_into_prometheus(
+    state: TradingState | None, expected: bool,
+) -> None:
+    """The gauge the Grafana halt rule reads is the same verdict as
+    `halt.halted`, labelled with the scope that supplies capital."""
+    svc = _service(trading_state=_FakeTradingState(state))
+    metrics = DaemonMetrics()
+    await metrics.refresh_trading_halted(svc)
+    labels = {"exchange_account_id": str(UUID(int=1)), "deployment_environment": "ci"}
+    assert metrics.registry.get_sample_value("bfx_trading_halted", labels) == float(expected)
+    assert (await svc.snapshot())["halt"]["halted"] is expected
+
+
+@pytest.mark.asyncio
+async def test_halt_gauge_is_absent_without_a_kill_guard() -> None:
+    metrics = DaemonMetrics()
+    svc = _service(guards=[], trading_state=_FakeTradingState(_trading("HALTED")))
+    assert await svc.halted() is None
+    await metrics.refresh_trading_halted(svc)
+    assert "bfx_trading_halted{" not in metrics.render().decode()
 
 
 @pytest.mark.asyncio

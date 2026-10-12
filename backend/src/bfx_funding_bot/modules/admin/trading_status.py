@@ -39,7 +39,7 @@ from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
-from bfx_funding_bot.modules.execution.protocols import AccountContext
+from bfx_funding_bot.modules.execution.protocols import AccountContext, GuardResult
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillResult
 from bfx_funding_bot.modules.execution.safety.trading_state import (
@@ -220,10 +220,8 @@ class TradingStatusService:
         else:
             sources["persisted"] = None
 
-        guard = next(
-            (g for g in self._chain.guards if g.name == MANUAL_KILL_GUARD_NAME), None,
-        )
-        if guard is None:
+        result = await self._kill_guard_verdict()
+        if result is None:
             return {
                 "halted": False,
                 "reason": None,
@@ -235,7 +233,6 @@ class TradingStatusService:
                 "sources": sources,
                 "history": history,
             }
-        result = await guard.evaluate(self._probe_decision(self._symbols[0]), self._ctx)
         return {
             "halted": not result.allowed,
             "reason": result.reason,
@@ -243,6 +240,32 @@ class TradingStatusService:
             "note": None,
             "sources": sources,
             "history": history,
+        }
+
+    async def _kill_guard_verdict(self) -> GuardResult | None:
+        """The installed ManualKillGuard's verdict on a synthetic POST; None without one."""
+        guard = next(
+            (g for g in self._chain.guards if g.name == MANUAL_KILL_GUARD_NAME), None,
+        )
+        if guard is None:
+            return None
+        return await guard.evaluate(self._probe_decision(self._symbols[0]), self._ctx)
+
+    async def halted(self) -> bool | None:
+        """`halt.halted` alone, for the `bfx_trading_halted` gauge.
+
+        None when no guard is installed: that process is neither halted nor
+        trading normally, so the gauge reports nothing rather than 0.
+        """
+        result = await self._kill_guard_verdict()
+        return None if result is None else not result.allowed
+
+    def metric_scope(self) -> dict[str, str]:
+        """Labels binding the halt gauge to the scope actually supplying capital."""
+        scope = self._exposure.scope
+        return {
+            "exchange_account_id": str(scope.exchange_account_id),
+            "deployment_environment": scope.deployment_environment,
         }
 
     # ------------------------------------------------------------ halt
