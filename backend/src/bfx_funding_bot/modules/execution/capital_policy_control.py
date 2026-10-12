@@ -45,10 +45,6 @@ from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
 
-CAPITAL_POLICY_REQUEST_APPLIED = "capital_policy_request_applied"
-CAPITAL_POLICY_REQUEST_REJECTED = "capital_policy_request_rejected"
-CAPITAL_POLICY_REQUEST_FAILED = "capital_policy_request_failed"
-
 _REJECTION_KINDS: dict[str, RejectionKind] = {
     "policy_unavailable": "not_found",
     "unsupported_enabled_symbol": "invalid",
@@ -113,19 +109,16 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
         fields: dict[str, Any] = {"request_id": str(row.request_id), "symbol": row.symbol,
                                   "action": row.action, "by": row.requested_by}
         if outcome.state == APPLIED:
-            alerts.emit(CAPITAL_POLICY_REQUEST_APPLIED, level=alerts.WARNING,
+            alerts.emit(alerts.CAPITAL_POLICY_REQUEST_APPLIED, level=alerts.WARNING,
                         outcome=outcome.reason, **fields)
         elif outcome.state == REJECTED:
-            alerts.emit(CAPITAL_POLICY_REQUEST_REJECTED, level=alerts.WARNING,
+            alerts.emit(alerts.CAPITAL_POLICY_REQUEST_REJECTED, level=alerts.WARNING,
                         reason=outcome.reason, **fields)
         else:
-            alerts.emit(CAPITAL_POLICY_REQUEST_FAILED, level=alerts.CRITICAL,
+            alerts.emit(alerts.CAPITAL_POLICY_REQUEST_FAILED, level=alerts.CRITICAL,
                         reason=outcome.reason, **fields)
 
 
 __all__ = [
-    "CAPITAL_POLICY_REQUEST_APPLIED",
-    "CAPITAL_POLICY_REQUEST_FAILED",
-    "CAPITAL_POLICY_REQUEST_REJECTED",
     "CapitalPolicyRequestWorker",
 ]

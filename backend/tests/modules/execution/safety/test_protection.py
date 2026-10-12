@@ -16,7 +16,6 @@ from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNav
 from bfx_funding_bot.modules.execution.safety.protection import (
     COMMAND_RATE_EXCEEDED,
     IDENTITY_CONFLICT,
-    NAV_DROP,
     OFFER_AMOUNT_MISMATCH,
     TRIGGERS,
     VENUE_LENT_ABOVE_LEDGER,
@@ -28,6 +27,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     WriterLockWatch,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingState, TransitionResult
+from bfx_funding_bot.modules.observability.alerts import NAV_DROP
 from tests.async_wait import until
 
 D = Decimal

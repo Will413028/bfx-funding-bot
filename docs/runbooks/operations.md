@@ -186,7 +186,11 @@ Overview 的 uncertainty 明細提供請求（同樣經 MFA、排入 `uncertaint
   主機 timer 停擺時交易事件仍由 bot 自己通報；合成一條就會讓其中一邊失去告警。token 分兩份檔是
   最小權限：`bot.env` 只給 bot container，`notify.env` 只給 root 的主機工具，DR unit（`ubuntu`）
   兩份都讀不到。
-- 測試：`sudo bfx-notify --level info "test"`。
+- 測試 host 路徑：`sudo bfx-notify --level info "test"`。
+- <a id="alert-alert_test"></a>測試 bot 路徑（`alert_test`，info）：在執行中的 bot container 裡跑
+  `sudo docker exec bfx-bot /app/.venv/bin/python -m scripts.send_test_alert`。它用 bot 自己的環境
+  （`bot.env`）建 sink，經 `alerts.emit` 送出（dedup、速率限制、secret 遮罩都照常），不碰資料庫與 venue；
+  Telegram 收下時 exit 0，只記 log（key 缺或格式錯）或送不出去時 exit 1。
 - Grafana 仍是第二條觀測路徑。
 - **停機後仍送單**（Grafana 規則 `bfx-trading-halted-submits`，critical）：bot 的 `/metrics` 匯出
   `bfx_trading_halted`（與 `/admin/trading-status` 的 `halt.halted` 同一個 guard 判定），規則在它連續
@@ -197,6 +201,201 @@ Overview 的 uncertainty 明細提供請求（同樣經 MFA、排入 `uncertaint
   - 系統自己會做的：command gate 在 halt 時拒絕新送單，這條告警只做事後偵測，不改交易狀態。
   - operator 要判斷的：用 `/admin/trading-status` 看 `halt` 與 `last_submit_attempt`，確認送出的是哪一筆、
     為什麼通過 gate；在找到原因前保持 halt。若 venue 上有不該存在的 offer，走 kill（§3）。
+
+### bot 告警事件
+
+bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENTS`，並在下面有一段（測試
+`tests/architecture/test_alert_runbook_coverage.py` 強制兩者一致）。同一事件同一組識別欄位 10 分鐘內只送
+一則；dedup 狀態只存在記憶體，bot 重啟後重新計算。
+
+<a id="alert-trading_state_changed"></a>
+#### `trading_state_changed`（HALTED 時 critical，ACTIVE 時 info）
+
+- 代表：`trading_state` 寫入一筆新的轉換（自動保護停機、自動恢復、UI 恢復／kill、`/admin/halt`）；標題 `trading state X -> Y`，附 cause、actor、reason、state_id。重述同一狀態（例如已 HALTED 時再 kill）不寫新列，也不發。
+- 系統會做：HALTED 後所有幣別不掛新單，planner 每一輪撤受管 offer；`HALTED/auto` 依 §4 第 3 級條件自動恢復，`HALTED/operator` 不會。
+- operator 判斷：看 cause／actor。`auto` 停機走 §4 第 3 級；`operator` 停機確認是不是你（同時應有 `trading_control_applied` 或 `kill_switch_engaged`）；`ACTIVE/auto`（actor `auto-resume`）是預期的恢復，不必處理。
+
+<a id="alert-protection_tripped"></a>
+#### `protection_tripped`（critical）
+
+- 代表：第 3 級自動保護觸發（`unclassifiable_commitment`、`offer_amount_mismatch`、`identity_conflict`、`venue_lent_above_ledger`、`command_rate_exceeded`），標題 `automatic HALT: …`，`detail` 是觸發細節。同一 trigger 10 分鐘內只發一次；已經 HALTED 時條件持續也會發（受同一 dedup 限制）。
+- 系統會做：guard 立刻擋新單，背景 task 寫 `HALTED/auto`（寫入失敗每 5 秒重試，期間仍擋單），接著收到 `trading_state_changed`；planner 按 id 撤受管 offer，外來 offer 不碰；停滿 15 分鐘且連續 3 個乾淨 snapshot 後自動恢復，24 小時內最多 2 次。
+- operator 判斷：沒有跟著收到 `trading_state_changed` 時，查 log `automatic_protection_engage_failed`（HALTED 寫不進 DB）。其餘照 §4 第 3 級處理步驟。
+
+<a id="alert-kill_switch_engaged"></a>
+#### `kill_switch_engaged`（cancel-all 完整時 warning，不完整時 critical）
+
+- 代表：operator 的 kill（UI kill、`/admin/halt`，或 `kill_cancel_all_caught_up` 補跑）寫完 `HALTED/operator` 並對每個幣別跑完 venue cancel-all。`complete=false` 時 `not_acknowledged` 列出沒被確認的幣別與 phase，`scope_error` 表示幣別清單讀不完整。自動保護不會走到這裡。
+- 系統會做：HALTED 維持；結果寫入 `funding_cancel_all_audit`。不完整的 cancel-all 不會自己重試（只有 process 中斷造成的未完成會由 `kill_cancel_all_caught_up` 補跑）。
+- operator 判斷：不完整時看 UI「本次停機的 venue 撤單」，照 §3 重試 kill；同一 state_id 同樣結果 10 分鐘內不會再告警，以面板為準。phase 為 `skipped`（`no_live_venue`、`writer_lock_not_held`）時先處理 bot 本身。不是你發的 kill：確認 `actor`。
+
+<a id="alert-boot_refused"></a>
+#### `boot_refused`（critical）
+
+- 代表：bot 在開機完成前失敗：watchdog 設定無效、`build_daemon` 拋錯（schema／realm／ledger epoch、policy 讀不到、venue wiring、資料庫非暫時性錯誤），或開機觀測遇到非暫時性錯誤、venue 拒絕憑證（exit 78）。`error` 是例外摘要。
+- 系統會做：process 退出，不寫交易狀態、不碰 venue；`restart: unless-stopped` 重啟 container。組裝 daemon 時的拒絕（schema／realm／ledger epoch、policy、venue wiring）會先發 `venue_offers_may_remain`；帳戶設定、watchdog 設定、開機觀測與憑證被拒只有這則。dedup 只在同一 process 內，crash loop 時每次重啟都會再收到一則。
+- operator 判斷：看 `error` 與 `docker logs bfx-bot`。schema／build 不符屬部署問題（[deploy runbook](deploy.md)）；憑證被拒要檢查 API key。修好後下一版照常開機，不需要 resume。writer lock 被另一個 writer 持有是 exit 75，不發這則（§4）。
+
+<a id="alert-boot_waiting"></a>
+#### `boot_waiting`（warning）
+
+- 代表：開機時第一次連資料庫（`step=database`）或開機觀測（`step=venue observation`）遇到暫時性連線錯誤；每次等待只在第一次失敗時發一則。
+- 系統會做：在 process 內以 1、2、4…最多 60 秒的 backoff 重試，不重啟；等待期間沒有任何交易 task，`/readyz` not ready；開機觀測每次重試前會重新確認 writer lock。連線回來後照常開機，不另發告警（log `boot_dependency_reachable`）。
+- operator 判斷：確認是 Bitfinex 端還是 `bfx-postgres`（`docker ps`、`docker logs bfx-postgres`）。很快恢復就不用處理；一直等待時處理依賴本身，不要重啟 bot（重啟只會再等一次）。
+
+<a id="alert-previous_run_unclean"></a>
+#### `previous_run_unclean`（critical）
+
+- 代表：開機時發現同一 scope 有沒有結束紀錄的 run（`bot_runs.end_reason` 為空），也就是上一個 process 沒走到正常收尾：loop watchdog（`BFX_LOOP_WATCHDOG_S`，預設 120 秒）、OOM kill、SIGKILL 或 crash。每個未結束的 run 發一則，附 run_id、started_at、noticed_at、host。
+- 系統會做：把那些 run 標成 unclean 後照常開機；當時送出但沒記下結果的單，開機 recovery 會轉成 UNKNOWN 並隔離該幣別（§4 第 2 級）。
+- operator 判斷：照 §4 的 watchdog 條目，在 container log 的 started_at～noticed_at 之間找 `Timeout` 段落；沒有的話看 `docker inspect` 的 `OOMKilled`。反覆發生就查記憶體或卡住 event loop 的原因。
+
+<a id="alert-daemon_fatal"></a>
+#### `daemon_fatal`（critical）
+
+- 代表：已完成開機的 bot 因致命錯誤停下：writer lock refresh 後仍未持有、送單結果無法寫入 DB（`submit_outcome_lost`）、venue 拒絕憑證（exit 78），或任一 sub-task 拋出例外。`error` 說明是哪一種。
+- 系統會做：process 退出、container 重啟；不寫交易狀態。結果沒寫下的送單在重啟後變成 UNKNOWN 並隔離該幣別（§4 第 2 級）；lock 仍被其他 writer 持有時開機以 exit 75 反覆重試。
+- operator 判斷：看 `error` 與 `docker logs bfx-bot`。資料庫斷線造成的 lock 遺失在 DB 恢復後自己好；憑證被拒要處理 API key（之後的開機會一直 `boot_refused`）；同一錯誤反覆出現就是 bug，要查清楚。venue 上的受管 offer 仍在包絡內，要撤用 kill（§3）。
+
+<a id="alert-foreign_exposure"></a>
+#### `foreign_exposure`（warning）
+
+- 代表：venue 上有一筆 active offer，沒有任何 durable intent 對得上（例如在 Bitfinex 網頁掛的單、自動續借、同一把 key 的其他程式，§9）；runtime 在 offer 建立超過 120 秒後才判定，開機時立即判定。每個 venue offer id 在同一 process 只發一次。
+- 系統會做：只告警（§4 第 4 級）：不撤、不算進受管 offer、不停機。只有 kill 的 cancel-all 會撤它。
+- operator 判斷：確認是不是你自己的操作或你啟用的自動續借。都不是的話視為 API key 外洩：走 kill（§3）並更換 key。
+
+<a id="alert-unknown_quarantine_aged"></a>
+#### `unknown_quarantine_aged`（warning）
+
+- 代表：一筆 UNKNOWN 送單讓該幣別隔離已超過 30 分鐘；仍未結案時每 6 小時再提醒一次。附 symbol、attempt_id、minutes、amount。
+- 系統會做：該幣別維持不掛新單，其他幣別照常；每個被接受的 observation 都會再試一次自動結案。不會升級成停機。
+- operator 判斷：照 §5 處理（Overview 的 uncertainty 明細）。
+
+<a id="alert-auto_resume_limit_reached"></a>
+#### `auto_resume_limit_reached`（critical）
+
+- 代表：一次 `HALTED/auto` 的條件已消失（停滿 15 分鐘、3 個乾淨 snapshot），但 24 小時內已自動恢復 2 次，DB trigger 拒絕第 3 次。每個停機 id 在同一 process 只發一次，附原停機的 reason。
+- 系統會做：維持 HALTED，planner 繼續撤受管 offer，不再嘗試自動恢復。
+- operator 判斷：一天內第 3 次停機代表原因會反覆出現。照 §4 第 3 級處理步驟查清原因，再在 UI 恢復。
+
+<a id="alert-reconcile_not_accepted"></a>
+#### `reconcile_not_accepted`（warning）
+
+- 代表：週期 reconcile（`BFX_RECONCILE_INTERVAL_S`，預設 90 秒）連續 3 個 cycle 沒有被 ledger 接受；`decision` 為 `incomplete_or_unequal`（history 不完整或兩次觀測不同）、`fenced`（觀測期間 command clock 前進）或 `query_admission_refused`（scope 內有還沒有結果的 attempt）。streak 剛到 3 時發一次，被接受一次後才會重新計數。
+- 系統會做：RECONCILE 健康狀態轉為 DEGRADED；沒被接受的 cycle 跳過 deployment，所以不掛新單、不重訂價，也不跑停機或停用後的受管 offer 撤單。下一個被接受的 cycle 就恢復。
+- operator 判斷：依 `decision` 找原因：`incomplete_or_unequal` 看同時段的 `venue_observation_history_incomplete`；`query_admission_refused` 看是否有一直沒結果的送單。持續不恢復且需要撤 venue 上的 offer 時走 kill（§3）。
+
+<a id="alert-offer_end_unconfirmed"></a>
+#### `offer_end_unconfirmed`（warning）
+
+- 代表：一筆 offer 從 active 消失，依 id 向 venue 點查超過 120 秒 grace 仍沒有 terminal 答案；`cause` 為 `not_returned`、`request_failed`、`cap_exhausted` 或 `unparseable`。grace 從本 process 第一次看到該 id 沒有答案時起算。
+- 系統會做：observation 把它記為 unconfirmed end（不寫 terminal 列），讓 observation 可以被接受；conservation 只用這筆 offer 自己的 funding trades 判斷成交量，判完發 `offer_end_judged`。
+- operator 判斷：通常不用處理，等 `offer_end_judged`。`cause` 一直是 `request_failed` 或 `cap_exhausted` 時，表示 venue API 或 request budget 有問題，要查 log。
+
+<a id="alert-offer_end_judged"></a>
+#### `offer_end_judged`（explained 時 info，undeterminable 時 warning）
+
+- 代表：conservation 對 unconfirmed end 的判決已寫入：`outcome=explained`（trades 定出成交量 `filled`）或 `undeterminable`（trades 定不出來，衝突仍在）；`verdict` 是該幣別這次的 conservation 判決。
+- 系統會做：explained 照常對帳。undeterminable 的幣別判為 `unexplained_lending`，capital read 回 `venue_lent_above_ledger`，接著 `protection_tripped` 與 `HALTED/auto`，之後依 §4 第 3 級自動恢復。
+- operator 判斷：explained 不用處理。undeterminable 照 `protection_tripped` 處理（§4）；同一情況反覆出現，表示只靠 trades 判斷的規則需要重新評估，要記錄下來交給開發處理。
+
+<a id="alert-provenance_conflict"></a>
+#### `provenance_conflict`（warning）
+
+- 代表：要撤某幣別的受管 offer（帳戶 HALTED 或該幣別停用）時，有一筆 live offer 的 provenance 自相矛盾，sweep 分不出哪些 offer 是 bot 的。同一（symbol、offer id）只發一次，直到該幣別撤單成功一次才重新計算。
+- 系統會做：該幣別這一輪什麼都不做（不撤也不掛），下一輪再讀一次；其他幣別照常。
+- operator 判斷：持續出現代表該幣別的受管 offer 撤不掉；需要撤時走 kill（§3，cancel-all 不看 provenance）。這是 ledger 與 venue 的紀錄矛盾，要附 offer id 回報成 bug。
+
+<a id="alert-nav_drop"></a>
+#### `nav_drop`（warning）
+
+- 代表：某幣別的 NAV（available＋offered＋lent，原生單位）24 小時內從高點下降超過 `realized_loss_24h_pct`（5%），或從歷史高點下降超過 `drawdown_pct`（10%）（`backend/configs/safety.live.yaml` 的 `nav_alerts`）。每個（幣別、指標）每次超標只發一次，回到門檻內才重新計算。
+- 系統會做：只告警（§4 第 4 級），放貸照常；利率不好只會少賺，不會讓 NAV 下降。
+- operator 判斷：確認是不是你自己的提領或轉帳。都不是的話，可能是平台損失或帳戶被動用：後者走 kill（§3）並更換 key。
+
+<a id="alert-foreign_lending"></a>
+#### `foreign_lending`（warning）
+
+- 代表：被接受的 basis 判定某幣別的新增借出無法用 bot 的成交解釋，但可以用該期間成交的外來 offer 涵蓋（超過 0.01）；`detail` 附 `lent_unexplained` 與 `foreign_executed`。每個 basis 只判一次。
+- 系統會做：只告警（§4 第 4 級），不停機。外來 offer 涵蓋不了的部分會變成 `venue_lent_above_ledger` 而停機，不是這則。
+- operator 判斷：同 `foreign_exposure`：確認是不是你自己的操作或自動續借；都不是的話走 kill（§3）並更換 key。
+
+<a id="alert-venue_offers_may_remain"></a>
+#### `venue_offers_may_remain`（critical）
+
+- 代表：組裝 daemon 時開機被拒（資料庫非暫時性錯誤、schema 與 build 不符、realm 或 ledger epoch 不對、applied policy 讀不到、venue wiring 失敗；模擬環境同樣會發），bot 停機前 venue 上的受管 offer 可能還在。`reason` 是拒絕原因。
+- 系統會做：不寫交易狀態、不碰 venue，接著發 `boot_refused` 並退出，container 重啟。留在 venue 上的 offer 仍在當初的包絡內。
+- operator 判斷：先修好原因（多半是部署，見 [deploy runbook](deploy.md)），修好後的版本照常開機、不需要 resume。必須撤單時照 §3 處理；bot 沒在跑時 `/admin/halt` 不可用。
+
+<a id="alert-command_throttled"></a>
+#### `command_throttled`（warning）
+
+- 代表：command gate 的 token bucket（`pre_trade_limits.command_rate`：容量 12、每秒補 0.1，約每分鐘 6 筆）用完時又來一筆送單，送單被擋（`command_rate_limited`）。附 `blocked_in_window`（300 秒內被擋的送單數）。被擋的撤單只記 log，不發告警、也不計入。
+- 系統會做：被擋的送單在寫入任何 durable 紀錄前就被擋下，之後再送；300 秒內被擋 6 筆就觸發 `protection_tripped`（`command_rate_exceeded`）並進入 `HALTED/auto`。
+- operator 判斷：開機或重訂價時偶爾一筆不必處理。`blocked_in_window` 一直增加代表有失控的送單迴圈，用 `docker logs bfx-bot` 找是哪個幣別、哪個 cell。不要用調高 limit 繞過。
+
+<a id="alert-trading_control_applied"></a>
+#### `trading_control_applied`（warning）
+
+- 代表：UI 的恢復或 kill 請求已由 `TradingControlWorker` 套用；`outcome` 是 `resumed` 或 `HALTED; venue cancel-all follows`，`by` 是請求者。kill 時帳戶本來就 HALTED 的話，`state_id` 是既有那一列，不會接著收到 `trading_state_changed`。
+- 系統會做：狀態有變時接著發 `trading_state_changed`；kill 接著跑 cancel-all，結果見 `kill_switch_engaged`。
+- operator 判斷：確認 `by` 是你。不是的話代表有人用 operator 權限操作：先 kill（§3）再查帳號。
+
+<a id="alert-trading_control_rejected"></a>
+#### `trading_control_rejected`（warning）
+
+- 代表：恢復或 kill 請求被拒，`reason` 為 `operator_not_authorized`（請求者已不是有效的 operator）、`already_active`（帳戶已是 ACTIVE 時要求恢復）或 `illegal_transition: …`（DB 規則拒絕）。被 kill 取代的請求（`superseded_by_kill`）只記在請求上，不發這則。
+- 系統會做：狀態不變，請求就此結案，不會重試。
+- operator 判斷：依 `reason` 處理；修正後在 UI 重新送出。
+
+<a id="alert-trading_control_failed"></a>
+#### `trading_control_failed`（critical）
+
+- 代表：套用恢復或 kill 時發生錯誤（`reason` 為 root exception 類型，或 `outcome_write_failed:…`），或 kill 已寫入 HALTED 但 kill switch 沒接上（`kill switch not wired: venue offers not cancelled`）。
+- 系統會做：一般失敗時整個套用 rollback，交易狀態不變（失敗的 kill **沒有**停機），請求標為 failed、不重試。kill switch 沒接上時 HALTED 已生效，但 venue 沒有撤單。
+- operator 判斷：如果失敗的是 kill，馬上用 `/admin/trading-status` 看 `halt`，沒停就重送 kill 或用 `/admin/halt`（§3）；cancel-all 沒跑就重試 kill。原因看 `docker logs bfx-bot` 的 `trading_control_failed`。
+
+<a id="alert-kill_cancel_all_caught_up"></a>
+#### `kill_cancel_all_caught_up`（critical）
+
+- 代表：閒置的 worker 發現最近一次已套用的 kill 仍在生效，但之後沒有完成的 cancel-all（process 在 commit 後死掉，或某幣別的 audit 停在 `requested`）。每個 kill 在同一 process 只補一次。
+- 系統會做：立刻補跑 cancel-all，結果見接著發的 `kill_switch_engaged`。
+- operator 判斷：看 `kill_switch_engaged` 是否完整，不完整照 §3 處理。同時段若有 `daemon_fatal` 或 `previous_run_unclean`，一起查原本的 cancel-all 為什麼中斷。
+
+<a id="alert-capital_policy_request_applied"></a>
+#### `capital_policy_request_applied`（warning）
+
+- 代表：UI 的幣別啟用或停用請求已套用；`outcome` 為 `enabled (revision N)`、`disabled (revision N)`、`enabled; envelope unset: …` 或 `unchanged: already …`（沒寫新 revision）。附 symbol 與 `by`。
+- 系統會做：停用後下一個 reconcile tick 撤該幣別的受管 offer；啟用後 planner 開始考慮該幣別，沒有包絡時每一筆單都會被 envelope guard 拒絕（§2）。
+- operator 判斷：確認 `by` 是你。看到 `envelope unset` 時，用 `amend_capital_policy` 設好包絡（§2）。
+
+<a id="alert-capital_policy_request_rejected"></a>
+#### `capital_policy_request_rejected`（warning）
+
+- 代表：幣別啟停請求被拒，`reason` 為 `operator_not_authorized`、`policy_unavailable`（該幣別沒有 applied policy）、`unsupported_enabled_symbol`（例如 fUSD），或其他 policy 拒絕代碼。被 kill 取代的啟用請求（`superseded_by_kill`）不發這則。
+- 系統會做：不寫 revision，請求就此結案。
+- operator 判斷：依 `reason` 處理（§2）；修正後重新送出。
+
+<a id="alert-capital_policy_request_failed"></a>
+#### `capital_policy_request_failed`（critical）
+
+- 代表：套用幣別啟停時發生錯誤（`reason` 為 root exception 類型或 `outcome_write_failed:…`）。
+- 系統會做：rollback，不寫 revision，請求標為 failed、不重試。失敗的**停用**代表該幣別仍在放貸。
+- operator 判斷：在 UI 確認該幣別的實際狀態並重送；停用失敗而且必須馬上撤單時走 kill（§3）。原因看 `docker logs bfx-bot` 的 `capital_policy_request_failed`。
+
+<a id="alert-venue_observation_history_incomplete"></a>
+#### `venue_observation_history_incomplete`（warning）
+
+- 代表：某次 venue 觀測裡，某幣別的 history（`stream` 為 `offers`、`credits`、`loans`、`trades`，或消失 offer 的點查 `offers_by_id`）不完整；`reason` 為 `coverage_incomplete`（頁數上限 5 頁或 request budget 用完）、一筆解析不了的列（例外文字），或 120 秒 grace 內點查沒有答案（`not_returned`、`request_failed`、`cap_exhausted`、`unparseable`）。
+- 系統會做：這次 observation 不被接受（`incomplete_or_unequal`），這個 cycle 不 deploy，UNKNOWN 也不能靠這份 history 結案；下一個 cycle 重試。`offers_by_id` 超過 grace 後改走 `offer_end_unconfirmed`。
+- operator 判斷：偶發可以忽略；持續出現會接著收到 `reconcile_not_accepted`。`reason` 是解析錯誤時，可能是 venue 回傳格式改了，要交給開發處理。
+
+<a id="alert-ledger_unknown_resolution_rejected"></a>
+#### `ledger_unknown_resolution_rejected`（warning）
+
+- 代表：observation 被接受後，自動結案判定要綁定或標記某筆 UNKNOWN，但 journal 拒絕寫入（`ResolutionRejected`，例如 attempt 已不是 UNKNOWN、scope 不符；或 `ResolutionAlreadyRecorded`，已經有人先結案）。附 attempt_id、symbol、action、error。
+- 系統會做：只 rollback 這一筆結案，UNKNOWN 維持開啟、該幣別維持隔離；其他結案照常寫入，下一個被接受的 observation 再試。
+- operator 判斷：`error` 是已經結案時，多半是你剛在 UI 處理過，確認它已結案即可。其他情況照 §5 處理；反覆出現要回報成 bug。30 分鐘後仍未結案會接著收到 `unknown_quarantine_aged`。
 
 ## 7. 改了 runtime env 之後重建 container
 

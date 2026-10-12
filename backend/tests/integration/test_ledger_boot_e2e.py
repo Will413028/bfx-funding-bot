@@ -35,7 +35,6 @@ from bfx_funding_bot.apps import bot, bot_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS
 from bfx_funding_bot.core.errors import BootInvariantError
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
-from bfx_funding_bot.modules.execution.capital_policy_control import CAPITAL_POLICY_REQUEST_APPLIED
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.command_boundary import CommandOutcomeNotice
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
@@ -358,4 +357,3 @@ async def test_the_policy_worker_amends_the_policy_without_the_event_stream(
         revision = await session.get(CapitalPolicyRevisionRow, applied.revision_id)
     assert revision.operator_request_id == request_id
     assert applied.revision == 2 and applied.policy.enabled is False
-    assert CAPITAL_POLICY_REQUEST_APPLIED  # the alert name the worker emits

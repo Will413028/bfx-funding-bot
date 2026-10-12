@@ -45,6 +45,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     SubmissionAttemptJournalRow,
 )
 from bfx_funding_bot.modules.ledger.wiring import build_ledger_journal, build_observation_sink
+from bfx_funding_bot.modules.observability import alerts
 
 from .test_ledger_basis import _observation, _offer
 from .test_ledger_capital_reader import (
@@ -528,7 +529,7 @@ async def test_a_journal_refusal_rolls_back_only_that_resolution(book, alert_spy
     assert result.decision == "accepted" and result.resolutions == ()
     assert await accepted_count(book) == before + 1
     assert await resolutions(book) == []
-    assert [event for event, _ in alert_spy] == [resolver.RESOLUTION_REJECTED_ALERT]
+    assert [event for event, _ in alert_spy] == [alerts.LEDGER_UNKNOWN_RESOLUTION_REJECTED]
 
 
 @pytest.mark.asyncio

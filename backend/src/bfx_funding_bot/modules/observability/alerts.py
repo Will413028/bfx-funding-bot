@@ -22,8 +22,11 @@ Contract (the reason this module exists in this shape):
 
 Wiring: the daemon installs the configured sink with :func:`install`; hooks
 call the module-level :func:`emit`. Before installation (tests, scripts) the
-default sink only logs. New event names need no registration -- a hook just
-calls ``emit("foreign_exposure", level="warning", ...)``.
+default sink only logs. Every event name is a constant here and an entry in
+:data:`ALERT_EVENTS`; tests/architecture/test_alert_runbook_coverage.py holds each
+``emit`` call to that table and each entry to a runbook anchor in
+docs/runbooks/operations.md. ``emit`` itself never rejects a name: an alert
+must not be lost to a missing registration.
 """
 from __future__ import annotations
 
@@ -47,7 +50,7 @@ WARNING: Final = "warning"
 CRITICAL: Final = "critical"
 _LOG_LEVELS: Final = {INFO: logging.INFO, WARNING: logging.WARNING, CRITICAL: logging.CRITICAL}
 
-# Event names used by the hooks in this repository. Others are accepted as-is.
+# Event names. Each one is also a key of ALERT_EVENTS below.
 TRADING_STATE_CHANGED: Final = "trading_state_changed"
 PROTECTION_TRIPPED: Final = "protection_tripped"
 KILL_SWITCH_ENGAGED: Final = "kill_switch_engaged"
@@ -79,6 +82,63 @@ OFFER_END_JUDGED: Final = "offer_end_judged"
 # One live offer's provenance contradicts itself: its currency places nothing
 # (the other currencies continue) until the contradiction is resolved.
 PROVENANCE_CONFLICT: Final = "provenance_conflict"
+# Level 4 alerts (execution/safety/protection.py): alerts, never stops.
+NAV_DROP: Final = "nav_drop"
+FOREIGN_LENDING: Final = "foreign_lending"
+# The bot refused to boot; its offers may still be at the venue (safety/boot_stop.py).
+VENUE_OFFERS_MAY_REMAIN: Final = "venue_offers_may_remain"
+# The venue write limiter refused a non-cancel command (safety/pre_trade.py).
+COMMAND_THROTTLED: Final = "command_throttled"
+# Outcomes of the operator's queued trading-control and capital-policy requests.
+TRADING_CONTROL_APPLIED: Final = "trading_control_applied"
+TRADING_CONTROL_REJECTED: Final = "trading_control_rejected"
+TRADING_CONTROL_FAILED: Final = "trading_control_failed"
+# An applied kill had no finished cancel-all (the process died or failed after the
+# commit); the idle worker runs it now.
+KILL_CANCEL_ALL_CAUGHT_UP: Final = "kill_cancel_all_caught_up"
+CAPITAL_POLICY_REQUEST_APPLIED: Final = "capital_policy_request_applied"
+CAPITAL_POLICY_REQUEST_REJECTED: Final = "capital_policy_request_rejected"
+CAPITAL_POLICY_REQUEST_FAILED: Final = "capital_policy_request_failed"
+# A venue history stream could not be read completely (execution/venue_observation.py).
+VENUE_OBSERVATION_HISTORY_INCOMPLETE: Final = "venue_observation_history_incomplete"
+# The UNKNOWN resolver refused a resolution (ledger/_internal/resolver.py).
+LEDGER_UNKNOWN_RESOLUTION_REJECTED: Final = "ledger_unknown_resolution_rejected"
+# Sent by backend/scripts/send_test_alert.py to prove the delivery path.
+ALERT_TEST: Final = "alert_test"
+
+# Every event the bot emits -> the level :func:`default_level` gives it when the
+# caller passes none. Events whose call sites always pass a level list that level.
+# Fields can still change it: see :func:`default_level`.
+ALERT_EVENTS: Final[Mapping[str, str]] = {
+    TRADING_STATE_CHANGED: INFO,           # CRITICAL when the new state is HALTED
+    PROTECTION_TRIPPED: CRITICAL,
+    KILL_SWITCH_ENGAGED: CRITICAL,         # WARNING when the cancel-all completed
+    BOOT_REFUSED: CRITICAL,
+    BOOT_WAITING: WARNING,
+    PREVIOUS_RUN_UNCLEAN: CRITICAL,
+    DAEMON_FATAL: CRITICAL,
+    FOREIGN_EXPOSURE: WARNING,
+    UNKNOWN_QUARANTINE_AGED: WARNING,
+    AUTO_RESUME_LIMIT_REACHED: CRITICAL,
+    RECONCILE_NOT_ACCEPTED: WARNING,
+    OFFER_END_UNCONFIRMED: WARNING,
+    OFFER_END_JUDGED: WARNING,             # the caller sends INFO when outcome=explained
+    PROVENANCE_CONFLICT: WARNING,
+    NAV_DROP: WARNING,
+    FOREIGN_LENDING: WARNING,
+    VENUE_OFFERS_MAY_REMAIN: CRITICAL,
+    COMMAND_THROTTLED: WARNING,
+    TRADING_CONTROL_APPLIED: WARNING,
+    TRADING_CONTROL_REJECTED: WARNING,
+    TRADING_CONTROL_FAILED: CRITICAL,
+    KILL_CANCEL_ALL_CAUGHT_UP: CRITICAL,
+    CAPITAL_POLICY_REQUEST_APPLIED: WARNING,
+    CAPITAL_POLICY_REQUEST_REJECTED: WARNING,
+    CAPITAL_POLICY_REQUEST_FAILED: CRITICAL,
+    VENUE_OBSERVATION_HISTORY_INCOMPLETE: WARNING,
+    LEDGER_UNKNOWN_RESOLUTION_REJECTED: WARNING,
+    ALERT_TEST: INFO,
+}
 
 # Fields that identify "the same event" for de-duplication. Unlisted events
 # de-duplicate on all of their fields.
@@ -336,9 +396,7 @@ def default_level(event: str, fields: Mapping[str, object]) -> str:
         return CRITICAL if fields.get("state") == "HALTED" else INFO
     if event == KILL_SWITCH_ENGAGED:
         return WARNING if fields.get("complete") is True else CRITICAL
-    if event in {PROTECTION_TRIPPED, BOOT_REFUSED, DAEMON_FATAL, AUTO_RESUME_LIMIT_REACHED}:
-        return CRITICAL
-    return WARNING
+    return ALERT_EVENTS.get(event, WARNING)
 
 
 def title(event: str, fields: Mapping[str, object]) -> str:
@@ -367,10 +425,12 @@ def title(event: str, fields: Mapping[str, object]) -> str:
         return "venue reconcile not accepted: no deployment until it is"
     if event == PROVENANCE_CONFLICT:
         return f"{fields.get('symbol', '?')} paused: an offer's provenance is contradictory"
-    if event == "nav_drop":
+    if event == NAV_DROP:
         return f"NAV drop on {fields.get('symbol', '?')} (alert only; lending continues)"
-    if event == "foreign_lending":
+    if event == FOREIGN_LENDING:
         return "lending no bot offer explains (foreign offer filled unseen)"
+    if event == ALERT_TEST:
+        return "test alert (no action needed)"
     return event
 
 
@@ -415,20 +475,39 @@ async def shutdown(*, timeout_s: float = 5.0) -> None:
 
 
 __all__ = [
+    "ALERT_EVENTS",
+    "ALERT_TEST",
     "AUTO_RESUME_LIMIT_REACHED",
     "BOOT_REFUSED",
     "BOOT_WAITING",
+    "CAPITAL_POLICY_REQUEST_APPLIED",
+    "CAPITAL_POLICY_REQUEST_FAILED",
+    "CAPITAL_POLICY_REQUEST_REJECTED",
+    "COMMAND_THROTTLED",
     "CRITICAL",
     "DAEMON_FATAL",
     "DEDUP_FIELDS",
     "FOREIGN_EXPOSURE",
+    "FOREIGN_LENDING",
     "INFO",
+    "KILL_CANCEL_ALL_CAUGHT_UP",
     "KILL_SWITCH_ENGAGED",
+    "LEDGER_UNKNOWN_RESOLUTION_REJECTED",
+    "NAV_DROP",
+    "OFFER_END_JUDGED",
+    "OFFER_END_UNCONFIRMED",
     "PREVIOUS_RUN_UNCLEAN",
     "PROTECTION_TRIPPED",
+    "PROVENANCE_CONFLICT",
+    "RECONCILE_NOT_ACCEPTED",
+    "TRADING_CONTROL_APPLIED",
+    "TRADING_CONTROL_FAILED",
+    "TRADING_CONTROL_REJECTED",
     "TRADING_STATE_CHANGED",
     "TRIGGER_TITLES",
     "UNKNOWN_QUARANTINE_AGED",
+    "VENUE_OBSERVATION_HISTORY_INCOMPLETE",
+    "VENUE_OFFERS_MAY_REMAIN",
     "WARNING",
     "AlertDeliveryError",
     "AlertSink",

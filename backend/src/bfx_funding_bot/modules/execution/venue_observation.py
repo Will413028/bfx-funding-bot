@@ -47,7 +47,6 @@ HISTORY_PAGE_CAP = 5
 # A budget that runs out is not a stall: the affected ids take the grace -> unconfirmed-end
 # path (cause ``cap_exhausted``), where conservation judges them by trades.
 OBSERVATION_REQUEST_CAP = 8 + 4 * HISTORY_PAGE_CAP * 2
-HISTORY_INCOMPLETE_ALERT = "venue_observation_history_incomplete"
 # Venue history may lag an offer's end. Whatever stops a vanished id from getting a terminal
 # answer (not returned, request failed, cap exhausted, unparseable row) is retried each cycle
 # inside this grace, measured in this process from the first sighting of that id without an
@@ -300,7 +299,7 @@ class BitfinexVenueObservation:
         return now - first >= OFFER_END_GRACE_MS
 
     def _alert(self, stream: str, symbol: str, *, reason: str) -> None:
-        alerts.emit(HISTORY_INCOMPLETE_ALERT, level=alerts.WARNING,
+        alerts.emit(alerts.VENUE_OBSERVATION_HISTORY_INCOMPLETE, level=alerts.WARNING,
                     exchange_account_id=str(self._scope.exchange_account_id),
                     deployment_environment=self._scope.deployment_environment,
                     stream=stream, symbol=symbol, reason=reason)

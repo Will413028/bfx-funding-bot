@@ -56,14 +56,6 @@ from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
 
-# Alert events (modules/observability/alerts); trading_state adds
-# trading_state_changed for every committed transition.
-TRADING_CONTROL_APPLIED = "trading_control_applied"
-TRADING_CONTROL_REJECTED = "trading_control_rejected"
-TRADING_CONTROL_FAILED = "trading_control_failed"
-# An applied kill had no finished cancel-all (the process died or failed after the
-# commit); the idle worker runs it now.
-KILL_CANCEL_ALL_CAUGHT_UP = "kill_cancel_all_caught_up"
 
 
 class _Kill(Protocol):
@@ -116,7 +108,7 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
             return
         self._caught_up.add(row.request_id)
         log.critical("kill_cancel_all_caught_up request=%s", row.request_id)
-        alerts.emit(KILL_CANCEL_ALL_CAUGHT_UP, level=alerts.CRITICAL,
+        alerts.emit(alerts.KILL_CANCEL_ALL_CAUGHT_UP, level=alerts.CRITICAL,
                     request_id=str(row.request_id), by=row.requested_by)
         await self._cancel_all(row)
 
@@ -179,23 +171,23 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
         fields = {"request_id": str(row.request_id), "action": row.action, "by": row.requested_by}
         if outcome.state == APPLIED:
             result = outcome.detail if isinstance(outcome.detail, TransitionResult) else None
-            alerts.emit(TRADING_CONTROL_APPLIED, level=alerts.WARNING, outcome=outcome.reason,
+            alerts.emit(alerts.TRADING_CONTROL_APPLIED, level=alerts.WARNING, outcome=outcome.reason,
                         state_id=result.state.id if result is not None else "unchanged", **fields)
             if result is not None:
                 announce(result)
             if row.action == "kill":
                 await self._cancel_all(row)
         elif outcome.state == REJECTED:
-            alerts.emit(TRADING_CONTROL_REJECTED, level=alerts.WARNING, reason=outcome.reason,
+            alerts.emit(alerts.TRADING_CONTROL_REJECTED, level=alerts.WARNING, reason=outcome.reason,
                         **fields)
         else:
-            alerts.emit(TRADING_CONTROL_FAILED, level=alerts.CRITICAL, reason=outcome.reason,
+            alerts.emit(alerts.TRADING_CONTROL_FAILED, level=alerts.CRITICAL, reason=outcome.reason,
                         **fields)
 
     async def _cancel_all(self, row: TradingControlRequestRow) -> None:
         if self.kill_switch is None:
             log.critical("trading_control_kill_without_kill_switch request=%s", row.request_id)
-            alerts.emit(TRADING_CONTROL_FAILED, level=alerts.CRITICAL, request_id=str(row.request_id),
+            alerts.emit(alerts.TRADING_CONTROL_FAILED, level=alerts.CRITICAL, request_id=str(row.request_id),
                         action=row.action, reason="kill switch not wired: venue offers not cancelled")
             return
         # HALTED is already committed; the kill switch restates it and runs
@@ -249,9 +241,5 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
 
 
 __all__ = [
-    "KILL_CANCEL_ALL_CAUGHT_UP",
-    "TRADING_CONTROL_APPLIED",
-    "TRADING_CONTROL_FAILED",
-    "TRADING_CONTROL_REJECTED",
     "TradingControlWorker",
 ]

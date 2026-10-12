@@ -61,7 +61,6 @@ log = logging.getLogger(__name__)
 
 # The operator-visible actor of a system resolution (the value the legacy reconcile used).
 SYSTEM_RESOLVER = "system:reconcile"
-RESOLUTION_REJECTED_ALERT = "ledger_unknown_resolution_rejected"
 
 
 # Exactly the columns the web API's role is granted on the observed offers (no ``raw``): the
@@ -385,7 +384,7 @@ async def resolve_unknowns(
                 terms.attempt_id, resolution.action, exc,
             )
             alerts.emit(
-                RESOLUTION_REJECTED_ALERT, level=alerts.WARNING,
+                alerts.LEDGER_UNKNOWN_RESOLUTION_REJECTED, level=alerts.WARNING,
                 exchange_account_id=str(scope.exchange_account_id),
                 deployment_environment=scope.deployment_environment,
                 attempt_id=str(terms.attempt_id), symbol=terms.symbol,

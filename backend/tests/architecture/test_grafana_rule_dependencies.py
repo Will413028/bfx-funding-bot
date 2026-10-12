@@ -7,11 +7,19 @@ homelab's bfx-rules.yml in the same release.
 `bfx-trading-halted-submits`:
     min(min_over_time(bfx_trading_halted[6m])) == 1
     and on() sum(increase(bfx_executor_submits_total{status!="not_sent"}[5m])) > 0
+
+The Loki rules match the bot container's log lines (container `bfx-bot`):
+    {container="bfx-bot"} |= "deployment_skip"
+    {container="bfx-bot"} |~ "deployment_submit_rejected|deployment_submit_error"
 """
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 from prometheus_client.parser import text_string_to_metric_families
 
+from bfx_funding_bot.modules.execution.deployment import reconciler
 from bfx_funding_bot.modules.observability.metrics import (
     _KNOWN_SUBMIT_STATUSES,
     DaemonMetrics,
@@ -45,3 +53,20 @@ def test_not_sent_is_the_only_status_that_never_left_the_bot() -> None:
     venue call). `exception` can also be a pre-intent gate block, but that only
     happens as a halt begins, which the rule's 6-minute halted window excludes."""
     assert "not_sent" in _KNOWN_SUBMIT_STATUSES
+
+
+LOKI_LOG_EVENTS = ("deployment_skip", "deployment_submit_rejected", "deployment_submit_error")
+
+
+def test_loki_rule_log_events_are_still_logged_by_the_reconciler() -> None:
+    """Renaming one of these log lines means changing homelab's bfx-rules.yml too."""
+    tree = ast.parse(Path(reconciler.__file__).read_text())
+    first_words = {
+        node.args[0].value.split(" ", 1)[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name) and node.func.value.id == "log"
+        and node.args and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    }
+    assert set(LOKI_LOG_EVENTS) <= first_words, sorted(set(LOKI_LOG_EVENTS) - first_words)

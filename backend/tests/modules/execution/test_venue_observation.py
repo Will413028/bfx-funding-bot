@@ -20,7 +20,6 @@ from bfx_funding_bot.external.bitfinex.observations import (
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.venue_observation import (
-    HISTORY_INCOMPLETE_ALERT,
     OFFER_END_GRACE_MS,
     BitfinexVenueObservation,
     normalize_credit,
@@ -31,6 +30,9 @@ from bfx_funding_bot.modules.execution.venue_observation import (
 )
 from bfx_funding_bot.modules.ledger import LiveOffer, ObservationWindow, Scope, VenueObservation
 from bfx_funding_bot.modules.observability import alerts
+from bfx_funding_bot.modules.observability.alerts import (
+    VENUE_OBSERVATION_HISTORY_INCOMPLETE as HISTORY_INCOMPLETE_ALERT,
+)
 
 SCOPE = Scope(UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"), "test")
 QUERY_START = 1_000_000
