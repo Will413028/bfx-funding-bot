@@ -17,12 +17,12 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@better-auth/passkey": "1.6.14",
+    "@better-auth/passkey": "1.6.33",
     "@hookform/resolvers": "^5.2.2",
     "@sentry/nextjs": "^10.76.0",
     "@tanstack/react-query": "^5.104.1",
     "@tanstack/react-query-devtools": "^5.91.3",
-    "better-auth": "1.6.14",
+    "better-auth": "1.6.33",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "ioredis": "5.11.1",
