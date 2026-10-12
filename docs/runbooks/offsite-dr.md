@@ -570,8 +570,11 @@ journalctl -fu bfx-restore-test@current.service
 ```
 
 On success the service writes `$HOME/bfx/dr-evidence/restore-heartbeat.json`;
-`bfx-backup-check` alerts when that heartbeat is missing or older than 35 days
-(only while `bfx-restore-test.timer` is enabled). A failure alerts through
+`bfx-backup-check` alerts (critical) when that heartbeat is older than 35 days, or
+missing while `bfx-restore-test.timer` is enabled. Once a heartbeat exists, a
+disabled timer is a warning: the host has run restore tests before, so the
+schedule was turned off. A new host has no heartbeat until the manual run below
+and gets no alert. A failure alerts through
 `bfx-alert@` and never touches trading state; only a deploy that asked for the
 test is stopped. Enable the timer after the first successful manual run:
 

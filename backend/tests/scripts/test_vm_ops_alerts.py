@@ -1,8 +1,9 @@
 """Host alerting and DR watch tools: bfx_notify, bfx_backup_check, bfx_restore_test.
 
 Contracts: an alert never makes its caller fail and never logs the bot token;
-the backup check alerts on RPO/staleness once confirmed, de-duplicates and
-announces recovery; the restore test refreshes its heartbeat only after the
+the backup check alerts on RPO/staleness, a disabled restore timer, a stale
+weekly report and disk usage once confirmed, de-duplicates and announces
+recovery; the restore test refreshes its heartbeat only after the
 existing drill succeeded with fresh measured evidence.
 """
 from __future__ import annotations
@@ -140,25 +141,38 @@ class CheckHarness:
     def __init__(self, tmp_path: Path) -> None:
         self.evidence = tmp_path / "backup.json"
         self.heartbeat = tmp_path / "restore-heartbeat.json"
+        self.weekly = tmp_path / "weekly-report-heartbeat.json"
         self.state = tmp_path / "state" / "backup-check.json"
         self.notices: list[tuple[str, str]] = []
         self.now = NOW
         self.restore_enabled = False
+        self.weekly_enabled = False
+        self.disk_percent = 37
 
     def write(self, **overrides: Any) -> None:
         now_ms = int(self.now * 1000)
         self.evidence.write_text(json.dumps(_evidence(observed_at_ms=now_ms - 60_000, **overrides)))
 
     def run(self) -> int:
+        enabled = {"bfx-restore-test.timer": self.restore_enabled,
+                   "bfx-weekly-report.timer": self.weekly_enabled}
+
         def status(argv: Sequence[str]) -> int:
-            assert list(argv) == ["systemctl", "is-enabled", "--quiet", "bfx-restore-test.timer"]
-            return 0 if self.restore_enabled else 1
+            assert list(argv[:3]) == ["systemctl", "is-enabled", "--quiet"]
+            return 0 if enabled[argv[3]] else 1
+
+        def disk_usage(path: Path) -> tuple[int, int, int]:
+            assert path == Path("/")
+            return 100, self.disk_percent, 100 - self.disk_percent
 
         result = check.run_check(
             evidence=self.evidence, heartbeat=self.heartbeat, restore_timer="bfx-restore-test.timer",
             state_path=self.state, rpo_limit_s=300, max_age_s=900, restore_max_age_s=35 * 86_400,
             realert_s=6 * 3600, notify=lambda level, text: self.notices.append((level, text)),
-            status=status, clock=lambda: self.now,
+            weekly_heartbeat=self.weekly, weekly_timer="bfx-weekly-report.timer",
+            weekly_max_age_s=8 * 86_400, disk_path=Path("/"), disk_warn_percent=85,
+            disk_critical_percent=95, status=status, disk_usage=disk_usage,
+            clock=lambda: self.now,
         )
         self.now += 300
         return int(result)
@@ -221,8 +235,119 @@ def test_restore_heartbeat_is_only_required_while_the_weekly_test_is_enabled(tmp
     # Monthly cadence: a 34-day-old heartbeat is fine, 36 days is stale.
     for days, expected in ((34, []), (36, ["restore_test_stale:36d"])):
         beat = {"observed_at_ms": int(h.now * 1000) - days * 86_400_000}
-        assert check.restore_problems(beat, now_ms=int(h.now * 1000),
-                                      max_age_s=35 * 86_400) == expected
+        assert check.restore_problems(beat, now_ms=int(h.now * 1000), max_age_s=35 * 86_400,
+                                      timer_enabled=True) == expected
+
+
+def _beat(h: CheckHarness, path: Path, *, days_old: float = 0) -> None:
+    path.write_text(json.dumps({"observed_at_ms": int((h.now - days_old * 86_400) * 1000)}))
+
+
+def _confirm(h: CheckHarness) -> int:
+    """Two runs: a problem alerts only once seen twice in a row."""
+    h.write()
+    h.run()
+    h.write()
+    return h.run()
+
+
+def test_disabling_the_restore_timer_on_a_host_that_ran_restores_warns(tmp_path: Path) -> None:
+    h = CheckHarness(tmp_path)
+    _beat(h, h.heartbeat, days_old=3)
+    assert _confirm(h) == 1
+    assert h.notices == [("warning", h.notices[0][1])]
+    assert "restore_timer_disabled" in h.notices[0][1]
+
+
+def test_a_new_host_without_a_restore_heartbeat_gets_no_alert(tmp_path: Path) -> None:
+    h = CheckHarness(tmp_path)
+    assert _confirm(h) == 0 and h.notices == []
+
+
+def test_a_stale_restore_heartbeat_is_critical_even_with_the_timer_disabled(tmp_path: Path) -> None:
+    h = CheckHarness(tmp_path)
+    _beat(h, h.heartbeat, days_old=40)
+    _confirm(h)
+    assert h.notices[0][0] == "critical" and "restore_test_stale:40d" in h.notices[0][1]
+
+
+@pytest.mark.parametrize(("percent", "expected"), [
+    (84, None), (85, ("warning", "disk_usage_high:85%")),
+    (95, ("critical", "disk_usage_critical:95%")),
+])
+def test_disk_usage_thresholds(tmp_path: Path, percent: int,
+                               expected: tuple[str, str] | None) -> None:
+    h = CheckHarness(tmp_path)
+    h.disk_percent = percent
+    assert _confirm(h) == (0 if expected is None else 1)
+    if expected is None:
+        assert h.notices == []
+    else:
+        assert h.notices[0][0] == expected[0] and expected[1] in h.notices[0][1]
+
+
+def test_unreadable_disk_usage_is_reported_not_raised() -> None:
+    def broken(path: Path) -> tuple[int, int, int]:
+        raise OSError("statvfs failed")
+
+    assert check.disk_problems(Path("/"), warn_percent=85, critical_percent=95,
+                               usage=broken) == ["disk_usage_unavailable"]
+
+
+def test_disk_percent_matches_df_use_column() -> None:
+    """df's Use% (the vm-facts figure): used / (used + available), not used / total."""
+    assert check.disk_problems(Path("/"), warn_percent=85, critical_percent=95,
+                               usage=lambda _: (200, 85, 10)) == ["disk_usage_high:89%"]
+
+
+@pytest.mark.parametrize(("enabled", "days_old", "alerts"), [
+    (True, 9, True), (True, 7, False), (False, 30, False),
+])
+def test_a_stale_weekly_report_warns_only_while_its_timer_is_enabled(
+    tmp_path: Path, enabled: bool, days_old: int, alerts: bool,
+) -> None:
+    h = CheckHarness(tmp_path)
+    h.weekly_enabled = enabled
+    _beat(h, h.weekly, days_old=days_old)
+    _confirm(h)
+    if alerts:
+        assert h.notices[0][0] == "warning"
+        assert f"weekly_report_stale:{days_old}d" in h.notices[0][1]
+    else:
+        assert h.notices == []
+
+
+def test_no_weekly_report_heartbeat_yet_is_not_a_problem(tmp_path: Path) -> None:
+    h = CheckHarness(tmp_path)
+    h.weekly_enabled = True
+    assert _confirm(h) == 0 and h.notices == []
+
+
+@pytest.mark.parametrize("problem", [
+    "weekly_report_heartbeat_invalid", "disk_usage_unavailable", "restore_timer_disabled",
+])
+def test_problems_that_page_as_a_warning(problem: str) -> None:
+    state: dict[str, Any] = {"kinds": [problem]}
+    message, _ = check.decide(state, [problem], now=NOW, realert_s=6 * 3600)
+    assert message is not None and message[0] == "warning"
+
+
+def test_a_corrupt_restore_heartbeat_is_critical_even_with_the_timer_disabled(
+    tmp_path: Path,
+) -> None:
+    h = CheckHarness(tmp_path)
+    h.heartbeat.write_text(json.dumps({"observed_at_ms": "yesterday"}))
+    _confirm(h)
+    assert h.notices[0][0] == "critical"
+    assert "restore_test_heartbeat_invalid" in h.notices[0][1]
+
+
+def test_a_warning_plus_a_critical_problem_pages_as_critical(tmp_path: Path) -> None:
+    h = CheckHarness(tmp_path)
+    h.disk_percent = 90
+    _beat(h, h.heartbeat, days_old=40)
+    _confirm(h)
+    assert h.notices[0][0] == "critical"
 
 
 # --------------------------------------------------------------------------- restore test

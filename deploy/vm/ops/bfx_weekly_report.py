@@ -24,7 +24,10 @@ One run:
      symlink): Compose 2.x and v5 disagree on how an unset create_host_path
      reads, so the runner, not Docker, guarantees nothing gets created;
   5. `docker compose -p bfx-weekly-report -f <that file> run --rm weekly-report`,
-     output streamed to the journal. systemd's TimeoutStartSec bounds the run.
+     output streamed to the journal. systemd's TimeoutStartSec bounds the run;
+  6. on exit 0, the heartbeat /var/lib/bfx-ops/weekly-report-heartbeat.json, which
+     bfx-backup-check reads while bfx-weekly-report.timer is enabled. A failed run
+     leaves the old heartbeat (and alerts through OnFailure=bfx-alert@).
 
 `--dry-run` prints the resolved plan (no secret values) and runs nothing.
 Container hardening is a property of the compose file and is enforced in CI
@@ -39,6 +42,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +75,8 @@ SECRET_KEYS = ("DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID")
 LIVE_KEYS = ("BFX_DEPLOYMENT_ENV",)
 # The bind source in docker-compose.weekly-report.yml (compose_policy.WEEKLY_REPORTS).
 REPORTS_DIR = Path("/home/ubuntu/bfx/reports")
+# Read by bfx_backup_check.py --weekly-heartbeat; StateDirectory of both units.
+HEARTBEAT = Path("/var/lib/bfx-ops/weekly-report-heartbeat.json")
 
 
 def log(message: str) -> None:
@@ -157,7 +164,20 @@ def build_plan(
                 backend_image=image, env=env)
 
 
-def run(plan: Plan, *, execute: Callable[..., int] | None = None) -> int:
+def write_heartbeat(path: Path, plan: Plan, *, now: float) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+        json.dump({"observed_at_ms": int(now * 1000),
+                   "tooling_revision": plan.tooling_revision,
+                   "deployed_revision": plan.deployed_revision}, stream, sort_keys=True)
+    os.replace(temporary, path)
+
+
+def run(
+    plan: Plan, *, execute: Callable[..., int] | None = None, heartbeat: Path = HEARTBEAT,
+    clock: Callable[[], float] = time.time,
+) -> int:
     if plan.tooling_revision != plan.deployed_revision:
         log(f"warning: steps from tooling release {plan.tooling_revision[:12]}, image from "
             f"deployed release {plan.deployed_revision[:12]} (tooling install failed after "
@@ -168,6 +188,12 @@ def run(plan: Plan, *, execute: Callable[..., int] | None = None) -> int:
             return subprocess.run(argv, env=dict(env), check=False).returncode
     returncode = execute(plan.argv, plan.env)
     log(f"finished with exit code {returncode}")
+    if returncode == 0:
+        try:
+            write_heartbeat(heartbeat, plan, now=clock())
+        except OSError as exc:
+            log(f"heartbeat not written: {exc.__class__.__name__}")
+            return 1
     return returncode
 
 

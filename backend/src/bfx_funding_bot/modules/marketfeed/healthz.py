@@ -112,6 +112,8 @@ def make_app(
     if metrics is not None:
         @app.get("/metrics")
         async def metrics_exposition() -> Response:
+            if trading_status is not None:
+                await metrics.refresh_trading_halted(trading_status)
             return Response(content=metrics.render(), media_type=metrics.content_type)
         log.info("metrics_endpoint_mounted endpoint=/metrics")
 
