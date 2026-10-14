@@ -104,7 +104,7 @@ export function useApiKeys() {
 
 ## 監控
 
-- **Sentry**: Client + Server error tracking（optional）
+- **Sentry**: browser（`instrumentation-client.ts`）、Node 與 edge 的 error tracking；DSN 由 build arg `NEXT_PUBLIC_SENTRY_DSN` 注入，未設即關閉；所有 runtime 都經 `src/lib/sentry.ts` 的 `sentryOptions`（遮罩 email／IP、不送 PII）。見 `docs/runbooks/operations.md`「Error tracking」。
 
 ## 部署
 

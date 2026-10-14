@@ -52,11 +52,12 @@ jobs:
           NEXT_PUBLIC_APP_NAME: ${{ vars.NEXT_PUBLIC_APP_NAME }}
           NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
           NEXT_PUBLIC_BETTER_AUTH_URL: ${{ vars.NEXT_PUBLIC_BETTER_AUTH_URL }}
+          NEXT_PUBLIC_SENTRY_DSN: ${{ vars.NEXT_PUBLIC_SENTRY_DSN }}
         run: |
           prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
           echo "backend=${prefix}-backend" >> "$GITHUB_OUTPUT"
           echo "frontend=${prefix}-frontend" >> "$GITHUB_OUTPUT"
-          keys="NEXT_PUBLIC_APP_NAME NEXT_PUBLIC_APP_URL NEXT_PUBLIC_BETTER_AUTH_URL"
+          keys="NEXT_PUBLIC_APP_NAME NEXT_PUBLIC_APP_URL NEXT_PUBLIC_BETTER_AUTH_URL NEXT_PUBLIC_SENTRY_DSN"
           for key in $keys; do
             if [ -z "${!key}" ]; then
               echo "::error::repository variable $key is not set"
@@ -66,6 +67,7 @@ jobs:
           {
             echo "frontend_args<<EOF"
             for key in $keys; do echo "$key=${!key}"; done
+            echo "NEXT_PUBLIC_SENTRY_RELEASE=${REVISION}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 

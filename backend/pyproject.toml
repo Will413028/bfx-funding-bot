@@ -29,6 +29,7 @@ dependencies = [
     "prometheus-client>=0.25.0",
     "opentelemetry-sdk>=1.44.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.44.0",
+    "sentry-sdk[fastapi]>=2.71.0",
 ]
 
 [dependency-groups]
