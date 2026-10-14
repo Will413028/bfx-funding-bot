@@ -215,6 +215,8 @@ ls -l /usr/local/lib/bfx-ops/current /home/ubuntu/bfx-releases/current
   `BFX_OPERATOR_USER_ID`；不沿用舊 launcher 的 `BFX_RELEASE_*`。
 - 告警所需 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` 同時配置到 `notify.env` 與
   `bot.env`；GHCR 憑證只需 `read:packages`。設定方式見 [operations](operations.md#6-告警)。
+- error tracking 的 `SENTRY_DSN`（`bfx-backend`）同時配置到 `bot.env` 與 `webapi.env`；空值等於關閉。
+  部署後依 [operations](operations.md#error-tracking-test) 各送一筆測試例外。
 
 Restore test 不需要設定檔（ledger mode 驗證 restored copy 內的每個 scope），使用本機
 `bfx-bot:local` 跑唯讀 boot check。先核對它對應的 image 與模組；缺少 image 或下列檢查

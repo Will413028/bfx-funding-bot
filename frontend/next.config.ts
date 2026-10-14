@@ -1,4 +1,4 @@
-import { withSentryConfig } from "@sentry/nextjs";
+import { withSentryConfig } from "@sentry/nextjs/config";
 import type { NextConfig } from "next";
 import createNextIntlPlugin from "next-intl/plugin";
 
@@ -14,6 +14,7 @@ export default withSentryConfig(withNextIntl(nextConfig), {
 	project: process.env.SENTRY_PROJECT,
 	silent: !process.env.CI,
 	widenClientFileUpload: true,
-	disableLogger: true,
-	automaticVercelMonitors: true,
+	// Upload needs a SENTRY_AUTH_TOKEN in CI and is deferred; without it the maps
+	// would only be served publicly next to the bundles.
+	sourcemaps: { disable: true },
 });

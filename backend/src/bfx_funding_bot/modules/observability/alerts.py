@@ -167,7 +167,7 @@ TRIGGER_TITLES: Final[Mapping[str, str]] = {
 
 # Values of these keys are scrubbed from every alert (exception text can carry them).
 SECRET_ENV_KEYS: Final = ("TELEGRAM_BOT_TOKEN", "BFX_API_KEY", "BFX_API_SECRET",
-                          "BFX_ADMIN_TOKEN", "BFX_VAULT_KEK")
+                          "BFX_ADMIN_TOKEN", "BFX_VAULT_KEK", "SENTRY_DSN")
 _TOKEN = re.compile(r"[0-9]{3,20}:[A-Za-z0-9_-]{20,100}")
 _CHAT_ID = re.compile(r"-?[0-9]{1,20}|@[A-Za-z0-9_]{4,64}")
 _MAX_TEXT = 3900
@@ -402,10 +402,13 @@ class AlertSink:
 
 
 def secret_values(environ: Mapping[str, str]) -> tuple[str, ...]:
-    """Secret values present in the environment, including the database password."""
+    """Secret values present in the environment, including the database password
+    and the Sentry DSN's key on its own."""
     values = [environ.get(key, "") for key in SECRET_ENV_KEYS]
     with contextlib.suppress(ValueError):
         values.append(urllib.parse.urlsplit(environ.get("DATABASE_URL", "")).password or "")
+    with contextlib.suppress(ValueError):
+        values.append(urllib.parse.urlsplit(environ.get("SENTRY_DSN", "")).username or "")
     return tuple(value for value in values if value)
 
 

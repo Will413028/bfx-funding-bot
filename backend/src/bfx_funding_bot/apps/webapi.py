@@ -1,9 +1,12 @@
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.starlette import StarletteIntegration
 
 from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.core.authority import require_ledger_authority
@@ -19,6 +22,7 @@ from bfx_funding_bot.modules.api.public import build_public_router
 from bfx_funding_bot.modules.api.routers import build_router as build_api_router
 from bfx_funding_bot.modules.api.trading_control import build_trading_control_router
 from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
+from bfx_funding_bot.modules.observability.error_tracking import init_error_tracking
 
 
 @asynccontextmanager
@@ -56,6 +60,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await existing_engine.dispose()
 
 
+# Before the app exists, so the FastAPI integration sees every request.
+init_error_tracking("webapi", os.environ,
+                    integrations=(StarletteIntegration(), FastApiIntegration()))
 app = FastAPI(title="bfx-funding-bot", lifespan=lifespan)
 app.include_router(build_api_router())
 app.include_router(build_api_keys_router())

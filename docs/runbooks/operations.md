@@ -202,6 +202,36 @@ Overview 的 uncertainty 明細提供請求（同樣經 MFA、排入 `uncertaint
   - operator 要判斷的：用 `/admin/trading-status` 看 `halt` 與 `last_submit_attempt`，確認送出的是哪一筆、
     為什麼通過 gate；在找到原因前保持 halt。若 venue 上有不該存在的 offer，走 kill（§3）。
 
+### Error tracking（Sentry）
+
+bot、webapi、frontend 的未處理例外與 ERROR log 送到 Sentry SaaS（org `will-me`；project `bfx-backend` 收 bot 與
+webapi，以 `service` tag 區分；`bfx-frontend` 收瀏覽器、Node server 與 edge）。Sentry 依 fingerprint 分組，
+只在**新 issue、回歸（resolved 後再出現）、或同一 issue 一小時超過 100 次**時寄 email；它不是 page 類告警，
+交易與營運異常仍由上面的 Telegram 與 Grafana 通報。
+
+| 服務 | 設定 | 關閉方式 |
+|---|---|---|
+| bot、webapi | `/opt/bfx/runtime/bot.env`、`webapi.env` 的 `SENTRY_DSN`（同一個 `bfx-backend` DSN） | 清空 `SENTRY_DSN` 後 `sudo bfx-deploy --recreate`（§7） |
+| frontend | build 時的 repository variable `NEXT_PUBLIC_SENTRY_DSN`（`release.yml` 缺值就失敗） | 改 variable 後重發 release |
+
+- 送出的內容（`modules/observability/error_tracking.py`、`frontend/src/lib/sentry.ts`）：
+  - 每個字串都會去掉 `alerts.secret_values` 列出的值（含 DB 密碼與 DSN key），以及 email 與 IP。
+  - `user`、cookie、`Authorization` 等 header 整個丟掉。
+  - 不送 local variables，也不送 request body。
+  - 遮罩失敗時整筆不送。
+- 送出由 SDK 的背景 thread 處理，queue 有上限，不在交易路徑上等待網路；結束時最多 flush 2 秒。
+  outgoing request 不加 trace header。
+- <a id="error-tracking-test"></a>測試：在執行中的 container 裡各送一筆測試例外：
+  `sudo docker exec bfx-bot /app/.venv/bin/python -m scripts.send_test_error --service bot`
+  （webapi 用 `bfx-webapi`、`--service webapi`）。exit 0 並印出 event id 後，到 Sentry 確認 issue
+  `ErrorTrackingTestError` 出現，而且訊息裡的 email 與 IP 顯示為 `[redacted]`；確認後把 issue resolve。
+  `SENTRY_DSN` 未設時 exit 1。
+  frontend：登入後在瀏覽器 devtools console 執行
+  `setTimeout(() => { throw new Error("frontend error test error-test@example.com") })`，
+  在 `bfx-frontend` 確認 issue 出現且 email 為 `[redacted]`。
+- operator 要判斷的：新 issue 是程式錯誤還是外部服務（venue、DB）的暫時失敗。前者開 issue 修；後者若
+  已有對應的 Telegram 告警或自動恢復，就把它在 Sentry 設為 ignore（直到再次回歸）。
+
 ### bot 告警事件
 
 bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENTS`，並在下面有一段（測試

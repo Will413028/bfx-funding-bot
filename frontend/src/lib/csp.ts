@@ -11,7 +11,8 @@ export function buildContentSecurityPolicy(
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self'",
-    "connect-src 'self' *.sentry.io *.ingest.sentry.io",
+    // Sentry ingest for the region our DSN lives in (o<org>.ingest.us.sentry.io).
+    "connect-src 'self' https://*.ingest.us.sentry.io",
     "object-src 'none'",
     "frame-ancestors 'none'",
     "base-uri 'self'",

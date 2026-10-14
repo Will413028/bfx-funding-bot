@@ -168,6 +168,7 @@ from bfx_funding_bot.modules.marketfeed.warmup import (
 )
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.observability.bot_runs import BotRunRecord
+from bfx_funding_bot.modules.observability.error_tracking import init_error_tracking
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
     MetricsSubmitMiddleware,
@@ -1053,6 +1054,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    init_error_tracking("bot", os.environ)
     try:
         asyncio.run(_run())
     except WriterLockUnacquired as exc:
