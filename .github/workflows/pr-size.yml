@@ -1,0 +1,38 @@
+name: PR size
+
+# A PR over the line limit must justify itself in its body
+# (backend/scripts/pr_size.py). A separate workflow on purpose: it listens to
+# `edited` so adding the justification re-runs the check, and in ci.yml that
+# event would cancel and re-run the whole suite on every title or body edit.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr_size:
+    name: PR size
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The checkout is the merge commit; its first parent is the base.
+          fetch-depth: 2
+      # Standard library only, so no uv sync.
+      - name: Check the PR size
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 scripts/pr_size.py --base-ref HEAD^1
