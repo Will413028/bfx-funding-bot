@@ -76,7 +76,7 @@ line-length = 100
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF", "PGH"]
 # E501: line length handled by formatter intent, not enforced.
 # RUF001/002/003: ambiguous-unicode checks target homoglyph attacks in
 # English-only code; this codebase intentionally uses CJK punctuation

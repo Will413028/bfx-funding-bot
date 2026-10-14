@@ -42,7 +42,9 @@ jobs:
         run: pnpm tsc --noEmit
 
       - name: Lint
-        run: pnpm biome check src/
+        run: |
+          pnpm biome check --error-on-warnings src/
+          pnpm biome lint --error-on-warnings e2e/
 
       - name: Unit tests
         run: pnpm vitest run
