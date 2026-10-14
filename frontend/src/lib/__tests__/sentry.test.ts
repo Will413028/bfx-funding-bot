@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { scrubEvent, scrubText, secretValues, sentryOptions } from "../sentry";
+import { SENTRY_TUNNEL_ROUTE } from "../sentry-tunnel";
 
 const frontendRoot = join(__dirname, "../../..");
 const read = (path: string) => readFileSync(join(frontendRoot, path), "utf8");
@@ -99,6 +100,24 @@ describe("sentryOptions", () => {
     expect(existsSync(join(frontendRoot, "sentry.client.config.ts"))).toBe(
       false,
     );
+  });
+});
+
+describe("tunnel route", () => {
+  it("is the route withSentryConfig rewrites to Sentry", () => {
+    expect(read("next.config.ts")).toContain(
+      "tunnelRoute: SENTRY_TUNNEL_ROUTE",
+    );
+  });
+
+  it("is left alone by the locale middleware, which still covers pages", () => {
+    const matcher = /matcher: \["([^"]+)"\]/.exec(read("middleware.ts"))?.[1];
+    expect(matcher).toBeDefined();
+    const matches = new RegExp(`^${matcher?.replaceAll("\\\\", "\\")}$`);
+    expect(matches.test(SENTRY_TUNNEL_ROUTE)).toBe(false);
+    expect(matches.test(`${SENTRY_TUNNEL_ROUTE}/`)).toBe(false);
+    expect(matches.test("/en/overview")).toBe(true);
+    expect(matches.test("/login")).toBe(true);
   });
 });
 

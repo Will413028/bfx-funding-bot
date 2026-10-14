@@ -221,6 +221,8 @@ webapi，以 `service` tag 區分；`bfx-frontend` 收瀏覽器、Node server �
   - 遮罩失敗時整筆不送。
 - 送出由 SDK 的背景 thread 處理，queue 有上限，不在交易路徑上等待網路；結束時最多 flush 2 秒。
   outgoing request 不加 trace header。
+- 瀏覽器的事件先送到本站的 `/fe-events`（`frontend/src/lib/sentry-tunnel.ts`），再由 Next server 轉給 Sentry；
+  廣告與隱私擴充套件會擋直接送往 `*.sentry.io` 的請求（console 顯示 `ERR_BLOCKED_BY_CONTENT_BLOCKER`）。
 - <a id="error-tracking-test"></a>測試：在執行中的 container 裡各送一筆測試例外：
   `sudo docker exec bfx-bot /app/.venv/bin/python -m scripts.send_test_error --service bot`
   （webapi 用 `bfx-webapi`、`--service webapi`）。exit 0 並印出 event id 後，到 Sentry 確認 issue

@@ -28,13 +28,13 @@ describe("buildContentSecurityPolicy", () => {
     );
   });
 
-  it("allows only our Sentry ingest region besides self", () => {
+  it("allows only self, Sentry included via the tunnel", () => {
     const connect = buildContentSecurityPolicy("abc123", false)
       .split(";")
       .map((part) => part.trim())
       .find((part) => part.startsWith("connect-src "));
 
-    expect(connect).toBe("connect-src 'self' https://*.ingest.us.sentry.io");
+    expect(connect).toBe("connect-src 'self'");
   });
 
   it("generates a fresh nonce per call", () => {

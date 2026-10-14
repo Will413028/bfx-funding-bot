@@ -87,5 +87,6 @@ export default function middleware(request: NextRequest) {
 }
 
 export const config = {
-	matcher: ["/((?!api|_next|.*\\..*).*)"],
+	// fe-events: the Sentry tunnel (src/lib/sentry-tunnel.ts), forwarded by a rewrite.
+	matcher: ["/((?!api|_next|fe-events|.*\\..*).*)"],
 };
