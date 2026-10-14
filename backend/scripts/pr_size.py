@@ -72,7 +72,7 @@ def generated_paths(root: Path, paths: Iterable[str]) -> frozenset[str]:
     stdin = "".join(f"{p}\0" for p in paths)
     out = subprocess.run(
         ["git", "-C", str(root), "check-attr", "-z", "--stdin", "linguist-generated"],
-        input=stdin, check=True, capture_output=True, text=True,
+        input=stdin, check=True, capture_output=True, text=True, errors="surrogateescape",
     ).stdout.split("\0")
     triples = zip(out[0::3], out[1::3], out[2::3], strict=False)
     return frozenset(path for path, _, value in triples if value in {"set", "true"})
@@ -94,9 +94,11 @@ def check(lines: int, body: str) -> list[str]:
 
 
 def diff_changes(root: Path, base_ref: str) -> list[FileChange]:
-    out = subprocess.run(  # an unknown ref fails here, never reads as "nothing changed"
+    # An unknown ref fails here, never reads as "nothing changed". Paths are raw bytes,
+    # so a non-UTF-8 name is carried through instead of crashing the decode.
+    out = subprocess.run(
         ["git", "-C", str(root), "diff", "--numstat", "-z", "-M", f"{base_ref}...HEAD"],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, errors="surrogateescape",
     ).stdout
     return parse_numstat(out)
 

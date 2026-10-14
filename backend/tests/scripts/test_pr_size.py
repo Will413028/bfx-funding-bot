@@ -24,6 +24,7 @@ def repo(tmp_path: Path) -> Path:
     _git(tmp_path, "init", "-q", "-b", "main")
     _git(tmp_path, "config", "user.email", "ci@example.invalid")
     _git(tmp_path, "config", "user.name", "ci")
+    _git(tmp_path, "config", "commit.gpgsign", "false")
     _write(tmp_path, "README.md", 1)
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-q", "-m", "base")
@@ -149,6 +150,21 @@ def test_a_missing_or_empty_justification_does_not_count(body: str) -> None:
 def test_a_justification_line_anywhere_in_the_body_counts() -> None:
     body = "## Summary\nbig move\n\nSize-Justification: generated fixtures moved as one unit\n"
     assert pr_size.check(LIMIT + 1, body) == []
+
+
+def test_a_non_utf8_path_is_counted_instead_of_crashing(repo: Path) -> None:
+    # Built with plumbing: some filesystems (APFS) refuse non-UTF-8 names on disk.
+    def git(*args: str, stdin: bytes = b"") -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], input=stdin, check=True, capture_output=True
+        ).stdout
+
+    blob = git("hash-object", "-w", "--stdin", stdin=b"x\n" * (LIMIT + 1)).strip()
+    git("update-index", "--index-info", stdin=b"100644 " + blob + b"\tsrc/bad\xff.py\n")
+    git("commit", "-q", "-m", "change")
+    changes = pr_size.diff_changes(repo, "base")
+    generated = pr_size.generated_paths(repo, (c.path for c in changes))
+    assert pr_size.counted_lines(changes, generated) == LIMIT + 1
 
 
 def test_an_unknown_base_ref_fails_instead_of_counting_nothing(repo: Path) -> None:
