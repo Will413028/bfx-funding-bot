@@ -1,0 +1,20 @@
+{
+  "suppressions": {
+    "noqa": 465,
+    "ruff: ignore": 2,
+    "type: ignore": 303,
+    "pyright: ignore": 0,
+    "biome-ignore": 5,
+    "eslint-disable": 1,
+    "ts-expect-error": 0,
+    "ts-ignore": 0,
+    "pytest.skip": 12,
+    "pytest.mark.skip": 1,
+    "xfail": 0,
+    "skipif": 4,
+    "test.skip": 3,
+    "it.skip": 0,
+    "describe.skip": 0
+  },
+  "tests_executed": 6484
+}

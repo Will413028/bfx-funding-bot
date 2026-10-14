@@ -64,6 +64,7 @@ Bitfinex 自動放貸 SaaS 平台。
 ### 測試與品質（強制）
 
 - **行為變更補對應的回歸測試**；純文件改動核對指令、路徑與規格即可，不為文件或格式改動新增機械測試
+- **suppression 與測試數只往好的方向動**：`backend/quality-ratchet.json` 鎖住各類 suppression（`noqa`、`type: ignore`、`biome-ignore`、skip 等）的數量與 CI 實際執行的測試數，由 CI 的 `Quality ratchet` job 檢查（本機：`cd backend && uv run python scripts/quality_ratchet.py`）；import-linter 的 `ignore_imports` 由 `tests/architecture/test_import_contracts.py` 鎖住。移除 suppression 要把鎖定值調低；要放寬（多一個 suppression、測試數變少）時，PR 裡要有 commit 帶 `Ratchet-Reason:` trailer，測試數變少還要用 `Removed-Test:` trailer 列出每個被刪的測試
 - **套用 migration 一律使用 `cd backend && uv run alembic upgrade head`，不可用 MCP 直接執行 SQL**
 - 後端架構詳見 `backend/ARCHITECTURE.md`（runtime 架構/資料流/放貸演算法）；測試慣例與 SQLAlchemy/Alembic 工作流以各 module 註解與既有測試為準
 - 前端測試指令、架構慣例詳見 `frontend/AGENTS.md`
