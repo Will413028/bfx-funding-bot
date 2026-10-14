@@ -47,7 +47,13 @@ jobs:
           pnpm biome lint --error-on-warnings e2e/
 
       - name: Unit tests
-        run: pnpm vitest run
+        run: pnpm vitest run --reporter=default --reporter=junit --outputFile.junit=junit/frontend.xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: junit-frontend
+          path: frontend/junit/frontend.xml
+          retention-days: 7
+          if-no-files-found: error
 
   deploy_policy:
     name: Deploy config policy
@@ -128,7 +134,13 @@ jobs:
       - run: uv run lint-imports
       # Pure CPU and no shared state: one worker per core. Wall-clock budgets run
       # serially in benchmark.yml.
-      - run: uv run pytest -m "not integration and not gate and not benchmark" -q -n auto
+      - run: uv run pytest -m "not integration and not gate and not benchmark" -q -n auto --junitxml=junit/backend_unit.xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: junit-backend_unit
+          path: backend/junit/backend_unit.xml
+          retention-days: 7
+          if-no-files-found: error
 
   backend_gate:
     name: Backend (Python) — deploy gate
@@ -153,7 +165,13 @@ jobs:
       - name: Param drift check (committed YAML == re-derive(fixture))
         run: uv run python scripts/derive_cells.py --check
       - name: Deploy sanity gate (deployed cells beat AlwaysMarketRate)
-        run: uv run pytest -m gate -q
+        run: uv run pytest -m gate -q --junitxml=junit/backend_gate.xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: junit-backend_gate
+          path: backend/junit/backend_gate.xml
+          retention-days: 7
+          if-no-files-found: error
 
   backend_integration:
     name: Backend (Python) — integration
@@ -210,4 +228,42 @@ jobs:
       # --durations: the suite is near its timeout; each run lists the slowest tests.
       # -n 4: the runner has 4 vCPU (public repository); loadfile keeps a module's templates on
       # one worker.
-      - run: uv run pytest -m "integration and not live" -q --maxfail=3 --durations=25 -n 4 --dist loadfile
+      - run: uv run pytest -m "integration and not live" -q --maxfail=3 --durations=25 -n 4 --dist loadfile --junitxml=junit/backend_integration.xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: junit-backend_integration
+          path: backend/junit/backend_integration.xml
+          retention-days: 7
+          if-no-files-found: error
+
+  # Suppression counts must equal backend/quality-ratchet.json and the executed tests
+  # of the four jobs above must not drop below it; see scripts/quality_ratchet.py.
+  quality_ratchet:
+    name: Quality ratchet
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [frontend, backend_unit, backend_gate, backend_integration]
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The PR's commits are read for Ratchet-Reason / Removed-Test trailers.
+          fetch-depth: 0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: junit-*
+          path: ${{ runner.temp }}/junit
+      # Standard library only, so no uv sync. On a PR the checkout is the merge
+      # commit; its first parent is the base the PR merges into.
+      - name: Check the ratchet
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          args=(--junit-dir "$RUNNER_TEMP/junit")
+          if [ "$EVENT_NAME" = pull_request ]; then args+=(--base-ref HEAD^1); fi
+          python3 scripts/quality_ratchet.py "${args[@]}"
