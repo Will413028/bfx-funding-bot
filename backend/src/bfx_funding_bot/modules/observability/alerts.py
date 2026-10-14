@@ -183,11 +183,29 @@ class AlertDeliveryError(RuntimeError):
     """Telegram did not accept the message. Carries a status, never the URL."""
 
 
+_TELEGRAM_URL_TOKEN = re.compile(r"(api\.telegram\.org/bot)[^/\s]+")
+
+
+class _RedactTelegramToken(logging.Filter):
+    """httpx logs every request URL at INFO (``HTTP Request: POST <url> ...``)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if "api.telegram.org/bot" in message:
+            record.msg, record.args = _TELEGRAM_URL_TOKEN.sub(r"\1[redacted]", message), ()
+        return True
+
+
+_HTTPX_TOKEN_FILTER = _RedactTelegramToken()
+
+
 class TelegramTransport:
-    """POST sendMessage. The token is in the URL, so no error text is ever logged."""
+    """POST sendMessage. The token is in the URL, so no error text is ever logged,
+    and httpx's own request line is redacted whatever level the process logs at."""
 
     def __init__(self, *, token: str, chat_id: str, timeout_s: float = 5.0,
                  client: httpx.AsyncClient | None = None) -> None:
+        logging.getLogger("httpx").addFilter(_HTTPX_TOKEN_FILTER)  # idempotent
         self._url = f"https://api.telegram.org/bot{token}/sendMessage"
         self._chat_id = chat_id
         self._client = client or httpx.AsyncClient(timeout=timeout_s)

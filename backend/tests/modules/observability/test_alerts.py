@@ -442,6 +442,22 @@ async def test_telegram_transport_posts_the_message_and_hides_the_token_on_failu
 
 
 @pytest.mark.asyncio
+async def test_httpx_request_log_never_carries_the_bot_token(
+        caplog: pytest.LogCaptureFixture) -> None:
+    """httpx logs every request URL at INFO and the bot runs at INFO; the
+    Telegram URL carries the token, so the line must reach the log redacted."""
+    transport = alerts.TelegramTransport(
+        token=TOKEN, chat_id="-100123",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200))))
+    with caplog.at_level(logging.INFO, logger="httpx"):
+        await transport.send("hello")
+    await transport.aclose()
+    lines = [record.getMessage() for record in caplog.records if record.name == "httpx"]
+    assert lines and all(TOKEN not in line for line in lines), lines
+    assert "api.telegram.org/bot[redacted]/sendMessage" in lines[0]
+
+
+@pytest.mark.asyncio
 async def test_shutdown_flushes_queued_alerts_within_the_timeout(installed: Any) -> None:
     transport = Recorder()
     installed(transport)
