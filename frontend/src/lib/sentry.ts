@@ -1,11 +1,12 @@
 // Error tracking for the browser, the Node server and the edge runtime. Off unless
 // NEXT_PUBLIC_SENTRY_DSN was set at build time (release.yml passes it as a build arg).
-// Events leave the operator's browser and our server, so emails and IP addresses are
-// scrubbed from every string, and user, cookies and auth headers are dropped; an event
+// Events leave the operator's browser and our server, so server secrets (by value),
+// emails and IP addresses are scrubbed from every string, user, cookies and auth
+// headers are dropped, and no trace headers are added to outgoing requests; an event
 // that cannot be scrubbed is not sent. Notifications are decided in Sentry (new issue,
 // regression); paging stays on symptoms.
 const REDACTED = "[redacted]";
-const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const EMAIL = /[A-Za-z0-9._%+-]+(?:@|%40)[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const IPV4 = /(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])/g;
 const IPV6 =
   /(?<![0-9A-Za-z:])(?:[0-9A-Fa-f]{1,4}:){3,7}[0-9A-Fa-f]{1,4}(?![0-9A-Za-z:])|(?<![0-9A-Za-z:])[0-9A-Fa-f:]*::[0-9A-Fa-f:]*[0-9A-Fa-f](?![0-9A-Za-z:])/g;
@@ -19,8 +20,38 @@ const DROPPED_HEADERS = new Set([
   "true-client-ip",
 ]);
 
-export function scrubText(text: string): string {
-  return text
+// Server-only values (undefined in the browser bundle), and the passwords inside URLs.
+const SECRET_ENV_KEYS = ["BETTER_AUTH_SECRET", "DATABASE_URL", "REDIS_URL"];
+
+export function secretValues(
+  env: Record<string, string | undefined> = typeof process === "undefined"
+    ? {}
+    : process.env,
+): string[] {
+  const values: string[] = [];
+  for (const key of SECRET_ENV_KEYS) {
+    const value = env[key];
+    if (!value) continue;
+    values.push(value);
+    try {
+      const password = decodeURIComponent(new URL(value).password);
+      if (password) values.push(password);
+    } catch {
+      // not a URL
+    }
+  }
+  return values
+    .filter((value) => value.length >= 6)
+    .sort((a, b) => b.length - a.length);
+}
+
+const SERVER_SECRETS = secretValues();
+
+export function scrubText(text: string, secrets = SERVER_SECRETS): string {
+  let scrubbed = text;
+  for (const secret of secrets)
+    scrubbed = scrubbed.split(secret).join(REDACTED);
+  return scrubbed
     .replace(EMAIL, REDACTED)
     .replace(IPV4, REDACTED)
     .replace(IPV6, REDACTED);
@@ -72,6 +103,7 @@ export function sentryOptions(dsn: string) {
     environment: process.env.NODE_ENV === "production" ? "prod" : "development",
     sendDefaultPii: false,
     tracesSampleRate: 0,
+    tracePropagationTargets: [],
     beforeSend: scrubEvent,
   };
 }

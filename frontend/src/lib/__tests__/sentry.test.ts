@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { scrubEvent, scrubText, sentryOptions } from "../sentry";
+import { scrubEvent, scrubText, secretValues, sentryOptions } from "../sentry";
 
 const frontendRoot = join(__dirname, "../../..");
 const read = (path: string) => readFileSync(join(frontendRoot, path), "utf8");
@@ -41,6 +41,26 @@ describe("scrubEvent", () => {
     });
   });
 
+  it("removes URL-encoded emails", () => {
+    expect(scrubText("/login?email=operator%40example.com")).toBe(
+      "/login?email=[redacted]",
+    );
+  });
+
+  it("removes server secrets by value, including URL passwords", () => {
+    const secrets = secretValues({
+      BETTER_AUTH_SECRET: "fake-auth-secret-0123456789abcdef",
+      DATABASE_URL: "postgresql://bfx_webauth:fake-db-pw@postgres:5432/bfx",
+      REDIS_URL: undefined,
+    });
+    const text = scrubText(
+      "secret fake-auth-secret-0123456789abcdef, connect failed: password fake-db-pw",
+      secrets,
+    );
+    expect(text).not.toContain("fake-auth-secret");
+    expect(text).not.toContain("fake-db-pw");
+  });
+
   it("keeps ordinary text", () => {
     const text = "fUSD rate 0.00021 at 12:30:45, v1.2.3";
     expect(scrubText(text)).toBe(text);
@@ -63,6 +83,7 @@ describe("sentryOptions", () => {
     const options = sentryOptions("https://key@o1.ingest.us.sentry.io/1");
     expect(options.sendDefaultPii).toBe(false);
     expect(options.tracesSampleRate).toBe(0);
+    expect(options.tracePropagationTargets).toEqual([]);
     expect(options.beforeSend).toBe(scrubEvent);
   });
 

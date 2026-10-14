@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
+import urllib.parse
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -37,7 +38,7 @@ log = logging.getLogger(__name__)
 
 SHUTDOWN_TIMEOUT_S: Final = 2.0
 REDACTED: Final = "[redacted]"
-_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+(?:@|%40)[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _IPV4 = re.compile(r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])")
 _IPV6 = re.compile(r"(?<![0-9A-Za-z:])(?:[0-9A-Fa-f]{1,4}:){3,7}[0-9A-Fa-f]{1,4}(?![0-9A-Za-z:])"
                    r"|(?<![0-9A-Za-z:])[0-9A-Fa-f:]*::[0-9A-Fa-f:]*[0-9A-Fa-f](?![0-9A-Za-z:])")
@@ -87,11 +88,16 @@ def init_error_tracking(service: str, environ: Mapping[str, str], *,
     dsn = environ.get("SENTRY_DSN", "").strip()
     if not dsn:
         return False
-    secrets = tuple(sorted((s for s in alerts.secret_values(environ) if len(s) >= 6),
+    # The DSN and its key belong to Sentry (the envelope header carries the key), so
+    # they are kept out of this list; logs and Telegram alerts still scrub them.
+    sentry_owned = {dsn, urllib.parse.urlsplit(dsn).username or ""}
+    secrets = tuple(sorted((s for s in alerts.secret_values(environ)
+                            if len(s) >= 6 and s not in sentry_owned),
                            key=len, reverse=True))
     sentry_sdk.init(
         dsn=dsn,
-        release=environ.get("BFX_SERVICE_VERSION") or None,
+        # An image built without GIT_SHA says "unknown"; None would make the SDK run git.
+        release=environ.get("BFX_SERVICE_VERSION", "").strip() or "unknown",
         environment=environ.get("BFX_DEPLOYMENT_ENV") or "unknown",
         send_default_pii=False,
         include_local_variables=False,

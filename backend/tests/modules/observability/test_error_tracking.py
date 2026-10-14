@@ -46,11 +46,13 @@ def _environ(dsn: str = "") -> dict[str, str]:
     }
 
 
-LEAKS = (TOKEN, API_SECRET, DB_PASSWORD, DSN_KEY, EMAIL, IPV4, IPV6)
+LEAKS = (TOKEN, API_SECRET, DB_PASSWORD, DSN_KEY, EMAIL, EMAIL.replace("@", "%40"), IPV4, IPV6)
+# The DSN key is Sentry's own: the envelope header must carry it intact.
+WIRE_LEAKS = tuple(leak for leak in LEAKS if leak != DSN_KEY)
 
 
-def _assert_clean(text: str) -> None:
-    found = [leak for leak in LEAKS if leak in text]
+def _assert_clean(text: str, leaks: tuple[str, ...] = LEAKS) -> None:
+    found = [leak for leak in leaks if leak in text]
     assert not found, f"leaked: {found}"
 
 
@@ -150,7 +152,8 @@ def test_events_on_the_wire_carry_no_secret_personal_data_or_locals(
     logger = logging.getLogger("bfx_funding_bot.test_error_tracking")
 
     logger.info("calling https://api.telegram.org/bot%s/sendMessage", TOKEN)  # breadcrumb
-    logger.error("reconcile failed for %s at %s", EMAIL, IPV6)  # event via logging
+    logger.error("reconcile failed for %s at %s (%s)", EMAIL, IPV6,
+                 "email=" + EMAIL.replace("@", "%40"))  # event via logging
     try:
         _fail_with_secrets_in_scope()
     except RuntimeError:
@@ -161,7 +164,9 @@ def test_events_on_the_wire_carry_no_secret_personal_data_or_locals(
     assert "venue refused" in wire and "reconcile failed" in wire
     assert '"service":"bot"' in wire.replace(" ", "")
     assert '"environment":"ci"' in wire.replace(" ", "")
-    _assert_clean(wire)
+    _assert_clean(wire, WIRE_LEAKS)
+    assert f'"public_key":"{DSN_KEY}"' in wire.replace(" ", "")
+    assert '"release":"aaaaaaa"' in wire.replace(" ", "")
     assert LOCAL_ONLY not in wire
     # urllib3 and the SDK log while sending; none of it may carry the DSN key.
     sending = [r.getMessage() for r in caplog.records if r.name != logger.name]
