@@ -14,6 +14,8 @@ export default defineConfig({
 		include: ["src/**/*.test.{ts,tsx}"],
 		environment: "jsdom",
 		setupFiles: ["./vitest.setup.ts"],
+		// A stray `.only` would silently skip the rest of the suite in CI.
+		allowOnly: false,
 		// next-intl's ESM imports "next/server" without an extension, which
 		// Node's resolver rejects; let Vite resolve it instead.
 		server: { deps: { inline: ["next-intl"] } },

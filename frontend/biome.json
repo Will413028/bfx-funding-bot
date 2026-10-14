@@ -9,6 +9,7 @@
     "includes": [
       "**/src/**/*.ts",
       "**/src/**/*.tsx",
+      "**/e2e/**/*.ts",
       "!**/dist",
       "!**/.next",
       "!**/node_modules"
@@ -35,7 +36,9 @@
         "noImgElement": "warn"
       },
       "suspicious": {
-        "noUnknownAtRules": "off"
+        "noUnknownAtRules": "off",
+        "noFocusedTests": "error",
+        "noSkippedTests": "error"
       }
     },
     "domains": {
@@ -47,5 +50,12 @@
     "formatter": {
       "quoteStyle": "double"
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["**/e2e/**"],
+      "formatter": { "enabled": false },
+      "assist": { "enabled": false }
+    }
+  ]
 }
