@@ -25,8 +25,12 @@ describe("browser SDK with sentryOptions", () => {
     Sentry.captureException(new Error("failed for operator@example.com"));
     await Sentry.flush(2000);
 
-    expect(sent).toHaveLength(1);
-    expect(sent[0]).toContain("failed for [redacted]");
-    expect(sent[0]).not.toContain("operator@example.com");
+    // The SDK may also send sessions or client reports; only events matter here.
+    const events = sent.filter((envelope) =>
+      envelope.includes('"type":"event"'),
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toContain("failed for [redacted]");
+    expect(sent.join("\n")).not.toContain("operator@example.com");
   });
 });
