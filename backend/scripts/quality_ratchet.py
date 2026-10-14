@@ -12,7 +12,7 @@ Two numbers are locked in ``backend/quality-ratchet.json``:
 
 A pull request that loosens the lock (raises a suppression count or lowers the test
 count) must carry a commit with a ``Ratchet-Reason:`` trailer; lowering the test count
-also needs a ``Removed-Test:`` trailer naming each removed test.
+also needs one ``Removed-Test:`` trailer per removed test.
 
 Usage:
     cd backend
@@ -131,8 +131,8 @@ def compare(
     return errors
 
 
-def loosened(base: Mapping[str, object], head: Mapping[str, object]) -> tuple[list[str], bool]:
-    """Return the loosened entries and whether tests_executed went down."""
+def loosened(base: Mapping[str, object], head: Mapping[str, object]) -> tuple[list[str], int]:
+    """Return the loosened entries and by how much tests_executed went down."""
     changes: list[str] = []
     base_s, head_s = base["suppressions"], head["suppressions"]
     assert isinstance(base_s, dict) and isinstance(head_s, dict)
@@ -141,7 +141,7 @@ def loosened(base: Mapping[str, object], head: Mapping[str, object]) -> tuple[li
             changes.append(f"{kind}: {base_s.get(kind, 0)} -> {n}")
     base_t, head_t = base["tests_executed"], head["tests_executed"]
     assert isinstance(base_t, int) and isinstance(head_t, int)
-    tests_down = head_t < base_t
+    tests_down = max(base_t - head_t, 0)
     if tests_down:
         changes.append(f"tests_executed: {base_t} -> {head_t}")
     return changes, tests_down
@@ -157,6 +157,10 @@ def trailers(root: Path, base_ref: str, key: str) -> list[str]:
 
 
 def check_loosening(root: Path, base_ref: str, head: Mapping[str, object]) -> list[str]:
+    subprocess.run(  # a wrong ref must fail, not read as "the lock is new"
+        ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}"],
+        check=True, capture_output=True,
+    )
     shown = subprocess.run(
         ["git", "-C", str(root), "show", f"{base_ref}:{LOCK_PATH}"],
         capture_output=True, text=True,
@@ -172,9 +176,11 @@ def check_loosening(root: Path, base_ref: str, head: Mapping[str, object]) -> li
             f"the lock was loosened ({'; '.join(changes)}) without a commit carrying a "
             f"'{RATCHET_REASON}:' trailer"
         )
-    if tests_down and not trailers(root, base_ref, REMOVED_TEST):
+    removed = len(trailers(root, base_ref, REMOVED_TEST))
+    if removed < tests_down:
         errors.append(
-            f"tests_executed went down without a '{REMOVED_TEST}:' trailer naming each removed test"
+            f"tests_executed went down by {tests_down} but only {removed} '{REMOVED_TEST}:' "
+            "trailers name removed tests (one per test)"
         )
     return errors
 

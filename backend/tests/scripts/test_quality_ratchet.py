@@ -177,6 +177,21 @@ def test_fewer_tests_also_need_the_removed_test_names(repo: Path) -> None:
     assert ratchet.check_loosening(repo, "base", head) == []
 
 
+def test_each_removed_test_needs_its_own_trailer(repo: Path) -> None:
+    head = _commit(
+        repo, _lock(tests=8, noqa=3),
+        "refactor: drop two tests\n\nRatchet-Reason: feature removed\n"
+        "Removed-Test: tests/test_a.py::test_one",
+    )
+    [error] = ratchet.check_loosening(repo, "base", head)
+    assert "went down by 2 but only 1" in error
+
+
+def test_an_unknown_base_ref_is_an_error_not_a_new_lock(repo: Path) -> None:
+    with pytest.raises(subprocess.CalledProcessError):
+        ratchet.check_loosening(repo, "no-such-ref", _lock(tests=1, noqa=99))
+
+
 def test_a_lock_new_in_this_change_has_nothing_to_loosen(repo: Path) -> None:
     _git(repo, "rm", "-q", ratchet.LOCK_PATH)
     _git(repo, "commit", "-q", "-m", "drop lock")
