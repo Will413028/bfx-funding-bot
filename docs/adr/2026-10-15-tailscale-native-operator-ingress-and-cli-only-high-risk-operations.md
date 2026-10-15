@@ -55,7 +55,7 @@ tags: [bfx-funding-bot, decision, security, auth, deployment, architecture, fron
   - 認證強度由 tailnet 的 IdP 帳號負責，只用硬體金鑰；operator 裝置的 node key 到期設短，VM 是 tagged node、不設到期。
 - **D2 移除 app 登入**：移除 Better Auth、TOTP、MFA marker、Next.js BFF route handler、JWT／JWKS、`auth` schema 與 `bfx_webauth` role、Redis。前端改為 static export，由 webapi 同源提供並加上安全 header。membership（owner／operator／viewer）保留，鍵改為 node user ID；`Principal` 介面保留，日後客戶 app 的 OIDC 驗證可以接上。
 - **D3 公開頁**：proof summary 與 funding-rates CSV 由 VM 上的排程工作產生 static 檔，部署到 Cloudflare Pages；webapi 移除公開端點。這是 [2026-08-31-account-isolated-execution-target-architecture](2026-08-31-account-isolated-execution-target-architecture.md) D6 的實作。
-- **D4 高風險操作只走 CLI**：resume、啟用幣別、換交易所憑證、UNKNOWN 裁決只能由 host CLI 經 Tailscale SSH 執行，SSH policy 用 check mode 且每次連線都重新到 IdP 驗證。CLI 寫同一個 operator-request outbox，actor 取 Tailscale SSH 的身分，不是自填字串。UI 只提供讀取與降低風險的操作（halt、停用幣別），手機不提供高風險操作。Tailscale 本身故障時的最後手段是 OCI Console Connection（serial console，不開 port），寫進 runbook 並演練。
+- **D4 高風險操作只走 CLI**：resume、啟用幣別、換交易所憑證、UNKNOWN 裁決只能由 host CLI 經 Tailscale SSH 執行，SSH policy 用 check mode 且每次連線都重新到 IdP 驗證（重新驗證的間隔已修訂為 12 小時，見 Amendment D4d）。CLI 寫同一個 operator-request outbox，actor 取 Tailscale SSH 的身分，不是自填字串。UI 只提供讀取與降低風險的操作（halt、停用幣別），手機不提供高風險操作。Tailscale 本身故障時的最後手段是 OCI Console Connection（serial console，不開 port），寫進 runbook 並演練。
 - **D5 KEK 移進 OCI Vault**：交易所憑證維持 envelope encryption，KEK 改由 OCI Vault 保管，支援多版本與 re-wrap。webapi 不持有 KEK、不呼叫 Bitfinex；憑證驗證經 outbox 由 bot 執行。
 - **D6 部署全停**：有 migration 時 bot 與 webapi 都停，migrate 完再啟動；webapi 與 bot 一樣，schema 不是預期的 head 就拒絕開機。schema 變更不再需要對上一版 webapi 向前相容（expand/contract）。
 
@@ -78,18 +78,20 @@ tags: [bfx-funding-bot, decision, security, auth, deployment, architecture, fron
 
 ## Amendment (2026-10-15)：D4 的 CLI 執行形狀、換憑證路徑與 SSH 入口
 
-CLI 那一批開工前的設計審查（獨立 subagent），對照本 ADR 的目標架構後補上三項決定，owner 拍板。
+CLI 那一批開工前的設計審查（獨立 subagent），對照本 ADR 的目標架構後補上 D4a–D4c；D4d 是設定 SSH policy 時發現的方案限制。皆由 owner 拍板。
 
 - **D4a CLI 的執行位置與 DB 身分**：CLI 以 one-off 容器執行（與 app 同一個映像、直接接資料網路，不經 tailscaled sidecar，也不進 webapi 的 process）。它用專屬的 DB role，只有各 outbox request 欄位的 INSERT 與需要的讀取。營運介面移除高風險操作之後，由 DB trigger 拒絕 webapi role 寫入 resume、啟用幣別與 UNKNOWN 裁決，讓「只能由 CLI 寫入」有資料層保證。請求的驗證與組裝抽成 application service，webapi 與 CLI 都只是轉接層。
 - **D4b 換憑證**：照 [2026-08-31-account-isolated-execution-target-architecture](2026-08-31-account-isolated-execution-target-architecture.md) D5'，CLI 那一批就新增換憑證的 outbox（沿用既有 outbox 契約），由 bot 驗證新 key、停用舊的、啟用新的，再自行重啟載入。CLI 不持有 KEK。D5 的 KEK 搬進 OCI Vault 仍在交易所憑證那一批做。
 - **D4c SSH 入口**：Tailscale SSH 與 OCI Console Connection 都演練過之後，停用一般 sshd，雲端防火牆不開 22 port；主機只剩 Tailscale SSH 一個 SSH 入口。
+- **D4d check mode 的重新驗證間隔**：check mode 採 Tailscale 預設的 12 小時，不設成每次連線（`checkPeriod: always`）；補強是 operator 裝置的 node key 到期設短，以及 SSH policy 只允許非 root 使用者。
 - **過渡**：營運入口切換（membership 改用 node user ID）之前，CLI 請求的 actor 欄位是設定的 operator id，SSH 身分記在主機日誌，CLI 請求也仍受既有 operator 授權條件約束；切換之後 actor 就是 SSH 身分。
 
 **Rationale**
 
 - **D4a 不用 `docker exec` 進 webapi**：營運入口切換後，webapi 共用 tailscaled sidecar 的 network namespace，部署全停（D6）後 schema 不符時也拒絕開機。break-glass 要備援的正是這些故障，exec 會跟著失效。業界做法是把管理工作當 one-off process（12-Factor App XII、`heroku run`、`kubectl run`）。**不沿用 webapi role**：webapi process 被攻破時，仍能插入 resume 請求並填上 operator id；每個寫入者一個 role，與 08-31 D4' 讓 webapi 與 bot 分 role 是同一個做法。**代價**：多一個 role、一個 runtime 秘密檔與一個 migration；role 要在 migration 之前先建好。
 - **D4b 不讓 CLI 直接寫 vault**：直接寫會牴觸 D5'；而且現行的「建立新 key → 驗證 → 刪舊的」在「同時只能有一個 active」的規則下不會讓新 key 生效，交易所憑證那一批也要整段重寫。OCI Vault 只擋「搬 KEK」，不擋「由 bot 驗證與啟用」，所以沒有理由等到那一批。**代價**：CLI 那一批多一張 outbox 表與一個 worker。
-- **D4c 不改成「sshd 只聽 tailnet 介面」**：持有 key 的人一樣能經 tailnet 連 sshd、不經 check mode，D4 的「每次重新驗證」就不成立。**代價**：每次 SSH（包括 coding agent 的維運）都要 owner 到 IdP 驗證；Tailscale 故障時只剩 Console Connection。
+- **D4c 不改成「sshd 只聽 tailnet 介面」**：持有 key 的人一樣能經 tailnet 連 sshd、不經 check mode，D4 的重新驗證就不成立。**代價**：SSH（包括 coding agent 的維運）要 owner 到 IdP 驗證；Tailscale 故障時只剩 Console Connection。
+- **D4d 選 12 小時而非每次連線**：自訂 `checkPeriod` 只有 Tailscale 付費方案（Premium、Enterprise）提供，免費方案存檔時直接拒絕。另一個選項是由 CLI 在寫入前自己要求硬體金鑰或通知確認，但那等於把 D2 移除的 app 驗證加回來。單一 operator、owner 自有的小額資金，不值得為一條規則付月費。**代價**：驗證後 12 小時內，同一台裝置執行高風險操作不必再過 IdP；ASVS V7.5「敏感操作前重新驗證」以 12 小時的窗口記為部分符合。
 
 ## Followup
 
@@ -100,6 +102,7 @@ CLI 那一批開工前的設計審查（獨立 subagent），對照本 ADR 的�
 
 ## Revocation Triggers
 
+- tailnet 改用付費方案，或開始保管外部使用者的資金 → D4d 改為 `checkPeriod: always`。
 - 開放外部客戶（08-31 D7 的 gate 通過）→ 另建客戶 app 與它自己的登入；營運介面維持本 ADR。
 - 需要多實例或有可用性 SLO → D6 改回 expand/contract。
 - Tailscale 的條款、價格或可用性不再適合 → 換成 identity-aware proxy（選項 B 或 Pomerium／oauth2-proxy），app 只換身分來源。
