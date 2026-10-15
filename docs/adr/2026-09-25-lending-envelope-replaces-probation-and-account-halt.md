@@ -137,6 +137,10 @@ NAV 以幣別原生單位計（`ReconcileNavTracker`＝available＋reserved＋re
 - 刪除第 3 級「受管 offer 落在包絡外」（包絡已在送單前強制，事後檢查在收緊設定後會誤停）；追加：金額全程 Decimal、gate 記憶體 latch 改為 process 退出、幣別開關走 TOTP UI。
 - Carry-over audit（刻意保留、重開條件）：`max_offer_amount` 留在 policy 頂層（Phase 5 或 schema 4 時重評）；「受管」由 classifier 與 `execution_decision_id` 兩層判定（claim 綁 venue id 方式改變或出現第三個 consumer 時重評）；`pathspec` 只為四條 DR trigger（下次改 `DR_TRIGGER_PATTERNS` 換 git `:(glob)`）；reconciler 的 legacy uncertainty fallback（paper/shadow 退場時刪）；trading-state trigger 的 Python 鏡像（規則再增加時重評，parity 測試守住）。
 
+## Updates (2026-10-15)
+
+- [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D1、D2、D4：控制面不再對外公開、app 登入與 TOTP 移除。本 ADR 寫「經 TOTP」的 operator resume 改為只走 host CLI（Tailscale SSH check mode）；包絡仍只能由 owner 腳本修改，包絡、限額與 HALTED 規則不變。
+
 ## Related
 
 - 來源：2026-09-25 與 Will 討論，本 ADR 即原始紀錄；另比對兩份獨立 agent 草稿（未存檔），其論點已併入 Rationale。程式碼事實取自 bfx-funding-bot main `d475d51`：`backend/src/bfx_funding_bot/modules/execution/` 的 `safety/protection.py`、`safety/nav_pnl_source.py`、`capital_policy.py`，`backend/configs/safety.live.yaml`。

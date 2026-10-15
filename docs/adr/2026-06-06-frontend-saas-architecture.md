@@ -30,10 +30,10 @@ Forensic 發現（反直覺）：`frontend/` 早已 feature-complete（Next 16 /
 
 - **D1 = spec D6** — FE **審查 + 現代化**（非 greenfield）。
 - **D2 = spec D7** — v1 **= operator console**：客戶頁凍在 flag 後、多租戶身份就緒但 **signups OFF**（Will=user #1）。
-- **D3 = spec D8** — auth **= 自托 Better Auth**（Neon Auth 為未來想卸 ops 時的零遷移 managed 替代）。
-- **D4 = spec D13** — **同一 Neon DB + `auth` schema + web app scoped role**；**Alembic 唯一 migration 工具**（port `better-auth generate` 出的 schema，永不跑 `better-auth migrate`）。
+- **D3 = spec D8**（已被 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D2 取代）— auth **= 自托 Better Auth**（Neon Auth 為未來想卸 ops 時的零遷移 managed 替代）。
+- **D4 = spec D13**（`auth` schema 部分已被 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D2 取代；Alembic 唯一 migration 工具不變）— **同一 Neon DB + `auth` schema + web app scoped role**；**Alembic 唯一 migration 工具**（port `better-auth generate` 出的 schema，永不跑 `better-auth migrate`）。
 - **D5 = spec D9/D10/D11/D12** — 即時性 **polling**（刪死 WS）；策略面 **唯讀**；**always-dark**；**flat users**（org_id 留 SP6）。
-- **D6 = spec D1/D2/D3/D5/D14** — v1 範圍 **SP1–SP5**（SP6 多租戶真錢執行延至 G3 gate ~2026-08-04）；MFA **TOTP + step-up 只在動錢操作**；billing 出 v1 **只 stub**；venue **Bitfinex-only**。
+- **D6 = spec D1/D2/D3/D5/D14** — v1 範圍 **SP1–SP5**（SP6 多租戶真錢執行延至 G3 gate ~2026-08-04）；MFA **TOTP + step-up 只在動錢操作**（已被 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D1、D4 取代：認證強度由 tailnet IdP 負責，動錢操作只走 CLI）；billing 出 v1 **只 stub**；venue **Bitfinex-only**。
 
 ## Rationale
 
@@ -63,9 +63,9 @@ spec 全文複核後，原 Decision 漏記、但仍約束現行程式或會被�
 
 ### Amendment Decision
 
-- **D7 = spec §3.1「保留」**：保留 BFF proxy 殼，瀏覽器只持有 Better Auth 的不透明 httpOnly session cookie、**永不見 JWT**；proxy 在 server 端 mint 短命 EdDSA JWT 轉給 FastAPI。依據 IETF OAuth 2.0 for Browser-Based Apps BCP 對 BFF 的建議。JWT plugin 只作 service-to-service token，**不取代 session model**。
-- **D8 = spec §3.1「自托責任」**：**永不啟用 Better Auth api-key plugin**（CVE-2025-61928 只影響它）；rate-limit 儲存不得留 in-memory（當時指 Upstash，現為 VM Redis，見 [2026-06-07-web-tier-hosting-funnel-scoped-roles](2026-06-07-web-tier-hosting-funnel-scoped-roles.md)）；依 security advisory 即時升版。
-- **D9 = SP1 plan「Key decisions」**：FastAPI web-API 是**獨立 process**（`main:app`），與真錢 daemon 分開部署；issuer `bfx-funding-bot`、audience `bfx-funding-backend` 寫死不走 env；`sub` = Better Auth user id（TEXT，非 uuid）；v1 `requireEmailVerification:false`。
+- **D7 = spec §3.1「保留」**（已被 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D2 取代：移除 BFF，前端改 static）：保留 BFF proxy 殼，瀏覽器只持有 Better Auth 的不透明 httpOnly session cookie、**永不見 JWT**；proxy 在 server 端 mint 短命 EdDSA JWT 轉給 FastAPI。依據 IETF OAuth 2.0 for Browser-Based Apps BCP 對 BFF 的建議。JWT plugin 只作 service-to-service token，**不取代 session model**。
+- **D8 = spec §3.1「自托責任」**（隨 Better Auth 移除而失效，[2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md)）：**永不啟用 Better Auth api-key plugin**（CVE-2025-61928 只影響它）；rate-limit 儲存不得留 in-memory（當時指 Upstash，現為 VM Redis，見 [2026-06-07-web-tier-hosting-funnel-scoped-roles](2026-06-07-web-tier-hosting-funnel-scoped-roles.md)）；依 security advisory 即時升版。
+- **D9 = SP1 plan「Key decisions」**：FastAPI web-API 是**獨立 process**（`main:app`），與真錢 daemon 分開部署；issuer `bfx-funding-bot`、audience `bfx-funding-backend` 寫死不走 env；`sub` = Better Auth user id（TEXT，非 uuid）（issuer／audience／`sub`／email 驗證設定隨 JWT 與 Better Auth 移除而失效，身分鍵改為 Tailscale node user ID，見 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D1、D2；獨立 process 不變）；v1 `requireEmailVerification:false`。
 - **D10 = spec §3.3/§3.4**：polling 不夠時的演進路線是**一條 SSE**（`StreamingResponse`，走既有 cookie-proxy、consumer hook 不變），WS 留給互動控制；觸發條件須是實測延遲不足，不是預期。設計系統採 3 層 token（OKLCH primitives → semantic／status lexicon → component）＋ lint 禁止 feature 元件寫 raw 色值。
 - **D11 = SP3 spec（2026-06-16）**：`/api/v1/configs` 只**儲存**策略偏好、daemon 不讀（inert）；既有前端就是契約、後端配合不改前端；一人一份（upsert）；後端驗證**只鏡像前端 Zod**（正數、min≤max），**刻意不加** openspec 時代的領域上下限。
 
@@ -74,6 +74,10 @@ spec 全文複核後，原 Decision 漏記、但仍約束現行程式或會被�
 - **D7**：瀏覽器不持 token，XSS 拿不到可重放的 bearer，相較把 JWT 放 localStorage 或 client header 攻擊面小；代價是每個 API 呼叫都要多一跳 Next server。
 - **D11**：後端比前端嚴格會造成「前端接受、後端 400」的分歧；config 在 v1 不影響任何送單，寬鬆上下限的代價近乎零。領域上下限的最終處置見 [2026-09-23-go-era-openspec-design-disposition](2026-09-23-go-era-openspec-design-disposition.md)（放棄，config draft 進 live 路徑時才一併設計）。
 - 現況（2026-09-27）：D4 的「同一 Neon DB」已隨 2026-06-23 退役 Neon 變成同一個 VM 自托 Postgres 18，`auth` schema＋scoped role 的邊界不變，印證 D3 的 portability 論點；SP3 的 per-user `user_configs` 已由 Halt 1 的 account-scoped config draft 取代（以 `ExchangeAccount.id` 定址、draft ≠ applied，見 ARCHITECTURE §1 與 `modules/api/config.py`）。SP3 實作 `git log --oneline 1565ba1^..5d42bc4`。
+
+## Updates (2026-10-15)
+
+- [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md)：營運入口改為 Tailscale 原生、移除 app 登入。D3、D4 的 `auth` schema、D6 的 TOTP／step-up、Amendment D7、D8 與 D9 的身分部分由它取代；D10 的 SSE 演進路線不再經 cookie-proxy。D1、D2 的 operator console 與不開放註冊、D5 的 polling 與唯讀策略面、D9 的獨立 process 不變；D2 的「多租戶身份就緒」改由日後的客戶 app 提供。客戶 app 與其登入在開放外部客戶時另建。
 
 ## Review Notes
 

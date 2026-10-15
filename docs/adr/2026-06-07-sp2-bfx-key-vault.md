@@ -26,11 +26,11 @@ SaaS 平台要托管使用者的 Bitfinex API key——一個 custody-sensitive 
 
 ## Decision
 
-- **D1 = spec D1** — at-rest 用 **app-managed envelope**（B）。
+- **D1 = spec D1** — at-rest 用 **app-managed envelope**（B）。（KEK 改由 OCI Vault 保管，見 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D5；envelope 結構不變）
 - **D2 = spec D2** — verify 用 **permission-aware fail-closed**（B）。
 - **D3 = spec D3** — **單一 key/user**（B）。
 - **D4 = spec D4** — **只加密 secret**（B），api_key 存明文。
-- **D5 = spec D5** — crypto 歸宿 **FastAPI web-API**（KEK 在其 env）。
+- **D5 = spec D5**（已被 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D5 取代：webapi 不持有 KEK、不呼叫 Bitfinex，驗證經 outbox 由 bot 執行）— crypto 歸宿 **FastAPI web-API**（KEK 在其 env）。
 - **D6 = spec D6** — **改造 dormant `APIKey` model**（FK → `user_profiles.user_id`、envelope 欄位）。
 
 ## Rationale
@@ -68,6 +68,10 @@ spec／plan 全文複核，D1–D6 與原裁定一致；以下是後來被改掉
 - **D5 解密歸宿擴大**：daemon 不再讀 `BFX_API_KEY`／`BFX_API_SECRET`，改由 account-owned credential vault 解密，所以 `BFX_VAULT_KEK` 現在同時在 webapi 與 daemon 的環境裡；「v1 唯一解密路徑 = verify」已不成立，KEK 外洩面相應擴大。
 - **KEK 輪替仍未支援**：`_CURRENT_KEY_VERSION = 1`，decrypt 不看 `key_version`；上方 Followup 的警告仍有效。
 - plan 內的 review amendment（不新增 dead `bfx_vault_kek` setting、跨方言 default、`webapi.env` 是整檔 `cp` 不是 `source`）已落在程式與 R1，無其他未記裁定。
+
+## Updates (2026-10-15)
+
+- [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) 取代 D5、修訂 D1：KEK 移進 OCI Vault（多版本、re-wrap），webapi 不再持有 KEK；上方 Amendment 的「KEK 同時在 webapi 與 daemon 的環境裡」與「輪替仍未支援」在該步驟完成後結案。D2–D4 不變。
 
 ## Related
 

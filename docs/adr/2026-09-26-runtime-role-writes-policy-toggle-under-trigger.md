@@ -60,6 +60,10 @@ prior state：migration `a9d3e5f7b102`（capital authority）對 `bfx_bot` 撤�
 - Phase 5 讓 tenant 改包絡數值 → trigger 的「只改 enabled」要擴充，重評是否改由專用 SECURITY DEFINER 函式寫入。
 - 出現第二種 runtime 需要寫 policy 的情境 → 重評，不要在 trigger 上疊例外。
 
+## Updates (2026-10-15)
+
+- [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D4：TOTP 移除；啟用幣別會擴大交易，改為只走 host CLI（Tailscale SSH check mode 每次重新驗證），停用幣別留在 UI。Expected Outcome 的「日常停用／啟用幣別只經 UI＋TOTP」改為「停用經 UI、啟用經 CLI」。trigger 與 role 的設計（D1、D2、Invariants）不變：兩條路徑寫的是同一個 operator-request outbox。
+
 ## Related
 
 - 來源：2026-09-26 與 Will 討論（design review 後的「加 UI 開關」決定），本 ADR 即原始紀錄；實作 PR #19（merge `2f3c70f`），

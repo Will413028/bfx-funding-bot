@@ -1,7 +1,7 @@
 ---
 title: Operator TOTP 由第一方設定頁直接走 Better Auth 登錄，首位 admin 由 host-only 稽核 CLI 指派
 date: 2026-09-20
-status: active
+status: "superseded-by: [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md)"
 tags: [bfx-funding-bot, decision, security, auth, frontend]
 related-commits:
   - e9f1369
@@ -11,6 +11,8 @@ related-commits:
 ---
 
 # Operator TOTP 自助登錄＋host-only 首位 admin bootstrap
+
+> 已被 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) 取代（2026-10-15）：app 登入與 TOTP 移除，operator 身分改由 tailnet 提供，高風險操作只走 CLI。
 
 ## Context
 
