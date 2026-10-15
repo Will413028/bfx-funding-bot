@@ -76,6 +76,21 @@ tags: [bfx-funding-bot, decision, security, auth, deployment, architecture, fron
 - KEK 不在任何容器的環境變數裡，可以輪替。
 - 部署工具在 migration 時停掉所有讀寫 schema 的服務。
 
+## Amendment (2026-10-15)：D4 的 CLI 執行形狀、換憑證路徑與 SSH 入口
+
+CLI 那一批開工前的設計審查（獨立 subagent），對照本 ADR 的目標架構後補上三項決定，owner 拍板。
+
+- **D4a CLI 的執行位置與 DB 身分**：CLI 以 one-off 容器執行（與 app 同一個映像、直接接資料網路，不經 tailscaled sidecar，也不進 webapi 的 process）。它用專屬的 DB role，只有各 outbox request 欄位的 INSERT 與需要的讀取。營運介面移除高風險操作之後，由 DB trigger 拒絕 webapi role 寫入 resume、啟用幣別與 UNKNOWN 裁決，讓「只能由 CLI 寫入」有資料層保證。請求的驗證與組裝抽成 application service，webapi 與 CLI 都只是轉接層。
+- **D4b 換憑證**：照 [2026-08-31-account-isolated-execution-target-architecture](2026-08-31-account-isolated-execution-target-architecture.md) D5'，CLI 那一批就新增換憑證的 outbox（沿用既有 outbox 契約），由 bot 驗證新 key、停用舊的、啟用新的，再自行重啟載入。CLI 不持有 KEK。D5 的 KEK 搬進 OCI Vault 仍在交易所憑證那一批做。
+- **D4c SSH 入口**：Tailscale SSH 與 OCI Console Connection 都演練過之後，停用一般 sshd，雲端防火牆不開 22 port；主機只剩 Tailscale SSH 一個 SSH 入口。
+- **過渡**：營運入口切換（membership 改用 node user ID）之前，CLI 請求的 actor 欄位是設定的 operator id，SSH 身分記在主機日誌，CLI 請求也仍受既有 operator 授權條件約束；切換之後 actor 就是 SSH 身分。
+
+**Rationale**
+
+- **D4a 不用 `docker exec` 進 webapi**：營運入口切換後，webapi 共用 tailscaled sidecar 的 network namespace，部署全停（D6）後 schema 不符時也拒絕開機。break-glass 要備援的正是這些故障，exec 會跟著失效。業界做法是把管理工作當 one-off process（12-Factor App XII、`heroku run`、`kubectl run`）。**不沿用 webapi role**：webapi process 被攻破時，仍能插入 resume 請求並填上 operator id；每個寫入者一個 role，與 08-31 D4' 讓 webapi 與 bot 分 role 是同一個做法。**代價**：多一個 role、一個 runtime 秘密檔與一個 migration；role 要在 migration 之前先建好。
+- **D4b 不讓 CLI 直接寫 vault**：直接寫會牴觸 D5'；而且現行的「建立新 key → 驗證 → 刪舊的」在「同時只能有一個 active」的規則下不會讓新 key 生效，交易所憑證那一批也要整段重寫。OCI Vault 只擋「搬 KEK」，不擋「由 bot 驗證與啟用」，所以沒有理由等到那一批。**代價**：CLI 那一批多一張 outbox 表與一個 worker。
+- **D4c 不改成「sshd 只聽 tailnet 介面」**：持有 key 的人一樣能經 tailnet 連 sshd、不經 check mode，D4 的「每次重新驗證」就不成立。**代價**：每次 SSH（包括 coding agent 的維運）都要 owner 到 IdP 驗證；Tailscale 故障時只剩 Console Connection。
+
 ## Followup
 
 - 依對真錢的風險分批實作，每批一個 PR：公開頁靜態化 → CLI 對等與 break-glass 演練 → 營運入口切換（CLI 演練完成後才做）→ 部署全停 → 網路分段 → KEK 與交易所憑證 → 秘密管理、供應鏈、安全 log、API 契約與文件。
