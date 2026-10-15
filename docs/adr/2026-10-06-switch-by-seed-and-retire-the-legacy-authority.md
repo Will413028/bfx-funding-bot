@@ -76,6 +76,10 @@ tags: [bfx-funding-bot, decision, ledger, migration, postgresql, disaster-recove
 - 每個行程都 assert schema head：epoch 讀取與寫入者檢查可移除（schema head 已蘊含 ledger）。
 - 不再需要在 History 顯示切換前資料：`legacy_archive` dump 到 offsite（前後比對 manifest digest）後 drop；先拆掉指進來的 FK。
 
+## Updates (2026-10-15)
+
+- [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D6 把部署改為 migration 時全停。部署工具實作後，上方第一條 `inherited` 約束不再成立，D6「收權限與刪欄跨 release」也隨之取消：沒有舊版 webapi 會跑在新 schema 上，停寫、撤權、DROP 可以在同一個 release 完成。
+
 ## Related
 
 - 修訂 [2026-09-28-ledger-journal-and-venue-mirror-replace-event-sourcing](2026-09-28-ledger-journal-and-venue-mirror-replace-event-sourcing.md) D6／D7'''；[2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue](2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue.md)（soak 門檻）；[2026-10-06-ledger-restore-verification-replaces-prefix-test](2026-10-06-ledger-restore-verification-replaces-prefix-test.md)（S1-8 的 DR 驗證決定）。

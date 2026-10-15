@@ -80,6 +80,10 @@ planner 按 id 撤受管 offer；D4 規定只有 operator 以 TOTP resume 能結
 - 出現自動恢復後造成可歸因於 bot 的損失 → 收緊條件或回到 A。
 - Phase 5 多租戶 → 上限與計數改為每 tenant，並重評是否要持久化計數。
 
+## Updates (2026-10-15)
+
+- [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D1、D4：控制面不再對外公開，operator resume 改為只走 host CLI，經 Tailscale SSH check mode 每次重新驗證，取代 TOTP。上方「resume 要 TOTP」的約束改為「resume 只走 CLI」；自動恢復的規則不變。
+
 ## Related
 
 - 部分取代：[2026-09-25-lending-envelope-replaces-probation-and-account-halt](2026-09-25-lending-envelope-replaces-probation-and-account-halt.md) D4 與其 Invariant「第 3 級停機不自動解除」。

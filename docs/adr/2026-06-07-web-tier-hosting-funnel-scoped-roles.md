@@ -39,11 +39,11 @@ prior state：SP1（[2026-06-06-frontend-saas-architecture](2026-06-06-frontend-
 ## Decision
 
 - **D1 = SP1-deploy「two-process」**：daemon 與 webapi 同一 codebase、兩個 runtime，**永不合併**；webapi 為獨立 compose service（cpu 0.5／mem 512M 上限、只綁 host loopback），`bot`／`migrate` 定義不動。
-- **D2 = SP1-deploy「public ingress」**：公開入口用 **Tailscale Funnel**；Cloudflare Tunnel 延到有網域、要開放客戶時再換（只改 FE `API_URL` 與 tunnel）。
-- **D3 = SP1-deploy §4/§5**：兩個最小權限 login role——`bfx_webauth` 只有 `auth` schema、`bfx_webapi` 只有逐表明確授權；migration 一律由 owner role 跑。webapi 用**獨立 env 檔**，看不到 daemon 的全權 `DATABASE_URL` 與 Bitfinex key。
-- **D4 = FE-VM spec「拓樸」（2026-06-23，取代 D2 的 Vercel 部分）**：前端容器化上 VM，**Funnel 443 只指前端**；webapi 退回內網（前端 server-side proxy 經 docker 網路呼叫），JWKS 也走內網 `http://frontend:…/api/auth/jwks`；Vercel 退役。
-- **D5 = FE-VM spec「Redis」**：自托 Redis 7（appendonly＋volume、無 published port、內網不設密碼），Better Auth `secondaryStorage`（session＋rate-limit）改用 `ioredis`，因此**不需要 DB session 表、也不跑 `better-auth migrate`**。
-- **D6 = FE-VM spec §7**：舊 auth 帳號隨 Neon 遺失，改為**重新註冊**，不做資料搬遷。
+- **D2 = SP1-deploy「public ingress」**（已被 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D1、D3 取代：Funnel 關閉，營運介面只經 Tailscale Serve，公開頁改放 Cloudflare Pages）：公開入口用 **Tailscale Funnel**；Cloudflare Tunnel 延到有網域、要開放客戶時再換（只改 FE `API_URL` 與 tunnel）。
+- **D3 = SP1-deploy §4/§5**（`bfx_webauth` 隨 `auth` schema 移除，見 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D2；`bfx_webapi` 與 owner 跑 migration 不變）：兩個最小權限 login role——`bfx_webauth` 只有 `auth` schema、`bfx_webapi` 只有逐表明確授權；migration 一律由 owner role 跑。webapi 用**獨立 env 檔**，看不到 daemon 的全權 `DATABASE_URL` 與 Bitfinex key。
+- **D4 = FE-VM spec「拓樸」（2026-06-23，取代 D2 的 Vercel 部分；已被 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D1、D2 取代：前端改 static、由 webapi 經 Tailscale Serve 同源提供）**：前端容器化上 VM，**Funnel 443 只指前端**；webapi 退回內網（前端 server-side proxy 經 docker 網路呼叫），JWKS 也走內網 `http://frontend:…/api/auth/jwks`；Vercel 退役。
+- **D5 = FE-VM spec「Redis」**（已被 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D2 取代：Redis 移除）：自托 Redis 7（appendonly＋volume、無 published port、內網不設密碼），Better Auth `secondaryStorage`（session＋rate-limit）改用 `ioredis`，因此**不需要 DB session 表、也不跑 `better-auth migrate`**。
+- **D6 = FE-VM spec §7**（隨 app 登入移除而失效，[2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md)）：舊 auth 帳號隨 Neon 遺失，改為**重新註冊**，不做資料搬遷。
 - **D7 = FE-VM spec「Build 位置」**：前端 image 在 VM 上 build（已被 [2026-09-25-ci-registry-digest-deploy](2026-09-25-ci-registry-digest-deploy.md) 取代）。
 
 ## Rationale
@@ -69,6 +69,10 @@ prior state：SP1（[2026-06-06-frontend-saas-architecture](2026-06-06-frontend-
 - 取得網域並開放客戶註冊 → D2 改 Cloudflare Tunnel 或基準反代。
 - 前端或 webapi 負載開始影響 daemon（CPU／記憶體爭用）→ 重評 D1/D4 的同機部署。
 - session 需要跨主機或不可遺失 → 重評 D5 的無密碼、無備份 Redis。
+
+## Updates (2026-10-15)
+
+- [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) 取代 D2、D4、D5、D6 與 D3 的 `bfx_webauth`：VM 不再有公開入口，營運介面只經 Tailscale Serve；webapi 以 tailscaled sidecar 隔離；前端改 static；Redis 與 app 登入移除。D1 的 webapi 與 daemon 分 process 不變，但「只綁 host loopback」改為 sidecar network namespace 內的 loopback、不發布 host port；`bfx_webapi` 的最小權限不變。上方 Revocation Triggers 的第一條（取得網域改 Cloudflare Tunnel）與第三條（Redis）隨之失效。
 
 ## Related
 

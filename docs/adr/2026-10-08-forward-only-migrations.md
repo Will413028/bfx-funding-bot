@@ -16,7 +16,7 @@ tags: [bfx-funding-bot, decision, database, migration, testing]
 **約束**：
 
 - `external` Bitfinex 已經發生的寫入（送單、成交、撤單）無法撤回，append-only ledger 的事實也不可刪；schema 退回舊版不會讓 venue 狀態跟著退回（`docs/runbooks/rollback-after-venue-write.md`）。
-- `inherited` bfx-deploy 在 migration 期間只停 bot、webapi 繼續跑上一版 image，migration 後不 downgrade（[2026-09-25-ci-registry-digest-deploy](2026-09-25-ci-registry-digest-deploy.md)）：仍成立，是部署工具的現行行為；它要求 schema 變更向前相容（expand／contract），與 downgrade 無關。
+- `inherited` bfx-deploy 在 migration 期間只停 bot、webapi 繼續跑上一版 image，migration 後不 downgrade（[2026-09-25-ci-registry-digest-deploy](2026-09-25-ci-registry-digest-deploy.md)）：寫成時成立；部署工具實作全停後不再成立（[2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D6）。它要求 schema 變更向前相容（expand／contract），與 downgrade 無關。
 - `inherited` 既有 76 支 migration 與 26 個測試檔依賴現有 downgrade：仍成立但屬自我約束（一致性與工作量），不是外部限制。
 
 ## Options Considered
@@ -63,6 +63,10 @@ tags: [bfx-funding-bot, decision, database, migration, testing]
 - 不採「改成在上一版 seed 再升級」：斷言意圖會變，例如權限白名單不再驗證逐步 downgrade 的還原。不採「新 migration 例外寫可執行的 downgrade」：違反 D1。（此處的取捨與上方 Options 的 A–D 無關。）
 - 後果：這些測試只涵蓋 forward-only 之前的 migration；之後的 migration 的升級前狀態測試照 D2。
 - 權限白名單：`LAST_REVERSIBLE_REVISION` 的 public 白名單寫成 `REVERSIBLE_*`，較舊版本的表權限從它推導；之後改 public 表或欄位權限的 migration 只改 head 的 `EXPECTED_*`，改 `legacy_archive` 或 schema 權限的要先把那部分同樣拆成兩份（`tests/integration/test_webapi_privilege_allowlist.py`）。
+
+## Updates (2026-10-15)
+
+- [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D6 把部署改為 migration 時全停，部署工具實作後，上方第二條約束（webapi 跑上一版 image、需要 expand/contract）不再成立。本 ADR 的 D1–D3 不受影響：正式環境仍只往前走，回滾仍是 roll forward 或還原隔離庫。
 
 ## Related
 

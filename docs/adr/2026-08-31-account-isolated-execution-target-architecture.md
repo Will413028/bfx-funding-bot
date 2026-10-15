@@ -96,13 +96,19 @@ plane 為不同 process boundary、D4 已定 control-plane commands 走 outbox�
 - worker tick 延遲使 operator 在時間敏感裁決（如 DR 900s 窗口內）無法及時完成。
 - 出現必須由 control plane 同步寫入 ledger 才能滿足的法規或稽核要求。
 
+## Amendment (2026-10-15)：D4' 的寫入端、D5 的憑證變更與 KMS
+
+- **D4''**（修訂 D4'，依 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D4）：operator 請求除了 webapi 也可由 host CLI 寫入同一個 outbox，由同一個 daemon worker 執行；resume、啟用幣別、換交易所憑證、UNKNOWN 裁決只能由 CLI 寫入，actor 取 Tailscale SSH 身分。webapi 對 ledger 與 projection 表零寫權限不變。
+- **D5'**（修訂 D5，依 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D4、D5）：換交易所憑證不再經 webapi，只能由 host CLI 經 Tailscale SSH 寫 operator-request outbox，由 bot 執行（D4'' 的路徑）；webapi 不持有 KEK、不呼叫 Bitfinex。KMS 多版本輪替不再等到外部 key 前，現在就做，KEK 放 OCI Vault。`CredentialProvider` 為唯一 SoT 不變。
+- 理由：讓 control plane 不接觸憑證明文與 KEK，與 Invariants 第一條「control plane 不直接呼叫 Bitfinex money-write API」同方向；高風險操作需要每次重新驗證，app 已無登入，由 SSH check mode 承擔。
+
 ## Followup
 
 - 完成 P0 containment：關 signup、撤銷非 operator sessions、補 operator/account authz。
 - 完成 money integrity：UNKNOWN submit lifecycle、per-account serialized projection、orphan quarantine。
 - 建立 offsite WAL/PITR、月度 restore drill、readiness 與主動 alerts。
 - 引入 ExchangeAccount、config versions/outbox、CredentialProvider 與 worker lease。
-- 收斂 OpenAPI contract、immutable image deploy、expand/contract migrations；外部 beta 依 D7 gates 解鎖。
+- 收斂 OpenAPI contract、immutable image deploy、~~expand/contract migrations~~（改為 migration 時全停，見 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D6）；外部 beta 依 D7 gates 解鎖。
 
 ## Invariants
 

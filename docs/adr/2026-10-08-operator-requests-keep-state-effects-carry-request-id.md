@@ -87,6 +87,10 @@ prior state：同日稍早的 [2026-10-08-operator-requests-insert-only-with-ins
 
 - 2026-10-08 實作前 design-review（獨立 agent）後修訂，ADR 尚未出貨：release 由三個併為兩個（Will 決定）；journal 改用兩條 MATCH SIMPLE FK 取代 generated 欄；`insert_request` 改用 `ON CONFLICT`；trading 配對的 tie-break 寫明。
 
+## Updates (2026-10-15)
+
+- [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D6 把部署改為 migration 時全停。部署工具實作後，上方「上一版 webapi 會在新 schema 上跑」的約束不再成立，Rationale 裡以相容性窗口決定 release 數的理由也隨之失效；本 ADR 的 D1–D9 不受影響。
+
 ## Related
 
 - 來源：2026-10-08 Will 在 coding agent 對話中選定 E′，本 ADR 即原始紀錄。比較由一個未參與實作的 agent 從零起草（選項未預設），結論已寫進 Options 與 Rationale；outcome ADR 的兩份獨立草稿中，草稿 1 主張保留單表與 partial unique index，與本決定方向一致。

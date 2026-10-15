@@ -53,6 +53,11 @@ tar、rsync 1.5GB 到 VM，再以自製程式驗證 archive（`image_artifact.py
 - **D3**：ledger 兩階段 append（部署開始先寫 started，結束寫 outcome），bot 開機可讀到自己的部署列；CI run id 寫入 ledger。
 - 主機端工具、systemd units 與 DR 腳本改由部署工具從目標版本套用，不再手動 `install.sh`、不再跑舊 working tree 的 DR 腳本。
 
+## Amendment (2026-10-15): migration 時全停
+
+- **D2'**（修訂 D2，依 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D6）：需要 migration 時，bot 與 webapi 都先停，備份、restore test、`alembic upgrade head` 之後再啟動；webapi 與 bot 一樣，schema 不是預期的 head 就拒絕開機。schema 變更不再需要對上一版 webapi 向前相容。失敗處理的規則同 D2，但停機與重啟的對象改為 bot 與 webapi：restore 彩排失敗時兩者都以運行中的版本重啟；沒有套用 migration 的失敗換回上一個 digest；套用過 migration 後失敗則兩者都停著、roll forward，期間的操作路徑是 host CLI（同 ADR D4）。
+- 理由：單實例、funding offer 掛在交易所上，停幾分鐘對錢沒有影響；全停之後不會有舊版 webapi 跑在新 schema 上。
+
 ## Rationale
 
 - **選 C 而非 A**：Docker 官方建議在 CI build 並 pin digest；以 digest pull 就能保證 image 不變，
