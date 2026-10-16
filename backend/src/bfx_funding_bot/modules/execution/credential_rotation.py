@@ -305,8 +305,9 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
             credential = await rotate_active_credential(
                 session, exchange_account_id=self.account_id,
                 replaces_credential_id=row.replaces_credential_id,
-                operator_request_id=row.request_id, label=row.label, api_key=verdict.api_key, api_secret=verdict.secret.reveal(),
-                verified_at=verdict.verified_at, kek=self.kek_loader())
+                operator_request_id=row.request_id, label=row.label, api_key=verdict.api_key,
+                api_secret=verdict.secret.reveal(), verified_at=verdict.verified_at,
+                kek=self.kek_loader())
         except ActiveCredentialChangedError as exc:
             raise RequestRejected(ACTIVE_CREDENTIAL_CHANGED) from exc
         return Outcome(APPLIED, f"rotated: credential {credential.id}", detail=credential.id)
