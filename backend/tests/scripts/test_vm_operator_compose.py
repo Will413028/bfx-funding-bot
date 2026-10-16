@@ -13,7 +13,6 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
@@ -23,6 +22,9 @@ from typing import Any
 
 import pytest
 import yaml
+
+# One Compose probe and skip marker for every VM compose test.
+from tests.scripts.test_vm_compose_app import COMPOSE_CMD, needs_compose
 
 ROOT = Path(__file__).resolve().parents[3]
 COMPOSE_PATH = ROOT / "deploy/vm/ops/docker-compose.operator.yml"
@@ -50,19 +52,6 @@ def _load(name: str, path: Path) -> ModuleType:
 
 
 policy = _load("vm_ops_compose_policy_for_operator", POLICY_PATH)
-
-COMPOSE_CMD = os.environ.get("BFX_TEST_COMPOSE", "docker compose").split()
-
-
-def _compose_available() -> bool:
-    if shutil.which(COMPOSE_CMD[0]) is None:
-        return False
-    return subprocess.run([*COMPOSE_CMD, "version"], capture_output=True,
-                          check=False).returncode == 0
-
-
-needs_compose = pytest.mark.skipif(not _compose_available(), reason="docker compose CLI unavailable")
-
 
 def _path_env() -> dict[str, str]:
     return {key: os.environ[key] for key in ("PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT")
@@ -99,15 +88,11 @@ def _uninterpolated(runtime: Path, path: Path = COMPOSE_PATH) -> dict[str, Any]:
 
 @pytest.fixture(scope="module")
 def rendered(runtime_dir: Path) -> dict[str, Any]:
-    if not _compose_available():
-        pytest.skip("docker compose CLI unavailable")
     return _rendered(runtime_dir)
 
 
 @pytest.fixture(scope="module")
 def uninterpolated(runtime_dir: Path) -> dict[str, Any]:
-    if not _compose_available():
-        pytest.skip("docker compose CLI unavailable")
     return _uninterpolated(runtime_dir)
 
 

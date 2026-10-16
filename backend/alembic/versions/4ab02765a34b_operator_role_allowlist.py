@@ -47,13 +47,11 @@ _OBSERVED_OFFER = (
     "rate_observed", "period_days", "offer_type", "flags", "status", "mts_created", "mts_updated",
 )
 
-# Whole rows the ORM reads (account and membership, trading state and its cancel-all,
-# the three outboxes, policy heads and revisions) and the authority epoch.
+# Whole rows the ORM reads: account and membership, trading state and its cancel-all,
+# the three outboxes, policy heads.
 OPERATOR_TABLE_PRIVILEGES: dict[str, tuple[str, ...]] = {
-    "capital_authority_epoch": _R,
     "capital_policy_heads": _R,
     "capital_policy_requests": _R,
-    "capital_policy_revisions": _R,
     "exchange_account_memberships": _R,
     "exchange_accounts": _R,
     "funding_cancel_all_audit": _R,
@@ -62,27 +60,28 @@ OPERATOR_TABLE_PRIVILEGES: dict[str, tuple[str, ...]] = {
     "uncertainty_resolution_requests": _R,
 }
 
-# (table, privilege) -> columns: the ledger reads an adjudication is judged against, the
-# schema head, and the request columns of each outbox. Never ``evidence``, ``raw``,
-# ``scope_block`` or ``normalized_payload``.
+# (table, privilege) -> columns: the authority epoch and the applied policy, the ledger
+# reads an adjudication is judged against, the schema head, and the request columns of
+# each outbox. Never ``evidence``, ``raw``, ``scope_block``, ``normalized_payload`` or a
+# revision's ``source``.
 OPERATOR_COLUMN_PRIVILEGES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("capital_authority_epoch", "SELECT"): ("epoch_seq", "authority", "actor"),
+    ("capital_policy_revisions", "SELECT"): (
+        "id", "exchange_account_id", "deployment_environment", "symbol", "revision",
+        "schema_version", "policy", "digest",
+    ),
     ("accepted_capital_basis", "SELECT"): (
         "id", "exchange_account_id", "deployment_environment", "observation_id",
-        "accept_revision", "attempt_seq_high_water", "accepted_at_ms",
+        "accept_revision", "attempt_seq_high_water",
     ),
     ("accepted_capital_basis_attempt", "SELECT"): (
         "basis_id", "attempt_id", "symbol", "classification",
     ),
-    ("accepted_capital_basis_credit", "SELECT"): ("basis_id", "symbol"),
     ("accepted_capital_basis_quarantine", "SELECT"): ("basis_id", "quarantine_id"),
-    ("accepted_capital_basis_symbol", "SELECT"): (
-        "basis_id", "symbol", "available", "offered", "credits", "unattributed_credits",
-    ),
     ("alembic_version", "SELECT"): ("version_num",),
     ("execution_resolution_journal", "SELECT"): (
         "id", "attempt_id", "quarantine_id", "exchange_account_id", "deployment_environment",
-        "symbol", "action", "venue_offer_id", "actor_kind", "actor_id", "operator_request_id",
-        "resolved_at_ms", "reason",
+        "symbol", "action", "actor_kind", "actor_id", "resolved_at_ms", "reason",
     ),
     ("ledger_observation", "SELECT"): (
         "id", "query_id", "exchange_account_id", "deployment_environment", "accepted",
@@ -111,14 +110,7 @@ OPERATOR_COLUMN_PRIVILEGES: dict[tuple[str, str], tuple[str, ...]] = {
         "symbol", "cell_id", "attempt_seq", "started_at_ms", "intended_amount",
         "match_rate", "match_period_days", "match_offer_type", "match_flags",
     ),
-    ("transport_outcome_journal", "SELECT"): (
-        "attempt_id", "kind", "venue_offer_id", "reason", "completed_at_ms",
-    ),
-    ("venue_offer_mirror", "SELECT"): (
-        "exchange_account_id", "deployment_environment", "venue_offer_id", "symbol",
-        "amount_original", "amount_remaining", "mts_updated",
-        "present_in_latest_accepted_snapshot",
-    ),
+    ("transport_outcome_journal", "SELECT"): ("attempt_id", "kind", "reason", "completed_at_ms"),
     ("capital_policy_requests", "INSERT"): (
         "request_id", "exchange_account_id", "deployment_environment", "symbol", "action",
         "reason", "requested_by", "created_at_ms",

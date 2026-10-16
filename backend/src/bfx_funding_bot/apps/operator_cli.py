@@ -69,7 +69,7 @@ EXIT: Final = {
 }
 DEFAULT_WAIT_SECONDS: Final = 120
 POLL_SECONDS: Final = 1.0
-UNCERTAINTY_LIMIT_MAX: Final = 200
+UNCERTAINTY_LIMIT_MAX: Final = 100  # the web API's list limit
 
 
 class CliExitError(Exception):
