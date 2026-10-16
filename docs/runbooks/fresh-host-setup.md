@@ -31,9 +31,13 @@ migration 照樣成功但**不會補 grant**。所以順序是：先建 role，�
 ### 1a. 建 role（migration 之前，以 `<owner>` 執行）
 
 密碼當場產生，直接寫進主機上的 runtime secret 檔（`/opt/bfx/runtime/*.env`，root 0600），
-不要貼到終端機歷史、chat 或任何檔案以外的地方。
+不要貼到終端機歷史、chat 或任何檔案以外的地方。`<owner>` 必須是 superuser（官方 image 的
+`POSTGRES_USER` 就是）：下面兩個 `SET` 是 superuser 參數，讓失敗的 `CREATE ROLE` 不會把含明文密碼的
+STATEMENT 寫進 PG log。
 
 ```sql
+SET log_statement = 'none';
+SET log_min_error_statement = 'panic';
 CREATE ROLE bfx_bot LOGIN PASSWORD '<read from the secret file>';
 CREATE ROLE bfx_webapi LOGIN PASSWORD '<read from the secret file>';
 CREATE ROLE bfx_webauth LOGIN PASSWORD '<read from the secret file>';
@@ -158,7 +162,7 @@ RESET ROLE;
 | `bot.env` | `bfx_bot` | 範本 `deploy/vm/bot.env.example` |
 | `webapi.env` | `bfx_webapi` | 同檔還有 `BETTER_AUTH_JWKS_URL=http://bfx-frontend:3000/api/auth/jwks`（docker 內網） |
 | `frontend.env` | `bfx_webauth` | direct 連線（`@postgres:5432/bfx`，無 pooler、無 sslmode）；範本 `deploy/vm/frontend.env.example` |
-| `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`、`BFX_OPERATOR_USER_ID`（兩者照抄 `bot.env`）與 `BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id）；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 wrapper 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml` |
+| `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`、`BFX_OPERATOR_USER_ID`（兩者照抄 `bot.env`）與 `BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id，`tailscale whois --json <operator 裝置的 tailnet IP>` 的 `UserProfile.ID`）；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 `bfx-op` 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
 | `migrate.env` | `<owner>` | 只有 bfx-deploy 的 migration 與 operator one-shot 使用 |
 
 `BETTER_AUTH_SECRET` 以 `openssl rand -base64 48` 在主機上產生後直接寫進 `frontend.env`
@@ -215,9 +219,11 @@ ls -l /usr/local/lib/bfx-ops/current /home/ubuntu/bfx-releases/current
 ```
 
 安裝器從 git 物件寫出 `/usr/local/lib/bfx-ops/releases/<rev>`，依 `ops/uv.lock`
-執行 `uv sync --frozen`，建立 `bfx-deploy`／`bfx-notify` wrappers 與
+執行 `uv sync --frozen`，建立 `bfx-deploy`／`bfx-notify`／`bfx-op` wrappers、
+`/etc/sudoers.d/bfx-op`（sudo 只為 `bfx-op` 保留 `SSH_CONNECTION`，寫入前 `visudo -c` 驗證）與
 `/home/ubuntu/bfx-releases/<rev>` DR checkout，再安裝 `systemd/managed-units`
-列出的 units。它不會啟用或啟動任何 timer。之後工具由成功部署的 release 自動更新。
+列出的 units。它不會啟用或啟動任何 timer。之後工具由成功部署的 release 自動更新；
+sbin 入口與 sudoers 例外，見 [deploy runbook §4](deploy.md#4-主機工具與-dr-腳本的版本)。
 
 ### 3b. Runtime 設定與首次驗證
 

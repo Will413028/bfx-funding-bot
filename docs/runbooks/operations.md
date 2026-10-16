@@ -10,7 +10,7 @@ UNKNOWN 與金額指紋、自動保護、Kill switch）。決策來源：ADR 202
 | 層 | 控制 | 效果 |
 |---|---|---|
 | 每筆單 | CapitalPolicy 的包絡（§2） | 單筆上限、天期、open offer 數、利率下限；超出就不送 |
-| 每幣別 | policy `enabled`（§2，UI 切換） | `false`：不掛新單，撤掉該幣別的受管 offer；已成交借款照常到期 |
+| 每幣別 | policy `enabled`（§2：啟用只走 CLI，停用 CLI 或 UI） | `false`：不掛新單，撤掉該幣別的受管 offer；已成交借款照常到期 |
 | 帳戶 | `trading_state` `ACTIVE`／`HALTED` | `HALTED`：所有幣別不掛新單，planner 撤掉受管 offer |
 
 `trading_state` 的 cause：`operator`（人）或 `auto`（自動保護，§4）。讀不到狀態或從未記錄任何決策
@@ -30,13 +30,19 @@ bot、webapi 與 owner 腳本開機時各讀一次：表或列缺失、值不是
 
 所有每幣別設定都是 DB 裡有版本的 CapitalPolicy，每次改動產生一個新 revision（舊的保留）。
 
-### 啟用／停用幣別：UI（TOTP，主要路徑）
+### 啟用／停用幣別：CLI（主要路徑）與 UI（只剩停用）
 
-Overview「交易狀態」面板的「幣別」區塊列出每個有 applied policy 的幣別：啟用與否、包絡
-（未設定時明白標示）、最近的請求與結果。停用／啟用需要填原因，經 frontend BFF 的 MFA 閘門，
-webapi 只把請求排入 `capital_policy_requests`（回 202），由 bot 的 `CapitalPolicyRequestWorker`
-在 account lock 下重新驗證 operator 後，走與 script 相同的 amendment 路徑寫一個新 revision
-（revision 的 `operator_request_id` 指回該請求；誰、為什麼是請求自己的欄位，不複製進 revision 的 `source`），結果顯示在該幣別下。
+```bash
+sudo bfx-op enable fUST --reason "為什麼啟用"     # 只走 CLI（ADR 2026-10-15 D4）
+sudo bfx-op disable fUST --reason "為什麼停用"    # CLI 或 UI 都可以
+sudo bfx-op status                                # 每個幣別的啟用、包絡與最近的請求
+```
+
+CLI 的入口、身分與 exit code 見 §10。兩條路都只把請求排入 `capital_policy_requests`，由 bot 的
+`CapitalPolicyRequestWorker` 在 account lock 下重新驗證 operator 後，走與 script 相同的 amendment
+路徑寫一個新 revision（revision 的 `operator_request_id` 指回該請求；誰、為什麼是請求自己的欄位，
+不複製進 revision 的 `source`）。CLI 預設等到結果才結束；UI 的 Overview「交易狀態」面板「幣別」
+區塊列出同樣的狀態與結果。UI 的啟用按鈕依 ADR 2026-10-15 D4 將移除，不要依賴它。
 
 - 停用：不掛新單，下一個 reconcile tick 撤掉該幣別的受管 offer；手動掛的單與已成交借款不動。
   不是停機，不寫 `trading_state`，恢復也不需要 resume。停用除了 operator 驗證之外不受任何條件
@@ -52,8 +58,8 @@ webapi 只把請求排入 `capital_policy_requests`（回 202），由 bot 的 `
 
 ### 包絡與其他欄位：`amend_capital_policy`
 
-包絡、`max_offer_amount` 等其他欄位只能用 script 改（`--enabled` 仍可用，作為 UI 不可用時的
-備用）：dry run → 看報告 → 用 digest apply。在 VM 上以已部署的 backend image 跑一次性
+包絡、`max_offer_amount` 等其他欄位只能用 script 改（`--enabled` 仍可用，作為 CLI 不可用時的
+備用；`--enabled true` 依 ADR 2026-10-15 D4 將移除）：dry run → 看報告 → 用 digest apply。在 VM 上以已部署的 backend image 跑一次性
 container，用 `/opt/bfx/runtime/migrate.env`（owner role）：
 
 ```bash
@@ -68,29 +74,35 @@ python -m scripts.amend_capital_policy --exchange-account-id UUID --environment 
 - 第一次設定包絡要五個欄位齊全（`envelope_incomplete` 會列出缺哪個）；之後可以只改其中一個。
 - 利率下限 ＝ max(`min_rate_apr`/365, 即時 bid 中位數 × `rate_floor_ratio`)。低於下限時該幣別閒置，
   不是錯誤。
-- 暫停／恢復一個幣別平常用上面的 UI；script 的 `--enabled false`／`--enabled true` 是備用。
+- 暫停／恢復一個幣別平常用上面的 CLI；script 的 `--enabled false`／`--enabled true` 是備用。
   這是日常的停止方式，不需要 HALTED。
 - 沒有包絡的幣別（舊 schema 的 policy）一律不送單（`envelope_unset`）。
 
 ## 3. 帳戶停止與恢復
 
-### 主要：UI（TOTP）
+### 主要：CLI（`sudo bfx-op`）；kill 另可用 UI
 
-Overview 的「交易狀態」面板。請求都經 frontend BFF 的 MFA 閘門，webapi 只把請求排入
-`trading_control_requests`（回 202），由 bot 的 `TradingControlWorker` 在 account lock 下重新驗證
-operator 後套用，結果顯示在面板上。
+```bash
+sudo bfx-op resume --reason "為什麼恢復"   # 只走 CLI（ADR 2026-10-15 D4）
+sudo bfx-op kill --reason "為什麼停"       # CLI 或 UI
+sudo bfx-op status                         # 交易狀態、本次停機的 cancel-all、最近的請求
+```
 
-| 按鈕 | 效果 |
+CLI 的入口、身分與 exit code 見 §10。請求排入 `trading_control_requests`，由 bot 的
+`TradingControlWorker` 在 account lock 下重新驗證 operator 後套用；CLI 預設等到結果才結束。
+webapi、frontend 停著時 CLI 照樣能用（它是 one-off container，直接連 Postgres）。
+
+| 命令 | 效果 |
 |---|---|
-| 恢復交易 | `HALTED` → `ACTIVE`（不論是誰停的）。不帶任何限額期：每筆單本來就在包絡內 |
-| Kill switch…（輸入 `KILL`） | `HALTED/operator` ＋ 每個幣別的 venue cancel-all，**連你在 Bitfinex 網頁手動掛的單也會撤**；已成交借款不受影響。等待中的其他請求標成 `superseded_by_kill`。kill 有自己的佇列、優先處理。已經 HALTED 時再按一次 ＝ 重試 cancel-all |
+| `resume` | `HALTED` → `ACTIVE`（不論是誰停的）。不帶任何限額期：每筆單本來就在包絡內。已經 `ACTIVE` 時被拒（`already_active`） |
+| `kill`（UI：Kill switch…，輸入 `KILL`） | `HALTED/operator` ＋ 每個幣別的 venue cancel-all，**連你在 Bitfinex 網頁手動掛的單也會撤**；已成交借款不受影響。等待中的其他請求標成 `superseded_by_kill`。kill 有自己的佇列、優先處理。已經 HALTED 時再送一次 ＝ 重試 cancel-all |
 
-面板的「本次停機的 venue 撤單」顯示 `funding_cancel_all_audit` 的結果（UI kill 觸發的列帶該請求的 `operator_request_id`，`/admin/halt` 與自動保護為 NULL）；不完整時重試 kill 或到
-Bitfinex 手動撤單。**恢復只有 UI 這一條路**；static token 不能恢復。
+`status` 與 UI 面板的「本次停機的 venue 撤單」顯示 `funding_cancel_all_audit` 的結果（kill 請求觸發的列帶該請求的 `operator_request_id`，`/admin/halt` 與自動保護為 NULL）；不完整時重試 kill 或到
+Bitfinex 手動撤單。**恢復只有 CLI 這一條路**（UI 的恢復按鈕依 ADR 2026-10-15 D4 將移除）；static token 不能恢復。
 
 ### 緊急備用：static admin token（只能降低曝險）
 
-UI 不可用時使用。bot 的 healthz server（container 內 port 8080，未對 host 公開）提供
+CLI 與 UI 都不可用時使用（例如只能從 Console 登入，§12）。bot 的 healthz server（container 內 port 8080，未對 host 公開）提供
 `POST /admin/halt?reason=...&actor=...`，與 UI kill 同一條路徑。200＝HALTED 且每個幣別 cancel-all
 都 acknowledged；502＝HALTED 已生效但 venue 部分未完成，再呼叫一次即重試。`/admin/pause` 已移除。
 
@@ -118,7 +130,7 @@ bot 自己停著時不可用：到 Bitfinex 網頁撤單並記錄。不依賴資
 |---|---|---|---|
 | 1 | 違反包絡、book 過期、auth DOWN、heartbeat 過期 | 擋那一筆 | 無 |
 | 2 | 送單結果不明（UNKNOWN）、讀取失敗、未被接受的 snapshot | 只隔離該幣別；settle 窗口（120s）後以金額指紋＋完整 history 自動結案 | 30 分鐘仍未結案時收到 `unknown_quarantine_aged`（之後每 6 小時），見 §5 |
-| 3 | `unclassifiable_commitment`、`offer_amount_mismatch`、`identity_conflict`、`venue_lent_above_ledger`、`command_rate_exceeded` | `HALTED/auto`，之後 planner 每一輪按 id 撤**受管** offer 直到沒有（外來 offer 不碰）；停滿 15 分鐘且連續 3 個乾淨 snapshot 後自動恢復（`ACTIVE/auto`），24 小時內最多 2 次 | 收到 `auto_resume_limit_reached` 或停機一直沒解除時：查清原因後 UI 恢復 |
+| 3 | `unclassifiable_commitment`、`offer_amount_mismatch`、`identity_conflict`、`venue_lent_above_ledger`、`command_rate_exceeded` | `HALTED/auto`，之後 planner 每一輪按 id 撤**受管** offer 直到沒有（外來 offer 不碰）；停滿 15 分鐘且連續 3 個乾淨 snapshot 後自動恢復（`ACTIVE/auto`），24 小時內最多 2 次 | 收到 `auto_resume_limit_reached` 或停機一直沒解除時：查清原因後以 CLI 恢復（§3） |
 | 4 | 外來 offer（`foreign_exposure`）、外來 offer 成交造成的借出（`foreign_lending`）、NAV 下降（`nav_drop`） | 只告警 | 確認是不是你自己的操作 |
 
 - **不會**觸發任何反應：借款到期造成 lent 減少、reconcile 補回 WS 漏掉的成交或撤單。
@@ -144,10 +156,10 @@ bot 自己停著時不可用：到 Bitfinex 網頁撤單並記錄。不依賴資
   reason 列出停機原因、停了幾分鐘與 3 個乾淨 snapshot 的 event_seq）。在 HALTED/auto 期間按 kill 會改寫成
   `HALTED/operator`，之後不會自動恢復。log：`auto_resumed`、`auto_resume_refused`。
 - 第 3 級處理步驟（自動恢復沒發生、或收到 `auto_resume_limit_reached`）：
-  1. 看 Telegram 與 UI 的 cause/reason；container log 用 `docker logs bfx-bot --since 1h`。
+  1. 看 Telegram 與 `sudo bfx-op status`（或 UI）的 cause/reason；container log 用 `docker logs bfx-bot --since 1h`。
   2. 看 log 的 `managed_offer_sweep`（requested／failed）；撤不掉的受管 offer 每一輪會重試，急的話用 kill。
   3. 查清 ledger 與 venue 的差異（`/admin/trading-status`、`/admin/dry-evaluate`）。
-  4. 原因消除後在 UI「恢復交易」。
+  4. 原因消除後 `sudo bfx-op resume --reason …`（§3）。
 
 ## 5. UNKNOWN 的人工處理
 
@@ -155,13 +167,26 @@ bot 自己停著時不可用：到 Bitfinex 網頁撤單並記錄。不依賴資
 涵蓋送單時間卻沒有，就判定未送出。以下情況會維持隔離、等你處理：history 不完整、兩個以上候選、
 候選已被其他紀錄認領、或指紋相同但其他條件不符。
 
-Overview 的 uncertainty 明細提供請求（同樣經 MFA、排入 `uncertainty_resolution_requests`，由 bot 套用；
-需要新鮮的 reconcile fence，過期會被拒 `stale_reconcile_fence`）：
+裁決只走 CLI（ADR 2026-10-15 D4；UI 的裁決按鈕將移除）。請求排入 `uncertainty_resolution_requests`，
+由 bot 套用；需要新鮮的 reconcile fence，過期會被拒 `stale_reconcile_fence`：
+
+```bash
+sudo bfx-op uncertainties --state open        # 未結案的 uncertainty
+sudo bfx-op uncertainty <uncertainty_id>      # 單筆：候選、引用的 evidence ref、最近的請求
+sudo bfx-op bind-to-venue <uncertainty_id> --evidence-ref <ref> --venue-offer-id <id> [--reason …]
+sudo bfx-op mark-not-accepted <uncertainty_id> --evidence-ref <ref> [--reason …]
+sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
+  --decision closed_at_venue|accepted_external_exposure --reason …
+```
+
+`--evidence-ref` 照抄 `uncertainty` 輸出裡的值；CLI 不接受自己組的 evidence。
 
 | uncertainty kind | 可用動作 |
 |---|---|
 | `submit_outcome_unknown`（UNKNOWN 送單） | `bind-to-venue`：綁到 venue 上唯一且完全符合的 offer；`mark-not-accepted`：有完整 venue history 證明 venue 沒收下 |
 | `unattributed_venue_offer`、`unsupported_venue_exposure`（2026-09-25 前留下的舊紀錄） | `manual-resolution`：`closed_at_venue` 或 `accepted_external_exposure`。新的外來 offer 不再產生這種紀錄 |
+
+`uncertainties` 回 `uncertainties_unavailable` 時看輸出的 `cause` 與 `sqlstate`：`42501` 是 `bfx_operator` 少了讀取權限（migration 的 grant 沒補上），不是一般的拒絕。
 
 規則：
 
@@ -243,7 +268,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 <a id="alert-trading_state_changed"></a>
 #### `trading_state_changed`（HALTED 時 critical，ACTIVE 時 info）
 
-- 代表：`trading_state` 寫入一筆新的轉換（自動保護停機、自動恢復、UI 恢復／kill、`/admin/halt`）；標題 `trading state X -> Y`，附 cause、actor、reason、state_id。重述同一狀態（例如已 HALTED 時再 kill）不寫新列，也不發。
+- 代表：`trading_state` 寫入一筆新的轉換（自動保護停機、自動恢復、CLI 恢復、CLI／UI kill、`/admin/halt`）；標題 `trading state X -> Y`，附 cause、actor、reason、state_id。重述同一狀態（例如已 HALTED 時再 kill）不寫新列，也不發。
 - 系統會做：HALTED 後所有幣別不掛新單，planner 每一輪撤受管 offer；`HALTED/auto` 依 §4 第 3 級條件自動恢復，`HALTED/operator` 不會。
 - operator 判斷：看 cause／actor。`auto` 停機走 §4 第 3 級；`operator` 停機確認是不是你（同時應有 `trading_control_applied` 或 `kill_switch_engaged`）；`ACTIVE/auto`（actor `auto-resume`）是預期的恢復，不必處理。
 
@@ -257,9 +282,9 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 <a id="alert-kill_switch_engaged"></a>
 #### `kill_switch_engaged`（cancel-all 完整時 warning，不完整時 critical）
 
-- 代表：operator 的 kill（UI kill、`/admin/halt`，或 `kill_cancel_all_caught_up` 補跑）寫完 `HALTED/operator` 並對每個幣別跑完 venue cancel-all。`complete=false` 時 `not_acknowledged` 列出沒被確認的幣別與 phase，`scope_error` 表示幣別清單讀不完整。自動保護不會走到這裡。
+- 代表：operator 的 kill（CLI／UI kill、`/admin/halt`，或 `kill_cancel_all_caught_up` 補跑）寫完 `HALTED/operator` 並對每個幣別跑完 venue cancel-all。`complete=false` 時 `not_acknowledged` 列出沒被確認的幣別與 phase，`scope_error` 表示幣別清單讀不完整。自動保護不會走到這裡。
 - 系統會做：HALTED 維持；結果寫入 `funding_cancel_all_audit`。不完整的 cancel-all 不會自己重試（只有 process 中斷造成的未完成會由 `kill_cancel_all_caught_up` 補跑）。
-- operator 判斷：不完整時看 UI「本次停機的 venue 撤單」，照 §3 重試 kill；同一 state_id 同樣結果 10 分鐘內不會再告警，以面板為準。phase 為 `skipped`（`no_live_venue`、`writer_lock_not_held`）時先處理 bot 本身。不是你發的 kill：確認 `actor`。
+- operator 判斷：不完整時看 `sudo bfx-op status`（或 UI）的「本次停機的 venue 撤單」，照 §3 重試 kill；同一 state_id 同樣結果 10 分鐘內不會再告警，以 `status` 為準。phase 為 `skipped`（`no_live_venue`、`writer_lock_not_held`）時先處理 bot 本身。不是你發的 kill：確認 `actor`。
 
 <a id="alert-boot_refused"></a>
 #### `boot_refused`（critical）
@@ -308,7 +333,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 
 - 代表：一次 `HALTED/auto` 的條件已消失（停滿 15 分鐘、3 個乾淨 snapshot），但 24 小時內已自動恢復 2 次，DB trigger 拒絕第 3 次。每個停機 id 在同一 process 只發一次，附原停機的 reason。
 - 系統會做：維持 HALTED，planner 繼續撤受管 offer，不再嘗試自動恢復。
-- operator 判斷：一天內第 3 次停機代表原因會反覆出現。照 §4 第 3 級處理步驟查清原因，再在 UI 恢復。
+- operator 判斷：一天內第 3 次停機代表原因會反覆出現。照 §4 第 3 級處理步驟查清原因，再以 CLI 恢復（§3）。
 
 <a id="alert-reconcile_not_accepted"></a>
 #### `reconcile_not_accepted`（warning）
@@ -369,7 +394,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 <a id="alert-trading_control_applied"></a>
 #### `trading_control_applied`（warning）
 
-- 代表：UI 的恢復或 kill 請求已由 `TradingControlWorker` 套用；`outcome` 是 `resumed` 或 `HALTED; venue cancel-all follows`，`by` 是請求者。kill 時帳戶本來就 HALTED 的話，`state_id` 是既有那一列，不會接著收到 `trading_state_changed`。
+- 代表：CLI 的恢復、CLI／UI 的 kill 請求已由 `TradingControlWorker` 套用；`outcome` 是 `resumed` 或 `HALTED; venue cancel-all follows`，`by` 是請求者。kill 時帳戶本來就 HALTED 的話，`state_id` 是既有那一列，不會接著收到 `trading_state_changed`。
 - 系統會做：狀態有變時接著發 `trading_state_changed`；kill 接著跑 cancel-all，結果見 `kill_switch_engaged`。
 - operator 判斷：確認 `by` 是你。不是的話代表有人用 operator 權限操作：先 kill（§3）再查帳號。
 
@@ -378,7 +403,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 
 - 代表：恢復或 kill 請求被拒，`reason` 為 `operator_not_authorized`（請求者已不是有效的 operator）、`already_active`（帳戶已是 ACTIVE 時要求恢復）或 `illegal_transition: …`（DB 規則拒絕）。被 kill 取代的請求（`superseded_by_kill`）只記在請求上，不發這則。
 - 系統會做：狀態不變，請求就此結案，不會重試。
-- operator 判斷：依 `reason` 處理；修正後在 UI 重新送出。
+- operator 判斷：依 `reason` 處理；修正後以 CLI（§3）重新送出。
 
 <a id="alert-trading_control_failed"></a>
 #### `trading_control_failed`（critical）
@@ -397,7 +422,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 <a id="alert-capital_policy_request_applied"></a>
 #### `capital_policy_request_applied`（warning）
 
-- 代表：UI 的幣別啟用或停用請求已套用；`outcome` 為 `enabled (revision N)`、`disabled (revision N)`、`enabled; envelope unset: …` 或 `unchanged: already …`（沒寫新 revision）。附 symbol 與 `by`。
+- 代表：CLI（或 UI 停用）的幣別啟用或停用請求已套用；`outcome` 為 `enabled (revision N)`、`disabled (revision N)`、`enabled; envelope unset: …` 或 `unchanged: already …`（沒寫新 revision）。附 symbol 與 `by`。
 - 系統會做：停用後下一個 reconcile tick 撤該幣別的受管 offer；啟用後 planner 開始考慮該幣別，沒有包絡時每一筆單都會被 envelope guard 拒絕（§2）。
 - operator 判斷：確認 `by` 是你。看到 `envelope unset` 時，用 `amend_capital_policy` 設好包絡（§2）。
 
@@ -413,14 +438,14 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 
 - 代表：套用幣別啟停時發生錯誤（`reason` 為 root exception 類型或 `outcome_write_failed:…`）。
 - 系統會做：rollback，不寫 revision，請求標為 failed、不重試。失敗的**停用**代表該幣別仍在放貸。
-- operator 判斷：在 UI 確認該幣別的實際狀態並重送；停用失敗而且必須馬上撤單時走 kill（§3）。原因看 `docker logs bfx-bot` 的 `capital_policy_request_failed`。
+- operator 判斷：以 `sudo bfx-op status` 確認該幣別的實際狀態並重送（§2）；停用失敗而且必須馬上撤單時走 kill（§3）。原因看 `docker logs bfx-bot` 的 `capital_policy_request_failed`。
 
 <a id="alert-credential_rotation_applied"></a>
 #### `credential_rotation_applied`（warning）
 
 - 代表：operator CLI 的 `rotate-credential` 已套用：新 key 的權限只有 funding 可寫、跟現行 key 屬於同一個 Bitfinex 帳號；舊憑證（`replaces_credential_id`）已 retired，新憑證（`credential_id`）是唯一的 active，`reason` 為 `rotated: credential <id>`。
 - 系統會做：commit 後 bot 照 SIGTERM 的乾淨停機流程結束（log `credential_rotation_restart`，`bot_runs` 記 `clean_stop`；commit 成功但確認遺失時，閒置的 worker 補做，log `credential_rotation_restart_caught_up`），container restart policy 重啟，開機以 `load_account_credentials` 載入新憑證。重啟前仍用記憶體裡的舊 key（在 Bitfinex 端仍有效），沒有無 key 的空窗。
-- operator 判斷：確認這次輪替是你送的；看到新的 bot run 開機成功後，才到 Bitfinex 刪除舊 key（key 衛生，不是交易步驟）。重啟後新 key 若載入或驗證失敗，bot 會發 `boot_refused`／`daemon_fatal`（`executor_auth_failed`，exit 78），此時的復原路徑是 webapi 的憑證端點。
+- operator 判斷：確認這次輪替是你送的；看到新的 bot run 開機成功後，才到 Bitfinex 刪除舊 key（key 衛生，不是交易步驟；完整步驟見 §11）。重啟後新 key 若載入或驗證失敗，bot 會發 `boot_refused`／`daemon_fatal`（`executor_auth_failed`，exit 78），此時的復原路徑是 webapi 的憑證端點（§11）。
 
 <a id="alert-credential_rotation_rejected"></a>
 #### `credential_rotation_rejected`（warning）
@@ -429,14 +454,14 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
   - 系統自己會恢復、重送即可：`recipient_key_stale`（請求封給的是已重啟的 bot run，CLI 會封給目前這次）、`deployment_in_progress`（最新的部署列是 15 分鐘內的 `started`，部署 settle 期間重啟會讓部署判失敗）、`bot_recently_started`（這次 bot 開機未滿 10 分鐘，部署可能仍在做 health 檢查與 settle；10 分鐘後重送）、`active_credential_changed`（送出後 active 憑證已換過）、`operator_not_authorized`（operator 權限或 TOTP 失效，先修好）。
   - operator 要判斷：`credential_account_mismatch`（新 key 屬於另一個 Bitfinex 帳號，確認建 key 的帳號）、`credential_reused`（這把 key 曾經用過並已 retired／revoked，請建新 key）、`invalid_credentials`（Bitfinex 拒絕這把 key）、`funding_write_required`／`withdraw_must_be_disabled`／`unexpected_write_scope:*`（調整 key 權限：只開 funding 寫入）、`account_identity_unavailable`（無法讀到 key 所屬帳號，確認 key 有 account info 讀取權限）、`sealed_payload_invalid`（密文損毀或被搬動，重送）。
 - 系統會做：不碰憑證，請求就此結案，bot 不重啟。
-- operator 判斷：依上面分類處理後重新送出。
+- operator 判斷：依上面分類處理後重新送出（§11）。
 
 <a id="alert-credential_rotation_failed"></a>
 #### `credential_rotation_failed`（critical）
 
 - 代表：輪替時發生錯誤；`reason` 為 `prepare_failed:BitfinexAPIError`（驗證 key 時 Bitfinex 沒有回答：連線、429、rate limit／維護代碼，或沒有 `["error", …]` 內容的 5xx；帶錯誤代碼的 500 例如 `apikey: digest invalid` 是拒絕，記成 rejected）、`prepare_failed:CredentialStoreError` 或 `credential_rotation_failed:<DBAPI 錯誤型別>`（資料庫錯誤，只記型別、不帶參數）、`credential_rotation_failed:<root exception>` 或 `outcome_write_failed:…`。
 - 系統會做：rollback，舊憑證仍是 active，請求標為 failed、不重試，bot 不重啟。
-- operator 判斷：暫時性錯誤時稍後重送；其他原因看 `docker logs bfx-bot` 的 `credential_rotation_failed`，交給開發處理。
+- operator 判斷：暫時性錯誤時稍後重送；其他原因看 `docker logs bfx-bot` 的 `credential_rotation_failed`，交給開發處理。重送照 §11。
 
 <a id="alert-venue_observation_history_incomplete"></a>
 #### `venue_observation_history_incomplete`（warning）
@@ -450,7 +475,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 
 - 代表：observation 被接受後，自動結案判定要綁定或標記某筆 UNKNOWN，但 journal 拒絕寫入（`ResolutionRejected`，例如 attempt 已不是 UNKNOWN、scope 不符；或 `ResolutionAlreadyRecorded`，已經有人先結案）。附 attempt_id、symbol、action、error。
 - 系統會做：只 rollback 這一筆結案，UNKNOWN 維持開啟、該幣別維持隔離；其他結案照常寫入，下一個被接受的 observation 再試。
-- operator 判斷：`error` 是已經結案時，多半是你剛在 UI 處理過，確認它已結案即可。其他情況照 §5 處理；反覆出現要回報成 bug。30 分鐘後仍未結案會接著收到 `unknown_quarantine_aged`。
+- operator 判斷：`error` 是已經結案時，多半是你剛處理過，確認它已結案即可。其他情況照 §5 處理；反覆出現要回報成 bug。30 分鐘後仍未結案會接著收到 `unknown_quarantine_aged`。
 
 ## 7. 改了 runtime env 之後重建 container
 
@@ -560,3 +585,87 @@ kill 的 cancel-all）被拒：
   計算，不同 key 互不影響，唯讀也避免誤下單。
 - bot log 出現 `bitfinex_auth_gate_slow_wait`（等 gate 超過 2 秒，含等待者種類）表示 venue 變慢或
   讀取堆積；背景讀取每筆最多 10 秒就會被切斷。
+
+## 10. Operator CLI（`bfx-op`）
+
+高風險操作（恢復交易、啟用幣別、UNKNOWN 裁決、換交易所憑證）只走這條路（ADR 2026-10-15 D4）。
+
+- **入口**：從自己的裝置 `tailscale ssh ubuntu@oci-a1`（或連到 VM tailnet IP 的 `ssh`，同樣經過
+  Tailscale SSH），通過 check mode 的 IdP 驗證（12 小時內同一台裝置不再問），然後
+  `sudo bfx-op <子命令> …`。不要用 `docker compose run` 直接跑 operator service。
+- **它做什麼**：取 session 的 peer（`SSH_CONNECTION` 第一欄，必須是 tailnet 位址）→
+  `tailscale whois` 取得你的 tailnet user ID → 以 ledger 最新 `deployed` 的 backend image 跑一次
+  `docker compose -p bfx-operator … run --rm -T operator <子命令>`。CLI 比對 user ID 與
+  `operator.env` 的 `BFX_OPERATOR_TAILNET_USER_ID`，不符拒絕；沒有指定 actor 的參數，請求的
+  `requested_by` 是 `BFX_OPERATOR_USER_ID`，tailnet 身分記在 host journal。
+- **信任邊界**：`ubuntu` 的 sudo 是 NOPASSWD，任何 root 等價的 shell 都能自己設定
+  `SSH_CONNECTION` 冒充另一個 peer：公網 sshd 還開著時持有 key 的登入、Console 上的 `ubuntu`。
+  公網 sshd 停用後只剩 Console 這一條。誰能開 session 由 Tailscale SSH 的 check mode 決定；`bfx-op`
+  做的是把誠實 session 的身分綁進請求並留下紀錄。
+- **子命令**（`sudo bfx-op <子命令> --help` 看參數）：唯讀 `status`、`uncertainties`、`uncertainty`、
+  `request <trading|currency|resolution|credential> <request_id>`、`credential`；寫入 `resume`、`kill`、
+  `enable`、`disable`（§2、§3）、`bind-to-venue`、`mark-not-accepted`、`manual-resolution`（§5）、
+  `rotate-credential`（§11）。寫入預設等到結果（`--wait-seconds`，預設 120）；`--no-wait` 只排入。
+  `sudo bfx-op --dry-run <子命令> …` 只印出會跑的 image、身分與命令。
+- **輸出**：stdout 一個 JSON；寫入時 stderr 一行 `operator_request request_id=… action=…`。
+
+| exit | 意義 |
+|---|---|
+| 0 | 讀取完成、請求已套用，或 `--no-wait` 已排入 |
+| 1 | 內部錯誤，或 `bfx-op` 組不出要跑的東西（`cannot run: <code>`，例如 `operator.env` 不是 root 0600、ledger 沒有 `deployed` 列） |
+| 2 | 參數錯誤；子命令前只接受 `--dry-run`；沒有用 sudo |
+| 3 | 被命令檢查或 bot 拒絕（輸出的 `error`） |
+| 4 | bot 套用失敗 |
+| 5 | 等到 `--wait-seconds` 仍未結案（請求仍在佇列，`request` 查結果） |
+| 77 | 沒有 tailnet 身分（`not_tailnet_peer`、`tailnet_whois_failed`）或不是設定的 operator（`operator_identity_mismatch`） |
+| 78 | schema head 或資金權威不是這個 image 的 |
+
+- **紀錄**：`sudo journalctl -t bfx-op --since today --no-pager`。每次呼叫一行 `start`（login、tailnet user
+  ID、裝置、peer、子命令、revision）與一行 `end`（request id、action、exit）；拒絕時一行 `refused`。
+  不記其他參數，也不記 stdin。
+
+## 11. 換交易所憑證
+
+前提：
+
+- 在 Bitfinex 建一把新 key，權限與現行相同：funding 可寫、withdraw 關閉、其他唯讀（含 account info）。
+- bot 這次開機已滿 10 分鐘，而且沒有部署正在進行（否則會被拒 `bot_recently_started`／`deployment_in_progress`，稍後重送即可）。
+
+步驟：
+
+1. 在自己的 Tailscale SSH session 執行，於提示輸入 key 與 secret（不回顯）。不要從檔案或 shell 變數 pipe 進去：
+   ```bash
+   sudo bfx-op rotate-credential --reason "為什麼換" --label "YYYY-MM-DD"
+   ```
+   key 與 secret 只在 `bfx-op` 與 CLI 的記憶體裡，以這次開機的 bot 的公鑰加密後才排入；不進 journal、log 或參數。
+2. 結果 `applied` 後 bot 自動重啟（[`credential_rotation_applied`](#alert-credential_rotation_applied)）。確認：
+   - `sudo bfx-op credential` 的 active 憑證是結果裡的新 id；
+   - `sudo docker inspect -f '{{.State.StartedAt}}' bfx-bot` 晚於 applied 的時間；
+   - `sudo bfx-op status` 正常，Telegram 沒有 `boot_refused`。
+3. 以上都成立後，才到 Bitfinex 刪除舊 key（key 衛生，不是交易步驟）。刪之前舊 key 一直可用，新 key 有問題時 bot 仍有退路。
+
+被拒或失敗：看 §6 的 [`credential_rotation_rejected`](#alert-credential_rotation_rejected)／[`credential_rotation_failed`](#alert-credential_rotation_failed)，拒絕時憑證沒有任何改動。
+重啟後新 key 載入失敗（`executor_auth_failed`）：輪替請求要 bot 在跑才會處理，所以用 webapi 既有的憑證端點建立並驗證一把可用的 key（舊憑證列已 retired，不會復活；舊 key 在 Bitfinex 還沒刪的話，可以用它的值重新建立）。
+
+## 12. Break-glass
+
+順序：Tailscale SSH（§10）→ OCI Console Connection。終態是公網 sshd 停用、UFW 與 OCI security list 都不開 22；
+在那之前公網 sshd 仍是一條入口（`sudo systemctl is-active ssh.socket ssh.service` 看現況）。
+
+| 元件壞了 | web UI | `bfx-op`（Tailscale SSH） | Console Connection |
+|---|---|---|---|
+| frontend、Better Auth、Redis、webapi | 不可用 | 可用 | 可用 |
+| host tailscaled、Tailscale control plane、IdP | 不可用 | 不可用 | 可用 |
+| Postgres、docker | 不可用 | 不可用 | 可用（只做主機修復） |
+
+Tailscale 不通時：
+
+1. 從 OCI Console 開 instance 的 Console Connection（OCI 只接受 RSA 公鑰，不接受 ed25519），以 `ubuntu` 與
+   break-glass 密碼登入。
+2. 查 `tailscale status`。node key 過期就 `sudo tailscale up` 重新驗證；tailscaled 異常就
+   `sudo systemctl restart tailscaled`（Funnel 會中斷數秒）。需要時可暫時重新啟用 sshd：
+   `sudo systemctl unmask ssh.socket ssh.service && sudo systemctl enable --now ssh.socket`、
+   `sudo ufw allow 22/tcp`，並在 OCI security list 加回 22；修好後照原樣停用、刪掉 UFW 規則、移除 OCI 的 22。
+3. Console 下 `bfx-op` 一律拒絕（`not_tailnet_peer`）：高風險操作只走 Tailscale SSH。這段期間 bot
+   照常自動放貸；要降低曝險，用 §3 的 `/admin/halt`，或停掉 bot container（§7）。
+
