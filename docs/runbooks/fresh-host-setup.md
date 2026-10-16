@@ -16,13 +16,14 @@ Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration �
 
 ## 1. Database roles 與 grants
 
-三個 runtime login role，各自只拿需要的權限：
+四個 runtime login role，各自只拿需要的權限：
 
 | role | 誰用 | 權限來源 |
 |---|---|---|
 | `bfx_bot` | bot daemon、每週報告、研究用一次性容器 | 本節的 default privileges ＋ 各 migration 的收斂 grant |
 | `bfx_webapi` | FastAPI web-API | migration `c74d45a54e46` 的 baseline（與之後各 migration）；不碰交易寫入 |
 | `bfx_webauth` | Next.js／Better Auth | 只有 `auth` schema（本節手動 grant） |
+| `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist：三個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
 
 Migration 對 role 的 grant 都包在 `IF EXISTS (SELECT FROM pg_roles ...)` 裡：role 不存在時
 migration 照樣成功但**不會補 grant**。所以順序是：先建 role，再第一次跑 migration。
@@ -36,6 +37,7 @@ migration 照樣成功但**不會補 grant**。所以順序是：先建 role，�
 CREATE ROLE bfx_bot LOGIN PASSWORD '<read from the secret file>';
 CREATE ROLE bfx_webapi LOGIN PASSWORD '<read from the secret file>';
 CREATE ROLE bfx_webauth LOGIN PASSWORD '<read from the secret file>';
+CREATE ROLE bfx_operator LOGIN PASSWORD '<read from the secret file>';
 
 -- bfx_bot：owner 之後建立的 public 表預設可 DML；受治理的表由各 migration 收斂
 -- （例如 capital_*、trading_*、deployments 只給 SELECT/INSERT 或欄位級 UPDATE）。
@@ -49,7 +51,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public
 
 `bfx_webapi` 與 `bfx_webauth` 在 public schema 不給任何 default privileges：webapi 的讀取
 清單與 outbox 欄位級 INSERT 全部由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand`），
-webauth 在 public 什麼都沒有。`bfx_webapi` 在 public 的權限是 migration `d0e1f2a3b4c6` 擁有的精確 allowlist（先 revoke 全部再 grant 回清單，含 `api_keys`、`user_configs` 與 `user_profiles` 的 UPDATE，不再需要手動 grant）；之後新增 webapi 權限的 migration 必須同步更新 `test_webapi_privilege_allowlist.py`。
+webauth 在 public 什麼都沒有。`bfx_operator` 同樣不給 default privileges，它的權限由 migration `4ab02765a34b` 先 revoke 全部（含 schema CREATE）再 grant 回清單，`test_operator_privilege_allowlist.py` 比對 effective privileges。`bfx_webapi` 在 public 的權限是 migration `d0e1f2a3b4c6` 擁有的精確 allowlist（先 revoke 全部再 grant 回清單，含 `api_keys`、`user_configs` 與 `user_profiles` 的 UPDATE，不再需要手動 grant）；之後新增 webapi 權限的 migration 必須同步更新 `test_webapi_privilege_allowlist.py`。
 
 ### 1b. 跑 migration
 
@@ -138,6 +140,15 @@ SELECT has_table_privilege(current_user, 'public.trading_state', 'SELECT') AS ca
        has_table_privilege(current_user, 'legacy_archive.event_log', 'INSERT')
          AS can_write_archive;  -- true, true, false
 RESET ROLE;
+
+SET ROLE bfx_operator;
+SELECT has_column_privilege(current_user, 'public.trading_control_requests', 'reason', 'INSERT')
+         AS can_queue,
+       has_table_privilege(current_user, 'public.trading_control_requests', 'UPDATE')
+         AS can_settle,
+       has_table_privilege(current_user, 'public.trading_state', 'INSERT')
+         AS can_write_state;  -- true, false, false
+RESET ROLE;
 ```
 
 ### 1e. 連線字串（寫進 secret 檔，不進 git）
@@ -147,6 +158,7 @@ RESET ROLE;
 | `bot.env` | `bfx_bot` | 範本 `deploy/vm/bot.env.example` |
 | `webapi.env` | `bfx_webapi` | 同檔還有 `BETTER_AUTH_JWKS_URL=http://bfx-frontend:3000/api/auth/jwks`（docker 內網） |
 | `frontend.env` | `bfx_webauth` | direct 連線（`@postgres:5432/bfx`，無 pooler、無 sslmode）；範本 `deploy/vm/frontend.env.example` |
+| `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`、`BFX_OPERATOR_USER_ID`（兩者照抄 `bot.env`）與 `BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id）；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 wrapper 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml` |
 | `migrate.env` | `<owner>` | 只有 bfx-deploy 的 migration 與 operator one-shot 使用 |
 
 `BETTER_AUTH_SECRET` 以 `openssl rand -base64 48` 在主機上產生後直接寫進 `frontend.env`

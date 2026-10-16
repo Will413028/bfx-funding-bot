@@ -1,0 +1,64 @@
+# Operator CLI (bfx_funding_bot.apps.operator_cli), one command per run, started
+# by the operator host wrapper from the deployed host tooling release
+# (/usr/local/lib/bfx-ops/current/ops). The wrapper is step 9c-1d and is not built
+# yet; until it is, this file is only rendered and checked by CI. Never run it with
+# bare `docker compose`: the wrapper is what binds the caller's tailnet identity.
+#
+#   docker compose -p bfx-operator -f <release>/ops/docker-compose.operator.yml \
+#     run --rm operator <subcommand> [args...]
+#
+# Image: the backend digest of the ledger's newest `deployed` row, as a complete
+# `<repository>@sha256:<digest>` reference; never a tag, never built, never pulled
+# here (bfx-deploy already pulled it and keeps it until two releases later).
+#
+# Env: /opt/bfx/runtime/operator.env (root 0600, never in git) holds DATABASE_URL
+# for the bfx_operator role (never the bot's role or the migration owner),
+# BFX_EXCHANGE_ACCOUNT_ID, BFX_OPERATOR_USER_ID and BFX_OPERATOR_TAILNET_USER_ID.
+# The wrapper passes BFX_OPERATOR_TAILNET_IDENTITY on every call (the CLI refuses
+# unless it equals BFX_OPERATOR_TAILNET_USER_ID) and BFX_DEPLOYMENT_ENV from the
+# deployed revision's live.env, both through Compose interpolation of its own
+# environment. BFX_RUNTIME_DIR exists only so CI can render this file without the
+# secret directory; the default must stay /opt/bfx/runtime and the file stays
+# required, so a missing operator.env stops the run instead of starting without it.
+#
+# Hardening mirrors docker-compose.app.yml (read-only rootfs, UID 1000, all
+# capabilities dropped, no-new-privileges, cwd /app, the image's exact interpreter
+# and module, loader/interpreter injection blanked); no ports, no volumes, no
+# tmpfs, only the existing bfx_default network to reach bfx-postgres. CI renders
+# this file and enforces it with compose_policy.py --kind operator.
+
+name: bfx-operator
+
+services:
+  operator:
+    image: ${BFX_BACKEND_IMAGE:?BFX_BACKEND_IMAGE must be a repository@sha256 reference}
+    pull_policy: never
+    entrypoint: ["/app/.venv/bin/python", "-m", "bfx_funding_bot.apps.operator_cli"]
+    user: "1000:1000"
+    working_dir: /app
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    env_file:
+      - path: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/operator.env
+        required: true
+    environment:
+      BFX_OPERATOR_TAILNET_IDENTITY: ${BFX_OPERATOR_TAILNET_IDENTITY:?BFX_OPERATOR_TAILNET_IDENTITY is required}
+      BFX_DEPLOYMENT_ENV: ${BFX_DEPLOYMENT_ENV:?BFX_DEPLOYMENT_ENV is required}
+      BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
+      BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ""
+      PYTHONHOME: ""
+      PYTHONUSERBASE: ""
+      LD_PRELOAD: ""
+      LD_LIBRARY_PATH: ""
+      LD_AUDIT: ""
+    networks:
+      bfx_default: {}
+
+networks:
+  bfx_default:
+    external: true
+    name: bfx_default
