@@ -23,6 +23,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -37,6 +38,7 @@ from bfx_funding_bot.modules.deployments.tables import DeploymentRow
 from bfx_funding_bot.modules.execution import credential_rotation as rotation
 from bfx_funding_bot.modules.execution import operator_commands as commands
 from bfx_funding_bot.modules.execution.credential_rotation import (
+    BOT_SETTLE_WINDOW,
     DEPLOYMENT_IN_PROGRESS_WINDOW,
     CredentialRotationWorker,
     PreparedRotation,
@@ -53,6 +55,8 @@ OPERATOR = "operator-1"
 KEK = bytes(range(32))
 NOW_MS = 1_800_000_000_000
 NOW = datetime.fromtimestamp(NOW_MS / 1000, UTC)
+# This run is past BOT_SETTLE_WINDOW unless a test says otherwise.
+RUN_STARTED_MS = NOW_MS - 3_600_000
 OLD_KEY, OLD_SECRET = "FAKE-OLD-KEY-000000", "FAKE-OLD-SECRET-not-real-000000"
 NEW_KEY, NEW_SECRET = "FAKE-NEW-KEY-111111", "FAKE-NEW-SECRET-not-real-111111"
 USER_ID = 4242
@@ -122,7 +126,7 @@ async def harness(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Harness]:
             verified_at=NOW - timedelta(days=30))
         session.add(old)
         session.add(BotRunRow(run_id=run_id, exchange_account_id=ACCOUNT,
-                              deployment_environment=ENV, started_at_ms=NOW_MS - 1000,
+                              deployment_environment=ENV, started_at_ms=RUN_STARTED_MS,
                               host_name="test", pid=1))
         await session.flush()
         old_id = old.id
@@ -144,7 +148,7 @@ async def harness(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Harness]:
         current_ctx=AccountContext(account_id=str(ACCOUNT),
                                    credentials=Credentials(OLD_KEY, OLD_SECRET)),
         kek_loader=lambda: KEK, restart=lambda: restarts.append(1), clock=lambda: NOW_MS)
-    worker.bind_run(run_id)
+    worker.bind_run(run_id, RUN_STARTED_MS)
     await worker.idle()
     try:
         yield Harness(factory, worker, new_client, current_client, restarts, recorded, old_id,
@@ -405,7 +409,7 @@ async def test_the_recipient_is_published_once_and_a_failure_is_retried(harness,
         current_client=h.current_client, current_ctx=h.worker.current_ctx,
         kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS)
     await worker.idle()  # no run bound yet: nothing to publish
-    worker.bind_run(uuid4())
+    worker.bind_run(uuid4(), RUN_STARTED_MS)
     with caplog.at_level(logging.WARNING):
         await worker.idle()
     assert worker.recipient_id is None
@@ -430,3 +434,145 @@ async def test_the_secret_is_in_no_repr_log_or_alert(harness, caplog) -> None:
         sealed = (await session.execute(select(
             CredentialRotationRequestRow.sealed_credential))).scalar_one()
     assert NEW_SECRET.encode() not in sealed and NEW_KEY.encode() not in sealed
+
+
+# --- a bot that just started (cr-1) ----------------------------------------------------------
+
+@pytest.mark.parametrize(("age", "expected"), [
+    (timedelta(seconds=30), "rejected"),
+    (BOT_SETTLE_WINDOW - timedelta(seconds=1), "rejected"),
+    (BOT_SETTLE_WINDOW + timedelta(seconds=1), "applied"),
+])
+@pytest.mark.asyncio
+async def test_a_bot_still_settling_after_its_start_refuses_to_restart(harness, age, expected) -> None:
+    """A deploy's health check and settle window watch the bot that just started."""
+    h = harness
+    run_id = h.worker._run_id
+    assert run_id is not None
+    h.worker.bind_run(run_id, NOW_MS - int(age.total_seconds() * 1000))
+    row = await _settle(h, await _queue(h))
+    assert row.state == expected
+    if expected == "rejected":
+        assert row.outcome_reason == "bot_recently_started"
+        assert h.new_client.calls == [] and h.restarts == []
+
+
+# --- the venue's answer with HTTP 500 (cr-2) -------------------------------------------------
+
+def _venue(status: int, raw: str | None) -> BitfinexAPIError:
+    return BitfinexAPIError(status, "venue", raw=raw)
+
+
+@pytest.mark.parametrize(("where", "error", "expected"), [
+    ("permissions", _venue(500, '["error",10100,"apikey: digest invalid"]'),
+     ("rejected", "invalid_credentials")),
+    ("new_user", _venue(500, '["error",10100,"apikey: digest invalid"]'),
+     ("rejected", "account_identity_unavailable")),
+    ("current_user", _venue(500, '["error",10100,"apikey: digest invalid"]'),
+     ("rejected", "account_identity_unavailable")),
+    ("permissions", _venue(500, '["error",11010,"ratelimit: error"]'),
+     ("failed", "prepare_failed:BitfinexAPIError")),
+    ("permissions", _venue(500, None), ("failed", "prepare_failed:BitfinexAPIError")),
+    ("permissions", _venue(429, None), ("failed", "prepare_failed:BitfinexAPIError")),
+    ("current_user", _venue(503, "<html>bad gateway</html>"),
+     ("failed", "prepare_failed:BitfinexAPIError")),
+])
+@pytest.mark.asyncio
+async def test_the_venue_refusing_with_http_500_is_an_answer(harness, where, error, expected) -> None:
+    h = harness
+    if where == "permissions":
+        h.new_client.perms = error
+    elif where == "new_user":
+        h.new_client.user_id = error
+    else:
+        h.current_client.user_id = error
+    row = await _settle(h, await _queue(h))
+    assert (row.state, row.outcome_reason) == expected
+    assert await _credentials(h) == [(OLD_KEY, "active")]
+    assert h.restarts == []
+
+
+# --- database errors carry no key (cr-5) -----------------------------------------------------
+
+class UniqueViolationError(Exception):
+    pass
+
+
+def _db_error() -> IntegrityError:
+    return IntegrityError("INSERT INTO exchange_account_credentials (api_key) VALUES ($1)",
+                          {"api_key": NEW_KEY, "secret": NEW_SECRET}, UniqueViolationError("dup"))
+
+
+@pytest.mark.asyncio
+async def test_a_database_error_while_rotating_names_only_its_type(
+        harness, monkeypatch, caplog) -> None:
+    h = harness
+
+    async def broken(*_: Any, **__: Any) -> Any:
+        raise _db_error()
+
+    monkeypatch.setattr(rotation, "rotate_active_credential", broken)
+    # The level the bot logs at (aiosqlite's DEBUG lines echo every parameter).
+    with caplog.at_level(logging.INFO):
+        row = await _settle(h, await _queue(h))
+    assert (row.state, row.outcome_reason) == ("failed", "credential_rotation_failed:UniqueViolationError")
+    assert NEW_KEY not in caplog.text and NEW_SECRET not in caplog.text
+    assert NEW_KEY not in repr(h.alerts)
+    assert await _credentials(h) == [(OLD_KEY, "active")]
+
+
+@pytest.mark.asyncio
+async def test_a_database_error_while_preparing_names_only_its_type(
+        harness, monkeypatch, caplog) -> None:
+    h = harness
+
+    async def broken(*_: Any, **__: Any) -> Any:
+        raise _db_error()
+
+    monkeypatch.setattr(h.worker, "_judge_locally", broken)
+    # The level the bot logs at (aiosqlite's DEBUG lines echo every parameter).
+    with caplog.at_level(logging.INFO):
+        row = await _settle(h, await _queue(h))
+    assert (row.state, row.outcome_reason) == ("failed", "prepare_failed:CredentialStoreError")
+    assert NEW_KEY not in caplog.text and NEW_SECRET not in caplog.text
+    assert "UniqueViolationError" in caplog.text
+
+
+# --- a rotation whose restart was lost (cr-6) ------------------------------------------------
+
+def _process_after(h: Harness, run_started_ms: int) -> CredentialRotationWorker:
+    """Another worker of the same account, as a process whose run started then."""
+    restarts = h.restarts
+    worker = CredentialRotationWorker(
+        session_factory=h.factory, account_id=ACCOUNT, environment=ENV,
+        authority=h.worker.authority, client_factory=lambda: h.new_client,
+        current_client=h.current_client, current_ctx=h.worker.current_ctx,
+        kek_loader=lambda: KEK, restart=lambda: restarts.append(2), clock=lambda: NOW_MS)
+    worker.bind_run(uuid4(), run_started_ms)
+    return worker
+
+
+@pytest.mark.parametrize(("run_started_ms", "restarted"), [
+    # The commit landed during this run but its restart never ran (lost acknowledgement).
+    (RUN_STARTED_MS, True),
+    # The rotation that caused this boot was applied before it started.
+    (NOW_MS + 1, False),
+])
+@pytest.mark.asyncio
+async def test_idle_catches_up_on_a_rotation_applied_during_this_run(
+        harness, run_started_ms, restarted) -> None:
+    h = harness
+    assert (await _settle(h, await _queue(h))).state == "applied"
+    assert h.restarts == [1]
+    worker = _process_after(h, run_started_ms)
+    await worker.idle()
+    await worker.idle()  # once
+    assert h.restarts == ([1, 2] if restarted else [1])
+
+
+@pytest.mark.asyncio
+async def test_the_restart_is_requested_once_per_process(harness) -> None:
+    h = harness
+    assert (await _settle(h, await _queue(h))).state == "applied"
+    await h.worker.idle()
+    assert h.restarts == [1]

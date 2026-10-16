@@ -43,6 +43,8 @@ KEK = bytes(range(32))
 OLD_KEY, OLD_SECRET = "FAKE-OLD-KEY-000000", "FAKE-OLD-SECRET-not-real-000000"
 NEW_KEY, NEW_SECRET = "FAKE-NEW-KEY-111111", "FAKE-NEW-SECRET-not-real-111111"
 NOW_MS = 1_800_000_000_000
+# The run started long before the worker's clock: past BOT_SETTLE_WINDOW.
+RUN_STARTED_MS = 1
 FUNDING_ONLY = KeyPermissions(scopes={"funding": (True, True), "withdraw": (False, False)})
 
 
@@ -181,7 +183,7 @@ async def bot(db):
         current_ctx=AccountContext(account_id=str(ACCOUNT),
                                    credentials=Credentials(OLD_KEY, OLD_SECRET)),
         kek_loader=lambda: KEK, restart=lambda: restarts.append(1), clock=lambda: NOW_MS)
-    worker.bind_run(db.run_id)
+    worker.bind_run(db.run_id, RUN_STARTED_MS)
     # As bfx_bot: the recipient insert is this role's own grant.
     await worker.idle()
     assert worker.recipient_id is not None
@@ -335,7 +337,7 @@ async def test_a_request_sealed_to_a_previous_boot_is_stale(db, operator_env, bo
         authority=bot.worker.authority, client_factory=lambda: bot.client,
         current_client=FakeClient(), current_ctx=bot.worker.current_ctx,
         kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS)
-    restarted.bind_run(db.run_id)
+    restarted.bind_run(db.run_id, RUN_STARTED_MS)
     await restarted.idle()
     assert await restarted.tick() is True
     view = (await cli("request", "credential", queued["request_id"]))[1]

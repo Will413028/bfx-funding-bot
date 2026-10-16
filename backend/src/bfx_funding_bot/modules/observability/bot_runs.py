@@ -70,6 +70,8 @@ class BotRunRecord:
         self.exchange_account_id = exchange_account_id
         self.deployment_environment = deployment_environment
         self.run_id = uuid4()
+        # When this run's row says it started (set by ``start``).
+        self.started_at_ms: int | None = None
         self._environ = environ
         self._clock_ms = clock_ms
         self.started = False
@@ -100,6 +102,7 @@ class BotRunRecord:
 
     async def _start(self) -> list[UncleanRun]:
         now = self._clock_ms()
+        self.started_at_ms = now
         async with self._session_factory.begin() as session:
             open_runs = (await session.scalars(
                 select(BotRunRow).where(

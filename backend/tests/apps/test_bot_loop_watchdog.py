@@ -58,10 +58,12 @@ class _RunRecord:
         self.scope = (exchange_account_id, deployment_environment)
         self.run_id = "run-1"
         self.started = False
+        self.started_at_ms: int | None = None
 
     async def start(self) -> list[Any]:
         _RunRecord.events.append("start")
         self.started = _RunRecord.start_succeeds
+        self.started_at_ms = 123 if self.started else None
         return []
 
     async def finish(self, reason: str) -> None:
@@ -201,11 +203,11 @@ async def test_a_writer_lock_release_that_never_returns_does_not_hold_the_exit(
 
 class _Rotation:
     def __init__(self) -> None:
-        self.bound: list[str] = []
+        self.bound: list[tuple[str, int]] = []
 
-    def bind_run(self, run_id: str) -> None:
+    def bind_run(self, run_id: str, started_at_ms: int) -> None:
         _RunRecord.events.append("bind_run")
-        self.bound.append(run_id)
+        self.bound.append((run_id, started_at_ms))
 
 
 @pytest.mark.parametrize("start_succeeds", [True, False])
@@ -222,7 +224,7 @@ async def test_the_rotation_worker_is_bound_to_the_run_once_it_is_recorded(
     monkeypatch.setattr(bot, "build_daemon", build_daemon)
     await bot._run()
     if start_succeeds:
-        assert rotation.bound == ["run-1"]
+        assert rotation.bound == [("run-1", 123)]
         assert _RunRecord.events[:3] == ["start", "bind_run", "run"]
     else:
         assert rotation.bound == []

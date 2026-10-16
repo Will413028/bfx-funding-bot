@@ -1141,8 +1141,9 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
     await run_record.start()
     # The rotation worker publishes its recipient key under this run: a CLI only seals to
     # the key of a run that started and has not ended.
-    if run_record.started and daemon.credential_rotation is not None:
-        daemon.credential_rotation.bind_run(run_record.run_id)
+    if (run_record.started and run_record.started_at_ms is not None
+            and daemon.credential_rotation is not None):
+        daemon.credential_rotation.bind_run(run_record.run_id, run_record.started_at_ms)
     # How this run ends, recorded after the drain. None (a BaseException other than
     # those below) leaves the row open: the next boot reports it, as it does for the
     # exits that never reach here (loop watchdog, OOM kill, SIGKILL).

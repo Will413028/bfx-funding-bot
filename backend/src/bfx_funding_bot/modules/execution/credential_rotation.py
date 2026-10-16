@@ -36,6 +36,7 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.sealed_credential import (
@@ -47,7 +48,11 @@ from bfx_funding_bot.core.sealed_credential import (
     open_sealed,
 )
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
-from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
+from bfx_funding_bot.external.bitfinex.errors import (
+    BitfinexAPIError,
+    BitfinexShapeError,
+    venue_did_not_answer,
+)
 from bfx_funding_bot.modules.accounts.rotation_tables import (
     CredentialRotationRecipientRow,
     CredentialRotationRequestRow,
@@ -80,8 +85,16 @@ log = logging.getLogger(__name__)
 # (a ``started`` row with no terminal row, never retried) blocks rotation for at most this
 # long.
 DEPLOYMENT_IN_PROGRESS_WINDOW = timedelta(minutes=15)
+# How long after this run started a rotation is refused. bfx-deploy writes its ``started``
+# row only after backup, restore test and migrations, yet stamps it with the attempt's
+# start, so the window above can lapse while the new bot is still being health-checked
+# and settled (bot health 300s + settle 60s by default, deploy/vm/ops/bfx_deploy.py:570-574,
+# plus margin). The bot being settled is always the one that just started; after any
+# restart a rotation waits this long.
+BOT_SETTLE_WINDOW = timedelta(minutes=10)
 
 DEPLOYMENT_IN_PROGRESS = "deployment_in_progress"
+BOT_RECENTLY_STARTED = "bot_recently_started"
 RECIPIENT_KEY_STALE = "recipient_key_stale"
 SEALED_PAYLOAD_INVALID = "sealed_payload_invalid"
 CREDENTIAL_REUSED = "credential_reused"
@@ -140,9 +153,21 @@ class PreparedRotation:
     verdict: Verified | Refused
 
 
-def _transient(exc: BitfinexAPIError) -> bool:
-    # The vault's rule: transport (0), rate limit and server errors say nothing about the key.
-    return exc.status_code == 0 or exc.status_code == 429 or exc.status_code >= 500
+class CredentialStoreError(RuntimeError):
+    """A database error while reading or writing credentials, named by its DBAPI type only.
+
+    SQLAlchemy's own message carries the statement's parameters -- the new API key among
+    them -- and the driver logs failures with their traceback; this one carries neither.
+    """
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(kind)
+        self.kind = kind
+
+
+def _store_error(exc: StatementError) -> CredentialStoreError:
+    return CredentialStoreError(type(exc.orig).__name__ if exc.orig is not None
+                                else type(exc).__name__)
 
 
 class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRow, PreparedRotation]):
@@ -178,22 +203,74 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
         self.kek_loader = kek_loader
         self.restart = restart
         self._run_id: UUID | None = None
+        self._run_started_ms: int | None = None
         self._recipient: tuple[UUID, Recipient] | None = None
+        self._restart_requested = False
 
     # ------------------------------------------------------------- recipient
 
-    def bind_run(self, run_id: UUID) -> None:
-        """This process's ``bot_runs`` row; the recipient key is published under it."""
+    def bind_run(self, run_id: UUID, started_at_ms: int) -> None:
+        """This process's ``bot_runs`` row; the recipient key is published under it, and no
+        rotation applies until the run is :data:`BOT_SETTLE_WINDOW` old."""
         self._run_id = run_id
+        self._run_started_ms = started_at_ms
+
+    def failure_reason(self, exc: BaseException) -> str:
+        if isinstance(exc, CredentialStoreError):
+            return f"{self.name}_failed:{exc.kind}"
+        return super().failure_reason(exc)
+
+    def _request_restart(self, event: str, request_id: UUID) -> None:
+        if self._restart_requested:
+            return
+        self._restart_requested = True
+        log.info("%s request_id=%s", event, request_id)
+        self.restart()
 
     @property
     def recipient_id(self) -> UUID | None:
         return None if self._recipient is None else self._recipient[0]
 
     async def idle(self) -> None:
-        """Publish this run's recipient key once; a failure is retried on the next tick."""
-        if self._run_id is None or self._recipient is not None:
+        """Publish this run's recipient key once (a failure is retried on the next tick), then
+        catch up on a rotation that committed without its restart."""
+        if self._run_id is None:
             return
+        if self._recipient is None:
+            await self._publish_recipient()
+        await self._catch_up_restart()
+
+    async def _catch_up_restart(self) -> None:
+        """Restart when the active credential came from a rotation applied during this run.
+
+        ``committed`` restarts after an applied rotation; when the commit landed but its
+        acknowledgement was lost, the driver marks nothing and calls no hook, so the new
+        credential would wait for an unrelated restart. The rotation that caused this boot
+        was applied before the run started and is left alone.
+        """
+        if self._restart_requested or self._run_started_ms is None:
+            return
+        try:
+            async with self.session_factory() as session:
+                applied = (await session.execute(select(
+                    CredentialRotationRequestRow.request_id,
+                    CredentialRotationRequestRow.processed_at_ms,
+                ).join(ExchangeAccountCredential,
+                       ExchangeAccountCredential.operator_request_id
+                       == CredentialRotationRequestRow.request_id).where(
+                    ExchangeAccountCredential.exchange_account_id == self.account_id,
+                    ExchangeAccountCredential.venue == "bitfinex",
+                    ExchangeAccountCredential.lifecycle_status == "active",
+                    CredentialRotationRequestRow.state == APPLIED,
+                ).limit(1))).first()
+        except Exception as exc:
+            log.warning("credential_rotation_catch_up_failed reason=%s", type(exc).__name__)
+            return
+        if (applied is not None and applied.processed_at_ms is not None
+                and applied.processed_at_ms >= self._run_started_ms):
+            self._request_restart("credential_rotation_restart_caught_up", applied.request_id)
+
+    async def _publish_recipient(self) -> None:
         recipient_id, recipient = uuid4(), generate_recipient()
         try:
             async with self.session_factory.begin() as session:
@@ -212,10 +289,13 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
 
     async def prepare(self, row_id: UUID) -> PreparedRotation:
         # What the database says first, in a session closed before Bitfinex is called.
-        async with self.session_factory() as session:
-            row = await session.scalar(self._scoped(select(self.model)).where(
-                self.model.request_id == row_id))
-            local = await self._judge_locally(session, row)
+        try:
+            async with self.session_factory() as session:
+                row = await session.scalar(self._scoped(select(self.model)).where(
+                    self.model.request_id == row_id))
+                local = await self._judge_locally(session, row)
+        except StatementError as exc:
+            raise _store_error(exc) from None
         if isinstance(local, Refused):
             return PreparedRotation(row_id, local)
         return PreparedRotation(row_id, await self._verify(local))
@@ -227,6 +307,10 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
             return Refused(REQUEST_NOT_PENDING)
         if await self._deployment_in_progress(session):
             return Refused(DEPLOYMENT_IN_PROGRESS)
+        if self._run_started_ms is None or (
+                self.clock() - self._run_started_ms
+                < BOT_SETTLE_WINDOW.total_seconds() * 1000):
+            return Refused(BOT_RECENTLY_STARTED)
         if self._recipient is None or row.recipient_id != self._recipient[0]:
             return Refused(RECIPIENT_KEY_STALE)
         try:
@@ -246,7 +330,9 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
         return opened
 
     async def _verify(self, opened: UnsealedCredential) -> Verified | Refused:
-        """Bitfinex's view of the new key. Transient errors raise (``failed``, resend)."""
+        """Bitfinex's view of the new key. When the venue did not answer (transport, rate
+        limit, maintenance, a 5xx without its error body) this raises (``failed``, resend);
+        its answer, even with HTTP 500 (``["error", 10100, ...]``), is a refusal."""
         ctx = AccountContext(account_id=str(self.account_id),
                              credentials=Credentials(api_key=opened.api_key,
                                                      api_secret=opened.api_secret))
@@ -254,7 +340,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
         try:
             perms = await client.get_key_permissions(ctx=ctx)
         except BitfinexAPIError as exc:
-            if _transient(exc):
+            if venue_did_not_answer(exc):
                 raise
             return Refused(INVALID_CREDENTIALS)
         refusal = permission_error(perms)
@@ -264,7 +350,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
             new_user = await client.get_user_id(ctx=ctx)
             current_user = await self.current_client.get_user_id(ctx=self.current_ctx)
         except BitfinexAPIError as exc:
-            if _transient(exc):
+            if venue_did_not_answer(exc):
                 raise
             return Refused(ACCOUNT_IDENTITY_UNAVAILABLE)
         except BitfinexShapeError:
@@ -302,15 +388,22 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
         if isinstance(verdict, Refused):
             raise RequestRejected(verdict.code)
         try:
-            credential = await rotate_active_credential(
+            credential = await self._rotate(session, row, verdict)
+        except ActiveCredentialChangedError as exc:
+            raise RequestRejected(ACTIVE_CREDENTIAL_CHANGED) from exc
+        return Outcome(APPLIED, f"rotated: credential {credential.id}", detail=credential.id)
+
+    async def _rotate(self, session: AsyncSession, row: CredentialRotationRequestRow,
+                      verdict: Verified) -> ExchangeAccountCredential:
+        try:
+            return await rotate_active_credential(
                 session, exchange_account_id=self.account_id,
                 replaces_credential_id=row.replaces_credential_id,
                 operator_request_id=row.request_id, label=row.label, api_key=verdict.api_key,
                 api_secret=verdict.secret.reveal(), verified_at=verdict.verified_at,
                 kek=self.kek_loader())
-        except ActiveCredentialChangedError as exc:
-            raise RequestRejected(ACTIVE_CREDENTIAL_CHANGED) from exc
-        return Outcome(APPLIED, f"rotated: credential {credential.id}", detail=credential.id)
+        except StatementError as exc:
+            raise _store_error(exc) from None
 
     async def committed(self, row: CredentialRotationRequestRow, outcome: Outcome) -> None:
         fields: dict[str, Any] = {"request_id": str(row.request_id),
@@ -322,8 +415,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
             finally:
                 # Also when the alert fails: the new credential is the active one now, and
                 # only a boot loads it.
-                log.info("credential_rotation_restart request_id=%s", row.request_id)
-                self.restart()
+                self._request_restart("credential_rotation_restart", row.request_id)
         elif outcome.state == REJECTED:
             alerts.emit(alerts.CREDENTIAL_ROTATION_REJECTED, level=alerts.WARNING,
                         reason=outcome.reason, **fields)
@@ -333,8 +425,10 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
 
 
 __all__ = [
+    "BOT_SETTLE_WINDOW",
     "DEPLOYMENT_IN_PROGRESS_WINDOW",
     "CredentialRotationWorker",
+    "CredentialStoreError",
     "KeyClient",
     "PreparedRotation",
     "Refused",
