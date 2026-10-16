@@ -66,7 +66,7 @@ class SealContext:
 class Recipient:
     """One run's key pair; the private half never leaves this process."""
 
-    private_key: X25519PrivateKey = field(repr=False)
+    private_half: X25519PrivateKey = field(repr=False)
     public_key: bytes
 
 
@@ -79,7 +79,7 @@ class UnsealedCredential:
 def generate_recipient() -> Recipient:
     private_key = X25519PrivateKey.generate()
     public = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    return Recipient(private_key=private_key, public_key=public)
+    return Recipient(private_half=private_key, public_key=public)
 
 
 def _check_field(value: object) -> str:

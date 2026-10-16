@@ -314,7 +314,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
         if self._recipient is None or row.recipient_id != self._recipient[0]:
             return Refused(RECIPIENT_KEY_STALE)
         try:
-            opened = open_sealed(row.sealed_credential, private_key=self._recipient[1].private_key,
+            opened = open_sealed(row.sealed_credential, private_key=self._recipient[1].private_half,
                                  context=SealContext(self.account_id, self.environment,
                                                      row.recipient_id, row.request_id))
         except SealedPayloadError:

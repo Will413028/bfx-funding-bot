@@ -42,7 +42,7 @@ def test_a_sealed_credential_opens_for_its_recipient_and_context() -> None:
     sealed = seal(KEY, SECRET, public_key=recipient.public_key, context=_context())
     assert SEALED_MIN_BYTES <= len(sealed) <= SEALED_MAX_BYTES
     assert KEY.encode() not in sealed and SECRET.encode() not in sealed
-    opened = open_sealed(sealed, private_key=recipient.private_key, context=_context())
+    opened = open_sealed(sealed, private_key=recipient.private_half, context=_context())
     assert (opened.api_key, opened.api_secret) == (KEY, SECRET)
     assert SECRET not in repr(opened) and KEY not in repr(opened)
     assert "private_key" not in repr(recipient)
@@ -59,14 +59,14 @@ def test_any_other_context_does_not_open(change: dict[str, Any]) -> None:
     recipient = generate_recipient()
     sealed = seal(KEY, SECRET, public_key=recipient.public_key, context=_context())
     with pytest.raises(SealedPayloadError) as refused:
-        open_sealed(sealed, private_key=recipient.private_key, context=_context(**change))
+        open_sealed(sealed, private_key=recipient.private_half, context=_context(**change))
     assert refused.value.code == "sealed_payload_undecryptable"
 
 
 def test_another_recipient_does_not_open() -> None:
     sealed = seal(KEY, SECRET, public_key=generate_recipient().public_key, context=_context())
     with pytest.raises(SealedPayloadError):
-        open_sealed(sealed, private_key=generate_recipient().private_key, context=_context())
+        open_sealed(sealed, private_key=generate_recipient().private_half, context=_context())
 
 
 @pytest.mark.parametrize("position", [0, 31, 40, -1])
@@ -75,7 +75,7 @@ def test_a_tampered_byte_does_not_open(position: int) -> None:
     sealed = bytearray(seal(KEY, SECRET, public_key=recipient.public_key, context=_context()))
     sealed[position] ^= 0x01
     with pytest.raises(SealedPayloadError):
-        open_sealed(bytes(sealed), private_key=recipient.private_key, context=_context())
+        open_sealed(bytes(sealed), private_key=recipient.private_half, context=_context())
 
 
 @pytest.mark.parametrize(("api_key", "api_secret"), [
@@ -101,7 +101,7 @@ def test_errors_never_carry_the_plaintext() -> None:
     recipient = generate_recipient()
     sealed = seal(KEY, SECRET, public_key=recipient.public_key, context=_context())
     with pytest.raises(SealedPayloadError) as refused:
-        open_sealed(sealed, private_key=recipient.private_key, context=_context(request_id=uuid4()))
+        open_sealed(sealed, private_key=recipient.private_half, context=_context(request_id=uuid4()))
     rendered = f"{refused.value!r} {refused.value} {refused.value.__cause__!r} {refused.value.__context__!r}"
     assert SECRET not in rendered and KEY not in rendered
     assert refused.value.__cause__ is None
@@ -110,7 +110,7 @@ def test_errors_never_carry_the_plaintext() -> None:
 @pytest.mark.parametrize("size", [0, SEALED_MIN_BYTES - 1, SEALED_MAX_BYTES + 1])
 def test_a_payload_outside_the_size_bound_is_refused(size: int) -> None:
     with pytest.raises(SealedPayloadError) as refused:
-        open_sealed(b"\x00" * size, private_key=generate_recipient().private_key,
+        open_sealed(b"\x00" * size, private_key=generate_recipient().private_half,
                     context=_context())
     assert refused.value.code == "sealed_payload_size"
 
