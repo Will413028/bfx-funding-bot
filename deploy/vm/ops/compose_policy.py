@@ -30,6 +30,16 @@ image with the app's hardening, the reports bind mount as its only writable
 host path, a small /tmp tmpfs, no env files (the runner passes exactly the keys
 the steps read) and no published ports.
 
+`--kind operator` checks deploy/vm/ops/docker-compose.operator.yml with the
+app's two renderings (it has an env file): one one-shot service whose entrypoint
+is exactly the image's operator CLI, the app's hardening, no ports, volumes or
+tmpfs, exactly the environment keys the wrapper supplies plus the blanked
+injection variables (so DATABASE_URL can only come from operator.env, the
+bfx_operator role), each wrapper value a required `${VAR:?...}` interpolation,
+and exactly one required `${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/operator.env`.
+The environment-key check assumes the stand-in operator.env is empty, as in CI:
+Compose 2.38 folds env file contents into the interpolated `environment`.
+
 Standard library only; exits 1 and lists every violation.
 """
 
@@ -71,6 +81,20 @@ WEEKLY_TMPFS = ["/tmp:rw,noexec,nosuid,size=64m"]
 WEEKLY_REPORTS = {"type": "bind", "source": "/home/ubuntu/bfx/reports", "target": "/reports"}
 WEEKLY_FORBIDDEN_KEYS = (*(k for k in FORBIDDEN_KEYS if k not in ("volumes", "tmpfs")),
                          "container_name", "env_file", "ports", "healthcheck")
+OPERATOR_PROJECT = "bfx-operator"
+OPERATOR_SERVICE = "operator"
+OPERATOR_ENTRYPOINT = ["/app/.venv/bin/python", "-m", "bfx_funding_bot.apps.operator_cli"]
+# environment key -> the variable the wrapper must supply (a `${VAR:?...}` reference)
+OPERATOR_INTERPOLATED = {
+    "BFX_OPERATOR_TAILNET_IDENTITY": "BFX_OPERATOR_TAILNET_IDENTITY",
+    "BFX_DEPLOYMENT_ENV": "BFX_DEPLOYMENT_ENV",
+    "BFX_IMAGE_DIGEST": "BFX_BACKEND_DIGEST",
+    "BFX_SOURCE_REVISION": "BFX_SOURCE_REVISION",
+}
+OPERATOR_ENV_KEYS = frozenset({*OPERATOR_INTERPOLATED, "PYTHONDONTWRITEBYTECODE",
+                               *LOADER_INJECTION, *PYTHON_INJECTION})
+OPERATOR_ENV_FILES = {OPERATOR_SERVICE: (f"/{RUNTIME_REFERENCE}operator.env",)}
+OPERATOR_FORBIDDEN_KEYS = (*FORBIDDEN_KEYS, "container_name", "ports", "command", "healthcheck")
 FRONTEND_PORTS = [{"mode": "ingress", "host_ip": "127.0.0.1", "target": 3000,
                    "published": "3001", "protocol": "tcp"}]
 
@@ -184,13 +208,74 @@ def weekly_violations(rendered: Mapping[str, Any]) -> list[str]:
     return found
 
 
-def env_file_violations(uninterpolated: Mapping[str, Any]) -> list[str]:
-    """Each service's env files, from `config --no-interpolate` (version-stable)."""
+def operator_violations(rendered: Mapping[str, Any]) -> list[str]:
+    """The operator CLI file (deploy/vm/ops/docker-compose.operator.yml), interpolated."""
+    found = []
+    if rendered.get("name") != OPERATOR_PROJECT:
+        found.append("project_name")
+    services = rendered.get("services") or {}
+    if set(services) != {OPERATOR_SERVICE}:
+        found.append("services")
+    if rendered.get("volumes"):
+        found.append("volumes")
+    network = (rendered.get("networks") or {}).get(NETWORK) or {}
+    if set(rendered.get("networks") or {}) != {NETWORK} or network.get("external") is not True \
+            or network.get("name") != NETWORK:
+        found.append("external_network")
+    spec = services.get(OPERATOR_SERVICE)
+    if not isinstance(spec, dict):
+        return found
+    env = spec.get("environment") or {}
+
+    def need(ok: bool, name: str) -> None:
+        if not ok:
+            found.append(f"{OPERATOR_SERVICE}:{name}")
+
+    image = str(spec.get("image", ""))
+    need("@sha256:" in image and ":main" not in image, "image_digest_reference")
+    need(spec.get("pull_policy") == "never", "pull_policy_never")
+    need(spec.get("entrypoint") == OPERATOR_ENTRYPOINT, "exact_entrypoint")
+    need(spec.get("user") == "1000:1000", "user")
+    need(spec.get("working_dir") == "/app", "workdir")
+    need(spec.get("read_only") is True, "read_only")
+    need(spec.get("cap_drop") == ["ALL"], "cap_drop_all")
+    need(spec.get("security_opt") == ["no-new-privileges:true"], "no_new_privileges")
+    need(spec.get("restart") == "no", "restart")
+    for key in OPERATOR_FORBIDDEN_KEYS:
+        need(not spec.get(key), f"no_{key}")
+    need(set(spec.get("networks") or {}) == {NETWORK}, "network")
+    need(set(env) == OPERATOR_ENV_KEYS, "environment_keys")
+    need(all(env.get(key) for key in OPERATOR_INTERPOLATED), "runtime_env")
+    need(all(env.get(key) == "" for key in LOADER_INJECTION), "loader_injection_blanked")
+    need(all(env.get(key) == "" for key in PYTHON_INJECTION)
+         and env.get("PYTHONDONTWRITEBYTECODE") == "1", "interpreter_injection_blanked")
+    return found
+
+
+def operator_uninterpolated_violations(uninterpolated: Mapping[str, Any]) -> list[str]:
+    """The operator file's env file and required wrapper variables, from `--no-interpolate`."""
+    found = env_file_violations(uninterpolated, OPERATOR_ENV_FILES)
+    spec = (uninterpolated.get("services") or {}).get(OPERATOR_SERVICE) or {}
+    env = spec.get("environment") or {}
+    if not all(str(env.get(key, "")).startswith("${" + variable + ":?")
+               for key, variable in OPERATOR_INTERPOLATED.items()):
+        found.append(f"{OPERATOR_SERVICE}:required_interpolation")
+    return found
+
+
+def env_file_violations(
+    uninterpolated: Mapping[str, Any],
+    wanted_files: Mapping[str, tuple[str, ...]] = ENV_FILES,
+) -> list[str]:
+    """Each service's env files, from `config --no-interpolate` (version-stable).
+
+    `wanted_files` maps each service to the path suffixes of its env files, in
+    order; the default is the app file's.
+    """
     found = []
     services = uninterpolated.get("services") or {}
-    for service in SERVICES:
+    for service, wanted in wanted_files.items():
         entries = (services.get(service) or {}).get("env_file") or []
-        wanted = ENV_FILES[service]
         paths = [str(e.get("path", "")) if isinstance(e, dict) else "" for e in entries]
         if len(paths) != len(wanted) or not all(
                 path.endswith(end) for path, end in zip(paths, wanted, strict=False)):
@@ -221,19 +306,20 @@ def violations(rendered: Mapping[str, Any]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check a rendered VM compose file.")
-    parser.add_argument("--kind", choices=("app", "weekly-report"), default="app",
+    parser.add_argument("--kind", choices=("app", "weekly-report", "operator"), default="app",
                         help="app: deploy/vm/docker-compose.app.yml (default); weekly-report: "
-                             "deploy/vm/ops/docker-compose.weekly-report.yml")
+                             "deploy/vm/ops/docker-compose.weekly-report.yml; operator: "
+                             "deploy/vm/ops/docker-compose.operator.yml")
     parser.add_argument("--uninterpolated",
                         help="JSON of `docker compose config --no-interpolate --format json` "
-                             "(required for --kind app)")
+                             "(required for --kind app and --kind operator)")
     args = parser.parse_args(argv)
-    if args.kind == "app" and not args.uninterpolated:
-        parser.error("--uninterpolated is required for --kind app")
+    if args.kind in ("app", "operator") and not args.uninterpolated:
+        parser.error(f"--uninterpolated is required for --kind {args.kind}")
     try:
         rendered = json.load(sys.stdin)
         uninterpolated = None
-        if args.kind == "app":
+        if args.kind in ("app", "operator"):
             with open(args.uninterpolated, encoding="utf-8") as stream:
                 uninterpolated = json.load(stream)
     except (OSError, ValueError):
@@ -241,6 +327,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if uninterpolated is None:
         found = weekly_violations(rendered)
+    elif args.kind == "operator":
+        found = operator_violations(rendered) + operator_uninterpolated_violations(uninterpolated)
     else:
         found = violations(rendered) + env_file_violations(uninterpolated)
     for item in found:

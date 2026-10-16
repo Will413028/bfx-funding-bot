@@ -108,6 +108,25 @@ jobs:
         run: |
           docker compose -f deploy/vm/ops/docker-compose.weekly-report.yml config --format json \
             | python3 deploy/vm/ops/compose_policy.py --kind weekly-report
+      # The operator CLI's one-shot container (the 9c-1d host wrapper supplies these
+      # variables on the VM); it has an env file, so it is checked on both
+      # renderings like the app file, with an empty stand-in operator.env.
+      - name: Compose hardening policy (operator CLI)
+        env:
+          BFX_BACKEND_IMAGE: ghcr.io/ci/backend@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          BFX_BACKEND_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+          BFX_SOURCE_REVISION: ${{ github.sha }}
+          BFX_OPERATOR_TAILNET_IDENTITY: ci-operator@example.test
+          BFX_DEPLOYMENT_ENV: prod
+        run: |
+          BFX_RUNTIME_DIR="$(mktemp -d)"
+          export BFX_RUNTIME_DIR
+          touch "$BFX_RUNTIME_DIR/operator.env"
+          docker compose -f deploy/vm/ops/docker-compose.operator.yml config --no-interpolate --format json \
+            > "$RUNNER_TEMP/operator-uninterpolated.json"
+          docker compose -f deploy/vm/ops/docker-compose.operator.yml config --no-env-resolution --format json \
+            | python3 deploy/vm/ops/compose_policy.py --kind operator \
+                --uninterpolated "$RUNNER_TEMP/operator-uninterpolated.json"
 
   backend_unit:
     name: Backend (Python) — unit

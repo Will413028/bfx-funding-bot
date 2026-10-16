@@ -763,6 +763,11 @@ resume／kill（`trading_control_requests`）與幣別 enable／disable（`capit
 failed＋根因）記回請求列，套用產生的效果列（trading state、policy revision、cancel-all audit、journal）帶 `operator_request_id` 指回請求；寫不進去的請求另以獨立交易標 failed，連這都失敗就由本 process 跳過，不擋佇列。
 需要在鎖外觀測的資料以 `NeedsPreparation` → `prepare` 取得後再 apply。清單列帶最新一筆請求，前端只在有 pending 時輪詢清單。webapi 對 ledger
 表零寫權限，授權與收回都在 migration（`1c435a35dcb4`、`5b1e7c9d2a40`、`7d2a9c4e6b13`、`5e820d6dc7da`）。
+請求的驗證與排入只有一份：`execution/operator_commands.py`，webapi handler 與 operator CLI（`apps/operator_cli.py`）都是它的 adapter。
+CLI 以 one-off compose service `bfx-operator`（`deploy/vm/ops/docker-compose.operator.yml`）執行，連線用專屬 role `bfx_operator`：
+migration `4ab02765a34b` 的精確 allowlist，只有三個 outbox 請求欄位的 INSERT 與驗證所需的讀取，沒有 UPDATE／DELETE（`test_operator_privilege_allowlist.py`）。
+CLI 開頭比對 wrapper 傳入的 tailnet 身分與 `operator.env` 設定的值，不符就 exit 77、不連 DB；之後同 webapi 檢查 schema head 與 ledger authority。
+請求一律以 `BFX_OPERATOR_USER_ID` 送出（9d 前），daemon 照樣以 `operator_authorized` 重驗。
 靜態 admin token 不能 resume live。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 
