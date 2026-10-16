@@ -1,11 +1,17 @@
 # Operator CLI (bfx_funding_bot.apps.operator_cli), one command per run, started
-# by the operator host wrapper from the deployed host tooling release
-# (/usr/local/lib/bfx-ops/current/ops). The wrapper is step 9c-1d and is not built
-# yet; until it is, this file is only rendered and checked by CI. Never run it with
-# bare `docker compose`: the wrapper is what binds the caller's tailnet identity.
+# by the host wrapper bfx-op (bfx_op.py next to this file, installed as
+# /usr/local/sbin/bfx-op) from the deployed host tooling release
+# (/usr/local/lib/bfx-ops/current/ops):
+#
+#   sudo bfx-op <subcommand> [args...]      # inside a Tailscale SSH session
+#
+# which runs
 #
 #   docker compose -p bfx-operator -f <release>/ops/docker-compose.operator.yml \
-#     run --rm operator <subcommand> [args...]
+#     run --rm -T operator <subcommand> [args...]
+#
+# Never run it with bare `docker compose`: the wrapper is what binds the caller's
+# tailnet identity and keeps the journal record.
 #
 # Image: the backend digest of the ledger's newest `deployed` row, as a complete
 # `<repository>@sha256:<digest>` reference; never a tag, never built, never pulled

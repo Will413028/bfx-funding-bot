@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# First install of the host tooling for digest deploys, alerts and DR checks.
+# First install of the host tooling for digest deploys, alerts, DR checks and the
+# operator CLI wrapper.
 #
-#   sudo deploy/vm/ops/install.sh        # from the clean VM mirror, at the release to install
+#   sudo deploy/vm/ops/install.sh        # from a clean checkout at the release to install
+#
+# On a running host, run it from the DR checkout of the deployed release
+# (/home/ubuntu/bfx-releases/current) with bfx-deploy.timer stopped and
+# bfx-deploy.service inactive. Re-run it whenever a release adds an entry point in
+# /usr/local/sbin or changes the sudoers drop-in: bfx-deploy never writes those.
 #
 # Lays out exactly what bfx-deploy maintains afterwards (it re-installs from each
 # release it deploys, effective from its next run), so this script is needed once:
@@ -9,7 +15,8 @@
 #   /usr/local/lib/bfx-ops/releases/<rev>/{ops,systemd}   root-owned, from git objects
 #   /usr/local/lib/bfx-ops/releases/<rev>/ops/.venv       uv sync --frozen (ops/uv.lock)
 #   /usr/local/lib/bfx-ops/current -> releases/<rev>
-#   /usr/local/sbin/bfx-deploy, bfx-notify                 wrappers into current
+#   /usr/local/sbin/bfx-deploy, bfx-notify, bfx-op          wrappers into current
+#   /etc/sudoers.d/bfx-op                                   sudo keeps SSH_CONNECTION for bfx-op
 #   /home/ubuntu/bfx-releases/<rev>, current -> <rev>       clean git worktree (DR scripts)
 #   /etc/systemd/system/<systemd/managed-units>            copied, then daemon-reload
 #
@@ -72,6 +79,16 @@ write_wrapper() {
 }
 write_wrapper bfx-deploy bfx_deploy.py
 write_wrapper bfx-notify bfx_notify.py
+write_wrapper bfx-op bfx_op.py
+
+# bfx-op reads the caller's tailnet peer from SSH_CONNECTION, which sudo's env_reset
+# drops; keep exactly that variable, for exactly that command.
+SUDOERS_DROPIN=/etc/sudoers.d/bfx-op
+sudoers_temporary=$(mktemp)
+printf 'Defaults!%s env_keep += "SSH_CONNECTION"\n' "$SBIN/bfx-op" >"$sudoers_temporary"
+visudo -cqf "$sudoers_temporary"
+install -o root -g root -m 0440 "$sudoers_temporary" "$SUDOERS_DROPIN"
+rm -f -- "$sudoers_temporary"
 
 install -d -o "$MIRROR_USER" -g "$MIRROR_USER" -m 0755 "$DR_ROOT"
 if [[ ! -d "$DR_ROOT/$REV" ]]; then

@@ -157,13 +157,25 @@ bfx-deploy 啟動前會檢查，違反即 `precheck` 失敗：
 
 ## 4. 主機工具與 DR 腳本的版本
 
-bfx-deploy 自己維護主機上的工具，不再依賴手動 `install.sh`（它只用於第一次安裝）：
+bfx-deploy 自己維護主機上的工具，不再依賴手動 `install.sh`。例外：bfx-deploy 不寫 `/usr/local/sbin`
+的入口（`bfx-deploy`、`bfx-notify`、`bfx-op`）與 `/etc/sudoers.d/bfx-op`，所以 release 新增 sbin 入口或
+改了 sudoers drop-in 時，要在部署成功後重跑一次 `install.sh`：
+
+```bash
+sudo systemctl stop bfx-deploy.timer
+systemctl is-active bfx-deploy.service          # 必須是 inactive，否則等它跑完
+git -C /home/ubuntu/bfx-releases/current rev-parse HEAD   # 等於 ledger 最新 deployed 的 revision
+sudo /home/ubuntu/bfx-releases/current/deploy/vm/ops/install.sh
+sudo systemctl start bfx-deploy.timer
+```
+
+從 DR worktree 跑（它就是已部署 revision 的乾淨 checkout），不要為此 checkout mirror。
 
 | 路徑 | 內容 | 何時更新 |
 |---|---|---|
 | `/usr/local/lib/bfx-ops/releases/<rev>/{ops,systemd}` | 從 `<rev>` 的 git 物件寫出，root 擁有 | release 部署成功後 |
 | `/usr/local/lib/bfx-ops/releases/<rev>/ops/.venv` | `uv sync --frozen`（`deploy/vm/ops/uv.lock`：PyYAML、pathspec） | 同上 |
-| `/usr/local/lib/bfx-ops/current` → `releases/<rev>` | wrapper `bfx-deploy`／`bfx-notify` 與 unit 都執行這裡（含每週報告的 runner 與 `docker-compose.weekly-report.yml`） | 同上，**下一輪 bfx-deploy 才用新版** |
+| `/usr/local/lib/bfx-ops/current` → `releases/<rev>` | wrapper `bfx-deploy`／`bfx-notify`／`bfx-op` 與 unit 都執行這裡（含每週報告的 runner 與 `docker-compose.weekly-report.yml`） | 同上，**下一輪 bfx-deploy 才用新版** |
 | `/etc/systemd/system/<deploy/vm/systemd/managed-units>` | 複製後 `daemon-reload`，從不 enable/start/stop | 同上 |
 | `/home/ubuntu/bfx-releases/<rev>` | mirror 的乾淨 git worktree（`ubuntu` 擁有），DR 腳本與 `docker-compose.dr.yml` | 需要備份或 restore test 時先建目標版本 |
 | `/home/ubuntu/bfx-releases/current` → `<rev>` | 排程備份／status／每月 restore test 用 | release 部署成功後 |

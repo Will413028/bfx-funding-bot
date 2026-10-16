@@ -150,6 +150,51 @@ def test_the_output_never_carries_the_database_url(env, monkeypatch) -> None:
     assert "DATABASE_URL" not in out.getvalue()
 
 
+class _AdaptedError(Exception):
+    """Stands in for the driver error SQLAlchemy wraps (``DBAPIError.orig``)."""
+
+    def __init__(self, message: str, sqlstate: str | None) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
+class _DBAPIError(Exception):
+    def __init__(self, message: str, sqlstate: str | None) -> None:
+        super().__init__(message)
+        self.orig = _AdaptedError(message, sqlstate)
+
+
+def _unavailable(cause: BaseException | None) -> OperatorCommandError:
+    error = OperatorCommandError("uncertainties_unavailable", kind="unavailable")
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.parametrize(("cause", "extra"), [
+    # A missing grant on a read path: 42501 tells it from an ordinary refusal.
+    (_DBAPIError(f"permission denied for table x [parameters: {URL}]", "42501"),
+     {"cause": "_DBAPIError", "sqlstate": "42501"}),
+    (_DBAPIError("odd driver", "not-a-state"), {"cause": "_DBAPIError"}),
+    (LookupError(f"lost {URL}"), {"cause": "LookupError"}),
+    # bot_not_running is raised without a cause: nothing is added.
+    (None, {}),
+])
+def test_an_unavailable_refusal_names_its_cause_never_its_message(
+        env, monkeypatch, cause, extra) -> None:
+    _stub_run(monkeypatch, _unavailable(cause))
+    code, payload, log = _main(["uncertainties"])
+    assert code == 3
+    assert payload == {"error": "uncertainties_unavailable", "kind": "unavailable", **extra}
+    assert "s3cret" not in json.dumps(payload) + log and "permission" not in json.dumps(payload)
+
+
+def test_other_refusals_never_name_a_cause(env, monkeypatch) -> None:
+    error = OperatorCommandError("request_pending", kind="conflict")
+    error.__cause__ = LookupError("x")
+    _stub_run(monkeypatch, error)
+    assert _main(["kill", "--reason", "stop"])[1] == {"error": "request_pending", "kind": "conflict"}
+
+
 def test_the_identity_comparison_is_constant_time(monkeypatch) -> None:
     """``hmac.compare_digest``, not ``==``: the mutation of this check fails here."""
     seen = []

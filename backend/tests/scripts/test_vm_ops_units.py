@@ -55,7 +55,7 @@ def test_managed_units_are_exactly_the_ones_the_tooling_owns() -> None:
     assert sorted(listed) == sorted({*NEW_UNITS, *PGBACKREST_UNITS})
     installer = (ROOT / "deploy/vm/ops/install.sh").read_text(encoding="utf-8")
     assert "managed-units" in installer and '"$UV" sync --frozen' in installer
-    for tool in ("bfx_deploy.py", "bfx_notify.py"):
+    for tool in ("bfx_deploy.py", "bfx_notify.py", "bfx_op.py"):
         assert tool in installer and (ROOT / "deploy/vm/ops" / tool).is_file()
     assert "systemctl enable" not in installer and "systemctl start" not in installer
     # The weekly job is managed; its timer is not (installing would undo a mask).
@@ -144,6 +144,43 @@ def test_installer_passes_shellcheck() -> None:
     completed = subprocess.run(["shellcheck", str(ROOT / "deploy/vm/ops/install.sh")],
                                capture_output=True, text=True, check=False)
     assert completed.returncode == 0, completed.stdout
+
+
+def _sudoers_dropin() -> str:
+    """The drop-in exactly as install.sh writes it (its printf, run by bash)."""
+    installer = (ROOT / "deploy/vm/ops/install.sh").read_text(encoding="utf-8")
+    (statement,) = [line for line in installer.splitlines()
+                    if line.startswith("printf 'Defaults!")]
+    command, redirect, target = statement.rpartition(" >")
+    assert redirect == " >" and target == '"$sudoers_temporary"'
+    completed = subprocess.run(["bash", "-c", f"SBIN=/usr/local/sbin; {command}"],
+                               capture_output=True, text=True, check=True)
+    return completed.stdout
+
+
+def test_installer_installs_bfx_op_and_its_sudoers_dropin() -> None:
+    installer = (ROOT / "deploy/vm/ops/install.sh").read_text(encoding="utf-8")
+    assert "write_wrapper bfx-op bfx_op.py" in installer
+    assert 'visudo -cqf "$sudoers_temporary"' in installer
+    assert 'install -o root -g root -m 0440 "$sudoers_temporary" "$SUDOERS_DROPIN"' in installer
+    assert "SUDOERS_DROPIN=/etc/sudoers.d/bfx-op" in installer
+    # sudo keeps one variable, for one command: the wrapper builds everything else.
+    assert _sudoers_dropin() == 'Defaults!/usr/local/sbin/bfx-op env_keep += "SSH_CONNECTION"\n'
+
+
+def test_the_sudoers_dropin_is_valid_sudoers(tmp_path: Path) -> None:
+    # Ubuntu runners and macOS both ship visudo; a missing one is a failure, not a skip.
+    visudo = shutil.which("visudo") or next(
+        (path for path in ("/usr/sbin/visudo", "/usr/bin/visudo") if Path(path).is_file()), None)
+    assert visudo is not None, "visudo is required to check the sudoers drop-in"
+    dropin = tmp_path / "bfx-op"
+    dropin.write_text(_sudoers_dropin())
+    checked = subprocess.run([visudo, "-cqf", str(dropin)], capture_output=True, text=True,
+                             check=False)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    dropin.write_text(_sudoers_dropin().replace('"SSH_CONNECTION"', '"SSH_CONNECTION'))
+    assert subprocess.run([visudo, "-cqf", str(dropin)], capture_output=True,
+                          check=False).returncode != 0
 
 
 def test_weekly_report_runs_the_deployed_tooling_never_the_vm_checkout() -> None:

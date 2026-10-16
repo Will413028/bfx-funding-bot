@@ -32,6 +32,7 @@ import getpass
 import hmac
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -367,6 +368,27 @@ async def _main(args: argparse.Namespace, operator: Operator, log: TextIO,
         await engine.dispose()
 
 
+_SQLSTATE: Final = re.compile(r"[0-9A-Z]{5}")
+
+
+def rejection_payload(exc: OperatorCommandError) -> dict[str, Any]:
+    """The refusal; an ``unavailable`` one also names what failed underneath.
+
+    Only the cause's type and, for a database error, its SQLSTATE (``42501`` is a missing
+    grant): never its message, which may carry parameters or the connection URL.
+    """
+    payload: dict[str, Any] = {"error": exc.code, "kind": exc.kind}
+    cause = exc.__cause__
+    if exc.kind != "unavailable" or cause is None:
+        return payload
+    payload["cause"] = type(cause).__name__
+    original = getattr(cause, "orig", None)
+    sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    if isinstance(sqlstate, str) and _SQLSTATE.fullmatch(sqlstate):
+        payload["sqlstate"] = sqlstate
+    return payload
+
+
 def main(argv: Sequence[str] | None = None, *, out: TextIO | None = None,
          log: TextIO | None = None, stdin: TextIO | None = None) -> int:
     out = out or sys.stdout
@@ -381,7 +403,7 @@ def main(argv: Sequence[str] | None = None, *, out: TextIO | None = None,
     except CliExitError as exc:
         outcome, payload = exc.outcome, dict(exc.payload)
     except OperatorCommandError as exc:
-        outcome, payload = "rejected", {"error": exc.code, "kind": exc.kind}
+        outcome, payload = "rejected", rejection_payload(exc)
     except Exception as exc:
         # One bounded line: the message of a connection error may carry the URL.
         outcome, payload = "internal", {"error": "internal", "type": type(exc).__name__}
