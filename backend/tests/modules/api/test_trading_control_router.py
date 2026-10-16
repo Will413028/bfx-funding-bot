@@ -325,3 +325,43 @@ async def test_reads_list_newest_first_and_name_no_effect(migrated_db, monkeypat
         assert [r["request_id"] for r in listed] == [str(high), str(low)]
     for shown in (single, currency, *overview["requests"], *fust["requests"]):
         assert not {"trading_state_id", "policy_revision_id"} & set(shown)
+
+
+# Refusal codes the operator sees. They are the contract the operator commands service
+# (shared with the CLI) must keep: each detail code, and the order the checks run in.
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["resume", "kill", "currencies/fUST/disable",
+                                  "currencies/fUST/enable"])
+async def test_a_viewer_is_refused_as_account_write_required(migrated_db, monkeypatch, path):
+    app, factory, account = await _app(migrated_db, monkeypatch, role="viewer")
+    await _seed_policies(factory, account)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        response = await client.post(f"/api/v1/exchange-accounts/{account}/trading-control/{path}",
+                                     json={"reason": "x"}, headers=AUTH)
+    assert (response.status_code, response.json()["detail"]) == (403, "account_write_required")
+
+
+@pytest.mark.asyncio
+async def test_a_currency_without_an_applied_policy_is_policy_unavailable(migrated_db, monkeypatch):
+    app, factory, account = await _app(migrated_db, monkeypatch)
+    await _seed_policies(factory, account)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        response = await client.post(
+            f"/api/v1/exchange-accounts/{account}/trading-control/currencies/fBTC/disable",
+            json={"reason": "x"}, headers=AUTH)
+    assert (response.status_code, response.json()["detail"]) == (404, "policy_unavailable")
+
+
+@pytest.mark.asyncio
+async def test_membership_is_judged_before_the_deployment_environment(migrated_db, monkeypatch):
+    """A non-member learns nothing about the host: 404 even when the environment is unset."""
+    app, _factory, account = await _app(migrated_db, monkeypatch)
+    monkeypatch.delenv("BFX_DEPLOYMENT_ENV")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        other = await client.post(f"/api/v1/exchange-accounts/{uuid4()}/trading-control/resume",
+                                  json={"reason": "x"}, headers=AUTH)
+        own = await client.post(f"/api/v1/exchange-accounts/{account}/trading-control/resume",
+                                json={"reason": "x"}, headers=AUTH)
+    assert (other.status_code, other.json()["detail"]) == (404, "not_found")
+    assert (own.status_code, own.json()["detail"]) == (503, "deployment_environment_not_configured")

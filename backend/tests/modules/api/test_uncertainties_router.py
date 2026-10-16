@@ -677,3 +677,110 @@ def test_request_response_echoes_stored_ref_after_context_advances(uncertainty_a
     assert detail["resolutionContext"]["evidenceRef"] == newer
     assert detail["resolutionRequest"]["evidenceRef"] == ref
     assert _request_outcome(client, queued["requestId"])["evidenceRef"] == ref
+
+
+# Refusal codes and evidence allow-lists of each adjudication. They are the contract the
+# operator commands service (shared with the CLI) must keep.
+
+def _adjudicate(client, action: str, body: dict[str, object]):
+    return client.post(f"{_BASE}/uncertainties/{UNCERTAINTY_ID}/{action}", json=body)
+
+
+async def _queued(factory) -> int:
+    from sqlalchemy import func, select
+
+    from bfx_funding_bot.modules.execution.uncertainty_tables import (
+        UncertaintyResolutionRequestRow,
+    )
+
+    async with factory() as session:
+        return int(await session.scalar(
+            select(func.count()).select_from(UncertaintyResolutionRequestRow)) or 0)
+
+
+_ACTION_FIELDS: dict[str, dict[str, object]] = {
+    "bind-to-venue": {"venueOfferId": "9001"},
+    "mark-not-accepted": {},
+    "manual-resolution": {"reason": "checked on the venue"},
+}
+
+
+@pytest.mark.parametrize(("action", "evidence"), [
+    ("bind-to-venue", {"candidateCount": 1}),
+    ("bind-to-venue", {"candidate_count": 1}),
+    ("bind-to-venue", {}),
+    ("mark-not-accepted", {"candidateCount": 0}),
+    ("mark-not-accepted", {"candidate_count": 0}),
+    ("mark-not-accepted", {}),
+    ("manual-resolution", {"decision": "not_accepted"}),
+])
+def test_each_adjudication_accepts_its_evidence_keys(uncertainty_app, action, evidence) -> None:
+    client, _factory, ledger = uncertainty_app
+    response = _adjudicate(client, action, {
+        "evidenceRef": ledger.ref, "operatorUuid": "operator-1", "evidence": evidence,
+        **_ACTION_FIELDS[action]})
+    assert response.status_code == 202, response.text
+
+
+@pytest.mark.parametrize(("action", "evidence"), [
+    ("bind-to-venue", {"decision": "not_accepted"}),
+    ("bind-to-venue", {"venueOfferId": "9001"}),
+    ("mark-not-accepted", {"decision": "not_accepted"}),
+    ("manual-resolution", {"candidateCount": 1}),
+    ("manual-resolution", {"decision": "not_accepted", "candidateCount": 1}),
+    ("mark-not-accepted", {"candidateCount": "x" * 20_000}),  # over the evidence size cap
+])
+def test_evidence_outside_an_adjudications_allow_list_is_refused(
+    uncertainty_app, action, evidence,
+) -> None:
+    client, factory, ledger = uncertainty_app
+    response = _adjudicate(client, action, {
+        "evidenceRef": ledger.ref, "operatorUuid": "operator-1", "evidence": evidence,
+        **_ACTION_FIELDS[action]})
+    assert (response.status_code, response.json()["detail"]) == (
+        422, "invalid_resolution_evidence")
+    assert asyncio.run(_queued(factory)) == 0
+
+
+@pytest.mark.parametrize(("operator_uuid", "status", "code"), [
+    ("someone-else", 403, "operator_identity_mismatch"),
+    ("   ", 422, "operator_required"),
+])
+def test_the_operator_named_in_the_body_must_be_the_caller(
+    uncertainty_app, operator_uuid, status, code,
+) -> None:
+    client, factory, ledger = uncertainty_app
+    response = _adjudicate(client, "mark-not-accepted", {
+        "evidenceRef": ledger.ref, "operatorUuid": operator_uuid})
+    assert (response.status_code, response.json()["detail"]) == (status, code)
+    assert asyncio.run(_queued(factory)) == 0
+
+
+def test_the_evidence_reference_is_judged_before_who_asked(uncertainty_app) -> None:
+    client, _factory, _ledger = uncertainty_app
+    response = _adjudicate(client, "mark-not-accepted", {
+        "evidenceRef": "42", "operatorUuid": "someone-else"})
+    assert (response.status_code, response.json()["detail"]) == (409, "stale_reconcile_fence")
+
+
+@pytest.mark.parametrize("path", ["uncertainties", f"uncertainties/{UNCERTAINTY_ID}"])
+def test_a_failing_evidence_read_is_uncertainties_unavailable(
+    uncertainty_app, monkeypatch, path,
+) -> None:
+    client, _factory, ledger = uncertainty_app
+
+    async def _broken(*_args, **_kwargs):
+        raise RuntimeError("evidence store down")
+
+    monkeypatch.setattr(ledger, "resolution_context", _broken)
+    response = client.get(f"{_BASE}/{path}")
+    assert (response.status_code, response.json()["detail"]) == (503, "uncertainties_unavailable")
+
+
+def test_an_uncertainty_that_cannot_be_rendered_is_unavailable(uncertainty_app, monkeypatch) -> None:
+    client, _factory, ledger = uncertainty_app
+    monkeypatch.setattr(ledger, "view", replace(ledger.view, intended_amount="not-a-number"))
+    for path in ("uncertainties", f"uncertainties/{UNCERTAINTY_ID}"):
+        response = client.get(f"{_BASE}/{path}")
+        assert (response.status_code, response.json()["detail"]) == (
+            503, "uncertainties_unavailable"), path
