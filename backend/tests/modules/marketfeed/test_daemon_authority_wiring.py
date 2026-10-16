@@ -22,6 +22,7 @@ Mutation checks (one at a time; revert after each):
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from pathlib import Path
@@ -171,6 +172,38 @@ async def test_the_daemon_observes_through_cycle_effects(monkeypatch, tmp_path, 
         status = await daemon.trading_status.snapshot()
         assert "capital_policy" in {g["name"] for g in status["guards"]}
         assert not ({"allocation_cap", "buying_power"} & {g["name"] for g in status["guards"]})
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_daemon_rotates_its_vault_credential_and_restarts_on_its_own_stop(
+    monkeypatch, tmp_path, httpx_mock,
+) -> None:
+    """Mutations: build the worker with another authority, or bind ``restart`` to an event
+    the daemon does not stop on."""
+    from bfx_funding_bot.apps.bot import build_daemon
+    from bfx_funding_bot.modules.execution.credential_rotation import CredentialRotationWorker
+    from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+
+    engine, factory, path = await _env_and_db(monkeypatch, tmp_path, httpx_mock, name="rotation")
+    await _apply_policies(factory)
+    try:
+        for given in (None, asyncio.Event()):
+            daemon = await build_daemon(cells_yaml_path=path, skip_ws=True, stop_event=given)
+            worker = daemon.credential_rotation
+            assert isinstance(worker, CredentialRotationWorker)
+            assert worker.authority is operator_authorized
+            assert given is None or daemon._stop_event is given
+            assert not daemon._stop_event.is_set()
+            worker.restart()
+            assert daemon._stop_event.is_set()
+            # The new key is checked on a client of its own nonce gate; the key in use on
+            # the daemon's shared one.
+            assert worker.client_factory()._auth_gate is not worker.current_client._auth_gate
+            assert worker.current_ctx is daemon.account_ctx
+            if daemon.writer_lock is not None:
+                await daemon.writer_lock.release()
     finally:
         await engine.dispose()
 

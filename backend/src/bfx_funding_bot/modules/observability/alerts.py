@@ -99,6 +99,10 @@ KILL_CANCEL_ALL_CAUGHT_UP: Final = "kill_cancel_all_caught_up"
 CAPITAL_POLICY_REQUEST_APPLIED: Final = "capital_policy_request_applied"
 CAPITAL_POLICY_REQUEST_REJECTED: Final = "capital_policy_request_rejected"
 CAPITAL_POLICY_REQUEST_FAILED: Final = "capital_policy_request_failed"
+# The operator's Bitfinex key rotation (execution/credential_rotation.py).
+CREDENTIAL_ROTATION_APPLIED: Final = "credential_rotation_applied"
+CREDENTIAL_ROTATION_REJECTED: Final = "credential_rotation_rejected"
+CREDENTIAL_ROTATION_FAILED: Final = "credential_rotation_failed"
 # A venue history stream could not be read completely (execution/venue_observation.py).
 VENUE_OBSERVATION_HISTORY_INCOMPLETE: Final = "venue_observation_history_incomplete"
 # The UNKNOWN resolver refused a resolution (ledger/_internal/resolver.py).
@@ -135,6 +139,9 @@ ALERT_EVENTS: Final[Mapping[str, str]] = {
     CAPITAL_POLICY_REQUEST_APPLIED: WARNING,
     CAPITAL_POLICY_REQUEST_REJECTED: WARNING,
     CAPITAL_POLICY_REQUEST_FAILED: CRITICAL,
+    CREDENTIAL_ROTATION_APPLIED: WARNING,
+    CREDENTIAL_ROTATION_REJECTED: WARNING,
+    CREDENTIAL_ROTATION_FAILED: CRITICAL,
     VENUE_OBSERVATION_HISTORY_INCOMPLETE: WARNING,
     LEDGER_UNKNOWN_RESOLUTION_REJECTED: WARNING,
     ALERT_TEST: INFO,
@@ -505,6 +512,9 @@ __all__ = [
     "CAPITAL_POLICY_REQUEST_FAILED",
     "CAPITAL_POLICY_REQUEST_REJECTED",
     "COMMAND_THROTTLED",
+    "CREDENTIAL_ROTATION_APPLIED",
+    "CREDENTIAL_ROTATION_FAILED",
+    "CREDENTIAL_ROTATION_REJECTED",
     "CRITICAL",
     "DAEMON_FATAL",
     "DEDUP_FIELDS",

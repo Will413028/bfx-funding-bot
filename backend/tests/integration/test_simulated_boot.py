@@ -114,6 +114,9 @@ async def test_both_venues_compose_the_same_guard_chain_and_workers(
         assert simulated_view["workers"]["credit_history_sync"] is True
         assert (simulated_view["auth_ws"], bitfinex_view["auth_ws"]) == (False, True)
         assert simulated_view["kill_venue"] == bitfinex_view["kill_venue"] == "BitfinexLiveExecutor"
+        # Only vault credentials can be rotated; the simulated venue's are throwaway.
+        assert simulated.credential_rotation is None
+        assert type(bitfinex.credential_rotation).__name__ == "CredentialRotationWorker"
     finally:
         await close_sim_env(sim, engine)
 
