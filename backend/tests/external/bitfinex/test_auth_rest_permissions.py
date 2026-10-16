@@ -7,6 +7,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
     BitfinexAuthREST,
     KeyPermissions,
     parse_key_permissions,
+    parse_user_id,
 )
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
@@ -80,3 +81,50 @@ async def test_get_key_permissions_raises_on_http_error():
         client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
         with pytest.raises(BitfinexAPIError):
             await client.get_key_permissions(ctx=_ctx())
+
+
+# /v2/auth/r/info/user: [ID, EMAIL, USERNAME, ...]; only the id is read.
+_USER_ROW = [4242, "someone@example.invalid", "someone", 1700000000000, 0]
+
+
+@pytest.mark.asyncio
+async def test_get_user_id_signs_and_reads_column_zero_only():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(200, json=_USER_ROW)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
+        assert await client.get_user_id(ctx=_ctx()) == 4242
+
+    assert captured["url"] == "https://api.bitfinex.com/v2/auth/r/info/user"
+    assert captured["headers"]["bfx-apikey"] == "KEY"
+    assert "bfx-signature" in captured["headers"]
+
+
+@pytest.mark.parametrize("raw", [
+    [], {"id": 1}, ["4242"], [0], [-1], [True], [None, "someone@example.invalid"],
+])
+def test_parse_user_id_rejects_anything_but_a_positive_int_first(raw):
+    with pytest.raises(BitfinexShapeError) as refused:
+        parse_user_id(raw)
+    # The row's other columns (e-mail, username) never reach the error.
+    assert "someone" not in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_get_user_id_raises_on_http_error_and_bad_json():
+    transport = httpx.MockTransport(lambda r: httpx.Response(401, text="nope"))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
+        with pytest.raises(BitfinexAPIError) as failed:
+            await client.get_user_id(ctx=_ctx())
+    assert failed.value.status_code == 401
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, text="not json"))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = BitfinexAuthREST(http=http, auth_gate=AuthRequestGate(lambda: 1))
+        with pytest.raises(BitfinexShapeError):
+            await client.get_user_id(ctx=_ctx())

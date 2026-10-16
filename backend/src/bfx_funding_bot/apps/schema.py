@@ -9,6 +9,7 @@ hand-picked subset; tests/apps/test_schema.py fails when a table module is missi
 
 import bfx_funding_bot.core.database_realm
 import bfx_funding_bot.modules.accounts.exchange_accounts
+import bfx_funding_bot.modules.accounts.rotation_tables
 import bfx_funding_bot.modules.accounts.tables
 import bfx_funding_bot.modules.accounts.user_profile
 import bfx_funding_bot.modules.candles.tables

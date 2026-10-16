@@ -63,6 +63,28 @@ class AccountCredentialNotConfiguredError(Exception):
 _ALLOWED_WRITE_SCOPES = {"funding"}
 
 
+class ActiveCredentialChangedError(Exception):
+    """The account's active credential is not the one a rotation was asked to replace."""
+
+
+def permission_error(perms: KeyPermissions) -> str | None:
+    """Why a key's permissions may not trade, or None: funding write on, nothing else writable.
+
+    Fail-closed default deny: a renamed or unknown write scope refuses the key too.
+    """
+    if not perms.can("funding", write=True):
+        return "funding_write_required"
+    offending = [
+        scope for scope, (_read, write) in perms.scopes.items()
+        if write and scope not in _ALLOWED_WRITE_SCOPES
+    ]
+    if not offending:
+        return None
+    if "withdraw" in offending:
+        return "withdraw_must_be_disabled"
+    return f"unexpected_write_scope:{offending[0]}"
+
+
 async def _require_account_membership(
     session: AsyncSession,
     *,
@@ -184,6 +206,62 @@ async def create_account_credential(
     )
 
 
+async def rotate_active_credential(
+    session: AsyncSession,
+    *,
+    exchange_account_id: UUID,
+    replaces_credential_id: UUID,
+    operator_request_id: UUID,
+    label: str,
+    api_key: str,
+    api_secret: str,
+    verified_at: datetime,
+    kek: bytes,
+) -> ExchangeAccountCredential:
+    """Retire the active credential and make an already verified key the active one, naming
+    the operator request that asked for it.
+
+    Both in the caller's transaction: either the account keeps its old active credential
+    or it has exactly the new one. The account row is locked first, as promotion does in
+    :func:`verify_account_credential`; the old row is retired and flushed before the new
+    one is inserted, so the one-active partial unique index never sees two. Raises
+    :class:`ActiveCredentialChangedError` when the active credential is not
+    ``replaces_credential_id`` (or there is none).
+    """
+    await session.scalar(
+        select(ExchangeAccount).where(ExchangeAccount.id == exchange_account_id).with_for_update()
+    )
+    current = await session.scalar(
+        select(ExchangeAccountCredential).where(
+            ExchangeAccountCredential.exchange_account_id == exchange_account_id,
+            ExchangeAccountCredential.venue == "bitfinex",
+            ExchangeAccountCredential.lifecycle_status == "active",
+        )
+    )
+    if current is None or current.id != replaces_credential_id:
+        raise ActiveCredentialChangedError(str(exchange_account_id))
+    current.lifecycle_status = "retired"
+    await session.flush()
+    envelope = encrypt_secret_with_aad(
+        api_secret, aad=account_id_canonical(exchange_account_id), kek=kek
+    )
+    return await create_exchange_account_credential(
+        session,
+        exchange_account_id=exchange_account_id,
+        venue="bitfinex",
+        label=label,
+        api_key=api_key,
+        secret_ciphertext=envelope.secret_ciphertext,
+        secret_nonce=envelope.secret_nonce,
+        wrapped_dek=envelope.wrapped_dek,
+        dek_nonce=envelope.dek_nonce,
+        key_version=envelope.key_version,
+        lifecycle_status="active",
+        verified_at=verified_at,
+        operator_request_id=operator_request_id,
+    )
+
+
 async def delete_account_credential(
     session: AsyncSession,
     *,
@@ -265,48 +343,36 @@ async def verify_account_credential(
         row.last_verify_error = "invalid_credentials"
         await session.flush()
         return row
-    if not perms.can("funding", write=True):
+    refusal = permission_error(perms)
+    if refusal is not None:
         row.lifecycle_status = "pending"
         row.verified_at = None
-        row.last_verify_error = "funding_write_required"
+        row.last_verify_error = refusal
     else:
-        offending = [
-            scope for scope, (_read, write) in perms.scopes.items()
-            if write and scope not in _ALLOWED_WRITE_SCOPES
-        ]
-        if offending:
+        # Serialize promotion for one account.  The partial unique index is
+        # the final race-proof guard, while this lock lets us return a
+        # deterministic domain result instead of a late IntegrityError.
+        await session.scalar(
+            select(ExchangeAccount)
+            .where(ExchangeAccount.id == exchange_account_id)
+            .with_for_update()
+        )
+        competing = await session.scalar(
+            select(ExchangeAccountCredential).where(
+                ExchangeAccountCredential.exchange_account_id == exchange_account_id,
+                ExchangeAccountCredential.venue == row.venue,
+                ExchangeAccountCredential.lifecycle_status == "active",
+                ExchangeAccountCredential.id != row.id,
+            )
+        )
+        if competing is not None:
             row.lifecycle_status = "pending"
             row.verified_at = None
-            row.last_verify_error = (
-                "withdraw_must_be_disabled"
-                if "withdraw" in offending
-                else f"unexpected_write_scope:{offending[0]}"
-            )
+            row.last_verify_error = "active_credential_exists"
         else:
-            # Serialize promotion for one account.  The partial unique index is
-            # the final race-proof guard, while this lock lets us return a
-            # deterministic domain result instead of a late IntegrityError.
-            await session.scalar(
-                select(ExchangeAccount)
-                .where(ExchangeAccount.id == exchange_account_id)
-                .with_for_update()
-            )
-            competing = await session.scalar(
-                select(ExchangeAccountCredential).where(
-                    ExchangeAccountCredential.exchange_account_id == exchange_account_id,
-                    ExchangeAccountCredential.venue == row.venue,
-                    ExchangeAccountCredential.lifecycle_status == "active",
-                    ExchangeAccountCredential.id != row.id,
-                )
-            )
-            if competing is not None:
-                row.lifecycle_status = "pending"
-                row.verified_at = None
-                row.last_verify_error = "active_credential_exists"
-            else:
-                row.lifecycle_status = "active"
-                row.last_verify_error = None
-                row.verified_at = datetime.now(UTC)
+            row.lifecycle_status = "active"
+            row.last_verify_error = None
+            row.verified_at = datetime.now(UTC)
     await session.flush()
     return row
 
@@ -425,6 +491,7 @@ async def verify_api_key(
 
 __all__ = [
     "AccountCredentialNotConfiguredError",
+    "ActiveCredentialChangedError",
     "Envelope",
     "KeyAlreadyExistsError",
     "VaultKeyMismatchError",
@@ -433,5 +500,7 @@ __all__ = [
     "list_account_credentials",
     "list_api_keys",
     "load_account_credentials",
+    "permission_error",
+    "rotate_active_credential",
     "verify_api_key",
 ]

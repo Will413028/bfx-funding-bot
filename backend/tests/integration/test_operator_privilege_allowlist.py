@@ -1,8 +1,8 @@
 """``bfx_operator``'s privileges in ``public`` and ``legacy_archive`` are an exact allowlist.
 
-``EXPECTED_*`` is head's allowlist for the operator CLI's role (``4ab02765a34b``): SELECT on what
-the CLI's read and validation paths read, INSERT on exactly the request columns of the three
-operator outboxes, nothing else. It is checked against the EFFECTIVE privileges of three builds
+``EXPECTED_*`` is head's allowlist for the operator CLI's role (``4ab02765a34b``, then
+``1db83367918c`` for credential rotation): SELECT on what the CLI's read and validation paths
+read, INSERT on exactly the request columns of the four operator outboxes, nothing else. It is checked against the EFFECTIVE privileges of three builds
 (worst-case default privileges, production's host setup, stray grants at the previous revision): a
 migration that grants or revokes anything for the role must update ``EXPECTED_*`` in the same
 change. The INSERT columns are each model's ``REQUEST_COLUMNS``, so a request column added to a
@@ -29,6 +29,7 @@ from unittest import mock
 import pytest
 from sqlalchemy import create_engine, text
 
+from bfx_funding_bot.modules.accounts.rotation_tables import CredentialRotationRequestRow
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.safety.tables import TradingControlRequestRow
 from bfx_funding_bot.modules.execution.uncertainty_tables import UncertaintyResolutionRequestRow
@@ -58,6 +59,8 @@ EXPECTED_TABLES: dict[str, set[str]] = {
     "trading_control_requests": _R,
     "trading_state": _R,
     "uncertainty_resolution_requests": _R,
+    # 1db83367918c: the recipient keys the CLI seals a new credential to.
+    "credential_rotation_recipients": _R,
 }
 EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("capital_authority_epoch", "SELECT"): {"epoch_seq", "authority", "actor"},
@@ -110,6 +113,20 @@ EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("trading_control_requests", "INSERT"): set(TradingControlRequestRow.REQUEST_COLUMNS),
     ("uncertainty_resolution_requests", "INSERT"): set(
         UncertaintyResolutionRequestRow.REQUEST_COLUMNS),
+    # 1db83367918c: a rotation request in, and everything about it back but its sealed key;
+    # of the credentials and runs only what the CLI's checks and its view name.
+    ("credential_rotation_requests", "INSERT"): set(CredentialRotationRequestRow.REQUEST_COLUMNS),
+    ("credential_rotation_requests", "SELECT"): (
+        set(CredentialRotationRequestRow.REQUEST_COLUMNS)
+        | set(CredentialRotationRequestRow.WORKER_COLUMNS)) - {"sealed_credential"},
+    ("exchange_account_credentials", "SELECT"): {
+        "id", "exchange_account_id", "venue", "label", "lifecycle_status", "verified_at",
+        "created_at", "operator_request_id",
+    },
+    ("bot_runs", "SELECT"): {
+        "run_id", "exchange_account_id", "deployment_environment", "started_at_ms",
+        "end_recorded_at_ms",
+    },
 }
 EXPECTED: set[tuple[str, ...]] = (
     {("table", t, p) for t, ps in EXPECTED_TABLES.items() for p in ps}
@@ -197,14 +214,14 @@ def test_effective_privileges_equal_the_allowlist(head_db) -> None:
 
 def test_the_role_writes_nothing_but_request_columns(head_db) -> None:
     """Independent of the list above: no UPDATE, DELETE or TRUNCATE on any relation, and
-    INSERT only on the three outboxes."""
+    INSERT only on the four outboxes."""
     with head_db.connect() as conn:
         found = _effective(conn, ROLE)
     writes = {f for f in found if f[-1] in {"UPDATE", "DELETE", "TRUNCATE"}}
     inserts = {f[1] for f in found if f[-1] == "INSERT"}
     assert writes == set()
     assert inserts <= {"capital_policy_requests", "trading_control_requests",
-                       "uncertainty_resolution_requests"}
+                       "uncertainty_resolution_requests", "credential_rotation_requests"}
     assert not any(f[0] == "schema" and f[1] == "legacy_archive" for f in found)
 
 
@@ -214,6 +231,13 @@ def test_the_payload_columns_stay_unreadable(head_db) -> None:
         ("accepted_capital_basis", "scope_block"), ("ledger_observation_offer", "raw"),
         ("ledger_observation_offer_history", "raw"), ("capital_authority_epoch", "evidence"),
         ("capital_policy_revisions", "source"),
+        ("credential_rotation_requests", "sealed_credential"),
+        ("exchange_account_credentials", "api_key"),
+        ("exchange_account_credentials", "secret_ciphertext"),
+        ("exchange_account_credentials", "secret_nonce"),
+        ("exchange_account_credentials", "wrapped_dek"),
+        ("exchange_account_credentials", "dek_nonce"),
+        ("exchange_account_credentials", "last_verify_error"),
     )
     with head_db.connect() as conn:
         for table, column in never:

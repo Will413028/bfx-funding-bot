@@ -7,6 +7,7 @@ PostgreSQL's own rendering of every CHECK, by table and name.
 import pytest
 from sqlalchemy import text
 
+import bfx_funding_bot.modules.accounts.rotation_tables
 import bfx_funding_bot.modules.accounts.tables
 import bfx_funding_bot.modules.deployments.tables
 import bfx_funding_bot.modules.execution.audit.tables
@@ -19,7 +20,8 @@ pytestmark = pytest.mark.integration
 
 GOVERNANCE_TABLES = ("trading_state", "funding_cancel_all_audit", "deployments",
                      "trading_control_requests", "uncertainty_resolution_requests",
-                     "capital_policy_requests")
+                     "capital_policy_requests", "credential_rotation_requests",
+                     "credential_rotation_recipients")
 # 5b1e7c9d2a40 left these NOT VALID so rows recorded under the retired rules
 # stay as they were; the model states the rule every new row obeys.
 _NOT_VALID = {("trading_state", "ck_trading_state_state"), ("trading_state", "ck_trading_state_cause")}
