@@ -59,6 +59,7 @@ from bfx_funding_bot.modules.execution.audit import AuditContext
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate
+from bfx_funding_bot.modules.execution.credential_rotation import CredentialRotationWorker
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
@@ -326,6 +327,9 @@ class Daemon:
     # Applies operator enable/disable of one currency's policy (its own queue:
     # a kill never waits behind it).
     capital_policy_control: CapitalPolicyRequestWorker | None = None
+    # Applies operator rotations of the vault credential (Bitfinex only; an applied one
+    # sets the stop event so the process restarts on the new key).
+    credential_rotation: CredentialRotationWorker | None = None
     # What the venue wiring contributes: its tasks, and how to close what it opened
     # (called by ``apps.bot._run``). Diagnostics exist for the simulated venue only.
     venue_tasks: tuple[VenueTask, ...] = ()
@@ -430,6 +434,9 @@ class Daemon:
             if self.capital_policy_control is not None:
                 tg.create_task(self.capital_policy_control.run(self._stop_event),
                                name="capital_policy_control")
+            if self.credential_rotation is not None:
+                tg.create_task(self.credential_rotation.run(self._stop_event),
+                               name="credential_rotation")
             if self.uncertainty_worker is not None:
                 tg.create_task(
                     self.uncertainty_worker.run(self._stop_event), name="uncertainty_resolution",

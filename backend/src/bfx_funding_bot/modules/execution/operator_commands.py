@@ -27,6 +27,12 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.core.sealed_credential import (
+    SealContext,
+    SealedPayloadError,
+    seal,
+    validate_credential,
+)
 from bfx_funding_bot.core.settings import require_deployment_environment
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     AccountNotFound,
@@ -36,6 +42,12 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
     get_exchange_account,
     require_account_membership,
 )
+from bfx_funding_bot.modules.accounts.rotation_tables import (
+    LABEL_MAX,
+    CredentialRotationRecipientRow,
+    CredentialRotationRequestRow,
+)
+from bfx_funding_bot.modules.accounts.tables import ExchangeAccountCredential
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.execution.safety.tables import (
@@ -68,6 +80,7 @@ from bfx_funding_bot.modules.ledger import (
 )
 from bfx_funding_bot.modules.ledger import ResolutionRejected as EvidenceRejected
 from bfx_funding_bot.modules.ledger.tables import CapitalPolicyHeadRow
+from bfx_funding_bot.modules.observability.tables import BotRunRow
 from bfx_funding_bot.modules.trading import envelope_payload
 
 RejectionKind = Literal["not_found", "forbidden", "conflict", "invalid", "unavailable"]
@@ -358,6 +371,139 @@ async def trading_overview(
     }
 
 
+# --- credential rotation ------------------------------------------------------------------
+#
+# Every read below names its columns: ``bfx_operator`` may read neither the sealed
+# credential nor a credential's key or ciphertext, and a whole-row select would ask for them.
+
+ACTIVE_CREDENTIAL_COLUMNS = ("id", "label", "lifecycle_status", "verified_at", "created_at",
+                             "operator_request_id")
+CREDENTIAL_REQUEST_COLUMNS = (
+    "request_id", "recipient_id", "replaces_credential_id", "label", "reason", "requested_by",
+    "created_at_ms", "state", "processed_at_ms", "outcome_reason",
+)
+
+
+def _credential_request_select() -> Any:
+    return select(*(getattr(CredentialRotationRequestRow, c) for c in CREDENTIAL_REQUEST_COLUMNS))
+
+
+async def _active_credential(session: AsyncSession, context: OperatorContext) -> Any:
+    return (await session.execute(select(
+        *(getattr(ExchangeAccountCredential, c) for c in ACTIVE_CREDENTIAL_COLUMNS)).where(
+        ExchangeAccountCredential.exchange_account_id == context.exchange_account_id,
+        ExchangeAccountCredential.venue == "bitfinex",
+        ExchangeAccountCredential.lifecycle_status == "active",
+    ).limit(1))).first()
+
+
+async def _current_recipient(session: AsyncSession, context: OperatorContext) -> Any:
+    """The recipient key of the scope's newest run, while that run has not ended; else None.
+
+    A run that crashed without recording its end still looks alive here; the next boot's
+    worker rejects a request sealed to it (``recipient_key_stale``).
+    """
+    run = (await session.execute(select(BotRunRow.run_id, BotRunRow.end_recorded_at_ms).where(
+        BotRunRow.exchange_account_id == context.exchange_account_id,
+        BotRunRow.deployment_environment == context.deployment_environment,
+    ).order_by(BotRunRow.started_at_ms.desc(), BotRunRow.run_id.desc()).limit(1))).first()
+    if run is None or run.end_recorded_at_ms is not None:
+        return None
+    return (await session.execute(select(
+        CredentialRotationRecipientRow.recipient_id, CredentialRotationRecipientRow.public_key,
+    ).where(
+        CredentialRotationRecipientRow.exchange_account_id == context.exchange_account_id,
+        CredentialRotationRecipientRow.deployment_environment == context.deployment_environment,
+        CredentialRotationRecipientRow.run_id == run.run_id,
+    ).order_by(CredentialRotationRecipientRow.created_at_ms.desc(),
+               CredentialRotationRecipientRow.recipient_id.desc()).limit(1))).first()
+
+
+async def request_credential_rotation(
+    session: AsyncSession, context: OperatorContext, *, api_key: str, api_secret: str,
+    label: str, reason: str, now_ms: int,
+) -> UUID:
+    """Seal a new Bitfinex key to the running bot and queue its rotation.
+
+    Refused before anything is queued when there is no active credential to replace (the
+    first key is still bootstrapped), or no running bot published a recipient key.
+    """
+    require_write(context)
+    control_reason(reason)
+    if len(label) > LABEL_MAX:
+        raise _invalid("invalid_label")
+    try:
+        validate_credential(api_key, api_secret)
+    except SealedPayloadError as exc:
+        raise _invalid(exc.code) from None
+    active = await _active_credential(session, context)
+    if active is None:
+        raise OperatorCommandError("no_active_credential", kind="conflict")
+    recipient = await _current_recipient(session, context)
+    if recipient is None:
+        raise OperatorCommandError("bot_not_running", kind="unavailable")
+    request_id = uuid4()
+    try:
+        sealed = seal(api_key, api_secret, public_key=recipient.public_key, context=SealContext(
+            context.exchange_account_id, context.deployment_environment,
+            recipient.recipient_id, request_id))
+    except SealedPayloadError as exc:
+        raise _invalid(exc.code) from None
+    if not await insert_request(session, CredentialRotationRequestRow, {
+        "request_id": request_id, "exchange_account_id": context.exchange_account_id,
+        "deployment_environment": context.deployment_environment,
+        "recipient_id": recipient.recipient_id, "replaces_credential_id": active.id,
+        "sealed_credential": sealed, "label": label, "reason": reason,
+        "requested_by": context.user_id, "created_at_ms": now_ms,
+    }):
+        raise OperatorCommandError("request_pending", kind="conflict")
+    return request_id
+
+
+def credential_request_view(row: Any) -> dict[str, Any]:
+    """A rotation request as the CLI shows it: never its sealed credential."""
+    view = {column: getattr(row, column) for column in CREDENTIAL_REQUEST_COLUMNS}
+    for column in ("request_id", "recipient_id", "replaces_credential_id"):
+        view[column] = str(view[column])
+    return view
+
+
+async def get_credential_request(
+    session: AsyncSession, context: OperatorContext, request_id: UUID,
+) -> Any:
+    row = (await session.execute(_credential_request_select().where(
+        CredentialRotationRequestRow.request_id == request_id,
+        CredentialRotationRequestRow.exchange_account_id == context.exchange_account_id,
+        CredentialRotationRequestRow.deployment_environment == context.deployment_environment,
+    ))).first()
+    if row is None:
+        raise _not_found()
+    return row
+
+
+async def active_credential_view(
+    session: AsyncSession, context: OperatorContext,
+) -> dict[str, Any]:
+    """The active credential (never its key or secret) and the newest rotation request."""
+    active = await _active_credential(session, context)
+    latest = (await session.execute(_credential_request_select().where(
+        CredentialRotationRequestRow.exchange_account_id == context.exchange_account_id,
+        CredentialRotationRequestRow.deployment_environment == context.deployment_environment,
+    ).order_by(CredentialRotationRequestRow.created_at_ms.desc(),
+               CredentialRotationRequestRow.request_id.desc()).limit(1))).first()
+    return {
+        "credential": None if active is None else {
+            "id": str(active.id), "label": active.label,
+            "lifecycle_status": active.lifecycle_status,
+            "verified_at": None if active.verified_at is None else active.verified_at.isoformat(),
+            "created_at": active.created_at.isoformat(),
+            "operator_request_id": (None if active.operator_request_id is None
+                                    else str(active.operator_request_id)),
+        },
+        "latest_request": None if latest is None else credential_request_view(latest),
+    }
+
+
 # --- uncertainty adjudication -------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
@@ -582,7 +728,9 @@ def _safe_scalar(value: Any) -> str | int | float | bool | None:
 
 
 __all__ = [
+    "ACTIVE_CREDENTIAL_COLUMNS",
     "CONTROL_REASON_MAX",
+    "CREDENTIAL_REQUEST_COLUMNS",
     "RESOLUTION_EVIDENCE_KEYS",
     "RESOLUTION_REASON_MAX",
     "SYMBOL_PATTERN",
@@ -592,16 +740,20 @@ __all__ = [
     "ResolutionCommand",
     "TradingAction",
     "UncertaintyDetail",
+    "active_credential_view",
     "bounded_evidence",
     "control_reason",
+    "credential_request_view",
     "currency_request_view",
     "evidence_summary",
+    "get_credential_request",
     "get_currency_request",
     "get_resolution_request",
     "get_trading_request",
     "get_uncertainty",
     "list_uncertainties",
     "manual_decision",
+    "request_credential_rotation",
     "request_currency",
     "request_resolution",
     "request_trading_control",

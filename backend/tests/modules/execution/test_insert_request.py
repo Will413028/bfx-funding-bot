@@ -14,6 +14,7 @@ from sqlalchemy import Index
 from sqlalchemy.exc import IntegrityError
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.accounts.rotation_tables import CredentialRotationRequestRow
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.execution.safety.tables import TradingControlRequestRow
@@ -40,6 +41,7 @@ async def session(sqlite_engine: Any, sqlite_session: Any) -> Any:
     (TradingControlRequestRow, {"action": "kill"}),
     (CapitalPolicyRequestRow, {}),
     (UncertaintyResolutionRequestRow, {}),
+    (CredentialRotationRequestRow, {}),
 ])
 def test_the_pending_slot_is_a_partial_unique_index_on_both_dialects(model: Any, values: Any) -> None:
     name = model.pending_index(values)
@@ -71,3 +73,22 @@ async def test_a_refusal_other_than_the_slot_raises(session: Any) -> None:
     # A blank reason breaks the CHECK; it was once reported as a pending request.
     with pytest.raises(IntegrityError):
         await insert_request(session, TradingControlRequestRow, _trading(reason="   "))
+
+
+def _rotation(**extra: object) -> dict[str, object]:
+    return {"request_id": uuid4(), "exchange_account_id": _ACCOUNT, "deployment_environment": "ci",
+            "recipient_id": uuid4(), "replaces_credential_id": uuid4(),
+            "sealed_credential": b"\x00" * 80, "label": "", "reason": "rotate",
+            "requested_by": "operator", "created_at_ms": 1, **extra}
+
+
+@pytest.mark.asyncio
+async def test_one_pending_rotation_per_account_and_environment(sqlite_engine: Any,
+                                                                sqlite_session: Any) -> None:
+    async with sqlite_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all,
+                            tables=[CredentialRotationRequestRow.__table__])
+    assert await insert_request(sqlite_session, CredentialRotationRequestRow, _rotation())
+    assert not await insert_request(sqlite_session, CredentialRotationRequestRow, _rotation())
+    assert await insert_request(sqlite_session, CredentialRotationRequestRow,
+                                _rotation(deployment_environment="prod"))

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.modules.accounts.rotation_tables import CredentialRotationRequestRow
 from bfx_funding_bot.modules.execution.capital_tables import (
     POLICY_REQUEST_ACTIONS,
     CapitalPolicyRequestRow,
@@ -35,7 +36,10 @@ _OUTBOXES = [
     (UncertaintyResolutionRequestRow, _UNCERTAINTY_MIGRATION, "UNCERTAINTY_"),
     (TradingControlRequestRow, "5b1e7c9d2a40_two_state_trading_control.py", ""),
     (CapitalPolicyRequestRow, "7d2a9c4e6b13_capital_policy_requests.py", ""),
+    (CredentialRotationRequestRow, "1db83367918c_credential_rotation_outbox.py", ""),
 ]
+# Outboxes created after the causation migration, which names only the ones before it.
+_AFTER_CAUSATION = {CredentialRotationRequestRow}
 
 
 def _migration(name: str = _MIGRATION):
@@ -71,7 +75,8 @@ def test_every_column_belongs_to_exactly_one_writer(model, migration_file, prefi
     assert {"state", "processed_at_ms", "outcome_reason"} <= set(model.WORKER_COLUMNS)
 
 
-@pytest.mark.parametrize("model", [model for model, _, _ in _OUTBOXES])
+@pytest.mark.parametrize("model", [model for model, _, _ in _OUTBOXES
+                                   if model not in _AFTER_CAUSATION])
 def test_the_causation_migration_guards_the_declared_request_columns(model) -> None:
     """Its grant assertion names exactly the columns no runtime role may UPDATE."""
     assert _migration(_CAUSATION).REQUEST_COLUMNS[model.__tablename__] == model.REQUEST_COLUMNS

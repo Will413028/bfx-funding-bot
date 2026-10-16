@@ -104,8 +104,10 @@ def test_bind_and_mark_take_no_evidence_flags() -> None:
                            "--candidate-count", "0"])
 
 
-def _stub_run(monkeypatch, result) -> None:
-    async def run(args, operator, factory, *, log, sleep=None):
+def _stub_run(monkeypatch, result, seen: list[Any] | None = None) -> None:
+    async def run(args, operator, factory, *, log, sleep=None, credential=None):
+        if seen is not None:
+            seen.append(credential)
         if isinstance(result, BaseException):
             raise result
         return result
@@ -165,3 +167,76 @@ def test_the_identity_comparison_is_constant_time(monkeypatch) -> None:
     })
     assert seen == [(b"1", b"1")]
     assert (operator.user_id, str(operator.exchange_account_id)) == ("operator-1", ACCOUNT)
+
+
+# --- rotate-credential ------------------------------------------------------------------------
+
+KEY, SECRET = "FAKE-KEY-0123456789", "FAKE-SECRET-not-a-real-one-0123456789"
+
+
+class Stdin(io.StringIO):
+    def __init__(self, text: str = "", *, tty: bool = False) -> None:
+        super().__init__(text)
+        self.tty = tty
+
+    def isatty(self) -> bool:
+        return self.tty
+
+
+def _rotate(stdin: io.StringIO) -> tuple[int, dict[str, Any], str]:
+    out, log = io.StringIO(), io.StringIO()
+    code = operator_cli.main(["rotate-credential", "--reason", "scheduled", "--no-wait"],
+                             out=out, log=log, stdin=stdin)
+    return code, json.loads(out.getvalue()), log.getvalue()
+
+
+def test_no_flag_carries_a_key_or_secret() -> None:
+    (commands,) = [a for a in operator_cli.build_parser()._actions
+                   if isinstance(a, argparse._SubParsersAction)]
+    rotate = commands.choices["rotate-credential"]
+    options = {o for a in rotate._actions for o in a.option_strings}
+    assert options == {"-h", "--help", "--reason", "--label", "--wait-seconds", "--no-wait"}
+    assert [a.dest for a in rotate._actions if not a.option_strings] == []
+    with pytest.raises(SystemExit):
+        operator_cli.build_parser().parse_args(
+            ["rotate-credential", "--reason", "x", "--api-secret", SECRET])
+
+
+def test_a_pipe_gives_two_lines_and_nothing_is_echoed(env, monkeypatch) -> None:
+    seen: list[Any] = []
+    _stub_run(monkeypatch, ("ok", {"state": "requested"}), seen)
+    code, payload, log = _rotate(Stdin(f"{KEY}\n{SECRET}\n"))
+    assert (code, payload) == (0, {"state": "requested"})
+    (credential,) = seen
+    assert (credential.api_key, credential.api_secret) == (KEY, SECRET)
+    assert SECRET not in repr(credential) and KEY not in repr(credential)
+    assert SECRET not in json.dumps(payload) + log
+
+
+def test_a_terminal_is_prompted_without_echo(monkeypatch) -> None:
+    prompts: list[str] = []
+
+    def prompt(text: str) -> str:
+        prompts.append(text)
+        return KEY if "key" in text else SECRET
+
+    entered = operator_cli.read_credential(Stdin(tty=True), prompt=prompt)
+    assert (entered.api_key, entered.api_secret) == (KEY, SECRET)
+    assert prompts == ["Bitfinex API key: ", "Bitfinex API secret: "]
+
+
+@pytest.mark.parametrize("text", ["", "\n\n", f"{KEY}\n", f"{KEY}\n\n", f"\n{SECRET}\n"])
+def test_a_missing_key_or_secret_is_refused_before_connecting(env, monkeypatch, text) -> None:
+    engine = NoEngine()
+    monkeypatch.setattr(operator_cli, "make_async_engine_from_url", engine)
+    code, payload, log = _rotate(Stdin(text))
+    assert (code, payload, engine.calls) == (2, {"error": "credential_input_missing"}, 0)
+    assert SECRET not in json.dumps(payload) + log
+
+
+def test_stdin_is_read_only_after_the_identity_check(env, monkeypatch) -> None:
+    monkeypatch.setenv("BFX_OPERATOR_TAILNET_IDENTITY", "999")
+    stdin = Stdin(f"{KEY}\n{SECRET}\n")
+    code, payload, _ = _rotate(stdin)
+    assert (code, payload) == (77, {"error": "operator_identity_mismatch"})
+    assert stdin.tell() == 0

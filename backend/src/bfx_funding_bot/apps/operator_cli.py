@@ -15,20 +15,27 @@ daemon's ``operator_authorized`` still requires that operator's admin role and T
 Before any command: the database's schema head must be this image's, and the capital
 authority ``ledger`` -- the same boot checks as the web API's.
 
+``rotate-credential`` reads the new Bitfinex key and secret from stdin only (prompted
+without echo on a terminal, else two lines); no flag or environment variable carries them,
+and they are sealed to the running bot before anything is queued
+(``operator_commands.request_credential_rotation``).
+
 Output: one JSON object on stdout; for a request, one line on stderr naming the request
-and the tailnet identity (the host journal keeps it). Exit codes are :data:`EXIT`.
+and the tailnet identity (the host journal keeps it). Neither ever carries a key, secret or
+ciphertext. Exit codes are :data:`EXIT`.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import hmac
 import json
 import os
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Final, TextIO
 from uuid import UUID
@@ -79,6 +86,27 @@ class CliExitError(Exception):
         super().__init__(outcome)
         self.outcome = outcome
         self.payload = payload
+
+
+@dataclass(frozen=True, slots=True)
+class EnteredCredential:
+    """The key and secret typed or piped in; never rendered."""
+
+    api_key: str = field(repr=False)
+    api_secret: str = field(repr=False)
+
+
+def read_credential(stdin: TextIO, *, prompt: Callable[[str], str] = getpass.getpass,
+                    ) -> EnteredCredential:
+    """The new key and secret, from stdin only: without echo on a terminal, else two lines."""
+    if stdin.isatty():
+        api_key, api_secret = prompt("Bitfinex API key: "), prompt("Bitfinex API secret: ")
+    else:
+        api_key, api_secret = stdin.readline(), stdin.readline()
+    api_key, api_secret = api_key.rstrip("\r\n"), api_secret.rstrip("\r\n")
+    if not api_key or not api_secret:
+        raise CliExitError("usage", {"error": "credential_input_missing"})
+    return EnteredCredential(api_key, api_secret)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +181,7 @@ class Queued:
     """A request now in its outbox, and how to read it back."""
 
     request_id: UUID
-    kind: str  # trading | currency | resolution
+    kind: str  # trading | currency | resolution | credential
     action: str
 
 
@@ -165,13 +193,23 @@ async def _read_request(session: AsyncSession, context: OperatorContext, kind: s
     if kind == "currency":
         return commands.currency_request_view(
             await commands.get_currency_request(session, context, request_id))
+    if kind == "credential":
+        return commands.credential_request_view(
+            await commands.get_credential_request(session, context, request_id))
     return resolution_request_view(
         await commands.get_resolution_request(session, context, request_id))
 
 
 async def _queue(session: AsyncSession, context: OperatorContext,
-                 args: argparse.Namespace) -> Queued:
+                 args: argparse.Namespace, credential: EnteredCredential | None) -> Queued:
     now_ms = int(time.time() * 1000)
+    if args.command == "rotate-credential":
+        if credential is None:
+            raise CliExitError("usage", {"error": "credential_input_missing"})
+        request_id = await commands.request_credential_rotation(
+            session, context, api_key=credential.api_key, api_secret=credential.api_secret,
+            label=args.label, reason=args.reason, now_ms=now_ms)
+        return Queued(request_id, "credential", "rotate_credential")
     if args.command in {"resume", "kill"}:
         request_id = await commands.request_trading_control(
             session, context, action=args.command, reason=args.reason, now_ms=now_ms)
@@ -204,6 +242,8 @@ async def _read(session: AsyncSession, context: OperatorContext,
             session, context, build_operator_reads(), build_operator_evidence(),
             state=args.state, limit=args.limit)
         return {"uncertainties": [uncertainty_view(d) for d in details]}
+    if args.command == "credential":
+        return await commands.active_credential_view(session, context)
     if args.command == "uncertainty":
         return uncertainty_view(await commands.get_uncertainty(
             session, context, build_operator_reads(), build_operator_evidence(),
@@ -212,7 +252,7 @@ async def _read(session: AsyncSession, context: OperatorContext,
 
 
 WRITES: Final = frozenset({"resume", "kill", "enable", "disable", "bind-to-venue",
-                           "mark-not-accepted", "manual-resolution"})
+                           "mark-not-accepted", "manual-resolution", "rotate-credential"})
 _TERMINAL_EXIT: Final = {"applied": "ok", "rejected": "rejected", "failed": "failed"}
 
 
@@ -226,6 +266,7 @@ async def _boot(session: AsyncSession) -> None:
 
 async def run(args: argparse.Namespace, operator: Operator, factory: Session, *,
               log: TextIO, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+              credential: EnteredCredential | None = None,
               ) -> tuple[str, dict[str, Any]]:
     """One command; returns the outcome name (a key of :data:`EXIT`) and the JSON payload."""
     async with factory() as session:
@@ -234,7 +275,7 @@ async def run(args: argparse.Namespace, operator: Operator, factory: Session, *,
             session, exchange_account_id=operator.exchange_account_id, user_id=operator.user_id)
         if args.command not in WRITES:
             return "ok", await _read(session, context, args)
-        queued = await _queue(session, context, args)
+        queued = await _queue(session, context, args, credential)
         await session.commit()
     print(f"operator_request request_id={queued.request_id} action={queued.action} "
           f"tailnet_identity={operator.tailnet_identity}", file=log, flush=True)
@@ -278,7 +319,8 @@ def build_parser() -> argparse.ArgumentParser:
     one = sub.add_parser("uncertainty", help="one uncertainty and its newest request")
     one.add_argument("uncertainty_id", type=UUID)
     request = sub.add_parser("request", help="one request and its outcome")
-    request.add_argument("kind", choices=("trading", "currency", "resolution"))
+    request.add_argument("kind", choices=("trading", "currency", "resolution", "credential"))
+    sub.add_parser("credential", help="the active credential and the newest rotation request")
     request.add_argument("request_id", type=UUID)
 
     def write(name: str, help_text: str) -> argparse.ArgumentParser:
@@ -308,26 +350,34 @@ def build_parser() -> argparse.ArgumentParser:
     manual.add_argument("--evidence-ref", required=True)
     manual.add_argument("--decision", required=True)
     manual.add_argument("--reason", required=True)
+    # The key and secret come from stdin (``read_credential``), never from a flag.
+    rotate = write("rotate-credential", "replace the account's Bitfinex key (read from stdin)")
+    rotate.add_argument("--reason", required=True)
+    rotate.add_argument("--label", default="")
     return parser
 
 
 async def _main(args: argparse.Namespace, operator: Operator, log: TextIO,
-                ) -> tuple[str, dict[str, Any]]:
+                credential: EnteredCredential | None = None) -> tuple[str, dict[str, Any]]:
     engine = make_async_engine_from_url(operator.database_url)
     try:
-        return await run(args, operator, make_session_factory(engine), log=log)
+        return await run(args, operator, make_session_factory(engine), log=log,
+                         credential=credential)
     finally:
         await engine.dispose()
 
 
 def main(argv: Sequence[str] | None = None, *, out: TextIO | None = None,
-         log: TextIO | None = None) -> int:
+         log: TextIO | None = None, stdin: TextIO | None = None) -> int:
     out = out or sys.stdout
     log = log or sys.stderr
     args = build_parser().parse_args(argv)
     try:
         operator = resolve_operator(os.environ)
-        outcome, payload = asyncio.run(_main(args, operator, log))
+        # Read before connecting: no session waits on a person typing.
+        credential = (read_credential(stdin or sys.stdin)
+                      if args.command == "rotate-credential" else None)
+        outcome, payload = asyncio.run(_main(args, operator, log, credential))
     except CliExitError as exc:
         outcome, payload = exc.outcome, dict(exc.payload)
     except OperatorCommandError as exc:

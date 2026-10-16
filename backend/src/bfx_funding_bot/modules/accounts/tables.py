@@ -168,6 +168,15 @@ class ExchangeAccountCredential(Base):
         server_default=func.current_timestamp(),
         onupdate=func.current_timestamp(),
     )
+    # The operator rotation that made this credential active (``rotation_tables``); NULL for
+    # a bootstrapped or web API credential. ``use_alter``: the request names the credential it
+    # replaces, so the two tables reference each other.
+    operator_request_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("credential_rotation_requests.request_id", ondelete="RESTRICT",
+                   name="fk_exchange_account_credentials_operator_request", use_alter=True),
+        nullable=True,
+    )
 
     __table_args__ = (
         CheckConstraint(

@@ -50,13 +50,20 @@ class _RunRecord:
     """Stands in for ``BotRunRecord``: records the order of lifecycle calls."""
 
     events: ClassVar[list[str]] = []
+    # Whether ``start`` wrote the row (``BotRunRecord.start`` swallows its own failure).
+    start_succeeds: ClassVar[bool] = True
 
     def __init__(self, session_factory: Any, *, exchange_account_id: Any,
                  deployment_environment: str) -> None:
         self.scope = (exchange_account_id, deployment_environment)
+        self.run_id = "run-1"
+        self.started = False
+        self.started_at_ms: int | None = None
 
     async def start(self) -> list[Any]:
         _RunRecord.events.append("start")
+        self.started = _RunRecord.start_succeeds
+        self.started_at_ms = 123 if self.started else None
         return []
 
     async def finish(self, reason: str) -> None:
@@ -67,6 +74,7 @@ class _RunRecord:
 def watchdogs(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[_Watchdog]]:
     _Watchdog.instances = []
     _RunRecord.events = []
+    _RunRecord.start_succeeds = True
     monkeypatch.setattr(bot, "LoopWatchdog", _Watchdog)
     monkeypatch.setattr(bot, "BotRunRecord", _RunRecord)
     previous = alerts.current()
@@ -75,7 +83,8 @@ def watchdogs(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[_Watchdog]]:
 
 
 def _fake_daemon(stop: asyncio.Event, watchdog_during_run: list[bool], *,
-                 fail: BaseException | None = None, booted: bool = True) -> Any:
+                 fail: BaseException | None = None, booted: bool = True,
+                 credential_rotation: Any = None) -> Any:
     async def run() -> None:
         watchdog_during_run.append(_Watchdog.instances[0].running)
         _RunRecord.events.append("run")
@@ -92,7 +101,7 @@ def _fake_daemon(stop: asyncio.Event, watchdog_during_run: list[bool], *,
         run=run, metrics=None, booted=booted, writer_lock=None, venue_aclose=None,
         tracing=None, bitfinex_http=SimpleNamespace(aclose=aclose),
         config=SimpleNamespace(phase="live", cells=[], run_duration_hours=None),
-        session_factory=None,
+        session_factory=None, credential_rotation=credential_rotation,
         account_bootstrap=SimpleNamespace(exchange_account_id="acct", deployment_environment="ci"),
     )
 
@@ -190,3 +199,32 @@ async def test_a_writer_lock_release_that_never_returns_does_not_hold_the_exit(
     await asyncio.wait_for(bot._run(), timeout=10)
     assert released == ["called"]
     assert _RunRecord.events[-1] == "finish:clean_stop"
+
+
+class _Rotation:
+    def __init__(self) -> None:
+        self.bound: list[tuple[str, int]] = []
+
+    def bind_run(self, run_id: str, started_at_ms: int) -> None:
+        _RunRecord.events.append("bind_run")
+        self.bound.append((run_id, started_at_ms))
+
+
+@pytest.mark.parametrize("start_succeeds", [True, False])
+async def test_the_rotation_worker_is_bound_to_the_run_once_it_is_recorded(
+    monkeypatch: pytest.MonkeyPatch, watchdogs: list[_Watchdog], start_succeeds: bool,
+) -> None:
+    """A recipient key is published only under a run the CLI can see as running."""
+    _RunRecord.start_succeeds = start_succeeds
+    rotation = _Rotation()
+
+    async def build_daemon(*, stop_event: asyncio.Event) -> Any:
+        return _fake_daemon(stop_event, [], credential_rotation=rotation)
+
+    monkeypatch.setattr(bot, "build_daemon", build_daemon)
+    await bot._run()
+    if start_succeeds:
+        assert rotation.bound == [("run-1", 123)]
+        assert _RunRecord.events[:3] == ["start", "bind_run", "run"]
+    else:
+        assert rotation.bound == []

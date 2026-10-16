@@ -146,6 +146,9 @@ class VenueWiring:
     tasks: tuple[VenueFeedTask, ...] = ()
     # Simulated only: the venue itself (tests and the soak report read its state).
     simulated: SimulatedVenue | None = None
+    # The credentials came from the account vault, so an operator can rotate them
+    # (``execution.credential_rotation``); the simulated venue's are throwaway.
+    credential_vault: bool = False
 
 
 async def _noop() -> None:
@@ -205,7 +208,8 @@ async def build_venue(
             credentials = await _vault_credentials(session, exchange_account_id)
         return VenueWiring(
             venue="bitfinex", credentials=credentials, auth_http=bitfinex_http,
-            auth_gate=gate, capabilities=BITFINEX_CAPABILITIES, aclose=_noop)
+            auth_gate=gate, capabilities=BITFINEX_CAPABILITIES, aclose=_noop,
+            credential_vault=True)
     return await _build_simulated(
         config, exchange_account_id=exchange_account_id, db_engine=db_engine,
         bitfinex=bitfinex, clock=clock, metrics=metrics, gate=gate, seam=seam or VenueSeam())

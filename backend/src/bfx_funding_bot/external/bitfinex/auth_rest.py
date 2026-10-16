@@ -274,6 +274,17 @@ def parse_key_permissions(raw: Any) -> KeyPermissions:
     return KeyPermissions(scopes=scopes)
 
 
+def parse_user_id(raw: Any) -> int:
+    """Column 0 of ``/v2/auth/r/info/user``. Errors name only types: the row carries the
+    account's e-mail and username."""
+    if not isinstance(raw, list) or not raw:
+        raise BitfinexShapeError(f"user info is not a non-empty list: {type(raw).__name__}")
+    user_id = raw[0]
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+        raise BitfinexShapeError(f"user info id is not a positive int: {type(user_id).__name__}")
+    return user_id
+
+
 @dataclass(frozen=True, slots=True)
 class InterestPayment:
     """One funding interest payout from the account ledger (category 28).
@@ -430,6 +441,7 @@ _LEDGERS_PATH = "v2/auth/r/ledgers"  # /{currency}/hist appended
 _FUNDING_TRADES_PATH = "v2/auth/r/funding/trades"  # /{symbol}/hist appended
 _WALLETS_PATH = "v2/auth/r/wallets"  # no /{symbol}; sign_request prepends /api/
 _PERMISSIONS_PATH = "v2/auth/r/permissions"  # no body args; sign_request prepends /api/
+_USER_INFO_PATH = "v2/auth/r/info/user"  # no body args; row[0] is the account's user id
 
 
 class BitfinexAuthREST:
@@ -997,3 +1009,15 @@ class BitfinexAuthREST:
         except json.JSONDecodeError as e:
             raise BitfinexShapeError(f"invalid JSON in permissions response: {e}") from e
         return parse_key_permissions(raw)
+
+    async def get_user_id(self, *, ctx: AccountContext) -> int:
+        """POST /v2/auth/r/info/user (signed): the Bitfinex user id the key belongs to.
+
+        Only column 0 (ID) is read; the e-mail, username and the rest of the row are
+        never kept. Same error contract as the other auth reads."""
+        resp = await self._signed_post(ctx=ctx, path=_USER_INFO_PATH, body_bytes=b"{}")
+        try:
+            raw = resp.json()
+        except json.JSONDecodeError as e:
+            raise BitfinexShapeError(f"invalid JSON in user info response: {e.msg}") from None
+        return parse_user_id(raw)

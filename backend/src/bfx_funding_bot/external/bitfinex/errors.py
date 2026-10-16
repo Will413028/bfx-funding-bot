@@ -1,3 +1,9 @@
+from __future__ import annotations
+
+import json
+
+from bfx_funding_bot.external.bitfinex.submit_wire import venue_error
+
 # Bitfinex v2 codes this code base decides on (docs.bitfinex.com, "Abbreviations
 # Glossary"). Every retry, reconnect or refuse decision on a code goes through
 # these names; nothing compares a literal code elsewhere.
@@ -46,3 +52,29 @@ class BitfinexRateLimited(BitfinexAPIError):  # noqa: N818
 
 class BitfinexShapeError(BitfinexError):
     """Response parsed as JSON but didn't match expected shape."""
+
+
+def venue_did_not_answer(exc: BitfinexAPIError) -> bool:
+    """Whether ``exc`` is the venue not answering (retry later), not answering *no*.
+
+    Status 0 is the client's transport error or deadline. A body shaped
+    ``["error", CODE, MESSAGE]`` is the venue answering -- Bitfinex sends its
+    refusals (``apikey: invalid``, ``nonce: small``) with HTTP 500 -- so only the
+    rate-limit and maintenance codes are "not now". Without such a body, 429 and
+    5xx (a gateway page, an empty body) are the venue declining for now; other
+    4xx are answers."""
+    if exc.status_code == 0:
+        return True
+    answer = parsed_venue_error(exc.raw)
+    if answer is not None:
+        return answer[0] in TRANSIENT_VENUE_ERROR_CODES
+    return exc.status_code == 429 or exc.status_code >= 500
+
+
+def parsed_venue_error(raw: str | None) -> tuple[int, str] | None:
+    if not raw:
+        return None
+    try:
+        return venue_error(json.loads(raw))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None

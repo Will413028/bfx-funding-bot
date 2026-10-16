@@ -16,3 +16,7 @@ b445ebc6e8fca2bf9dbc66e0467cb2075c864bdd:frontend/src/features/dashboard/compone
 b445ebc6e8fca2bf9dbc66e0467cb2075c864bdd:frontend/src/features/dashboard/components/__tests__/offers-table.test.tsx:generic-api-key:19
 # offer UUID (offerKey) in a frontend test fixture, not a credential
 b445ebc6e8fca2bf9dbc66e0467cb2075c864bdd:frontend/src/features/dashboard/hooks/__tests__/use-offers.test.tsx:generic-api-key:17
+# the X25519 recipient field's type annotation in core/sealed_credential.py (field since renamed), not a key
+5c8c0b16a1b14cb0a11d52731d116a41a3d9f525:backend/src/bfx_funding_bot/core/sealed_credential.py:generic-api-key:69
+# the comment that first described the entry above quoted that annotation; since reworded
+8f4994044dc6149bb162d18bd3ed6b4aa16497e2:.gitleaksignore:generic-api-key:19

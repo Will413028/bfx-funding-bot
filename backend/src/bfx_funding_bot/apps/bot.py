@@ -22,6 +22,7 @@ from bfx_funding_bot.apps.bot_ports import ObservationVenue, build_capital_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
 from bfx_funding_bot.apps.venue import VenueSeam, build_venue
 from bfx_funding_bot.core.bounded import run_bounded
+from bfx_funding_bot.core.crypto import load_kek
 from bfx_funding_bot.core.database_realm import assert_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
@@ -39,6 +40,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
 from bfx_funding_bot.external.bitfinex.funding_rules import FundingRules
+from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.external.bitfinex.ws import (
@@ -58,6 +60,7 @@ from bfx_funding_bot.modules.execution.audit import ExecutionDecisionRecorder
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_boundary import CommandOutcomeNotice
+from bfx_funding_bot.modules.execution.credential_rotation import CredentialRotationWorker
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
 from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPricer
@@ -201,6 +204,8 @@ async def build_daemon(
     the simulated venue runs on the live market feed and without injected faults.
     ``stop_event`` becomes the daemon's stop event; ``_run`` passes the one its loop
     watchdog already follows."""
+    # Created first: the daemon stops on it, and an applied credential rotation sets it.
+    stop_event = stop_event if stop_event is not None else asyncio.Event()
     config = load_config(cells_yaml_path=cells_yaml_path)
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -649,6 +654,21 @@ async def build_daemon(
         clock=now_ms_utc,
         ownership=writer_lock.verify_held,
     )
+    # Rotating the vault credential: only where the credentials came from the vault. The new
+    # key is checked on a client of its own (its own nonce gate); the key in use answers
+    # through the shared one.
+    credential_rotation: CredentialRotationWorker | None = None
+    if venue_wiring.credential_vault:
+        rotation_http = venue_wiring.auth_http
+        credential_rotation = CredentialRotationWorker(
+            session_factory=session_factory, account_id=UUID(account_id),
+            environment=env_str, authority=operator_authorized,
+            client_factory=lambda: BitfinexAuthREST(http=rotation_http,
+                                                    auth_gate=AuthRequestGate()),
+            current_client=auth_rest, current_ctx=account_ctx,
+            kek_loader=load_kek, restart=stop_event.set,
+            clock=now_ms_utc, ownership=writer_lock.verify_held,
+        )
     deployment_reconciler = DeploymentReconciler(
         capital=capital.capital_authority,
         offers=managed_offers,
@@ -1040,12 +1060,13 @@ async def build_daemon(
         protection=protection,
         trading_control=trading_control,
         capital_policy_control=capital_policy_control,
+        credential_rotation=credential_rotation,
         writer_lock_watch=WriterLockWatch(lock=writer_lock),
         boot_mts=now_mts,
         venue_tasks=venue_wiring.tasks,
         venue_aclose=venue_wiring.aclose,
         venue_diagnostics=venue_wiring.simulated,
-        _stop_event=stop_event if stop_event is not None else asyncio.Event(),
+        _stop_event=stop_event,
     )
 
 
@@ -1118,6 +1139,11 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         deployment_environment=daemon.account_bootstrap.deployment_environment,
     )
     await run_record.start()
+    # The rotation worker publishes its recipient key under this run: a CLI only seals to
+    # the key of a run that started and has not ended.
+    if (run_record.started and run_record.started_at_ms is not None
+            and daemon.credential_rotation is not None):
+        daemon.credential_rotation.bind_run(run_record.run_id, run_record.started_at_ms)
     # How this run ends, recorded after the drain. None (a BaseException other than
     # those below) leaves the row open: the next boot reports it, as it does for the
     # exits that never reach here (loop watchdog, OOM kill, SIGKILL).

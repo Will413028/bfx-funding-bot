@@ -255,3 +255,14 @@ async def test_a_schema_head_this_image_does_not_run_on_is_refused(book, operato
     async with book.factory.begin() as session:
         await session.execute(text("UPDATE alembic_version SET version_num = 'ffffffffffff'"))
     assert (await cli("status"))[:2] == (78, {"error": "schema_head_mismatch"})
+
+
+@pytest.mark.asyncio
+async def test_the_credential_reads_need_no_more_than_the_role_has(book, operator_env) -> None:
+    """``credential`` and ``request credential`` as ``bfx_operator`` (rotation itself:
+    tests/integration/test_credential_rotation.py)."""
+    await member(book)
+    code, view, _ = await cli("credential")
+    assert (code, view) == (0, {"credential": None, "latest_request": None})
+    assert (await cli("request", "credential", str(uuid4())))[:2] == (
+        3, {"error": "not_found", "kind": "not_found"})
