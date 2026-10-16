@@ -281,15 +281,15 @@ _RELATIONS = """SELECT c.oid, CASE n.nspname WHEN 'public' THEN c.relname
                 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') ORDER BY 2"""
 
 
-def _effective(conn) -> set[tuple[str, ...]]:
-    """Everything ``bfx_webapi`` can do in ``public`` and ``legacy_archive``, through the privilege functions
+def _effective(conn, role: str = "bfx_webapi") -> set[tuple[str, ...]]:
+    """Everything ``role`` can do in ``public`` and ``legacy_archive``, through the privilege functions
     (so grants via PUBLIC or role membership count, not only its own ACL entries)."""
     found: set[tuple[str, ...]] = set()
     for oid, name in conn.exec_driver_sql(_RELATIONS).all():
         held = set()
         for privilege in _TABLE_PRIVILEGES:
-            if conn.scalar(text("SELECT has_table_privilege('bfx_webapi', :o, :p)"),
-                           {"o": oid, "p": privilege}):
+            if conn.scalar(text("SELECT has_table_privilege(:r, :o, :p)"),
+                           {"r": role, "o": oid, "p": privilege}):
                 held.add(privilege)
                 found.add(("table", name, privilege))
         columns = conn.exec_driver_sql(
@@ -299,8 +299,8 @@ def _effective(conn) -> set[tuple[str, ...]]:
             if privilege in held:
                 continue
             for column in columns:
-                if conn.scalar(text("SELECT has_column_privilege('bfx_webapi', :o, :c, :p)"),
-                               {"o": oid, "c": column, "p": privilege}):
+                if conn.scalar(text("SELECT has_column_privilege(:r, :o, :c, :p)"),
+                               {"r": role, "o": oid, "c": column, "p": privilege}):
                     found.add(("column", name, column, privilege))
     for (oid, name) in conn.exec_driver_sql(
             "SELECT c.oid, CASE n.nspname WHEN 'public' THEN c.relname "
@@ -308,21 +308,21 @@ def _effective(conn) -> set[tuple[str, ...]]:
             "JOIN pg_namespace n ON n.oid = c.relnamespace "
             "WHERE n.nspname IN ('public', 'legacy_archive') AND c.relkind = 'S'"):
         for privilege in ("USAGE", "SELECT", "UPDATE"):
-            if conn.scalar(text("SELECT has_sequence_privilege('bfx_webapi', :s, :p)"),
-                           {"s": oid, "p": privilege}):
+            if conn.scalar(text("SELECT has_sequence_privilege(:r, :s, :p)"),
+                           {"r": role, "s": oid, "p": privilege}):
                 found.add(("sequence", name, privilege))
     # PUBLIC may execute any function by default; only the role's own grants are the allowlist's business.
-    for (signature,) in conn.exec_driver_sql(
+    for (signature,) in conn.execute(text(
             "SELECT p.oid::regprocedure::text FROM pg_proc p, aclexplode(p.proacl) a "
             "WHERE p.pronamespace = 'public'::regnamespace "
-            "AND a.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'bfx_webapi')"):
+            "AND a.grantee = (SELECT oid FROM pg_roles WHERE rolname = :r)"), {"r": role}):
         found.add(("function", signature, "EXECUTE"))
     for schema in _SCHEMAS:
         if conn.scalar(text("SELECT to_regnamespace(:n) IS NULL"), {"n": schema}):
             continue
         for privilege in ("USAGE", "CREATE"):
-            if conn.scalar(text("SELECT has_schema_privilege('bfx_webapi', :n, :p)"),
-                           {"n": schema, "p": privilege}):
+            if conn.scalar(text("SELECT has_schema_privilege(:r, :n, :p)"),
+                           {"r": role, "n": schema, "p": privilege}):
                 found.add(("schema", schema, privilege))
     return found
 
