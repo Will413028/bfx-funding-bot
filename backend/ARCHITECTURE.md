@@ -573,8 +573,16 @@ exchange_account_memberships
   PK (exchange_account_id FK RESTRICT, user_id), role
 exchange_account_credentials (AEAD 加密；AAD = canonical account UUID)
   PK id (UUID), exchange_account_id FK RESTRICT, venue, api_key,
-  secret_ciphertext/nonce, wrapped_dek/dek_nonce, key_version, lifecycle_status
+  secret_ciphertext/nonce, wrapped_dek/dek_nonce, key_version, lifecycle_status,
+  operator_request_id FK credential_rotation_requests（輪替產生的列；其他為 NULL）
   UNIQUE partial (exchange_account_id, venue) WHERE lifecycle_status = 'active'
+credential_rotation_recipients (每次 bot run 一把 HPKE X25519 公鑰；runtime 不可改／刪)
+  PK recipient_id, exchange_account_id, deployment_environment, run_id FK bot_runs,
+  public_key (32 bytes), created_at_ms
+credential_rotation_requests (operator outbox；sealed_credential 只有該次 run 解得開)
+  PK request_id, recipient_id FK, replaces_credential_id FK credentials,
+  sealed_credential, label, reason, requested_by, state/processed_at_ms/outcome_reason
+  UNIQUE partial (exchange_account_id, deployment_environment) WHERE state = 'requested'
 
 funding_stats          (Bitfinex /v2/funding/stats/{symbol}/hist)
   PK (symbol, mts)；symbol 一律帶 `f` 前綴（`fUSD`/`fUST`）
@@ -765,9 +773,17 @@ failed＋根因）記回請求列，套用產生的效果列（trading state、p
 表零寫權限，授權與收回都在 migration（`1c435a35dcb4`、`5b1e7c9d2a40`、`7d2a9c4e6b13`、`5e820d6dc7da`）。
 請求的驗證與排入只有一份：`execution/operator_commands.py`，webapi handler 與 operator CLI（`apps/operator_cli.py`）都是它的 adapter。
 CLI 以 one-off compose service `bfx-operator`（`deploy/vm/ops/docker-compose.operator.yml`）執行，連線用專屬 role `bfx_operator`：
-migration `4ab02765a34b` 的精確 allowlist，只有三個 outbox 請求欄位的 INSERT 與驗證所需的讀取，沒有 UPDATE／DELETE（`test_operator_privilege_allowlist.py`）。
+migration `4ab02765a34b`（輪替另由 `1db83367918c` 加上）的精確 allowlist，只有四個 outbox 請求欄位的 INSERT 與驗證所需的讀取，沒有 UPDATE／DELETE（`test_operator_privilege_allowlist.py`）。
 CLI 開頭比對 wrapper 傳入的 tailnet 身分與 `operator.env` 設定的值，不符就 exit 77、不連 DB；之後同 webapi 檢查 schema head 與 ledger authority。
 請求一律以 `BFX_OPERATOR_USER_ID` 送出（9d 前），daemon 照樣以 `operator_authorized` 重驗。
+**憑證輪替（`execution/credential_rotation.py`、`core/sealed_credential.py`，migration `1db83367918c`）**：
+CLI 不持有 KEK。bot 每次開機（`bot_runs` 寫入後）產生一把 X25519 收件 key，私鑰只在記憶體，公鑰寫進 `credential_rotation_recipients`；
+CLI 的 `rotate-credential` 從 stdin 讀新 key，只封給「scope 最新、尚未結束的 run」的收件 key（HPKE base mode，`info` 綁帳號、環境、收件 key 與 request id），
+寫進 `credential_rotation_requests`（同一套 outbox 合約，`bfx_operator` 讀不到 `sealed_credential`）。`CredentialRotationWorker` 在鎖外判定
+（最新部署列是 15 分鐘內的 `started` → `deployment_in_progress`；收件 key 不是這次開機的 → `recipient_key_stale`；
+解不開；key 曾 retired／revoked；權限不是只有 funding 可寫；與現行 key 的 Bitfinex user id 不同），判定結果帶回鎖內才拒絕（記成 rejected）；
+通過時在記結果的同一個交易裡 retire 舊憑證、以 KEK envelope 寫入新的 active 憑證（`operator_request_id` 指回請求）。commit 後設 daemon 的 stop event，
+照 SIGTERM 的乾淨停機結束、由 container restart policy 重啟，開機時 `load_account_credentials` 載入新憑證。重啟後舊密文永遠解不開。只有 vault 憑證的 venue（Bitfinex）接這個 worker。
 靜態 admin token 不能 resume live。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 
