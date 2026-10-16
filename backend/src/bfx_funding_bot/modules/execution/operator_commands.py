@@ -425,10 +425,14 @@ def _check_lengths(command: ResolutionCommand) -> None:
         raise _invalid("invalid_reason")
     if command.action == "manual_resolution" and not command.reason:
         raise _invalid("invalid_reason")
+    if command.action == "manual_resolution" and command.operator_uuid is None:
+        raise _invalid("operator_required")
     if command.operator_uuid is not None and not 1 <= len(command.operator_uuid) <= OPERATOR_ID_MAX:
         raise _invalid("operator_required")
-    if command.action == "bind_to_venue" and not (
-            command.venue_offer_id and len(command.venue_offer_id) <= VENUE_OFFER_ID_MAX):
+    if command.action == "bind_to_venue":
+        if not (command.venue_offer_id and len(command.venue_offer_id) <= VENUE_OFFER_ID_MAX):
+            raise _invalid("invalid_venue_offer_id")
+    elif command.venue_offer_id is not None:
         raise _invalid("invalid_venue_offer_id")
 
 
@@ -451,7 +455,7 @@ async def request_resolution(
         evidence_ref=command.evidence_ref,
         operator_id=_operator_id(context, command.operator_uuid),
         reason=command.reason,
-        venue_offer_id=command.venue_offer_id if command.action == "bind_to_venue" else None,
+        venue_offer_id=command.venue_offer_id,
         decision=manual_decision(evidence) if command.action == "manual_resolution" else None,
     )
     try:

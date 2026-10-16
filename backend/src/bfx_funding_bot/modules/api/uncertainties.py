@@ -12,6 +12,7 @@ projection write privilege.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
@@ -217,6 +218,15 @@ def _request_response(row: UncertaintyResolutionRequestRow) -> dict[str, object]
 
 
 
+def _rendered[T](render: Callable[[], T]) -> T:
+    """A read's response; one that cannot be rendered is unavailable, never a 500."""
+    try:
+        return render()
+    except Exception as exc:
+        raise command_error(OperatorCommandError(
+            "uncertainties_unavailable", kind="unavailable")) from exc
+
+
 async def _queue(
     session: AsyncSession,
     *,
@@ -262,7 +272,7 @@ def build_uncertainties_router() -> APIRouter:
                 state=state, limit=limit)
         except OperatorCommandError as exc:
             raise command_error(exc) from exc
-        return {"data": [_response(detail, context.scope) for detail in details]}
+        return {"data": _rendered(lambda: [_response(d, context.scope) for d in details])}
 
     @router.get("/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}")
     async def get_account_uncertainty(
@@ -277,7 +287,7 @@ def build_uncertainties_router() -> APIRouter:
                 uncertainty_id)
         except OperatorCommandError as exc:
             raise command_error(exc) from exc
-        return {"data": _response(detail, context.scope)}
+        return {"data": _rendered(lambda: _response(detail, context.scope))}
 
     @router.get(
         "/exchange-accounts/{exchange_account_id}/uncertainty-resolution-requests/{request_id}"

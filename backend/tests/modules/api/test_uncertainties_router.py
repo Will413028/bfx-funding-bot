@@ -775,3 +775,12 @@ def test_a_failing_evidence_read_is_uncertainties_unavailable(
     monkeypatch.setattr(ledger, "resolution_context", _broken)
     response = client.get(f"{_BASE}/{path}")
     assert (response.status_code, response.json()["detail"]) == (503, "uncertainties_unavailable")
+
+
+def test_an_uncertainty_that_cannot_be_rendered_is_unavailable(uncertainty_app, monkeypatch) -> None:
+    client, _factory, ledger = uncertainty_app
+    monkeypatch.setattr(ledger, "view", replace(ledger.view, intended_amount="not-a-number"))
+    for path in ("uncertainties", f"uncertainties/{UNCERTAINTY_ID}"):
+        response = client.get(f"{_BASE}/{path}")
+        assert (response.status_code, response.json()["detail"]) == (
+            503, "uncertainties_unavailable"), path

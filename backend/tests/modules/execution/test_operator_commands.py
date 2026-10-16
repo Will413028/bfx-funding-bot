@@ -136,6 +136,13 @@ def test_a_manual_decision_is_the_lone_decision_string(evidence, decision) -> No
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("command", "code"), [
     (ResolutionCommand(UNCERTAINTY, "manual_resolution", REF), "invalid_reason"),
+    (ResolutionCommand(UNCERTAINTY, "manual_resolution", REF, reason="checked"),
+     "operator_required"),
+    (ResolutionCommand(UNCERTAINTY, "mark_not_accepted", REF, venue_offer_id="9001"),
+     "invalid_venue_offer_id"),
+    (ResolutionCommand(UNCERTAINTY, "manual_resolution", REF, reason="checked",
+                       operator_uuid="operator", venue_offer_id="9001"),
+     "invalid_venue_offer_id"),
     (ResolutionCommand(UNCERTAINTY, "manual_resolution", REF, reason=""), "invalid_reason"),
     (ResolutionCommand(UNCERTAINTY, "mark_not_accepted", REF,
                        reason="x" * (RESOLUTION_REASON_MAX + 1)), "invalid_reason"),
