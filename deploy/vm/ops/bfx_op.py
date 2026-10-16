@@ -28,7 +28,8 @@ One call:
      request id and the exit code. Never other arguments, never stdin.
 
 Trust boundary: any root-equivalent shell can set SSH_CONNECTION and pass as
-another peer (ubuntu's sudo is NOPASSWD). Who may open a session is Tailscale
+another peer (ubuntu's sudo is NOPASSWD): a public sshd login while sshd still
+runs, or ubuntu on the OCI serial console. Who may open a session is Tailscale
 SSH's check mode; this binds an honest session's identity to its requests and
 records it. Exit codes are the CLI's, plus 77 (no tailnet identity), 1 (cannot
 resolve what to run) and 2 (not root, or an option before the subcommand).
@@ -272,10 +273,9 @@ def subprocess_execute(argv: list[str], env: Mapping[str, str], stdin_text: str 
         if stdin_text is not None and process.stdin is not None:
             try:
                 process.stdin.write(stdin_text)
-            except BrokenPipeError:
-                pass
-            finally:
                 process.stdin.close()
+            except BrokenPipeError:
+                pass  # the CLI exited before reading; its exit code says why
         assert process.stderr is not None
         for line in process.stderr:
             on_stderr(line)
@@ -348,8 +348,7 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
             identity=identity, caller_env=environ)
     except RefusedError as exc:
         log(f"refused: {exc.code}")
-        if exc.code != "not_root":
-            journal(f"refused reason={exc.code} peer={peer}")
+        journal(f"refused reason={exc.code} peer={peer}")
         return exc.exit_code
     except DeployError as exc:
         log(f"cannot run: {exc.code}")

@@ -23,7 +23,9 @@
 # It never enables, starts or stops a timer: that is a separate operator step.
 set -euo pipefail
 
-ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
+# Physical path: run through /home/ubuntu/bfx-releases/current, a logical path would be
+# the root-owned symlink, and its owner would become MIRROR_USER below.
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd -P)
 OPS_ROOT=/usr/local/lib/bfx-ops
 DR_ROOT=/home/ubuntu/bfx-releases
 SBIN=/usr/local/sbin

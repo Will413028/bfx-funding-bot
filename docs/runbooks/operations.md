@@ -454,14 +454,14 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
   - 系統自己會恢復、重送即可：`recipient_key_stale`（請求封給的是已重啟的 bot run，CLI 會封給目前這次）、`deployment_in_progress`（最新的部署列是 15 分鐘內的 `started`，部署 settle 期間重啟會讓部署判失敗）、`bot_recently_started`（這次 bot 開機未滿 10 分鐘，部署可能仍在做 health 檢查與 settle；10 分鐘後重送）、`active_credential_changed`（送出後 active 憑證已換過）、`operator_not_authorized`（operator 權限或 TOTP 失效，先修好）。
   - operator 要判斷：`credential_account_mismatch`（新 key 屬於另一個 Bitfinex 帳號，確認建 key 的帳號）、`credential_reused`（這把 key 曾經用過並已 retired／revoked，請建新 key）、`invalid_credentials`（Bitfinex 拒絕這把 key）、`funding_write_required`／`withdraw_must_be_disabled`／`unexpected_write_scope:*`（調整 key 權限：只開 funding 寫入）、`account_identity_unavailable`（無法讀到 key 所屬帳號，確認 key 有 account info 讀取權限）、`sealed_payload_invalid`（密文損毀或被搬動，重送）。
 - 系統會做：不碰憑證，請求就此結案，bot 不重啟。
-- operator 判斷：依上面分類處理後重新送出。
+- operator 判斷：依上面分類處理後重新送出（§11）。
 
 <a id="alert-credential_rotation_failed"></a>
 #### `credential_rotation_failed`（critical）
 
 - 代表：輪替時發生錯誤；`reason` 為 `prepare_failed:BitfinexAPIError`（驗證 key 時 Bitfinex 沒有回答：連線、429、rate limit／維護代碼，或沒有 `["error", …]` 內容的 5xx；帶錯誤代碼的 500 例如 `apikey: digest invalid` 是拒絕，記成 rejected）、`prepare_failed:CredentialStoreError` 或 `credential_rotation_failed:<DBAPI 錯誤型別>`（資料庫錯誤，只記型別、不帶參數）、`credential_rotation_failed:<root exception>` 或 `outcome_write_failed:…`。
 - 系統會做：rollback，舊憑證仍是 active，請求標為 failed、不重試，bot 不重啟。
-- operator 判斷：暫時性錯誤時稍後重送；其他原因看 `docker logs bfx-bot` 的 `credential_rotation_failed`，交給開發處理。
+- operator 判斷：暫時性錯誤時稍後重送；其他原因看 `docker logs bfx-bot` 的 `credential_rotation_failed`，交給開發處理。重送照 §11。
 
 <a id="alert-venue_observation_history_incomplete"></a>
 #### `venue_observation_history_incomplete`（warning）
@@ -599,7 +599,8 @@ kill 的 cancel-all）被拒：
   `operator.env` 的 `BFX_OPERATOR_TAILNET_USER_ID`，不符拒絕；沒有指定 actor 的參數，請求的
   `requested_by` 是 `BFX_OPERATOR_USER_ID`，tailnet 身分記在 host journal。
 - **信任邊界**：`ubuntu` 的 sudo 是 NOPASSWD，任何 root 等價的 shell 都能自己設定
-  `SSH_CONNECTION` 冒充另一個 peer。誰能開 session 由 Tailscale SSH 的 check mode 決定；`bfx-op`
+  `SSH_CONNECTION` 冒充另一個 peer：公網 sshd 還開著時持有 key 的登入、Console 上的 `ubuntu`。
+  公網 sshd 停用後只剩 Console 這一條。誰能開 session 由 Tailscale SSH 的 check mode 決定；`bfx-op`
   做的是把誠實 session 的身分綁進請求並留下紀錄。
 - **子命令**（`sudo bfx-op <子命令> --help` 看參數）：唯讀 `status`、`uncertainties`、`uncertainty`、
   `request <trading|currency|resolution|credential> <request_id>`、`credential`；寫入 `resume`、`kill`、
@@ -637,18 +638,19 @@ kill 的 cancel-all）被拒：
    sudo bfx-op rotate-credential --reason "為什麼換" --label "YYYY-MM-DD"
    ```
    key 與 secret 只在 `bfx-op` 與 CLI 的記憶體裡，以這次開機的 bot 的公鑰加密後才排入；不進 journal、log 或參數。
-2. 結果 `applied` 後 bot 自動重啟（`credential_rotation_applied`，§6）。確認：
+2. 結果 `applied` 後 bot 自動重啟（[`credential_rotation_applied`](#alert-credential_rotation_applied)）。確認：
    - `sudo bfx-op credential` 的 active 憑證是結果裡的新 id；
    - `sudo docker inspect -f '{{.State.StartedAt}}' bfx-bot` 晚於 applied 的時間；
    - `sudo bfx-op status` 正常，Telegram 沒有 `boot_refused`。
 3. 以上都成立後，才到 Bitfinex 刪除舊 key（key 衛生，不是交易步驟）。刪之前舊 key 一直可用，新 key 有問題時 bot 仍有退路。
 
-被拒或失敗：看 §6 的 `credential_rotation_rejected`／`credential_rotation_failed`，拒絕時憑證沒有任何改動。
+被拒或失敗：看 §6 的 [`credential_rotation_rejected`](#alert-credential_rotation_rejected)／[`credential_rotation_failed`](#alert-credential_rotation_failed)，拒絕時憑證沒有任何改動。
 重啟後新 key 載入失敗（`executor_auth_failed`）：輪替請求要 bot 在跑才會處理，所以用 webapi 既有的憑證端點建立並驗證一把可用的 key（舊憑證列已 retired，不會復活；舊 key 在 Bitfinex 還沒刪的話，可以用它的值重新建立）。
 
 ## 12. Break-glass
 
-順序：Tailscale SSH（§10）→ OCI Console Connection。公網 sshd 已停用、OCI 不開 22。
+順序：Tailscale SSH（§10）→ OCI Console Connection。終態是公網 sshd 停用、UFW 與 OCI security list 都不開 22；
+在那之前公網 sshd 仍是一條入口（`sudo systemctl is-active ssh.socket ssh.service` 看現況）。
 
 | 元件壞了 | web UI | `bfx-op`（Tailscale SSH） | Console Connection |
 |---|---|---|---|
@@ -662,8 +664,8 @@ Tailscale 不通時：
    break-glass 密碼登入。
 2. 查 `tailscale status`。node key 過期就 `sudo tailscale up` 重新驗證；tailscaled 異常就
    `sudo systemctl restart tailscaled`（Funnel 會中斷數秒）。需要時可暫時重新啟用 sshd：
-   `sudo systemctl unmask ssh.socket ssh.service && sudo systemctl enable --now ssh.socket`，並在 OCI
-   security list 加回 22；修好後照原樣停用與移除。
+   `sudo systemctl unmask ssh.socket ssh.service && sudo systemctl enable --now ssh.socket`、
+   `sudo ufw allow 22/tcp`，並在 OCI security list 加回 22；修好後照原樣停用、刪掉 UFW 規則、移除 OCI 的 22。
 3. Console 下 `bfx-op` 一律拒絕（`not_tailnet_peer`）：高風險操作只走 Tailscale SSH。這段期間 bot
    照常自動放貸；要降低曝險，用 §3 的 `/admin/halt`，或停掉 bot container（§7）。
 

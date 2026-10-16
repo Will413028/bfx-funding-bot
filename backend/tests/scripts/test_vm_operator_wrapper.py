@@ -254,7 +254,7 @@ def test_dry_run_prints_the_plan_and_runs_nothing(host, capsys) -> None:
 def test_not_root_refuses(host) -> None:
     journal: list[str] = []
     assert op.main(["status"], env=_env(), journal=journal.append, is_root=lambda: False) == 2
-    assert journal == []
+    assert journal == ["refused reason=not_root peer=-"]
 
 
 # --------------------------------------------------------------------------- rotate-credential
@@ -370,6 +370,33 @@ def test_defaults_are_the_deployers() -> None:
     assert (args.runtime_dir, args.state_dir, args.backend_repository, args.postgres_container) == (
         defaults.runtime_dir, defaults.state_dir, defaults.backend_repository,
         defaults.postgres_container)
+
+
+@pytest.mark.parametrize(("stdin_text", "expected"), [
+    (None, op.subprocess.DEVNULL), (f"{KEY}\n{SECRET}\n", op.subprocess.PIPE)])
+def test_stdin_is_closed_unless_a_key_is_handed_over(monkeypatch, stdin_text, expected) -> None:
+    # An inherited terminal would echo whatever is typed into a container without a TTY.
+    seen: dict[str, Any] = {}
+
+    class Process:
+        def __init__(self, argv, **kwargs) -> None:
+            seen.update(kwargs)
+            self.stdin = io.StringIO() if kwargs["stdin"] == op.subprocess.PIPE else None
+            self.stderr = iter(())
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(op.subprocess, "Popen", Process)
+    assert op.subprocess_execute(["x"], {}, stdin_text, lambda _line: None) == 0
+    assert seen["stdin"] == expected and seen["stderr"] == op.subprocess.PIPE
+    assert "stdout" not in seen  # inherited: the JSON goes straight to the operator
 
 
 def test_the_child_streams_stderr_and_keeps_stdout(tmp_path: Path) -> None:

@@ -164,6 +164,9 @@ def test_installer_installs_bfx_op_and_its_sudoers_dropin() -> None:
     assert 'visudo -cqf "$sudoers_temporary"' in installer
     assert 'install -o root -g root -m 0440 "$sudoers_temporary" "$SUDOERS_DROPIN"' in installer
     assert "SUDOERS_DROPIN=/etc/sudoers.d/bfx-op" in installer
+    # Re-run through the DR checkout's `current` symlink (root-owned): the owner must be
+    # read from the physical directory, or the DR root would be chowned to root.
+    assert re.search(r'^ROOT=\$\(cd -- .* && pwd -P\)$', installer, re.MULTILINE)
     # sudo keeps one variable, for one command: the wrapper builds everything else.
     assert _sudoers_dropin() == 'Defaults!/usr/local/sbin/bfx-op env_keep += "SSH_CONNECTION"\n'
 
