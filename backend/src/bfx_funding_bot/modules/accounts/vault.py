@@ -333,11 +333,34 @@ async def verify_account_credential(
         account_id=str(exchange_account_id),
         credentials=Credentials(api_key=row.api_key, api_secret=secret),
     )
+    perms: KeyPermissions | None
     try:
         perms = await client.get_key_permissions(ctx=ctx)
     except BitfinexAPIError as e:
         if e.status_code == 0 or e.status_code == 429 or e.status_code >= 500:
             raise
+        perms = None  # the key was refused: recorded below, under the lock
+    # Serialize every verdict for one account, then re-read the row: while Bitfinex was
+    # answering, an operator rotation may have retired it (``rotate_active_credential``
+    # takes the same lock), and a terminal row is never written over.  The partial unique
+    # index stays the final race-proof guard for promotion.
+    await session.scalar(
+        select(ExchangeAccount)
+        .where(ExchangeAccount.id == exchange_account_id)
+        .with_for_update()
+    )
+    locked: ExchangeAccountCredential | None = await session.scalar(
+        select(ExchangeAccountCredential)
+        .where(
+            ExchangeAccountCredential.id == key_id,
+            ExchangeAccountCredential.exchange_account_id == exchange_account_id,
+        )
+        .execution_options(populate_existing=True)
+    )
+    if locked is None or locked.lifecycle_status in {"revoked", "retired"}:
+        return None
+    row = locked
+    if perms is None:
         row.lifecycle_status = "revoked"
         row.verified_at = None
         row.last_verify_error = "invalid_credentials"
@@ -349,14 +372,6 @@ async def verify_account_credential(
         row.verified_at = None
         row.last_verify_error = refusal
     else:
-        # Serialize promotion for one account.  The partial unique index is
-        # the final race-proof guard, while this lock lets us return a
-        # deterministic domain result instead of a late IntegrityError.
-        await session.scalar(
-            select(ExchangeAccount)
-            .where(ExchangeAccount.id == exchange_account_id)
-            .with_for_update()
-        )
         competing = await session.scalar(
             select(ExchangeAccountCredential).where(
                 ExchangeAccountCredential.exchange_account_id == exchange_account_id,
