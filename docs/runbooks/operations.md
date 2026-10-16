@@ -419,14 +419,14 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 #### `credential_rotation_applied`（warning）
 
 - 代表：operator CLI 的 `rotate-credential` 已套用：新 key 的權限只有 funding 可寫、跟現行 key 屬於同一個 Bitfinex 帳號；舊憑證（`replaces_credential_id`）已 retired，新憑證（`credential_id`）是唯一的 active，`reason` 為 `rotated: credential <id>`。
-- 系統會做：commit 後 bot 照 SIGTERM 的乾淨停機流程結束（log `credential_rotation_restart`，`bot_runs` 記 `clean_stop`），container restart policy 重啟，開機以 `load_account_credentials` 載入新憑證。重啟前仍用記憶體裡的舊 key（在 Bitfinex 端仍有效），沒有無 key 的空窗。
+- 系統會做：commit 後 bot 照 SIGTERM 的乾淨停機流程結束（log `credential_rotation_restart`，`bot_runs` 記 `clean_stop`；commit 成功但確認遺失時，閒置的 worker 補做，log `credential_rotation_restart_caught_up`），container restart policy 重啟，開機以 `load_account_credentials` 載入新憑證。重啟前仍用記憶體裡的舊 key（在 Bitfinex 端仍有效），沒有無 key 的空窗。
 - operator 判斷：確認這次輪替是你送的；看到新的 bot run 開機成功後，才到 Bitfinex 刪除舊 key（key 衛生，不是交易步驟）。重啟後新 key 若載入或驗證失敗，bot 會發 `boot_refused`／`daemon_fatal`（`executor_auth_failed`，exit 78），此時的復原路徑是 webapi 的憑證端點。
 
 <a id="alert-credential_rotation_rejected"></a>
 #### `credential_rotation_rejected`（warning）
 
 - 代表：輪替請求被拒，憑證沒有任何改動，`reason` 為：
-  - 系統自己會恢復、重送即可：`recipient_key_stale`（請求封給的是已重啟的 bot run，CLI 會封給目前這次）、`deployment_in_progress`（最新的部署列是 15 分鐘內的 `started`，部署 settle 期間重啟會讓部署判失敗）、`active_credential_changed`（送出後 active 憑證已換過）、`operator_not_authorized`（operator 權限或 TOTP 失效，先修好）。
+  - 系統自己會恢復、重送即可：`recipient_key_stale`（請求封給的是已重啟的 bot run，CLI 會封給目前這次）、`deployment_in_progress`（最新的部署列是 15 分鐘內的 `started`，部署 settle 期間重啟會讓部署判失敗）、`bot_recently_started`（這次 bot 開機未滿 10 分鐘，部署可能仍在做 health 檢查與 settle；10 分鐘後重送）、`active_credential_changed`（送出後 active 憑證已換過）、`operator_not_authorized`（operator 權限或 TOTP 失效，先修好）。
   - operator 要判斷：`credential_account_mismatch`（新 key 屬於另一個 Bitfinex 帳號，確認建 key 的帳號）、`credential_reused`（這把 key 曾經用過並已 retired／revoked，請建新 key）、`invalid_credentials`（Bitfinex 拒絕這把 key）、`funding_write_required`／`withdraw_must_be_disabled`／`unexpected_write_scope:*`（調整 key 權限：只開 funding 寫入）、`account_identity_unavailable`（無法讀到 key 所屬帳號，確認 key 有 account info 讀取權限）、`sealed_payload_invalid`（密文損毀或被搬動，重送）。
 - 系統會做：不碰憑證，請求就此結案，bot 不重啟。
 - operator 判斷：依上面分類處理後重新送出。
@@ -434,7 +434,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 <a id="alert-credential_rotation_failed"></a>
 #### `credential_rotation_failed`（critical）
 
-- 代表：輪替時發生錯誤；`reason` 為 `prepare_failed:BitfinexAPIError`（驗證新 key 時 Bitfinex 暫時性錯誤：連線、429、5xx）、`credential_rotation_failed:<root exception>` 或 `outcome_write_failed:…`。
+- 代表：輪替時發生錯誤；`reason` 為 `prepare_failed:BitfinexAPIError`（驗證 key 時 Bitfinex 沒有回答：連線、429、rate limit／維護代碼，或沒有 `["error", …]` 內容的 5xx；帶錯誤代碼的 500 例如 `apikey: digest invalid` 是拒絕，記成 rejected）、`prepare_failed:CredentialStoreError` 或 `credential_rotation_failed:<DBAPI 錯誤型別>`（資料庫錯誤，只記型別、不帶參數）、`credential_rotation_failed:<root exception>` 或 `outcome_write_failed:…`。
 - 系統會做：rollback，舊憑證仍是 active，請求標為 failed、不重試，bot 不重啟。
 - operator 判斷：暫時性錯誤時稍後重送；其他原因看 `docker logs bfx-bot` 的 `credential_rotation_failed`，交給開發處理。
 

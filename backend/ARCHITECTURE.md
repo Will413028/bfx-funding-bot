@@ -780,10 +780,10 @@ CLI 開頭比對 wrapper 傳入的 tailnet 身分與 `operator.env` 設定的值
 CLI 不持有 KEK。bot 每次開機（`bot_runs` 寫入後）產生一把 X25519 收件 key，私鑰只在記憶體，公鑰寫進 `credential_rotation_recipients`；
 CLI 的 `rotate-credential` 從 stdin 讀新 key，只封給「scope 最新、尚未結束的 run」的收件 key（HPKE base mode，`info` 綁帳號、環境、收件 key 與 request id），
 寫進 `credential_rotation_requests`（同一套 outbox 合約，`bfx_operator` 讀不到 `sealed_credential`）。`CredentialRotationWorker` 在鎖外判定
-（最新部署列是 15 分鐘內的 `started` → `deployment_in_progress`；收件 key 不是這次開機的 → `recipient_key_stale`；
-解不開；key 曾 retired／revoked；權限不是只有 funding 可寫；與現行 key 的 Bitfinex user id 不同），判定結果帶回鎖內才拒絕（記成 rejected）；
+（最新部署列是 15 分鐘內的 `started` → `deployment_in_progress`；這次 run 開機未滿 10 分鐘 → `bot_recently_started`（被部署 settle 的一定是剛開機的 bot）；收件 key 不是這次開機的 → `recipient_key_stale`；
+解不開；key 曾 retired／revoked；權限不是只有 funding 可寫；與現行 key 的 Bitfinex user id 不同；Bitfinex 帶錯誤代碼的 500 是回答，沒回答才算 transient，同 boot wait 的 `errors.venue_did_not_answer`），判定結果帶回鎖內才拒絕（記成 rejected）；
 通過時在記結果的同一個交易裡 retire 舊憑證、以 KEK envelope 寫入新的 active 憑證（`operator_request_id` 指回請求）。commit 後設 daemon 的 stop event，
-照 SIGTERM 的乾淨停機結束、由 container restart policy 重啟，開機時 `load_account_credentials` 載入新憑證。重啟後舊密文永遠解不開。只有 vault 憑證的 venue（Bitfinex）接這個 worker。
+照 SIGTERM 的乾淨停機結束（commit 成功但確認遺失時，閒置的 worker 看到 active 憑證來自本 run 期間 applied 的請求就補做）、由 container restart policy 重啟，開機時 `load_account_credentials` 載入新憑證。重啟後舊密文永遠解不開。只有 vault 憑證的 venue（Bitfinex）接這個 worker。
 靜態 admin token 不能 resume live。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 
