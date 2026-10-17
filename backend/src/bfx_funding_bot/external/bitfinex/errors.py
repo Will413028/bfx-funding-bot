@@ -50,6 +50,16 @@ class BitfinexRateLimited(BitfinexAPIError):  # noqa: N818
         self.retry_after_seconds = retry_after_seconds
 
 
+class VenueCredentialRejectedError(BitfinexAPIError):
+    """Bitfinex refused the request's key or signature: ``["error", ERR_AUTH_FAIL, ...]``
+    (sent with HTTP 500) or HTTP 401/403 (:func:`is_credential_rejection`).
+
+    An answer, not an outage: retrying the same key changes nothing until the key is fixed
+    at Bitfinex or replaced. A :class:`BitfinexAPIError`, so every existing ``except``,
+    ``status_code`` check and :func:`venue_did_not_answer` treats it as before; only the
+    boot (credential recovery mode) and the periodic reconcile (exit 78) single it out."""
+
+
 class BitfinexShapeError(BitfinexError):
     """Response parsed as JSON but didn't match expected shape."""
 
@@ -78,3 +88,46 @@ def parsed_venue_error(raw: str | None) -> tuple[int, str] | None:
         return venue_error(json.loads(raw))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
+
+
+# HTTP statuses that name the credential itself as refused.
+CREDENTIAL_REJECTED_STATUSES = frozenset({401, 403})
+
+
+def is_credential_rejection(status_code: int, raw: str | None) -> bool:
+    """Whether an HTTP error response is the venue refusing the key or signature.
+
+    Bitfinex answers a wrong, revoked or swapped key with HTTP 500 and
+    ``["error", 10100, "apikey: ..."]``; a 401 or 403 says the same without the venue body.
+    Any other code (``10114`` nonce: small, rate limit, maintenance) or a body-less 5xx is
+    not a credential rejection."""
+    answer = parsed_venue_error(raw)
+    if answer is not None and answer[0] == ERR_AUTH_FAIL:
+        return True
+    return status_code in CREDENTIAL_REJECTED_STATUSES
+
+
+def credential_rejection(exc: BaseException) -> VenueCredentialRejectedError | None:
+    """The credential rejection anywhere in ``exc``'s chain (``__cause__`` and
+    ``__context__``), or None.
+
+    A :class:`VenueCredentialRejectedError` is returned as is; a plain :class:`BitfinexAPIError`
+    whose status and body classify as a rejection (:func:`is_credential_rejection`) is
+    returned as one, so a caller that wraps or rebuilds the error is classified alike."""
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, VenueCredentialRejectedError):
+            return current
+        if (isinstance(current, BitfinexAPIError) and current.status_code != 0
+                and is_credential_rejection(current.status_code, current.raw)):
+            return VenueCredentialRejectedError(current.status_code, current.message, current.raw)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    return None
