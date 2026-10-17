@@ -1,7 +1,7 @@
 """Protocols + dataclasses for execution pipeline.
 
-All concrete adapters (BitfinexLiveExecutor,
-RestPollingFillTracker, hard/calibrated guards) conform to these.
+All concrete adapters (BitfinexLiveExecutor, hard/calibrated guards) conform
+to these.
 
 AccountContext carries credentials + per-account allocation cap.  The daemon
 constructs it only from the canonical ExchangeAccount UUID (serialized as a
@@ -10,7 +10,6 @@ or process-global realm fallback.
 """
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -36,7 +35,6 @@ __all__ = [
     "CancelPort",
     "Credentials",
     "ExecutorPort",
-    "FillTracker",
     "FundingCancelAllPort",
     "FundingCancelAllResult",
     "GuardResult",
@@ -196,7 +194,3 @@ class FundingCancelAllPort(Protocol):
         self, *, currency: str, ctx: AccountContext,
     ) -> FundingCancelAllResult: ...
 
-
-class FillTracker(Protocol):
-    """Polls venue for fill / status_change events. Daemon TaskGroup sub-task."""
-    async def poll_loop(self, stop_event: asyncio.Event) -> None: ...
