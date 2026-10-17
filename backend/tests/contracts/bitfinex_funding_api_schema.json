@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Bitfinex Funding API responses (subset used by FillTracker)",
+  "title": "Bitfinex Funding API responses (funding offers and credits rows)",
   "definitions": {
     "FundingOffer": {
       "type": "array",

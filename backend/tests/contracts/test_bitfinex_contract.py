@@ -1,6 +1,7 @@
 """Validate canned Bitfinex funding API responses match hand-curated schema.
 
-Acts as drift detector for mock responses used by FillTracker tests.
+Pins the documented row layout (offers, credits) that the REST client parses by
+column index; a sample edited without the schema, or the reverse, fails here.
 """
 import json
 from pathlib import Path
