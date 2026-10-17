@@ -217,9 +217,10 @@ async def rotate_active_credential(
     api_secret: str,
     verified_at: datetime,
     kek: bytes,
+    bitfinex_user_id: int,
 ) -> ExchangeAccountCredential:
     """Retire the active credential and make an already verified key the active one, naming
-    the operator request that asked for it.
+    the operator request that asked for it and the Bitfinex user the key belongs to.
 
     Both in the caller's transaction: either the account keeps its old active credential
     or it has exactly the new one. The account row is locked first, as promotion does in
@@ -259,6 +260,7 @@ async def rotate_active_credential(
         lifecycle_status="active",
         verified_at=verified_at,
         operator_request_id=operator_request_id,
+        bitfinex_user_id=bitfinex_user_id,
     )
 
 

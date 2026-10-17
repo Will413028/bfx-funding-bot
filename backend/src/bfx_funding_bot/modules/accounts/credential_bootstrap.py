@@ -16,11 +16,13 @@ from bfx_funding_bot.modules.accounts.vault import (
     create_account_credential,
     verify_account_credential,
 )
-from bfx_funding_bot.modules.execution.protocols import AccountContext
+from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 
 
 class PermissionsClient(Protocol):
     async def get_key_permissions(self, *, ctx: AccountContext) -> KeyPermissions: ...
+
+    async def get_user_id(self, *, ctx: AccountContext) -> int: ...
 
 
 class BootstrapError(Exception):
@@ -94,6 +96,12 @@ async def bootstrap_credential(
             )
             if verified is None or verified.lifecycle_status != "active":
                 raise BootstrapError("bootstrap_permissions_rejected")
+            # The Bitfinex account the key belongs to: a later rotation compares the new
+            # key's account with it, even after this key is revoked at Bitfinex.
+            verified.bitfinex_user_id = await client.get_user_id(ctx=AccountContext(
+                account_id=str(exchange_account_id),
+                credentials=Credentials(api_key=api_key, api_secret=api_secret)))
+            await session.flush()
             if not apply:
                 await session.rollback()
         return {"status": "verified", "applied": apply}

@@ -13,11 +13,17 @@ Settling one request (``OperatorRequestWorker``):
 2. :meth:`prepare` runs with no lock or transaction and only observes: no deployment is
    settling, the request was sealed to this run, it opens, the key was never retired or
    revoked, its permissions are funding-write only, and it belongs to the same Bitfinex
-   user as the key in use. Its verdict is returned, never raised: a refusal raised there
-   would be recorded as ``failed``;
+   user as the credential it replaces (that row's stored ``bitfinex_user_id``; asked of the
+   key in use only while the row has none). Its verdict is returned, never raised: a
+   refusal raised there would be recorded as ``failed``;
 3. under the lock again (operator re-checked), :meth:`apply` raises the refusal as
    ``rejected``, or retires the replaced credential and inserts the verified one as active
    in the same transaction that records ``applied`` (``vault.rotate_active_credential``).
+
+The stored id lets a key already revoked at Bitfinex be replaced: a revoked key can no
+longer answer ``v2/auth/r/info/user``. A NULL id on the active row is filled once per run
+from the key the bot booted on (trust on first use, :meth:`idle`), never in credential
+recovery mode, where that key is the one being refused.
 
 After an applied rotation commits, the process stops the way SIGTERM stops it (``restart``
 sets the daemon's stop event) and the container restart policy boots it on the new key,
@@ -35,7 +41,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -92,6 +98,9 @@ DEPLOYMENT_IN_PROGRESS_WINDOW = timedelta(minutes=15)
 # plus margin). The bot being settled is always the one that just started; after any
 # restart a rotation waits this long.
 BOT_SETTLE_WINDOW = timedelta(minutes=10)
+# After a failed fill of the active row's NULL ``bitfinex_user_id`` (the key in use did not
+# answer ``info/user``), the next try waits this long, not the next 2s tick.
+USER_ID_BACKFILL_RETRY = timedelta(hours=1)
 
 DEPLOYMENT_IN_PROGRESS = "deployment_in_progress"
 BOT_RECENTLY_STARTED = "bot_recently_started"
@@ -206,6 +215,11 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
         self._run_started_ms: int | None = None
         self._recipient: tuple[UUID, Recipient] | None = None
         self._restart_requested = False
+        # Credential recovery mode (the daemon says so): the key in use is the refused one,
+        # so nothing asks Bitfinex about it.
+        self._credential_recovery = False
+        self._backfill_done = False
+        self._backfill_next_ms: int | None = None
 
     # ------------------------------------------------------------- recipient
 
@@ -214,6 +228,11 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
         rotation applies until the run is :data:`BOT_SETTLE_WINDOW` old."""
         self._run_id = run_id
         self._run_started_ms = started_at_ms
+
+    def note_credential_recovery(self) -> None:
+        """The daemon runs in credential recovery mode: the key in use was refused, so the
+        stored user id is never filled from it (rotations still apply, settle window kept)."""
+        self._credential_recovery = True
 
     def failure_reason(self, exc: BaseException) -> str:
         if isinstance(exc, CredentialStoreError):
@@ -232,13 +251,58 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
         return None if self._recipient is None else self._recipient[0]
 
     async def idle(self) -> None:
-        """Publish this run's recipient key once (a failure is retried on the next tick), then
-        catch up on a rotation that committed without its restart."""
+        """Publish this run's recipient key once (a failure is retried on the next tick), catch
+        up on a rotation that committed without its restart, then fill the active row's
+        missing Bitfinex user id."""
         if self._run_id is None:
             return
         if self._recipient is None:
             await self._publish_recipient()
         await self._catch_up_restart()
+        await self._backfill_user_id()
+
+    async def _backfill_user_id(self) -> None:
+        """Store the Bitfinex user id of the key this run booted on, when the active row has
+        none (trust on first use): a later rotation compares with it, even once this key is
+        revoked. One try per run, then at most one per :data:`USER_ID_BACKFILL_RETRY`;
+        never in credential recovery mode.
+
+        The row is found by the booted key, not "the active row": when the active credential
+        was replaced meanwhile (the web API), this key's id is never written onto the new row.
+        """
+        if self._credential_recovery or self._backfill_done or self._restart_requested:
+            return
+        now = self.clock()
+        if self._backfill_next_ms is not None and now < self._backfill_next_ms:
+            return
+        api_key = self.current_ctx.credentials.api_key
+        try:
+            async with self.session_factory() as session:
+                missing = await session.scalar(select(func.count()).select_from(
+                    ExchangeAccountCredential).where(
+                    ExchangeAccountCredential.exchange_account_id == self.account_id,
+                    ExchangeAccountCredential.venue == "bitfinex",
+                    ExchangeAccountCredential.lifecycle_status == "active",
+                    ExchangeAccountCredential.bitfinex_user_id.is_(None)))
+            if not missing:
+                self._backfill_done = True
+                return
+            user_id = await self.current_client.get_user_id(ctx=self.current_ctx)
+            async with self.session_factory.begin() as session:
+                result = await session.execute(update(ExchangeAccountCredential).where(
+                    ExchangeAccountCredential.exchange_account_id == self.account_id,
+                    ExchangeAccountCredential.venue == "bitfinex",
+                    ExchangeAccountCredential.api_key == api_key,
+                    ExchangeAccountCredential.lifecycle_status == "active",
+                    ExchangeAccountCredential.bitfinex_user_id.is_(None),
+                ).values(bitfinex_user_id=user_id))
+            written = int(getattr(result, "rowcount", 0) or 0)
+        except Exception as exc:
+            self._backfill_next_ms = now + int(USER_ID_BACKFILL_RETRY.total_seconds() * 1000)
+            log.warning("credential_user_id_backfill_failed reason=%s", type(exc).__name__)
+            return
+        self._backfill_done = True
+        log.info("credential_user_id_backfilled written=%d", written)
 
     async def _catch_up_restart(self) -> None:
         """Restart when the active credential came from a rotation applied during this run.
@@ -289,16 +353,22 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
 
     async def prepare(self, row_id: UUID) -> PreparedRotation:
         # What the database says first, in a session closed before Bitfinex is called.
+        stored_user_id: int | None = None
         try:
             async with self.session_factory() as session:
                 row = await session.scalar(self._scoped(select(self.model)).where(
                     self.model.request_id == row_id))
                 local = await self._judge_locally(session, row)
+                if row is not None and not isinstance(local, Refused):
+                    stored_user_id = await session.scalar(
+                        select(ExchangeAccountCredential.bitfinex_user_id).where(
+                            ExchangeAccountCredential.id == row.replaces_credential_id,
+                            ExchangeAccountCredential.exchange_account_id == self.account_id))
         except StatementError as exc:
             raise _store_error(exc) from None
         if isinstance(local, Refused):
             return PreparedRotation(row_id, local)
-        return PreparedRotation(row_id, await self._verify(local))
+        return PreparedRotation(row_id, await self._verify(local, stored_user_id))
 
     async def _judge_locally(self, session: AsyncSession,
                              row: CredentialRotationRequestRow | None,
@@ -329,10 +399,15 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
             return Refused(CREDENTIAL_REUSED)
         return opened
 
-    async def _verify(self, opened: UnsealedCredential) -> Verified | Refused:
+    async def _verify(self, opened: UnsealedCredential,
+                      stored_user_id: int | None) -> Verified | Refused:
         """Bitfinex's view of the new key. When the venue did not answer (transport, rate
         limit, maintenance, a 5xx without its error body) this raises (``failed``, resend);
-        its answer, even with HTTP 500 (``["error", 10100, ...]``), is a refusal."""
+        its answer, even with HTTP 500 (``["error", 10100, ...]``), is a refusal.
+
+        The new key must belong to the Bitfinex user stored on the credential it replaces;
+        only while that row has none is the key in use asked (it may be the revoked one, and
+        then the identity is unavailable)."""
         ctx = AccountContext(account_id=str(self.account_id),
                              credentials=Credentials(api_key=opened.api_key,
                                                      api_secret=opened.api_secret))
@@ -348,7 +423,8 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
             return Refused(refusal)
         try:
             new_user = await client.get_user_id(ctx=ctx)
-            current_user = await self.current_client.get_user_id(ctx=self.current_ctx)
+            current_user = (stored_user_id if stored_user_id is not None
+                            else await self.current_client.get_user_id(ctx=self.current_ctx))
         except BitfinexAPIError as exc:
             if venue_did_not_answer(exc):
                 raise
@@ -401,7 +477,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
                 replaces_credential_id=row.replaces_credential_id,
                 operator_request_id=row.request_id, label=row.label, api_key=verdict.api_key,
                 api_secret=verdict.secret.reveal(), verified_at=verdict.verified_at,
-                kek=self.kek_loader())
+                kek=self.kek_loader(), bitfinex_user_id=verdict.user_id)
         except StatementError as exc:
             raise _store_error(exc) from None
 
@@ -427,6 +503,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
 __all__ = [
     "BOT_SETTLE_WINDOW",
     "DEPLOYMENT_IN_PROGRESS_WINDOW",
+    "USER_ID_BACKFILL_RETRY",
     "CredentialRotationWorker",
     "CredentialStoreError",
     "KeyClient",

@@ -350,7 +350,8 @@ async def _rotate(s, *, replaces: UUID, request_id: UUID, kek: bytes = _KEK):
     return await rotate_active_credential(
         s, exchange_account_id=_ROTATION_ACCOUNT, replaces_credential_id=replaces,
         operator_request_id=request_id, label="new", api_key="FAKE-NEW-KEY",
-        api_secret="FAKE-NEW-SECRET", verified_at=datetime.now(UTC), kek=kek)
+        api_secret="FAKE-NEW-SECRET", verified_at=datetime.now(UTC), kek=kek,
+        bitfinex_user_id=4242)
 
 
 async def _states(factory) -> list[tuple[str, str, UUID | None]]:
@@ -372,6 +373,8 @@ async def test_rotate_retires_the_replaced_credential_then_inserts_the_new_activ
     async with session_scope(pg_session_factory) as s:
         new = await _rotate(s, replaces=old_id, request_id=request_id)
         assert (new.lifecycle_status, new.operator_request_id) == ("active", request_id)
+        # The new row names the Bitfinex user the verified key belongs to.
+        assert new.bitfinex_user_id == 4242
     assert await _states(pg_session_factory) == [
         ("FAKE-NEW-KEY", "active", request_id), ("FAKE-OLD-KEY", "retired", None)]
     async with session_scope(pg_session_factory) as s:

@@ -19,9 +19,10 @@ KEK = bytes(range(32))
 
 
 class Permissions:
-    def __init__(self, scopes=None, error=None):
+    def __init__(self, scopes=None, error=None, user_error=None):
         self.scopes = scopes if scopes is not None else {"funding": (True, True)}
         self.error = error
+        self.user_error = user_error
 
     async def get_key_permissions(self, *, ctx):
         assert ctx.account_id == str(ACCOUNT)
@@ -30,6 +31,14 @@ class Permissions:
         if self.error:
             raise self.error
         return KeyPermissions(scopes=self.scopes)
+
+    async def get_user_id(self, *, ctx):
+        # Asked of the key being bootstrapped, never another.
+        assert ctx.account_id == str(ACCOUNT)
+        assert ctx.credentials.api_key == "fixture-key"
+        if self.user_error:
+            raise self.user_error
+        return 4242
 
 
 @pytest_asyncio.fixture
@@ -89,7 +98,20 @@ async def test_apply_commits_uuid_bound_loadable_credential(factory):
         )
         with pytest.raises(InvalidTag):
             decrypt_secret_with_aad(envelope, aad="owner", kek=KEK)
+        # The Bitfinex account the key belongs to, for later rotations to compare with.
+        assert row.bitfinex_user_id == 4242
     assert await count(factory) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_user_id_leaves_no_row(factory):
+    """The id is part of the bootstrap: without it a later rotation of a revoked key could
+    not prove the account, so nothing is committed."""
+    with pytest.raises(bootstrap.BootstrapError) as error:
+        await invoke(factory, apply=True,
+                     client=Permissions(user_error=RuntimeError("fixture-secret")))
+    assert "fixture-secret" not in str(error.value)
+    assert await count(factory) == 0
 
 
 @pytest.mark.asyncio

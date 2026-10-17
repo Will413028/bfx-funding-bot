@@ -177,6 +177,11 @@ class ExchangeAccountCredential(Base):
                    name="fk_exchange_account_credentials_operator_request", use_alter=True),
         nullable=True,
     )
+    # The Bitfinex account this key belongs to (``v2/auth/r/info/user`` column 0). Written by
+    # an applied rotation and the operator bootstrap, filled once from the booted key when
+    # NULL (trust on first use); a rotation compares the new key's account with it, so a
+    # key already revoked at Bitfinex can still be replaced. NULL: not known yet.
+    bitfinex_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -187,6 +192,10 @@ class ExchangeAccountCredential(Base):
             "lifecycle_status <> 'active' OR "
             "(verified_at IS NOT NULL AND last_verify_error IS NULL)",
             name="ck_exchange_account_credentials_active_verified",
+        ),
+        CheckConstraint(
+            "bitfinex_user_id IS NULL OR bitfinex_user_id > 0",
+            name="ck_exchange_account_credentials_bitfinex_user_id_positive",
         ),
         Index(
             "uq_exchange_account_credentials_active_venue",
