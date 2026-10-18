@@ -155,7 +155,7 @@ async def build_daemon(*, stop_event):
 
     return SimpleNamespace(
         run=run, metrics=None, booted=True, writer_lock=None, tracing=None,
-        credential_rotation=None,
+        credential_rotation=None, bind_run=lambda _started_at_ms: None,
         bitfinex_http=SimpleNamespace(aclose=nothing), venue_aclose=dispose,
         config=SimpleNamespace(phase="live", cells=[], run_duration_hours=None),
         session_factory=async_sessionmaker(engine, expire_on_commit=False),

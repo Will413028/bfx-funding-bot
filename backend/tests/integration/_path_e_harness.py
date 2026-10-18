@@ -10,6 +10,10 @@ The daemon is the Bitfinex-venue composition; nothing here may reach the network
 candle warm-up is skipped and the book/auth WebSocket tasks and the venue observation loops
 are detached (the same set ``go_offline`` detaches in the sqlite wiring tests).
 
+Variant ``reconcile_rejected`` (argv[1]): no synthetic submit; the periodic reconcile's
+observation raises ``VenueCredentialRejectedError`` (the venue refusing the key while the bot
+runs), which must end the process with 78 as well.
+
 Not a pytest file (leading underscore) — pytest skips it during collection.
 """
 from __future__ import annotations
@@ -22,6 +26,7 @@ from uuid import uuid4
 
 from bfx_funding_bot.apps import bot as daemon_mod
 from bfx_funding_bot.core.errors import ExecutorAuthError
+from bfx_funding_bot.external.bitfinex.errors import VenueCredentialRejectedError
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -29,6 +34,7 @@ from bfx_funding_bot.modules.execution.protocols import (
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 _orig_build_daemon = daemon_mod.build_daemon
+_MODE = sys.argv[1] if len(sys.argv) > 1 else "submit_auth"
 
 
 async def _no_warmup(**_kw: Any) -> None:
@@ -55,7 +61,17 @@ def _detach_network(d: Any) -> None:
 async def _patched_build_daemon(*args: Any, **kwargs: Any) -> Any:
     kwargs.setdefault("skip_ws", True)
     d = await _orig_build_daemon(*args, **kwargs)
+    reconcile = d.periodic_reconcile
     _detach_network(d)
+    if _MODE == "reconcile_rejected":
+        class _RefusingObservation:
+            async def run(self, scope: Any) -> Any:
+                raise VenueCredentialRejectedError(
+                    500, "Internal Server Error", '["error",10100,"apikey: digest invalid"]')
+
+        reconcile._recovery = _RefusingObservation()
+        d.periodic_reconcile = reconcile
+        return d
 
     async def _auth_fail_submit(*_a: Any, **_kw: Any) -> Any:
         raise ExecutorAuthError("subprocess_synthetic_auth_fail")

@@ -36,9 +36,14 @@ _SAFETY_YAML = Path(__file__).resolve().parents[2] / "configs" / "safety.live.ya
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["submit_auth", "reconcile_rejected"])
 async def test_path_e_subprocess_exits_with_auth_failed_code(
-    pg_engine, pg_session_factory,
+    pg_engine, pg_session_factory, mode: str,
 ) -> None:
+    """``submit_auth``: an ``ExecutorAuthError`` from a submit. ``reconcile_rejected``: the
+    periodic reconcile meets the venue refusing the key (9c-2a); mutation: drop its re-raise
+    in ``PeriodicReconcile._tick`` (or the ``except* VenueCredentialRejectedError`` branch)
+    and the process keeps running or exits 1."""
     assert _HARNESS.exists(), f"harness file not found: {_HARNESS}"
     assert _CELLS_YAML.exists(), f"cells.yaml not found: {_CELLS_YAML}"
     await seed_exchange_account(pg_engine)
@@ -67,7 +72,7 @@ async def test_path_e_subprocess_exits_with_auth_failed_code(
     env["BFX_HEALTHZ_PORT"] = "0"
 
     result = subprocess.run(
-        [sys.executable, str(_HARNESS)],
+        [sys.executable, str(_HARNESS), mode],
         env=env,
         capture_output=True,
         timeout=60,

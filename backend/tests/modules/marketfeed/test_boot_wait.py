@@ -4,7 +4,8 @@ Before: a venue fetch failure in the boot observation raised out of
 ``Daemon.run`` and the process exited; the restarted process met the same
 outage and exited again. Now a transient reachability failure is retried with a
 capped backoff, nothing that can trade runs meanwhile, and a stop request ends
-the wait cleanly. Refusals still refuse.
+the wait cleanly. Refusals still refuse -- except the venue refusing the account's key,
+which holds the boot in credential recovery mode (``test_credential_recovery.py``).
 
 The backoff is injected as zero, so no test waits on a clock.
 
@@ -14,7 +15,11 @@ Mutation checks (one at a time; revert after each):
   ``test_an_unreachable_venue_at_boot_is_retried_until_it_answers``.
 * drop the writer-lock check before a retry: ``test_a_lost_writer_lock_ends_the_wait``.
 * treat every ``BitfinexAPIError`` 5xx as transient (ignore its ``["error", CODE, ...]``
-  body): ``test_a_refusal_still_refuses_the_boot[500_10100]``.
+  body): ``test_a_refusal_still_refuses_the_boot[500_10114]``.
+* hold the boot for any non-transient refusal, not only a refused key (10114 enters
+  recovery mode too): ``test_a_refusal_still_refuses_the_boot[500_10114]``.
+* drop the credential-rejection branch of ``_boot_until_observed``:
+  ``test_a_refused_key_holds_the_boot_for_credential_recovery`` fails.
 """
 from __future__ import annotations
 
@@ -39,7 +44,10 @@ from bfx_funding_bot.core.errors import (
     ExecutorAuthError,
     ExecutorTransientError,
 )
-from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+from bfx_funding_bot.external.bitfinex.errors import (
+    BitfinexAPIError,
+    VenueCredentialRejectedError,
+)
 from bfx_funding_bot.modules.execution.safety.protection import WriterLockLostError
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.marketfeed.boot_wait import (
@@ -47,7 +55,7 @@ from bfx_funding_bot.modules.marketfeed.boot_wait import (
     is_transient_dependency_error,
     wait_for_database,
 )
-from bfx_funding_bot.modules.marketfeed.daemon import Daemon
+from bfx_funding_bot.modules.marketfeed.daemon import BootOutcome, Daemon
 
 
 class _Venue:
@@ -91,7 +99,7 @@ async def test_an_unreachable_venue_at_boot_is_retried_until_it_answers(caplog) 
     fake = _daemon(venue, lock_watch=lock_watch)
 
     with caplog.at_level(logging.WARNING):
-        assert await Daemon._boot_until_observed(fake) is True
+        assert await Daemon._boot_until_observed(fake) is BootOutcome.OBSERVED
 
     assert venue.calls == 4
     # The observation only reruns as the single writer.
@@ -124,9 +132,11 @@ async def test_nothing_trades_while_the_boot_waits_and_a_stop_ends_the_wait() ->
 @pytest.mark.parametrize(
     ("label", "error"),
     [
-        # Bitfinex refuses a revoked or wrong key with HTTP 500 and a parsed body.
-        ("500_10100", lambda: BitfinexAPIError(status_code=500, message="Internal Server Error",
-                                               raw='["error",10100,"apikey: invalid"]')),
+        # A venue answer that is not about the key: nonce too small (another process
+        # signing with the same key, or a clock gone back).
+        ("500_10114", lambda: BitfinexAPIError(status_code=500, message="Internal Server Error",
+                                               raw='["error",10114,"nonce: small"]')),
+        # The executor's own auth error keeps its existing handling (exit 78 path).
         ("auth", lambda: ExecutorAuthError("auth_failed: HTTP 401")),
         ("invariant", lambda: BootInvariantError("boot observation refused query admission")),
         ("value", lambda: ValueError("boot observation scope is required")),
@@ -139,6 +149,31 @@ async def test_a_refusal_still_refuses_the_boot(label: str, error: Callable[[], 
     with pytest.raises(type(error())):
         await Daemon._boot_until_observed(fake)
     assert venue.calls == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # As the signed client raises it.
+        lambda: VenueCredentialRejectedError(500, "Internal Server Error",
+                                             '["error",10100,"apikey: digest invalid"]'),
+        # The same answer as a plain BitfinexAPIError (built by another caller).
+        lambda: BitfinexAPIError(status_code=500, message="Internal Server Error",
+                                 raw='["error",10100,"apikey: invalid"]'),
+        # Wrapped by the observation.
+        lambda: _caused(RuntimeError("wallets read failed"),
+                        BitfinexAPIError(status_code=401, message="Unauthorized")),
+    ],
+    ids=["typed_10100", "plain_10100", "wrapped_401"],
+)
+async def test_a_refused_key_holds_the_boot_for_credential_recovery(
+        error: Callable[[], BaseException]) -> None:
+    venue = _Venue(1, error)
+    fake = _daemon(venue, delay=lambda _n: pytest.fail("a refused key is not waited out"))
+
+    assert await Daemon._boot_until_observed(fake) is BootOutcome.CREDENTIAL_REJECTED
+    assert venue.calls == 1
+    assert fake.booted is False
 
 
 async def test_a_lost_writer_lock_ends_the_wait() -> None:

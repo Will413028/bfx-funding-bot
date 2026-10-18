@@ -28,7 +28,7 @@ import logging
 import os
 import secrets
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from uuid import UUID
 
@@ -97,10 +97,14 @@ def fault_plan(spec: SimFaultSpec) -> FaultPlan:
 
 @dataclass(frozen=True, slots=True)
 class VenueSeam:
-    """Tests only: replace the venue's market feed and/or inject venue faults."""
+    """Tests only: replace the venue's market feed and/or inject venue faults, or have the
+    bot sign with ``client_credentials`` instead of the keys the simulated venue accepts (the
+    venue then refuses every signed request, as Bitfinex refuses a revoked key). Only the
+    simulated venue reads it."""
 
     feed: MarketFeed | None = None
     faults: FaultPlan | None = None
+    client_credentials: Credentials | None = field(default=None, repr=False)
 
 
 class VenueFeedTask:
@@ -277,7 +281,10 @@ async def _build_simulated(
     client = venue.client()
     attach_httpx_metrics(client, metrics)
     return VenueWiring(
-        venue="simulated", credentials=credentials, auth_http=client, auth_gate=gate,
+        venue="simulated",
+        credentials=seam.client_credentials if seam.client_credentials is not None
+        else credentials,
+        auth_http=client, auth_gate=gate,
         capabilities=SIMULATED_CAPABILITIES, aclose=_closer(client), tasks=tasks,
         simulated=venue,
     )

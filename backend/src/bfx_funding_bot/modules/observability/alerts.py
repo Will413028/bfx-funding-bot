@@ -103,6 +103,10 @@ CAPITAL_POLICY_REQUEST_FAILED: Final = "capital_policy_request_failed"
 CREDENTIAL_ROTATION_APPLIED: Final = "credential_rotation_applied"
 CREDENTIAL_ROTATION_REJECTED: Final = "credential_rotation_rejected"
 CREDENTIAL_ROTATION_FAILED: Final = "credential_rotation_failed"
+# The venue refused the account's key at boot: the bot trades nothing and runs only the
+# credential rotation worker and its liveness until the key works again or is replaced
+# (marketfeed/daemon.py, credential recovery mode).
+CREDENTIAL_RECOVERY_MODE: Final = "credential_recovery_mode"
 # A venue history stream could not be read completely (execution/venue_observation.py).
 VENUE_OBSERVATION_HISTORY_INCOMPLETE: Final = "venue_observation_history_incomplete"
 # The UNKNOWN resolver refused a resolution (ledger/_internal/resolver.py).
@@ -142,6 +146,7 @@ ALERT_EVENTS: Final[Mapping[str, str]] = {
     CREDENTIAL_ROTATION_APPLIED: WARNING,
     CREDENTIAL_ROTATION_REJECTED: WARNING,
     CREDENTIAL_ROTATION_FAILED: CRITICAL,
+    CREDENTIAL_RECOVERY_MODE: CRITICAL,
     VENUE_OBSERVATION_HISTORY_INCOMPLETE: WARNING,
     LEDGER_UNKNOWN_RESOLUTION_REJECTED: WARNING,
     ALERT_TEST: INFO,
@@ -161,6 +166,7 @@ DEDUP_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     PROVENANCE_CONFLICT: ("symbol", "venue_offer_id"),
     OFFER_END_UNCONFIRMED: ("venue_offer_id",),
     OFFER_END_JUDGED: ("venue_offer_id", "outcome"),
+    CREDENTIAL_RECOVERY_MODE: ("account",),        # one per account, whatever the error text
 }
 
 # Human titles for the protection triggers the plan names explicitly.
@@ -457,6 +463,9 @@ def title(event: str, fields: Mapping[str, object]) -> str:
         return f"NAV drop on {fields.get('symbol', '?')} (alert only; lending continues)"
     if event == FOREIGN_LENDING:
         return "lending no bot offer explains (foreign offer filled unseen)"
+    if event == CREDENTIAL_RECOVERY_MODE:
+        return ("venue refused the account's key: not trading, waiting for the key to work "
+                "or for a credential rotation")
     if event == ALERT_TEST:
         return "test alert (no action needed)"
     return event
@@ -512,6 +521,7 @@ __all__ = [
     "CAPITAL_POLICY_REQUEST_FAILED",
     "CAPITAL_POLICY_REQUEST_REJECTED",
     "COMMAND_THROTTLED",
+    "CREDENTIAL_RECOVERY_MODE",
     "CREDENTIAL_ROTATION_APPLIED",
     "CREDENTIAL_ROTATION_FAILED",
     "CREDENTIAL_ROTATION_REJECTED",

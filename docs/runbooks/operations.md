@@ -289,9 +289,9 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 <a id="alert-boot_refused"></a>
 #### `boot_refused`（critical）
 
-- 代表：bot 在開機完成前失敗：watchdog 設定無效、`build_daemon` 拋錯（schema／realm／ledger epoch、policy 讀不到、venue wiring、資料庫非暫時性錯誤），或開機觀測遇到非暫時性錯誤、venue 拒絕憑證（exit 78）。`error` 是例外摘要。
-- 系統會做：process 退出，不寫交易狀態、不碰 venue；`restart: unless-stopped` 重啟 container。組裝 daemon 時的拒絕（schema／realm／ledger epoch、policy、venue wiring）會先發 `venue_offers_may_remain`；帳戶設定、watchdog 設定、開機觀測與憑證被拒只有這則。dedup 只在同一 process 內，crash loop 時每次重啟都會再收到一則。
-- operator 判斷：看 `error` 與 `docker logs bfx-bot`。schema／build 不符屬部署問題（[deploy runbook](deploy.md)）；憑證被拒要檢查 API key。修好後下一版照常開機，不需要 resume。writer lock 被另一個 writer 持有是 exit 75，不發這則（§4）。
+- 代表：bot 在開機完成前失敗（exit 1）：watchdog 設定無效、`build_daemon` 拋錯（schema／realm／ledger epoch、policy 讀不到、venue wiring、vault 沒有可用的 active 憑證或 KEK 不符、資料庫非暫時性錯誤），或開機觀測遇到非暫時性錯誤（例如 nonce 10114、invariant）。venue 拒絕 API key 不在此列：bot 不結束，改發 [`credential_recovery_mode`](#alert-credential_recovery_mode)。`error` 是例外摘要。
+- 系統會做：process 退出，不寫交易狀態、不碰 venue；`restart: unless-stopped` 重啟 container。組裝 daemon 時的拒絕（schema／realm／ledger epoch、policy、venue wiring）會先發 `venue_offers_may_remain`；帳戶設定、watchdog 設定與開機觀測只有這則。dedup 只在同一 process 內，crash loop 時每次重啟都會再收到一則。
+- operator 判斷：看 `error` 與 `docker logs bfx-bot`。schema／build 不符屬部署問題（[deploy runbook](deploy.md)）；nonce 10114 見 §9。修好後下一版照常開機，不需要 resume。writer lock 被另一個 writer 持有是 exit 75，不發這則（§4）。
 
 <a id="alert-boot_waiting"></a>
 #### `boot_waiting`（warning）
@@ -310,9 +310,9 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 <a id="alert-daemon_fatal"></a>
 #### `daemon_fatal`（critical）
 
-- 代表：已完成開機的 bot 因致命錯誤停下：writer lock refresh 後仍未持有、送單結果無法寫入 DB（`submit_outcome_lost`）、venue 拒絕憑證（exit 78），或任一 sub-task 拋出例外。`error` 說明是哪一種。
+- 代表：已完成開機的 bot 因致命錯誤停下：writer lock refresh 後仍未持有、送單結果無法寫入 DB（`submit_outcome_lost`）、periodic reconcile 遇到 venue 拒絕 API key（`VenueCredentialRejectedError`，exit 78），或任一 sub-task 拋出例外（exit 1）。`error` 說明是哪一種。
 - 系統會做：process 退出、container 重啟；不寫交易狀態。結果沒寫下的送單在重啟後變成 UNKNOWN 並隔離該幣別（§4 第 2 級）；lock 仍被其他 writer 持有時開機以 exit 75 反覆重試。
-- operator 判斷：看 `error` 與 `docker logs bfx-bot`。資料庫斷線造成的 lock 遺失在 DB 恢復後自己好；憑證被拒要處理 API key（之後的開機會一直 `boot_refused`）；同一錯誤反覆出現就是 bug，要查清楚。venue 上的受管 offer 仍在包絡內，要撤用 kill（§3）。
+- operator 判斷：看 `error` 與 `docker logs bfx-bot`。資料庫斷線造成的 lock 遺失在 DB 恢復後自己好；`VenueCredentialRejectedError` 時重啟後的開機會進憑證恢復模式，接著收到 [`credential_recovery_mode`](#alert-credential_recovery_mode)，照那則處理；同一錯誤反覆出現就是 bug，要查清楚。venue 上的受管 offer 仍在包絡內，要撤用 kill（§3）。
 
 <a id="alert-foreign_exposure"></a>
 #### `foreign_exposure`（warning）
@@ -445,7 +445,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 
 - 代表：operator CLI 的 `rotate-credential` 已套用：新 key 的權限只有 funding 可寫、跟現行 key 屬於同一個 Bitfinex 帳號；舊憑證（`replaces_credential_id`）已 retired，新憑證（`credential_id`）是唯一的 active，`reason` 為 `rotated: credential <id>`。
 - 系統會做：commit 後 bot 照 SIGTERM 的乾淨停機流程結束（log `credential_rotation_restart`，`bot_runs` 記 `clean_stop`；commit 成功但確認遺失時，閒置的 worker 補做，log `credential_rotation_restart_caught_up`），container restart policy 重啟，開機以 `load_account_credentials` 載入新憑證。重啟前仍用記憶體裡的舊 key（在 Bitfinex 端仍有效），沒有無 key 的空窗。
-- operator 判斷：確認這次輪替是你送的；看到新的 bot run 開機成功後，才到 Bitfinex 刪除舊 key（key 衛生，不是交易步驟；完整步驟見 §11）。重啟後新 key 若載入或驗證失敗，bot 會發 `boot_refused`／`daemon_fatal`（`executor_auth_failed`，exit 78），此時的復原路徑是 webapi 的憑證端點（§11）。
+- operator 判斷：確認這次輪替是你送的；看到新的 bot run 開機成功後，才到 Bitfinex 刪除舊 key（key 衛生，不是交易步驟；完整步驟見 §11）。重啟後 Bitfinex 若拒絕新 key，bot 進憑證恢復模式（[`credential_recovery_mode`](#alert-credential_recovery_mode)），可以再送一次輪替（§11）。
 
 <a id="alert-credential_rotation_rejected"></a>
 #### `credential_rotation_rejected`（warning）
@@ -462,6 +462,13 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 - 代表：輪替時發生錯誤；`reason` 為 `prepare_failed:BitfinexAPIError`（驗證 key 時 Bitfinex 沒有回答：連線、429、rate limit／維護代碼，或沒有 `["error", …]` 內容的 5xx；帶錯誤代碼的 500 例如 `apikey: digest invalid` 是拒絕，記成 rejected）、`prepare_failed:CredentialStoreError` 或 `credential_rotation_failed:<DBAPI 錯誤型別>`（資料庫錯誤，只記型別、不帶參數）、`credential_rotation_failed:<root exception>` 或 `outcome_write_failed:…`。
 - 系統會做：rollback，舊憑證仍是 active，請求標為 failed、不重試，bot 不重啟。
 - operator 判斷：暫時性錯誤時稍後重送；其他原因看 `docker logs bfx-bot` 的 `credential_rotation_failed`，交給開發處理。重送照 §11。
+
+<a id="alert-credential_recovery_mode"></a>
+#### `credential_recovery_mode`（critical）
+
+- 代表：開機時 Bitfinex 拒絕帳戶的 API key（回應 `["error",10100,"apikey: …"]`，或 HTTP 401／403），bot 進入憑證恢復模式。例如 key 被撤銷或刪除、key 與 secret 對調。執行中被拒時 bot 先以 exit 78 結束（`daemon_fatal`，`error=VenueCredentialRejectedError`），重啟後的開機才發這則。每個帳戶一則（dedup 欄位 `account`）。
+- 系統會做：不送單、不撤單、不寫帳本；只跑換憑證 worker（照常發佈收件公鑰，CLI 可以封裝新 key 送進來）、writer lock、`health_check`、`db_keepalive` 與 healthz。`/healthz` 回 200（部署進恢復模式算部署成功，bfx-deploy 不會停掉 bot），`/readyz` 回 503。kill 等交易控制請求留在佇列，下次以可用的 key 開機後才套用並撤單。在 process 內每 1、2、4 分鐘、之後每 5 分鐘重試一次開機觀測；以下任一發生時乾淨重啟（`bot_runs` 記 `clean_stop`、exit 0），重啟後正常開機：輪替 applied、重試成功（key 在 Bitfinex 端恢復）、DB 裡的 active 憑證已換成另一把 key。重啟一律等這次 bot 開機滿 10 分鐘（部署 settle 期間不重啟）。其他錯誤（nonce 10114、invariant）照舊拒絕開機（`boot_refused`）。
+- operator 判斷：先判斷 key 是不是外洩或被人改動（Bitfinex 的 API key 頁面、帳號安全紀錄）。到 Bitfinex 產生一把新 key（只開 funding 寫入，IP 白名單照舊），以 `sudo bfx-op rotate-credential` 送出（§11）。bot 開機未滿 10 分鐘或部署進行中時請求會被拒（`bot_recently_started`／`deployment_in_progress`，見 [`credential_rotation_rejected`](#alert-credential_rotation_rejected)），屆時重送。輪替比對的是舊憑證列存下的 Bitfinex user id，所以舊 key 已撤銷也能換；舊憑證列沒有存 id 時（9c-2a 部署前建立、bot 還沒用可用的 key 開機過）會回 `account_identity_unavailable`，此時改用 webapi 的憑證端點建立新 key，恢復模式偵測到 active 憑證改變就會自動重啟。
 
 <a id="alert-venue_observation_history_incomplete"></a>
 #### `venue_observation_history_incomplete`（warning）
@@ -645,7 +652,7 @@ kill 的 cancel-all）被拒：
 3. 以上都成立後，才到 Bitfinex 刪除舊 key（key 衛生，不是交易步驟）。刪之前舊 key 一直可用，新 key 有問題時 bot 仍有退路。
 
 被拒或失敗：看 §6 的 [`credential_rotation_rejected`](#alert-credential_rotation_rejected)／[`credential_rotation_failed`](#alert-credential_rotation_failed)，拒絕時憑證沒有任何改動。
-重啟後新 key 載入失敗（`executor_auth_failed`）：輪替請求要 bot 在跑才會處理，所以用 webapi 既有的憑證端點建立並驗證一把可用的 key（舊憑證列已 retired，不會復活；舊 key 在 Bitfinex 還沒刪的話，可以用它的值重新建立）。
+現行 key 已經被 Bitfinex 拒絕（例如撤銷或刪除）：bot 在憑證恢復模式（[`credential_recovery_mode`](#alert-credential_recovery_mode)），換憑證 worker 照常執行，照上面的步驟送出即可；等 bot 開機滿 10 分鐘再送。比對帳號用的是舊憑證列存下的 Bitfinex user id，不需要舊 key 可用。舊憑證列沒有存 id（回 `account_identity_unavailable`）時，用 webapi 既有的憑證端點建立並驗證一把可用的 key；恢復模式偵測到 active 憑證改變會自動重啟。
 
 ## 12. Break-glass
 

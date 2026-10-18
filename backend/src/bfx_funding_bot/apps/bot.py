@@ -38,6 +38,7 @@ from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
+from bfx_funding_bot.external.bitfinex.errors import VenueCredentialRejectedError
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
 from bfx_funding_bot.external.bitfinex.funding_rules import FundingRules
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
@@ -1066,6 +1067,11 @@ async def build_daemon(
         venue_tasks=venue_wiring.tasks,
         venue_aclose=venue_wiring.aclose,
         venue_diagnostics=venue_wiring.simulated,
+        # Credential recovery mode ends when the vault's active key is no longer this one;
+        # the simulated venue's throwaway keys are in no vault.
+        boot_credential_api_key=(venue_wiring.credentials.api_key
+                                 if venue_wiring.credential_vault else None),
+        clock=now_ms_utc,
         _stop_event=stop_event,
     )
 
@@ -1144,6 +1150,10 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
     if (run_record.started and run_record.started_at_ms is not None
             and daemon.credential_rotation is not None):
         daemon.credential_rotation.bind_run(run_record.run_id, run_record.started_at_ms)
+    # Credential recovery mode restarts the process only once this run is past
+    # BOT_SETTLE_WINDOW, counted from the same start the rotation worker uses.
+    if run_record.started and run_record.started_at_ms is not None:
+        daemon.bind_run(run_record.started_at_ms)
     # How this run ends, recorded after the drain. None (a BaseException other than
     # those below) leaves the row open: the next boot reports it, as it does for the
     # exits that never reach here (loop watchdog, OOM kill, SIGKILL).
@@ -1182,6 +1192,18 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         )
         alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
                     error="ExecutorAuthError: venue credentials rejected")
+        end_reason = "fatal" if daemon.booted else "boot_refused"
+        sys.exit(EXIT_CODE_AUTH_FAILED)
+    except* VenueCredentialRejectedError:
+        # The venue refused the key while running (the periodic reconcile raises it; a
+        # refusal at boot never gets here, it holds the boot in credential recovery mode).
+        # Ordered before ``except* Exception``, which would otherwise take it as an ordinary
+        # fatal error and exit 1. The restarted process boots into credential recovery mode.
+        log.critical(
+            "venue_credential_rejected — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
+        )
+        alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
+                    error="VenueCredentialRejectedError: venue refused the account's key")
         end_reason = "fatal" if daemon.booted else "boot_refused"
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* Exception as eg:
