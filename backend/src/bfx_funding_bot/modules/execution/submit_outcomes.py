@@ -329,6 +329,17 @@ type SubmitOutcome = (
 # the server may have started processing while asking the client to retry later.
 ALLOWLISTED_4XX_REJECTION_STATUSES = frozenset({400, 401, 403, 404, 409, 422})
 
+# Bitfinex answers a funding-submit validation failure with HTTP 500 and
+# ["error", CODE, MESSAGE].  10001 is its generic code, so the code alone cannot
+# tell a refused offer from an internal fault; only an exact (code, message)
+# pair recorded from the live venue is rejection evidence, and every other 5xx
+# stays UNKNOWN.  An entry joins only after it is seen verbatim (ADR 2026-09-23
+# venue-refusal-kept-before-classified, D2).
+VENUE_SUBMIT_REFUSALS_5XX: frozenset[tuple[int, str]] = frozenset({
+    # 2026-10-18, fUST offer above the available funding balance.
+    (10001, "Invalid offer: not enough UST balance available in deposit wallet"),
+})
+
 
 def _bounded_text(value: object, *, limit: int = 256) -> str | None:
     if value is None:
@@ -488,6 +499,16 @@ def classify_submit_response(
         return _unknown("response_missing", transport_started=True, parsed_body=parsed_body)
 
     if http_status >= 500:
+        venue = venue_error(parsed_body)
+        if http_status == 500 and venue is not None and venue in VENUE_SUBMIT_REFUSALS_5XX:
+            code, message = venue
+            reason = f"venue_rejected:{code}:{message}"
+            return SubmitRejected(
+                reason=reason,
+                raw_response=_bounded_response_diagnostic(
+                    parsed_body, status="HTTP_500", reason=reason,
+                ),
+            )
         return _unknown("http_5xx", transport_started=True, parsed_body=parsed_body)
 
     rejection_reason = _structured_rejection_reason(parsed_body)

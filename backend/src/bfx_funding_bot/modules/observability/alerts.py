@@ -107,6 +107,9 @@ CREDENTIAL_ROTATION_FAILED: Final = "credential_rotation_failed"
 VENUE_OBSERVATION_HISTORY_INCOMPLETE: Final = "venue_observation_history_incomplete"
 # The UNKNOWN resolver refused a resolution (ledger/_internal/resolver.py).
 LEDGER_UNKNOWN_RESOLUTION_REJECTED: Final = "ledger_unknown_resolution_rejected"
+# The venue refused a deployment submit with explicit evidence
+# (execution/deployment/reconciler.py); the symbol keeps deploying.
+VENUE_SUBMIT_REJECTED: Final = "venue_submit_rejected"
 # Sent by backend/scripts/send_test_alert.py to prove the delivery path.
 ALERT_TEST: Final = "alert_test"
 
@@ -144,6 +147,7 @@ ALERT_EVENTS: Final[Mapping[str, str]] = {
     CREDENTIAL_ROTATION_FAILED: CRITICAL,
     VENUE_OBSERVATION_HISTORY_INCOMPLETE: WARNING,
     LEDGER_UNKNOWN_RESOLUTION_REJECTED: WARNING,
+    VENUE_SUBMIT_REJECTED: WARNING,
     ALERT_TEST: INFO,
 }
 
@@ -161,6 +165,7 @@ DEDUP_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     PROVENANCE_CONFLICT: ("symbol", "venue_offer_id"),
     OFFER_END_UNCONFIRMED: ("venue_offer_id",),
     OFFER_END_JUDGED: ("venue_offer_id", "outcome"),
+    VENUE_SUBMIT_REJECTED: ("symbol", "reason"),   # a refusal loop is one alert per window
 }
 
 # Human titles for the protection triggers the plan names explicitly.
@@ -539,6 +544,7 @@ __all__ = [
     "UNKNOWN_QUARANTINE_AGED",
     "VENUE_OBSERVATION_HISTORY_INCOMPLETE",
     "VENUE_OFFERS_MAY_REMAIN",
+    "VENUE_SUBMIT_REJECTED",
     "WARNING",
     "AlertDeliveryError",
     "AlertSink",
