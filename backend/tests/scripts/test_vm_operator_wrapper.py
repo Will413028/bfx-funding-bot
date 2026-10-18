@@ -7,11 +7,16 @@ wrapper hands the CLI and what it records, with fake whois, ledger and execution
 """
 from __future__ import annotations
 
+import http.server
 import importlib.util
 import io
 import json
 import shutil
+import socket
+import subprocess
 import sys
+import threading
+import urllib.parse
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import ModuleType
@@ -410,3 +415,219 @@ def test_the_child_streams_stderr_and_keeps_stdout(tmp_path: Path) -> None:
     code = op.subprocess_execute([sys.executable, str(script)], {"PATH": "/usr/bin:/bin"},
                                  f"{KEY}\n{SECRET}\n", lines.append)
     assert code == 0 and lines == ["operator_request request_id=r1 action=rotate tailnet_identity=1\n"]
+
+
+# --------------------------------------------------------------------------- halt
+#
+# Mutations (one at a time; revert after each): halt requires the tailnet identity
+# (test_halt_runs_from_the_console_as_host_root fails); every subcommand skips it
+# (test_every_other_subcommand_still_needs_a_tailnet_peer fails); HALT_SCRIPT treats
+# 502 as 0 (test_the_halt_script_exit_protocol[502-3] fails).
+
+HALT_REASON = "venue looks wrong, stop now"
+
+
+class NoLedger:
+    """halt reads no ledger, operator.env or DB: it only reaches the running bot."""
+
+    def read(self) -> Any:
+        raise AssertionError("halt read the deploy ledger")
+
+
+def _halt(argv: list[str], *, env: Mapping[str, str] | None = None,
+          runner: FakeRunner | None = None, execute: FakeExecute | None = None,
+          ) -> tuple[int, list[str], FakeExecute, FakeRunner]:
+    def no_secret(path: Path) -> None:
+        raise AssertionError(f"halt checked {path}")
+
+    return _call(argv, env=env, runner=runner, execute=execute, ledger=NoLedger(),
+                 secret_check=no_secret)
+
+
+def _halt_argv(reason: str, actor: str) -> list[str]:
+    return ["docker", "exec", "bfx-bot", "/app/.venv/bin/python", "-c", op.HALT_SCRIPT,
+            reason, actor]
+
+
+def test_halt_with_a_tailnet_identity_acts_as_the_login() -> None:
+    code, journal, execute, runner = _halt(["halt", "--reason", HALT_REASON])
+    assert code == 0 and runner.calls == [["tailscale", "whois", "--json", PEER]]
+    (argv, env, stdin_text), = execute.calls
+    assert argv == _halt_argv(HALT_REASON, "Will413028@github")
+    assert stdin_text is None and set(env) == {"PATH", "HOME"}
+    who = (f"command=halt identity=tailnet login=Will413028@github tailnet_user_id={TAILNET_ID} "
+           f"node=wills-macbook-pro.tail357fef.ts.net. peer={PEER} actor=Will413028@github")
+    assert journal == [f"start {who}", f"end {who} exit=0"]
+
+
+@pytest.mark.parametrize("connection", [None, "", "203.0.113.5 1 10.0.0.2 22"])
+def test_halt_runs_from_the_console_as_host_root(connection) -> None:
+    # The OCI console (no SSH_CONNECTION) is exactly when the static halt is needed.
+    code, journal, execute, runner = _halt(["halt", "--reason", HALT_REASON],
+                                           env=_env(SSH_CONNECTION=connection))
+    assert code == 0 and runner.calls == []
+    (argv, _, _), = execute.calls
+    assert argv == _halt_argv(HALT_REASON, "host-root")
+    who = "command=halt identity=none login=- peer=- actor=host-root"
+    assert journal == [f"start {who} no_identity=not_tailnet_peer", f"end {who} exit=0"]
+
+
+@pytest.mark.parametrize("runner", [
+    FakeRunner(returncode=1), FakeRunner(whois_document(None)),
+    FakeRunner(error=bfx.CommandError("timeout:tailscale whois", timed_out=True)),
+])
+def test_halt_runs_when_whois_fails(runner) -> None:
+    code, journal, execute, _ = _halt(["halt", "--reason", HALT_REASON], runner=runner)
+    assert code == 0
+    (argv, _, _), = execute.calls
+    assert argv[-1] == "host-root"
+    assert journal[0] == ("start command=halt identity=none login=- peer=- actor=host-root "
+                          "no_identity=tailnet_whois_failed")
+
+
+@pytest.mark.parametrize("argv", [
+    ["halt"], ["halt", "--reason"], ["halt", "--reason", ""], ["halt", "--reason", "   "],
+    ["halt", "--reason", "x" * 501], ["halt", "--reason", "r", "--actor", "x"],
+    ["halt", "--reason", "r", "extra"], ["halt", "--reason=", "x"],
+])
+def test_halt_needs_one_non_blank_bounded_reason(argv) -> None:
+    code, journal, execute, runner = _halt(argv)
+    assert code == 2 and execute.calls == [] and runner.calls == []
+    assert journal == ["refused reason=halt_reason_invalid peer=-"]
+
+
+@pytest.mark.parametrize("argv", [["halt", "--reason", "x" * 500], ["halt", "--reason=why"]])
+def test_halt_accepts_a_reason_up_to_the_cli_limit(argv) -> None:
+    code, _, execute, _ = _halt(argv)
+    assert code == 0 and execute.calls[0][0][-2] == argv[-1].removeprefix("--reason=")
+    assert op.HALT_REASON_MAX == 500
+
+
+@pytest.mark.parametrize("returncode", [0, 1, 3])
+def test_halt_exits_with_the_scripts_code(returncode, capsys) -> None:
+    code, journal, _, _ = _halt(["halt", "--reason", HALT_REASON],
+                                execute=FakeExecute(returncode=returncode))
+    assert code == returncode and journal[-1].endswith(f"exit={returncode}")
+    err = capsys.readouterr().err
+    assert ("operations runbook" in err) is (returncode != 0)
+
+
+def test_halt_never_journals_the_reason() -> None:
+    _, journal, _, _ = _halt(["halt", "--reason", HALT_REASON])
+    assert "venue looks wrong" not in " ".join(journal)
+
+
+def test_halt_dry_run_prints_the_argv_and_runs_nothing(capsys) -> None:
+    env = _env(SSH_CONNECTION=None, BFX_ADMIN_TOKEN="t0kenNEVERshown")
+    code, journal, execute, _ = _halt(["--dry-run", "halt", "--reason", HALT_REASON], env=env)
+    assert code == 0 and execute.calls == [] and journal == []
+    out = capsys.readouterr().out
+    described = json.loads(out)
+    assert described["argv"] == _halt_argv(HALT_REASON, "host-root")
+    assert described["identity"] == "none" and "t0kenNEVERshown" not in out
+
+
+def test_halt_not_root_refuses() -> None:
+    journal: list[str] = []
+    execute = FakeExecute()
+    assert op.main(["halt", "--reason", "r"], env=_env(SSH_CONNECTION=None),
+                   journal=journal.append, execute=execute, is_root=lambda: False) == 2
+    assert journal == ["refused reason=not_root peer=-"] and execute.calls == []
+
+
+def test_the_bot_container_is_the_app_compose_files() -> None:
+    text = (ROOT / "deploy/vm/docker-compose.app.yml").read_text(encoding="utf-8")
+    assert f"container_name: {op.BOT_CONTAINER}\n" in text and op.BOT_CONTAINER == "bfx-bot"
+
+
+@pytest.mark.parametrize("command", [
+    "status", "uncertainties", "credential", "resume", "kill", "enable", "disable",
+    "bind-to-venue", "mark-not-accepted", "manual-resolution", "rotate-credential", "request",
+])
+def test_every_other_subcommand_still_needs_a_tailnet_peer(host, command) -> None:
+    code, journal, execute, runner = _call([command, "--reason", "r"],
+                                           env=_env(SSH_CONNECTION=None))
+    assert code == 77 and execute.calls == [] and runner.calls == []
+    assert journal == ["refused reason=not_tailnet_peer peer=-"]
+
+
+# --------------------------------------------------------------------------- the halt script
+
+
+class _Bot:
+    """A stand-in for the bot's healthz server: records the request, answers ``status``."""
+
+    def __init__(self, status: int) -> None:
+        seen: list[tuple[str, str, str | None]] = []
+        self.seen = seen
+
+        def answer(handler: http.server.BaseHTTPRequestHandler) -> None:
+            seen.append((handler.command, handler.path, handler.headers.get("Authorization")))
+            body = json.dumps({"state": "HALTED", "cancel_all_complete": status == 200})
+            handler.send_response(status)
+            handler.send_header("Content-Type", "application/json")
+            handler.end_headers()
+            handler.wfile.write(body.encode())
+
+        # Built with type(): the stdlib's do_POST name is not ours to rename.
+        handler = type("Handler", (http.server.BaseHTTPRequestHandler,),
+                       {"do_POST": answer, "log_message": lambda *_args: None})
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/admin/halt"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def _run_halt_script(url: str, *, token: str | None = "t0kenNEVERshown") -> Any:
+    assert op.HALT_SCRIPT.count(op.HALT_URL) == 1
+    script = op.HALT_SCRIPT.replace(op.HALT_URL, url)  # the only test-side change
+    env = {"PATH": "/usr/bin:/bin"}
+    if token is not None:
+        env["BFX_ADMIN_TOKEN"] = token
+    return subprocess.run([sys.executable, "-I", "-c", script, HALT_REASON, "Will413028@github"],
+                          env=env, capture_output=True, text=True, timeout=60, check=False)
+
+
+def test_the_halt_script_targets_the_bots_own_healthz() -> None:
+    assert op.HALT_URL == "http://127.0.0.1:8080/admin/halt"
+
+
+@pytest.mark.parametrize(("status", "expected"), [
+    (200, 0), (502, 3), (401, 1), (403, 1), (400, 1), (500, 1), (201, 1),
+])
+def test_the_halt_script_exit_protocol(status, expected) -> None:
+    bot = _Bot(status)
+    try:
+        result = _run_halt_script(bot.url)
+    finally:
+        bot.close()
+    assert result.returncode == expected, result.stderr
+    assert json.loads(result.stdout)["state"] == "HALTED"  # the body reaches the operator
+    (method, path, authorization), = bot.seen
+    assert method == "POST" and authorization == "Bearer t0kenNEVERshown"
+    query = urllib.parse.parse_qs(path.split("?", 1)[1])
+    assert query == {"reason": [HALT_REASON], "actor": ["Will413028@github"]}
+    assert "t0kenNEVERshown" not in result.stdout + result.stderr
+
+
+def test_the_halt_script_without_an_answer_exits_1() -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    result = _run_halt_script(f"http://127.0.0.1:{port}/admin/halt")
+    assert result.returncode == 1 and result.stdout == ""
+    assert "no answer from the bot" in result.stderr
+
+
+def test_the_halt_script_without_a_token_sends_nothing() -> None:
+    bot = _Bot(200)
+    try:
+        result = _run_halt_script(bot.url, token=None)
+    finally:
+        bot.close()
+    assert result.returncode == 1 and bot.seen == []
+    assert "BFX_ADMIN_TOKEN" in result.stderr

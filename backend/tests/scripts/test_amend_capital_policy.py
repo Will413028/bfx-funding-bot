@@ -144,3 +144,46 @@ async def test_an_unstamped_database_refuses(database) -> None:
         await session.execute(text("DELETE FROM database_realm"))
     with pytest.raises(DatabaseRealmMismatch, match="unstamped"):
         await script.run(_args())
+
+
+# Enabling a currency goes only through the operator CLI (ADR 2026-10-15 D4); the
+# script may still disable it or change the envelope. The bot's worker applies the
+# CLI's enable through the same amendment path, unchanged
+# (tests/integration/test_capital_policy_control.py::
+# test_disable_then_enable_append_one_revision_each). Mutation: ``_enabled`` accepts
+# ``true`` again -> test_enabling_is_refused_and_points_to_the_cli fails.
+
+def _main_args(*extra: str) -> list[str]:
+    return ["amend_capital_policy", "--exchange-account-id", str(ACCOUNT), "--environment", "ci",
+            "--symbol", "fUST", *extra]
+
+
+@pytest.mark.parametrize("extra", [
+    ("--enabled", "true"), ("--enabled", "true", "--apply-digest", "d", "--reason", "r"),
+    ("--enabled", "yes"),
+])
+def test_enabling_is_refused_and_points_to_the_cli(monkeypatch, capsys, restore_logging,
+                                                   extra) -> None:
+    monkeypatch.setattr("sys.argv", _main_args(*extra))
+    monkeypatch.setattr(script, "run", lambda args: pytest.fail("ran an enable"))
+    with pytest.raises(SystemExit) as exit_:
+        script.main()
+    assert exit_.value.code == 2
+    assert "sudo bfx-op enable" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("extra", "enabled"), [
+    (("--enabled", "false"), False), (("--max-offer-amount", "200"), None),
+])
+def test_disabling_and_the_envelope_still_parse(monkeypatch, capsys, restore_logging,
+                                                extra, enabled) -> None:
+    monkeypatch.setattr("sys.argv", _main_args(*extra))
+    seen: list[argparse.Namespace] = []
+
+    async def run(args: argparse.Namespace) -> dict[str, str]:
+        seen.append(args)
+        return {"status": "dry_run"}
+
+    monkeypatch.setattr(script, "run", run)
+    assert script.main() == 0
+    assert seen[0].enabled is enabled
