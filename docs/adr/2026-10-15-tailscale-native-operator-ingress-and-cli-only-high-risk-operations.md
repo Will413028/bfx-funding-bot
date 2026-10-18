@@ -101,11 +101,26 @@ D4a 寫「由 DB trigger 拒絕 webapi role 寫入 resume、啟用幣別與 UNKN
 - **D4a'' resume 與啟用以允許清單 trigger 擋**：`trading_control_requests` 還要留 kill、`capital_policy_requests` 還要留停用，所以兩張表各掛一個 `BEFORE INSERT OR UPDATE OF action` trigger（`guard_operator_only_request_action`），`resume`／`enable` 只允許 table owner（migration、owner 腳本）與 `bfx_operator` 寫入。用允許清單而不是「拒絕 `bfx_webapi`」：任何其他持有請求欄位 INSERT 的 role（日後新增的也一樣）都被拒絕，不必記得逐一列入。`bfx_bot` 對兩張表本來就沒有 INSERT。
 - **Rationale**：trigger 只用在同一張表必須保留部分 action 的地方；整張表都是高風險動作時，權限本身就是最小的機制。trigger 與缺權限的錯誤同為 SQLSTATE 42501，測試以 trigger 的訊息區分。**代價**：上一版 webapi 在部署窗口內的 resume／啟用／裁決／憑證寫入會回 500，那正是要移除的功能；kill、停用與各種讀取不受影響。
 
+## Amendment (2026-10-18)：營運入口切換不再等 CLI 的 VM 演練
+
+原 Followup 要求營運入口切換前，CLI 的 resume、啟用幣別、換憑證與 UNKNOWN 裁決各在 VM 上演練過一次。owner 拍板拿掉這個前置條件：營運入口切換照排程做，不等演練。
+
+- **現況**：
+  - resume 與 kill 已在 VM 上經 `bfx-op` 演練過，當時 webapi 是停著的。
+  - 啟用幣別、換憑證與 UNKNOWN 裁決走同一條 CLI 路徑（`bfx-op` → one-off `operator` 容器 → outbox → bot 的 worker），由 integration 測試對真實 PostgreSQL 與 `bfx_operator` role 驗證。
+  - 這三項沒有在 prod 實際跑過。
+- **Rationale**：
+  - 這項前置條件要防的是「入口切換後 operator 沒有能用的高風險操作路徑」。但入口切換只改 webapi 的入口與身分來源，CLI 不在它的路徑上：D4a 讓 CLI 以 one-off 容器直接接資料網路，不經 webapi、不經 tailscaled sidecar。所以切換成功或失敗，都不會改變 CLI 能不能用。
+  - 在 prod 演練這三項都會改到真實狀態：要先停用一個幣別再啟用、要有一筆 UNKNOWN、要在 Bitfinex 開一把新 key。在單一 operator、小額資金的條件下，這個代價大於它的保證。
+  - UI 的高風險路徑已在入口切換前移除，所以演練與否也不改變「入口切換時有幾條路徑」。
+- **代價**：這三項第一次在 prod 使用時才算真正驗過。第一次使用就照 runbook 操作並記錄結果。若失敗，修好之前，該操作沒有其他路徑。
+- **Revocation trigger**：網路分段那一批若會改到 `operator` 容器接的網路，或 CLI 改成經過 webapi 或 sidecar，該批完成前要先演練受影響的操作。
+
 ## Followup
 
-- 依對真錢的風險分批實作，每批一個 PR：公開頁靜態化 → CLI 對等與 break-glass 演練 → 營運入口切換（CLI 演練完成後才做）→ 部署全停 → 網路分段 → KEK 與交易所憑證 → 秘密管理、供應鏈、安全 log、API 契約與文件。
+- 依對真錢的風險分批實作，每批一個 PR：公開頁靜態化 → CLI 對等與 break-glass 演練 → 營運入口切換 → 部署全停 → 網路分段 → KEK 與交易所憑證 → 秘密管理、供應鏈、安全 log、API 契約與文件。
 - 交易所憑證那一批同時讓執行服務在開機與定期檢查憑證的權限與來源限制，不合規就停止送單、恢復後自動繼續；該批另以 ADR 記錄。
-- 營運入口切換前，CLI 必須已能完成 resume、啟用幣別、換憑證與 UNKNOWN 裁決，並在 VM 上演練過一次。
+- 營運入口切換前，CLI 必須已能完成 resume、啟用幣別、換憑證與 UNKNOWN 裁決；VM 演練的要求已由 Amendment (2026-10-18)「營運入口切換不再等 CLI 的 VM 演練」移除。
 - ASVS L2 對照在全部實作完成後重新判定，放進 `docs/security/`（只寫判定與控制）。
 
 ## Revocation Triggers
