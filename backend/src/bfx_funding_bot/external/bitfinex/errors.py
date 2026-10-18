@@ -59,6 +59,13 @@ class VenueCredentialRejectedError(BitfinexAPIError):
     ``status_code`` check and :func:`venue_did_not_answer` treats it as before; only the
     boot (credential recovery mode) and the periodic reconcile (exit 78) single it out."""
 
+    @property
+    def venue_coded(self) -> bool:
+        """Whether the venue's own body named the key (``ERR_AUTH_FAIL``), not a bare 401/403
+        that a gateway in front of the venue (a WAF page) can also send."""
+        answer = parsed_venue_error(self.raw)
+        return answer is not None and answer[0] == ERR_AUTH_FAIL
+
 
 class BitfinexShapeError(BitfinexError):
     """Response parsed as JSON but didn't match expected shape."""
@@ -99,11 +106,11 @@ def is_credential_rejection(status_code: int, raw: str | None) -> bool:
 
     Bitfinex answers a wrong, revoked or swapped key with HTTP 500 and
     ``["error", 10100, "apikey: ..."]``; a 401 or 403 says the same without the venue body.
-    Any other code (``10114`` nonce: small, rate limit, maintenance) or a body-less 5xx is
-    not a credential rejection."""
+    Any other code (``10114`` nonce: small, rate limit, maintenance), whatever the status,
+    or a body-less 5xx is not a credential rejection."""
     answer = parsed_venue_error(raw)
-    if answer is not None and answer[0] == ERR_AUTH_FAIL:
-        return True
+    if answer is not None:
+        return answer[0] == ERR_AUTH_FAIL
     return status_code in CREDENTIAL_REJECTED_STATUSES
 
 

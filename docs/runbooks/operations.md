@@ -143,7 +143,7 @@ bot 自己停著時不可用：到 Bitfinex 網頁撤單並記錄。不依賴資
   refresh（30 秒），仍會因 writer lock 遺失（見上）而退出。開機時 Bitfinex 連不上，或資料庫在開機第一次
   連線時就連不上，則在 process 內重試等待（Telegram 收到一次 `boot_waiting`），不會反覆重啟。資料庫若在
   開機觀測進行中才斷，會因 writer lock 遺失退出一次（`daemon_fatal`、`boot_refused`），重啟後再於第一次連線處等待。
-  Bitfinex 明確拒絕（例如 API key 無效，HTTP 500 帶 `["error", 10100, ...]`）不會等待，直接拒絕開機。
+  Bitfinex 拒絕 API key（HTTP 500 帶 `["error", 10100, ...]`）不等待也不結束，改進憑證恢復模式（見 `credential_recovery_mode`）；其他明確拒絕（例如 nonce 10114）不會等待，直接拒絕開機。
 - event loop 卡住超過 `BFX_LOOP_WATCHDOG_S`（預設 120 秒）：bot 把所有 thread 的 traceback 寫到 container
   log 後直接退出、container 重啟。退出當下來不及發 Telegram；重啟後的開機會發現上一個 run 沒有結束紀錄，
   發一次 `previous_run_unclean`（附 run id、開始時間、發現時間），在 container log 的這段時間找 `Timeout`
@@ -466,8 +466,8 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 <a id="alert-credential_recovery_mode"></a>
 #### `credential_recovery_mode`（critical）
 
-- 代表：開機時 Bitfinex 拒絕帳戶的 API key（回應 `["error",10100,"apikey: …"]`，或 HTTP 401／403），bot 進入憑證恢復模式。例如 key 被撤銷或刪除、key 與 secret 對調。執行中被拒時 bot 先以 exit 78 結束（`daemon_fatal`，`error=VenueCredentialRejectedError`），重啟後的開機才發這則。每個帳戶一則（dedup 欄位 `account`）。
-- 系統會做：不送單、不撤單、不寫帳本；只跑換憑證 worker（照常發佈收件公鑰，CLI 可以封裝新 key 送進來）、writer lock、`health_check`、`db_keepalive` 與 healthz。`/healthz` 回 200（部署進恢復模式算部署成功，bfx-deploy 不會停掉 bot），`/readyz` 回 503。kill 等交易控制請求留在佇列，下次以可用的 key 開機後才套用並撤單。在 process 內每 1、2、4 分鐘、之後每 5 分鐘重試一次開機觀測；以下任一發生時乾淨重啟（`bot_runs` 記 `clean_stop`、exit 0），重啟後正常開機：輪替 applied、重試成功（key 在 Bitfinex 端恢復）、DB 裡的 active 憑證已換成另一把 key。重啟一律等這次 bot 開機滿 10 分鐘（部署 settle 期間不重啟）。其他錯誤（nonce 10114、invariant）照舊拒絕開機（`boot_refused`）。
+- 代表：開機時 Bitfinex 拒絕帳戶的 API key（回應 `["error",10100,"apikey: …"]`，或 HTTP 401／403），bot 進入憑證恢復模式。例如 key 被撤銷或刪除、key 與 secret 對調。執行中被拒（只認 body 帶 10100；不帶 body 的 401／403 可能是閘道頁面，照一般抓取失敗累計）時 bot 先以 exit 78 結束（`daemon_fatal`，`error=VenueCredentialRejectedError`），重啟後的開機才發這則。每個帳戶一則（dedup 欄位 `account`）。
+- 系統會做：被拒期間不送單、不撤單、不寫帳本（重試的開機觀測成功那一次照常寫入觀測）；只跑換憑證 worker（照常發佈收件公鑰，CLI 可以封裝新 key 送進來）、writer lock、`health_check`、`db_keepalive` 與 healthz。`/healthz` 回 200（部署進恢復模式算部署成功，bfx-deploy 不會停掉 bot），`/readyz` 回 503。kill 等交易控制請求留在佇列，下次以可用的 key 開機後才套用並撤單。在 process 內每 1、2、4 分鐘、之後每 5 分鐘重試一次開機觀測；以下任一發生時乾淨重啟（`bot_runs` 記 `clean_stop`、exit 0），重啟後正常開機：輪替 applied、重試成功（key 在 Bitfinex 端恢復）、DB 裡的 active 憑證已換成另一把 key。重啟一律等這次 bot 開機滿 10 分鐘（部署 settle 期間不重啟）。其他錯誤（nonce 10114、invariant）照舊拒絕開機（`boot_refused`）。
 - operator 判斷：先判斷 key 是不是外洩或被人改動（Bitfinex 的 API key 頁面、帳號安全紀錄）。到 Bitfinex 產生一把新 key（只開 funding 寫入，IP 白名單照舊），以 `sudo bfx-op rotate-credential` 送出（§11）。bot 開機未滿 10 分鐘或部署進行中時請求會被拒（`bot_recently_started`／`deployment_in_progress`，見 [`credential_rotation_rejected`](#alert-credential_rotation_rejected)），屆時重送。輪替比對的是舊憑證列存下的 Bitfinex user id，所以舊 key 已撤銷也能換；舊憑證列沒有存 id 時（9c-2a 部署前建立、bot 還沒用可用的 key 開機過）會回 `account_identity_unavailable`，此時改用 webapi 的憑證端點建立新 key，恢復模式偵測到 active 憑證改變就會自動重啟。
 
 <a id="alert-venue_observation_history_incomplete"></a>

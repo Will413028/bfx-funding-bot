@@ -10,6 +10,7 @@ Mutation checks (one at a time; revert after each):
 
 * drop the 401/403 branch of ``is_credential_rejection``: ``test_a_refused_key_*[401]``.
 * classify any parsed venue code as a rejection: ``test_other_errors_*[500_10114]``.
+* let a 401/403 status win over the body's code: ``test_other_errors_*[403_10114]``.
 """
 from __future__ import annotations
 
@@ -72,8 +73,9 @@ async def test_a_refused_key_raises_the_credential_rejection(response: httpx.Res
         httpx.Response(502, text="<html>bad gateway</html>"),
         httpx.Response(429, text=""),
         httpx.Response(400, text="bad request"),
+        httpx.Response(403, text='["error",10114,"nonce: small"]'),
     ],
-    ids=["500_10114", "500_11010", "500_empty", "502_html", "429", "400"],
+    ids=["500_10114", "500_11010", "500_empty", "502_html", "429", "400", "403_10114"],
 )
 async def test_other_errors_stay_plain_venue_errors(response: httpx.Response) -> None:
     error = await _user_id_error(response)
@@ -122,3 +124,9 @@ def test_the_rejection_is_found_anywhere_in_the_chain() -> None:
 )
 def test_nothing_else_is_a_rejection(exc: BaseException) -> None:
     assert credential_rejection(exc) is None
+
+
+def test_only_the_venue_body_makes_a_rejection_venue_coded() -> None:
+    assert VenueCredentialRejectedError(500, "x", _DIGEST_INVALID).venue_coded is True
+    assert VenueCredentialRejectedError(403, "Forbidden", "<html>waf</html>").venue_coded is False
+    assert VenueCredentialRejectedError(401, "Unauthorized", None).venue_coded is False

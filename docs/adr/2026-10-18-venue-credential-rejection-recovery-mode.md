@@ -36,7 +36,7 @@ tags: [bfx-funding-bot, decision, security, credentials, boot, architecture]
 - **D1 分類**：`VenueCredentialRejectedError`（`external/bitfinex/errors.py`，`BitfinexAPIError` 的子類）＝回應 body 的 venue code 為 `ERR_AUTH_FAIL`（10100），或 HTTP 401／403。所有簽名讀取的 choke point `_signed_post` 依此選型別；`credential_rejection(exc)` 沿 `__cause__`／`__context__` 找它。nonce 10114、`BootInvariantError`、schema／realm 錯誤不屬於這類，照舊拒絕開機。送單結果的分類（UNKNOWN）與 `ExecutorAuthError` 的處理不變。
 - **D2 開機時被拒 → 憑證恢復模式**：`_boot_until_observed` 回 `CREDENTIAL_REJECTED`，`Daemon.run` 改跑恢復模式：只啟動 `CredentialRotationWorker`、`health_check`、`db_keepalive`、healthz 與 writer lock liveness，不跑任何交易 task，也不跑 trading control。`/healthz` 200（部署進恢復模式算部署成功）、`/readyz` 503，發一則 CRITICAL `credential_recovery_mode` 告警。開機觀測在行程內以 1、2、4 分鐘、之後每 5 分鐘重試一次。
 - **D3 恢復模式的出口一律是乾淨重啟**：輪替 applied（worker 照舊重啟）、重試的開機觀測成功、或 DB 的 active 憑證已不是開機載入的那把 key（webapi 端點換的），都設 stop event、`clean_stop`、exit 0，由 restart policy 開一個新 process 正常開機。重啟一律等到這次 run 滿 `BOT_SETTLE_WINDOW`。
-- **D4 執行中被拒 → exit 78**：periodic reconcile 遇到 D1 的拒絕時往外丟（不再算一次抓取失敗），`_run_daemon` 在 `except* Exception` 之前以 exit 78 結束；重啟後由開機進恢復模式。偵測延遲最多一個 reconcile 週期。
+- **D4 執行中被拒 → exit 78**：periodic reconcile 遇到 body 帶 10100 的拒絕時往外丟（不再算一次抓取失敗），`_run_daemon` 在 `except* Exception` 之前以 exit 78 結束；重啟後由開機進恢復模式。偵測延遲最多一個 reconcile 週期。不帶 venue body 的 401／403 可能是 venue 前面的閘道（WAF）頁面，執行中照一般抓取失敗累計，不 exit 78，避免每個偶發頁面都付出一次重啟加 settle 窗口；開機時仍視為拒絕。
 - **D5 存 Bitfinex user id**：`exchange_account_credentials.bitfinex_user_id`（nullable，正值 CHECK）。輪替 applied 與 bootstrap 寫入；active 列為 NULL 時，bot 在正常模式下用開機載入的 key 查一次補上（trust on first use，以 key 定位列，失敗後最多每小時再試，恢復模式不試）。worker 的帳號比對用被取代那一列存下的 id；為 NULL 時退回用現行 key 即時查詢。
 - 選 A，不選 B、C。
 

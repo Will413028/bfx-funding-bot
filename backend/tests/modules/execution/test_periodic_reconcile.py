@@ -290,6 +290,7 @@ async def test_periodic_expected_refusal_is_not_transport_failure():
 
 # --- a refused key (9c-2a) ---------------------------------------------------------------------
 # Mutation: drop the re-raise in ``PeriodicReconcile._tick``: the first two tests fail.
+# Mutation: drop the ``venue_coded`` condition: ``test_a_bare_403_mid_run_*`` fails.
 
 _DIGEST_INVALID = '["error",10100,"apikey: digest invalid"]'
 
@@ -325,6 +326,23 @@ async def test_a_refused_key_wrapped_by_the_cycle_is_raised_as_the_rejection():
     with pytest.raises(VenueCredentialRejectedError) as raised:
         await pr._tick()
     assert raised.value.__cause__ is wrapped
+
+
+@pytest.mark.asyncio
+async def test_a_bare_403_mid_run_counts_as_a_fetch_failure_not_a_refused_key():
+    """A 403 without the venue's body may be a gateway (WAF) page: exiting 78 on it would
+    cost a restart and the settle window per spurious page, so it joins the failure streak."""
+    from bfx_funding_bot.external.bitfinex.errors import VenueCredentialRejectedError
+
+    probe = _FakeProbe()
+    pr = _make_periodic(
+        recovery=_FakeRecovery(results=[
+            VenueCredentialRejectedError(403, "Forbidden", "<html>waf</html>")]),
+        probe=probe, interval_s=0.005, max_consecutive_failures=2)
+
+    await pr._tick()  # swallowed
+    assert pr._consecutive_failures == 1
+    assert probe.updates == []
 
 
 @pytest.mark.asyncio

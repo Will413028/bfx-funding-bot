@@ -156,9 +156,10 @@ class PeriodicReconcile:
             cycle = await self._recovery.run(self._scope)
         except Exception as exc:  # never let the backbone crash the daemon...
             rejected = credential_rejection(exc)
-            if rejected is not None:
-                # ...except on a refused key: retrying it changes nothing, and only a boot
-                # (credential recovery mode) runs without trading while it is replaced.
+            if rejected is not None and rejected.venue_coded:
+                # ...except on a key the venue itself refused: retrying it changes nothing, and
+                # only a boot (credential recovery mode) runs without trading while it is
+                # replaced. A bare 401/403 (a WAF page can send one) counts as a failure below.
                 log.critical("periodic_reconcile_credential_rejected err=%r", exc)
                 if rejected is exc:
                     raise
