@@ -422,7 +422,8 @@ class AccountCommandGate:
             outcome = CommandOutcome(
                 "unknown", None, _bounded_reason(result.outcome, "submit_outcome_unknown",
                                                  secrets=secrets),
-                occurred_at_ms, {}, event_id=event_id)
+                occurred_at_ms, _venue_evidence(result.outcome, secrets=secrets),
+                event_id=event_id)
         elif kind is SubmitOutcomeKind.NOT_SENT:
             outcome = CommandOutcome("not_sent", None, "local_pre_transport",
                                      occurred_at_ms, {}, event_id=event_id)
@@ -533,8 +534,27 @@ def _bounded_reason(
     """Keep durable outcome evidence bounded and free of runtime credentials."""
     value = getattr(outcome, "reason", fallback)
     text = str(value).strip() or fallback
+    return _redacted(text, secrets)[:256]
+
+
+def _redacted(text: str, secrets: tuple[str, ...]) -> str:
     for secret in secrets:
         if secret:
             text = text.replace(secret, "[redacted]")
-    text = re.sub(r"(?i)authorization\s*[:=]\s*\S+", "authorization=[redacted]", text)
-    return text[:256]
+    return re.sub(r"(?i)authorization\s*[:=]\s*\S+", "authorization=[redacted]", text)
+
+
+def _venue_evidence(outcome: object, *, secrets: tuple[str, ...]) -> dict[str, object]:
+    """What the venue said about an UNKNOWN submit, kept past log retention.
+
+    The allowlist of settled refusals grows only from messages seen verbatim, and
+    an UNKNOWN with a venue answer is where the next one will appear.
+    """
+    code = getattr(outcome, "venue_error_code", None)
+    if code is None:
+        return {}
+    evidence: dict[str, object] = {"venue_error_code": code}
+    message = getattr(outcome, "venue_error_message", None)
+    if message is not None:
+        evidence["venue_error_message"] = _redacted(message, secrets)
+    return evidence

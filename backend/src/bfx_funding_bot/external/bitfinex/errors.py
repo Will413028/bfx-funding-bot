@@ -17,13 +17,17 @@ ERR_AUTH_FAIL = 10100
 # ERR_RATE_LIMIT: ``["error", 11010, "ratelimit: error"]``, with HTTP 429 or 200
 # (tests/modules/external_signals/test_client.py, tests/external/bitfinex/test_rest.py).
 ERR_RATE_LIMIT = 11010
+# ERR_READY: "Not ready, try again later" (glossary). Observed in production as
+# ``["error",11000,"ready: invalid"]`` with HTTP 500 from v2/auth/r/funding/offers
+# (2026-10-14), one request after a 200 from the same account.
+ERR_READY = 11000
 # Info events on a WebSocket (``{"event": "info", "code": CODE}``).
 INFO_SERVER_RESTART = 20051     # the server is restarting: reconnect
 INFO_MAINTENANCE = 20060        # maintenance begins
 INFO_MAINTENANCE_END = 20061    # maintenance is over: Bitfinex advises resubscribing
 # Codes that mean "not now" rather than a refusal; every other venue error code is
 # the venue's answer (ERR_AUTH_FAIL, or 10114 "nonce: small").
-TRANSIENT_VENUE_ERROR_CODES = frozenset({ERR_RATE_LIMIT, INFO_MAINTENANCE})
+TRANSIENT_VENUE_ERROR_CODES = frozenset({ERR_RATE_LIMIT, ERR_READY, INFO_MAINTENANCE})
 # Info codes asking the client for a fresh connection.
 RECONNECT_INFO_CODES = frozenset({INFO_SERVER_RESTART, INFO_MAINTENANCE_END})
 
@@ -77,7 +81,7 @@ def venue_did_not_answer(exc: BitfinexAPIError) -> bool:
     Status 0 is the client's transport error or deadline. A body shaped
     ``["error", CODE, MESSAGE]`` is the venue answering -- Bitfinex sends its
     refusals (``apikey: invalid``, ``nonce: small``) with HTTP 500 -- so only the
-    rate-limit and maintenance codes are "not now". Without such a body, 429 and
+    rate-limit, not-ready and maintenance codes are "not now". Without such a body, 429 and
     5xx (a gateway page, an empty body) are the venue declining for now; other
     4xx are answers."""
     if exc.status_code == 0:

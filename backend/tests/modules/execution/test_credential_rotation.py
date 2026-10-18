@@ -488,6 +488,8 @@ def _venue(status: int, raw: str | None) -> BitfinexAPIError:
      ("rejected", "account_identity_unavailable")),
     ("permissions", _venue(500, '["error",11010,"ratelimit: error"]'),
      ("failed", "prepare_failed:BitfinexAPIError")),
+    ("permissions", _venue(500, '["error",11000,"ready: invalid"]'),
+     ("failed", "prepare_failed:BitfinexAPIError")),
     ("permissions", _venue(500, None), ("failed", "prepare_failed:BitfinexAPIError")),
     ("permissions", _venue(429, None), ("failed", "prepare_failed:BitfinexAPIError")),
     ("current_user", _venue(503, "<html>bad gateway</html>"),

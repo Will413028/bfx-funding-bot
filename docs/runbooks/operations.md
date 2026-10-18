@@ -484,6 +484,13 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 - 系統會做：只 rollback 這一筆結案，UNKNOWN 維持開啟、該幣別維持隔離；其他結案照常寫入，下一個被接受的 observation 再試。
 - operator 判斷：`error` 是已經結案時，多半是你剛處理過，確認它已結案即可。其他情況照 §5 處理；反覆出現要回報成 bug。30 分鐘後仍未結案會接著收到 `unknown_quarantine_aged`。
 
+<a id="alert-venue_submit_rejected"></a>
+#### `venue_submit_rejected`（warning）
+
+- 代表：deployment 送單被 venue 明確拒絕（HTTP 4xx／200 的結構化拒絕，或 HTTP 500 帶 `VENUE_SUBMIT_REFUSALS_5XX` 列出的訊息，例如 deposit wallet 餘額不足）。附 symbol、cell、reason（含 venue 的 code 與訊息）。同一個 symbol 與 reason 10 分鐘內只發一次。
+- 系統會做：這筆 attempt 記成 rejected，reservation 釋放，幣別不隔離；下一個 tick 依最新的 ledger 重新 sizing 再送。
+- operator 判斷：偶發一次（例如 credit 剛回到錢包的空檔）可以忽略。每 10 分鐘反覆出現表示 bot 的可用額估計一直高於 venue 的認定，要交給開發查 ledger 與 venue 錢包的差異。
+
 ## 7. 改了 runtime env 之後重建 container
 
 bfx-deploy 只在有新 release（或 `--retry`）時自動重建 container；只改 `/opt/bfx/runtime/*.env`

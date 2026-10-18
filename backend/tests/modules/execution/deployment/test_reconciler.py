@@ -984,6 +984,23 @@ async def test_venue_rejected_submit_is_attempted_once():
     assert len(ex.submitted) == 1            # attempted once
 
 
+async def test_venue_rejected_submit_alerts_the_operator(monkeypatch):
+    # A rejection settles without halting the symbol, so a venue that keeps
+    # refusing (e.g. its balance view below the ledger's) would otherwise loop
+    # quietly every tick; the alert de-duplicates on symbol and reason.
+    from bfx_funding_bot.modules.observability import alerts
+
+    emitted: list = []
+    monkeypatch.setattr(alerts, "emit", lambda event, **fields: emitted.append((event, fields)))
+    rec, _ex, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")], executor=_RejectingExecutor(),
+    )
+    await rec.deploy()
+    assert emitted == [(alerts.VENUE_SUBMIT_REJECTED, {
+        "symbol": "fUST", "cell": "fUST_a30", "reason": "venue_rejected",
+    })]
+
+
 async def test_ambiguous_submit_not_reported_as_success():
     sink = _CapturingSink()
     rec, _ex, _ = _build(

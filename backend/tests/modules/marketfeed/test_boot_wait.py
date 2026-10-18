@@ -208,8 +208,10 @@ def _caused(outer: BaseException, cause: BaseException) -> BaseException:
         # A gateway page or empty body: no venue answer to read.
         BitfinexAPIError(status_code=502, message="Bad Gateway", raw="<html>bad gateway</html>"),
         BitfinexAPIError(status_code=500, message="Internal Server Error", raw=""),
-        # The venue's own "not now": rate limit and maintenance codes.
+        # The venue's own "not now": rate limit, not-ready and maintenance codes.
         BitfinexAPIError(status_code=500, message="x", raw='["error",11010,"ratelimit: error"]'),
+        # Observed in production on 2026-10-14 from v2/auth/r/funding/offers.
+        BitfinexAPIError(status_code=500, message="x", raw='["error",11000,"ready: invalid"]'),
         BitfinexAPIError(status_code=500, message="x", raw='["error",20060,"maintenance"]'),
         socket.gaierror(-2, "Name or service not known"),
         OSError(errno.ENETUNREACH, "Network is unreachable"),

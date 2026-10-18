@@ -61,6 +61,33 @@ tags: [bfx-funding-bot, decision, execution, venue, uncertainty, observability]
 - Bitfinex 公開完整的 funding 錯誤碼語意 → D2 可直接依文件訂清單。
 - 出現任一次「帶結構化 error 的 5xx 事後證明單其實已掛上」→ D2 的前提失效，5xx 永遠維持 UNKNOWN。
 
+## Amendment (2026-10-18): D2 落地
+
+**實收資料。** prod Loki（保留 30 天，約 09-18～10-18）只有 09-21／22 兩筆送單 5xx，都在 D1 之前，沒有 code；
+兩筆金額不同，digest 卻相同，代表 body 是不帶金額的固定訊息。D1 上線後約 35 次送單，0 次 5xx。等送單時自然
+出現拒絕湊不到樣本，所以改成主動探測：用正式 key 送三筆不可能成交的 fUST offer（可用餘額約 0），回應原文是：
+
+| 送出 amount | HTTP | body |
+|---|---|---|
+| 1 | 500 | `["error",10001,"Invalid offer: not enough UST balance available in deposit wallet"]` |
+| 100000 | 500 | 同上 |
+| 0 | 500 | `["error",10001,"Invalid offer: Insufficient Margin Wallet tradable balance to take a loan this large."]` |
+
+- **10001 是通用碼**：餘額不足和金額為 0 回的都是 10001，所以允許清單用 `(code, message)` 整組精確比對，不收前綴。
+- **venue 先驗餘額，後驗最低額**：`amount=1` 回的是餘額不足。可用餘額為 0 時錄不到最低額訊息；credit 到期後
+  bot 約 4 秒內就重新掛單，這段空檔也接不住。兩組新 body 的 digest 都不等於 09-21／22 的 `0d2110…`，
+  所以那兩次不是餘額不足（多半是最低額，尚未證實）。
+
+**落地內容。**
+
+- `VENUE_SUBMIT_REFUSALS_5XX` 只收 `(10001, "Invalid offer: not enough UST balance available in deposit wallet")`，
+  而且只在 HTTP 500 時成立（502／503 可能是沒看到 venue 決定的 proxy）；其餘一律 UNKNOWN。
+- 金額為 0 那條不收：本機 `validate_amount` 擋掉低於最低額的金額，bot 送不出 0，收進來也用不到。
+- 帶結構化錯誤的 UNKNOWN 把 code 與 message（憑證遮蔽）寫進 `transport_outcome_journal.evidence`，不需要改
+  schema。下一條拒絕訊息（最低額、其他幣別的餘額訊息）會留在 journal，不會隨日誌過期消失；在 journal 裡看到
+  原文後，再補進允許清單並加回歸測試。
+- 撤銷條件不變：出現任一次「清單內的 5xx 事後證明單其實已掛上」，就移除該條目，5xx 回到一律 UNKNOWN。
+
 ## Lessons
 
 ### Rules
