@@ -93,6 +93,14 @@ CLI 那一批開工前的設計審查（獨立 subagent），對照本 ADR 的�
 - **D4c 不改成「sshd 只聽 tailnet 介面」**：持有 key 的人一樣能經 tailnet 連 sshd、不經 check mode，D4 的重新驗證就不成立。**代價**：SSH（包括 coding agent 的維運）要 owner 到 IdP 驗證；Tailscale 故障時只剩 Console Connection。
 - **D4d 選 12 小時而非每次連線**：自訂 `checkPeriod` 只有 Tailscale 付費方案（Premium、Enterprise）提供，免費方案存檔時直接拒絕。另一個選項是由 CLI 在寫入前自己要求硬體金鑰或通知確認，但那等於把 D2 移除的 app 驗證加回來。單一 operator、owner 自有的小額資金，不值得為一條規則付月費。**代價**：驗證後 12 小時內，同一台裝置執行高風險操作不必再過 IdP；ASVS V7.5「敏感操作前重新驗證」以 12 小時的窗口記為部分符合。
 
+## Amendment (2026-10-18)：D4a 的資料層保證（9c-2b）
+
+D4a 寫「由 DB trigger 拒絕 webapi role 寫入 resume、啟用幣別與 UNKNOWN 裁決」。實作時讀碼後改為兩種機制（migration `36e59526f8cf`）：
+
+- **D4a' 裁決以收權限擋**：`uncertainty_resolution_requests` 的每一列都是裁決（`action` 只有 bind_to_venue／mark_not_accepted／manual_resolution），webapi 不再需要任何 INSERT，直接 `REVOKE INSERT`，比 trigger 簡單也更強。換憑證同理：`bfx_webapi` 對 `exchange_account_credentials` 收回 INSERT／UPDATE（端點一併刪除）。
+- **D4a'' resume 與啟用以允許清單 trigger 擋**：`trading_control_requests` 還要留 kill、`capital_policy_requests` 還要留停用，所以兩張表各掛一個 `BEFORE INSERT OR UPDATE OF action` trigger（`guard_operator_only_request_action`），`resume`／`enable` 只允許 table owner（migration、owner 腳本）與 `bfx_operator` 寫入。用允許清單而不是「拒絕 `bfx_webapi`」：任何其他持有請求欄位 INSERT 的 role（日後新增的也一樣）都被拒絕，不必記得逐一列入。`bfx_bot` 對兩張表本來就沒有 INSERT。
+- **Rationale**：trigger 只用在同一張表必須保留部分 action 的地方；整張表都是高風險動作時，權限本身就是最小的機制。trigger 與缺權限的錯誤同為 SQLSTATE 42501，測試以 trigger 的訊息區分。**代價**：上一版 webapi 在部署窗口內的 resume／啟用／裁決／憑證寫入會回 500，那正是要移除的功能；kill、停用與各種讀取不受影響。
+
 ## Followup
 
 - 依對真錢的風險分批實作，每批一個 PR：公開頁靜態化 → CLI 對等與 break-glass 演練 → 營運入口切換（CLI 演練完成後才做）→ 部署全停 → 網路分段 → KEK 與交易所憑證 → 秘密管理、供應鏈、安全 log、API 契約與文件。

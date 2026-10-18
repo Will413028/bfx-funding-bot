@@ -9,7 +9,6 @@ import pytest
 
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.core.telemetry import Phase
-from bfx_funding_bot.modules.api.schemas import CreateApiKeyRequest
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
 from bfx_funding_bot.modules.marketfeed.daemon import Daemon
@@ -59,21 +58,6 @@ def test_daemon_admin_token_hidden(
     )
     assert daemon.admin_token == "fake-admin-token"
     assert "fake-admin-token" not in render(daemon)
-
-
-@pytest.mark.parametrize("render", [repr, str], ids=["repr", "str"])
-def test_request_secrets_hidden_and_serialization_preserved(
-    render: Callable[[object], str],
-) -> None:
-    request = CreateApiKeyRequest(apiKey="fake-api-key", apiSecret="fake-api-secret")
-    expected = {"label": "", "api_key": "fake-api-key", "api_secret": "fake-api-secret"}
-    aliased = {"label": "", "apiKey": "fake-api-key", "apiSecret": "fake-api-secret"}
-    assert request.model_dump() == expected
-    assert json.loads(request.model_dump_json()) == expected
-    assert request.model_dump(by_alias=True) == aliased
-    assert json.loads(request.model_dump_json(by_alias=True)) == aliased
-    for secret in ("fake-api-key", "fake-api-secret"):
-        assert secret not in render(request)
 
 
 @pytest.mark.parametrize("render", [repr, str], ids=["repr", "str"])

@@ -162,7 +162,7 @@ def _request(realm: str) -> str:
     return (
         "INSERT INTO trading_control_requests(request_id, exchange_account_id, deployment_environment, "
         f"action, reason, requested_by, created_at_ms) VALUES ('{uuid4()}', '{_ACCOUNT}', '{realm}', "
-        "'resume', 'r', 'operator', 1)"
+        "'kill', 'r', 'operator', 1)"  # the web API's own request (resume is the CLI's)
     )
 
 

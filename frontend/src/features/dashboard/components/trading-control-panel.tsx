@@ -10,13 +10,14 @@ import {
   useTradingControlRequest,
 } from "@/features/dashboard/hooks/use-trading-control";
 import { ApiError } from "@/lib/api-client";
-import type {
-  CurrencyAction,
-  CurrencyPolicy,
-  TradingControlOverview,
-} from "@/types";
+import type { CurrencyPolicy, TradingControlOverview } from "@/types";
 
 const KILL_PHRASE = "KILL";
+// Resume and enable are queued only by the operator CLI (ADR 2026-10-15 D4).
+const RESUME_COMMAND = 'sudo bfx-op resume --reason "…"';
+function enableCommand(symbol: string): string {
+  return `sudo bfx-op enable ${symbol} --reason "…"`;
+}
 const KNOWN_ERRORS = new Set([
   "request_pending",
   "forbidden",
@@ -32,8 +33,9 @@ function time(ms: number): string {
 }
 
 /**
- * Trading state, resume, the kill switch and each currency's enable/disable
- * (lending envelope ADR D4).
+ * Trading state, the kill switch and each currency's disable (lending envelope
+ * ADR D4). Resume and enable go through the operator CLI only; requests it
+ * queued still show here as waiting and with their outcome.
  */
 export function TradingControlPanel({
   exchangeAccountId,
@@ -44,7 +46,6 @@ export function TradingControlPanel({
   const overview = useTradingControl(exchangeAccountId);
   const control = useTradingControlRequest(exchangeAccountId);
   const id = useId();
-  const [reason, setReason] = useState("");
 
   if (overview.isError && !overview.data)
     // Nothing to act on but the stop: a kill never depends on reading the state.
@@ -65,15 +66,6 @@ export function TradingControlPanel({
     (request) => request.state === "requested" && request.action === "kill",
   );
   const latest = data.requests.find((request) => request.state !== "requested");
-  // Stale data after a failed re-read: show it, but act only on what is current.
-  const blocked = overview.isError || control.isPending;
-
-  function resume() {
-    control.mutate(
-      { action: "resume", reason: reason.trim() },
-      { onSuccess: () => setReason("") },
-    );
-  }
 
   return (
     <section
@@ -116,24 +108,9 @@ export function TradingControlPanel({
       )}
 
       {state?.state !== "ACTIVE" && (
-        <div className="space-y-2 border-t pt-3">
-          <label className="block" htmlFor={`${id}-reason`}>
-            {t("reason")}
-          </label>
-          <Input
-            id={`${id}-reason`}
-            value={reason}
-            maxLength={500}
-            onChange={(event) => setReason(event.target.value)}
-          />
-          <Button
-            disabled={blocked || Boolean(pending) || !reason.trim()}
-            onClick={resume}
-          >
-            {t("resume")}
-          </Button>
-          <p className="text-sm text-muted-foreground">{t("resumeHint")}</p>
-        </div>
+        <p className="border-t pt-3 text-sm text-muted-foreground">
+          {t("resumeCli")} <code>{RESUME_COMMAND}</code>
+        </p>
       )}
 
       <KillControl
@@ -146,7 +123,6 @@ export function TradingControlPanel({
       <CurrenciesView
         exchangeAccountId={exchangeAccountId}
         currencies={data.currencies ?? []}
-        stale={overview.isError}
       />
     </section>
   );
@@ -156,11 +132,9 @@ export function TradingControlPanel({
 function CurrenciesView({
   exchangeAccountId,
   currencies,
-  stale,
 }: {
   exchangeAccountId: string;
   currencies: CurrencyPolicy[];
-  stale: boolean;
 }) {
   const t = useTranslations("tradingControl.currencies");
   return (
@@ -176,7 +150,6 @@ function CurrenciesView({
               key={currency.symbol}
               exchangeAccountId={exchangeAccountId}
               currency={currency}
-              stale={stale}
             />
           ))}
         </ul>
@@ -192,11 +165,9 @@ function percent(fraction: string): string {
 function CurrencyControl({
   exchangeAccountId,
   currency,
-  stale,
 }: {
   exchangeAccountId: string;
   currency: CurrencyPolicy;
-  stale: boolean;
 }) {
   const t = useTranslations("tradingControl");
   const c = useTranslations("tradingControl.currencies");
@@ -210,12 +181,11 @@ function CurrencyControl({
   const latest = currency.requests.find(
     (request) => request.state !== "requested",
   );
-  const action: CurrencyAction | null =
-    currency.enabled === null ? null : currency.enabled ? "disable" : "enable";
-  const waiting = pending.some((request) => request.action === action);
-  // Stale data after a failed re-read: a disable only narrows trading (and is
-  // a no-op if already in force), so it stays available, like the kill.
-  const held = (stale && action === "enable") || toggle.isPending || waiting;
+  // Only a disable is offered here; enabling is CLI-only. A disable narrows
+  // trading (and is a no-op if already in force), so stale data after a
+  // failed re-read does not hold it, like the kill.
+  const waiting = pending.some((request) => request.action === "disable");
+  const held = toggle.isPending || waiting;
 
   return (
     <li
@@ -263,7 +233,12 @@ function CurrencyControl({
           {latest.outcome_reason ? ` — ${humanize(latest.outcome_reason)}` : ""}
         </p>
       )}
-      {action !== null && (
+      {currency.enabled === false && (
+        <p className="pt-1 text-sm text-muted-foreground">
+          {c("enableCli")} <code>{enableCommand(symbol)}</code>
+        </p>
+      )}
+      {currency.enabled === true && (
         <div className="space-y-2 pt-1">
           <label className="block" htmlFor={`${id}-reason`}>
             {c("reason", { symbol })}
@@ -275,16 +250,16 @@ function CurrencyControl({
             onChange={(event) => setReason(event.target.value)}
           />
           <Button
-            variant={action === "disable" ? "outline" : "default"}
+            variant="outline"
             disabled={held || !reason.trim()}
             onClick={() =>
               toggle.mutate(
-                { symbol, action, reason: reason.trim() },
+                { symbol, action: "disable", reason: reason.trim() },
                 { onSuccess: () => setReason("") },
               )
             }
           >
-            {c(action, { symbol })}
+            {c("disable", { symbol })}
           </Button>
           {toggle.error && <ErrorView error={toggle.error} />}
         </div>

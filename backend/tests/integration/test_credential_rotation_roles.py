@@ -117,8 +117,9 @@ def test_the_sealed_credential_is_the_bots_alone(conn) -> None:
 
 def test_the_stored_bitfinex_user_id_is_the_bots_to_write_and_not_the_operators(conn) -> None:
     """1d34a3306e02 adds the column without a grant: the bot's table privileges cover it (the
-    rotation inserts it, the backfill updates it); the CLI's column allowlist does not name
-    it."""
+    rotation inserts it; its UPDATE still covers it too, to be narrowed with 9g's grant
+    review); the CLI's column allowlist does not name it, and the web API writes no
+    credential at all (36e59526f8cf)."""
     assert conn.scalar(text(
         "SELECT data_type FROM information_schema.columns WHERE table_schema = 'public' "
         "AND table_name = 'exchange_account_credentials' AND column_name = 'bitfinex_user_id'"
@@ -128,6 +129,9 @@ def test_the_stored_bitfinex_user_id_is_the_bots_to_write_and_not_the_operators(
                        privilege), privilege
     assert not _column(conn, "bfx_operator", "exchange_account_credentials", "bitfinex_user_id",
                        "SELECT")
+    for privilege in ("INSERT", "UPDATE"):
+        assert not _column(conn, "bfx_webapi", "exchange_account_credentials", "bitfinex_user_id",
+                           privilege), privilege
     conn.rollback()  # the reads above autobegan a transaction
     with pytest.raises(Exception, match="bitfinex_user_id_positive"), conn.begin():
         conn.exec_driver_sql(

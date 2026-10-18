@@ -101,13 +101,27 @@ def test_migration_checks_match_the_declared_actions_and_states() -> None:
     assert migration.REQUEST_STATES == REQUEST_STATES
 
 
-def test_currency_toggle_actions_match_the_migration_and_the_web_api() -> None:
+def test_currency_toggle_actions_match_the_migration_and_the_operator_commands() -> None:
     from typing import get_args
 
-    from bfx_funding_bot.modules.api.trading_control import CurrencyAction
+    from bfx_funding_bot.modules.execution.operator_commands import CurrencyAction
 
     migration = _migration("7d2a9c4e6b13_capital_policy_requests.py")
     assert migration.ACTIONS == POLICY_REQUEST_ACTIONS == get_args(CurrencyAction)
+
+
+def test_the_operator_only_actions_are_resume_and_enable_of_their_tables() -> None:
+    """36e59526f8cf spells the tables and actions only the owner and the CLI may write."""
+    from typing import get_args
+
+    from bfx_funding_bot.modules.execution.operator_commands import CurrencyAction, TradingAction
+
+    guarded = {table: action for table, _trigger, action
+               in _migration("36e59526f8cf_web_api_loses_high_risk_writes.py").OPERATOR_ONLY}
+    assert guarded == {TradingControlRequestRow.__tablename__: "resume",
+                       CapitalPolicyRequestRow.__tablename__: "enable"}
+    assert guarded[TradingControlRequestRow.__tablename__] in get_args(TradingAction)
+    assert guarded[CapitalPolicyRequestRow.__tablename__] in get_args(CurrencyAction)
 
 
 def test_the_contract_drops_exactly_the_columns_its_first_step_closed() -> None:

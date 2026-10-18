@@ -184,8 +184,11 @@ async def create_account_credential(
     api_key: str,
     api_secret: str,
     kek: bytes,
+    bitfinex_user_id: int,
 ) -> ExchangeAccountCredential:
-    """Create a credential encrypted with canonical ExchangeAccount AAD."""
+    """Create a pending credential encrypted with canonical ExchangeAccount AAD, naming the
+    Bitfinex user the key belongs to: an active credential always has it (a CHECK), so it is
+    stored before the row can be promoted."""
     await _require_account_membership(
         session, exchange_account_id=exchange_account_id, user_id=user_id, write=True
     )
@@ -203,6 +206,7 @@ async def create_account_credential(
         wrapped_dek=envelope.wrapped_dek,
         dek_nonce=envelope.dek_nonce,
         key_version=envelope.key_version,
+        bitfinex_user_id=bitfinex_user_id,
     )
 
 
@@ -264,30 +268,6 @@ async def rotate_active_credential(
     )
 
 
-async def delete_account_credential(
-    session: AsyncSession,
-    *,
-    exchange_account_id: UUID,
-    user_id: str,
-    key_id: UUID,
-) -> bool:
-    """Retire a credential; credential rows are never hard-deleted."""
-    await _require_account_membership(
-        session, exchange_account_id=exchange_account_id, user_id=user_id, write=True
-    )
-    row = await session.scalar(
-        select(ExchangeAccountCredential).where(
-            ExchangeAccountCredential.id == key_id,
-            ExchangeAccountCredential.exchange_account_id == exchange_account_id,
-        )
-    )
-    if row is None:
-        return False
-    row.lifecycle_status = "retired"
-    await session.flush()
-    return True
-
-
 async def verify_account_credential(
     session: AsyncSession,
     client: _PermissionsClient,
@@ -311,8 +291,8 @@ async def verify_account_credential(
         return None
     # Revoked and retired rows are terminal audit records.  Verification must
     # never resurrect one into the sole active slot; rotation creates a new
-    # pending row instead.  Returning ``None`` lets the account-scoped route
-    # use its normal non-enumerating 404 response.
+    # pending row instead.  ``None`` tells the caller (the operator bootstrap)
+    # that nothing was verified.
     if row.lifecycle_status in {"revoked", "retired"}:
         return None
     try:
@@ -329,7 +309,7 @@ async def verify_account_credential(
         )
     except InvalidTag as exc:
         # Wrong/rotated KEK or ciphertext corruption must be a clean vault
-        # boundary, never an unhandled 500 from the HTTP handler.
+        # boundary, never a decryption error escaping to the caller.
         raise VaultKeyMismatchError(str(key_id)) from exc
     ctx = AccountContext(
         account_id=str(exchange_account_id),

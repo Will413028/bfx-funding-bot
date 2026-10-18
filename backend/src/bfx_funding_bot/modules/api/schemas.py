@@ -5,14 +5,6 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class CreateApiKeyRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    label: str = ""
-    api_key: str = Field(alias="apiKey", repr=False)
-    api_secret: str = Field(alias="apiSecret", repr=False)
-
-
 class ApiKeyResponse(BaseModel):
     id: str
     label: str
@@ -22,11 +14,6 @@ class ApiKeyResponse(BaseModel):
     created_at: str = Field(serialization_alias="createdAt")
     verified_at: str | None = Field(default=None, serialization_alias="verifiedAt")
     last_verify_error: str | None = Field(default=None, serialization_alias="lastVerifyError")
-
-
-class VerifyResultResponse(BaseModel):
-    status: str
-    error: str | None = None
 
 
 class ExchangeAccountResponse(BaseModel):

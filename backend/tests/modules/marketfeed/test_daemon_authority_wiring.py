@@ -198,10 +198,9 @@ async def test_the_daemon_rotates_its_vault_credential_and_restarts_on_its_own_s
             assert not daemon._stop_event.is_set()
             worker.restart()
             assert daemon._stop_event.is_set()
-            # The new key is checked on a client of its own nonce gate; the key in use on
-            # the daemon's shared one.
-            assert worker.client_factory()._auth_gate is not worker.current_client._auth_gate
-            assert worker.current_ctx is daemon.account_ctx
+            # Each verification of a new key gets a client on a nonce gate of its own, never
+            # the one the key in use shares.
+            assert worker.client_factory()._auth_gate is not worker.client_factory()._auth_gate
             if daemon.writer_lock is not None:
                 await daemon.writer_lock.release()
     finally:

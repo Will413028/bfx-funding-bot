@@ -8,10 +8,10 @@ runs and deployments, the existing grants ``1db83367918c`` relies on). Bitfinex 
 
 Mutation checks (one at a time; revert after each):
 
-* ``_verify`` asks the key in use instead of the stored user id:
-  ``test_a_revoked_key_is_replaced_by_its_stored_user_id`` fails.
-* drop the ``api_key`` condition from the user id backfill's UPDATE:
-  ``test_the_backfill_never_writes_onto_a_credential_replaced_meanwhile`` fails.
+* ``_verify`` compares with anything but the stored user id:
+  ``test_a_key_of_another_bitfinex_account_is_refused`` fails.
+* ``_verify`` goes on when the replaced row has no stored id:
+  ``test_a_replaced_credential_without_a_stored_id_is_refused`` fails.
 """
 from __future__ import annotations
 
@@ -31,13 +31,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from bfx_funding_bot.apps import operator_cli
 from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
-from bfx_funding_bot.external.bitfinex.errors import (
-    BitfinexAPIError,
-    VenueCredentialRejectedError,
-)
+from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.accounts.vault import load_account_credentials
 from bfx_funding_bot.modules.execution.credential_rotation import CredentialRotationWorker
-from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+from bfx_funding_bot.modules.execution.protocols import AccountContext
 from tests.pg_templates import alembic, stamp_realm
 
 from .test_ledger_schema_roles import _prepare
@@ -93,8 +90,8 @@ def db(pg_templates, pg_clone):
         old = conn.scalar(text(
             "INSERT INTO exchange_account_credentials (exchange_account_id, venue, label, api_key, "
             "secret_ciphertext, secret_nonce, wrapped_dek, dek_nonce, key_version, "
-            "lifecycle_status, verified_at) VALUES (:a, 'bitfinex', 'old', :k, :c, :n, :w, :d, "
-            ":v, 'active', now()) RETURNING id"),
+            "lifecycle_status, verified_at, bitfinex_user_id) VALUES (:a, 'bitfinex', 'old', :k, "
+            ":c, :n, :w, :d, :v, 'active', now(), 4242) RETURNING id"),
             {"a": ACCOUNT, "k": OLD_KEY, "c": envelope.secret_ciphertext,
              "n": envelope.secret_nonce, "w": envelope.wrapped_dek, "d": envelope.dek_nonce,
              "v": envelope.key_version})
@@ -167,7 +164,6 @@ class Bot:
     authorized: set[str]
     engine: Any
     factory: Any
-    current: FakeClient
 
 
 def _as(url: str, role: str) -> tuple[Any, Any]:
@@ -185,23 +181,21 @@ def _as(url: str, role: str) -> tuple[Any, Any]:
 @pytest.fixture
 async def bot(db):
     engine, factory = _as(db.url, "bfx_bot")
-    client, current, restarts, authorized = FakeClient(), FakeClient(), [], {OPERATOR}
+    client, restarts, authorized = FakeClient(), [], {OPERATOR}
 
     async def authority(session, *, account_id, user) -> bool:
         return user in authorized
 
     worker = CredentialRotationWorker(
         session_factory=factory, account_id=ACCOUNT, environment="ci", authority=authority,
-        client_factory=lambda: client, current_client=current,
-        current_ctx=AccountContext(account_id=str(ACCOUNT),
-                                   credentials=Credentials(OLD_KEY, OLD_SECRET)),
+        client_factory=lambda: client,
         kek_loader=lambda: KEK, restart=lambda: restarts.append(1), clock=lambda: NOW_MS)
     worker.bind_run(db.run_id, RUN_STARTED_MS)
     # As bfx_bot: the recipient insert is this role's own grant.
     await worker.idle()
     assert worker.recipient_id is not None
     try:
-        yield Bot(worker, client, restarts, authorized, engine, factory, current)
+        yield Bot(worker, client, restarts, authorized, engine, factory)
     finally:
         await engine.dispose()
 
@@ -348,7 +342,6 @@ async def test_a_request_sealed_to_a_previous_boot_is_stale(db, operator_env, bo
     restarted = CredentialRotationWorker(
         session_factory=bot.factory, account_id=ACCOUNT, environment="ci",
         authority=bot.worker.authority, client_factory=lambda: bot.client,
-        current_client=FakeClient(), current_ctx=bot.worker.current_ctx,
         kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS)
     restarted.bind_run(db.run_id, RUN_STARTED_MS)
     await restarted.idle()
@@ -368,23 +361,14 @@ def _user_ids(db: Db) -> dict[str, int | None]:
 
 
 @pytest.mark.asyncio
-async def test_the_first_idle_stores_the_booted_keys_user_id_as_the_bot(db, bot) -> None:
-    """Trust on first use, under ``bfx_bot``'s own grants (the fixture's first idle)."""
-    assert _user_ids(db) == {OLD_KEY: 4242}
-    assert bot.current.calls == ["user_id"]
-
-
-@pytest.mark.asyncio
 async def test_a_revoked_key_is_replaced_by_its_stored_user_id(db, operator_env, bot) -> None:
-    """The key in use is already revoked at Bitfinex (``info/user`` answers 10100): the new
-    key is still compared with the account stored on the credential it replaces."""
-    bot.current.user_id = VenueCredentialRejectedError(
-        500, "Internal Server Error", '["error",10100,"apikey: digest invalid"]')
+    """The key in use may already be revoked at Bitfinex: the worker never asks it, the new
+    key is compared with the account stored on the credential it replaces."""
     _, queued, _ = await rotate()
     assert await bot.worker.tick() is True
     view = (await cli("request", "credential", queued["request_id"]))[1]
     assert view["state"] == "applied"
-    assert bot.current.calls == ["user_id"]  # the backfill only, never the rotation
+    assert bot.client.calls == ["permissions", "user_id"]  # the new key only
     assert _user_ids(db) == {OLD_KEY: 4242, NEW_KEY: 4242}
     assert bot.restarts == [1]
 
@@ -401,25 +385,16 @@ async def test_a_key_of_another_bitfinex_account_is_refused(db, operator_env, bo
 
 
 @pytest.mark.asyncio
-async def test_the_backfill_never_writes_onto_a_credential_replaced_meanwhile(db, bot) -> None:
-    """The web API swapped the active credential after this process booted on the old key:
-    the old key's id must not land on the new row."""
-    envelope = encrypt_secret_with_aad("FAKE-WEBAPI-SECRET", aad=str(ACCOUNT), kek=KEK)
+async def test_a_replaced_credential_without_a_stored_id_is_refused(db, operator_env, bot) -> None:
+    """Only a credential retired before the id was stored can lack one (an active row cannot,
+    ``ck_exchange_account_credentials_active_user_id``): the identity is unavailable and
+    Bitfinex is not asked."""
+    _, queued, _ = await rotate()
     with db.owner.begin() as conn:
         conn.exec_driver_sql("UPDATE exchange_account_credentials SET lifecycle_status = 'retired', "
                              "bitfinex_user_id = NULL")
-        conn.execute(text(
-            "INSERT INTO exchange_account_credentials (exchange_account_id, venue, label, api_key, "
-            "secret_ciphertext, secret_nonce, wrapped_dek, dek_nonce, key_version, "
-            "lifecycle_status, verified_at) VALUES (:a, 'bitfinex', 'webapi', 'FAKE-WEBAPI-KEY', "
-            ":c, :n, :w, :d, :v, 'active', now())"),
-            {"a": ACCOUNT, "c": envelope.secret_ciphertext, "n": envelope.secret_nonce,
-             "w": envelope.wrapped_dek, "d": envelope.dek_nonce, "v": envelope.key_version})
-    booted_on_old = CredentialRotationWorker(
-        session_factory=bot.factory, account_id=ACCOUNT, environment="ci",
-        authority=bot.worker.authority, client_factory=lambda: bot.client,
-        current_client=FakeClient(user_id=9999), current_ctx=bot.worker.current_ctx,
-        kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS)
-    booted_on_old.bind_run(db.run_id, RUN_STARTED_MS)
-    await booted_on_old.idle()
-    assert _user_ids(db) == {OLD_KEY: None, "FAKE-WEBAPI-KEY": None}
+    assert await bot.worker.tick() is True
+    view = (await cli("request", "credential", queued["request_id"]))[1]
+    assert (view["state"], view["outcome_reason"]) == ("rejected", "account_identity_unavailable")
+    assert bot.client.calls == []
+    assert bot.restarts == []

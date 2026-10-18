@@ -656,8 +656,7 @@ async def build_daemon(
         ownership=writer_lock.verify_held,
     )
     # Rotating the vault credential: only where the credentials came from the vault. The new
-    # key is checked on a client of its own (its own nonce gate); the key in use answers
-    # through the shared one.
+    # key is checked on a client of its own (its own nonce gate), apart from the key in use.
     credential_rotation: CredentialRotationWorker | None = None
     if venue_wiring.credential_vault:
         rotation_http = venue_wiring.auth_http
@@ -666,7 +665,6 @@ async def build_daemon(
             environment=env_str, authority=operator_authorized,
             client_factory=lambda: BitfinexAuthREST(http=rotation_http,
                                                     auth_gate=AuthRequestGate()),
-            current_client=auth_rest, current_ctx=account_ctx,
             kek_loader=load_kek, restart=stop_event.set,
             clock=now_ms_utc, ownership=writer_lock.verify_held,
         )

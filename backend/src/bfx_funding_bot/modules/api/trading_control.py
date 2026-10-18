@@ -1,4 +1,5 @@
-"""Operator trading control: resume, kill and per-currency enable/disable.
+"""Operator trading control: kill and per-currency disable; resume and enabling a currency
+go through the operator CLI only (ADR 2026-10-15 D4).
 
 Reached only through the frontend BFF, which requires an MFA-verified operator
 session before it mints the JWT this router checks (lending envelope ADR
@@ -6,9 +7,10 @@ session before it mints the JWT this router checks (lending envelope ADR
 it queues an operator request (``execution.operator_requests``) and returns
 202; the account daemon re-checks the operator, applies it under the account
 lock and records the outcome, which ``GET .../requests/{id}`` and the overview
-report. No action depends on which build is running. The checks and the queueing
-are ``execution.operator_commands``, shared with the operator CLI; this router maps
-their refusals to HTTP.
+report -- the CLI's resume and enable requests included. No action depends on which
+build is running. The checks and the queueing are ``execution.operator_commands``,
+shared with the operator CLI; this router maps their refusals to HTTP. The database
+refuses the web API's role a resume or an enable too (a trigger, 36e59526f8cf).
 
 The per-currency ``enabled`` flag of the applied CapitalPolicy is the everyday
 stop (ADR D4). Its requests go to their own outbox (``capital_policy_requests``,
@@ -41,9 +43,7 @@ from bfx_funding_bot.modules.execution import operator_commands as commands
 from bfx_funding_bot.modules.execution.operator_commands import (
     CONTROL_REASON_MAX,
     SYMBOL_PATTERN,
-    CurrencyAction,
     OperatorCommandError,
-    TradingAction,
 )
 
 _DIGEST = r"^sha256:[0-9a-f]{64}$"
@@ -101,30 +101,30 @@ def build_trading_control_router() -> APIRouter:
             "currencies": view["currencies"],
         }}
 
-    @router.post("/{action}", status_code=202)
-    async def request(action: TradingAction, body: ControlBody,
-                      context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
-                      session: AsyncSession = Depends(get_session)) -> dict[str, Any]:  # noqa: B008
+    @router.post("/kill", status_code=202)
+    async def request_kill(body: ControlBody,
+                           context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
+                           session: AsyncSession = Depends(get_session)) -> dict[str, Any]:  # noqa: B008
         try:
             request_id = await commands.request_trading_control(
-                session, context, action=action, reason=body.reason, now_ms=_now_ms())
+                session, context, action="kill", reason=body.reason, now_ms=_now_ms())
         except OperatorCommandError as exc:
             raise command_error(exc) from exc
-        return {"data": {"request_id": str(request_id), "action": action, "state": "requested"}}
+        return {"data": {"request_id": str(request_id), "action": "kill", "state": "requested"}}
 
-    @router.post("/currencies/{symbol}/{action}", status_code=202)
-    async def request_currency(
-            action: CurrencyAction, body: ControlBody,
+    @router.post("/currencies/{symbol}/disable", status_code=202)
+    async def request_currency_disable(
+            body: ControlBody,
             symbol: str = Path(pattern=SYMBOL_PATTERN),
             context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
             session: AsyncSession = Depends(get_session)) -> dict[str, Any]:  # noqa: B008
         try:
             request_id = await commands.request_currency(
-                session, context, symbol=symbol, action=action, reason=body.reason,
+                session, context, symbol=symbol, action="disable", reason=body.reason,
                 now_ms=_now_ms())
         except OperatorCommandError as exc:
             raise command_error(exc) from exc
-        return {"data": {"request_id": str(request_id), "symbol": symbol, "action": action,
+        return {"data": {"request_id": str(request_id), "symbol": symbol, "action": "disable",
                          "state": "requested"}}
 
     @router.get("/currency-requests/{request_id}")

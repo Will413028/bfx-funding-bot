@@ -119,7 +119,7 @@ describe("useTradingControl", () => {
 describe("useTradingControlRequest", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("sends only the reason, and never retries", async () => {
+  it("sends a kill with only the reason, and never retries", async () => {
     const { client, wrapper } = setup();
     vi.mocked(apiClient.post).mockResolvedValue({
       request_id: "r",
@@ -133,17 +133,10 @@ describe("useTradingControlRequest", () => {
     await act(() =>
       result.current.mutateAsync({ action: "kill", reason: "incident" }),
     );
-    await act(() =>
-      result.current.mutateAsync({ action: "resume", reason: "back" }),
-    );
     expect(vi.mocked(apiClient.post).mock.calls).toEqual([
       [
         `/exchange-accounts/${ACCOUNT_ID}/trading-control/kill`,
         { reason: "incident" },
-      ],
-      [
-        `/exchange-accounts/${ACCOUNT_ID}/trading-control/resume`,
-        { reason: "back" },
       ],
     ]);
     expect(invalidate).toHaveBeenCalledWith({
@@ -153,7 +146,7 @@ describe("useTradingControlRequest", () => {
     vi.mocked(apiClient.post).mockReset();
     vi.mocked(apiClient.post).mockRejectedValue(new Error("conflict"));
     act(() => {
-      result.current.mutate({ action: "resume", reason: "x" });
+      result.current.mutate({ action: "kill", reason: "x" });
     });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(apiClient.post).toHaveBeenCalledTimes(1);
@@ -176,7 +169,7 @@ describe("currency toggles", () => {
     expect(tradingControlPollInterval(waiting)).toBe(PENDING_CONTROL_POLL_MS);
   });
 
-  it("queues enable/disable for one currency and never retries", async () => {
+  it("queues a disable for one currency and never retries", async () => {
     const { client, wrapper } = setup();
     vi.mocked(apiClient.post).mockRejectedValue(new Error("conflict"));
     const invalidate = vi.spyOn(client, "invalidateQueries");
@@ -201,8 +194,8 @@ describe("currency toggles", () => {
     await act(() =>
       result.current.mutateAsync({
         symbol: "fUST",
-        action: "enable",
-        reason: "back",
+        action: "disable",
+        reason: "again",
       }),
     );
     expect(invalidate).toHaveBeenCalledWith({

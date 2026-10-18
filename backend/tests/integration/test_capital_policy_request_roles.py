@@ -167,7 +167,14 @@ def test_the_web_api_queues_only_request_columns_and_the_rules_hold(migrated):
     with engine.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         conn.exec_driver_sql(_request_sql())
-        # Enable has its own slot beside the waiting disable.
+    # Enabling is the operator CLI's alone since 36e59526f8cf (test_web_api_high_risk_writes).
+    with engine.begin() as conn, pytest.raises(
+            Exception, match="may be requested only through the operator CLI"):
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+        conn.exec_driver_sql(_request_sql("00000000-0000-0000-0000-0000000000e6", "enable"))
+    with engine.begin() as conn:
+        # Enable (the owner here, as the CLI's role would) has its own slot beside the
+        # waiting disable.
         conn.exec_driver_sql(_request_sql("00000000-0000-0000-0000-0000000000e2", "enable"))
     for sql, message in (
             (_request_sql("00000000-0000-0000-0000-0000000000e3"), "uq_capital_policy_requests_pending"),

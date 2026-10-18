@@ -1,10 +1,10 @@
 {
   "suppressions": {
-    "noqa": 465,
+    "noqa": 449,
     "ruff: ignore": 2,
     "type: ignore": 303,
     "pyright: ignore": 0,
-    "biome-ignore": 5,
+    "biome-ignore": 4,
     "eslint-disable": 1,
     "ts-expect-error": 0,
     "ts-ignore": 0,

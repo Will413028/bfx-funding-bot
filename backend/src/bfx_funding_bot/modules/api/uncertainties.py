@@ -1,23 +1,23 @@
-"""Account-scoped operator endpoints for execution uncertainties.
+"""Account-scoped operator reads of execution uncertainties.
 
 The rows returned by this module are deliberately small, bounded read DTOs.
-Resolution is an operator request, not a write (ADR D4'): the handler hands it to
-``execution.operator_commands`` (shared with the operator CLI), which validates the
-account scope, evidence and reconcile fence so the operator sees a refusal at once,
-then queues the request. The account daemon's resolution worker re-validates it
-and alone appends the domain event, so this service holds no ledger or
-projection write privilege.
+Adjudicating an uncertainty goes through the operator CLI only (ADR 2026-10-15 D4):
+``bfx-op bind-to-venue|mark-not-accepted|manual-resolution`` queues the request
+(``execution.operator_commands``), and the account daemon's resolution worker
+re-validates it and alone appends the domain event. This service holds no write on
+the adjudication requests (36e59526f8cf), the ledger or the projections; it shows a
+queued request and its outcome (``GET .../uncertainty-resolution-requests/{id}``,
+and the newest one on each uncertainty).
 """
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,55 +30,15 @@ from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models, get_se
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.execution import operator_commands as commands
 from bfx_funding_bot.modules.execution.operator_commands import (
-    OPERATOR_ID_MAX,
-    RESOLUTION_REASON_MAX,
-    VENUE_OFFER_ID_MAX,
     OperatorCommandError,
-    ResolutionCommand,
     UncertaintyDetail,
 )
-from bfx_funding_bot.modules.execution.uncertainty_tables import (
-    ResolutionAction,
-    UncertaintyResolutionRequestRow,
-)
+from bfx_funding_bot.modules.execution.uncertainty_tables import UncertaintyResolutionRequestRow
 from bfx_funding_bot.modules.ledger import Scope, observation_evidence_ref
 
 _MAX_LIMIT = 100
 _MAX_CANDIDATE_VENUE_OFFER_IDS = 16
 _EvidenceValue = str | int | float | bool | None | dict[str, Any] | list[Any]
-
-
-class UncertaintyResolutionRequest(BaseModel):
-    """Common opaque evidence reference and optional operator identity."""
-
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-
-    evidence_ref: str = Field(alias="evidenceRef")
-    operator_uuid: str | None = Field(
-        default=None,
-        alias="operatorUuid",
-        min_length=1,
-        max_length=OPERATOR_ID_MAX,
-    )
-    reason: str | None = Field(default=None, max_length=RESOLUTION_REASON_MAX)
-    evidence: dict[str, Any] = Field(default_factory=dict)
-
-
-class BindToVenueRequest(UncertaintyResolutionRequest):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-
-    venue_offer_id: str = Field(alias="venueOfferId", min_length=1, max_length=VENUE_OFFER_ID_MAX)
-
-
-class MarkNotAcceptedRequest(UncertaintyResolutionRequest):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-
-
-class ManualResolutionRequest(UncertaintyResolutionRequest):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-
-    operator_uuid: str = Field(alias="operatorUuid", min_length=1, max_length=OPERATOR_ID_MAX)
-    reason: str = Field(min_length=1, max_length=RESOLUTION_REASON_MAX)
 
 
 class UncertaintyResolutionContext(BaseModel):
@@ -227,30 +187,6 @@ def _rendered[T](render: Callable[[], T]) -> T:
             "uncertainties_unavailable", kind="unavailable")) from exc
 
 
-async def _queue(
-    session: AsyncSession,
-    *,
-    context: ExchangeAccountContext,
-    models: ReadModels,
-    uncertainty_id: UUID,
-    action: ResolutionAction,
-    body: UncertaintyResolutionRequest,
-    venue_offer_id: str | None = None,
-) -> dict[str, object]:
-    command = ResolutionCommand(
-        uncertainty_id=uncertainty_id, action=action, evidence_ref=body.evidence_ref,
-        operator_uuid=body.operator_uuid, reason=body.reason, evidence=body.evidence,
-        venue_offer_id=venue_offer_id,
-    )
-    try:
-        row = await commands.request_resolution(
-            session, context, models.operator_resolution, command,
-            now_ms=int(time.time() * 1000))
-    except OperatorCommandError as exc:
-        raise command_error(exc) from exc
-    return {"data": _request_response(row)}
-
-
 def build_uncertainties_router() -> APIRouter:
     router = APIRouter(
         prefix="/api/v1",
@@ -303,63 +239,11 @@ def build_uncertainties_router() -> APIRouter:
             raise command_error(exc) from exc
         return {"data": _request_response(row)}
 
-    @router.post(
-        "/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}/bind-to-venue",
-        status_code=status.HTTP_202_ACCEPTED,
-    )
-    async def bind_to_venue(
-        uncertainty_id: UUID,
-        body: BindToVenueRequest,
-        context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
-        session: AsyncSession = Depends(get_session),  # noqa: B008
-        models: ReadModels = Depends(get_read_models),  # noqa: B008
-    ) -> dict[str, object]:
-        return await _queue(
-            session, context=context, models=models, uncertainty_id=uncertainty_id,
-            action="bind_to_venue", body=body, venue_offer_id=body.venue_offer_id,
-        )
-
-    @router.post(
-        "/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}/mark-not-accepted",
-        status_code=status.HTTP_202_ACCEPTED,
-    )
-    async def mark_not_accepted(
-        uncertainty_id: UUID,
-        body: MarkNotAcceptedRequest,
-        context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
-        session: AsyncSession = Depends(get_session),  # noqa: B008
-        models: ReadModels = Depends(get_read_models),  # noqa: B008
-    ) -> dict[str, object]:
-        return await _queue(
-            session, context=context, models=models, uncertainty_id=uncertainty_id,
-            action="mark_not_accepted", body=body,
-        )
-
-    @router.post(
-        "/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}/manual-resolution",
-        status_code=status.HTTP_202_ACCEPTED,
-    )
-    async def manual_resolution(
-        uncertainty_id: UUID,
-        body: ManualResolutionRequest,
-        context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
-        session: AsyncSession = Depends(get_session),  # noqa: B008
-        models: ReadModels = Depends(get_read_models),  # noqa: B008
-    ) -> dict[str, object]:
-        return await _queue(
-            session, context=context, models=models, uncertainty_id=uncertainty_id,
-            action="manual_resolution", body=body,
-        )
-
     return router
 
 
 __all__ = [
-    "BindToVenueRequest",
-    "ManualResolutionRequest",
-    "MarkNotAcceptedRequest",
     "ResolutionRequestResponse",
-    "UncertaintyResolutionRequest",
     "UncertaintyResponse",
     "build_uncertainties_router",
 ]

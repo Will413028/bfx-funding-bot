@@ -57,6 +57,7 @@ def _credential(account_id: UUID, *, status: str = "active") -> ExchangeAccountC
         dek_nonce=b"dek-nonce",
         key_version=1,
         lifecycle_status=status,
+        bitfinex_user_id=4242,
     )
 
 

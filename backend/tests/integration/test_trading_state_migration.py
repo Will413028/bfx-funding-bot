@@ -354,13 +354,13 @@ def test_web_api_can_only_queue_a_request(migrated):
     _, engine, _ = migrated
     with engine.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
-        _insert_request(conn)
+        _insert_request(conn, action="kill")  # resume is the operator CLI's (36e59526f8cf)
         assert conn.scalar(text("SELECT count(*) FROM trading_control_requests")) == 1
     for sql in (
         "UPDATE trading_control_requests SET state='applied', processed_at_ms=2",
         "INSERT INTO trading_control_requests (request_id, exchange_account_id, deployment_environment,"
         " action, reason, requested_by, created_at_ms, state, processed_at_ms)"
-        f" VALUES ('00000000-0000-0000-0000-0000000000d2', '{_A}', 'prod', 'resume', 'x',"
+        f" VALUES ('00000000-0000-0000-0000-0000000000d2', '{_A}', 'prod', 'kill', 'x',"
         " 'operator', 1, 'applied', 2)",
         f"INSERT INTO trading_state (exchange_account_id, deployment_environment, state, cause, actor,"
         f" reason, created_at_ms) VALUES ('{_A}', 'prod', 'ACTIVE', 'operator', 'x', 'x', 1)",
@@ -373,20 +373,24 @@ def test_web_api_can_only_queue_a_request(migrated):
             conn.exec_driver_sql(sql)
 
 
-def test_the_web_api_queues_a_resume_and_a_kill_has_its_own_lane(migrated):
-    """A waiting resume never makes a kill wait; retired actions are refused."""
+def test_a_cli_resume_and_a_web_api_kill_each_have_their_own_lane(migrated):
+    """A waiting resume (queued by the operator CLI; the owner here) never makes the web API's
+    kill wait; the web API may not queue a resume; retired actions are refused."""
     _, engine, _ = migrated
     with engine.begin() as conn:
-        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         _insert_request(conn, "00000000-0000-0000-0000-0000000000e1", action="resume")
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         _insert_request(conn, "00000000-0000-0000-0000-0000000000e2", action="kill")
-    for action, account, message in (
-            ("kill", _A, "uq_trading_control_requests_pending_kill"),
-            ("resume", _A, "uq_trading_control_requests_pending"),
-            ("approve", _B, "ck_trading_control_requests_action"),
-            ("pause", _B, "ck_trading_control_requests_action")):
+    for role, action, account, message in (
+            ("bfx_webapi", "kill", _A, "uq_trading_control_requests_pending_kill"),
+            ("bfx_webapi", "resume", _B, "resume may be requested only through the operator CLI"),
+            (None, "resume", _A, "uq_trading_control_requests_pending"),
+            ("bfx_webapi", "approve", _B, "ck_trading_control_requests_action"),
+            ("bfx_webapi", "pause", _B, "ck_trading_control_requests_action")):
         with engine.begin() as conn, pytest.raises(Exception, match=message):
-            conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+            if role is not None:
+                conn.exec_driver_sql(f"SET LOCAL ROLE {role}")
             _insert_request(conn, "00000000-0000-0000-0000-0000000000e3", account, action)
 
 
@@ -512,7 +516,8 @@ def test_the_web_api_baseline_is_granted_by_migration_not_by_hand(pg_templates, 
             "legacy_archive.event_log": set(), "legacy_archive.execution_uncertainties": set(),
             "legacy_archive.submission_attempts": set(),
             "attribution_weekly": {"SELECT"}, "funding_candles": {"SELECT"},
-            "exchange_account_credentials": {"SELECT", "INSERT", "UPDATE"},
+            # 36e59526f8cf: the operator CLI writes credentials, the web API reads them.
+            "exchange_account_credentials": {"SELECT"},
             "account_config_drafts": {"SELECT", "INSERT", "UPDATE", "DELETE"},
             "trading_state": {"SELECT"}, "funding_cancel_all_audit": {"SELECT"},
             "deployments": {"SELECT"},

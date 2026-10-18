@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from bfx_funding_bot.core.crypto import Envelope, decrypt_secret_with_aad
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
+from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.accounts import credential_bootstrap as bootstrap
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
@@ -23,8 +24,10 @@ class Permissions:
         self.scopes = scopes if scopes is not None else {"funding": (True, True)}
         self.error = error
         self.user_error = user_error
+        self.calls: list[str] = []
 
     async def get_key_permissions(self, *, ctx):
+        self.calls.append("permissions")
         assert ctx.account_id == str(ACCOUNT)
         assert ctx.credentials.api_key == "fixture-key"
         assert ctx.credentials.api_secret == "fixture-secret"
@@ -34,6 +37,7 @@ class Permissions:
 
     async def get_user_id(self, *, ctx):
         # Asked of the key being bootstrapped, never another.
+        self.calls.append("user_id")
         assert ctx.account_id == str(ACCOUNT)
         assert ctx.credentials.api_key == "fixture-key"
         if self.user_error:
@@ -106,11 +110,53 @@ async def test_apply_commits_uuid_bound_loadable_credential(factory):
 @pytest.mark.asyncio
 async def test_an_unreadable_user_id_leaves_no_row(factory):
     """The id is part of the bootstrap: without it a later rotation of a revoked key could
-    not prove the account, so nothing is committed."""
+    not prove the account, so nothing is committed -- nor is any row created first."""
+    client = Permissions(user_error=RuntimeError("fixture-secret"))
     with pytest.raises(bootstrap.BootstrapError) as error:
-        await invoke(factory, apply=True,
-                     client=Permissions(user_error=RuntimeError("fixture-secret")))
+        await invoke(factory, apply=True, client=client)
+    assert str(error.value) == "bootstrap_failed"
     assert "fixture-secret" not in str(error.value)
+    assert client.calls == ["user_id"]
+    assert await count(factory) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_pending_row_carries_the_user_id_before_it_is_promoted(factory, monkeypatch):
+    """An active credential always names its user (a CHECK the promotion cannot defer), so
+    the id is asked first and written with the pending row; the promotion keeps it."""
+    created: list[tuple[str, int | None]] = []
+    real = bootstrap.create_account_credential
+
+    async def spy(session, **kwargs):
+        row = await real(session, **kwargs)
+        created.append((row.lifecycle_status, row.bitfinex_user_id))
+        return row
+
+    monkeypatch.setattr(bootstrap, "create_account_credential", spy)
+    client = Permissions()
+    assert await invoke(factory, apply=True, client=client) == {"status": "verified",
+                                                                 "applied": True}
+    assert created == [("pending", 4242)]
+    assert client.calls == ["user_id", "permissions"]
+    async with factory() as session:
+        row = await session.scalar(select(ExchangeAccountCredential))
+        assert (row.lifecycle_status, row.bitfinex_user_id) == ("active", 4242)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error, code", [
+    (BitfinexAPIError(500, "apikey: invalid", '["error",10100,"apikey: invalid"]'),
+     "bootstrap_permissions_rejected"),
+    (BitfinexAPIError(401, "unauthorized", None), "bootstrap_permissions_rejected"),
+    (BitfinexAPIError(0, "transport error", None), "bootstrap_failed"),
+    (BitfinexAPIError(500, "nonce: small", '["error",10114,"nonce: small"]'), "bootstrap_failed"),
+])
+async def test_a_key_bitfinex_refuses_is_a_permissions_rejection(factory, error, code):
+    """The user id is the first call with the new key, so Bitfinex refusing the key shows
+    there; the operator still sees the rejection, not a generic failure."""
+    with pytest.raises(bootstrap.BootstrapError) as raised:
+        await invoke(factory, apply=True, client=Permissions(user_error=error))
+    assert str(raised.value) == code
     assert await count(factory) == 0
 
 
