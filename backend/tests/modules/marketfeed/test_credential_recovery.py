@@ -36,7 +36,6 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
 from bfx_funding_bot.core.db import Base
@@ -132,10 +131,11 @@ class Recorder:
 
 
 @pytest.fixture
-async def engine() -> AsyncIterator[AsyncEngine]:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:",
-                                 connect_args={"check_same_thread": False},
-                                 poolclass=StaticPool)
+async def engine(tmp_path: Any) -> AsyncIterator[AsyncEngine]:
+    # A file, not one shared in-memory connection: recovery mode's tasks (keepalive, the
+    # rotation worker, the retry) and the test open sessions concurrently.
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/recovery.db",
+                                 connect_args={"timeout": 30})
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     envelope = encrypt_secret_with_aad(BOOT_SECRET, aad=str(ACCOUNT), kek=KEK)
@@ -398,6 +398,11 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
         await session.execute(text("UPDATE exchange_account_credentials SET bitfinex_user_id = 4242"))
     refused_key = _RefusedKeyClient()
     holder: dict[str, Any] = {}
+    restarts: list[int] = []
+
+    def restart() -> None:
+        restarts.append(1)
+        holder["daemon"]._stop_event.set()
 
     async def authority(session: Any, *, account_id: UUID, user: str) -> bool:
         return True
@@ -407,7 +412,7 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
         client_factory=_NewKeyClient, current_client=refused_key,
         current_ctx=AccountContext(account_id=str(ACCOUNT),
                                    credentials=Credentials(BOOT_KEY, BOOT_SECRET)),
-        kek_loader=lambda: KEK, restart=lambda: holder["daemon"]._stop_event.set(),
+        kek_loader=lambda: KEK, restart=restart,
         clock=lambda: T0, poll_interval_s=0.01)
     worker.bind_run(run_id, started)
     fake = _daemon(engine, Venue(_refused()), rotation=worker, run_started_at_ms=started,
@@ -422,12 +427,23 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
                                      deployment_environment="ci"),
             api_key=NEW_KEY, api_secret=NEW_SECRET, label="rotated", reason="key revoked",
             now_ms=T0)
-    await task  # the applied rotation's restart ends the run
+    async def settled() -> str | None:
+        async with factory() as session:
+            state = await session.scalar(text(
+                "SELECT state FROM credential_rotation_requests WHERE request_id = :r"),
+                {"r": request_id.hex})
+        return None if state == "requested" else state
 
+    await until(settled, what="the rotation settled")
+    await until(lambda: restarts or task.done(), what="the restart")
+    if not task.done():  # a refused rotation never restarts: end the run to report it
+        holder["daemon"]._stop_event.set()
+    await task
     async with factory() as session:
-        state = await session.scalar(text(
-            "SELECT state FROM credential_rotation_requests WHERE request_id = :r"),
-            {"r": request_id.hex})
-    assert state == "applied"
+        row = (await session.execute(text(
+            "SELECT state, outcome_reason FROM credential_rotation_requests "
+            "WHERE request_id = :r"), {"r": request_id.hex})).one()
+    assert row.state == "applied", row.outcome_reason
+    assert restarts == [1]  # the worker's own restart ended the run
     assert refused_key.asked == 0  # neither the backfill nor the identity check asked it
     _trading_untouched(fake)
