@@ -73,7 +73,7 @@ def test_placing_reserves_funds_and_freezes_the_queue() -> None:
 
 
 @pytest.mark.parametrize(("kwargs", "why"), [
-    ({"amount": "1001"}, "insufficient"),
+    ({"amount": "1001"}, "not enough UST balance"),
     ({"amount": "149"}, "below minimum"),
     ({"period": 1}, "period"),
     ({"period": 121}, "period"),

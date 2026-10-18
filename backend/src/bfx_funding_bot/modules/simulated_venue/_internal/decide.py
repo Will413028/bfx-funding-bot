@@ -78,7 +78,8 @@ def decide_submit(
         return Refusal(f"amount: below minimum {config.min_offer_amount}")
     currency = currency_of(symbol)
     if amount > state.available(currency):
-        return Refusal("amount: insufficient balance")
+        # Bitfinex's own text, so the 5xx refusal allowlist recognises it as a clean rejection.
+        return Refusal(f"Invalid offer: not enough {currency} balance available in deposit wallet")
     if book is None:
         # Never place on an assumed-empty queue: that is a silent optimistic fill.
         return NoMarketData("no book snapshot for the queue position")
