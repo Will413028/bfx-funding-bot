@@ -13,8 +13,8 @@ Empirical rate-limit behaviour (probed 2026-07-19):
 - Binance /fapi/v1/fundingRate: generous (weight-based); 1 req/s is safe.
 
 429 appears both as HTTP 429 and as HTTP 200 with body
-["error", 11010, "ratelimit: error"] — both are handled as retryable, as is the
-maintenance notice (TRANSIENT_VENUE_ERROR_CODES). Any other ["error", CODE, MESSAGE]
+["error", 11010, "ratelimit: error"] — both are handled as retryable, as are the
+not-ready and maintenance notices (TRANSIENT_VENUE_ERROR_CODES). Any other ["error", CODE, MESSAGE]
 body is the venue's answer and raises at once, without retrying (for example
 ERR_AUTH_FAIL 10100); the codes live in external/bitfinex/errors.py.
 """

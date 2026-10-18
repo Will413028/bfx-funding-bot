@@ -331,7 +331,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
 
     async def _verify(self, opened: UnsealedCredential) -> Verified | Refused:
         """Bitfinex's view of the new key. When the venue did not answer (transport, rate
-        limit, maintenance, a 5xx without its error body) this raises (``failed``, resend);
+        limit, not ready, maintenance, a 5xx without its error body) this raises (``failed``, resend);
         its answer, even with HTTP 500 (``["error", 10100, ...]``), is a refusal."""
         ctx = AccountContext(account_id=str(self.account_id),
                              credentials=Credentials(api_key=opened.api_key,
