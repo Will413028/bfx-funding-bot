@@ -654,6 +654,13 @@ class DeploymentReconciler:
                                 cell=cell_id, symbol=symbol, amount=amount,
                                 reason="local_pre_transport",
                             )
+                    if result.outcome_kind is SubmitOutcomeKind.REJECTED:
+                        # A rejection does not halt the symbol, so a venue that
+                        # keeps refusing would repeat every tick unseen.
+                        alerts.emit(
+                            alerts.VENUE_SUBMIT_REJECTED, symbol=symbol, cell=cell_id,
+                            reason=getattr(result.outcome, "reason", "venue_rejected"),
+                        )
                     await self._emit_submit(cell_id, outcome, result, reconcile_id)
                     continue
                 log.info("deployment_submitted cell=%s amount=%s", cell_id, amount)
