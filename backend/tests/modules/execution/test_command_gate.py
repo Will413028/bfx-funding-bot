@@ -331,6 +331,40 @@ async def test_the_intent_is_durable_before_the_venue_sees_data() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unknown_keeps_the_venue_error_as_durable_evidence() -> None:
+    """The log line ages out; the journal is where an unlisted refusal is read later."""
+    reader = _FakeUncertaintyReader(set())
+    recording = _recording(reader)
+    venue = _FakeVenue(SubmitOutcomeUnknown(
+        "http_5xx", True, venue_error_code=10001,
+        venue_error_message="Invalid offer: never-persist-secret is not a rate",
+    ))
+
+    await _gate(venue, reader, recording).submit(_ready(), _context())
+
+    [record] = recording.txns[1]
+    assert isinstance(record, OutcomeRecorded)
+    assert record.outcome.reason == "http_5xx"
+    assert record.outcome.evidence == {
+        "venue_error_code": 10001,
+        "venue_error_message": "Invalid offer: [redacted] is not a rate",
+    }
+
+
+@pytest.mark.asyncio
+async def test_unknown_without_a_venue_answer_records_no_venue_evidence() -> None:
+    reader = _FakeUncertaintyReader(set())
+    recording = _recording(reader)
+    venue = _FakeVenue(SubmitOutcomeUnknown("timeout", True))
+
+    await _gate(venue, reader, recording).submit(_ready(), _context())
+
+    [record] = recording.txns[1]
+    assert isinstance(record, OutcomeRecorded)
+    assert record.outcome.evidence == {}
+
+
+@pytest.mark.asyncio
 async def test_unknown_is_durable_and_blocks_next_command_without_retry() -> None:
     reader = _FakeUncertaintyReader(set())
     recording = _recording(reader)
