@@ -384,7 +384,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 
 - 代表：組裝 daemon 時開機被拒（資料庫非暫時性錯誤、schema 與 build 不符、realm 或 ledger epoch 不對、applied policy 讀不到、venue wiring 失敗；模擬環境同樣會發），bot 停機前 venue 上的受管 offer 可能還在。`reason` 是拒絕原因。
 - 系統會做：不寫交易狀態、不碰 venue，接著發 `boot_refused` 並退出，container 重啟。留在 venue 上的 offer 仍在當初的包絡內。
-- operator 判斷：先修好原因（多半是部署，見 [deploy runbook](deploy.md)），修好後的版本照常開機、不需要 resume。必須撤單時照 §3 處理；bot 沒在跑時 `/admin/halt` 不可用。
+- operator 判斷：先修好原因（多半是部署，見 [deploy runbook](deploy.md)），修好後的版本照常開機、不需要 resume。必須撤單時照 §3 處理；bot 沒在跑時 `bfx-op halt` 不可用。
 
 <a id="alert-command_throttled"></a>
 #### `command_throttled`（warning）
@@ -412,7 +412,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 
 - 代表：套用恢復或 kill 時發生錯誤（`reason` 為 root exception 類型，或 `outcome_write_failed:…`），或 kill 已寫入 HALTED 但 kill switch 沒接上（`kill switch not wired: venue offers not cancelled`）。
 - 系統會做：一般失敗時整個套用 rollback，交易狀態不變（失敗的 kill **沒有**停機），請求標為 failed、不重試。kill switch 沒接上時 HALTED 已生效，但 venue 沒有撤單。
-- operator 判斷：如果失敗的是 kill，馬上用 `/admin/trading-status` 看 `halt`，沒停就重送 kill 或用 `/admin/halt`（§3）；cancel-all 沒跑就重試 kill。原因看 `docker logs bfx-bot` 的 `trading_control_failed`。
+- operator 判斷：如果失敗的是 kill，馬上用 `/admin/trading-status` 看 `halt`，沒停就重送 kill 或用 `sudo bfx-op halt`（§3）；cancel-all 沒跑就重試 kill。原因看 `docker logs bfx-bot` 的 `trading_control_failed`。
 
 <a id="alert-kill_cancel_all_caught_up"></a>
 #### `kill_cancel_all_caught_up`（critical）
@@ -618,7 +618,7 @@ kill 的 cancel-all）被拒：
   `SSH_CONNECTION` 冒充另一個 peer：公網 sshd 還開著時持有 key 的登入、Console 上的 `ubuntu`。
   公網 sshd 停用後只剩 Console 這一條。誰能開 session 由 Tailscale SSH 的 check mode 決定；`bfx-op`
   做的是把誠實 session 的身分綁進請求並留下紀錄。
-- **子命令**（`sudo bfx-op <子命令> --help` 看參數）：唯讀 `status`、`uncertainties`、`uncertainty`、
+- **子命令**（`sudo bfx-op <子命令> --help` 看參數；`halt` 除外，它只收 `--reason`）：唯讀 `status`、`uncertainties`、`uncertainty`、
   `request <trading|currency|resolution|credential> <request_id>`、`credential`；寫入 `resume`、`kill`、
   `enable`、`disable`（§2、§3）、`bind-to-venue`、`mark-not-accepted`、`manual-resolution`（§5）、
   `rotate-credential`（§11）；緊急停機 `halt`（§3，不要求 tailnet 身分、不經 operator container）。寫入預設等到結果（`--wait-seconds`，預設 120）；`--no-wait` 只排入。
