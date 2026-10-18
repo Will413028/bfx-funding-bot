@@ -75,6 +75,7 @@ async def _seed_account(
                     key_version=envelope.key_version,
                     lifecycle_status="active",
                     verified_at=datetime.now(UTC),
+                    bitfinex_user_id=4242,
                 )
             )
         if draft:

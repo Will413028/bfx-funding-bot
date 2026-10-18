@@ -1,20 +1,25 @@
 """Account-scoped uncertainty API contract tests.
 
-The public router through FastAPI, on SQLite for the request outbox it owns. What an
-uncertainty is, which evidence is fresh and what a resolution writes belong to the ledger's
-ports (``OperatorReads`` / ``OperatorEvidence`` / ``OperatorResolution``), covered on
-PostgreSQL by ``tests/integration/test_ledger_operator_resolution_pg.py`` and
+The public router through FastAPI, on SQLite for the request outbox. What an uncertainty is,
+which evidence is fresh and what a resolution writes belong to the ledger's ports
+(``OperatorReads`` / ``OperatorEvidence`` / ``OperatorResolution``), covered on PostgreSQL by
+``tests/integration/test_ledger_operator_resolution_pg.py`` and
 ``tests/integration/test_ledger_operator_reads.py``; here a scripted stand-in plays them, so
-these tests pin the router and the outbox: scoping, the wire shape, the HTTP codes of a
-refusal, the queue's same-request / pending semantics and the worker's outcome recording.
+these tests pin the router's reads and the outbox: scoping, the wire shape, the queue's
+same-request / pending semantics and the worker's outcome recording.
+
+Since 9c-2b the web API queues no adjudication (ADR 2026-10-15 D4): requests are queued
+here through ``operator_commands.request_resolution``, the operator CLI's path, and the
+router only shows them. The command's refusal codes and evidence allow-lists are
+``tests/modules/execution/test_operator_commands.py``.
 
 Mutation checks (one at a time; revert after each):
 
 * ``_resolution_context`` passes the first candidate only, or the port's count no longer:
   ``test_uncertainty_read_renders_*``.
-* ``_queue`` skips ``resolution.columns``: ``test_a_malformed_evidence_ref_is_*``.
 * ``_same_intent`` ignores the reason: ``test_identical_repeat_*``.
 * the worker trusts acceptance instead of re-reading the operator: ``test_revoked_operator_*``.
+* an adjudication route comes back: ``test_adjudications_are_not_routes``.
 """
 
 from __future__ import annotations
@@ -39,6 +44,12 @@ from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.api.deps import ReadModels, get_session
+from bfx_funding_bot.modules.execution import operator_commands as commands
+from bfx_funding_bot.modules.execution.operator_commands import (
+    OperatorCommandError,
+    OperatorContext,
+    ResolutionCommand,
+)
 from bfx_funding_bot.modules.ledger import (
     AppliedResolution,
     RequestColumns,
@@ -218,16 +229,32 @@ async def uncertainty_app(sqlite_engine, monkeypatch):
 _BASE = f"/api/v1/exchange-accounts/{ACCOUNT_ID}"
 
 
-def _mark_not_accepted(client, evidence_ref: str, *, reason: str = "zero candidates"):
-    return client.post(
-        f"{_BASE}/uncertainties/{UNCERTAINTY_ID}/mark-not-accepted",
-        json={
-            "evidenceRef": evidence_ref,
-            "operatorUuid": "operator-1",
-            "reason": reason,
-            "evidence": {"candidateCount": 0},
-        },
-    )
+_OPERATOR = OperatorContext(exchange_account_id=ACCOUNT_ID, user_id="operator-1", role="owner",
+                            lifecycle_status="active", deployment_environment="ci")
+
+
+def _mark_not_accepted(app, evidence_ref: str, *, reason: str = "zero candidates") -> str:
+    """Queue a mark-not-accepted as the operator CLI does; the request's id."""
+    _client, factory, ledger = app
+
+    async def queue() -> str:
+        async with factory.begin() as session:
+            row = await commands.request_resolution(
+                session, _OPERATOR, ledger, ResolutionCommand(
+                    uncertainty_id=UNCERTAINTY_ID, action="mark_not_accepted",
+                    evidence_ref=evidence_ref, operator_uuid="operator-1", reason=reason,
+                    evidence={"candidateCount": 0}),
+                now_ms=3_000)
+            return str(row.request_id)
+
+    return asyncio.run(queue())
+
+
+def _refused(app, evidence_ref: str, *, reason: str = "zero candidates") -> str:
+    """The refusal code of a queueing that is refused."""
+    with pytest.raises(OperatorCommandError) as refused:
+        _mark_not_accepted(app, evidence_ref, reason=reason)
+    return refused.value.code
 
 
 def _request_outcome(client, request_id: str) -> dict[str, object]:
@@ -286,9 +313,7 @@ def test_uncertainty_and_request_responses_omit_event_seq_fields(
 ) -> None:
     client, _factory, ledger = uncertainty_app
     ref = ledger.ref
-    queued = _mark_not_accepted(client, ref)
-    assert queued.status_code == 202, queued.text
-    request_id = queued.json()["data"]["requestId"]
+    request_id = _mark_not_accepted(uncertainty_app, ref)
     if applied:
         assert _apply_queued(uncertainty_app) is True
 
@@ -306,7 +331,7 @@ def test_uncertainty_and_request_responses_omit_event_seq_fields(
         "openedEventSeq", "reconcileEventSeq", "resolvedEventSeq", "lastEventSeq",
         "opened_event_seq", "reconcile_event_seq", "resolved_event_seq", "last_event_seq",
     }
-    for data in [queued.json()["data"], request_data, detail_data, *listed.json()["data"]]:
+    for data in [request_data, detail_data, *listed.json()["data"]]:
         assert forbidden.isdisjoint(data)
         if "resolutionContext" in data:
             assert forbidden.isdisjoint(data["resolutionContext"])
@@ -320,9 +345,7 @@ def test_queued_request_is_visible_as_pending_until_the_worker_applies_it(
     uncertainty_app,
 ) -> None:
     client, _factory, ledger = uncertainty_app
-    queued = _mark_not_accepted(client, ledger.ref)
-    assert queued.status_code == 202, queued.text
-    request_id = queued.json()["data"]["requestId"]
+    request_id = _mark_not_accepted(uncertainty_app, ledger.ref)
 
     listed = client.get(f"{_BASE}/uncertainties", params={"state": "open"}).json()["data"]
     assert [row["resolutionRequest"]["requestId"] for row in listed] == [request_id]
@@ -339,42 +362,23 @@ def test_queued_request_is_visible_as_pending_until_the_worker_applies_it(
 def test_identical_repeat_is_the_same_request_and_a_different_one_waits(
     uncertainty_app,
 ) -> None:
-    client, _factory, ledger = uncertainty_app
-    first = _mark_not_accepted(client, ledger.ref)
-    repeat = _mark_not_accepted(client, ledger.ref)
-    assert first.status_code == repeat.status_code == 202
-    assert repeat.json()["data"]["requestId"] == first.json()["data"]["requestId"]
+    _client, _factory, ledger = uncertainty_app
+    first = _mark_not_accepted(uncertainty_app, ledger.ref)
+    assert _mark_not_accepted(uncertainty_app, ledger.ref) == first
 
-    different = _mark_not_accepted(client, ledger.ref, reason="another reason")
-    assert different.status_code == 409
-    assert different.json()["detail"] == "resolution_request_pending"
+    assert _refused(uncertainty_app, ledger.ref, reason="another reason") == (
+        "resolution_request_pending")
 
     assert _apply_queued(uncertainty_app) is True
-    after = _mark_not_accepted(client, ledger.ref)
-    assert after.status_code == 409
-    assert after.json()["detail"] == "uncertainty_already_resolved"
+    assert _refused(uncertainty_app, ledger.ref) == "uncertainty_already_resolved"
     assert len(ledger.applied) == 1
 
 
 def test_a_stale_reference_is_refused_when_queueing(uncertainty_app) -> None:
-    client, _factory, ledger = uncertainty_app
+    _client, _factory, ledger = uncertainty_app
     stale = ledger.ref
     ledger.advance()
-    response = _mark_not_accepted(client, stale)
-    assert (response.status_code, response.json()["detail"]) == (409, "stale_reconcile_fence")
-
-
-@pytest.mark.parametrize("evidence_ref", ["42", "042", " 42", f"{_PREFIX}not-a-uuid"])
-def test_a_malformed_evidence_ref_is_refused_before_anything_is_queued(
-    uncertainty_app, evidence_ref,
-) -> None:
-    client, _factory, _ledger = uncertainty_app
-    response = client.post(
-        f"{_BASE}/uncertainties/{UNCERTAINTY_ID}/mark-not-accepted",
-        json={"evidenceRef": evidence_ref},
-    )
-    assert response.status_code == 409
-    assert response.json()["detail"] == "stale_reconcile_fence"
+    assert _refused(uncertainty_app, stale) == "stale_reconcile_fence"
 
 
 def test_worker_records_why_an_accepted_request_no_longer_applies(
@@ -382,19 +386,18 @@ def test_worker_records_why_an_accepted_request_no_longer_applies(
 ) -> None:
     """Evidence can move between acceptance and apply; say so, never apply."""
     client, _factory, ledger = uncertainty_app
-    queued = _mark_not_accepted(client, ledger.ref)
-    assert queued.status_code == 202
+    request_id = _mark_not_accepted(uncertainty_app, ledger.ref)
     ledger.advance()  # a newer fence arrives
 
     assert _apply_queued(uncertainty_app) is True
-    outcome = _request_outcome(client, queued.json()["data"]["requestId"])
+    outcome = _request_outcome(client, request_id)
     assert outcome["state"] == "rejected"
     assert outcome["outcomeReason"] == "stale_reconcile_fence"
     assert ledger.applied == []
     detail = client.get(f"{_BASE}/uncertainties/{UNCERTAINTY_ID}").json()["data"]
     assert detail["state"] == "open"
     # The console learns why from the list itself, not a separate poll.
-    assert detail["resolutionRequest"]["requestId"] == queued.json()["data"]["requestId"]
+    assert detail["resolutionRequest"]["requestId"] == request_id
     assert detail["resolutionRequest"]["state"] == "rejected"
     assert detail["resolutionRequest"]["outcomeReason"] == "stale_reconcile_fence"
 
@@ -408,7 +411,7 @@ def test_worker_failure_is_recorded_with_its_root_cause_not_a_bare_conflict(
         pass
 
     client, _factory, ledger = uncertainty_app
-    queued = _mark_not_accepted(client, ledger.ref)
+    request_id = _mark_not_accepted(uncertainty_app, ledger.ref)
     try:
         raise InsufficientPrivilegeError("permission denied for table execution_resolution_journal")
     except InsufficientPrivilegeError as cause:
@@ -417,54 +420,42 @@ def test_worker_failure_is_recorded_with_its_root_cause_not_a_bare_conflict(
     ledger.apply_error = error
 
     assert _apply_queued(uncertainty_app) is True
-    outcome = _request_outcome(client, queued.json()["data"]["requestId"])
+    outcome = _request_outcome(client, request_id)
     assert outcome["state"] == "failed"
     assert outcome["outcomeReason"] == "resolution_failed:InsufficientPrivilegeError"
     assert ledger.applied == []
 
     # A failed request is terminal; the operator may ask again.
     ledger.apply_error = None
-    retry = _mark_not_accepted(client, ledger.ref)
-    assert retry.status_code == 202, retry.text
-    assert retry.json()["data"]["requestId"] != queued.json()["data"]["requestId"]
+    retry = _mark_not_accepted(uncertainty_app, ledger.ref)
+    assert retry != request_id
     assert _apply_queued(uncertainty_app) is True
-    assert _request_outcome(client, retry.json()["data"]["requestId"])["state"] == "applied"
+    assert _request_outcome(client, retry)["state"] == "applied"
 
 
-def test_only_the_configured_operator_can_queue_an_adjudication() -> None:
-    """The web API admits exactly who the worker will authorize.
-
-    `require_operator` (configured operator id + admin role) guards every
-    adjudication route through `require_account_member`, so a writer who is not
-    the operator is refused with 403 before anything is queued -- never accepted
-    and later rejected as `operator_not_authorized`. The worker's database check then
-    only catches what changed since: ban, lost TOTP, lost membership.
-    """
-    from fastapi.dependencies.models import Dependant
+def test_adjudications_are_not_routes(uncertainty_app) -> None:
+    """Adjudicating goes through the operator CLI only since 9c-2b: the three POSTs are gone
+    (and the database refuses the web API's role the INSERT), the reads stay."""
     from fastapi.routing import APIRoute
 
     from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
 
-    def calls(dependant: Dependant) -> set[object]:
-        found = {dependant.call}
-        for child in dependant.dependencies:
-            found |= calls(child)
-        return found
-
-    posts = [
-        route for route in build_uncertainties_router().routes
-        if isinstance(route, APIRoute) and "POST" in route.methods
-    ]
-    assert {route.path.rsplit("/", 1)[-1] for route in posts} == {
-        "bind-to-venue", "mark-not-accepted", "manual-resolution",
-    }
-    for route in posts:
-        assert require_operator in calls(route.dependant), route.path
+    client, factory, ledger = uncertainty_app
+    methods = {method for route in build_uncertainties_router().routes
+               if isinstance(route, APIRoute) for method in route.methods}
+    assert methods == {"GET"}
+    for action in ("bind-to-venue", "mark-not-accepted", "manual-resolution"):
+        response = client.post(f"{_BASE}/uncertainties/{UNCERTAINTY_ID}/{action}", json={
+            "evidenceRef": ledger.ref, "operatorUuid": "operator-1", "reason": "x",
+            "venueOfferId": "9001"})
+        assert response.status_code in (404, 405), (action, response.status_code)
+    assert asyncio.run(_queued(factory)) == 0
+    assert ledger.applied == []
 
 
 def test_resolution_request_reads_are_account_scoped(uncertainty_app) -> None:
     client, _factory, ledger = uncertainty_app
-    request_id = _mark_not_accepted(client, ledger.ref).json()["data"]["requestId"]
+    request_id = _mark_not_accepted(uncertainty_app, ledger.ref)
     denied = client.get(
         f"/api/v1/exchange-accounts/{OTHER_ACCOUNT_ID}/uncertainty-resolution-requests/{request_id}"
     )
@@ -475,7 +466,7 @@ def test_resolution_request_reads_are_account_scoped(uncertainty_app) -> None:
 
 
 async def _queue_directly(factory, *, uncertainty_id: UUID, created_at_ms: int) -> UUID:
-    """A request the web API would have refused; the worker must still settle it."""
+    """A request the operator command would have refused; the worker must still settle it."""
     from sqlalchemy import insert
 
     from bfx_funding_bot.modules.execution.uncertainty_tables import (
@@ -516,7 +507,7 @@ def test_a_request_whose_outcome_cannot_be_written_does_not_block_the_queue(
     """Head-of-line poison: the outcome write fails, so the tick used to roll back
     and the same oldest row was picked again forever, starving every later one."""
     client, factory, ledger = uncertainty_app
-    poison = _mark_not_accepted(client, ledger.ref).json()["data"]["requestId"]
+    poison = _mark_not_accepted(uncertainty_app, ledger.ref)
     later = asyncio.run(_queue_directly(factory, uncertainty_id=uuid4(), created_at_ms=10**15))
     _unrecordable(monkeypatch, poison)
 
@@ -537,7 +528,7 @@ def test_worker_skips_a_request_it_cannot_even_mark_failed(uncertainty_app, monk
     )
 
     client, factory, ledger = uncertainty_app
-    poison = _mark_not_accepted(client, ledger.ref).json()["data"]["requestId"]
+    poison = _mark_not_accepted(uncertainty_app, ledger.ref)
     later = asyncio.run(_queue_directly(factory, uncertainty_id=uuid4(), created_at_ms=10**15))
     _unrecordable(monkeypatch, poison)
 
@@ -557,7 +548,7 @@ def test_worker_skips_a_request_it_cannot_even_mark_failed(uncertainty_app, monk
 
 def test_worker_only_touches_its_own_account(uncertainty_app) -> None:
     client, factory, ledger = uncertainty_app
-    request_id = _mark_not_accepted(client, ledger.ref).json()["data"]["requestId"]
+    request_id = _mark_not_accepted(uncertainty_app, ledger.ref)
     other = _worker(factory, ledger, account=OTHER_ACCOUNT_ID)
     assert asyncio.run(other.tick()) is False
     assert _request_outcome(client, request_id)["state"] == "requested"
@@ -566,13 +557,12 @@ def test_worker_only_touches_its_own_account(uncertainty_app) -> None:
 def test_revoked_operator_request_is_rejected_without_an_apply(uncertainty_app) -> None:
     """Authority is re-read when the daemon applies, not trusted from acceptance."""
     client, _factory, ledger = uncertainty_app
-    queued = _mark_not_accepted(client, ledger.ref)
-    assert queued.status_code == 202, queued.text
+    request_id = _mark_not_accepted(uncertainty_app, ledger.ref)
 
     revoked = _Authority(authorized=set())
     assert _apply_queued(uncertainty_app, authority=revoked) is True
     assert revoked.calls == [(ACCOUNT_ID, "operator-1")]
-    outcome = _request_outcome(client, queued.json()["data"]["requestId"])
+    outcome = _request_outcome(client, request_id)
     assert outcome["state"] == "rejected"
     assert outcome["outcomeReason"] == "operator_not_authorized"
     assert ledger.applied == []
@@ -584,12 +574,12 @@ def test_authorized_operator_request_is_applied_after_the_authority_check(
     uncertainty_app,
 ) -> None:
     client, _factory, ledger = uncertainty_app
-    queued = _mark_not_accepted(client, ledger.ref)
+    request_id = _mark_not_accepted(uncertainty_app, ledger.ref)
 
     authority = _Authority()
     assert _apply_queued(uncertainty_app, authority=authority) is True
     assert authority.calls == [(ACCOUNT_ID, "operator-1")]
-    outcome = _request_outcome(client, queued.json()["data"]["requestId"])
+    outcome = _request_outcome(client, request_id)
     assert outcome["state"] == "applied"
     assert len(ledger.applied) == 1
 
@@ -636,54 +626,16 @@ def test_shared_operator_authority_defers_to_the_database_verdict(monkeypatch) -
         assert params == {"account": ACCOUNT_ID, "actor": "operator-1"}
 
 
-@pytest.mark.parametrize("field", ["reconcile_event_seq", "reconcileEventSeq"])
-def test_old_resolution_body_field_is_rejected(uncertainty_app, field) -> None:
-    client, _factory, _ledger = uncertainty_app
-    response = client.post(
-        f"{_BASE}/uncertainties/{UNCERTAINTY_ID}/mark-not-accepted", json={field: 42},
-    )
-    assert response.status_code == 422
-    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
-
-
-def test_resolution_evidence_rejects_unknown_secret_like_fields(uncertainty_app) -> None:
-    client, _factory, ledger = uncertainty_app
-    response = client.post(
-        f"{_BASE}/uncertainties/{UNCERTAINTY_ID}/mark-not-accepted",
-        json={
-            "evidenceRef": ledger.ref,
-            "evidence": {"candidateCount": 0, "apiSecret": "must-not-persist"},
-        },
-    )
-    assert response.status_code == 422
-
-
-def test_manual_resolution_requires_reason_and_operator_uuid(uncertainty_app) -> None:
-    client, _factory, ledger = uncertainty_app
-    response = client.post(
-        f"{_BASE}/uncertainties/{uuid4()}/manual-resolution",
-        json={"evidenceRef": ledger.ref, "operatorUuid": "operator-1"},
-    )
-    assert response.status_code == 422
-
-
 def test_request_response_echoes_stored_ref_after_context_advances(uncertainty_app) -> None:
     client, _factory, ledger = uncertainty_app
     ref = ledger.ref
-    queued = _mark_not_accepted(client, ref).json()["data"]
-    assert queued["evidenceRef"] == ref
+    request_id = _mark_not_accepted(uncertainty_app, ref)
+    assert _request_outcome(client, request_id)["evidenceRef"] == ref
     newer = ledger.advance()
     detail = client.get(f"{_BASE}/uncertainties/{UNCERTAINTY_ID}").json()["data"]
     assert detail["resolutionContext"]["evidenceRef"] == newer
     assert detail["resolutionRequest"]["evidenceRef"] == ref
-    assert _request_outcome(client, queued["requestId"])["evidenceRef"] == ref
-
-
-# Refusal codes and evidence allow-lists of each adjudication. They are the contract the
-# operator commands service (shared with the CLI) must keep.
-
-def _adjudicate(client, action: str, body: dict[str, object]):
-    return client.post(f"{_BASE}/uncertainties/{UNCERTAINTY_ID}/{action}", json=body)
+    assert _request_outcome(client, request_id)["evidenceRef"] == ref
 
 
 async def _queued(factory) -> int:
@@ -696,71 +648,6 @@ async def _queued(factory) -> int:
     async with factory() as session:
         return int(await session.scalar(
             select(func.count()).select_from(UncertaintyResolutionRequestRow)) or 0)
-
-
-_ACTION_FIELDS: dict[str, dict[str, object]] = {
-    "bind-to-venue": {"venueOfferId": "9001"},
-    "mark-not-accepted": {},
-    "manual-resolution": {"reason": "checked on the venue"},
-}
-
-
-@pytest.mark.parametrize(("action", "evidence"), [
-    ("bind-to-venue", {"candidateCount": 1}),
-    ("bind-to-venue", {"candidate_count": 1}),
-    ("bind-to-venue", {}),
-    ("mark-not-accepted", {"candidateCount": 0}),
-    ("mark-not-accepted", {"candidate_count": 0}),
-    ("mark-not-accepted", {}),
-    ("manual-resolution", {"decision": "not_accepted"}),
-])
-def test_each_adjudication_accepts_its_evidence_keys(uncertainty_app, action, evidence) -> None:
-    client, _factory, ledger = uncertainty_app
-    response = _adjudicate(client, action, {
-        "evidenceRef": ledger.ref, "operatorUuid": "operator-1", "evidence": evidence,
-        **_ACTION_FIELDS[action]})
-    assert response.status_code == 202, response.text
-
-
-@pytest.mark.parametrize(("action", "evidence"), [
-    ("bind-to-venue", {"decision": "not_accepted"}),
-    ("bind-to-venue", {"venueOfferId": "9001"}),
-    ("mark-not-accepted", {"decision": "not_accepted"}),
-    ("manual-resolution", {"candidateCount": 1}),
-    ("manual-resolution", {"decision": "not_accepted", "candidateCount": 1}),
-    ("mark-not-accepted", {"candidateCount": "x" * 20_000}),  # over the evidence size cap
-])
-def test_evidence_outside_an_adjudications_allow_list_is_refused(
-    uncertainty_app, action, evidence,
-) -> None:
-    client, factory, ledger = uncertainty_app
-    response = _adjudicate(client, action, {
-        "evidenceRef": ledger.ref, "operatorUuid": "operator-1", "evidence": evidence,
-        **_ACTION_FIELDS[action]})
-    assert (response.status_code, response.json()["detail"]) == (
-        422, "invalid_resolution_evidence")
-    assert asyncio.run(_queued(factory)) == 0
-
-
-@pytest.mark.parametrize(("operator_uuid", "status", "code"), [
-    ("someone-else", 403, "operator_identity_mismatch"),
-    ("   ", 422, "operator_required"),
-])
-def test_the_operator_named_in_the_body_must_be_the_caller(
-    uncertainty_app, operator_uuid, status, code,
-) -> None:
-    client, factory, ledger = uncertainty_app
-    response = _adjudicate(client, "mark-not-accepted", {
-        "evidenceRef": ledger.ref, "operatorUuid": operator_uuid})
-    assert (response.status_code, response.json()["detail"]) == (status, code)
-    assert asyncio.run(_queued(factory)) == 0
-
-
-def test_the_evidence_reference_is_judged_before_who_asked(uncertainty_app) -> None:
-    client, _factory, _ledger = uncertainty_app
-    response = _adjudicate(client, "mark-not-accepted", {
-        "evidenceRef": "42", "operatorUuid": "someone-else"})
-    assert (response.status_code, response.json()["detail"]) == (409, "stale_reconcile_fence")
 
 
 @pytest.mark.parametrize("path", ["uncertainties", f"uncertainties/{UNCERTAINTY_ID}"])

@@ -53,7 +53,7 @@ from bfx_funding_bot.modules.execution.credential_rotation import (
     CredentialRotationWorker,
 )
 from bfx_funding_bot.modules.execution.operator_commands import OperatorContext
-from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.marketfeed import daemon as daemon_module
 from bfx_funding_bot.modules.marketfeed.daemon import (
@@ -149,7 +149,8 @@ async def engine(tmp_path: Any) -> AsyncIterator[AsyncEngine]:
             secret_ciphertext=envelope.secret_ciphertext, secret_nonce=envelope.secret_nonce,
             wrapped_dek=envelope.wrapped_dek, dek_nonce=envelope.dek_nonce,
             key_version=envelope.key_version, lifecycle_status="active",
-            verified_at=datetime.fromtimestamp(T0 / 1000, UTC) - timedelta(days=30)))
+            verified_at=datetime.fromtimestamp(T0 / 1000, UTC) - timedelta(days=30),
+            bitfinex_user_id=4242))
     try:
         yield engine
     finally:
@@ -219,7 +220,7 @@ def _trading_untouched(fake: Any) -> None:
 # --- what runs --------------------------------------------------------------------------------
 
 async def test_recovery_mode_runs_the_rotation_worker_and_liveness_only(engine, sent) -> None:
-    rotation = SimpleNamespace(run=AsyncMock(), note_credential_recovery=MagicMock())
+    rotation = SimpleNamespace(run=AsyncMock())
     venue = Venue(_refused(), on_call=lambda n: n == 3 and fake._stop_event.set())
     fake = _daemon(engine, venue, rotation=rotation, writer_lock=object())
 
@@ -231,7 +232,6 @@ async def test_recovery_mode_runs_the_rotation_worker_and_liveness_only(engine, 
     await Daemon.run(fake)
 
     _trading_untouched(fake)
-    rotation.note_credential_recovery.assert_called_once_with()
     rotation.run.assert_awaited_once_with(fake._stop_event)
     assert sent == [("credential_recovery_mode", {"level": "critical", "account": str(ACCOUNT)})]
 
@@ -364,30 +364,21 @@ def test_the_retry_backoff_runs_from_one_to_five_minutes() -> None:
 # --- with the real rotation worker ------------------------------------------------------------
 
 class _NewKeyClient:
+    """The rotation's own client: only the new key is ever asked, never the refused one."""
+
     async def get_key_permissions(self, *, ctx: AccountContext) -> KeyPermissions:
+        assert ctx.credentials.api_key == NEW_KEY
         return KeyPermissions(scopes={"funding": (True, True), "withdraw": (False, False)})
 
     async def get_user_id(self, *, ctx: AccountContext) -> int:
+        assert ctx.credentials.api_key == NEW_KEY
         return 4242
-
-
-class _RefusedKeyClient:
-    """The key the bot booted on: Bitfinex refuses it."""
-
-    asked: int = 0
-
-    async def get_key_permissions(self, *, ctx: AccountContext) -> KeyPermissions:
-        raise _refused()
-
-    async def get_user_id(self, *, ctx: AccountContext) -> int:
-        self.asked += 1
-        raise _refused()
 
 
 async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -> None:
     """The deadlock this mode removes: with the key refused at boot, the worker still runs,
-    publishes its recipient key, applies the rotation (compared with the stored user id, the
-    refused key never asked) and stops the run for a boot on the new key."""
+    publishes its recipient key, applies the rotation (compared with the stored user id; the
+    worker holds no client of the refused key) and stops the run for a boot on the new key."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = uuid4()
     started = T0 - 2 * SETTLE_MS
@@ -395,8 +386,6 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
         session.add(BotRunRow(run_id=run_id, exchange_account_id=ACCOUNT,
                               deployment_environment="ci", started_at_ms=started,
                               host_name="test", pid=1))
-        await session.execute(text("UPDATE exchange_account_credentials SET bitfinex_user_id = 4242"))
-    refused_key = _RefusedKeyClient()
     holder: dict[str, Any] = {}
     restarts: list[int] = []
 
@@ -409,9 +398,7 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
 
     worker = CredentialRotationWorker(
         session_factory=factory, account_id=ACCOUNT, environment="ci", authority=authority,
-        client_factory=_NewKeyClient, current_client=refused_key,
-        current_ctx=AccountContext(account_id=str(ACCOUNT),
-                                   credentials=Credentials(BOOT_KEY, BOOT_SECRET)),
+        client_factory=_NewKeyClient,
         kek_loader=lambda: KEK, restart=restart,
         clock=lambda: T0, poll_interval_s=0.01)
     worker.bind_run(run_id, started)
@@ -445,5 +432,4 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
             "WHERE request_id = :r"), {"r": request_id.hex})).one()
     assert row.state == "applied", row.outcome_reason
     assert restarts == [1]  # the worker's own restart ended the run
-    assert refused_key.asked == 0  # neither the backfill nor the identity check asked it
     _trading_untouched(fake)

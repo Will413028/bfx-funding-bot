@@ -15,6 +15,7 @@ import bfx_funding_bot.modules.execution.uncertainty_tables
 import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
 from bfx_funding_bot.core.auth import Principal
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.accounts import vault
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.api.account_scope import (
@@ -182,6 +183,13 @@ async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
             user_id="other-operator",
             role="owner",
         )
+        # One credential per account, as the operator CLI writes them (the web API only
+        # lists them since 9c-2b): a scope leak lists the other account's.
+        for account, owner, api_key in ((_ACCOUNT_ID, "operator-1", "PUB"),
+                                        (other_id, "other-operator", "OTHER")):
+            await vault.create_account_credential(
+                seed, exchange_account_id=account, user_id=owner, label="main",
+                api_key=api_key, api_secret="SEC", kek=bytes(range(32)), bitfinex_user_id=4242)
         await seed.commit()
 
     app = FastAPI()
@@ -247,14 +255,9 @@ def test_nonmember_account_path_is_404(scoped_app: TestClient) -> None:
 def test_viewer_can_read_but_cannot_mutate(scoped_app: TestClient) -> None:
     scoped_app.current_user["value"] = "viewer-1"
     assert scoped_app.get(f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/positions").status_code == 200
-    payload = {
-        "label": "main",
-        "apiKey": "PUB",
-        "apiSecret": "SEC",
-    }
-    assert scoped_app.post(
-        f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/credentials", json=payload
-    ).status_code == 403
+    listed = scoped_app.get(f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/credentials")
+    assert listed.status_code == 200
+    assert [item["apiKey"] for item in listed.json()["data"]] == ["PUB"]
     config = {
         "currency": "USD",
         "amount": {"min": 50, "max": 100},
@@ -267,20 +270,13 @@ def test_viewer_can_read_but_cannot_mutate(scoped_app: TestClient) -> None:
     ).status_code == 403
 
 
-def test_owner_can_manage_account_credential_and_config(scoped_app: TestClient) -> None:
-    payload = {"label": "main", "apiKey": "PUB", "apiSecret": "SEC"}
-    created = scoped_app.post(
-        f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/credentials", json=payload
-    )
-    assert created.status_code == 201, created.text
-    credential = created.json()["data"]
-    assert credential["exchangeAccountId"] == str(_ACCOUNT_ID)
-    assert credential["apiSecret"] == "****"
-    assert credential["status"] == "pending"
-
+def test_owner_reads_account_credentials_and_manages_config(scoped_app: TestClient) -> None:
     listed = scoped_app.get(f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/credentials")
     assert listed.status_code == 200
-    assert [item["id"] for item in listed.json()["data"]] == [credential["id"]]
+    (credential,) = listed.json()["data"]
+    assert credential["exchangeAccountId"] == str(_ACCOUNT_ID)
+    assert (credential["apiKey"], credential["apiSecret"], credential["status"]) == (
+        "PUB", "****", "pending")
 
     config = {
         "currency": "USD",
@@ -299,26 +295,24 @@ def test_owner_can_manage_account_credential_and_config(scoped_app: TestClient) 
     assert fetched.status_code == 200
     assert fetched.json()["data"]["config"] == config
 
-    deleted = scoped_app.delete(
-        f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/credentials/{credential['id']}"
-    )
-    assert deleted.status_code == 204
-    # Credential lifecycle is retained for audit rather than hard-deleted.
-    assert scoped_app.get(
-        f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/credentials"
-    ).json()["data"][0]["status"] == "retired"
-
 
 def test_retired_account_is_hidden_from_command_routes(scoped_app: TestClient) -> None:
     # The dependency-level suite covers a persisted retired row; this route
     # check covers the command path's identical non-enumerating boundary for a
     # UUID that is not present in the account registry.
     missing = UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")
-    response = scoped_app.post(
-        f"/api/v1/exchange-accounts/{missing}/credentials",
-        json={"label": "main", "apiKey": "PUB", "apiSecret": "SEC"},
-    )
-    assert response.status_code == 404
+    config = {
+        "currency": "USD",
+        "amount": {"min": 50, "max": 100},
+        "rate": {"min": 0.0001, "max": 0.001},
+        "period": {"min": 2, "max": 30},
+        "autoRenew": True,
+    }
+    for method, path, kwargs in (
+            ("get", f"/api/v1/exchange-accounts/{missing}/credentials", {}),
+            ("put", f"/api/v1/exchange-accounts/{missing}/config-draft", {"json": config})):
+        response = getattr(scoped_app, method)(path, **kwargs)
+        assert response.status_code == 404, path
 
 
 def test_unscoped_private_routes_are_not_registered(scoped_app: TestClient) -> None:

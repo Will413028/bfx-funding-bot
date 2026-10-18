@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@/lib/test-utils";
 import type { ApiKey } from "@/types";
 import { ApiKeyCard } from "../api-key-card";
@@ -16,42 +16,25 @@ function makeKey(overrides: Partial<ApiKey> = {}): ApiKey {
   };
 }
 
-const noop = vi.fn();
-
 afterEach(() => cleanup());
 
 describe("ApiKeyCard", () => {
   it("labels a newly created credential as pending verification", () => {
-    render(
-      <ApiKeyCard
-        apiKey={makeKey({ status: "pending" })}
-        onVerify={noop}
-        onDelete={noop}
-        isVerifying={false}
-        isDeleting={false}
-      />,
-    );
+    render(<ApiKeyCard apiKey={makeKey({ status: "pending" })} />);
 
     expect(screen.getByText("Pending verification").textContent).toContain(
       "Pending verification",
     );
   });
 
-  it("does not offer verification for terminal credential states", () => {
-    render(
-      <ApiKeyCard
-        apiKey={makeKey({ status: "retired" })}
-        onVerify={noop}
-        onDelete={noop}
-        isVerifying={false}
-        isDeleting={false}
-      />,
-    );
+  it.each(["pending", "verified", "failed", "revoked", "retired"] as const)(
+    "is read-only: no verify or delete action (%s)",
+    (status) => {
+      render(<ApiKeyCard apiKey={makeKey({ status })} />);
 
-    expect(
-      screen.getByRole("button", { name: "Verify" }).hasAttribute("disabled"),
-    ).toBe(true);
-  });
+      expect(screen.queryAllByRole("button")).toHaveLength(0);
+    },
+  );
 
   it("surfaces lastVerifyError reason when status is failed", () => {
     render(
@@ -60,10 +43,6 @@ describe("ApiKeyCard", () => {
           status: "failed",
           lastVerifyError: "withdraw permission is enabled",
         })}
-        onVerify={noop}
-        onDelete={noop}
-        isVerifying={false}
-        isDeleting={false}
       />,
     );
 
@@ -78,10 +57,6 @@ describe("ApiKeyCard", () => {
           status: "pending",
           lastVerifyError: "funding write permission required",
         })}
-        onVerify={noop}
-        onDelete={noop}
-        isVerifying={false}
-        isDeleting={false}
       />,
     );
 
@@ -94,10 +69,6 @@ describe("ApiKeyCard", () => {
     render(
       <ApiKeyCard
         apiKey={makeKey({ status: "failed", lastVerifyError: null })}
-        onVerify={noop}
-        onDelete={noop}
-        isVerifying={false}
-        isDeleting={false}
       />,
     );
 
@@ -111,10 +82,6 @@ describe("ApiKeyCard", () => {
           status: "verified",
           lastVerifyError: "old failure",
         })}
-        onVerify={noop}
-        onDelete={noop}
-        isVerifying={false}
-        isDeleting={false}
       />,
     );
 

@@ -1,6 +1,11 @@
-"""Web API for trading control: it queues a request and changes nothing else.
+"""Web API for trading control: it queues a kill or a currency disable and changes nothing else.
 
-On the migrated PostgreSQL schema (its CHECKs and triggers are the authority)."""
+Resume and enabling a currency go through the operator CLI only since 9c-2b (ADR 2026-10-15
+D4): their routes are gone, and requests the CLI queued (here: inserted by the owner) are
+still shown. On the migrated PostgreSQL schema (its CHECKs and triggers are the authority).
+
+Mutation: let ``POST /{action}`` accept resume again:
+``test_resume_and_enable_are_not_routes`` fails."""
 from __future__ import annotations
 
 from uuid import uuid4
@@ -14,6 +19,7 @@ import bfx_funding_bot.modules.execution.audit.tables  # noqa: F401
 from bfx_funding_bot.core import auth
 from bfx_funding_bot.core.auth import Principal
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccountMembership
+from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.execution.safety.tables import (
     TradingControlRequestRow,
     TradingStateRow,
@@ -43,16 +49,26 @@ async def _app(migrated_db, monkeypatch, *, role="owner", principal=None):
     return app, factory, account
 
 
+async def _queue_as_the_cli(factory, account, model, action: str, **columns) -> None:
+    """A request the operator CLI queued (as the owner here: the trigger lets it through)."""
+    async with factory.begin() as session:
+        assert await insert_request(session, model, {
+            "request_id": uuid4(), "exchange_account_id": account, "deployment_environment": "ci",
+            "action": action, "reason": "from the cli", "requested_by": "operator",
+            "created_at_ms": 1, **columns})
+
+
 @pytest.mark.asyncio
-async def test_resume_only_queues_a_request_with_the_operator_identity(migrated_db, monkeypatch):
+async def test_kill_only_queues_a_request_with_the_operator_identity(migrated_db, monkeypatch):
     app, factory, account = await _app(migrated_db, monkeypatch)
     base = f"/api/v1/exchange-accounts/{account}/trading-control"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
-        response = await client.post(f"{base}/resume", json={"reason": "incident closed"},
+        response = await client.post(f"{base}/kill", json={"reason": "venue incident"},
                                      headers=AUTH)
         assert response.status_code == 202
+        assert response.json()["data"]["action"] == "kill"
         request_id = response.json()["data"]["request_id"]
-        again = await client.post(f"{base}/resume", json={"reason": "x"}, headers=AUTH)
+        again = await client.post(f"{base}/kill", json={"reason": "x"}, headers=AUTH)
         assert again.status_code == 409 and again.json()["detail"] == "request_pending"
         status = await client.get(f"{base}/requests/{request_id}", headers=AUTH)
         assert status.json()["data"]["state"] == "requested"
@@ -62,20 +78,43 @@ async def test_resume_only_queues_a_request_with_the_operator_identity(migrated_
         assert "approvals" not in overview
     async with factory() as session:
         rows = (await session.scalars(select(TradingControlRequestRow))).all()
-        assert [(r.action, r.requested_by, r.state) for r in rows] == [("resume", "operator", "requested")]
+        assert [(r.action, r.requested_by, r.state) for r in rows] == [("kill", "operator", "requested")]
         # Nothing the daemon owns was written.
         assert (await session.scalars(select(TradingStateRow))).all() == []
 
 
 @pytest.mark.asyncio
+async def test_resume_and_enable_are_not_routes(migrated_db, monkeypatch):
+    """Resume and enable go through the operator CLI only: no route, nothing queued. A
+    pending request the CLI queued is still shown."""
+    from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
+    app, factory, account = await _app(migrated_db, monkeypatch)
+    await _seed_policies(factory, account)
+    base = f"/api/v1/exchange-accounts/{account}/trading-control"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        for path in ("resume", "currencies/fUST/enable", "currencies/fUSD/enable"):
+            response = await client.post(f"{base}/{path}", json={"reason": "x"}, headers=AUTH)
+            assert response.status_code in (404, 405), (path, response.status_code)
+        async with factory() as session:
+            assert (await session.scalars(select(TradingControlRequestRow))).all() == []
+            assert (await session.scalars(select(CapitalPolicyRequestRow))).all() == []
+        await _queue_as_the_cli(factory, account, TradingControlRequestRow, "resume")
+        await _queue_as_the_cli(factory, account, CapitalPolicyRequestRow, "enable", symbol="fUSD")
+        overview = (await client.get(base, headers=AUTH)).json()["data"]
+    assert [(r["action"], r["state"]) for r in overview["requests"]] == [("resume", "requested")]
+    fusd = next(c for c in overview["currencies"] if c["symbol"] == "fUSD")
+    assert [(r["action"], r["state"]) for r in fusd["requests"]] == [("enable", "requested")]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("action", "body", "status"), [
-    ("resume", {"reason": ""}, 422),
-    ("resume", {"reason": " \t "}, 422),                           # blank, not request_pending
-    ("resume", {"reason": "x", "state": "applied"}, 422),
-    ("resume", {"reason": "x", "backend_digest": DIGEST}, 422),   # no build is named any more
-    ("approve", {"reason": "x"}, 422),                             # retired actions
-    ("pause", {"reason": "x"}, 422),
-    ("promote", {"reason": "x"}, 422),
+    ("kill", {"reason": ""}, 422),
+    ("kill", {"reason": " \t "}, 422),                             # blank, not request_pending
+    ("kill", {"reason": "x", "state": "applied"}, 422),
+    ("kill", {"reason": "x", "backend_digest": DIGEST}, 422),     # no build is named any more
+    ("approve", {"reason": "x"}, 404),                             # retired actions: no route
+    ("pause", {"reason": "x"}, 404),
+    ("promote", {"reason": "x"}, 404),
 ])
 async def test_malformed_forged_or_retired_requests_are_refused(migrated_db, monkeypatch, action,
                                                                 body, status):
@@ -98,7 +137,7 @@ async def test_only_the_operator_with_write_membership_can_request(migrated_db, 
                                                                    principal, status):
     app, factory, account = await _app(migrated_db, monkeypatch, role=role, principal=principal)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
-        response = await client.post(f"/api/v1/exchange-accounts/{account}/trading-control/resume",
+        response = await client.post(f"/api/v1/exchange-accounts/{account}/trading-control/kill",
                                      json={"reason": "x"}, headers=AUTH)
     assert response.status_code == status
     async with factory() as session:
@@ -109,9 +148,9 @@ async def test_only_the_operator_with_write_membership_can_request(migrated_db, 
 async def test_a_kill_is_never_blocked_by_a_pending_resume(migrated_db, monkeypatch):
     app, factory, account = await _app(migrated_db, monkeypatch)
     base = f"/api/v1/exchange-accounts/{account}/trading-control"
+    # A resume the operator CLI queued.
+    await _queue_as_the_cli(factory, account, TradingControlRequestRow, "resume")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
-        resume = await client.post(f"{base}/resume", json={"reason": "back"}, headers=AUTH)
-        assert resume.status_code == 202
         # A pending resume never makes a kill wait: the kill has its own lane.
         kill = await client.post(f"{base}/kill", json={"reason": "venue incident"}, headers=AUTH)
         assert kill.status_code == 202
@@ -241,9 +280,8 @@ async def test_a_currency_toggle_only_queues_a_request(migrated_db, monkeypatch)
         assert (body["symbol"], body["action"], body["state"]) == ("fUST", "disable", "requested")
         again = await client.post(f"{base}/currencies/fUST/disable", json={"reason": "x"}, headers=AUTH)
         assert (again.status_code, again.json()["detail"]) == (409, "request_pending")
-        # Its own slot: a pending disable never blocks the opposite ask...
-        assert (await client.post(f"{base}/currencies/fUST/enable", json={"reason": "y"},
-                                  headers=AUTH)).status_code == 202
+        # Its own slot: a pending disable never blocks the opposite ask (the CLI's enable)...
+        await _queue_as_the_cli(factory, account, CapitalPolicyRequestRow, "enable", symbol="fUST")
         # ...and no toggle ever blocks a kill.
         assert (await client.post(f"{base}/kill", json={"reason": "z"}, headers=AUTH)).status_code == 202
         status = await client.get(f"{base}/currency-requests/{body['request_id']}", headers=AUTH)
@@ -265,7 +303,7 @@ async def test_a_currency_toggle_only_queues_a_request(migrated_db, monkeypatch)
 @pytest.mark.parametrize(("path", "body", "status"), [
     ("currencies/fBTC/disable", {"reason": "x"}, 404),       # no applied policy
     ("currencies/fust/disable", {"reason": "x"}, 422),       # not a funding symbol
-    ("currencies/fUST/pause", {"reason": "x"}, 422),
+    ("currencies/fUST/pause", {"reason": "x"}, 404),         # no such route
     ("currencies/fUST/disable", {"reason": ""}, 422),        # a reason is required
     ("currencies/fUST/disable", {"reason": "  "}, 422),      # blank, not request_pending
     ("currencies/fUST/disable", {"reason": "x", "state": "applied"}, 422),
@@ -331,8 +369,7 @@ async def test_reads_list_newest_first_and_name_no_effect(migrated_db, monkeypat
 # (shared with the CLI) must keep: each detail code, and the order the checks run in.
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["resume", "kill", "currencies/fUST/disable",
-                                  "currencies/fUST/enable"])
+@pytest.mark.parametrize("path", ["kill", "currencies/fUST/disable"])
 async def test_a_viewer_is_refused_as_account_write_required(migrated_db, monkeypatch, path):
     app, factory, account = await _app(migrated_db, monkeypatch, role="viewer")
     await _seed_policies(factory, account)
@@ -359,9 +396,9 @@ async def test_membership_is_judged_before_the_deployment_environment(migrated_d
     app, _factory, account = await _app(migrated_db, monkeypatch)
     monkeypatch.delenv("BFX_DEPLOYMENT_ENV")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
-        other = await client.post(f"/api/v1/exchange-accounts/{uuid4()}/trading-control/resume",
+        other = await client.post(f"/api/v1/exchange-accounts/{uuid4()}/trading-control/kill",
                                   json={"reason": "x"}, headers=AUTH)
-        own = await client.post(f"/api/v1/exchange-accounts/{account}/trading-control/resume",
+        own = await client.post(f"/api/v1/exchange-accounts/{account}/trading-control/kill",
                                 json={"reason": "x"}, headers=AUTH)
     assert (other.status_code, other.json()["detail"]) == (404, "not_found")
     assert (own.status_code, own.json()["detail"]) == (503, "deployment_environment_not_configured")

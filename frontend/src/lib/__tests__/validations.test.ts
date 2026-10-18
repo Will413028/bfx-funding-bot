@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   changePasswordSchema,
-  createApiKeySchema,
   loginSchema,
   strategyConfigSchema,
 } from "../validations";
@@ -27,35 +26,6 @@ describe("loginSchema", () => {
     const result = loginSchema.safeParse({
       email: "a@b.com",
       password: "",
-    });
-    expect(result.success).toBe(false);
-  });
-});
-
-describe("createApiKeySchema", () => {
-  it("accepts valid input", () => {
-    const result = createApiKeySchema.safeParse({
-      label: "my key",
-      apiKey: "key123",
-      apiSecret: "secret123",
-    });
-    expect(result.success).toBe(true);
-  });
-
-  it("rejects empty label", () => {
-    const result = createApiKeySchema.safeParse({
-      label: "",
-      apiKey: "key123",
-      apiSecret: "secret123",
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects label over 50 chars", () => {
-    const result = createApiKeySchema.safeParse({
-      label: "a".repeat(51),
-      apiKey: "key123",
-      apiSecret: "secret123",
     });
     expect(result.success).toBe(false);
   });

@@ -86,7 +86,8 @@ async def _seed(factory: Any, *, credential: str | None = "active") -> None:
                 secret_nonce=envelope.secret_nonce, wrapped_dek=envelope.wrapped_dek,
                 dek_nonce=envelope.dek_nonce, key_version=envelope.key_version,
                 lifecycle_status=credential,
-                verified_at=datetime.now(UTC) if credential == "active" else None))
+                verified_at=datetime.now(UTC) if credential == "active" else None,
+                bitfinex_user_id=4242))
 
 
 async def test_the_bitfinex_wiring_reads_the_vault(factory, monkeypatch) -> None:

@@ -7,14 +7,6 @@ export const loginSchema = z.object({
 
 export type LoginFormInput = z.infer<typeof loginSchema>;
 
-export const createApiKeySchema = z.object({
-  label: z.string().min(1, "required").max(50, "maxLength"),
-  apiKey: z.string().min(1, "required"),
-  apiSecret: z.string().min(1, "required"),
-});
-
-export type CreateApiKeyInput = z.infer<typeof createApiKeySchema>;
-
 const rangeSchema = (_label: string) =>
   z
     .object({

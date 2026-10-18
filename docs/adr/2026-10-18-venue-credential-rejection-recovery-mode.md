@@ -50,6 +50,14 @@ tags: [bfx-funding-bot, decision, security, credentials, boot, architecture]
 - **重試的就是開機本身**：不另做探測，所以不會出現「探測成功、開機仍失敗」的重啟循環。
 - **代價**：改動開機與執行中的停單條件（交易路徑），因此有回滾段；多一個 nullable 欄位與一個恢復模式的 TaskGroup；webapi 端點在 9c-2b 刪除前，它建立的新 active 列要等下一次正常開機才補上 user id。
 
+## Amendment (2026-10-18)：CHECK 取代 D5 的回填與即時查詢（9c-2b）
+
+9c-2b 刪除 webapi 的憑證端點時，照 Followup 第一點加上 CHECK（migration `36e59526f8cf`）；讀碼後修訂 D3、D5：
+
+- **D5'**：`ck_exchange_account_credentials_active_user_id`（active ⇒ `bitfinex_user_id` 非 NULL）取代 D5 的 trust on first use 回填與「NULL 時以現行 key 即時查詢」。migration 先鎖表並斷言沒有 active 且 NULL 的列，否則拒絕套用。bootstrap 改為先以新 key 查 user id，pending 列建立時就帶 id，再驗證與 promote（CHECK 不可延遲，promote 那一刻就要有 id）；新 key 被 Bitfinex 拒絕時仍回 `bootstrap_permissions_rejected`。worker 刪掉回填，被取代的列沒有 id（只可能是 id 寫入前就 retired 的舊列）時直接拒絕 `account_identity_unavailable`，從不問現行 key；`current_client`／`current_ctx` 一併移除。
+- **D3'**：「DB 的 active 憑證已不是開機載入的那把 key」這個出口仍在，但 webapi 端點已刪、`bfx_webapi` 對憑證表沒有 INSERT／UPDATE，只剩 owner 直接改資料庫會觸發它；輪替 applied 本來就由 worker 重啟。
+- **Rationale**：CHECK 之後不可能有 active 且 NULL 的列，回填與即時查詢都成了到不了的程式；留著它們等於保留一條會用現行 key 打 Bitfinex 的路徑，而那把 key 在恢復模式下正是被拒的那把。prod 在 9c-2a 部署後量到 active 且 NULL 的列為 0，但 migration 自己再驗一次（[2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them](2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them.md)）。**代價**：bootstrap 查新 key `info/user` 的時機提前到建列之前（同一個呼叫，只換順序）；`bfx_bot` 的表級 UPDATE 仍涵蓋 `bitfinex_user_id`，收窄留到 9g 的權限重查。
+
 ## Expected Outcome
 
 - 開機時 key 被拒：bot 不再 crash loop，CLI 可以送輪替，applied 後自動重啟回正常交易；key 在 Bitfinex 端恢復時也自動回來。

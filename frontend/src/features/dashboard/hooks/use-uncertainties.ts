@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { accountScopedPath, apiClient } from "@/lib/api-client";
 import {
   executionKeys,
@@ -6,40 +6,14 @@ import {
   positionKeys,
   uncertaintyKeys,
 } from "@/lib/query-keys";
-import type { Uncertainty, UncertaintyResolutionRequest } from "@/types";
-
-export type UncertaintyResolutionAction =
-  | "bind-to-venue"
-  | "mark-not-accepted"
-  | "manual-resolution";
-
-export interface ResolveUncertaintyInput {
-  uncertaintyId: string;
-  action: UncertaintyResolutionAction;
-  evidenceRef: string;
-  venueOfferId?: string;
-  operatorUuid?: string;
-  reason?: string;
-  evidence?: Record<string, unknown>;
-}
+import type { Uncertainty } from "@/types";
 
 /**
- * How often the list is re-read while an adjudication waits for the daemon.
+ * How often the list is re-read while an adjudication (queued by the operator
+ * CLI) waits for the daemon.
  * One list-level poll, however many panels are open: the read budget is shared.
  */
 export const PENDING_RESOLUTION_POLL_MS = 5_000;
-
-/** Build an action URL without ever exposing a venue-submit retry endpoint. */
-export function uncertaintyResolutionPath(
-  exchangeAccountId: string,
-  uncertaintyId: string,
-  action: UncertaintyResolutionAction,
-): string {
-  return accountScopedPath(
-    exchangeAccountId,
-    `/uncertainties/${encodeURIComponent(uncertaintyId)}/${action}`,
-  );
-}
 
 function pendingRequestIds(rows: Uncertainty[] | undefined): Set<string> {
   return new Set(
@@ -102,46 +76,5 @@ export function useUncertainties(
     // operator as an error; silently retrying does not unblock trading.
     retry: false,
     refetchInterval: (query) => pendingResolutionPollInterval(query.state.data),
-  });
-}
-
-/**
- * Queue one operator adjudication. The web API only records the request; the
- * account daemon applies it, so success here means "accepted", not "resolved".
- * The mutation stays pending until the list is re-read, so the row already
- * shows the queued request when the controls come back. No retry: a repeated
- * identical request returns the same queued row, but a network retry is still
- * not the operator's intent.
- */
-export function useResolveUncertainty(exchangeAccountId?: string) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async (input: ResolveUncertaintyInput) => {
-      if (!exchangeAccountId) throw new Error("exchangeAccountNotSelected");
-      const body = {
-        evidenceRef: input.evidenceRef,
-        ...(input.venueOfferId !== undefined
-          ? { venueOfferId: input.venueOfferId }
-          : {}),
-        ...(input.operatorUuid !== undefined
-          ? { operatorUuid: input.operatorUuid }
-          : {}),
-        ...(input.reason !== undefined ? { reason: input.reason } : {}),
-        evidence: input.evidence ?? {},
-      };
-      return apiClient.post<UncertaintyResolutionRequest>(
-        uncertaintyResolutionPath(
-          exchangeAccountId,
-          input.uncertaintyId,
-          input.action,
-        ),
-        body,
-      );
-    },
-    retry: false,
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: uncertaintyKeys.all });
-    },
   });
 }

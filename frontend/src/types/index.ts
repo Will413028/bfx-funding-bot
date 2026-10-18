@@ -66,16 +66,6 @@ export interface ExchangeAccount {
   role: "owner" | "operator" | "viewer";
 }
 
-export interface VerifyResult {
-  status: ApiKeyStatus;
-  error?: string | null;
-  fundingBalance?: {
-    currency: string;
-    balance: number;
-    available: number;
-  };
-}
-
 // ── Strategy Config ──
 
 export interface AmountConfig {

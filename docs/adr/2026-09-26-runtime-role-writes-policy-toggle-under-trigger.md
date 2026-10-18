@@ -76,3 +76,7 @@ prior state：migration `a9d3e5f7b102`（capital authority）對 `bfx_bot` 撤�
 D1 trigger（`guard_runtime_policy_revision()`）的「`source.request_id` 指向仍在等待的請求」，在 [2026-10-08-operator-requests-insert-only-with-insert-once-outcome](2026-10-08-operator-requests-insert-only-with-insert-once-outcome.md) 的 R1 起改為「該請求沒有 outcome 列」（原為 `state='requested'`）；bot 須在同一交易內先寫 revision、再寫 outcome。其餘條件（同 scope／幣別／方向、`operator_authorized`、只改 `enabled`、head 只前進一格）不變。D2 的 supersede 改成對無 outcome 的等待中 enable 寫 `rejected`／`superseded_by_kill` outcome。
 
 （2026-10-08 再修訂：上一段由 [2026-10-08-operator-requests-keep-state-effects-carry-request-id](2026-10-08-operator-requests-keep-state-effects-carry-request-id.md) 取代——G1 仍看 `state='requested'`，授權鍵改為 revision 的 typed `operator_request_id`（含 scope 與幣別的複合 FK），`source->>'request_id'` 只留作稽核文字；kill supersede 維持 UPDATE 狀態欄。）
+
+## Amendment (2026-10-18)：啟用只經 CLI 的資料層保證（9c-2b）
+
+Updates（2026-10-15）的「停用經 UI、啟用經 CLI」在 9c-2b 落到程式與資料庫：webapi 只剩 `POST .../currencies/{symbol}/disable`，UI 對停用中的幣別只顯示 CLI 指令；`capital_policy_requests` 加上 `capital_policy_request_operator_only` trigger（migration `36e59526f8cf`），`action='enable'` 只允許 table owner 與 `bfx_operator` 寫入。停用仍可經 UI 或 CLI。Invariants 不變：webapi 對 policy 表只有 SELECT，bot 對 policy 的寫入仍綁定仍等待且 `operator_authorized` 的請求、只改 `enabled`；worker 套用 CLI 排入的 enable 的路徑也不變。

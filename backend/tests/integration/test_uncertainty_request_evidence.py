@@ -239,25 +239,18 @@ def test_journal_operator_request_is_unique_but_nullable(seeded) -> None:
         _journal(conn, first, quarantine=_quarantine(conn))
 
 
-def test_only_the_observation_is_the_web_apis_to_write(seeded) -> None:
-    def as_role(role: str, sql: str) -> None:
-        with seeded.begin() as conn:
-            conn.exec_driver_sql(f"SET LOCAL ROLE {role}")
-            conn.exec_driver_sql(sql)
-
+def test_no_runtime_role_writes_the_observation_and_no_epoch_gates_it(seeded) -> None:
+    """The operator CLI's role inserts it (test_operator_privilege_allowlist); since
+    36e59526f8cf the web API no longer does, and neither role may update it."""
     with seeded.connect() as conn:
-        assert conn.scalar(
-            text(f"SELECT has_column_privilege('bfx_webapi','{_TABLE}','observation_id','INSERT')")
-        )
-        assert not conn.scalar(text(
-            f"SELECT has_column_privilege('bfx_bot','{_TABLE}','observation_id','INSERT, UPDATE')"
-        ))
-        assert not conn.scalar(
-            text(f"SELECT has_column_privilege('bfx_webapi','{_TABLE}','observation_id','UPDATE')")
-        )
+        for role in ("bfx_webapi", "bfx_bot"):
+            assert not conn.scalar(text(
+                f"SELECT has_column_privilege('{role}','{_TABLE}','observation_id','INSERT, UPDATE')"
+            )), role
     # No epoch gates the observation any more: the epoch row is irrelevant (this clone's latest
     # is ``legacy``, which the evidence epoch trigger would have refused).
-    as_role("bfx_webapi", _request(seq=None, observation=_O))
+    with seeded.begin() as conn:
+        conn.exec_driver_sql(_request(seq=None, observation=_O))
 
 
 # -- the contract steps, each against a database built only to the revision before it ----------

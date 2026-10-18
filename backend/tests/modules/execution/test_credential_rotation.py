@@ -10,10 +10,9 @@ Mutation checks (one at a time; revert after each):
   ``test_every_refusal_is_rejected_and_keeps_the_old_credential`` fails.
 * ``committed`` calls ``restart`` on a rejection: same test, and the failed one, fail.
 * the user id comparison is removed: the ``credential_account_mismatch`` case fails.
-* ``_verify`` asks the key in use even when the replaced row has a stored id:
-  ``test_a_stored_user_id_*`` fail.
-* the backfill also runs in credential recovery mode, or retries on every tick:
-  ``test_the_backfill_*`` fail.
+* ``_verify`` compares with anything but the replaced row's stored id (or goes on when it has
+  none): ``test_a_stored_user_id_of_another_account_is_a_mismatch`` or
+  ``test_a_replaced_credential_without_a_stored_id_is_refused_before_bitfinex_is_asked`` fails.
 """
 from __future__ import annotations
 
@@ -34,10 +33,7 @@ from sqlalchemy.pool import StaticPool
 from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
-from bfx_funding_bot.external.bitfinex.errors import (
-    BitfinexAPIError,
-    VenueCredentialRejectedError,
-)
+from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.accounts.rotation_tables import CredentialRotationRequestRow
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
 from bfx_funding_bot.modules.accounts.vault import load_account_credentials
@@ -47,14 +43,13 @@ from bfx_funding_bot.modules.execution import operator_commands as commands
 from bfx_funding_bot.modules.execution.credential_rotation import (
     BOT_SETTLE_WINDOW,
     DEPLOYMENT_IN_PROGRESS_WINDOW,
-    USER_ID_BACKFILL_RETRY,
     CredentialRotationWorker,
     PreparedRotation,
     Verified,
     _Secret,
 )
 from bfx_funding_bot.modules.execution.operator_commands import OperatorContext
-from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.observability.tables import BotRunRow
 
 ACCOUNT = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
@@ -105,7 +100,6 @@ class Harness:
     factory: async_sessionmaker[AsyncSession]
     worker: CredentialRotationWorker
     new_client: FakeClient
-    current_client: FakeClient
     restarts: list[int]
     alerts: list[tuple[str, dict[str, Any]]]
     old_credential: UUID
@@ -131,7 +125,7 @@ async def harness(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Harness]:
             secret_ciphertext=envelope.secret_ciphertext, secret_nonce=envelope.secret_nonce,
             wrapped_dek=envelope.wrapped_dek, dek_nonce=envelope.dek_nonce,
             key_version=envelope.key_version, lifecycle_status="active",
-            verified_at=NOW - timedelta(days=30))
+            verified_at=NOW - timedelta(days=30), bitfinex_user_id=USER_ID)
         session.add(old)
         session.add(BotRunRow(run_id=run_id, exchange_account_id=ACCOUNT,
                               deployment_environment=ENV, started_at_ms=RUN_STARTED_MS,
@@ -149,21 +143,15 @@ async def harness(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Harness]:
     async def authority(session: AsyncSession, *, account_id: UUID, user: str) -> bool:
         return user in authorized
 
-    new_client, current_client, restarts = FakeClient(), FakeClient(), []
+    new_client, restarts = FakeClient(), []
     worker = CredentialRotationWorker(
         session_factory=factory, account_id=ACCOUNT, environment=ENV, authority=authority,
-        client_factory=lambda: new_client, current_client=current_client,
-        current_ctx=AccountContext(account_id=str(ACCOUNT),
-                                   credentials=Credentials(OLD_KEY, OLD_SECRET)),
+        client_factory=lambda: new_client,
         kek_loader=lambda: KEK, restart=lambda: restarts.append(1), clock=lambda: NOW_MS)
     worker.bind_run(run_id, RUN_STARTED_MS)
-    # The replaced row keeps no stored user id here (the 9c-1c path, the key in use is asked);
-    # the stored-id and backfill tests below opt in.
-    worker._backfill_done = True
     await worker.idle()
     try:
-        yield Harness(factory, worker, new_client, current_client, restarts, recorded, old_id,
-                      authorized)
+        yield Harness(factory, worker, new_client, restarts, recorded, old_id, authorized)
     finally:
         await engine.dispose()
 
@@ -226,10 +214,9 @@ async def test_an_applied_rotation_swaps_the_active_credential_and_restarts(harn
                            "reason"}
     assert fields["replaces_credential_id"] == str(h.old_credential)
     assert fields["credential_id"] == str(new.id)
-    # The new key on its own client; the key in use answers who it belongs to.
+    # The new key on its own client, compared with the replaced row's stored user id.
     assert h.new_client.calls == ["permissions", "user_id"]
     assert set(h.new_client.keys) == {NEW_KEY}
-    assert (h.current_client.calls, h.current_client.keys) == (["user_id"], [OLD_KEY])
     # The new row stores the Bitfinex user its key belongs to.
     assert await _stored_user_id(h, NEW_KEY) == USER_ID
 
@@ -253,7 +240,7 @@ async def test_an_unauthorized_operator_is_rejected_before_anything_is_opened(ha
     h.authorized.clear()
     row = await _settle(h, request_id)
     assert (row.state, row.outcome_reason) == ("rejected", "operator_not_authorized")
-    assert h.new_client.calls == [] and h.current_client.calls == []
+    assert h.new_client.calls == []
     assert await _credentials(h) == [(OLD_KEY, "active")]
     assert h.restarts == []
 
@@ -328,15 +315,6 @@ async def test_a_transient_venue_error_fails_the_request_without_a_restart(harne
     assert h.restarts == []
     (event, fields), = h.alerts
     assert (event, fields["level"]) == ("credential_rotation_failed", "critical")
-
-
-@pytest.mark.asyncio
-async def test_a_transient_error_on_the_current_key_fails_too(harness) -> None:
-    h = harness
-    h.current_client.user_id = BitfinexAPIError(0, "transport error")
-    row = await _settle(h, await _queue(h))
-    assert (row.state, row.outcome_reason) == ("failed", "prepare_failed:BitfinexAPIError")
-    assert h.restarts == []
 
 
 @pytest.mark.asyncio
@@ -419,7 +397,6 @@ async def test_the_recipient_is_published_once_and_a_failure_is_retried(harness,
     worker = CredentialRotationWorker(
         session_factory=Broken(), account_id=ACCOUNT, environment=ENV,
         authority=h.worker.authority, client_factory=lambda: h.new_client,
-        current_client=h.current_client, current_ctx=h.worker.current_ctx,
         kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS)
     await worker.idle()  # no run bound yet: nothing to publish
     worker.bind_run(uuid4(), RUN_STARTED_MS)
@@ -481,18 +458,13 @@ def _venue(status: int, raw: str | None) -> BitfinexAPIError:
      ("rejected", "invalid_credentials")),
     ("new_user", _venue(500, '["error",10100,"apikey: digest invalid"]'),
      ("rejected", "account_identity_unavailable")),
-    ("current_user", _venue(500, '["error",10100,"apikey: digest invalid"]'),
-     ("rejected", "account_identity_unavailable")),
-    # The key in use already revoked, as the signed client raises it, and no stored id.
-    ("current_user", VenueCredentialRejectedError(500, "venue", '["error",10100,"apikey: invalid"]'),
-     ("rejected", "account_identity_unavailable")),
     ("permissions", _venue(500, '["error",11010,"ratelimit: error"]'),
      ("failed", "prepare_failed:BitfinexAPIError")),
     ("permissions", _venue(500, '["error",11000,"ready: invalid"]'),
      ("failed", "prepare_failed:BitfinexAPIError")),
     ("permissions", _venue(500, None), ("failed", "prepare_failed:BitfinexAPIError")),
     ("permissions", _venue(429, None), ("failed", "prepare_failed:BitfinexAPIError")),
-    ("current_user", _venue(503, "<html>bad gateway</html>"),
+    ("new_user", _venue(503, "<html>bad gateway</html>"),
      ("failed", "prepare_failed:BitfinexAPIError")),
 ])
 @pytest.mark.asyncio
@@ -500,10 +472,8 @@ async def test_the_venue_refusing_with_http_500_is_an_answer(harness, where, err
     h = harness
     if where == "permissions":
         h.new_client.perms = error
-    elif where == "new_user":
-        h.new_client.user_id = error
     else:
-        h.current_client.user_id = error
+        h.new_client.user_id = error
     row = await _settle(h, await _queue(h))
     assert (row.state, row.outcome_reason) == expected
     assert await _credentials(h) == [(OLD_KEY, "active")]
@@ -564,7 +534,6 @@ def _process_after(h: Harness, run_started_ms: int) -> CredentialRotationWorker:
     worker = CredentialRotationWorker(
         session_factory=h.factory, account_id=ACCOUNT, environment=ENV,
         authority=h.worker.authority, client_factory=lambda: h.new_client,
-        current_client=h.current_client, current_ctx=h.worker.current_ctx,
         kek_loader=lambda: KEK, restart=lambda: restarts.append(2), clock=lambda: NOW_MS)
     worker.bind_run(uuid4(), run_started_ms)
     return worker
@@ -596,7 +565,7 @@ async def test_the_restart_is_requested_once_per_process(harness) -> None:
     assert h.restarts == [1]
 
 
-# --- the stored Bitfinex user id (9c-2a) -----------------------------------------------------
+# --- the stored Bitfinex user id (9c-2a; the only identity compared since 9c-2b) ------------
 
 async def _store_user_id(h: Harness, user_id: int | None, *, key: str = OLD_KEY) -> None:
     async with h.factory.begin() as session:
@@ -611,95 +580,30 @@ async def _stored_user_id(h: Harness, key: str) -> int | None:
             ExchangeAccountCredential.api_key == key))
 
 
-@pytest.mark.parametrize("current", [
-    USER_ID,
-    # The key in use is already revoked at Bitfinex: it is never asked.
-    VenueCredentialRejectedError(500, "venue", '["error",10100,"apikey: invalid"]'),
-])
-@pytest.mark.asyncio
-async def test_a_stored_user_id_is_compared_without_asking_the_key_in_use(
-        harness, current) -> None:
-    h = harness
-    await _store_user_id(h, USER_ID)
-    h.current_client.user_id = current
-    row = await _settle(h, await _queue(h))
-    assert row.state == "applied"
-    assert h.current_client.calls == []
-    assert h.new_client.calls == ["permissions", "user_id"]
-    assert await _stored_user_id(h, NEW_KEY) == USER_ID
-    assert h.restarts == [1]
-
-
 @pytest.mark.asyncio
 async def test_a_stored_user_id_of_another_account_is_a_mismatch(harness) -> None:
     h = harness
     await _store_user_id(h, USER_ID + 1)
     row = await _settle(h, await _queue(h))
     assert (row.state, row.outcome_reason) == ("rejected", "credential_account_mismatch")
-    assert h.current_client.calls == []
     assert await _credentials(h) == [(OLD_KEY, "active")]
     assert h.restarts == []
 
 
-def _fresh_worker(h: Harness, clock: list[int]) -> CredentialRotationWorker:
-    worker = CredentialRotationWorker(
-        session_factory=h.factory, account_id=ACCOUNT, environment=ENV,
-        authority=h.worker.authority, client_factory=lambda: h.new_client,
-        current_client=h.current_client, current_ctx=h.worker.current_ctx,
-        kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: clock[0])
-    worker.bind_run(uuid4(), RUN_STARTED_MS)
-    return worker
-
-
 @pytest.mark.asyncio
-async def test_the_backfill_stores_the_booted_keys_user_id_once(harness) -> None:
+async def test_a_replaced_credential_without_a_stored_id_is_refused_before_bitfinex_is_asked(
+        harness) -> None:
+    """Only a credential retired before the id was stored can lack one (an active row always
+    has it): the identity is unavailable and no key, new or in use, is asked."""
     h = harness
-    worker = _fresh_worker(h, [NOW_MS])
-    await worker.idle()
-    await worker.idle()
-    assert await _stored_user_id(h, OLD_KEY) == USER_ID
-    assert (h.current_client.calls, h.current_client.keys) == (["user_id"], [OLD_KEY])
-
-
-@pytest.mark.asyncio
-async def test_the_backfill_never_overwrites_a_stored_id(harness) -> None:
-    h = harness
-    await _store_user_id(h, USER_ID + 7)
-    worker = _fresh_worker(h, [NOW_MS])
-    await worker.idle()
-    assert await _stored_user_id(h, OLD_KEY) == USER_ID + 7
-    assert h.current_client.calls == []
-
-
-@pytest.mark.asyncio
-async def test_the_backfill_never_asks_the_refused_key_in_recovery_mode(harness) -> None:
-    h = harness
-    worker = _fresh_worker(h, [NOW_MS])
-    worker.note_credential_recovery()
-    await worker.idle()
-    assert worker.recipient_id is not None  # the CLI can still seal a new key to this run
-    assert h.current_client.calls == []
-    assert await _stored_user_id(h, OLD_KEY) is None
-
-
-@pytest.mark.asyncio
-async def test_the_backfill_retries_a_failure_at_most_hourly(harness, caplog) -> None:
-    h = harness
-    clock = [NOW_MS]
-    h.current_client.user_id = BitfinexAPIError(0, "transport error")
-    worker = _fresh_worker(h, clock)
-    with caplog.at_level(logging.WARNING):
-        await worker.idle()
-    assert "credential_user_id_backfill_failed reason=BitfinexAPIError" in caplog.text
-    retry_ms = int(USER_ID_BACKFILL_RETRY.total_seconds() * 1000)
-    clock[0] = NOW_MS + retry_ms - 1
-    await worker.idle()  # a 2s tick later, or nearly an hour: not again
-    assert h.current_client.calls == ["user_id"]
-    h.current_client.user_id = USER_ID
-    clock[0] = NOW_MS + retry_ms
-    await worker.idle()
-    assert h.current_client.calls == ["user_id", "user_id"]
-    assert await _stored_user_id(h, OLD_KEY) == USER_ID
+    request_id = await _queue(h)
+    async with h.factory.begin() as session:
+        await session.execute(text("UPDATE exchange_account_credentials "
+                                   "SET lifecycle_status = 'retired', bitfinex_user_id = NULL"))
+    row = await _settle(h, request_id)
+    assert (row.state, row.outcome_reason) == ("rejected", "account_identity_unavailable")
+    assert h.new_client.calls == []
+    assert h.restarts == []
 
 
 @pytest.mark.asyncio
@@ -709,7 +613,6 @@ async def test_a_bot_in_recovery_mode_still_waits_out_its_settle_window(harness)
     h = harness
     run_id = h.worker._run_id
     assert run_id is not None
-    h.worker.note_credential_recovery()
     h.worker.bind_run(run_id, NOW_MS - 60_000)
     row = await _settle(h, await _queue(h))
     assert (row.state, row.outcome_reason) == ("rejected", "bot_recently_started")

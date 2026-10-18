@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
+from bfx_funding_bot.external.bitfinex.errors import credential_rejection
 from bfx_funding_bot.modules.accounts.tables import (
     ExchangeAccount,
     ExchangeAccountCredential,
@@ -44,7 +45,11 @@ async def bootstrap_credential(
 
     Requires the identity account/membership backfill already present. The
     account lock serializes bootstrap attempts; the vault's partial unique
-    index also guards concurrent activation through the API.
+    index also guards a concurrent activation. The key's Bitfinex user id is
+    asked first and stored on the pending row: an active credential always
+    names it (``ck_exchange_account_credentials_active_user_id``), so the row
+    has it before verification promotes it. A key Bitfinex refuses is
+    ``bootstrap_permissions_rejected`` whichever of the two calls refuses it.
     """
     if not api_key.strip() or not api_secret.strip() or len(kek) != 32:
         raise BootstrapError("bootstrap_input_invalid")
@@ -77,6 +82,14 @@ async def bootstrap_credential(
             )
             if existing is not None:
                 raise BootstrapError("bootstrap_credential_exists")
+            try:
+                bitfinex_user_id = await client.get_user_id(ctx=AccountContext(
+                    account_id=str(exchange_account_id),
+                    credentials=Credentials(api_key=api_key, api_secret=api_secret)))
+            except Exception as exc:
+                if credential_rejection(exc) is not None:
+                    raise BootstrapError("bootstrap_permissions_rejected") from None
+                raise
             row = await create_account_credential(
                 session,
                 exchange_account_id=exchange_account_id,
@@ -85,6 +98,7 @@ async def bootstrap_credential(
                 api_key=api_key,
                 api_secret=api_secret,
                 kek=kek,
+                bitfinex_user_id=bitfinex_user_id,
             )
             verified = await verify_account_credential(
                 session,
@@ -96,12 +110,6 @@ async def bootstrap_credential(
             )
             if verified is None or verified.lifecycle_status != "active":
                 raise BootstrapError("bootstrap_permissions_rejected")
-            # The Bitfinex account the key belongs to: a later rotation compares the new
-            # key's account with it, even after this key is revoked at Bitfinex.
-            verified.bitfinex_user_id = await client.get_user_id(ctx=AccountContext(
-                account_id=str(exchange_account_id),
-                credentials=Credentials(api_key=api_key, api_secret=api_secret)))
-            await session.flush()
             if not apply:
                 await session.rollback()
         return {"status": "verified", "applied": apply}

@@ -125,10 +125,11 @@ def test_upgrade_archives_the_retired_rules_and_stops_the_current_pause(before):
     with engine.begin() as conn, pytest.raises(Exception, match="release_archive is frozen"):
         conn.exec_driver_sql("DELETE FROM release_archive.trading_state_probation")
     with engine.begin() as conn:
+        # The web API's own request at head (a resume is the operator CLI's, 36e59526f8cf).
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         conn.execute(text("""INSERT INTO trading_control_requests (request_id, exchange_account_id,
             deployment_environment, action, reason, requested_by, created_at_ms)
-            VALUES ('00000000-0000-0000-0000-0000000000e1', :a, 'prod', 'resume', 'x', 'will', 9)"""),
+            VALUES ('00000000-0000-0000-0000-0000000000e1', :a, 'prod', 'kill', 'x', 'will', 9)"""),
             {"a": _A})
 
 

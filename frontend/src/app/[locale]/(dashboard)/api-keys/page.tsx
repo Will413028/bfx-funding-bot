@@ -1,25 +1,19 @@
 "use client";
 
-import { KeyRound, Plus } from "lucide-react";
+import { KeyRound } from "lucide-react";
 import { useTranslations } from "next-intl";
-import { useState } from "react";
 import { ApiKeysSkeleton } from "@/components/shared/page-skeleton";
 import { QueryError } from "@/components/shared/query-error";
-import { Button } from "@/components/ui/button";
 import { useSelectedExchangeAccountId } from "@/features/accounts/hooks/use-exchange-accounts";
 import { ApiKeyCard } from "@/features/api-keys/components/api-key-card";
-import { CreateApiKeyDialog } from "@/features/api-keys/components/create-apikey-dialog";
-import {
-  useApiKeys,
-  useCreateApiKey,
-  useDeleteApiKey,
-  useVerifyApiKey,
-} from "@/features/api-keys/hooks/use-api-keys";
-import type { CreateApiKeyInput } from "@/lib/validations";
+import { useApiKeys } from "@/features/api-keys/hooks/use-api-keys";
 
+/**
+ * Read-only list of the account's Bitfinex credentials. Keys are added only by
+ * the operator CLI bootstrap and replaced only by `bfx-op rotate-credential`.
+ */
 export default function ApiKeysPage() {
   const t = useTranslations("apiKeys");
-  const [createOpen, setCreateOpen] = useState(false);
   const account = useSelectedExchangeAccountId();
   const {
     data: apiKeys,
@@ -27,15 +21,6 @@ export default function ApiKeysPage() {
     isError,
     refetch,
   } = useApiKeys(account.exchangeAccountId);
-  const createMutation = useCreateApiKey(account.exchangeAccountId);
-  const deleteMutation = useDeleteApiKey(account.exchangeAccountId);
-  const verifyMutation = useVerifyApiKey(account.exchangeAccountId);
-
-  function handleCreate(data: CreateApiKeyInput) {
-    createMutation.mutate(data, {
-      onSuccess: () => setCreateOpen(false),
-    });
-  }
 
   if (account.isLoading || isLoading) {
     return <ApiKeysSkeleton />;
@@ -46,62 +31,26 @@ export default function ApiKeysPage() {
   }
 
   const keys = apiKeys ?? [];
-  const hasKey = keys.length > 0;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="space-y-1">
         <h1 className="font-semibold text-xl tracking-tight">{t("title")}</h1>
-        {!hasKey && (
-          <Button
-            size="sm"
-            onClick={() => setCreateOpen(true)}
-            className="active:scale-[0.98]"
-          >
-            <Plus className="mr-1.5 size-4" />
-            {t("addKeyShort")}
-          </Button>
-        )}
+        <p className="text-sm text-zinc-500">{t("cliHint")}</p>
       </div>
 
-      {!hasKey ? (
+      {keys.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-white/10 bg-white/[0.01] py-16">
           <KeyRound className="size-10 text-zinc-600" />
           <p className="mt-4 text-sm text-zinc-500">{t("empty")}</p>
-          <Button
-            size="sm"
-            className="mt-4 active:scale-[0.98]"
-            onClick={() => setCreateOpen(true)}
-          >
-            <Plus className="mr-1.5 size-4" />
-            {t("addKeyShort")}
-          </Button>
         </div>
       ) : (
         <div className="space-y-4">
           {keys.map((key) => (
-            <ApiKeyCard
-              key={key.id}
-              apiKey={key}
-              onVerify={(id) => verifyMutation.mutate(id)}
-              onDelete={(id) => deleteMutation.mutate(id)}
-              isVerifying={
-                verifyMutation.isPending && verifyMutation.variables === key.id
-              }
-              isDeleting={
-                deleteMutation.isPending && deleteMutation.variables === key.id
-              }
-            />
+            <ApiKeyCard key={key.id} apiKey={key} />
           ))}
         </div>
       )}
-
-      <CreateApiKeyDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        onSubmit={handleCreate}
-        isPending={createMutation.isPending}
-      />
     </div>
   );
 }

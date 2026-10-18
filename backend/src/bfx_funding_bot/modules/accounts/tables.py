@@ -169,8 +169,8 @@ class ExchangeAccountCredential(Base):
         onupdate=func.current_timestamp(),
     )
     # The operator rotation that made this credential active (``rotation_tables``); NULL for
-    # a bootstrapped or web API credential. ``use_alter``: the request names the credential it
-    # replaces, so the two tables reference each other.
+    # a bootstrapped credential (or one the former web API endpoints wrote). ``use_alter``: the
+    # request names the credential it replaces, so the two tables reference each other.
     operator_request_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("credential_rotation_requests.request_id", ondelete="RESTRICT",
@@ -178,9 +178,10 @@ class ExchangeAccountCredential(Base):
         nullable=True,
     )
     # The Bitfinex account this key belongs to (``v2/auth/r/info/user`` column 0). Written by
-    # an applied rotation and the operator bootstrap, filled once from the booted key when
-    # NULL (trust on first use); a rotation compares the new key's account with it, so a
-    # key already revoked at Bitfinex can still be replaced. NULL: not known yet.
+    # an applied rotation and the operator bootstrap when the row is created; a rotation
+    # compares the new key's account with it, so a key already revoked at Bitfinex can still
+    # be replaced. An active row always has it (``..._active_user_id``); NULL only on an
+    # inactive row written before the id was stored.
     bitfinex_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     __table_args__ = (
@@ -196,6 +197,10 @@ class ExchangeAccountCredential(Base):
         CheckConstraint(
             "bitfinex_user_id IS NULL OR bitfinex_user_id > 0",
             name="ck_exchange_account_credentials_bitfinex_user_id_positive",
+        ),
+        CheckConstraint(
+            "lifecycle_status <> 'active' OR bitfinex_user_id IS NOT NULL",
+            name="ck_exchange_account_credentials_active_user_id",
         ),
         Index(
             "uq_exchange_account_credentials_active_venue",

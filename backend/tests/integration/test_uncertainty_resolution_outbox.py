@@ -1,9 +1,10 @@
-"""ADR D4' on real PostgreSQL roles: the web API queues, the account writer applies.
+"""ADR D4' on real PostgreSQL roles: the operator CLI queues, the account writer applies.
 
-The historical fixture below reproduces the manual baseline and the five extra
-grants from 2026-09-22. Migrations must repair that state and provision today's
-permissions without manual grants. Owner-only fixtures would pass whether or not
-the web API could still write the ledger.
+Since 9c-2b (36e59526f8cf) the web API queues no adjudication; it reads the requests and
+their outcomes. The historical fixture below reproduces the manual baseline and the five
+extra grants from 2026-09-22. Migrations must repair that state and provision today's
+permissions without manual grants. Owner-only fixtures would pass whether or not the web
+API could still write the ledger.
 """
 import asyncio
 import importlib.util
@@ -21,6 +22,8 @@ from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
+from bfx_funding_bot.modules.execution import operator_commands as commands
+from bfx_funding_bot.modules.execution.operator_commands import OperatorContext, ResolutionCommand
 from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
 from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionScope,
@@ -36,8 +39,8 @@ from .test_ledger_operator_resolution_pg import open_unknown
 from .test_ledger_schema_roles import _A as _SEEDED_ACCOUNT
 from .test_ledger_schema_roles import _O as _SEEDED_OBSERVATION
 from .test_ledger_schema_roles import _seed as _seed_ledger
-from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-export
 from .test_ledger_unknown_resolver_pg import SCOPE as LEDGER_SCOPE
+from .test_operator_cli import ledger_db  # noqa: F401 - fixture re-export, with bfx_operator
 
 pytestmark = pytest.mark.integration
 
@@ -81,7 +84,8 @@ GRANT INSERT ON TABLE public.user_profiles TO bfx_webapi;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.exchange_account_credentials TO bfx_webapi;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.account_config_drafts TO bfx_webapi;
 """
-# What was granted by hand on 2026-09-22 so `mark-not-accepted` could append.
+# What was granted by hand on 2026-09-22 so the web API's former `mark-not-accepted` route
+# could append.
 _HAND_GRANTS = """
 GRANT INSERT ON public.event_log TO bfx_webapi;
 GRANT USAGE ON SEQUENCE public.event_log_event_seq_seq TO bfx_webapi;
@@ -203,10 +207,11 @@ def test_outbox_grants_are_column_scoped_per_role(migrated) -> None:
                 assert not _privilege(
                     conn, f"SELECT has_table_privilege('{role}', :t, :p)", t=table, p=privilege
                 ), (role, privilege)
+        # The web API queues no adjudication since 36e59526f8cf: the operator CLI does
+        # (test_operator_privilege_allowlist).
+        assert not _privilege(
+            conn, "SELECT has_any_column_privilege('bfx_webapi', :t, 'INSERT')", t=table)
         for column in _REQUEST_COLUMNS:
-            assert _privilege(
-                conn, "SELECT has_column_privilege('bfx_webapi', :t, :c, 'INSERT')", t=table, c=column
-            ), column
             for privilege in ("UPDATE",):
                 assert not _privilege(
                     conn, "SELECT has_column_privilege('bfx_webapi', :t, :c, :p)",
@@ -240,13 +245,14 @@ def test_request_is_immutable_and_its_outcome_terminal(ledger_db) -> None:  # no
     first, second = uuid4(), uuid4()
     with engine.begin() as conn:
         _seed_ledger(conn)  # the account and the observation a request cites
-        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_operator")
         conn.execute(text(_REQUEST_SQL), {"id": first, "u": uncertainty})
     denied = (
-        ("bfx_webapi", "INSERT INTO uncertainty_resolution_requests(request_id,exchange_account_id,"
+        ("bfx_operator", "INSERT INTO uncertainty_resolution_requests(request_id,exchange_account_id,"
          "deployment_environment,uncertainty_id,action,observation_id,requested_by,"
          f"created_at_ms,state) VALUES ('{uuid4()}','{_SEEDED_ACCOUNT}','ci',"
          f"'{uuid4()}','mark_not_accepted','{_SEEDED_OBSERVATION}','op',1000,'applied')"),
+        ("bfx_webapi", _REQUEST_SQL.replace(":id", f"'{uuid4()}'").replace(":u", f"'{uuid4()}'")),
         ("bfx_webapi", "UPDATE uncertainty_resolution_requests SET state='rejected'"),
         ("bfx_bot", "UPDATE uncertainty_resolution_requests SET reason='rewritten'"),
         ("bfx_webapi", "DELETE FROM uncertainty_resolution_requests"),
@@ -277,7 +283,7 @@ def test_request_is_immutable_and_its_outcome_terminal(ledger_db) -> None:  # no
         conn.exec_driver_sql("DELETE FROM uncertainty_resolution_requests")
     # Once the first has an outcome, the operator may ask again.
     with engine.begin() as conn:
-        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_operator")
         conn.execute(text(_REQUEST_SQL), {"id": second, "u": uncertainty})
 
 
@@ -329,13 +335,33 @@ def _url(ledger_db_) -> str:
     return ledger_db_.url.render_as_string(hide_password=False)
 
 
+_CONTEXT = OperatorContext(exchange_account_id=LEDGER_SCOPE.exchange_account_id,
+                           user_id="operator-1", role="owner", lifecycle_status="active",
+                           deployment_environment="ci")
+
+
+async def _queue_as_operator(operator, uncertainty_id: UUID, ref: str) -> str:
+    """Mark-not-accepted as the operator CLI queues it: ``request_resolution`` as
+    ``bfx_operator``. The queued request's id."""
+    async with operator.begin() as session:
+        row = await commands.request_resolution(
+            session, _CONTEXT, build_operator_resolution(), ResolutionCommand(
+                uncertainty_id=uncertainty_id, action="mark_not_accepted", evidence_ref=ref,
+                operator_uuid="operator-1", reason="zero exact candidates",
+                evidence={"candidateCount": 0}),
+            now_ms=2_000)
+        return str(row.request_id)
+
+
 async def _journal_rows(owner) -> int:
     async with owner() as session:
         return int(await session.scalar(
             select(func.count()).select_from(ExecutionResolutionJournalRow)) or 0)
 
 
-def test_web_api_queues_and_only_the_account_writer_applies(book, ledger_db, monkeypatch) -> None:  # noqa: F811
+def test_the_cli_queues_the_web_api_shows_and_only_the_account_writer_applies(
+    book, ledger_db, monkeypatch  # noqa: F811
+) -> None:
     _operator_env(monkeypatch)
     url = _url(ledger_db)
 
@@ -344,8 +370,10 @@ def test_web_api_queues_and_only_the_account_writer_applies(book, ledger_db, mon
         owner = book.factory
         webapi_engine = _restricted_engine(url, "bfx_webapi")
         bot_engine = _restricted_engine(url, "bfx_bot")
+        operator_engine = _restricted_engine(url, "bfx_operator")
         webapi = async_sessionmaker(webapi_engine, expire_on_commit=False)
         bot = async_sessionmaker(bot_engine, expire_on_commit=False)
+        operator = async_sessionmaker(operator_engine, expire_on_commit=False)
         account = LEDGER_SCOPE.exchange_account_id
         try:
             # The web API holds no write on the resolution journal: only the worker applies.
@@ -371,15 +399,11 @@ def test_web_api_queues_and_only_the_account_writer_applies(book, ledger_db, mon
             base = f"/api/v1/exchange-accounts/{account}"
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                body = {"evidenceRef": ref, "operatorUuid": "operator-1",
-                        "reason": "zero exact candidates", "evidence": {"candidateCount": 0}}
-                first, repeat = await asyncio.gather(
-                    client.post(f"{base}/uncertainties/{uncertainty_id}/mark-not-accepted", json=body),
-                    client.post(f"{base}/uncertainties/{uncertainty_id}/mark-not-accepted", json=body),
-                )
-                assert first.status_code == repeat.status_code == 202, (first.text, repeat.text)
-                request_id = first.json()["data"]["requestId"]
-                assert repeat.json()["data"]["requestId"] == request_id
+                # Two identical requests at once are the same request.
+                request_id, repeat = await asyncio.gather(
+                    _queue_as_operator(operator, uncertainty_id, ref),
+                    _queue_as_operator(operator, uncertainty_id, ref))
+                assert repeat == request_id
                 listed = (await client.get(f"{base}/uncertainties", params={"state": "open"})).json()
                 assert listed["data"][0]["resolutionRequest"]["requestId"] == request_id
                 assert listed["data"][0]["resolutionRequest"]["state"] == "requested"
@@ -404,7 +428,7 @@ def test_web_api_queues_and_only_the_account_writer_applies(book, ledger_db, mon
             assert (stored.attempt_id, stored.action, stored.operator_request_id) == (
                 uncertainty_id, "not_accepted", UUID(request_id))
         finally:
-            for engine in (webapi_engine, bot_engine):
+            for engine in (webapi_engine, bot_engine, operator_engine):
                 await engine.dispose()
 
     asyncio.run(scenario())
@@ -413,8 +437,9 @@ def test_web_api_queues_and_only_the_account_writer_applies(book, ledger_db, mon
 def test_queueing_a_request_never_waits_for_or_holds_the_account_writer_lock(
     book, ledger_db, monkeypatch  # noqa: F811
 ) -> None:
-    """The web API must not contend for the daemon's account lock: a slow or
-    abusive request would otherwise stall reconcile and submit."""
+    """Queueing (the operator CLI's ``request_resolution``) must not contend for the
+    daemon's account lock: a slow or abusive request would otherwise stall reconcile and
+    submit."""
     from bfx_funding_bot.core.writer_lock import (
         account_id_canonical,
         derive_transaction_lock_key,
@@ -427,43 +452,23 @@ def test_queueing_a_request_never_waits_for_or_holds_the_account_writer_lock(
         uncertainty_id, ref = await _seed_open_submit_unknown(book)
         account = LEDGER_SCOPE.exchange_account_id
         owner_engine = create_async_engine(url.replace("+psycopg", "+asyncpg"))
-        webapi_engine = _restricted_engine(url, "bfx_webapi")
-        webapi = async_sessionmaker(webapi_engine, expire_on_commit=False)
+        operator_engine = _restricted_engine(url, "bfx_operator")
+        operator = async_sessionmaker(operator_engine, expire_on_commit=False)
         try:
-            async def restricted_session():
-                async with webapi() as session:
-                    try:
-                        yield session
-                        await session.commit()
-                    except Exception:
-                        await session.rollback()
-                        raise
-
-            app = FastAPI()
-            app.include_router(build_uncertainties_router())
-            app.state.read_models = build_read_models()
-            app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
-            app.dependency_overrides[get_session] = restricted_session
             key = derive_transaction_lock_key(account_id_canonical(str(account)), "ci")
             daemon = await owner_engine.connect()
             transaction = await daemon.begin()
             try:
                 # The account writer is mid-transaction (reconcile, submit...).
                 await daemon.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
-                transport = httpx.ASGITransport(app=app)
-                async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                    response = await asyncio.wait_for(client.post(
-                        f"/api/v1/exchange-accounts/{account}/uncertainties/"
-                        f"{uncertainty_id}/mark-not-accepted",
-                        json={"evidenceRef": ref, "operatorUuid": "operator-1",
-                              "evidence": {"candidateCount": 0}},
-                    ), timeout=5)
-                assert response.status_code == 202, response.text
+                request_id = await asyncio.wait_for(
+                    _queue_as_operator(operator, uncertainty_id, ref), timeout=5)
+                assert UUID(request_id)
             finally:
                 await transaction.rollback()
                 await daemon.close()
         finally:
-            for engine in (owner_engine, webapi_engine):
+            for engine in (owner_engine, operator_engine):
                 await engine.dispose()
 
     asyncio.run(scenario())
