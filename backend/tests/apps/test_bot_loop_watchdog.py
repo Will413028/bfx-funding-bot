@@ -97,12 +97,14 @@ def _fake_daemon(stop: asyncio.Event, watchdog_during_run: list[bool], *,
     async def aclose() -> None:
         return None
 
+    bound_runs: list[int] = []
     return SimpleNamespace(
         run=run, metrics=None, booted=booted, writer_lock=None, venue_aclose=None,
         tracing=None, bitfinex_http=SimpleNamespace(aclose=aclose),
         config=SimpleNamespace(phase="live", cells=[], run_duration_hours=None),
         session_factory=None, credential_rotation=credential_rotation,
         account_bootstrap=SimpleNamespace(exchange_account_id="acct", deployment_environment="ci"),
+        bound_runs=bound_runs, bind_run=bound_runs.append,
     )
 
 
@@ -228,3 +230,46 @@ async def test_the_rotation_worker_is_bound_to_the_run_once_it_is_recorded(
         assert _RunRecord.events[:3] == ["start", "bind_run", "run"]
     else:
         assert rotation.bound == []
+
+
+async def test_the_daemon_learns_when_its_run_started(
+    monkeypatch: pytest.MonkeyPatch, watchdogs: list[_Watchdog],
+) -> None:
+    """Credential recovery mode counts BOT_SETTLE_WINDOW from the recorded run's start."""
+    daemons: list[Any] = []
+
+    async def build_daemon(*, stop_event: asyncio.Event) -> Any:
+        daemons.append(_fake_daemon(stop_event, []))
+        return daemons[0]
+
+    monkeypatch.setattr(bot, "build_daemon", build_daemon)
+    await bot._run()
+    assert daemons[0].bound_runs == [123]
+
+
+async def test_a_key_refused_while_running_exits_78_as_a_fatal_error(
+    monkeypatch: pytest.MonkeyPatch, watchdogs: list[_Watchdog],
+) -> None:
+    """The periodic reconcile raises the rejection out of the TaskGroup; ``_run_daemon``
+    must take it before ``except* Exception`` (which would exit 1). The restarted process
+    then boots into credential recovery mode.
+
+    Mutation: move the ``except* VenueCredentialRejectedError`` branch after
+    ``except* Exception``: this test fails (ExceptionGroup, not SystemExit 78)."""
+    from bfx_funding_bot.core.errors import EXIT_CODE_AUTH_FAILED
+    from bfx_funding_bot.external.bitfinex.errors import VenueCredentialRejectedError
+
+    sent: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(alerts, "emit", lambda event, **fields: sent.append((event, fields)))
+    refused = ExceptionGroup("taskgroup", [VenueCredentialRejectedError(
+        500, "Internal Server Error", '["error",10100,"apikey: digest invalid"]')])
+
+    async def build_daemon(*, stop_event: asyncio.Event) -> Any:
+        return _fake_daemon(stop_event, [], fail=refused, booted=True)
+
+    monkeypatch.setattr(bot, "build_daemon", build_daemon)
+    with pytest.raises(SystemExit) as exited:
+        await bot._run()
+    assert exited.value.code == EXIT_CODE_AUTH_FAILED == 78
+    assert [event for event, _ in sent] == ["daemon_fatal"]
+    assert _RunRecord.events[-1] == "finish:fatal"

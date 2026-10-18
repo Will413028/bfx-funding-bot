@@ -203,6 +203,7 @@ async def create_exchange_account_credential(
     verified_at: datetime | None = None,
     last_verify_error: str | None = None,
     operator_request_id: UUID | None = None,
+    bitfinex_user_id: int | None = None,
 ) -> ExchangeAccountCredential:
     """Insert an account credential while enforcing active-key uniqueness.
 
@@ -243,6 +244,7 @@ async def create_exchange_account_credential(
         verified_at=verified_at,
         last_verify_error=last_verify_error,
         operator_request_id=operator_request_id,
+        bitfinex_user_id=bitfinex_user_id,
     )
     session.add(row)
     await session.flush()

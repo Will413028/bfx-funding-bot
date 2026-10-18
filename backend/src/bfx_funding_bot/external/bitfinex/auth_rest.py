@@ -19,7 +19,12 @@ import httpx
 
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
 from bfx_funding_bot.external.bitfinex.credentials import Credentials
-from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
+from bfx_funding_bot.external.bitfinex.errors import (
+    BitfinexAPIError,
+    BitfinexShapeError,
+    VenueCredentialRejectedError,
+    is_credential_rejection,
+)
 from bfx_funding_bot.external.bitfinex.funding_offer_row import parse_funding_offer_row
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.external.bitfinex.observations import (
@@ -680,7 +685,8 @@ class BitfinexAuthREST:
     ) -> httpx.Response:
         """The only way this client talks to the venue: sign + POST under the
         shared gate, so the request arrives in nonce order. Raises
-        BitfinexAPIError on transport error or deadline (status 0) or HTTP >= 400.
+        BitfinexAPIError on transport error or deadline (status 0) or HTTP >= 400, as
+        VenueCredentialRejectedError when the venue refused the key.
 
         Every call here is a read, so it waits behind any queued order-path
         request and is cut at a total deadline: an order (a kill) waiting for
@@ -711,7 +717,12 @@ class BitfinexAuthREST:
                 ) from e
         if resp.status_code >= 400:
             log_auth_http_error(resp, path=path, credentials=ctx.credentials)
-            raise BitfinexAPIError(
+            # The key itself refused (10100, 401/403) is its own type: the boot holds in
+            # credential recovery mode and the periodic reconcile ends the run on it.
+            error = (VenueCredentialRejectedError
+                     if is_credential_rejection(resp.status_code, resp.text)
+                     else BitfinexAPIError)
+            raise error(
                 status_code=resp.status_code,
                 message=resp.reason_phrase or "http error", raw=resp.text,
             )

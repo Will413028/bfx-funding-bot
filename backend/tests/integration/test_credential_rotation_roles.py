@@ -113,3 +113,28 @@ def test_the_sealed_credential_is_the_bots_alone(conn) -> None:
                            "SELECT"), column
     assert _column(conn, "bfx_operator", "exchange_account_credentials", "operator_request_id",
                    "SELECT")
+
+
+def test_the_stored_bitfinex_user_id_is_the_bots_to_write_and_not_the_operators(conn) -> None:
+    """1d34a3306e02 adds the column without a grant: the bot's table privileges cover it (the
+    rotation inserts it, the backfill updates it); the CLI's column allowlist does not name
+    it."""
+    assert conn.scalar(text(
+        "SELECT data_type FROM information_schema.columns WHERE table_schema = 'public' "
+        "AND table_name = 'exchange_account_credentials' AND column_name = 'bitfinex_user_id'"
+    )) == "bigint"
+    for privilege in ("SELECT", "INSERT", "UPDATE"):
+        assert _column(conn, "bfx_bot", "exchange_account_credentials", "bitfinex_user_id",
+                       privilege), privilege
+    assert not _column(conn, "bfx_operator", "exchange_account_credentials", "bitfinex_user_id",
+                       "SELECT")
+    conn.rollback()  # the reads above autobegan a transaction
+    with pytest.raises(Exception, match="bitfinex_user_id_positive"), conn.begin():
+        conn.exec_driver_sql(
+            "INSERT INTO exchange_accounts(id, venue, label) "
+            "VALUES ('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', 'bitfinex', 'x')")
+        conn.exec_driver_sql(
+            "INSERT INTO exchange_account_credentials (exchange_account_id, venue, api_key, "
+            "secret_ciphertext, secret_nonce, wrapped_dek, dek_nonce, bitfinex_user_id) VALUES "
+            "('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', 'bitfinex', 'k', '\\x00', '\\x00', '\\x00', "
+            "'\\x00', 0)")

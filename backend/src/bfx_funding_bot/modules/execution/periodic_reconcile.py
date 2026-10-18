@@ -11,6 +11,9 @@ silently breaks.
   HealthTarget.BITFINEX_REST (owned by the daemon REST poller).
 - Fail-safe: consecutive venue-fetch failures -> EXECUTOR DOWN so AuthHealthGuard
   blocks new offers (never trade on a stale ledger). Cleared on recovery.
+- The venue refusing the account's key is not a fetch failure: it raises out of the loop
+  (the daemon exits 78) and the next boot holds in credential recovery mode, where the
+  credential rotation worker can replace the key.
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ from typing import Protocol
 
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.external.bitfinex.errors import credential_rejection
 from bfx_funding_bot.modules.execution.deployment_input import DeploymentInput
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import CycleResult, ObservationSink, Scope
@@ -150,7 +154,16 @@ class PeriodicReconcile:
     async def _tick(self) -> None:
         try:
             cycle = await self._recovery.run(self._scope)
-        except Exception as exc:  # never let the backbone crash the daemon
+        except Exception as exc:  # never let the backbone crash the daemon...
+            rejected = credential_rejection(exc)
+            if rejected is not None and rejected.venue_coded:
+                # ...except on a key the venue itself refused: retrying it changes nothing, and
+                # only a boot (credential recovery mode) runs without trading while it is
+                # replaced. A bare 401/403 (a WAF page can send one) counts as a failure below.
+                log.critical("periodic_reconcile_credential_rejected err=%r", exc)
+                if rejected is exc:
+                    raise
+                raise rejected from exc
             self._consecutive_failures += 1
             log.warning(
                 "periodic_reconcile_failed attempt=%d/%d err=%r",

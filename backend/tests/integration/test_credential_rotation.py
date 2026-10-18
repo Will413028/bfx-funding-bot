@@ -5,6 +5,13 @@ Production's host setup: ``bfx_bot`` holds the owner's default DML on new tables
 role has no default privileges and no schema grant before the migrations. So every read and
 write below is one a migration granted (or, for the worker on the credentials, accounts,
 runs and deployments, the existing grants ``1db83367918c`` relies on). Bitfinex is a fake.
+
+Mutation checks (one at a time; revert after each):
+
+* ``_verify`` asks the key in use instead of the stored user id:
+  ``test_a_revoked_key_is_replaced_by_its_stored_user_id`` fails.
+* drop the ``api_key`` condition from the user id backfill's UPDATE:
+  ``test_the_backfill_never_writes_onto_a_credential_replaced_meanwhile`` fails.
 """
 from __future__ import annotations
 
@@ -24,7 +31,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from bfx_funding_bot.apps import operator_cli
 from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
-from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+from bfx_funding_bot.external.bitfinex.errors import (
+    BitfinexAPIError,
+    VenueCredentialRejectedError,
+)
 from bfx_funding_bot.modules.accounts.vault import load_account_credentials
 from bfx_funding_bot.modules.execution.credential_rotation import CredentialRotationWorker
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
@@ -133,7 +143,7 @@ async def rotate(key: str = NEW_KEY, secret: str = NEW_SECRET) -> tuple[int, dic
 @dataclass
 class FakeClient:
     perms: KeyPermissions | BaseException = FUNDING_ONLY
-    user_id: int = 4242
+    user_id: int | BaseException = 4242
     calls: list[str] = field(default_factory=list)
 
     async def get_key_permissions(self, *, ctx: AccountContext) -> KeyPermissions:
@@ -144,6 +154,8 @@ class FakeClient:
 
     async def get_user_id(self, *, ctx: AccountContext) -> int:
         self.calls.append("user_id")
+        if isinstance(self.user_id, BaseException):
+            raise self.user_id
         return self.user_id
 
 
@@ -155,6 +167,7 @@ class Bot:
     authorized: set[str]
     engine: Any
     factory: Any
+    current: FakeClient
 
 
 def _as(url: str, role: str) -> tuple[Any, Any]:
@@ -172,14 +185,14 @@ def _as(url: str, role: str) -> tuple[Any, Any]:
 @pytest.fixture
 async def bot(db):
     engine, factory = _as(db.url, "bfx_bot")
-    client, restarts, authorized = FakeClient(), [], {OPERATOR}
+    client, current, restarts, authorized = FakeClient(), FakeClient(), [], {OPERATOR}
 
     async def authority(session, *, account_id, user) -> bool:
         return user in authorized
 
     worker = CredentialRotationWorker(
         session_factory=factory, account_id=ACCOUNT, environment="ci", authority=authority,
-        client_factory=lambda: client, current_client=FakeClient(),
+        client_factory=lambda: client, current_client=current,
         current_ctx=AccountContext(account_id=str(ACCOUNT),
                                    credentials=Credentials(OLD_KEY, OLD_SECRET)),
         kek_loader=lambda: KEK, restart=lambda: restarts.append(1), clock=lambda: NOW_MS)
@@ -188,7 +201,7 @@ async def bot(db):
     await worker.idle()
     assert worker.recipient_id is not None
     try:
-        yield Bot(worker, client, restarts, authorized, engine, factory)
+        yield Bot(worker, client, restarts, authorized, engine, factory, current)
     finally:
         await engine.dispose()
 
@@ -344,3 +357,69 @@ async def test_a_request_sealed_to_a_previous_boot_is_stale(db, operator_env, bo
     assert (view["state"], view["outcome_reason"]) == ("rejected", "recipient_key_stale")
     assert bot.client.calls == []
 
+
+
+# --- the stored Bitfinex user id (9c-2a) -----------------------------------------------------
+
+def _user_ids(db: Db) -> dict[str, int | None]:
+    with db.owner.connect() as conn:
+        return dict(conn.execute(text(
+            "SELECT api_key, bitfinex_user_id FROM exchange_account_credentials")).tuples().all())
+
+
+@pytest.mark.asyncio
+async def test_the_first_idle_stores_the_booted_keys_user_id_as_the_bot(db, bot) -> None:
+    """Trust on first use, under ``bfx_bot``'s own grants (the fixture's first idle)."""
+    assert _user_ids(db) == {OLD_KEY: 4242}
+    assert bot.current.calls == ["user_id"]
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_key_is_replaced_by_its_stored_user_id(db, operator_env, bot) -> None:
+    """The key in use is already revoked at Bitfinex (``info/user`` answers 10100): the new
+    key is still compared with the account stored on the credential it replaces."""
+    bot.current.user_id = VenueCredentialRejectedError(
+        500, "Internal Server Error", '["error",10100,"apikey: digest invalid"]')
+    _, queued, _ = await rotate()
+    assert await bot.worker.tick() is True
+    view = (await cli("request", "credential", queued["request_id"]))[1]
+    assert view["state"] == "applied"
+    assert bot.current.calls == ["user_id"]  # the backfill only, never the rotation
+    assert _user_ids(db) == {OLD_KEY: 4242, NEW_KEY: 4242}
+    assert bot.restarts == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_key_of_another_bitfinex_account_is_refused(db, operator_env, bot) -> None:
+    bot.client.user_id = 4243
+    _, queued, _ = await rotate()
+    assert await bot.worker.tick() is True
+    view = (await cli("request", "credential", queued["request_id"]))[1]
+    assert (view["state"], view["outcome_reason"]) == ("rejected", "credential_account_mismatch")
+    assert _credentials(db) == [(OLD_KEY, "active", None)]
+    assert bot.restarts == []
+
+
+@pytest.mark.asyncio
+async def test_the_backfill_never_writes_onto_a_credential_replaced_meanwhile(db, bot) -> None:
+    """The web API swapped the active credential after this process booted on the old key:
+    the old key's id must not land on the new row."""
+    envelope = encrypt_secret_with_aad("FAKE-WEBAPI-SECRET", aad=str(ACCOUNT), kek=KEK)
+    with db.owner.begin() as conn:
+        conn.exec_driver_sql("UPDATE exchange_account_credentials SET lifecycle_status = 'retired', "
+                             "bitfinex_user_id = NULL")
+        conn.execute(text(
+            "INSERT INTO exchange_account_credentials (exchange_account_id, venue, label, api_key, "
+            "secret_ciphertext, secret_nonce, wrapped_dek, dek_nonce, key_version, "
+            "lifecycle_status, verified_at) VALUES (:a, 'bitfinex', 'webapi', 'FAKE-WEBAPI-KEY', "
+            ":c, :n, :w, :d, :v, 'active', now())"),
+            {"a": ACCOUNT, "c": envelope.secret_ciphertext, "n": envelope.secret_nonce,
+             "w": envelope.wrapped_dek, "d": envelope.dek_nonce, "v": envelope.key_version})
+    booted_on_old = CredentialRotationWorker(
+        session_factory=bot.factory, account_id=ACCOUNT, environment="ci",
+        authority=bot.worker.authority, client_factory=lambda: bot.client,
+        current_client=FakeClient(user_id=9999), current_ctx=bot.worker.current_ctx,
+        kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS)
+    booted_on_old.bind_run(db.run_id, RUN_STARTED_MS)
+    await booted_on_old.idle()
+    assert _user_ids(db) == {OLD_KEY: None, "FAKE-WEBAPI-KEY": None}

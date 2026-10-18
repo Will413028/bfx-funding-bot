@@ -286,3 +286,75 @@ async def test_periodic_expected_refusal_is_not_transport_failure():
     )
     await periodic._tick()
     assert periodic._consecutive_failures == 0
+
+
+# --- a refused key (9c-2a) ---------------------------------------------------------------------
+# Mutation: drop the re-raise in ``PeriodicReconcile._tick``: the first two tests fail.
+# Mutation: drop the ``venue_coded`` condition: ``test_a_bare_403_mid_run_*`` fails.
+
+_DIGEST_INVALID = '["error",10100,"apikey: digest invalid"]'
+
+
+@pytest.mark.asyncio
+async def test_a_refused_key_ends_the_loop_instead_of_counting_as_a_fetch_failure():
+    from bfx_funding_bot.external.bitfinex.errors import VenueCredentialRejectedError
+
+    probe = _FakeProbe()
+    refused = VenueCredentialRejectedError(500, "Internal Server Error", _DIGEST_INVALID)
+    pr = _make_periodic(recovery=_FakeRecovery(results=[refused]), probe=probe,
+                        interval_s=0.005, max_consecutive_failures=3)
+
+    with pytest.raises(VenueCredentialRejectedError) as raised:
+        await pr._tick()
+    assert raised.value is refused
+    assert pr._consecutive_failures == 0
+    assert probe.updates == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_key_wrapped_by_the_cycle_is_raised_as_the_rejection():
+    from bfx_funding_bot.external.bitfinex.errors import (
+        BitfinexAPIError,
+        VenueCredentialRejectedError,
+    )
+
+    wrapped = RuntimeError("observation failed")
+    wrapped.__cause__ = BitfinexAPIError(500, "Internal Server Error", _DIGEST_INVALID)
+    pr = _make_periodic(recovery=_FakeRecovery(results=[wrapped]), probe=_FakeProbe(),
+                        interval_s=0.005)
+
+    with pytest.raises(VenueCredentialRejectedError) as raised:
+        await pr._tick()
+    assert raised.value.__cause__ is wrapped
+
+
+@pytest.mark.asyncio
+async def test_a_bare_403_mid_run_counts_as_a_fetch_failure_not_a_refused_key():
+    """A 403 without the venue's body may be a gateway (WAF) page: exiting 78 on it would
+    cost a restart and the settle window per spurious page, so it joins the failure streak."""
+    from bfx_funding_bot.external.bitfinex.errors import VenueCredentialRejectedError
+
+    probe = _FakeProbe()
+    pr = _make_periodic(
+        recovery=_FakeRecovery(results=[
+            VenueCredentialRejectedError(403, "Forbidden", "<html>waf</html>")]),
+        probe=probe, interval_s=0.005, max_consecutive_failures=2)
+
+    await pr._tick()  # swallowed
+    assert pr._consecutive_failures == 1
+    assert probe.updates == []
+
+
+@pytest.mark.asyncio
+async def test_other_venue_refusals_still_count_as_fetch_failures():
+    from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+
+    probe = _FakeProbe()
+    pr = _make_periodic(
+        recovery=_FakeRecovery(results=[
+            BitfinexAPIError(500, "x", '["error",10114,"nonce: small"]')]),
+        probe=probe, interval_s=0.005, max_consecutive_failures=1)
+
+    await pr._tick()  # swallowed, as before
+    assert pr._consecutive_failures == 1
+    assert _reconcile_statuses(probe, HealthTarget.EXECUTOR) == [HealthStatus.DOWN]

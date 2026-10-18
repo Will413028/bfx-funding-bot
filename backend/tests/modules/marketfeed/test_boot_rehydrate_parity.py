@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.marketfeed.daemon import Daemon
+from bfx_funding_bot.modules.marketfeed.daemon import BootOutcome, Daemon
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
     ExtractedSignal,
@@ -150,7 +150,7 @@ async def test_the_daemon_arms_the_scheduler_from_the_boot_clock() -> None:
     scheduler = MagicMock()
     fake = SimpleNamespace(
         config=SimpleNamespace(cells=[cell]), scheduler=scheduler, boot_mts=1_791_000_000_123,
-        _boot_until_observed=AsyncMock(return_value=False),
+        _boot_until_observed=AsyncMock(return_value=BootOutcome.STOPPED),
     )
 
     await Daemon.run(fake)  # type: ignore[arg-type]
