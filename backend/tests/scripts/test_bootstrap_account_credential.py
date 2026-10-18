@@ -149,11 +149,14 @@ def test_real_cli_transaction_and_dependency_errors_are_secret_safe(
     monkeypatch.setattr(db, "make_async_engine_from_url", lambda url: engine)
 
     def transport(request):
-        assert request.url.path == "/v2/auth/r/permissions"
+        # The permissions check, then the key's Bitfinex user id (stored on the row).
+        assert request.url.path in ("/v2/auth/r/permissions", "/v2/auth/r/info/user")
         assert request.headers["bfx-apikey"] == "KEY-SENTINEL"
         logging.getLogger("httpx").critical(leak)
         if fault == "http":
             return httpx.Response(500, text=leak)
+        if request.url.path == "/v2/auth/r/info/user":
+            return httpx.Response(200, json=[4242, "fixture@example.invalid", "fixture"])
         return httpx.Response(200, json=[["funding", 1, 1]])
 
     original_client = httpx.AsyncClient
