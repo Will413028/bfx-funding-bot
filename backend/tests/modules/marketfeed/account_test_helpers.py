@@ -98,6 +98,7 @@ async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool =
                 key_version=envelope.key_version,
                 lifecycle_status="active",
                 verified_at=datetime.now(UTC),
+                bitfinex_user_id=4242,
             )
         )
     if capital_policies:

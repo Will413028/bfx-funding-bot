@@ -484,14 +484,12 @@ class Daemon:
         The run ends (the stop event, then ``clean_stop`` and exit 0; the container restart
         policy boots a fresh process) once the key works again or was replaced -- an applied
         rotation (the worker restarts as it always does), a retried boot observation that
-        succeeds, or a different active credential in the database (the web API's endpoints)
+        succeeds, or a different active credential in the database (since 9c-2b only the owner)
         -- and the run is at least :data:`BOT_SETTLE_WINDOW` old. A SIGTERM ends it too.
         """
         account = self.account_bootstrap.account_id
         log.critical("credential_recovery_mode_entered account=%s", account)
         alerts.emit(alerts.CREDENTIAL_RECOVERY_MODE, level=alerts.CRITICAL, account=account)
-        if self.credential_rotation is not None:
-            self.credential_rotation.note_credential_recovery()
         self._recovery_started_at_ms()  # pinned now when bot_runs gave no start
         async with asyncio.TaskGroup() as tg:
             for name, task in self._credential_recovery_tasks():

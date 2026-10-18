@@ -1,16 +1,4 @@
-from bfx_funding_bot.modules.api.schemas import (
-    ApiKeyResponse,
-    CreateApiKeyRequest,
-    VerifyResultResponse,
-)
-
-
-def test_create_request_accepts_camelcase():
-    req = CreateApiKeyRequest.model_validate(
-        {"label": "main", "apiKey": "PUB", "apiSecret": "SEC"}
-    )
-    assert req.api_key == "PUB"
-    assert req.api_secret == "SEC"
+from bfx_funding_bot.modules.api.schemas import ApiKeyResponse
 
 
 def test_response_serializes_camelcase_and_masks_secret():
@@ -40,16 +28,3 @@ def test_response_serializes_last_verify_error():
     assert dumped["lastVerifyError"] == "withdraw_must_be_disabled"
     assert "last_verify_error" not in dumped
 
-
-def test_create_request_accepts_snake_case():
-    req = CreateApiKeyRequest.model_validate(
-        {"label": "main", "api_key": "PUB", "api_secret": "SEC"}
-    )
-    assert req.api_key == "PUB"
-    assert req.api_secret == "SEC"
-
-
-def test_verify_result():
-    assert VerifyResultResponse(status="failed", error="withdraw_must_be_disabled").model_dump() == {
-        "status": "failed", "error": "withdraw_must_be_disabled",
-    }

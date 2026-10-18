@@ -46,6 +46,7 @@ from .test_ledger_schema_roles import (
     reversible_ledger_db,  # noqa: F401 - fixture re-export
     reversible_seeded,  # noqa: F401 - fixture re-export
 )
+from .test_operator_cli import _build as _build_with_operator
 
 pytestmark = pytest.mark.integration
 
@@ -67,6 +68,19 @@ def seeded(ledger_db):
     with ledger_db.begin() as conn:
         _seed(conn)
     return ledger_db
+
+
+@pytest.fixture
+def seeded_with_operator(pg_templates, pg_clone):
+    """``seeded`` on a build with the operator CLI's role, which queues adjudications."""
+    engine = create_engine(pg_clone(pg_templates.template("operator_cli_ledger",
+                                                          _build_with_operator)))
+    try:
+        with engine.begin() as conn:
+            _seed(conn)
+        yield engine
+    finally:
+        engine.dispose()
 
 
 def _seed_observation_sql(
@@ -283,7 +297,8 @@ def test_runtime_role_cannot_write_seed_origin_even_under_ledger_epoch(seeded) -
         assert conn.scalar(text("SELECT count(*) FROM ledger_observation WHERE origin='legacy_seed'")) == 1
 
 
-def test_seed_observation_is_never_resolution_or_operator_evidence(seeded) -> None:
+def test_seed_observation_is_never_resolution_or_operator_evidence(seeded_with_operator) -> None:
+    seeded = seeded_with_operator
     with seeded.begin() as conn:
         seed = _owner_seed_observation(conn)
         venue_quarantine, seed_quarantine = str(uuid4()), str(uuid4())
@@ -296,14 +311,18 @@ def test_seed_observation_is_never_resolution_or_operator_evidence(seeded) -> No
         conn.exec_driver_sql(_request_sql(_O))
     with seeded.begin() as conn, pytest.raises(Exception, match="a seed observation is not evidence"):
         conn.exec_driver_sql(_request_sql(seed))
-    # The web API cannot read ``origin``; the rule still holds for its INSERT (definer rights).
+    # The operator CLI's role (the one that queues adjudications since 36e59526f8cf) cannot
+    # read ``origin``; the rule still holds for its INSERT (definer rights).
+    with seeded.connect() as conn:
+        assert not conn.scalar(text("SELECT has_column_privilege('bfx_operator', "
+                                    "'public.ledger_observation', 'origin', 'SELECT')"))
     with seeded.begin() as conn:
         _append_epoch(conn, "ledger")
     with seeded.begin() as conn:
-        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_operator")
         conn.exec_driver_sql(_request_sql(_O))
     with seeded.begin() as conn, pytest.raises(Exception, match="a seed observation is not evidence"):
-        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_operator")
         conn.exec_driver_sql(_request_sql(seed))
 
 

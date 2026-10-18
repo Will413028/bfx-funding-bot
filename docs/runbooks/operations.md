@@ -30,7 +30,7 @@ bot、webapi 與 owner 腳本開機時各讀一次：表或列缺失、值不是
 
 所有每幣別設定都是 DB 裡有版本的 CapitalPolicy，每次改動產生一個新 revision（舊的保留）。
 
-### 啟用／停用幣別：CLI（主要路徑）與 UI（只剩停用）
+### 啟用／停用幣別：啟用只走 CLI，停用 CLI 或 UI
 
 ```bash
 sudo bfx-op enable fUST --reason "為什麼啟用"     # 只走 CLI（ADR 2026-10-15 D4）
@@ -42,7 +42,9 @@ CLI 的入口、身分與 exit code 見 §10。兩條路都只把請求排入 `c
 `CapitalPolicyRequestWorker` 在 account lock 下重新驗證 operator 後，走與 script 相同的 amendment
 路徑寫一個新 revision（revision 的 `operator_request_id` 指回該請求；誰、為什麼是請求自己的欄位，
 不複製進 revision 的 `source`）。CLI 預設等到結果才結束；UI 的 Overview「交易狀態」面板「幣別」
-區塊列出同樣的狀態與結果。UI 的啟用按鈕依 ADR 2026-10-15 D4 將移除，不要依賴它。
+區塊列出同樣的狀態與結果（CLI 排入的請求也在內）。UI 沒有啟用按鈕，停用中的幣別只顯示 CLI 指令；
+webapi 也沒有啟用的端點，資料庫的 trigger 拒絕 table owner 與 `bfx_operator` 以外的 role 排入
+`enable`（migration `36e59526f8cf`）。
 
 - 停用：不掛新單，下一個 reconcile tick 撤掉該幣別的受管 offer；手動掛的單與已成交借款不動。
   不是停機，不寫 `trading_state`，恢復也不需要 resume。停用除了 operator 驗證之外不受任何條件
@@ -80,7 +82,7 @@ python -m scripts.amend_capital_policy --exchange-account-id UUID --environment 
 
 ## 3. 帳戶停止與恢復
 
-### 主要：CLI（`sudo bfx-op`）；kill 另可用 UI
+### 主要：CLI（`sudo bfx-op`）；UI 只能 kill
 
 ```bash
 sudo bfx-op resume --reason "為什麼恢復"   # 只走 CLI（ADR 2026-10-15 D4）
@@ -98,7 +100,9 @@ webapi、frontend 停著時 CLI 照樣能用（它是 one-off container，直接
 | `kill`（UI：Kill switch…，輸入 `KILL`） | `HALTED/operator` ＋ 每個幣別的 venue cancel-all，**連你在 Bitfinex 網頁手動掛的單也會撤**；已成交借款不受影響。等待中的其他請求標成 `superseded_by_kill`。kill 有自己的佇列、優先處理。已經 HALTED 時再送一次 ＝ 重試 cancel-all |
 
 `status` 與 UI 面板的「本次停機的 venue 撤單」顯示 `funding_cancel_all_audit` 的結果（kill 請求觸發的列帶該請求的 `operator_request_id`，`/admin/halt` 與自動保護為 NULL）；不完整時重試 kill 或到
-Bitfinex 手動撤單。**恢復只有 CLI 這一條路**（UI 的恢復按鈕依 ADR 2026-10-15 D4 將移除）；static token 不能恢復。
+Bitfinex 手動撤單。**恢復只有 CLI 這一條路**（ADR 2026-10-15 D4）：UI 沒有恢復按鈕，HALTED 時只顯示 CLI 指令；
+webapi 沒有 resume 端點，資料庫的 trigger 也拒絕 table owner 與 `bfx_operator` 以外的 role 排入 `resume`
+（migration `36e59526f8cf`）；static token 不能恢復。
 
 ### 緊急備用：`sudo bfx-op halt`（只能降低曝險）
 
@@ -169,7 +173,8 @@ container（見 §7）：停下的 bot 不會掛新單，但也不會撤單。
 涵蓋送單時間卻沒有，就判定未送出。以下情況會維持隔離、等你處理：history 不完整、兩個以上候選、
 候選已被其他紀錄認領、或指紋相同但其他條件不符。
 
-裁決只走 CLI（ADR 2026-10-15 D4；UI 的裁決按鈕將移除）。請求排入 `uncertainty_resolution_requests`，
+裁決只走 CLI（ADR 2026-10-15 D4）：UI 只顯示證據、候選與請求結果，下一步顯示 CLI 指令；webapi 沒有裁決端點，
+對 `uncertainty_resolution_requests` 也沒有 INSERT 權限（migration `36e59526f8cf`）。請求排入 `uncertainty_resolution_requests`，
 由 bot 套用；需要新鮮的 reconcile fence，過期會被拒 `stale_reconcile_fence`：
 
 ```bash
@@ -470,7 +475,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 
 - 代表：開機時 Bitfinex 拒絕帳戶的 API key（回應 `["error",10100,"apikey: …"]`，或 HTTP 401／403），bot 進入憑證恢復模式。例如 key 被撤銷或刪除、key 與 secret 對調。執行中被拒（只認 body 帶 10100；不帶 body 的 401／403 可能是閘道頁面，照一般抓取失敗累計）時 bot 先以 exit 78 結束（`daemon_fatal`，`error=VenueCredentialRejectedError`），重啟後的開機才發這則。每個帳戶一則（dedup 欄位 `account`）。
 - 系統會做：被拒期間不送單、不撤單、不寫帳本（重試的開機觀測成功那一次照常寫入觀測）；只跑換憑證 worker（照常發佈收件公鑰，CLI 可以封裝新 key 送進來）、writer lock、`health_check`、`db_keepalive` 與 healthz。`/healthz` 回 200（部署進恢復模式算部署成功，bfx-deploy 不會停掉 bot），`/readyz` 回 503。kill 等交易控制請求留在佇列，下次以可用的 key 開機後才套用並撤單。在 process 內每 1、2、4 分鐘、之後每 5 分鐘重試一次開機觀測；以下任一發生時乾淨重啟（`bot_runs` 記 `clean_stop`、exit 0），重啟後正常開機：輪替 applied、重試成功（key 在 Bitfinex 端恢復）、DB 裡的 active 憑證已換成另一把 key。重啟一律等這次 bot 開機滿 10 分鐘（部署 settle 期間不重啟）。其他錯誤（nonce 10114、invariant）照舊拒絕開機（`boot_refused`）。
-- operator 判斷：先判斷 key 是不是外洩或被人改動（Bitfinex 的 API key 頁面、帳號安全紀錄）。到 Bitfinex 產生一把新 key（只開 funding 寫入，IP 白名單照舊），以 `sudo bfx-op rotate-credential` 送出（§11）。bot 開機未滿 10 分鐘或部署進行中時請求會被拒（`bot_recently_started`／`deployment_in_progress`，見 [`credential_rotation_rejected`](#alert-credential_rotation_rejected)），屆時重送。輪替比對的是舊憑證列存下的 Bitfinex user id，所以舊 key 已撤銷也能換；舊憑證列沒有存 id 時（9c-2a 部署前建立、bot 還沒用可用的 key 開機過）會回 `account_identity_unavailable`，此時改用 webapi 的憑證端點建立新 key，恢復模式偵測到 active 憑證改變就會自動重啟。
+- operator 判斷：先判斷 key 是不是外洩或被人改動（Bitfinex 的 API key 頁面、帳號安全紀錄）。到 Bitfinex 產生一把新 key（只開 funding 寫入，IP 白名單照舊），以 `sudo bfx-op rotate-credential` 送出（§11）。bot 開機未滿 10 分鐘或部署進行中時請求會被拒（`bot_recently_started`／`deployment_in_progress`，見 [`credential_rotation_rejected`](#alert-credential_rotation_rejected)），屆時重送。輪替比對的是舊憑證列存下的 Bitfinex user id，所以舊 key 已撤銷也能換；active 憑證列一定存有 id（migration `36e59526f8cf` 的 CHECK），被換掉的列沒有 id 只可能是它在 id 寫入前就已 retired，此時回 `account_identity_unavailable`，以現在的 active 憑證重送（§11）。
 
 <a id="alert-venue_observation_history_incomplete"></a>
 #### `venue_observation_history_incomplete`（warning）
@@ -589,7 +594,6 @@ HTTP 500（body 為 `nonce: small`）。bot 內所有簽章請求共用一個 `A
 **只管 bot 這一個 process**。以下用同一把 key 的呼叫不經過它，可能讓 bot 的請求（包括撤單或
 kill 的 cancel-all）被拒：
 
-- webapi 的 `verify_account_key`（UI 驗證／更新帳戶 key 時呼叫 `auth/r/permissions`）
 - 一次性腳本：`scripts/bootstrap_account_credential.py` 等會打 Bitfinex auth 端點的工具
 - 任何在其他機器上用同一把 key 的手動測試
 
@@ -662,7 +666,7 @@ kill 的 cancel-all）被拒：
 3. 以上都成立後，才到 Bitfinex 刪除舊 key（key 衛生，不是交易步驟）。刪之前舊 key 一直可用，新 key 有問題時 bot 仍有退路。
 
 被拒或失敗：看 §6 的 [`credential_rotation_rejected`](#alert-credential_rotation_rejected)／[`credential_rotation_failed`](#alert-credential_rotation_failed)，拒絕時憑證沒有任何改動。
-現行 key 已經被 Bitfinex 拒絕（例如撤銷或刪除）：bot 在憑證恢復模式（[`credential_recovery_mode`](#alert-credential_recovery_mode)），換憑證 worker 照常執行，照上面的步驟送出即可；等 bot 開機滿 10 分鐘再送。比對帳號用的是舊憑證列存下的 Bitfinex user id，不需要舊 key 可用。舊憑證列沒有存 id（回 `account_identity_unavailable`）時，用 webapi 既有的憑證端點建立並驗證一把可用的 key；恢復模式偵測到 active 憑證改變會自動重啟。
+現行 key 已經被 Bitfinex 拒絕（例如撤銷或刪除）：bot 在憑證恢復模式（[`credential_recovery_mode`](#alert-credential_recovery_mode)），換憑證 worker 照常執行，照上面的步驟送出即可；等 bot 開機滿 10 分鐘再送。比對帳號用的是舊憑證列存下的 Bitfinex user id，不需要舊 key 可用；active 憑證列一定存有 id（migration `36e59526f8cf` 的 CHECK）。換憑證只有這一條路：憑證表的 INSERT／UPDATE 與寫入端點都已自 webapi 移除。
 
 ## 12. Break-glass
 
@@ -674,6 +678,9 @@ kill 的 cancel-all）被拒：
 | frontend、Better Auth、Redis、webapi | 不可用 | 可用 | 可用 |
 | host tailscaled、Tailscale control plane、IdP | 不可用 | 不可用 | 可用 |
 | Postgres、docker | 不可用 | 不可用 | 可用（只做主機修復） |
+
+「web UI」欄只指 kill、停用幣別與各種讀取；resume、啟用幣別、UNKNOWN 裁決與換憑證不論哪個元件壞了都只走 `bfx-op`
+（ADR 2026-10-15 D4），web UI 可用時也一樣。
 
 Tailscale 不通時：
 

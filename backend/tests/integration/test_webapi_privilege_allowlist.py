@@ -177,10 +177,12 @@ REVERSIBLE_COLUMNS: dict[tuple[str, str], set[str]] = {
 }
 # Head's allowlist: a migration after LAST_REVERSIBLE_REVISION that changes a web API privilege
 # adds or removes it here, never in REVERSIBLE_*.
-EXPECTED_TABLES: dict[str, set[str]] = {**REVERSIBLE_TABLES}
-EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {**REVERSIBLE_COLUMNS}
-# Before e4f5a6b7c8d9 revoked it, the web API could still insert the pre-switch evidence column.
+# 36e59526f8cf: credentials become read-only, and adjudications are queued by the CLI alone.
 _REQUEST_INSERT = ("uncertainty_resolution_requests", "INSERT")
+EXPECTED_TABLES: dict[str, set[str]] = {**REVERSIBLE_TABLES, "exchange_account_credentials": _R}
+EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
+    key: cols for key, cols in REVERSIBLE_COLUMNS.items() if key != _REQUEST_INSERT}
+# Before e4f5a6b7c8d9 revoked it, the web API could still insert the pre-switch evidence column.
 PRE_CONTRACT_COLUMNS = {
     **REVERSIBLE_COLUMNS,
     _REQUEST_INSERT: REVERSIBLE_COLUMNS[_REQUEST_INSERT] | {"reconcile_event_seq"},

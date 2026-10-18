@@ -39,7 +39,8 @@ venue's truth. Follow this sequence and do not skip a step:
    `POST /admin/halt`; works from the OCI console too). Both commit `HALTED` and then run
    the venue funding cancel-all; require every currency's cancel-all to be
    `acknowledged` (UI panel or `funding_cancel_all_audit`), and repeat the kill
-   until it is. HALTED is never lifted except by an operator resume in the UI.
+   until it is. HALTED is never lifted except by an operator resume through the
+   operator CLI (`sudo bfx-op resume`; the UI has no resume, ADR 2026-10-15 D4).
 2. Run a fresh full-account reconcile and record the accepted observation id,
    its query revision and timestamp, bounded venue IDs, and venue-vs-DB
    exposure diff.
@@ -59,7 +60,8 @@ venue's truth. Follow this sequence and do not skip a step:
 
 **Operator confirmation:** the named operator must sign the classification
 (matched/adopted, still UNKNOWN, orphan quarantined, or manually resolved) and
-the forward-fix evidence before the operator resumes in the UI under the applied
+the forward-fix evidence before the operator resumes through the operator CLI
+(`sudo bfx-op resume`) under the applied
 CapitalPolicy envelope. Keep the operator halt for UNKNOWN, orphan, mismatch, incomplete coverage, or any
 nonzero exposure difference. There is no automatic retry.
 

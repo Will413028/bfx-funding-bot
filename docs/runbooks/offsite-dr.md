@@ -446,7 +446,8 @@ exit status zero.
 Retain both reports and their digests in the release or incident evidence
 bundle. A future/stale timestamp, missing field, cleanup error, or
 `measured: false` report blocks acceptance. These artifacts never authorize a
-resume; resuming is an operator action in the UI. Never edit
+resume; resuming is an operator action through the operator CLI
+(`sudo bfx-op resume`; the UI has no resume, ADR 2026-10-15 D4). Never edit
 JSON to manufacture acceptance.
 
 ### 9. Enable, start, and list the timers

@@ -1,7 +1,7 @@
 """S1-3e4: the operator uncertainty-resolution request path under the ledger authority (PostgreSQL).
 
-The web API validates and queues a request that cites a ledger observation; the account
-daemon's worker re-validates it, matches the attempt against that observation and writes
+The operator CLI validates and queues a request that cites a ledger observation (the web API
+did until 9c-2b and now only reads); the account daemon's worker re-validates it, matches the attempt against that observation and writes
 the resolution journal row the request outcome then points at. Nothing touches the event
 log. Mutation map (spec "Acceptance + mutations", numbers in the test docstrings).
 """
@@ -584,7 +584,7 @@ async def test_a_second_request_cannot_reuse_a_journal_row(book) -> None:  # noq
             {"r": request_id}) == 1
 
 
-# --- real roles: the web API validates and queues, the bot applies ----------------------------------------
+# --- real roles: the bot applies, the web API reads (the CLI queues: test_operator_cli) ----------------
 
 
 def _role_factory(ledger_db, role: str):  # noqa: F811
@@ -604,14 +604,16 @@ def _role_factory(ledger_db, role: str):  # noqa: F811
 
 
 @pytest.mark.asyncio
-async def test_the_web_api_role_queues_and_the_bot_role_applies(book, ledger_db) -> None:  # noqa: F811
-    """No new grant: prepare reads only allowlisted columns."""
+async def test_the_bot_role_applies_and_the_web_api_role_reads_the_outcome(book, ledger_db) -> None:  # noqa: F811
+    """No new grant: the worker applies under ``bfx_bot``'s grants and the web API reads the
+    result under its own. Queued by the owner here; the operator CLI's role queueing the same
+    request is ``test_operator_cli``."""
     attempt, ref = await open_unknown(book, offers=(venue_offer("V1"),))
     web, web_factory = _role_factory(ledger_db, "bfx_webapi")
     bot, bot_factory = _role_factory(ledger_db, "bfx_bot")
     try:
         bind = intent(attempt, ref, "bind_to_venue", venue_offer_id="V1")
-        request_id = await queue(web_factory, bind)
+        request_id = await queue(book.factory, bind)
         assert await settle(bot_factory, request_id) == "applied"
         done = await request_row(book.factory, request_id)
         assert done.state == "applied"

@@ -2,9 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { accountScopedPath, apiClient } from "@/lib/api-client";
 import { fundingStatusKeys, tradingControlKeys } from "@/lib/query-keys";
 import type {
-  CurrencyAction,
   CurrencyRequest,
-  TradingControlAction,
   TradingControlOverview,
   TradingControlRequest,
 } from "@/types";
@@ -27,7 +25,7 @@ export function tradingControlPath(
 function pendingRequestIds(
   overview: TradingControlOverview | undefined,
 ): Set<string> {
-  // Resume/kill and currency toggles alike: each is settled by the daemon.
+  // Kill/resume (CLI) and currency toggles alike: each is settled by the daemon.
   const requests: { request_id: string; state: string }[] = [
     ...(overview?.requests ?? []),
     ...(overview?.currencies ?? []).flatMap((currency) => currency.requests),
@@ -83,14 +81,15 @@ export function useTradingControl(exchangeAccountId?: string) {
 }
 
 export interface TradingControlInput {
-  action: TradingControlAction;
+  /** The web API takes only a kill; resume is queued by the operator CLI. */
+  action: "kill";
   reason: string;
 }
 
 /**
- * Queue one operator request. The web API only records it; the account daemon
- * applies it, so success here means "accepted", not "done". No retry: a network
- * retry is not the operator's intent.
+ * Queue a kill. The web API only records it; the account daemon applies it,
+ * so success here means "accepted", not "done". No retry: a network retry is
+ * not the operator's intent.
  */
 export function useTradingControlRequest(exchangeAccountId?: string) {
   const queryClient = useQueryClient();
@@ -99,7 +98,7 @@ export function useTradingControlRequest(exchangeAccountId?: string) {
       if (!exchangeAccountId) throw new Error("exchangeAccountNotSelected");
       return apiClient.post<
         Pick<TradingControlRequest, "request_id" | "action" | "state">
-      >(tradingControlPath(exchangeAccountId, `/${input.action}`), {
+      >(tradingControlPath(exchangeAccountId, "/kill"), {
         reason: input.reason,
       });
     },
@@ -114,12 +113,13 @@ export function useTradingControlRequest(exchangeAccountId?: string) {
 
 export interface CurrencyToggleInput {
   symbol: string;
-  action: CurrencyAction;
+  /** The web API takes only a disable; enable is queued by the operator CLI. */
+  action: "disable";
   reason: string;
 }
 
 /**
- * Queue an enable/disable of one currency's policy. Same contract as
+ * Queue a disable of one currency's policy. Same contract as
  * {@link useTradingControlRequest}: accepted, not done; never retried.
  */
 export function useCurrencyToggleRequest(exchangeAccountId?: string) {
@@ -132,7 +132,7 @@ export function useCurrencyToggleRequest(exchangeAccountId?: string) {
       >(
         tradingControlPath(
           exchangeAccountId,
-          `/currencies/${encodeURIComponent(input.symbol)}/${input.action}`,
+          `/currencies/${encodeURIComponent(input.symbol)}/disable`,
         ),
         { reason: input.reason },
       );

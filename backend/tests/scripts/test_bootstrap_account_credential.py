@@ -148,10 +148,14 @@ def test_real_cli_transaction_and_dependency_errors_are_secret_safe(
     leak = " ".join(values.values())
     monkeypatch.setattr(db, "make_async_engine_from_url", lambda url: engine)
 
+    paths: list[str] = []
+    inserted: list[object] = []
+
     def transport(request):
-        # The permissions check, then the key's Bitfinex user id (stored on the row).
+        # The key's Bitfinex user id (stored on the pending row), then the permissions check.
         assert request.url.path in ("/v2/auth/r/permissions", "/v2/auth/r/info/user")
         assert request.headers["bfx-apikey"] == "KEY-SENTINEL"
+        paths.append(request.url.path)
         logging.getLogger("httpx").critical(leak)
         if fault == "http":
             return httpx.Response(500, text=leak)
@@ -174,6 +178,11 @@ def test_real_cli_transaction_and_dependency_errors_are_secret_safe(
     def fail_commit(conn):
         raise RuntimeError(leak)
 
+    def record_insert(conn, cursor, statement, parameters, context, many):
+        if "INSERT INTO exchange_account_credentials" in statement:
+            inserted.append(parameters)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record_insert)
     if fault == "flush":
         event.listen(engine.sync_engine, "before_cursor_execute", fail_flush)
     if fault == "commit":
@@ -211,6 +220,11 @@ def test_real_cli_transaction_and_dependency_errors_are_secret_safe(
         async with factory() as session:
             return await session.scalar(select(func.count()).select_from(ExchangeAccountCredential))
 
+    event.remove(engine.sync_engine, "before_cursor_execute", record_insert)
+    if fault not in ("http", "flush"):
+        # The pending row is inserted with the id: an active row must name it (a CHECK).
+        assert paths[0] == "/v2/auth/r/info/user"
+        assert len(inserted) == 1 and 4242 in tuple(inserted[0])
     try:
         assert asyncio.run(count_rows()) == expected_count
     finally:

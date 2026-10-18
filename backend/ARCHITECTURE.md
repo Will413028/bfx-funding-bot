@@ -356,7 +356,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 **Quarantine（`_internal/quarantine.py`）**：`quarantine_opening` 與不可變的 `quarantine_member`，開在兩種情況：(a) 已 `ack`（或已綁定）的 attempt 的 offer 由完整證據證明不在 active、history 與 trades 裡（R6，`ack_unreflected`，`basis._can_quarantine`）；(b) mirror 上已確證終結的 offer／credit id 又出現在 active（`terminal_identity_reappeared`，同 symbol 已有未解的 plain quarantine（`source_attempt_id IS NULL`）就加成 member，否則另開；不併入 `ack_unreflected`）。quarantine 讓該 symbol 的 capital read 回 `execution_unknown`，只能由 operator 的 `manual` resolution 結束。
 
-**Operator resolution outbox**：webapi 只 INSERT `uncertainty_resolution_requests` 的請求欄位（必須引用該 scope 最新的 accepted observation）；`prepare` 在 webapi role 以生成欄位做預覽比對（advisory），daemon 的 `UncertaintyResolutionWorker` 在 scope lock 內以 attempt payload（digest 重驗）重跑同一條 `match_unknown` 規則後寫 `execution_resolution_journal`（帶 `operator_request_id`），請求列再記下結果（`_internal/operator_resolution.py`、`execution/operator_requests.py`）。operator 的 bind 需要點名該 offer 的 exact match、not-accepted 需要 zero match，沒有 settle／near-miss／認領檢查；`manual` 只用於 quarantine。
+**Operator resolution outbox**：operator CLI（`bfx_operator`）只 INSERT `uncertainty_resolution_requests` 的請求欄位（必須引用該 scope 最新的 accepted observation；webapi 只讀，migration `36e59526f8cf` 收回它的 INSERT）；`prepare` 在排入的 role 以生成欄位做預覽比對（advisory），daemon 的 `UncertaintyResolutionWorker` 在 scope lock 內以 attempt payload（digest 重驗）重跑同一條 `match_unknown` 規則後寫 `execution_resolution_journal`（帶 `operator_request_id`），請求列再記下結果（`_internal/operator_resolution.py`、`execution/operator_requests.py`）。operator 的 bind 需要點名該 offer 的 exact match、not-accepted 需要 zero match，沒有 settle／near-miss／認領檢查；`manual` 只用於 quarantine。
 
 **Bus 通知（`execution/events.py`、`command_boundary.py`、`ledger/__init__.py`）**：bus 不持久化任何東西，只在對應寫入 commit 之後發：`CommandOutcomeNotice`、`UnknownResolutionNotice`、`PositionReconciled`（每個 accepted cycle、每 symbol，取自該 cycle 自己的 basis，餵 NAV 告警）、`VenueHintNotification`（hint sink，無 DB 寫入），以及 audit 用的 `CancelRequested`／`CancelAcknowledged`。publish 失敗只記 log，不影響已 durable 的事實；任何通知都不是資金來源。
 
@@ -385,11 +385,11 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 3. `HeartbeatGuard` — 只 watch dependency freshness：有 public WS 的 process watch `ws_data`（`MARKET_DATA_FRESHNESS`：這個 WS client 實際收到 frame 的時間，含 Bitfinex `hb`，`BitfinexWSClient.last_frame_age_ms`），沒有 public WS 的組裝（`skip_ws`，只用於測試）不 watch 任何 key。判斷規則與 threshold 只有一份：`core.health.dependency_is_stale`／`DEPENDENCY_THRESHOLDS`（`ws_data` 90 s，整數秒、等於門檻不擋），`/readyz` 用同一個函式；safety config 只剩 `heartbeat.enabled`（舊的 `sub_task_stale_threshold_seconds` 會被拒絕載入）。開機後從未記錄過的 key 視為過期、擋單，直到第一個 beat（fail-closed）。Bitfinex 斷線時由此擋單、不靠重啟。刻意**不** watch `executor`/`safety_chain`（reactive，靜市場時不跳動，誤判會造成 idle restart loop）。
 4. `CapitalPolicyGuard` 與 `OfferEnvelopeGuard`：資金上限只來自已套用的 `CapitalPolicy`（沒有 `AllocationCapGuard` / `BuyingPowerGuard`，也沒有 safety config 的 `allocation_cap` / `buying_power` 區段）；鏈尾是 `WriterLockGuard`。
 
-5. `OfferEnvelopeGuard`（`safety/pre_trade.py`，lending envelope ADR 2026-09-25 D1）— 每筆新 offer 對 applied `CapitalPolicy` 的包絡檢查：`max_offer_amount`、天期 [min,max]、同幣別 open 的受管 offer 數（手動單不佔名額）、利率下限 ＝ max(`min_rate_apr`/365, 即時 bid 中位數 × `rate_floor_ratio`)。policy 沒有包絡（schema 1/2）、讀不到、沒有新鮮 book 一律擋。包絡改動走 `scripts/amend_capital_policy.py`（dry run → digest → apply，新 revision）；`enabled` 平常由 UI 請求切換（見下方 Trading state）；撤單不經過它。送單節流 `CommandThrottle` 是平台設定（`pre_trade_limits.command_rate`），不在包絡裡。
+5. `OfferEnvelopeGuard`（`safety/pre_trade.py`，lending envelope ADR 2026-09-25 D1）— 每筆新 offer 對 applied `CapitalPolicy` 的包絡檢查：`max_offer_amount`、天期 [min,max]、同幣別 open 的受管 offer 數（手動單不佔名額）、利率下限 ＝ max(`min_rate_apr`/365, 即時 bid 中位數 × `rate_floor_ratio`)。policy 沒有包絡（schema 1/2）、讀不到、沒有新鮮 book 一律擋。包絡改動走 `scripts/amend_capital_policy.py`（dry run → digest → apply，新 revision）；`enabled` 由 operator 請求切換：啟用只經 CLI，停用經 UI 或 CLI（見下方 Trading state）；撤單不經過它。送單節流 `CommandThrottle` 是平台設定（`pre_trade_limits.command_rate`），不在包絡裡。
 
 **NAV-drop 告警（第 4 級，不擋單）**：`NavDropMonitor` 包住 `ReconcileNavTracker`（per-symbol，NAV＝available＋offered＋lent，原生單位），24h 虧損或 drawdown 超過 `nav_alerts` 門檻時發 `nav_drop` 告警一次。放貸只會少賺、不會讓 NAV 下降；會下降的是提領、轉帳、平台分攤損失，停止放貸補救不了，所以不再有 loss／drawdown guard。
 
-**Trading state（ADR D4）**：`trading_state` 是帳戶層的停機權威，append-only，只有 `ACTIVE`／`HALTED`，cause 為 `operator`｜`auto`；DB trigger 只允許 operator 結束 HALTED，唯一例外是 `HALTED/auto` → `ACTIVE/auto`（見「自動保護」；migration `8e4b2f6a1c37`）；trigger 在 scope lock 之後讀最新列判斷轉移，所以只接受 READ COMMITTED 的寫入者（其他等級 `BX004`：REPEATABLE READ／SERIALIZABLE 的 snapshot 早於鎖，而前一筆是 READ COMMITTED 時 SSI 也偵測不到；migration `2e835b6f4c12`）（2026-09-25 前的列可能是 REDUCING／`material_deploy`，CHECK 為 NOT VALID 保留原樣，遷移時目前是 REDUCING 的 scope 已補一列 operator HALTED）。日常的單幣別停止是 policy 的 `enabled=false`：不掛新單，reconciler 撤掉該幣別的受管 offer（見下方「受管 offer 的收斂」），已成交借款照常到期。`enabled` 由 webapi 的 TOTP enable/disable 請求切換（`capital_policy_requests`，`CapitalPolicyRequestWorker` 經 `capital_amendment` → ledger `PolicyStore.apply_policy` 寫新 revision）；停用只看 operator 驗證，不看 build、trading state 或包絡；沒有包絡也可啟用（guard 照擋）。bfx_bot 對 policy 表只有這一種寫法：DB trigger 只准它寫「目前 head 的下一個 revision、除 `enabled` 外完全相同、typed `operator_request_id` 指向一筆仍在等待、同幣別同方向、且 `public.operator_authorized` 仍通過的請求」並把 head 前進一格（migration `5e820d6dc7da`；誰、為什麼是請求自己的欄位，revision 的 `source` 只記 amendment digest 與 changes，owner script 另記 `--reason`）；偽造的 request id 無法讓 runtime role 自行擴大交易；owner（script）不受限。恢復只經 webapi 的 TOTP resume 請求，不帶任何限額期；static token 只有 `/admin/halt`。部署不寫 trading state；change class 已移除（`deployments.change_class` 由 migration `5b9e3d7a2f41` drop，舊列的 class 仍留在 `detail`）。
+**Trading state（ADR D4）**：`trading_state` 是帳戶層的停機權威，append-only，只有 `ACTIVE`／`HALTED`，cause 為 `operator`｜`auto`；DB trigger 只允許 operator 結束 HALTED，唯一例外是 `HALTED/auto` → `ACTIVE/auto`（見「自動保護」；migration `8e4b2f6a1c37`）；trigger 在 scope lock 之後讀最新列判斷轉移，所以只接受 READ COMMITTED 的寫入者（其他等級 `BX004`：REPEATABLE READ／SERIALIZABLE 的 snapshot 早於鎖，而前一筆是 READ COMMITTED 時 SSI 也偵測不到；migration `2e835b6f4c12`）（2026-09-25 前的列可能是 REDUCING／`material_deploy`，CHECK 為 NOT VALID 保留原樣，遷移時目前是 REDUCING 的 scope 已補一列 operator HALTED）。日常的單幣別停止是 policy 的 `enabled=false`：不掛新單，reconciler 撤掉該幣別的受管 offer（見下方「受管 offer 的收斂」），已成交借款照常到期。`enabled` 由 operator 請求切換（`capital_policy_requests`：enable 只由 CLI 排入，disable 由 CLI 或 webapi 的 TOTP 請求排入；`CapitalPolicyRequestWorker` 經 `capital_amendment` → ledger `PolicyStore.apply_policy` 寫新 revision）；停用只看 operator 驗證，不看 build、trading state 或包絡；沒有包絡也可啟用（guard 照擋）。bfx_bot 對 policy 表只有這一種寫法：DB trigger 只准它寫「目前 head 的下一個 revision、除 `enabled` 外完全相同、typed `operator_request_id` 指向一筆仍在等待、同幣別同方向、且 `public.operator_authorized` 仍通過的請求」並把 head 前進一格（migration `5e820d6dc7da`；誰、為什麼是請求自己的欄位，revision 的 `source` 只記 amendment digest 與 changes，owner script 另記 `--reason`）；偽造的 request id 無法讓 runtime role 自行擴大交易；owner（script）不受限。恢復只經 CLI（`bfx-op resume`）排入的 resume 請求，不帶任何限額期；webapi 只能排入 kill；static token 只有 `/admin/halt`。部署不寫 trading state；change class 已移除（`deployments.change_class` 由 migration `5b9e3d7a2f41` drop，舊列的 class 仍留在 `detail`）。
 
 **受管與外來 offer（D2）**：有 provenance（點名它的 `ack` outcome 或 `bound_to_venue` resolution → attempt，§5）的才是受管。沒有的是外來（手動掛單、Bitfinex auto-renew）：capital classifier 記入 `foreign`、不算受管曝險（金額本來就不在 venue available 內），bot 不撤不重定價，`foreign_exposure` 告警一次。
 
@@ -472,7 +472,7 @@ accepted_capital_basis (每個 accepted observation 一列，同 txn 寫入)
   + accepted_capital_basis_symbol（含 block 與 conservation verdict）/ _cell / _credit /
     _credit_cell / _attempt（classification）/ _quarantine
 
-uncertainty_resolution_requests (webapi→daemon 裁決請求；webapi 只 INSERT 請求欄位)
+uncertainty_resolution_requests (CLI→daemon 裁決請求；bfx_operator 只 INSERT 請求欄位，webapi 只讀)
   request_id, scope, uncertainty_id, action, observation_id, venue_offer_id, decision,
   reason, requested_by, created_at_ms, state, ...
 
@@ -764,7 +764,7 @@ account proxy/MFA，webapi 只需既有 membership/account SELECT grants，向 d
 缺 policy、disabled、halt 分別顯示；Decimal 保留字串，draft 不等於 applied。
 **Operator requests（`execution/operator_requests.py`，ADR D4'）**：所有會改動執行狀態的人為操作——
 uncertainty 裁決（bind-to-venue／mark-not-accepted／manual-resolution，`uncertainty_resolution_requests`）、
-resume／kill（`trading_control_requests`）與幣別 enable／disable（`capital_policy_requests`）——走同一套 outbox 合約：webapi 只以
+resume／kill（`trading_control_requests`）與幣別 enable／disable（`capital_policy_requests`）——走同一套 outbox 合約：寫入者（operator CLI；webapi 只剩 kill 與 disable）只以
 `insert_request` 寫該表的請求欄位（model 的 `REQUEST_COLUMNS`＝migration 的欄位級 INSERT grant）並回 202，
 不取帳戶鎖（單一 pending 由 partial unique index 保證：`INSERT … ON CONFLICT (<該 index>) DO NOTHING`，只有這種衝突回 409，其他違規照常拋出）；daemon 的 `OperatorRequestWorker` 子類
 （`UncertaintyResolutionWorker`、`TradingControlWorker`、`CapitalPolicyRequestWorker`，各自一個 task）一次處理最舊的一筆，在帳戶鎖內的 savepoint 以
@@ -772,7 +772,11 @@ resume／kill（`trading_control_requests`）與幣別 enable／disable（`capit
 failed＋根因）記回請求列，套用產生的效果列（trading state、policy revision、cancel-all audit、journal）帶 `operator_request_id` 指回請求；寫不進去的請求另以獨立交易標 failed，連這都失敗就由本 process 跳過，不擋佇列。
 需要在鎖外觀測的資料以 `NeedsPreparation` → `prepare` 取得後再 apply。清單列帶最新一筆請求，前端只在有 pending 時輪詢清單。webapi 對 ledger
 表零寫權限，授權與收回都在 migration（`1c435a35dcb4`、`5b1e7c9d2a40`、`7d2a9c4e6b13`、`5e820d6dc7da`）。
-請求的驗證與排入只有一份：`execution/operator_commands.py`，webapi handler 與 operator CLI（`apps/operator_cli.py`）都是它的 adapter。
+resume、enable、裁決與換憑證只由 CLI 排入（ADR 2026-10-15 D4，migration `36e59526f8cf`）：裁決表的 INSERT 與憑證表的 INSERT／UPDATE 已自 `bfx_webapi` 收回；
+還保留 kill／disable 的兩張請求表各掛一個 `BEFORE INSERT OR UPDATE OF action` trigger（`trading_control_request_operator_only`、
+`capital_policy_request_operator_only`，函式 `guard_operator_only_request_action`），`resume`／`enable` 只允許 table owner（migration、owner 腳本）與
+`bfx_operator` 寫入，是允許清單：其他持有請求欄位 INSERT 的 role（`bfx_webapi`、日後新增的 role）一律拒絕。
+請求的驗證與排入只有一份：`execution/operator_commands.py`，operator CLI（`apps/operator_cli.py`）與 webapi 的 kill／disable handler 都是它的 adapter。
 CLI 以 one-off compose service `bfx-operator`（`deploy/vm/ops/docker-compose.operator.yml`）執行，連線用專屬 role `bfx_operator`：
 migration `4ab02765a34b`（輪替另由 `1db83367918c` 加上）的精確 allowlist，只有四個 outbox 請求欄位的 INSERT 與驗證所需的讀取，沒有 UPDATE／DELETE（`test_operator_privilege_allowlist.py`）。
 CLI 開頭比對 wrapper 傳入的 tailnet 身分與 `operator.env` 設定的值，不符就 exit 77、不連 DB；之後同 webapi 檢查 schema head 與 ledger authority。
@@ -782,10 +786,12 @@ CLI 不持有 KEK。bot 每次開機（`bot_runs` 寫入後）產生一把 X2551
 CLI 的 `rotate-credential` 從 stdin 讀新 key，只封給「scope 最新、尚未結束的 run」的收件 key（HPKE base mode，`info` 綁帳號、環境、收件 key 與 request id），
 寫進 `credential_rotation_requests`（同一套 outbox 合約，`bfx_operator` 讀不到 `sealed_credential`）。`CredentialRotationWorker` 在鎖外判定
 （最新部署列是 15 分鐘內的 `started` → `deployment_in_progress`；這次 run 開機未滿 10 分鐘 → `bot_recently_started`（被部署 settle 的一定是剛開機的 bot）；收件 key 不是這次開機的 → `recipient_key_stale`；
-解不開；key 曾 retired／revoked；權限不是只有 funding 可寫；與被取代憑證列存下的 Bitfinex user id（`bitfinex_user_id`，migration `1d34a3306e02`）不同——沒有存 id 時才以現行 key 即時查；Bitfinex 帶錯誤代碼的 500 是回答，沒回答才算 transient，同 boot wait 的 `errors.venue_did_not_answer`），判定結果帶回鎖內才拒絕（記成 rejected）；
+解不開；key 曾 retired／revoked；權限不是只有 funding 可寫；與被取代憑證列存下的 Bitfinex user id（`bitfinex_user_id`，migration `1d34a3306e02`）不同——被取代的列沒有存 id 時直接拒絕 `account_identity_unavailable`，不問現行 key；Bitfinex 帶錯誤代碼的 500 是回答，沒回答才算 transient，同 boot wait 的 `errors.venue_did_not_answer`），判定結果帶回鎖內才拒絕（記成 rejected）；
 通過時在記結果的同一個交易裡 retire 舊憑證、以 KEK envelope 寫入新的 active 憑證（`operator_request_id` 指回請求）。commit 後設 daemon 的 stop event，
 照 SIGTERM 的乾淨停機結束（commit 成功但確認遺失時，閒置的 worker 看到 active 憑證來自本 run 期間 applied 的請求就補做）、由 container restart policy 重啟，開機時 `load_account_credentials` 載入新憑證。重啟後舊密文永遠解不開。只有 vault 憑證的 venue（Bitfinex）接這個 worker。
-`bitfinex_user_id` 由 applied 的輪替與 bootstrap 寫入；active 列為 NULL 時，worker 在正常模式的閒置時以開機載入的 key 查 `info/user` 補上（trust on first use；UPDATE 以該 key 定位列，webapi 中途換掉 active 列時不會寫到新列；每個 run 試一次，失敗後最多每小時一次；憑證恢復模式不試）。所以現行 key 已在 Bitfinex 撤銷時仍可輪替，憑證恢復模式因此有出口。
+`bitfinex_user_id` 由 applied 的輪替與 bootstrap 在建立列時寫入（bootstrap 先以新 key 查 `info/user`，pending 列就帶 id，驗證通過才 promote）；
+CHECK `ck_exchange_account_credentials_active_user_id`（migration `36e59526f8cf`，加之前斷言沒有 active 且 NULL 的列）保證 active 列一定有 id，所以 worker 不需要也沒有 trust-on-first-use 回填，換憑證 worker 也從不問現行 key。
+因此現行 key 已在 Bitfinex 撤銷時仍可輪替，憑證恢復模式因此有出口。
 靜態 admin token 不能 resume live。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 

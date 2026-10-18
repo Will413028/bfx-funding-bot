@@ -325,7 +325,7 @@ async def _rotation_fixture(factory) -> tuple[UUID, UUID]:
             api_key="FAKE-OLD-KEY", secret_ciphertext=envelope.secret_ciphertext,
             secret_nonce=envelope.secret_nonce, wrapped_dek=envelope.wrapped_dek,
             dek_nonce=envelope.dek_nonce, key_version=envelope.key_version,
-            lifecycle_status="active", verified_at=datetime.now(UTC))
+            lifecycle_status="active", verified_at=datetime.now(UTC), bitfinex_user_id=4242)
         s.add(old)
         s.add(BotRunRow(run_id=run_id, exchange_account_id=_ROTATION_ACCOUNT,
                         deployment_environment="ci", started_at_ms=1, host_name="t", pid=1))
@@ -433,7 +433,7 @@ async def test_verify_never_writes_over_a_row_retired_while_bitfinex_answered(pg
             api_key="FAKE-KEY", secret_ciphertext=envelope.secret_ciphertext,
             secret_nonce=envelope.secret_nonce, wrapped_dek=envelope.wrapped_dek,
             dek_nonce=envelope.dek_nonce, key_version=envelope.key_version,
-            lifecycle_status="active", verified_at=datetime.now(UTC))
+            lifecycle_status="active", verified_at=datetime.now(UTC), bitfinex_user_id=4242)
         s.add(row)
         await s.flush()
         key_id = row.id

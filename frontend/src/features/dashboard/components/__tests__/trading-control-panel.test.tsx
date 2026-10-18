@@ -126,9 +126,10 @@ it("reads no recorded decision as halted", async () => {
       "No trading decision recorded — treated as HALTED.",
     ),
   ).toBeTruthy();
+  expect(screen.getByText('sudo bfx-op resume --reason "…"')).toBeTruthy();
 });
 
-it("resume is offered after a stop and goes through the web API naming no build", async () => {
+it("a stop offers no resume here, only the operator CLI command", async () => {
   const sent = mount(
     overview({
       trading_state: stateOf("HALTED", "auto"),
@@ -137,22 +138,19 @@ it("resume is offered after a stop and goes through the web API naming no build"
       ],
     }),
   );
-  expect(await screen.findByText(/no probation follows/)).toBeTruthy();
-  fireEvent.change(
-    screen.getByLabelText("Reason (recorded with your request)"),
-    { target: { value: "loss explained" } },
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Resume trading" }));
-  await waitFor(() =>
-    expect(sent.filter((s) => s.method === "POST")).toHaveLength(1),
-  );
-  expect(sent.find((s) => s.method === "POST")).toEqual({
-    url: `${base}/resume`,
-    method: "POST",
-    body: { reason: "loss explained" },
-  });
-  // Never the bot's static-token admin API.
-  expect(sent.every((s) => s.url.startsWith(base))).toBe(true);
+  expect(
+    await screen.findByText('sudo bfx-op resume --reason "…"'),
+  ).toBeTruthy();
+  expect(
+    screen.getByText(/Resuming goes through the operator CLI/),
+  ).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /resume/i })).toBeNull();
+  // Nothing to type a resume reason into: the kill keeps its own form.
+  expect(screen.queryAllByRole("textbox")).toHaveLength(0);
+  expect(
+    screen.getAllByRole("button").map((button) => button.textContent),
+  ).toEqual(["Retry kill switch…"]);
+  expect(sent.some((s) => s.method === "POST")).toBe(false);
 });
 
 it("an active state offers no resume, only the kill switch", async () => {
@@ -160,7 +158,8 @@ it("an active state offers no resume, only the kill switch", async () => {
   expect(
     await screen.findByRole("button", { name: "Kill switch…" }),
   ).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Resume trading" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /resume/i })).toBeNull();
+  expect(screen.queryByText(/bfx-op resume/)).toBeNull();
   expect(
     screen.getAllByRole("button").map((button) => button.textContent),
   ).toEqual(["Kill switch…"]);
@@ -229,7 +228,7 @@ it("a halt with no cancel-all recorded says so", async () => {
   ).toBeTruthy();
 });
 
-it("while a request waits, other actions wait too but the kill does not", async () => {
+it("a resume queued from the CLI shows as waiting and never holds the kill", async () => {
   mount(
     overview({
       trading_state: stateOf("HALTED", "operator"),
@@ -239,17 +238,7 @@ it("while a request waits, other actions wait too but the kill does not", async 
   expect(
     await screen.findByText("Waiting for the trading daemon: resume"),
   ).toBeTruthy();
-  fireEvent.change(
-    screen.getByLabelText("Reason (recorded with your request)"),
-    { target: { value: "again" } },
-  );
-  expect(
-    (
-      screen.getByRole("button", {
-        name: "Resume trading",
-      }) as HTMLButtonElement
-    ).disabled,
-  ).toBe(true);
+  expect(screen.queryByRole("button", { name: /resume/i })).toBeNull();
   expect(
     (
       screen.getByRole("button", {
@@ -277,17 +266,22 @@ it("shows why the daemon refused the last request", async () => {
   ).toBeTruthy();
 });
 
-it("shows the web API's refusal of a request", async () => {
+it("shows the web API's refusal of a kill", async () => {
   mount(overview({ trading_state: stateOf("HALTED", "operator") }), () =>
-    Response.json({ detail: "request_pending" }, { status: 409 }),
+    Response.json({ detail: "forbidden" }, { status: 403 }),
   );
-  fireEvent.change(
-    await screen.findByLabelText("Reason (recorded with your request)"),
-    { target: { value: "back" } },
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Retry kill switch…" }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Resume trading" }));
+  const fieldset = screen.getByRole("group", { name: "Kill switch" });
+  const [reason, phrase] = Array.from(
+    fieldset.querySelectorAll("input"),
+  ) as HTMLInputElement[];
+  fireEvent.change(reason, { target: { value: "again" } });
+  fireEvent.change(phrase, { target: { value: "KILL" } });
+  fireEvent.click(screen.getByRole("button", { name: "Confirm kill" }));
   expect(
-    await screen.findByText("Another request is still waiting for the daemon."),
+    await screen.findByText("Only the operator can do this."),
   ).toBeTruthy();
 });
 
@@ -312,7 +306,7 @@ it("an unreadable state leaves nothing to act on but the kill switch", async () 
   );
 });
 
-// ── Currency enable/disable ─────────────────────────────────────────────────
+// ── Currency disable (enable only through the operator CLI) ─────────────────
 
 function currency(extra: Partial<CurrencyPolicy> = {}): CurrencyPolicy {
   return {
@@ -366,7 +360,34 @@ it("shows each currency's state and offer limits, or that the limits are unset",
   expect(screen.getByText("fUSD · Disabled")).toBeTruthy();
   expect(screen.getByText(/Offer limits not set/)).toBeTruthy();
   expect(screen.getByRole("button", { name: "Disable fUST" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Enable fUSD" })).toBeTruthy();
+});
+
+it("a disabled currency offers no enable here, only the operator CLI command", async () => {
+  const sent = mount(
+    overview({
+      currencies: [currency({ symbol: "fUSD", enabled: false })],
+    }),
+  );
+  expect(
+    await screen.findByText('sudo bfx-op enable fUSD --reason "…"'),
+  ).toBeTruthy();
+  expect(
+    screen.getByText(/Enabling goes through the operator CLI/),
+  ).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /fUSD/ })).toBeNull();
+  expect(screen.queryByLabelText("Reason for the fUSD change")).toBeNull();
+  expect(
+    screen.getAllByRole("button").map((button) => button.textContent),
+  ).toEqual(["Kill switch…"]);
+  expect(sent.some((s) => s.method === "POST")).toBe(false);
+});
+
+it("an enabled currency shows no CLI enable command", async () => {
+  mount(overview({ currencies: [currency()] }));
+  expect(
+    await screen.findByRole("button", { name: "Disable fUST" }),
+  ).toBeTruthy();
+  expect(screen.queryByText(/bfx-op enable/)).toBeNull();
 });
 
 it("disabling a currency needs a reason and only queues a request", async () => {

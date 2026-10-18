@@ -241,7 +241,7 @@ def preview_terms(
 ) -> UnknownTerms | None:
     """The attempt's terms from the generated match columns: no payload, hence no digest recheck.
 
-    Advisory only (the web API's preview and queue-time check); the worker re-judges every
+    Advisory only (the web API's preview, the CLI's queue-time check); the worker re-judges every
     request from the payload through ``_terms``. A NULL column is an absent payload key.
     """
     if rate is None or period is None or offer_type is None or flags is None:
