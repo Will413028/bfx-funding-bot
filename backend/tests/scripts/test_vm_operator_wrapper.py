@@ -512,6 +512,16 @@ def test_halt_exits_with_the_scripts_code(returncode, capsys) -> None:
     assert ("operations runbook" in err) is (returncode != 0)
 
 
+def test_halt_journals_the_end_when_docker_cannot_run() -> None:
+    def no_docker(argv: list[str], env: Mapping[str, str], stdin_text: str | None,
+                  on_stderr: Any) -> int:
+        raise FileNotFoundError(argv[0])
+
+    code, journal, _, _ = _halt(["halt", "--reason", HALT_REASON], execute=no_docker)
+    assert code == 1 and journal[-1].startswith("end command=halt")
+    assert journal[-1].endswith("exit=1")
+
+
 def test_halt_never_journals_the_reason() -> None:
     _, journal, _, _ = _halt(["halt", "--reason", HALT_REASON])
     assert "venue looks wrong" not in " ".join(journal)

@@ -416,7 +416,11 @@ def run_halt(call: Call, environ: Mapping[str, str], *, journal: Journal, runner
         sys.stderr.write(line)
         sys.stderr.flush()
 
-    returncode = execute(argv, _caller_values(environ), None, on_stderr)
+    try:
+        returncode = execute(argv, _caller_values(environ), None, on_stderr)
+    except OSError as exc:  # docker missing or not runnable: still journal the end
+        log(f"cannot run docker: {type(exc).__name__}")
+        returncode = EXIT_CANNOT_RUN
     journal(f"end {who} exit={returncode}")
     if returncode == 3:
         log("HALTED, but the venue cancel-all is incomplete: run the same halt again to "
