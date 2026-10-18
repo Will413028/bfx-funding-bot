@@ -371,6 +371,31 @@ async def test_submit_failure_keeps_only_bounded_response_evidence() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_settles_a_recorded_venue_refusal_as_failed() -> None:
+    """A 500 carrying a recorded validation refusal is the venue's answer, not an outage."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text=(
+            '["error",10001,"Invalid offer: not enough UST balance available in deposit wallet"]'
+        ))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = BitfinexLiveExecutor(
+        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
+        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
+        configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
+        auth_gate=AuthRequestGate(lambda: 1000),
+    )
+    result = await _submit(executor, _ready(_make_decision()), _make_ctx())
+    assert result.outcome_kind is SubmitOutcomeKind.REJECTED
+    assert result.status == "failed"
+    assert result.venue_offer_id is None
+    assert result.raw_response == {
+        "http_status": 500,
+        "response_digest": result.raw_response["response_digest"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_cancel_publishes_cancel_requested() -> None:
     # Bitfinex cancel SUCCESS shape (10 elements; raw[6]="SUCCESS")
     cancel_success_resp = [
