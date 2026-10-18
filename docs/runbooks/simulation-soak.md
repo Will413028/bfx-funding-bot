@@ -243,7 +243,19 @@ docker rm bfx-sim
 在視窗開始後第 6 到 10 小時之間做**一次**（報告檢查 kill 的時間落在這段，這樣恢復後才有 ≥ 8 小時的交易）：
 
 1. kill：以 §3 的 `sim.env` 內的 token，對 sim 的 healthz 送 `POST /admin/halt?reason=...&actor=soak-kill`
-   （做法同 [operations.md](operations.md) §3「緊急備用」，container 換成 `bfx-sim`，`docker exec` 讓 token 留在 container 內）。
+   （`bfx-op halt` 只打 `bfx-bot`，sim 直接 `docker exec`，token 留在 container 內）：
+   ```bash
+   sudo docker exec bfx-sim /app/.venv/bin/python -c '
+   import os, sys, urllib.error, urllib.parse, urllib.request
+   q = urllib.parse.urlencode({"reason": sys.argv[1], "actor": "soak-kill"})
+   r = urllib.request.Request("http://127.0.0.1:8080/admin/halt?" + q, method="POST",
+       headers={"Authorization": "Bearer " + os.environ["BFX_ADMIN_TOKEN"]})
+   try:
+       print(urllib.request.urlopen(r, timeout=120).read().decode())
+   except urllib.error.HTTPError as e:
+       print(e.code, e.read().decode()); sys.exit(1)
+   ' "soak kill"
+   ```
    200＝`HALTED/operator` 且每個幣別 cancel-all 都 acknowledged；502＝HALTED 已生效但 venue 部分未完成，再呼叫一次。
    報告以「cause=operator 的 HALT ＋ 有 `acknowledged` 的 `funding_cancel_all_audit`」計一次 kill。
 2. 維持 HALTED 至少一個 reconcile 週期：下一個 accepted observation 的 basis 必須是 `conserved`，venue 沒有任何受管的 resting offer。

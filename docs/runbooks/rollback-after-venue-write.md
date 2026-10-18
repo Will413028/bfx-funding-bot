@@ -35,7 +35,8 @@ Once a submit may have reached the venue, a database image cannot establish the
 venue's truth. Follow this sequence and do not skip a step:
 
 1. Put and keep the account in `HALTED`: the UI kill switch (TOTP), or the
-   emergency `POST /admin/halt` on the bot. Both commit `HALTED` and then run
+   emergency `sudo bfx-op halt --reason "..."` on the VM (the bot's
+   `POST /admin/halt`; works from the OCI console too). Both commit `HALTED` and then run
    the venue funding cancel-all; require every currency's cancel-all to be
    `acknowledged` (UI panel or `funding_cancel_all_audit`), and repeat the kill
    until it is. HALTED is never lifted except by an operator resume through the

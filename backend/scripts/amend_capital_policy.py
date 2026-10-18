@@ -1,7 +1,8 @@
 """Dry-run -> digest-confirmed amendment of an applied CapitalPolicy; never resume.
 
-Sets ``enabled``, the per-offer ceiling (max_offer_amount) and the offer
-envelope (periods, open offers, rate floor). Without an envelope the
+Sets the per-offer ceiling (max_offer_amount), the offer envelope (periods,
+open offers, rate floor) and ``--enabled false``. Enabling a currency is only
+``sudo bfx-op enable <symbol>`` (ADR 2026-10-15 D4). Without an envelope the
 offer-envelope guard refuses every offer for the symbol; the first envelope
 needs all five envelope options.
 
@@ -70,9 +71,13 @@ def _amount(value: str) -> Decimal:
 
 
 def _enabled(value: str) -> bool:
-    if value not in ("true", "false"):
-        raise argparse.ArgumentTypeError("true or false")
-    return value == "true"
+    # Only here: the bot's CapitalPolicyRequestWorker applies the CLI's enable through
+    # the same amend_capital_policy, which cannot tell the two apart.
+    if value != "false":
+        raise argparse.ArgumentTypeError(
+            "only false: enable a currency with `sudo bfx-op enable <symbol>` "
+            "(ADR 2026-10-15 D4)")
+    return False
 
 
 def _changes(args: argparse.Namespace) -> PolicyChanges:

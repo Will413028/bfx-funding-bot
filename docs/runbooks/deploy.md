@@ -222,7 +222,7 @@ image 內 migrations 推導出的唯一 head（`core/schema_head.build_head`）�
    ——venue 可能已有寫入，見 [rollback after a venue write](rollback-after-venue-write.md)。
 
 bot 停下時 venue 上的掛單不會自己消失：停 bot 之前，若有掛單而且停機會超過幾分鐘，先在 UI 或
-`/admin/halt` 執行 kill（見 operations）。bot 停著時兩者都不可用，改在 Bitfinex 網頁手動撤單並記錄。
+`sudo bfx-op halt --reason "…"` 執行 kill（見 operations §3）。bot 停著時兩者都不可用，改在 Bitfinex 網頁手動撤單並記錄。
 
 ## 6. Rollback drill（刻意走一次回滾路徑）
 

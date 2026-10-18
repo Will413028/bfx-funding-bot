@@ -2,6 +2,7 @@
 """bfx-op: run one operator CLI command as the tailnet identity of this SSH session.
 
     sudo bfx-op [--dry-run] <subcommand> [args...]     # inside a Tailscale SSH session
+    sudo bfx-op [--dry-run] halt --reason "..."        # also from the OCI console
 
 Installed by install.sh as /usr/local/sbin/bfx-op, running this file from the
 current host tooling release. sudo keeps exactly one variable for it,
@@ -11,7 +12,8 @@ interpolates is built here, never taken from the caller.
 One call:
   1. the peer: the first field of SSH_CONNECTION must be a tailnet address
      (100.64.0.0/10, fd7a:115c:a1e0::/48), else exit 77 -- a public sshd login or
-     the OCI serial console is not an operator session;
+     the OCI serial console is not an operator session. halt is the exception: see
+     below;
   2. the identity: `tailscale whois --json <peer>` -> UserProfile.ID (passed as
      BFX_OPERATOR_TAILNET_IDENTITY), LoginName and Node.Name (journal only). The
      CLI compares the ID with operator.env's BFX_OPERATOR_TAILNET_USER_ID; this
@@ -27,12 +29,25 @@ One call:
   5. the journal (syslog ident bfx-op): who, from where, which subcommand, the
      request id and the exit code. Never other arguments, never stdin.
 
+halt only lowers exposure (HALTED, then the venue cancel-all; it cannot resume),
+and it is the stop for when the CLI cannot run, typically tailscaled down and only
+the OCI console left. So it needs no tailnet identity and no ledger, operator.env
+or DB: with a tailnet peer that whois names, the login is the actor; without one
+(console, whois failing) the actor is host-root and the journal says identity=none.
+It runs HALT_SCRIPT in the running bot (`docker exec bfx-bot`), which posts to the
+bot's own /admin/halt with the container's BFX_ADMIN_TOKEN (never read or printed
+here) and exits 0 (HALTED, every cancel-all acknowledged), 3 (HALTED, cancel-all
+incomplete: run it again to retry) or 1 (any other answer, or none).
+
 Trust boundary: any root-equivalent shell can set SSH_CONNECTION and pass as
 another peer (ubuntu's sudo is NOPASSWD): a public sshd login while sshd still
 runs, or ubuntu on the OCI serial console. Who may open a session is Tailscale
 SSH's check mode; this binds an honest session's identity to its requests and
-records it. Exit codes are the CLI's, plus 77 (no tailnet identity), 1 (cannot
-resolve what to run) and 2 (not root, or an option before the subcommand).
+records it. That is also why halt asks for none: a shell that can sudo can stop
+the bot container anyway, so an identity check would stop only the operator.
+Exit codes are the CLI's (halt: HALT_SCRIPT's), plus 77 (no tailnet identity), 1
+(cannot resolve what to run) and 2 (not root, an option before the subcommand,
+or a halt without a usable --reason).
 """
 
 from __future__ import annotations
@@ -85,6 +100,41 @@ EXIT_IDENTITY = 77
 REQUEST_LINE = re.compile(r"^operator_request request_id=(\S+) action=(\S+)")
 # The only caller variables the child gets; everything else is built here.
 CALLER_KEYS = ("PATH", "HOME")
+DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+HALT = "halt"
+BOT_CONTAINER = "bfx-bot"  # deploy/vm/docker-compose.app.yml container_name
+BOT_PYTHON = "/app/.venv/bin/python"
+HALT_ACTOR_WITHOUT_IDENTITY = "host-root"
+# The CLI's CONTROL_REASON_MAX (modules/execution/operator_commands.py); this file runs
+# on the host's python without the backend package, so the value is restated here.
+HALT_REASON_MAX = 500
+HALT_URL = "http://127.0.0.1:8080/admin/halt"  # the bot's healthz server, inside the container
+# Runs in the bot container: argv is (reason, actor); the token stays in its environment.
+# stdout is the response body; exit 0 on 200, 3 on 502 (HALTED, cancel-all incomplete),
+# 1 on any other status or no answer.
+HALT_SCRIPT = """\
+import os, sys, urllib.error, urllib.parse, urllib.request
+token = os.environ.get("BFX_ADMIN_TOKEN", "")
+if not token.strip():
+    print("halt: BFX_ADMIN_TOKEN is not set in this container", file=sys.stderr)
+    sys.exit(1)
+query = urllib.parse.urlencode({"reason": sys.argv[1], "actor": sys.argv[2]})
+request = urllib.request.Request("__HALT_URL__?" + query, method="POST",
+                                 headers={"Authorization": "Bearer " + token})
+try:
+    with urllib.request.urlopen(request, timeout=120) as response:
+        status, body = response.status, response.read()
+except urllib.error.HTTPError as error:
+    status, body = error.code, error.read()
+except OSError as error:
+    print("halt: no answer from the bot: " + type(error).__name__, file=sys.stderr)
+    sys.exit(1)
+print(body.decode("utf-8", "replace"))
+if status != 200:
+    print("halt: HTTP " + str(status), file=sys.stderr)
+sys.exit(0 if status == 200 else 3 if status == 502 else 1)
+""".replace("__HALT_URL__", HALT_URL)
 
 Journal = Callable[[str], None]
 
@@ -225,6 +275,12 @@ def _live_values(path: Path) -> dict[str, str]:
     return {key: values[key] for key in LIVE_KEYS}
 
 
+def _caller_values(caller_env: Mapping[str, str]) -> dict[str, str]:
+    values = {key: caller_env[key] for key in CALLER_KEYS if caller_env.get(key)}
+    values.setdefault("PATH", DEFAULT_PATH)
+    return values
+
+
 def build_plan(
     *, ops_dir: Path, ledger: Any, runtime_dir: Path, state_dir: Path,
     backend_repository: str, secret_check: Callable[[Path], None], identity: Identity,
@@ -246,14 +302,13 @@ def build_plan(
     image = f"{backend_repository}@{digest}"
     live_env = state_dir / "releases" / deployed.source_revision / "live.env"
     env = {
-        **{key: caller_env[key] for key in CALLER_KEYS if caller_env.get(key)},
+        **_caller_values(caller_env),
         **_live_values(live_env),
         "BFX_BACKEND_IMAGE": image,
         "BFX_BACKEND_DIGEST": digest,
         "BFX_SOURCE_REVISION": deployed.source_revision,
         "BFX_OPERATOR_TAILNET_IDENTITY": identity.user_id,
     }
-    env.setdefault("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
     return Plan(compose_file=compose_file, tooling_revision=revision,
                 deployed_revision=deployed.source_revision, backend_image=image, env=env)
 
@@ -310,6 +365,73 @@ def run(plan: Plan, call: Call, identity: Identity, *, journal: Journal,
     return returncode
 
 
+# --------------------------------------------------------------------------- halt
+
+
+def halt_reason(args: Sequence[str]) -> str:
+    """Exactly one --reason: non-blank and within the CLI's limit."""
+    if len(args) == 2 and args[0] == "--reason":
+        reason = args[1]
+    elif len(args) == 1 and args[0].startswith("--reason="):
+        reason = args[0].removeprefix("--reason=")
+    else:
+        raise RefusedError("halt_reason_invalid", EXIT_USAGE)
+    if not reason.strip() or len(reason) > HALT_REASON_MAX:
+        raise RefusedError("halt_reason_invalid", EXIT_USAGE)
+    return reason
+
+
+def halt_identity(environ: Mapping[str, str], *, runner: Any) -> tuple[Identity | None, str]:
+    """The tailnet identity when there is one, else None and why: halt runs either way."""
+    try:
+        return whois(tailnet_peer(environ), runner=runner), "-"
+    except RefusedError as exc:
+        return None, exc.code
+
+
+def halt_argv(reason: str, actor: str) -> list[str]:
+    return ["docker", "exec", BOT_CONTAINER, BOT_PYTHON, "-c", HALT_SCRIPT, reason, actor]
+
+
+def run_halt(call: Call, environ: Mapping[str, str], *, journal: Journal, runner: Any,
+             execute: Execute) -> int:
+    reason = halt_reason(call.args[1:])  # raises before any whois
+    identity, missing = halt_identity(environ, runner=runner)
+    if identity is None:
+        actor = HALT_ACTOR_WITHOUT_IDENTITY
+        who = f"command={HALT} identity=none login=- peer=- actor={actor}"
+    else:
+        actor = identity.login if identity.login != "-" else f"tailnet:{identity.user_id}"
+        who = (f"command={HALT} identity=tailnet login={identity.login} "
+               f"tailnet_user_id={identity.user_id} node={identity.node} peer={identity.peer} "
+               f"actor={actor}")
+    argv = halt_argv(reason, actor)
+    if call.dry_run:
+        print(json.dumps({"identity": "none" if identity is None else "tailnet",
+                          "actor": actor, "argv": argv}, indent=2))
+        return 0
+    journal(f"start {who}" + (f" no_identity={missing}" if identity is None else ""))
+
+    def on_stderr(line: str) -> None:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+
+    try:
+        returncode = execute(argv, _caller_values(environ), None, on_stderr)
+    except OSError as exc:  # docker missing or not runnable: still journal the end
+        log(f"cannot run docker: {type(exc).__name__}")
+        returncode = EXIT_CANNOT_RUN
+    journal(f"end {who} exit={returncode}")
+    if returncode == 3:
+        log("HALTED, but the venue cancel-all is incomplete: run the same halt again to "
+            "retry it (operations runbook §3)")
+    elif returncode != 0:
+        log(f"halt not confirmed (exit {returncode}): if {BOT_CONTAINER} is not running it "
+            "cannot cancel; cancel at Bitfinex, or stop the container (operations runbook "
+            "§3, §7)")
+    return returncode
+
+
 def _parser() -> argparse.ArgumentParser:
     defaults = bfx_deploy.Settings()
     parser = argparse.ArgumentParser(add_help=False)
@@ -335,6 +457,9 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         if not is_root():
             raise RefusedError("not_root", EXIT_USAGE)
         call = parse_args(arguments)
+        if call.command == HALT:
+            return run_halt(call, environ, journal=journal,
+                            runner=runner or bfx_deploy.subprocess_runner, execute=execute)
         peer = tailnet_peer(environ)
         identity = whois(peer, runner=runner or bfx_deploy.subprocess_runner)
         plan = build_plan(

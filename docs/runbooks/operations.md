@@ -60,8 +60,8 @@ webapi 也沒有啟用的端點，資料庫的 trigger 拒絕 table owner 與 `b
 
 ### 包絡與其他欄位：`amend_capital_policy`
 
-包絡、`max_offer_amount` 等其他欄位只能用 script 改（`--enabled` 仍可用，作為 CLI 不可用時的
-備用；`--enabled true` 依 ADR 2026-10-15 D4 將移除）：dry run → 看報告 → 用 digest apply。在 VM 上以已部署的 backend image 跑一次性
+包絡、`max_offer_amount` 等其他欄位只能用 script 改（`--enabled false` 仍可用，作為 CLI 不可用時
+停用的備用；`--enabled true` 被拒，啟用只走 `sudo bfx-op enable`，ADR 2026-10-15 D4）：dry run → 看報告 → 用 digest apply。在 VM 上以已部署的 backend image 跑一次性
 container，用 `/opt/bfx/runtime/migrate.env`（owner role）：
 
 ```bash
@@ -76,7 +76,7 @@ python -m scripts.amend_capital_policy --exchange-account-id UUID --environment 
 - 第一次設定包絡要五個欄位齊全（`envelope_incomplete` 會列出缺哪個）；之後可以只改其中一個。
 - 利率下限 ＝ max(`min_rate_apr`/365, 即時 bid 中位數 × `rate_floor_ratio`)。低於下限時該幣別閒置，
   不是錯誤。
-- 暫停／恢復一個幣別平常用上面的 CLI；script 的 `--enabled false`／`--enabled true` 是備用。
+- 暫停／恢復一個幣別平常用上面的 CLI；script 的 `--enabled false` 是停用的備用（啟用沒有備用）。
   這是日常的停止方式，不需要 HALTED。
 - 沒有包絡的幣別（舊 schema 的 policy）一律不送單（`envelope_unset`）。
 
@@ -104,29 +104,31 @@ Bitfinex 手動撤單。**恢復只有 CLI 這一條路**（ADR 2026-10-15 D4）
 webapi 沒有 resume 端點，資料庫的 trigger 也拒絕 table owner 與 `bfx_operator` 以外的 role 排入 `resume`
 （migration `36e59526f8cf`）；static token 不能恢復。
 
-### 緊急備用：static admin token（只能降低曝險）
+### 緊急備用：`sudo bfx-op halt`（只能降低曝險）
 
-CLI 與 UI 都不可用時使用（例如只能從 Console 登入，§12）。bot 的 healthz server（container 內 port 8080，未對 host 公開）提供
-`POST /admin/halt?reason=...&actor=...`，與 UI kill 同一條路徑。200＝HALTED 且每個幣別 cancel-all
-都 acknowledged；502＝HALTED 已生效但 venue 部分未完成，再呼叫一次即重試。`/admin/pause` 已移除。
-
-在 VM 上執行（token 從 container 自己的環境讀，不印出）：
+CLI 與 UI 都不可用時使用（例如只能從 Console 登入，§12）：
 
 ```bash
-sudo docker exec bfx-bot /app/.venv/bin/python -c '
-import os, sys, urllib.error, urllib.parse, urllib.request
-q = urllib.parse.urlencode({"reason": sys.argv[1], "actor": "operator-cli"})
-r = urllib.request.Request("http://127.0.0.1:8080/admin/halt?" + q, method="POST",
-    headers={"Authorization": "Bearer " + os.environ["BFX_ADMIN_TOKEN"]})
-try:
-    print(urllib.request.urlopen(r, timeout=120).read().decode())
-except urllib.error.HTTPError as e:
-    print(e.code, e.read().decode()); sys.exit(1)
-' "reason text"
+sudo bfx-op halt --reason "為什麼停"
+sudo bfx-op --dry-run halt --reason "為什麼停"   # 只印出要跑的命令
 ```
 
-bot 自己停著時不可用：到 Bitfinex 網頁撤單並記錄。不依賴資料庫的 break-glass 是停掉 bot container
-（見 §7）：停下的 bot 不會掛新單，但也不會撤單。
+`halt` 是唯一不要求 tailnet 身分的子命令：Tailscale SSH session 裡以你的 login 為 actor；Console
+或 `tailscale whois` 失敗時照樣執行，actor 為 `host-root`，journal 標 `identity=none`。它不經 operator
+container、不讀 ledger、`operator.env` 或資料庫，而是 `docker exec bfx-bot` 呼叫 bot healthz server
+（container 內 port 8080，未對 host 公開）的 `POST /admin/halt`，與 kill 同一條路徑（HALTED ＋ 每個
+幣別的 cancel-all）。token 從 container 自己的環境讀，不印出；reason 由 bot 記進 `trading_state`，
+不進 host journal。
+
+| exit | 意義 |
+|---|---|
+| 0 | HALTED 且每個幣別 cancel-all 都 acknowledged（回應 body 印在 stdout） |
+| 3 | HALTED 已生效，但 venue 的 cancel-all 沒有全部完成：同一個命令再跑一次即重試 |
+| 1 | 其他回應或沒有回應（bot 沒在跑、token 不對等）：停機沒有確認 |
+| 2 | 沒有 `--reason`、空白或超過 500 字；沒有用 sudo |
+
+bot 自己停著時不可用（exit 1）：到 Bitfinex 網頁撤單並記錄。不依賴資料庫的 break-glass 是停掉 bot
+container（見 §7）：停下的 bot 不會掛新單，但也不會撤單。
 
 ## 4. 異常的四個等級
 
@@ -387,7 +389,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 
 - 代表：組裝 daemon 時開機被拒（資料庫非暫時性錯誤、schema 與 build 不符、realm 或 ledger epoch 不對、applied policy 讀不到、venue wiring 失敗；模擬環境同樣會發），bot 停機前 venue 上的受管 offer 可能還在。`reason` 是拒絕原因。
 - 系統會做：不寫交易狀態、不碰 venue，接著發 `boot_refused` 並退出，container 重啟。留在 venue 上的 offer 仍在當初的包絡內。
-- operator 判斷：先修好原因（多半是部署，見 [deploy runbook](deploy.md)），修好後的版本照常開機、不需要 resume。必須撤單時照 §3 處理；bot 沒在跑時 `/admin/halt` 不可用。
+- operator 判斷：先修好原因（多半是部署，見 [deploy runbook](deploy.md)），修好後的版本照常開機、不需要 resume。必須撤單時照 §3 處理；bot 沒在跑時 `bfx-op halt` 不可用。
 
 <a id="alert-command_throttled"></a>
 #### `command_throttled`（warning）
@@ -415,7 +417,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 
 - 代表：套用恢復或 kill 時發生錯誤（`reason` 為 root exception 類型，或 `outcome_write_failed:…`），或 kill 已寫入 HALTED 但 kill switch 沒接上（`kill switch not wired: venue offers not cancelled`）。
 - 系統會做：一般失敗時整個套用 rollback，交易狀態不變（失敗的 kill **沒有**停機），請求標為 failed、不重試。kill switch 沒接上時 HALTED 已生效，但 venue 沒有撤單。
-- operator 判斷：如果失敗的是 kill，馬上用 `/admin/trading-status` 看 `halt`，沒停就重送 kill 或用 `/admin/halt`（§3）；cancel-all 沒跑就重試 kill。原因看 `docker logs bfx-bot` 的 `trading_control_failed`。
+- operator 判斷：如果失敗的是 kill，馬上用 `/admin/trading-status` 看 `halt`，沒停就重送 kill 或用 `sudo bfx-op halt`（§3）；cancel-all 沒跑就重試 kill。原因看 `docker logs bfx-bot` 的 `trading_control_failed`。
 
 <a id="alert-kill_cancel_all_caught_up"></a>
 #### `kill_cancel_all_caught_up`（critical）
@@ -620,10 +622,10 @@ kill 的 cancel-all）被拒：
   `SSH_CONNECTION` 冒充另一個 peer：公網 sshd 還開著時持有 key 的登入、Console 上的 `ubuntu`。
   公網 sshd 停用後只剩 Console 這一條。誰能開 session 由 Tailscale SSH 的 check mode 決定；`bfx-op`
   做的是把誠實 session 的身分綁進請求並留下紀錄。
-- **子命令**（`sudo bfx-op <子命令> --help` 看參數）：唯讀 `status`、`uncertainties`、`uncertainty`、
+- **子命令**（`sudo bfx-op <子命令> --help` 看參數；`halt` 除外，它只收 `--reason`）：唯讀 `status`、`uncertainties`、`uncertainty`、
   `request <trading|currency|resolution|credential> <request_id>`、`credential`；寫入 `resume`、`kill`、
   `enable`、`disable`（§2、§3）、`bind-to-venue`、`mark-not-accepted`、`manual-resolution`（§5）、
-  `rotate-credential`（§11）。寫入預設等到結果（`--wait-seconds`，預設 120）；`--no-wait` 只排入。
+  `rotate-credential`（§11）；緊急停機 `halt`（§3，不要求 tailnet 身分、不經 operator container）。寫入預設等到結果（`--wait-seconds`，預設 120）；`--no-wait` 只排入。
   `sudo bfx-op --dry-run <子命令> …` 只印出會跑的 image、身分與命令。
 - **輸出**：stdout 一個 JSON；寫入時 stderr 一行 `operator_request request_id=… action=…`。
 
@@ -640,6 +642,7 @@ kill 的 cancel-all）被拒：
 
 - **紀錄**：`sudo journalctl -t bfx-op --since today --no-pager`。每次呼叫一行 `start`（login、tailnet user
   ID、裝置、peer、子命令、revision）與一行 `end`（request id、action、exit）；拒絕時一行 `refused`。
+  `halt` 的兩行改帶 `identity=tailnet|none` 與 `actor`。
   不記其他參數，也不記 stdin。
 
 ## 11. 換交易所憑證
@@ -687,6 +690,6 @@ Tailscale 不通時：
    `sudo systemctl restart tailscaled`（Funnel 會中斷數秒）。需要時可暫時重新啟用 sshd：
    `sudo systemctl unmask ssh.socket ssh.service && sudo systemctl enable --now ssh.socket`、
    `sudo ufw allow 22/tcp`，並在 OCI security list 加回 22；修好後照原樣停用、刪掉 UFW 規則、移除 OCI 的 22。
-3. Console 下 `bfx-op` 一律拒絕（`not_tailnet_peer`）：高風險操作只走 Tailscale SSH。這段期間 bot
-   照常自動放貸；要降低曝險，用 §3 的 `/admin/halt`，或停掉 bot container（§7）。
+3. Console 下 `bfx-op` 除了 `halt` 一律拒絕（`not_tailnet_peer`）：高風險操作只走 Tailscale SSH。這段期間 bot
+   照常自動放貸；要降低曝險，用 §3 的 `sudo bfx-op halt --reason "…"`，或停掉 bot container（§7）。
 
