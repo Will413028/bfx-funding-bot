@@ -127,15 +127,26 @@ async def test_submit_ack_has_the_documented_notification_shape_with_text_at_ind
     assert parse_offer_response(body).venue_offer_id == outcome.venue_offer_id
 
 
-async def test_business_rejection_defaults_to_5xx_error_which_the_client_reads_as_unknown() -> None:
+async def test_insufficient_balance_defaults_to_the_live_5xx_refusal_the_client_rejects() -> None:
     w = await make_world(funds={"UST": "1000"})
     response = await w.submit(amount="5000")  # more than available
+    body = response.json()
+    # the body Bitfinex returned on 2026-10-18 for an fUST offer above the funding balance
+    assert response.status_code == 500
+    assert body == ["error", 10001, "Invalid offer: not enough UST balance available in deposit wallet"]
+    outcome = classify_submit_response(response.status_code, body, True)
+    assert isinstance(outcome, SubmitRejected) and outcome.reason.startswith("venue_rejected:10001")
+    assert (await w.rest.fetch_active_offer_observations(ctx=CTX)) == []  # nothing recorded
+
+
+async def test_a_5xx_refusal_outside_the_allowlist_stays_unknown() -> None:
+    w = await make_world(funds={"UST": "1000"})
+    response = await w.submit(amount="150", period=1)  # below the minimum period
     body = response.json()
     assert response.status_code == 500 and body[0] == "error" and isinstance(body[1], int)
     outcome = classify_submit_response(response.status_code, body, True)
     assert isinstance(outcome, SubmitOutcomeUnknown) and outcome.reason == "http_5xx"
-    assert outcome.venue_error_code == body[1] and "balance" in (outcome.venue_error_message or "")
-    assert (await w.rest.fetch_active_offer_observations(ctx=CTX)) == []  # nothing recorded
+    assert outcome.venue_error_code == body[1] and "period" in (outcome.venue_error_message or "")
 
 
 async def test_documented_200_error_rejection_form_is_a_clean_rejection() -> None:
