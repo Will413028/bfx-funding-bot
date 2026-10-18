@@ -33,10 +33,12 @@ from bfx_funding_bot.modules.marketfeed.healthz import make_app
 from tests.async_wait import until
 from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
 
+from . import test_ledger_schema_roles as _schema_roles
 from .sim_daemon import close_sim_env, make_sim_env
-from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture dependency
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+# The migrated database fixture, shared with the other simulated-venue tests.
+ledger_db = _schema_roles.ledger_db
 
 REVOKED = Credentials("FAKE-REVOKED-KEY-000000", "FAKE-REVOKED-SECRET-not-real-000000")
 # Liveness beats recovery mode may record; any trading task's beat would show up here.
@@ -67,7 +69,7 @@ async def _runs(factory: Any) -> list[tuple[Any, str | None]]:
 
 
 async def test_a_refused_key_at_boot_holds_in_recovery_mode_and_a_kill_waits_for_a_working_key(
-        ledger_db, monkeypatch, httpx_mock, tmp_path) -> None:  # noqa: F811
+        ledger_db, monkeypatch, httpx_mock, tmp_path) -> None:
     sim, engine = await make_sim_env(ledger_db, monkeypatch, httpx_mock, tmp_path)
     try:
         stop = asyncio.Event()
