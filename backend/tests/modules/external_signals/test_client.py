@@ -114,6 +114,23 @@ async def test_soft_ratelimit_error_body_retries() -> None:
 
 
 @pytest.mark.asyncio
+async def test_not_ready_error_body_retries() -> None:
+    n = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        n["count"] += 1
+        if n["count"] == 1:
+            return httpx.Response(200, json=["error", 11000, "ready: invalid"])
+        return httpx.Response(200, json=[[_LIQ_ENTRY]])
+
+    client, http = _client(httpx.MockTransport(handler))
+    async with http:
+        recs = await client.get_liquidations_hist(end=1, limit=10)
+    assert n["count"] == 2
+    assert len(recs) == 1
+
+
+@pytest.mark.asyncio
 async def test_retries_exhausted_raises() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, json=["error", 11010, "ratelimit: error"])
