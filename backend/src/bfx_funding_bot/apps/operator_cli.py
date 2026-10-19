@@ -10,7 +10,8 @@ Who asks is the tailnet identity the host wrapper resolved for this call
 (``BFX_OPERATOR_TAILNET_IDENTITY``); it must equal the one ``operator.env`` names
 (``BFX_OPERATOR_TAILNET_USER_ID``) before anything connects. There is no flag naming an
 actor: every request is made by ``BFX_OPERATOR_USER_ID`` (D10 Q2, until 9d), and the
-daemon's ``operator_authorized`` still requires that operator's admin role and TOTP.
+daemon's ``operator_authorized`` requires that user to be an owner/operator member of the
+live account (9d-1).
 
 Before any command: the database's schema head must be this image's, and the capital
 authority ``ledger`` -- the same boot checks as the web API's.
