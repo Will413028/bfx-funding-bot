@@ -744,11 +744,11 @@ recreate 後查健康，失敗就回到前一個 digest，每次結果寫進 app
 部署閘門：target digest 必須是 `backend:main` 且與 `backend:sha-<rev>` 相同、`<rev>` 在 `origin/main` 上；
 有 pending migration、diff 讀不到、或改到 DR 路徑（`DR_TRIGGER_PATTERNS`：`deploy/vm/pgbackrest/**`、
 `deploy/vm/postgres/**`、`docker-compose.bot.yml`、`docker-compose.dr.yml`，寫死在執行中的工具裡，commit
-無法關掉自己的觸發）時，先跑該版本 DR 腳本的 isolated restore test；有 migration 時先停 bot 並備份。
-停 bot 之後任何失敗都維持停止，唯一例外是 restore test 的 receipt 為 `migration_rehearsal_failed`
-（備份可還原、prod schema 沒動）：重新啟動舊 bot。
+無法關掉自己的觸發）時，先跑該版本 DR 腳本的 isolated restore test；有 migration 時先停 webapi、再停 bot，然後備份（全停，ADR 2026-10-15 D6）。
+停下之後任何失敗兩者都維持停止，唯一例外是 restore test 的 receipt 為 `migration_rehearsal_failed`
+（備份可還原、prod schema 沒動）：依序重新啟動舊 bot 與舊 webapi。webapi 開機時比對 schema head，不符就拒絕啟動（與 bot 相同）。
 health wait：bot `/healthz` 300 s、webapi 120 s、frontend `127.0.0.1:3001` 120 s，再 60 s settle。
-已套用 migration 後失敗不回滾（舊碼未必能跑新 schema），停 bot、roll forward。
+已套用 migration 後失敗不回滾（舊碼未必能跑新 schema），停 bot 與 webapi、roll forward。
 部署工具注入 `BFX_IMAGE_DIGEST`／`BFX_SOURCE_REVISION`／`BFX_DEPLOYMENT_ID`：只用來標示每筆
 execution audit 的 `config_hash`／`service_version` 與狀態報告，部署永遠不改變 trading state（§6）。
 live daemon 開機時（讀憑證與任何交易之前）比對 image 內 `alembic/` 推導出的唯一 head（`core/schema_head.build_head`；多個 head 也拒絕開機）與資料庫的
