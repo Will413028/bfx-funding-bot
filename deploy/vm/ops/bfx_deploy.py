@@ -814,6 +814,11 @@ def release_services(
     for role, container in ROLE_CONTAINERS.items():
         if names[role].container != container:
             raise DeployError(f"compose_container_name:{role}")
+        if not names[role].env_files:
+            # Compose 2.38 folds env files into `environment` even with
+            # --no-env-resolution; the VM's v5.1.4 lists them. Without the list nothing
+            # would be validated, so refuse rather than deploy unchecked.
+            raise DeployError(f"compose_env_files_not_rendered:{role}")
     return tuple(found)
 
 

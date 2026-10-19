@@ -189,6 +189,12 @@ def test_deployer_reads_the_release_from_the_real_rendering(rendered: dict[str, 
     """bfx-deploy renders the release the same way (--no-env-resolution) and runs what it finds."""
     target = bfx.Target(FAKE_ENV["BFX_SOURCE_REVISION"], DIGEST_B, DIGEST_F,
                         FAKE_ENV["BFX_BACKEND_IMAGE"], FAKE_ENV["BFX_FRONTEND_IMAGE"])
+    if "env_file" not in rendered["services"]["bot"]:
+        # Compose 2.38 (CI) folds env files into `environment`: refused, never unchecked.
+        with pytest.raises(bfx.DeployError, match="compose_env_files_not_rendered:bot"):
+            bfx.release_services(rendered, target=target, runtime_dir=runtime_dir,
+                                 release_dir=COMPOSE_PATH.parent)
+        return
     services = bfx.release_services(rendered, target=target, runtime_dir=runtime_dir,
                                     release_dir=COMPOSE_PATH.parent)
     assert [(s.name, s.container, s.image) for s in services] == [

@@ -119,7 +119,7 @@ def render_compose(compose_file: Path, env: Mapping[str, str]) -> dict[str, Any]
         return None
     base = compose_file.parent
     for spec in document["services"].values():
-        if "env_file" in spec:
+        if spec.get("env_file"):
             spec["env_file"] = [
                 {**({"path": entry} if isinstance(entry, str) else entry),
                  "path": os.path.normpath(base / (entry if isinstance(entry, str) else entry["path"]))}
@@ -1421,6 +1421,8 @@ def test_env_files_are_the_ones_the_release_compose_file_names(harness: Harness)
      "compose_env_file_optional:webapi"),
     ("container_name: bfx-webapi", "container_name: bfx-api", "compose_container_name:webapi"),
     ("    container_name: bfx-webapi\n", "", "compose_container_name_missing:webapi"),
+    ("      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env\n", "",
+     "compose_env_files_not_rendered:webapi"),
     ("  webapi:\n", "  api:\n", "compose_service_missing:webapi"),
     ("name: bfx-app\n", "name: other\n", "compose_project_name"),
 ])
