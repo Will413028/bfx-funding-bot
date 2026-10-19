@@ -141,3 +141,7 @@ plane 為不同 process boundary、D4 已定 control-plane commands 走 outbox�
 ## Updates (2026-09-28)
 
 - [2026-09-28-ledger-journal-and-venue-mirror-replace-event-sourcing](2026-09-28-ledger-journal-and-venue-mirror-replace-event-sourcing.md) 以 bot 事實 insert-once journal＋venue 已接受觀測取代 event-only projector 與「projection 可決定性重建」；per-account lock、四值 outcome、UNKNOWN、orphan 與禁止盲目 restore 的決定不變。
+
+## Updates (2026-10-19)
+
+- [2026-10-19-runtime-roles-and-necessity-gated-module-boundaries](2026-10-19-runtime-roles-and-necessity-gated-module-boundaries.md) 修訂 D3：市場資料錄製獨立成全系統一個的 `marketdata` process（book snapshot 唯一寫入者），與 control plane、account worker、reporting 並列。

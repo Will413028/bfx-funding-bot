@@ -89,6 +89,10 @@ tags: [bfx-funding-bot, decision, architecture, refactoring]
 
 - 原第 5 步（拆 execution）排到 market context 之後：盤點顯示 execution 牽涉的 59 條例外全是它與外部模組的依賴（最多的是 `execution → marketfeed` 24 條），只在 execution 內部重新分組一條也消不掉，還會產生新的 trading ↔ control 循環（`uncertainty_tables → operator_requests.REQUEST_STATES`）。
 
+## Updates (2026-10-19)
+
+- D1（目標 context、命名與 venue 實作上層 port）、Amendment D3' 與 Followup 第 5、6、8 步由 [2026-10-19-runtime-roles-and-necessity-gated-module-boundaries](2026-10-19-runtime-roles-and-necessity-gated-module-boundaries.md) 取代（拆成三種 runtime role、三分改為依必要條件、強制終態 15 個 contract）；D2、D4、D5 仍有效；D3 已由 Amendment D3' 取代，D3' 再由新 ADR 的 D3'' 取代。
+
 ## Amendment (2026-09-28)：D3' 合約／實作／組裝三分，跨模組只走合約＋注入
 
 ### Amendment Context

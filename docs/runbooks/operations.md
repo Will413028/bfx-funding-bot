@@ -62,7 +62,7 @@ webapi 也沒有啟用的端點，資料庫的 trigger 拒絕 table owner 與 `b
 
 包絡、`max_offer_amount` 等其他欄位只能用 script 改（`--enabled false` 仍可用，作為 CLI 不可用時
 停用的備用；`--enabled true` 被拒，啟用只走 `sudo bfx-op enable`，ADR 2026-10-15 D4）：dry run → 看報告 → 用 digest apply。在 VM 上以已部署的 backend image 跑一次性
-container，用 `/opt/bfx/runtime/migrate.env`（owner role）：
+container，用 `/opt/bfx/runtime/migrate.env`（owner role）。在正式環境，script 是 capital policy 的第二個寫入者，和 bot 用同一把 scope lock 序列化（ADR 2026-09-26 D1、ADR 2026-10-19 D4）：
 
 ```bash
 python -m scripts.amend_capital_policy --exchange-account-id UUID --environment prod \
