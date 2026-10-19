@@ -10,11 +10,14 @@ operator entry moves to Tailscale and the ``auth`` schema is dropped (9d-7).
   tailnet's, and a membership row is writable only by the table owner.
 - ``release_archive.release_operator_authorized``: ``false``. Its tables are frozen
   (``archive_frozen``), so nothing reaches it; it only must not read ``auth``.
-- ``bfx_bot`` keeps SELECT only on ``exchange_account_memberships`` and
-  ``exchange_accounts``. The default privileges of fresh-host-setup §1a gave it every
-  write on both, which did not matter while ``auth`` decided authority; with membership
-  the only authority, a runtime role that could write it could authorize anyone. Nothing
-  in the bot writes either table (accounts and memberships come from owner scripts).
+- ``bfx_bot`` keeps SELECT only on ``exchange_account_memberships``, and SELECT plus
+  UPDATE of ``label`` alone on ``exchange_accounts``. The default privileges of
+  fresh-host-setup §1a gave it every write on both, which did not matter while ``auth``
+  decided authority; with membership and lifecycle the only authority, a runtime role that
+  could write them could authorize anyone. Nothing in the bot writes either table
+  (accounts and memberships come from owner scripts); the vault locks the account row
+  (``SELECT ... FOR UPDATE`` serializes credential changes), and PostgreSQL requires UPDATE
+  on at least one column for any row lock -- ``label`` is a display name, no authority.
 
 Asserted in the same transaction, under SHARE locks on the two tables the verdict reads
 (docs/adr/2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them.md):
@@ -25,7 +28,8 @@ Asserted in the same transaction, under SHARE locks on the two tables the verdic
    operator id) goes away with this revision, and a second member would otherwise gain
    the daemon's authority;
 3. no function body in the database reads ``auth``;
-4. ``bfx_bot`` holds no write on either table, at table or column level.
+4. ``bfx_bot`` holds no write on either table, at table or column level, except UPDATE of
+   ``exchange_accounts.label``.
 
 Forward-only (docs/adr/2026-10-08-forward-only-migrations.md); a later revision restores
 the old body if needed, ``auth`` stays until 9d-7.
@@ -105,12 +109,25 @@ def upgrade() -> None:
         for table in (MEMBERSHIPS, ACCOUNTS):
             op.execute(f"REVOKE ALL ON {table} FROM bfx_bot")
             op.execute(f"GRANT SELECT ON {table} TO bfx_bot")
+        op.execute(f"GRANT UPDATE (label) ON {ACCOUNTS} TO bfx_bot")
+        for table in (MEMBERSHIPS, ACCOUNTS):
             for privilege in WRITES:
                 _assert(f"SELECT NOT has_table_privilege('bfx_bot', '{table}', '{privilege}')",
                         f"bfx_bot still holds {privilege} on {table}")
-            for privilege in ("INSERT", "UPDATE", "REFERENCES"):
+            for privilege in ("INSERT", "REFERENCES"):
                 _assert(f"SELECT NOT has_any_column_privilege('bfx_bot', '{table}', "
                         f"'{privilege}')", f"bfx_bot still holds column {privilege} on {table}")
+        _assert(f"SELECT NOT has_any_column_privilege('bfx_bot', '{MEMBERSHIPS}', 'UPDATE')",
+                f"bfx_bot still holds column UPDATE on {MEMBERSHIPS}")
+        _assert("SELECT count(*) = 1 FROM information_schema.column_privileges "
+                "WHERE grantee = 'bfx_bot' AND table_schema = 'public' "
+                "AND table_name = 'exchange_accounts' AND privilege_type = 'UPDATE' "
+                "AND column_name = 'label'",
+                "bfx_bot's UPDATE on exchange_accounts is not label alone")
+        _assert("SELECT count(*) = 1 FROM information_schema.column_privileges "
+                "WHERE grantee = 'bfx_bot' AND table_schema = 'public' "
+                "AND table_name = 'exchange_accounts' AND privilege_type = 'UPDATE'",
+                "bfx_bot holds UPDATE on an exchange_accounts column other than label")
 
 
 def downgrade() -> None:

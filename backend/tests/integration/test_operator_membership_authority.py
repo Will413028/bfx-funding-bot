@@ -252,7 +252,7 @@ async def test_the_script_refuses_a_third_authorized_user(head) -> None:
 def test_the_runtime_role_cannot_write_authority(head) -> None:
     """With membership the only authority, the bot's role must not be able to grant it."""
     for table in ("exchange_account_memberships", "exchange_accounts"):
-        for privilege in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
+        for privilege in ("INSERT", "DELETE", "TRUNCATE"):
             with head.connect() as conn:
                 assert not conn.scalar(text("SELECT has_table_privilege('bfx_bot', :t, :p)"),
                                        {"t": f"public.{table}", "p": privilege}), (table, privilege)
@@ -262,6 +262,14 @@ def test_the_runtime_role_cannot_write_authority(head) -> None:
     with head.begin() as conn, pytest.raises(Exception, match="permission denied"):
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         _member(conn, "intruder")
+    with head.begin() as conn, pytest.raises(Exception, match="permission denied"):
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
+        conn.execute(text("UPDATE exchange_accounts SET lifecycle_status='active'"))
+    # The vault's row lock (credential promotion and rotation) still works.
+    with head.begin() as conn:
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
+        assert conn.scalar(text("SELECT id FROM exchange_accounts WHERE id=:a FOR UPDATE"),
+                           {"a": _ACCOUNT}) == _ACCOUNT
 
 
 async def test_the_script_refuses_a_mistyped_source(head) -> None:
