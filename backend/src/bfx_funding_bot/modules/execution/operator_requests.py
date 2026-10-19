@@ -89,17 +89,15 @@ class OperatorAuthority(Protocol):
 async def operator_authorized(session: AsyncSession, *, account_id: UUID, user: str) -> bool:
     """Whether ``user`` may act as this account's operator right now.
 
-    The one authority for every operator request the daemon applies. The
-    configured sole admin operator only, then the database's own verdict
-    (``public.operator_authorized``): still an admin, not banned, TOTP
-    enrolled, an owner/operator member of a live account. Call it in the
-    transaction that applies the request: the function takes SHARE locks, so
-    the authority it read holds until that commit.
+    The one authority for every operator request the daemon applies: the
+    database's verdict (``public.operator_authorized``), an owner/operator
+    member of a live account. Membership rows are written by the table owner
+    only, and the migration that made this the sole check asserted a single
+    authorized user (quality plan 9d-1). Call it in the transaction that
+    applies the request: the function takes SHARE locks, so the authority it
+    read holds until that commit.
     """
-    from bfx_funding_bot.core.settings import AuthSettings
-
-    settings = AuthSettings()
-    if not user or user != settings.operator_user_id or settings.operator_role != "admin":
+    if not user:
         return False
     return bool(await session.scalar(
         text("SELECT public.operator_authorized(:account, :actor)"),

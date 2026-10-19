@@ -584,18 +584,21 @@ def test_authorized_operator_request_is_applied_after_the_authority_check(
     assert len(ledger.applied) == 1
 
 
-@pytest.mark.parametrize(
-    ("configured", "role", "user"),
-    [
-        ("operator-1", "admin", "someone-else"),
-        ("operator-1", "viewer", "operator-1"),
-        ("", "admin", ""),
-    ],
-)
-def test_shared_operator_authority_refuses_before_asking_the_database(
-    monkeypatch, configured: str, role: str, user: str
+def test_shared_operator_authority_refuses_an_empty_user_before_asking_the_database() -> None:
+    from unittest.mock import AsyncMock
+
+    from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+
+    session = AsyncMock()
+    assert asyncio.run(operator_authorized(session, account_id=ACCOUNT_ID, user="")) is False
+    session.scalar.assert_not_called()
+
+
+@pytest.mark.parametrize(("configured", "role"), [("someone-else", "admin"), ("operator-1", "viewer")])
+def test_shared_operator_authority_ignores_the_configured_operator(
+    monkeypatch, configured: str, role: str
 ) -> None:
-    """Configured sole admin first; the database function is never reached."""
+    """Membership is the only authority (9d-1): the configured id and role no longer gate."""
     from unittest.mock import AsyncMock
 
     from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
@@ -604,8 +607,9 @@ def test_shared_operator_authority_refuses_before_asking_the_database(
     monkeypatch.setenv("BFX_OPERATOR_USER_ID", configured)
     monkeypatch.setenv("BFX_OPERATOR_ROLE", role)
     session = AsyncMock()
-    assert asyncio.run(operator_authorized(session, account_id=ACCOUNT_ID, user=user)) is False
-    session.scalar.assert_not_called()
+    session.scalar.return_value = True
+    assert asyncio.run(operator_authorized(session, account_id=ACCOUNT_ID, user="operator-1"))
+    session.scalar.assert_called_once()
 
 
 def test_shared_operator_authority_defers_to_the_database_verdict(monkeypatch) -> None:

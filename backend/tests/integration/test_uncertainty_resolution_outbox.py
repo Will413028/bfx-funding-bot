@@ -306,11 +306,11 @@ def _operator_env(monkeypatch) -> None:
     monkeypatch.delenv("BFX_PHASE", raising=False)
 
 
-async def _set_two_factor(owner, enabled: bool) -> None:
+async def _set_member_role(owner, role: str) -> None:
     async with owner.begin() as session:
         await session.execute(
-            text('UPDATE auth."user" SET "twoFactorEnabled"=:enabled WHERE id=\'operator-1\''),
-            {"enabled": enabled},
+            text("UPDATE exchange_account_memberships SET role=:role WHERE user_id='operator-1'"),
+            {"role": role},
         )
 
 
@@ -527,9 +527,9 @@ def test_revoked_operator_request_is_rejected_by_the_account_writer(
             worker = UncertaintyResolutionWorker(
                 session_factory=bot, scope=scope, authority=operator_authorized,
                 clock=lambda: 3000, resolution=build_operator_resolution())
-            # Accepted while enrolled, then TOTP is removed before the daemon applies.
+            # Accepted while a member, then demoted to viewer before the daemon applies.
             revoked = await queue(2500)
-            await _set_two_factor(owner, False)
+            await _set_member_role(owner, "viewer")
             assert await worker.tick() is True
             assert tuple(await outcome(revoked)) == ("rejected", "operator_not_authorized")
             assert await _journal_rows(owner) == 0
@@ -538,8 +538,8 @@ def test_revoked_operator_request_is_rejected_by_the_account_writer(
                     session, LEDGER_SCOPE, uncertainty_id)
             assert view is not None and view.state == "open"
 
-            # Re-enrolled, the same operator's fresh request applies.
-            await _set_two_factor(owner, True)
+            # An owner again, the same operator's fresh request applies.
+            await _set_member_role(owner, "owner")
             restored = await queue(2600)
             assert await worker.tick() is True
             assert tuple(await outcome(restored)) == ("applied", None)

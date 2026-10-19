@@ -768,7 +768,7 @@ resume／kill（`trading_control_requests`）與幣別 enable／disable（`capit
 `insert_request` 寫該表的請求欄位（model 的 `REQUEST_COLUMNS`＝migration 的欄位級 INSERT grant）並回 202，
 不取帳戶鎖（單一 pending 由 partial unique index 保證：`INSERT … ON CONFLICT (<該 index>) DO NOTHING`，只有這種衝突回 409，其他違規照常拋出）；daemon 的 `OperatorRequestWorker` 子類
 （`UncertaintyResolutionWorker`、`TradingControlWorker`、`CapitalPolicyRequestWorker`，各自一個 task）一次處理最舊的一筆，在帳戶鎖內的 savepoint 以
-`operator_authorized`（SQL `public.operator_authorized`）重驗權限後才 apply，結果（applied／rejected＋原因碼／
+`operator_authorized`（SQL `public.operator_authorized`：帳戶 `active`／`halted` 且請求者是 owner／operator member；只看 membership，migration `e489261c10b1`）重驗權限後才 apply，結果（applied／rejected＋原因碼／
 failed＋根因）記回請求列，套用產生的效果列（trading state、policy revision、cancel-all audit、journal）帶 `operator_request_id` 指回請求；寫不進去的請求另以獨立交易標 failed，連這都失敗就由本 process 跳過，不擋佇列。
 需要在鎖外觀測的資料以 `NeedsPreparation` → `prepare` 取得後再 apply。清單列帶最新一筆請求，前端只在有 pending 時輪詢清單。webapi 對 ledger
 表零寫權限，授權與收回都在 migration（`1c435a35dcb4`、`5b1e7c9d2a40`、`7d2a9c4e6b13`、`5e820d6dc7da`）。
@@ -780,7 +780,7 @@ resume、enable、裁決與換憑證只由 CLI 排入（ADR 2026-10-15 D4，migr
 CLI 以 one-off compose service `bfx-operator`（`deploy/vm/ops/docker-compose.operator.yml`）執行，連線用專屬 role `bfx_operator`：
 migration `4ab02765a34b`（輪替另由 `1db83367918c` 加上）的精確 allowlist，只有四個 outbox 請求欄位的 INSERT 與驗證所需的讀取，沒有 UPDATE／DELETE（`test_operator_privilege_allowlist.py`）。
 CLI 開頭比對 wrapper 傳入的 tailnet 身分與 `operator.env` 設定的值，不符就 exit 77、不連 DB；之後同 webapi 檢查 schema head 與 ledger authority。
-請求一律以 `BFX_OPERATOR_USER_ID` 送出（9d 前），daemon 照樣以 `operator_authorized` 重驗。
+請求一律以 `BFX_OPERATOR_USER_ID` 送出（9d 前），daemon 照樣以 `operator_authorized` 重驗。9d 改用 tailnet node user ID 之前，由 owner 腳本 `scripts/grant_operator_membership.py` 把現有 membership 複製給 node user ID（冪等、授權的相異 user 上限 2）。
 **憑證輪替（`execution/credential_rotation.py`、`core/sealed_credential.py`，migration `1db83367918c`）**：
 CLI 不持有 KEK。bot 每次開機（`bot_runs` 寫入後）產生一把 X25519 收件 key，私鑰只在記憶體，公鑰寫進 `credential_rotation_recipients`；
 CLI 的 `rotate-credential` 從 stdin 讀新 key，只封給「scope 最新、尚未結束的 run」的收件 key（HPKE base mode，`info` 綁帳號、環境、收件 key 與 request id），
