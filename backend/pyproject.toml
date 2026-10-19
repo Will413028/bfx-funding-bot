@@ -540,3 +540,67 @@ source_modules = ["bfx_funding_bot.modules.trading"]
 forbidden_modules = ["bfx_funding_bot.modules.ledger"]
 ignore_imports = []
 broken_contract_guidance = "Inject ledger data into trading; do not add ignores."
+
+[[tool.importlinter.contracts]]
+id = "control-plane-exposure"
+name = "The control plane cannot reach venue writes, money-state writers, or the bot runtime"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.apps.webapi", "bfx_funding_bot.modules.api"]
+forbidden_modules = [
+    "bfx_funding_bot.external.bitfinex.live_executor",
+    "bfx_funding_bot.external.bitfinex.funding_trades_ws",
+    "bfx_funding_bot.modules.admin",
+    "bfx_funding_bot.modules.simulated_venue",
+    "bfx_funding_bot.modules.execution.audit",
+    "bfx_funding_bot.modules.execution.bus",
+    "bfx_funding_bot.modules.execution.capital_policy_control",
+    "bfx_funding_bot.modules.execution.command_boundary",
+    "bfx_funding_bot.modules.execution.command_gate",
+    "bfx_funding_bot.modules.execution.credential_rotation",
+    "bfx_funding_bot.modules.execution.deployment",
+    "bfx_funding_bot.modules.execution.diagnostics",
+    "bfx_funding_bot.modules.execution.emit",
+    "bfx_funding_bot.modules.execution.ledger_cycle_effects",
+    "bfx_funding_bot.modules.execution.managed_cancel",
+    "bfx_funding_bot.modules.execution.middleware",
+    "bfx_funding_bot.modules.execution.periodic_reconcile",
+    "bfx_funding_bot.modules.execution.projection_cutover",
+    "bfx_funding_bot.modules.execution.reconcile_monitors",
+    "bfx_funding_bot.modules.execution.registry",
+    "bfx_funding_bot.modules.execution.resync_channel",
+    "bfx_funding_bot.modules.execution.retry",
+    "bfx_funding_bot.modules.execution.safety.boot_stop",
+    "bfx_funding_bot.modules.execution.safety.chain",
+    "bfx_funding_bot.modules.execution.safety.hard_guards",
+    "bfx_funding_bot.modules.execution.safety.kill_switch",
+    "bfx_funding_bot.modules.execution.safety.nav_peak_store",
+    "bfx_funding_bot.modules.execution.safety.nav_pnl_source",
+    "bfx_funding_bot.modules.execution.safety.nav_window_store",
+    "bfx_funding_bot.modules.execution.safety.pre_trade",
+    "bfx_funding_bot.modules.execution.safety.protection",
+    "bfx_funding_bot.modules.execution.trading_control",
+    "bfx_funding_bot.modules.execution.venue_observation",
+    "bfx_funding_bot.modules.execution.ws_dispatcher",
+    "bfx_funding_bot.modules.marketfeed.book_snapshot",
+    "bfx_funding_bot.modules.marketfeed.boot_wait",
+    "bfx_funding_bot.modules.marketfeed.candle_writer",
+    "bfx_funding_bot.modules.marketfeed.daemon",
+    "bfx_funding_bot.modules.marketfeed.divergence_reporter",
+    "bfx_funding_bot.modules.marketfeed.health_monitor",
+    "bfx_funding_bot.modules.marketfeed.healthz",
+    "bfx_funding_bot.modules.marketfeed.scheduler",
+    "bfx_funding_bot.modules.marketfeed.signal_engine",
+    "bfx_funding_bot.modules.marketfeed.strategy_registry",
+    "bfx_funding_bot.modules.marketfeed.warmup",
+]
+ignore_imports = []
+broken_contract_guidance = "webapi and the operator API only record requests and read; the bot applies them (ADR 2026-08-31 D4'', ADR 2026-10-19 D6). Move the read you need below these modules; do not add ignores."
+
+[[tool.importlinter.contracts]]
+id = "execution-acyclic"
+name = "Execution submodules have no cycles between siblings"
+type = "acyclic_siblings"
+ancestors = ["bfx_funding_bot.modules.execution"]
+depth = 0
+ignore_imports = []
+broken_contract_guidance = "Do not add ignores; move the shared piece below both siblings (ADR 2026-10-19 D2)."
