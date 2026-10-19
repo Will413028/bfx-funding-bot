@@ -14,8 +14,8 @@ and rolled back unless:
 - the node user ID is digits only (the form ``tailscale whois`` reports);
 - the connected role owns the membership table (only the owner may write it);
 - ``--from-user`` holds at least one membership;
-- afterwards at most two distinct users are authorized (the old id and the node id), so a
-  typo cannot hand the daemon's authority to a third user.
+- afterwards the authorized users are exactly the old id and the node id, so a typo in
+  either cannot hand the daemon's authority to anyone else.
 
 On the VM run it as a one-shot of the deployed backend image with
 /opt/bfx/runtime/migrate.env (the owner role). DATABASE_URL must be supplied explicitly;
@@ -38,7 +38,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
 
 NODE_USER_ID = re.compile(r"^[0-9]+$")
-MAX_AUTHORIZED = 2
 
 
 class GrantRefusedError(Exception):
@@ -66,13 +65,15 @@ async def grant(session: AsyncSession, *, from_user: str, node_user_id: str) -> 
         "SELECT exchange_account_id, :node, role FROM public.exchange_account_memberships "
         "WHERE user_id = :u ON CONFLICT (exchange_account_id, user_id) DO NOTHING "
         "RETURNING exchange_account_id"), {"node": node_user_id, "u": from_user})).all()
-    authorized = await session.scalar(text(
-        "SELECT count(DISTINCT m.user_id) FROM public.exchange_account_memberships m "
-        "WHERE public.operator_authorized(m.exchange_account_id, m.user_id)"))
-    if authorized > MAX_AUTHORIZED:
-        raise GrantRefusedError("too_many_authorized_users")
+    authorized = set((await session.scalars(text(
+        "SELECT DISTINCT m.user_id FROM public.exchange_account_memberships m "
+        "WHERE public.operator_authorized(m.exchange_account_id, m.user_id)"))).all())
+    if not authorized <= {from_user, node_user_id}:
+        raise GrantRefusedError("unexpected_authorized_user")
+    if node_user_id not in authorized:
+        raise GrantRefusedError("node_user_id_not_authorized")
     return {"status": "granted", "accounts": len(source), "inserted": len(inserted),
-            "authorized_users": authorized}
+            "authorized_users": len(authorized)}
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:

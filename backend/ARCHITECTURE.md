@@ -768,7 +768,7 @@ resume／kill（`trading_control_requests`）與幣別 enable／disable（`capit
 `insert_request` 寫該表的請求欄位（model 的 `REQUEST_COLUMNS`＝migration 的欄位級 INSERT grant）並回 202，
 不取帳戶鎖（單一 pending 由 partial unique index 保證：`INSERT … ON CONFLICT (<該 index>) DO NOTHING`，只有這種衝突回 409，其他違規照常拋出）；daemon 的 `OperatorRequestWorker` 子類
 （`UncertaintyResolutionWorker`、`TradingControlWorker`、`CapitalPolicyRequestWorker`，各自一個 task）一次處理最舊的一筆，在帳戶鎖內的 savepoint 以
-`operator_authorized`（SQL `public.operator_authorized`：帳戶 `active`／`halted` 且請求者是 owner／operator member；只看 membership，migration `e489261c10b1`）重驗權限後才 apply，結果（applied／rejected＋原因碼／
+`operator_authorized`（SQL `public.operator_authorized`：帳戶 `active`／`halted` 且請求者是 owner／operator member；只看 membership，migration `e489261c10b1`；同一個 migration 把 `bfx_bot` 對 membership 與帳戶表收成只讀，runtime role 不能自己生出授權）重驗權限後才 apply，結果（applied／rejected＋原因碼／
 failed＋根因）記回請求列，套用產生的效果列（trading state、policy revision、cancel-all audit、journal）帶 `operator_request_id` 指回請求；寫不進去的請求另以獨立交易標 failed，連這都失敗就由本 process 跳過，不擋佇列。
 需要在鎖外觀測的資料以 `NeedsPreparation` → `prepare` 取得後再 apply。清單列帶最新一筆請求，前端只在有 pending 時輪詢清單。webapi 對 ledger
 表零寫權限，授權與收回都在 migration（`1c435a35dcb4`、`5b1e7c9d2a40`、`7d2a9c4e6b13`、`5e820d6dc7da`）。

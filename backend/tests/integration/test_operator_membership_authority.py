@@ -17,7 +17,10 @@ Mutations (one at a time; revert after each):
 * drop the migration's single-user assertion: ``test_the_migration_refuses_two_authorized_
   users`` fails;
 * remove the script's digits check: ``test_the_script_refuses_a_non_numeric_node_id`` fails;
-* remove the script's cap: ``test_the_script_refuses_a_third_authorized_user`` fails.
+* remove the script's subset check: ``test_the_script_refuses_a_third_authorized_user``
+  and ``test_the_script_refuses_a_mistyped_source`` fail;
+* drop the REVOKE from ``bfx_bot``: the migration's own privilege assertion refuses it (the
+  database build errors), and ``test_the_runtime_role_cannot_write_authority`` would fail.
 """
 from __future__ import annotations
 
@@ -239,8 +242,36 @@ async def test_the_script_refuses_a_third_authorized_user(head) -> None:
     with head.begin() as conn:
         _member(conn, _OPERATOR)
         _member(conn, "second-member")
-    with pytest.raises(GrantRefusedError, match="too_many_authorized_users"):
+    with pytest.raises(GrantRefusedError, match="unexpected_authorized_user"):
         await _grant(head)
+    with head.begin() as conn:
+        assert conn.scalar(text("SELECT count(*) FROM exchange_account_memberships "
+                                "WHERE user_id=:u"), {"u": _NODE}) == 0
+
+
+def test_the_runtime_role_cannot_write_authority(head) -> None:
+    """With membership the only authority, the bot's role must not be able to grant it."""
+    for table in ("exchange_account_memberships", "exchange_accounts"):
+        for privilege in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
+            with head.connect() as conn:
+                assert not conn.scalar(text("SELECT has_table_privilege('bfx_bot', :t, :p)"),
+                                       {"t": f"public.{table}", "p": privilege}), (table, privilege)
+        with head.connect() as conn:
+            assert conn.scalar(text("SELECT has_table_privilege('bfx_bot', :t, 'SELECT')"),
+                               {"t": f"public.{table}"})
+    with head.begin() as conn, pytest.raises(Exception, match="permission denied"):
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
+        _member(conn, "intruder")
+
+
+async def test_the_script_refuses_a_mistyped_source(head) -> None:
+    """A source that is a member but not authorized (a viewer) while someone else is:
+    the node id would not be the operator's, so nothing is written."""
+    with head.begin() as conn:
+        _member(conn, _OPERATOR)
+        _member(conn, "a-viewer", "viewer")
+    with pytest.raises(GrantRefusedError, match="unexpected_authorized_user"):
+        await _grant(head, from_user="a-viewer")
     with head.begin() as conn:
         assert conn.scalar(text("SELECT count(*) FROM exchange_account_memberships "
                                 "WHERE user_id=:u"), {"u": _NODE}) == 0
