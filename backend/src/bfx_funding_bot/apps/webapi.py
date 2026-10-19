@@ -27,6 +27,11 @@ from bfx_funding_bot.modules.observability.error_tracking import init_error_trac
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    if os.environ.get("BFX_ADMIN_TOKEN", "").strip():
+        # The daemon's halt credential; the web API reads with BFX_ADMIN_READ_TOKEN only
+        # (9d-2). Refusing to start makes a left-over key fail the deploy, which rolls back.
+        logging.critical("Startup refused: BFX_ADMIN_TOKEN must not be in the web API's env")
+        raise RuntimeError("bfx_admin_token_in_webapi_env")
     try:
         settings = Settings()
         logging.basicConfig(level=settings.log_level)

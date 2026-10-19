@@ -6,7 +6,7 @@ import logging
 import os
 import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -190,6 +190,19 @@ from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strate
 
 _BITFINEX_REST_BASE_URL = "https://api-pub.bitfinex.com"
 
+
+
+def admin_tokens(env: Mapping[str, str]) -> tuple[str | None, str | None]:
+    """The bot's /admin tokens: (halt and read, read only).
+
+    A read token equal to the admin token would let the web API's read credential halt, so
+    it is dropped (the admin token keeps /admin working for the operator)."""
+    admin = env.get("BFX_ADMIN_TOKEN", "").strip() or None
+    read = env.get("BFX_ADMIN_READ_TOKEN", "").strip() or None
+    if read is not None and read == admin:
+        log.error("admin_read_token_ignored reason=equals_admin_token")
+        read = None
+    return admin, read
 
 async def build_daemon(
     *,
@@ -972,7 +985,7 @@ async def build_daemon(
     healthz_port_env = os.environ.get("BFX_HEALTHZ_PORT", "").strip()
     healthz_port = int(healthz_port_env) if healthz_port_env else 8080
     healthz_host = os.environ.get("BFX_HEALTHZ_HOST", "0.0.0.0").strip() or "0.0.0.0"
-    admin_token = os.environ.get("BFX_ADMIN_TOKEN", "").strip() or None
+    admin_token, admin_read_token = admin_tokens(os.environ)
 
     # Phase 4.4a Task 19: WS dispatcher — wired only for a venue whose capabilities require
     # the authenticated WebSocket (Bitfinex); the simulated venue has none, so these remain
@@ -1046,6 +1059,7 @@ async def build_daemon(
         healthz_host=healthz_host,
         healthz_port=healthz_port,
         admin_token=admin_token,
+        admin_read_token=admin_read_token,
         trading_status=trading_status,
         trading_readiness=trading_readiness,
         writer_lock=writer_lock,

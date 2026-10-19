@@ -185,7 +185,8 @@ TRIGGER_TITLES: Final[Mapping[str, str]] = {
 
 # Values of these keys are scrubbed from every alert (exception text can carry them).
 SECRET_ENV_KEYS: Final = ("TELEGRAM_BOT_TOKEN", "BFX_API_KEY", "BFX_API_SECRET",
-                          "BFX_ADMIN_TOKEN", "BFX_VAULT_KEK", "SENTRY_DSN")
+                          "BFX_ADMIN_TOKEN", "BFX_ADMIN_READ_TOKEN", "BFX_VAULT_KEK",
+                          "SENTRY_DSN")
 _TOKEN = re.compile(r"[0-9]{3,20}:[A-Za-z0-9_-]{20,100}")
 _CHAT_ID = re.compile(r"-?[0-9]{1,20}|@[A-Za-z0-9_]{4,64}")
 _MAX_TEXT = 3900

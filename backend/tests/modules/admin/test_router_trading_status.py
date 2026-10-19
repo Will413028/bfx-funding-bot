@@ -1,6 +1,7 @@
 """Admin router — GET /admin/trading-status and POST /admin/dry-evaluate.
 
-Both endpoints sit behind the same static Bearer token as /admin/halt.
+Both endpoints accept the admin token or the read token; /admin/halt accepts the
+admin token only (9d-2).
 Auth is retested here rather than assumed: these expose real-money position and
 balance figures, and /dry-evaluate runs the guard chain on demand.
 """
@@ -243,3 +244,56 @@ def test_actor_defaults_to_something_identifiable() -> None:
         "/admin/halt?reason=x", headers={"Authorization": "Bearer secret"},
     )
     assert status.halts[0]["actor"]  # non-empty
+
+
+# ------------------------------------------------------------------ read token (9d-2)
+
+
+def _read_app(status: Any) -> FastAPI:
+    app = FastAPI()
+    app.include_router(build_router(
+        admin_token="secret", read_token="read-only", trading_status=status,
+    ))
+    return app
+
+
+def test_the_read_token_reads_status_and_dry_runs() -> None:
+    status = _HaltableStatus()
+    client = TestClient(_read_app(status))
+    headers = {"Authorization": "Bearer read-only"}
+    assert client.get("/admin/trading-status", headers=headers).status_code == 200
+    assert client.post("/admin/dry-evaluate", headers=headers).status_code == 200
+
+
+def test_the_read_token_cannot_halt() -> None:
+    """The web API holds only the read token: a leaked web credential cannot stop trading."""
+    status = _HaltableStatus()
+    resp = TestClient(_read_app(status)).post(
+        "/admin/halt?reason=x", headers={"Authorization": "Bearer read-only"})
+    assert resp.status_code == 403
+    assert status.halts == []
+
+
+def test_the_admin_token_still_halts_beside_a_read_token() -> None:
+    status = _HaltableStatus()
+    resp = TestClient(_read_app(status)).post(
+        "/admin/halt?reason=x", headers={"Authorization": "Bearer secret"})
+    assert resp.status_code == 200
+    assert status.halts == [{"reason": "x", "actor": "admin-api"}]
+
+
+def test_tokens_are_compared_in_constant_time() -> None:
+    """No ``==``/``!=`` against a token in the router: only ``hmac.compare_digest``."""
+    import ast
+    import inspect
+
+    from bfx_funding_bot.modules.admin import router
+
+    tree = ast.parse(inspect.getsource(router))
+    token_names = {"token", "expected", "admin_token", "read_token"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare) and any(
+                isinstance(op, ast.Eq | ast.NotEq) for op in node.ops):
+            names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+            assert not names & token_names, ast.unparse(node)
+    assert "compare_digest" in inspect.getsource(router._auth_error)

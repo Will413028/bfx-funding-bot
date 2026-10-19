@@ -55,9 +55,11 @@ def test_daemon_admin_token_hidden(
         account_ctx=Mock(),
         bus=Mock(),
         admin_token="fake-admin-token",
+        admin_read_token="fake-read-token",
     )
     assert daemon.admin_token == "fake-admin-token"
     assert "fake-admin-token" not in render(daemon)
+    assert "fake-read-token" not in render(daemon)
 
 
 @pytest.mark.parametrize("render", [repr, str], ids=["repr", "str"])

@@ -64,3 +64,14 @@ def test_startup_refuses_an_unreadable_or_unsupported_authority(
     monkeypatch.setenv("DATABASE_URL", _authority_db(tmp_path / f"{epoch}.db", epoch))
     with pytest.raises(AuthorityMismatch, match=match), TestClient(app):
         pass
+
+
+def test_startup_refuses_the_daemon_halt_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """9d-2: the web API holds the read token only; a left-over halt token fails the boot,
+    so the deploy rolls back instead of quietly keeping the web API able to halt."""
+    monkeypatch.setenv("DATABASE_URL", _authority_db(tmp_path / "ledger.db", "ledger"))
+    monkeypatch.setenv("BFX_ADMIN_TOKEN", "halt-secret")
+    with pytest.raises(RuntimeError, match="bfx_admin_token_in_webapi_env"), TestClient(app):
+        pass

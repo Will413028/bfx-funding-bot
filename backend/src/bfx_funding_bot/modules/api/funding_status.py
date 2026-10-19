@@ -1,7 +1,8 @@
 """Authenticated account adapter for the daemon's canonical read-only status.
 
-No budget calculation or execution endpoint exists in this adapter. The internal
-admin credential stays server-side; user mutations use durable release sessions.
+No budget calculation or execution endpoint exists in this adapter. It holds the
+daemon's read token only (``BFX_ADMIN_READ_TOKEN``), which the daemon refuses for
+halt; user mutations use durable release sessions.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 
 
 async def _read_daemon(path: str) -> dict[str, Any]:
-    token = os.environ.get("BFX_ADMIN_TOKEN")
+    token = os.environ.get("BFX_ADMIN_READ_TOKEN")
     if not token:
         raise RuntimeError("daemon_status_unconfigured")
     async with httpx.AsyncClient(base_url="http://bfx-bot:8080", timeout=15,

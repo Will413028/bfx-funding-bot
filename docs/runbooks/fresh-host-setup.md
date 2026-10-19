@@ -160,7 +160,7 @@ RESET ROLE;
 | 檔案（`/opt/bfx/runtime/`） | `DATABASE_URL` 的 role | 備註 |
 |---|---|---|
 | `bot.env` | `bfx_bot` | 範本 `deploy/vm/bot.env.example` |
-| `webapi.env` | `bfx_webapi` | 同檔還有 `BETTER_AUTH_JWKS_URL=http://bfx-frontend:3000/api/auth/jwks`（docker 內網） |
+| `webapi.env` | `bfx_webapi` | 同檔還有 `BETTER_AUTH_JWKS_URL=http://bfx-frontend:3000/api/auth/jwks`（docker 內網），以及和 `bot.env` 同值的 `BFX_ADMIN_READ_TOKEN`（`openssl rand -hex 32`）；**不可**放 `BFX_ADMIN_TOKEN`，webapi 看到它會拒絕開機（halt token 只留在 `bot.env`） |
 | `frontend.env` | `bfx_webauth` | direct 連線（`@postgres:5432/bfx`，無 pooler、無 sslmode）；範本 `deploy/vm/frontend.env.example` |
 | `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`、`BFX_OPERATOR_USER_ID`（兩者照抄 `bot.env`）與 `BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id，`tailscale whois --json <operator 裝置的 tailnet IP>` 的 `UserProfile.ID`）；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 `bfx-op` 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
 | `migrate.env` | `<owner>` | 只有 bfx-deploy 的 migration 與 operator one-shot 使用 |

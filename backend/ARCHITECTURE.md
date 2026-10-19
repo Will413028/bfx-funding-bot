@@ -792,7 +792,7 @@ CLI 的 `rotate-credential` 從 stdin 讀新 key，只封給「scope 最新、�
 `bitfinex_user_id` 由 applied 的輪替與 bootstrap 在建立列時寫入（bootstrap 先以新 key 查 `info/user`，pending 列就帶 id，驗證通過才 promote）；
 CHECK `ck_exchange_account_credentials_active_user_id`（migration `36e59526f8cf`，加之前斷言沒有 active 且 NULL 的列）保證 active 列一定有 id，所以 worker 不需要也沒有 trust-on-first-use 回填，換憑證 worker 也從不問現行 key。
 因此現行 key 已在 Bitfinex 撤銷時仍可輪替，憑證恢復模式因此有出口。
-靜態 admin token 不能 resume live。TOTP 真實 enrollment／production acceptance
+靜態 admin token 不能 resume live。bot `/admin` 有兩把 token（常數時間比對）：`BFX_ADMIN_TOKEN` 可讀狀態也可 halt，只在 bot 與 `bfx-op halt`；`BFX_ADMIN_READ_TOKEN` 只能讀 `trading-status`／`dry-evaluate`，webapi 的 funding status 只持有這把（9d-2）。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 
 **關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`、
