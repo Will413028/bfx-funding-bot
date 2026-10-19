@@ -335,6 +335,7 @@ class Daemon:
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
     admin_token: str | None = field(default=None, repr=False)
+    admin_read_token: str | None = field(default=None, repr=False)
     # Behaviour-reporting service behind /admin/trading-status + /admin/dry-evaluate.
     trading_status: TradingStatusService | None = None
     trading_readiness: TradingReadiness | None = None
@@ -813,6 +814,7 @@ class Daemon:
             port=self.healthz_port,
             stop_event=self._stop_event,
             admin_token=self.admin_token,
+            read_token=self.admin_read_token,
             metrics=self.metrics,
             trading_status=self.trading_status,
             readiness=self.trading_readiness,

@@ -49,6 +49,7 @@ def make_app(
     probe: HealthProbe,
     *,
     admin_token: str | None = None,
+    read_token: str | None = None,
     metrics: DaemonMetrics | None = None,
     trading_status: TradingStatusService | None = None,
     readiness: TradingReadiness | None = None,
@@ -119,7 +120,8 @@ def make_app(
 
     if admin_token and trading_status is not None:
         from bfx_funding_bot.modules.admin.router import build_router
-        app.include_router(build_router(admin_token=admin_token, trading_status=trading_status))
+        app.include_router(build_router(admin_token=admin_token, read_token=read_token,
+                                        trading_status=trading_status))
         log.info("admin_router_mounted trading_status=True")
     else:
         log.info(
@@ -137,6 +139,7 @@ async def run_healthz_server(
     port: int,
     stop_event: asyncio.Event,
     admin_token: str | None = None,
+    read_token: str | None = None,
     metrics: DaemonMetrics | None = None,
     trading_status: TradingStatusService | None = None,
     readiness: TradingReadiness | None = None,
@@ -150,7 +153,7 @@ async def run_healthz_server(
     sub-tasks per D4 spec).
     """
     app = make_app(
-        probe, admin_token=admin_token, metrics=metrics,
+        probe, admin_token=admin_token, read_token=read_token, metrics=metrics,
         trading_status=trading_status, readiness=readiness,
     )
     config = uvicorn.Config(

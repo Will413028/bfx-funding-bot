@@ -4,12 +4,16 @@ Mounted by healthz.make_app() whenever `admin_token` is set and `trading_status`
 is provided; `trading_status` gates GET /admin/trading-status, POST
 /admin/dry-evaluate and POST /admin/halt.
 
-Auth: static `Authorization: Bearer <BFX_ADMIN_TOKEN>` header check on every
-route. trading-status exposes real-money balances and positions, and
-dry-evaluate runs the guard chain on demand — neither is public.
+Auth: static `Authorization: Bearer <token>` header check on every route,
+compared in constant time. The two reads accept the admin token or the read
+token (`BFX_ADMIN_READ_TOKEN`, the web API's); halt accepts the admin token
+only, so the web API's credential cannot stop trading. trading-status exposes
+real-money balances and positions, and dry-evaluate runs the guard chain on
+demand — neither is public.
 """
 from __future__ import annotations
 
+import hmac
 import logging
 from typing import Any, Protocol
 
@@ -28,15 +32,18 @@ class _TradingStatusProtocol(Protocol):
     async def halt(self, *, reason: str, actor: str) -> dict[str, Any]: ...
 
 
-def _auth_error(authorization: str | None, admin_token: str) -> JSONResponse | None:
-    """Shared Bearer check. Returns a response to send, or None when authorized."""
+def _auth_error(authorization: str | None, *tokens: str | None) -> JSONResponse | None:
+    """Shared Bearer check against any of ``tokens``. Returns a response to send, or None
+    when authorized."""
     if not authorization:
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"error": "missing_auth"},
         )
     scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or token != admin_token:
+    accepted = any(hmac.compare_digest(token.encode(), expected.encode())
+                   for expected in tokens if expected)
+    if scheme.lower() != "bearer" or not accepted:
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
             content={"error": "unauthorized"},
@@ -47,6 +54,7 @@ def _auth_error(authorization: str | None, admin_token: str) -> JSONResponse | N
 def build_router(
     *,
     admin_token: str,
+    read_token: str | None = None,
     trading_status: _TradingStatusProtocol | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/admin", tags=["admin"])
@@ -63,7 +71,7 @@ def build_router(
             "did the pause take effect?" could only be answered by re-reading
             the thing we had just written (2026-07-27).
             """
-            denied = _auth_error(authorization, admin_token)
+            denied = _auth_error(authorization, admin_token, read_token)
             if denied is not None:
                 return denied
             return JSONResponse(status_code=200, content=await trading_status.snapshot())
@@ -82,7 +90,7 @@ def build_router(
             evaluated, including a live writer-lock check), not because it
             mutates anything — it does not.
             """
-            denied = _auth_error(authorization, admin_token)
+            denied = _auth_error(authorization, admin_token, read_token)
             if denied is not None:
                 return denied
             try:

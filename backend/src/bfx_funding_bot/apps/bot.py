@@ -973,6 +973,7 @@ async def build_daemon(
     healthz_port = int(healthz_port_env) if healthz_port_env else 8080
     healthz_host = os.environ.get("BFX_HEALTHZ_HOST", "0.0.0.0").strip() or "0.0.0.0"
     admin_token = os.environ.get("BFX_ADMIN_TOKEN", "").strip() or None
+    admin_read_token = os.environ.get("BFX_ADMIN_READ_TOKEN", "").strip() or None
 
     # Phase 4.4a Task 19: WS dispatcher — wired only for a venue whose capabilities require
     # the authenticated WebSocket (Bitfinex); the simulated venue has none, so these remain
@@ -1046,6 +1047,7 @@ async def build_daemon(
         healthz_host=healthz_host,
         healthz_port=healthz_port,
         admin_token=admin_token,
+        admin_read_token=admin_read_token,
         trading_status=trading_status,
         trading_readiness=trading_readiness,
         writer_lock=writer_lock,
