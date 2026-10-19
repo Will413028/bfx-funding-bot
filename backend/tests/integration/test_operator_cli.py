@@ -93,7 +93,12 @@ async def cli(*argv: str) -> tuple[int, dict[str, Any], str]:
     """``main`` in a thread: it runs its own event loop, as the container's entrypoint does."""
     out, log = io.StringIO(), io.StringIO()
     code = await asyncio.to_thread(operator_cli.main, list(argv), out=out, log=log)
-    return code, json.loads(out.getvalue()), log.getvalue()
+    payload = json.loads(out.getvalue())
+    if code != 0:
+        # Shown only when a test fails: this file has failed intermittently in CI (KeyError on
+        # the payload) with no trace of which refusal or exception the CLI hit.
+        print(f"cli {argv[0]} exit={code} payload={payload} log={log.getvalue()!r}")
+    return code, payload, log.getvalue()
 
 
 async def allow(session, *, account_id, user) -> bool:
