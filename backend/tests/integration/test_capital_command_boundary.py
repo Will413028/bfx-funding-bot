@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
+from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
@@ -28,7 +29,6 @@ from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardRe
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials, SubmittedOrder
 from bfx_funding_bot.modules.execution.safety.hard_guards import CapitalPolicyGuard, ManualKillGuard
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.ledger import CapitalAvailable, PolicyRefused
 from bfx_funding_bot.modules.ledger.tables import (
     CapitalCommandClockRow,
@@ -803,7 +803,7 @@ async def test_an_acknowledged_submit_records_the_offer_and_charges_the_amount(g
 
 
 async def test_a_rejected_submit_records_the_rejection_and_charges_nothing(gate_stack):
-    from bfx_funding_bot.modules.execution.submit_outcomes import SubmitRejected
+    from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitRejected
     rig = await boundary(gate_stack)
 
     class Rejecting(Venue):

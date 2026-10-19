@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from bfx_funding_bot.apps import bot, bot_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS
 from bfx_funding_bot.core.errors import BootInvariantError
+from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.command_boundary import CommandOutcomeNotice
@@ -44,7 +45,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.ledger import (
     RUNTIME_GRACE_MS,
     Attempt,

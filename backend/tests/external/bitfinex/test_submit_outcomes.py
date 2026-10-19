@@ -10,8 +10,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
-from bfx_funding_bot.modules.execution.submit_outcomes import (
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmissionAttemptPayload,
     SubmitAcknowledged,
     SubmitNotSent,
@@ -23,6 +22,7 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     normalize_submit_payload,
     response_digest,
 )
+from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
 
 
 def _success_body(venue_offer_id: int = 42) -> list[object]:

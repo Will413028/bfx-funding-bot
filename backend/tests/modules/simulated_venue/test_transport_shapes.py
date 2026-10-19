@@ -10,8 +10,8 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
     parse_offer_response,
 )
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
-from bfx_funding_bot.modules.execution.retry import classify_httpx_response
-from bfx_funding_bot.modules.execution.submit_outcomes import (
+from bfx_funding_bot.external.bitfinex.retry import classify_httpx_response
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitAcknowledged,
     SubmitOutcomeUnknown,
     SubmitRejected,

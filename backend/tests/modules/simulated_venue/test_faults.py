@@ -7,7 +7,7 @@ from decimal import Decimal
 import httpx
 import pytest
 
-from bfx_funding_bot.modules.execution.submit_outcomes import (
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitOutcomeUnknown,
     classify_submit_response,
 )

@@ -9,7 +9,7 @@ anything else stays UNKNOWN, so the allowlist can widen only by observation.
 """
 import pytest
 
-from bfx_funding_bot.modules.execution.submit_outcomes import (
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     VENUE_SUBMIT_REFUSALS_5XX,
     SubmitOutcomeKind,
     SubmitOutcomeUnknown,

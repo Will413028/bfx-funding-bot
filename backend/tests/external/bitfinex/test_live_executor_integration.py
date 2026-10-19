@@ -10,6 +10,7 @@ import pytest
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
+from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
@@ -24,7 +25,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
 
 
@@ -488,7 +488,7 @@ async def test_submit_cancelled_while_waiting_for_the_gate_is_not_sent() -> None
     nothing was sent, so the intent can close as NOT_SENT instead of UNKNOWN."""
     import asyncio
 
-    from bfx_funding_bot.modules.execution.submit_outcomes import SubmitCancelledNotSent
+    from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitCancelledNotSent
 
     requests: list[httpx.Request] = []
 

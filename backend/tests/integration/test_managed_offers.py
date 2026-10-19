@@ -13,10 +13,10 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
 from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmitAcknowledged
 
 from .test_capital_command_boundary import (
     boundary,

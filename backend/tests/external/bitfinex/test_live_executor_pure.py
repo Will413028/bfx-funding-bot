@@ -11,9 +11,9 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
     format_venue_decimal,
     parse_offer_response,
 )
+from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 
 
 def test_live_executor_submit_accepts_only_ready_to_submit() -> None:

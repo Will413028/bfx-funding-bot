@@ -25,6 +25,14 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
     format_offer_amount,
     format_venue_decimal,
 )
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmissionAttemptPayload,
+    SubmitCancelledNotSent,
+    SubmitNotSent,
+    SubmitOutcomeKind,
+    SubmitOutcomeUnknown,
+    normalize_submit_payload,
+)
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary, CommandFacts
@@ -40,14 +48,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     VenueExecutorPort,
 )
 from bfx_funding_bot.modules.execution.safety.protection import ProtectionPort
-from bfx_funding_bot.modules.execution.submit_outcomes import (
-    SubmissionAttemptPayload,
-    SubmitCancelledNotSent,
-    SubmitNotSent,
-    SubmitOutcomeKind,
-    SubmitOutcomeUnknown,
-    normalize_submit_payload,
-)
 from bfx_funding_bot.modules.ledger import (
     CancelAdmitted,
     CommandAttempt,

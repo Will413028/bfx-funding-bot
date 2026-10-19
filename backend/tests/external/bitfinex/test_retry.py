@@ -9,7 +9,7 @@ from bfx_funding_bot.core.errors import (
     ExecutorFatalError,
     ExecutorTransientError,
 )
-from bfx_funding_bot.modules.execution.retry import (
+from bfx_funding_bot.external.bitfinex.retry import (
     RETRY_ATTEMPTS,
     classify_httpx_exception,
     classify_httpx_response,

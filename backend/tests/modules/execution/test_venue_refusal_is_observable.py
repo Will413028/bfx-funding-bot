@@ -22,7 +22,7 @@ from bfx_funding_bot.external.bitfinex.funding_rules import (
     submit_amount,
     validate_amount,
 )
-from bfx_funding_bot.modules.execution.submit_outcomes import (
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitOutcomeKind,
     classify_submit_response,
     venue_error,
