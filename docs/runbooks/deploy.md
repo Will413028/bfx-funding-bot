@@ -42,21 +42,32 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    在 `origin/main` 上；compose 檔與 `live.env` 都取自 `<rev>` 本身（git 物件，不讀 working tree）。
 5. 以 digest pull 兩個 image；檢查 `/opt/bfx/runtime/*.env`；在新 image 的 one-shot
    （`migrate.env`，owner role）比較 `alembic current` 與 `alembic heads`。
-6. **有待套用的 migration**（Will 2026-09-25）：先停 bot（唯一的 writer）→
+6. **有待套用的 migration**（Will 2026-09-25；全停：ADR
+   `2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations` D6）：
+   先停 webapi，再停 bot（唯一的 writer）→
    用 `<rev>` 的 `backup.sh --type diff` 備份 → 用 `<rev>` 的 DR 腳本跑 isolated restore test
    （`bfx-restore-test@<rev>.service`；驗證還原之後，用 `<rev>` 的 backend image 在隔離副本上
    演練 `alembic upgrade head` 與 boot check，[offsite-dr](offsite-dr.md)）→ `alembic upgrade head`。
-   **從停 bot 起任何一步失敗，bot 都維持停止**，只能 roll forward（新 release）或 `--retry`；
+   webapi 停不了：什麼都不做，bot 照跑；bot 停不了：什麼都不做，把剛停的 webapi 重新啟動。
+   **兩者都停下後任何一步失敗，bot 與 webapi 都維持停止**（舊 webapi 不在新 schema 上跑），
+   只能 roll forward（新 release）或 `--retry`；
    唯一例外是演練失敗（receipt `error_code: migration_rehearsal_failed`）：備份已證明可還原、
-   prod schema 沒動，bfx-deploy 把停下的 bot 重新啟動（D7'，Will 2026-10-08）。
+   prod schema 沒動，bfx-deploy 依序把停下的 bot 與 webapi 重新啟動，各自等健康與 settle
+   （D7'，Will 2026-10-08）。
+   **這段期間（停 webapi 到新版健康）營運 UI 不可用**；frontend 照跑但拿不到資料
+   （停機前撤單見下方「migration 之後」末段）。
    **沒有 migration 但 diff 碰到 DR 路徑**（`deploy/vm/pgbackrest/**`、`deploy/vm/postgres/**`、
-   `docker-compose.bot.yml`、`docker-compose.dr.yml`，或 diff 讀不到）：bot 照跑，先跑 restore test。
+   `docker-compose.bot.yml`、`docker-compose.dr.yml`，或 diff 讀不到）：什麼都不停，先跑 restore test。
+   沒有 migration 的部署與回滾路徑不停 webapi。
 7. 寫入 ledger 的 `started` 列（attempt id、digest、revision、CI run；之後不可修改），
    再 `docker compose -p bfx-app -f <release>/docker-compose.app.yml up -d --no-deps bot webapi frontend`。
    `BFX_DEPLOYMENT_ID` 只用來讓 audit 與狀態報告指出這次部署，不影響交易。
 8. 檢查每個 container 跑的是這次記錄的 digest 與身分 env（`BFX_IMAGE_DIGEST`、
    `BFX_SOURCE_REVISION`、`BFX_DEPLOYMENT_ID`）、屬於 compose project `bfx-app`；
    等健康（bot `:8080/healthz`、webapi health、frontend `127.0.0.1:3001`），再 settle 60 秒。
+   webapi 與 bot 一樣，開機時比對 image 內 migrations 的唯一 head（`core/schema_head.py`）與
+   `alembic_version`，不一致就拒絕開機（uvicorn 結束、health 不會通過）：舊 webapi 不會在
+   migrate 過的 schema 上服務，新 webapi 也不會在還沒 migrate 的 schema 上服務。
    Hardening（read-only、UID、cap-drop、port、network）不在 VM 上重驗，而是 CI 對
    `docker compose config` 的輸出做 policy 檢查（`deploy/vm/ops/compose_policy.py`）。
 9. 成功：`bfx-bot:local` 重新 tag 到新 backend（DR verifier 仍用這個 alias；weekly report 改用 ledger 的 digest）；
@@ -114,7 +125,8 @@ journalctl -u bfx-deploy.service -n 200 --no-pager
 ```
 
 `--dry-run` 的 JSON 看 `ci_run`、`migrations_pending`、
-`stop_bot_before_migration`、`restore_test_before_deploy`、`rollback_target`、`blockers`
+`stop_bot_before_migration`、`stop_webapi_before_migration`、`restore_test_before_deploy`、
+`rollback_target`、`blockers`
 （例如 `foreign_container_holds_name:bfx-bot`）。
 
 部署紀錄（最新在上；同一次嘗試的 `started` 與結束列共用 `attempt_id`）：
@@ -199,23 +211,25 @@ sudo systemctl start bfx-deploy.timer
 | `deployed` | 成功 | 無 |
 | `failed`，detail `precheck:*` | 部署前檢查失敗，現行 release 沒動 | 依 code 修（env、registry、git、foreign container…），再 `--retry` |
 | `failed`，`dr_checkout_failed` | 建不出目標的 DR checkout，現行 release 沒動 | 查 mirror／`/home/ubuntu/bfx-releases` 權限，再 `--retry` |
-| `failed`，`bot_stop_failed` | 有 migration 但停不了 bot，什麼都沒做 | 查 docker，再 `--retry` |
-| `failed`，`backup_failed` / `restore_test_failed(migration_pending)` / `migration_failed`，detail 含 `bot stopped until a release deploys` | schema 未變，**bot 已停** | 看 `journalctl -u 'bfx-restore-test@*'` 或 backup log；修好後 `--retry` 或出新 release |
-| `failed`，`restore_test_failed(migration_pending):…:migration_rehearsal_failed`，detail 含 `bot restarted on the running release` | 目標 release 的 migration 在隔離副本上失敗；prod schema 未變，**舊 bot 已重新啟動** | 看 `journalctl -u 'bfx-restore-test@*'` 的 `migration_rehearsal_failed: <step>`；修 migration 出新 release（不 `--retry` 同一 digest） |
-| 同上但 detail 含 `bot_restart_failed:<why>` | 演練失敗，重新啟動的 bot 起不來或不健康（含 settle 60 秒），bot 已停；`BOT_STOP_FAILED, bot may be running` 表示連停都停不了 | 查 `docker ps`、`docker logs bfx-bot`；修好後 `--recreate` 或出新 release |
+| `failed`，`webapi_stop_failed` | 有 migration 但停不了 webapi，什麼都沒做，bot 照跑 | 查 docker，再 `--retry` |
+| `failed`，`bot_stop_failed` | 有 migration 但停不了 bot，什麼都沒做；detail 含 `webapi restarted` 表示剛停的 webapi 已重新啟動，含 `webapi_restart_failed:<why>` 表示 webapi 沒起來 | 查 docker，再 `--retry` |
+| `failed`，`backup_failed` / `restore_test_failed(migration_pending)` / `migration_failed`，detail 含 `bot and webapi stopped until a release deploys` | schema 未變，**bot 與 webapi 已停**（UI 不可用） | 看 `journalctl -u 'bfx-restore-test@*'` 或 backup log；修好後 `--retry` 或出新 release |
+| `failed`，`restore_test_failed(migration_pending):…:migration_rehearsal_failed`，detail 含 `bot restarted on the running release; webapi restarted on the running release` | 目標 release 的 migration 在隔離副本上失敗；prod schema 未變，**舊 bot 與舊 webapi 已重新啟動** | 看 `journalctl -u 'bfx-restore-test@*'` 的 `migration_rehearsal_failed: <step>`；修 migration 出新 release（不 `--retry` 同一 digest） |
+| 同上但 detail 含 `bot_restart_failed:<why>` 或 `webapi_restart_failed:<why>` | 演練失敗，重新啟動的那個 container 起不來或不健康（含 settle 60 秒），已停；`BOT_STOP_FAILED, bot may be running`（或 `WEBAPI_…`）表示連停都停不了；另一個照 detail 各自記錄 | 查 `docker ps`、`docker logs bfx-bot`／`bfx-webapi`；修好後 `--recreate` 或出新 release |
 | `failed`，`restore_test_failed(dr_paths:…)` | 沒有 migration 的 DR 變更沒通過 restore test，現行 release 沒動 | 修 DR 變更出新 release |
-| `failed`，`migration_partial_or_unverified` | schema **已變**、狀態不明，bot 已停 | 見下方「migration 之後」 |
-| `failed`，`ledger_started_unrecorded` | `started` 列寫不進去，container 沒動（有 migration 時 bot 已停） | 查 postgres，再 `--retry` |
+| `failed`，`migration_partial_or_unverified` | schema **已變**、狀態不明，bot 與 webapi 已停 | 見下方「migration 之後」 |
+| `failed`，`ledger_started_unrecorded` | `started` 列寫不進去，container 沒動（有 migration 時 bot 與 webapi 已停：`bot and webapi stay stopped`） | 查 postgres，再 `--retry` |
 | `rolled_back` | 新版不健康、沒有 migration，已回到上一個成功的 digest（用它原本的 deployment id） | 查原因；修好出新 release，或 `--retry` 同一 digest |
-| `failed`，`unhealthy:*; migrations applied` 或 `no previous deployment` | 不能自動回滾，bfx-deploy 已停 bot | 見下方 |
+| `failed`，`unhealthy:*; migrations applied` 或 `no previous deployment` | 不能自動回滾，bfx-deploy 已停 bot；有 migration 時 webapi 也停（`bot stopped; webapi stopped`） | 見下方 |
 | 只有 `started`、沒有結束列 | 嘗試中途中斷（bfx-deploy 被殺、主機重開） | 看 `docker ps` 與 journal 判斷停在哪；之後 `--retry` |
 
 **migration 之前**失敗：沒有 migration 的部署，現行 release 不受影響，自動回滾只發生在這種情況。
-有 migration 的部署在備份前就停了 bot，失敗時維持停止（Will 2026-09-25）。
+有 migration 的部署在備份前就停了 webapi 與 bot，失敗時兩者維持停止（Will 2026-09-25；全停 D6）。
 
 **migration 之後**失敗：舊 code 可能不能在新 schema 上跑（live daemon 開機會比對
 image 內 migrations 推導出的唯一 head（`core/schema_head.build_head`）與 `alembic_version`，不一致就發
-`venue_offers_may_remain` 告警、拒絕開機，不寫交易狀態也不碰 venue）。只能：
+`venue_offers_may_remain` 告警、拒絕開機，不寫交易狀態也不碰 venue；webapi 做同樣的比對，
+不一致就拒絕開機）。只能：
 
 1. roll forward：修正後出新 release（新 commit → CI → GHCR → bfx-deploy）；或
 2. 把 migration 前的備份還原到**隔離**資料庫比對，再決定。**不要把舊備份蓋回 production**

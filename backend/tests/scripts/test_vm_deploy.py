@@ -3,8 +3,9 @@
 The simulated host answers the exact argv bfx-deploy issues (git through
 runuser, docker pull/run/compose/inspect/exec/stop, backup.sh, systemctl, uv)
 and keeps just enough state -- schema revision, running images, health by
-digest, git worktrees -- to prove the ordering and fail-safe rules: the bot is
-stopped before a migration and stays stopped if anything after that fails, a
+digest, git worktrees -- to prove the ordering and fail-safe rules: the web API
+and the bot are stopped before a migration and stay stopped if anything after
+that fails (full stop, ADR 2026-10-15 D6), a
 backup and a restore test with the target's DR scripts precede the migration,
 the `started` row precedes any container change, rollback only when no
 migration ran, and the target's tooling is installed only once it deployed.
@@ -167,6 +168,8 @@ class FakeHost:
     local_digests: dict[str, list[str]] = field(default_factory=dict)  # repository -> digests
     uv_ok: bool = True
     stop_ok: bool = True
+    stop_fails: set[str] = field(default_factory=set)   # containers whose `docker stop` fails
+    start_fails: set[str] = field(default_factory=set)  # containers whose `docker start` fails
     compose_fail: set[str] = field(default_factory=set)
     unhealthy: set[str] = field(default_factory=set)
     tampered: dict[str, Callable[[dict[str, Any]], None]] = field(default_factory=dict)
@@ -174,7 +177,7 @@ class FakeHost:
     running: dict[str, tuple[str, str, str, str]] = field(default_factory=dict)
     stopped: list[str] = field(default_factory=list)
     started: list[str] = field(default_factory=list)
-    stopped_bot: tuple[str, str, str, str] | None = None
+    parked: dict[str, tuple[str, str, str, str]] = field(default_factory=dict)  # stopped
     worktrees: dict[str, str] = field(default_factory=dict)
     docker_configs: list[dict[str, Any]] = field(default_factory=list)
 
@@ -249,19 +252,24 @@ class FakeHost:
             healthy = service in self.running and self.running[service][1] not in self.unhealthy
             return bfx.CommandResult(0 if healthy else 1, "", "")
         if call[:2] == ("docker", "stop"):
-            if not self.stop_ok or (self.started and not self.stop_ok_after_start):
+            container = call[-1]
+            service = next(s for s, c in bfx.CONTAINERS.items() if c == container)
+            if (not self.stop_ok or container in self.stop_fails
+                    or (self.started and not self.stop_ok_after_start)):
                 return bfx.CommandResult(1, "", "daemon unreachable")
-            if "bot" not in self.running:
-                return bfx.CommandResult(1, "", "Error response from daemon: No such container: bfx-bot")
-            self.stopped_bot = self.running.pop("bot")
-            self.stopped.append(call[-1])
+            if service not in self.running:
+                return bfx.CommandResult(1, "", f"Error response from daemon: No such container: {container}")
+            self.parked[service] = self.running.pop(service)
+            self.stopped.append(container)
             return ok
         if call[:2] == ("docker", "start"):
-            assert call[2:] == ("bfx-bot",)
-            if not self.start_ok or self.stopped_bot is None:
+            assert len(call) == 3 and call[2] in {"bfx-bot", "bfx-webapi"}
+            container = call[2]
+            service = next(s for s, c in bfx.CONTAINERS.items() if c == container)
+            if not self.start_ok or container in self.start_fails or service not in self.parked:
                 return bfx.CommandResult(1, "", "Error response from daemon")
-            self.running["bot"] = self.stopped_bot
-            self.started.append(call[-1])
+            self.running[service] = self.parked.pop(service)
+            self.started.append(container)
             return ok
         if call[:3] == ("docker", "image", "ls"):
             return bfx.CommandResult(0, "\n".join(self.local_digests.get(call[-1], [])), "")
@@ -455,7 +463,9 @@ def _alembic(*args: str) -> Callable[[tuple[str, ...]], bool]:
 BACKUP = lambda call: len(call) > 4 and call[4].endswith("backup.sh")  # noqa: E731
 RESTORE_TEST = _is(("systemctl", "start"))
 COMPOSE_UP = _is(("docker", "compose"))
-STOP_BOT = _is(("docker", "stop"))
+STOP_BOT = _is(("docker", "stop", "--time", "30", "bfx-bot"))
+STOP_WEBAPI = _is(("docker", "stop", "--time", "30", "bfx-webapi"))
+STOP_ANY = _is(("docker", "stop"))
 PULL = _is(("docker", "pull"))
 UV_SYNC = _is(("uv", "sync"))
 
@@ -499,7 +509,7 @@ def test_second_run_is_skipped_while_the_lock_is_held(harness: Harness) -> None:
 def test_release_without_migration_deploys_by_digest(harness: Harness) -> None:
     assert harness.run() == 0
     host = harness.host
-    assert host.count(BACKUP) == 0 and host.count(STOP_BOT) == 0
+    assert host.count(BACKUP) == 0 and host.count(STOP_ANY) == 0
     assert host.count(_alembic("upgrade", "head")) == 0
     assert host.index(PULL) < host.index(_alembic("current")) < host.index(COMPOSE_UP)
     env = host.envs[host.index(COMPOSE_UP)]
@@ -558,12 +568,17 @@ def test_started_row_that_cannot_be_written_changes_no_container(harness: Harnes
     assert harness.host.running["bot"][1] == OLD_B
 
 
-def test_pending_migration_stops_the_bot_then_backs_up_restore_tests_and_migrates(harness: Harness) -> None:
+def test_pending_migration_stops_the_webapi_and_the_bot_then_backs_up_restore_tests_and_migrates(
+    harness: Harness,
+) -> None:
+    """Full stop (ADR 2026-10-15 D6): no web API runs while the schema changes."""
     harness.host.current = ("h1",)
     assert harness.run() == 0
     host = harness.host
-    assert (host.index(STOP_BOT) < host.index(BACKUP) < host.index(RESTORE_TEST)
-            < host.index(_alembic("upgrade", "head")) < host.index(COMPOSE_UP))
+    assert (host.index(STOP_WEBAPI) < host.index(STOP_BOT) < host.index(BACKUP)
+            < host.index(RESTORE_TEST) < host.index(_alembic("upgrade", "head"))
+            < host.index(COMPOSE_UP))
+    assert host.stopped == ["bfx-webapi", "bfx-bot"] and host.started == []
     # The target release's DR scripts, from a clean checkout of <rev>.
     checkout = harness.settings.dr_root / REV_NEW
     assert host.calls[host.index(BACKUP)][4] == str(checkout / "deploy/vm/pgbackrest/backup.sh")
@@ -573,7 +588,7 @@ def test_pending_migration_stops_the_bot_then_backs_up_restore_tests_and_migrate
     assert started.migrations_applied is True
     assert harness.ledger.last.migrations_applied is True
     assert harness.ledger.last.outcome == "deployed"
-    assert host.running["bot"][1] == NEW_B
+    assert host.running["bot"][1] == host.running["webapi"][1] == NEW_B
 
 
 def test_change_classes_are_gone_from_the_command_line() -> None:
@@ -703,19 +718,53 @@ def test_repository_live_env_is_safe_for_compose() -> None:
     assert not {"BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_CHANGE_CLASS", "BFX_DEPLOYMENT_ID"} & set(values)
 
 
-def test_bot_that_cannot_be_stopped_blocks_the_migration(harness: Harness) -> None:
-    harness.host.current = ("h1",)
-    harness.host.stop_ok = False
+def test_bot_that_cannot_be_stopped_blocks_the_migration_and_starts_the_webapi_again(
+    harness: Harness,
+) -> None:
+    host = harness.host
+    host.current = ("h1",)
+    host.stop_fails = {"bfx-bot"}
     assert harness.run() == 1
-    assert harness.host.count(BACKUP) == 0 and harness.host.count(_alembic("upgrade", "head")) == 0
-    assert "bot_stop_failed; nothing migrated" in harness.ledger.last.detail
+    assert host.count(BACKUP) == 0 and host.count(_alembic("upgrade", "head")) == 0
+    # Nothing migrated: the web API stopped for it serves the running release again.
+    assert host.stopped == ["bfx-webapi"] and host.started == ["bfx-webapi"]
+    assert host.running["webapi"] == (f"{BACKEND}@{OLD_B}", OLD_B, REV_OLD, OLD_ATTEMPT)
+    assert harness.ledger.last.detail == (
+        "bot_stop_failed; nothing migrated; running release untouched; webapi restarted")
 
 
-def test_absent_bot_does_not_block_a_first_migration(harness: Harness) -> None:
+def test_webapi_that_cannot_be_stopped_blocks_the_migration_with_the_bot_running(
+    harness: Harness,
+) -> None:
+    host = harness.host
+    host.current = ("h1",)
+    host.stop_fails = {"bfx-webapi"}
+    assert harness.run() == 1
+    assert host.count(STOP_BOT) == 0 and host.count(BACKUP) == 0
+    assert host.count(_alembic("upgrade", "head")) == 0 and host.count(COMPOSE_UP) == 0
+    assert host.stopped == [] and host.running["bot"][1] == OLD_B
+    row = harness.ledger.last
+    assert (row.outcome, row.migrations_applied) == ("failed", False)
+    assert row.detail == "webapi_stop_failed; nothing migrated; running release untouched"
+
+
+@pytest.mark.parametrize("service", ["bot", "webapi"])
+def test_absent_container_does_not_block_a_first_migration(harness: Harness, service: str) -> None:
     harness.host.current = ("h1",)
-    del harness.host.running["bot"]
+    del harness.host.running[service]
     assert harness.run() == 0
     assert harness.ledger.last.outcome == "deployed"
+
+
+def test_started_row_that_cannot_be_written_after_a_migration_keeps_both_stopped(
+    harness: Harness,
+) -> None:
+    host = harness.host
+    host.current = ("h1",)
+    harness.ledger.fail_append = {"started"}
+    assert harness.run() == 1
+    assert host.count(COMPOSE_UP) == 0 and not {"bot", "webapi"} & set(host.running)
+    assert harness.ledger.last.detail.endswith("; bot and webapi stay stopped")
 
 
 @pytest.mark.parametrize(("setup", "code", "migrated"), [
@@ -724,7 +773,7 @@ def test_absent_bot_does_not_block_a_first_migration(harness: Harness) -> None:
     ("fail_unchanged", "migration_failed", False),
     ("fail_partial", "migration_partial_or_unverified", True),
 ])
-def test_any_failure_after_the_bot_stopped_keeps_it_stopped(
+def test_any_failure_after_the_stop_keeps_the_bot_and_the_webapi_stopped(
     harness: Harness, setup: str, code: str, migrated: bool,
 ) -> None:
     harness.host.current = ("h1",)
@@ -736,13 +785,14 @@ def test_any_failure_after_the_bot_stopped_keeps_it_stopped(
         harness.host.upgrade_result = setup
     assert harness.run() == 1
     host = harness.host
-    assert host.stopped == ["bfx-bot"] and "bot" not in host.running
+    assert host.stopped == ["bfx-webapi", "bfx-bot"] and host.started == []
+    assert not {"bot", "webapi"} & set(host.running)   # no old web API on a changed schema
     assert host.count(COMPOSE_UP) == 0 and _started(harness) == []
     if setup in {"backup", "restore"}:
         assert host.count(_alembic("upgrade", "head")) == 0
     row = harness.ledger.last
     assert (row.outcome, row.migrations_applied) == ("failed", migrated)
-    assert code in row.detail and "bot stopped until a release deploys" in row.detail
+    assert code in row.detail and "bot and webapi stopped until a release deploys" in row.detail
     assert harness.notices[-1][0] == "critical"
 
 
@@ -754,25 +804,29 @@ def _receipt(code: str = "migration_rehearsal_failed", *, observed_at_ms: int = 
             **changes}
 
 
-def test_a_failed_migration_rehearsal_starts_the_running_bot_again(harness: Harness) -> None:
+def test_a_failed_migration_rehearsal_starts_the_running_bot_and_webapi_again(
+    harness: Harness,
+) -> None:
     """D7' (Will 2026-10-08): the backup restored and production's schema is untouched; only the
-    target's migrations failed on the isolated copy, so the release is refused and the bot
-    that was stopped for it runs on."""
+    target's migrations failed on the isolated copy, so the release is refused and the bot and
+    the web API that were stopped for it run on (each health-probed like a deploy)."""
     host = harness.host
     host.current = ("h1",)
     host.restore_test_ok = False
     host.restore_receipt = _receipt()
     assert harness.run() == 1
-    assert host.stopped == ["bfx-bot"] and host.started == ["bfx-bot"]
-    assert host.running["bot"] == (f"{BACKEND}@{OLD_B}", OLD_B, REV_OLD, OLD_ATTEMPT)
+    assert host.stopped == ["bfx-webapi", "bfx-bot"] and host.started == ["bfx-bot", "bfx-webapi"]
+    for service in ("bot", "webapi"):
+        assert host.running[service] == (f"{BACKEND}@{OLD_B}", OLD_B, REV_OLD, OLD_ATTEMPT)
+    assert host.count(_is(("docker", "exec", "bfx-webapi"))) >= 2  # probed, then after settle
     assert host.count(_alembic("upgrade", "head")) == 0
     assert host.count(COMPOSE_UP) == 0 and _started(harness) == []
     assert host.index(BACKUP) < host.index(RESTORE_TEST) < host.index(_is(("docker", "start")))
     row = harness.ledger.last
     assert (row.outcome, row.migrations_applied, row.backend_digest) == ("failed", False, NEW_B)
     assert row.detail == ("restore_test_failed(migration_pending):restore_test_unit_failed:"
-            "migration_rehearsal_failed; schema unchanged; bot restarted on the running release"
-            )
+            "migration_rehearsal_failed; schema unchanged; bot restarted on the running release; "
+            "webapi restarted on the running release")
     assert harness.notices[-1][0] == "critical"
     # Refused like any failed digest: not retried every tick.
     calls = len(host.calls)
@@ -791,7 +845,7 @@ def test_a_failed_migration_rehearsal_starts_the_running_bot_again(harness: Harn
                  id="no-revision"),
     pytest.param(_receipt(observed_at_ms="1790000000001"), id="untyped-time"),
 ])
-def test_any_other_restore_test_failure_keeps_the_bot_stopped(
+def test_any_other_restore_test_failure_keeps_the_bot_and_webapi_stopped(
     harness: Harness, receipt: dict[str, Any] | None,
 ) -> None:
     host = harness.host
@@ -799,10 +853,11 @@ def test_any_other_restore_test_failure_keeps_the_bot_stopped(
     host.restore_test_ok = False
     host.restore_receipt = receipt
     assert harness.run() == 1
-    assert host.stopped == ["bfx-bot"] and host.started == [] and "bot" not in host.running
+    assert host.stopped == ["bfx-webapi", "bfx-bot"] and host.started == []
+    assert not {"bot", "webapi"} & set(host.running)
     row = harness.ledger.last
     assert "restore_test_failed(migration_pending):restore_test_unit_failed; schema unchanged; " \
-        "bot stopped until a release deploys" in row.detail
+        "bot and webapi stopped until a release deploys" in row.detail
 
 
 @pytest.mark.parametrize("planted", ["symlink", "directory", "garbage", "oversized"])
@@ -822,7 +877,7 @@ def test_an_unusable_receipt_keeps_the_bot_stopped(harness: Harness, planted: st
     else:
         path.write_text(json.dumps(_receipt(padding="x" * bfx._MAX_EVIDENCE_BYTES)))
     assert harness.run() == 1
-    assert host.started == [] and "bot" not in host.running
+    assert host.started == [] and not {"bot", "webapi"} & set(host.running)
 
 
 def test_a_failed_backup_keeps_the_bot_stopped_even_beside_a_rehearsal_receipt(
@@ -834,7 +889,8 @@ def test_a_failed_backup_keeps_the_bot_stopped_even_beside_a_rehearsal_receipt(
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(_receipt()))
     assert harness.run() == 1
-    assert host.started == [] and "bot" not in host.running and host.count(RESTORE_TEST) == 0
+    assert host.started == [] and not {"bot", "webapi"} & set(host.running)
+    assert host.count(RESTORE_TEST) == 0
     assert "backup_failed" in harness.ledger.last.detail
 
 
@@ -859,9 +915,27 @@ def test_a_bot_that_does_not_come_back_is_left_stopped(
     assert harness.run() == 1
     assert detail in harness.ledger.last.detail
     if setup == "unhealthy":
-        assert host.stopped == ["bfx-bot", "bfx-bot"] and "bot" not in host.running
+        assert host.stopped == ["bfx-webapi", "bfx-bot", "bfx-bot", "bfx-webapi"]
+        assert not {"bot", "webapi"} & set(host.running)
+        assert "webapi_restart_failed:unhealthy; webapi stopped until a release deploys" \
+            in harness.ledger.last.detail
     if setup == "start_fails":
-        assert "bot" not in host.running
+        assert not {"bot", "webapi"} & set(host.running)
+
+
+def test_a_webapi_that_does_not_come_back_leaves_the_restarted_bot_running(
+    harness: Harness,
+) -> None:
+    host = harness.host
+    host.current = ("h1",)
+    host.restore_test_ok = False
+    host.restore_receipt = _receipt()
+    host.start_fails = {"bfx-webapi"}
+    assert harness.run() == 1
+    assert host.running["bot"][1] == OLD_B and "webapi" not in host.running
+    assert harness.ledger.last.detail.endswith(
+        "schema unchanged; bot restarted on the running release; "
+        "webapi_restart_failed:start_failed; webapi stopped until a release deploys")
 
 
 def test_a_restore_test_first_drops_other_digests_so_the_candidate_is_unambiguous(
@@ -1036,16 +1110,20 @@ def test_unhealthy_release_without_migration_rolls_back_to_previous_digests(harn
     assert host.count(_is(("docker", "tag"))) == 0
 
 
-def test_unhealthy_release_after_migration_stops_the_bot_without_rollback(harness: Harness) -> None:
+def test_unhealthy_release_after_migration_stops_the_bot_and_webapi_without_rollback(
+    harness: Harness,
+) -> None:
     harness.host.current = ("h1",)
     harness.host.unhealthy = {NEW_B}
     assert harness.run() == 1
     host = harness.host
     assert host.count(COMPOSE_UP) == 1
-    assert host.stopped == ["bfx-bot", "bfx-bot"]  # before the migration, and after the failed start
+    # Before the migration, and after the failed start: the web API stays down with the bot.
+    assert host.stopped == ["bfx-webapi", "bfx-bot", "bfx-bot", "bfx-webapi"]
+    assert not {"bot", "webapi"} & set(host.running)
     row = harness.ledger.last
     assert (row.outcome, row.migrations_applied) == ("failed", True)
-    assert "no automatic rollback" in row.detail
+    assert "no automatic rollback; bot stopped; webapi stopped" in row.detail
     assert harness.notices[-1][0] == "critical"
 
 
@@ -1106,6 +1184,28 @@ def test_health_timeout_waits_the_configured_budget_then_rolls_back(harness: Har
     assert harness.clock.now - start >= harness.settings.health_timeouts["frontend"]
 
 
+@pytest.mark.parametrize("setup", [
+    "deployed", "dr_paths", "rolled_back", "rollback_failed", "first_deployment", "recreate_failed",
+])
+def test_a_deploy_without_a_migration_never_stops_the_webapi(harness: Harness, setup: str) -> None:
+    """Full stop is for migrations only: every other path keeps its pre-D6 behaviour."""
+    host = harness.host
+    if setup == "dr_paths":
+        host.diffs[(REV_OLD, REV_NEW)] = ["deploy/vm/pgbackrest/pgbackrest.conf"]
+    elif setup == "rolled_back":
+        host.unhealthy = {NEW_B}
+    elif setup == "rollback_failed":
+        host.unhealthy = {NEW_B, OLD_B}
+    elif setup == "first_deployment":
+        harness.ledger.rows.clear()
+        host.unhealthy = {NEW_F}
+    elif setup == "recreate_failed":
+        host.unhealthy = {OLD_B}
+    harness.run(recreate=setup == "recreate_failed")
+    assert host.count(STOP_WEBAPI) == 0 and host.count(_is(("docker", "start"))) == 0
+    assert "webapi" in host.running
+
+
 def test_rollback_drill_takes_the_real_rollback_path(harness: Harness) -> None:
     assert harness.run(rollback_drill=True) == 1
     host = harness.host
@@ -1127,7 +1227,7 @@ def test_rollback_drill_is_refused_when_it_could_not_roll_back(harness: Harness,
     rows = len(harness.ledger.rows)
     assert harness.run(rollback_drill=True) == 1
     assert harness.host.count(COMPOSE_UP) == 0 and harness.host.count(BACKUP) == 0
-    assert harness.host.count(STOP_BOT) == 0
+    assert harness.host.count(STOP_ANY) == 0
     assert len(harness.ledger.rows) == rows
 
 
@@ -1149,7 +1249,7 @@ def test_recreate_redeploys_the_running_release_through_the_ledger(harness: Harn
     assert (started.outcome, finished.outcome) == ("started", "deployed")
     assert env["BFX_DEPLOYMENT_ID"] == started.attempt_id == finished.attempt_id != OLD_ATTEMPT
     assert finished.detail == "recreate; ok"
-    assert host.count(STOP_BOT) == 0 and host.count(BACKUP) == 0 and host.count(UV_SYNC) == 0
+    assert host.count(STOP_ANY) == 0 and host.count(BACKUP) == 0 and host.count(UV_SYNC) == 0
 
 
 def test_recreate_that_fails_stops_the_bot_and_has_no_rollback(harness: Harness) -> None:
@@ -1230,6 +1330,7 @@ def test_dry_run_reports_the_plan_and_changes_nothing(harness: Harness, capsys: 
     plan = json.loads(capsys.readouterr().out)
     assert plan["migrations_pending"] is True and plan["backup_before_migration"] is True
     assert plan["stop_bot_before_migration"] is True and plan["ci_run"] == CI_RUN
+    assert plan["stop_webapi_before_migration"] is True
     assert plan["restore_test_before_deploy"] == "migration_pending"
     assert harness.host.count(RESTORE_TEST) == 0
     assert plan["rollback_target"] == REV_OLD

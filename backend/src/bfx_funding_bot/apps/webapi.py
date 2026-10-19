@@ -11,6 +11,7 @@ from sentry_sdk.integrations.starlette import StarletteIntegration
 from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.core.authority import require_ledger_authority
 from bfx_funding_bot.core.db import make_engine, make_session_factory
+from bfx_funding_bot.core.schema_head import SchemaHeadMismatch, assert_schema_head
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.attribution import build_attribution_router
@@ -44,14 +45,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.session_factory = None
     factory = app.state.session_factory
     if factory is not None:
-        # Read once: a database not on the ledger (or an unreadable epoch) refuses to
-        # start, so /health never reports a build on the wrong authority.
+        # Read once, in the bot's order: a database at another schema than this image's
+        # single migration head (ADR 2026-10-15 D6: the deploy stops the web API for a
+        # migration, so another head means the wrong build for this database), or not on
+        # the ledger (or an unreadable epoch), refuses to start, so /health never reports
+        # a build on the wrong schema or authority and uvicorn exits.
         try:
             async with factory() as session:
+                await assert_schema_head(session)
                 await require_ledger_authority(session)
             app.state.read_models = build_read_models()
-        except Exception:
-            logging.critical("Startup refused: capital authority unreadable or unsupported")
+        except Exception as exc:
+            reason = (str(exc) if isinstance(exc, SchemaHeadMismatch)
+                      else "capital authority unreadable or unsupported")
+            logging.critical("Startup refused: %s", reason)
             await app.state.engine.dispose()
             raise
     try:

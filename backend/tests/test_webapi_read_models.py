@@ -5,6 +5,7 @@ Mutation checks (one at a time; revert after each):
 * ``build_read_models`` returns another reader than the ledger's: ``test_build_read_models_*``.
 * The lifespan stops requiring the ``ledger`` epoch: ``test_lifespan_*``.
 * The lifespan stops storing ``app.state.read_models``: ``test_lifespan_*``.
+* The lifespan skips the schema-head check: ``test_lifespan_checks_the_schema_head_first``.
 * ``_request_model`` stops citing the row's observation: ``test_request_*``.
 """
 
@@ -19,6 +20,7 @@ from fastapi import FastAPI, HTTPException
 from bfx_funding_bot.apps import webapi
 from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.core import authority as authority_module
+from bfx_funding_bot.core.schema_head import SchemaHeadMismatch
 from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models
 from bfx_funding_bot.modules.api.uncertainties import _request_model
 
@@ -43,6 +45,10 @@ class _Session:
         return None
 
 
+async def _at_head(_session: object) -> None:
+    return None
+
+
 @pytest.mark.asyncio
 async def test_lifespan_stores_the_authority_and_its_read_models(monkeypatch) -> None:
     required: list[object] = []
@@ -55,6 +61,7 @@ async def test_lifespan_stores_the_authority_and_its_read_models(monkeypatch) ->
     monkeypatch.setattr(webapi, "make_engine", lambda _settings: _Engine())
     monkeypatch.setattr(webapi, "make_session_factory", lambda _engine: _Session)
     monkeypatch.setattr(webapi, "require_ledger_authority", require_ledger_authority)
+    monkeypatch.setattr(webapi, "assert_schema_head", _at_head)
     app = FastAPI()
     async with webapi.lifespan(app):
         assert len(required) == 1
@@ -70,11 +77,36 @@ async def test_lifespan_still_refuses_an_unreadable_authority(monkeypatch) -> No
     monkeypatch.setattr(webapi, "make_engine", lambda _settings: _Engine())
     monkeypatch.setattr(webapi, "make_session_factory", lambda _engine: _Session)
     monkeypatch.setattr(webapi, "require_ledger_authority", require_ledger_authority)
+    monkeypatch.setattr(webapi, "assert_schema_head", _at_head)
     app = FastAPI()
     with pytest.raises(authority_module.AuthorityMismatch):
         async with webapi.lifespan(app):
             pytest.fail("must not boot")
     assert not hasattr(app.state, "read_models")
+
+
+@pytest.mark.asyncio
+async def test_lifespan_checks_the_schema_head_first(monkeypatch) -> None:
+    order: list[str] = []
+
+    async def mismatched(_session: object) -> None:
+        order.append("schema_head")
+        raise SchemaHeadMismatch("schema_head_mismatch database=ffffffffffff build=x")
+
+    async def require_ledger_authority(_session: object) -> str:
+        order.append("authority")
+        return "migration b1c2d3e4f5a6 genesis"
+
+    monkeypatch.setattr(webapi, "Settings", lambda: SimpleNamespace(log_level="WARNING"))
+    monkeypatch.setattr(webapi, "make_engine", lambda _settings: _Engine())
+    monkeypatch.setattr(webapi, "make_session_factory", lambda _engine: _Session)
+    monkeypatch.setattr(webapi, "require_ledger_authority", require_ledger_authority)
+    monkeypatch.setattr(webapi, "assert_schema_head", mismatched)
+    app = FastAPI()
+    with pytest.raises(SchemaHeadMismatch):
+        async with webapi.lifespan(app):
+            pytest.fail("must not boot")
+    assert order == ["schema_head"] and not hasattr(app.state, "read_models")
 
 
 @pytest.mark.asyncio

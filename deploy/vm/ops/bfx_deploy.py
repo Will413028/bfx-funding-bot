@@ -20,13 +20,18 @@ One run:
      DR trigger paths (a diff that cannot be read counts as a DR change);
   6. pull both images by digest, validate the env files, compare `alembic
      current` with `alembic heads` in a one-shot of the new image;
-  7. migrations pending: stop the bot (the writer), back up with <rev>'s
-     backup.sh, run the isolated restore test with <rev>'s DR scripts (which also
-     rehearses <rev>'s migrations on the restored copy), `alembic upgrade head`.
-     Any failure from here keeps the bot stopped: roll forward. The exception is
-     a failed rehearsal: the backup restored and production's schema is
-     untouched, so the stopped bot is started again on the running release.
-     No migration but a DR-path change: restore test first, bot keeps running;
+  7. migrations pending: stop the web API, then the bot (the writer) -- a full
+     stop (ADR 2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-
+     risk-operations D6), so no build ever runs on a schema it was not written
+     for -- back up with <rev>'s backup.sh, run the isolated restore test with
+     <rev>'s DR scripts (which also rehearses <rev>'s migrations on the restored
+     copy), `alembic upgrade head`. A web API that cannot be stopped blocks the
+     migration with the bot untouched; a bot that cannot be stopped blocks it and
+     starts the web API again. Any failure after both stopped keeps both stopped:
+     roll forward. The exception is a failed rehearsal: the backup restored and
+     production's schema is untouched, so the stopped bot and web API are
+     started again on the running release.
+     No migration but a DR-path change: restore test first, nothing is stopped;
   8. append the `started` ledger row (the bot reads it at boot as its own
      deployment, BFX_DEPLOYMENT_ID), then `docker compose -p bfx-app up`, check
      each container runs the expected digest with the expected identity env,
@@ -34,7 +39,8 @@ One run:
      settle window;
   9. on failure without applied migrations: recreate the previous successful
      digests (rolled_back). With applied migrations, or nothing to roll back to:
-     stop the bot, never roll back (old code may not run on the new schema);
+     stop the bot (and, after a migration path, the web API), never roll back
+     (old code may not run on the new schema);
  10. on success: install <rev>'s host tooling and units (effective from the
      next run) and point the DR checkout `current` at <rev>;
  11. append the terminal ledger row and alert.
@@ -120,9 +126,9 @@ DR_TRIGGER_PATTERNS = (
 )
 RESTORE_TEST_UNIT = "bfx-restore-test@{revision}.service"
 # The restore test's receipt (the wrapper's default --evidence, written by the drill as the
-# unit's user) and the one failure code after which the stopped bot is started again: the
-# backup restored and verified, only the target's migrations failed on the isolated copy
-# (ADR 2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them).
+# unit's user) and the one failure code after which the stopped bot and web API are started
+# again: the backup restored and verified, only the target's migrations failed on the
+# isolated copy (ADR 2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them).
 RESTORE_EVIDENCE = Path("/home/ubuntu/bfx/dr-evidence/restore-ledger.json")
 REHEARSAL_FAILED = "migration_rehearsal_failed"
 _MAX_EVIDENCE_BYTES = 1_048_576
@@ -623,6 +629,7 @@ class Attempt:
     action: str = "deploy"  # deploy | recreate
     migrations_applied: bool = False
     bot_stopped: bool = False
+    webapi_stopped: bool = False
     started_recorded: bool = False
 
 
@@ -888,6 +895,7 @@ class Deployer:
                 "schema_current": list(prepared.current), "schema_heads": list(prepared.heads),
                 "migrations_pending": prepared.pending,
                 "stop_bot_before_migration": prepared.pending,
+                "stop_webapi_before_migration": prepared.pending,
                 "backup_before_migration": prepared.pending,
                 "restore_test_before_deploy": reason,
                 "rollback_target": view.last_success.source_revision if view.last_success else None,
@@ -924,7 +932,9 @@ class Deployer:
         try:
             self._record_started(attempt)
         except DeployError as exc:
-            kept = "; bot stays stopped" if attempt.bot_stopped else "; running release untouched"
+            kept = ("; bot and webapi stay stopped" if attempt.webapi_stopped
+                    else "; bot stays stopped" if attempt.bot_stopped
+                    else "; running release untouched")
             return self._finish(attempt, "failed", f"{exc.code}{kept}")
         try:
             self._compose_up(prepared.release_dir, target, attempt.attempt_id)
@@ -941,17 +951,34 @@ class Deployer:
     def _migration_path(
         self, prepared: Prepared, attempt: Attempt, dr_checkout: Path, reason: str,
     ) -> int | None:
-        """Stop the writer, back up, restore-test, migrate (Will 2026-09-25).
+        """Stop the web API and the writer, back up, restore-test, migrate (Will 2026-09-25;
+        full stop: ADR 2026-10-15 D6).
 
-        From the moment the bot is stopped every failure leaves it stopped: the
-        way out is a new release (roll forward) or --retry, never the old one.
+        The web API stops first: a web API that cannot be stopped then leaves nothing
+        stopped and nothing migrated. From the moment both are stopped every failure
+        leaves them stopped -- an old web API never runs on a migrated schema: the way out
+        is a new release (roll forward) or --retry, never the old one.
         """
-        stopped = self._stop_bot()
-        if stopped == "BOT_STOP_FAILED":
-            return self._finish(attempt, "failed", "bot_stop_failed; nothing migrated; "
+        webapi = self._stop("webapi")
+        if webapi == "WEBAPI_STOP_FAILED":
+            return self._finish(attempt, "failed", "webapi_stop_failed; nothing migrated; "
                                 "running release untouched")
+        attempt.webapi_stopped = True
+        stopped = self._stop("bot")
+        if stopped == "BOT_STOP_FAILED":
+            # Nothing migrated and the running release keeps its schema: the web API
+            # stopped for this migration goes back to serving it.
+            note = "running release untouched"
+            if webapi == "webapi stopped":
+                restarted = self._restart("webapi")
+                if restarted == "restarted":
+                    attempt.webapi_stopped = False
+                    note += "; webapi restarted"
+                else:
+                    note = f"webapi_restart_failed:{restarted}"
+            return self._finish(attempt, "failed", f"bot_stop_failed; nothing migrated; {note}")
         attempt.bot_stopped = True
-        held = "bot stopped until a release deploys (roll forward or --retry)"
+        held = "bot and webapi stopped until a release deploys (roll forward or --retry)"
         try:
             self._backup(dr_checkout)
         except DeployError as exc:
@@ -966,16 +993,21 @@ class Deployer:
             # Only the target's migrations failed, on the isolated copy: the running release
             # goes on as if this release had never come (D7', Will 2026-10-08).
             failed += f":{REHEARSAL_FAILED}"
-            if stopped != "bot stopped":
-                return self._finish(attempt, "failed", f"{failed}; schema unchanged; {stopped}; "
-                                    "nothing to restart")
-            restarted = self._restart_bot()
-            if restarted != "restarted":
-                return self._finish(attempt, "failed", f"{failed}; schema unchanged; "
-                                    f"bot_restart_failed:{restarted}")
-            attempt.bot_stopped = False
+            # The bot first (the writer), then the web API; each on its own, so one that
+            # does not come back never keeps the other off the schema it runs on.
+            notes = []
+            for service, state in (("bot", stopped), ("webapi", webapi)):
+                if state != f"{service} stopped":
+                    notes.append(f"{state}; nothing to restart")
+                    continue
+                restarted = self._restart(service)
+                if restarted != "restarted":
+                    notes.append(f"{service}_restart_failed:{restarted}")
+                    continue
+                setattr(attempt, f"{service}_stopped", False)
+                notes.append(f"{service} restarted on the running release")
             return self._finish(attempt, "failed", f"{failed}; schema unchanged; "
-                                "bot restarted on the running release")
+                                + "; ".join(notes))
         return self._migrate(prepared, attempt, held)
 
     def _rehearsal_failed(self, since_ms: int, revision: str) -> bool:
@@ -1010,39 +1042,44 @@ class Deployer:
                 and report.get("source_revision") == revision
                 and type(observed) is int and observed >= since_ms)
 
-    def _restart_bot(self) -> str:
-        """Start the stopped bot container (the running release, unchanged); like a deploy,
-        healthy, then still the same running container and healthy after the settle window.
+    def _restart(self, service: str) -> str:
+        """Start a container stopped for this migration (the running release, unchanged); like
+        a deploy, healthy, then still the same running container and healthy after the settle
+        window.
 
-        Returns `restarted`, or why not and what state the bot is left in.
+        Returns `restarted`, or why not and what state the container is left in.
         """
-        log("migration rehearsal failed on the restored copy; starting the bot again")
-        started = self._run(["docker", "start", CONTAINERS["bot"]], timeout=90.0)
+        container = CONTAINERS[service]
+        log(f"nothing migrated; starting {container} again on the running release")
+        started = self._run(["docker", "start", container], timeout=90.0)
         if started.returncode != 0:
-            log(f"docker start bfx-bot failed: {started.stderr.strip()[-500:]}")
-            return "start_failed; bot stopped until a release deploys"
+            log(f"docker start {container} failed: {started.stderr.strip()[-500:]}")
+            return f"start_failed; {service} stopped until a release deploys"
         began = self._clock()
         healthy = True
-        while not self._probe("bot"):
-            if self._clock() - began >= self.settings.health_timeouts["bot"]:
+        while not self._probe(service):
+            if self._clock() - began >= self.settings.health_timeouts[service]:
                 healthy = False
                 break
             self._sleep(self.settings.health_interval)
         if healthy:
-            before = self._bot_state()
+            before = self._container_state(service)
             self._sleep(self.settings.settle_seconds)
-            healthy = before is not None and before == self._bot_state() and self._probe("bot")
+            healthy = (before is not None and before == self._container_state(service)
+                       and self._probe(service))
         if healthy:
             return "restarted"
-        log("restarted bot is not healthy; stopping it again")
-        if self._stop_bot() == "BOT_STOP_FAILED":
-            return "unhealthy; BOT_STOP_FAILED, bot may be running"
-        return "unhealthy; bot stopped until a release deploys"
+        log(f"restarted {container} is not healthy; stopping it again")
+        failed = f"{service.upper()}_STOP_FAILED"
+        if self._stop(service) == failed:
+            return f"unhealthy; {failed}, {service} may be running"
+        return f"unhealthy; {service} stopped until a release deploys"
 
-    def _bot_state(self) -> str | None:
-        """The bot container's restart count and running flag, or None when unreadable."""
+    def _container_state(self, service: str) -> str | None:
+        """A container's restart count and running flag, or None when unreadable."""
         result = self._run(["docker", "inspect", "--type", "container", "--format",
-                            "{{.RestartCount}} {{.State.Running}}", CONTAINERS["bot"]], timeout=60.0)
+                            "{{.RestartCount}} {{.State.Running}}", CONTAINERS[service]],
+                           timeout=60.0)
         if result.returncode != 0 or not result.stdout.strip().endswith("true"):
             return None
         return result.stdout.strip()
@@ -1334,27 +1371,33 @@ class Deployer:
         if unhealthy:
             raise DeployError("unhealthy_after_settle:" + ",".join(unhealthy))
 
-    def _stop_bot(self) -> str:
-        result = self._run(["docker", "stop", "--time", "30", CONTAINERS["bot"]], timeout=90.0)
+    def _stop(self, service: str) -> str:
+        """`<service> stopped`, `<service> absent`, or `<SERVICE>_STOP_FAILED`."""
+        container = CONTAINERS[service]
+        result = self._run(["docker", "stop", "--time", "30", container], timeout=90.0)
         if result.returncode == 0:
-            return "bot stopped"
+            return f"{service} stopped"
         if "no such container" in result.stderr.lower():
-            return "bot absent"
-        log(f"docker stop bfx-bot failed: {result.stderr.strip()[-500:]}")
-        return "BOT_STOP_FAILED"
+            return f"{service} absent"
+        log(f"docker stop {container} failed: {result.stderr.strip()[-500:]}")
+        return f"{service.upper()}_STOP_FAILED"
 
     def _unhealthy(self, view: LedgerView, attempt: Attempt, exc: DeployError) -> int:
         reason = exc.code
         previous = view.last_success
         if attempt.migrations_applied or attempt.bot_stopped or previous is None:
             why = "migrations applied" if attempt.migrations_applied else "no previous deployment"
-            stopped = self._stop_bot()
+            stopped = self._stop("bot")
+            if attempt.migrations_applied or attempt.webapi_stopped:
+                # Full stop (D6): after a migration path the web API stays down with the bot;
+                # whatever web API compose left running is not trusted on this schema.
+                stopped += "; " + self._stop("webapi")
             return self._finish(attempt, "failed", f"unhealthy:{reason}; {why}; no automatic "
                                 f"rollback; {stopped}")
         try:
             self._rollback_to(previous)
         except DeployError as rollback:
-            stopped = self._stop_bot()
+            stopped = self._stop("bot")
             return self._finish(attempt, "failed", f"unhealthy:{reason}; rollback_failed:"
                                 f"{rollback.code}; {stopped}")
         return self._finish(attempt, "rolled_back", f"unhealthy:{reason}; rolled_back_to="
@@ -1424,7 +1467,7 @@ class Deployer:
             self._verify(target, attempt.attempt_id)
             self._wait_healthy()
         except DeployError as exc:
-            stopped = self._stop_bot()
+            stopped = self._stop("bot")
             return self._finish(attempt, "failed", f"unhealthy:{exc.code}; recreate has no rollback; "
                                 f"{stopped}; fix the runtime env and --recreate")
         return self._finish(attempt, "deployed", "ok")
