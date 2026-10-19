@@ -36,11 +36,22 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
 1. `flock`（`/run/lock/bfx-deploy.lock`），兩個執行不會重疊。
 2. 解析 GHCR `backend:main` 的 digest；若 ledger 最新的成功部署已是它就結束。
    **上次失敗、rolled_back 或中斷（只有 `started` 列）的 digest 不會自動重試**，要 `--retry`。
-3. 讀 image label 的 revision 與 CI run，要求 `backend:sha-<rev>` 是同一個 digest、
-   `frontend:sha-<rev>` 帶同一個 revision。
+3. 讀 image label 的 revision 與 CI run，要求 `backend:sha-<rev>` 是同一個 digest；
+   `frontend:sha-<rev>` 存在時要帶同一個 revision。
 4. 在 VM mirror（`/home/ubuntu/bfx-funding-bot`，以 `ubuntu` 身分跑 git）fetch，要求 `<rev>`
-   在 `origin/main` 上；compose 檔與 `live.env` 都取自 `<rev>` 本身（git 物件，不讀 working tree）。
-5. 以 digest pull 兩個 image；檢查 `/opt/bfx/runtime/*.env`；在新 image 的 one-shot
+   在 `origin/main` 上；compose 檔與 `live.env` 都取自 `<rev>` 本身（git 物件，不讀 working tree），
+   寫進 `/var/lib/bfx-deploy/releases/<rev>/`。**要跑什麼由這份 compose 檔決定**：
+   `docker compose config --no-env-resolution --format json`（不讀 env 檔內容）渲染出服務、
+   `container_name`、image 與 env 檔，部署、檢查、健康等待都只針對這些服務。compose 有 frontend 服務
+   而 `frontend:sha-<rev>` 還沒推上來時，跟 CI 推到一半一樣靜默重試、30 分鐘後告警；compose 沒有
+   frontend（9d-5 起）就不需要 frontend image，ledger 的 `frontend_digest` 記 NULL。
+   頂層 `configs` 的 `file`（只接受 release 目錄內的檔案；`content`／`environment` 形式與頂層
+   `secrets` 一律拒絕）同樣從 `<rev>` 的 git 物件寫到 release 目錄的同一個相對路徑；
+   compose 沒有 `configs` 就什麼都不多寫，所以回滾或 `--recreate` 到沒有這些檔的舊 revision 照常運作。
+   引用了但 `<rev>` 沒有這個檔：`release_file_missing`，什麼都還沒停。
+5. 以 digest pull compose 裡的每個 image：release 自己的 backend／frontend 帶 GHCR 憑證，
+   第三方 image 只允許 `docker.io/tailscale/tailscale@sha256:…`（`THIRD_PARTY_IMAGE`）且不帶憑證；
+   其他 image 一律拒絕。檢查 compose 引用的 env 檔、`migrate.env` 與 `live.env`；在新 image 的 one-shot
    （`migrate.env`，owner role）比較 `alembic current` 與 `alembic heads`。
 6. **有待套用的 migration**（Will 2026-09-25；全停：ADR
    `2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations` D6）：
@@ -60,11 +71,13 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    `docker-compose.bot.yml`、`docker-compose.dr.yml`，或 diff 讀不到）：什麼都不停，先跑 restore test。
    沒有 migration 的部署與回滾路徑不停 webapi。
 7. 寫入 ledger 的 `started` 列（attempt id、digest、revision、CI run；之後不可修改），
-   再 `docker compose -p bfx-app -f <release>/docker-compose.app.yml up -d --no-deps bot webapi frontend`。
+   再 `docker compose -p bfx-app -f <release>/docker-compose.app.yml up -d --no-deps --remove-orphans <compose 的服務>`；
+   compose 不再有的服務（9d-5 之後的 frontend）以 `--remove-orphans` 移除，回滾到舊版會再建回來。
    `BFX_DEPLOYMENT_ID` 只用來讓 audit 與狀態報告指出這次部署，不影響交易。
-8. 檢查每個 container 跑的是這次記錄的 digest 與身分 env（`BFX_IMAGE_DIGEST`、
-   `BFX_SOURCE_REVISION`、`BFX_DEPLOYMENT_ID`）、屬於 compose project `bfx-app`；
-   等健康（bot `:8080/healthz`、webapi health、frontend `127.0.0.1:3001`），再 settle 60 秒。
+8. 檢查每個 container 跑的是 compose 渲染出的 image、屬於 compose project `bfx-app`；release 自己的
+   image 另外比對身分 env（`BFX_IMAGE_DIGEST`、`BFX_SOURCE_REVISION`、`BFX_DEPLOYMENT_ID`）；
+   等健康（bot `:8080/healthz`、webapi health、有 frontend 時 `127.0.0.1:3001`；其他服務只看 settle
+   期間沒有重啟），再 settle 60 秒。
    webapi 與 bot 一樣，開機時比對 image 內 migrations 的唯一 head（`core/schema_head.py`）與
    `alembic_version`，不一致就拒絕開機（uvicorn 結束、health 不會通過）：舊 webapi 不會在
    migrate 過的 schema 上服務，新 webapi 也不會在還沒 migrate 的 schema 上服務。

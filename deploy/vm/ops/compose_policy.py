@@ -15,7 +15,10 @@ Two renderings, because Compose versions differ in one place: an interpolated
 uninterpolated rendering, which every version prints the same way: each service
 names exactly its own `${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/<name>.env` (the
 production default) plus, for the bot, live.env -- all `required: true`, so a
-missing secret file stops `up` instead of starting without it. Every other
+missing secret file stops `up` instead of starting without it. The bot and the
+web API are required; the frontend is optional (9d-5 removes it), and no other
+service is allowed yet. Top-level `secrets` are refused and `configs` must be
+file-backed. Every other
 hardening property is checked on the interpolated rendering. Checking Compose's
 own rendering rather than the YAML text means an anchor, an override or a
 changed Compose default cannot slip a property past the check. This replaces
@@ -51,7 +54,11 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
-SERVICES = ("bot", "webapi", "frontend")
+# Every app release has the bot and the web API; the frontend service goes away in 9d-5.
+# bfx-deploy derives what it runs from the rendered file (bfx_deploy.release_services).
+REQUIRED_SERVICES = ("bot", "webapi")
+OPTIONAL_SERVICES = ("frontend",)
+SERVICES = (*REQUIRED_SERVICES, *OPTIONAL_SERVICES)
 NETWORK = "bfx_default"
 CONTAINERS = {"bot": "bfx-bot", "webapi": "bfx-webapi", "frontend": "bfx-frontend"}
 COMMANDS = {
@@ -254,7 +261,7 @@ def operator_violations(rendered: Mapping[str, Any]) -> list[str]:
 
 def operator_uninterpolated_violations(uninterpolated: Mapping[str, Any]) -> list[str]:
     """The operator file's env file and required wrapper variables, from `--no-interpolate`."""
-    found = env_file_violations(uninterpolated, OPERATOR_ENV_FILES)
+    found = env_file_violations(uninterpolated, OPERATOR_ENV_FILES, optional=())
     spec = (uninterpolated.get("services") or {}).get(OPERATOR_SERVICE) or {}
     env = spec.get("environment") or {}
     if not all(str(env.get(key, "")).startswith("${" + variable + ":?")
@@ -266,15 +273,19 @@ def operator_uninterpolated_violations(uninterpolated: Mapping[str, Any]) -> lis
 def env_file_violations(
     uninterpolated: Mapping[str, Any],
     wanted_files: Mapping[str, tuple[str, ...]] = ENV_FILES,
+    optional: tuple[str, ...] = OPTIONAL_SERVICES,
 ) -> list[str]:
     """Each service's env files, from `config --no-interpolate` (version-stable).
 
     `wanted_files` maps each service to the path suffixes of its env files, in
-    order; the default is the app file's.
+    order; the default is the app file's. A service in `optional` that the file
+    does not define is skipped (whether it may be absent is violations()'s call).
     """
     found = []
     services = uninterpolated.get("services") or {}
     for service, wanted in wanted_files.items():
+        if service in optional and service not in services:
+            continue
         entries = (services.get(service) or {}).get("env_file") or []
         paths = [str(e.get("path", "")) if isinstance(e, dict) else "" for e in entries]
         if len(paths) != len(wanted) or not all(
@@ -289,10 +300,21 @@ def violations(rendered: Mapping[str, Any]) -> list[str]:
     found = []
     if rendered.get("name") != "bfx-app":
         found.append("project_name")
-    if set(rendered.get("services") or {}) != set(SERVICES):
+    names = set(rendered.get("services") or {})
+    if not set(REQUIRED_SERVICES) <= names <= set(SERVICES):
         found.append("services")
     if rendered.get("volumes"):
         found.append("volumes")
+    # Nothing writes or rotates a Compose secret; a config is a tracked file that
+    # bfx-deploy writes from the release's own revision, never an interpolated
+    # `content`/`environment` value.
+    if rendered.get("secrets"):
+        found.append("no_secrets")
+    configs = rendered.get("configs") or {}
+    if not isinstance(configs, dict) or any(
+            not isinstance(c, dict) or set(c) - {"name", "file"} or not c.get("file")
+            for c in configs.values()):
+        found.append("configs_file_only")
     network = (rendered.get("networks") or {}).get(NETWORK) or {}
     if set(rendered.get("networks") or {}) != {NETWORK} or network.get("external") is not True \
             or network.get("name") != NETWORK:

@@ -162,10 +162,11 @@ def test_wrong_or_optional_env_files_are_detected(
 
 
 def test_policy_and_deployer_agree_on_names_and_commands() -> None:
-    assert policy.CONTAINERS == bfx.CONTAINERS
+    assert {role: policy.CONTAINERS[role] for role in bfx.ROLE_CONTAINERS} == bfx.ROLE_CONTAINERS
+    assert set(bfx.ROLE_CONTAINERS) == set(policy.REQUIRED_SERVICES)
     assert tuple(bfx.identity_env(
-        bfx.Target("b" * 40, DIGEST_B, DIGEST_F, "x", "y"), service="bot",
-        deployment_id="d")) == policy.IDENTITY
+        bfx.Target("b" * 40, DIGEST_B, DIGEST_F, "x", "y"), image="x",
+        deployment_id="d") or {}) == policy.IDENTITY
 
 
 def test_retired_change_class_is_gone() -> None:
@@ -180,6 +181,60 @@ def test_retired_change_class_is_gone() -> None:
 @needs_compose
 def test_rendered_compose_file_satisfies_the_policy(rendered: dict[str, Any]) -> None:
     assert policy.violations(rendered) == []
+
+
+@needs_compose
+def test_deployer_reads_the_release_from_the_real_rendering(rendered: dict[str, Any],
+                                                           runtime_dir: Path) -> None:
+    """bfx-deploy renders the release the same way (--no-env-resolution) and runs what it finds."""
+    target = bfx.Target(FAKE_ENV["BFX_SOURCE_REVISION"], DIGEST_B, DIGEST_F,
+                        FAKE_ENV["BFX_BACKEND_IMAGE"], FAKE_ENV["BFX_FRONTEND_IMAGE"])
+    services = bfx.release_services(rendered, target=target, runtime_dir=runtime_dir,
+                                    release_dir=COMPOSE_PATH.parent)
+    assert [(s.name, s.container, s.image) for s in services] == [
+        ("bot", "bfx-bot", target.backend_image), ("frontend", "bfx-frontend", target.frontend_image),
+        ("webapi", "bfx-webapi", target.backend_image)]
+    assert [[p.name for p in s.env_files] for s in services] == [
+        ["bot.env", "live.env"], ["frontend.env"], ["webapi.env"]]
+    assert all(p.parent in (runtime_dir, COMPOSE_PATH.parent) for s in services for p in s.env_files)
+    assert bfx.release_config_files(rendered, COMPOSE_PATH.parent) == ()
+
+
+@needs_compose
+def test_a_release_without_a_frontend_satisfies_the_policy(
+    tmp_path: Path, runtime_dir: Path,
+) -> None:
+    text = COMPOSE_TEXT[:COMPOSE_TEXT.index("  frontend:\n")] \
+        + COMPOSE_TEXT[COMPOSE_TEXT.index("networks:\n  bfx_default:\n    external"):]
+    mutated = tmp_path / "docker-compose.app.yml"
+    mutated.write_text(text)
+    shutil.copy(ROOT / "deploy/vm/live.env", tmp_path / "live.env")
+    env = {k: v for k, v in FAKE_ENV.items() if not k.startswith("BFX_FRONTEND_")}
+    result = _render(runtime_dir, env, path=mutated)
+    assert result.returncode == 0, result.stderr
+    assert policy.violations(json.loads(result.stdout)) == []
+    assert policy.env_file_violations(_uninterpolated(runtime_dir, mutated)) == []
+
+
+@needs_compose
+@pytest.mark.parametrize(("mutate", "violation"), [
+    (lambda r: r["services"].pop("bot"), "services"),
+    (lambda r: r["services"].pop("webapi"), "services"),
+    (lambda r: r["services"].__setitem__("extra", copy.deepcopy(r["services"]["webapi"])), "services"),
+    (lambda r: r.__setitem__("secrets", {"key": {"name": "bfx-app_key", "file": "/x"}}), "no_secrets"),
+    (lambda r: r.__setitem__("configs", {"c": {"name": "bfx-app_c", "content": "x"}}), "configs_file_only"),
+    (lambda r: r.__setitem__("configs", {"c": {"name": "bfx-app_c", "environment": "HOME"}}),
+     "configs_file_only"),
+])
+def test_the_service_set_secrets_and_configs_are_enforced(
+    rendered: dict[str, Any], mutate: Callable[[dict[str, Any]], None], violation: str,
+) -> None:
+    broken = copy.deepcopy(rendered)
+    mutate(broken)
+    assert violation in policy.violations(broken)
+    fine = copy.deepcopy(rendered)
+    fine["configs"] = {"c": {"name": "bfx-app_c", "file": "/opt/x/serve.json"}}
+    assert policy.violations(fine) == []
 
 
 @needs_compose
@@ -320,8 +375,9 @@ def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> Non
         for service, record in zip(("bot", "webapi", "frontend"), json.loads(inspected.stdout),
                                    strict=True):
             mismatches = bfx.container_mismatches(
-                record, service=service, target=target,
-                deployment_id=FAKE_ENV["BFX_DEPLOYMENT_ID"])
+                record, container=bfx.ROLE_CONTAINERS.get(service, "bfx-frontend"), image=image,
+                identity=bfx.identity_env(target, image=image,
+                                          deployment_id=FAKE_ENV["BFX_DEPLOYMENT_ID"]))
             assert mismatches == ["name", "project"], (service, mismatches)
     finally:
         subprocess.run([*compose, "down", "--remove-orphans"], capture_output=True, env=env,

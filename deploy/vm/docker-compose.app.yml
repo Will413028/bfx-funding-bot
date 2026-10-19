@@ -1,8 +1,10 @@
 # Application services only (bot, webapi, frontend), deployed by bfx-deploy
-# (deploy/vm/ops/bfx_deploy.py) from the release's own commit:
+# (deploy/vm/ops/bfx_deploy.py) from the release's own commit. bfx-deploy takes
+# the services, containers, images and env files from this file's rendering
+# (`docker compose config --no-env-resolution`) and runs:
 #
 #   docker compose -p bfx-app -f <release>/docker-compose.app.yml \
-#     up -d --no-deps bot webapi frontend
+#     up -d --no-deps --remove-orphans <every service defined here>
 #
 # PostgreSQL and Redis stay in docker-compose.bot.yml (project `bfx`) and are never
 # defined, recreated or touched here. This project only joins their existing

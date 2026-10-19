@@ -13,13 +13,17 @@ One run:
      successful deployment already runs that digest (or its newest attempt
      already tried it -- a failed digest is retried only with --retry);
   3. read the revision and CI-run labels, require `backend:sha-<rev>` to be the
-     same digest and `frontend:sha-<rev>` to carry the same revision;
+     same digest and `frontend:sha-<rev>`, when it exists, to carry the same
+     revision;
   4. fetch the VM mirror, require <rev> on origin/main, and take the compose
-     file and live.env from <rev> itself;
+     file, live.env and the config files the compose file references from <rev>
+     itself; render that compose file (`docker compose config`) for the services
+     to deploy, their containers, images and env files (below);
   5. read `git diff --name-only --no-renames <last deployed>..<rev>` for the
      DR trigger paths (a diff that cannot be read counts as a DR change);
-  6. pull both images by digest, validate the env files, compare `alembic
-     current` with `alembic heads` in a one-shot of the new image;
+  6. pull every image the release names by digest, validate the env files it
+     names, compare `alembic current` with `alembic heads` in a one-shot of the
+     new image;
   7. migrations pending: stop the web API, then the bot (the writer) -- a full
      stop (ADR 2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-
      risk-operations D6), so no build ever runs on a schema it was not written
@@ -33,10 +37,11 @@ One run:
      started again on the running release.
      No migration but a DR-path change: restore test first, nothing is stopped;
   8. append the `started` ledger row (the bot reads it at boot as its own
-     deployment, BFX_DEPLOYMENT_ID), then `docker compose -p bfx-app up`, check
-     each container runs the expected digest with the expected identity env,
-     wait for health (bot healthz, webapi health, frontend 127.0.0.1:3001) and a
-     settle window;
+     deployment, BFX_DEPLOYMENT_ID), then `docker compose -p bfx-app up
+     --remove-orphans` with the release's services, check each container runs
+     the expected image (and, for the release's own images, identity env), wait
+     for health (bot healthz, webapi health, frontend 127.0.0.1:3001 when the
+     release has one) and a settle window;
   9. on failure without applied migrations: recreate the previous successful
      digests (rolled_back). With applied migrations, or nothing to roll back to:
      stop the bot (and, after a migration path, the web API), never roll back
@@ -47,6 +52,17 @@ One run:
 
 `--recreate` redeploys the running release (same digests) after a runtime env
 change, through the same started row, identity check, health wait and ledger.
+
+The release's own compose file decides what runs (9d-tailscale-ingress brief §5
+"9e"; this tool is installed one release before the compose file changes shape):
+the services `up` creates and --remove-orphans keeps, the containers checked,
+the env files validated, the images pulled -- the release's backend and
+frontend digests with the GHCR token, an allowlisted third-party digest
+(THIRD_PARTY_IMAGE) without it -- and the top-level `configs` files written
+next to it. A release without a frontend service needs no frontend image and
+records none. Every rendered property is refused unless this tool can run it
+(release_services, release_config_files); the hardening itself is CI's
+(compose_policy.py).
 
 Container hardening (read-only rootfs, users, capabilities, ports, network) is
 a property of deploy/vm/docker-compose.app.yml and is enforced in CI on the
@@ -76,7 +92,7 @@ import urllib.request
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -112,7 +128,17 @@ COMPOSE_PATH = "deploy/vm/docker-compose.app.yml"
 LIVE_ENV_PATH = "deploy/vm/live.env"
 BACKUP_SCRIPT = "deploy/vm/pgbackrest/backup.sh"
 TOOLING_PATHS = ("deploy/vm/ops", "deploy/vm/systemd")
-SERVICES = ("bot", "webapi", "frontend")
+# The writer and the web API every release has; compose_policy.py pins their container
+# names, and the migration path stops and starts them by role.
+ROLE_CONTAINERS = {"bot": "bfx-bot", "webapi": "bfx-webapi"}
+# Transitional: releases before 9d-5 have a frontend service, and a rollback may return
+# to one. End state: once two releases without it have deployed in a row, no rollback
+# target can have one -- then delete FRONTEND, the frontend registry lookup, probe and
+# settings, and compose_policy.OPTIONAL_SERVICES (the ledger column stays, as history).
+FRONTEND = "frontend"
+# The only images a release's compose file may name besides its own backend and frontend
+# digests; pulled by digest without the registry token (the 9d tailscale sidecar).
+THIRD_PARTY_IMAGE = re.compile(r"docker\.io/tailscale/tailscale@sha256:[0-9a-f]{64}")
 # A change to how PostgreSQL is run, backed up or restored earns an isolated
 # restore test before the release goes out (plan DR bullet, Will 2026-09-25), as
 # does every pending migration and any diff that cannot be read. Hard-wired in
@@ -132,8 +158,6 @@ RESTORE_TEST_UNIT = "bfx-restore-test@{revision}.service"
 RESTORE_EVIDENCE = Path("/home/ubuntu/bfx/dr-evidence/restore-ledger.json")
 REHEARSAL_FAILED = "migration_rehearsal_failed"
 _MAX_EVIDENCE_BYTES = 1_048_576
-CONTAINERS = {"bot": "bfx-bot", "webapi": "bfx-webapi", "frontend": "bfx-frontend"}
-RUNTIME_ENV_FILES = {"bot": "bot.env", "webapi": "webapi.env", "frontend": "frontend.env"}
 PROBE = (
     "import sys,urllib.request;"
     "sys.exit(0 if urllib.request.urlopen(sys.argv[1],timeout=5).status==200 else 1)"
@@ -413,7 +437,7 @@ class LedgerRow:
     attempt_id: str
     source_revision: str
     backend_digest: str
-    frontend_digest: str
+    frontend_digest: str | None  # None: the release's compose file has no frontend service
     outcome: str
     migrations_applied: bool
     ci_run: str | None = None
@@ -433,7 +457,7 @@ class LedgerEntry:
     finished_at: str | None  # None exactly for the `started` row
     source_revision: str
     backend_digest: str
-    frontend_digest: str
+    frontend_digest: str | None
     migrations_applied: bool
     outcome: str
     detail: str
@@ -466,7 +490,7 @@ _LEDGER_APPEND = """INSERT INTO public.deployments (
   attempt_id, started_at, finished_at, source_revision, backend_digest, frontend_digest,
   migrations_applied, outcome, detail, ci_run)
 VALUES (:'attempt_id', :'started_at', NULLIF(:'finished_at', '')::timestamptz,
-  :'source_revision', :'backend_digest', :'frontend_digest',
+  :'source_revision', :'backend_digest', NULLIF(:'frontend_digest', ''),
   :'migrations_applied', :'outcome', :'detail', NULLIF(:'ci_run', ''))
 RETURNING id;
 """
@@ -516,7 +540,7 @@ class PsqlLedger:
             "attempt_id": entry.attempt_id,
             "started_at": entry.started_at, "finished_at": entry.finished_at or "",
             "source_revision": entry.source_revision, "backend_digest": entry.backend_digest,
-            "frontend_digest": entry.frontend_digest,
+            "frontend_digest": entry.frontend_digest or "",
             "migrations_applied": "true" if entry.migrations_applied else "false",
             "outcome": entry.outcome, "detail": entry.detail, "ci_run": entry.ci_run or "",
         })
@@ -531,11 +555,12 @@ def _ledger_row(value: object) -> LedgerRow | None:
         return None
     if not isinstance(value, dict):
         raise TypeError
-    ci_run = value.get("ci_run")
+    ci_run, frontend = value.get("ci_run"), value["frontend_digest"]
     return LedgerRow(
         id=int(value["id"]), attempt_id=str(value["attempt_id"]),
         source_revision=str(value["source_revision"]),
-        backend_digest=str(value["backend_digest"]), frontend_digest=str(value["frontend_digest"]),
+        backend_digest=str(value["backend_digest"]),
+        frontend_digest=str(frontend) if frontend is not None else None,
         outcome=str(value["outcome"]),
         migrations_applied=bool(value["migrations_applied"]),
         ci_run=str(ci_run) if ci_run is not None else None,
@@ -591,14 +616,45 @@ class Settings:
 class Target:
     revision: str
     backend_digest: str
-    frontend_digest: str
+    frontend_digest: str | None  # None: no frontend image (the compose file has no frontend)
     backend_image: str
-    frontend_image: str
+    frontend_image: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeService:
+    """One service of a release, as `docker compose config` renders its compose file."""
+
+    name: str
+    container: str
+    image: str
+    env_files: tuple[Path, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Release:
+    """A revision's files on disk (compose file, live.env, referenced config files) and the
+    services its compose file renders to, sorted by name."""
+
+    directory: Path
+    services: tuple[ComposeService, ...]
+
+    @property
+    def compose_file(self) -> Path:
+        return self.directory / Path(COMPOSE_PATH).name
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(service.name for service in self.services)
+
+    @property
+    def containers(self) -> tuple[str, ...]:
+        return tuple(service.container for service in self.services)
 
 
 @dataclass(frozen=True, slots=True)
 class Prepared:
-    release_dir: Path
+    release: Release
     current: tuple[str, ...]
     heads: tuple[str, ...]
     changed_paths: tuple[str, ...] | None = None  # None: the diff could not be read
@@ -668,22 +724,28 @@ def _alembic_revisions(output: str) -> tuple[str, ...]:
     return tuple(sorted(set(revisions)))
 
 
-def identity_env(target: Target, *, service: str, deployment_id: str) -> dict[str, str]:
-    backend = service != "frontend"
+def identity_env(target: Target, *, image: str, deployment_id: str) -> dict[str, str] | None:
+    """The identity a container of `image` runs with; None for a third-party image."""
+    digests = {target.backend_image: target.backend_digest}
+    if target.frontend_image is not None and target.frontend_digest is not None:
+        digests[target.frontend_image] = target.frontend_digest
+    if image not in digests:
+        return None
     return {
-        "BFX_IMAGE_DIGEST": target.backend_digest if backend else target.frontend_digest,
+        "BFX_IMAGE_DIGEST": digests[image],
         "BFX_SOURCE_REVISION": target.revision,
         "BFX_DEPLOYMENT_ID": deployment_id,
     }
 
 
 def container_mismatches(
-    record: Mapping[str, Any], *, service: str, target: Target, deployment_id: str,
+    record: Mapping[str, Any], *, container: str, image: str, identity: Mapping[str, str] | None,
 ) -> list[str]:
     """What bfx-deploy re-checks on a created container: the release it runs.
 
     Hardening is the compose file's job and is checked in CI (compose_policy.py);
-    this proves Compose started exactly the digest and identity this attempt
+    this proves Compose started exactly the image the release's compose file
+    rendered and, for the release's own images, the identity this attempt
     recorded in the ledger.
     """
     config = record.get("Config") or {}
@@ -691,18 +753,87 @@ def container_mismatches(
     for item in config.get("Env") or []:
         key, _, value = str(item).partition("=")
         env[key] = value
-    image = target.backend_image if service != "frontend" else target.frontend_image
     mismatches = []
-    if record.get("Name") != "/" + CONTAINERS[service]:
+    if record.get("Name") != "/" + container:
         mismatches.append("name")
     if (config.get("Labels") or {}).get("com.docker.compose.project") != PROJECT:
         mismatches.append("project")
     if config.get("Image") != image:
         mismatches.append("image")
-    expected = identity_env(target, service=service, deployment_id=deployment_id)
-    if any(env.get(key) != value for key, value in expected.items()):
+    if identity is not None and any(env.get(key) != value for key, value in identity.items()):
         mismatches.append("identity_env")
     return mismatches
+
+
+def release_services(
+    rendered: Mapping[str, Any], *, target: Target, runtime_dir: Path, release_dir: Path,
+) -> tuple[ComposeService, ...]:
+    """The services of a release's rendered compose file, refused unless bfx-deploy can run them.
+
+    Each needs a container name and an image that is the target's own backend or frontend
+    digest or an allowlisted third-party digest; every env file must be required and be the
+    service's own `<runtime dir>/<service>.env` (validated before `up`) or the release's
+    live.env; the
+    bot and the web API must be there under their role names. Top-level `secrets` are
+    refused: nothing writes or rotates them (configs: release_config_files).
+    """
+    if rendered.get("name") != PROJECT:
+        raise DeployError("compose_project_name")
+    if rendered.get("secrets"):
+        raise DeployError("compose_secrets_refused")
+    services = rendered.get("services")
+    if not isinstance(services, dict) or not services:
+        raise DeployError("compose_services_missing")
+    for role in ROLE_CONTAINERS:
+        if role not in services:
+            raise DeployError(f"compose_service_missing:{role}")
+    own = {target.backend_image, *([target.frontend_image] if target.frontend_image else [])}
+    found = []
+    for name in sorted(services):
+        spec = services[name]
+        if not isinstance(spec, dict):
+            raise DeployError(f"compose_service_invalid:{name}")
+        container = spec.get("container_name")
+        if not isinstance(container, str) or not container:
+            raise DeployError(f"compose_container_name_missing:{name}")
+        image = spec.get("image")
+        if not isinstance(image, str) or (image not in own and THIRD_PARTY_IMAGE.fullmatch(image) is None):
+            raise DeployError(f"compose_image_not_allowed:{name}")
+        env_files = []
+        for entry in spec.get("env_file") or []:
+            if not isinstance(entry, dict) or entry.get("required", True) is not True:
+                raise DeployError(f"compose_env_file_optional:{name}")
+            path = Path(str(entry.get("path", "")))
+            # A service reads only its own secret file (and live.env), never another's
+            # or the host tool's (migrate.env holds the owner role, ghcr.env the token).
+            if path != runtime_dir / f"{name}.env" and path != release_dir / "live.env":
+                raise DeployError(f"compose_env_file_outside_runtime:{name}")
+            env_files.append(path)
+        found.append(ComposeService(name, container, image, tuple(env_files)))
+    names = {service.name: service for service in found}
+    for role, container in ROLE_CONTAINERS.items():
+        if names[role].container != container:
+            raise DeployError(f"compose_container_name:{role}")
+    return tuple(found)
+
+
+def release_config_files(rendered: Mapping[str, Any], release_dir: Path) -> tuple[str, ...]:
+    """The top-level `configs` files of a rendered compose file, relative to the release.
+
+    Only file-backed configs inside the release directory: a `content` or `environment`
+    config is interpolated by Compose at `up` and would bypass git, and a path outside
+    the directory would read a host file.
+    """
+    paths = []
+    for name, config in sorted((rendered.get("configs") or {}).items()):
+        if not isinstance(config, dict) or set(config) - {"name", "file"} or not config.get("file"):
+            raise DeployError(f"compose_config_not_file:{name}")
+        file = Path(str(config["file"]))
+        if not file.is_absolute() or os.path.normpath(file) != str(file) \
+                or not file.is_relative_to(release_dir) or file == release_dir:
+            raise DeployError(f"compose_config_outside_release:{name}")
+        paths.append(file.relative_to(release_dir).as_posix())
+    return tuple(paths)
 
 
 class Deployer:
@@ -812,7 +943,6 @@ class Deployer:
             target = self._discover(main)
         except DeployError as exc:
             return self._discovery_failed(exc)
-        self._discovery_ok()
         ci_run = main.labels.get(CI_RUN_LABEL)
         attempt = Attempt(started_at=started_at, target=target,
                           ci_run=ci_run if ci_run and CI_RUN_URL.fullmatch(ci_run) else None)
@@ -825,16 +955,24 @@ class Deployer:
             raise DiscoveryError("registry_revision_label_missing")
         if self._registry.inspect(f"{settings.backend_repository}:sha-{revision}").digest != main.digest:
             raise DiscoveryError("registry_main_and_revision_tag_disagree")
-        frontend = self._registry.inspect(f"{settings.frontend_repository}:sha-{revision}")
+        try:
+            frontend = self._registry.inspect(f"{settings.frontend_repository}:sha-{revision}")
+        except DiscoveryError as exc:
+            if not exc.code.startswith("registry_not_found:"):
+                raise
+            # From 9d-5 CI builds no frontend image; whether this revision needs one is its
+            # compose file's call (_materialize), which also keeps waiting while CI pushes.
+            return self._target(revision, main.digest, None)
         if frontend.labels.get(REVISION_LABEL) != revision:
             raise DiscoveryError("registry_frontend_revision_mismatch")
         return self._target(revision, main.digest, frontend.digest)
 
-    def _target(self, revision: str, backend_digest: str, frontend_digest: str) -> Target:
+    def _target(self, revision: str, backend_digest: str, frontend_digest: str | None) -> Target:
         return Target(
             revision=revision, backend_digest=backend_digest, frontend_digest=frontend_digest,
             backend_image=f"{self.settings.backend_repository}@{backend_digest}",
-            frontend_image=f"{self.settings.frontend_repository}@{frontend_digest}",
+            frontend_image=(f"{self.settings.frontend_repository}@{frontend_digest}"
+                            if frontend_digest is not None else None),
         )
 
     # ------------------------------------------------------------------ discovery state
@@ -882,16 +1020,24 @@ class Deployer:
         log(f"target {target.revision} backend {target.backend_digest} frontend {target.frontend_digest}")
         try:
             prepared = self._prepare(view, attempt)
+        except DiscoveryError as exc:
+            # The compose file needs a frontend image CI has not pushed (yet).
+            return self._discovery_failed(exc)
         except DeployError as exc:
+            self._discovery_ok()
             if self.settings.dry_run:
                 log(f"dry run: precheck would fail: {exc.code}")
                 return 1
             return self._finish(attempt, "failed", f"precheck:{exc.code}; running release untouched")
+        self._discovery_ok()
+        target = attempt.target
+        release = prepared.release
         reason = prepared.restore_test_reason
         if self.settings.dry_run:
             self.plan = {
                 "revision": target.revision, "backend_image": target.backend_image,
                 "frontend_image": target.frontend_image, "ci_run": attempt.ci_run,
+                "services": list(release.names),
                 "schema_current": list(prepared.current), "schema_heads": list(prepared.heads),
                 "migrations_pending": prepared.pending,
                 "stop_bot_before_migration": prepared.pending,
@@ -937,9 +1083,9 @@ class Deployer:
                     else "; running release untouched")
             return self._finish(attempt, "failed", f"{exc.code}{kept}")
         try:
-            self._compose_up(prepared.release_dir, target, attempt.attempt_id)
-            self._verify(target, attempt.attempt_id)
-            self._wait_healthy()
+            self._compose_up(release, target, attempt.attempt_id)
+            self._verify(release, target, attempt.attempt_id)
+            self._wait_healthy(release)
             if self.settings.rollback_drill:
                 raise DeployError("rollback_drill")
         except DeployError as exc:
@@ -1049,7 +1195,7 @@ class Deployer:
 
         Returns `restarted`, or why not and what state the container is left in.
         """
-        container = CONTAINERS[service]
+        container = ROLE_CONTAINERS[service]
         log(f"nothing migrated; starting {container} again on the running release")
         started = self._run(["docker", "start", container], timeout=90.0)
         if started.returncode != 0:
@@ -1078,7 +1224,7 @@ class Deployer:
     def _container_state(self, service: str) -> str | None:
         """A container's restart count and running flag, or None when unreadable."""
         result = self._run(["docker", "inspect", "--type", "container", "--format",
-                            "{{.RestartCount}} {{.State.Running}}", CONTAINERS[service]],
+                            "{{.RestartCount}} {{.State.Running}}", ROLE_CONTAINERS[service]],
                            timeout=60.0)
         if result.returncode != 0 or not result.stdout.strip().endswith("true"):
             return None
@@ -1087,14 +1233,17 @@ class Deployer:
     def _prepare(self, view: LedgerView, attempt: Attempt) -> Prepared:
         target = attempt.target
         self._fetch_and_require_on_main(target.revision)
-        release_dir = self._materialize(target.revision)
+        release = self._materialize(target, attempt.attempt_id)
+        if target.frontend_digest is not None and FRONTEND not in release.names:
+            # CI still pushed a frontend image, but this release does not run one.
+            attempt.target = target = replace(target, frontend_digest=None, frontend_image=None)
         changed_paths, why = self._changed_paths(view, target.revision)
         if changed_paths is None:
             log(f"changed paths unavailable ({why}); treated as a DR change")
-        self._validate_env_files(release_dir)
-        self._refuse_foreign_containers()
-        current, heads = self._schema(target)
-        return Prepared(release_dir=release_dir, current=current, heads=heads,
+        self._validate_env_files(release)
+        self._refuse_foreign_containers(release)
+        current, heads = self._schema(release, target)
+        return Prepared(release=release, current=current, heads=heads,
                         changed_paths=changed_paths)
 
     def _fetch_and_require_on_main(self, revision: str) -> None:
@@ -1110,8 +1259,8 @@ class Deployer:
         if ancestry != 0:
             raise DeployError("git_merge_base_failed")
 
-    def _schema(self, target: Target) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        self._pull((target.backend_image, target.frontend_image))
+    def _schema(self, release: Release, target: Target) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        self._pull(release)
         heads = _alembic_revisions(self._one_shot(target.backend_image, ("heads",), 120.0).stdout)
         current = _alembic_revisions(self._one_shot(target.backend_image, ("current",), 120.0).stdout)
         if not heads:
@@ -1120,13 +1269,66 @@ class Deployer:
             raise DeployError("schema_current_empty")
         return current, heads
 
-    def _materialize(self, revision: str) -> Path:
-        """Write the compose file and live.env of <revision>; the mirror's worktree is never touched."""
+    def _materialize(self, target: Target, deployment_id: str) -> Release:
+        """Write <revision>'s compose file, live.env and the config files its compose file
+        references, and read its services; the mirror's worktree is never touched.
+
+        What else to write comes from that revision's own rendered compose file, so a
+        revision without top-level `configs` (every one before 9d-4) needs nothing more and
+        a rollback or --recreate to it works; a referenced file the revision lacks is
+        `release_file_missing`, before anything is stopped. Files land at their path
+        relative to deploy/vm/, which is where the compose file sits in the repository.
+        """
+        revision = target.revision
         release_dir = self.settings.state_dir / "releases" / revision
         for path in (COMPOSE_PATH, LIVE_ENV_PATH):
             content = self._git("show", f"{revision}:{path}", code=f"release_file_missing:{path}").stdout
             _write_private(release_dir / Path(path).name, content)
-        return release_dir
+        compose_file = release_dir / Path(COMPOSE_PATH).name
+        if target.frontend_digest is None and FRONTEND in self._compose_services(compose_file):
+            raise DiscoveryError("registry_frontend_image_missing")
+        rendered = self._render(compose_file, target, deployment_id)
+        services = release_services(rendered, target=target, runtime_dir=self.settings.runtime_dir,
+                                    release_dir=release_dir)
+        for relative in release_config_files(rendered, release_dir):
+            path = f"{Path(COMPOSE_PATH).parent.as_posix()}/{relative}"
+            listed = self._git("ls-tree", revision, "--", path, code="git_ls_tree_failed").stdout.split()
+            if not listed:
+                raise DeployError(f"release_file_missing:{path}")
+            if listed[0] not in ("100644", "100755"):
+                raise DeployError(f"release_file_not_regular:{path}")
+            destination = release_dir / relative
+            if any(parent.is_symlink() for parent in (destination, *destination.parents)
+                   if parent.is_relative_to(release_dir)):
+                raise DeployError(f"release_path_symlink:{path}")
+            content = self._git("show", f"{revision}:{path}", code=f"release_file_missing:{path}").stdout
+            _write_private(destination, content)
+        return Release(directory=release_dir, services=services)
+
+    def _compose_services(self, compose_file: Path) -> set[str]:
+        """The service names of a compose file, without interpolating it (no variable needed)."""
+        result = self._check(["docker", "compose", "-p", PROJECT, "-f", str(compose_file), "config",
+                              "--no-interpolate", "--services"],
+                             code="compose_config_failed", timeout=60.0, env=_base_env())
+        return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+    def _render(self, compose_file: Path, target: Target, deployment_id: str) -> dict[str, Any]:
+        """`docker compose config` with the environment `up` gets.
+
+        --no-env-resolution keeps the env files' contents (the secrets) out of the output;
+        their paths are listed instead (Compose v5.1.4, the VM's).
+        """
+        result = self._check(["docker", "compose", "-p", PROJECT, "-f", str(compose_file), "config",
+                              "--no-env-resolution", "--format", "json"],
+                             code="compose_config_failed", timeout=60.0,
+                             env=self._compose_env(target, deployment_id))
+        try:
+            rendered = json.loads(result.stdout)
+        except ValueError:
+            raise DeployError("compose_config_unparsable") from None
+        if not isinstance(rendered, dict):
+            raise DeployError("compose_config_unparsable")
+        return rendered
 
     def _changed_paths(self, view: LedgerView, revision: str) -> tuple[tuple[str, ...] | None, str]:
         if view.last_success is None:
@@ -1142,19 +1344,21 @@ class Deployer:
             return None, "diff_failed"
         return tuple(path for path in diff.stdout.split("\0") if path), ""
 
-    def _validate_env_files(self, release_dir: Path) -> None:
-        files = [(self.settings.runtime_dir / name, name != "migrate.env")
-                 for name in (*RUNTIME_ENV_FILES.values(), "migrate.env")]
+    def _validate_env_files(self, release: Release) -> None:
+        """The env files the release's compose file names, migrate.env and live.env."""
+        live = release.directory / "live.env"
+        named = sorted({path for service in release.services for path in service.env_files} - {live})
+        files = [(path, True) for path in named] + [(self.settings.runtime_dir / "migrate.env", False)]
         for path, _ in files:
             self._secret_check(path)
-        for path, compose in [*files, (release_dir / "live.env", True)]:
+        for path, compose in [*files, (live, True)]:
             try:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeError):
                 raise DeployError(f"env_file_unreadable:{path.name}") from None
             parse_env_file(text, name=path.name, compose=compose)
 
-    def _refuse_foreign_containers(self) -> None:
+    def _refuse_foreign_containers(self, release: Release) -> None:
         result = self._check(
             ["docker", "ps", "--all", "--no-trunc", "--format",
              '{{.Names}}\t{{.Label "com.docker.compose.project"}}'],
@@ -1162,7 +1366,7 @@ class Deployer:
         )
         for line in result.stdout.splitlines():
             name, _, project = line.partition("\t")
-            if name in CONTAINERS.values() and project != PROJECT:
+            if name in release.containers and project != PROJECT:
                 # Cutover: containers left by the retired immutable-release launcher
                 # must be stopped and renamed by the operator; bfx-deploy never deletes
                 # them (docs/runbooks/fresh-host-setup.md).
@@ -1171,13 +1375,20 @@ class Deployer:
                     continue
                 raise DeployError(f"foreign_container_holds_name:{name}")
 
-    def _pull(self, images: Sequence[str]) -> None:
+    def _pull(self, release: Release) -> None:
+        """Every image the release names, by digest: its own with the GHCR token, the
+        allowlisted third-party ones without it (the token never goes to another registry)."""
+        images = sorted({service.image for service in release.services})
+        third_party = [image for image in images if THIRD_PARTY_IMAGE.fullmatch(image)]
         hosts = (self.settings.backend_repository.split("/", 1)[0],
                  self.settings.frontend_repository.split("/", 1)[0])
         with docker_auth(self.settings.state_dir, self._registry_credentials, hosts) as env:
             for image in images:
-                self._check(["docker", "pull", "--quiet", image], code="image_pull_failed",
-                            timeout=1800.0, env=env or None)
+                if image not in third_party:
+                    self._check(["docker", "pull", "--quiet", image], code="image_pull_failed",
+                                timeout=1800.0, env=env or None)
+        for image in third_party:
+            self._check(["docker", "pull", "--quiet", image], code="image_pull_failed", timeout=1800.0)
 
     def _one_shot(self, image: str, alembic_args: Sequence[str], timeout: float) -> CommandResult:
         name = f"bfx-deploy-oneshot-{secrets.token_hex(6)}"
@@ -1288,67 +1499,81 @@ class Deployer:
         attempt.started_recorded = True
 
     def _compose_env(self, target: Target, deployment_id: str) -> dict[str, str]:
+        frontend = ({"BFX_FRONTEND_IMAGE": target.frontend_image,
+                     "BFX_FRONTEND_DIGEST": target.frontend_digest}
+                    if target.frontend_image is not None and target.frontend_digest is not None
+                    else {})
         return {**_base_env(), "BFX_BACKEND_IMAGE": target.backend_image,
                 "BFX_BACKEND_DIGEST": target.backend_digest,
-                "BFX_FRONTEND_IMAGE": target.frontend_image,
-                "BFX_FRONTEND_DIGEST": target.frontend_digest,
+                **frontend,
                 "BFX_SOURCE_REVISION": target.revision,
                 "BFX_DEPLOYMENT_ID": deployment_id,
                 # The env files Compose reads are the ones validated above.
                 "BFX_RUNTIME_DIR": str(self.settings.runtime_dir)}
 
-    def _compose_up(self, release_dir: Path, target: Target, deployment_id: str,
+    def _compose_up(self, release: Release, target: Target, deployment_id: str,
                     *, force_recreate: bool = False) -> None:
-        for image, digest in ((target.backend_image, target.backend_digest),
-                              (target.frontend_image, target.frontend_digest)):
+        pinned = [(target.backend_image, target.backend_digest)]
+        if target.frontend_image is not None or target.frontend_digest is not None:
+            pinned.append((target.frontend_image or "", target.frontend_digest or ""))
+        for image, digest in pinned:
             if DIGEST.fullmatch(digest) is None or not image.endswith("@" + digest):
                 raise DeployError("image_reference_not_digest_pinned")
-        options = ["--detach", "--no-deps", *(["--force-recreate"] if force_recreate else [])]
-        self._check(["docker", "compose", "-p", PROJECT, "-f",
-                     str(release_dir / Path(COMPOSE_PATH).name), "up", *options, *SERVICES],
+        # --remove-orphans: a service the release no longer has (the frontend from 9d-5)
+        # is removed instead of running on, and a rollback creates it again.
+        options = ["--detach", "--no-deps", "--remove-orphans",
+                   *(["--force-recreate"] if force_recreate else [])]
+        self._check(["docker", "compose", "-p", PROJECT, "-f", str(release.compose_file),
+                     "up", *options, *release.names],
                     code="compose_up_failed", timeout=600.0,
                     env=self._compose_env(target, deployment_id))
 
-    def _verify(self, target: Target, deployment_id: str) -> None:
-        result = self._check(["docker", "inspect", "--type", "container", *CONTAINERS.values()],
+    def _verify(self, release: Release, target: Target, deployment_id: str) -> None:
+        result = self._check(["docker", "inspect", "--type", "container", *release.containers],
                              code="docker_inspect_failed", timeout=60.0)
         try:
             records = {str(record["Name"]).lstrip("/"): record for record in json.loads(result.stdout)}
         except (ValueError, KeyError, TypeError):
             raise DeployError("docker_inspect_unparsable") from None
         problems = []
-        for service, container in CONTAINERS.items():
-            record = records.get(container)
+        for service in release.services:
+            record = records.get(service.container)
             if record is None:
-                problems.append(f"{service}:missing")
+                problems.append(f"{service.name}:missing")
                 continue
-            problems += [f"{service}:{m}" for m in container_mismatches(
-                record, service=service, target=target, deployment_id=deployment_id)]
+            problems += [f"{service.name}:{m}" for m in container_mismatches(
+                record, container=service.container, image=service.image,
+                identity=identity_env(target, image=service.image, deployment_id=deployment_id))]
         if problems:
             raise DeployError("container_release_mismatch:" + ",".join(problems))
 
     def _probe(self, service: str) -> bool:
-        if service == "frontend":
+        if service == FRONTEND:
             return self._http(self.settings.frontend_url, 5.0) == 200
+        if service not in ROLE_CONTAINERS:
+            # No health endpoint declared for it: running and not restarting through the
+            # settle window is its check. 9e-3 gives the sidecar its own (TS health check),
+            # and must be the installed tool before 9d-4 adds the sidecar (gate G1).
+            return True
         port = self.settings.healthz_port if service == "bot" else 8000
         path = "healthz" if service == "bot" else "health"
-        result = self._run(["docker", "exec", CONTAINERS[service], "/app/.venv/bin/python", "-c",
+        result = self._run(["docker", "exec", ROLE_CONTAINERS[service], "/app/.venv/bin/python", "-c",
                             PROBE, f"http://127.0.0.1:{port}/{path}"], timeout=20.0)
         return result.returncode == 0
 
-    def _restart_counts(self) -> dict[str, str]:
+    def _restart_counts(self, release: Release) -> dict[str, str]:
         result = self._check(["docker", "inspect", "--type", "container", "--format",
                               "{{.Name}} {{.RestartCount}} {{.State.Running}}",
-                              *CONTAINERS.values()], code="docker_inspect_failed", timeout=60.0)
+                              *release.containers], code="docker_inspect_failed", timeout=60.0)
         counts = {}
         for line in result.stdout.splitlines():
             name, _, rest = line.strip().lstrip("/").partition(" ")
             counts[name] = rest
         return counts
 
-    def _wait_healthy(self) -> None:
+    def _wait_healthy(self, release: Release) -> None:
         started = self._clock()
-        pending = set(SERVICES)
+        pending = set(release.names)
         while pending:
             for service in sorted(pending):
                 if self._probe(service):
@@ -1356,24 +1581,24 @@ class Deployer:
             if not pending:
                 break
             elapsed = self._clock() - started
-            late = sorted(s for s in pending if elapsed >= self.settings.health_timeouts[s])
+            late = sorted(s for s in pending if elapsed >= self.settings.health_timeouts.get(s, 120.0))
             if late:
                 raise DeployError("health_timeout:" + ",".join(late))
             self._sleep(self.settings.health_interval)
         # A daemon can answer once and then die in its startup checks: require the
         # same containers, still running, still healthy after a settle window.
-        before = self._restart_counts()
+        before = self._restart_counts(release)
         self._sleep(self.settings.settle_seconds)
-        after = self._restart_counts()
+        after = self._restart_counts(release)
         if after != before or any(not value.endswith("true") for value in after.values()):
             raise DeployError("restarted_during_settle")
-        unhealthy = [service for service in SERVICES if not self._probe(service)]
+        unhealthy = [service for service in release.names if not self._probe(service)]
         if unhealthy:
             raise DeployError("unhealthy_after_settle:" + ",".join(unhealthy))
 
     def _stop(self, service: str) -> str:
         """`<service> stopped`, `<service> absent`, or `<SERVICE>_STOP_FAILED`."""
-        container = CONTAINERS[service]
+        container = ROLE_CONTAINERS[service]
         result = self._run(["docker", "stop", "--time", "30", container], timeout=90.0)
         if result.returncode == 0:
             return f"{service} stopped"
@@ -1408,11 +1633,11 @@ class Deployer:
         log(f"rolling back to {previous.source_revision}")
         target = self._target(previous.source_revision, previous.backend_digest,
                               previous.frontend_digest)
-        release_dir = self._materialize(previous.source_revision)
-        self._pull((target.backend_image, target.frontend_image))
-        self._compose_up(release_dir, target, previous.attempt_id)
-        self._verify(target, previous.attempt_id)
-        self._wait_healthy()
+        release = self._materialize(target, previous.attempt_id)
+        self._pull(release)
+        self._compose_up(release, target, previous.attempt_id)
+        self._verify(release, target, previous.attempt_id)
+        self._wait_healthy(release)
 
     # ------------------------------------------------------------------ recreate
 
@@ -1441,10 +1666,10 @@ class Deployer:
         try:
             if self._git_try("cat-file", "-e", f"{target.revision}^{{commit}}").returncode != 0:
                 raise DeployError("revision_not_in_mirror")
-            release_dir = self._materialize(target.revision)
-            self._validate_env_files(release_dir)
-            self._refuse_foreign_containers()
-            current, heads = self._schema(target)
+            release = self._materialize(target, attempt.attempt_id)
+            self._validate_env_files(release)
+            self._refuse_foreign_containers(release)
+            current, heads = self._schema(release, target)
             if set(current) != set(heads):
                 raise DeployError("schema_not_at_release_head")
         except DeployError as exc:
@@ -1455,7 +1680,7 @@ class Deployer:
         if self.settings.dry_run:
             self.plan = {"action": "recreate", "revision": target.revision,
                          "backend_image": target.backend_image, "frontend_image": target.frontend_image,
-                         "blockers": list(self._dry_run_blockers)}
+                         "services": list(release.names), "blockers": list(self._dry_run_blockers)}
             print(json.dumps(self.plan, indent=2, sort_keys=True))
             return 0
         try:
@@ -1463,9 +1688,9 @@ class Deployer:
         except DeployError as exc:
             return self._finish(attempt, "failed", f"{exc.code}; running release untouched")
         try:
-            self._compose_up(release_dir, target, attempt.attempt_id, force_recreate=True)
-            self._verify(target, attempt.attempt_id)
-            self._wait_healthy()
+            self._compose_up(release, target, attempt.attempt_id, force_recreate=True)
+            self._verify(release, target, attempt.attempt_id)
+            self._wait_healthy(release)
         except DeployError as exc:
             stopped = self._stop("bot")
             return self._finish(attempt, "failed", f"unhealthy:{exc.code}; recreate has no rollback; "
@@ -1497,7 +1722,14 @@ class Deployer:
         return sorted(set(warnings + self._prune_images(view, target)))
 
     def _prune_images(self, view: LedgerView, target: Target) -> list[str]:
-        """Remove local images other than the target's and the last successful release's."""
+        """Remove local images other than the target's and the last successful release's.
+
+        Only the release's own repositories are listed: a third-party image (the sidecar's)
+        is never removed here, so a rollback always finds the one it ran. Known cost: each
+        sidecar upgrade leaves its previous image (one per manual digest bump in the compose
+        file); prune them by the target's and last success's compose files when a second
+        upgrade lands or disk use calls for it.
+        """
         warnings = []
         keep = {target.backend_digest, target.frontend_digest}
         if view.last_success is not None:
