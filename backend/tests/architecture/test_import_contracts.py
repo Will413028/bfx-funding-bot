@@ -27,6 +27,8 @@ MAX_IGNORES_BY_ID = {
     "simulated-venue-wiring-is-top": 0,
     "runtime-not-simulated-venue": 0,
     "trading-not-ledger": 0,
+    "control-plane-exposure": 0,
+    "execution-acyclic": 0,
     "market-contracts-are-pure": 0,
     "market-contracts-no-sibling-dependencies": 0,
     "market-contracts-via-facade": 0,
