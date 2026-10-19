@@ -35,7 +35,7 @@ from bfx_funding_bot.modules.execution.safety.pre_trade import (
 )
 from bfx_funding_bot.modules.execution.safety.protection import COMMAND_RATE_EXCEEDED
 from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow
-from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
+from bfx_funding_bot.modules.market import MarketSnapshot
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.strategy import (
     DecisionOutcome,

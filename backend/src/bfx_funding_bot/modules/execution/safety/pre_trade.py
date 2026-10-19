@@ -42,7 +42,7 @@ from bfx_funding_bot.modules.ledger import (
     ManagedOfferReader,
     Scope,
 )
-from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookProvider
+from bfx_funding_bot.modules.market import FundingBookProvider
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.trading import CapitalPolicy

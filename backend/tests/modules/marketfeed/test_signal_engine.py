@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
+from bfx_funding_bot.modules.execution.event_payloads import Envelope
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter
-from bfx_funding_bot.modules.marketfeed.schemas import Envelope
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.strategy import CellConfig, DecisionOutcome

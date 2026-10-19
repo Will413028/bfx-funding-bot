@@ -46,7 +46,7 @@ from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
     FillModelUnavailable,
 )
-from bfx_funding_bot.modules.marketfeed.funding_book import BookUnavailable, MarketSnapshot
+from bfx_funding_bot.modules.market import BookUnavailable, MarketSnapshot
 from bfx_funding_bot.modules.strategy import CellConfig, DecisionOutcome, StrategyName
 from tests.external.bitfinex.test_funding_rules import FixedRules
 

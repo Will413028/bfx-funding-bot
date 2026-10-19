@@ -1,7 +1,7 @@
 """Gate A0 — book period coverage aggregation (pure, no DB)."""
 from decimal import Decimal
 
-from bfx_funding_bot.modules.marketfeed.book_period_coverage import (
+from bfx_funding_bot.modules.market.book_period_coverage import (
     BookAskSnapshot,
     render_markdown,
     snapshot_from_payload,

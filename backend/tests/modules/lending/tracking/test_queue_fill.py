@@ -9,7 +9,7 @@ from hypothesis import strategies as st
 
 from bfx_funding_bot.modules.lending.tracking.book_replay import queue_ahead
 from bfx_funding_bot.modules.lending.tracking.queue_fill import filled_amount, queue_ahead_of
-from bfx_funding_bot.modules.marketfeed.book_period_coverage import BookAskSnapshot
+from bfx_funding_bot.modules.market.book_period_coverage import BookAskSnapshot
 
 D = Decimal
 

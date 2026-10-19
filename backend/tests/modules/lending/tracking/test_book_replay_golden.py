@@ -20,7 +20,7 @@ from bfx_funding_bot.modules.lending.tracking.book_replay import (
     BOOK_MODEL_VERSION,
     BookReplayLearner,
 )
-from bfx_funding_bot.modules.marketfeed.book_period_coverage import BookAskSnapshot
+from bfx_funding_bot.modules.market.book_period_coverage import BookAskSnapshot
 
 _BACKEND = Path(__file__).resolve().parents[4]
 _FIXTURE = _BACKEND / "fixtures" / "candles" / "fUST_p2_1h.jsonl.gz"

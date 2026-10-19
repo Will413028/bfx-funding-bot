@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from bfx_funding_bot.core.telemetry import EventType, HealthTarget, Level, Phase
-from bfx_funding_bot.modules.marketfeed.schemas import (
+from bfx_funding_bot.modules.execution.event_payloads import (
     Envelope,
     OrderSubmitPayload,
     SafetyTriggerPayload,

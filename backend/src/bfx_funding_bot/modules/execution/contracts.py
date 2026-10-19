@@ -15,7 +15,7 @@ from bfx_funding_bot.external.bitfinex.funding_rules import FundingAmountEvidenc
 
 if TYPE_CHECKING:
     from bfx_funding_bot.modules.ledger import CapitalAvailable
-    from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
+    from bfx_funding_bot.modules.market import MarketSnapshot
 
 from bfx_funding_bot.modules.strategy import DecisionPayload
 

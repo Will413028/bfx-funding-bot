@@ -34,7 +34,7 @@ from bfx_funding_bot.modules.lending.tracking.book_replay import (
 from bfx_funding_bot.modules.lending.tracking.fill_rate import BucketStat
 from bfx_funding_bot.modules.lending.tracking.repository import ensure_fill_model_artifact
 from bfx_funding_bot.modules.lending.tracking.tables import FillRateStatsRow
-from bfx_funding_bot.modules.marketfeed.book_period_coverage import (
+from bfx_funding_bot.modules.market.book_period_coverage import (
     BookAskSnapshot,
     snapshot_from_payload,
 )

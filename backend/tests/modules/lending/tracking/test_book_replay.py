@@ -8,7 +8,7 @@ from bfx_funding_bot.modules.lending.tracking.book_replay import (
     BookReplayLearner,
     queue_ahead,
 )
-from bfx_funding_bot.modules.marketfeed.book_period_coverage import BookAskSnapshot
+from bfx_funding_bot.modules.market.book_period_coverage import BookAskSnapshot
 
 _H = 3_600_000
 _T0 = 1_704_067_200_000  # 2024-01-01T00:00Z
