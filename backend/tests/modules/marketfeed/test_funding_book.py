@@ -5,8 +5,8 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
-from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
 from bfx_funding_bot.modules.marketfeed.funding_book import (
     BookUnavailable,
     FundingBookService,

@@ -8,9 +8,9 @@ looks harmless, which is exactly how the first L4 run produced a false all-clear
 from decimal import Decimal
 
 from bfx_funding_bot.apps.research import research_strategy
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import run_backtest
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 _HOUR = 3_600_000
 _LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")

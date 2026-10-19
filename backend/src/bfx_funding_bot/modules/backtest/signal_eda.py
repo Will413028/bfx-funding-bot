@@ -13,8 +13,8 @@ from datetime import UTC, datetime
 import numpy as np
 import pandas as pd
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 
 # SEED, HORIZONS: shared defaults consumed by later tasks (bootstrap seed, driver horizons).
 SEED = 20260605

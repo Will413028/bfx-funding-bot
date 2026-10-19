@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.execution.diagnostics.sink import NoopDiagnosticsSink
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter

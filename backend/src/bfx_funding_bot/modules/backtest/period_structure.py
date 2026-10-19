@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
 from bfx_funding_bot.modules.backtest.oos_profitability import (
@@ -38,7 +39,6 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     summarize_oos,
 )
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 from bfx_funding_bot.modules.strategy import Strategy

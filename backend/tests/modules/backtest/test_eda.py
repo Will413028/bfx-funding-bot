@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.eda import (
     autocorrelation_at_lags,
     close_over_ema_sigma,
@@ -7,7 +8,6 @@ from bfx_funding_bot.modules.backtest.eda import (
     mean_rate_by_weekday,
     per_quarter_regime_drift,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 def _candle(mts: int, close: str) -> FundingCandle:

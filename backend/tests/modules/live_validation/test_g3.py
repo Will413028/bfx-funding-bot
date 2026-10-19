@@ -18,8 +18,8 @@ import bfx_funding_bot.modules.execution.uncertainty_tables  # the ledger tables
 import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.auth_rest import InterestPayment
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.candles.repository import upsert_candles
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.live_validation.credit_attribution import (
     CreditCells,

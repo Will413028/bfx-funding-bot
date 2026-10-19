@@ -19,7 +19,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.modules.marketfeed.tables import FundingBookSnapshotRow
 
 log = logging.getLogger(__name__)

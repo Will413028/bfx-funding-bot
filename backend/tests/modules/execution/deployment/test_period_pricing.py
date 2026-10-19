@@ -1,7 +1,7 @@
 from decimal import Decimal
 from uuid import uuid4
 
-from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.modules.execution.contracts import BlockedExecution, BlockReason
 from bfx_funding_bot.modules.execution.deployment.period_pricing import (
     PeriodPricer,

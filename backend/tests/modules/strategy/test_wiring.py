@@ -7,8 +7,8 @@ import pytest
 
 import bfx_funding_bot.modules.strategy as strategy_facade
 from bfx_funding_bot.apps.research import research_strategy
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.candles.reindex import FilledCandle, reindex_and_ffill
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import FilledCandle as LegacyFilledCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill as legacy_reindex
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import ExtractedSignal

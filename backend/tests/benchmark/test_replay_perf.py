@@ -12,7 +12,7 @@ from decimal import Decimal
 
 import pytest
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
     ExtractedSignal,

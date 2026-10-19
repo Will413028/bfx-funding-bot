@@ -23,6 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.apps.config import load_cells_only
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 from bfx_funding_bot.modules.backtest.signal_eda import (
     HORIZONS,
     SIGNALS,
@@ -39,9 +41,7 @@ from bfx_funding_bot.modules.backtest.signal_eda import (
     split_regime,
 )
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.funding_stats.repository import get_in_range as get_stats_in_range
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 from bfx_funding_bot.modules.strategy import CellConfig
 
 logger = logging.getLogger(__name__)

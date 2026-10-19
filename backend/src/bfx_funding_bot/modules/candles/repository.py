@@ -10,7 +10,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.sqlite.dml import Insert as SQLiteInsert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.candles.tables import (
     FundingCandleRevisionRow,
     FundingCandleRow,

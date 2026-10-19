@@ -11,11 +11,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 from bfx_funding_bot.modules.strategy import ResearchStrategySpec
 

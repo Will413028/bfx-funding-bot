@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     BoundaryStrategyBuilder,
 )

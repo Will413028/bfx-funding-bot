@@ -5,8 +5,8 @@ import zlib
 
 import pytest
 
+from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
-from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
 
 
 def test_book_subscription_enables_sequence_and_checksum() -> None:

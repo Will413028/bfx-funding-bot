@@ -342,7 +342,7 @@ class _AuditContexts:
 
 
 def _valid_snapshot() -> MarketSnapshot:
-    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+    from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 
     return MarketSnapshot(
         snapshot_id="book-1", symbol="fUST",
@@ -353,7 +353,7 @@ def _valid_snapshot() -> MarketSnapshot:
 
 
 def _ask_snapshot() -> MarketSnapshot:
-    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+    from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 
     return MarketSnapshot(
         snapshot_id="book-ask", symbol="fUST", bids=(),
@@ -364,7 +364,7 @@ def _ask_snapshot() -> MarketSnapshot:
 
 
 def _bid_snapshot() -> MarketSnapshot:
-    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+    from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 
     return MarketSnapshot(
         snapshot_id="book-bid", symbol="fUST",
@@ -375,7 +375,7 @@ def _bid_snapshot() -> MarketSnapshot:
 
 
 def _signal_floor_snapshot() -> MarketSnapshot:
-    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+    from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 
     return MarketSnapshot(
         snapshot_id="book-floor", symbol="fUST", bids=(),
@@ -386,7 +386,7 @@ def _signal_floor_snapshot() -> MarketSnapshot:
 
 
 def _raise_snapshot() -> MarketSnapshot:
-    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+    from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 
     return MarketSnapshot(
         snapshot_id="book-raise", symbol="fUST", bids=(),
@@ -1559,7 +1559,7 @@ async def test_recorder_is_optional_and_absent_changes_nothing():
 
 
 def _book_with_ask(rate: float) -> MarketSnapshot:
-    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+    from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 
     return MarketSnapshot(
         snapshot_id="book-ask-ref", symbol="fUST", bids=(),

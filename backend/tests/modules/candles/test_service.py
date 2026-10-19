@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.candles.service import backfill_candles
 
 

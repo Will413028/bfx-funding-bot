@@ -12,8 +12,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Literal, Protocol
 
+from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.external.bitfinex.funding_book_ws import funding_book_checksum
-from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
 
 log = logging.getLogger(__name__)
 

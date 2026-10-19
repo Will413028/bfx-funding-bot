@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.strategy import LendDecision
 from bfx_funding_bot.modules.strategy._internal.strategies.base import Strategy
 

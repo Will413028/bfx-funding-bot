@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.oos_profitability import (
     WindowOutcome,
     active_return_summary,
@@ -21,7 +22,6 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     percentile,
     sharpe_skew_kurt,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.strategy import CellConfig, ResearchStrategySpec
 
 # ---------------------------------------------------------------------------

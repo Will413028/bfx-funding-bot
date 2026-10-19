@@ -14,7 +14,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from decimal import Decimal
 
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 from bfx_funding_bot.modules.live_validation.live_attribution import FRR_ANNUALIZATION
 
 _DEFAULT_MAX_STALENESS_MS = 24 * 3_600_000  # max observed gap is ~9.2h (2026-07-19 audit)

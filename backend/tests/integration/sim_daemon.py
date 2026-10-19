@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from bfx_funding_bot.apps import bot
 from bfx_funding_bot.apps.venue import VenueSeam
-from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuote
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger.tables import ExecutionResolutionJournalRow

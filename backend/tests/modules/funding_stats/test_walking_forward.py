@@ -11,8 +11,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 from bfx_funding_bot.modules.funding_stats.repository import upsert_funding_stats
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 from bfx_funding_bot.modules.funding_stats.service import (
     backfill_funding_stats_to_latest,
 )

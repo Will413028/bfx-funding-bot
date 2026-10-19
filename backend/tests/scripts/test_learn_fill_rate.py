@@ -4,8 +4,8 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.candles.repository import upsert_candles
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking import tables as _t  # noqa: F401
 from bfx_funding_bot.modules.lending.tracking.fill_rate import BucketStat
 from bfx_funding_bot.modules.lending.tracking.repository import load_fill_rate_stats

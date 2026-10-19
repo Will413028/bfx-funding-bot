@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.fill_rate import (
     FillRateLearner,
 )

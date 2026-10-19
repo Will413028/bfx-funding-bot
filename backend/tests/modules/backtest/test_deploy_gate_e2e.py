@@ -12,6 +12,7 @@ import pytest
 
 from bfx_funding_bot.apps.config import load_cells_only
 from bfx_funding_bot.apps.research import research_strategy
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.deploy_gate import GateResult, evaluate_gate
 from bfx_funding_bot.modules.backtest.fixture_io import load_candles
@@ -22,7 +23,6 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     paired_active_returns,
 )
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.strategy import CellConfig, Strategy
 from bfx_funding_bot.modules.strategy.wiring import build_strategy
 

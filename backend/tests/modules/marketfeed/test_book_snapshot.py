@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.marketfeed.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
 from bfx_funding_bot.modules.marketfeed.tables import FundingBookSnapshotRow
 

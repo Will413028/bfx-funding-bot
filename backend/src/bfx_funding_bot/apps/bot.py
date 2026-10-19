@@ -40,6 +40,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.errors import VenueCredentialRejectedError
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.external.bitfinex.funding_rules import FundingRules
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
@@ -54,7 +55,6 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
 )
 from bfx_funding_bot.modules.admin.trading_status import CapitalStatusReads, TradingStatusService
 from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_periods
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.deployments.identity import DeploymentIdentity
 from bfx_funding_bot.modules.execution.audit import ExecutionDecisionRecorder

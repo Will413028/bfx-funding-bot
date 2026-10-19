@@ -2,8 +2,8 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.split import compute_train_end_mts
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 def _candles(n: int) -> list[FundingCandle]:

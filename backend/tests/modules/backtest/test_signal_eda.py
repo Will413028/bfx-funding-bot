@@ -4,6 +4,8 @@ from decimal import Decimal
 import numpy as np
 import pandas as pd
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 from bfx_funding_bot.modules.backtest.signal_eda import (
     SIGNALS,
     SPLIT_MTS,
@@ -26,8 +28,6 @@ from bfx_funding_bot.modules.backtest.signal_eda import (
     split_regime,
     utilization_pctile,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 
 _DAY = 86_400_000
 

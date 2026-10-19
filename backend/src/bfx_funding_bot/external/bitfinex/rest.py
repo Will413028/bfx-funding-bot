@@ -12,9 +12,10 @@ from bfx_funding_bot.external.bitfinex.errors import (
     BitfinexRateLimited,
     BitfinexShapeError,
 )
+from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 
 logger = logging.getLogger(__name__)
 
@@ -24,27 +25,6 @@ logger = logging.getLogger(__name__)
 # the scheduled delay. The live daemon keeps the default (no retry): a blocked
 # book fetch fails closed and the next cycle tries again.
 BATCH_RATE_LIMIT_BACKOFF: tuple[float, ...] = (60.0, 120.0, 240.0, 240.0)
-
-
-@dataclass(frozen=True, slots=True)
-class FundingBookLevel:
-    """One row of GET /v2/book/f{sym}/P0 — [RATE, PERIOD, COUNT, AMOUNT].
-
-    AMOUNT > 0 = ask（貸方掛單）、< 0 = bid（借方需求）。rate 與 ticker/candle
-    close 同尺度（日利率 decimal）。"""
-    rate: float
-    period: int
-    count: int
-    amount: float
-
-    @classmethod
-    def from_bitfinex(cls, entry: list[Any]) -> "FundingBookLevel":
-        if not isinstance(entry, list) or len(entry) < 4:
-            raise BitfinexShapeError(f"funding book row too short: {entry!r}")
-        return cls(
-            rate=float(entry[0]), period=int(entry[1]),
-            count=int(entry[2]), amount=float(entry[3]),
-        )
 
 
 @dataclass(frozen=True, slots=True)

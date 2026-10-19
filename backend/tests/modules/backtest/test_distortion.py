@@ -2,8 +2,8 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.distortion import perturb_candles
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 def _candle(mts: int, close: str) -> FundingCandle:

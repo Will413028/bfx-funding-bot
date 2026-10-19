@@ -11,13 +11,13 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.modules.candles.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.modules.candles.repository import (
     get_up_to,
     seal_closed_periods,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.marketfeed.scheduler import last_candle_close_mts
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
