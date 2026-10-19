@@ -13,13 +13,13 @@ from uuid import UUID
 
 from bfx_funding_bot.core.telemetry import EventType, Level, Phase
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
-from bfx_funding_bot.modules.execution.protocols import (
-    AccountContext,
-)
-from bfx_funding_bot.modules.marketfeed.schemas import (
+from bfx_funding_bot.modules.execution.event_payloads import (
     Envelope,
     OrderSubmitPayload,
     SafetyTriggerPayload,
+)
+from bfx_funding_bot.modules.execution.protocols import (
+    AccountContext,
 )
 from bfx_funding_bot.modules.strategy import StrategyName
 

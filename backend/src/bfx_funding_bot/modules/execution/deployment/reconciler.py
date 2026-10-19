@@ -90,11 +90,7 @@ from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
     FillModelUnavailable,
 )
-from bfx_funding_bot.modules.marketfeed.funding_book import (
-    BookUnavailable,
-    FundingBookProvider,
-    MarketSnapshot,
-)
+from bfx_funding_bot.modules.market import BookUnavailable, FundingBookProvider, MarketSnapshot
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.strategy import (
     CellConfig,

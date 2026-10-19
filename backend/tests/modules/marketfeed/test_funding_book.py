@@ -7,12 +7,8 @@ import pytest
 
 from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
-from bfx_funding_bot.modules.marketfeed.funding_book import (
-    BookUnavailable,
-    FundingBookService,
-    FundingBookStore,
-    MarketSnapshot,
-)
+from bfx_funding_bot.modules.market import BookUnavailable, MarketSnapshot
+from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookService, FundingBookStore
 
 
 def _level(*, rate: str, period: int, amount: str) -> FundingBookLevel:

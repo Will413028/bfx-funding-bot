@@ -40,7 +40,7 @@ from bfx_funding_bot.modules.lending.tracking.fill_rate import (
     _percentile,
 )
 from bfx_funding_bot.modules.lending.tracking.queue_fill import filled_amount, queue_ahead_of
-from bfx_funding_bot.modules.marketfeed.book_period_coverage import BookAskSnapshot
+from bfx_funding_bot.modules.market.book_period_coverage import BookAskSnapshot
 
 BOOK_SOURCE = "book"
 BOOK_MODEL_VERSION = "book-replay-v2"  # v2: horizon counts only candles wholly inside the window

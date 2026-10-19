@@ -270,13 +270,6 @@ ignore_imports = [
     "bfx_funding_bot.modules.accounts.credential_bootstrap -> bfx_funding_bot.modules.execution.protocols",
     "bfx_funding_bot.modules.accounts.vault -> bfx_funding_bot.modules.execution.protocols",
     "bfx_funding_bot.modules.admin.trading_status -> bfx_funding_bot.modules.marketfeed.readiness",
-    "bfx_funding_bot.modules.execution.contracts -> bfx_funding_bot.modules.marketfeed.funding_book",
-    "bfx_funding_bot.modules.execution.deployment.eligibility -> bfx_funding_bot.modules.marketfeed.funding_book",
-    "bfx_funding_bot.modules.execution.deployment.period_pricing -> bfx_funding_bot.modules.marketfeed.funding_book",
-    "bfx_funding_bot.modules.execution.deployment.reconciler -> bfx_funding_bot.modules.marketfeed.funding_book",
-    "bfx_funding_bot.modules.execution.emit -> bfx_funding_bot.modules.marketfeed.schemas",
-    "bfx_funding_bot.modules.execution.safety.pre_trade -> bfx_funding_bot.modules.marketfeed.funding_book",
-    "bfx_funding_bot.modules.lending.tracking.book_replay -> bfx_funding_bot.modules.marketfeed.book_period_coverage",
     "bfx_funding_bot.modules.live_validation.g3 -> bfx_funding_bot.modules.backtest.oos_profitability",
     "bfx_funding_bot.modules.live_validation.live_attribution -> bfx_funding_bot.modules.backtest.oos_profitability",
     "bfx_funding_bot.modules.observability.metrics -> bfx_funding_bot.modules.execution.contracts",
@@ -308,6 +301,7 @@ name = "market-contracts-are-pure"
 type = "forbidden"
 source_modules = [
     "bfx_funding_bot.modules.market",
+    "bfx_funding_bot.modules.market.book_period_coverage",
     "bfx_funding_bot.modules.market.contracts",
 ]
 forbidden_modules = [
@@ -327,6 +321,7 @@ name = "market-contracts-no-sibling-dependencies"
 type = "forbidden"
 source_modules = [
     "bfx_funding_bot.modules.market",
+    "bfx_funding_bot.modules.market.book_period_coverage",
     "bfx_funding_bot.modules.market.contracts",
 ]
 forbidden_modules = [

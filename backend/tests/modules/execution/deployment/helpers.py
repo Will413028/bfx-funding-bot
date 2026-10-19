@@ -13,7 +13,7 @@ from bfx_funding_bot.modules.execution.deployment.period_pricing import (
     PriceBranch,
     PriceDecision,
 )
-from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
+from bfx_funding_bot.modules.market import MarketSnapshot
 from bfx_funding_bot.modules.strategy import DecisionOutcome as PayloadOutcome
 from bfx_funding_bot.modules.strategy import DecisionPayload
 

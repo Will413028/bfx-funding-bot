@@ -96,9 +96,7 @@ from bfx_funding_bot.modules.marketfeed.boot_wait import (
 )
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
-from bfx_funding_bot.modules.marketfeed.funding_book import (
-    FundingBookService,
-)
+from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookService
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
 from bfx_funding_bot.modules.marketfeed.healthz import run_healthz_server
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness

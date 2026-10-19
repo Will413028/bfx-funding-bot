@@ -153,10 +153,7 @@ from bfx_funding_bot.modules.marketfeed.daemon import (
     log,
 )
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter
-from bfx_funding_bot.modules.marketfeed.funding_book import (
-    FundingBookService,
-    FundingBookStore,
-)
+from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookService, FundingBookStore
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from bfx_funding_bot.modules.marketfeed.scheduler import (

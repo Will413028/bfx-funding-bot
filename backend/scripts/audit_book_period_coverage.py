@@ -24,7 +24,7 @@ from sqlalchemy import select
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory
 from bfx_funding_bot.core.settings import Settings
-from bfx_funding_bot.modules.marketfeed.book_period_coverage import (
+from bfx_funding_bot.modules.market.book_period_coverage import (
     DEFAULT_PERIODS,
     BookAskSnapshot,
     render_markdown,

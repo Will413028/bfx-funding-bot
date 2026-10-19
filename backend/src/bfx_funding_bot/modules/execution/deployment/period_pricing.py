@@ -7,7 +7,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from bfx_funding_bot.modules.execution.contracts import BlockedExecution, BlockReason
-from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
+from bfx_funding_bot.modules.market import MarketSnapshot
 from bfx_funding_bot.modules.strategy import DecisionPayload
 
 
