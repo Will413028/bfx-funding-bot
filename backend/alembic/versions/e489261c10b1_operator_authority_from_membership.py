@@ -99,10 +99,10 @@ def upgrade() -> None:
     _assert(f"SELECT count(DISTINCT user_id) <= 1 FROM {AUTHORIZED}_new",
             "more than one user is an owner/operator member of a live account: removing the "
             "configured-operator gate would give the daemon's authority to each of them")
-    # Any spelling: auth."user", auth.user, auth . "user", or another auth table.
+    # Any spelling: auth."user", "auth"."user", auth.user, auth . "user", another auth table.
     _assert(r"""SELECT count(*) = 0 FROM pg_proc p
                  JOIN pg_namespace n ON n.oid = p.pronamespace
-                 WHERE n.nspname <> 'auth' AND p.prosrc ~* '\mauth\s*\.'""",
+                 WHERE n.nspname <> 'auth' AND p.prosrc ~* '(\m|")auth"?\s*\.'""",
             "a function body outside auth still reads the auth schema")
 
     if _role_exists("bfx_bot"):
@@ -119,15 +119,11 @@ def upgrade() -> None:
                         f"'{privilege}')", f"bfx_bot still holds column {privilege} on {table}")
         _assert(f"SELECT NOT has_any_column_privilege('bfx_bot', '{MEMBERSHIPS}', 'UPDATE')",
                 f"bfx_bot still holds column UPDATE on {MEMBERSHIPS}")
-        _assert("SELECT count(*) = 1 FROM information_schema.column_privileges "
-                "WHERE grantee = 'bfx_bot' AND table_schema = 'public' "
-                "AND table_name = 'exchange_accounts' AND privilege_type = 'UPDATE' "
-                "AND column_name = 'label'",
+        # has_column_privilege counts inherited roles, PUBLIC and every grantor.
+        _assert(f"SELECT bool_and(has_column_privilege('bfx_bot', '{ACCOUNTS}', attname, "
+                "'UPDATE') = (attname = 'label')) FROM pg_attribute "
+                f"WHERE attrelid = '{ACCOUNTS}'::regclass AND attnum > 0 AND NOT attisdropped",
                 "bfx_bot's UPDATE on exchange_accounts is not label alone")
-        _assert("SELECT count(*) = 1 FROM information_schema.column_privileges "
-                "WHERE grantee = 'bfx_bot' AND table_schema = 'public' "
-                "AND table_name = 'exchange_accounts' AND privilege_type = 'UPDATE'",
-                "bfx_bot holds UPDATE on an exchange_accounts column other than label")
 
 
 def downgrade() -> None:
