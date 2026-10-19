@@ -2,9 +2,10 @@
 
 Written only by the host tool (deploy/vm/ops/bfx_deploy.py) through `docker exec
 bfx-postgres psql` as the owner role; the runtime roles may only read it. The
-row records what was attempted and how it ended -- source revision, both image
-digests, whether migrations ran, outcome -- and is never updated:
-a trigger rejects UPDATE, DELETE and TRUNCATE. An attempt that changes the
+row records what was attempted and how it ended -- source revision, the image
+digests (no frontend digest for a release without a frontend service), whether
+migrations ran, outcome -- and is never updated: a trigger rejects UPDATE,
+DELETE and TRUNCATE. An attempt that changes the
 containers has two rows sharing `attempt_id`: `started` (appended before the
 containers are created; `attempt_id` is the BFX_DEPLOYMENT_ID the containers
 get) and a terminal outcome; an attempt that stops earlier has only the latter.
@@ -53,7 +54,8 @@ class DeploymentRow(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     source_revision: Mapped[str] = mapped_column(Text, nullable=False)
     backend_digest: Mapped[str] = mapped_column(Text, nullable=False)
-    frontend_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL for a release whose compose file has no frontend service (9d-5 onward).
+    frontend_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
     migrations_applied: Mapped[bool] = mapped_column(Boolean, nullable=False)
     outcome: Mapped[str] = mapped_column(Text, nullable=False)
     detail: Mapped[str] = mapped_column(Text, nullable=False)
@@ -64,7 +66,8 @@ class DeploymentRow(Base):
         # Regex CHECKs are PostgreSQL's (the authority); SQLite fixtures skip them.
         CheckConstraint("source_revision ~ '^[0-9a-f]{40}$'",
                         name="ck_deployments_source_revision").ddl_if(dialect="postgresql"),
-        CheckConstraint(f"backend_digest ~ {_DIGEST_RE} AND frontend_digest ~ {_DIGEST_RE}",
+        CheckConstraint(f"backend_digest ~ {_DIGEST_RE} AND "
+                        f"(frontend_digest IS NULL OR frontend_digest ~ {_DIGEST_RE})",
                         name="ck_deployments_digests").ddl_if(dialect="postgresql"),
         CheckConstraint("outcome IN ('started', 'deployed', 'rolled_back', 'failed')",
                         name="ck_deployments_outcome"),
