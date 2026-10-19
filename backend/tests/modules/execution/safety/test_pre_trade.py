@@ -19,7 +19,7 @@ import pytest
 from bfx_funding_bot.core.errors import ConfigurationError
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import Phase
-from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPricer, PriceBranch
 from bfx_funding_bot.modules.execution.deployment.sizing import allocate_capital
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials

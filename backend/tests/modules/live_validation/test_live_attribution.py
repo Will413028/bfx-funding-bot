@@ -10,7 +10,7 @@ from decimal import Decimal
 
 import pytest
 
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 from bfx_funding_bot.modules.live_validation.credit_attribution import CreditLifetime
 from bfx_funding_bot.modules.live_validation.live_attribution import (
     FRR_ANNUALIZATION,

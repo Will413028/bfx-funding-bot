@@ -3,8 +3,8 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow, compute_wfo_windows
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 def _candles_hourly(start_year: int, start_month: int, n_hours: int) -> list[FundingCandle]:

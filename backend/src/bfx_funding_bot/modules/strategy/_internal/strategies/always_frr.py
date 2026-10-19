@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from decimal import Decimal
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.strategy._internal.lend_decision import LendDecision
 from bfx_funding_bot.modules.strategy._internal.strategies.base import Strategy
 

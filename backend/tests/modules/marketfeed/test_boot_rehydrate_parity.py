@@ -12,7 +12,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.marketfeed.daemon import BootOutcome, Daemon
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,

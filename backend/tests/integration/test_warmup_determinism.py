@@ -8,8 +8,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.candles.repository import upsert_candles
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.tables import (
     FundingCandleRow,  # noqa: F401 — registers table with Base.metadata
 )

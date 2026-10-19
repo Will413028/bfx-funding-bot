@@ -6,8 +6,9 @@ AMOUNT > 0 = ask (funding offered), AMOUNT < 0 = bid (funding demand).
 """
 import httpx
 
+from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
-from bfx_funding_bot.external.bitfinex.rest import BitfinexREST, FundingBookLevel
+from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 
 _ROWS = [
     [0.00021, 30, 3, 120_000.0],    # ask

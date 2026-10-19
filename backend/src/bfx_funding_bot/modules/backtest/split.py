@@ -5,7 +5,7 @@ and matrix runner so train_end_mts matches across the two flows.
 """
 from __future__ import annotations
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 
 TRAIN_RATIO = 0.7
 

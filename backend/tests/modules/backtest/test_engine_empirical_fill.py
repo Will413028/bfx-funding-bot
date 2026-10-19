@@ -4,13 +4,13 @@ from decimal import Decimal
 import pytest
 
 from bfx_funding_bot.apps.research import research_strategy
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import (
     BacktestIncomplete,
     _apply_friction,
     run_backtest,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.artifact import FillModelArtifact
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 from bfx_funding_bot.modules.strategy import LendDecision

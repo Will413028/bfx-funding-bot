@@ -233,8 +233,6 @@ ignore_imports = [
     "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.retry",
     "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.submit_outcomes",
     "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.strategy",
-    "bfx_funding_bot.external.bitfinex.rest -> bfx_funding_bot.modules.candles.schemas",
-    "bfx_funding_bot.external.bitfinex.rest -> bfx_funding_bot.modules.funding_stats.schemas",
 ]
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
 

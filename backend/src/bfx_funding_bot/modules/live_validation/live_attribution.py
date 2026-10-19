@@ -42,8 +42,8 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 
 if TYPE_CHECKING:
     # Annotations only: credit_attribution -> weekly_attribution imports this module.

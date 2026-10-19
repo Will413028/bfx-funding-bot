@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 from bfx_funding_bot.modules.funding_stats.repository import (
     get_frr_at_or_before_mts,
     get_in_range,
@@ -11,7 +12,6 @@ from bfx_funding_bot.modules.funding_stats.repository import (
     get_min_mts,
     upsert_funding_stats,
 )
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 
 
 @pytest.fixture

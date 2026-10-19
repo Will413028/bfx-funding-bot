@@ -3,8 +3,8 @@ from decimal import Decimal
 
 import numpy as np
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 from scripts.run_signal_eda import _apply_fdr_and_decide, _Obs, run_funnel_for_cell
 
 _DAY = 86_400_000

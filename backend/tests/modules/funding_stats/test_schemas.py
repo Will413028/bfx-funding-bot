@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 
 
 def test_funding_stat_from_bitfinex_array() -> None:

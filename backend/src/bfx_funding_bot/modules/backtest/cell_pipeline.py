@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 from ruamel.yaml import YAML
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.cell_derivation import DerivedCell, derive_cell_params
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.fixture_io import (
@@ -18,7 +19,6 @@ from bfx_funding_bot.modules.backtest.fixture_io import (
     freeze_candles,
     load_candles,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 from bfx_funding_bot.modules.strategy import CellConfig, ResearchStrategySpec
 

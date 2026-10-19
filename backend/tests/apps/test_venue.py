@@ -31,7 +31,8 @@ from bfx_funding_bot.apps.venue import (
 from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
 from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 from bfx_funding_bot.core.errors import ConfigurationError
-from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel, FundingTrade
+from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
+from bfx_funding_bot.external.bitfinex.rest import FundingTrade
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
 from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookStore
 from bfx_funding_bot.modules.simulated_venue import LiveFeedConfig, LiveMarketFeed

@@ -7,7 +7,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.sqlite.dml import Insert as SQLiteInsert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
 
 _UPSERT_INDEX = ["symbol", "mts"]

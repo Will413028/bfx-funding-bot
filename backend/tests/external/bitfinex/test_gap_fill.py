@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.candles.gap_fill import fill_gap_from_rest
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 async def test_fill_gap_returns_zero_when_no_gap(sqlite_session: AsyncSession):

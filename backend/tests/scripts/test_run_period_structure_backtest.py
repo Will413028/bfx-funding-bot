@@ -4,8 +4,8 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.fixture_io import freeze_candles
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from scripts.run_period_structure_backtest import _amain
 
 _HOUR = 3_600_000

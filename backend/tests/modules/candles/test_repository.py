@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.candles.repository import (
     get_candles_in_range,
     get_min_mts,
@@ -13,7 +14,6 @@ from bfx_funding_bot.modules.candles.repository import (
     seal_closed_periods,
     upsert_candles,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.tables import (
     FundingCandleRevisionRow,
     FundingCandleRow,

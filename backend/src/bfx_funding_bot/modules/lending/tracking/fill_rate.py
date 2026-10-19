@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 
 # Spread buckets in basis points of relative spread (1% = 100 bps), non-uniform,
 # denser near 0. Each value is a bucket midpoint; the learner evaluates a

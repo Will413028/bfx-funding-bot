@@ -1,7 +1,7 @@
 from decimal import Decimal
 
+from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
 from bfx_funding_bot.modules.backtest.frr_series import FrrSeries
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 
 H = 3_600_000  # 1h in ms
 

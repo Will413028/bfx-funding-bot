@@ -2,6 +2,7 @@ import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.modules.candles.reindex import (
     FilledCandle as FilledCandle,
@@ -14,7 +15,6 @@ from bfx_funding_bot.modules.candles.repository import (
     get_min_mts,
     upsert_candles,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.market import BackfillCursorStuck, BackfillStats, SeriesSpec
 
 

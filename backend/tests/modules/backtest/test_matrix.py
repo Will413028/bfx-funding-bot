@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from bfx_funding_bot.apps.research import research_strategy
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.matrix import (
     CellVerdict,
@@ -13,7 +14,6 @@ from bfx_funding_bot.modules.backtest.matrix import (
 )
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 _LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
 

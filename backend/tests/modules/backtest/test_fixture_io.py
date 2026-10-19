@@ -1,11 +1,11 @@
 from decimal import Decimal
 
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.fixture_io import (
     fixture_data_hash,
     freeze_candles,
     load_candles,
 )
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 def _series(close="0.0003"):

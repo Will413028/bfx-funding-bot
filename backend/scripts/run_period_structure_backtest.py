@@ -42,6 +42,7 @@ from bfx_funding_bot.apps.config import load_cells_only
 from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.fixture_io import load_candles
 from bfx_funding_bot.modules.backtest.frr_series import FrrSeries
@@ -65,7 +66,6 @@ from bfx_funding_bot.modules.backtest.period_structure import (
 )
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.funding_stats.repository import get_in_range
 from bfx_funding_bot.modules.lending.tracking.book_replay import BOOK_SOURCE
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
