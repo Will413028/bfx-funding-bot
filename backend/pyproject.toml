@@ -230,8 +230,6 @@ ignore_imports = [
     "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.errors",
     "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.events",
     "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.protocols",
-    "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.retry",
-    "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.execution.submit_outcomes",
     "bfx_funding_bot.external.bitfinex.live_executor -> bfx_funding_bot.modules.strategy",
 ]
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
@@ -561,7 +559,7 @@ forbidden_modules = [
     "bfx_funding_bot.modules.execution.reconcile_monitors",
     "bfx_funding_bot.modules.execution.registry",
     "bfx_funding_bot.modules.execution.resync_channel",
-    "bfx_funding_bot.modules.execution.retry",
+    "bfx_funding_bot.external.bitfinex.retry",
     "bfx_funding_bot.modules.execution.safety.boot_stop",
     "bfx_funding_bot.modules.execution.safety.chain",
     "bfx_funding_bot.modules.execution.safety.hard_guards",

@@ -24,6 +24,7 @@ from bfx_funding_bot.external.bitfinex.funding_rules import (
     FundingRuleProvider,
     submit_amount,
 )
+from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.execution.audit import AuditContext
 from bfx_funding_bot.modules.execution.contracts import (
     BlockedExecution,
@@ -76,7 +77,6 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     capital_block_trigger,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import HALTED, read_current
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.ledger import (
     CapitalAuthority,
     CapitalAvailable,

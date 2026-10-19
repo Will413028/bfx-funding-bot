@@ -31,6 +31,21 @@ from bfx_funding_bot.external.bitfinex.auth_rest import log_auth_http_error
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
 from bfx_funding_bot.external.bitfinex.funding_rules import RULE, validate_amount
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
+from bfx_funding_bot.external.bitfinex.retry import (
+    classify_httpx_exception,
+    classify_httpx_response,
+    transient_retry,
+)
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitCancelledNotSent,
+    SubmitNotSent,
+    SubmitOutcome,
+    SubmitOutcomeUnknown,
+    classify_submit_response,
+    response_digest,
+    venue_error,
+)
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
@@ -42,21 +57,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     FundingCancelAllResult,
     SubmittedOrder,
-)
-from bfx_funding_bot.modules.execution.retry import (
-    classify_httpx_exception,
-    classify_httpx_response,
-    transient_retry,
-)
-from bfx_funding_bot.modules.execution.submit_outcomes import (
-    SubmitAcknowledged,
-    SubmitCancelledNotSent,
-    SubmitNotSent,
-    SubmitOutcome,
-    SubmitOutcomeUnknown,
-    classify_submit_response,
-    response_digest,
-    venue_error,
 )
 from bfx_funding_bot.modules.strategy import StrategyName
 

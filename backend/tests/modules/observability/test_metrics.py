@@ -20,6 +20,10 @@ import pytest
 
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitOutcomeUnknown,
+)
 from bfx_funding_bot.modules.execution.contracts import (
     BlockReason,
     ExecutionPolicy,
@@ -31,10 +35,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
     SubmittedOrder,
-)
-from bfx_funding_bot.modules.execution.submit_outcomes import (
-    SubmitAcknowledged,
-    SubmitOutcomeUnknown,
 )
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.observability.metrics import (

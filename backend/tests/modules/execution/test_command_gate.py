@@ -13,6 +13,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitNotSent,
+    SubmitOutcomeUnknown,
+    SubmitRejected,
+)
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     CommandGateBlocked,
@@ -31,12 +37,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
     SubmittedOrder,
-)
-from bfx_funding_bot.modules.execution.submit_outcomes import (
-    SubmitAcknowledged,
-    SubmitNotSent,
-    SubmitOutcomeUnknown,
-    SubmitRejected,
 )
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
@@ -535,7 +535,7 @@ async def test_submit_cancelled_before_transport_closes_intent_as_not_sent() -> 
     """The executor was cancelled while waiting for the per-key venue gate:
     nothing was sent, so the intent closes as NOT_SENT (no UNKNOWN quarantine
     for recovery to invent) and the cancellation still propagates."""
-    from bfx_funding_bot.modules.execution.submit_outcomes import SubmitCancelledNotSent
+    from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitCancelledNotSent
 
     reader = _FakeUncertaintyReader(set())
     recording = _recording(reader)

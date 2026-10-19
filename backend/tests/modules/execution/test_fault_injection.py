@@ -22,6 +22,11 @@ import pytest
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitOutcomeKind,
+    SubmitOutcomeUnknown,
+    SubmitRejected,
+)
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
@@ -38,11 +43,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
     SubmittedOrder,
-)
-from bfx_funding_bot.modules.execution.submit_outcomes import (
-    SubmitOutcomeKind,
-    SubmitOutcomeUnknown,
-    SubmitRejected,
 )
 from bfx_funding_bot.modules.ledger import (
     Coverage,

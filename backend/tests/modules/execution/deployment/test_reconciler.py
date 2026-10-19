@@ -8,6 +8,11 @@ import pytest
 from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.core.telemetry import EventType, Phase
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitOutcomeUnknown,
+    SubmitRejected,
+)
 from bfx_funding_bot.modules.execution.contracts import (
     BlockReason,
     ExecutionPolicy,
@@ -36,11 +41,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     GuardResult,
     SubmittedOrder,
-)
-from bfx_funding_bot.modules.execution.submit_outcomes import (
-    SubmitAcknowledged,
-    SubmitOutcomeUnknown,
-    SubmitRejected,
 )
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,

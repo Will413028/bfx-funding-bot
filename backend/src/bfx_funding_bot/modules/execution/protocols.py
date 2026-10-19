@@ -18,15 +18,15 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.credentials import Credentials
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitOutcome,
+    SubmitOutcomeKind,
+)
 from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
     ReadyToSubmit,
     ReservationRef,
-)
-from bfx_funding_bot.modules.execution.submit_outcomes import (
-    SubmitAcknowledged,
-    SubmitOutcome,
-    SubmitOutcomeKind,
 )
 from bfx_funding_bot.modules.strategy import DecisionPayload
 

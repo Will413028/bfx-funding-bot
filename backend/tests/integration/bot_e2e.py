@@ -29,6 +29,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from bfx_funding_bot.apps import bot
 from bfx_funding_bot.apps.bot_ports import build_policy_ports
 from bfx_funding_bot.apps.read_models import build_read_models
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitOutcomeUnknown,
+)
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
@@ -39,10 +43,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
     SubmittedOrder,
-)
-from bfx_funding_bot.modules.execution.submit_outcomes import (
-    SubmitAcknowledged,
-    SubmitOutcomeUnknown,
 )
 from bfx_funding_bot.modules.ledger import (
     CapitalAvailable,

@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import Phase
+from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitOutcomeUnknown
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
 from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
@@ -23,7 +24,6 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     AutomaticProtection,
 )
 from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
-from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
 from bfx_funding_bot.modules.strategy import StrategyName
 
 from .contracts.stacks import ACCOUNT
