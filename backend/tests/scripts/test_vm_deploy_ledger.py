@@ -265,6 +265,27 @@ def test_attempt_has_one_started_row_first_and_one_matching_terminal_row(ledger_
         assert conn.scalar(text("SELECT count(*) FROM deployments")) == 3
 
 
+def test_a_release_without_a_frontend_records_no_frontend_digest(ledger_db: Any) -> None:
+    """From 9d-5 the compose file has no frontend service and CI builds no frontend image."""
+    url, engine, ledger = ledger_db
+    _alembic(url, "upgrade", "head")
+    ledger.append(_entry(attempt_id=ATTEMPT, outcome="started", finished_at=None, frontend_digest=None))
+    with pytest.raises(bfx.CommandError):                      # finishing as another release
+        ledger.append(_entry(attempt_id=ATTEMPT))
+    ledger.append(_entry(attempt_id=ATTEMPT, frontend_digest=None))
+    view = ledger.read()
+    assert view.last_success is not None and view.last_success.attempt_id == ATTEMPT
+    assert view.last_success.frontend_digest is None
+    with engine.connect() as conn:
+        assert conn.scalar(text("SELECT count(*) FROM deployments WHERE frontend_digest IS NULL")) == 2
+    # A release that still has a frontend keeps carrying its digest, well-formed.
+    ledger.append(_entry())
+    latest = ledger.read().last_success
+    assert latest is not None and latest.frontend_digest == DIGEST_F
+    with pytest.raises(bfx.CommandError):
+        ledger.append(_entry(frontend_digest="sha256:abc"))
+
+
 def test_runtime_roles_can_only_read_the_ledger(ledger_db: Any) -> None:
     url, engine, ledger = ledger_db
     _alembic(url, "upgrade", "head")

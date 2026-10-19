@@ -16,6 +16,7 @@ import fcntl
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -25,6 +26,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -50,6 +52,33 @@ OLD_ATTEMPT = "11111111-1111-4111-8111-111111111111"
 CI_RUN = "https://github.com/Will413028/bfx-funding-bot/actions/runs/123456789"
 COMPOSE_TEXT = (ROOT / "deploy/vm/docker-compose.app.yml").read_text(encoding="utf-8")
 LIVE_ENV_TEXT = (ROOT / "deploy/vm/live.env").read_text(encoding="utf-8")
+# From 9d-5 the compose file has no frontend service (and CI builds no frontend image).
+NO_FRONTEND_TEXT = COMPOSE_TEXT[:COMPOSE_TEXT.index("  frontend:\n")] \
+    + COMPOSE_TEXT[COMPOSE_TEXT.index("networks:\n  bfx_default:\n    external"):]
+TAILSCALE = "docker.io/tailscale/tailscale@sha256:" + "c" * 64
+SERVE_PATH = "deploy/vm/tailscale/serve.json"
+# The 9d-4 shape in miniature: a third-party sidecar and a file-backed config.
+SIDECAR = f"""  tailscale:
+    image: {TAILSCALE}
+    pull_policy: never
+    container_name: bfx-tailscale
+    restart: unless-stopped
+    configs:
+      - source: ts-serve
+        target: /config/serve.json
+
+"""
+CONFIGS = "configs:\n  ts-serve:\n    file: ./tailscale/serve.json\n"
+CONTAINER_NAMES = {"bot": "bfx-bot", "webapi": "bfx-webapi", "frontend": "bfx-frontend",
+                   "tailscale": "bfx-tailscale"}
+SERVICE_OF = {container: service for service, container in CONTAINER_NAMES.items()}
+
+
+def with_sidecar(text: str, *, configs: bool = True) -> str:
+    at = text.index("networks:\n  bfx_default:\n    external")
+    return text[:at] + SIDECAR + text[at:] + (CONFIGS if configs else "")
+
+
 TOOLING = {
     str(path.relative_to(ROOT)): path.read_text(encoding="utf-8")
     for base in ("deploy/vm/ops", "deploy/vm/systemd")
@@ -59,6 +88,47 @@ TOOLING = {
 
 
 # --------------------------------------------------------------------------- fakes
+
+
+_VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:\?|:-)([^}]*))?\}")
+
+
+def render_compose(compose_file: Path, env: Mapping[str, str]) -> dict[str, Any] | None:
+    """`docker compose config --no-env-resolution --format json`, for the part of Compose
+    these files use (shape measured on Compose v5.1.4): variables interpolated, env_file
+    and config/secret `file` paths made absolute against the compose file's directory,
+    env file contents never read. None when a required variable is unset."""
+    def interpolate(value: Any) -> Any:
+        if isinstance(value, str):
+            def substitute(match: re.Match[str]) -> str:
+                name, operator, argument = match.group(1), match.group(2), match.group(3) or ""
+                current = env.get(name, "")
+                if operator == ":?" and not current:
+                    raise LookupError(name)
+                return argument if operator == ":-" and not current else current
+            return _VARIABLE.sub(substitute, value)
+        if isinstance(value, list):
+            return [interpolate(item) for item in value]
+        if isinstance(value, dict):
+            return {key: interpolate(item) for key, item in value.items()}
+        return value
+
+    try:
+        document = interpolate(yaml.safe_load(compose_file.read_text()))
+    except LookupError:
+        return None
+    base = compose_file.parent
+    for spec in document["services"].values():
+        if spec.get("env_file"):
+            spec["env_file"] = [
+                {**({"path": entry} if isinstance(entry, str) else entry),
+                 "path": os.path.normpath(base / (entry if isinstance(entry, str) else entry["path"]))}
+                for entry in spec["env_file"]]
+    for section in ("configs", "secrets"):
+        for item in (document.get(section) or {}).values():
+            if "file" in item:
+                item["file"] = os.path.normpath(base / item["file"])
+    return dict(document)
 
 
 class FakeRegistry:
@@ -134,10 +204,12 @@ def inspect_record(service: str, running: tuple[str, str, str, str]) -> dict[str
     image, digest, revision, deployment_id = running
     # BFX_CHANGE_CLASS=retired: containers created before the follow-up release
     # still carry the transitional default; the identity check must ignore it.
+    # A third-party container (empty digest here) carries no release identity.
     env = [f"BFX_IMAGE_DIGEST={digest}", f"BFX_SOURCE_REVISION={revision}",
-           f"BFX_DEPLOYMENT_ID={deployment_id}", "PATH=/usr/bin", "BFX_CHANGE_CLASS=retired"]
+           f"BFX_DEPLOYMENT_ID={deployment_id}", "BFX_CHANGE_CLASS=retired"] if digest else []
+    env.append("PATH=/usr/bin")
     return {
-        "Name": "/" + bfx.CONTAINERS[service],
+        "Name": "/" + CONTAINER_NAMES[service],
         "Config": {"Image": image, "Env": env,
                    "Labels": {"com.docker.compose.project": "bfx-app"}},
     }
@@ -180,6 +252,8 @@ class FakeHost:
     parked: dict[str, tuple[str, str, str, str]] = field(default_factory=dict)  # stopped
     worktrees: dict[str, str] = field(default_factory=dict)
     docker_configs: list[dict[str, Any]] = field(default_factory=list)
+    pulls: list[tuple[str, bool]] = field(default_factory=list)  # (image, with a DOCKER_CONFIG)
+    symlinks: set[tuple[str, str]] = field(default_factory=set)   # (revision, path) tracked as links
 
     def __post_init__(self) -> None:
         for revision in (REV_OLD, REV_NEW):
@@ -233,12 +307,13 @@ class FakeHost:
             return ok
         if call[:2] == ("docker", "ps"):
             lines = [f"{name}\t" for name in self.foreign]
-            lines += [f"{bfx.CONTAINERS[s]}\tbfx-app" for s in self.running]
+            lines += [f"{CONTAINER_NAMES[s]}\tbfx-app" for s in self.running]
             return bfx.CommandResult(0, "\n".join(lines), "")
         if call[:2] == ("docker", "pull"):
             if env and "DOCKER_CONFIG" in env:
                 config = Path(env["DOCKER_CONFIG"]) / "config.json"
                 self.docker_configs.append(json.loads(config.read_text()))
+            self.pulls.append((call[-1], bool(env and "DOCKER_CONFIG" in env)))
             return ok
         if call[:2] == ("docker", "run"):
             return self._alembic(call)
@@ -247,13 +322,12 @@ class FakeHost:
         if call[:2] == ("docker", "inspect"):
             return self._inspect(call)
         if call[:2] == ("docker", "exec"):
-            container = call[2]
-            service = next(s for s, c in bfx.CONTAINERS.items() if c == container)
+            service = SERVICE_OF[call[2]]
             healthy = service in self.running and self.running[service][1] not in self.unhealthy
             return bfx.CommandResult(0 if healthy else 1, "", "")
         if call[:2] == ("docker", "stop"):
             container = call[-1]
-            service = next(s for s, c in bfx.CONTAINERS.items() if c == container)
+            service = SERVICE_OF[container]
             if (not self.stop_ok or container in self.stop_fails
                     or (self.started and not self.stop_ok_after_start)):
                 return bfx.CommandResult(1, "", "daemon unreachable")
@@ -265,7 +339,7 @@ class FakeHost:
         if call[:2] == ("docker", "start"):
             assert len(call) == 3 and call[2] in {"bfx-bot", "bfx-webapi"}
             container = call[2]
-            service = next(s for s, c in bfx.CONTAINERS.items() if c == container)
+            service = SERVICE_OF[container]
             if not self.start_ok or container in self.start_fails or service not in self.parked:
                 return bfx.CommandResult(1, "", "Error response from daemon")
             self.running[service] = self.parked.pop(service)
@@ -306,6 +380,12 @@ class FakeHost:
             if paths is None:
                 return bfx.CommandResult(128, "", "fatal")
             return bfx.CommandResult(0, "".join(p + "\0" for p in paths), "")
+        if args[0] == "ls-tree" and args[2] == "--":
+            revision, path = args[1], args[3]
+            if (revision, path) not in self.files:
+                return bfx.CommandResult(0, "", "")
+            mode = "120000" if (revision, path) in self.symlinks else "100644"
+            return bfx.CommandResult(0, f"{mode} blob {'0' * 40}\t{path}\n", "")
         if args[:4] == ("ls-tree", "-r", "-z", "--name-only"):
             revision, prefixes = args[4], args[6:]
             listed = [path for (rev, path) in self.files if rev == revision
@@ -353,28 +433,46 @@ class FakeHost:
     def _compose(self, call: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
         assert call[:5] == ("docker", "compose", "-p", "bfx-app", "-f")
         compose_file = Path(call[5])
-        assert compose_file.read_text() == COMPOSE_TEXT
+        revision = compose_file.parent.name
+        assert compose_file.read_text() == self.files[(revision, bfx.COMPOSE_PATH)]
         assert (compose_file.parent / "live.env").read_text() == LIVE_ENV_TEXT
-        assert call[6:9] == ("up", "--detach", "--no-deps")
-        assert call[-3:] == ("bot", "webapi", "frontend")
+        if call[6:] == ("config", "--no-interpolate", "--services"):
+            services = yaml.safe_load(compose_file.read_text())["services"]
+            return bfx.CommandResult(0, "".join(f"{name}\n" for name in services), "")
         assert env is not None
+        rendered = render_compose(compose_file, env)
+        if call[6:] == ("config", "--no-env-resolution", "--format", "json"):
+            if rendered is None:
+                return bfx.CommandResult(1, "", "required variable is missing a value")
+            return bfx.CommandResult(0, json.dumps(rendered), "")
+        assert call[6:10] == ("up", "--detach", "--no-deps", "--remove-orphans")
+        assert rendered is not None
+        services = call[10:] if call[10:11] != ("--force-recreate",) else call[11:]
+        assert services == tuple(sorted(rendered["services"]))
         if env["BFX_BACKEND_DIGEST"] in self.compose_fail:
             return bfx.CommandResult(1, "", "compose failed")
-        backend = (env["BFX_BACKEND_IMAGE"], env["BFX_BACKEND_DIGEST"])
-        frontend = (env["BFX_FRONTEND_IMAGE"], env["BFX_FRONTEND_DIGEST"])
         assert "BFX_CHANGE_CLASS" not in env  # retired; compose supplies a transitional default
+        for orphan in set(self.running) - set(services):
+            del self.running[orphan]
         identity = (env["BFX_SOURCE_REVISION"], env["BFX_DEPLOYMENT_ID"])
-        for service in ("bot", "webapi"):
-            self.running[service] = (*backend, *identity)
-        self.running["frontend"] = (*frontend, *identity)
+        for service in services:
+            image = rendered["services"][service]["image"]
+            if image == TAILSCALE:
+                self.running[service] = (image, "", "", "")
+            else:
+                digest = image.rpartition("@")[2]
+                assert digest in {env["BFX_BACKEND_DIGEST"], env.get("BFX_FRONTEND_DIGEST")}
+                self.running[service] = (image, digest, *identity)
         return bfx.CommandResult(0, "", "")
 
     def _inspect(self, call: tuple[str, ...]) -> Any:
+        names = [part for part in call[2:] if part.startswith("bfx-")]
         if "--format" in call:
-            lines = [f"/{bfx.CONTAINERS[s]} 0 true" for s in bfx.SERVICES if s in self.running]
+            lines = [f"/{name} 0 true" for name in names if SERVICE_OF[name] in self.running]
             return bfx.CommandResult(0, "\n".join(lines), "")
         records = []
-        for service in bfx.SERVICES:
+        for name in names:
+            service = SERVICE_OF[name]
             if service not in self.running:
                 return bfx.CommandResult(1, "[]", "no such container")
             record = inspect_record(service, self.running[service])
@@ -462,7 +560,13 @@ def _alembic(*args: str) -> Callable[[tuple[str, ...]], bool]:
 
 BACKUP = lambda call: len(call) > 4 and call[4].endswith("backup.sh")  # noqa: E731
 RESTORE_TEST = _is(("systemctl", "start"))
-COMPOSE_UP = _is(("docker", "compose"))
+
+
+def _compose(verb: str) -> Callable[[tuple[str, ...]], bool]:
+    return lambda call: call[:2] == ("docker", "compose") and call[6:7] == (verb,)
+
+
+COMPOSE_UP = _compose("up")
 STOP_BOT = _is(("docker", "stop", "--time", "30", "bfx-bot"))
 STOP_WEBAPI = _is(("docker", "stop", "--time", "30", "bfx-webapi"))
 STOP_ANY = _is(("docker", "stop"))
@@ -533,7 +637,8 @@ def test_started_row_precedes_the_containers_and_names_their_deployment_id(harne
     original = harness.host._compose
 
     def compose(call: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
-        ledger_rows_at_compose.append(len(harness.ledger.rows))
+        if COMPOSE_UP(call):
+            ledger_rows_at_compose.append(len(harness.ledger.rows))
         return original(call, env)
 
     harness.host._compose = compose  # type: ignore[method-assign]
@@ -1231,6 +1336,251 @@ def test_rollback_drill_is_refused_when_it_could_not_roll_back(harness: Harness,
     assert len(harness.ledger.rows) == rows
 
 
+# --------------------------------------------------------------------------- the release's compose file
+
+
+def _release(harness: Harness, revision: str = REV_NEW) -> Path:
+    return harness.settings.state_dir / "releases" / revision
+
+
+def _without_frontend(harness: Harness, revision: str = REV_NEW) -> None:
+    """A 9d-5-style release: no frontend service, and CI built no frontend image."""
+    harness.host.files[(revision, bfx.COMPOSE_PATH)] = NO_FRONTEND_TEXT
+    harness.registry.refs.pop(f"{FRONTEND}:sha-{revision}")
+
+
+def test_a_release_without_a_frontend_deploys_and_removes_the_old_frontend(harness: Harness) -> None:
+    _without_frontend(harness)
+    # Its env file is not the release's any more: an unreadable one blocks nothing.
+    (harness.settings.runtime_dir / "frontend.env").write_text("BROKEN='quoted'\n")
+    assert harness.run() == 0
+    host = harness.host
+    up = host.calls[host.index(COMPOSE_UP)]
+    assert up[-2:] == ("bot", "webapi") and "--remove-orphans" in up
+    assert "frontend" not in host.running          # the orphan went with --remove-orphans
+    env = host.envs[host.index(COMPOSE_UP)]
+    assert env is not None and "BFX_FRONTEND_IMAGE" not in env
+    row = harness.ledger.last
+    assert (row.outcome, row.frontend_digest) == ("deployed", None)
+    assert [s.frontend_digest for s in _started(harness)] == [None]
+    assert all(image != f"{FRONTEND}@{NEW_F}" for image, _ in host.pulls)
+
+
+def test_a_release_with_a_frontend_still_deploys_all_three(harness: Harness) -> None:
+    assert harness.run() == 0
+    host = harness.host
+    assert host.calls[host.index(COMPOSE_UP)][-3:] == ("bot", "frontend", "webapi")
+    assert harness.ledger.last.frontend_digest == NEW_F
+
+
+def test_rollback_to_a_release_with_a_frontend_brings_it_back(harness: Harness) -> None:
+    _without_frontend(harness)
+    harness.host.unhealthy = {NEW_B}
+    assert harness.run() == 1
+    assert harness.ledger.last.outcome == "rolled_back"
+    assert harness.host.running["frontend"] == (f"{FRONTEND}@{OLD_F}", OLD_F, REV_OLD, OLD_ATTEMPT)
+
+
+def test_a_frontend_image_of_a_release_without_a_frontend_is_not_recorded(harness: Harness) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = NO_FRONTEND_TEXT
+    assert harness.run() == 0
+    assert harness.ledger.last.frontend_digest is None
+    assert all(image != f"{FRONTEND}@{NEW_F}" for image, _ in harness.host.pulls)
+
+
+def test_env_files_are_the_ones_the_release_compose_file_names(harness: Harness) -> None:
+    text = with_sidecar(COMPOSE_TEXT, configs=False).replace(
+        "    container_name: bfx-tailscale\n",
+        "    container_name: bfx-tailscale\n    env_file:\n"
+        "      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/tailscale.env\n")
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = text
+    (harness.settings.runtime_dir / "tailscale.env").write_text("TS_HOSTNAME=$host\n")
+    assert harness.run() == 1
+    assert harness.ledger.last.detail == ("precheck:env_file_value_ambiguous_for_compose:"
+                                          "tailscale.env:TS_HOSTNAME; running release untouched")
+    checked: list[Path] = []
+    deployer = harness.deployer(retry=True)
+    deployer._secret_check = checked.append
+    (harness.settings.runtime_dir / "tailscale.env").write_text("TS_HOSTNAME=bfx-ops\n")
+    assert deployer.run() == 0
+    runtime = harness.settings.runtime_dir
+    assert sorted(p.name for p in checked) == ["bot.env", "frontend.env", "migrate.env",
+                                               "tailscale.env", "webapi.env"]
+    assert all(p.parent == runtime for p in checked)
+
+
+@pytest.mark.parametrize(("old", "new", "code"), [
+    ("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env", "/etc/webapi.env",
+     "compose_env_file_outside_runtime:webapi"),
+    ("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env", "${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/migrate.env",
+     "compose_env_file_outside_runtime:webapi"),
+    ("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env", "${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/bot.env",
+     "compose_env_file_outside_runtime:webapi"),
+    ("      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env",
+     "      - path: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env\n        required: false",
+     "compose_env_file_optional:webapi"),
+    ("container_name: bfx-webapi", "container_name: bfx-api", "compose_container_name:webapi"),
+    ("    container_name: bfx-webapi\n", "", "compose_container_name_missing:webapi"),
+    ("      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env\n", "",
+     "compose_env_files_not_rendered:webapi"),
+    ("  webapi:\n", "  api:\n", "compose_service_missing:webapi"),
+    ("name: bfx-app\n", "name: other\n", "compose_project_name"),
+])
+def test_a_compose_file_the_deployer_cannot_run_is_refused_before_any_change(
+    harness: Harness, old: str, new: str, code: str,
+) -> None:
+    assert COMPOSE_TEXT.count(old) == 1
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = COMPOSE_TEXT.replace(old, new)
+    assert harness.run() == 1
+    assert harness.ledger.last.detail == f"precheck:{code}; running release untouched"
+    assert harness.host.count(PULL) == harness.host.count(COMPOSE_UP) == 0
+
+
+def test_a_third_party_image_is_pulled_by_digest_without_the_registry_token(harness: Harness) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT, configs=False)
+    deployer = harness.deployer()
+    deployer._registry_credentials = ("will", "ghcr-token")
+    assert deployer.run() == 0
+    host = harness.host
+    assert sorted(host.pulls) == sorted([(f"{BACKEND}@{NEW_B}", True), (f"{FRONTEND}@{NEW_F}", True),
+                                         (TAILSCALE, False)])
+    assert host.calls[host.index(COMPOSE_UP)][-4:] == ("bot", "frontend", "tailscale", "webapi")
+    assert host.running["tailscale"][0] == TAILSCALE
+    # bfx-deploy verified it like the others (name, project, image), without identity env.
+    inspected = host.calls[host.index(_is(("docker", "inspect", "--type", "container", "bfx-bot")))]
+    assert "bfx-tailscale" in inspected
+
+
+def test_a_third_party_container_on_another_image_fails_the_deploy(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT, configs=False)
+    original = harness.host._compose
+
+    def compose(call: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
+        result = original(call, env)
+        if COMPOSE_UP(call) and "tailscale" in harness.host.running:
+            harness.host.running["tailscale"] = (TAILSCALE.replace("c" * 64, "d" * 64), "", "", "")
+        return result
+
+    monkeypatch.setattr(harness.host, "_compose", compose)
+    assert harness.run() == 1
+    row = harness.ledger.last
+    assert row.outcome == "rolled_back"
+    assert row.detail.startswith("unhealthy:container_release_mismatch:tailscale:image;")
+
+
+def test_pruning_never_removes_a_third_party_image(harness: Harness) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT, configs=False)
+    harness.host.local_digests = {BACKEND: [OLD_B, NEW_B, "sha256:" + "8" * 64], FRONTEND: [OLD_F, NEW_F]}
+    assert harness.run() == 0
+    removed = [call[-1] for call in harness.host.calls if call[:3] == ("docker", "image", "rm")]
+    assert removed == [f"{BACKEND}@sha256:" + "8" * 64]
+    listed = [call[-1] for call in harness.host.calls if call[:3] == ("docker", "image", "ls")]
+    assert set(listed) == {BACKEND, FRONTEND}
+
+
+@pytest.mark.parametrize("image", [
+    "tailscale/tailscale@sha256:" + "c" * 64,                    # Compose prints it as written
+    "docker.io/tailscale/tailscale:v1.102.5",
+    "docker.io/library/busybox@sha256:" + "c" * 64,
+    "ghcr.io/will413028/bfx-funding-bot-backend@sha256:" + "9" * 64,
+])
+def test_an_image_outside_the_release_and_the_allowlist_is_refused(harness: Harness, image: str) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT, configs=False) \
+        .replace(TAILSCALE, image)
+    assert harness.run() == 1
+    assert harness.ledger.last.detail == ("precheck:compose_image_not_allowed:tailscale; "
+                                          "running release untouched")
+    assert harness.host.pulls == []
+
+
+def test_a_config_file_the_compose_file_references_is_written_from_its_revision(harness: Harness) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT)
+    harness.host.files[(REV_NEW, SERVE_PATH)] = '{"TCP": {"443": {"HTTPS": true}}}\n'
+    assert harness.run() == 0
+    written = _release(harness) / "tailscale/serve.json"
+    assert written.read_text() == '{"TCP": {"443": {"HTTPS": true}}}\n'
+    assert (written.stat().st_mode & 0o777) == 0o600
+
+
+def test_a_revision_without_configs_writes_nothing_more(harness: Harness) -> None:
+    harness.host.files[(REV_NEW, SERVE_PATH)] = "{}\n"     # tracked, but not referenced
+    assert harness.run() == 0
+    assert sorted(p.name for p in _release(harness).iterdir()) == ["docker-compose.app.yml", "live.env"]
+
+
+def test_rollback_to_a_revision_without_the_config_file_works(harness: Harness) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT)
+    harness.host.files[(REV_NEW, SERVE_PATH)] = "{}\n"
+    harness.host.unhealthy = {NEW_B}
+    assert harness.run() == 1
+    row = harness.ledger.last
+    assert row.outcome == "rolled_back", row.detail
+    assert "tailscale" not in harness.host.running         # the orphan of the failed release
+    assert not (_release(harness, REV_OLD) / "tailscale").exists()
+
+
+def test_recreate_of_a_revision_without_configs_works(harness: Harness) -> None:
+    assert harness.run(recreate=True) == 0
+    assert harness.ledger.last.outcome == "deployed"
+    assert sorted(p.name for p in _release(harness, REV_OLD).iterdir()) == [
+        "docker-compose.app.yml", "live.env"]
+
+
+def test_recreate_writes_the_config_file_its_revision_references(harness: Harness) -> None:
+    harness.host.files[(REV_OLD, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT)
+    harness.host.files[(REV_OLD, SERVE_PATH)] = "{}\n"
+    assert harness.run(recreate=True) == 0
+    assert (_release(harness, REV_OLD) / "tailscale/serve.json").read_text() == "{}\n"
+
+
+def test_a_referenced_config_file_the_revision_lacks_fails_the_precheck(harness: Harness) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT)
+    harness.host.current = ("h1",)                       # even with a migration pending
+    assert harness.run() == 1
+    assert harness.ledger.last.detail == (f"precheck:release_file_missing:{SERVE_PATH}; "
+                                          "running release untouched")
+    assert harness.host.stopped == [] and harness.host.count(COMPOSE_UP) == 0
+
+
+@pytest.mark.parametrize(("change", "code"), [
+    (lambda t: t.replace("file: ./tailscale/serve.json", "file: ../../serve.json"),
+     "compose_config_outside_release:ts-serve"),
+    (lambda t: t.replace("file: ./tailscale/serve.json", "file: /etc/passwd"),
+     "compose_config_outside_release:ts-serve"),
+    (lambda t: t.replace("file: ./tailscale/serve.json", 'content: "{}"'),
+     "compose_config_not_file:ts-serve"),
+    (lambda t: t.replace("file: ./tailscale/serve.json", "environment: HOME"),
+     "compose_config_not_file:ts-serve"),
+    (lambda t: t + "secrets:\n  key:\n    file: ./tailscale/serve.json\n", "compose_secrets_refused"),
+])
+def test_a_config_that_is_not_a_release_file_is_refused(
+    harness: Harness, change: Callable[[str], str], code: str,
+) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = change(with_sidecar(COMPOSE_TEXT))
+    harness.host.files[(REV_NEW, SERVE_PATH)] = "{}\n"
+    assert harness.run() == 1
+    assert harness.ledger.last.detail == f"precheck:{code}; running release untouched"
+    assert sorted(p.name for p in _release(harness).iterdir()) == ["docker-compose.app.yml", "live.env"]
+
+
+def test_a_config_tracked_as_a_symlink_is_refused(harness: Harness) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT)
+    harness.host.files[(REV_NEW, SERVE_PATH)] = "/etc/shadow"
+    harness.host.symlinks.add((REV_NEW, SERVE_PATH))
+    assert harness.run() == 1
+    assert harness.ledger.last.detail == (f"precheck:release_file_not_regular:{SERVE_PATH}; "
+                                          "running release untouched")
+
+
+def test_a_foreign_frontend_does_not_block_a_release_without_one(harness: Harness) -> None:
+    _without_frontend(harness)
+    harness.host.foreign = ["bfx-frontend"]
+    assert harness.run() == 0
+    assert harness.ledger.last.outcome == "deployed"
+
+
 # --------------------------------------------------------------------------- recreate
 
 
@@ -1277,7 +1627,9 @@ def test_release_not_yet_fully_published_is_retried_and_alerted_once(harness: Ha
     del harness.registry.refs[f"{FRONTEND}:sha-{REV_NEW}"]
     rows = len(harness.ledger.rows)
     assert harness.run() == 1
-    assert harness.host.calls == [] and harness.notices == []
+    # Whether the revision needs a frontend image is its compose file's call: it does.
+    assert harness.host.count(PULL) == harness.host.count(COMPOSE_UP) == 0
+    assert harness.notices == []
     harness.clock.now += harness.settings.discovery_alert_after + 1
     assert harness.run() == 1
     assert [level for level, _ in harness.notices] == ["warning"]
@@ -1346,14 +1698,20 @@ def _target() -> Any:
     return bfx.Target(REV_NEW, NEW_B, NEW_F, f"{BACKEND}@{NEW_B}", f"{FRONTEND}@{NEW_F}")
 
 
+def _mismatches(record: dict[str, Any], service: str, target: Any, deployment_id: str) -> list[str]:
+    image = target.frontend_image if service == "frontend" else target.backend_image
+    return list(bfx.container_mismatches(
+        record, container=CONTAINER_NAMES[service], image=image,
+        identity=bfx.identity_env(target, image=image, deployment_id=deployment_id)))
+
+
 @pytest.mark.parametrize("service", ["bot", "webapi", "frontend"])
 def test_container_running_the_recorded_release_has_no_mismatch(service: str) -> None:
     target = _target()
     backend = service != "frontend"
     running = (target.backend_image if backend else target.frontend_image,
                NEW_B if backend else NEW_F, REV_NEW, "dep-1")
-    assert bfx.container_mismatches(inspect_record(service, running), service=service, target=target,
-                                    deployment_id="dep-1") == []
+    assert _mismatches(inspect_record(service, running), service, target, "dep-1") == []
 
 
 @pytest.mark.parametrize("change_class", [None, "material", "standard", "retired"])
@@ -1364,9 +1722,20 @@ def test_identity_check_ignores_the_retired_change_class(change_class: str | Non
     record = inspect_record("bot", (target.backend_image, NEW_B, REV_NEW, "dep-1"))
     env = [e for e in record["Config"]["Env"] if not e.startswith("BFX_CHANGE_CLASS=")]
     record["Config"]["Env"] = env + ([f"BFX_CHANGE_CLASS={change_class}"] if change_class else [])
-    assert bfx.container_mismatches(record, service="bot", target=target, deployment_id="dep-1") == []
-    assert set(bfx.identity_env(target, service="bot", deployment_id="dep-1")) == {
+    assert _mismatches(record, "bot", target, "dep-1") == []
+    assert set(bfx.identity_env(target, image=target.backend_image, deployment_id="dep-1") or {}) == {
         "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_DEPLOYMENT_ID"}
+
+
+def test_a_third_party_container_is_checked_by_name_project_and_image_alone() -> None:
+    target = _target()
+    assert bfx.identity_env(target, image=TAILSCALE, deployment_id="dep-1") is None
+    record = inspect_record("tailscale", (TAILSCALE, "", "", ""))
+    assert bfx.container_mismatches(record, container="bfx-tailscale", image=TAILSCALE,
+                                    identity=None) == []
+    record["Config"]["Image"] = TAILSCALE.replace("c" * 64, "d" * 64)
+    assert bfx.container_mismatches(record, container="bfx-tailscale", image=TAILSCALE,
+                                    identity=None) == ["image"]
 
 
 @pytest.mark.parametrize(("mutate", "mismatch"), [
@@ -1381,8 +1750,7 @@ def test_each_release_mismatch_is_reported(mutate: Callable[[dict[str, Any]], No
     target = _target()
     record = inspect_record("frontend", (target.frontend_image, NEW_F, REV_NEW, "dep-1"))
     mutate(record)
-    assert mismatch in bfx.container_mismatches(record, service="frontend", target=target,
-                                                deployment_id="dep-1")
+    assert mismatch in _mismatches(record, "frontend", target, "dep-1")
 
 
 # --------------------------------------------------------------------------- imagetools registry

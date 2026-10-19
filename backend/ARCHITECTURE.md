@@ -747,7 +747,8 @@ recreate 後查健康，失敗就回到前一個 digest，每次結果寫進 app
 無法關掉自己的觸發）時，先跑該版本 DR 腳本的 isolated restore test；有 migration 時先停 webapi、再停 bot，然後備份（全停，ADR 2026-10-15 D6）。
 停下之後任何失敗兩者都維持停止，唯一例外是 restore test 的 receipt 為 `migration_rehearsal_failed`
 （備份可還原、prod schema 沒動）：依序重新啟動舊 bot 與舊 webapi。webapi 開機時比對 schema head，不符就拒絕啟動（與 bot 相同）。
-health wait：bot `/healthz` 300 s、webapi 120 s、frontend `127.0.0.1:3001` 120 s，再 60 s settle。
+部署哪些服務、檢查哪些 container 與 env 檔、pull 哪些 image，都由該 release 自己的 compose 檔渲染結果（`docker compose config --no-env-resolution`）決定，`up --remove-orphans` 移除 compose 不再有的服務；第三方 image 只允許 allowlist 的 digest、不帶 GHCR 憑證；沒有 frontend 服務的 release 不需要 frontend image，ledger 的 `frontend_digest` 為 NULL。
+health wait：bot `/healthz` 300 s、webapi 120 s、有 frontend 時 `127.0.0.1:3001` 120 s，再 60 s settle。
 已套用 migration 後失敗不回滾（舊碼未必能跑新 schema），停 bot 與 webapi、roll forward。
 部署工具注入 `BFX_IMAGE_DIGEST`／`BFX_SOURCE_REVISION`／`BFX_DEPLOYMENT_ID`：只用來標示每筆
 execution audit 的 `config_hash`／`service_version` 與狀態報告，部署永遠不改變 trading state（§6）。
