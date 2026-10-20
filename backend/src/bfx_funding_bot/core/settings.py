@@ -121,6 +121,10 @@ class IngressSettings(BaseSettings):
         dsn = urlsplit(self.fe_sentry_dsn)
         if dsn.scheme != "https" or not dsn.username or not dsn.hostname or not dsn.path.strip("/"):
             raise ValueError("BFX_FE_SENTRY_DSN must be an https Sentry DSN")
+        try:
+            _ = dsn.port  # raises on a non-numeric or out-of-range port
+        except ValueError as exc:
+            raise ValueError("BFX_FE_SENTRY_DSN has an invalid port") from exc
         return self
 
 

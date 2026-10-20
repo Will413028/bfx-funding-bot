@@ -14,8 +14,11 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from pytest_httpx import HTTPXMock
+from starlette.requests import ClientDisconnect
 
+from bfx_funding_bot.modules.api import ingress
 from bfx_funding_bot.modules.api.ingress import (
     FE_EVENTS_PATH,
     MAX_EVENT_BYTES,
@@ -23,7 +26,7 @@ from bfx_funding_bot.modules.api.ingress import (
     install_ingress,
     sentry_envelope_target,
 )
-from tests.ingress_support import ALLOWED_HOST, INGRESS_ENV, attach_ingress
+from tests.ingress_support import ALLOWED_HOST, INGRESS_ENV, attach_ingress, ingress_settings
 
 ORIGIN = f"https://{ALLOWED_HOST}"
 SCRIPT = b"self.__next_f.push([1,\"x\"])"
@@ -53,6 +56,10 @@ def client(export_dir: Path) -> TestClient:
     @app.delete("/api/v1/thing")
     async def drop_thing() -> dict[str, str]:
         return {"dropped": "yes"}
+
+    @app.get("/api/v1/getonly")
+    async def getonly() -> dict[str, str]:
+        return {"ok": "yes"}
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -190,3 +197,28 @@ def test_a_dsn_with_a_path_prefix_and_port_targets_its_own_endpoint() -> None:
     assert sentry_envelope_target(envelope, dsn) == "https://sentry.example:9000/prefix/api/42/envelope/"
     other_port = b'{"dsn":"https://key@sentry.example:9001/prefix/42"}\n{}'
     assert sentry_envelope_target(other_port, dsn) is None
+
+
+def test_a_known_api_path_with_another_method_answers_405(client: TestClient) -> None:
+    """The fallback must not turn a wrong method on a real route into 404."""
+    response = _post(client, "/api/v1/getonly")
+    assert response.status_code == 405 and response.json() == {"detail": "method_not_allowed"}
+
+
+@pytest.mark.parametrize("dsn", [
+    "https://key@sentry.example:abc/42",
+    "https://key@sentry.example:99999/42",
+])
+def test_a_configured_dsn_with_an_invalid_port_refuses_to_start(dsn: str) -> None:
+    with pytest.raises(ValidationError, match="invalid port"):
+        ingress_settings(BFX_FE_SENTRY_DSN=dsn)
+
+
+def test_fe_events_answer_a_client_disconnect_without_an_error(
+        client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def disconnected(request: object, limit: int) -> bytes:
+        raise ClientDisconnect
+
+    monkeypatch.setattr(ingress, "_read_limited", disconnected)
+    response = client.post(FE_EVENTS_PATH, content=ENVELOPE, headers={"Origin": ORIGIN})
+    assert response.status_code == 400 and response.json()["detail"] == "client_disconnected"

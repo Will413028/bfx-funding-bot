@@ -29,6 +29,8 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import ClientDisconnect
+from starlette.routing import Match
 
 from bfx_funding_bot.core.settings import IngressSettings
 
@@ -190,7 +192,10 @@ def install_ingress(app: FastAPI, *, static_dir: Path) -> None:
     @app.post(FE_EVENTS_PATH, include_in_schema=False)
     async def fe_events(request: Request) -> Response:
         """Browser Sentry events, forwarded only to the configured frontend project."""
-        body = await _read_limited(request, MAX_EVENT_BYTES)
+        try:
+            body = await _read_limited(request, MAX_EVENT_BYTES)
+        except ClientDisconnect:
+            return _refuse(400, "client_disconnected")
         if body is None:
             return _refuse(413, "event_too_large")
         settings: IngressSettings = request.app.state.ingress
@@ -212,7 +217,12 @@ def install_ingress(app: FastAPI, *, static_dir: Path) -> None:
     # Before the static mount: an unknown API path answers JSON, not the export's 404 page.
     @app.api_route(API_FALLBACK_PATH, methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
                    include_in_schema=False)
-    async def no_such_api(rest: str) -> Response:
+    async def no_such_api(request: Request, rest: str) -> Response:
+        # A real route on this path with another method: 405, as Starlette would answer.
+        if any(getattr(route, "path", None) != API_FALLBACK_PATH
+               and route.matches(request.scope)[0] is Match.PARTIAL
+               for route in request.app.router.routes):
+            return _refuse(405, "method_not_allowed")
         return _refuse(404, "not_found")
 
     if not static_dir.is_dir():
