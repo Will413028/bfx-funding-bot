@@ -215,7 +215,8 @@ Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.
   沒有 `eth0` 的舊 namespace，手動 `docker compose up` 也不修（Compose 沿用沒變的容器）。下一次部署（main 有新
   的 digest 時）會偵測到並重建，每輪的 netns 修復只重建 webapi、不修 tailscale；在那之前入口是斷的（不影響放貸），
   要立刻修就 `sudo bfx-deploy --recreate`（一律重建全部服務）。
-- 換節點（state 壞掉）：admin console 刪節點 → `docker volume rm bfx_tsstate` → 放一把新 auth key →
+- 換節點（state 壞掉）：admin console 刪節點 → `docker rm -f bfx-tailscale`（還有容器引用時 volume 刪不掉）→
+  `docker volume rm bfx_tsstate` → 放一把新 auth key →
   `--recreate`。
 
 ## 4. 主機工具與 DR 腳本的版本

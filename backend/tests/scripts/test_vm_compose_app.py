@@ -319,6 +319,7 @@ def test_the_ingress_shape_is_pinned(
     (lambda r: r["configs"].__setitem__("extra", {"file": "/x/tailscale/serve.json"}), "serve_config"),
     (lambda r: r["configs"]["ts-serve"].__setitem__("file", "/etc/serve.json"), "serve_config"),
     (lambda r: r["configs"]["ts-serve"].__setitem__("name", "other_ts-serve"), "serve_config"),
+    (lambda r: r["configs"]["ts-serve"].__setitem__("file", "tailscale/serve.json"), "serve_config"),
     (lambda r: r["configs"].__setitem__("ts-serve", {"name": "bfx-app_ts-serve", "content": "{}"}),
      "configs_file_only"),
     # The web API joins the holder only in 9d-5.
@@ -383,6 +384,13 @@ def test_policy_cli_is_what_ci_runs(
     completed = subprocess.run(argv, input=json.dumps(rendered), capture_output=True, text=True,
                                check=False, env=env)
     assert completed.returncode == 1 and "webapi:env_files_required" in completed.stderr
+    # The top-level volume and config are checked on the uninterpolated rendering too.
+    uninterpolated_broken = copy.deepcopy(uninterpolated)
+    uninterpolated_broken["volumes"]["bfx_tsstate"]["external"] = True
+    snapshot.write_text(json.dumps(uninterpolated_broken))
+    completed = subprocess.run(argv, input=json.dumps(rendered), capture_output=True, text=True,
+                               check=False, env=env)
+    assert completed.returncode == 1 and "uninterpolated:volumes" in completed.stderr
 
 
 REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {

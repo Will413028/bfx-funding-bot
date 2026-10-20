@@ -382,6 +382,25 @@ def violations(rendered: Mapping[str, Any]) -> list[str]:
     names = set(rendered.get("services") or {})
     if not {*REQUIRED_SERVICES, *INGRESS_SERVICES} <= names <= {*SERVICES, *INGRESS_SERVICES}:
         found.append("services")
+    found += top_level_violations(rendered)
+    network = (rendered.get("networks") or {}).get(NETWORK) or {}
+    if set(rendered.get("networks") or {}) != {NETWORK} or network.get("external") is not True \
+            or network.get("name") != NETWORK:
+        found.append("external_network")
+    for service in SERVICES:
+        spec = (rendered.get("services") or {}).get(service)
+        if isinstance(spec, dict):
+            found += service_violations(service, spec)
+    for service in INGRESS_SERVICES:
+        spec = (rendered.get("services") or {}).get(service)
+        if isinstance(spec, dict):
+            found += ingress_violations(service, spec)
+    return found
+
+
+def top_level_violations(rendered: Mapping[str, Any]) -> list[str]:
+    """Top-level volumes, secrets and configs; checked on both renderings."""
+    found = []
     # The node state, under a fixed name so a renamed project never registers a new node.
     if rendered.get("volumes") != {STATE_VOLUME: {"name": STATE_VOLUME}}:
         found.append("volumes")
@@ -396,22 +415,11 @@ def violations(rendered: Mapping[str, Any]) -> list[str]:
             for c in configs.values()):
         found.append("configs_file_only")
     serve = configs.get(SERVE_CONFIG) if isinstance(configs, dict) else None
+    serve_file = str(serve.get("file", "")) if isinstance(serve, dict) else ""
     if set(configs) != {SERVE_CONFIG} or not isinstance(serve, dict) \
-            or not str(serve.get("file", "")).endswith("/tailscale/serve.json") \
+            or not serve_file.startswith("/") or not serve_file.endswith("/tailscale/serve.json") \
             or serve.get("name", f"bfx-app_{SERVE_CONFIG}") != f"bfx-app_{SERVE_CONFIG}":
         found.append("serve_config")
-    network = (rendered.get("networks") or {}).get(NETWORK) or {}
-    if set(rendered.get("networks") or {}) != {NETWORK} or network.get("external") is not True \
-            or network.get("name") != NETWORK:
-        found.append("external_network")
-    for service in SERVICES:
-        spec = (rendered.get("services") or {}).get(service)
-        if isinstance(spec, dict):
-            found += service_violations(service, spec)
-    for service in INGRESS_SERVICES:
-        spec = (rendered.get("services") or {}).get(service)
-        if isinstance(spec, dict):
-            found += ingress_violations(service, spec)
     return found
 
 
@@ -441,7 +449,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.kind == "operator":
         found = operator_violations(rendered) + operator_uninterpolated_violations(uninterpolated)
     else:
-        found = violations(rendered) + env_file_violations(uninterpolated)
+        found = violations(rendered) + env_file_violations(uninterpolated) \
+            + [f"uninterpolated:{v}" for v in top_level_violations(uninterpolated)]
     for item in found:
         print(f"compose-policy: violation {item}", file=sys.stderr)
     if not found:

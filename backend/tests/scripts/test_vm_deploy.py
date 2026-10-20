@@ -1848,6 +1848,30 @@ def test_an_ingress_late_before_a_failing_bot_still_reports_the_bot(harness: Har
     assert harness.ledger.last.detail.startswith("unhealthy:health_timeout:bot;")
 
 
+def test_a_broken_application_is_judged_before_an_ingress_not_as_released(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A migration applied, the new bot unhealthy and the new sidecar on the wrong image: the
+    application's failure decides (full stop, as before 9d-4), never "the ingress is down,
+    keep the release"."""
+    _ingress_release(harness, REV_NEW)
+    harness.host.current = ("h1",)
+    harness.host.unhealthy = {NEW_B}
+    original = harness.host._compose
+
+    def compose(call: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
+        result = original(call, env)
+        if COMPOSE_UP(call) and "tailscale" in harness.host.running:
+            harness.host.running["tailscale"] = (TAILSCALE.replace("c" * 64, "d" * 64), "", "", "")
+        return result
+
+    monkeypatch.setattr(harness.host, "_compose", compose)
+    assert harness.run() == 1
+    row = harness.ledger.last
+    assert row.outcome == "failed" and row.detail.startswith("unhealthy:health_timeout:")
+    assert "bot stopped" in row.detail
+
+
 def test_an_ingress_not_as_released_never_fails_a_rollback(
     harness: Harness, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

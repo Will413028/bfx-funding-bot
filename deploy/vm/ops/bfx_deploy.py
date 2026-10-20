@@ -1271,8 +1271,18 @@ class Deployer:
             return self._finish(attempt, "failed", f"{exc.code}{kept}")
         try:
             created = self._compose_up(release, target, attempt.attempt_id)
-            ingress = self._verify(release, target, attempt.attempt_id, gate_ingress=created)
+            # The application is judged first: an ingress that is not as released waits until
+            # the bot, web API and frontend passed their health checks.
+            mismatch = None
+            try:
+                ingress = self._verify(release, target, attempt.attempt_id, gate_ingress=created)
+            except DeployError as exc:
+                if not exc.code.startswith(INGRESS_UNHEALTHY):
+                    raise
+                mismatch, ingress = exc, []
             ingress += self._wait_healthy(release, gate_ingress=created)
+            if mismatch is not None:
+                raise mismatch
             if self.settings.rollback_drill:
                 raise DeployError("rollback_drill")
         except DeployError as exc:
