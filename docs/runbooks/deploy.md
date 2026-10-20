@@ -212,9 +212,8 @@ Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.
 - 查狀態：`docker exec bfx-tailscale tailscale status`（tagged、key 到期 none）、
   `docker exec bfx-tailscale tailscale serve status`。
 - **不要單獨 `docker restart bfx-netns`**：holder 換了新 namespace，tailscale（與 9d-5 起的 webapi）會留在
-  沒有 `eth0` 的舊 namespace，手動 `docker compose up` 也不修（Compose 沿用沒變的容器）。下一次部署（main 有新
-  的 digest 時）會偵測到並重建，每輪的 netns 修復只重建 webapi、不修 tailscale；在那之前入口是斷的（不影響放貸），
-  要立刻修就 `sudo bfx-deploy --recreate`（一律重建全部服務）。
+  沒有 `eth0` 的舊 namespace，手動 `docker compose up` 也不修（Compose 沿用沒變的容器）。bfx-deploy 下一輪
+  （5 分鐘內）的 netns 修復會只重建卡住的加入者（見 §5）；要立刻修就 `sudo bfx-deploy --recreate`（一律重建全部服務）。
 - 換節點（state 壞掉）：admin console 刪節點 → `docker rm -f bfx-tailscale`（還有容器引用時 volume 刪不掉）→
   `docker volume rm bfx_tsstate` → 放一把新 auth key →
   `--recreate`。
@@ -288,19 +287,21 @@ image 內 migrations 推導出的唯一 head（`core/schema_head.build_head`）�
 2. 把 migration 前的備份還原到**隔離**資料庫比對，再決定。**不要把舊備份蓋回 production**
    ——venue 可能已有寫入，見 [rollback after a venue write](rollback-after-venue-write.md)。
 
-### webapi 留在 holder 已死的 network namespace（9d-5 之後）
+### 加入者留在 holder 已死的 network namespace
 
-holder（`bfx-netns`）單獨重啟或單獨重建後，webapi 會留在舊的 namespace：`/health` 仍回 ok，但連不到 DB、
-也收不到 Serve 流量（9d-0 與 holder spike 實測），Docker 不會自己修。tailscale 重啟不會造成這件事（它也只是
-加入者）。bfx-deploy 每一輪沒有要部署時（up to date、already
-attempted），若最後一次嘗試是 `deployed` 或 `rolled_back`，就 `docker inspect bfx-netns bfx-webapi`：
-webapi 的 `NetworkMode` 不是目前 holder 的 Id，或 holder 比 webapi 晚啟動，就以最後成功部署的 digest 與
-deployment id 只重建 webapi（`up --no-deps --force-recreate webapi`），再等 `/ready` 與 settle。
+holder（`bfx-netns`）單獨重啟或單獨重建後，加入它的容器（tailscale；9d-5 起還有 webapi）會留在舊的
+namespace：tailscale 離開 tailnet，webapi 的 `/health` 仍回 ok 但連不到 DB、也收不到 Serve 流量（9d-0 與
+holder spike 實測），Docker 不會自己修。tailscale 自己重啟不會造成這件事（它只是加入者）。bfx-deploy 每一輪
+沒有要部署時（up to date、already attempted），若最後一次嘗試是 `deployed` 或 `rolled_back`，就
+`docker inspect bfx-netns bfx-tailscale bfx-webapi`：在跑、`NetworkMode` 是 `container:` 的加入者，只要它的
+`NetworkMode` 不是目前 holder 的 Id、或 holder 比它晚啟動，就以最後成功部署的 digest 與 deployment id 只重建
+這些加入者（`up --no-deps --force-recreate <它們>`），再等各自的健康檢查（webapi `/ready`、tailscale 的 compose
+healthcheck）與 settle。
 不看健康狀態（DB 短暫中斷不會觸發）、永遠不碰 bot、不寫 ledger，只發通知（成功 info、失敗 warning）。
 同一個事件（holder Id＋啟動時間）連續失敗 3 次發一次 critical、之後不再重試，直到 namespace 恢復正常
 或 holder 又重啟；計數在 `/var/lib/bfx-deploy/netns-repair.json`，要立刻重試就刪掉它。
-webapi 或 holder 沒在跑、webapi 不在 holder 的 namespace（9d-5 之前）、最後一次嘗試是 `failed`／`started`
-時什麼都不做。
+holder 沒在跑、加入者沒在跑或不在 holder 的 namespace（9d-5 之前的 webapi）、最後一次嘗試是
+`failed`／`started` 時什麼都不做。
 
 bot 停下時 venue 上的掛單不會自己消失：停 bot 之前，若有掛單而且停機會超過幾分鐘，先在 UI 或
 `sudo bfx-op halt --reason "…"` 執行 kill（見 operations §3）。bot 停著時兩者都不可用，改在 Bitfinex 網頁手動撤單並記錄。

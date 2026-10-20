@@ -543,8 +543,9 @@ class FakeHost:
         assert call[6] == "up" and rendered is not None
         options = tuple(part for part in call[7:] if part.startswith("--"))
         services = call[7 + len(options):]
-        if services == ("webapi",):        # netns repair: the web API alone, nothing removed
+        if "--remove-orphans" not in options:    # netns repair: the stale joiners, nothing removed
             assert options == ("--detach", "--no-deps", "--force-recreate")
+            assert services and set(services) <= {"tailscale", "webapi"}
         else:
             assert options[:3] == ("--detach", "--no-deps", "--remove-orphans")
             assert options[3:] in {(), ("--force-recreate",)}
@@ -710,7 +711,7 @@ PULL = _is(("docker", "pull"))
 UV_SYNC = _is(("uv", "sync"))
 
 
-NETNS_INSPECT = ("docker", "inspect", "--type", "container", "bfx-netns", "bfx-webapi")
+NETNS_INSPECT = ("docker", "inspect", "--type", "container", "bfx-netns", "bfx-tailscale", "bfx-webapi")
 
 
 def _started(harness: Harness) -> list[Any]:
@@ -2128,8 +2129,8 @@ def _break(harness: Harness, how: str) -> None:
 
 
 def _repair(call: tuple[str, ...]) -> bool:
-    """The netns repair's `up`: the web API alone."""
-    return COMPOSE_UP(call) and call[-1] == "webapi"
+    """The netns repair's `up`: only stale joiners, nothing removed."""
+    return COMPOSE_UP(call) and "--remove-orphans" not in call
 
 NETNS_STATE = "netns-repair.json"
 
@@ -2245,7 +2246,7 @@ def test_an_escalated_incident_that_recovers_says_so_and_forgets_it(harness: Har
         harness.run()
     harness.host.create("webapi", "container:" + harness.host.meta["netns"]["Id"])  # operator
     assert harness.run() == 0
-    assert harness.notices[-1] == ("info", "bfx-webapi is in the holder's network namespace again")
+    assert harness.notices[-1] == ("info", "the holder's network namespace is shared by all its joiners again")
     assert not (harness.settings.state_dir / NETNS_STATE).exists()
 
 
@@ -2285,6 +2286,65 @@ def test_an_unreadable_repair_record_counts_as_none(harness: Harness) -> None:
     path.write_text("{not json")
     assert harness.run() == 0
     assert harness.host.count(_repair) == 1 and not path.exists()
+
+
+def _ingress_running(harness: Harness, *, webapi_joins: bool) -> None:
+    """The running release (REV_OLD, what main still names) with the ingress: 9d-4 (the web
+    API on bfx_default) or 9d-5 (the web API in the holder's namespace too)."""
+    harness.registry.refs[f"{BACKEND}:main"] = OLD_B
+    _ingress_release(harness, REV_OLD)
+    if webapi_joins:
+        text = harness.host.files[(REV_OLD, bfx.COMPOSE_PATH)]
+        harness.host.files[(REV_OLD, bfx.COMPOSE_PATH)] = text.replace(
+            WEBAPI_NETWORKS, "    network_mode: service:netns\n\n  frontend:")
+    _running_ingress(harness)
+    if webapi_joins:
+        harness.host.create("webapi", "container:" + harness.host.meta["netns"]["Id"])
+
+
+def test_a_holder_restart_strands_the_sidecar_and_the_repair_recreates_it_alone(harness: Harness) -> None:
+    """9d-4: only the sidecar joins the holder; the web API on bfx_default is not touched."""
+    _ingress_running(harness, webapi_joins=False)
+    webapi = harness.host.meta["webapi"]["Id"]
+    harness.host.restart_in_place("netns")
+    assert harness.run() == 0
+    host = harness.host
+    assert host.count(_repair) == 1
+    assert host.calls[host.index(_repair)][-1:] == ("tailscale",)
+    assert host.meta["webapi"]["Id"] == webapi
+    assert not bfx.netns_stale(inspect_record("tailscale", host.running["tailscale"], host.meta["tailscale"]),
+                               inspect_record("netns", host.running["netns"], host.meta["netns"]))
+    assert _bot_untouched(harness)
+    assert harness.notices == [("info", "bfx-tailscale left in a dead network namespace; recreated")]
+
+
+def test_a_holder_restart_strands_both_joiners_and_the_repair_recreates_both(harness: Harness) -> None:
+    """9d-5: the sidecar and the web API both join the holder; both are recreated, and the
+    web API under the running release's identity."""
+    _ingress_running(harness, webapi_joins=True)
+    harness.host.restart_in_place("netns")
+    assert harness.run() == 0
+    host = harness.host
+    assert host.count(_repair) == 1
+    assert host.calls[host.index(_repair)][-2:] == ("tailscale", "webapi")
+    env = host.envs[host.index(_repair)]
+    assert env is not None and (env["BFX_BACKEND_DIGEST"], env["BFX_DEPLOYMENT_ID"]) == (OLD_B, OLD_ATTEMPT)
+    for service in ("tailscale", "webapi"):
+        assert not bfx.netns_stale(inspect_record(service, host.running[service], host.meta[service]),
+                                   inspect_record("netns", host.running["netns"], host.meta["netns"]))
+    assert _bot_untouched(harness)
+
+
+def test_a_sidecar_unhealthy_after_the_repair_counts_as_a_failed_repair(harness: Harness) -> None:
+    _ingress_running(harness, webapi_joins=False)
+    harness.host.restart_in_place("netns")
+    harness.host.sidecar_health = "unhealthy"
+    assert harness.run() == 0
+    assert [level for level, _ in harness.notices] == ["warning"]
+    assert "unhealthy:tailscale" in harness.notices[0][1]
+    state = json.loads((harness.settings.state_dir / NETNS_STATE).read_text())
+    assert state["failures"] == 1
+    assert _bot_untouched(harness)
 
 
 def test_a_dry_run_only_reports_a_dead_namespace(harness: Harness) -> None:

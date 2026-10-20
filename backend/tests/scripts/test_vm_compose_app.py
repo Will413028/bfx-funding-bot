@@ -172,6 +172,8 @@ def test_policy_and_deployer_agree_on_names_and_commands() -> None:
     assert {role: policy.CONTAINERS[role] for role in bfx.ROLE_CONTAINERS} == bfx.ROLE_CONTAINERS
     # The netns repair inspects the holder by name; a renamed holder would never be repaired.
     assert policy.INGRESS_CONTAINERS["netns"] == bfx.NETNS_HOLDER
+    joiners = {"tailscale": policy.INGRESS_CONTAINERS["tailscale"], "webapi": policy.CONTAINERS["webapi"]}
+    assert joiners == bfx.NETNS_JOINERS
     assert set(bfx.ROLE_CONTAINERS) == set(policy.REQUIRED_SERVICES)
     assert tuple(bfx.identity_env(
         bfx.Target("b" * 40, DIGEST_B, DIGEST_F, "x", "y"), image="x",
