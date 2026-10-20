@@ -1742,7 +1742,7 @@ def test_a_fresh_unhealthy_ingress_never_stops_the_bot_after_a_migration(harness
     harness.host.sidecar_health = "unhealthy"
     assert harness.run() == 0
     row = harness.ledger.last
-    assert row.outcome == "deployed" and "ingress_unhealthy:tailscale" in row.detail
+    assert row.outcome == "deployed" and "ingress_unhealthy:" in row.detail and "tailscale" in row.detail
     assert harness.host.running["bot"][1] == NEW_B and harness.host.running["webapi"][1] == NEW_B
 
 
@@ -1773,6 +1773,37 @@ def test_a_docker_that_cannot_list_container_ids_gates_no_ingress(harness: Harne
     harness.host.timeouts = {("docker", "inspect", "--type", "container", "--format", "{{.Name}} {{.Id}}")}
     assert harness.run() == 0
     assert harness.ledger.last.outcome == "deployed"
+
+
+@pytest.mark.parametrize("known", [{"h1", "h2"}, {"h1", "h2", "h3"}])
+def test_a_fresh_ingress_never_triggers_a_rollback_that_cannot_happen(
+    harness: Harness, known: set[str],
+) -> None:
+    """An earlier attempt migrated to h3 and failed, so the h2 release cannot come back: a
+    healthy release whose new ingress is down stays, instead of a doomed rollback stopping
+    the bot."""
+    _ingress_release(harness, REV_NEW)
+    harness.host.heads, harness.host.current = ("h3",), ("h3",)
+    harness.host.heads_by_digest = {OLD_B: ("h2",)}
+    harness.host.known_by_digest = {OLD_B: known}
+    harness.host.sidecar_health = "unhealthy"
+    assert harness.run() == 0
+    row = harness.ledger.last
+    assert row.outcome == "deployed" and "ingress_unhealthy:" in row.detail
+    assert harness.host.stopped == [] and harness.host.running["bot"][1] == NEW_B
+    assert harness.host.count(COMPOSE_UP) == 1
+
+
+def test_a_first_deploy_with_nothing_to_roll_back_keeps_a_healthy_release(harness: Harness) -> None:
+    """A fresh host's first release brings the ingress: there is no previous release, so a
+    down node is reported and the bot runs."""
+    harness.ledger.rows.clear()
+    _ingress_release(harness, REV_NEW)
+    harness.host.sidecar_health = "unhealthy"
+    assert harness.run() == 0
+    row = harness.ledger.last
+    assert row.outcome == "deployed" and "ingress_unhealthy:" in row.detail
+    assert harness.host.stopped == []
 
 
 def test_a_third_party_container_on_another_image_fails_the_deploy(
@@ -1920,7 +1951,7 @@ def test_a_sidecar_that_never_turns_healthy_fails_the_deploy(harness: Harness) -
     assert harness.run() == 1
     row = harness.ledger.last
     assert row.outcome == "rolled_back"
-    assert row.detail.startswith("unhealthy:health_timeout:tailscale;")
+    assert row.detail.startswith("unhealthy:ingress_unhealthy:tailscale;")
 
 
 @pytest.mark.parametrize("healthcheck", [

@@ -149,6 +149,8 @@ THIRD_PARTY_IMAGE = re.compile(r"docker\.io/tailscale/tailscale@sha256:[0-9a-f]{
 # compose_policy.INGRESS_CONTAINERS pins the name); netns repair inspects it.
 NETNS_HOLDER = "bfx-netns"
 NETNS_REPAIR_LIMIT = 3
+# The code of a deploy that failed only because the ingress it created is unhealthy.
+INGRESS_UNHEALTHY = "ingress_unhealthy:"
 HEALTH_FORMAT = "{{if .State.Health}}{{.State.Health.Status}}{{end}}"
 _DOCKER_TIME = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z")
 # A change to how PostgreSQL is run, backed up or restored earns an isolated
@@ -1267,18 +1269,20 @@ class Deployer:
                     else "; bot stays stopped" if attempt.bot_stopped
                     else "; running release untouched")
             return self._finish(attempt, "failed", f"{exc.code}{kept}")
-        # A fresh ingress that is unhealthy fails the deploy only when that means a rollback;
-        # after a migration (or with nothing to roll back to) failing stops the bot instead.
-        rollback_follows = not (attempt.migrations_applied or attempt.bot_stopped
-                                or view.last_success is None)
         try:
             created = self._compose_up(release, target, attempt.attempt_id)
             self._verify(release, target, attempt.attempt_id)
-            ingress = self._wait_healthy(release, gate_ingress=created if rollback_follows else ())
+            ingress = self._wait_healthy(release, gate_ingress=created)
             if self.settings.rollback_drill:
                 raise DeployError("rollback_drill")
         except DeployError as exc:
-            return self._unhealthy(view, attempt, exc)
+            if not exc.code.startswith(INGRESS_UNHEALTHY) or self._rollback_possible(view, attempt):
+                return self._unhealthy(view, attempt, exc)
+            # Only the ingress this release created is down and nothing can be rolled back:
+            # the release is healthy, so it stays (a stopped bot would be the tailnet's doing).
+            ingress = [exc.code]
+            self._notify("warning", f"{exc.code}: the new tailnet ingress is down and no rollback "
+                         "is possible; the release stays, the bot is unaffected")
         warnings = ingress + self._after_success(view, target)
         detail = "ok" if not warnings else "ok; warnings=" + ",".join(warnings)
         return self._finish(attempt, "deployed", detail)
@@ -1851,18 +1855,19 @@ class Deployer:
         return counts
 
     def _wait_healthy(self, release: Release, *, gate_ingress: Collection[str] = ()) -> list[str]:
-        """The bot, the web API and the frontend must turn and stay healthy; the ingress
-        services (anything else: the tailnet node) only those in `gate_ingress` -- the ones
-        this deploy created. The tailnet's health never stops or rolls back the bot: an
-        ingress service that was already running, or any during a rollback or --recreate,
-        that is unhealthy is returned as an `ingress_unhealthy:<service>` warning instead.
+        """The bot, the web API and the frontend must turn and stay healthy (a failure raises
+        as always). The ingress services (anything else: the tailnet node) are held to it only
+        when in `gate_ingress` -- the ones this deploy created -- and only after the
+        application passed, with a code of their own (`ingress_unhealthy:...`) so the caller
+        can tell the tailnet from the release. Any other unhealthy ingress service is
+        returned as an `ingress_unhealthy:<service>` warning: the tailnet never fails a
+        rollback or --recreate, and never stops the bot.
         """
         started = self._clock()
         containers = {service.name: service.container for service in release.services}
-        gated = [name for name in release.names
-                 if name in ROLE_CONTAINERS or name == FRONTEND or name in gate_ingress]
-        watched = [containers[name] for name in gated]
-        pending = set(gated)
+        application = [name for name in release.names if name in ROLE_CONTAINERS or name == FRONTEND]
+        ingress = [name for name in release.names if name in gate_ingress and name not in application]
+        pending, ingress_late = set(application + ingress), []
         while pending:
             for service in sorted(pending):
                 if self._probe(service, containers[service]):
@@ -1871,21 +1876,35 @@ class Deployer:
                 break
             elapsed = self._clock() - started
             late = sorted(s for s in pending if elapsed >= self.settings.health_timeouts.get(s, 120.0))
-            if late:
+            if any(name in application for name in late):
                 raise DeployError("health_timeout:" + ",".join(late))
-            self._sleep(self.settings.health_interval)
+            for name in late:                     # an ingress service: judged after the app
+                pending.discard(name)
+                ingress_late.append(name)
+            if pending:
+                self._sleep(self.settings.health_interval)
         # A daemon can answer once and then die in its startup checks: require the
         # same containers, still running, still healthy after a settle window.
         before = self._restart_counts(release)
         self._sleep(self.settings.settle_seconds)
         after = self._restart_counts(release)
-        if any(after.get(c) != before.get(c) or not after.get(c, "").endswith("true") for c in watched):
+
+        def restarted(name: str) -> bool:
+            container = containers[name]
+            return after.get(container) != before.get(container) or not after.get(container, "").endswith("true")
+
+        if any(restarted(name) for name in application):
             raise DeployError("restarted_during_settle")
-        unhealthy = [service for service in gated if not self._probe(service, containers[service])]
+        unhealthy = [service for service in application if not self._probe(service, containers[service])]
         if unhealthy:
             raise DeployError("unhealthy_after_settle:" + ",".join(unhealthy))
+        failed = sorted(set(ingress_late) | {name for name in ingress if name not in ingress_late
+                                             and (restarted(name) or not self._probe(name, containers[name]))})
+        if failed:
+            raise DeployError(INGRESS_UNHEALTHY + ",".join(failed))
         warnings = [f"ingress_unhealthy:{name}" for name in release.names
-                    if name not in gated and not self._probe(name, containers[name])]
+                    if name not in application and name not in ingress
+                    and not self._probe(name, containers[name])]
         for warning in warnings:
             self._notify("warning", f"{warning}: the tailnet ingress is down; the bot is unaffected")
         return warnings
@@ -1923,6 +1942,28 @@ class Deployer:
         return self._finish(attempt, "rolled_back", f"unhealthy:{reason}; rolled_back_to="
                             f"{previous.source_revision}{warned}")
 
+    def _rollback_possible(self, view: LedgerView, attempt: Attempt) -> bool:
+        """Whether _unhealthy would roll back and the rollback would get past its schema
+        check (the step that refuses before anything changes)."""
+        if attempt.migrations_applied or attempt.bot_stopped or view.last_success is None:
+            return False
+        try:
+            self._rollback_release(view.last_success)
+        except DeployError as exc:
+            log(f"rollback not possible: {exc.code}")
+            return False
+        return True
+
+    def _rollback_release(self, previous: LedgerRow) -> tuple[Release, Target]:
+        """The previous release on disk, refused unless the schema is its own."""
+        target = self._target(previous.source_revision, previous.backend_digest,
+                              previous.frontend_digest)
+        release = self._materialize(target, previous.attempt_id)
+        current, heads = self._schema(release, target)
+        if set(current) != set(heads):
+            raise DeployError("rollback_schema_mismatch")
+        return release, target
+
     def _rollback_to(self, previous: LedgerRow) -> list[str]:
         """Recreate the previous successful release under its own deployment id, only onto the
         schema it was written for.
@@ -1934,12 +1975,7 @@ class Deployer:
         image cannot locate the newer revision), rollback_schema_mismatch when it can.
         """
         log(f"rolling back to {previous.source_revision}")
-        target = self._target(previous.source_revision, previous.backend_digest,
-                              previous.frontend_digest)
-        release = self._materialize(target, previous.attempt_id)
-        current, heads = self._schema(release, target)
-        if set(current) != set(heads):
-            raise DeployError("rollback_schema_mismatch")
+        release, target = self._rollback_release(previous)
         self._compose_up(release, target, previous.attempt_id)
         self._verify(release, target, previous.attempt_id)
         return self._wait_healthy(release)    # the ingress warns, never fails the rollback
