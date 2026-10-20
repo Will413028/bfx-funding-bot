@@ -561,9 +561,14 @@ class FakeHost:
             image = rendered["services"][service]["image"]
             # Compose keeps a container whose config is unchanged: a third-party one (no
             # identity env) on the same image, unless forced or its namespace's provider was
-            # recreated in this `up` (measured, v5.1.4) -- even when that namespace is dead.
-            if image == TAILSCALE and self.running.get(service, ("",))[0] == image \
+            # recreated in this `up` (measured, v5.1.4) -- even when that namespace is dead,
+            # or its config file changed. A stopped one is started again: same Id and mounts.
+            kept = self.running.get(service) or self.parked.get(service)
+            if image == TAILSCALE and kept is not None and kept[0] == image \
                     and "--force-recreate" not in options and joined not in recreated:
+                if service in self.parked:
+                    self.running[service] = self.parked.pop(service)
+                    self.restart_in_place(service)
                 continue
             recreated.add(service)
             self.create(service, "container:" + self.meta[joined]["Id"] if joined else "bfx_default")
@@ -585,6 +590,10 @@ class FakeHost:
             assert len(names) == 1 and SERVICE_OF[names[0]] not in bfx.ROLE_CONTAINERS
             running = SERVICE_OF[names[0]] in self.running
             return bfx.CommandResult(0, self.sidecar_health + "\n" if running else "", "")
+        if "--format" in call and call[call.index("--format") + 1] == "{{.Name}} {{.Id}}":
+            lines = [f"/{name} {self.meta[SERVICE_OF[name]]['Id']}" for name in names
+                     if SERVICE_OF[name] in self.running or SERVICE_OF[name] in self.parked]
+            return bfx.CommandResult(0, "\n".join(lines), "")
         if "--format" in call:
             lines = [f"/{name} 0 true" for name in names if SERVICE_OF[name] in self.running]
             return bfx.CommandResult(0, "\n".join(lines), "")
@@ -1667,6 +1676,59 @@ def test_a_stopped_holder_with_its_sidecar_running_recreates_both(harness: Harne
     harness.host.parked["netns"] = harness.host.running.pop("netns")
     assert harness.run() == 0
     assert "--force-recreate" in harness.host.calls[harness.host.index(COMPOSE_UP)]
+
+
+def test_a_stopped_sidecar_with_a_changed_config_is_recreated(harness: Harness) -> None:
+    """A stopped container keeps its mounts: `up` would start it with the old serve.json."""
+    _ingress_release(harness, REV_OLD, REV_NEW)
+    _running_ingress(harness)
+    harness.host.parked["tailscale"] = harness.host.running.pop("tailscale")
+    harness.host.files[(REV_NEW, SERVE_PATH)] = '{"TCP": {"443": {"HTTPS": true}}}\n'
+    assert harness.run() == 0
+    host = harness.host
+    assert "--force-recreate" in host.calls[host.index(COMPOSE_UP)]
+    assert Path(host.meta["tailscale"]["ConfigMount"]).read_text() == '{"TCP": {"443": {"HTTPS": true}}}\n'
+
+
+def test_an_ingress_already_down_never_fails_a_bot_deploy(harness: Harness) -> None:
+    """The node was down before this deploy and the deploy did not touch it: the release
+    deploys, the ingress is reported, nothing is rolled back or stopped."""
+    _ingress_release(harness, REV_OLD, REV_NEW)
+    _running_ingress(harness)
+    harness.host.sidecar_health = "unhealthy"
+    assert harness.run() == 0
+    row = harness.ledger.last
+    assert row.outcome == "deployed" and "ingress_unhealthy:tailscale" in row.detail
+    assert harness.host.stopped == []
+    assert ("warning", "ingress_unhealthy:tailscale: the tailnet ingress is down; the bot is unaffected") \
+        in harness.notices
+
+
+def test_a_rollback_is_never_failed_by_the_ingress(harness: Harness) -> None:
+    """The new release fails on its own; rolling back, the old release's node is down too:
+    the rollback still succeeds and the bot keeps running."""
+    _ingress_release(harness, REV_OLD, REV_NEW)
+    _running_ingress(harness)
+    harness.host.sidecar_health = "unhealthy"
+    harness.host.unhealthy = {NEW_B}                   # the new bot fails its own check
+    assert harness.run() == 1
+    assert harness.ledger.last.outcome == "rolled_back"
+    assert harness.host.stopped == []
+    assert harness.host.running["bot"][1] == OLD_B
+
+
+def test_a_rollback_serves_the_previous_serve_config_again(harness: Harness) -> None:
+    """The failed release recreated the sidecar with its serve.json; the rollback compares
+    against the previous release's file and recreates, so the old config is served again."""
+    _ingress_release(harness, REV_OLD, REV_NEW)
+    _running_ingress(harness)
+    old = harness.host.files[(REV_OLD, SERVE_PATH)]
+    harness.host.files[(REV_NEW, SERVE_PATH)] = '{"new": 1}\n'
+    assert harness.run(rollback_drill=True) == 1
+    host = harness.host
+    assert harness.ledger.last.outcome == "rolled_back"
+    assert [("--force-recreate" in call) for call in host.calls if COMPOSE_UP(call)] == [True, True]
+    assert Path(host.meta["tailscale"]["ConfigMount"]).read_text() == old
 
 
 def test_a_third_party_container_on_another_image_fails_the_deploy(

@@ -95,7 +95,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -1268,14 +1268,14 @@ class Deployer:
                     else "; running release untouched")
             return self._finish(attempt, "failed", f"{exc.code}{kept}")
         try:
-            self._compose_up(release, target, attempt.attempt_id)
+            created = self._compose_up(release, target, attempt.attempt_id)
             self._verify(release, target, attempt.attempt_id)
-            self._wait_healthy(release)
+            ingress = self._wait_healthy(release, gate_ingress=created)
             if self.settings.rollback_drill:
                 raise DeployError("rollback_drill")
         except DeployError as exc:
             return self._unhealthy(view, attempt, exc)
-        warnings = self._after_success(view, target)
+        warnings = ingress + self._after_success(view, target)
         detail = "ok" if not warnings else "ok; warnings=" + ",".join(warnings)
         return self._finish(attempt, "deployed", detail)
 
@@ -1699,7 +1699,9 @@ class Deployer:
                 "BFX_RUNTIME_DIR": str(self.settings.runtime_dir)}
 
     def _compose_up(self, release: Release, target: Target, deployment_id: str,
-                    *, force_recreate: bool = False) -> None:
+                    *, force_recreate: bool = False) -> frozenset[str]:
+        """`up` every service of `release`; returns the services whose container it created
+        (a new container Id), which the deploy holds to their health check."""
         pinned = [(target.backend_image, target.backend_digest)]
         if target.frontend_image is not None or target.frontend_digest is not None:
             pinned.append((target.frontend_image or "", target.frontend_digest or ""))
@@ -1721,14 +1723,31 @@ class Deployer:
             log(f"recreating every service: {', '.join(reasons)}")
         options = ["--detach", "--no-deps", "--remove-orphans",
                    *(["--force-recreate"] if force_recreate or reasons else [])]
+        before = self._container_ids(release)
         self._check(["docker", "compose", "-p", PROJECT, "-f", str(release.compose_file),
                      "up", *options, *release.names],
                     code="compose_up_failed", timeout=600.0,
                     env=self._compose_env(target, deployment_id))
+        after = self._container_ids(release)
+        return frozenset(name for name in release.names
+                         if name not in after or after.get(name) != before.get(name))
+
+    def _container_ids(self, release: Release) -> dict[str, str]:
+        """Each service's current container Id; a service whose container is missing (or
+        docker answering nothing) is left out, which counts as created."""
+        result = self._run(["docker", "inspect", "--type", "container", "--format", "{{.Name}} {{.Id}}",
+                            *release.containers], timeout=60.0)
+        service_of = {service.container: service.name for service in release.services}
+        ids = {}
+        for line in result.stdout.splitlines():
+            name, _, identifier = line.strip().lstrip("/").partition(" ")
+            if name in service_of and identifier:
+                ids[service_of[name]] = identifier
+        return ids
 
     def _recreate_reasons(self, release: Release) -> list[str]:
-        """Why a running container of `release` must be recreated although Compose would keep
-        it: `<service>:netns` when it joins a namespace its provider no longer holds (or a
+        """Why an existing container of `release` must be recreated although Compose would keep
+        it (or only start it again): `<service>:netns` when it joins a namespace its provider no longer holds (or a
         stopped provider, which `up` starts with a new one), `<service>:config` when a file it
         mounts from a release directory differs from this release's. Nothing to judge (no
         container, docker answering nothing) is no verdict: _verify still checks after `up`."""
@@ -1744,11 +1763,13 @@ class Deployer:
         reasons = []
         for service in release.services:
             record = records.get(service.container)
-            if record is None or not (record.get("State") or {}).get("Running"):
+            if record is None:
                 continue
             provider = records.get(by_name[service.joins].container) if service.joins in by_name else None
-            if provider is not None and (not (provider.get("State") or {}).get("Running")
-                                         or netns_stale(record, provider)):
+            # A stopped joiner joins the live namespace when `up` starts it; a stopped
+            # container keeps its mounts, so its config is checked all the same.
+            if provider is not None and (record.get("State") or {}).get("Running") and (
+                    not (provider.get("State") or {}).get("Running") or netns_stale(record, provider)):
                 reasons.append(f"{service.name}:netns")
             for mount in record.get("Mounts") or []:
                 source = Path(str((mount or {}).get("Source", "")))
@@ -1821,10 +1842,19 @@ class Deployer:
             counts[name] = rest
         return counts
 
-    def _wait_healthy(self, release: Release) -> None:
+    def _wait_healthy(self, release: Release, *, gate_ingress: Collection[str] = ()) -> list[str]:
+        """The bot, the web API and the frontend must turn and stay healthy; the ingress
+        services (anything else: the tailnet node) only those in `gate_ingress` -- the ones
+        this deploy created. The tailnet's health never stops or rolls back the bot: an
+        ingress service that was already running, or any during a rollback or --recreate,
+        that is unhealthy is returned as an `ingress_unhealthy:<service>` warning instead.
+        """
         started = self._clock()
         containers = {service.name: service.container for service in release.services}
-        pending = set(release.names)
+        gated = [name for name in release.names
+                 if name in ROLE_CONTAINERS or name == FRONTEND or name in gate_ingress]
+        watched = [containers[name] for name in gated]
+        pending = set(gated)
         while pending:
             for service in sorted(pending):
                 if self._probe(service, containers[service]):
@@ -1841,11 +1871,16 @@ class Deployer:
         before = self._restart_counts(release)
         self._sleep(self.settings.settle_seconds)
         after = self._restart_counts(release)
-        if after != before or any(not value.endswith("true") for value in after.values()):
+        if any(after.get(c) != before.get(c) or not after.get(c, "").endswith("true") for c in watched):
             raise DeployError("restarted_during_settle")
-        unhealthy = [service for service in release.names if not self._probe(service, containers[service])]
+        unhealthy = [service for service in gated if not self._probe(service, containers[service])]
         if unhealthy:
             raise DeployError("unhealthy_after_settle:" + ",".join(unhealthy))
+        warnings = [f"ingress_unhealthy:{name}" for name in release.names
+                    if name not in gated and not self._probe(name, containers[name])]
+        for warning in warnings:
+            self._notify("warning", f"{warning}: the tailnet ingress is down; the bot is unaffected")
+        return warnings
 
     def _stop(self, service: str) -> str:
         """`<service> stopped`, `<service> absent`, or `<SERVICE>_STOP_FAILED`."""
@@ -1898,7 +1933,7 @@ class Deployer:
             raise DeployError("rollback_schema_mismatch")
         self._compose_up(release, target, previous.attempt_id)
         self._verify(release, target, previous.attempt_id)
-        self._wait_healthy(release)
+        self._wait_healthy(release)       # the ingress warns, never fails the rollback
 
     # ------------------------------------------------------------------ recreate
 
@@ -1951,12 +1986,12 @@ class Deployer:
         try:
             self._compose_up(release, target, attempt.attempt_id, force_recreate=True)
             self._verify(release, target, attempt.attempt_id)
-            self._wait_healthy(release)
+            ingress = self._wait_healthy(release)    # the ingress warns, never stops the bot
         except DeployError as exc:
             stopped = self._stop("bot")
             return self._finish(attempt, "failed", f"unhealthy:{exc.code}; recreate has no rollback; "
                                 f"{stopped}; fix the runtime env and --recreate")
-        return self._finish(attempt, "deployed", "ok")
+        return self._finish(attempt, "deployed", "ok" if not ingress else "ok; warnings=" + ",".join(ingress))
 
     # ------------------------------------------------------------------ after success
 
