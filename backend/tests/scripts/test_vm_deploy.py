@@ -43,26 +43,22 @@ def _load(name: str, path: Path) -> ModuleType:
 bfx = _load("vm_ops_bfx_deploy_under_test", ROOT / "deploy/vm/ops/bfx_deploy.py")
 
 BACKEND = "ghcr.io/will413028/bfx-funding-bot-backend"
-FRONTEND = "ghcr.io/will413028/bfx-funding-bot-frontend"
 REV_OLD = "a" * 40
 REV_NEW = "b" * 40
-OLD_B, OLD_F = "sha256:" + "1" * 64, "sha256:" + "2" * 64
-NEW_B, NEW_F = "sha256:" + "3" * 64, "sha256:" + "4" * 64
+OLD_B = "sha256:" + "1" * 64
+NEW_B = "sha256:" + "3" * 64
 OLD_ATTEMPT = "11111111-1111-4111-8111-111111111111"
 CI_RUN = "https://github.com/Will413028/bfx-funding-bot/actions/runs/123456789"
 REAL_COMPOSE_TEXT = (ROOT / "deploy/vm/docker-compose.app.yml").read_text(encoding="utf-8")
 FIXTURES = Path(__file__).parent / "fixtures"
-# The release shapes the deployer still meets as rollback targets, frozen from main: before
-# 9d-4 (bot, webapi, frontend; most tests vary this one) and 9d-4 (plus the ingress, the
-# web API still on bfx_default). The real file (9d-5: the web API in the holder's
-# namespace, no frontend) is deployed on its own (test_the_real_release_file_deploys...).
+# Earlier release shapes, frozen from main without their frontend service (9d-5 removed
+# it): before 9d-4 (bot and webapi only; most tests vary this one) and 9d-4 (plus the
+# ingress, the web API still on bfx_default). The real file (9d-5: the web API in the
+# holder's namespace) is deployed on its own (test_the_real_release_file_deploys...).
 COMPOSE_TEXT = (FIXTURES / "docker-compose.app.pre-9d4.yml").read_text(encoding="utf-8")
 INGRESS_9D4_TEXT = (FIXTURES / "docker-compose.app.9d4.yml").read_text(encoding="utf-8")
 assert "tailscale" not in COMPOSE_TEXT.partition("\nservices:")[2]
 LIVE_ENV_TEXT = (ROOT / "deploy/vm/live.env").read_text(encoding="utf-8")
-# From 9d-5 the compose file has no frontend service (and CI builds no frontend image).
-NO_FRONTEND_TEXT = COMPOSE_TEXT[:COMPOSE_TEXT.index("  frontend:\n")] \
-    + COMPOSE_TEXT[COMPOSE_TEXT.index("networks:\n  bfx_default:\n    external"):]
 TAILSCALE = "docker.io/tailscale/tailscale@sha256:" + "c" * 64
 SERVE_PATH = "deploy/vm/tailscale/serve.json"
 # The 9d-4 shape in miniature: a third-party sidecar and a file-backed config.
@@ -94,7 +90,7 @@ HOLDER = f"""  netns:
 
 """
 CONFIGS = "configs:\n  ts-serve:\n    file: ./tailscale/serve.json\n"
-CONTAINER_NAMES = {"bot": "bfx-bot", "webapi": "bfx-webapi", "frontend": "bfx-frontend",
+CONTAINER_NAMES = {"bot": "bfx-bot", "webapi": "bfx-webapi",
                    "tailscale": "bfx-tailscale", "netns": "bfx-netns"}
 SERVICE_OF = {container: service for service, container in CONTAINER_NAMES.items()}
 
@@ -110,9 +106,10 @@ def with_holder(text: str) -> str:
 
 
 # The 9d-5 shape: the web API runs in the holder's network namespace.
-WEBAPI_NETWORKS = "    networks:\n      bfx_default: {}\n\n  frontend:"
-JOINED_TEXT = with_holder(COMPOSE_TEXT).replace(
-    WEBAPI_NETWORKS, "    network_mode: service:netns\n\n  frontend:")
+WEBAPI_NETWORKS = "    networks:\n      bfx_default: {}\n\nnetworks:\n"
+assert COMPOSE_TEXT.count(WEBAPI_NETWORKS) == 1
+JOINED_TEXT = with_holder(COMPOSE_TEXT.replace(
+    WEBAPI_NETWORKS, "    network_mode: service:netns\n\nnetworks:\n"))
 assert JOINED_TEXT.count("network_mode: service:netns") == 1
 
 
@@ -172,13 +169,11 @@ class FakeRegistry:
     def __init__(self) -> None:
         self.refs = {
             f"{BACKEND}:main": NEW_B, f"{BACKEND}:sha-{REV_NEW}": NEW_B,
-            f"{FRONTEND}:sha-{REV_NEW}": NEW_F,
-            f"{BACKEND}:sha-{REV_OLD}": OLD_B, f"{FRONTEND}:sha-{REV_OLD}": OLD_F,
+            f"{BACKEND}:sha-{REV_OLD}": OLD_B,
         }
         self.labels: dict[str, dict[str, str]] = {
             NEW_B: {bfx.REVISION_LABEL: REV_NEW, bfx.CI_RUN_LABEL: CI_RUN},
-            NEW_F: {bfx.REVISION_LABEL: REV_NEW},
-            OLD_B: {bfx.REVISION_LABEL: REV_OLD}, OLD_F: {bfx.REVISION_LABEL: REV_OLD},
+            OLD_B: {bfx.REVISION_LABEL: REV_OLD},
         }
         self.inspected: list[str] = []
 
@@ -196,12 +191,11 @@ class FakeLedger:
         self.rows: list[Any] = []
         self.fail_append: set[str] = set()  # outcomes whose append fails
 
-    def seed(self, revision: str, backend: str, frontend: str, outcome: str,
-             attempt_id: str = OLD_ATTEMPT) -> None:
+    def seed(self, revision: str, backend: str, outcome: str, attempt_id: str = OLD_ATTEMPT) -> None:
         self.rows.append(bfx.LedgerEntry(
             attempt_id=attempt_id,
             started_at="2026-09-24T00:00:00+00:00", finished_at="2026-09-24T00:01:00+00:00",
-            source_revision=revision, backend_digest=backend, frontend_digest=frontend,
+            source_revision=revision, backend_digest=backend,
             migrations_applied=False, outcome=outcome, detail="seed"))
 
     def _row(self, index: int) -> Any:
@@ -209,7 +203,6 @@ class FakeLedger:
         return bfx.LedgerRow(id=index + 1, attempt_id=entry.attempt_id,
                              source_revision=entry.source_revision,
                              backend_digest=entry.backend_digest,
-                             frontend_digest=entry.frontend_digest,
                              outcome=entry.outcome,
                              migrations_applied=entry.migrations_applied, ci_run=entry.ci_run)
 
@@ -317,13 +310,11 @@ class FakeHost:
             for path, text in TOOLING.items():
                 self.files[(revision, path)] = text
         self.diffs.setdefault((REV_OLD, REV_NEW), ["docs/runbooks/offsite-dr.md"])
-        self.start_release(REV_OLD, OLD_B, OLD_F, OLD_ATTEMPT)
+        self.start_release(REV_OLD, OLD_B, OLD_ATTEMPT)
 
-    def start_release(self, revision: str, backend: str, frontend: str, deployment_id: str) -> None:
+    def start_release(self, revision: str, backend: str, deployment_id: str) -> None:
         for service in ("bot", "webapi"):
             self.running[service] = (f"{BACKEND}@{backend}", backend, revision, deployment_id)
-        self.running["frontend"] = (f"{FRONTEND}@{frontend}", frontend, revision, deployment_id)
-        for service in ("bot", "webapi", "frontend"):
             self.create(service)
 
     def _tick(self) -> int:
@@ -437,11 +428,6 @@ class FakeHost:
         if call[:2] in {("docker", "tag"), ("docker", "rm")} or call[:3] == ("docker", "image", "rm"):
             return ok
         raise AssertionError(f"unexpected command: {call}")
-
-    def frontend_status(self, url: str, timeout: float) -> int:
-        assert url == "http://127.0.0.1:3001/"
-        running = self.running.get("frontend")
-        return 200 if running and running[1] not in self.unhealthy else 503
 
     def _git(self, where: Path, args: tuple[str, ...]) -> Any:
         if where != self.mirror:
@@ -588,7 +574,7 @@ class FakeHost:
                 self.running[service] = (image, "", "", "")
             else:
                 digest = image.rpartition("@")[2]
-                assert digest in {env["BFX_BACKEND_DIGEST"], env.get("BFX_FRONTEND_DIGEST")}
+                assert digest == env["BFX_BACKEND_DIGEST"]
                 self.running[service] = (image, digest, *identity)
         return bfx.CommandResult(0, "", "")
 
@@ -651,7 +637,7 @@ class Harness:
         return bfx.Deployer(
             settings, runner=self.host, registry=self.registry, ledger=self.ledger,
             notify=lambda level, text: self.notices.append((level, text)),
-            clock=self.clock.time, sleep=self.clock.sleep, http=self.host.frontend_status,
+            clock=self.clock.time, sleep=self.clock.sleep,
             secret_check=lambda path: None,
         )
 
@@ -662,7 +648,6 @@ class Harness:
 VALID_ENV = {
     "bot.env": "DATABASE_URL=postgresql://bfx_bot:x@bfx-postgres:5432/bfx\nBFX_ADMIN_TOKEN=t\n",
     "webapi.env": "DATABASE_URL=postgresql://bfx_webapi:x@bfx-postgres:5432/bfx\n",
-    "frontend.env": "DATABASE_URL=postgresql://bfx_webauth:x@bfx-postgres:5432/bfx\n",
     "migrate.env": "DATABASE_URL=postgresql://bfx:x@bfx-postgres:5432/bfx\n",
 }
 
@@ -683,7 +668,7 @@ def harness(tmp_path: Path) -> Harness:
         uv="uv", backup_user="ubuntu", restore_evidence=tmp_path / "dr-evidence/restore-ledger.json",
     )
     ledger = FakeLedger()
-    ledger.seed(REV_OLD, OLD_B, OLD_F, "deployed")
+    ledger.seed(REV_OLD, OLD_B, "deployed")
     host = FakeHost(mirror=mirror, dr_root=settings.dr_root,
                     restore_evidence=settings.restore_evidence)
     return Harness(host=host, registry=FakeRegistry(),
@@ -725,7 +710,7 @@ def _started(harness: Harness) -> list[Any]:
 
 
 def test_nothing_happens_when_main_already_runs(harness: Harness) -> None:
-    harness.ledger.seed(REV_NEW, NEW_B, NEW_F, "deployed", attempt_id="n")
+    harness.ledger.seed(REV_NEW, NEW_B, "deployed", attempt_id="n")
     rows = len(harness.ledger.rows)
     assert harness.run() == 0
     assert harness.host.calls == [NETNS_INSPECT]       # no holder yet: nothing else
@@ -735,7 +720,7 @@ def test_nothing_happens_when_main_already_runs(harness: Harness) -> None:
 @pytest.mark.parametrize("outcome", ["rolled_back", "failed", "started"])
 def test_a_digest_already_attempted_is_not_retried_every_tick(harness: Harness, outcome: str) -> None:
     # `started` without a terminal row: the attempt was interrupted (crash, kill).
-    harness.ledger.seed(REV_NEW, NEW_B, NEW_F, outcome, attempt_id="n")
+    harness.ledger.seed(REV_NEW, NEW_B, outcome, attempt_id="n")
     assert harness.run() == 0
     assert harness.host.calls == ([NETNS_INSPECT] if outcome == "rolled_back" else [])
     assert harness.notices == []
@@ -763,14 +748,14 @@ def test_release_without_migration_deploys_by_digest(harness: Harness) -> None:
     env = host.envs[host.index(COMPOSE_UP)]
     assert env is not None
     assert env["BFX_BACKEND_IMAGE"] == f"{BACKEND}@{NEW_B}"
-    assert env["BFX_FRONTEND_IMAGE"] == f"{FRONTEND}@{NEW_F}"
+    assert not any(key.startswith("BFX_FRONTEND") for key in env)
     assert env["BFX_SOURCE_REVISION"] == REV_NEW and "BFX_CHANGE_CLASS" not in env
     # Compose reads the env files bfx-deploy validated, not a separate default.
     assert env["BFX_RUNTIME_DIR"] == str(harness.settings.runtime_dir)
     row = harness.ledger.last
     assert (row.outcome, row.migrations_applied) == ("deployed", False)
     assert "class=" not in row.detail and "class=" not in harness.notices[-1][1]
-    assert (row.backend_digest, row.frontend_digest, row.source_revision) == (NEW_B, NEW_F, REV_NEW)
+    assert (row.backend_digest, row.source_revision) == (NEW_B, REV_NEW)
     assert harness.notices[-1][0] == "info"
     assert host.stopped == []
     assert host.count(_is(("docker", "tag", f"{BACKEND}@{NEW_B}", "bfx-bot:local"))) == 1
@@ -792,10 +777,8 @@ def test_started_row_precedes_the_containers_and_names_their_deployment_id(harne
     assert ledger_rows_at_compose == [len(harness.ledger.rows) - 1]  # started row already there
     assert started.attempt_id == finished.attempt_id
     assert started.finished_at is None and finished.finished_at is not None
-    assert (started.source_revision, started.backend_digest, started.frontend_digest,
-            started.started_at) == (
-        finished.source_revision, finished.backend_digest, finished.frontend_digest,
-        finished.started_at)
+    assert (started.source_revision, started.backend_digest, started.started_at) == (
+        finished.source_revision, finished.backend_digest, finished.started_at)
     env = harness.host.envs[harness.host.index(COMPOSE_UP)]
     assert env is not None and env["BFX_DEPLOYMENT_ID"] == started.attempt_id
     assert harness.host.running["bot"][3] == started.attempt_id
@@ -850,7 +833,8 @@ def test_pull_uses_a_throwaway_docker_config_when_credentials_exist(harness: Har
     deployer = harness.deployer()
     deployer._registry_credentials = ("will413028", "ghp_token")
     assert deployer.run() == 0
-    assert len(harness.host.docker_configs) == 2
+    assert harness.host.pulls == [(f"{BACKEND}@{NEW_B}", True)]
+    assert len(harness.host.docker_configs) == 1
     assert set(harness.host.docker_configs[0]["auths"]) == {"ghcr.io"}
     leftovers = list((harness.settings.state_dir).glob("docker-auth-*"))
     assert leftovers == []
@@ -1195,13 +1179,13 @@ def test_a_restore_test_first_drops_other_digests_so_the_candidate_is_unambiguou
     host = harness.host
     host.current = ("h1",)
     stale = "sha256:" + "9" * 64
-    host.local_digests = {BACKEND: [OLD_B, NEW_B, stale], FRONTEND: [OLD_F, NEW_F]}
+    host.local_digests = {BACKEND: [OLD_B, NEW_B, stale]}
     assert harness.run() == 0
     removed = host.index(_is(("docker", "image", "rm", f"{BACKEND}@{stale}")))
     assert removed < host.index(RESTORE_TEST)
     assert not any(call[:3] == ("docker", "image", "rm") and call[-1].endswith(digest)
                    for call in host.calls[:host.index(RESTORE_TEST)]
-                   for digest in (OLD_B, NEW_B, OLD_F, NEW_F))
+                   for digest in (OLD_B, NEW_B))
 
 
 def test_a_failed_rehearsal_without_a_migration_leaves_the_running_release_alone(
@@ -1345,7 +1329,6 @@ def test_unhealthy_release_without_migration_rolls_back_to_previous_digests(harn
     rollback_env = host.envs[ups[1]]
     assert rollback_env is not None
     assert rollback_env["BFX_BACKEND_IMAGE"] == f"{BACKEND}@{OLD_B}"
-    assert rollback_env["BFX_FRONTEND_IMAGE"] == f"{FRONTEND}@{OLD_F}"
     assert rollback_env["BFX_SOURCE_REVISION"] == REV_OLD
     # The previous release comes back under its own deployment id.
     assert rollback_env["BFX_DEPLOYMENT_ID"] == OLD_ATTEMPT and "BFX_CHANGE_CLASS" not in rollback_env
@@ -1378,7 +1361,7 @@ def test_unhealthy_release_after_migration_stops_the_bot_and_webapi_without_roll
 
 def test_unhealthy_first_deployment_stops_the_bot(harness: Harness) -> None:
     harness.ledger.rows.clear()
-    harness.host.unhealthy = {NEW_F}
+    harness.host.unhealthy = {NEW_B}
     assert harness.run() == 1
     assert harness.host.count(COMPOSE_UP) == 1
     assert harness.host.stopped == ["bfx-bot"]
@@ -1426,11 +1409,13 @@ def test_compose_failure_on_rollback_too_stops_the_bot(harness: Harness) -> None
 
 
 def test_health_timeout_waits_the_configured_budget_then_rolls_back(harness: Harness) -> None:
-    harness.host.unhealthy = {NEW_F}
+    harness.host.unhealthy = {NEW_B}
     start = harness.clock.now
     assert harness.run() == 1
-    assert "health_timeout:frontend" in harness.ledger.last.detail
-    assert harness.clock.now - start >= harness.settings.health_timeouts["frontend"]
+    row = harness.ledger.last
+    # The web API's budget (120 s) runs out before the bot's (300 s).
+    assert row.outcome == "rolled_back" and "health_timeout:webapi" in row.detail
+    assert harness.clock.now - start >= harness.settings.health_timeouts["webapi"]
 
 
 @pytest.mark.parametrize("setup", [
@@ -1447,7 +1432,7 @@ def test_a_deploy_without_a_migration_never_stops_the_webapi(harness: Harness, s
         host.unhealthy = {NEW_B, OLD_B}
     elif setup == "first_deployment":
         harness.ledger.rows.clear()
-        host.unhealthy = {NEW_F}
+        host.unhealthy = {NEW_B}
     elif setup == "recreate_failed":
         host.unhealthy = {OLD_B}
     harness.run(recreate=setup == "recreate_failed")
@@ -1487,49 +1472,35 @@ def _release(harness: Harness, revision: str = REV_NEW) -> Path:
     return harness.settings.state_dir / "releases" / revision
 
 
-def _without_frontend(harness: Harness, revision: str = REV_NEW) -> None:
-    """A 9d-5-style release: no frontend service, and CI built no frontend image."""
-    harness.host.files[(revision, bfx.COMPOSE_PATH)] = NO_FRONTEND_TEXT
-    harness.registry.refs.pop(f"{FRONTEND}:sha-{revision}")
+# The 9d-4 frontend's service, as a release that brought one back would name it.
+FRONTEND_IMAGE = "ghcr.io/will413028/bfx-funding-bot-frontend@sha256:" + "4" * 64
+FRONTEND_SERVICE = f"""  frontend:
+    image: {FRONTEND_IMAGE}
+    pull_policy: never
+    container_name: bfx-frontend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "true"]
+    networks:
+      bfx_default: {{}}
+
+"""
 
 
-def test_a_release_without_a_frontend_deploys_and_removes_the_old_frontend(harness: Harness) -> None:
-    _without_frontend(harness)
-    # Its env file is not the release's any more: an unreadable one blocks nothing.
-    (harness.settings.runtime_dir / "frontend.env").write_text("BROKEN='quoted'\n")
-    assert harness.run() == 0
-    host = harness.host
-    up = host.calls[host.index(COMPOSE_UP)]
-    assert up[-2:] == ("bot", "webapi") and "--remove-orphans" in up
-    assert "frontend" not in host.running          # the orphan went with --remove-orphans
-    env = host.envs[host.index(COMPOSE_UP)]
-    assert env is not None and "BFX_FRONTEND_IMAGE" not in env
-    row = harness.ledger.last
-    assert (row.outcome, row.frontend_digest) == ("deployed", None)
-    assert [s.frontend_digest for s in _started(harness)] == [None]
-    assert all(image != f"{FRONTEND}@{NEW_F}" for image, _ in host.pulls)
-
-
-def test_a_release_with_a_frontend_still_deploys_all_three(harness: Harness) -> None:
-    assert harness.run() == 0
-    host = harness.host
-    assert host.calls[host.index(COMPOSE_UP)][-3:] == ("bot", "frontend", "webapi")
-    assert harness.ledger.last.frontend_digest == NEW_F
-
-
-def test_rollback_to_a_release_with_a_frontend_brings_it_back(harness: Harness) -> None:
-    _without_frontend(harness)
-    harness.host.unhealthy = {NEW_B}
+def test_a_release_with_a_frontend_service_is_refused_before_any_change(harness: Harness) -> None:
+    """9d-5 removed the frontend and 9d-6 its transitional support: a frontend image is no
+    image of the release's own, so its compose file is refused like any other."""
+    at = COMPOSE_TEXT.index("networks:\n  bfx_default:\n    external")
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = COMPOSE_TEXT[:at] + FRONTEND_SERVICE + COMPOSE_TEXT[at:]
+    running = dict(harness.host.running)
     assert harness.run() == 1
-    assert harness.ledger.last.outcome == "rolled_back"
-    assert harness.host.running["frontend"] == (f"{FRONTEND}@{OLD_F}", OLD_F, REV_OLD, OLD_ATTEMPT)
-
-
-def test_a_frontend_image_of_a_release_without_a_frontend_is_not_recorded(harness: Harness) -> None:
-    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = NO_FRONTEND_TEXT
-    assert harness.run() == 0
-    assert harness.ledger.last.frontend_digest is None
-    assert all(image != f"{FRONTEND}@{NEW_F}" for image, _ in harness.host.pulls)
+    row = harness.ledger.last
+    assert (row.outcome, row.detail) == (
+        "failed", "precheck:compose_image_not_allowed:frontend; running release untouched")
+    assert _bot_untouched(harness) and harness.host.running == running
+    assert harness.host.count(PULL) == harness.host.count(COMPOSE_UP) == 0
+    assert not any(ref.startswith("ghcr.io/will413028/bfx-funding-bot-frontend")
+                   for ref in harness.registry.inspected)
 
 
 def test_env_files_are_the_ones_the_release_compose_file_names(harness: Harness) -> None:
@@ -1548,8 +1519,7 @@ def test_env_files_are_the_ones_the_release_compose_file_names(harness: Harness)
     (harness.settings.runtime_dir / "tailscale.env").write_text("TS_HOSTNAME=bfx-ops\n")
     assert deployer.run() == 0
     runtime = harness.settings.runtime_dir
-    assert sorted(p.name for p in checked) == ["bot.env", "frontend.env", "migrate.env",
-                                               "tailscale.env", "webapi.env"]
+    assert sorted(p.name for p in checked) == ["bot.env", "migrate.env", "tailscale.env", "webapi.env"]
     assert all(p.parent == runtime for p in checked)
 
 
@@ -1586,9 +1556,8 @@ def test_a_third_party_image_is_pulled_by_digest_without_the_registry_token(harn
     deployer._registry_credentials = ("will", "ghcr-token")
     assert deployer.run() == 0
     host = harness.host
-    assert sorted(host.pulls) == sorted([(f"{BACKEND}@{NEW_B}", True), (f"{FRONTEND}@{NEW_F}", True),
-                                         (TAILSCALE, False)])
-    assert host.calls[host.index(COMPOSE_UP)][-4:] == ("bot", "frontend", "tailscale", "webapi")
+    assert sorted(host.pulls) == sorted([(f"{BACKEND}@{NEW_B}", True), (TAILSCALE, False)])
+    assert host.calls[host.index(COMPOSE_UP)][-3:] == ("bot", "tailscale", "webapi")
     assert host.running["tailscale"][0] == TAILSCALE
     # bfx-deploy verified it like the others (name, project, image), without identity env.
     inspected = host.calls[host.index(_is(("docker", "inspect", "--type", "container", "bfx-bot")))]
@@ -1621,7 +1590,6 @@ def test_the_real_release_file_deploys_the_ingress_beside_the_app(harness: Harne
     assert (TAILSCALE, False) in host.pulls
     for joiner in ("tailscale", "webapi"):
         assert host.meta[joiner]["NetworkMode"] == "container:" + host.meta["netns"]["Id"]
-    assert "frontend" not in host.running                          # the orphan, removed
     assert (_release(harness) / "tailscale/serve.json").read_text() == serve
     assert harness.ledger.last.outcome == "deployed"
 
@@ -1914,7 +1882,7 @@ def test_the_cutover_moves_the_web_api_into_the_holder_without_restarting_the_in
     assert "--force-recreate" not in host.calls[host.index(COMPOSE_UP)]
     assert (host.meta["tailscale"]["Id"], host.meta["netns"]["Id"]) == (sidecar, holder)
     assert host.meta["webapi"]["NetworkMode"] == "container:" + holder
-    assert "frontend" not in host.running and harness.ledger.last.outcome == "deployed"
+    assert harness.ledger.last.outcome == "deployed"
 
 
 def test_a_third_party_container_on_another_image_fails_the_deploy(
@@ -1938,12 +1906,12 @@ def test_a_third_party_container_on_another_image_fails_the_deploy(
 
 def test_pruning_never_removes_a_third_party_image(harness: Harness) -> None:
     harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT, configs=False)
-    harness.host.local_digests = {BACKEND: [OLD_B, NEW_B, "sha256:" + "8" * 64], FRONTEND: [OLD_F, NEW_F]}
+    harness.host.local_digests = {BACKEND: [OLD_B, NEW_B, "sha256:" + "8" * 64]}
     assert harness.run() == 0
     removed = [call[-1] for call in harness.host.calls if call[:3] == ("docker", "image", "rm")]
     assert removed == [f"{BACKEND}@sha256:" + "8" * 64]
     listed = [call[-1] for call in harness.host.calls if call[:3] == ("docker", "image", "ls")]
-    assert set(listed) == {BACKEND, FRONTEND}
+    assert listed == [BACKEND]
 
 
 @pytest.mark.parametrize("image", [
@@ -2041,7 +2009,7 @@ def test_a_config_tracked_as_a_symlink_is_refused(harness: Harness) -> None:
 
 
 def test_a_foreign_frontend_does_not_block_a_release_without_one(harness: Harness) -> None:
-    _without_frontend(harness)
+    """Only a name the release's own containers take is refused (a launcher-era leftover)."""
     harness.host.foreign = ["bfx-frontend"]
     assert harness.run() == 0
     assert harness.ledger.last.outcome == "deployed"
@@ -2087,7 +2055,7 @@ def test_the_web_api_and_the_holder_it_joins_are_created_in_one_up(harness: Harn
     assert harness.run() == 0
     host = harness.host
     assert host.count(COMPOSE_UP) == 1
-    assert host.calls[host.index(COMPOSE_UP)][-4:] == ("bot", "frontend", "netns", "webapi")
+    assert host.calls[host.index(COMPOSE_UP)][-3:] == ("bot", "netns", "webapi")
     assert host.meta["webapi"]["NetworkMode"] == "container:" + host.meta["netns"]["Id"]
     assert harness.ledger.last.outcome == "deployed"
 
@@ -2197,7 +2165,7 @@ def test_a_dead_namespace_is_repaired_by_recreating_the_web_api_alone(harness: H
 def test_the_already_attempted_branch_repairs_too(harness: Harness) -> None:
     _joined(harness)
     harness.registry.refs[f"{BACKEND}:main"] = NEW_B
-    harness.ledger.seed(REV_NEW, NEW_B, NEW_F, "rolled_back", attempt_id="n")
+    harness.ledger.seed(REV_NEW, NEW_B, "rolled_back", attempt_id="n")
     _break(harness, "restarted")
     assert harness.run() == 0
     assert harness.host.count(_repair) == 1 and harness.host.count(COMPOSE_UP) == 1
@@ -2208,7 +2176,7 @@ def test_no_repair_after_a_failed_or_interrupted_attempt(harness: Harness, outco
     # A failed migration path keeps the bot and the web API stopped on purpose.
     _joined(harness)
     harness.registry.refs[f"{BACKEND}:main"] = NEW_B
-    harness.ledger.seed(REV_NEW, NEW_B, NEW_F, outcome, attempt_id="n")
+    harness.ledger.seed(REV_NEW, NEW_B, outcome, attempt_id="n")
     _break(harness, "recreated")
     assert harness.run() == 0
     assert harness.host.calls == []
@@ -2481,8 +2449,7 @@ def test_recreate_redeploys_the_running_release_through_the_ledger(harness: Harn
     assert "--force-recreate" in compose
     env = host.envs[host.index(COMPOSE_UP)]
     assert env is not None
-    assert (env["BFX_BACKEND_DIGEST"], env["BFX_FRONTEND_DIGEST"], env["BFX_SOURCE_REVISION"]) == (
-        OLD_B, OLD_F, REV_OLD)
+    assert (env["BFX_BACKEND_DIGEST"], env["BFX_SOURCE_REVISION"]) == (OLD_B, REV_OLD)
     assert "BFX_CHANGE_CLASS" not in env
     started, finished = harness.ledger.rows[-2:]
     assert (started.outcome, finished.outcome) == ("started", "deployed")
@@ -2513,10 +2480,9 @@ def test_recreate_refuses_without_a_deployment_or_with_a_pending_schema(harness:
 
 
 def test_release_not_yet_fully_published_is_retried_and_alerted_once(harness: Harness) -> None:
-    del harness.registry.refs[f"{FRONTEND}:sha-{REV_NEW}"]
+    del harness.registry.refs[f"{BACKEND}:sha-{REV_NEW}"]
     rows = len(harness.ledger.rows)
     assert harness.run() == 1
-    # Whether the revision needs a frontend image is its compose file's call: it does.
     assert harness.host.count(PULL) == harness.host.count(COMPOSE_UP) == 0
     assert harness.notices == []
     harness.clock.now += harness.settings.discovery_alert_after + 1
@@ -2525,7 +2491,7 @@ def test_release_not_yet_fully_published_is_retried_and_alerted_once(harness: Ha
     assert harness.run() == 1
     assert len(harness.notices) == 1
     assert len(harness.ledger.rows) == rows
-    harness.registry.refs[f"{FRONTEND}:sha-{REV_NEW}"] = NEW_F
+    harness.registry.refs[f"{BACKEND}:sha-{REV_NEW}"] = NEW_B
     assert harness.run() == 0
     assert harness.notices[1][0] == "info"
     assert not (harness.settings.state_dir / "discovery-failure.json").exists()
@@ -2533,11 +2499,10 @@ def test_release_not_yet_fully_published_is_retried_and_alerted_once(harness: Ha
 
 @pytest.mark.parametrize("mutate", [
     lambda r: r.refs.__setitem__(f"{BACKEND}:sha-{REV_NEW}", "sha256:" + "9" * 64),
-    lambda r: r.labels[NEW_F].__setitem__(bfx.REVISION_LABEL, REV_OLD),
     lambda r: r.labels[NEW_B].pop(bfx.REVISION_LABEL),
 ])
-def test_main_tag_revision_tag_and_frontend_must_agree(harness: Harness,
-                                                       mutate: Callable[[FakeRegistry], None]) -> None:
+def test_main_tag_and_revision_tag_must_agree(harness: Harness,
+                                              mutate: Callable[[FakeRegistry], None]) -> None:
     mutate(harness.registry)
     assert harness.run() == 1
     assert harness.host.calls == []
@@ -2561,7 +2526,7 @@ def test_unexpected_exception_alerts_instead_of_dying_silently(harness: Harness)
 
 def test_dry_run_reports_the_plan_and_changes_nothing(harness: Harness, capsys: pytest.CaptureFixture[str]) -> None:
     harness.host.current = ("h1",)
-    harness.host.foreign = ["bfx-bot", "bfx-webapi", "bfx-frontend"]
+    harness.host.foreign = ["bfx-bot", "bfx-webapi"]
     rows = len(harness.ledger.rows)
     assert harness.run(dry_run=True) == 0
     host = harness.host
@@ -2575,31 +2540,28 @@ def test_dry_run_reports_the_plan_and_changes_nothing(harness: Harness, capsys: 
     assert plan["restore_test_before_deploy"] == "migration_pending"
     assert harness.host.count(RESTORE_TEST) == 0
     assert plan["rollback_target"] == REV_OLD
-    assert not {"change_class", "class_detail"} & set(plan)
-    assert plan["blockers"] == [f"foreign_container_holds_name:{n}"
-                                for n in ("bfx-bot", "bfx-webapi", "bfx-frontend")]
+    assert not {"change_class", "class_detail", "frontend_image"} & set(plan)
+    assert plan["blockers"] == [f"foreign_container_holds_name:{n}" for n in ("bfx-bot", "bfx-webapi")]
 
 
 # --------------------------------------------------------------------------- container check unit
 
 
 def _target() -> Any:
-    return bfx.Target(REV_NEW, NEW_B, NEW_F, f"{BACKEND}@{NEW_B}", f"{FRONTEND}@{NEW_F}")
+    return bfx.Target(REV_NEW, NEW_B, f"{BACKEND}@{NEW_B}")
 
 
 def _mismatches(record: dict[str, Any], service: str, target: Any, deployment_id: str) -> list[str]:
-    image = target.frontend_image if service == "frontend" else target.backend_image
+    image = target.backend_image
     return list(bfx.container_mismatches(
         record, container=CONTAINER_NAMES[service], image=image,
         identity=bfx.identity_env(target, image=image, deployment_id=deployment_id)))
 
 
-@pytest.mark.parametrize("service", ["bot", "webapi", "frontend"])
+@pytest.mark.parametrize("service", ["bot", "webapi"])
 def test_container_running_the_recorded_release_has_no_mismatch(service: str) -> None:
     target = _target()
-    backend = service != "frontend"
-    running = (target.backend_image if backend else target.frontend_image,
-               NEW_B if backend else NEW_F, REV_NEW, "dep-1")
+    running = (target.backend_image, NEW_B, REV_NEW, "dep-1")
     assert _mismatches(inspect_record(service, running), service, target, "dep-1") == []
 
 
@@ -2630,16 +2592,16 @@ def test_a_third_party_container_is_checked_by_name_project_and_image_alone() ->
 @pytest.mark.parametrize(("mutate", "mismatch"), [
     (lambda r: r.__setitem__("Name", "/other"), "name"),
     (lambda r: r["Config"].__setitem__("Labels", {}), "project"),
-    (lambda r: r["Config"].__setitem__("Image", f"{FRONTEND}@{NEW_B}"), "image"),
-    (lambda r: r["Config"]["Env"].__setitem__(0, "BFX_IMAGE_DIGEST=" + NEW_B), "identity_env"),
+    (lambda r: r["Config"].__setitem__("Image", f"{BACKEND}@{OLD_B}"), "image"),
+    (lambda r: r["Config"]["Env"].__setitem__(0, "BFX_IMAGE_DIGEST=" + OLD_B), "identity_env"),
     (lambda r: r["Config"]["Env"].__setitem__(1, "BFX_SOURCE_REVISION=" + REV_OLD), "identity_env"),
     (lambda r: r["Config"]["Env"].__setitem__(2, "BFX_DEPLOYMENT_ID=other"), "identity_env"),
 ])
 def test_each_release_mismatch_is_reported(mutate: Callable[[dict[str, Any]], None], mismatch: str) -> None:
     target = _target()
-    record = inspect_record("frontend", (target.frontend_image, NEW_F, REV_NEW, "dep-1"))
+    record = inspect_record("webapi", (target.backend_image, NEW_B, REV_NEW, "dep-1"))
     mutate(record)
-    assert mismatch in _mismatches(record, "frontend", target, "dep-1")
+    assert mismatch in _mismatches(record, "webapi", target, "dep-1")
 
 
 # --------------------------------------------------------------------------- imagetools registry
@@ -2684,12 +2646,12 @@ def test_imagetools_reads_the_index_digest_and_the_arm64_labels() -> None:
 
 
 def test_imagetools_reads_a_single_platform_manifest() -> None:
-    single = json.dumps({"manifest": {"digest": NEW_F},
+    single = json.dumps({"manifest": {"digest": NEW_B},
                          "image": {"architecture": "arm64", "config": {"Labels": {bfx.REVISION_LABEL: REV_NEW}}}})
-    runner, _ = _imagetools({f"{FRONTEND}@{NEW_F}": (0, single, "")})
+    runner, _ = _imagetools({f"{BACKEND}@{NEW_B}": (0, single, "")})
     info = bfx.ImagetoolsRegistry(runner, lambda: __import__("contextlib").nullcontext({})).inspect(
-        f"{FRONTEND}@{NEW_F}")
-    assert (info.digest, info.labels[bfx.REVISION_LABEL]) == (NEW_F, REV_NEW)
+        f"{BACKEND}@{NEW_B}")
+    assert (info.digest, info.labels[bfx.REVISION_LABEL]) == (NEW_B, REV_NEW)
 
 
 @pytest.mark.parametrize(("output", "code"), [
@@ -2723,7 +2685,7 @@ def test_psql_ledger_passes_values_as_psql_variables_never_as_sql() -> None:
     detail = "unhealthy:x'; DROP TABLE deployments; --"
     ledger_id = ledger.append(bfx.LedgerEntry(
         attempt_id=OLD_ATTEMPT, started_at="2026-09-25T00:00:00+00:00", finished_at=None,
-        source_revision=REV_NEW, backend_digest=NEW_B, frontend_digest=NEW_F,
+        source_revision=REV_NEW, backend_digest=NEW_B,
         migrations_applied=True, outcome="started", detail=detail))
     assert ledger_id == 7
     assert seen["argv"][:6] == ["docker", "exec", "-i", "--user", "postgres", "bfx-postgres"]
@@ -2731,6 +2693,8 @@ def test_psql_ledger_passes_values_as_psql_variables_never_as_sql() -> None:
     assert detail not in seen["sql"] and ":'detail'" in seen["sql"]
     # The retired change_class column is never written (left NULL until it is dropped).
     assert "change_class" not in seen["sql"]
+    # frontend_digest is history: written NULL, never from a variable.
+    assert not any(str(arg).startswith("frontend_digest=") for arg in seen["argv"])
     assert not any(arg.startswith("change_class=") for arg in seen["argv"])
 
 

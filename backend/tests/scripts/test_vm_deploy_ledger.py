@@ -66,7 +66,7 @@ def _entry(**overrides: Any) -> Any:
     values: dict[str, Any] = {
         "attempt_id": str(__import__("uuid").uuid4()),
         "started_at": "2026-09-25T10:00:00+00:00", "finished_at": "2026-09-25T10:04:00+00:00",
-        "source_revision": REV, "backend_digest": DIGEST_B, "frontend_digest": DIGEST_F,
+        "source_revision": REV, "backend_digest": DIGEST_B,
         "migrations_applied": False, "outcome": "deployed",
         "detail": "ok", **overrides,
     }
@@ -174,6 +174,17 @@ def _old_tool_insert(conn: Any, attempt: str, outcome: str, klass: str) -> None:
         f"'{klass}', true, '{outcome}', 'class={klass}(rules_unavailable)')")
 
 
+def _frontend_era_insert(conn: Any, attempt: str, outcome: str) -> None:
+    """A row the way bfx-deploy wrote it before 9d-6: no class, the frontend digest. The
+    current tool writes frontend_digest NULL, which only head's schema (89886d27750b) admits."""
+    finished = "NULL" if outcome == "started" else "'2026-09-25T10:04:00+00:00'"
+    conn.exec_driver_sql(
+        "INSERT INTO deployments (attempt_id, started_at, finished_at, source_revision, backend_digest, "
+        "frontend_digest, migrations_applied, outcome, detail) VALUES "
+        f"('{attempt}', '2026-09-25T10:00:00+00:00', {finished}, '{REV}', '{DIGEST_B}', '{DIGEST_F}', "
+        f"false, '{outcome}', 'ok')")
+
+
 def test_previous_tool_can_deploy_the_release_that_retires_change_class(ledger_db_at_ledger: Any) -> None:
     """Rollout: the old bfx-deploy migrates, then writes both rows with a class."""
     url, engine, ledger = ledger_db_at_ledger
@@ -185,7 +196,8 @@ def test_previous_tool_can_deploy_the_release_that_retires_change_class(ledger_d
     with engine.begin() as conn:                      # the old tool, after the migration ran
         _old_tool_insert(conn, ATTEMPT, "started", "material")
         _old_tool_insert(conn, ATTEMPT, "deployed", "material")
-    ledger.append(_entry())                           # then the new tool, next release
+    with engine.begin() as conn:                      # then the new tool, next release
+        _frontend_era_insert(conn, str(__import__("uuid").uuid4()), "deployed")
     view = ledger.read()
     assert view.last_success is not None and view.last_success.attempt_id != ATTEMPT
     with engine.connect() as conn:
@@ -221,7 +233,6 @@ def test_ledger_rejects_every_mutation_even_for_the_owner(ledger_db: Any, statem
 @pytest.mark.parametrize("overrides", [
     {"source_revision": "main"},
     {"backend_digest": "sha256:abc"},
-    {"frontend_digest": "ghcr.io/x:main"},
     {"outcome": "no_change"},
     {"finished_at": "2026-09-25T09:00:00+00:00"},
     {"finished_at": None},                      # only a started row has no finish
@@ -266,24 +277,22 @@ def test_attempt_has_one_started_row_first_and_one_matching_terminal_row(ledger_
 
 
 def test_a_release_without_a_frontend_records_no_frontend_digest(ledger_db: Any) -> None:
-    """From 9d-5 the compose file has no frontend service and CI builds no frontend image."""
+    """9d-5 removed the frontend; the column stays as history. A row from before still reads
+    (it is a rollback target like any other), and every new row records NULL."""
     url, engine, ledger = ledger_db
     _alembic(url, "upgrade", "head")
-    ledger.append(_entry(attempt_id=ATTEMPT, outcome="started", finished_at=None, frontend_digest=None))
-    with pytest.raises(bfx.CommandError):                      # finishing as another release
-        ledger.append(_entry(attempt_id=ATTEMPT))
-    ledger.append(_entry(attempt_id=ATTEMPT, frontend_digest=None))
+    earlier = str(__import__("uuid").uuid4())
+    with engine.begin() as conn:
+        _frontend_era_insert(conn, earlier, "deployed")
+    view = ledger.read()
+    assert view.last_success is not None and view.last_success.attempt_id == earlier
+    ledger.append(_entry(attempt_id=ATTEMPT, outcome="started", finished_at=None))
+    ledger.append(_entry(attempt_id=ATTEMPT))
     view = ledger.read()
     assert view.last_success is not None and view.last_success.attempt_id == ATTEMPT
-    assert view.last_success.frontend_digest is None
     with engine.connect() as conn:
-        assert conn.scalar(text("SELECT count(*) FROM deployments WHERE frontend_digest IS NULL")) == 2
-    # A release that still has a frontend keeps carrying its digest, well-formed.
-    ledger.append(_entry())
-    latest = ledger.read().last_success
-    assert latest is not None and latest.frontend_digest == DIGEST_F
-    with pytest.raises(bfx.CommandError):
-        ledger.append(_entry(frontend_digest="sha256:abc"))
+        digests = [row[0] for row in conn.execute(text("SELECT frontend_digest FROM deployments ORDER BY id"))]
+    assert digests == [DIGEST_F, None, None]
 
 
 def test_runtime_roles_can_only_read_the_ledger(ledger_db: Any) -> None:
@@ -320,8 +329,9 @@ def test_migration_is_reversible_and_leaves_no_drift(ledger_db_reversible: Any) 
     assert ledger.read().last_attempt is None
     # Classless rows: the downgrade refuses rather than invent a class that never
     # happened in an append-only ledger.
-    ledger.append(_entry(attempt_id=ATTEMPT, outcome="started", finished_at=None))
-    ledger.append(_entry(attempt_id=ATTEMPT))
+    with engine.begin() as conn:
+        _frontend_era_insert(conn, ATTEMPT, "started")
+        _frontend_era_insert(conn, ATTEMPT, "deployed")
     result = subprocess.run([sys.executable, "-m", "alembic", "downgrade", REVISION], cwd=BACKEND,
                             env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
     assert result.returncode != 0
@@ -331,11 +341,12 @@ def test_migration_is_reversible_and_leaves_no_drift(ledger_db_reversible: Any) 
         assert conn.scalar(text("SELECT count(*) FROM deployments")) == 2
         assert conn.scalar(text("SELECT version_num FROM alembic_version")) == LAST_REVERSIBLE_REVISION
     # Back across the drop re-adds the column (NULL) and the pairing check still
-    # accepts an attempt written the current way. Named, not "-1": later
-    # migrations stack on top of the drop.
+    # accepts a classless attempt (as that schema's tool wrote it). Named, not "-1":
+    # later migrations stack on top of the drop.
     _alembic(url, "downgrade", DROPPED_PARENT)
-    ledger.append(_entry(attempt_id=ATTEMPT.replace("0b8f", "2b8f"), outcome="started", finished_at=None))
-    ledger.append(_entry(attempt_id=ATTEMPT.replace("0b8f", "2b8f")))
+    with engine.begin() as conn:
+        _frontend_era_insert(conn, ATTEMPT.replace("0b8f", "2b8f"), "started")
+        _frontend_era_insert(conn, ATTEMPT.replace("0b8f", "2b8f"), "deployed")
     with engine.connect() as conn:
         assert [row[0] for row in conn.execute(text("SELECT change_class FROM deployments"))] == [None] * 4
     _alembic(url, "upgrade", "head")

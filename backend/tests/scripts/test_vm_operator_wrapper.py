@@ -57,7 +57,7 @@ class FakeLedger:
         def row(index: int) -> Any:
             revision, digest, outcome = self.rows[index]
             return bfx.LedgerRow(id=index + 1, attempt_id=f"a-{index}", source_revision=revision,
-                                 backend_digest=digest, frontend_digest="sha256:" + "f" * 64,
+                                 backend_digest=digest,
                                  outcome=outcome, migrations_applied=False)
 
         return bfx.LedgerView(exists=True, last_attempt=row(len(self.rows) - 1) if self.rows else None,
