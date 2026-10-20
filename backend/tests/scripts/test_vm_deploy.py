@@ -63,6 +63,9 @@ SIDECAR = f"""  tailscale:
     pull_policy: never
     container_name: bfx-tailscale
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "-T", "3", "http://127.0.0.1:9002/healthz"]
+      interval: 5s
     configs:
       - source: ts-serve
         target: /config/serve.json
@@ -77,6 +80,13 @@ SERVICE_OF = {container: service for service, container in CONTAINER_NAMES.items
 def with_sidecar(text: str, *, configs: bool = True) -> str:
     at = text.index("networks:\n  bfx_default:\n    external")
     return text[:at] + SIDECAR + text[at:] + (CONFIGS if configs else "")
+
+
+# The 9d-5 shape: the web API runs in the sidecar's network namespace.
+WEBAPI_NETWORKS = "    networks:\n      bfx_default: {}\n\n  frontend:"
+JOINED_TEXT = with_sidecar(COMPOSE_TEXT, configs=False).replace(
+    WEBAPI_NETWORKS, "    network_mode: service:tailscale\n\n  frontend:")
+assert JOINED_TEXT.count("network_mode: service:tailscale") == 1
 
 
 TOOLING = {
@@ -200,8 +210,10 @@ class FakeLedger:
         return [row.outcome for row in self.rows if row.attempt_id == attempt_id]
 
 
-def inspect_record(service: str, running: tuple[str, str, str, str]) -> dict[str, Any]:
+def inspect_record(service: str, running: tuple[str, str, str, str],
+                   meta: Mapping[str, str] | None = None, *, is_running: bool = True) -> dict[str, Any]:
     image, digest, revision, deployment_id = running
+    meta = meta or {}
     # BFX_CHANGE_CLASS=retired: containers created before the follow-up release
     # still carry the transitional default; the identity check must ignore it.
     # A third-party container (empty digest here) carries no release identity.
@@ -209,7 +221,9 @@ def inspect_record(service: str, running: tuple[str, str, str, str]) -> dict[str
            f"BFX_DEPLOYMENT_ID={deployment_id}", "BFX_CHANGE_CLASS=retired"] if digest else []
     env.append("PATH=/usr/bin")
     return {
-        "Name": "/" + CONTAINER_NAMES[service],
+        "Name": "/" + CONTAINER_NAMES[service], "Id": meta.get("Id", ""),
+        "State": {"Running": is_running, "StartedAt": meta.get("StartedAt", "")},
+        "HostConfig": {"NetworkMode": meta.get("NetworkMode", "bfx_default")},
         "Config": {"Image": image, "Env": env,
                    "Labels": {"com.docker.compose.project": "bfx-app"}},
     }
@@ -254,6 +268,13 @@ class FakeHost:
     docker_configs: list[dict[str, Any]] = field(default_factory=list)
     pulls: list[tuple[str, bool]] = field(default_factory=list)  # (image, with a DOCKER_CONFIG)
     symlinks: set[tuple[str, str]] = field(default_factory=set)   # (revision, path) tracked as links
+    # Per service: the container's Id, State.StartedAt and HostConfig.NetworkMode.
+    meta: dict[str, dict[str, str]] = field(default_factory=dict)
+    sequence: int = 0
+    sidecar_health: str = "healthy"
+    heads_by_digest: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    timeouts: set[tuple[str, ...]] = field(default_factory=set)  # argv prefixes that time out
+    probes: list[str] = field(default_factory=list)              # URLs probed with docker exec
 
     def __post_init__(self) -> None:
         for revision in (REV_OLD, REV_NEW):
@@ -268,6 +289,33 @@ class FakeHost:
         for service in ("bot", "webapi"):
             self.running[service] = (f"{BACKEND}@{backend}", backend, revision, deployment_id)
         self.running["frontend"] = (f"{FRONTEND}@{frontend}", frontend, revision, deployment_id)
+        for service in ("bot", "webapi", "frontend"):
+            self.create(service)
+
+    def _tick(self) -> int:
+        self.sequence += 1
+        return self.sequence
+
+    def create(self, service: str, network_mode: str = "bfx_default") -> None:
+        """A new container: another Id, a later start."""
+        tick = self._tick()
+        self.meta[service] = {"Id": f"{tick:064x}", "StartedAt": self._time(tick),
+                              "NetworkMode": network_mode}
+
+    def restart_in_place(self, service: str) -> None:
+        """The same container started again (its restart policy, `docker start`)."""
+        self.meta[service]["StartedAt"] = self._time(self._tick())
+
+    @staticmethod
+    def _time(tick: int) -> str:
+        # Docker's RFC 3339 with nanoseconds, trailing zeros trimmed.
+        return f"2026-10-20T08:{tick // 60 % 60:02d}:{tick % 60:02d}.{tick * 10:d}Z"
+
+    def run_joined(self) -> None:
+        """The 9d-5 shape running: a sidecar and the web API in its namespace."""
+        self.running["tailscale"] = (TAILSCALE, "", "", "")
+        self.create("tailscale")
+        self.create("webapi", "container:" + self.meta["tailscale"]["Id"])
 
     def index(self, predicate: Callable[[tuple[str, ...]], bool]) -> int:
         return next(i for i, call in enumerate(self.calls) if predicate(call))
@@ -280,6 +328,8 @@ class FakeHost:
         call = tuple(argv)
         self.calls.append(call)
         self.envs.append(env)
+        if any(call[:len(prefix)] == prefix for prefix in self.timeouts):
+            raise bfx.CommandError(f"timeout:{bfx._describe(call)}", timed_out=True)
         ok = bfx.CommandResult(0, "", "")
         if call[:4] == ("runuser", "-u", "ubuntu", "--") and call[4] == "git":
             assert call[5] == "-C"
@@ -322,6 +372,7 @@ class FakeHost:
         if call[:2] == ("docker", "inspect"):
             return self._inspect(call)
         if call[:2] == ("docker", "exec"):
+            self.probes.append(call[-1])
             service = SERVICE_OF[call[2]]
             healthy = service in self.running and self.running[service][1] not in self.unhealthy
             return bfx.CommandResult(0 if healthy else 1, "", "")
@@ -343,6 +394,7 @@ class FakeHost:
             if not self.start_ok or container in self.start_fails or service not in self.parked:
                 return bfx.CommandResult(1, "", "Error response from daemon")
             self.running[service] = self.parked.pop(service)
+            self.restart_in_place(service)
             self.started.append(container)
             return ok
         if call[:3] == ("docker", "image", "ls"):
@@ -418,7 +470,7 @@ class FakeHost:
         assert "--read-only" in call and "--cap-drop=ALL" in call and "--pull=never" in call
         args = call[at + 1:]
         if args == ("heads",):
-            return bfx.CommandResult(0, "".join(f"{h} (head)\n" for h in self.heads), "")
+            return bfx.CommandResult(0, "".join(f"{h} (head)\n" for h in self._heads(call)), "")
         if args == ("current",):
             return bfx.CommandResult(0, "".join(f"{c}\n" for c in self.current), "")
         if args == ("upgrade", "head"):
@@ -429,6 +481,10 @@ class FakeHost:
                 self.current = ("h1b",)
             return bfx.CommandResult(1, "", "boom")
         raise AssertionError(f"unexpected alembic: {args}")
+
+    def _heads(self, call: tuple[str, ...]) -> tuple[str, ...]:
+        image = call[call.index("/app/.venv/bin/alembic") - 1]
+        return self.heads_by_digest.get(image.rpartition("@")[2], self.heads)
 
     def _compose(self, call: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
         assert call[:5] == ("docker", "compose", "-p", "bfx-app", "-f")
@@ -445,17 +501,28 @@ class FakeHost:
             if rendered is None:
                 return bfx.CommandResult(1, "", "required variable is missing a value")
             return bfx.CommandResult(0, json.dumps(rendered), "")
-        assert call[6:10] == ("up", "--detach", "--no-deps", "--remove-orphans")
-        assert rendered is not None
-        services = call[10:] if call[10:11] != ("--force-recreate",) else call[11:]
-        assert services == tuple(sorted(rendered["services"]))
+        assert call[6] == "up" and rendered is not None
+        options = tuple(part for part in call[7:] if part.startswith("--"))
+        services = call[7 + len(options):]
+        if services == ("webapi",):        # netns repair: the web API alone, nothing removed
+            assert options == ("--detach", "--no-deps", "--force-recreate")
+        else:
+            assert options[:3] == ("--detach", "--no-deps", "--remove-orphans")
+            assert options[3:] in {(), ("--force-recreate",)}
+            assert services == tuple(sorted(rendered["services"]))
         if env["BFX_BACKEND_DIGEST"] in self.compose_fail:
             return bfx.CommandResult(1, "", "compose failed")
         assert "BFX_CHANGE_CLASS" not in env  # retired; compose supplies a transitional default
-        for orphan in set(self.running) - set(services):
-            del self.running[orphan]
+        if "--remove-orphans" in options:
+            for orphan in set(self.running) - set(services):
+                del self.running[orphan]
         identity = (env["BFX_SOURCE_REVISION"], env["BFX_DEPLOYMENT_ID"])
-        for service in services:
+        # Compose creates a namespace's provider before the services that join it.
+        joins = {name: str(rendered["services"][name].get("network_mode", "")).removeprefix("service:")
+                 for name in services}
+        for service in sorted(services, key=lambda name: name in joins and joins[name] in rendered["services"]):
+            joined = joins[service] if joins[service] in rendered["services"] else None
+            self.create(service, "container:" + self.meta[joined]["Id"] if joined else "bfx_default")
             image = rendered["services"][service]["image"]
             if image == TAILSCALE:
                 self.running[service] = (image, "", "", "")
@@ -467,20 +534,26 @@ class FakeHost:
 
     def _inspect(self, call: tuple[str, ...]) -> Any:
         names = [part for part in call[2:] if part.startswith("bfx-")]
+        if "--format" in call and call[call.index("--format") + 1] == bfx.HEALTH_FORMAT:
+            assert names == ["bfx-tailscale"]
+            return bfx.CommandResult(0, self.sidecar_health + "\n" if "tailscale" in self.running else "", "")
         if "--format" in call:
             lines = [f"/{name} 0 true" for name in names if SERVICE_OF[name] in self.running]
             return bfx.CommandResult(0, "\n".join(lines), "")
-        records = []
+        records, missing = [], False
         for name in names:
             service = SERVICE_OF[name]
-            if service not in self.running:
-                return bfx.CommandResult(1, "[]", "no such container")
-            record = inspect_record(service, self.running[service])
-            digest = self.running[service][1]
+            if service not in self.running and service not in self.parked:
+                missing = True                  # docker prints the others and exits 1
+                continue
+            is_running = service in self.running
+            running = self.running[service] if is_running else self.parked[service]
+            record = inspect_record(service, running, self.meta.get(service), is_running=is_running)
+            digest = running[1]
             if digest in self.tampered:
                 self.tampered[digest](record)
             records.append(record)
-        return bfx.CommandResult(0, json.dumps(records), "")
+        return bfx.CommandResult(1 if missing else 0, json.dumps(records), "no such container" if missing else "")
 
 
 class FakeClock:
@@ -574,6 +647,9 @@ PULL = _is(("docker", "pull"))
 UV_SYNC = _is(("uv", "sync"))
 
 
+NETNS_INSPECT = ("docker", "inspect", "--type", "container", "bfx-tailscale", "bfx-webapi")
+
+
 def _started(harness: Harness) -> list[Any]:
     return [row for row in harness.ledger.rows if row.outcome == "started"]
 
@@ -585,7 +661,7 @@ def test_nothing_happens_when_main_already_runs(harness: Harness) -> None:
     harness.ledger.seed(REV_NEW, NEW_B, NEW_F, "deployed", attempt_id="n")
     rows = len(harness.ledger.rows)
     assert harness.run() == 0
-    assert harness.host.calls == []
+    assert harness.host.calls == [NETNS_INSPECT]       # no sidecar yet: nothing else
     assert (harness.notices, len(harness.ledger.rows)) == ([], rows)
 
 
@@ -594,7 +670,8 @@ def test_a_digest_already_attempted_is_not_retried_every_tick(harness: Harness, 
     # `started` without a terminal row: the attempt was interrupted (crash, kill).
     harness.ledger.seed(REV_NEW, NEW_B, NEW_F, outcome, attempt_id="n")
     assert harness.run() == 0
-    assert harness.host.calls == [] and harness.notices == []
+    assert harness.host.calls == ([NETNS_INSPECT] if outcome == "rolled_back" else [])
+    assert harness.notices == []
     assert harness.run(retry=True) == 0
     assert harness.ledger.last.outcome == "deployed"
 
@@ -1579,6 +1656,312 @@ def test_a_foreign_frontend_does_not_block_a_release_without_one(harness: Harnes
     harness.host.foreign = ["bfx-frontend"]
     assert harness.run() == 0
     assert harness.ledger.last.outcome == "deployed"
+
+
+# --------------------------------------------------------------------------- health probes
+
+
+def test_the_webapi_is_probed_on_ready_which_reads_the_database(harness: Harness) -> None:
+    assert harness.run() == 0
+    probes = set(harness.host.probes)
+    assert probes == {"http://127.0.0.1:8080/healthz", "http://127.0.0.1:8000/ready"}
+
+
+def test_a_sidecar_that_never_turns_healthy_fails_the_deploy(harness: Harness) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT, configs=False)
+    harness.host.sidecar_health = "unhealthy"
+    assert harness.run() == 1
+    row = harness.ledger.last
+    assert row.outcome == "rolled_back"
+    assert row.detail.startswith("unhealthy:health_timeout:tailscale;")
+
+
+@pytest.mark.parametrize("healthcheck", [
+    "",
+    "    healthcheck:\n      disable: true\n",
+])
+def test_a_service_with_no_probe_of_its_own_is_refused(harness: Harness, healthcheck: str) -> None:
+    declared = SIDECAR[SIDECAR.index("    healthcheck:\n"):SIDECAR.index("    configs:\n")]
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT, configs=False) \
+        .replace(declared, healthcheck)
+    assert harness.run() == 1
+    assert harness.ledger.last.detail == ("precheck:compose_healthcheck_missing:tailscale; "
+                                          "running release untouched")
+    assert harness.host.pulls == []
+
+
+# --------------------------------------------------------------------------- netns
+
+
+def test_the_web_api_and_the_sidecar_it_joins_are_created_in_one_up(harness: Harness) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = JOINED_TEXT
+    assert harness.run() == 0
+    host = harness.host
+    assert host.count(COMPOSE_UP) == 1
+    assert host.calls[host.index(COMPOSE_UP)][-4:] == ("bot", "frontend", "tailscale", "webapi")
+    assert host.meta["webapi"]["NetworkMode"] == "container:" + host.meta["tailscale"]["Id"]
+    assert harness.ledger.last.outcome == "deployed"
+
+
+@pytest.mark.parametrize("how", ["recreated", "restarted"])
+def test_a_web_api_left_in_a_dead_namespace_fails_the_deploy(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, how: str,
+) -> None:
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = JOINED_TEXT
+    original = harness.host._compose
+
+    def compose(call: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
+        result = original(call, env)
+        if COMPOSE_UP(call) and "tailscale" in harness.host.running:
+            # A Compose that left the web API behind its sidecar (recreated, or started again).
+            if how == "recreated":
+                harness.host.create("tailscale")
+            else:
+                harness.host.restart_in_place("tailscale")
+        return result
+
+    monkeypatch.setattr(harness.host, "_compose", compose)
+    assert harness.run() == 1
+    row = harness.ledger.last
+    assert row.outcome == "rolled_back"
+    assert row.detail.startswith("unhealthy:container_release_mismatch:webapi:netns;")
+
+
+@pytest.mark.parametrize(("joined", "provider", "stale"), [
+    ({"NetworkMode": "container:x", "StartedAt": "2026-10-20T08:00:01.5Z"},
+     {"Id": "x", "StartedAt": "2026-10-20T08:00:01.25Z"}, False),
+    # trailing zeros trimmed: .5 is later than .25 although "5" < "25" as text
+    ({"NetworkMode": "container:x", "StartedAt": "2026-10-20T08:00:01.25Z"},
+     {"Id": "x", "StartedAt": "2026-10-20T08:00:01.5Z"}, True),
+    ({"NetworkMode": "container:x", "StartedAt": "2026-10-20T08:00:02Z"},
+     {"Id": "x", "StartedAt": "2026-10-20T08:00:01.999999999Z"}, False),
+    ({"NetworkMode": "container:old", "StartedAt": "2026-10-20T08:00:02Z"},
+     {"Id": "x", "StartedAt": "2026-10-20T08:00:01Z"}, True),
+    ({"NetworkMode": "container:x", "StartedAt": "garbage"},
+     {"Id": "x", "StartedAt": "2026-10-20T08:00:01Z"}, True),
+])
+def test_netns_staleness(joined: dict[str, str], provider: dict[str, str], stale: bool) -> None:
+    def record(container: dict[str, str]) -> dict[str, Any]:
+        return {"Id": container.get("Id", ""), "State": {"StartedAt": container["StartedAt"]},
+                "HostConfig": {"NetworkMode": container.get("NetworkMode", "bfx_default")}}
+
+    assert bfx.netns_stale(record(joined), record(provider)) is stale
+
+
+def _joined(harness: Harness) -> None:
+    """The running release (REV_OLD, what main still names) has the web API in the sidecar."""
+    harness.registry.refs[f"{BACKEND}:main"] = OLD_B
+    harness.host.files[(REV_OLD, bfx.COMPOSE_PATH)] = JOINED_TEXT
+    harness.host.run_joined()
+
+
+def _break(harness: Harness, how: str) -> None:
+    if how == "recreated":
+        harness.host.create("tailscale")
+    else:
+        harness.host.restart_in_place("tailscale")
+
+
+def _repair(call: tuple[str, ...]) -> bool:
+    """The netns repair's `up`: the web API alone."""
+    return COMPOSE_UP(call) and call[-1] == "webapi"
+
+NETNS_STATE = "netns-repair.json"
+
+
+def _bot_untouched(harness: Harness) -> bool:
+    return not any("bfx-bot" in call or (COMPOSE_UP(call) and "bot" in call)
+                   for call in harness.host.calls)
+
+
+def test_nothing_is_repaired_while_the_namespace_is_live(harness: Harness) -> None:
+    _joined(harness)
+    assert harness.run() == 0
+    assert harness.host.calls == [NETNS_INSPECT] and harness.notices == []
+    assert not (harness.settings.state_dir / NETNS_STATE).exists()
+
+
+@pytest.mark.parametrize("how", ["recreated", "restarted"])
+def test_a_dead_namespace_is_repaired_by_recreating_the_web_api_alone(harness: Harness, how: str) -> None:
+    _joined(harness)
+    _break(harness, how)
+    rows = len(harness.ledger.rows)
+    assert harness.run() == 0
+    host = harness.host
+    assert host.count(COMPOSE_UP) == 1
+    assert host.calls[host.index(COMPOSE_UP)][6:] == ("up", "--detach", "--no-deps", "--force-recreate",
+                                                     "webapi")
+    env = host.envs[host.index(COMPOSE_UP)]
+    assert env is not None
+    assert (env["BFX_BACKEND_DIGEST"], env["BFX_SOURCE_REVISION"], env["BFX_DEPLOYMENT_ID"]) == (
+        OLD_B, REV_OLD, OLD_ATTEMPT)
+    assert host.meta["webapi"]["NetworkMode"] == "container:" + host.meta["tailscale"]["Id"]
+    assert not bfx.netns_stale(inspect_record("webapi", host.running["webapi"], host.meta["webapi"]),
+                               inspect_record("tailscale", host.running["tailscale"], host.meta["tailscale"]))
+    assert "http://127.0.0.1:8000/ready" in host.probes
+    assert _bot_untouched(harness)
+    assert len(harness.ledger.rows) == rows                 # same digest and revision: no row
+    assert [level for level, _ in harness.notices] == ["info"]
+    assert not (harness.settings.state_dir / NETNS_STATE).exists()
+
+
+def test_the_already_attempted_branch_repairs_too(harness: Harness) -> None:
+    _joined(harness)
+    harness.registry.refs[f"{BACKEND}:main"] = NEW_B
+    harness.ledger.seed(REV_NEW, NEW_B, NEW_F, "rolled_back", attempt_id="n")
+    _break(harness, "restarted")
+    assert harness.run() == 0
+    assert harness.host.count(_repair) == 1 and harness.host.count(COMPOSE_UP) == 1
+
+
+@pytest.mark.parametrize("outcome", ["failed", "started"])
+def test_no_repair_after_a_failed_or_interrupted_attempt(harness: Harness, outcome: str) -> None:
+    # A failed migration path keeps the bot and the web API stopped on purpose.
+    _joined(harness)
+    harness.registry.refs[f"{BACKEND}:main"] = NEW_B
+    harness.ledger.seed(REV_NEW, NEW_B, NEW_F, outcome, attempt_id="n")
+    _break(harness, "recreated")
+    assert harness.run() == 0
+    assert harness.host.calls == []
+
+
+def test_a_database_outage_alone_repairs_nothing(harness: Harness) -> None:
+    _joined(harness)
+    harness.host.unhealthy = {OLD_B}                  # /ready answers 503
+    assert harness.run() == 0
+    assert harness.host.calls == [NETNS_INSPECT]
+
+
+def test_a_web_api_on_its_own_network_is_never_repaired(harness: Harness) -> None:
+    # 9d-4 to 9d-5: the sidecar runs, the web API is still on bfx_default.
+    harness.registry.refs[f"{BACKEND}:main"] = OLD_B
+    harness.host.files[(REV_OLD, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT, configs=False)
+    harness.host.running["tailscale"] = (TAILSCALE, "", "", "")
+    harness.host.create("tailscale")                  # started after the web API
+    assert harness.run() == 0
+    assert harness.host.calls == [NETNS_INSPECT]
+
+
+@pytest.mark.parametrize("stopped", ["webapi", "tailscale"])
+def test_a_stopped_web_api_or_sidecar_is_left_alone(harness: Harness, stopped: str) -> None:
+    _joined(harness)
+    _break(harness, "recreated")
+    harness.host.parked[stopped] = harness.host.running.pop(stopped)
+    assert harness.run() == 0
+    assert harness.host.calls == [NETNS_INSPECT] and harness.notices == []
+
+
+def test_failed_repairs_never_touch_the_bot_and_stop_after_three(harness: Harness) -> None:
+    _joined(harness)
+    _break(harness, "recreated")
+    harness.host.compose_fail = {OLD_B}               # the web API cannot be recreated
+    for attempt in (1, 2, 3):
+        assert harness.run() == 0
+        assert harness.host.count(_repair) == attempt
+        state = json.loads((harness.settings.state_dir / NETNS_STATE).read_text())
+        assert state["failures"] == attempt
+    assert [level for level, _ in harness.notices] == ["warning", "warning", "critical"]
+    assert "compose_up_failed" in harness.notices[-1][1]
+    assert harness.run() == 0                          # a fourth tick: no more attempts
+    assert harness.host.count(_repair) == 3 and len(harness.notices) == 3
+    assert _bot_untouched(harness) and harness.host.stopped == []
+    # The sidecar starts anew: a new incident, counted from zero.
+    _break(harness, "restarted")
+    assert harness.run() == 0
+    assert harness.host.count(_repair) == 4
+    assert json.loads((harness.settings.state_dir / NETNS_STATE).read_text())["failures"] == 1
+
+
+def test_an_escalated_incident_that_recovers_says_so_and_forgets_it(harness: Harness) -> None:
+    _joined(harness)
+    _break(harness, "recreated")
+    harness.host.compose_fail = {OLD_B}
+    for _ in range(3):
+        harness.run()
+    harness.host.create("webapi", "container:" + harness.host.meta["tailscale"]["Id"])  # operator
+    assert harness.run() == 0
+    assert harness.notices[-1] == ("info", "bfx-webapi is in the sidecar's network namespace again")
+    assert not (harness.settings.state_dir / NETNS_STATE).exists()
+
+
+def test_a_repaired_namespace_whose_web_api_is_not_ready_is_not_repaired_again(harness: Harness) -> None:
+    # The database is down while the repair runs: the namespace is right, /ready is not.
+    _joined(harness)
+    _break(harness, "recreated")
+    harness.host.unhealthy = {OLD_B}
+    assert harness.run() == 0
+    assert [level for level, _ in harness.notices] == ["warning"]
+    assert harness.run() == 0
+    assert harness.host.count(_repair) == 1
+    assert not (harness.settings.state_dir / NETNS_STATE).exists()
+
+
+def test_an_unreadable_repair_record_counts_as_none(harness: Harness) -> None:
+    _joined(harness)
+    _break(harness, "recreated")
+    path = harness.settings.state_dir / NETNS_STATE
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json")
+    assert harness.run() == 0
+    assert harness.host.count(_repair) == 1 and not path.exists()
+
+
+def test_a_dry_run_only_reports_a_dead_namespace(harness: Harness) -> None:
+    _joined(harness)
+    _break(harness, "recreated")
+    assert harness.run(dry_run=True) == 0
+    assert harness.host.calls == [NETNS_INSPECT] and harness.notices == []
+    assert not (harness.settings.state_dir / NETNS_STATE).exists()
+
+
+# --------------------------------------------------------------------------- hung commands
+
+
+def test_a_docker_stop_that_times_out_is_a_failed_stop_not_a_crash(harness: Harness) -> None:
+    harness.host.current = ("h1",)
+    harness.host.timeouts = {("docker", "stop", "--time", "30", "bfx-bot")}
+    assert harness.run() == 1
+    row = harness.ledger.last
+    assert row.outcome == "failed"
+    assert row.detail == "bot_stop_failed; nothing migrated; running release untouched; webapi restarted"
+    assert not any("crashed" in text for _, text in harness.notices)
+
+
+def test_a_docker_start_that_times_out_is_a_failed_start_not_a_crash(harness: Harness) -> None:
+    harness.host.current = ("h1",)
+    harness.host.stop_fails = {"bfx-bot"}
+    harness.host.timeouts = {("docker", "start", "bfx-webapi")}
+    assert harness.run() == 1
+    assert harness.ledger.last.detail.startswith("bot_stop_failed; nothing migrated; webapi_restart_failed:"
+                                                 "start_failed")
+    assert not any("crashed" in text for _, text in harness.notices)
+
+
+def test_a_hung_probe_is_an_unhealthy_one_and_the_attempt_gets_its_terminal_row(harness: Harness) -> None:
+    harness.host.timeouts = {("docker", "exec", "bfx-webapi")}
+    assert harness.run() == 1
+    started = _started(harness)[-1]
+    assert harness.ledger.attempt(started.attempt_id)[-1] == "failed"
+    assert "health_timeout:webapi" in harness.ledger.last.detail
+    assert not any("crashed" in text for _, text in harness.notices)
+
+
+# --------------------------------------------------------------------------- rollback schema
+
+
+def test_rollback_onto_a_schema_past_the_previous_release_is_refused(harness: Harness) -> None:
+    # An earlier attempt migrated to h3 and failed; this one (a --retry or a later release) has
+    # nothing left to migrate and is unhealthy. The previous release was written for h2.
+    harness.host.heads, harness.host.current = ("h3",), ("h3",)
+    harness.host.heads_by_digest = {OLD_B: ("h2",)}
+    harness.host.unhealthy = {NEW_B}
+    assert harness.run() == 1
+    row = harness.ledger.last
+    assert row.outcome == "failed"
+    assert "rollback_failed:rollback_schema_mismatch" in row.detail
+    host = harness.host
+    assert host.count(COMPOSE_UP) == 1                  # the release's own; the old one never came back
+    assert host.running["webapi"][1] == NEW_B and host.stopped == ["bfx-bot"]
 
 
 # --------------------------------------------------------------------------- recreate

@@ -76,8 +76,13 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    `BFX_DEPLOYMENT_ID` 只用來讓 audit 與狀態報告指出這次部署，不影響交易。
 8. 檢查每個 container 跑的是 compose 渲染出的 image、屬於 compose project `bfx-app`；release 自己的
    image 另外比對身分 env（`BFX_IMAGE_DIGEST`、`BFX_SOURCE_REVISION`、`BFX_DEPLOYMENT_ID`）；
-   等健康（bot `:8080/healthz`、webapi health、有 frontend 時 `127.0.0.1:3001`；其他服務只看 settle
-   期間沒有重啟），再 settle 60 秒。
+   加入另一個服務 network namespace 的服務（`network_mode: service:<X>`，9d-5 的 webapi）要在 `<X>`
+   目前的 namespace 裡（`HostConfig.NetworkMode` 等於 `container:<X 的 Id>`，且晚於 `<X>` 啟動），否則
+   `container_release_mismatch:<服務>:netns`。兩者一定在同一次 `up`：`<X>` 被重建時 Compose 會連帶重建加入它的
+   服務（Compose v5.1.4 實測），這條檢查證明它真的發生。
+   等健康（bot `:8080/healthz`、webapi `:8000/ready`（會連 DB；`/health` 在死掉的 netns 裡仍回 ok）、有 frontend 時
+   `127.0.0.1:3001`；其他服務一定要在 compose 宣告 `healthcheck`，看 Docker 的 `State.Health.Status` 是
+   `healthy`，沒宣告就 precheck `compose_healthcheck_missing:<服務>`），再 settle 60 秒。
    webapi 與 bot 一樣，開機時比對 image 內 migrations 的唯一 head（`core/schema_head.py`）與
    `alembic_version`，不一致就拒絕開機（uvicorn 結束、health 不會通過）：舊 webapi 不會在
    migrate 過的 schema 上服務，新 webapi 也不會在還沒 migrate 的 schema 上服務。
@@ -233,6 +238,7 @@ sudo systemctl start bfx-deploy.timer
 | `failed`，`migration_partial_or_unverified` | schema **已變**、狀態不明，bot 與 webapi 已停 | 見下方「migration 之後」 |
 | `failed`，`ledger_started_unrecorded` | `started` 列寫不進去，container 沒動（有 migration 時 bot 與 webapi 已停：`bot and webapi stay stopped`） | 查 postgres，再 `--retry` |
 | `rolled_back` | 新版不健康、沒有 migration，已回到上一個成功的 digest（用它原本的 deployment id） | 查原因；修好出新 release，或 `--retry` 同一 digest |
+| `failed`，`rollback_failed:rollback_schema_mismatch` | 新版不健康，schema 已經不是上一個成功 release 的（之前的嘗試套用過 migration）：不回滾、什麼都沒建回來，bot 已停，webapi 維持新版 | roll forward（見下方「migration 之後」） |
 | `failed`，`unhealthy:*; migrations applied` 或 `no previous deployment` | 不能自動回滾，bfx-deploy 已停 bot；有 migration 時 webapi 也停（`bot stopped; webapi stopped`） | 見下方 |
 | 只有 `started`、沒有結束列 | 嘗試中途中斷（bfx-deploy 被殺、主機重開） | 看 `docker ps` 與 journal 判斷停在哪；之後 `--retry` |
 
@@ -247,6 +253,19 @@ image 內 migrations 推導出的唯一 head（`core/schema_head.build_head`）�
 1. roll forward：修正後出新 release（新 commit → CI → GHCR → bfx-deploy）；或
 2. 把 migration 前的備份還原到**隔離**資料庫比對，再決定。**不要把舊備份蓋回 production**
    ——venue 可能已有寫入，見 [rollback after a venue write](rollback-after-venue-write.md)。
+
+### webapi 留在 sidecar 已死的 network namespace（9d-5 之後）
+
+sidecar 被 restart policy 重啟或單獨重建後，webapi 會留在舊的 namespace：`/health` 仍回 ok，但連不到 DB、
+也收不到 Serve 流量（9d-0 實測），Docker 不會自己修。bfx-deploy 每一輪沒有要部署時（up to date、already
+attempted），若最後一次嘗試是 `deployed` 或 `rolled_back`，就 `docker inspect bfx-tailscale bfx-webapi`：
+webapi 的 `NetworkMode` 不是目前 sidecar 的 Id，或 sidecar 比 webapi 晚啟動，就以最後成功部署的 digest 與
+deployment id 只重建 webapi（`up --no-deps --force-recreate webapi`），再等 `/ready` 與 settle。
+不看健康狀態（DB 短暫中斷不會觸發）、永遠不碰 bot、不寫 ledger，只發通知（成功 info、失敗 warning）。
+同一個事件（sidecar Id＋啟動時間）連續失敗 3 次發一次 critical、之後不再重試，直到 namespace 恢復正常
+或 sidecar 又重啟；計數在 `/var/lib/bfx-deploy/netns-repair.json`，要立刻重試就刪掉它。
+webapi 或 sidecar 沒在跑、webapi 不在 sidecar 的 namespace（9d-5 之前）、最後一次嘗試是 `failed`／`started`
+時什麼都不做。
 
 bot 停下時 venue 上的掛單不會自己消失：停 bot 之前，若有掛單而且停機會超過幾分鐘，先在 UI 或
 `sudo bfx-op halt --reason "…"` 執行 kill（見 operations §3）。bot 停著時兩者都不可用，改在 Bitfinex 網頁手動撤單並記錄。

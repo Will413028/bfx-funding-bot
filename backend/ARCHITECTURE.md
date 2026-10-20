@@ -748,8 +748,8 @@ recreate 後查健康，失敗就回到前一個 digest，每次結果寫進 app
 停下之後任何失敗兩者都維持停止，唯一例外是 restore test 的 receipt 為 `migration_rehearsal_failed`
 （備份可還原、prod schema 沒動）：依序重新啟動舊 bot 與舊 webapi。webapi 開機時比對 schema head，不符就拒絕啟動（與 bot 相同）。
 部署哪些服務、檢查哪些 container 與 env 檔、pull 哪些 image，都由該 release 自己的 compose 檔渲染結果（`docker compose config --no-env-resolution`）決定，`up --remove-orphans` 移除 compose 不再有的服務；第三方 image 只允許 allowlist 的 digest、不帶 GHCR 憑證；沒有 frontend 服務的 release 不需要 frontend image，ledger 的 `frontend_digest` 為 NULL。
-health wait：bot `/healthz` 300 s、webapi 120 s、有 frontend 時 `127.0.0.1:3001` 120 s，再 60 s settle。
-已套用 migration 後失敗不回滾（舊碼未必能跑新 schema），停 bot 與 webapi、roll forward。
+health wait：bot `/healthz` 300 s、webapi `/ready` 120 s、有 frontend 時 `127.0.0.1:3001` 120 s、其他服務（9d sidecar）必須宣告的 compose healthcheck 120 s，再 60 s settle。加入另一服務 network namespace 的服務（9d-5 的 webapi）與它在同一次 `up`，部署檢查它在活的 namespace 裡；沒有要部署的那一輪若 sidecar 重啟或重建讓 webapi 留在死 namespace，只重建 webapi（不碰 bot，同一事件最多 3 次）。
+已套用 migration 後失敗不回滾（舊碼未必能跑新 schema），停 bot 與 webapi、roll forward；schema 已不是上一個成功 release 的（先前嘗試套用過 migration）也不回滾。
 部署工具注入 `BFX_IMAGE_DIGEST`／`BFX_SOURCE_REVISION`／`BFX_DEPLOYMENT_ID`：只用來標示每筆
 execution audit 的 `config_hash`／`service_version` 與狀態報告，部署永遠不改變 trading state（§6）。
 live daemon 開機時（讀憑證與任何交易之前）比對 image 內 `alembic/` 推導出的唯一 head（`core/schema_head.build_head`；多個 head 也拒絕開機）與資料庫的
