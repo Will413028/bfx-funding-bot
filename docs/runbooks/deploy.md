@@ -196,11 +196,12 @@ compose 裡的 `netns`（`bfx-netns`）只持有 network namespace（只跑 `sle
 節點 `bfx-ops`、userspace、沒有 capability、沒有 port）以 `network_mode: service:netns` 加入它；9d-5 起
 webapi 也加入它。tailscaled 重啟、崩潰或單獨重建都不會換掉 namespace（計畫 D13，holder spike 實測）。
 兩者都要 compose healthcheck：`bfx-tailscale` 的 `/healthz` 在節點拿到 tailnet 位址後才回 200。
-**入口的健康狀態永遠不會讓 bot 被停**：只有這次部署新建或重建的入口容器（第一次部署、image 或 serve.json 改了、
-被 §1 第 7 步強制重建）不健康時才算部署失敗，照一般的不健康處理（沒有 migration 就回滾，回滾到沒有入口的版本會
-移除它；套用過 migration 則停 bot 與 webapi，見 §5）——例如 auth key 錯、tailnet policy 沒有 `tag:bfx-ops` 的
-owner 時的 `health_timeout:tailscale`。入口本來就壞、這次沒動到它，或是回滾與 `--recreate` 時入口不健康，只記
-`ingress_unhealthy:<服務>` 並發 warning，部署照常完成、bot 照跑。平常的部署不重建兩者（見 §1 第 7 步）。
+**入口的健康狀態永遠不會讓 bot 被停**：只有「這次部署新建或重建了入口容器（第一次部署、image 或 serve.json
+改了、被 §1 第 7 步強制重建），而且失敗會走回滾（沒套用 migration、bot 沒被停、有上一個成功版本）」時，入口
+不健康才算部署失敗並回滾（回到沒有入口的版本會移除它）——例如 auth key 錯、tailnet policy 沒有 `tag:bfx-ops`
+的 owner 時的 `health_timeout:tailscale`。其他情況（入口本來就壞、這次沒動到它；套用了 migration；回滾；
+`--recreate`；docker 答不出容器 Id）入口不健康只在 ledger detail 記 `warnings=ingress_unhealthy:<服務>` 並發
+warning，部署照常完成、bot 照跑。平常的部署不重建兩者（見 §1 第 7 步）。
 Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.1:8000`），隨部署寫進 release 目錄；內容改了
 那次部署會重建全部服務讓它生效；
 9d-5 之前 webapi 不在這個 namespace，Serve 打過去是 502。
@@ -208,7 +209,8 @@ Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.
 - 查狀態：`docker exec bfx-tailscale tailscale status`（tagged、key 到期 none）、
   `docker exec bfx-tailscale tailscale serve status`。
 - **不要單獨 `docker restart bfx-netns`**：holder 換了新 namespace，tailscale（與 9d-5 起的 webapi）會留在
-  沒有 `eth0` 的舊 namespace，手動 `docker compose up` 也不修（Compose 沿用沒變的容器）。下一次部署會偵測到並重建；
+  沒有 `eth0` 的舊 namespace，手動 `docker compose up` 也不修（Compose 沿用沒變的容器）。下一次部署（main 有新
+  的 digest 時）會偵測到並重建，每輪的 netns 修復只重建 webapi、不修 tailscale；在那之前入口是斷的（不影響放貸），
   要立刻修就 `sudo bfx-deploy --recreate`（一律重建全部服務）。
 - 換節點（state 壞掉）：admin console 刪節點 → `docker volume rm bfx_tsstate` → 放一把新 auth key →
   `--recreate`。

@@ -299,6 +299,7 @@ class FakeHost:
     meta: dict[str, dict[str, str]] = field(default_factory=dict)
     sequence: int = 0
     sidecar_health: str = "healthy"
+    crashing: set[str] = field(default_factory=set)              # services restarting in a loop
     heads_by_digest: dict[str, tuple[str, ...]] = field(default_factory=dict)
     known_by_digest: dict[str, set[str]] = field(default_factory=dict)  # revisions an image's scripts have
     timeouts: set[tuple[str, ...]] = field(default_factory=set)  # argv prefixes that time out
@@ -595,7 +596,8 @@ class FakeHost:
                      if SERVICE_OF[name] in self.running or SERVICE_OF[name] in self.parked]
             return bfx.CommandResult(0, "\n".join(lines), "")
         if "--format" in call:
-            lines = [f"/{name} 0 true" for name in names if SERVICE_OF[name] in self.running]
+            lines = [f"/{name} {self._tick() if SERVICE_OF[name] in self.crashing else 0} true"
+                     for name in names if SERVICE_OF[name] in self.running]
             return bfx.CommandResult(0, "\n".join(lines), "")
         records, missing = [], False
         for name in names:
@@ -1713,6 +1715,7 @@ def test_a_rollback_is_never_failed_by_the_ingress(harness: Harness) -> None:
     harness.host.unhealthy = {NEW_B}                   # the new bot fails its own check
     assert harness.run() == 1
     assert harness.ledger.last.outcome == "rolled_back"
+    assert "ingress_unhealthy:tailscale" in harness.ledger.last.detail.partition("; warnings=")[2]
     assert harness.host.stopped == []
     assert harness.host.running["bot"][1] == OLD_B
 
@@ -1729,6 +1732,47 @@ def test_a_rollback_serves_the_previous_serve_config_again(harness: Harness) -> 
     assert harness.ledger.last.outcome == "rolled_back"
     assert [("--force-recreate" in call) for call in host.calls if COMPOSE_UP(call)] == [True, True]
     assert Path(host.meta["tailscale"]["ConfigMount"]).read_text() == old
+
+
+def test_a_fresh_unhealthy_ingress_never_stops_the_bot_after_a_migration(harness: Harness) -> None:
+    """With a migration applied a failed deploy stops the bot and the web API (no rollback),
+    so the first ingress's health is only reported."""
+    _ingress_release(harness, REV_NEW)
+    harness.host.current = ("h1",)                       # a pending migration
+    harness.host.sidecar_health = "unhealthy"
+    assert harness.run() == 0
+    row = harness.ledger.last
+    assert row.outcome == "deployed" and "ingress_unhealthy:tailscale" in row.detail
+    assert harness.host.running["bot"][1] == NEW_B and harness.host.running["webapi"][1] == NEW_B
+
+
+def test_a_recreate_is_never_failed_by_the_ingress(harness: Harness) -> None:
+    _ingress_release(harness, REV_OLD)
+    _running_ingress(harness)
+    harness.host.sidecar_health = "unhealthy"
+    assert harness.run(recreate=True) == 0
+    row = harness.ledger.last
+    assert row.outcome == "deployed" and "ingress_unhealthy:tailscale" in row.detail
+    assert harness.host.stopped == []
+
+
+def test_a_crash_looping_ingress_the_deploy_did_not_touch_never_fails_it(harness: Harness) -> None:
+    _ingress_release(harness, REV_OLD, REV_NEW)
+    _running_ingress(harness)
+    harness.host.crashing = {"tailscale"}
+    harness.host.sidecar_health = "unhealthy"
+    assert harness.run() == 0
+    assert harness.ledger.last.outcome == "deployed"
+
+
+def test_a_docker_that_cannot_list_container_ids_gates_no_ingress(harness: Harness) -> None:
+    """Which containers `up` created is unknown: a guess must not hold the ingress to it."""
+    _ingress_release(harness, REV_OLD, REV_NEW)
+    _running_ingress(harness)
+    harness.host.sidecar_health = "unhealthy"
+    harness.host.timeouts = {("docker", "inspect", "--type", "container", "--format", "{{.Name}} {{.Id}}")}
+    assert harness.run() == 0
+    assert harness.ledger.last.outcome == "deployed"
 
 
 def test_a_third_party_container_on_another_image_fails_the_deploy(

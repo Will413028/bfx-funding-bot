@@ -1267,10 +1267,14 @@ class Deployer:
                     else "; bot stays stopped" if attempt.bot_stopped
                     else "; running release untouched")
             return self._finish(attempt, "failed", f"{exc.code}{kept}")
+        # A fresh ingress that is unhealthy fails the deploy only when that means a rollback;
+        # after a migration (or with nothing to roll back to) failing stops the bot instead.
+        rollback_follows = not (attempt.migrations_applied or attempt.bot_stopped
+                                or view.last_success is None)
         try:
             created = self._compose_up(release, target, attempt.attempt_id)
             self._verify(release, target, attempt.attempt_id)
-            ingress = self._wait_healthy(release, gate_ingress=created)
+            ingress = self._wait_healthy(release, gate_ingress=created if rollback_follows else ())
             if self.settings.rollback_drill:
                 raise DeployError("rollback_drill")
         except DeployError as exc:
@@ -1729,14 +1733,18 @@ class Deployer:
                     code="compose_up_failed", timeout=600.0,
                     env=self._compose_env(target, deployment_id))
         after = self._container_ids(release)
+        if before is None or after is None:
+            return frozenset()      # docker did not answer: gate nothing on a guess
         return frozenset(name for name in release.names
                          if name not in after or after.get(name) != before.get(name))
 
-    def _container_ids(self, release: Release) -> dict[str, str]:
-        """Each service's current container Id; a service whose container is missing (or
-        docker answering nothing) is left out, which counts as created."""
+    def _container_ids(self, release: Release) -> dict[str, str] | None:
+        """Each service's current container Id; a service whose container is missing is left
+        out (it counts as created). None when docker answers nothing at all."""
         result = self._run(["docker", "inspect", "--type", "container", "--format", "{{.Name}} {{.Id}}",
                             *release.containers], timeout=60.0)
+        if result.returncode != 0 and not result.stdout.strip():
+            return None
         service_of = {service.container: service.name for service in release.services}
         ids = {}
         for line in result.stdout.splitlines():
@@ -1906,15 +1914,16 @@ class Deployer:
             return self._finish(attempt, "failed", f"unhealthy:{reason}; {why}; no automatic "
                                 f"rollback; {stopped}")
         try:
-            self._rollback_to(previous)
+            ingress = self._rollback_to(previous)
         except DeployError as rollback:
             stopped = self._stop("bot")
             return self._finish(attempt, "failed", f"unhealthy:{reason}; rollback_failed:"
                                 f"{rollback.code}; {stopped}")
+        warned = "" if not ingress else "; warnings=" + ",".join(ingress)
         return self._finish(attempt, "rolled_back", f"unhealthy:{reason}; rolled_back_to="
-                            f"{previous.source_revision}")
+                            f"{previous.source_revision}{warned}")
 
-    def _rollback_to(self, previous: LedgerRow) -> None:
+    def _rollback_to(self, previous: LedgerRow) -> list[str]:
         """Recreate the previous successful release under its own deployment id, only onto the
         schema it was written for.
 
@@ -1933,7 +1942,7 @@ class Deployer:
             raise DeployError("rollback_schema_mismatch")
         self._compose_up(release, target, previous.attempt_id)
         self._verify(release, target, previous.attempt_id)
-        self._wait_healthy(release)       # the ingress warns, never fails the rollback
+        return self._wait_healthy(release)    # the ingress warns, never fails the rollback
 
     # ------------------------------------------------------------------ recreate
 
