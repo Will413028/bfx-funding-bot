@@ -638,7 +638,7 @@ kill 的 cancel-all）被拒：
 | 3 | 被命令檢查或 bot 拒絕（輸出的 `error`） |
 | 4 | bot 套用失敗 |
 | 5 | 等到 `--wait-seconds` 仍未結案（請求仍在佇列，`request` 查結果） |
-| 77 | 沒有 tailnet 身分（`not_tailnet_peer`、`tailnet_whois_failed`、`operator_identity_invalid`）或不是該帳戶的 member（`operator_not_member`） |
+| 77 | 沒有 tailnet 身分（`not_tailnet_peer`、`tailnet_whois_failed`、`operator_identity_invalid`）或不是該帳戶的 member（`operator_not_member`；`operator.env` 的 `BFX_EXCHANGE_ACCOUNT_ID` 指到不存在或已 retired 的帳戶也是這個碼，兩者刻意不分） |
 | 78 | schema head 或資金權威不是這個 image 的 |
 
 - **紀錄**：`sudo journalctl -t bfx-op --since today --no-pager`。每次呼叫一行 `start`（login、tailnet user

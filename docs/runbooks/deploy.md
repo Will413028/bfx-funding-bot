@@ -49,7 +49,7 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    引用了但 `<rev>` 沒有這個檔：`release_file_missing`，什麼都還沒停。
 5. 以 digest pull compose 裡的每個 image：release 自己的 backend 帶 GHCR 憑證，
    第三方 image 只允許 `docker.io/tailscale/tailscale@sha256:…`（`THIRD_PARTY_IMAGE`）且不帶憑證；
-   其他 image 一律拒絕（含舊的 frontend image：`precheck:compose_image_not_allowed:frontend`，什麼都還沒停）。檢查 compose 引用的 env 檔、`migrate.env` 與 `live.env`；在新 image 的 one-shot
+   其他 image 一律拒絕。9d-5 之前、帶 frontend 服務的 revision 在 precheck 被拒、什麼都還沒停（它的 `${BFX_FRONTEND_IMAGE:?}` 已沒人提供，渲染即失敗；寫死 digest 的則是 `compose_image_not_allowed:frontend`）。檢查 compose 引用的 env 檔、`migrate.env` 與 `live.env`；在新 image 的 one-shot
    （`migrate.env`，owner role）比較 `alembic current` 與 `alembic heads`。
 6. **有待套用的 migration**（Will 2026-09-25；全停：ADR
    `2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations` D6）：
