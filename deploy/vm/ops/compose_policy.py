@@ -61,10 +61,8 @@ from typing import Any
 # Every app release has the bot and the web API (9d-5 removed the frontend service).
 # bfx-deploy derives what it runs from the rendered file (bfx_deploy.release_services).
 REQUIRED_SERVICES = ("bot", "webapi")
-OPTIONAL_SERVICES: tuple[str, ...] = ()
 # The tailnet ingress (9d-4), third-party image, own shape (ingress_violations).
 INGRESS_SERVICES = ("netns", "tailscale")
-SERVICES = (*REQUIRED_SERVICES, *OPTIONAL_SERVICES)
 NETWORK = "bfx_default"
 TAILSCALE_IMAGE = ("docker.io/tailscale/tailscale@sha256:"
                    "c507f3a2a6ab1cabd8d809b98edeb41edbd5c3fb6ad9632ffd098b4c7d0b4065")
@@ -344,7 +342,7 @@ def operator_violations(rendered: Mapping[str, Any]) -> list[str]:
 
 def operator_uninterpolated_violations(uninterpolated: Mapping[str, Any]) -> list[str]:
     """The operator file's env file and required wrapper variables, from `--no-interpolate`."""
-    found = env_file_violations(uninterpolated, OPERATOR_ENV_FILES, optional=())
+    found = env_file_violations(uninterpolated, OPERATOR_ENV_FILES)
     spec = (uninterpolated.get("services") or {}).get(OPERATOR_SERVICE) or {}
     env = spec.get("environment") or {}
     if not all(str(env.get(key, "")).startswith("${" + variable + ":?")
@@ -356,19 +354,15 @@ def operator_uninterpolated_violations(uninterpolated: Mapping[str, Any]) -> lis
 def env_file_violations(
     uninterpolated: Mapping[str, Any],
     wanted_files: Mapping[str, tuple[str, ...]] = ENV_FILES,
-    optional: tuple[str, ...] = OPTIONAL_SERVICES,
 ) -> list[str]:
     """Each service's env files, from `config --no-interpolate` (version-stable).
 
     `wanted_files` maps each service to the path suffixes of its env files, in
-    order; the default is the app file's. A service in `optional` that the file
-    does not define is skipped (whether it may be absent is violations()'s call).
+    order; the default is the app file's.
     """
     found = []
     services = uninterpolated.get("services") or {}
     for service, wanted in wanted_files.items():
-        if service in optional and service not in services:
-            continue
         entries = (services.get(service) or {}).get("env_file") or []
         paths = [str(e.get("path", "")) if isinstance(e, dict) else "" for e in entries]
         if len(paths) != len(wanted) or not all(
@@ -384,14 +378,14 @@ def violations(rendered: Mapping[str, Any]) -> list[str]:
     if rendered.get("name") != "bfx-app":
         found.append("project_name")
     names = set(rendered.get("services") or {})
-    if not {*REQUIRED_SERVICES, *INGRESS_SERVICES} <= names <= {*SERVICES, *INGRESS_SERVICES}:
+    if names != {*REQUIRED_SERVICES, *INGRESS_SERVICES}:
         found.append("services")
     found += top_level_violations(rendered)
     network = (rendered.get("networks") or {}).get(NETWORK) or {}
     if set(rendered.get("networks") or {}) != {NETWORK} or network.get("external") is not True \
             or network.get("name") != NETWORK:
         found.append("external_network")
-    for service in SERVICES:
+    for service in REQUIRED_SERVICES:
         spec = (rendered.get("services") or {}).get(service)
         if isinstance(spec, dict):
             found += service_violations(service, spec)

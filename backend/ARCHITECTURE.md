@@ -20,7 +20,7 @@ bfx-funding-bot 在 Bitfinex 的 funding（放貸）市場上自動掛單放貸�
 3. **單一寫入者曝險（single-writer exposure）**：`DeploymentReconciler` 是 venue 提交的唯一寫入者；訊號層不送單。
 4. **Reconcile 即正確性骨幹（reconcile-as-correctness-backbone）**：venue（透過 REST）是曝險真相的權威來源；90s 週期的觀測 cycle 保證 ledger 收斂。WebSocket 只產生 venue hint（要求提早 reconcile），不寫任何資金狀態。
 
-部署形態：單一長駐 daemon，以 `asyncio.TaskGroup` 並行跑多個 sub-task；全 stack 自托於單一 Oracle Cloud VM（下稱 `<vm-host>`；docker compose：`bfx-bot`/`bfx-webapi`/`bfx-netns`/`bfx-tailscale`/`bfx-postgres`(PG 18)/`bfx-redis`）。Koyeb/Neon/Upstash 為歷史平台（2026-05-31 Koyeb cutover、2026-06-23 Neon/Vercel 歸零）。
+部署形態：單一長駐 daemon，以 `asyncio.TaskGroup` 並行跑多個 sub-task；全 stack 自托於單一 Oracle Cloud VM（下稱 `<vm-host>`；docker compose：`bfx-bot`/`bfx-webapi`/`bfx-netns`/`bfx-tailscale`/`bfx-postgres`(PG 18)）。Koyeb/Neon/Upstash 為歷史平台（2026-05-31 Koyeb cutover、2026-06-23 Neon/Vercel 歸零）。
 
 ### Web API identity (9d-5) and Halt 1 identity
 
@@ -739,7 +739,6 @@ deployment reconciler 在 ledger 的 `spendable` 內、依各 cell 的 `max_new_
 |---|---|
 | Backend daemon | VM 自托（`<vm-host>`，Docker，Python 3.13 + uv；`bfx-bot`/`bfx-webapi`。Koyeb 已於 2026-05-31 cutover 至 VM） |
 | Database | VM 自托 Postgres 18（`bfx-postgres`。Neon 已於 2026-06-23 棄用歸零） |
-| Cache | VM 自托 Redis 7（`bfx-redis`）：9d-5 起沒有使用者，W9 移除 |
 | 營運 UI | 前端 static export build 進 backend image，由 webapi 提供；入口是 tailnet 節點 `bfx-tailscale`（Tailscale Serve，只限 tailnet 內），見上方「Web API identity」 |
 
 **跨 migration 的契約（`core/schema_head.py`）**：serialized projector 的 seeded cursor 與 projection archive 各由一個 migration 建立；之後每個 migration 以模組屬性 `ledger_contract = "preserved" | "changed"` 宣告是否改變它，契約成立的 revision 集合由此推導（從 head 往回到最近一個 changed，或到建立它的那個），不再有人工維護的清單。`tests/test_schema_head.py` 拒絕沒宣告的 migration 與多個 head。
@@ -753,8 +752,8 @@ recreate 後查健康，失敗就回到前一個 digest，每次結果寫進 app
 無法關掉自己的觸發）時，先跑該版本 DR 腳本的 isolated restore test；有 migration 時先停 webapi、再停 bot，然後備份（全停，ADR 2026-10-15 D6）。
 停下之後任何失敗兩者都維持停止，唯一例外是 restore test 的 receipt 為 `migration_rehearsal_failed`
 （備份可還原、prod schema 沒動）：依序重新啟動舊 bot 與舊 webapi。webapi 開機時比對 schema head，不符就拒絕啟動（與 bot 相同）。
-部署哪些服務、檢查哪些 container 與 env 檔、pull 哪些 image，都由該 release 自己的 compose 檔渲染結果（`docker compose config --no-env-resolution`）決定，`up --remove-orphans` 移除 compose 不再有的服務；Compose 會沿用沒變的第三方容器，只有它掛載的設定檔內容與這次 release 不同、或加入者卡在已死的 namespace 時才 `--force-recreate`（平常的部署不重啟 tailnet 節點）；第三方 image 只允許 allowlist 的 digest、不帶 GHCR 憑證；沒有 frontend 服務的 release 不需要 frontend image，ledger 的 `frontend_digest` 為 NULL。
-health wait：bot `/healthz` 300 s、webapi `/ready` 120 s、有 frontend 時（9d-5 之前的回滾目標）`127.0.0.1:3001` 120 s、其他服務（9d 的 `netns` holder 與 `tailscale` sidecar）必須宣告的 compose healthcheck 120 s，再 60 s settle；入口服務只在這次部署新建它時、於 app 通過之後才把關（`ingress_unhealthy:`），且只在回滾做得到時（沒套用 migration、有上一個成功版本、schema 是上一版的）才回滾，做不到就保留健康的新版並記 warning；回滾、`--recreate` 與沒動到的入口不健康或不符（部署後檢查）只記 warning；例外只有 Compose 起不了入口容器、或只因入口而回滾卻在 schema 檢查之後失敗（照一般規則）。加入另一服務 network namespace 的服務（`tailscale`、9d-5 起的 webapi，都加入只持有 namespace 的 `netns`，計畫 D13）與它在同一次 `up`，部署檢查它在活的 namespace 裡；沒有要部署的那一輪若 holder 重啟或重建讓加入者留在死 namespace，只重建卡住的加入者（tailscale、9d-5 起的 webapi；不碰 bot，同一事件最多 3 次）。
+部署哪些服務、檢查哪些 container 與 env 檔、pull 哪些 image，都由該 release 自己的 compose 檔渲染結果（`docker compose config --no-env-resolution`）決定，`up --remove-orphans` 移除 compose 不再有的服務；Compose 會沿用沒變的第三方容器，只有它掛載的設定檔內容與這次 release 不同、或加入者卡在已死的 namespace 時才 `--force-recreate`（平常的部署不重啟 tailnet 節點）；第三方 image 只允許 allowlist 的 digest、不帶 GHCR 憑證；只有 backend 自己的 digest 與 allowlist 的第三方 image，帶 frontend 服務的 compose 在 precheck 被拒；ledger 的 `frontend_digest` 只是 9d-5 之前的歷史，新列為 NULL。
+health wait：bot `/healthz` 300 s、webapi `/ready` 120 s、其他服務（9d 的 `netns` holder 與 `tailscale` sidecar）必須宣告的 compose healthcheck 120 s，再 60 s settle；入口服務只在這次部署新建它時、於 app 通過之後才把關（`ingress_unhealthy:`），且只在回滾做得到時（沒套用 migration、有上一個成功版本、schema 是上一版的）才回滾，做不到就保留健康的新版並記 warning；回滾、`--recreate` 與沒動到的入口不健康或不符（部署後檢查）只記 warning；例外只有 Compose 起不了入口容器、或只因入口而回滾卻在 schema 檢查之後失敗（照一般規則）。加入另一服務 network namespace 的服務（`tailscale`、9d-5 起的 webapi，都加入只持有 namespace 的 `netns`，計畫 D13）與它在同一次 `up`，部署檢查它在活的 namespace 裡；沒有要部署的那一輪若 holder 重啟或重建讓加入者留在死 namespace，只重建卡住的加入者（tailscale、9d-5 起的 webapi；不碰 bot，同一事件最多 3 次）。
 已套用 migration 後失敗不回滾（舊碼未必能跑新 schema），停 bot 與 webapi、roll forward；schema 已不是上一個成功 release 的（先前嘗試套用過 migration）也不回滾。
 部署工具注入 `BFX_IMAGE_DIGEST`／`BFX_SOURCE_REVISION`／`BFX_DEPLOYMENT_ID`：只用來標示每筆
 execution audit 的 `config_hash`／`service_version` 與狀態報告，部署永遠不改變 trading state（§6）。
@@ -786,8 +785,7 @@ resume、enable、裁決與換憑證只由 CLI 排入（ADR 2026-10-15 D4，migr
 請求的驗證與排入只有一份：`execution/operator_commands.py`，operator CLI（`apps/operator_cli.py`）與 webapi 的 kill／disable handler 都是它的 adapter。
 CLI 以 one-off compose service `bfx-operator`（`deploy/vm/ops/docker-compose.operator.yml`）執行，連線用專屬 role `bfx_operator`：
 migration `4ab02765a34b`（輪替另由 `1db83367918c` 加上）的精確 allowlist，只有四個 outbox 請求欄位的 INSERT 與驗證所需的讀取，沒有 UPDATE／DELETE（`test_operator_privilege_allowlist.py`）。
-CLI 開頭比對 wrapper 傳入的 tailnet 身分與 `operator.env` 設定的值，不符就 exit 77、不連 DB；之後同 webapi 檢查 schema head 與 ledger authority。
-請求一律以 `BFX_OPERATOR_USER_ID` 送出（9d 前），daemon 照樣以 `operator_authorized` 重驗。9d 改用 tailnet node user ID 之前，由 owner 腳本 `scripts/grant_operator_membership.py` 把現有 membership 複製給 node user ID（冪等、授權的相異 user 上限 2）。
+誰在操作是 wrapper 以 `tailscale whois` 取得、傳入的 tailnet user ID（`BFX_OPERATOR_TAILNET_IDENTITY`），它就是請求的 `requested_by`（9d-6）；`operator.env` 不設定 operator。格式不是 tailnet user ID 就 exit 77、不連 DB；之後同 webapi 檢查 schema head 與 ledger authority，再確認它是帳戶的 member（不是就 exit 77、不寫入），daemon 套用時照樣以 `operator_authorized` 重驗。node user ID 的 membership 由 owner 腳本 `scripts/grant_operator_membership.py` 寫入（W3，冪等、授權的相異 user 上限 2）。
 **憑證輪替（`execution/credential_rotation.py`、`core/sealed_credential.py`，migration `1db83367918c`）**：
 CLI 不持有 KEK。bot 每次開機（`bot_runs` 寫入後）產生一把 X25519 收件 key，私鑰只在記憶體，公鑰寫進 `credential_rotation_recipients`；
 CLI 的 `rotate-credential` 從 stdin 讀新 key，只封給「scope 最新、尚未結束的 run」的收件 key（HPKE base mode，`info` 綁帳號、環境、收件 key 與 request id），

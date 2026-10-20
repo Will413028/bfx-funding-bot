@@ -21,8 +21,8 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
           ──► VM bfx-deploy.timer（每 5 分鐘，*:2/5）→ bfx-deploy
 ```
 
-- Image：`ghcr.io/will413028/bfx-funding-bot-backend`（9d-5 起不再建 `…-frontend`；舊 revision 的 frontend image
-  仍在 GHCR，供回滾到 9d-5 之前用）。
+- Image：`ghcr.io/will413028/bfx-funding-bot-backend`（9d-5 起不再建 `…-frontend`；9d-6 起 bfx-deploy 也不查它，
+  compose 檔帶 frontend 服務的 revision 會在 precheck 被拒）。
   `main` tag 只用來「發現」最新 release；部署一律以 `repository@sha256:<digest>`。
 - Registry 查詢用 `docker buildx imagetools inspect`（GHCR 憑證只放在每次呼叫的暫時
   `DOCKER_CONFIG`，不留下 `docker login`）。
@@ -36,22 +36,20 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
 1. `flock`（`/run/lock/bfx-deploy.lock`），兩個執行不會重疊。
 2. 解析 GHCR `backend:main` 的 digest；若 ledger 最新的成功部署已是它就結束。
    **上次失敗、rolled_back 或中斷（只有 `started` 列）的 digest 不會自動重試**，要 `--retry`。
-3. 讀 image label 的 revision 與 CI run，要求 `backend:sha-<rev>` 是同一個 digest；
-   `frontend:sha-<rev>` 存在時要帶同一個 revision。
+3. 讀 image label 的 revision 與 CI run，要求 `backend:sha-<rev>` 是同一個 digest。
 4. 在 VM mirror（`/home/ubuntu/bfx-funding-bot`，以 `ubuntu` 身分跑 git）fetch，要求 `<rev>`
    在 `origin/main` 上；compose 檔與 `live.env` 都取自 `<rev>` 本身（git 物件，不讀 working tree），
    寫進 `/var/lib/bfx-deploy/releases/<rev>/`。**要跑什麼由這份 compose 檔決定**：
    `docker compose config --no-env-resolution --format json`（不讀 env 檔內容）渲染出服務、
-   `container_name`、image 與 env 檔，部署、檢查、健康等待都只針對這些服務。compose 有 frontend 服務
-   而 `frontend:sha-<rev>` 還沒推上來時，跟 CI 推到一半一樣靜默重試、30 分鐘後告警；compose 沒有
-   frontend（9d-5 起）就不需要 frontend image，ledger 的 `frontend_digest` 記 NULL。
+   `container_name`、image 與 env 檔，部署、檢查、健康等待都只針對這些服務。ledger 的 `frontend_digest`
+   只是 9d-5 之前的歷史，新列一律記 NULL、部署不讀它。
    頂層 `configs` 的 `file`（只接受 release 目錄內的檔案；`content`／`environment` 形式與頂層
    `secrets` 一律拒絕）同樣從 `<rev>` 的 git 物件寫到 release 目錄的同一個相對路徑；
    compose 沒有 `configs` 就什麼都不多寫，所以回滾或 `--recreate` 到沒有這些檔的舊 revision 照常運作。
    引用了但 `<rev>` 沒有這個檔：`release_file_missing`，什麼都還沒停。
-5. 以 digest pull compose 裡的每個 image：release 自己的 backend／frontend 帶 GHCR 憑證，
+5. 以 digest pull compose 裡的每個 image：release 自己的 backend 帶 GHCR 憑證，
    第三方 image 只允許 `docker.io/tailscale/tailscale@sha256:…`（`THIRD_PARTY_IMAGE`）且不帶憑證；
-   其他 image 一律拒絕。檢查 compose 引用的 env 檔、`migrate.env` 與 `live.env`；在新 image 的 one-shot
+   其他 image 一律拒絕。9d-5 之前、帶 frontend 服務的 revision 在 precheck 被拒、什麼都還沒停（它的 `${BFX_FRONTEND_IMAGE:?}` 已沒人提供，渲染即失敗；寫死 digest 的則是 `compose_image_not_allowed:frontend`）。檢查 compose 引用的 env 檔、`migrate.env` 與 `live.env`；在新 image 的 one-shot
    （`migrate.env`，owner role）比較 `alembic current` 與 `alembic heads`。
 6. **有待套用的 migration**（Will 2026-09-25；全停：ADR
    `2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations` D6）：
@@ -72,7 +70,7 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    沒有 migration 的部署與回滾路徑不停 webapi。
 7. 寫入 ledger 的 `started` 列（attempt id、digest、revision、CI run；之後不可修改），
    再 `docker compose -p bfx-app -f <release>/docker-compose.app.yml up -d --no-deps --remove-orphans <compose 的服務>`；
-   compose 不再有的服務（9d-5 之後的 frontend）以 `--remove-orphans` 移除，回滾到舊版會再建回來。
+   compose 不再有的服務以 `--remove-orphans` 移除。
    自家服務每次都會重建（身分 env 每次不同）；沒變的第三方容器（holder、tailscale）Compose 會沿用，所以平常的
    部署不會重啟 tailnet 節點。只有兩種情況加 `--force-recreate` 重建全部：它掛載的設定檔（serve.json）和這次
    release 的內容不同（Compose 自己不會因此重建），或加入者卡在已死的 namespace（holder 被單獨重啟或停掉過）。
@@ -83,8 +81,7 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    目前的 namespace 裡（`HostConfig.NetworkMode` 等於 `container:<X 的 Id>`，且晚於 `<X>` 啟動），否則
    `container_release_mismatch:<服務>:netns`。兩者一定在同一次 `up`：`<X>` 被重建時 Compose 會連帶重建加入它的
    服務（Compose v5.1.4 實測），這條檢查證明它真的發生。
-   等健康（bot `:8080/healthz`、webapi `:8000/ready`（會連 DB；`/health` 在死掉的 netns 裡仍回 ok）、有 frontend 時
-   （9d-5 之前的回滾目標）`127.0.0.1:3001`；其他服務一定要在 compose 宣告 `healthcheck`，看 Docker 的 `State.Health.Status` 是
+   等健康（bot `:8080/healthz`、webapi `:8000/ready`（會連 DB；`/health` 在死掉的 netns 裡仍回 ok）；其他服務一定要在 compose 宣告 `healthcheck`，看 Docker 的 `State.Health.Status` 是
    `healthy`，沒宣告就 precheck `compose_healthcheck_missing:<服務>`），再 settle 60 秒。
    webapi 與 bot 一樣，開機時比對 image 內 migrations 的唯一 head（`core/schema_head.py`）與
    `alembic_version`，不一致就拒絕開機（uvicorn 結束、health 不會通過）：舊 webapi 不會在
@@ -98,9 +95,11 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
     並發 Telegram（deployed＝info、有 warning 或 rolled_back＝warning、其他＝critical）。
     在變更任何 container 之前就失敗的嘗試只有結束列。
 
-PostgreSQL 與 Redis 在 `docker-compose.bot.yml`（project `bfx`），bfx-deploy 從不碰；
-app 只加入既有的 `bfx_default` network。這個檔只定義 `postgres` 與 `redis`
-（`test_offsite_dr_image.py` 守住）；app 的舊 compose 定義已刪除。
+PostgreSQL 在 `docker-compose.bot.yml`（project `bfx`），bfx-deploy 從不碰；
+app 只加入既有的 `bfx_default` network。這個檔只定義 `postgres`
+（`test_offsite_dr_image.py` 守住）；app 的舊 compose 定義已刪除。Redis 隨 app 登入移除（9d-6）：
+容器以 `docker rm -f bfx-redis` 移除（compose 檔已沒有這個服務，`compose rm redis` 找不到它），
+volume（`docker volume ls --filter name=redisdata`）保留 30 天後再刪。
 
 ### 套用資料服務的 compose 變更
 
@@ -123,7 +122,7 @@ docker exec --user postgres bfx-postgres pgbackrest --stanza=bfx check          
 docker start bfx-bot && sudo systemctl start bfx-deploy.timer
 ```
 
-dry run 只能列出 `bfx-postgres Recreate`；出現 redis 或其他服務就停下來查。`pgbackrest check`
+dry run 只能列出 `bfx-postgres Recreate`；出現其他服務或 orphan 容器就停下來查。`pgbackrest check`
 失敗時 bot 維持停止，先修 archive（RPO 由 `bfx-backup-check` 監看）。
 
 ## 2. 部署與交易狀態
@@ -196,7 +195,7 @@ compose 裡的 `netns`（`bfx-netns`）只持有 network namespace（只跑 `sle
 節點 `bfx-ops`、userspace、沒有 capability、沒有 port）以 `network_mode: service:netns` 加入它；9d-5 起
 webapi 也加入它。tailscaled 重啟、崩潰或單獨重建都不會換掉 namespace（計畫 D13，holder spike 實測）。
 兩者都要 compose healthcheck：`bfx-tailscale` 的 `/healthz` 在節點拿到 tailnet 位址後才回 200。
-**入口的狀態不讓 bot 被停**：bot、webapi（與 9d-5 之前的 frontend）照舊把關；入口（健康檢查，以及部署後檢查的 image、名稱、
+**入口的狀態不讓 bot 被停**：bot、webapi 照舊把關；入口（健康檢查，以及部署後檢查的 image、名稱、
 namespace）只在這次部署新建或重建了它（第一次部署、image 或 serve.json 改了、被 §1 第 7 步強制重建）時才把關，
 而且在 app 都通過之後才判斷，錯誤碼是 `ingress_unhealthy:<服務>[:<不符項>]`。這種失敗只在回滾真的做得到時才回滾（沒套用 migration、有上一個成功版本、上一版
 的 schema 就是現在的 schema；回到沒有入口的版本會移除它）——例如 auth key 錯、tailnet policy 沒有 `tag:bfx-ops`

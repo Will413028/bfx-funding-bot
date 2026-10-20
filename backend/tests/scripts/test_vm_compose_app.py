@@ -169,7 +169,7 @@ def test_policy_and_deployer_agree_on_names_and_commands() -> None:
     assert joiners == bfx.NETNS_JOINERS
     assert set(bfx.ROLE_CONTAINERS) == set(policy.REQUIRED_SERVICES)
     assert tuple(bfx.identity_env(
-        bfx.Target("b" * 40, DIGEST_B, None, "x", None), image="x",
+        bfx.Target("b" * 40, DIGEST_B, "x"), image="x",
         deployment_id="d") or {}) == policy.IDENTITY
 
 
@@ -191,8 +191,7 @@ def test_rendered_compose_file_satisfies_the_policy(rendered: dict[str, Any]) ->
 def test_deployer_reads_the_release_from_the_real_rendering(rendered: dict[str, Any],
                                                            runtime_dir: Path) -> None:
     """bfx-deploy renders the release the same way (--no-env-resolution) and runs what it finds."""
-    target = bfx.Target(FAKE_ENV["BFX_SOURCE_REVISION"], DIGEST_B, None,
-                        FAKE_ENV["BFX_BACKEND_IMAGE"], None)
+    target = bfx.Target(FAKE_ENV["BFX_SOURCE_REVISION"], DIGEST_B, FAKE_ENV["BFX_BACKEND_IMAGE"])
     if "env_file" not in rendered["services"]["bot"]:
         # Compose 2.38 (CI) folds env files into `environment`: refused, never unchecked.
         with pytest.raises(bfx.DeployError, match="compose_env_files_not_rendered:bot"):
@@ -494,7 +493,7 @@ def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> Non
     (tmp_path / "tailscale").mkdir()
     shutil.copy(SERVE_PATH, tmp_path / "tailscale/serve.json")
     digest = image.split("@", 1)[1]
-    target = bfx.Target(FAKE_ENV["BFX_SOURCE_REVISION"], digest, None, image, None)
+    target = bfx.Target(FAKE_ENV["BFX_SOURCE_REVISION"], digest, image)
     env = {**_path_env(), **FAKE_ENV, "BFX_RUNTIME_DIR": str(runtime),
            "BFX_BACKEND_IMAGE": image, "BFX_BACKEND_DIGEST": digest}
     project = f"bfx-app-test-{suffix}"

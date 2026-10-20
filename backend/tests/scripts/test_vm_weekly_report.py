@@ -264,7 +264,7 @@ class FakeLedger:
     def _row(self, index: int) -> Any:
         revision, digest, outcome = self.rows[index]
         return bfx.LedgerRow(id=index + 1, attempt_id=f"attempt-{index}", source_revision=revision,
-                             backend_digest=digest, frontend_digest="sha256:" + "f" * 64,
+                             backend_digest=digest,
                              outcome=outcome, migrations_applied=False)
 
     def read(self) -> Any:
