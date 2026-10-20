@@ -15,14 +15,8 @@ export class ApiError extends Error {
 
 // ── Base URL ──
 
-const isServer = typeof window === "undefined";
-
-function getBaseUrl(): string {
-  if (isServer) {
-    return `${process.env.API_URL}/api/v1`;
-  }
-  return "/api/proxy";
-}
+/** Every API call goes through the same-origin BFF proxy, from the browser only. */
+const API_BASE = "/api/proxy";
 
 const UUID_PATH_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -54,10 +48,7 @@ async function request<T>(
   path: string,
   options?: RequestOptions,
 ): Promise<T> {
-  const url = new URL(
-    `${getBaseUrl()}${path}`,
-    isServer ? undefined : window.location.origin,
-  );
+  const url = new URL(`${API_BASE}${path}`, window.location.origin);
 
   if (options?.params) {
     for (const [key, value] of Object.entries(options.params)) {
@@ -72,43 +63,6 @@ async function request<T>(
   };
   if (options?.body) {
     headers["Content-Type"] = "application/json";
-  }
-
-  if (isServer) {
-    try {
-      const { auth, getOperatorMfaSessionAccess } = await import("@/lib/auth");
-      const { headers: nextHeaders } = await import("next/headers");
-      const requestHeaders = await nextHeaders();
-      const operatorUserId = process.env.BFX_OPERATOR_USER_ID?.trim();
-      if (!operatorUserId) {
-        throw new ApiError(
-          503,
-          "auth_not_configured",
-          "Operator authorization is not configured",
-        );
-      }
-      const access = await getOperatorMfaSessionAccess(
-        requestHeaders,
-        operatorUserId,
-      );
-      if (!access.allowed) {
-        throw new ApiError(403, access.error, access.error);
-      }
-      const res = await auth.api.getToken({ headers: requestHeaders });
-      if (res?.token) headers.Authorization = `Bearer ${res.token}`;
-      else {
-        throw new ApiError(401, "UNAUTHORIZED", "Auth token unavailable");
-      }
-    } catch (error) {
-      if (error instanceof ApiError) throw error;
-      // A missing request context or unavailable auth dependency is not a
-      // reason to send an unauthenticated request to a private backend route.
-      throw new ApiError(
-        403,
-        "operator_required",
-        "Operator session unavailable",
-      );
-    }
   }
 
   const controller = new AbortController();

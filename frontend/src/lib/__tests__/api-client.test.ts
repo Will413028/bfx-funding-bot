@@ -6,15 +6,11 @@ beforeEach(() => {
   vi.resetModules();
   mockFetch.mockReset();
   vi.stubGlobal("fetch", mockFetch);
-  vi.stubEnv("API_URL", "http://localhost:8080");
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
-  vi.unstubAllEnvs();
   vi.unstubAllGlobals();
-  vi.doUnmock("@/lib/auth");
-  vi.doUnmock("next/headers");
 });
 
 function jsonResponse(data: unknown, status = 200) {
@@ -29,36 +25,6 @@ async function loadApiClient() {
 }
 
 describe("apiClient.get", () => {
-  it("does not mint or forward a server-side request without MFA marker access", async () => {
-    const getToken = vi.fn();
-    const getOperatorMfaSessionAccess = vi
-      .fn()
-      .mockResolvedValue({ allowed: false, error: "mfa_required" });
-    vi.stubGlobal("window", undefined);
-    vi.stubEnv("BFX_OPERATOR_USER_ID", "operator-1");
-    vi.doMock("next/headers", () => ({
-      headers: vi.fn(async () => new Headers()),
-    }));
-    vi.doMock("@/lib/auth", () => ({
-      auth: { api: { getToken } },
-      getOperatorMfaSessionAccess,
-    }));
-
-    const { apiClient, ApiError } = await loadApiClient();
-
-    await expect(
-      apiClient.get(
-        "/exchange-accounts/550e8400-e29b-41d4-a716-446655440000/positions",
-      ),
-    ).rejects.toMatchObject({
-      status: 403,
-      code: "mfa_required",
-    } satisfies Partial<InstanceType<typeof ApiError>>);
-    expect(getOperatorMfaSessionAccess).toHaveBeenCalledOnce();
-    expect(getToken).not.toHaveBeenCalled();
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
   it("unwraps data envelope", async () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({ data: { id: 1, name: "test" } }),
@@ -174,6 +140,17 @@ describe("apiClient.getList", () => {
 });
 
 describe("request params", () => {
+  it("sends the request to the same-origin proxy", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ data: [] }));
+
+    const { apiClient } = await loadApiClient();
+    await apiClient.get("/items");
+
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      `${window.location.origin}/api/proxy/items`,
+    );
+  });
+
   it("appends query params to URL", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ data: [] }));
 

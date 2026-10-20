@@ -38,8 +38,7 @@ middleware.ts                       # Auth guard + i18n + security headers
 const user = await apiClient.get<User>("/users/me");
 const keys = await apiClient.getList<ApiKey[]>("/api-keys");
 
-// Client 端 → /api/proxy → Python web-API（注入 server-minted JWT）
-// Server 端 → 直接呼叫 API_URL
+// 只在 client 端呼叫：/api/proxy（api-client 的 API_BASE）→ Python web-API（注入 server-minted JWT）
 ```
 
 - 錯誤拋出 `ApiError`（含 `status`, `code`, `message`）
