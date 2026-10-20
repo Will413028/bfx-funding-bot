@@ -13,6 +13,7 @@ const protectedPaths = [
 	"/api-keys",
 	"/strategy",
 	"/history",
+	"/attribution",
 	"/settings",
 ];
 const authPaths = ["/login"];
