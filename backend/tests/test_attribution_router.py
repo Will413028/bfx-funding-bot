@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.live_validation.tables  # noqa: F401  # registers ORM
-from bfx_funding_bot.core.auth import Principal, require_operator, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
@@ -15,6 +15,7 @@ from bfx_funding_bot.modules.api.attribution import build_attribution_router
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
+from tests.ingress_support import attach_ingress
 
 _ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 _WEEKLY_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/attribution/weekly"
@@ -126,25 +127,22 @@ def test_weekly_excludes_other_realm(app_client):
 
 
 def test_weekly_rejects_non_operator_after_skipping_router_rate_limit(app_client):
-    """Catches weekly attribution regressing from require_operator to require_user."""
+    """A route not gated by require_operator would answer instead of refusing."""
     async def _reject_non_operator():
         raise HTTPException(status_code=403, detail="operator_required")
 
-    async def _permissive_user():
-        return Principal(user_id="user_abc", email="will@example.com", role="operator")
 
     async def _skip_rate_limit():
         return None
 
     app_client.app.dependency_overrides[require_operator] = _reject_non_operator
-    app_client.app.dependency_overrides[require_user] = _permissive_user
     app_client.app.dependency_overrides[shared_rate_limit_dependency()] = _skip_rate_limit
 
     assert app_client.get(_WEEKLY_PATH).status_code == 403
 
 
 def test_weekly_requires_auth(sqlite_engine):
-    app = FastAPI()
+    app = attach_ingress(FastAPI())
     app.include_router(build_attribution_router())
     client = TestClient(app)
     assert client.get(_WEEKLY_PATH).status_code in (401, 403)

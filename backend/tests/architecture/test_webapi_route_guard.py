@@ -17,16 +17,21 @@ from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute, RouteContext, iter_route_contexts
 
 from bfx_funding_bot.apps.webapi import app
-from bfx_funding_bot.core.auth import require_operator, require_user
+from bfx_funding_bot.core.auth import require_operator
+from bfx_funding_bot.modules.api.ingress import FE_EVENTS_PATH
 
 PUBLIC_API_PATHS = frozenset({
     "/api/v1/public/proof-summary",
     "/api/v1/public/funding-rates.csv",
 })
 PROBE_PATHS = frozenset({"/health", "/ready"})
-# FastAPI's generated docs; the only non-APIRoute routes the app may carry.
+# The ingress's own routes (9d-5): `/` redirects to the UI, /fe-events forwards browser
+# Sentry events; both are guarded by the ingress middleware's same-origin check, not auth.
+INGRESS_PATHS = frozenset({"/", FE_EVENTS_PATH})
+# The static export's mount (present only where the image ships it); generated docs are off.
+UI_MOUNT = "/"
 DOCS_PATHS = frozenset({"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"})
-_AUTH_DEPENDENCIES = (require_operator, require_user)
+_AUTH_DEPENDENCIES = (require_operator,)
 
 
 def _calls(dependant: Dependant) -> Iterator[object]:
@@ -46,7 +51,7 @@ def _unguarded_private_routes(target: FastAPI) -> list[str]:
     return sorted(
         f"{sorted(route.methods)} {route.path}"
         for route in _api_routes(target)
-        if route.path not in PUBLIC_API_PATHS | PROBE_PATHS
+        if route.path not in PUBLIC_API_PATHS | PROBE_PATHS | INGRESS_PATHS
         and require_operator not in set(_calls(route.dependant))
     )
 
@@ -55,25 +60,28 @@ def test_private_routes_require_the_operator() -> None:
     assert _unguarded_private_routes(app) == []
 
 
-def test_every_route_is_versioned_api_a_probe_or_docs() -> None:
-    """A mount, websocket or plain Starlette route would bypass the APIRoute walk above."""
+def test_every_route_is_versioned_api_a_probe_or_the_ingress() -> None:
+    """A mount, websocket or plain Starlette route would bypass the APIRoute walk above; the
+    only one allowed is the UI's static mount, and there are no generated docs."""
     other = sorted(
         str(context.path) for context in iter_route_contexts(app.routes)
         if not isinstance(context.original_route, APIRoute)
     )
-    assert set(other) == DOCS_PATHS
+    assert set(other) <= {UI_MOUNT}
+    assert not set(other) & DOCS_PATHS
     stray = sorted(
         route.path for route in _api_routes(app)
-        if not route.path.startswith("/api/v1/") and route.path not in PROBE_PATHS
+        if not route.path.startswith("/api/v1/") and route.path not in PROBE_PATHS | INGRESS_PATHS
     )
     assert stray == []
+    assert app.openapi_url is None and app.docs_url is None and app.redoc_url is None
 
 
 def test_public_routes_exist_and_carry_no_auth() -> None:
     by_path = {route.path: route for route in _api_routes(app)}
-    assert by_path.keys() >= PUBLIC_API_PATHS | PROBE_PATHS
+    assert by_path.keys() >= PUBLIC_API_PATHS | PROBE_PATHS | INGRESS_PATHS
     authed = sorted(
-        path for path in PUBLIC_API_PATHS | PROBE_PATHS
+        path for path in PUBLIC_API_PATHS | PROBE_PATHS | INGRESS_PATHS
         if set(_calls(by_path[path].dependant)) & set(_AUTH_DEPENDENCIES)
     )
     assert authed == []

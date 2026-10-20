@@ -188,6 +188,16 @@ _DOCKER_ENDPOINT_VARIABLES = (
 
 
 @pytest.fixture(autouse=True)
+def _ingress_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The web API's required ingress settings (9d-5), so a full lifespan starts; a test that
+    proves one missing value refuses to start deletes it."""
+    from tests.ingress_support import INGRESS_ENV
+
+    for key, value in INGRESS_ENV.items():
+        monkeypatch.setenv(key, value)
+
+
+@pytest.fixture(autouse=True)
 def _no_ambient_docker_endpoint(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only a test marked ``docker`` may see the developer's Docker endpoint.
 

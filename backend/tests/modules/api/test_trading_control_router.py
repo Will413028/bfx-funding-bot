@@ -16,33 +16,30 @@ from fastapi import FastAPI
 from sqlalchemy import select
 
 import bfx_funding_bot.modules.execution.audit.tables  # noqa: F401
-from bfx_funding_bot.core import auth
-from bfx_funding_bot.core.auth import Principal
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccountMembership
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.execution.safety.tables import (
     TradingControlRequestRow,
     TradingStateRow,
 )
+from tests.ingress_support import attach_ingress, operator_headers
 
 pytestmark = pytest.mark.integration
 
 DIGEST = "sha256:" + "a" * 64
-AUTH = {"Authorization": "Bearer fixture"}
+AUTH = operator_headers("operator")
 
 
-async def _app(migrated_db, monkeypatch, *, role="owner", principal=None):
+async def _app(migrated_db, monkeypatch, *, role="owner"):
     from bfx_funding_bot.apps.read_models import build_read_models
     from bfx_funding_bot.modules.api.trading_control import build_trading_control_router
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
-    monkeypatch.setenv("BFX_OPERATOR_USER_ID", "operator")
     monkeypatch.setenv("BFX_IMAGE_DIGEST", DIGEST)
     monkeypatch.setenv("BFX_SOURCE_REVISION", "c" * 40)
-    monkeypatch.setattr(auth, "_verify", lambda _: principal or Principal("operator", None, "admin"))
     factory, account = migrated_db
     async with factory.begin() as session:
         session.add(ExchangeAccountMembership(exchange_account_id=account, user_id="operator", role=role))
-    app = FastAPI()
+    app = attach_ingress(FastAPI(), BFX_OPERATOR_TAILNET_USER_ID="operator")
     app.state.session_factory = factory
     app.state.read_models = build_read_models()
     app.include_router(build_trading_control_router())
@@ -128,17 +125,16 @@ async def test_malformed_forged_or_retired_requests_are_refused(migrated_db, mon
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("role", "principal", "status"), [
-    ("viewer", None, 403),
-    ("owner", Principal("other", None, "admin"), 403),
-    ("owner", Principal("operator", None, "user"), 403),
+@pytest.mark.parametrize(("role", "caller", "status"), [
+    ("viewer", "operator", 403),
+    ("owner", "other", 401),     # the forwarded capability names another tailnet user
 ])
 async def test_only_the_operator_with_write_membership_can_request(migrated_db, monkeypatch, role,
-                                                                   principal, status):
-    app, factory, account = await _app(migrated_db, monkeypatch, role=role, principal=principal)
+                                                                   caller, status):
+    app, factory, account = await _app(migrated_db, monkeypatch, role=role)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
         response = await client.post(f"/api/v1/exchange-accounts/{account}/trading-control/kill",
-                                     json={"reason": "x"}, headers=AUTH)
+                                     json={"reason": "x"}, headers=operator_headers(caller))
     assert response.status_code == status
     async with factory() as session:
         assert (await session.scalars(select(TradingControlRequestRow))).all() == []
@@ -321,12 +317,8 @@ async def test_malformed_currency_requests_are_refused(migrated_db, monkeypatch,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("role", "principal"), [
-    ("viewer", None),
-    ("owner", Principal("operator", None, "user")),
-])
-async def test_only_the_operator_can_toggle_a_currency(migrated_db, monkeypatch, role, principal):
-    app, factory, account = await _app(migrated_db, monkeypatch, role=role, principal=principal)
+async def test_only_the_operator_can_toggle_a_currency(migrated_db, monkeypatch):
+    app, factory, account = await _app(migrated_db, monkeypatch, role="viewer")
     await _seed_policies(factory, account)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
         response = await client.post(

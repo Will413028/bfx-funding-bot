@@ -71,13 +71,6 @@ class AuthSettings(BaseSettings):
         extra="ignore",
     )
 
-    # SP1 web-API auth (Better Auth JWKS verification)
-    better_auth_jwks_url: str = ""        # deploy: https://<app>/api/auth/jwks (real endpoint)
-    # Pinned stable issuer — must byte-match the FE jwt plugin's `issuer` (frontend
-    # src/lib/auth.ts), NOT the deploy URL, so a domain change can't break verify.
-    # Override via env BETTER_AUTH_ISSUER only if the FE issuer string ever changes.
-    better_auth_issuer: str = "bfx-funding-bot"
-    jwt_audience: str = "bfx-funding-backend"
     operator_user_id: str = Field(default="", validation_alias="BFX_OPERATOR_USER_ID")
     operator_role: str = Field(default="admin", validation_alias="BFX_OPERATOR_ROLE")
 
@@ -87,6 +80,47 @@ class AuthSettings(BaseSettings):
         phase = os.environ.get("BFX_PHASE", "").lower()
         if phase == "live" and self.operator_role != "admin":
             raise ValueError("BFX_OPERATOR_ROLE must be 'admin' in live")
+        return self
+
+
+class IngressSettings(BaseSettings):
+    """The web API's tailnet ingress (9d-5): every value required at every web API start.
+
+    Built once in the web API's lifespan and kept on ``app.state.ingress``; never at module
+    import (the import must work without these keys) and never on the ``Settings`` chain
+    (other processes build ``Settings`` without them). Not gated on ``BFX_PHASE``: the web
+    API reads only ``webapi.env``, which carries no phase, and has no mode without Serve.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # The operator's tailnet node user ID: what the Serve-forwarded operator capability must
+    # name, and the principal's key (the membership user_id).
+    operator_tailnet_user_id: str = Field(validation_alias="BFX_OPERATOR_TAILNET_USER_ID", min_length=1)
+    # Comma-separated Host values the web API answers (the node's MagicDNS name).
+    allowed_hosts_csv: str = Field(validation_alias="BFX_WEBAPI_ALLOWED_HOSTS", min_length=1)
+    # /fe-events forwards only to this DSN's Sentry project.
+    fe_sentry_dsn: str = Field(validation_alias="BFX_FE_SENTRY_DSN", min_length=1, repr=False)
+
+    @property
+    def allowed_hosts(self) -> frozenset[str]:
+        return frozenset(host.strip().lower() for host in self.allowed_hosts_csv.split(",") if host.strip())
+
+    @model_validator(mode="after")
+    def _validate(self) -> "IngressSettings":
+        if not self.operator_tailnet_user_id.strip():
+            raise ValueError("BFX_OPERATOR_TAILNET_USER_ID must not be blank")
+        hosts = self.allowed_hosts
+        if not hosts or any("/" in host or ":" in host or "*" in host for host in hosts):
+            raise ValueError("BFX_WEBAPI_ALLOWED_HOSTS must list bare host names")
+        dsn = urlsplit(self.fe_sentry_dsn)
+        if dsn.scheme != "https" or not dsn.username or not dsn.hostname or not dsn.path.strip("/"):
+            raise ValueError("BFX_FE_SENTRY_DSN must be an https Sentry DSN")
         return self
 
 

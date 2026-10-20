@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.account_scope import ExchangeAccountContext, require_account_member
+from tests.ingress_support import attach_ingress
 
 
 @pytest.mark.parametrize("scope_error", [None, "account", "realm", "missing_realm"])
@@ -58,7 +59,7 @@ async def test_funding_status_has_no_anonymous_access():
 
     async def read(path):
         pytest.fail("anonymous caller must not reach daemon")
-    app = FastAPI()
+    app = attach_ingress(FastAPI())
     app.include_router(build_funding_status_router(reader=read))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(f"/api/v1/exchange-accounts/{uuid4()}/funding-status")
