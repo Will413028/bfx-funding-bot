@@ -248,6 +248,9 @@ def inspect_record(service: str, running: tuple[str, str, str, str],
         "Name": "/" + CONTAINER_NAMES[service], "Id": meta.get("Id", ""),
         "State": {"Running": is_running, "StartedAt": meta.get("StartedAt", "")},
         "HostConfig": {"NetworkMode": meta.get("NetworkMode", "bfx_default")},
+        # A config file is bind-mounted from the release directory that created the container.
+        "Mounts": ([{"Type": "bind", "Source": meta["ConfigMount"], "Destination": "/config/serve.json"}]
+                   if meta.get("ConfigMount") else []),
         "Config": {"Image": image, "Env": env,
                    "Labels": {"com.docker.compose.project": "bfx-app"}},
     }
@@ -564,6 +567,10 @@ class FakeHost:
                 continue
             recreated.add(service)
             self.create(service, "container:" + self.meta[joined]["Id"] if joined else "bfx_default")
+            for mount in rendered["services"][service].get("configs") or []:
+                config = (rendered.get("configs") or {}).get(mount["source"]) or {}
+                if config.get("file"):
+                    self.meta[service]["ConfigMount"] = str(Path(config["file"]).resolve())
             if image == TAILSCALE:
                 self.running[service] = (image, "", "", "")
             else:
@@ -1603,11 +1610,8 @@ def test_a_sidecar_stranded_by_a_holder_restart_is_recreated_by_the_next_deploy(
     an unchanged container (holder spike S4): the deploy's `up` must force the recreate, or
     _verify fails, the rollback fails the same way and the bot is stopped."""
     _ingress_release(harness, REV_OLD, REV_NEW)
+    _running_ingress(harness)
     host = harness.host
-    for service in ("netns", "tailscale"):
-        host.running[service] = (TAILSCALE, "", "", "")
-    host.create("netns")
-    host.create("tailscale", "container:" + host.meta["netns"]["Id"])
     host.restart_in_place("netns")
     assert harness.run() == 0
     assert harness.ledger.last.outcome == "deployed"
@@ -1617,19 +1621,52 @@ def test_a_sidecar_stranded_by_a_holder_restart_is_recreated_by_the_next_deploy(
     assert host.stopped == []
 
 
-def test_every_up_recreates_the_third_party_containers_too(harness: Harness) -> None:
-    """Compose keeps an unchanged third-party container, mounting the serve.json of the release
-    that created it -- deleted by the release prune two deploys later (measured, v5.1.4)."""
-    _ingress_release(harness, REV_OLD, REV_NEW)
+def _running_ingress(harness: Harness, revision: str = REV_OLD) -> None:
+    """The ingress of `revision` running, its sidecar mounting that release's serve.json."""
     host = harness.host
     for service in ("netns", "tailscale"):
         host.running[service] = (TAILSCALE, "", "", "")
     host.create("netns")
     host.create("tailscale", "container:" + host.meta["netns"]["Id"])
+    serve = harness.settings.state_dir / "releases" / revision / SERVE_PATH.removeprefix("deploy/vm/")
+    serve.parent.mkdir(parents=True, exist_ok=True)
+    serve.write_text(host.files[(revision, SERVE_PATH)])
+    host.meta["tailscale"]["ConfigMount"] = str(serve.resolve())
+
+
+def test_an_unchanged_ingress_is_left_running_by_a_deploy(harness: Harness) -> None:
+    """A bot deploy never restarts the sidecar (and so never waits on the tailnet) when its
+    image, config and namespace are unchanged."""
+    _ingress_release(harness, REV_OLD, REV_NEW)
+    _running_ingress(harness)
+    host = harness.host
+    sidecar = host.meta["tailscale"]["Id"]
+    assert harness.run() == 0
+    assert "--force-recreate" not in host.calls[host.index(COMPOSE_UP)]
+    assert host.meta["tailscale"]["Id"] == sidecar
+
+
+def test_a_changed_serve_config_recreates_the_sidecar(harness: Harness) -> None:
+    """Compose keeps a container whose config file changed (measured, v5.1.4): the deploy
+    forces the recreate, so the new serve.json takes effect."""
+    _ingress_release(harness, REV_OLD, REV_NEW)
+    _running_ingress(harness)
+    harness.host.files[(REV_NEW, SERVE_PATH)] = '{"TCP": {"443": {"HTTPS": true}}}\n'
+    host = harness.host
     sidecar = host.meta["tailscale"]["Id"]
     assert harness.run() == 0
     assert "--force-recreate" in host.calls[host.index(COMPOSE_UP)]
     assert host.meta["tailscale"]["Id"] != sidecar
+    assert Path(host.meta["tailscale"]["ConfigMount"]).read_text() == '{"TCP": {"443": {"HTTPS": true}}}\n'
+
+
+def test_a_stopped_holder_with_its_sidecar_running_recreates_both(harness: Harness) -> None:
+    """`up` would start the stopped holder with a new namespace and keep the sidecar."""
+    _ingress_release(harness, REV_OLD, REV_NEW)
+    _running_ingress(harness)
+    harness.host.parked["netns"] = harness.host.running.pop("netns")
+    assert harness.run() == 0
+    assert "--force-recreate" in harness.host.calls[harness.host.index(COMPOSE_UP)]
 
 
 def test_a_third_party_container_on_another_image_fails_the_deploy(

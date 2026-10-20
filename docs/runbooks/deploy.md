@@ -71,11 +71,11 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    `docker-compose.bot.yml`、`docker-compose.dr.yml`，或 diff 讀不到）：什麼都不停，先跑 restore test。
    沒有 migration 的部署與回滾路徑不停 webapi。
 7. 寫入 ledger 的 `started` 列（attempt id、digest、revision、CI run；之後不可修改），
-   再 `docker compose -p bfx-app -f <release>/docker-compose.app.yml up -d --no-deps --remove-orphans --force-recreate <compose 的服務>`；
+   再 `docker compose -p bfx-app -f <release>/docker-compose.app.yml up -d --no-deps --remove-orphans <compose 的服務>`；
    compose 不再有的服務（9d-5 之後的 frontend）以 `--remove-orphans` 移除，回滾到舊版會再建回來。
-   一律 `--force-recreate`：自家服務本來每次都會重建（身分 env 每次不同），沒變的第三方容器（tailscale、holder）
-   Compose 會沿用，它掛的是建立它那個 release 目錄裡的 serve.json，兩次部署後該目錄被清掉就再也啟動不了；
-   沿用也會忽略 serve.json 的修改，以及留在已死的 namespace。
+   自家服務每次都會重建（身分 env 每次不同）；沒變的第三方容器（holder、tailscale）Compose 會沿用，所以平常的
+   部署不會重啟 tailnet 節點。只有兩種情況加 `--force-recreate` 重建全部：它掛載的設定檔（serve.json）和這次
+   release 的內容不同（Compose 自己不會因此重建），或加入者卡在已死的 namespace（holder 被單獨重啟或停掉過）。
    `BFX_DEPLOYMENT_ID` 只用來讓 audit 與狀態報告指出這次部署，不影響交易。
 8. 檢查每個 container 跑的是 compose 渲染出的 image、屬於 compose project `bfx-app`；release 自己的
    image 另外比對身分 env（`BFX_IMAGE_DIGEST`、`BFX_SOURCE_REVISION`、`BFX_DEPLOYMENT_ID`）；
@@ -197,16 +197,17 @@ compose 裡的 `netns`（`bfx-netns`）只持有 network namespace（只跑 `sle
 webapi 也加入它。tailscaled 重啟、崩潰或單獨重建都不會換掉 namespace（計畫 D13，holder spike 實測）。
 兩者都要 compose healthcheck：`bfx-tailscale` 的 `/healthz` 在節點拿到 tailnet 位址後才回 200，所以 auth key
 錯誤、tailnet policy 沒有 `tag:bfx-ops` 的 owner 時部署會 `health_timeout:tailscale`，之後照一般的不健康處理
-（沒有 migration 就回滾；同一個 release 套用過 migration 則停 bot 與 webapi，見 §5）。每次部署都重建兩者
-（`--force-recreate`），節點會重連幾秒。
-Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.1:8000`），隨部署寫進 release 目錄、下一次部署生效；
+（沒有 migration 就回滾；同一個 release 套用過 migration 則停 bot 與 webapi，見 §5）。平常的部署不重建兩者
+（見 §1 第 7 步），所以 bot 的部署不必等節點重新連上 tailnet。
+Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.1:8000`），隨部署寫進 release 目錄；內容改了
+那次部署會重建全部服務讓它生效；
 9d-5 之前 webapi 不在這個 namespace，Serve 打過去是 502。
 
 - 查狀態：`docker exec bfx-tailscale tailscale status`（tagged、key 到期 none）、
   `docker exec bfx-tailscale tailscale serve status`。
 - **不要單獨 `docker restart bfx-netns`**：holder 換了新 namespace，tailscale（與 9d-5 起的 webapi）會留在
-  沒有 `eth0` 的舊 namespace，手動 `docker compose up` 也不修（Compose 沿用沒變的容器）。需要重來時用
-  `sudo bfx-deploy --recreate`（一律重建全部服務）。
+  沒有 `eth0` 的舊 namespace，手動 `docker compose up` 也不修（Compose 沿用沒變的容器）。下一次部署會偵測到並重建；
+  要立刻修就 `sudo bfx-deploy --recreate`（一律重建全部服務）。
 - 換節點（state 壞掉）：admin console 刪節點 → `docker volume rm bfx_tsstate` → 放一把新 auth key →
   `--recreate`。
 

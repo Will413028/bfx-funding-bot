@@ -1698,7 +1698,8 @@ class Deployer:
                 # The env files Compose reads are the ones validated above.
                 "BFX_RUNTIME_DIR": str(self.settings.runtime_dir)}
 
-    def _compose_up(self, release: Release, target: Target, deployment_id: str) -> None:
+    def _compose_up(self, release: Release, target: Target, deployment_id: str,
+                    *, force_recreate: bool = False) -> None:
         pinned = [(target.backend_image, target.backend_digest)]
         if target.frontend_image is not None or target.frontend_digest is not None:
             pinned.append((target.frontend_image or "", target.frontend_digest or ""))
@@ -1710,17 +1711,58 @@ class Deployer:
         # Every service in one `up`, never a sidecar alone: Compose recreates a service that
         # joins a recreated one's network namespace in the same `up` (measured, v5.1.4), and
         # _verify proves it (netns_stale).
-        # --force-recreate, always: the release's own services are recreated anyway (their
-        # identity env changes with every attempt), but Compose keeps an unchanged third-party
-        # container (measured, v5.1.4) -- mounting the config file of the release that created
-        # it, which _prune_releases deletes two deploys later (it then cannot start again:
-        # "no such file"), ignoring a changed serve.json, and left in a dead namespace after a
-        # holder restart (holder spike S4), where _verify then the rollback fail.
-        options = ["--detach", "--no-deps", "--remove-orphans", "--force-recreate"]
+        # Compose keeps an unchanged third-party container (measured, v5.1.4): one serving the
+        # config file of the release that created it after the file changed, or one left in a
+        # dead namespace by a holder restart (holder spike S4, where _verify and then the
+        # rollback would fail and stop the bot). Only then is every service recreated; never
+        # always, which would tie each bot deploy to the sidecar reaching the tailnet again.
+        reasons = [] if force_recreate else self._recreate_reasons(release)
+        if reasons:
+            log(f"recreating every service: {', '.join(reasons)}")
+        options = ["--detach", "--no-deps", "--remove-orphans",
+                   *(["--force-recreate"] if force_recreate or reasons else [])]
         self._check(["docker", "compose", "-p", PROJECT, "-f", str(release.compose_file),
                      "up", *options, *release.names],
                     code="compose_up_failed", timeout=600.0,
                     env=self._compose_env(target, deployment_id))
+
+    def _recreate_reasons(self, release: Release) -> list[str]:
+        """Why a running container of `release` must be recreated although Compose would keep
+        it: `<service>:netns` when it joins a namespace its provider no longer holds (or a
+        stopped provider, which `up` starts with a new one), `<service>:config` when a file it
+        mounts from a release directory differs from this release's. Nothing to judge (no
+        container, docker answering nothing) is no verdict: _verify still checks after `up`."""
+        by_name = {service.name: service for service in release.services}
+        result = self._run(["docker", "inspect", "--type", "container",
+                            *sorted({service.container for service in release.services})], timeout=60.0)
+        try:
+            records = {str(record["Name"]).lstrip("/"): record
+                       for record in json.loads(result.stdout or "[]")}
+        except (ValueError, KeyError, TypeError):
+            return []
+        releases = self.settings.state_dir / "releases"
+        reasons = []
+        for service in release.services:
+            record = records.get(service.container)
+            if record is None or not (record.get("State") or {}).get("Running"):
+                continue
+            provider = records.get(by_name[service.joins].container) if service.joins in by_name else None
+            if provider is not None and (not (provider.get("State") or {}).get("Running")
+                                         or netns_stale(record, provider)):
+                reasons.append(f"{service.name}:netns")
+            for mount in record.get("Mounts") or []:
+                source = Path(str((mount or {}).get("Source", "")))
+                if not source.is_relative_to(releases) or len(source.relative_to(releases).parts) < 2:
+                    continue
+                wanted = release.directory.joinpath(*source.relative_to(releases).parts[1:])
+                try:
+                    same = wanted.read_bytes() == source.read_bytes()
+                except OSError:
+                    same = False
+                if not same:
+                    reasons.append(f"{service.name}:config")
+                    break
+        return reasons
 
     def _verify(self, release: Release, target: Target, deployment_id: str,
                 *, only: Sequence[str] | None = None) -> None:
@@ -1907,7 +1949,7 @@ class Deployer:
         except DeployError as exc:
             return self._finish(attempt, "failed", f"{exc.code}; running release untouched")
         try:
-            self._compose_up(release, target, attempt.attempt_id)
+            self._compose_up(release, target, attempt.attempt_id, force_recreate=True)
             self._verify(release, target, attempt.attempt_id)
             self._wait_healthy(release)
         except DeployError as exc:

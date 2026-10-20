@@ -5,7 +5,7 @@
 # (`docker compose config --no-env-resolution`) and runs:
 #
 #   docker compose -p bfx-app -f <release>/docker-compose.app.yml \
-#     up -d --no-deps --remove-orphans --force-recreate <every service defined here>
+#     up -d --no-deps --remove-orphans <every service defined here>
 #
 # PostgreSQL and Redis stay in docker-compose.bot.yml (project `bfx`) and are never
 # defined, recreated or touched here. This project only joins their existing
