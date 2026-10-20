@@ -11,15 +11,13 @@ export interface ApiErrorResponse {
   };
 }
 
-// ── User ──
+// ── Profile ──
 
-export interface User {
-  id: string;
-  email: string;
-  status: "active" | "suspended";
-  plan: "free" | "starter" | "pro" | "enterprise";
-  createdAt: string;
-  updatedAt: string;
+/** GET /api/v1/profile: the operator identity Tailscale Serve forwards. */
+export interface Profile {
+  userId: string;
+  email: string | null;
+  role: string;
 }
 
 // ── API Key ──

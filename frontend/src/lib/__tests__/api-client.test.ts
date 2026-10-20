@@ -48,7 +48,7 @@ describe("apiClient.get", () => {
     const { apiClient, ApiError } = await loadApiClient();
 
     try {
-      await apiClient.get("/me");
+      await apiClient.get("/profile");
       expect.unreachable("should have thrown");
     } catch (e) {
       expect(e).toBeInstanceOf(ApiError);

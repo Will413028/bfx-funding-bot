@@ -26,4 +26,19 @@ describe("SettingsPage", () => {
 
     expect(screen.getByText("Failed to load user data")).toBeDefined();
   });
+
+  it("shows the tailnet identity from the profile", () => {
+    useUser.mockReturnValue({
+      data: { userId: "4182", email: "op@github", role: "operator" },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    });
+
+    render(<SettingsPage />);
+
+    expect(screen.getByText("op@github")).toBeDefined();
+    expect(screen.getByText("4182")).toBeDefined();
+    expect(screen.getByText("operator")).toBeDefined();
+  });
 });
