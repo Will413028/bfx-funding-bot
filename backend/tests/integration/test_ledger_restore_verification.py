@@ -349,6 +349,16 @@ def test_boot_check_accepts_the_restored_copy_with_the_drill_grants_only(cluster
         ("fUST", "cell", _B)]
 
 
+def test_boot_check_accepts_an_account_that_holds_nothing(clusters) -> None:
+    """A newest basis with no cells (the account drained) is a state, not an unread capital."""
+    restored, _ = clusters
+    _superuser(restored, "DELETE FROM accepted_capital_basis_cell")
+    completed = _boot_check(_verifier_url(restored))
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    [scope] = json.loads(completed.stdout.splitlines()[-1])["boot"]["scopes"]
+    assert (scope["basis_id"], scope["reads"]) == (_B, [])
+
+
 def test_boot_check_refuses_a_restored_copy_that_is_not_on_the_ledger(clusters) -> None:
     restored, _ = clusters
     _superuser(restored, "DELETE FROM capital_authority_epoch WHERE epoch_seq = 2")

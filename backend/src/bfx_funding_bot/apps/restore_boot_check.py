@@ -13,7 +13,10 @@ transaction:
 4. the epoch guard a Bitfinex bot boots through (``require_ledger_epoch``: a known writer);
 5. the ledger capital reader (``read_capital``) for every (symbol, cell) of each scope's newest
    accepted basis, as of that scope's newest query: it must fold a basis, or say the newest
-   query is still pending (the restore point fell inside an observation cycle).
+   query is still pending (the restore point fell inside an observation cycle). A basis with
+   no cells (the account holds nothing, e.g. drained for a withdrawal) has nothing to read;
+   its scope is reported with no reads. The drill compares the restored ledger with
+   production row by row, so an empty basis there is production's own state.
 
 Prints one JSON line {"boot": {...}}; exit 3 with {"error": <bounded code>} on a refusal. The
 drill runs this module of the deployed image directly (``restore_commands.ledger_verifier_command``),
@@ -163,8 +166,6 @@ async def _check(database_url: str) -> dict[str, object]:
                     "deployment_environment": scope.deployment_environment,
                     "basis_id": basis_id, "reads": reads,
                 })
-            if not any(item["reads"] for item in checked):
-                raise RefusedError("boot_capital_unread")
     finally:
         await engine.dispose()
     return {"boot": {"schema_head": build_head(), "realm": realm, "authority": "ledger",
