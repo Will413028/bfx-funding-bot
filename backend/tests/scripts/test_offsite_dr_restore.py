@@ -1417,7 +1417,7 @@ def test_restore_rejects_egress_membership_before_verifier(tmp_path: Path) -> No
 
 def test_malformed_boot_check_output_fails_without_a_success_measurement(tmp_path: Path) -> None:
     fake = _FakeRunner(
-        verifier=subprocess.CompletedProcess(("fake",), 0, _boot(reads=[]), "")
+        verifier=subprocess.CompletedProcess(("fake",), 0, _boot().replace('"ledger"', '"legacy"'), "")
     )
 
     assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
