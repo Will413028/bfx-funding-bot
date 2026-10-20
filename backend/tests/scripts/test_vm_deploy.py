@@ -2347,6 +2347,47 @@ def test_a_sidecar_unhealthy_after_the_repair_counts_as_a_failed_repair(harness:
     assert _bot_untouched(harness)
 
 
+def test_only_the_stale_joiner_is_recreated(harness: Harness) -> None:
+    """9d-5 shape, the web API left on an old holder Id, the sidecar fine: the sidecar stays."""
+    _ingress_running(harness, webapi_joins=True)
+    sidecar = harness.host.meta["tailscale"]["Id"]
+    harness.host.meta["webapi"]["NetworkMode"] = "container:" + "0" * 64
+    assert harness.run() == 0
+    host = harness.host
+    assert host.calls[host.index(_repair)][-1:] == ("webapi",) and "tailscale" not in host.calls[host.index(_repair)]
+    assert host.meta["tailscale"]["Id"] == sidecar
+
+
+def test_a_repair_that_leaves_a_joiner_stale_counts_as_failed(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recreated sidecar is still behind the holder (it restarted again meanwhile): the
+    release check after `up` fails the repair instead of reporting it fixed every tick."""
+    _ingress_running(harness, webapi_joins=False)
+    harness.host.restart_in_place("netns")
+    original = harness.host._compose
+
+    def compose(call: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
+        result = original(call, env)
+        if _repair(call):
+            harness.host.restart_in_place("netns")
+        return result
+
+    monkeypatch.setattr(harness.host, "_compose", compose)
+    assert harness.run() == 0
+    assert [level for level, _ in harness.notices] == ["warning"]
+    assert "container_release_mismatch:tailscale:netns" in harness.notices[0][1]
+
+
+def test_both_joiners_must_be_healthy_for_the_repair_to_count(harness: Harness) -> None:
+    _ingress_running(harness, webapi_joins=True)
+    harness.host.restart_in_place("netns")
+    harness.host.sidecar_health = "unhealthy"
+    assert harness.run() == 0
+    assert [level for level, _ in harness.notices] == ["warning"]
+    assert "unhealthy:tailscale" in harness.notices[0][1]
+
+
 def test_a_dry_run_only_reports_a_dead_namespace(harness: Harness) -> None:
     _joined(harness)
     _break(harness, "recreated")
