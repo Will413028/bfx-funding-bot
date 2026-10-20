@@ -115,6 +115,7 @@ ENV_FILES = {
     "webapi": (f"/{RUNTIME_REFERENCE}webapi.env",),
     "frontend": (f"/{RUNTIME_REFERENCE}frontend.env",),
     "tailscale": (f"/{RUNTIME_REFERENCE}tailscale.env",),
+    "netns": (),
 }
 IDENTITY = ("BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_DEPLOYMENT_ID")
 LOADER_INJECTION = ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT")
@@ -206,7 +207,8 @@ def ingress_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
     if service == "netns":
         need(spec.get("entrypoint") == NETNS_ENTRYPOINT and not spec.get("command"), "exact_entrypoint")
         need(spec.get("init") is True, "init")
-        need(set(spec.get("networks") or {}) == {NETWORK}, "network")
+        networks = spec.get("networks") or {}
+        need(set(networks) == {NETWORK} and not networks.get(NETWORK), "network")
     else:
         # The image's own entrypoint (containerboot), nothing appended.
         need(not spec.get("entrypoint") and not spec.get("command"), "image_entrypoint")

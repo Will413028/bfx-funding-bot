@@ -552,10 +552,18 @@ class FakeHost:
         # Compose creates a namespace's provider before the services that join it.
         joins = {name: str(rendered["services"][name].get("network_mode", "")).removeprefix("service:")
                  for name in services}
+        recreated: set[str] = set()
         for service in sorted(services, key=lambda name: name in joins and joins[name] in rendered["services"]):
             joined = joins[service] if joins[service] in rendered["services"] else None
-            self.create(service, "container:" + self.meta[joined]["Id"] if joined else "bfx_default")
             image = rendered["services"][service]["image"]
+            # Compose keeps a container whose config is unchanged: a third-party one (no
+            # identity env) on the same image, unless forced or its namespace's provider was
+            # recreated in this `up` (measured, v5.1.4) -- even when that namespace is dead.
+            if image == TAILSCALE and self.running.get(service, ("",))[0] == image \
+                    and "--force-recreate" not in options and joined not in recreated:
+                continue
+            recreated.add(service)
+            self.create(service, "container:" + self.meta[joined]["Id"] if joined else "bfx_default")
             if image == TAILSCALE:
                 self.running[service] = (image, "", "", "")
             else:
@@ -1561,15 +1569,22 @@ def test_a_third_party_image_is_pulled_by_digest_without_the_registry_token(harn
     assert "bfx-tailscale" in inspected
 
 
+def _ingress_release(harness: Harness, *revisions: str) -> str:
+    """The tracked file (fake digest for the fake host) at these revisions; returns serve.json."""
+    real_image = re.search(r"docker\.io/tailscale/tailscale@sha256:[0-9a-f]{64}", REAL_COMPOSE_TEXT)
+    assert real_image is not None
+    serve = (ROOT / SERVE_PATH).read_text(encoding="utf-8")
+    for revision in revisions:
+        harness.host.files[(revision, bfx.COMPOSE_PATH)] = REAL_COMPOSE_TEXT.replace(real_image[0], TAILSCALE)
+        harness.host.files[(revision, SERVE_PATH)] = serve
+    (harness.settings.runtime_dir / "tailscale.env").write_text("")
+    return serve
+
+
 def test_the_real_release_file_deploys_the_ingress_beside_the_app(harness: Harness) -> None:
     """The tracked file (9d-4): the holder and the sidecar in the one `up`, the sidecar in the
     holder's namespace, its image pulled without the token and serve.json in the release."""
-    real_image = re.search(r"docker\.io/tailscale/tailscale@sha256:[0-9a-f]{64}", REAL_COMPOSE_TEXT)
-    assert real_image is not None
-    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = REAL_COMPOSE_TEXT.replace(real_image[0], TAILSCALE)
-    serve = (ROOT / SERVE_PATH).read_text(encoding="utf-8")
-    harness.host.files[(REV_NEW, SERVE_PATH)] = serve
-    (harness.settings.runtime_dir / "tailscale.env").write_text("")
+    serve = _ingress_release(harness, REV_NEW)
     deployer = harness.deployer()
     deployer._registry_credentials = ("will", "ghcr-token")
     assert deployer.run() == 0
@@ -1581,6 +1596,38 @@ def test_the_real_release_file_deploys_the_ingress_beside_the_app(harness: Harne
     assert host.meta["webapi"]["NetworkMode"] == "bfx_default"      # 9d-5 moves it in
     assert (_release(harness) / "tailscale/serve.json").read_text() == serve
     assert harness.ledger.last.outcome == "deployed"
+
+
+def test_a_sidecar_stranded_by_a_holder_restart_is_recreated_by_the_next_deploy(harness: Harness) -> None:
+    """A holder restarted in place leaves the sidecar in the dead namespace, and Compose keeps
+    an unchanged container (holder spike S4): the deploy's `up` must force the recreate, or
+    _verify fails, the rollback fails the same way and the bot is stopped."""
+    _ingress_release(harness, REV_OLD, REV_NEW)
+    host = harness.host
+    for service in ("netns", "tailscale"):
+        host.running[service] = (TAILSCALE, "", "", "")
+    host.create("netns")
+    host.create("tailscale", "container:" + host.meta["netns"]["Id"])
+    host.restart_in_place("netns")
+    assert harness.run() == 0
+    assert harness.ledger.last.outcome == "deployed"
+    assert "--force-recreate" in host.calls[host.index(COMPOSE_UP)]
+    assert not bfx.netns_stale(inspect_record("tailscale", host.running["tailscale"], host.meta["tailscale"]),
+                               inspect_record("netns", host.running["netns"], host.meta["netns"]))
+    assert host.stopped == []
+
+
+def test_a_live_ingress_is_not_force_recreated(harness: Harness) -> None:
+    _ingress_release(harness, REV_OLD, REV_NEW)
+    host = harness.host
+    for service in ("netns", "tailscale"):
+        host.running[service] = (TAILSCALE, "", "", "")
+    host.create("netns")
+    host.create("tailscale", "container:" + host.meta["netns"]["Id"])
+    sidecar = host.meta["tailscale"]["Id"]
+    assert harness.run() == 0
+    assert "--force-recreate" not in host.calls[host.index(COMPOSE_UP)]
+    assert host.meta["tailscale"]["Id"] == sidecar                    # kept: nothing changed
 
 
 def test_a_third_party_container_on_another_image_fails_the_deploy(

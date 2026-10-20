@@ -227,10 +227,12 @@ sbin 入口與 sudoers 例外，見 [deploy runbook §4](deploy.md#4-主機工�
 
 ### 3b. Runtime 設定與首次驗證
 
-- `/opt/bfx/runtime/{bot,webapi,frontend,migrate,notify,ghcr}.env` 依
+- `/opt/bfx/runtime/{bot,webapi,frontend,tailscale,migrate,notify,ghcr}.env` 依
   [deploy env 規則](deploy.md#env-檔規則) 準備，root 擁有且 mode `0600`。
   bot／webapi 使用已核對的 canonical `BFX_EXCHANGE_ACCOUNT_ID` 與相同的
   `BFX_OPERATOR_USER_ID`；不沿用舊 launcher 的 `BFX_RELEASE_*`。
+- `tailscale.env` 放一把新的 tagged（`tag:bfx-ops`）、單次使用的 auth key；新主機的 `bfx_tsstate` 是空的，
+  節點會重新登入（舊節點先在 admin console 刪掉，名稱 `bfx-ops` 才不會變成 `bfx-ops-1`）。
 - 告警所需 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` 同時配置到 `notify.env` 與
   `bot.env`；GHCR 憑證只需 `read:packages`。設定方式見 [operations](operations.md#6-告警)。
 - error tracking 的 `SENTRY_DSN`（`bfx-backend`）同時配置到 `bot.env` 與 `webapi.env`；空值等於關閉。

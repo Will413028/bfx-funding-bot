@@ -193,7 +193,9 @@ compose 裡的 `netns`（`bfx-netns`）只持有 network namespace（只跑 `sle
 節點 `bfx-ops`、userspace、沒有 capability、沒有 port）以 `network_mode: service:netns` 加入它；9d-5 起
 webapi 也加入它。tailscaled 重啟、崩潰或單獨重建都不會換掉 namespace（計畫 D13，holder spike 實測）。
 兩者都要 compose healthcheck：`bfx-tailscale` 的 `/healthz` 在節點拿到 tailnet 位址後才回 200，所以 auth key
-錯誤、tailnet policy 沒有 `tag:bfx-ops` 的 owner 時部署會 `health_timeout:tailscale` 並回滾。
+錯誤、tailnet policy 沒有 `tag:bfx-ops` 的 owner 時部署會 `health_timeout:tailscale`，之後照一般的不健康處理
+（沒有 migration 就回滾；同一個 release 套用過 migration 則停 bot 與 webapi，見 §5）。部署前若有加入者卡在
+已死的 namespace（例如 holder 被單獨重啟過），該次 `up` 自動加 `--force-recreate`，全部服務重建。
 Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.1:8000`），隨部署寫進 release 目錄；
 9d-5 之前 webapi 不在這個 namespace，Serve 打過去是 502。
 

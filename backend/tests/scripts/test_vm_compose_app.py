@@ -293,6 +293,8 @@ INGRESS_MUTATIONS: list[tuple[str, Callable[[dict[str, Any]], None], str]] = [
     ("netns", lambda s: s["networks"].__setitem__("other", {}), "netns:network"),
     ("netns", lambda s: s.__setitem__("container_name", "bfx-holder"), "netns:container_name"),
     ("netns", lambda s: s.__setitem__("cap_add", ["NET_ADMIN"]), "netns:no_cap_add"),
+    ("netns", lambda s: s.pop("init"), "netns:init"),
+    ("netns", lambda s: s["networks"].__setitem__("bfx_default", {"aliases": ["bfx-postgres"]}), "netns:network"),
 ]
 
 
@@ -316,6 +318,7 @@ def test_the_ingress_shape_is_pinned(
     (lambda r: r["volumes"]["bfx_tsstate"].__setitem__("external", True), "volumes"),
     (lambda r: r["configs"].__setitem__("extra", {"file": "/x/tailscale/serve.json"}), "serve_config"),
     (lambda r: r["configs"]["ts-serve"].__setitem__("file", "/etc/serve.json"), "serve_config"),
+    (lambda r: r["configs"]["ts-serve"].__setitem__("name", "other_ts-serve"), "serve_config"),
     (lambda r: r["configs"].__setitem__("ts-serve", {"name": "bfx-app_ts-serve", "content": "{}"}),
      "configs_file_only"),
     # The web API joins the holder only in 9d-5.
@@ -337,6 +340,10 @@ def test_the_sidecar_reads_only_tailscale_env(uninterpolated: dict[str, Any]) ->
     broken = copy.deepcopy(uninterpolated)
     broken["services"]["tailscale"]["env_file"][0]["path"] = paths[0].replace("tailscale.env", "webapi.env")
     assert "tailscale:env_files" in policy.env_file_violations(broken)
+    # The holder reads no env file at all.
+    broken = copy.deepcopy(uninterpolated)
+    broken["services"]["netns"]["env_file"] = [{"path": paths[0], "required": True}]
+    assert "netns:env_files" in policy.env_file_violations(broken)
 
 
 def test_serve_config_proxies_only_to_the_local_web_api() -> None:
