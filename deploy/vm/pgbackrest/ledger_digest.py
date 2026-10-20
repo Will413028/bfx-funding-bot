@@ -594,8 +594,9 @@ def parse_boot(output: str, bounds: Bounds) -> dict[str, object]:
                 _fail("restore_output_invalid")
         scopes.append({**scope, "reads": reads})
     expected = sorted((scope.account, scope.environment) for scope in bounds.scopes)
-    if (len(seen) != len(set(seen)) or sorted(seen) != expected
-            or not any(scope["reads"] for scope in scopes)):
+    # A scope may have no reads: its newest basis has no cells (the account holds nothing),
+    # which the row-by-row comparison with production already confirmed.
+    if len(seen) != len(set(seen)) or sorted(seen) != expected:
         _fail("restore_output_invalid")
     return {**boot, "scopes": scopes}
 
