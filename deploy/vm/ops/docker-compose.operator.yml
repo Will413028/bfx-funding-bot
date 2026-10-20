@@ -18,10 +18,10 @@
 # here (bfx-deploy already pulled it and keeps it until two releases later).
 #
 # Env: /opt/bfx/runtime/operator.env (root 0600, never in git) holds DATABASE_URL
-# for the bfx_operator role (never the bot's role or the migration owner),
-# BFX_EXCHANGE_ACCOUNT_ID, BFX_OPERATOR_USER_ID and BFX_OPERATOR_TAILNET_USER_ID.
-# The wrapper passes BFX_OPERATOR_TAILNET_IDENTITY on every call (the CLI refuses
-# unless it equals BFX_OPERATOR_TAILNET_USER_ID) and BFX_DEPLOYMENT_ENV from the
+# for the bfx_operator role (never the bot's role or the migration owner) and
+# BFX_EXCHANGE_ACCOUNT_ID. The wrapper passes BFX_OPERATOR_TAILNET_IDENTITY on
+# every call (the caller's tailnet user ID: the requests' requested_by, refused
+# unless it is a member of the account) and BFX_DEPLOYMENT_ENV from the
 # deployed revision's live.env, both through Compose interpolation of its own
 # environment. BFX_RUNTIME_DIR exists only so CI can render this file without the
 # secret directory; the default must stay /opt/bfx/runtime and the file stays

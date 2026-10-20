@@ -43,8 +43,8 @@ pytestmark = pytest.mark.integration
 
 ROLE = "bfx_operator"
 PASSWORD = "operator-rotation-test"
-OPERATOR = "operator-1"
 TAILNET = "4182486213003443"
+OPERATOR = TAILNET  # the caller's tailnet identity is the requester (9d-6)
 ACCOUNT = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 KEK = bytes(range(32))
 OLD_KEY, OLD_SECRET = "FAKE-OLD-KEY-000000", "FAKE-OLD-SECRET-not-real-000000"
@@ -111,8 +111,9 @@ def operator_env(db, monkeypatch) -> None:
     for key, value in {
         "DATABASE_URL": url.render_as_string(hide_password=False),
         "BFX_EXCHANGE_ACCOUNT_ID": str(ACCOUNT),
-        "BFX_OPERATOR_USER_ID": OPERATOR,
-        "BFX_OPERATOR_TAILNET_USER_ID": TAILNET,
+        # The keys operator.env keeps until W10; the CLI must ignore them.
+        "BFX_OPERATOR_USER_ID": "operator-1",
+        "BFX_OPERATOR_TAILNET_USER_ID": "999",
         "BFX_OPERATOR_TAILNET_IDENTITY": TAILNET,
         "BFX_DEPLOYMENT_ENV": "ci",
     }.items():

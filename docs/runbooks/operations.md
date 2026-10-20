@@ -616,9 +616,9 @@ kill 的 cancel-all）被拒：
   `sudo bfx-op <子命令> …`。不要用 `docker compose run` 直接跑 operator service。
 - **它做什麼**：取 session 的 peer（`SSH_CONNECTION` 第一欄，必須是 tailnet 位址）→
   `tailscale whois` 取得你的 tailnet user ID → 以 ledger 最新 `deployed` 的 backend image 跑一次
-  `docker compose -p bfx-operator … run --rm -T operator <子命令>`。CLI 比對 user ID 與
-  `operator.env` 的 `BFX_OPERATOR_TAILNET_USER_ID`，不符拒絕；沒有指定 actor 的參數，請求的
-  `requested_by` 是 `BFX_OPERATOR_USER_ID`，tailnet 身分記在 host journal。
+  `docker compose -p bfx-operator … run --rm -T operator <子命令>`。這個 user ID 就是請求的
+  `requested_by`（9d-6 起）；沒有指定 actor 的參數。CLI 連上 DB 後先確認它是該帳戶的 member，
+  不是就拒絕、什麼都不寫；寫入另要 owner／operator，bot 套用時再以 `operator_authorized` 重驗。
 - **信任邊界**：`ubuntu` 的 sudo 是 NOPASSWD，任何 root 等價的 shell 都能自己設定
   `SSH_CONNECTION` 冒充另一個 peer：公網 sshd 還開著時持有 key 的登入、Console 上的 `ubuntu`。
   公網 sshd 停用後只剩 Console 這一條。誰能開 session 由 Tailscale SSH 的 check mode 決定；`bfx-op`
@@ -638,7 +638,7 @@ kill 的 cancel-all）被拒：
 | 3 | 被命令檢查或 bot 拒絕（輸出的 `error`） |
 | 4 | bot 套用失敗 |
 | 5 | 等到 `--wait-seconds` 仍未結案（請求仍在佇列，`request` 查結果） |
-| 77 | 沒有 tailnet 身分（`not_tailnet_peer`、`tailnet_whois_failed`）或不是設定的 operator（`operator_identity_mismatch`） |
+| 77 | 沒有 tailnet 身分（`not_tailnet_peer`、`tailnet_whois_failed`、`operator_identity_invalid`）或不是該帳戶的 member（`operator_not_member`） |
 | 78 | schema head 或資金權威不是這個 image 的 |
 
 - **紀錄**：`sudo journalctl -t bfx-op --since today --no-pager`。每次呼叫一行 `start`（login、tailnet user

@@ -16,8 +16,9 @@ One call:
      below;
   2. the identity: `tailscale whois --json <peer>` -> UserProfile.ID (passed as
      BFX_OPERATOR_TAILNET_IDENTITY), LoginName and Node.Name (journal only). The
-     CLI compares the ID with operator.env's BFX_OPERATOR_TAILNET_USER_ID; this
-     file never compares or rewrites it, and no flag names an actor;
+     ID is who asks: the CLI writes it as requested_by and refuses one that is not
+     a member of the account (9d-6); this file never compares or rewrites it, and
+     no flag names an actor;
   3. the image: the ledger's newest `deployed` row and its revision's live.env,
      as bfx-weekly-report resolves them; operator.env must be root 0600 (Compose
      reads it, this file does not);

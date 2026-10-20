@@ -41,8 +41,8 @@ pytestmark = pytest.mark.integration
 
 ROLE = "bfx_operator"
 PASSWORD = "operator-cli-test"
-OPERATOR = "operator-1"
 TAILNET = "4182486213003443"
+OPERATOR = TAILNET  # the caller's tailnet identity is the requester (9d-6)
 ACCOUNT = SCOPE.exchange_account_id
 WORKER_NOW = 2_000_000
 
@@ -80,8 +80,9 @@ def operator_env(ledger_db, monkeypatch) -> None:
     for key, value in {
         "DATABASE_URL": url.render_as_string(hide_password=False),
         "BFX_EXCHANGE_ACCOUNT_ID": str(ACCOUNT),
-        "BFX_OPERATOR_USER_ID": OPERATOR,
-        "BFX_OPERATOR_TAILNET_USER_ID": TAILNET,
+        # The keys operator.env keeps until W10; the CLI must ignore them.
+        "BFX_OPERATOR_USER_ID": "operator-1",
+        "BFX_OPERATOR_TAILNET_USER_ID": "999",
         "BFX_OPERATOR_TAILNET_IDENTITY": TAILNET,
         "BFX_DEPLOYMENT_ENV": "ci",
     }.items():
@@ -243,12 +244,14 @@ async def test_refusals_come_before_the_outbox(book, operator_env, monkeypatch) 
     assert (await cli("mark-not-accepted", str(uncertainty), "--evidence-ref", ref,
                       "--no-wait"))[:2] == (
         3, {"error": "account_write_required", "kind": "forbidden"})
-    # Not a member: the account looks absent.
-    monkeypatch.setenv("BFX_OPERATOR_USER_ID", "someone-else")
-    assert (await cli("status"))[:2] == (3, {"error": "not_found", "kind": "not_found"})
-    # The identity is checked before anything connects.
+    # Not a member: refused before anything is queued, a write included.
     monkeypatch.setenv("BFX_OPERATOR_TAILNET_IDENTITY", "1")
-    assert (await cli("status"))[:2] == (77, {"error": "operator_identity_mismatch"})
+    assert (await cli("status"))[:2] == (77, {"error": "operator_not_member"})
+    assert (await cli("mark-not-accepted", str(uncertainty), "--evidence-ref", ref,
+                      "--no-wait"))[:2] == (77, {"error": "operator_not_member"})
+    # A malformed identity is refused before anything connects.
+    monkeypatch.setenv("BFX_OPERATOR_TAILNET_IDENTITY", "operator-1")
+    assert (await cli("status"))[:2] == (77, {"error": "operator_identity_invalid"})
     async with book.factory() as session:
         assert await session.scalar(text(
             "SELECT count(*) FROM uncertainty_resolution_requests")) == 0

@@ -160,8 +160,8 @@ RESET ROLE;
 | 檔案（`/opt/bfx/runtime/`） | `DATABASE_URL` 的 role | 備註 |
 |---|---|---|
 | `bot.env` | `bfx_bot` | 範本 `deploy/vm/bot.env.example` |
-| `webapi.env` | `bfx_webapi` | 同檔還有開機必填的入口設定（缺任一個 webapi 拒絕開機）：`BFX_OPERATOR_TAILNET_USER_ID`（與 `operator.env` 同值）、`BFX_WEBAPI_ALLOWED_HOSTS=<ops-host>`、`BFX_FE_SENTRY_DSN`（與 repository variable `NEXT_PUBLIC_SENTRY_DSN` 同值），以及和 `bot.env` 同值的 `BFX_ADMIN_READ_TOKEN`（`openssl rand -hex 32`）；**不可**放 `BFX_ADMIN_TOKEN`，webapi 看到它會拒絕開機（halt token 只留在 `bot.env`） |
-| `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`、`BFX_OPERATOR_USER_ID`（兩者照抄 `bot.env`）與 `BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id，`tailscale whois --json <operator 裝置的 tailnet IP>` 的 `UserProfile.ID`）；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 `bfx-op` 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
+| `webapi.env` | `bfx_webapi` | 同檔還有開機必填的入口設定（缺任一個 webapi 拒絕開機）：`BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id，`tailscale whois --json <operator 裝置的 tailnet IP>` 的 `UserProfile.ID`；也是 operator membership 的 `user_id`）、`BFX_WEBAPI_ALLOWED_HOSTS=<ops-host>`、`BFX_FE_SENTRY_DSN`（與 repository variable `NEXT_PUBLIC_SENTRY_DSN` 同值），以及和 `bot.env` 同值的 `BFX_ADMIN_READ_TOKEN`（`openssl rand -hex 32`）；**不可**放 `BFX_ADMIN_TOKEN`，webapi 看到它會拒絕開機（halt token 只留在 `bot.env`） |
+| `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`）；誰在操作不寫這裡：`bfx-op` 每次以 `tailscale whois` 取得呼叫者的 tailnet user id 當 `requested_by`，CLI 只接受該帳戶的 member；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 `bfx-op` 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
 | `migrate.env` | `<owner>` | 只有 bfx-deploy 的 migration 與 operator one-shot 使用 |
 
 ## 2. Tailnet 入口（營運 UI）
@@ -194,7 +194,7 @@ RESET ROLE;
 
 ## 3. 首次安裝主機工具
 
-本節安裝 `bfx-deploy`、告警與 DR units；不會建立 Postgres／Redis、runtime secrets、
+本節安裝 `bfx-deploy`、告警與 DR units；不會建立 Postgres、runtime secrets、
 帳戶資料或 pgBackRest repository。先完成資料服務與 `bfx_default` network、上面的
 roles／連線設定，以及 [offsite DR](offsite-dr.md) 的備份與 restore 前置作業。
 部署前須有可用的 restore test；空資料庫與缺少 verifier image 的主機不能直接套用
@@ -225,8 +225,7 @@ sbin 入口與 sudoers 例外，見 [deploy runbook §4](deploy.md#4-主機工�
 
 - `/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr}.env` 依
   [deploy env 規則](deploy.md#env-檔規則) 準備，root 擁有且 mode `0600`。
-  bot／webapi 使用已核對的 canonical `BFX_EXCHANGE_ACCOUNT_ID` 與相同的
-  `BFX_OPERATOR_USER_ID`；不沿用舊 launcher 的 `BFX_RELEASE_*`。
+  bot 與 `operator.env` 使用已核對的 canonical `BFX_EXCHANGE_ACCOUNT_ID`；不沿用舊 launcher 的 `BFX_RELEASE_*`。
 - `tailscale.env` 放一把新的 tagged（`tag:bfx-ops`）、單次使用的 auth key；新主機的 `bfx_tsstate` 是空的，
   節點會重新登入（舊節點先在 admin console 刪掉，名稱 `bfx-ops` 才不會變成 `bfx-ops-1`）。
 - 告警所需 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` 同時配置到 `notify.env` 與
