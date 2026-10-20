@@ -12,7 +12,7 @@ One run:
   2. `docker buildx imagetools inspect backend:main`; stop if the ledger's newest
      successful deployment already runs that digest (or its newest attempt
      already tried it -- a failed digest is retried only with --retry). Such a
-     tick first recreates the web API alone when the sidecar's restart or
+     tick first recreates the web API alone when the netns holder's restart or
      recreation left it in a dead network namespace (Deployer._repair_netns);
   3. read the revision and CI-run labels, require `backend:sha-<rev>` to be the
      same digest and `frontend:sha-<rev>`, when it exists, to carry the same
@@ -144,9 +144,10 @@ FRONTEND = "frontend"
 # The only images a release's compose file may name besides its own backend and frontend
 # digests; pulled by digest without the registry token (the 9d tailscale sidecar).
 THIRD_PARTY_IMAGE = re.compile(r"docker\.io/tailscale/tailscale@sha256:[0-9a-f]{64}")
-# The 9d sidecar whose network namespace the web API joins from 9d-5 (`network_mode:
-# service:tailscale`; compose_policy.py pins the name from 9d-4); netns repair inspects it.
-SIDECAR_CONTAINER = "bfx-tailscale"
+# The container holding the ingress network namespace (plan D13): the tailscale sidecar
+# joins it from 9d-4 and the web API from 9d-5 (`network_mode: service:netns`;
+# compose_policy.INGRESS_CONTAINERS pins the name); netns repair inspects it.
+NETNS_HOLDER = "bfx-netns"
 NETNS_REPAIR_LIMIT = 3
 HEALTH_FORMAT = "{{if .State.Health}}{{.State.Health.Status}}{{end}}"
 _DOCKER_TIME = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z")
@@ -1082,12 +1083,12 @@ class Deployer:
         return self.settings.state_dir / "netns-repair.json"
 
     def _repair_netns(self, view: LedgerView) -> None:
-        """Recreate the web API alone when it is left in the sidecar's dead network namespace.
+        """Recreate the web API alone when it is left in the holder's dead network namespace.
 
-        Necessary because Docker never repairs it: a sidecar restarted by its restart policy,
-        or recreated on its own, leaves the web API answering /health while reaching neither
-        the database nor Serve (9d-0 spike). Remove once the web API joins no other
-        container's namespace.
+        Necessary because Docker never repairs it: a holder restarted on its own, or
+        recreated on its own, leaves the web API answering /health while reaching neither
+        the database nor Serve (9d-0 and holder spikes). Remove once the web API joins no
+        other container's namespace, or once a holder restart is alerted on (plan D13).
 
         Only on a tick that deploys nothing (a deploy recreates the web API anyway), and only
         when the last attempt left the last successful release running (deployed,
@@ -1096,8 +1097,8 @@ class Deployer:
         verdict: the record is kept and nothing is sent. Detection is netns_stale, never health: a short
         database outage fails /ready with nothing to repair. The repair recreates the web API
         only, never touches the bot and writes no ledger row; after NETNS_REPAIR_LIMIT
-        failures of one incident (the sidecar's Id and start) it stops trying until the
-        namespace is right again or the sidecar starts anew. The count lives in the state
+        failures of one incident (the holder's Id and start) it stops trying until the
+        namespace is right again or the holder starts anew. The count lives in the state
         directory, as discovery-failure.json does: each tick is a new process. Deleting the
         file retries at once.
         """
@@ -1119,7 +1120,7 @@ class Deployer:
             if self.settings.dry_run:
                 return
             if recorded is not None and recorded[2]:
-                self._notify("info", "bfx-webapi is in the sidecar's network namespace again")
+                self._notify("info", "bfx-webapi is in the holder's network namespace again")
             path.unlink(missing_ok=True)
             return
         failures, escalated = recorded[1:] if recorded is not None and recorded[0] == incident \
@@ -1149,14 +1150,14 @@ class Deployer:
                                          "escalated": escalated}))
 
     def _netns_incident(self) -> str | None:
-        """`<sidecar Id>@<its StartedAt>` when the web API is in a stale namespace of the
-        sidecar; None also when there is nothing to judge: no sidecar (before 9d-4), a web API
+        """`<holder Id>@<its StartedAt>` when the web API is in a stale namespace of the
+        holder; None also when there is nothing to judge: no holder (before 9d-4), a web API
         on its own network (before 9d-5), or either one not running (a web API stopped on
-        purpose stays stopped; joining a stopped sidecar would fail).
+        purpose stays stopped; joining a stopped holder would fail).
         """
         webapi = ROLE_CONTAINERS["webapi"]
         # Exit 1 when one is missing; the other's record is still printed.
-        result = self._run(["docker", "inspect", "--type", "container", SIDECAR_CONTAINER, webapi],
+        result = self._run(["docker", "inspect", "--type", "container", NETNS_HOLDER, webapi],
                            timeout=60.0)
         try:
             records = {str(record["Name"]).lstrip("/"): record
@@ -1166,16 +1167,16 @@ class Deployer:
         if result.returncode != 0 and not records:
             # Docker not answering (or both gone) is no verdict: not "recovered" either.
             raise DeployError("netns_inspect_failed")
-        sidecar, joined = records.get(SIDECAR_CONTAINER), records.get(webapi)
-        if sidecar is None or joined is None:
+        holder, joined = records.get(NETNS_HOLDER), records.get(webapi)
+        if holder is None or joined is None:
             return None
         if not str((joined.get("HostConfig") or {}).get("NetworkMode", "")).startswith("container:"):
             return None
-        if not (joined.get("State") or {}).get("Running") or not (sidecar.get("State") or {}).get("Running"):
+        if not (joined.get("State") or {}).get("Running") or not (holder.get("State") or {}).get("Running"):
             return None
-        if not netns_stale(joined, sidecar):
+        if not netns_stale(joined, holder):
             return None
-        return f"{sidecar.get('Id')}@{(sidecar.get('State') or {}).get('StartedAt')}"
+        return f"{holder.get('Id')}@{(holder.get('State') or {}).get('StartedAt')}"
 
     def _recreate_webapi(self, previous: LedgerRow) -> str | None:
         """`up --no-deps --force-recreate webapi` from the running release's compose file under
@@ -1752,7 +1753,8 @@ class Deployer:
             return self._http(self.settings.frontend_url, 5.0) == 200
         if service not in ROLE_CONTAINERS:
             # Its compose healthcheck, which release_services requires: the 9d sidecar's
-            # TS_ENABLE_HEALTH_CHECK /healthz, 200 once the node has a tailnet address.
+            # TS_ENABLE_HEALTH_CHECK /healthz, 200 once the node has a tailnet address
+            # (the netns holder's is `true`: running is all it does).
             result = self._run(["docker", "inspect", "--type", "container", "--format", HEALTH_FORMAT,
                                 container], timeout=20.0)
             return result.returncode == 0 and result.stdout.strip() == "healthy"

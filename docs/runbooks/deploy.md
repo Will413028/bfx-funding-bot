@@ -169,7 +169,7 @@ schema 不在該 release 的 head 時拒絕。
 
 ### Env 檔規則
 
-`/opt/bfx/runtime/{bot,webapi,frontend,migrate,notify,ghcr}.env`：root 擁有、mode `0600`、
+`/opt/bfx/runtime/{bot,webapi,frontend,tailscale,migrate,notify,ghcr}.env`：root 擁有、mode `0600`、
 不可是 symlink（`ubuntu` 使用者的 checkout 由 DR unit 執行，secret 不能讓它讀到）。
 bfx-deploy 啟動前會檢查，違反即 `precheck` 失敗：
 
@@ -184,6 +184,25 @@ bfx-deploy 啟動前會檢查，違反即 `precheck` 失敗：
   （CI 在 `config --no-interpolate` 的輸出上由 `compose_policy.py` 檢查，也要求 `required: true`），env 檔也維持必填，缺秘密檔時 `up` 會失敗而不是無聲啟動；
 - `ghcr.env`：`GHCR_USERNAME`、`GHCR_TOKEN`（read-only `read:packages`）；檔案不存在＝匿名 pull。
 - `notify.env`：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`（見 [operations §6](operations.md#6-告警)）。
+- `tailscale.env`：只有 `TS_AUTHKEY`（tagged `tag:bfx-ops`、非 ephemeral、單次使用、短效期）。只在節點第一次
+  登入時用（`TS_AUTH_ONCE=true`），之後節點的 key 存在 volume `bfx_tsstate`；key 過期或用過都不影響已登入的節點。
+
+### Tailnet 入口（netns、tailscale）
+
+compose 裡的 `netns`（`bfx-netns`）只持有 network namespace（只跑 `sleep`），`tailscale`（`bfx-tailscale`，
+節點 `bfx-ops`、userspace、沒有 capability、沒有 port）以 `network_mode: service:netns` 加入它；9d-5 起
+webapi 也加入它。tailscaled 重啟、崩潰或單獨重建都不會換掉 namespace（計畫 D13，holder spike 實測）。
+兩者都要 compose healthcheck：`bfx-tailscale` 的 `/healthz` 在節點拿到 tailnet 位址後才回 200，所以 auth key
+錯誤、tailnet policy 沒有 `tag:bfx-ops` 的 owner 時部署會 `health_timeout:tailscale` 並回滾。
+Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.1:8000`），隨部署寫進 release 目錄；
+9d-5 之前 webapi 不在這個 namespace，Serve 打過去是 502。
+
+- 查狀態：`docker exec bfx-tailscale tailscale status`（tagged、key 到期 none）、
+  `docker exec bfx-tailscale tailscale serve status`。
+- **不要單獨 `docker restart bfx-netns`**：holder 換了新 namespace，tailscale（與 9d-5 起的 webapi）會留在
+  沒有 `eth0` 的舊 namespace，之後的 `up` 也不修。需要重來時用 `sudo bfx-deploy --recreate`。
+- 換節點（state 壞掉）：admin console 刪節點 → `docker volume rm bfx_tsstate` → 放一把新 auth key →
+  `--recreate`。
 
 ## 4. 主機工具與 DR 腳本的版本
 
@@ -254,17 +273,18 @@ image 內 migrations 推導出的唯一 head（`core/schema_head.build_head`）�
 2. 把 migration 前的備份還原到**隔離**資料庫比對，再決定。**不要把舊備份蓋回 production**
    ——venue 可能已有寫入，見 [rollback after a venue write](rollback-after-venue-write.md)。
 
-### webapi 留在 sidecar 已死的 network namespace（9d-5 之後）
+### webapi 留在 holder 已死的 network namespace（9d-5 之後）
 
-sidecar 被 restart policy 重啟或單獨重建後，webapi 會留在舊的 namespace：`/health` 仍回 ok，但連不到 DB、
-也收不到 Serve 流量（9d-0 實測），Docker 不會自己修。bfx-deploy 每一輪沒有要部署時（up to date、already
-attempted），若最後一次嘗試是 `deployed` 或 `rolled_back`，就 `docker inspect bfx-tailscale bfx-webapi`：
-webapi 的 `NetworkMode` 不是目前 sidecar 的 Id，或 sidecar 比 webapi 晚啟動，就以最後成功部署的 digest 與
+holder（`bfx-netns`）單獨重啟或單獨重建後，webapi 會留在舊的 namespace：`/health` 仍回 ok，但連不到 DB、
+也收不到 Serve 流量（9d-0 與 holder spike 實測），Docker 不會自己修。tailscale 重啟不會造成這件事（它也只是
+加入者）。bfx-deploy 每一輪沒有要部署時（up to date、already
+attempted），若最後一次嘗試是 `deployed` 或 `rolled_back`，就 `docker inspect bfx-netns bfx-webapi`：
+webapi 的 `NetworkMode` 不是目前 holder 的 Id，或 holder 比 webapi 晚啟動，就以最後成功部署的 digest 與
 deployment id 只重建 webapi（`up --no-deps --force-recreate webapi`），再等 `/ready` 與 settle。
 不看健康狀態（DB 短暫中斷不會觸發）、永遠不碰 bot、不寫 ledger，只發通知（成功 info、失敗 warning）。
-同一個事件（sidecar Id＋啟動時間）連續失敗 3 次發一次 critical、之後不再重試，直到 namespace 恢復正常
-或 sidecar 又重啟；計數在 `/var/lib/bfx-deploy/netns-repair.json`，要立刻重試就刪掉它。
-webapi 或 sidecar 沒在跑、webapi 不在 sidecar 的 namespace（9d-5 之前）、最後一次嘗試是 `failed`／`started`
+同一個事件（holder Id＋啟動時間）連續失敗 3 次發一次 critical、之後不再重試，直到 namespace 恢復正常
+或 holder 又重啟；計數在 `/var/lib/bfx-deploy/netns-repair.json`，要立刻重試就刪掉它。
+webapi 或 holder 沒在跑、webapi 不在 holder 的 namespace（9d-5 之前）、最後一次嘗試是 `failed`／`started`
 時什麼都不做。
 
 bot 停下時 venue 上的掛單不會自己消失：停 bot 之前，若有掛單而且停機會超過幾分鐘，先在 UI 或

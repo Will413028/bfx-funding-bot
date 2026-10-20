@@ -16,9 +16,13 @@ uninterpolated rendering, which every version prints the same way: each service
 names exactly its own `${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/<name>.env` (the
 production default) plus, for the bot, live.env -- all `required: true`, so a
 missing secret file stops `up` instead of starting without it. The bot and the
-web API are required; the frontend is optional (9d-5 removes it), and no other
-service is allowed yet. Top-level `secrets` are refused and `configs` must be
-file-backed. Every other
+web API are required; the frontend is optional (9d-5 removes it). The tailnet
+ingress is required too and pinned to its exact shape: `netns` only holds the
+network namespace (plan D13) and `tailscale` joins it with the state volume, the
+Serve config and tailscale.env as its only inputs; no other service may join a
+namespace yet (9d-5 lets the web API join `netns`). Top-level `secrets` are
+refused, the one top-level volume is the fixed-name node state and the one
+config is the tracked serve.json. Every other
 hardening property is checked on the interpolated rendering. Checking Compose's
 own rendering rather than the YAML text means an anchor, an override or a
 changed Compose default cannot slip a property past the check. This replaces
@@ -58,8 +62,44 @@ from typing import Any
 # bfx-deploy derives what it runs from the rendered file (bfx_deploy.release_services).
 REQUIRED_SERVICES = ("bot", "webapi")
 OPTIONAL_SERVICES = ("frontend",)
+# The tailnet ingress (9d-4), third-party image, own shape (ingress_violations).
+INGRESS_SERVICES = ("netns", "tailscale")
 SERVICES = (*REQUIRED_SERVICES, *OPTIONAL_SERVICES)
 NETWORK = "bfx_default"
+TAILSCALE_IMAGE = ("docker.io/tailscale/tailscale@sha256:"
+                   "c507f3a2a6ab1cabd8d809b98edeb41edbd5c3fb6ad9632ffd098b4c7d0b4065")
+# bfx_deploy.NETNS_HOLDER inspects this container for the netns repair.
+INGRESS_CONTAINERS = {"netns": "bfx-netns", "tailscale": "bfx-tailscale"}
+NETNS_ENTRYPOINT = ["sleep", "2147483647"]
+TAILSCALE_ENV = {
+    "TS_USERSPACE": "true",
+    "TS_AUTH_ONCE": "true",
+    "TS_HOSTNAME": "bfx-ops",
+    "TS_STATE_DIR": "/var/lib/tailscale",
+    "TS_SERVE_CONFIG": "/config/serve.json",
+    "TS_ENABLE_HEALTH_CHECK": "true",
+    "TS_LOCAL_ADDR_PORT": "127.0.0.1:9002",
+}
+TAILSCALE_TMPFS = ["/tmp", "/var/run/tailscale"]
+STATE_VOLUME = "bfx_tsstate"
+TAILSCALE_VOLUMES = [{"type": "volume", "source": STATE_VOLUME, "target": "/var/lib/tailscale"}]
+SERVE_CONFIG = "ts-serve"
+TAILSCALE_CONFIGS = [{"source": SERVE_CONFIG, "target": "/config/serve.json"}]
+HEALTHCHECKS = {
+    "netns": ["CMD", "true"],
+    "tailscale": ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9002/healthz"],
+}
+# Keys an ingress service may set at all; anything else (ports, cap_add, devices,
+# command, user, extra volumes...) is a violation by name.
+INGRESS_KEYS = {
+    "netns": frozenset({"image", "pull_policy", "container_name", "entrypoint", "command", "init",
+                        "read_only", "cap_drop", "security_opt", "restart", "healthcheck",
+                        "networks"}),
+    "tailscale": frozenset({"image", "pull_policy", "container_name", "network_mode", "read_only",
+                            "cap_drop", "security_opt", "restart", "tmpfs", "env_file",
+                            "environment", "volumes", "configs", "healthcheck", "depends_on",
+                            "entrypoint", "command"}),
+}
 CONTAINERS = {"bot": "bfx-bot", "webapi": "bfx-webapi", "frontend": "bfx-frontend"}
 COMMANDS = {
     "bot": ["/app/.venv/bin/python", "-m", "bfx_funding_bot.apps.bot"],
@@ -74,6 +114,7 @@ ENV_FILES = {
     "bot": (f"/{RUNTIME_REFERENCE}bot.env", "/live.env"),
     "webapi": (f"/{RUNTIME_REFERENCE}webapi.env",),
     "frontend": (f"/{RUNTIME_REFERENCE}frontend.env",),
+    "tailscale": (f"/{RUNTIME_REFERENCE}tailscale.env",),
 }
 IDENTITY = ("BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_DEPLOYMENT_ID")
 LOADER_INJECTION = ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT")
@@ -140,6 +181,42 @@ def service_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
     else:
         need(all(env.get(key) == "" for key in PYTHON_INJECTION)
              and env.get("PYTHONDONTWRITEBYTECODE") == "1", "interpreter_injection_blanked")
+    return found
+
+
+def ingress_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
+    """The holder and the sidecar, each pinned to exactly one shape."""
+    found = []
+
+    def need(ok: bool, name: str) -> None:
+        if not ok:
+            found.append(f"{service}:{name}")
+
+    need(spec.get("image") == TAILSCALE_IMAGE, "image_allowlisted_digest")
+    need(spec.get("pull_policy") == "never", "pull_policy_never")
+    need(spec.get("container_name") == INGRESS_CONTAINERS[service], "container_name")
+    need(spec.get("read_only") is True, "read_only")
+    need(spec.get("cap_drop") == ["ALL"], "cap_drop_all")
+    need(spec.get("security_opt") == ["no-new-privileges:true"], "no_new_privileges")
+    need(spec.get("restart") == "unless-stopped", "restart")
+    check = spec.get("healthcheck") or {}
+    need(check.get("test") == HEALTHCHECKS[service] and not check.get("disable"), "healthcheck")
+    for key in sorted(set(spec) - INGRESS_KEYS[service]):
+        need(not spec.get(key), f"no_{key}")
+    if service == "netns":
+        need(spec.get("entrypoint") == NETNS_ENTRYPOINT and not spec.get("command"), "exact_entrypoint")
+        need(spec.get("init") is True, "init")
+        need(set(spec.get("networks") or {}) == {NETWORK}, "network")
+    else:
+        # The image's own entrypoint (containerboot), nothing appended.
+        need(not spec.get("entrypoint") and not spec.get("command"), "image_entrypoint")
+        need(spec.get("network_mode") == "service:netns", "joins_netns")
+        need(spec.get("environment") == TAILSCALE_ENV, "exact_environment")
+        need(spec.get("tmpfs") == TAILSCALE_TMPFS, "tmpfs")
+        volumes = [{k: v for k, v in m.items() if k != "volume" or v}
+                   if isinstance(m, dict) else m for m in spec.get("volumes") or []]
+        need(volumes == TAILSCALE_VOLUMES, "state_volume_only")
+        need(spec.get("configs") == TAILSCALE_CONFIGS, "serve_config_only")
     return found
 
 
@@ -301,9 +378,10 @@ def violations(rendered: Mapping[str, Any]) -> list[str]:
     if rendered.get("name") != "bfx-app":
         found.append("project_name")
     names = set(rendered.get("services") or {})
-    if not set(REQUIRED_SERVICES) <= names <= set(SERVICES):
+    if not {*REQUIRED_SERVICES, *INGRESS_SERVICES} <= names <= {*SERVICES, *INGRESS_SERVICES}:
         found.append("services")
-    if rendered.get("volumes"):
+    # The node state, under a fixed name so a renamed project never registers a new node.
+    if rendered.get("volumes") != {STATE_VOLUME: {"name": STATE_VOLUME}}:
         found.append("volumes")
     # Nothing writes or rotates a Compose secret; a config is a tracked file that
     # bfx-deploy writes from the release's own revision, never an interpolated
@@ -315,6 +393,11 @@ def violations(rendered: Mapping[str, Any]) -> list[str]:
             not isinstance(c, dict) or set(c) - {"name", "file"} or not c.get("file")
             for c in configs.values()):
         found.append("configs_file_only")
+    serve = configs.get(SERVE_CONFIG) if isinstance(configs, dict) else None
+    if set(configs) != {SERVE_CONFIG} or not isinstance(serve, dict) \
+            or not str(serve.get("file", "")).endswith("/tailscale/serve.json") \
+            or serve.get("name", f"bfx-app_{SERVE_CONFIG}") != f"bfx-app_{SERVE_CONFIG}":
+        found.append("serve_config")
     network = (rendered.get("networks") or {}).get(NETWORK) or {}
     if set(rendered.get("networks") or {}) != {NETWORK} or network.get("external") is not True \
             or network.get("name") != NETWORK:
@@ -323,6 +406,10 @@ def violations(rendered: Mapping[str, Any]) -> list[str]:
         spec = (rendered.get("services") or {}).get(service)
         if isinstance(spec, dict):
             found += service_violations(service, spec)
+    for service in INGRESS_SERVICES:
+        spec = (rendered.get("services") or {}).get(service)
+        if isinstance(spec, dict):
+            found += ingress_violations(service, spec)
     return found
 
 
