@@ -89,7 +89,8 @@ jobs:
         run: |
           BFX_RUNTIME_DIR="$(mktemp -d)"
           export BFX_RUNTIME_DIR
-          touch "$BFX_RUNTIME_DIR/bot.env" "$BFX_RUNTIME_DIR/webapi.env" "$BFX_RUNTIME_DIR/frontend.env"
+          touch "$BFX_RUNTIME_DIR/bot.env" "$BFX_RUNTIME_DIR/webapi.env" "$BFX_RUNTIME_DIR/frontend.env" \
+            "$BFX_RUNTIME_DIR/tailscale.env"
           docker compose version
           docker compose -f deploy/vm/docker-compose.app.yml config --no-interpolate --format json \
             > "$RUNNER_TEMP/uninterpolated.json"

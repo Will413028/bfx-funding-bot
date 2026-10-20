@@ -12,7 +12,7 @@ One run:
   2. `docker buildx imagetools inspect backend:main`; stop if the ledger's newest
      successful deployment already runs that digest (or its newest attempt
      already tried it -- a failed digest is retried only with --retry). Such a
-     tick first recreates the web API alone when the sidecar's restart or
+     tick first recreates the web API alone when the netns holder's restart or
      recreation left it in a dead network namespace (Deployer._repair_netns);
   3. read the revision and CI-run labels, require `backend:sha-<rev>` to be the
      same digest and `frontend:sha-<rev>`, when it exists, to carry the same
@@ -95,7 +95,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -144,10 +144,13 @@ FRONTEND = "frontend"
 # The only images a release's compose file may name besides its own backend and frontend
 # digests; pulled by digest without the registry token (the 9d tailscale sidecar).
 THIRD_PARTY_IMAGE = re.compile(r"docker\.io/tailscale/tailscale@sha256:[0-9a-f]{64}")
-# The 9d sidecar whose network namespace the web API joins from 9d-5 (`network_mode:
-# service:tailscale`; compose_policy.py pins the name from 9d-4); netns repair inspects it.
-SIDECAR_CONTAINER = "bfx-tailscale"
+# The container holding the ingress network namespace (plan D13): the tailscale sidecar
+# joins it from 9d-4 and the web API from 9d-5 (`network_mode: service:netns`;
+# compose_policy.INGRESS_CONTAINERS pins the name); netns repair inspects it.
+NETNS_HOLDER = "bfx-netns"
 NETNS_REPAIR_LIMIT = 3
+# The code of a deploy that failed only because the ingress it created is unhealthy.
+INGRESS_UNHEALTHY = "ingress_unhealthy:"
 HEALTH_FORMAT = "{{if .State.Health}}{{.State.Health.Status}}{{end}}"
 _DOCKER_TIME = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z")
 # A change to how PostgreSQL is run, backed up or restored earns an isolated
@@ -1082,12 +1085,12 @@ class Deployer:
         return self.settings.state_dir / "netns-repair.json"
 
     def _repair_netns(self, view: LedgerView) -> None:
-        """Recreate the web API alone when it is left in the sidecar's dead network namespace.
+        """Recreate the web API alone when it is left in the holder's dead network namespace.
 
-        Necessary because Docker never repairs it: a sidecar restarted by its restart policy,
-        or recreated on its own, leaves the web API answering /health while reaching neither
-        the database nor Serve (9d-0 spike). Remove once the web API joins no other
-        container's namespace.
+        Necessary because Docker never repairs it: a holder restarted on its own, or
+        recreated on its own, leaves the web API answering /health while reaching neither
+        the database nor Serve (9d-0 and holder spikes). Remove once the web API joins no
+        other container's namespace, or once a holder restart is alerted on (plan D13).
 
         Only on a tick that deploys nothing (a deploy recreates the web API anyway), and only
         when the last attempt left the last successful release running (deployed,
@@ -1096,8 +1099,8 @@ class Deployer:
         verdict: the record is kept and nothing is sent. Detection is netns_stale, never health: a short
         database outage fails /ready with nothing to repair. The repair recreates the web API
         only, never touches the bot and writes no ledger row; after NETNS_REPAIR_LIMIT
-        failures of one incident (the sidecar's Id and start) it stops trying until the
-        namespace is right again or the sidecar starts anew. The count lives in the state
+        failures of one incident (the holder's Id and start) it stops trying until the
+        namespace is right again or the holder starts anew. The count lives in the state
         directory, as discovery-failure.json does: each tick is a new process. Deleting the
         file retries at once.
         """
@@ -1119,7 +1122,7 @@ class Deployer:
             if self.settings.dry_run:
                 return
             if recorded is not None and recorded[2]:
-                self._notify("info", "bfx-webapi is in the sidecar's network namespace again")
+                self._notify("info", "bfx-webapi is in the holder's network namespace again")
             path.unlink(missing_ok=True)
             return
         failures, escalated = recorded[1:] if recorded is not None and recorded[0] == incident \
@@ -1149,14 +1152,14 @@ class Deployer:
                                          "escalated": escalated}))
 
     def _netns_incident(self) -> str | None:
-        """`<sidecar Id>@<its StartedAt>` when the web API is in a stale namespace of the
-        sidecar; None also when there is nothing to judge: no sidecar (before 9d-4), a web API
+        """`<holder Id>@<its StartedAt>` when the web API is in a stale namespace of the
+        holder; None also when there is nothing to judge: no holder (before 9d-4), a web API
         on its own network (before 9d-5), or either one not running (a web API stopped on
-        purpose stays stopped; joining a stopped sidecar would fail).
+        purpose stays stopped; joining a stopped holder would fail).
         """
         webapi = ROLE_CONTAINERS["webapi"]
         # Exit 1 when one is missing; the other's record is still printed.
-        result = self._run(["docker", "inspect", "--type", "container", SIDECAR_CONTAINER, webapi],
+        result = self._run(["docker", "inspect", "--type", "container", NETNS_HOLDER, webapi],
                            timeout=60.0)
         try:
             records = {str(record["Name"]).lstrip("/"): record
@@ -1166,16 +1169,16 @@ class Deployer:
         if result.returncode != 0 and not records:
             # Docker not answering (or both gone) is no verdict: not "recovered" either.
             raise DeployError("netns_inspect_failed")
-        sidecar, joined = records.get(SIDECAR_CONTAINER), records.get(webapi)
-        if sidecar is None or joined is None:
+        holder, joined = records.get(NETNS_HOLDER), records.get(webapi)
+        if holder is None or joined is None:
             return None
         if not str((joined.get("HostConfig") or {}).get("NetworkMode", "")).startswith("container:"):
             return None
-        if not (joined.get("State") or {}).get("Running") or not (sidecar.get("State") or {}).get("Running"):
+        if not (joined.get("State") or {}).get("Running") or not (holder.get("State") or {}).get("Running"):
             return None
-        if not netns_stale(joined, sidecar):
+        if not netns_stale(joined, holder):
             return None
-        return f"{sidecar.get('Id')}@{(sidecar.get('State') or {}).get('StartedAt')}"
+        return f"{holder.get('Id')}@{(holder.get('State') or {}).get('StartedAt')}"
 
     def _recreate_webapi(self, previous: LedgerRow) -> str | None:
         """`up --no-deps --force-recreate webapi` from the running release's compose file under
@@ -1267,14 +1270,30 @@ class Deployer:
                     else "; running release untouched")
             return self._finish(attempt, "failed", f"{exc.code}{kept}")
         try:
-            self._compose_up(release, target, attempt.attempt_id)
-            self._verify(release, target, attempt.attempt_id)
-            self._wait_healthy(release)
+            created = self._compose_up(release, target, attempt.attempt_id)
+            # The application is judged first: an ingress that is not as released waits until
+            # the bot, web API and frontend passed their health checks.
+            mismatch = None
+            try:
+                ingress = self._verify(release, target, attempt.attempt_id, gate_ingress=created)
+            except DeployError as exc:
+                if not exc.code.startswith(INGRESS_UNHEALTHY):
+                    raise
+                mismatch, ingress = exc, []
+            ingress += self._wait_healthy(release, gate_ingress=created)
+            if mismatch is not None:
+                raise mismatch
             if self.settings.rollback_drill:
                 raise DeployError("rollback_drill")
         except DeployError as exc:
-            return self._unhealthy(view, attempt, exc)
-        warnings = self._after_success(view, target)
+            if not exc.code.startswith(INGRESS_UNHEALTHY) or self._rollback_possible(view, attempt):
+                return self._unhealthy(view, attempt, exc)
+            # Only the ingress this release created is down and nothing can be rolled back:
+            # the release is healthy, so it stays (a stopped bot would be the tailnet's doing).
+            ingress = [exc.code]
+            self._notify("warning", f"{exc.code}: the new tailnet ingress is down and no rollback "
+                         "is possible; the release stays, the bot is unaffected")
+        warnings = ingress + self._after_success(view, target)
         detail = "ok" if not warnings else "ok; warnings=" + ",".join(warnings)
         return self._finish(attempt, "deployed", detail)
 
@@ -1698,7 +1717,9 @@ class Deployer:
                 "BFX_RUNTIME_DIR": str(self.settings.runtime_dir)}
 
     def _compose_up(self, release: Release, target: Target, deployment_id: str,
-                    *, force_recreate: bool = False) -> None:
+                    *, force_recreate: bool = False) -> frozenset[str]:
+        """`up` every service of `release`; returns the services whose container it created
+        (a new container Id), which the deploy holds to their health check."""
         pinned = [(target.backend_image, target.backend_digest)]
         if target.frontend_image is not None or target.frontend_digest is not None:
             pinned.append((target.frontend_image or "", target.frontend_digest or ""))
@@ -1710,49 +1731,140 @@ class Deployer:
         # Every service in one `up`, never a sidecar alone: Compose recreates a service that
         # joins a recreated one's network namespace in the same `up` (measured, v5.1.4), and
         # _verify proves it (netns_stale).
+        # Compose keeps an unchanged third-party container (measured, v5.1.4): one serving the
+        # config file of the release that created it after the file changed, or one left in a
+        # dead namespace by a holder restart (holder spike S4, where _verify and then the
+        # rollback would fail and stop the bot). Only then is every service recreated; never
+        # always, which would tie each bot deploy to the sidecar reaching the tailnet again.
+        reasons = [] if force_recreate else self._recreate_reasons(release)
+        if reasons:
+            log(f"recreating every service: {', '.join(reasons)}")
         options = ["--detach", "--no-deps", "--remove-orphans",
-                   *(["--force-recreate"] if force_recreate else [])]
+                   *(["--force-recreate"] if force_recreate or reasons else [])]
+        before = self._container_ids(release)
         self._check(["docker", "compose", "-p", PROJECT, "-f", str(release.compose_file),
                      "up", *options, *release.names],
                     code="compose_up_failed", timeout=600.0,
                     env=self._compose_env(target, deployment_id))
+        after = self._container_ids(release)
+        if before is None or after is None:
+            return frozenset()      # docker did not answer: gate nothing on a guess
+        return frozenset(name for name in release.names
+                         if name not in after or after.get(name) != before.get(name))
+
+    def _container_ids(self, release: Release) -> dict[str, str] | None:
+        """Each service's current container Id; a service whose container is missing is left
+        out (it counts as created). None when docker answers nothing at all."""
+        result = self._run(["docker", "inspect", "--type", "container", "--format", "{{.Name}} {{.Id}}",
+                            *release.containers], timeout=60.0)
+        if result.returncode != 0 and not result.stdout.strip():
+            return None
+        service_of = {service.container: service.name for service in release.services}
+        ids = {}
+        for line in result.stdout.splitlines():
+            name, _, identifier = line.strip().lstrip("/").partition(" ")
+            if name in service_of and identifier:
+                ids[service_of[name]] = identifier
+        return ids
+
+    def _recreate_reasons(self, release: Release) -> list[str]:
+        """Why an existing container of `release` must be recreated although Compose would keep
+        it (or only start it again): `<service>:netns` when it joins a namespace its provider no longer holds (or a
+        stopped provider, which `up` starts with a new one), `<service>:config` when a file it
+        mounts from a release directory differs from this release's. Nothing to judge (no
+        container, docker answering nothing) is no verdict: _verify still checks after `up`."""
+        by_name = {service.name: service for service in release.services}
+        result = self._run(["docker", "inspect", "--type", "container",
+                            *sorted({service.container for service in release.services})], timeout=60.0)
+        try:
+            records = {str(record["Name"]).lstrip("/"): record
+                       for record in json.loads(result.stdout or "[]")}
+        except (ValueError, KeyError, TypeError):
+            return []
+        releases = self.settings.state_dir / "releases"
+        reasons = []
+        for service in release.services:
+            record = records.get(service.container)
+            if record is None:
+                continue
+            provider = records.get(by_name[service.joins].container) if service.joins in by_name else None
+            # A stopped joiner joins the live namespace when `up` starts it; a stopped
+            # container keeps its mounts, so its config is checked all the same.
+            if provider is not None and (record.get("State") or {}).get("Running") and (
+                    not (provider.get("State") or {}).get("Running") or netns_stale(record, provider)):
+                reasons.append(f"{service.name}:netns")
+            for mount in record.get("Mounts") or []:
+                source = Path(str((mount or {}).get("Source", "")))
+                if not source.is_relative_to(releases) or len(source.relative_to(releases).parts) < 2:
+                    continue
+                wanted = release.directory.joinpath(*source.relative_to(releases).parts[1:])
+                try:
+                    same = wanted.read_bytes() == source.read_bytes()
+                except OSError:
+                    same = False
+                if not same:
+                    reasons.append(f"{service.name}:config")
+                    break
+        return reasons
 
     def _verify(self, release: Release, target: Target, deployment_id: str,
-                *, only: Sequence[str] | None = None) -> None:
+                *, only: Sequence[str] | None = None,
+                gate_ingress: Collection[str] | None = None) -> list[str]:
         """Each (or each `only`) service's container runs the release, and one that joins
-        another's network namespace is in the live one."""
+        another's network namespace is in the live one. With `gate_ingress` given, an ingress
+        service (not the bot, web API or frontend) fails it only when listed -- with the
+        ingress code, as _wait_healthy does -- and is otherwise returned as an
+        `ingress_unhealthy:<service>:<mismatch>` warning."""
         by_name = {service.name: service for service in release.services}
         checked = [service for service in release.services if only is None or service.name in only]
         containers = sorted({service.container for service in checked}
                             | {by_name[service.joins].container for service in checked if service.joins})
-        result = self._check(["docker", "inspect", "--type", "container", *containers],
-                             code="docker_inspect_failed", timeout=60.0)
+        # Exit 1 when one is missing; the others are still printed (and the missing one named).
+        result = self._run(["docker", "inspect", "--type", "container", *containers], timeout=60.0)
         try:
-            records = {str(record["Name"]).lstrip("/"): record for record in json.loads(result.stdout)}
+            records = {str(record["Name"]).lstrip("/"): record for record in json.loads(result.stdout or "[]")}
         except (ValueError, KeyError, TypeError):
             raise DeployError("docker_inspect_unparsable") from None
-        problems = []
+        if result.returncode != 0 and not records:
+            raise DeployError("docker_inspect_failed")
+        problems: dict[str, list[str]] = {}
         for service in checked:
+            found = problems.setdefault(service.name, [])
             record = records.get(service.container)
             if record is None:
-                problems.append(f"{service.name}:missing")
+                found.append("missing")
                 continue
-            problems += [f"{service.name}:{m}" for m in container_mismatches(
+            found += container_mismatches(
                 record, container=service.container, image=service.image,
-                identity=identity_env(target, image=service.image, deployment_id=deployment_id))]
+                identity=identity_env(target, image=service.image, deployment_id=deployment_id))
             if service.joins is not None:
                 provider = records.get(by_name[service.joins].container)
                 if provider is None or netns_stale(record, provider):
-                    problems.append(f"{service.name}:netns")
-        if problems:
-            raise DeployError("container_release_mismatch:" + ",".join(problems))
+                    found.append("netns")
+
+        def ingress(name: str) -> bool:
+            return gate_ingress is not None and name not in ROLE_CONTAINERS and name != FRONTEND
+
+        fatal = [f"{name}:{m}" for name, found in problems.items() for m in found if not ingress(name)]
+        if fatal:
+            raise DeployError("container_release_mismatch:" + ",".join(fatal))
+        gated = [f"{name}:{m}" for name, found in problems.items() for m in found
+                 if ingress(name) and name in (gate_ingress or ())]
+        if gated:
+            raise DeployError(INGRESS_UNHEALTHY + ",".join(gated))
+        warnings = [f"{INGRESS_UNHEALTHY}{name}:{m}" for name, found in problems.items() for m in found
+                    if ingress(name)]
+        for warning in warnings:
+            self._notify("warning", f"{warning}: the tailnet ingress is not as released; the bot is unaffected")
+        return warnings
 
     def _probe(self, service: str, container: str) -> bool:
         if service == FRONTEND:
             return self._http(self.settings.frontend_url, 5.0) == 200
         if service not in ROLE_CONTAINERS:
             # Its compose healthcheck, which release_services requires: the 9d sidecar's
-            # TS_ENABLE_HEALTH_CHECK /healthz, 200 once the node has a tailnet address.
+            # TS_ENABLE_HEALTH_CHECK /healthz, 200 once the node has a tailnet address
+            # (the netns holder's is `true`: running is all it does).
             result = self._run(["docker", "inspect", "--type", "container", "--format", HEALTH_FORMAT,
                                 container], timeout=20.0)
             return result.returncode == 0 and result.stdout.strip() == "healthy"
@@ -1773,10 +1885,20 @@ class Deployer:
             counts[name] = rest
         return counts
 
-    def _wait_healthy(self, release: Release) -> None:
+    def _wait_healthy(self, release: Release, *, gate_ingress: Collection[str] = ()) -> list[str]:
+        """The bot, the web API and the frontend must turn and stay healthy (a failure raises
+        as always). The ingress services (anything else: the tailnet node) are held to it only
+        when in `gate_ingress` -- the ones this deploy created -- and only after the
+        application passed, with a code of their own (`ingress_unhealthy:...`) so the caller
+        can tell the tailnet from the release. Any other unhealthy ingress service is
+        returned as an `ingress_unhealthy:<service>` warning: the tailnet never fails a
+        rollback or --recreate, and never stops the bot.
+        """
         started = self._clock()
         containers = {service.name: service.container for service in release.services}
-        pending = set(release.names)
+        application = [name for name in release.names if name in ROLE_CONTAINERS or name == FRONTEND]
+        ingress = [name for name in release.names if name in gate_ingress and name not in application]
+        pending, ingress_late = set(application + ingress), []
         while pending:
             for service in sorted(pending):
                 if self._probe(service, containers[service]):
@@ -1785,19 +1907,38 @@ class Deployer:
                 break
             elapsed = self._clock() - started
             late = sorted(s for s in pending if elapsed >= self.settings.health_timeouts.get(s, 120.0))
-            if late:
-                raise DeployError("health_timeout:" + ",".join(late))
-            self._sleep(self.settings.health_interval)
+            if any(name in application for name in late):
+                raise DeployError("health_timeout:" + ",".join(n for n in late if n in application))
+            for name in late:                     # an ingress service: judged after the app
+                pending.discard(name)
+                ingress_late.append(name)
+            if pending:
+                self._sleep(self.settings.health_interval)
         # A daemon can answer once and then die in its startup checks: require the
         # same containers, still running, still healthy after a settle window.
         before = self._restart_counts(release)
         self._sleep(self.settings.settle_seconds)
         after = self._restart_counts(release)
-        if after != before or any(not value.endswith("true") for value in after.values()):
+
+        def restarted(name: str) -> bool:
+            container = containers[name]
+            return after.get(container) != before.get(container) or not after.get(container, "").endswith("true")
+
+        if any(restarted(name) for name in application):
             raise DeployError("restarted_during_settle")
-        unhealthy = [service for service in release.names if not self._probe(service, containers[service])]
+        unhealthy = [service for service in application if not self._probe(service, containers[service])]
         if unhealthy:
             raise DeployError("unhealthy_after_settle:" + ",".join(unhealthy))
+        failed = sorted(set(ingress_late) | {name for name in ingress if name not in ingress_late
+                                             and (restarted(name) or not self._probe(name, containers[name]))})
+        if failed:
+            raise DeployError(INGRESS_UNHEALTHY + ",".join(failed))
+        warnings = [f"ingress_unhealthy:{name}" for name in release.names
+                    if name not in application and name not in ingress
+                    and not self._probe(name, containers[name])]
+        for warning in warnings:
+            self._notify("warning", f"{warning}: the tailnet ingress is down; the bot is unaffected")
+        return warnings
 
     def _stop(self, service: str) -> str:
         """`<service> stopped`, `<service> absent`, or `<SERVICE>_STOP_FAILED`."""
@@ -1823,15 +1964,38 @@ class Deployer:
             return self._finish(attempt, "failed", f"unhealthy:{reason}; {why}; no automatic "
                                 f"rollback; {stopped}")
         try:
-            self._rollback_to(previous)
+            ingress = self._rollback_to(previous)
         except DeployError as rollback:
             stopped = self._stop("bot")
             return self._finish(attempt, "failed", f"unhealthy:{reason}; rollback_failed:"
                                 f"{rollback.code}; {stopped}")
+        warned = "" if not ingress else "; warnings=" + ",".join(ingress)
         return self._finish(attempt, "rolled_back", f"unhealthy:{reason}; rolled_back_to="
-                            f"{previous.source_revision}")
+                            f"{previous.source_revision}{warned}")
 
-    def _rollback_to(self, previous: LedgerRow) -> None:
+    def _rollback_possible(self, view: LedgerView, attempt: Attempt) -> bool:
+        """Whether _unhealthy would roll back and the rollback would get past its schema
+        check (the step that refuses before anything changes)."""
+        if attempt.migrations_applied or attempt.bot_stopped or view.last_success is None:
+            return False
+        try:
+            self._rollback_release(view.last_success)
+        except DeployError as exc:
+            log(f"rollback not possible: {exc.code}")
+            return False
+        return True
+
+    def _rollback_release(self, previous: LedgerRow) -> tuple[Release, Target]:
+        """The previous release on disk, refused unless the schema is its own."""
+        target = self._target(previous.source_revision, previous.backend_digest,
+                              previous.frontend_digest)
+        release = self._materialize(target, previous.attempt_id)
+        current, heads = self._schema(release, target)
+        if set(current) != set(heads):
+            raise DeployError("rollback_schema_mismatch")
+        return release, target
+
+    def _rollback_to(self, previous: LedgerRow) -> list[str]:
         """Recreate the previous successful release under its own deployment id, only onto the
         schema it was written for.
 
@@ -1842,15 +2006,11 @@ class Deployer:
         image cannot locate the newer revision), rollback_schema_mismatch when it can.
         """
         log(f"rolling back to {previous.source_revision}")
-        target = self._target(previous.source_revision, previous.backend_digest,
-                              previous.frontend_digest)
-        release = self._materialize(target, previous.attempt_id)
-        current, heads = self._schema(release, target)
-        if set(current) != set(heads):
-            raise DeployError("rollback_schema_mismatch")
+        release, target = self._rollback_release(previous)
         self._compose_up(release, target, previous.attempt_id)
-        self._verify(release, target, previous.attempt_id)
-        self._wait_healthy(release)
+        # The ingress warns, never fails the rollback.
+        warnings = self._verify(release, target, previous.attempt_id, gate_ingress=())
+        return warnings + self._wait_healthy(release)
 
     # ------------------------------------------------------------------ recreate
 
@@ -1902,13 +2062,14 @@ class Deployer:
             return self._finish(attempt, "failed", f"{exc.code}; running release untouched")
         try:
             self._compose_up(release, target, attempt.attempt_id, force_recreate=True)
-            self._verify(release, target, attempt.attempt_id)
-            self._wait_healthy(release)
+            # The ingress warns, never stops the bot.
+            ingress = self._verify(release, target, attempt.attempt_id, gate_ingress=())
+            ingress += self._wait_healthy(release)
         except DeployError as exc:
             stopped = self._stop("bot")
             return self._finish(attempt, "failed", f"unhealthy:{exc.code}; recreate has no rollback; "
                                 f"{stopped}; fix the runtime env and --recreate")
-        return self._finish(attempt, "deployed", "ok")
+        return self._finish(attempt, "deployed", "ok" if not ingress else "ok; warnings=" + ",".join(ingress))
 
     # ------------------------------------------------------------------ after success
 

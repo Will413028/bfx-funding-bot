@@ -28,6 +28,11 @@ ROOT = Path(__file__).resolve().parents[3]
 COMPOSE_PATH = ROOT / "deploy/vm/docker-compose.app.yml"
 COMPOSE_TEXT = COMPOSE_PATH.read_text(encoding="utf-8")
 COMPOSE = yaml.safe_load(COMPOSE_TEXT)
+INGRESS_START = COMPOSE_TEXT.index("  # Holds the ingress network namespace")
+NETWORKS_START = COMPOSE_TEXT.index("networks:\n  bfx_default:\n    external")
+# The application services alone, for the tests that create containers or drop the frontend.
+APP_ONLY_TEXT = COMPOSE_TEXT[:INGRESS_START] + COMPOSE_TEXT[NETWORKS_START:]
+SERVE_PATH = ROOT / "deploy/vm/tailscale/serve.json"
 DIGEST_B = "sha256:" + "3" * 64
 DIGEST_F = "sha256:" + "4" * 64
 FAKE_ENV = {
@@ -78,7 +83,7 @@ def runtime_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Empty stand-ins for /opt/bfx/runtime: older Compose stats env files even
     with --no-env-resolution, and CI has no secret directory."""
     directory = tmp_path_factory.mktemp("runtime")
-    for name in ("bot.env", "webapi.env", "frontend.env"):
+    for name in ("bot.env", "webapi.env", "frontend.env", "tailscale.env"):
         (directory / name).write_text("")
     return directory
 
@@ -116,10 +121,10 @@ def uninterpolated(runtime_dir: Path) -> dict[str, Any]:
 # --------------------------------------------------------------------------- file shape
 
 
-def test_only_the_three_application_services_are_defined() -> None:
-    assert set(COMPOSE["services"]) == {"bot", "webapi", "frontend"}
+def test_the_application_services_and_the_ingress_are_defined() -> None:
+    assert set(COMPOSE["services"]) == {"bot", "webapi", "frontend", "netns", "tailscale"}
     assert COMPOSE["name"] == "bfx-app"
-    assert "volumes" not in COMPOSE
+    assert COMPOSE["volumes"] == {"bfx_tsstate": {"name": "bfx_tsstate"}}
 
 
 def test_postgres_and_redis_are_never_part_of_this_project() -> None:
@@ -128,8 +133,10 @@ def test_postgres_and_redis_are_never_part_of_this_project() -> None:
 
 
 def test_no_image_tag_appears_anywhere_in_the_file() -> None:
-    images = [spec["image"] for spec in COMPOSE["services"].values()]
-    assert all(image.startswith("${") for image in images)
+    images = {name: spec["image"] for name, spec in COMPOSE["services"].items()}
+    assert all(images[name].startswith("${") for name in ("bot", "webapi", "frontend"))
+    assert images["netns"] == images["tailscale"] == policy.TAILSCALE_IMAGE
+    assert bfx.THIRD_PARTY_IMAGE.fullmatch(policy.TAILSCALE_IMAGE)
     assert re.search(r"ghcr\.io/\S+:(main|sha-|latest)", COMPOSE_TEXT) is None
 
 
@@ -163,6 +170,8 @@ def test_wrong_or_optional_env_files_are_detected(
 
 def test_policy_and_deployer_agree_on_names_and_commands() -> None:
     assert {role: policy.CONTAINERS[role] for role in bfx.ROLE_CONTAINERS} == bfx.ROLE_CONTAINERS
+    # The netns repair inspects the holder by name; a renamed holder would never be repaired.
+    assert policy.INGRESS_CONTAINERS["netns"] == bfx.NETNS_HOLDER
     assert set(bfx.ROLE_CONTAINERS) == set(policy.REQUIRED_SERVICES)
     assert tuple(bfx.identity_env(
         bfx.Target("b" * 40, DIGEST_B, DIGEST_F, "x", "y"), image="x",
@@ -197,24 +206,29 @@ def test_deployer_reads_the_release_from_the_real_rendering(rendered: dict[str, 
         return
     services = bfx.release_services(rendered, target=target, runtime_dir=runtime_dir,
                                     release_dir=COMPOSE_PATH.parent)
-    assert [(s.name, s.container, s.image) for s in services] == [
-        ("bot", "bfx-bot", target.backend_image), ("frontend", "bfx-frontend", target.frontend_image),
-        ("webapi", "bfx-webapi", target.backend_image)]
+    assert [(s.name, s.container, s.image, s.joins) for s in services] == [
+        ("bot", "bfx-bot", target.backend_image, None),
+        ("frontend", "bfx-frontend", target.frontend_image, None),
+        ("netns", "bfx-netns", policy.TAILSCALE_IMAGE, None),
+        ("tailscale", "bfx-tailscale", policy.TAILSCALE_IMAGE, "netns"),
+        ("webapi", "bfx-webapi", target.backend_image, None)]
     assert [[p.name for p in s.env_files] for s in services] == [
-        ["bot.env", "live.env"], ["frontend.env"], ["webapi.env"]]
+        ["bot.env", "live.env"], ["frontend.env"], [], ["tailscale.env"], ["webapi.env"]]
     assert all(p.parent in (runtime_dir, COMPOSE_PATH.parent) for s in services for p in s.env_files)
-    assert bfx.release_config_files(rendered, COMPOSE_PATH.parent) == ()
+    assert [str(p) for p in bfx.release_config_files(rendered, COMPOSE_PATH.parent)] == [
+        "tailscale/serve.json"]
 
 
 @needs_compose
 def test_a_release_without_a_frontend_satisfies_the_policy(
     tmp_path: Path, runtime_dir: Path,
 ) -> None:
-    text = COMPOSE_TEXT[:COMPOSE_TEXT.index("  frontend:\n")] \
-        + COMPOSE_TEXT[COMPOSE_TEXT.index("networks:\n  bfx_default:\n    external"):]
+    text = COMPOSE_TEXT[:COMPOSE_TEXT.index("  frontend:\n")] + COMPOSE_TEXT[INGRESS_START:]
     mutated = tmp_path / "docker-compose.app.yml"
     mutated.write_text(text)
     shutil.copy(ROOT / "deploy/vm/live.env", tmp_path / "live.env")
+    (tmp_path / "tailscale").mkdir()
+    shutil.copy(SERVE_PATH, tmp_path / "tailscale/serve.json")
     env = {k: v for k, v in FAKE_ENV.items() if not k.startswith("BFX_FRONTEND_")}
     result = _render(runtime_dir, env, path=mutated)
     assert result.returncode == 0, result.stderr
@@ -239,8 +253,113 @@ def test_the_service_set_secrets_and_configs_are_enforced(
     mutate(broken)
     assert violation in policy.violations(broken)
     fine = copy.deepcopy(rendered)
-    fine["configs"] = {"c": {"name": "bfx-app_c", "file": "/opt/x/serve.json"}}
+    fine["configs"] = {"ts-serve": {"file": "/opt/bfx/releases/r/tailscale/serve.json"}}  # 2.38: no name
     assert policy.violations(fine) == []
+
+
+def _bind(spec: dict[str, Any]) -> None:
+    spec["volumes"].append({"type": "bind", "source": "/etc", "target": "/host"})
+
+
+INGRESS_MUTATIONS: list[tuple[str, Callable[[dict[str, Any]], None], str]] = [
+    ("tailscale", lambda s: s.__setitem__("cap_add", ["NET_ADMIN"]), "tailscale:no_cap_add"),
+    ("tailscale", lambda s: s.__setitem__("cap_drop", []), "tailscale:cap_drop_all"),
+    ("tailscale", lambda s: s.__setitem__("ports", [{"target": 443, "published": "443"}]),
+     "tailscale:no_ports"),
+    ("tailscale", lambda s: s.__setitem__("devices", ["/dev/net/tun"]), "tailscale:no_devices"),
+    ("tailscale", _bind, "tailscale:state_volume_only"),
+    ("tailscale", lambda s: s["volumes"].append({"type": "volume", "source": "x", "target": "/x"}),
+     "tailscale:state_volume_only"),
+    ("tailscale", lambda s: s["configs"][0].__setitem__("target", "/etc/serve.json"),
+     "tailscale:serve_config_only"),
+    ("tailscale", lambda s: s["environment"].__setitem__("TS_USERSPACE", "false"),
+     "tailscale:exact_environment"),
+    ("tailscale", lambda s: s["environment"].__setitem__("TS_LOCAL_ADDR_PORT", "[::]:9002"),
+     "tailscale:exact_environment"),
+    ("tailscale", lambda s: s["environment"].__setitem__("TS_AUTHKEY", "tskey-x"),
+     "tailscale:exact_environment"),
+    ("tailscale", lambda s: s.__setitem__("network_mode", "host"), "tailscale:joins_netns"),
+    ("tailscale", lambda s: s.__setitem__("read_only", False), "tailscale:read_only"),
+    ("tailscale", lambda s: s.__setitem__("image", "docker.io/tailscale/tailscale@sha256:" + "d" * 64),
+     "tailscale:image_allowlisted_digest"),
+    ("tailscale", lambda s: s.__setitem__("command", ["tailscaled"]), "tailscale:image_entrypoint"),
+    ("tailscale", lambda s: s.pop("healthcheck"), "tailscale:healthcheck"),
+    ("tailscale", lambda s: s.__setitem__("tmpfs", ["/tmp", "/var/run/tailscale", "/var/lib"]),
+     "tailscale:tmpfs"),
+    ("netns", lambda s: s.__setitem__("entrypoint", ["sh"]), "netns:exact_entrypoint"),
+    ("netns", lambda s: s.__setitem__("volumes", [{"type": "volume", "source": "x", "target": "/x"}]),
+     "netns:no_volumes"),
+    ("netns", lambda s: s.__setitem__("ports", [{"target": 8000, "published": "8000"}]), "netns:no_ports"),
+    ("netns", lambda s: s["networks"].__setitem__("other", {}), "netns:network"),
+    ("netns", lambda s: s.__setitem__("container_name", "bfx-holder"), "netns:container_name"),
+    ("netns", lambda s: s.__setitem__("cap_add", ["NET_ADMIN"]), "netns:no_cap_add"),
+    ("netns", lambda s: s.pop("init"), "netns:init"),
+    ("netns", lambda s: s["networks"].__setitem__("bfx_default", {"aliases": ["bfx-postgres"]}), "netns:network"),
+]
+
+
+@needs_compose
+@pytest.mark.parametrize(("service", "mutate", "violation"), INGRESS_MUTATIONS,
+                         ids=[v for _, _, v in INGRESS_MUTATIONS])
+def test_the_ingress_shape_is_pinned(
+    rendered: dict[str, Any], service: str, mutate: Callable[[dict[str, Any]], None], violation: str,
+) -> None:
+    broken = copy.deepcopy(rendered)
+    mutate(broken["services"][service])
+    assert violation in policy.violations(broken)
+
+
+@needs_compose
+@pytest.mark.parametrize(("mutate", "violation"), [
+    (lambda r: r["services"].pop("tailscale"), "services"),
+    (lambda r: r["services"].pop("netns"), "services"),
+    (lambda r: r["volumes"].__setitem__("other", {"name": "other"}), "volumes"),
+    (lambda r: r["volumes"]["bfx_tsstate"].pop("name"), "volumes"),
+    (lambda r: r["volumes"]["bfx_tsstate"].__setitem__("external", True), "volumes"),
+    (lambda r: r["configs"].__setitem__("extra", {"file": "/x/tailscale/serve.json"}), "serve_config"),
+    (lambda r: r["configs"]["ts-serve"].__setitem__("file", "/etc/serve.json"), "serve_config"),
+    (lambda r: r["configs"]["ts-serve"].__setitem__("name", "other_ts-serve"), "serve_config"),
+    (lambda r: r["configs"]["ts-serve"].__setitem__("file", "tailscale/serve.json"), "serve_config"),
+    (lambda r: r["configs"].__setitem__("ts-serve", {"name": "bfx-app_ts-serve", "content": "{}"}),
+     "configs_file_only"),
+    # The web API joins the holder only in 9d-5.
+    (lambda r: r["services"]["webapi"].__setitem__("network_mode", "service:netns"),
+     "webapi:no_network_mode"),
+])
+def test_the_ingress_volume_config_and_join_are_pinned(
+    rendered: dict[str, Any], mutate: Callable[[dict[str, Any]], None], violation: str,
+) -> None:
+    broken = copy.deepcopy(rendered)
+    mutate(broken)
+    assert violation in policy.violations(broken)
+
+
+@needs_compose
+def test_the_sidecar_reads_only_tailscale_env(uninterpolated: dict[str, Any]) -> None:
+    paths = [e["path"] for e in uninterpolated["services"]["tailscale"]["env_file"]]
+    assert len(paths) == 1 and paths[0].endswith("/${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/tailscale.env")
+    broken = copy.deepcopy(uninterpolated)
+    broken["services"]["tailscale"]["env_file"][0]["path"] = paths[0].replace("tailscale.env", "webapi.env")
+    assert "tailscale:env_files" in policy.env_file_violations(broken)
+    # The holder reads no env file at all.
+    broken = copy.deepcopy(uninterpolated)
+    broken["services"]["netns"]["env_file"] = [{"path": paths[0], "required": True}]
+    assert "netns:env_files" in policy.env_file_violations(broken)
+
+
+def test_serve_config_proxies_only_to_the_local_web_api() -> None:
+    """Read as tracked (Compose never interpolates a config file): one HTTPS listener whose
+    only handler proxies to the shared namespace's 127.0.0.1:8000, forwarding the operator
+    capability; no Funnel, no host name of this tailnet."""
+    text = SERVE_PATH.read_text(encoding="utf-8")
+    serve = json.loads(text)
+    assert set(serve) == {"TCP", "Web"}
+    assert serve["TCP"] == {"443": {"HTTPS": True}}
+    assert list(serve["Web"]) == ["${TS_CERT_DOMAIN}:443"]
+    assert serve["Web"]["${TS_CERT_DOMAIN}:443"] == {"Handlers": {"/": {
+        "Proxy": "http://127.0.0.1:8000",
+        "AcceptAppCaps": ["github.com/Will413028/bfx-funding-bot/cap/operator"]}}}
+    assert "AllowFunnel" not in text and ".ts.net" not in text
 
 
 @needs_compose
@@ -265,6 +384,13 @@ def test_policy_cli_is_what_ci_runs(
     completed = subprocess.run(argv, input=json.dumps(rendered), capture_output=True, text=True,
                                check=False, env=env)
     assert completed.returncode == 1 and "webapi:env_files_required" in completed.stderr
+    # The top-level volume and config are checked on the uninterpolated rendering too.
+    uninterpolated_broken = copy.deepcopy(uninterpolated)
+    uninterpolated_broken["volumes"]["bfx_tsstate"]["external"] = True
+    snapshot.write_text(json.dumps(uninterpolated_broken))
+    completed = subprocess.run(argv, input=json.dumps(rendered), capture_output=True, text=True,
+                               check=False, env=env)
+    assert completed.returncode == 1 and "uninterpolated:volumes" in completed.stderr
 
 
 REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
@@ -342,7 +468,7 @@ def _local_image_with_repo_digest() -> str | None:
 @pytest.mark.docker
 @needs_compose
 def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> None:
-    """Create (never start) the three services from the real file and check them.
+    """Create (never start) the three application services from the real file and check them.
 
     A local image that already has a repository digest stands in for both
     application images; network and container names are made unique so nothing
@@ -357,7 +483,7 @@ def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> Non
     runtime.mkdir()
     for name in ("bot.env", "webapi.env", "frontend.env"):
         (runtime / name).write_text("EXAMPLE=1\n")
-    text = (COMPOSE_TEXT.replace("name: bfx_default", f"name: {network}")
+    text = (APP_ONLY_TEXT.replace("name: bfx_default", f"name: {network}")
             .replace("name: bfx-app", f"name: bfx-app-test-{suffix}"))
     for container in ("bfx-bot", "bfx-webapi", "bfx-frontend"):
         text = text.replace(f"container_name: {container}", f"container_name: {container}-{suffix}")

@@ -516,7 +516,7 @@ sudo bfx-deploy --recreate
 
 | unit | 排程 | 作用 |
 |---|---|---|
-| `bfx-deploy.timer` | 每 5 分鐘（`*:2/5`） | 部署最新綠燈 main；沒有要部署時修復 webapi 的 netns（[deploy §5](deploy.md#webapi-留在-sidecar-已死的-network-namespace9d-5-之後)；要立刻重試就刪 `/var/lib/bfx-deploy/netns-repair.json`） |
+| `bfx-deploy.timer` | 每 5 分鐘（`*:2/5`） | 部署最新綠燈 main；沒有要部署時修復 webapi 的 netns（[deploy §5](deploy.md#webapi-留在-holder-已死的-network-namespace9d-5-之後)；要立刻重試就刪 `/var/lib/bfx-deploy/netns-repair.json`） |
 | `bfx-pgbackrest-backup.timer` / `bfx-pgbackrest-status.timer` | 見 unit | 備份與 RPO evidence（`OnFailure=bfx-alert@`） |
 | `bfx-backup-check.timer` | 每 5 分鐘（`*:1/5`） | evidence、restore heartbeat、weekly report heartbeat 與磁碟使用率檢查，連續兩次才告警，6 小時重發（見下方「主機檢查」） |
 | `bfx-restore-test.timer` | 每月 1 日 09:17 UTC | `bfx-restore-test@current`：用已部署 release 的 DR 腳本做 isolated restore ＋ ledger 驗證（與 production 比對有界 digest、唯讀 boot check；[offsite DR](offsite-dr.md#monthly-and-change-triggered-ledger-restore-test)） |
