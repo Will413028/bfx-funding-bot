@@ -148,6 +148,9 @@ THIRD_PARTY_IMAGE = re.compile(r"docker\.io/tailscale/tailscale@sha256:[0-9a-f]{
 # joins it from 9d-4 and the web API from 9d-5 (`network_mode: service:netns`;
 # compose_policy.INGRESS_CONTAINERS pins the name); netns repair inspects it.
 NETNS_HOLDER = "bfx-netns"
+# The containers that may join the holder's namespace, by service: the sidecar from 9d-4,
+# the web API from 9d-5 (compose_policy.INGRESS_CONTAINERS and CONTAINERS pin the names).
+NETNS_JOINERS = {"tailscale": "bfx-tailscale", "webapi": "bfx-webapi"}
 NETNS_REPAIR_LIMIT = 3
 # The code of a deploy that failed only because the ingress it created is unhealthy.
 INGRESS_UNHEALTHY = "ingress_unhealthy:"
@@ -1085,20 +1088,22 @@ class Deployer:
         return self.settings.state_dir / "netns-repair.json"
 
     def _repair_netns(self, view: LedgerView) -> None:
-        """Recreate the web API alone when it is left in the holder's dead network namespace.
+        """Recreate the services left in the holder's dead network namespace -- the sidecar
+        and, from 9d-5, the web API -- and nothing else.
 
         Necessary because Docker never repairs it: a holder restarted on its own, or
-        recreated on its own, leaves the web API answering /health while reaching neither
-        the database nor Serve (9d-0 and holder spikes). Remove once the web API joins no
-        other container's namespace, or once a holder restart is alerted on (plan D13).
+        recreated on its own, leaves its joiners in the old namespace without eth0 -- the
+        sidecar off the tailnet, the web API answering /health while reaching neither the
+        database nor Serve (9d-0 and holder spikes). Remove once a holder restart is alerted
+        on (plan D13).
 
-        Only on a tick that deploys nothing (a deploy recreates the web API anyway), and only
+        Only on a tick that deploys nothing (a deploy recreates what is stale itself), and only
         when the last attempt left the last successful release running (deployed,
         rolled_back): never after `failed` (a migration may be applied and the bot stopped on
         purpose) or `started` (interrupted). A docker inspect that answers nothing is no
         verdict: the record is kept and nothing is sent. Detection is netns_stale, never health: a short
-        database outage fails /ready with nothing to repair. The repair recreates the web API
-        only, never touches the bot and writes no ledger row; after NETNS_REPAIR_LIMIT
+        database outage fails /ready with nothing to repair. The repair recreates the stale
+        joiners only, never touches the bot and writes no ledger row; after NETNS_REPAIR_LIMIT
         failures of one incident (the holder's Id and start) it stops trying until the
         namespace is right again or the holder starts anew. The count lives in the state
         directory, as discovery-failure.json does: each tick is a new process. Deleting the
@@ -1108,7 +1113,7 @@ class Deployer:
         if view.last_success is None or last is None or last.outcome not in ("deployed", "rolled_back"):
             return
         try:
-            incident = self._netns_incident()
+            found = self._netns_incident()
         except DeployError as exc:
             log(f"netns check skipped: {exc.code}")
             return
@@ -1118,29 +1123,31 @@ class Deployer:
             recorded = (str(state["incident"]), int(state["failures"]), bool(state["escalated"]))
         except (OSError, ValueError, KeyError, TypeError):
             recorded = None
-        if incident is None:
+        if found is None:
             if self.settings.dry_run:
                 return
             if recorded is not None and recorded[2]:
-                self._notify("info", "bfx-webapi is in the holder's network namespace again")
+                self._notify("info", "the holder's network namespace is shared by all its joiners again")
             path.unlink(missing_ok=True)
             return
+        incident, stale = found
+        names = ", ".join(NETNS_JOINERS[service] for service in stale)
         failures, escalated = recorded[1:] if recorded is not None and recorded[0] == incident \
             else (0, False)
         if failures >= NETNS_REPAIR_LIMIT:
-            log(f"webapi network namespace stale ({incident}); {failures} repairs failed, not retried")
+            log(f"{names} in a stale network namespace ({incident}); {failures} repairs failed, not retried")
             return
         if self.settings.dry_run:
-            log(f"dry run: webapi network namespace stale ({incident}); would recreate webapi")
+            log(f"dry run: {names} in a stale network namespace ({incident}); would recreate them")
             return
-        log(f"webapi network namespace stale ({incident}); recreating webapi")
-        failure = self._recreate_webapi(view.last_success)
+        log(f"{names} in a stale network namespace ({incident}); recreating them")
+        failure = self._recreate_joined(view.last_success, stale)
         if failure is None:
             path.unlink(missing_ok=True)
-            self._notify("info", "bfx-webapi was left in a dead network namespace; recreated it")
+            self._notify("info", f"{names} left in a dead network namespace; recreated")
             return
         failures += 1
-        message = (f"bfx-webapi is in a dead network namespace; recreating it failed ({failure}), "
+        message = (f"{names} in a dead network namespace; recreating failed ({failure}), "
                    f"attempt {failures}/{NETNS_REPAIR_LIMIT}; the bot is untouched")
         if failures < NETNS_REPAIR_LIMIT:
             self._notify("warning", message)
@@ -1151,54 +1158,65 @@ class Deployer:
         _write_private(path, json.dumps({"incident": incident, "failures": failures,
                                          "escalated": escalated}))
 
-    def _netns_incident(self) -> str | None:
-        """`<holder Id>@<its StartedAt>` when the web API is in a stale namespace of the
-        holder; None also when there is nothing to judge: no holder (before 9d-4), a web API
-        on its own network (before 9d-5), or either one not running (a web API stopped on
-        purpose stays stopped; joining a stopped holder would fail).
+    def _netns_incident(self) -> tuple[str, tuple[str, ...]] | None:
+        """`(<holder Id>@<its StartedAt>, the stale joiners' services)` when a running joiner
+        (NETNS_JOINERS) sits in a stale namespace of the running holder; None also when there
+        is nothing to judge: no holder (before 9d-4), a joiner on its own network (the web API
+        before 9d-5), or a stopped one (a web API stopped on purpose stays stopped; joining a
+        stopped holder would fail).
         """
-        webapi = ROLE_CONTAINERS["webapi"]
-        # Exit 1 when one is missing; the other's record is still printed.
-        result = self._run(["docker", "inspect", "--type", "container", NETNS_HOLDER, webapi],
-                           timeout=60.0)
+        # Exit 1 when one is missing; the others' records are still printed.
+        result = self._run(["docker", "inspect", "--type", "container", NETNS_HOLDER,
+                            *NETNS_JOINERS.values()], timeout=60.0)
         try:
             records = {str(record["Name"]).lstrip("/"): record
                        for record in json.loads(result.stdout or "[]")}
         except (ValueError, KeyError, TypeError):
             raise DeployError("netns_inspect_unparsable") from None
         if result.returncode != 0 and not records:
-            # Docker not answering (or both gone) is no verdict: not "recovered" either.
+            # Docker not answering (or all gone) is no verdict: not "recovered" either.
             raise DeployError("netns_inspect_failed")
-        holder, joined = records.get(NETNS_HOLDER), records.get(webapi)
-        if holder is None or joined is None:
+        holder = records.get(NETNS_HOLDER)
+        if holder is None or not (holder.get("State") or {}).get("Running"):
             return None
-        if not str((joined.get("HostConfig") or {}).get("NetworkMode", "")).startswith("container:"):
+        stale = []
+        for service, container in NETNS_JOINERS.items():
+            joined = records.get(container)
+            if joined is None or not (joined.get("State") or {}).get("Running"):
+                continue
+            if not str((joined.get("HostConfig") or {}).get("NetworkMode", "")).startswith("container:"):
+                continue
+            if netns_stale(joined, holder):
+                stale.append(service)
+        if not stale:
             return None
-        if not (joined.get("State") or {}).get("Running") or not (holder.get("State") or {}).get("Running"):
-            return None
-        if not netns_stale(joined, holder):
-            return None
-        return f"{holder.get('Id')}@{(holder.get('State') or {}).get('StartedAt')}"
+        return f"{holder.get('Id')}@{(holder.get('State') or {}).get('StartedAt')}", tuple(sorted(stale))
 
-    def _recreate_webapi(self, previous: LedgerRow) -> str | None:
-        """`up --no-deps --force-recreate webapi` from the running release's compose file under
-        its own deployment id (so the identity check holds), then probe and settle; the
-        failure code, or None. Not _recreate, which recreates every service and stops the
+    def _recreate_joined(self, previous: LedgerRow, services: Sequence[str]) -> str | None:
+        """`up --no-deps --force-recreate <services>` from the running release's compose file
+        under its own deployment id (so the identity check holds), then probe and settle each;
+        the failure code, or None. Not _recreate, which recreates every service and stops the
         bot when it fails.
         """
         target = self._target(previous.source_revision, previous.backend_digest,
                               previous.frontend_digest)
         try:
             release = self._materialize(target, previous.attempt_id)
+            missing = [service for service in services if service not in release.names]
+            if missing:
+                raise DeployError("netns_joiner_not_in_release:" + ",".join(missing))
             self._validate_env_files(release)
             self._check(["docker", "compose", "-p", PROJECT, "-f", str(release.compose_file), "up",
-                         "--detach", "--no-deps", "--force-recreate", "webapi"],
+                         "--detach", "--no-deps", "--force-recreate", *services],
                         code="compose_up_failed", timeout=600.0,
                         env=self._compose_env(target, previous.attempt_id))
-            self._verify(release, target, previous.attempt_id, only=("webapi",))
+            self._verify(release, target, previous.attempt_id, only=tuple(services))
         except DeployError as exc:
             return exc.code
-        return None if self._healthy_and_settled("webapi") else "unhealthy:webapi"
+        containers = {service.name: service.container for service in release.services}
+        unhealthy = [service for service in services
+                     if not self._healthy_and_settled(service, containers[service])]
+        return None if not unhealthy else "unhealthy:" + ",".join(unhealthy)
 
     # ------------------------------------------------------------------ deploy
 
@@ -1412,24 +1430,24 @@ class Deployer:
             return f"unhealthy; {failed}, {service} may be running"
         return f"unhealthy; {service} stopped until a release deploys"
 
-    def _healthy_and_settled(self, service: str) -> bool:
-        """A role container answers its probe within its budget, then is still the same running
-        container and still answers after the settle window."""
-        container = ROLE_CONTAINERS[service]
+    def _healthy_and_settled(self, service: str, container: str | None = None) -> bool:
+        """A container (a role's by default) answers its probe within its budget, then is still
+        the same running container and still answers after the settle window."""
+        container = container or ROLE_CONTAINERS[service]
         began = self._clock()
         while not self._probe(service, container):
-            if self._clock() - began >= self.settings.health_timeouts[service]:
+            if self._clock() - began >= self.settings.health_timeouts.get(service, 120.0):
                 return False
             self._sleep(self.settings.health_interval)
-        before = self._container_state(service)
+        before = self._container_state(container)
         self._sleep(self.settings.settle_seconds)
-        return (before is not None and before == self._container_state(service)
+        return (before is not None and before == self._container_state(container)
                 and self._probe(service, container))
 
-    def _container_state(self, service: str) -> str | None:
+    def _container_state(self, container: str) -> str | None:
         """A container's restart count and running flag, or None when unreadable."""
         result = self._run(["docker", "inspect", "--type", "container", "--format",
-                            "{{.RestartCount}} {{.State.Running}}", ROLE_CONTAINERS[service]],
+                            "{{.RestartCount}} {{.State.Running}}", container],
                            timeout=60.0)
         if result.returncode != 0 or not result.stdout.strip().endswith("true"):
             return None
