@@ -51,10 +51,13 @@ NEW_B, NEW_F = "sha256:" + "3" * 64, "sha256:" + "4" * 64
 OLD_ATTEMPT = "11111111-1111-4111-8111-111111111111"
 CI_RUN = "https://github.com/Will413028/bfx-funding-bot/actions/runs/123456789"
 REAL_COMPOSE_TEXT = (ROOT / "deploy/vm/docker-compose.app.yml").read_text(encoding="utf-8")
-# The application services alone (the shape before 9d-4): most tests vary this; the real
-# file, with its ingress, is deployed on its own (test_the_real_release_file_deploys...).
-COMPOSE_TEXT = REAL_COMPOSE_TEXT[:REAL_COMPOSE_TEXT.index("  # Holds the ingress network namespace")] \
-    + REAL_COMPOSE_TEXT[REAL_COMPOSE_TEXT.index("networks:\n  bfx_default:\n    external"):]
+FIXTURES = Path(__file__).parent / "fixtures"
+# The release shapes the deployer still meets as rollback targets, frozen from main: before
+# 9d-4 (bot, webapi, frontend; most tests vary this one) and 9d-4 (plus the ingress, the
+# web API still on bfx_default). The real file (9d-5: the web API in the holder's
+# namespace, no frontend) is deployed on its own (test_the_real_release_file_deploys...).
+COMPOSE_TEXT = (FIXTURES / "docker-compose.app.pre-9d4.yml").read_text(encoding="utf-8")
+INGRESS_9D4_TEXT = (FIXTURES / "docker-compose.app.9d4.yml").read_text(encoding="utf-8")
 assert "tailscale" not in COMPOSE_TEXT.partition("\nservices:")[2]
 LIVE_ENV_TEXT = (ROOT / "deploy/vm/live.env").read_text(encoding="utf-8")
 # From 9d-5 the compose file has no frontend service (and CI builds no frontend image).
@@ -1592,13 +1595,14 @@ def test_a_third_party_image_is_pulled_by_digest_without_the_registry_token(harn
     assert "bfx-tailscale" in inspected
 
 
-def _ingress_release(harness: Harness, *revisions: str) -> str:
-    """The tracked file (fake digest for the fake host) at these revisions; returns serve.json."""
-    real_image = re.search(r"docker\.io/tailscale/tailscale@sha256:[0-9a-f]{64}", REAL_COMPOSE_TEXT)
+def _ingress_release(harness: Harness, *revisions: str, text: str = REAL_COMPOSE_TEXT) -> str:
+    """A file with the ingress (the tracked one by default; fake digest for the fake host) at
+    these revisions; returns serve.json."""
+    real_image = re.search(r"docker\.io/tailscale/tailscale@sha256:[0-9a-f]{64}", text)
     assert real_image is not None
     serve = (ROOT / SERVE_PATH).read_text(encoding="utf-8")
     for revision in revisions:
-        harness.host.files[(revision, bfx.COMPOSE_PATH)] = REAL_COMPOSE_TEXT.replace(real_image[0], TAILSCALE)
+        harness.host.files[(revision, bfx.COMPOSE_PATH)] = text.replace(real_image[0], TAILSCALE)
         harness.host.files[(revision, SERVE_PATH)] = serve
     (harness.settings.runtime_dir / "tailscale.env").write_text("")
     return serve
@@ -1613,10 +1617,11 @@ def test_the_real_release_file_deploys_the_ingress_beside_the_app(harness: Harne
     assert deployer.run() == 0
     host = harness.host
     assert host.count(COMPOSE_UP) == 1
-    assert host.calls[host.index(COMPOSE_UP)][-5:] == ("bot", "frontend", "netns", "tailscale", "webapi")
+    assert host.calls[host.index(COMPOSE_UP)][-4:] == ("bot", "netns", "tailscale", "webapi")
     assert (TAILSCALE, False) in host.pulls
-    assert host.meta["tailscale"]["NetworkMode"] == "container:" + host.meta["netns"]["Id"]
-    assert host.meta["webapi"]["NetworkMode"] == "bfx_default"      # 9d-5 moves it in
+    for joiner in ("tailscale", "webapi"):
+        assert host.meta[joiner]["NetworkMode"] == "container:" + host.meta["netns"]["Id"]
+    assert "frontend" not in host.running                          # the orphan, removed
     assert (_release(harness) / "tailscale/serve.json").read_text() == serve
     assert harness.ledger.last.outcome == "deployed"
 
@@ -1638,12 +1643,15 @@ def test_a_sidecar_stranded_by_a_holder_restart_is_recreated_by_the_next_deploy(
 
 
 def _running_ingress(harness: Harness, revision: str = REV_OLD) -> None:
-    """The ingress of `revision` running, its sidecar mounting that release's serve.json."""
+    """The ingress of `revision` running, its sidecar mounting that release's serve.json and,
+    when that release's web API joins the holder (9d-5), the web API in its namespace."""
     host = harness.host
     for service in ("netns", "tailscale"):
         host.running[service] = (TAILSCALE, "", "", "")
     host.create("netns")
     host.create("tailscale", "container:" + host.meta["netns"]["Id"])
+    if "network_mode: service:netns\n    healthcheck" in host.files[(revision, bfx.COMPOSE_PATH)]:
+        host.create("webapi", "container:" + host.meta["netns"]["Id"])
     serve = harness.settings.state_dir / "releases" / revision / SERVE_PATH.removeprefix("deploy/vm/")
     serve.parent.mkdir(parents=True, exist_ok=True)
     serve.write_text(host.files[(revision, SERVE_PATH)])
@@ -1892,6 +1900,21 @@ def test_an_ingress_not_as_released_never_fails_a_rollback(
     row = harness.ledger.last
     assert row.outcome == "rolled_back" and "ingress_unhealthy:tailscale:image" in row.detail
     assert harness.host.stopped == []
+
+
+def test_the_cutover_moves_the_web_api_into_the_holder_without_restarting_the_ingress(harness: Harness) -> None:
+    """9d-4 running (the web API on bfx_default) to 9d-5: the web API's config changed, so
+    Compose recreates it into the holder's namespace; the unchanged ingress stays up."""
+    _ingress_release(harness, REV_OLD, text=INGRESS_9D4_TEXT)
+    _ingress_release(harness, REV_NEW)
+    _running_ingress(harness)
+    host = harness.host
+    sidecar, holder = host.meta["tailscale"]["Id"], host.meta["netns"]["Id"]
+    assert harness.run() == 0
+    assert "--force-recreate" not in host.calls[host.index(COMPOSE_UP)]
+    assert (host.meta["tailscale"]["Id"], host.meta["netns"]["Id"]) == (sidecar, holder)
+    assert host.meta["webapi"]["NetworkMode"] == "container:" + holder
+    assert "frontend" not in host.running and harness.ledger.last.outcome == "deployed"
 
 
 def test_a_third_party_container_on_another_image_fails_the_deploy(
@@ -2292,14 +2315,8 @@ def _ingress_running(harness: Harness, *, webapi_joins: bool) -> None:
     """The running release (REV_OLD, what main still names) with the ingress: 9d-4 (the web
     API on bfx_default) or 9d-5 (the web API in the holder's namespace too)."""
     harness.registry.refs[f"{BACKEND}:main"] = OLD_B
-    _ingress_release(harness, REV_OLD)
-    if webapi_joins:
-        text = harness.host.files[(REV_OLD, bfx.COMPOSE_PATH)]
-        harness.host.files[(REV_OLD, bfx.COMPOSE_PATH)] = text.replace(
-            WEBAPI_NETWORKS, "    network_mode: service:netns\n\n  frontend:")
+    _ingress_release(harness, REV_OLD, text=REAL_COMPOSE_TEXT if webapi_joins else INGRESS_9D4_TEXT)
     _running_ingress(harness)
-    if webapi_joins:
-        harness.host.create("webapi", "container:" + harness.host.meta["netns"]["Id"])
 
 
 def test_a_holder_restart_strands_the_sidecar_and_the_repair_recreates_it_alone(harness: Harness) -> None:

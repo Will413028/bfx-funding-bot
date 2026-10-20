@@ -4,7 +4,7 @@
 
 ```bash
 pnpm dev          # 開發（Turbopack HMR）
-pnpm build        # Production build
+pnpm build        # Static export → out/（由 web API 提供）
 pnpm lint         # tsc + biome check
 pnpm format       # biome format --write
 pnpm knip         # 找未使用的 exports
@@ -17,16 +17,15 @@ pnpm test:e2e     # Playwright E2E
 
 ```
 src/
-  app/[locale]/                     # i18n 路由；(marketing) 公開、(auth) 登入與雙因素、(dashboard) 受保護
-  app/api/auth/[...all]/route.ts    # Better Auth（JWT HTTP endpoints blocked）
-  app/api/proxy/[...path]/route.ts  # BFF → Python web-API
+  app/[locale]/                     # i18n 路由（generateStaticParams 預先產生 en、zh-TW）；(dashboard) 營運頁
+  app/not-found.tsx                 # 找不到的路徑（export 成 404.html）
   components/ui/                    # shadcn/ui（自動產生，不要手改樣式邏輯）
   components/{layout,shared}/
   features/<feature>/{components,hooks}/  # 一個功能一個模組；現有模組以目錄為準
-  lib/                              # api-client、query-keys、env（Zod）、validations、format
+  lib/                              # api-client、query-keys、validations、format、sentry
 messages/                           # i18n JSON（en、zh-TW）
 e2e/                                # Playwright
-middleware.ts                       # Auth guard + i18n + security headers
+instrumentation-client.ts           # 瀏覽器的 Sentry init（tunnel /fe-events）
 ```
 
 ## 架構慣例
@@ -38,24 +37,20 @@ middleware.ts                       # Auth guard + i18n + security headers
 const user = await apiClient.get<User>("/users/me");
 const keys = await apiClient.getList<ApiKey[]>("/api-keys");
 
-// 只在 client 端呼叫：/api/proxy（api-client 的 API_BASE）→ Python web-API（注入 server-minted JWT）
+// 只在瀏覽器呼叫，同源：/api/v1（api-client 的 API_BASE）→ 提供這個 UI 的 web API
 ```
 
 - 錯誤拋出 `ApiError`（含 `status`, `code`, `message`）
-- Proxy route 只對 exact public GET allowlist anonymous；其他路徑需要 operator
-  identity + fresh session + server-owned MFA marker，再由 server mint JWT。
-- Proxy canonicalizes every path and rejects empty/dot/traversal segments before
-  constructing the backend URL。
+- 寫入請求一律 JSON；web API 拒絕跨站、非同源（`Origin`）或非 JSON 的寫入。
 
-### 認證
+### Static export 與身分（9d-5）
 
-- Better Auth（自托）處理 login/logout/TOTP（Server Actions + auth API）；
-  self-service signup 永久關閉
-- Session 存在 HttpOnly opaque cookie（Better Auth，secondaryStorage → VM Redis，7 天）
-- Middleware 用 `getSessionCookie` 檢查 session，保護 dashboard 路由
-- Proxy 對後端請求 server-mint 短效 EdDSA JWT（pinned `iss=bfx-funding-bot` / `aud=bfx-funding-backend`，解耦部署 URL；後端用 JWKS 驗證）；JWT 不會進 browser response
-- 未完成 TOTP 的 pending session 不得取得 execution JWT；僅 exact per-session MFA marker 可放行
-- 只有 `/login`、`/two-factor` auth pages；dashboard middleware 只用 session cookie 做路由級 guard
+- `next.config.ts` 是 `output: "export"`：沒有 Next server、middleware、route handler、server action、
+  `next/headers`、rewrite；`src/lib/__tests__/dashboard-client-only.test.ts` 守住這件事。
+- 身分不在 UI：web API 只經 Tailscale Serve 進入，Serve 轉送 tailnet policy 授予的 operator capability，
+  web API 據此授權。UI 沒有登入、登出或 TOTP。
+- web API 回應帶 hash 型 CSP（export 裡每段 inline script 的 sha256）；不要加需要 `unsafe-inline` 或
+  runtime nonce 的寫法。
 
 ### 狀態管理
 
@@ -98,13 +93,12 @@ export function useApiKeys() {
 
 ## 環境變數
 
-變數清單與驗證在 `lib/env.ts`（Zod schema），範本見 `.env.example`。`NEXT_PUBLIC_` 前綴的會進瀏覽器，secret 不可加此前綴。
-`BFX_OPERATOR_USER_ID` 前後端必須完全一致；Release 0 preflight 會拒絕缺值、非 admin role、或前後端 operator ID 不一致。
+只有 build 時的 `NEXT_PUBLIC_SENTRY_DSN`（選填，範本 `.env.example`）。`NEXT_PUBLIC_` 前綴的會進瀏覽器，secret 不可放進前端。
 
 ## 監控
 
-- **Sentry**: browser（`instrumentation-client.ts`）、Node 與 edge 的 error tracking；DSN 由 build arg `NEXT_PUBLIC_SENTRY_DSN` 注入，未設即關閉；所有 runtime 都經 `src/lib/sentry.ts` 的 `sentryOptions`（遮罩 email／IP、不送 PII）；瀏覽器事件經同源的 tunnel route（`src/lib/sentry-tunnel.ts`，`middleware.ts` 的 matcher 要排除它）轉送。見 `docs/runbooks/operations.md`「Error tracking」。
+- **Sentry**: 只有瀏覽器（`instrumentation-client.ts`）；DSN 由 build arg `NEXT_PUBLIC_SENTRY_DSN` 注入，未設即關閉；經 `src/lib/sentry.ts` 的 `sentryOptions`（遮罩 email／IP、不送 PII）；事件送到同源的 `/fe-events`（`src/lib/sentry-tunnel.ts`），由 web API 只轉給 `BFX_FE_SENTRY_DSN` 的 project。見 `docs/runbooks/operations.md`「Error tracking」。
 
 ## 部署
 
-見根目錄 `AGENTS.md`「部署架構」與 `docs/runbooks/deploy.md`。
+沒有前端 image：`backend/Dockerfile` 的 `ui` stage 把這個目錄 build 成 static export 放進 backend image，由 web API 提供。見根目錄 `AGENTS.md`「部署架構」與 `docs/runbooks/deploy.md`。

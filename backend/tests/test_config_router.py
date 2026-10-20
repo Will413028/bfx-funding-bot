@@ -7,13 +7,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.accounts.tables  # side-effect: registers ORM models for Base.metadata.create_all
 import bfx_funding_bot.modules.accounts.user_profile  # noqa: F401  # side-effect: registers ORM models
-from bfx_funding_bot.core.auth import Principal, require_operator, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.api.config import build_config_router
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
+from tests.ingress_support import attach_ingress
 
 _ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 _CONFIG_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/config-draft"
@@ -116,18 +117,15 @@ def test_delete_existing_then_absent(app_client):
 
 
 def test_non_operator_is_rejected_by_every_config_route(app_client):
-    """Catches any config route wired to require_user instead of require_operator."""
+    """A route not gated by require_operator would answer instead of refusing."""
     async def _reject_non_operator():
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="operator_required")
 
-    async def _permissive_user():
-        return Principal(user_id="user_abc", email="will@example.com", role="operator")
 
     async def _skip_rate_limit():
         return None
 
     app_client.app.dependency_overrides[require_operator] = _reject_non_operator
-    app_client.app.dependency_overrides[require_user] = _permissive_user
     app_client.app.dependency_overrides[shared_rate_limit_dependency()] = _skip_rate_limit
     requests = (
         ("get", _CONFIG_PATH, {}),
@@ -141,7 +139,7 @@ def test_non_operator_is_rejected_by_every_config_route(app_client):
 
 
 def test_requires_auth():
-    app = FastAPI()
+    app = attach_ingress(FastAPI())
     app.include_router(build_config_router())
     c = TestClient(app)
     assert c.get(_CONFIG_PATH).status_code in (401, 403)

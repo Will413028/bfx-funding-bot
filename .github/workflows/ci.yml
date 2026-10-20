@@ -79,8 +79,6 @@ jobs:
         env:
           BFX_BACKEND_IMAGE: ghcr.io/ci/backend@sha256:0000000000000000000000000000000000000000000000000000000000000000
           BFX_BACKEND_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
-          BFX_FRONTEND_IMAGE: ghcr.io/ci/frontend@sha256:1111111111111111111111111111111111111111111111111111111111111111
-          BFX_FRONTEND_DIGEST: sha256:1111111111111111111111111111111111111111111111111111111111111111
           BFX_SOURCE_REVISION: ${{ github.sha }}
           BFX_DEPLOYMENT_ID: 00000000-0000-4000-8000-000000000000
         # Placeholder secret files: Compose 2.x stats env files even with
@@ -89,8 +87,7 @@ jobs:
         run: |
           BFX_RUNTIME_DIR="$(mktemp -d)"
           export BFX_RUNTIME_DIR
-          touch "$BFX_RUNTIME_DIR/bot.env" "$BFX_RUNTIME_DIR/webapi.env" "$BFX_RUNTIME_DIR/frontend.env" \
-            "$BFX_RUNTIME_DIR/tailscale.env"
+          touch "$BFX_RUNTIME_DIR/bot.env" "$BFX_RUNTIME_DIR/webapi.env" "$BFX_RUNTIME_DIR/tailscale.env"
           docker compose version
           docker compose -f deploy/vm/docker-compose.app.yml config --no-interpolate --format json \
             > "$RUNNER_TEMP/uninterpolated.json"
@@ -227,19 +224,6 @@ jobs:
           # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz (all these jobs run on x64).
           checksum: "9167d72b3319674b6303c4cbe071854bba13ebdf3d76b1a7cbdc175471fb66d6"
           enable-cache: true
-      # tests/integration/test_operator_bootstrap.py imports the frontend's
-      # operator CLI, which needs its node dependencies (ioredis etc.).
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          package_json_file: frontend/package.json
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile
       - run: uv sync --all-groups
       # PostgreSQL 18 server binaries only (each pytest process runs its own throwaway cluster).
       - uses: ./.github/actions/postgres-18

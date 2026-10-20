@@ -1,42 +1,34 @@
 # BFX Funding Bot frontend
 
-Next.js 16 App Router frontend for the Release 0 operator-only deployment.
-Self-service signup is disabled; private API calls go through the same-origin
-BFF and only receive a server-side EdDSA execution JWT after fresh session and
-per-session MFA checks.
+Next.js 16 App Router operator UI, built as a static export (9d-5). There is no Next
+server: the web API serves `out/` behind Tailscale Serve, and the browser calls the same
+origin's `/api/v1`. Who may use it is decided by the tailnet policy (the operator app
+capability Serve forwards), not by a login in the UI.
 
 ## Development
 
 ```bash
 pnpm install
-pnpm dev
+pnpm dev          # the UI alone; API calls fail without a web API (see e2e/README.md)
 pnpm test
 pnpm lint
-pnpm build
+pnpm build        # writes out/
 ```
 
-The frontend uses `NEXT_PUBLIC_*` values at build time. Server-only values
-(`API_URL`, Better Auth/Postgres/Redis secrets and operator ID/role) are
-supplied at runtime; `src/lib/env.ts` validates them during Node startup.
+The only build input is `NEXT_PUBLIC_SENTRY_DSN` (optional; `.env.example`). Browser
+Sentry events go to the web API's `/fe-events`, which forwards them to that DSN's project.
 
 ## E2E
 
 ```bash
 pnpm test:e2e
-E2E_FULL_STACK=1 pnpm test:e2e
 ```
 
-The full-stack tier covers signup denial, JWT endpoint/header containment and
-the exact anonymous public proof proxy allowlist. See [`e2e/README.md`](e2e/README.md)
-for the disposable Postgres/Redis setup.
+See [`e2e/README.md`](e2e/README.md) for running against the web API with the export.
 
 ## Deployment
 
-CI builds the frontend image (linux/arm64) from each green `main` commit and pushes
-it to GHCR; the VM deploys it by digest with `bfx-deploy` (see the
-[deploy runbook](../docs/runbooks/deploy.md)). Public build inputs
-(`NEXT_PUBLIC_*`) come from the GitHub repository variables `NEXT_PUBLIC_APP_NAME`,
-`NEXT_PUBLIC_APP_URL` and `NEXT_PUBLIC_BETTER_AUTH_URL`; runtime secrets from
-`/opt/bfx/runtime/frontend.env` on the VM. Operator bootstrap and non-operator
-containment are one-shots described in the
-[Release 0 operator containment runbook](../docs/runbooks/release-0-operator-containment.md).
+There is no frontend image: `backend/Dockerfile`'s `ui` stage builds this directory (the
+named build context `frontend` in `.github/workflows/release.yml`) into the backend image,
+and the web API serves it from `/app/static`. The VM deploys that image by digest with
+`bfx-deploy` (see the [deploy runbook](../docs/runbooks/deploy.md)).

@@ -92,7 +92,7 @@ sudo bfx-op status                         # 交易狀態、本次停機的 canc
 
 CLI 的入口、身分與 exit code 見 §10。請求排入 `trading_control_requests`，由 bot 的
 `TradingControlWorker` 在 account lock 下重新驗證 operator 後套用；CLI 預設等到結果才結束。
-webapi、frontend 停著時 CLI 照樣能用（它是 one-off container，直接連 Postgres）。
+webapi 停著時 CLI 照樣能用（它是 one-off container，直接連 Postgres）。
 
 | 命令 | 效果 |
 |---|---|
@@ -236,15 +236,15 @@ sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
 
 ### Error tracking（Sentry）
 
-bot、webapi、frontend 的未處理例外與 ERROR log 送到 Sentry SaaS（org `will-me`；project `bfx-backend` 收 bot 與
-webapi，以 `service` tag 區分；`bfx-frontend` 收瀏覽器、Node server 與 edge）。Sentry 依 fingerprint 分組，
+bot、webapi 與營運 UI（瀏覽器）的未處理例外與 ERROR log 送到 Sentry SaaS（org `will-me`；project `bfx-backend` 收 bot 與
+webapi，以 `service` tag 區分；`bfx-frontend` 收瀏覽器）。Sentry 依 fingerprint 分組，
 只在**新 issue、回歸（resolved 後再出現）、或同一 issue 一小時超過 100 次**時寄 email；它不是 page 類告警，
 交易與營運異常仍由上面的 Telegram 與 Grafana 通報。
 
 | 服務 | 設定 | 關閉方式 |
 |---|---|---|
 | bot、webapi | `/opt/bfx/runtime/bot.env`、`webapi.env` 的 `SENTRY_DSN`（同一個 `bfx-backend` DSN） | 清空 `SENTRY_DSN` 後 `sudo bfx-deploy --recreate`（§7） |
-| frontend | build 時的 repository variable `NEXT_PUBLIC_SENTRY_DSN`（`release.yml` 缺值就失敗） | 改 variable 後重發 release |
+| 營運 UI（瀏覽器） | build 時的 repository variable `NEXT_PUBLIC_SENTRY_DSN`（`release.yml` 缺值就失敗，build 進 backend image）；webapi 的 `BFX_FE_SENTRY_DSN`（`/fe-events` 唯一允許的轉送目標，必須是同一個 DSN） | 改 variable 後重發 release |
 
 - 送出的內容（`modules/observability/error_tracking.py`、`frontend/src/lib/sentry.ts`）：
   - 每個字串都會去掉 `alerts.secret_values` 列出的值（含 DB 密碼與 DSN key），以及 email 與 IP。
@@ -253,14 +253,15 @@ webapi，以 `service` tag 區分；`bfx-frontend` 收瀏覽器、Node server �
   - 遮罩失敗時整筆不送。
 - 送出由 SDK 的背景 thread 處理，queue 有上限，不在交易路徑上等待網路；結束時最多 flush 2 秒。
   outgoing request 不加 trace header。
-- 瀏覽器的事件先送到本站的 `/fe-events`（`frontend/src/lib/sentry-tunnel.ts`），再由 Next server 轉給 Sentry；
+- 瀏覽器的事件先送到本站的 `/fe-events`（`frontend/src/lib/sentry-tunnel.ts`），再由 webapi 轉給 `BFX_FE_SENTRY_DSN`
+  的 project（`backend/.../modules/api/ingress.py`；只接受同源、DSN 相符的 envelope）；
   廣告與隱私擴充套件會擋直接送往 `*.sentry.io` 的請求（console 顯示 `ERR_BLOCKED_BY_CONTENT_BLOCKER`）。
 - <a id="error-tracking-test"></a>測試：在執行中的 container 裡各送一筆測試例外：
   `sudo docker exec bfx-bot /app/.venv/bin/python -m scripts.send_test_error --service bot`
   （webapi 用 `bfx-webapi`、`--service webapi`）。exit 0 並印出 event id 後，到 Sentry 確認 issue
   `ErrorTrackingTestError` 出現，而且訊息裡的 email 與 IP 顯示為 `[redacted]`；確認後把 issue resolve。
   `SENTRY_DSN` 未設時 exit 1。
-  frontend：登入後在瀏覽器 devtools console 執行
+  營運 UI：從 tailnet 打開 UI 後在瀏覽器 devtools console 執行
   `setTimeout(() => { throw new Error("frontend error test error-test@example.com") })`，
   在 `bfx-frontend` 確認 issue 出現且 email 為 `[redacted]`。
 - operator 要判斷的：新 issue 是程式錯誤還是外部服務（venue、DB）的暫時失敗。前者開 issue 修；後者若
@@ -458,7 +459,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 #### `credential_rotation_rejected`（warning）
 
 - 代表：輪替請求被拒，憑證沒有任何改動，`reason` 為：
-  - 系統自己會恢復、重送即可：`recipient_key_stale`（請求封給的是已重啟的 bot run，CLI 會封給目前這次）、`deployment_in_progress`（最新的部署列是 15 分鐘內的 `started`，部署 settle 期間重啟會讓部署判失敗）、`bot_recently_started`（這次 bot 開機未滿 10 分鐘，部署可能仍在做 health 檢查與 settle；10 分鐘後重送）、`active_credential_changed`（送出後 active 憑證已換過）、`operator_not_authorized`（operator 權限或 TOTP 失效，先修好）。
+  - 系統自己會恢復、重送即可：`recipient_key_stale`（請求封給的是已重啟的 bot run，CLI 會封給目前這次）、`deployment_in_progress`（最新的部署列是 15 分鐘內的 `started`，部署 settle 期間重啟會讓部署判失敗）、`bot_recently_started`（這次 bot 開機未滿 10 分鐘，部署可能仍在做 health 檢查與 settle；10 分鐘後重送）、`active_credential_changed`（送出後 active 憑證已換過）、`operator_not_authorized`（operator 的 membership 失效，先修好）。
   - operator 要判斷：`credential_account_mismatch`（新 key 屬於另一個 Bitfinex 帳號，確認建 key 的帳號）、`credential_reused`（這把 key 曾經用過並已 retired／revoked，請建新 key）、`invalid_credentials`（Bitfinex 拒絕這把 key）、`funding_write_required`／`withdraw_must_be_disabled`／`unexpected_write_scope:*`（調整 key 權限：只開 funding 寫入）、`account_identity_unavailable`（無法讀到 key 所屬帳號，確認 key 有 account info 讀取權限）、`sealed_payload_invalid`（密文損毀或被搬動，重送）。
 - 系統會做：不碰憑證，請求就此結案，bot 不重啟。
 - operator 判斷：依上面分類處理後重新送出（§11）。
@@ -675,8 +676,9 @@ kill 的 cancel-all）被拒：
 
 | 元件壞了 | web UI | `bfx-op`（Tailscale SSH） | Console Connection |
 |---|---|---|---|
-| frontend、Better Auth、Redis、webapi | 不可用 | 可用 | 可用 |
-| host tailscaled、Tailscale control plane、IdP | 不可用 | 不可用 | 可用 |
+| webapi、tailnet 入口（`bfx-netns`／`bfx-tailscale`） | 不可用 | 可用 | 可用 |
+| Tailscale control plane、IdP | 不可用 | 不可用 | 可用 |
+| host tailscaled | 可用（入口節點在自己的容器裡） | 不可用 | 可用 |
 | Postgres、docker | 不可用 | 不可用 | 可用（只做主機修復） |
 
 「web UI」欄只指 kill、停用幣別與各種讀取；resume、啟用幣別、UNKNOWN 裁決與換憑證不論哪個元件壞了都只走 `bfx-op`
@@ -687,7 +689,7 @@ Tailscale 不通時：
 1. 從 OCI Console 開 instance 的 Console Connection（OCI 只接受 RSA 公鑰，不接受 ed25519），以 `ubuntu` 與
    break-glass 密碼登入。
 2. 查 `tailscale status`。node key 過期就 `sudo tailscale up` 重新驗證；tailscaled 異常就
-   `sudo systemctl restart tailscaled`（Funnel 會中斷數秒）。需要時可暫時重新啟用 sshd：
+   `sudo systemctl restart tailscaled`。需要時可暫時重新啟用 sshd：
    `sudo systemctl unmask ssh.socket ssh.service && sudo systemctl enable --now ssh.socket`、
    `sudo ufw allow 22/tcp`，並在 OCI security list 加回 22；修好後照原樣停用、刪掉 UFW 規則、移除 OCI 的 22。
 3. Console 下 `bfx-op` 除了 `halt` 一律拒絕（`not_tailnet_peer`）：高風險操作只走 Tailscale SSH。這段期間 bot

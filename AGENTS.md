@@ -5,7 +5,7 @@ Bitfinex 自動放貸 SaaS 平台。
 ## 專案結構
 
 - `backend/` — Python 3.13 後端（FastAPI + SQLAlchemy 2.0 async + httpx + Alembic）— **active**
-- `frontend/` — Next.js 16 前端
+- `frontend/` — Next.js 16 前端（static export；build 進 backend image，由 webapi 提供）
 - Python 後端曾名 `backend_py/`；舊文件與 SDD 裡的 `backend_py` 指的就是現在的 `backend/`
 - `backend/ARCHITECTURE.md` — **後端架構 source of truth**（ledger 資金紀錄：insert-once journal＋已接受的 venue 觀測、command gate、observation cycle 與 reconcile 骨幹、UNKNOWN 結案與 quarantine、deployment reconciler、放貸演算法、DB schema、safety、phases/部署、key invariants；含 mermaid 架構/資料流圖）
 - 維運 runbook 在 `docs/runbooks/`；決策紀錄（ADR）：`docs/adr/`；研究報告與 roadmap 另行私下保存，不放在本 repo（`.gitignore` 擋住舊路徑）
@@ -14,19 +14,18 @@ Bitfinex 自動放貸 SaaS 平台。
 
 應用程式與資料服務自托於 Oracle Cloud VM（單機 Docker）；外部服務包含 Bitfinex venue、GHCR（image registry）與 Cloudflare R2 offsite backup。
 
-- **應用程式**（bot／webapi／frontend）：compose project `bfx-app`（`deploy/vm/docker-compose.app.yml`）。CI（`.github/workflows/release.yml`）在綠燈的 `main` commit 建 arm64 image 推到 GHCR；VM 的 `bfx-deploy` timer 只以 digest 部署，VM 不 build image，部署不改變交易狀態。一次部署的步驟（migration 前停 webapi 與 bot、備份與 restore test、ledger、回滾、通知）見 `docs/runbooks/deploy.md`。
+- **應用程式**（bot／webapi，與 tailnet 入口 netns／tailscale）：compose project `bfx-app`（`deploy/vm/docker-compose.app.yml`）。CI（`.github/workflows/release.yml`）在綠燈的 `main` commit 建 arm64 backend image（含前端 static export）推到 GHCR；VM 的 `bfx-deploy` timer 只以 digest 部署，VM 不 build image，部署不改變交易狀態。一次部署的步驟（migration 前停 webapi 與 bot、備份與 restore test、ledger、回滾、通知）見 `docs/runbooks/deploy.md`。
 - **資料服務**（Postgres／Redis）：compose project `bfx`，`docker-compose.bot.yml`（只有 postgres 與 redis）。
 - Runbook：部署 `docs/runbooks/deploy.md`；交易狀態／包絡／停機／告警 `docs/runbooks/operations.md`；新主機的 DB roles／公開入口／首次安裝工具 `docs/runbooks/fresh-host-setup.md`；研究用一次性容器 `docs/runbooks/research-one-shot-jobs.md`。
 
 | 服務 | 平台 |
 |------|------|
-| Frontend | VM `bfx-frontend`（Next.js standalone，公開入口 443→`127.0.0.1:3001`，目前是 Tailscale Funnel；實際公開 host 見 `AGENTS.local.md`，設定見 `docs/runbooks/fresh-host-setup.md`） |
-| Backend (bot + webapi) | VM（`bfx-bot` / `bfx-webapi`；webapi 內網限定，FE 經 docker 網路呼叫） |
-| Database | 自托 Postgres 18（`bfx-postgres`，volume `bfx_pgdata`；roles：bot owner、`bfx_webapi`、`bfx_webauth`） |
-| Cache | 自托 Redis 7（`bfx-redis`，volume `bfx_redisdata`；Better Auth secondaryStorage：session + rate-limit，ioredis） |
+| 營運 UI 與 webapi | VM `bfx-webapi`：只聽 `127.0.0.1:8000`，在 holder `bfx-netns` 的 network namespace 裡；唯一入口是 tailnet 節點 `bfx-tailscale` 的 Tailscale Serve（`https://bfx-ops.<tailnet>.ts.net`，只有 tailnet 內、policy 授予 operator capability 的人連得到；實際 host 見 `AGENTS.local.md`，入口說明見 `docs/runbooks/deploy.md`「Tailnet 入口」）。webapi 同時提供前端的 static export |
+| Bot | VM `bfx-bot` |
+| Database | 自托 Postgres 18（`bfx-postgres`，volume `bfx_pgdata`；roles：bot owner、`bfx_webapi`、`bfx_webauth`（9d-7 刪除）） |
+| Cache | 自托 Redis 7（`bfx-redis`）：9d-5 起沒有使用者（原本是 Better Auth 的 session），W9 移除 |
 
 - 備份與 DR 見 `docs/runbooks/offsite-dr.md`，定期與背景工作（含每週報告）見 `docs/runbooks/operations.md` §8；systemd unit 在 `deploy/vm/systemd/`，實際啟用與健康狀態須查目標環境。
-- Redis session 為 ephemeral。
 
 ## 指令執行目錄
 

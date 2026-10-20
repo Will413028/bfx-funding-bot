@@ -1806,9 +1806,11 @@ class Deployer:
             if record is None:
                 continue
             provider = records.get(by_name[service.joins].container) if service.joins in by_name else None
-            # A stopped joiner joins the live namespace when `up` starts it; a stopped
-            # container keeps its mounts, so its config is checked all the same.
-            if provider is not None and (record.get("State") or {}).get("Running") and (
+            # A stopped joiner joins the live namespace when `up` starts it, and one still on
+            # its own network (the web API before 9d-5) is recreated anyway: its config
+            # changed. A stopped container keeps its mounts, so its config is checked all the same.
+            joined = str((record.get("HostConfig") or {}).get("NetworkMode", "")).startswith("container:")
+            if provider is not None and joined and (record.get("State") or {}).get("Running") and (
                     not (provider.get("State") or {}).get("Running") or netns_stale(record, provider)):
                 reasons.append(f"{service.name}:netns")
             for mount in record.get("Mounts") or []:

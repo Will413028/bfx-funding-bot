@@ -14,7 +14,7 @@ test.describe("symbol-scoped uncertainty console", () => {
 		page,
 	}) => {
 		await page.route(
-			`**/api/proxy/exchange-accounts/${accountId}/positions**`,
+			`**/api/v1/exchange-accounts/${accountId}/positions**`,
 			async (route) => {
 				await route.fulfill({
 					status: 200,
@@ -47,7 +47,7 @@ test.describe("symbol-scoped uncertainty console", () => {
 			},
 		);
 		await page.route(
-			`**/api/proxy/exchange-accounts/${accountId}/uncertainties**`,
+			`**/api/v1/exchange-accounts/${accountId}/uncertainties**`,
 			async (route) => {
 				await route.fulfill({
 					status: 200,

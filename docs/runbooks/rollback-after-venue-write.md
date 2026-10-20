@@ -34,7 +34,7 @@ is no automatic retry.
 Once a submit may have reached the venue, a database image cannot establish the
 venue's truth. Follow this sequence and do not skip a step:
 
-1. Put and keep the account in `HALTED`: the UI kill switch (TOTP), or the
+1. Put and keep the account in `HALTED`: the UI kill switch (over the tailnet), or the
    emergency `sudo bfx-op halt --reason "..."` on the VM (the bot's
    `POST /admin/halt`; works from the OCI console too). Both commit `HALTED` and then run
    the venue funding cancel-all; require every currency's cancel-all to be

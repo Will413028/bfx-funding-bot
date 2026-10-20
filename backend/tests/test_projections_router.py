@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 # Every table the shared metadata may reach by foreign key, whatever was imported first.
 import bfx_funding_bot.modules.execution.audit.tables
 import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
-from bfx_funding_bot.core.auth import Principal, require_operator, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
@@ -27,6 +27,7 @@ from bfx_funding_bot.modules.api.deps import ReadModels, get_session
 from bfx_funding_bot.modules.api.projections import _ACTIVE_CLAIM_STATES, build_projections_router
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.ledger import OfferView, PositionView, Scope
+from tests.ingress_support import attach_ingress
 
 _ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 _ENV = "prod"
@@ -122,7 +123,7 @@ async def app_client(factory, reads, monkeypatch):
 @pytest_asyncio.fixture
 async def anon_client(factory):
     """No require_operator override — the real dependency must reject."""
-    app = FastAPI()
+    app = attach_ingress(FastAPI())
     app.include_router(build_projections_router())
     app.state.read_models = _models(_Reads())
 
@@ -185,18 +186,15 @@ def test_executions_limit_capped(app_client):
 
 
 def test_non_operator_is_rejected_by_every_projection_route(app_client):
-    """Catches any projection route wired to require_user instead of require_operator."""
+    """A route not gated by require_operator would answer instead of refusing."""
     async def _reject_non_operator():
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="operator_required")
 
-    async def _permissive_user():
-        return Principal(user_id="user_abc", email="will@example.com", role="operator")
 
     async def _skip_rate_limit():
         return None
 
     app_client.app.dependency_overrides[require_operator] = _reject_non_operator
-    app_client.app.dependency_overrides[require_user] = _permissive_user
     app_client.app.dependency_overrides[shared_rate_limit_dependency()] = _skip_rate_limit
     for path in (_POSITIONS_PATH, _OFFERS_PATH, _EXECUTIONS_PATH):
         response = app_client.get(path)

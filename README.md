@@ -53,9 +53,9 @@ uv run python -m bfx_funding_bot.apps.bot  # 跑 daemon（phase 由 BFX_PHASE �
 - [前端架構慣例與開發指令](frontend/AGENTS.md)
 - [Deploy runbook](docs/runbooks/deploy.md) — CI 建 image 推 GHCR，VM 上 `bfx-deploy`
   以 digest 部署、migration 前備份與還原測試、失敗回滾與 `deployments` ledger。
-- [Operations runbook](docs/runbooks/operations.md) — 幣別啟停、放貸包絡、交易狀態、UI（TOTP）
-  恢復／kill、自動保護、UNKNOWN 處理與 Telegram 告警。
-- [Fresh host setup](docs/runbooks/fresh-host-setup.md) — 新主機的 DB roles、公開入口與首次安裝工具。
+- [Operations runbook](docs/runbooks/operations.md) — 幣別啟停、放貸包絡、交易狀態、UI（經 tailnet）
+  kill、自動保護、UNKNOWN 處理與 Telegram 告警。
+- [Fresh host setup](docs/runbooks/fresh-host-setup.md) — 新主機的 DB roles、tailnet 入口與首次安裝工具。
 - [Release 0 operator-only containment runbook](docs/runbooks/release-0-operator-containment.md)
 - [Research one-shot jobs](docs/runbooks/research-one-shot-jobs.md) — 研究資料補齊與一次性容器。
 - [Rollback after a venue write](docs/runbooks/rollback-after-venue-write.md) — Venue 寫入後的回滾與還原判斷。

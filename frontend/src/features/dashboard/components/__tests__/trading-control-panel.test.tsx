@@ -13,7 +13,7 @@ import { TradingControlPanel } from "../trading-control-panel";
 const account = "11111111-1111-4111-8111-111111111111";
 const DIGEST = `sha256:${"a".repeat(64)}`;
 const REVISION = "c".repeat(40);
-const base = `/api/proxy/exchange-accounts/${account}/trading-control`;
+const base = `/api/v1/exchange-accounts/${account}/trading-control`;
 
 function stateOf(
   state: TradingStateView["state"],
