@@ -18,6 +18,10 @@ type Props = {
   params: Promise<{ locale: string }>;
 };
 
+export function generateStaticParams() {
+  return routing.locales.map((locale) => ({ locale }));
+}
+
 export default async function LocaleLayout({ children, params }: Props) {
   // Render per request: the CSP nonce only exists at request time, and a page
   // prerendered at build time would ship scripts the policy then blocks.
