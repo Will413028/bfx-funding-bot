@@ -14,21 +14,21 @@
 push main ──► CI (.github/workflows/ci.yml) 綠燈
               含 compose hardening policy（docker compose config → compose_policy.py）
           ──► Release images (.github/workflows/release.yml)
-                arm64 backend/frontend image → GHCR
+                arm64 backend image（含營運 UI 的 static export）→ GHCR
                 tags: sha-<40 位 revision>；main 只在該 revision 仍是 main 的 head 時才推
                 （workflow_run 可能亂序完成，舊 revision 不得把 main tag 拉回去）
                 labels: org.opencontainers.image.revision、bfx.ci-run-url（通過的 CI run）
           ──► VM bfx-deploy.timer（每 5 分鐘，*:2/5）→ bfx-deploy
 ```
 
-- Image：`ghcr.io/will413028/bfx-funding-bot-backend`、`ghcr.io/will413028/bfx-funding-bot-frontend`。
+- Image：`ghcr.io/will413028/bfx-funding-bot-backend`（9d-5 起不再建 `…-frontend`；舊 revision 的 frontend image
+  仍在 GHCR，供回滾到 9d-5 之前用）。
   `main` tag 只用來「發現」最新 release；部署一律以 `repository@sha256:<digest>`。
 - Registry 查詢用 `docker buildx imagetools inspect`（GHCR 憑證只放在每次呼叫的暫時
   `DOCKER_CONFIG`，不留下 `docker login`）。
-- Frontend 的 `NEXT_PUBLIC_*` build 參數來自 GitHub repository variables
-  `NEXT_PUBLIC_APP_NAME`／`NEXT_PUBLIC_APP_URL`／`NEXT_PUBLIC_BETTER_AUTH_URL`（公開設定、非 secret；
-  任一未設定時 release 直接失敗）。改它就是改 image：之後的下一個 `main` commit 才會帶進新 image。
-  公開入口與這些值怎麼對應見 [fresh host setup](fresh-host-setup.md#2-frontend-public-ingress)。
+- 營運 UI 唯一的 build 參數是 GitHub repository variable `NEXT_PUBLIC_SENTRY_DSN`（公開設定、非 secret；
+  未設定時 release 直接失敗；backend/Dockerfile 的 `ui` stage 從 named context `frontend` build）。改它就是改
+  image：之後的下一個 `main` commit 才會帶進新 image。入口見 [fresh host setup](fresh-host-setup.md#2-tailnet-入口營運-ui)。
 - VM 從不 build image。
 
 ### bfx-deploy 一次執行做什麼
@@ -65,7 +65,7 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    唯一例外是演練失敗（receipt `error_code: migration_rehearsal_failed`）：備份已證明可還原、
    prod schema 沒動，bfx-deploy 依序把停下的 bot 與 webapi 重新啟動，各自等健康與 settle
    （D7'，Will 2026-10-08）。
-   **這段期間（停 webapi 到新版健康）營運 UI 不可用**；frontend 照跑但拿不到資料
+   **這段期間（停 webapi 到新版健康）營運 UI 不可用**（UI 由 webapi 提供）
    （停機前撤單見下方「migration 之後」末段）。
    **沒有 migration 但 diff 碰到 DR 路徑**（`deploy/vm/pgbackrest/**`、`deploy/vm/postgres/**`、
    `docker-compose.bot.yml`、`docker-compose.dr.yml`，或 diff 讀不到）：什麼都不停，先跑 restore test。
@@ -84,7 +84,7 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    `container_release_mismatch:<服務>:netns`。兩者一定在同一次 `up`：`<X>` 被重建時 Compose 會連帶重建加入它的
    服務（Compose v5.1.4 實測），這條檢查證明它真的發生。
    等健康（bot `:8080/healthz`、webapi `:8000/ready`（會連 DB；`/health` 在死掉的 netns 裡仍回 ok）、有 frontend 時
-   `127.0.0.1:3001`；其他服務一定要在 compose 宣告 `healthcheck`，看 Docker 的 `State.Health.Status` 是
+   （9d-5 之前的回滾目標）`127.0.0.1:3001`；其他服務一定要在 compose 宣告 `healthcheck`，看 Docker 的 `State.Health.Status` 是
    `healthy`，沒宣告就 precheck `compose_healthcheck_missing:<服務>`），再 settle 60 秒。
    webapi 與 bot 一樣，開機時比對 image 內 migrations 的唯一 head（`core/schema_head.py`）與
    `alembic_version`，不一致就拒絕開機（uvicorn 結束、health 不會通過）：舊 webapi 不會在
@@ -172,12 +172,12 @@ schema 不在該 release 的 head 時拒絕。
 
 ### Env 檔規則
 
-`/opt/bfx/runtime/{bot,webapi,frontend,tailscale,migrate,notify,ghcr}.env`：root 擁有、mode `0600`、
+`/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr}.env`：root 擁有、mode `0600`、
 不可是 symlink（`ubuntu` 使用者的 checkout 由 DR unit 執行，secret 不能讓它讀到）。
 bfx-deploy 啟動前會檢查，違反即 `precheck` 失敗：
 
 - 每行 `KEY=VALUE`，不可重複 key；
-- 交給 compose 的檔（bot/webapi/frontend 與 `live.env`）的值不可含 `$`、不可有包住的引號、
+- 交給 compose 的檔（bot/webapi/tailscale 與 `live.env`）的值不可含 `$`、不可有包住的引號、
   不可含 ` #`：這些 secret 當初是為 `docker --env-file`（字面值）寫的，compose 的 env_file
   會做內插、去引號、截註解，值會默默變成另一個 secret；
 - 身分 env（`BFX_IMAGE_DIGEST` 等）由 compose 的 `environment:` 注入，優先於 env 檔，寫在 env 檔
@@ -196,7 +196,7 @@ compose 裡的 `netns`（`bfx-netns`）只持有 network namespace（只跑 `sle
 節點 `bfx-ops`、userspace、沒有 capability、沒有 port）以 `network_mode: service:netns` 加入它；9d-5 起
 webapi 也加入它。tailscaled 重啟、崩潰或單獨重建都不會換掉 namespace（計畫 D13，holder spike 實測）。
 兩者都要 compose healthcheck：`bfx-tailscale` 的 `/healthz` 在節點拿到 tailnet 位址後才回 200。
-**入口的狀態不讓 bot 被停**：bot、webapi、frontend 照舊把關；入口（健康檢查，以及部署後檢查的 image、名稱、
+**入口的狀態不讓 bot 被停**：bot、webapi（與 9d-5 之前的 frontend）照舊把關；入口（健康檢查，以及部署後檢查的 image、名稱、
 namespace）只在這次部署新建或重建了它（第一次部署、image 或 serve.json 改了、被 §1 第 7 步強制重建）時才把關，
 而且在 app 都通過之後才判斷，錯誤碼是 `ingress_unhealthy:<服務>[:<不符項>]`。這種失敗只在回滾真的做得到時才回滾（沒套用 migration、有上一個成功版本、上一版
 的 schema 就是現在的 schema；回到沒有入口的版本會移除它）——例如 auth key 錯、tailnet policy 沒有 `tag:bfx-ops`
@@ -205,9 +205,9 @@ namespace）只在這次部署新建或重建了它（第一次部署、image �
 `warnings=ingress_unhealthy:<服務>` 並發 warning，bot 照跑。平常的部署不重建兩者（見 §1 第 7 步）。
 已知例外（機率低）：Compose 本身起不了入口容器（`compose_up_failed`，分不出是哪個服務）照一般失敗處理；只因入口而
 回滾、回滾卻在 schema 檢查之後（上一版的 `up` 或健康檢查）失敗時，照一般規則停 bot。
-Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.1:8000`），隨部署寫進 release 目錄；內容改了
-那次部署會重建全部服務讓它生效；
-9d-5 之前 webapi 不在這個 namespace，Serve 打過去是 502。
+Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.1:8000`，轉送 operator capability），
+隨部署寫進 release 目錄；內容改了那次部署會重建全部服務讓它生效。webapi 在同一個 namespace 只聽
+`127.0.0.1:8000`，提供營運 UI 與 `/api/v1`（身分見 ARCHITECTURE「Web API identity」）。
 
 - 查狀態：`docker exec bfx-tailscale tailscale status`（tagged、key 到期 none）、
   `docker exec bfx-tailscale tailscale serve status`。

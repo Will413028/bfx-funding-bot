@@ -28,18 +28,11 @@ ROOT = Path(__file__).resolve().parents[3]
 COMPOSE_PATH = ROOT / "deploy/vm/docker-compose.app.yml"
 COMPOSE_TEXT = COMPOSE_PATH.read_text(encoding="utf-8")
 COMPOSE = yaml.safe_load(COMPOSE_TEXT)
-INGRESS_START = COMPOSE_TEXT.index("  # Holds the ingress network namespace")
-NETWORKS_START = COMPOSE_TEXT.index("networks:\n  bfx_default:\n    external")
-# The application services alone, for the tests that create containers or drop the frontend.
-APP_ONLY_TEXT = COMPOSE_TEXT[:INGRESS_START] + COMPOSE_TEXT[NETWORKS_START:]
 SERVE_PATH = ROOT / "deploy/vm/tailscale/serve.json"
 DIGEST_B = "sha256:" + "3" * 64
-DIGEST_F = "sha256:" + "4" * 64
 FAKE_ENV = {
     "BFX_BACKEND_IMAGE": f"ghcr.io/will413028/bfx-funding-bot-backend@{DIGEST_B}",
     "BFX_BACKEND_DIGEST": DIGEST_B,
-    "BFX_FRONTEND_IMAGE": f"ghcr.io/will413028/bfx-funding-bot-frontend@{DIGEST_F}",
-    "BFX_FRONTEND_DIGEST": DIGEST_F,
     "BFX_SOURCE_REVISION": "b" * 40,
     "BFX_DEPLOYMENT_ID": "0b8f7c5e-5d59-4a4c-9b58-6f0a1c2d3e4f",
 }
@@ -83,7 +76,7 @@ def runtime_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Empty stand-ins for /opt/bfx/runtime: older Compose stats env files even
     with --no-env-resolution, and CI has no secret directory."""
     directory = tmp_path_factory.mktemp("runtime")
-    for name in ("bot.env", "webapi.env", "frontend.env", "tailscale.env"):
+    for name in ("bot.env", "webapi.env", "tailscale.env"):
         (directory / name).write_text("")
     return directory
 
@@ -122,7 +115,7 @@ def uninterpolated(runtime_dir: Path) -> dict[str, Any]:
 
 
 def test_the_application_services_and_the_ingress_are_defined() -> None:
-    assert set(COMPOSE["services"]) == {"bot", "webapi", "frontend", "netns", "tailscale"}
+    assert set(COMPOSE["services"]) == {"bot", "webapi", "netns", "tailscale"}     # no frontend (9d-5)
     assert COMPOSE["name"] == "bfx-app"
     assert COMPOSE["volumes"] == {"bfx_tsstate": {"name": "bfx_tsstate"}}
 
@@ -134,7 +127,7 @@ def test_postgres_and_redis_are_never_part_of_this_project() -> None:
 
 def test_no_image_tag_appears_anywhere_in_the_file() -> None:
     images = {name: spec["image"] for name, spec in COMPOSE["services"].items()}
-    assert all(images[name].startswith("${") for name in ("bot", "webapi", "frontend"))
+    assert all(images[name].startswith("${") for name in ("bot", "webapi"))
     assert images["netns"] == images["tailscale"] == policy.TAILSCALE_IMAGE
     assert bfx.THIRD_PARTY_IMAGE.fullmatch(policy.TAILSCALE_IMAGE)
     assert re.search(r"ghcr\.io/\S+:(main|sha-|latest)", COMPOSE_TEXT) is None
@@ -153,9 +146,9 @@ def test_env_files_are_the_required_production_defaults(uninterpolated: dict[str
     ("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env", "${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/bot.env",
      "webapi:env_files"),
     ("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/bot.env", "${BFX_RUNTIME_DIR:-/tmp}/bot.env", "bot:env_files"),
-    ("      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/frontend.env",
-     "      - path: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/frontend.env\n        required: false",
-     "frontend:env_files_required"),
+    ("      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env",
+     "      - path: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env\n        required: false",
+     "webapi:env_files_required"),
     ("      - live.env\n", "", "bot:env_files"),
 ])
 def test_wrong_or_optional_env_files_are_detected(
@@ -176,13 +169,13 @@ def test_policy_and_deployer_agree_on_names_and_commands() -> None:
     assert joiners == bfx.NETNS_JOINERS
     assert set(bfx.ROLE_CONTAINERS) == set(policy.REQUIRED_SERVICES)
     assert tuple(bfx.identity_env(
-        bfx.Target("b" * 40, DIGEST_B, DIGEST_F, "x", "y"), image="x",
+        bfx.Target("b" * 40, DIGEST_B, None, "x", None), image="x",
         deployment_id="d") or {}) == policy.IDENTITY
 
 
 def test_retired_change_class_is_gone() -> None:
     assert "BFX_CHANGE_CLASS" not in policy.IDENTITY
-    for service in ("bot", "webapi", "frontend"):
+    for service in ("bot", "webapi"):
         assert "BFX_CHANGE_CLASS" not in COMPOSE["services"][service]["environment"]
 
 
@@ -198,8 +191,8 @@ def test_rendered_compose_file_satisfies_the_policy(rendered: dict[str, Any]) ->
 def test_deployer_reads_the_release_from_the_real_rendering(rendered: dict[str, Any],
                                                            runtime_dir: Path) -> None:
     """bfx-deploy renders the release the same way (--no-env-resolution) and runs what it finds."""
-    target = bfx.Target(FAKE_ENV["BFX_SOURCE_REVISION"], DIGEST_B, DIGEST_F,
-                        FAKE_ENV["BFX_BACKEND_IMAGE"], FAKE_ENV["BFX_FRONTEND_IMAGE"])
+    target = bfx.Target(FAKE_ENV["BFX_SOURCE_REVISION"], DIGEST_B, None,
+                        FAKE_ENV["BFX_BACKEND_IMAGE"], None)
     if "env_file" not in rendered["services"]["bot"]:
         # Compose 2.38 (CI) folds env files into `environment`: refused, never unchecked.
         with pytest.raises(bfx.DeployError, match="compose_env_files_not_rendered:bot"):
@@ -210,32 +203,22 @@ def test_deployer_reads_the_release_from_the_real_rendering(rendered: dict[str, 
                                     release_dir=COMPOSE_PATH.parent)
     assert [(s.name, s.container, s.image, s.joins) for s in services] == [
         ("bot", "bfx-bot", target.backend_image, None),
-        ("frontend", "bfx-frontend", target.frontend_image, None),
         ("netns", "bfx-netns", policy.TAILSCALE_IMAGE, None),
         ("tailscale", "bfx-tailscale", policy.TAILSCALE_IMAGE, "netns"),
-        ("webapi", "bfx-webapi", target.backend_image, None)]
+        ("webapi", "bfx-webapi", target.backend_image, "netns")]
     assert [[p.name for p in s.env_files] for s in services] == [
-        ["bot.env", "live.env"], ["frontend.env"], [], ["tailscale.env"], ["webapi.env"]]
+        ["bot.env", "live.env"], [], ["tailscale.env"], ["webapi.env"]]
     assert all(p.parent in (runtime_dir, COMPOSE_PATH.parent) for s in services for p in s.env_files)
     assert [str(p) for p in bfx.release_config_files(rendered, COMPOSE_PATH.parent)] == [
         "tailscale/serve.json"]
 
 
 @needs_compose
-def test_a_release_without_a_frontend_satisfies_the_policy(
-    tmp_path: Path, runtime_dir: Path,
-) -> None:
-    text = COMPOSE_TEXT[:COMPOSE_TEXT.index("  frontend:\n")] + COMPOSE_TEXT[INGRESS_START:]
-    mutated = tmp_path / "docker-compose.app.yml"
-    mutated.write_text(text)
-    shutil.copy(ROOT / "deploy/vm/live.env", tmp_path / "live.env")
-    (tmp_path / "tailscale").mkdir()
-    shutil.copy(SERVE_PATH, tmp_path / "tailscale/serve.json")
-    env = {k: v for k, v in FAKE_ENV.items() if not k.startswith("BFX_FRONTEND_")}
-    result = _render(runtime_dir, env, path=mutated)
-    assert result.returncode == 0, result.stderr
-    assert policy.violations(json.loads(result.stdout)) == []
-    assert policy.env_file_violations(_uninterpolated(runtime_dir, mutated)) == []
+def test_a_frontend_service_is_refused(rendered: dict[str, Any]) -> None:
+    """9d-5: the web API serves the UI; a frontend service coming back is a violation."""
+    broken = copy.deepcopy(rendered)
+    broken["services"]["frontend"] = copy.deepcopy(broken["services"]["bot"])
+    assert "services" in policy.violations(broken)
 
 
 @needs_compose
@@ -325,8 +308,8 @@ def test_the_ingress_shape_is_pinned(
     (lambda r: r["configs"].__setitem__("ts-serve", {"name": "bfx-app_ts-serve", "content": "{}"}),
      "configs_file_only"),
     # The web API joins the holder only in 9d-5.
-    (lambda r: r["services"]["webapi"].__setitem__("network_mode", "service:netns"),
-     "webapi:no_network_mode"),
+    (lambda r: r["services"]["webapi"].__setitem__("network_mode", "service:tailscale"),
+     "webapi:joins_netns"),
 ])
 def test_the_ingress_volume_config_and_join_are_pinned(
     rendered: dict[str, Any], mutate: Callable[[dict[str, Any]], None], violation: str,
@@ -410,27 +393,42 @@ REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
     "no_new_privileges": lambda s: s.pop("security_opt"),
     "no_privileged": lambda s: s.__setitem__("privileged", True),
     "restart": lambda s: s.pop("restart"),
-    "network": lambda s: s["networks"].__setitem__("other", {}),
-    "no_network_mode": lambda s: s.__setitem__("network_mode", "host"),
     "no_volumes": lambda s: s.__setitem__("volumes", [{"type": "bind", "source": "/", "target": "/host"}]),
     "no_tmpfs": lambda s: s.__setitem__("tmpfs", ["/tmp"]),
     "no_pid": lambda s: s.__setitem__("pid", "host"),
     "ports": lambda s: s.__setitem__("ports", [{"target": 3000, "published": "3001"}]),
     "identity_env": lambda s: s["environment"].pop("BFX_DEPLOYMENT_ID"),
     "loader_injection_blanked": lambda s: s["environment"].pop("LD_PRELOAD"),
-    "interpreter_injection_blanked": lambda s: s["environment"].pop(
-        "NODE_OPTIONS" if "NODE_OPTIONS" in s["environment"] else "PYTHONPATH"),
+    "interpreter_injection_blanked": lambda s: s["environment"].pop("PYTHONPATH"),
 }
+# The bot keeps its own network; the web API lives in the holder's namespace (9d-5).
+BOT_REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
+    "network": lambda s: s["networks"].__setitem__("other", {}),
+    "no_network_mode": lambda s: s.__setitem__("network_mode", "host"),
+}
+WEBAPI_REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
+    "no_networks": lambda s: s.__setitem__("networks", {"bfx_default": {}}),
+    "joins_netns": lambda s: s.__setitem__("network_mode", "host"),
+    "exact_command": lambda s: s.__setitem__("command", [
+        "/app/.venv/bin/python", "-m", "uvicorn", "bfx_funding_bot.apps.webapi:app",
+        "--host", "0.0.0.0", "--port", "8000"]),
+    "ready_healthcheck": lambda s: s.pop("healthcheck"),
+}
+PROPERTY_CASES = [
+    *((service, prop, mutate) for service in ("bot", "webapi") for prop, mutate in sorted(REMOVALS.items())),
+    *(("bot", prop, mutate) for prop, mutate in sorted(BOT_REMOVALS.items())),
+    *(("webapi", prop, mutate) for prop, mutate in sorted(WEBAPI_REMOVALS.items())),
+]
 
 
 @needs_compose
-@pytest.mark.parametrize("service", ["bot", "webapi", "frontend"])
-@pytest.mark.parametrize("prop", sorted(REMOVALS))
+@pytest.mark.parametrize(("service", "prop", "mutate"), PROPERTY_CASES,
+                         ids=[f"{prop}-{service}" for service, prop, _ in PROPERTY_CASES])
 def test_dropping_a_property_is_detected_by_name(
-    rendered: dict[str, Any], service: str, prop: str,
+    rendered: dict[str, Any], service: str, prop: str, mutate: Callable[[dict[str, Any]], None],
 ) -> None:
     broken = copy.deepcopy(rendered)
-    REMOVALS[prop](broken["services"][service])
+    mutate(broken["services"][service])
     assert f"{service}:{prop}" in policy.violations(broken)
 
 
@@ -470,11 +468,11 @@ def _local_image_with_repo_digest() -> str | None:
 @pytest.mark.docker
 @needs_compose
 def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> None:
-    """Create (never start) the three application services from the real file and check them.
+    """Create (never start) the services of the real file and check the application ones.
 
-    A local image that already has a repository digest stands in for both
-    application images; network and container names are made unique so nothing
-    real is touched (so only name and project differ from what bfx-deploy expects).
+    A local image that already has a repository digest stands in for every image;
+    network, volume and container names are made unique so nothing real is touched (so
+    only name and project differ from what bfx-deploy expects).
     """
     image = _local_image_with_repo_digest()
     if image is None:
@@ -483,19 +481,22 @@ def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> Non
     network = f"bfx-test-{suffix}"
     runtime = tmp_path / "runtime"
     runtime.mkdir()
-    for name in ("bot.env", "webapi.env", "frontend.env"):
+    for name in ("bot.env", "webapi.env", "tailscale.env"):
         (runtime / name).write_text("EXAMPLE=1\n")
-    text = (APP_ONLY_TEXT.replace("name: bfx_default", f"name: {network}")
-            .replace("name: bfx-app", f"name: bfx-app-test-{suffix}"))
-    for container in ("bfx-bot", "bfx-webapi", "bfx-frontend"):
+    text = (COMPOSE_TEXT.replace("name: bfx_default", f"name: {network}")
+            .replace("name: bfx-app", f"name: bfx-app-test-{suffix}")
+            .replace("name: bfx_tsstate", f"name: bfx_tsstate-{suffix}")
+            .replace(policy.TAILSCALE_IMAGE, image))
+    for container in ("bfx-bot", "bfx-webapi", "bfx-netns", "bfx-tailscale"):
         text = text.replace(f"container_name: {container}", f"container_name: {container}-{suffix}")
     (tmp_path / "docker-compose.app.yml").write_text(text)
     shutil.copy(ROOT / "deploy/vm/live.env", tmp_path / "live.env")
+    (tmp_path / "tailscale").mkdir()
+    shutil.copy(SERVE_PATH, tmp_path / "tailscale/serve.json")
     digest = image.split("@", 1)[1]
-    target = bfx.Target(FAKE_ENV["BFX_SOURCE_REVISION"], digest, digest, image, image)
+    target = bfx.Target(FAKE_ENV["BFX_SOURCE_REVISION"], digest, None, image, None)
     env = {**_path_env(), **FAKE_ENV, "BFX_RUNTIME_DIR": str(runtime),
-           "BFX_BACKEND_IMAGE": image, "BFX_FRONTEND_IMAGE": image,
-           "BFX_BACKEND_DIGEST": digest, "BFX_FRONTEND_DIGEST": digest}
+           "BFX_BACKEND_IMAGE": image, "BFX_BACKEND_DIGEST": digest}
     project = f"bfx-app-test-{suffix}"
     compose = [*COMPOSE_CMD, "-p", project, "-f", str(tmp_path / "docker-compose.app.yml")]
     subprocess.run(["docker", "network", "create", network], check=True, capture_output=True)
@@ -503,17 +504,16 @@ def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> Non
         created = subprocess.run([*compose, "create", "--no-recreate"], capture_output=True,
                                  text=True, check=False, env=env, timeout=120)
         assert created.returncode == 0, created.stderr
-        names = [f"{c}-{suffix}" for c in ("bfx-bot", "bfx-webapi", "bfx-frontend")]
+        names = [f"{c}-{suffix}" for c in ("bfx-bot", "bfx-webapi")]
         inspected = subprocess.run(["docker", "inspect", *names], capture_output=True, text=True,
                                    check=True)
-        for service, record in zip(("bot", "webapi", "frontend"), json.loads(inspected.stdout),
-                                   strict=True):
+        for service, record in zip(("bot", "webapi"), json.loads(inspected.stdout), strict=True):
             mismatches = bfx.container_mismatches(
-                record, container=bfx.ROLE_CONTAINERS.get(service, "bfx-frontend"), image=image,
+                record, container=bfx.ROLE_CONTAINERS[service], image=image,
                 identity=bfx.identity_env(target, image=image,
                                           deployment_id=FAKE_ENV["BFX_DEPLOYMENT_ID"]))
             assert mismatches == ["name", "project"], (service, mismatches)
     finally:
-        subprocess.run([*compose, "down", "--remove-orphans"], capture_output=True, env=env,
+        subprocess.run([*compose, "down", "--remove-orphans", "--volumes"], capture_output=True, env=env,
                        check=False, timeout=120)
         subprocess.run(["docker", "network", "rm", network], capture_output=True, check=False)

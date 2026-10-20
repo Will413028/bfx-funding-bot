@@ -4,7 +4,7 @@
 部署流程本身見 [deploy runbook](deploy.md)；備份與 restore 見 [offsite DR](offsite-dr.md)。
 
 Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration 用它跑）；
-`<public-host>` 是 frontend 對外的 host name。實際值只寫在本機的 `AGENTS.local.md`
+`<ops-host>` 是營運入口節點的 MagicDNS 名稱（`bfx-ops.<tailnet>.ts.net`）。實際值只寫在本機的 `AGENTS.local.md`
 或主機上的 secret 檔，不進 git。
 
 ## 0. 資料服務的 env 檔
@@ -22,7 +22,7 @@ Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration �
 |---|---|---|
 | `bfx_bot` | bot daemon、每週報告、研究用一次性容器 | 本節的 default privileges ＋ 各 migration 的收斂 grant |
 | `bfx_webapi` | FastAPI web-API | migration `c74d45a54e46` 的 baseline（與之後各 migration）；不碰交易寫入 |
-| `bfx_webauth` | Next.js／Better Auth | 只有 `auth` schema（本節手動 grant） |
+| `bfx_webauth` | （9d-5 起無使用者；9d-7 的 migration 刪除） | 只有 `auth` schema（本節手動 grant；migration 鏈到 9d-7 前仍會引用它） |
 | `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist：三個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
 
 Migration 對 role 的 grant 都包在 `IF EXISTS (SELECT FROM pg_roles ...)` 裡：role 不存在時
@@ -160,41 +160,37 @@ RESET ROLE;
 | 檔案（`/opt/bfx/runtime/`） | `DATABASE_URL` 的 role | 備註 |
 |---|---|---|
 | `bot.env` | `bfx_bot` | 範本 `deploy/vm/bot.env.example` |
-| `webapi.env` | `bfx_webapi` | 同檔還有 `BETTER_AUTH_JWKS_URL=http://bfx-frontend:3000/api/auth/jwks`（docker 內網），以及和 `bot.env` 同值的 `BFX_ADMIN_READ_TOKEN`（`openssl rand -hex 32`）；**不可**放 `BFX_ADMIN_TOKEN`，webapi 看到它會拒絕開機（halt token 只留在 `bot.env`） |
-| `frontend.env` | `bfx_webauth` | direct 連線（`@postgres:5432/bfx`，無 pooler、無 sslmode）；範本 `deploy/vm/frontend.env.example` |
+| `webapi.env` | `bfx_webapi` | 同檔還有開機必填的入口設定（缺任一個 webapi 拒絕開機）：`BFX_OPERATOR_TAILNET_USER_ID`（與 `operator.env` 同值）、`BFX_WEBAPI_ALLOWED_HOSTS=<ops-host>`、`BFX_FE_SENTRY_DSN`（與 repository variable `NEXT_PUBLIC_SENTRY_DSN` 同值），以及和 `bot.env` 同值的 `BFX_ADMIN_READ_TOKEN`（`openssl rand -hex 32`）；**不可**放 `BFX_ADMIN_TOKEN`，webapi 看到它會拒絕開機（halt token 只留在 `bot.env`） |
 | `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`、`BFX_OPERATOR_USER_ID`（兩者照抄 `bot.env`）與 `BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id，`tailscale whois --json <operator 裝置的 tailnet IP>` 的 `UserProfile.ID`）；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 `bfx-op` 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
 | `migrate.env` | `<owner>` | 只有 bfx-deploy 的 migration 與 operator one-shot 使用 |
 
-`BETTER_AUTH_SECRET` 以 `openssl rand -base64 48` 在主機上產生後直接寫進 `frontend.env`
-（read from the secret file；不要在任何文件或 chat 裡出現實際值）。
+## 2. Tailnet 入口（營運 UI）
 
-## 2. Frontend public ingress
+沒有公開入口：營運 UI 與 webapi 只能從 tailnet 內、經 Tailscale Serve 連到（9d-5）。webapi 只聽
+`127.0.0.1:8000`，在 holder `bfx-netns` 的 namespace 裡；節點 `bfx-tailscale`（`tag:bfx-ops`）
+與它共用 namespace，Serve 把 `https://<ops-host>/` 轉給它（`deploy/vm/tailscale/serve.json`）。
+主機不開任何雲端 security-list port，TLS 由 Serve 終結（tailnet 開啟 MagicDNS 與 HTTPS certificates）。
 
-公開面只有 frontend container。它只綁 host loopback `127.0.0.1:3001`
-（`deploy/vm/docker-compose.app.yml`；host 的 3000 是 Grafana）。web-API 不公開：FE
-server-side proxy 經 docker 網路打 `http://webapi:8000`，JWKS 也走內網。主機不開任何
-雲端 security-list port，TLS 由入口服務終結。
+1. tailnet policy（admin console → Access controls，Will 存檔）：`tagOwners` 有 `"tag:bfx-ops": ["autogroup:admin"]`；
+   一條 grant 只讓 operator 連 `tag:bfx-ops` 的 `tcp:443`，並帶 operator capability：
+   `{"src": ["<operator login>"], "dst": ["tag:bfx-ops"], "ip": ["tcp:443"],
+   "app": {"github.com/Will413028/bfx-funding-bot/cap/operator": [{"user_id": "<BFX_OPERATOR_TAILNET_USER_ID>"}]}}`。
+   webapi 只認這個 capability 的 `user_id`。
+2. 節點第一次登入（不用 auth key）：在主機上以同一個 state volume 跑一次性容器，Will 核准它印出的網址：
+   ```bash
+   docker volume create bfx_tsstate
+   docker run -d --name bfx-ts-login --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+     --tmpfs /tmp --tmpfs /var/run/tailscale -v bfx_tsstate:/var/lib/tailscale \
+     --entrypoint tailscaled <docker-compose.app.yml 裡的 tailscale image> \
+     --tun=userspace-networking --statedir=/var/lib/tailscale
+   docker exec bfx-ts-login sh -c 'tailscale up --advertise-tags=tag:bfx-ops --hostname=bfx-ops --timeout=20m'
+   ```
+   不經 containerboot：它等登入有時限，會在核准前退出。`tailscale status` 顯示 tagged、無 key 到期後
+   `docker rm -f bfx-ts-login`；之後的部署沿用這個 volume（`TS_AUTH_ONCE=true`），`tailscale.env` 可以是空檔。
+3. `webapi.env` 寫好入口設定（§1e），部署。
 
-任何能「公開 HTTPS 443 → 主機 `127.0.0.1:3001`」的入口都可以，例如：
-
-- **Tailscale Funnel**（目前使用）：主機裝好 Tailscale，tailnet 開啟 Funnel、MagicDNS 與
-  HTTPS certificates 後執行
-  `tailscale funnel --bg --https=443 http://127.0.0.1:3001`，`tailscale funnel status` 顯示公開 URL。
-- **Cloudflare Tunnel**：`cloudflared` 建 tunnel，把 `<public-host>` 的 ingress 指到
-  `http://127.0.0.1:3001`；DNS 由 Cloudflare 管。
-
-入口確定後，`<public-host>` 要同步到這些地方（改 host 就是改 image，需要一次部署）：
-
-| 位置 | 值 |
-|---|---|
-| GitHub repository variables `NEXT_PUBLIC_APP_URL`、`NEXT_PUBLIC_BETTER_AUTH_URL` | `https://<public-host>`（CI build 時 bake 進 client bundle） |
-| GitHub repository variable `NEXT_PUBLIC_APP_NAME` | `bfx-funding-bot` |
-| `/opt/bfx/runtime/frontend.env` 的 `BETTER_AUTH_URL`、`NEXT_PUBLIC_*` | 同上 |
-| `/opt/bfx/runtime/frontend.env` 的 `PASSKEY_RP_ID` | `<public-host>`（只有 host，不含 scheme）；換 host 會讓既有 passkey 失效 |
-
-驗證：先在主機上 `curl -fsS http://127.0.0.1:3001/` 確認 FE 起來，再從外部開
-`https://<public-host>` 走一次登入 → dashboard（`/api/proxy/*` 回 200）。回滾：把入口指回
-舊目標或停掉入口服務；bot 與 webapi 不受影響。
+驗證：從 tailnet 裡的 operator 裝置開 `https://<ops-host>/`（轉到 `/en/overview/`、讀取正常）；不在 tailnet 時
+連不到；帶外站 `Origin` 的 POST 回 403。回滾：見 [deploy runbook](deploy.md) 的「Tailnet 入口」；bot 不受影響。
 
 ## 3. 首次安裝主機工具
 
@@ -227,7 +223,7 @@ sbin 入口與 sudoers 例外，見 [deploy runbook §4](deploy.md#4-主機工�
 
 ### 3b. Runtime 設定與首次驗證
 
-- `/opt/bfx/runtime/{bot,webapi,frontend,tailscale,migrate,notify,ghcr}.env` 依
+- `/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr}.env` 依
   [deploy env 規則](deploy.md#env-檔規則) 準備，root 擁有且 mode `0600`。
   bot／webapi 使用已核對的 canonical `BFX_EXCHANGE_ACCOUNT_ID` 與相同的
   `BFX_OPERATOR_USER_ID`；不沿用舊 launcher 的 `BFX_RELEASE_*`。

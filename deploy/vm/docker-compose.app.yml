@@ -1,5 +1,5 @@
-# Application services (bot, webapi, frontend) and the tailnet ingress (netns,
-# tailscale), deployed by bfx-deploy
+# Application services (bot, webapi) and the tailnet ingress (netns, tailscale),
+# deployed by bfx-deploy
 # (deploy/vm/ops/bfx_deploy.py) from the release's own commit. bfx-deploy takes
 # the services, containers, images and env files from this file's rendering
 # (`docker compose config --no-env-resolution`) and runs:
@@ -19,11 +19,12 @@
 # first, so `up` can only start what was already verified.
 #
 # Hardening kept from the retired immutable-release launcher (removed in T6):
-# read-only root filesystem, bot/webapi UID 1000, frontend user nextjs, all
-# capabilities dropped, no-new-privileges, cwd /app, the image's exact
-# interpreter/module, bot DNS alias bfx-bot, frontend published on host loopback
-# 127.0.0.1:3001 only, no volumes, no writable mounts, loader and interpreter
-# injection variables forced empty. CI renders this file with `docker compose
+# read-only root filesystem, bot/webapi UID 1000, all capabilities dropped,
+# no-new-privileges, cwd /app, the image's exact interpreter/module, bot DNS alias
+# bfx-bot, no published ports, no volumes, no writable mounts, loader and interpreter
+# injection variables forced empty. The web API serves the operator UI (the
+# frontend's static export, baked into the backend image) on 127.0.0.1:8000 inside
+# the tailnet node's namespace: Tailscale Serve is the only way in (9d-5). CI renders this file with `docker compose
 # config` and enforces all of it (deploy/vm/ops/compose_policy.py); bfx-deploy
 # re-checks only the digest and identity each created container runs with.
 #
@@ -78,7 +79,7 @@ services:
     pull_policy: never
     container_name: bfx-webapi
     entrypoint: []
-    command: ["/app/.venv/bin/python", "-m", "uvicorn", "bfx_funding_bot.apps.webapi:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["/app/.venv/bin/python", "-m", "uvicorn", "bfx_funding_bot.apps.webapi:app", "--host", "127.0.0.1", "--port", "8000"]
     user: "1000:1000"
     working_dir: /app
     read_only: true
@@ -98,39 +99,19 @@ services:
       LD_PRELOAD: ""
       LD_LIBRARY_PATH: ""
       LD_AUDIT: ""
-    networks:
-      bfx_default: {}
-
-  frontend:
-    image: ${BFX_FRONTEND_IMAGE:?BFX_FRONTEND_IMAGE must be a repository@sha256 reference}
-    pull_policy: never
-    container_name: bfx-frontend
-    entrypoint: []
-    command: ["node", "server.js"]
-    user: nextjs
-    working_dir: /app
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    restart: unless-stopped
-    env_file:
-      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/frontend.env
-    environment:
-      BFX_IMAGE_DIGEST: ${BFX_FRONTEND_DIGEST:?BFX_FRONTEND_DIGEST is required}
-      BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
-      BFX_DEPLOYMENT_ID: ${BFX_DEPLOYMENT_ID:?BFX_DEPLOYMENT_ID is required}
-      NODE_OPTIONS: ""
-      LD_PRELOAD: ""
-      LD_LIBRARY_PATH: ""
-      LD_AUDIT: ""
-    ports:
-      # Host 3000 is Grafana; Tailscale Funnel 443 -> 127.0.0.1:3001. Loopback only.
-      - "127.0.0.1:3001:3000"
-    networks:
-      bfx_default: {}
+    # In the holder's namespace with the tailnet node (plan D13): reachable only through
+    # Serve on 127.0.0.1:8000; the database through the holder's bfx_default interface.
+    network_mode: service:netns
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/ready',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
 
   # Holds the ingress network namespace and nothing else (plan D13): the tailscale
-  # sidecar (and, from 9d-5, the web API) join it with `network_mode: service:netns`,
+  # sidecar and the web API join it with `network_mode: service:netns`,
   # so a tailscaled restart, crash or recreate never replaces the namespace they
   # share. Restarting this container on its own strands them in a namespace without
   # eth0 -- recreate the services with bfx-deploy instead (docs/runbooks/deploy.md).
@@ -154,9 +135,9 @@ services:
     networks:
       bfx_default: {}
 
-  # The tailnet node tag:bfx-ops. Serve proxies https://<node>:443 to 127.0.0.1:8000
-  # in the shared namespace (deploy/vm/tailscale/serve.json); until 9d-5 moves the web
-  # API in, that answers 502. userspace networking, no capabilities, no ports. The
+  # The tailnet node tag:bfx-ops. Serve proxies https://<node>:443 to the web API on
+  # 127.0.0.1:8000 in the shared namespace (deploy/vm/tailscale/serve.json) and forwards
+  # the operator capability the tailnet policy grants. userspace, no capabilities, no ports. The
   # auth key (tagged, single use) is in tailscale.env and used only on the first
   # login; the node key lives in the bfx_tsstate volume.
   tailscale:

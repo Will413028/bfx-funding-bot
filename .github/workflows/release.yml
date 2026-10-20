@@ -1,7 +1,8 @@
 name: Release images
 
-# Builds the production images once, in CI, from a main commit whose CI run
-# passed, and publishes them to GHCR. The VM deploys by digest only; the `main`
+# Builds the production image once, in CI, from a main commit whose CI run
+# passed, and publishes it to GHCR. Since 9d-5 there is one image: the backend,
+# which also carries the operator UI's static export (backend/Dockerfile `ui` stage). The VM deploys by digest only; the `main`
 # tag exists so the VM can discover the newest release, never as deploy input.
 # `bfx.ci-run-url` names the CI run that passed this commit; bfx-deploy writes it
 # into the deployments ledger (ci_run).
@@ -26,7 +27,7 @@ concurrency:
 
 jobs:
   publish:
-    name: Build and push images (linux/arm64)
+    name: Build and push the image (linux/arm64)
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     # Native arm64: production (OCI A1) is arm64, so no emulation.
     runs-on: ubuntu-24.04-arm
@@ -45,19 +46,14 @@ jobs:
       - name: Resolve image names
         id: names
         env:
-          # Public build inputs (baked into the client bundle; not secrets) come
-          # from repository variables so the deployment's host name stays out of
-          # the source tree. A missing value fails the release instead of baking
-          # an empty URL into the image.
-          NEXT_PUBLIC_APP_NAME: ${{ vars.NEXT_PUBLIC_APP_NAME }}
-          NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
-          NEXT_PUBLIC_BETTER_AUTH_URL: ${{ vars.NEXT_PUBLIC_BETTER_AUTH_URL }}
+          # The UI's public build input (baked into the bundle; not a secret) comes
+          # from a repository variable. A missing value fails the release instead of
+          # shipping a UI that silently reports nothing.
           NEXT_PUBLIC_SENTRY_DSN: ${{ vars.NEXT_PUBLIC_SENTRY_DSN }}
         run: |
           prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
           echo "backend=${prefix}-backend" >> "$GITHUB_OUTPUT"
-          echo "frontend=${prefix}-frontend" >> "$GITHUB_OUTPUT"
-          keys="NEXT_PUBLIC_APP_NAME NEXT_PUBLIC_APP_URL NEXT_PUBLIC_BETTER_AUTH_URL NEXT_PUBLIC_SENTRY_DSN"
+          keys="NEXT_PUBLIC_SENTRY_DSN"
           for key in $keys; do
             if [ -z "${!key}" ]; then
               echo "::error::repository variable $key is not set"
@@ -65,7 +61,8 @@ jobs:
             fi
           done
           {
-            echo "frontend_args<<EOF"
+            echo "build_args<<EOF"
+            echo "GIT_SHA=${REVISION}"
             for key in $keys; do echo "$key=${!key}"; done
             echo "NEXT_PUBLIC_SENTRY_RELEASE=${REVISION}"
             echo "EOF"
@@ -99,9 +96,11 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: backend
+          # The UI stage copies the frontend from this named context.
+          build-contexts: frontend=frontend
           platforms: linux/arm64
           push: true
-          build-args: GIT_SHA=${{ env.REVISION }}
+          build-args: ${{ steps.names.outputs.build_args }}
           labels: |
             org.opencontainers.image.revision=${{ env.REVISION }}
             bfx.ci-run-url=${{ github.event.workflow_run.html_url }}
@@ -111,30 +110,11 @@ jobs:
           cache-from: type=gha,scope=backend
           cache-to: type=gha,scope=backend,mode=max
 
-      - name: Build and push frontend
-        id: frontend
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: frontend
-          platforms: linux/arm64
-          push: true
-          build-args: ${{ steps.names.outputs.frontend_args }}
-          labels: |
-            org.opencontainers.image.revision=${{ env.REVISION }}
-            bfx.ci-run-url=${{ github.event.workflow_run.html_url }}
-          tags: |
-            ${{ steps.names.outputs.frontend }}:sha-${{ env.REVISION }}
-            ${{ steps.head.outputs.main_tag == 'true' && format('{0}:main', steps.names.outputs.frontend) || '' }}
-          cache-from: type=gha,scope=frontend
-          cache-to: type=gha,scope=frontend,mode=max
-
       - name: Record release
         env:
           MAIN_TAG: ${{ steps.head.outputs.main_tag }}
           BACKEND_IMAGE: ${{ steps.names.outputs.backend }}
           BACKEND_DIGEST: ${{ steps.backend.outputs.digest }}
-          FRONTEND_IMAGE: ${{ steps.names.outputs.frontend }}
-          FRONTEND_DIGEST: ${{ steps.frontend.outputs.digest }}
         run: |
           {
             echo "### Release ${REVISION} (main tag: ${MAIN_TAG})"
@@ -142,5 +122,4 @@ jobs:
             echo "| image | digest |"
             echo "|---|---|"
             echo "| ${BACKEND_IMAGE} | \`${BACKEND_DIGEST}\` |"
-            echo "| ${FRONTEND_IMAGE} | \`${FRONTEND_DIGEST}\` |"
           } >> "$GITHUB_STEP_SUMMARY"

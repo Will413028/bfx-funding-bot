@@ -16,11 +16,11 @@ uninterpolated rendering, which every version prints the same way: each service
 names exactly its own `${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/<name>.env` (the
 production default) plus, for the bot, live.env -- all `required: true`, so a
 missing secret file stops `up` instead of starting without it. The bot and the
-web API are required; the frontend is optional (9d-5 removes it). The tailnet
-ingress is required too and pinned to its exact shape: `netns` only holds the
-network namespace (plan D13) and `tailscale` joins it with the state volume, the
-Serve config and tailscale.env as its only inputs; no other service may join a
-namespace yet (9d-5 lets the web API join `netns`). Top-level `secrets` are
+web API are required and no other application service is allowed (9d-5 removed the
+frontend: the web API serves the UI). The tailnet ingress is required too and pinned
+to its exact shape: `netns` only holds the network namespace (plan D13), `tailscale`
+joins it with the state volume, the Serve config and tailscale.env as its only inputs,
+and the web API joins it listening on 127.0.0.1 only, with no network of its own. Top-level `secrets` are
 refused, the one top-level volume is the fixed-name node state and the one
 config is the tracked serve.json. Every other
 hardening property is checked on the interpolated rendering. Checking Compose's
@@ -58,10 +58,10 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
-# Every app release has the bot and the web API; the frontend service goes away in 9d-5.
+# Every app release has the bot and the web API (9d-5 removed the frontend service).
 # bfx-deploy derives what it runs from the rendered file (bfx_deploy.release_services).
 REQUIRED_SERVICES = ("bot", "webapi")
-OPTIONAL_SERVICES = ("frontend",)
+OPTIONAL_SERVICES: tuple[str, ...] = ()
 # The tailnet ingress (9d-4), third-party image, own shape (ingress_violations).
 INGRESS_SERVICES = ("netns", "tailscale")
 SERVICES = (*REQUIRED_SERVICES, *OPTIONAL_SERVICES)
@@ -100,20 +100,23 @@ INGRESS_KEYS = {
                             "environment", "volumes", "configs", "healthcheck", "depends_on",
                             "entrypoint", "command"}),
 }
-CONTAINERS = {"bot": "bfx-bot", "webapi": "bfx-webapi", "frontend": "bfx-frontend"}
+CONTAINERS = {"bot": "bfx-bot", "webapi": "bfx-webapi"}
 COMMANDS = {
     "bot": ["/app/.venv/bin/python", "-m", "bfx_funding_bot.apps.bot"],
+    # Loopback only: inside the holder's namespace, Serve is the one client (9d-5).
     "webapi": ["/app/.venv/bin/python", "-m", "uvicorn", "bfx_funding_bot.apps.webapi:app",
-               "--host", "0.0.0.0", "--port", "8000"],
-    "frontend": ["node", "server.js"],
+               "--host", "127.0.0.1", "--port", "8000"],
 }
-USERS = {"bot": "1000:1000", "webapi": "1000:1000", "frontend": "nextjs"}
+USERS = {"bot": "1000:1000", "webapi": "1000:1000"}
+WEBAPI_NETWORK_MODE = "service:netns"
+WEBAPI_HEALTHCHECK = ["CMD", "/app/.venv/bin/python", "-c",
+                      "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen("
+                      "'http://127.0.0.1:8000/ready',timeout=5).status==200 else 1)"]
 PRODUCTION_RUNTIME_DIR = "/opt/bfx/runtime"
 RUNTIME_REFERENCE = "${BFX_RUNTIME_DIR:-" + PRODUCTION_RUNTIME_DIR + "}/"
 ENV_FILES = {
     "bot": (f"/{RUNTIME_REFERENCE}bot.env", "/live.env"),
     "webapi": (f"/{RUNTIME_REFERENCE}webapi.env",),
-    "frontend": (f"/{RUNTIME_REFERENCE}frontend.env",),
     "tailscale": (f"/{RUNTIME_REFERENCE}tailscale.env",),
     "netns": (),
 }
@@ -144,8 +147,6 @@ OPERATOR_ENV_KEYS = frozenset({*OPERATOR_INTERPOLATED, "PYTHONDONTWRITEBYTECODE"
                                *LOADER_INJECTION, *PYTHON_INJECTION})
 OPERATOR_ENV_FILES = {OPERATOR_SERVICE: (f"/{RUNTIME_REFERENCE}operator.env",)}
 OPERATOR_FORBIDDEN_KEYS = (*FORBIDDEN_KEYS, "container_name", "ports", "command", "healthcheck")
-FRONTEND_PORTS = [{"mode": "ingress", "host_ip": "127.0.0.1", "target": 3000,
-                   "published": "3001", "protocol": "tcp"}]
 
 
 def service_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
@@ -169,19 +170,22 @@ def service_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
     need(spec.get("security_opt") == ["no-new-privileges:true"], "no_new_privileges")
     need(spec.get("restart") == "unless-stopped", "restart")
     for key in FORBIDDEN_KEYS:
-        need(not spec.get(key), f"no_{key}")
+        if not (service == "webapi" and key == "network_mode"):
+            need(not spec.get(key), f"no_{key}")
     networks = spec.get("networks") or {}
-    need(set(networks) == {NETWORK}, "network")
-    if service == "bot":
+    if service == "webapi":
+        need(spec.get("network_mode") == WEBAPI_NETWORK_MODE, "joins_netns")
+        need(not networks, "no_networks")
+        check = spec.get("healthcheck") or {}
+        need(check.get("test") == WEBAPI_HEALTHCHECK and not check.get("disable"), "ready_healthcheck")
+    else:
+        need(set(networks) == {NETWORK}, "network")
         need(((networks.get(NETWORK) or {}).get("aliases") or []) == ["bfx-bot"], "bot_alias")
-    need((spec.get("ports") or []) == (FRONTEND_PORTS if service == "frontend" else []), "ports")
+    need(not spec.get("ports"), "ports")
     need(all(env.get(key) for key in IDENTITY), "identity_env")
     need(all(env.get(key) == "" for key in LOADER_INJECTION), "loader_injection_blanked")
-    if service == "frontend":
-        need(env.get("NODE_OPTIONS") == "", "interpreter_injection_blanked")
-    else:
-        need(all(env.get(key) == "" for key in PYTHON_INJECTION)
-             and env.get("PYTHONDONTWRITEBYTECODE") == "1", "interpreter_injection_blanked")
+    need(all(env.get(key) == "" for key in PYTHON_INJECTION)
+         and env.get("PYTHONDONTWRITEBYTECODE") == "1", "interpreter_injection_blanked")
     return found
 
 
