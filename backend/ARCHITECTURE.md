@@ -20,7 +20,7 @@ bfx-funding-bot 在 Bitfinex 的 funding（放貸）市場上自動掛單放貸�
 3. **單一寫入者曝險（single-writer exposure）**：`DeploymentReconciler` 是 venue 提交的唯一寫入者；訊號層不送單。
 4. **Reconcile 即正確性骨幹（reconcile-as-correctness-backbone）**：venue（透過 REST）是曝險真相的權威來源；90s 週期的觀測 cycle 保證 ledger 收斂。WebSocket 只產生 venue hint（要求提早 reconcile），不寫任何資金狀態。
 
-部署形態：單一長駐 daemon，以 `asyncio.TaskGroup` 並行跑多個 sub-task；全 stack 自托於單一 Oracle Cloud VM（下稱 `<vm-host>`；docker compose：`bfx-bot`/`bfx-webapi`/`bfx-netns`/`bfx-tailscale`/`bfx-postgres`(PG 18)/`bfx-redis`）。Koyeb/Neon/Upstash 為歷史平台（2026-05-31 Koyeb cutover、2026-06-23 Neon/Vercel 歸零）。
+部署形態：單一長駐 daemon，以 `asyncio.TaskGroup` 並行跑多個 sub-task；全 stack 自托於單一 Oracle Cloud VM（下稱 `<vm-host>`；docker compose：`bfx-bot`/`bfx-webapi`/`bfx-netns`/`bfx-tailscale`/`bfx-postgres`(PG 18)）。Koyeb/Neon/Upstash 為歷史平台（2026-05-31 Koyeb cutover、2026-06-23 Neon/Vercel 歸零）。
 
 ### Web API identity (9d-5) and Halt 1 identity
 
@@ -739,7 +739,6 @@ deployment reconciler 在 ledger 的 `spendable` 內、依各 cell 的 `max_new_
 |---|---|
 | Backend daemon | VM 自托（`<vm-host>`，Docker，Python 3.13 + uv；`bfx-bot`/`bfx-webapi`。Koyeb 已於 2026-05-31 cutover 至 VM） |
 | Database | VM 自托 Postgres 18（`bfx-postgres`。Neon 已於 2026-06-23 棄用歸零） |
-| Cache | VM 自托 Redis 7（`bfx-redis`）：9d-5 起沒有使用者，W9 移除 |
 | 營運 UI | 前端 static export build 進 backend image，由 webapi 提供；入口是 tailnet 節點 `bfx-tailscale`（Tailscale Serve，只限 tailnet 內），見上方「Web API identity」 |
 
 **跨 migration 的契約（`core/schema_head.py`）**：serialized projector 的 seeded cursor 與 projection archive 各由一個 migration 建立；之後每個 migration 以模組屬性 `ledger_contract = "preserved" | "changed"` 宣告是否改變它，契約成立的 revision 集合由此推導（從 head 往回到最近一個 changed，或到建立它的那個），不再有人工維護的清單。`tests/test_schema_head.py` 拒絕沒宣告的 migration 與多個 head。
@@ -786,8 +785,7 @@ resume、enable、裁決與換憑證只由 CLI 排入（ADR 2026-10-15 D4，migr
 請求的驗證與排入只有一份：`execution/operator_commands.py`，operator CLI（`apps/operator_cli.py`）與 webapi 的 kill／disable handler 都是它的 adapter。
 CLI 以 one-off compose service `bfx-operator`（`deploy/vm/ops/docker-compose.operator.yml`）執行，連線用專屬 role `bfx_operator`：
 migration `4ab02765a34b`（輪替另由 `1db83367918c` 加上）的精確 allowlist，只有四個 outbox 請求欄位的 INSERT 與驗證所需的讀取，沒有 UPDATE／DELETE（`test_operator_privilege_allowlist.py`）。
-CLI 開頭比對 wrapper 傳入的 tailnet 身分與 `operator.env` 設定的值，不符就 exit 77、不連 DB；之後同 webapi 檢查 schema head 與 ledger authority。
-請求一律以 `BFX_OPERATOR_USER_ID` 送出（9d 前），daemon 照樣以 `operator_authorized` 重驗。9d 改用 tailnet node user ID 之前，由 owner 腳本 `scripts/grant_operator_membership.py` 把現有 membership 複製給 node user ID（冪等、授權的相異 user 上限 2）。
+誰在操作是 wrapper 以 `tailscale whois` 取得、傳入的 tailnet user ID（`BFX_OPERATOR_TAILNET_IDENTITY`），它就是請求的 `requested_by`（9d-6）；`operator.env` 不設定 operator。格式不是 tailnet user ID 就 exit 77、不連 DB；之後同 webapi 檢查 schema head 與 ledger authority，再確認它是帳戶的 member（不是就 exit 77、不寫入），daemon 套用時照樣以 `operator_authorized` 重驗。node user ID 的 membership 由 owner 腳本 `scripts/grant_operator_membership.py` 寫入（W3，冪等、授權的相異 user 上限 2）。
 **憑證輪替（`execution/credential_rotation.py`、`core/sealed_credential.py`，migration `1db83367918c`）**：
 CLI 不持有 KEK。bot 每次開機（`bot_runs` 寫入後）產生一把 X25519 收件 key，私鑰只在記憶體，公鑰寫進 `credential_rotation_recipients`；
 CLI 的 `rotate-credential` 從 stdin 讀新 key，只封給「scope 最新、尚未結束的 run」的收件 key（HPKE base mode，`info` 綁帳號、環境、收件 key 與 request id），
