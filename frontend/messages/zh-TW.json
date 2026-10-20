@@ -29,9 +29,7 @@
     "history": "執行事件",
     "settings": "帳戶設定",
     "logout": "登出",
-    "pricing": "方案價格",
-    "attribution": "歸因分析",
-    "proof": "真實績效"
+    "attribution": "歸因分析"
   },
   "common": {
     "loading": "載入中...",
@@ -214,44 +212,6 @@
     "passwordMismatch": "密碼不一致",
     "rangeMinMax": "最小值必須小於或等於最大值"
   },
-  "landing": {
-    "heroTitle": "Bitfinex 自動放貸",
-    "heroSubtitle": "透過智慧市場分析、自動掛單和即時監控，最大化您的放貸收益 — 全天候運行。",
-    "getStarted": "立即開始",
-    "feature1Title": "自動放貸",
-    "feature1Desc": "設定策略後，機器人全天候自動處理掛單、續約和資金再平衡。",
-    "feature2Title": "市場分析",
-    "feature2Desc": "來自訂單簿、清算和跨幣種資金流的即時信號，驅動智慧定價。",
-    "feature3Title": "安全加密",
-    "feature3Desc": "API 金鑰以 AES-256-GCM 加密儲存，您的憑證永遠不會以明文離開伺服器。",
-    "feature4Title": "即時監控",
-    "feature4Desc": "即時儀表板一覽錢包餘額、進行中掛單、收益和市場體制。",
-    "ctaTitle": "準備好在睡覺時賺錢了嗎？",
-    "ctaSubtitle": "立即加入，幾分鐘內開始自動放貸。",
-    "ctaButton": "免費建立帳號"
-  },
-  "pricing": {
-    "title": "方案價格",
-    "subtitle": "選擇適合您放貸策略的方案。",
-    "free": "免費版",
-    "starter": "入門版",
-    "pro": "專業版",
-    "enterprise": "企業版",
-    "perMonth": "/月",
-    "recommended": "推薦",
-    "cta": "立即開始",
-    "featureDashboard": "儀表板與分析",
-    "featureManualLending": "手動放貸",
-    "featureAutoLending": "自動放貸",
-    "featureFixedStrategy": "固定利率策略",
-    "featureEmailNotify": "Email 通知",
-    "featureAdvancedStrategy": "進階策略",
-    "featureMarketAnalysis": "市場分析信號",
-    "featurePriorityQuota": "優先 API 配額",
-    "featureAllFeatures": "包含所有功能",
-    "featureDedicatedSupport": "專屬支援",
-    "featureCustomParams": "自訂策略參數"
-  },
   "status": {
     "running": "運行中",
     "paused": "已暫停",
@@ -269,25 +229,6 @@
     "loading": "載入中…",
     "loadFailed": "歸因資料載入失敗",
     "empty": "尚無歸因資料 — 每週排程尚未執行。"
-  },
-  "proof": {
-    "liveBadge": "機器人運行中 — 每週更新",
-    "headline": "Bitfinex 放貸機器人真實績效，每週公開",
-    "subtitle": "真實運行中放貸機器人的歷史數據，對比被動 always-on-FRR 基準。以下所有數字皆為百分比 — 不揭露任何美金金額，亦非預估數字。",
-    "asOf": "資料截至 {date}",
-    "chartTitle": "週度已實現 APR — Bot vs 被動基準",
-    "chartSubtitle": "跨所有追蹤放貸單元、經手續費調整、以資金天數加權的年化報酬",
-    "botLine": "Bot（實得，扣費）",
-    "baselineLine": "AlwaysFRR（利用率調整）",
-    "empty": "尚無績效資料 — 本部署的每週歸因排程尚未產出報告。",
-    "statAvgRealized": "近 {weeks} 週平均已實現 APR",
-    "statSpread": "對比基準價差",
-    "statWeeksTracked": "追蹤週數",
-    "csvTitle": "免費利率歷史資料",
-    "csvBody": "10 年 fUST/fUSD Bitfinex 每小時利率資料，免費下載，無需註冊。",
-    "csvCta": "下載 CSV",
-    "disclaimerTitle": "過去績效不代表未來表現",
-    "disclaimerBody": "本頁面所有數字皆為歷史資料，並非對未來報酬的預測、承諾或保證，本頁內容亦不構成投資建議。Bitfinex 放貸利率波動劇烈，可能歸零；過去表現不保證未來績效。"
   },
   "tradingControl": {
     "title": "交易狀態",

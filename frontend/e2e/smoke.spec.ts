@@ -12,9 +12,7 @@ function accountScopedPath(resourcePath: `/${string}`): string {
 }
 
 test.describe("Smoke tests", () => {
-	test("landing page loads and redirects to default locale", async ({
-		page,
-	}) => {
+	test("root redirects to the default locale", async ({ page }) => {
 		await page.goto("/");
 		await expect(page).toHaveURL(/\/en/);
 	});
@@ -24,12 +22,6 @@ test.describe("Smoke tests", () => {
 		await expect(
 			page.getByRole("button", { name: /sign in|log in/i }),
 		).toBeVisible();
-	});
-
-	test("pricing page loads", async ({ page }) => {
-		await page.goto("/en/pricing");
-		await expect(page.getByText(/free/i)).toBeVisible();
-		await expect(page.getByText(/pro/i)).toBeVisible();
 	});
 });
 
