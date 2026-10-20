@@ -29,4 +29,7 @@ web API listens on 127.0.0.1 only, so a forged header locally is no risk.
    `use: { baseURL: "http://localhost:8000", extraHTTPHeaders: { "Tailscale-App-Capabilities":
    '{"github.com/Will413028/bfx-funding-bot/cap/operator":[{"user_id":"operator-1"}]}' } }`
    and no `webServer`. The operator also needs a membership row with `user_id = operator-1`
-   in the dev database to see an account.
+   in the dev database to see an account. Writes from `http://localhost:8000` are refused
+   (403): the web API accepts only `https://<allowed host>` as Origin, so a local run that
+   exercises writes needs an https front (e.g. `tailscale serve` on your own node) or a test
+   that sets `Origin: https://localhost`.

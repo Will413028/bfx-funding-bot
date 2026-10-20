@@ -7,8 +7,9 @@ namespace), so these checks are about the browser, not the network:
   /health and /ready, which bfx-deploy sends to 127.0.0.1 from inside the container, are
   exempt.
 - A state-changing request must come from one of those origins (``Origin`` required and
-  equal, ``Sec-Fetch-Site`` same-origin when sent) and, except /fe-events, carry JSON, so
-  a cross-site form or ``no-cors`` fetch cannot reach a handler.
+  equal, ``Sec-Fetch-Site`` same-origin when sent) and, when it carries a body (except
+  /fe-events), carry JSON, so a cross-site form or ``no-cors`` fetch cannot reach a
+  handler. A bodiless DELETE needs no content type: the Origin check already stops it.
 - The static export of the frontend is served with a hash-based CSP: the hashes of every
   inline script in the export, computed once at start.
 """
@@ -33,6 +34,7 @@ from bfx_funding_bot.core.settings import IngressSettings
 
 PROBE_PATHS = frozenset({"/health", "/ready"})
 FE_EVENTS_PATH = "/fe-events"
+API_FALLBACK_PATH = "/api/{rest:path}"
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 SAME_SITE_FETCH = frozenset({"same-origin", "none"})
 HOME = "/en/overview/"
@@ -130,26 +132,54 @@ class IngressMiddleware:
         origin = request.headers.get("origin")
         if origin is None or origin.lower() not in {f"https://{h}" for h in settings.allowed_hosts}:
             return _refuse(403, "cross_site_refused")
-        if request.url.path != FE_EVENTS_PATH:
+        if request.url.path != FE_EVENTS_PATH and _has_body(request):
             media = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
             if media != "application/json":
                 return _refuse(415, "json_required")
         return None
 
 
+def _has_body(request: Request) -> bool:
+    length = request.headers.get("content-length")
+    return "transfer-encoding" in request.headers or (length is not None and length.strip() != "0")
+
+
+def _dsn_parts(dsn: str) -> tuple[str, str | None, str, str, str] | None:
+    """(host, port, path prefix, project id, public key) of a Sentry DSN, or None."""
+    parts = urlsplit(dsn)
+    prefix, _, project = parts.path.rstrip("/").rpartition("/")
+    if not parts.hostname or not project or not parts.username:
+        return None
+    port = str(parts.port) if parts.port is not None else None
+    return parts.hostname, port, prefix, project, parts.username
+
+
 def sentry_envelope_target(envelope: bytes, dsn: str) -> str | None:
     """The configured project's envelope endpoint when the envelope's header names that
-    project's DSN; None for anything else (another project, another host, no header)."""
+    project's DSN; None for anything else (another project, host, port or key, no header).
+    The target is built from the configured DSN only, never from the envelope."""
     header = envelope.split(b"\n", 1)[0]
     try:
-        named = urlsplit(str(json.loads(header).get("dsn", "")))
+        named = _dsn_parts(str(json.loads(header).get("dsn", "")))
     except (ValueError, AttributeError):
         return None
-    allowed = urlsplit(dsn)
-    project = allowed.path.strip("/")
-    if (named.hostname, named.path.strip("/"), named.username) != (allowed.hostname, project, allowed.username):
+    allowed = _dsn_parts(dsn)
+    if allowed is None or named != allowed:
         return None
-    return f"https://{allowed.hostname}/api/{project}/envelope/"
+    host, port, prefix, project, _key = allowed
+    netloc = host if port is None else f"{host}:{port}"
+    return f"https://{netloc}{prefix}/api/{project}/envelope/"
+
+
+async def _read_limited(request: Request, limit: int) -> bytes | None:
+    """The body, or None as soon as it exceeds `limit` (never read whole first)."""
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def install_ingress(app: FastAPI, *, static_dir: Path) -> None:
@@ -160,8 +190,8 @@ def install_ingress(app: FastAPI, *, static_dir: Path) -> None:
     @app.post(FE_EVENTS_PATH, include_in_schema=False)
     async def fe_events(request: Request) -> Response:
         """Browser Sentry events, forwarded only to the configured frontend project."""
-        body = await request.body()
-        if len(body) > MAX_EVENT_BYTES:
+        body = await _read_limited(request, MAX_EVENT_BYTES)
+        if body is None:
             return _refuse(413, "event_too_large")
         settings: IngressSettings = request.app.state.ingress
         target = sentry_envelope_target(body, settings.fe_sentry_dsn)
@@ -178,6 +208,12 @@ def install_ingress(app: FastAPI, *, static_dir: Path) -> None:
     @app.get("/", include_in_schema=False)
     async def home() -> RedirectResponse:
         return RedirectResponse(HOME, status_code=307)
+
+    # Before the static mount: an unknown API path answers JSON, not the export's 404 page.
+    @app.api_route(API_FALLBACK_PATH, methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+                   include_in_schema=False)
+    async def no_such_api(rest: str) -> Response:
+        return _refuse(404, "not_found")
 
     if not static_dir.is_dir():
         logging.warning("No frontend export at %s; the web API serves the API only", static_dir)

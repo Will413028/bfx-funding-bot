@@ -263,9 +263,9 @@ sudo systemctl start --no-block bfx-deploy.service
 journalctl -fu bfx-deploy.service
 ```
 
-依 [deploy runbook](deploy.md) 核對 ledger 的 `started`／`deployed`、三個 app container
-的 `bfx-app` ownership 與 digest、health、工具與 DR checkout 的 `current` revision。
-新資料庫在 migration 後完成 §1c 的 auth grants 與 §1d 的隔離驗證；再驗證登入、TOTP、
+依 [deploy runbook](deploy.md) 核對 ledger 的 `started`／`deployed`、`bfx-app` 的各個 container
+（bot、webapi、netns、tailscale）的 ownership 與 digest、health、工具與 DR checkout 的 `current` revision。
+新資料庫在 migration 後完成 §1c 的 auth grants 與 §1d 的隔離驗證；再從 tailnet 打開 UI（§2）驗證
 uncertainty／history 頁面與告警。交易狀態與包絡依 [operations](operations.md) 驗證，
 部署本身不會 resume，也沒有 build 核准或限額期。
 

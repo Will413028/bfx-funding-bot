@@ -18,7 +18,7 @@ from fastapi.routing import APIRoute, RouteContext, iter_route_contexts
 
 from bfx_funding_bot.apps.webapi import app
 from bfx_funding_bot.core.auth import require_operator
-from bfx_funding_bot.modules.api.ingress import FE_EVENTS_PATH
+from bfx_funding_bot.modules.api.ingress import API_FALLBACK_PATH, FE_EVENTS_PATH
 
 PUBLIC_API_PATHS = frozenset({
     "/api/v1/public/proof-summary",
@@ -26,8 +26,9 @@ PUBLIC_API_PATHS = frozenset({
 })
 PROBE_PATHS = frozenset({"/health", "/ready"})
 # The ingress's own routes (9d-5): `/` redirects to the UI, /fe-events forwards browser
-# Sentry events; both are guarded by the ingress middleware's same-origin check, not auth.
-INGRESS_PATHS = frozenset({"/", FE_EVENTS_PATH})
+# Sentry events, the API fallback answers an unknown /api path with a JSON 404; none is
+# auth-guarded (the ingress middleware's same-origin check guards the writes).
+INGRESS_PATHS = frozenset({"/", FE_EVENTS_PATH, API_FALLBACK_PATH})
 # The static export's mount (present only where the image ships it); generated docs are off.
 UI_MOUNT = "/"
 DOCS_PATHS = frozenset({"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"})

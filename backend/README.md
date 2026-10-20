@@ -22,7 +22,8 @@ The web API refuses to start without the three ingress values (`IngressSettings`
 values above are fakes). There is no Tailscale Serve locally: a private route needs the
 header Serve would add, e.g.
 `-H 'Tailscale-App-Capabilities: {"github.com/Will413028/bfx-funding-bot/cap/operator":[{"user_id":"operator-1"}]}'`;
-it only binds 127.0.0.1, so a forged header locally is no risk. Set
+it only binds 127.0.0.1, so a forged header locally is no risk. A POST, PUT or DELETE also
+needs `-H 'Origin: https://localhost'` (an allowed host over https; JSON for a body). Set
 `BFX_WEBAPI_STATIC_DIR=../frontend/out` (after `pnpm build` there) to serve the UI too.
 
 ## Test

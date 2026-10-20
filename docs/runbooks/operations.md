@@ -459,7 +459,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 #### `credential_rotation_rejected`（warning）
 
 - 代表：輪替請求被拒，憑證沒有任何改動，`reason` 為：
-  - 系統自己會恢復、重送即可：`recipient_key_stale`（請求封給的是已重啟的 bot run，CLI 會封給目前這次）、`deployment_in_progress`（最新的部署列是 15 分鐘內的 `started`，部署 settle 期間重啟會讓部署判失敗）、`bot_recently_started`（這次 bot 開機未滿 10 分鐘，部署可能仍在做 health 檢查與 settle；10 分鐘後重送）、`active_credential_changed`（送出後 active 憑證已換過）、`operator_not_authorized`（operator 權限或 TOTP 失效，先修好）。
+  - 系統自己會恢復、重送即可：`recipient_key_stale`（請求封給的是已重啟的 bot run，CLI 會封給目前這次）、`deployment_in_progress`（最新的部署列是 15 分鐘內的 `started`，部署 settle 期間重啟會讓部署判失敗）、`bot_recently_started`（這次 bot 開機未滿 10 分鐘，部署可能仍在做 health 檢查與 settle；10 分鐘後重送）、`active_credential_changed`（送出後 active 憑證已換過）、`operator_not_authorized`（operator 的 membership 失效，先修好）。
   - operator 要判斷：`credential_account_mismatch`（新 key 屬於另一個 Bitfinex 帳號，確認建 key 的帳號）、`credential_reused`（這把 key 曾經用過並已 retired／revoked，請建新 key）、`invalid_credentials`（Bitfinex 拒絕這把 key）、`funding_write_required`／`withdraw_must_be_disabled`／`unexpected_write_scope:*`（調整 key 權限：只開 funding 寫入）、`account_identity_unavailable`（無法讀到 key 所屬帳號，確認 key 有 account info 讀取權限）、`sealed_payload_invalid`（密文損毀或被搬動，重送）。
 - 系統會做：不碰憑證，請求就此結案，bot 不重啟。
 - operator 判斷：依上面分類處理後重新送出（§11）。

@@ -50,6 +50,10 @@ def client(export_dir: Path) -> TestClient:
     async def thing() -> dict[str, str]:
         return {"ok": "yes"}
 
+    @app.delete("/api/v1/thing")
+    async def drop_thing() -> dict[str, str]:
+        return {"dropped": "yes"}
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -157,3 +161,32 @@ def test_fe_events_refuse_an_oversized_envelope(client: TestClient) -> None:
 def test_an_envelope_without_a_dsn_header_has_no_target() -> None:
     assert sentry_envelope_target(b"garbage\n{}", DSN) is None
     assert sentry_envelope_target(b'{"event_id":"x"}\n{}', DSN) is None
+
+
+def test_a_bodiless_same_origin_delete_needs_no_content_type(client: TestClient) -> None:
+    """The UI's DELETE carries no body and so no Content-Type; the Origin check guards it."""
+    response = client.delete("/api/v1/thing", headers={"Origin": ORIGIN})
+    assert response.status_code == 200 and response.json() == {"dropped": "yes"}
+
+
+def test_a_delete_with_a_non_json_body_is_refused(client: TestClient) -> None:
+    response = client.request("DELETE", "/api/v1/thing", content=b"a=1",
+                              headers={"Origin": ORIGIN, "Content-Type": "application/x-www-form-urlencoded"})
+    assert response.status_code == 415
+
+
+def test_a_bodiless_cross_site_delete_is_refused(client: TestClient) -> None:
+    assert client.delete("/api/v1/thing", headers={"Origin": "https://evil.example"}).status_code == 403
+
+
+def test_an_unknown_api_path_answers_json_not_the_ui(client: TestClient) -> None:
+    response = client.get("/api/v1/nope")
+    assert response.status_code == 404 and response.json() == {"detail": "not_found"}
+
+
+def test_a_dsn_with_a_path_prefix_and_port_targets_its_own_endpoint() -> None:
+    dsn = "https://key@sentry.example:9000/prefix/42"
+    envelope = b'{"dsn":"' + dsn.encode() + b'"}\n{}'
+    assert sentry_envelope_target(envelope, dsn) == "https://sentry.example:9000/prefix/api/42/envelope/"
+    other_port = b'{"dsn":"https://key@sentry.example:9001/prefix/42"}\n{}'
+    assert sentry_envelope_target(other_port, dsn) is None
