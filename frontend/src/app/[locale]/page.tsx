@@ -1,13 +1,14 @@
-import { redirect } from "next/navigation";
+"use client";
 
-type Props = {
-  params: Promise<{ locale: string }>;
-};
+import { useEffect } from "react";
+import { useRouter } from "@/i18n/navigation";
 
-// The operator UI has no public landing page, so the locale root opens the
-// overview. A static export cannot redirect; once the web API serves the
-// export, it sends `/` to the overview itself and this page goes away.
-export default async function LocaleRootPage({ params }: Props) {
-  const { locale } = await params;
-  redirect(`/${locale}/overview`);
+// The locale root opens the overview. A static export cannot redirect on the server; the
+// web API redirects `/` itself, and this covers `/<locale>/`.
+export default function LocaleRootPage() {
+  const router = useRouter();
+  useEffect(() => {
+    router.replace("/overview");
+  }, [router]);
+  return null;
 }

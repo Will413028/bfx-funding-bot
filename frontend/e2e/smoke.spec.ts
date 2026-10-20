@@ -17,11 +17,9 @@ test.describe("Smoke tests", () => {
 		await expect(page).toHaveURL(/\/en/);
 	});
 
-	test("login page loads", async ({ page }) => {
-		await page.goto("/en/login");
-		await expect(
-			page.getByRole("button", { name: /sign in|log in/i }),
-		).toBeVisible();
+	test("overview page loads", async ({ page }) => {
+		await page.goto("/en/overview/");
+		await expect(page.getByRole("navigation", { name: "Main navigation" })).toBeVisible();
 	});
 });
 
@@ -37,10 +35,9 @@ test.describe("ExchangeAccount identity contract", () => {
 });
 
 test.describe("i18n", () => {
-	test("zh-TW login page shows Chinese content", async ({ page }) => {
-		await page.goto("/zh-TW/login");
-		await expect(page.getByRole("button")).toBeVisible();
-		// URL should contain zh-TW locale
-		await expect(page).toHaveURL(/\/zh-TW\/login/);
+	test("zh-TW overview keeps its locale", async ({ page }) => {
+		await page.goto("/zh-TW/overview/");
+		await expect(page.getByRole("navigation", { name: "Main navigation" })).toBeVisible();
+		await expect(page).toHaveURL(/\/zh-TW\/overview\//);
 	});
 });

@@ -140,14 +140,14 @@ describe("apiClient.getList", () => {
 });
 
 describe("request params", () => {
-  it("sends the request to the same-origin proxy", async () => {
+  it("sends the request to the same-origin web API", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ data: [] }));
 
     const { apiClient } = await loadApiClient();
     await apiClient.get("/items");
 
     expect(mockFetch.mock.calls[0][0]).toBe(
-      `${window.location.origin}/api/proxy/items`,
+      `${window.location.origin}/api/v1/items`,
     );
   });
 

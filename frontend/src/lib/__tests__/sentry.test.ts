@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { scrubEvent, scrubText, secretValues, sentryOptions } from "../sentry";
+import { scrubEvent, scrubText, sentryOptions } from "../sentry";
 import { SENTRY_TUNNEL_ROUTE } from "../sentry-tunnel";
 
 const frontendRoot = join(__dirname, "../../..");
@@ -48,20 +48,6 @@ describe("scrubEvent", () => {
     );
   });
 
-  it("removes server secrets by value, including URL passwords", () => {
-    const secrets = secretValues({
-      BETTER_AUTH_SECRET: "fake-auth-secret-0123456789abcdef",
-      DATABASE_URL: "postgresql://bfx_webauth:fake-db-pw@postgres:5432/bfx",
-      REDIS_URL: undefined,
-    });
-    const text = scrubText(
-      "secret fake-auth-secret-0123456789abcdef, connect failed: password fake-db-pw",
-      secrets,
-    );
-    expect(text).not.toContain("fake-auth-secret");
-    expect(text).not.toContain("fake-db-pw");
-  });
-
   it("keeps ordinary text", () => {
     const text = "fUSD rate 0.00021 at 12:30:45, v1.2.3";
     expect(scrubText(text)).toBe(text);
@@ -88,56 +74,41 @@ describe("sentryOptions", () => {
     expect(options.beforeSend).toBe(scrubEvent);
   });
 
-  it("is used by every runtime's init", () => {
+  it("is used by the browser init, the only runtime of a static export", () => {
+    expect(read("instrumentation-client.ts")).toContain("sentryOptions(dsn)");
     for (const path of [
-      "instrumentation-client.ts",
+      "sentry.client.config.ts",
       "sentry.server.config.ts",
       "sentry.edge.config.ts",
+      "instrumentation.ts",
     ]) {
-      expect(read(path)).toContain("sentryOptions(dsn)");
+      expect(existsSync(join(frontendRoot, path))).toBe(false);
     }
-    // @sentry/nextjs injects this file only under webpack; Next 16 builds with Turbopack.
-    expect(existsSync(join(frontendRoot, "sentry.client.config.ts"))).toBe(
-      false,
-    );
   });
 });
 
 describe("tunnel route", () => {
-  it("is the route withSentryConfig rewrites to Sentry", () => {
-    expect(read("next.config.ts")).toContain(
-      "tunnelRoute: SENTRY_TUNNEL_ROUTE",
+  it("is where the browser sends its events", () => {
+    expect(read("instrumentation-client.ts")).toContain(
+      "tunnel: SENTRY_TUNNEL_ROUTE",
     );
   });
 
-  it("is left alone by the locale middleware, which still covers pages", () => {
-    const matcher = /matcher: \["([^"]+)"\]/.exec(read("middleware.ts"))?.[1];
-    expect(matcher).toBeDefined();
-    const matches = new RegExp(`^${matcher?.replaceAll("\\\\", "\\")}$`);
-    expect(matches.test(SENTRY_TUNNEL_ROUTE)).toBe(false);
-    expect(matches.test(`${SENTRY_TUNNEL_ROUTE}/`)).toBe(false);
-    expect(matches.test("/en/overview")).toBe(true);
-    expect(matches.test("/login")).toBe(true);
+  it("is the web API's /fe-events, which forwards to Sentry", () => {
+    const ingress = read(
+      "../backend/src/bfx_funding_bot/modules/api/ingress.py",
+    );
+    expect(ingress).toContain(`FE_EVENTS_PATH = "${SENTRY_TUNNEL_ROUTE}"`);
   });
 });
 
 describe("public build inputs", () => {
-  const envSource = read("src/lib/env.ts");
-  const schema = envSource.slice(
-    envSource.indexOf("clientEnvSchema = z.object({"),
-    envSource.indexOf("});"),
-  );
-  const publicKeys = [...schema.matchAll(/(NEXT_PUBLIC_[A-Z_]+):/g)].map(
-    (match) => match[1],
-  );
-  const dockerfile = read("Dockerfile");
+  // The UI is built inside the backend image (9d-5): backend/Dockerfile's `ui` stage.
+  const dockerfile = read("../backend/Dockerfile");
   const release = read("../.github/workflows/release.yml");
+  const publicKeys = ["NEXT_PUBLIC_SENTRY_DSN"];
 
-  it("covers the Sentry DSN", () => {
-    expect(publicKeys).toContain("NEXT_PUBLIC_SENTRY_DSN");
-  });
-
-  it("bakes every public key and the release into the image", () => {
+  it("bakes the DSN and the release into the UI stage", () => {
     for (const key of [...publicKeys, "NEXT_PUBLIC_SENTRY_RELEASE"]) {
       expect(dockerfile).toMatch(new RegExp(`^ARG ${key}$`, "m"));
       expect(dockerfile).toContain(`${key}=$${key}`);
@@ -151,5 +122,6 @@ describe("public build inputs", () => {
       expect(release).toContain(`${key}: \${{ vars.${key} }}`);
     }
     expect(release).toContain(`echo "NEXT_PUBLIC_SENTRY_RELEASE=\${REVISION}"`);
+    expect(release).toContain("build-contexts: frontend=frontend");
   });
 });

@@ -15,8 +15,8 @@ export class ApiError extends Error {
 
 // ── Base URL ──
 
-/** Every API call goes through the same-origin BFF proxy, from the browser only. */
-const API_BASE = "/api/proxy";
+/** Every API call goes to the web API that serves this UI (same origin, behind Serve). */
+const API_BASE = "/api/v1";
 
 const UUID_PATH_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

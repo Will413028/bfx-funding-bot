@@ -1,22 +1,16 @@
-import { withSentryConfig } from "@sentry/nextjs/config";
 import type { NextConfig } from "next";
 import createNextIntlPlugin from "next-intl/plugin";
-import { SENTRY_TUNNEL_ROUTE } from "./src/lib/sentry-tunnel";
 
+// A static export (9d-5): the web API serves `out/` behind Tailscale Serve, so there is
+// no Next server -- no middleware, route handlers, server actions or rewrites. Browser
+// Sentry events go to the web API's /fe-events (instrumentation-client.ts).
 const nextConfig: NextConfig = {
 	reactCompiler: true,
-	output: "standalone",
+	output: "export",
+	trailingSlash: true,
+	images: { unoptimized: true },
 };
 
 const withNextIntl = createNextIntlPlugin();
 
-export default withSentryConfig(withNextIntl(nextConfig), {
-	org: process.env.SENTRY_ORG,
-	project: process.env.SENTRY_PROJECT,
-	silent: !process.env.CI,
-	widenClientFileUpload: true,
-	tunnelRoute: SENTRY_TUNNEL_ROUTE,
-	// Upload needs a SENTRY_AUTH_TOKEN in CI and is deferred; without it the maps
-	// would only be served publicly next to the bundles.
-	sourcemaps: { disable: true },
-});
+export default withNextIntl(nextConfig);

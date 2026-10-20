@@ -6,33 +6,25 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
-    "start": "next start",
     "lint": "tsc --noEmit && biome check --error-on-warnings src/",
     "lint:e2e": "biome lint --error-on-warnings e2e/",
     "format": "biome format --write",
     "knip": "knip",
-    "auth:bootstrap-operator": "node scripts/bootstrap-operator.mjs",
-    "auth:revoke-non-operators": "node scripts/revoke-non-operators.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@better-auth/passkey": "1.6.33",
     "@hookform/resolvers": "^5.2.2",
     "@sentry/nextjs": "^10.76.0",
     "@tanstack/react-query": "^5.104.1",
     "@tanstack/react-query-devtools": "^5.91.3",
-    "better-auth": "1.6.33",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "ioredis": "5.11.1",
     "lucide-react": "^0.577.0",
     "next": "16.3.8",
     "next-intl": "^4.14.9",
     "nuqs": "^2.8.9",
-    "pg": "^8.21.0",
-    "qrcode.react": "4.2.0",
     "radix-ui": "^1.6.7",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -49,7 +41,6 @@
     "@testing-library/dom": "^10.4.2",
     "@testing-library/react": "^16.3.3",
     "@types/node": "^20",
-    "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "babel-plugin-react-compiler": "1.0.0",
@@ -61,7 +52,6 @@
   },
   "pnpm": {
     "overrides": {
-      "kysely": "0.28.17",
       "vite": "7.3.6"
     }
   }

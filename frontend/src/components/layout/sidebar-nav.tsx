@@ -5,13 +5,11 @@ import {
   Key,
   LayoutDashboard,
   LineChart,
-  LogOut,
   ScrollText,
   Settings,
 } from "lucide-react";
 import { usePathname } from "next/navigation";
-import { useLocale, useTranslations } from "next-intl";
-import { logout } from "@/app/[locale]/(auth)/actions";
+import { useTranslations } from "next-intl";
 import { Link } from "@/i18n/navigation";
 import { routing } from "@/i18n/routing";
 import { cn } from "@/lib/utils";
@@ -29,17 +27,13 @@ const navItems = [
 
 export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const t = useTranslations("nav");
-  const locale = useLocale();
   const pathname = usePathname();
 
   // Strip locale prefix for matching (e.g. /en/overview → /overview)
   const pathnameWithoutLocale = pathname.replace(localePrefix, "") || "/";
 
   return (
-    <nav
-      aria-label="Main navigation"
-      className="flex flex-1 flex-col justify-between"
-    >
+    <nav aria-label="Main navigation" className="flex flex-1 flex-col">
       <ul className="flex flex-col gap-1 px-3 py-2">
         {navItems.map((item) => {
           const isActive = pathnameWithoutLocale.startsWith(item.href);
@@ -63,17 +57,6 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
           );
         })}
       </ul>
-
-      <div className="border-t border-white/5 px-3 py-3">
-        <button
-          type="button"
-          onClick={() => logout(locale)}
-          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-white/[0.04] hover:text-foreground"
-        >
-          <LogOut className="size-4" />
-          {t("logout")}
-        </button>
-      </div>
     </nav>
   );
 }
