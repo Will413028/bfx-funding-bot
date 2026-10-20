@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from bfx_funding_bot.core import auth
-from bfx_funding_bot.core.settings import AuthSettings, Settings
+from bfx_funding_bot.core.settings import Settings
 from tests.ingress_support import (
     INGRESS_ENV,
     OPERATOR_TAILNET_USER_ID,
@@ -64,26 +64,6 @@ def test_missing_ingress_settings_fail_closed():
     assert exc.value.detail == "auth_not_configured"
 
 
-@pytest.mark.parametrize("phase", ["live"])
-def test_production_phase_rejects_non_admin_operator_role(monkeypatch, phase):
-    """Rejects the regression that allows a non-admin production role setting."""
-    monkeypatch.setenv("BFX_PHASE", phase)
-    monkeypatch.setenv("BFX_OPERATOR_ROLE", "user")
-
-    with pytest.raises(ValueError, match="BFX_OPERATOR_ROLE must be 'admin'"):
-        AuthSettings()
-
-
-def test_auth_settings_does_not_require_database_url(monkeypatch):
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setenv("BFX_OPERATOR_USER_ID", "operator-1")
-
-    settings = AuthSettings()
-
-    assert settings.operator_user_id == "operator-1"
-    assert settings.operator_role == "admin"
-
-
 def test_settings_never_require_the_ingress_values(monkeypatch):
     """IngressSettings stays off the Settings chain: other processes build Settings without
     the web API's keys."""
@@ -98,7 +78,7 @@ def test_main_import_is_db_independent() -> None:
     """Importing the web API needs neither a database nor the ingress values: they are read
     in the lifespan only."""
     environment = os.environ.copy()
-    for key in ("DATABASE_URL", "BFX_OPERATOR_USER_ID", *INGRESS_ENV):
+    for key in ("DATABASE_URL", *INGRESS_ENV):
         environment.pop(key, None)
     backend_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(

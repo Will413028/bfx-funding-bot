@@ -68,7 +68,6 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
         raise ValueError("DATABASE_URL required")
-    redis_url = os.environ.get("REDIS_URL") or None
 
     deployment_env_str = os.environ.get("BFX_DEPLOYMENT_ENV", "").strip()
     if not deployment_env_str:
@@ -264,7 +263,6 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         "book_max_down_pct": book_max_down_pct,
         "optimizer_fee_rate": optimizer_fee_rate,
         "fill_model_artifact": fill_model_artifact or None,
-        "redis_url": redis_url,
         "run_duration_hours": run_duration_h,
         "scheduler_buffer_s": scheduler_buffer_s,
     }
