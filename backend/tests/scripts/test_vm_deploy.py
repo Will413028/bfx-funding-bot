@@ -1617,7 +1617,9 @@ def test_a_sidecar_stranded_by_a_holder_restart_is_recreated_by_the_next_deploy(
     assert host.stopped == []
 
 
-def test_a_live_ingress_is_not_force_recreated(harness: Harness) -> None:
+def test_every_up_recreates_the_third_party_containers_too(harness: Harness) -> None:
+    """Compose keeps an unchanged third-party container, mounting the serve.json of the release
+    that created it -- deleted by the release prune two deploys later (measured, v5.1.4)."""
     _ingress_release(harness, REV_OLD, REV_NEW)
     host = harness.host
     for service in ("netns", "tailscale"):
@@ -1626,8 +1628,8 @@ def test_a_live_ingress_is_not_force_recreated(harness: Harness) -> None:
     host.create("tailscale", "container:" + host.meta["netns"]["Id"])
     sidecar = host.meta["tailscale"]["Id"]
     assert harness.run() == 0
-    assert "--force-recreate" not in host.calls[host.index(COMPOSE_UP)]
-    assert host.meta["tailscale"]["Id"] == sidecar                    # kept: nothing changed
+    assert "--force-recreate" in host.calls[host.index(COMPOSE_UP)]
+    assert host.meta["tailscale"]["Id"] != sidecar
 
 
 def test_a_third_party_container_on_another_image_fails_the_deploy(

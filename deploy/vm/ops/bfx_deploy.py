@@ -1698,8 +1698,7 @@ class Deployer:
                 # The env files Compose reads are the ones validated above.
                 "BFX_RUNTIME_DIR": str(self.settings.runtime_dir)}
 
-    def _compose_up(self, release: Release, target: Target, deployment_id: str,
-                    *, force_recreate: bool = False) -> None:
+    def _compose_up(self, release: Release, target: Target, deployment_id: str) -> None:
         pinned = [(target.backend_image, target.backend_digest)]
         if target.frontend_image is not None or target.frontend_digest is not None:
             pinned.append((target.frontend_image or "", target.frontend_digest or ""))
@@ -1710,44 +1709,18 @@ class Deployer:
         # is removed instead of running on, and a rollback creates it again.
         # Every service in one `up`, never a sidecar alone: Compose recreates a service that
         # joins a recreated one's network namespace in the same `up` (measured, v5.1.4), and
-        # _verify proves it (netns_stale). Compose keeps an unchanged container even in a dead
-        # namespace (a holder restarted in place, holder spike S4), so a stale one forces the
-        # recreate; otherwise _verify, then the rollback, would fail and stop the bot.
-        stale = self._stale_joiners(release)
-        if stale and not force_recreate:
-            log(f"{', '.join(stale)} in a stale network namespace; recreating every service")
-        options = ["--detach", "--no-deps", "--remove-orphans",
-                   *(["--force-recreate"] if force_recreate or stale else [])]
+        # _verify proves it (netns_stale).
+        # --force-recreate, always: the release's own services are recreated anyway (their
+        # identity env changes with every attempt), but Compose keeps an unchanged third-party
+        # container (measured, v5.1.4) -- mounting the config file of the release that created
+        # it, which _prune_releases deletes two deploys later (it then cannot start again:
+        # "no such file"), ignoring a changed serve.json, and left in a dead namespace after a
+        # holder restart (holder spike S4), where _verify then the rollback fail.
+        options = ["--detach", "--no-deps", "--remove-orphans", "--force-recreate"]
         self._check(["docker", "compose", "-p", PROJECT, "-f", str(release.compose_file),
                      "up", *options, *release.names],
                     code="compose_up_failed", timeout=600.0,
                     env=self._compose_env(target, deployment_id))
-
-    def _stale_joiners(self, release: Release) -> list[str]:
-        """The running services of `release` that join a namespace their provider no longer
-        holds (netns_stale). Nothing to judge (no joiner, a container missing or stopped,
-        docker answering nothing) is no verdict: [] -- _verify still checks after `up`."""
-        by_name = {service.name: service for service in release.services}
-        joiners = [service for service in release.services if service.joins in by_name]
-        if not joiners:
-            return []
-        containers = sorted({s.container for s in joiners} | {by_name[s.joins].container for s in joiners})
-        result = self._run(["docker", "inspect", "--type", "container", *containers], timeout=60.0)
-        try:
-            records = {str(record["Name"]).lstrip("/"): record
-                       for record in json.loads(result.stdout or "[]")}
-        except (ValueError, KeyError, TypeError):
-            return []
-        stale = []
-        for service in joiners:
-            joined, provider = records.get(service.container), records.get(by_name[service.joins].container)
-            if joined is None or provider is None:
-                continue
-            if not (joined.get("State") or {}).get("Running") or not (provider.get("State") or {}).get("Running"):
-                continue
-            if netns_stale(joined, provider):
-                stale.append(service.name)
-        return stale
 
     def _verify(self, release: Release, target: Target, deployment_id: str,
                 *, only: Sequence[str] | None = None) -> None:
@@ -1934,7 +1907,7 @@ class Deployer:
         except DeployError as exc:
             return self._finish(attempt, "failed", f"{exc.code}; running release untouched")
         try:
-            self._compose_up(release, target, attempt.attempt_id, force_recreate=True)
+            self._compose_up(release, target, attempt.attempt_id)
             self._verify(release, target, attempt.attempt_id)
             self._wait_healthy(release)
         except DeployError as exc:
