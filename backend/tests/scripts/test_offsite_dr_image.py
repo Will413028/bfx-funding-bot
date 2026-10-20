@@ -40,7 +40,8 @@ def test_tracked_pgbackrest_config_contains_no_secret_options() -> None:
 def test_production_postgres_service_uses_archive_image_and_keeps_autoheal_separate() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.bot.yml").read_text())
     # The data services only: the application is deployed as bfx-app, never from here.
-    assert set(compose["services"]) == {"postgres", "redis"}
+    assert set(compose["services"]) == {"postgres"}
+    assert set(compose["volumes"]) == {"bfx_pgdata"}
     postgres = compose["services"]["postgres"]
     assert postgres["image"] == "bfx-postgres:local"
     assert postgres["build"]["dockerfile"] == "deploy/vm/postgres/Dockerfile"
