@@ -11,7 +11,9 @@ One run:
   1. flock, so two runs never overlap;
   2. `docker buildx imagetools inspect backend:main`; stop if the ledger's newest
      successful deployment already runs that digest (or its newest attempt
-     already tried it -- a failed digest is retried only with --retry);
+     already tried it -- a failed digest is retried only with --retry). Such a
+     tick first recreates the web API alone when the sidecar's restart or
+     recreation left it in a dead network namespace (Deployer._repair_netns);
   3. read the revision and CI-run labels, require `backend:sha-<rev>` to be the
      same digest and `frontend:sha-<rev>`, when it exists, to carry the same
      revision;
@@ -39,11 +41,14 @@ One run:
   8. append the `started` ledger row (the bot reads it at boot as its own
      deployment, BFX_DEPLOYMENT_ID), then `docker compose -p bfx-app up
      --remove-orphans` with the release's services, check each container runs
-     the expected image (and, for the release's own images, identity env), wait
-     for health (bot healthz, webapi health, frontend 127.0.0.1:3001 when the
-     release has one) and a settle window;
+     the expected image (and, for the release's own images, identity env; for
+     one that joins another's network namespace, the live one), wait for health
+     (bot healthz, webapi ready -- it reads the database --, frontend
+     127.0.0.1:3001 when the release has one, any other service its compose
+     healthcheck) and a settle window;
   9. on failure without applied migrations: recreate the previous successful
-     digests (rolled_back). With applied migrations, or nothing to roll back to:
+     digests (rolled_back) if the schema is still theirs. With applied
+     migrations, or nothing to roll back to:
      stop the bot (and, after a migration path, the web API), never roll back
      (old code may not run on the new schema);
  10. on success: install <rev>'s host tooling and units (effective from the
@@ -139,6 +144,12 @@ FRONTEND = "frontend"
 # The only images a release's compose file may name besides its own backend and frontend
 # digests; pulled by digest without the registry token (the 9d tailscale sidecar).
 THIRD_PARTY_IMAGE = re.compile(r"docker\.io/tailscale/tailscale@sha256:[0-9a-f]{64}")
+# The 9d sidecar whose network namespace the web API joins from 9d-5 (`network_mode:
+# service:tailscale`; compose_policy.py pins the name from 9d-4); netns repair inspects it.
+SIDECAR_CONTAINER = "bfx-tailscale"
+NETNS_REPAIR_LIMIT = 3
+HEALTH_FORMAT = "{{if .State.Health}}{{.State.Health.Status}}{{end}}"
+_DOCKER_TIME = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z")
 # A change to how PostgreSQL is run, backed up or restored earns an isolated
 # restore test before the release goes out (plan DR bullet, Will 2026-09-25), as
 # does every pending migration and any diff that cannot be read. Hard-wired in
@@ -629,6 +640,7 @@ class ComposeService:
     container: str
     image: str
     env_files: tuple[Path, ...]
+    joins: str | None = None  # `network_mode: service:<joins>`: runs in that service's netns
 
 
 @dataclass(frozen=True, slots=True)
@@ -774,8 +786,9 @@ def release_services(
     digest or an allowlisted third-party digest; every env file must be required and be the
     service's own `<runtime dir>/<service>.env` (validated before `up`) or the release's
     live.env; the
-    bot and the web API must be there under their role names. Top-level `secrets` are
-    refused: nothing writes or rotates them (configs: release_config_files).
+    bot and the web API must be there under their role names, and any other service besides
+    the frontend must declare a compose healthcheck. Top-level `secrets` are refused: nothing
+    writes or rotates them (configs: release_config_files).
     """
     if rendered.get("name") != PROJECT:
         raise DeployError("compose_project_name")
@@ -809,7 +822,18 @@ def release_services(
             if path != runtime_dir / f"{name}.env" and path != release_dir / "live.env":
                 raise DeployError(f"compose_env_file_outside_runtime:{name}")
             env_files.append(path)
-        found.append(ComposeService(name, container, image, tuple(env_files)))
+        mode = spec.get("network_mode")
+        joins = mode.removeprefix("service:") if isinstance(mode, str) and mode.startswith("service:") \
+            else None
+        if joins is not None and joins not in services:
+            raise DeployError(f"compose_network_mode_service_missing:{name}")
+        check = spec.get("healthcheck")
+        if name not in ROLE_CONTAINERS and name != FRONTEND and not (
+                isinstance(check, dict) and check.get("test") and not check.get("disable")):
+            # Its compose healthcheck is its only probe (_probe): without one a sidecar that
+            # never joins the tailnet would pass the deploy.
+            raise DeployError(f"compose_healthcheck_missing:{name}")
+        found.append(ComposeService(name, container, image, tuple(env_files), joins))
     names = {service.name: service for service in found}
     for role, container in ROLE_CONTAINERS.items():
         if names[role].container != container:
@@ -820,6 +844,30 @@ def release_services(
             # would be validated, so refuse rather than deploy unchecked.
             raise DeployError(f"compose_env_files_not_rendered:{role}")
     return tuple(found)
+
+
+def _started_at(record: Mapping[str, Any]) -> tuple[datetime, int] | None:
+    """A container's `State.StartedAt` (RFC 3339, nanoseconds, trailing zeros trimmed)."""
+    match = _DOCKER_TIME.fullmatch(str((record.get("State") or {}).get("StartedAt", "")))
+    if match is None:
+        return None
+    return datetime.fromisoformat(match.group(1)), int((match.group(2) or "").ljust(9, "0"))
+
+
+def netns_stale(joined: Mapping[str, Any], provider: Mapping[str, Any]) -> bool:
+    """Whether a container that joined another's network namespace (`network_mode:
+    service:<X>`, which Docker records as `container:<X's Id>`) is left in one that is gone:
+    X was recreated (another Id), or restarted in place after it (same Id, new namespace).
+
+    Docker repairs neither. Compose recreates the joined container in the same `up` as X for
+    the first, never for the second (measured on Compose v5.1.4, the VM's: 9d-0 spike and
+    9e-3). An unreadable start time counts as stale.
+    """
+    mode = str((joined.get("HostConfig") or {}).get("NetworkMode", ""))
+    if mode != f"container:{provider.get('Id', '')}":
+        return True
+    joined_at, provider_at = _started_at(joined), _started_at(provider)
+    return joined_at is None or provider_at is None or provider_at > joined_at
 
 
 def release_config_files(rendered: Mapping[str, Any], release_dir: Path) -> tuple[str, ...]:
@@ -868,13 +916,21 @@ class Deployer:
         self, argv: Sequence[str], *, timeout: float, input_text: str | None = None,
         env: Mapping[str, str] | None = None,
     ) -> CommandResult:
-        return self._runner(argv, timeout=timeout, input_text=input_text, env=env)
+        """For calls whose failure is an answer: a timeout or a command that cannot run comes
+        back as a failed result (exit -1), so a hung `docker stop` is a stop that failed --
+        handled, recorded -- not a crash that leaves the attempt without its terminal row."""
+        try:
+            return self._runner(argv, timeout=timeout, input_text=input_text, env=env)
+        except CommandError as exc:
+            log(exc.code)
+            return CommandResult(-1, "", exc.code)
 
     def _check(
         self, argv: Sequence[str], *, code: str, timeout: float,
         input_text: str | None = None, env: Mapping[str, str] | None = None,
     ) -> CommandResult:
-        result = self._run(argv, timeout=timeout, input_text=input_text, env=env)
+        # A timeout raises CommandError(timed_out=True) from the runner (_one_shot cleans up).
+        result = self._runner(argv, timeout=timeout, input_text=input_text, env=env)
         if result.returncode != 0:
             tail = result.stderr.strip()[-1500:]
             log(f"{code}: `{_describe(argv)}` exited {result.returncode}: {tail}")
@@ -937,12 +993,14 @@ class Deployer:
         if view.last_success is not None and view.last_success.backend_digest == main.digest:
             self._discovery_ok()
             log(f"up to date: {view.last_success.source_revision} ({main.digest})")
+            self._repair_netns(view)
             return 0
         attempted = view.last_attempt
         if attempted is not None and attempted.backend_digest == main.digest and not settings.retry:
             self._discovery_ok()
             log(f"{main.digest} was already attempted (ledger #{attempted.id}, {attempted.outcome}); "
                 "waiting for a new release or --retry")
+            self._repair_netns(view)
             return 0
         try:
             target = self._discover(main)
@@ -1017,6 +1075,127 @@ class Deployer:
         if isinstance(state, dict) and state.get("notified"):
             self._notify("info", "bfx-deploy can identify the release again")
         path.unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------ netns repair
+
+    def _netns_state_path(self) -> Path:
+        return self.settings.state_dir / "netns-repair.json"
+
+    def _repair_netns(self, view: LedgerView) -> None:
+        """Recreate the web API alone when it is left in the sidecar's dead network namespace.
+
+        Necessary because Docker never repairs it: a sidecar restarted by its restart policy,
+        or recreated on its own, leaves the web API answering /health while reaching neither
+        the database nor Serve (9d-0 spike). Remove once the web API joins no other
+        container's namespace.
+
+        Only on a tick that deploys nothing (a deploy recreates the web API anyway), and only
+        when the last attempt left the last successful release running (deployed,
+        rolled_back): never after `failed` (a migration may be applied and the bot stopped on
+        purpose) or `started` (interrupted). A docker inspect that answers nothing is no
+        verdict: the record is kept and nothing is sent. Detection is netns_stale, never health: a short
+        database outage fails /ready with nothing to repair. The repair recreates the web API
+        only, never touches the bot and writes no ledger row; after NETNS_REPAIR_LIMIT
+        failures of one incident (the sidecar's Id and start) it stops trying until the
+        namespace is right again or the sidecar starts anew. The count lives in the state
+        directory, as discovery-failure.json does: each tick is a new process. Deleting the
+        file retries at once.
+        """
+        last = view.last_attempt
+        if view.last_success is None or last is None or last.outcome not in ("deployed", "rolled_back"):
+            return
+        try:
+            incident = self._netns_incident()
+        except DeployError as exc:
+            log(f"netns check skipped: {exc.code}")
+            return
+        path = self._netns_state_path()
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            recorded = (str(state["incident"]), int(state["failures"]), bool(state["escalated"]))
+        except (OSError, ValueError, KeyError, TypeError):
+            recorded = None
+        if incident is None:
+            if self.settings.dry_run:
+                return
+            if recorded is not None and recorded[2]:
+                self._notify("info", "bfx-webapi is in the sidecar's network namespace again")
+            path.unlink(missing_ok=True)
+            return
+        failures, escalated = recorded[1:] if recorded is not None and recorded[0] == incident \
+            else (0, False)
+        if failures >= NETNS_REPAIR_LIMIT:
+            log(f"webapi network namespace stale ({incident}); {failures} repairs failed, not retried")
+            return
+        if self.settings.dry_run:
+            log(f"dry run: webapi network namespace stale ({incident}); would recreate webapi")
+            return
+        log(f"webapi network namespace stale ({incident}); recreating webapi")
+        failure = self._recreate_webapi(view.last_success)
+        if failure is None:
+            path.unlink(missing_ok=True)
+            self._notify("info", "bfx-webapi was left in a dead network namespace; recreated it")
+            return
+        failures += 1
+        message = (f"bfx-webapi is in a dead network namespace; recreating it failed ({failure}), "
+                   f"attempt {failures}/{NETNS_REPAIR_LIMIT}; the bot is untouched")
+        if failures < NETNS_REPAIR_LIMIT:
+            self._notify("warning", message)
+        elif not escalated:
+            self._notify("critical", message + "; not retried until it recovers "
+                         f"(or delete {path})")
+            escalated = True
+        _write_private(path, json.dumps({"incident": incident, "failures": failures,
+                                         "escalated": escalated}))
+
+    def _netns_incident(self) -> str | None:
+        """`<sidecar Id>@<its StartedAt>` when the web API is in a stale namespace of the
+        sidecar; None also when there is nothing to judge: no sidecar (before 9d-4), a web API
+        on its own network (before 9d-5), or either one not running (a web API stopped on
+        purpose stays stopped; joining a stopped sidecar would fail).
+        """
+        webapi = ROLE_CONTAINERS["webapi"]
+        # Exit 1 when one is missing; the other's record is still printed.
+        result = self._run(["docker", "inspect", "--type", "container", SIDECAR_CONTAINER, webapi],
+                           timeout=60.0)
+        try:
+            records = {str(record["Name"]).lstrip("/"): record
+                       for record in json.loads(result.stdout or "[]")}
+        except (ValueError, KeyError, TypeError):
+            raise DeployError("netns_inspect_unparsable") from None
+        if result.returncode != 0 and not records:
+            # Docker not answering (or both gone) is no verdict: not "recovered" either.
+            raise DeployError("netns_inspect_failed")
+        sidecar, joined = records.get(SIDECAR_CONTAINER), records.get(webapi)
+        if sidecar is None or joined is None:
+            return None
+        if not str((joined.get("HostConfig") or {}).get("NetworkMode", "")).startswith("container:"):
+            return None
+        if not (joined.get("State") or {}).get("Running") or not (sidecar.get("State") or {}).get("Running"):
+            return None
+        if not netns_stale(joined, sidecar):
+            return None
+        return f"{sidecar.get('Id')}@{(sidecar.get('State') or {}).get('StartedAt')}"
+
+    def _recreate_webapi(self, previous: LedgerRow) -> str | None:
+        """`up --no-deps --force-recreate webapi` from the running release's compose file under
+        its own deployment id (so the identity check holds), then probe and settle; the
+        failure code, or None. Not _recreate, which recreates every service and stops the
+        bot when it fails.
+        """
+        target = self._target(previous.source_revision, previous.backend_digest,
+                              previous.frontend_digest)
+        try:
+            release = self._materialize(target, previous.attempt_id)
+            self._validate_env_files(release)
+            self._check(["docker", "compose", "-p", PROJECT, "-f", str(release.compose_file), "up",
+                         "--detach", "--no-deps", "--force-recreate", "webapi"],
+                        code="compose_up_failed", timeout=600.0,
+                        env=self._compose_env(target, previous.attempt_id))
+            self._verify(release, target, previous.attempt_id, only=("webapi",))
+        except DeployError as exc:
+            return exc.code
+        return None if self._healthy_and_settled("webapi") else "unhealthy:webapi"
 
     # ------------------------------------------------------------------ deploy
 
@@ -1206,25 +1385,27 @@ class Deployer:
         if started.returncode != 0:
             log(f"docker start {container} failed: {started.stderr.strip()[-500:]}")
             return f"start_failed; {service} stopped until a release deploys"
-        began = self._clock()
-        healthy = True
-        while not self._probe(service):
-            if self._clock() - began >= self.settings.health_timeouts[service]:
-                healthy = False
-                break
-            self._sleep(self.settings.health_interval)
-        if healthy:
-            before = self._container_state(service)
-            self._sleep(self.settings.settle_seconds)
-            healthy = (before is not None and before == self._container_state(service)
-                       and self._probe(service))
-        if healthy:
+        if self._healthy_and_settled(service):
             return "restarted"
         log(f"restarted {container} is not healthy; stopping it again")
         failed = f"{service.upper()}_STOP_FAILED"
         if self._stop(service) == failed:
             return f"unhealthy; {failed}, {service} may be running"
         return f"unhealthy; {service} stopped until a release deploys"
+
+    def _healthy_and_settled(self, service: str) -> bool:
+        """A role container answers its probe within its budget, then is still the same running
+        container and still answers after the settle window."""
+        container = ROLE_CONTAINERS[service]
+        began = self._clock()
+        while not self._probe(service, container):
+            if self._clock() - began >= self.settings.health_timeouts[service]:
+                return False
+            self._sleep(self.settings.health_interval)
+        before = self._container_state(service)
+        self._sleep(self.settings.settle_seconds)
+        return (before is not None and before == self._container_state(service)
+                and self._probe(service, container))
 
     def _container_state(self, service: str) -> str | None:
         """A container's restart count and running flag, or None when unreadable."""
@@ -1526,6 +1707,9 @@ class Deployer:
                 raise DeployError("image_reference_not_digest_pinned")
         # --remove-orphans: a service the release no longer has (the frontend from 9d-5)
         # is removed instead of running on, and a rollback creates it again.
+        # Every service in one `up`, never a sidecar alone: Compose recreates a service that
+        # joins a recreated one's network namespace in the same `up` (measured, v5.1.4), and
+        # _verify proves it (netns_stale).
         options = ["--detach", "--no-deps", "--remove-orphans",
                    *(["--force-recreate"] if force_recreate else [])]
         self._check(["docker", "compose", "-p", PROJECT, "-f", str(release.compose_file),
@@ -1533,15 +1717,22 @@ class Deployer:
                     code="compose_up_failed", timeout=600.0,
                     env=self._compose_env(target, deployment_id))
 
-    def _verify(self, release: Release, target: Target, deployment_id: str) -> None:
-        result = self._check(["docker", "inspect", "--type", "container", *release.containers],
+    def _verify(self, release: Release, target: Target, deployment_id: str,
+                *, only: Sequence[str] | None = None) -> None:
+        """Each (or each `only`) service's container runs the release, and one that joins
+        another's network namespace is in the live one."""
+        by_name = {service.name: service for service in release.services}
+        checked = [service for service in release.services if only is None or service.name in only]
+        containers = sorted({service.container for service in checked}
+                            | {by_name[service.joins].container for service in checked if service.joins})
+        result = self._check(["docker", "inspect", "--type", "container", *containers],
                              code="docker_inspect_failed", timeout=60.0)
         try:
             records = {str(record["Name"]).lstrip("/"): record for record in json.loads(result.stdout)}
         except (ValueError, KeyError, TypeError):
             raise DeployError("docker_inspect_unparsable") from None
         problems = []
-        for service in release.services:
+        for service in checked:
             record = records.get(service.container)
             if record is None:
                 problems.append(f"{service.name}:missing")
@@ -1549,20 +1740,26 @@ class Deployer:
             problems += [f"{service.name}:{m}" for m in container_mismatches(
                 record, container=service.container, image=service.image,
                 identity=identity_env(target, image=service.image, deployment_id=deployment_id))]
+            if service.joins is not None:
+                provider = records.get(by_name[service.joins].container)
+                if provider is None or netns_stale(record, provider):
+                    problems.append(f"{service.name}:netns")
         if problems:
             raise DeployError("container_release_mismatch:" + ",".join(problems))
 
-    def _probe(self, service: str) -> bool:
+    def _probe(self, service: str, container: str) -> bool:
         if service == FRONTEND:
             return self._http(self.settings.frontend_url, 5.0) == 200
         if service not in ROLE_CONTAINERS:
-            # No health endpoint declared for it: running and not restarting through the
-            # settle window is its check. 9e-3 gives the sidecar its own (TS health check),
-            # and must be the installed tool before 9d-4 adds the sidecar (gate G1).
-            return True
-        port = self.settings.healthz_port if service == "bot" else 8000
-        path = "healthz" if service == "bot" else "health"
-        result = self._run(["docker", "exec", ROLE_CONTAINERS[service], "/app/.venv/bin/python", "-c",
+            # Its compose healthcheck, which release_services requires: the 9d sidecar's
+            # TS_ENABLE_HEALTH_CHECK /healthz, 200 once the node has a tailnet address.
+            result = self._run(["docker", "inspect", "--type", "container", "--format", HEALTH_FORMAT,
+                                container], timeout=20.0)
+            return result.returncode == 0 and result.stdout.strip() == "healthy"
+        # The web API's /ready reads the database; /health answers even from a dead
+        # network namespace.
+        port, path = (self.settings.healthz_port, "healthz") if service == "bot" else (8000, "ready")
+        result = self._run(["docker", "exec", container, "/app/.venv/bin/python", "-c",
                             PROBE, f"http://127.0.0.1:{port}/{path}"], timeout=20.0)
         return result.returncode == 0
 
@@ -1578,10 +1775,11 @@ class Deployer:
 
     def _wait_healthy(self, release: Release) -> None:
         started = self._clock()
+        containers = {service.name: service.container for service in release.services}
         pending = set(release.names)
         while pending:
             for service in sorted(pending):
-                if self._probe(service):
+                if self._probe(service, containers[service]):
                     pending.discard(service)
             if not pending:
                 break
@@ -1597,7 +1795,7 @@ class Deployer:
         after = self._restart_counts(release)
         if after != before or any(not value.endswith("true") for value in after.values()):
             raise DeployError("restarted_during_settle")
-        unhealthy = [service for service in release.names if not self._probe(service)]
+        unhealthy = [service for service in release.names if not self._probe(service, containers[service])]
         if unhealthy:
             raise DeployError("unhealthy_after_settle:" + ",".join(unhealthy))
 
@@ -1634,12 +1832,22 @@ class Deployer:
                             f"{previous.source_revision}")
 
     def _rollback_to(self, previous: LedgerRow) -> None:
-        """Recreate the previous successful release under its own deployment id."""
+        """Recreate the previous successful release under its own deployment id, only onto the
+        schema it was written for.
+
+        The schema can be past it with no migration in this attempt: an earlier attempt
+        migrated and failed, then a --retry or a later release came. Its bot and web API
+        would refuse to boot (core/schema_head.py), the web API restart-looping; so it fails
+        before anything changes, as --recreate refuses: usually alembic_current_failed (the old
+        image cannot locate the newer revision), rollback_schema_mismatch when it can.
+        """
         log(f"rolling back to {previous.source_revision}")
         target = self._target(previous.source_revision, previous.backend_digest,
                               previous.frontend_digest)
         release = self._materialize(target, previous.attempt_id)
-        self._pull(release)
+        current, heads = self._schema(release, target)
+        if set(current) != set(heads):
+            raise DeployError("rollback_schema_mismatch")
         self._compose_up(release, target, previous.attempt_id)
         self._verify(release, target, previous.attempt_id)
         self._wait_healthy(release)
