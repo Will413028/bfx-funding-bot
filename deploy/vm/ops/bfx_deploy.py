@@ -1271,8 +1271,8 @@ class Deployer:
             return self._finish(attempt, "failed", f"{exc.code}{kept}")
         try:
             created = self._compose_up(release, target, attempt.attempt_id)
-            self._verify(release, target, attempt.attempt_id)
-            ingress = self._wait_healthy(release, gate_ingress=created)
+            ingress = self._verify(release, target, attempt.attempt_id, gate_ingress=created)
+            ingress += self._wait_healthy(release, gate_ingress=created)
             if self.settings.rollback_drill:
                 raise DeployError("rollback_drill")
         except DeployError as exc:
@@ -1798,34 +1798,55 @@ class Deployer:
         return reasons
 
     def _verify(self, release: Release, target: Target, deployment_id: str,
-                *, only: Sequence[str] | None = None) -> None:
+                *, only: Sequence[str] | None = None,
+                gate_ingress: Collection[str] | None = None) -> list[str]:
         """Each (or each `only`) service's container runs the release, and one that joins
-        another's network namespace is in the live one."""
+        another's network namespace is in the live one. With `gate_ingress` given, an ingress
+        service (not the bot, web API or frontend) fails it only when listed -- with the
+        ingress code, as _wait_healthy does -- and is otherwise returned as an
+        `ingress_unhealthy:<service>:<mismatch>` warning."""
         by_name = {service.name: service for service in release.services}
         checked = [service for service in release.services if only is None or service.name in only]
         containers = sorted({service.container for service in checked}
                             | {by_name[service.joins].container for service in checked if service.joins})
-        result = self._check(["docker", "inspect", "--type", "container", *containers],
-                             code="docker_inspect_failed", timeout=60.0)
+        # Exit 1 when one is missing; the others are still printed (and the missing one named).
+        result = self._run(["docker", "inspect", "--type", "container", *containers], timeout=60.0)
         try:
-            records = {str(record["Name"]).lstrip("/"): record for record in json.loads(result.stdout)}
+            records = {str(record["Name"]).lstrip("/"): record for record in json.loads(result.stdout or "[]")}
         except (ValueError, KeyError, TypeError):
             raise DeployError("docker_inspect_unparsable") from None
-        problems = []
+        if result.returncode != 0 and not records:
+            raise DeployError("docker_inspect_failed")
+        problems: dict[str, list[str]] = {}
         for service in checked:
+            found = problems.setdefault(service.name, [])
             record = records.get(service.container)
             if record is None:
-                problems.append(f"{service.name}:missing")
+                found.append("missing")
                 continue
-            problems += [f"{service.name}:{m}" for m in container_mismatches(
+            found += container_mismatches(
                 record, container=service.container, image=service.image,
-                identity=identity_env(target, image=service.image, deployment_id=deployment_id))]
+                identity=identity_env(target, image=service.image, deployment_id=deployment_id))
             if service.joins is not None:
                 provider = records.get(by_name[service.joins].container)
                 if provider is None or netns_stale(record, provider):
-                    problems.append(f"{service.name}:netns")
-        if problems:
-            raise DeployError("container_release_mismatch:" + ",".join(problems))
+                    found.append("netns")
+
+        def ingress(name: str) -> bool:
+            return gate_ingress is not None and name not in ROLE_CONTAINERS and name != FRONTEND
+
+        fatal = [f"{name}:{m}" for name, found in problems.items() for m in found if not ingress(name)]
+        if fatal:
+            raise DeployError("container_release_mismatch:" + ",".join(fatal))
+        gated = [f"{name}:{m}" for name, found in problems.items() for m in found
+                 if ingress(name) and name in (gate_ingress or ())]
+        if gated:
+            raise DeployError(INGRESS_UNHEALTHY + ",".join(gated))
+        warnings = [f"{INGRESS_UNHEALTHY}{name}:{m}" for name, found in problems.items() for m in found
+                    if ingress(name)]
+        for warning in warnings:
+            self._notify("warning", f"{warning}: the tailnet ingress is not as released; the bot is unaffected")
+        return warnings
 
     def _probe(self, service: str, container: str) -> bool:
         if service == FRONTEND:
@@ -1877,7 +1898,7 @@ class Deployer:
             elapsed = self._clock() - started
             late = sorted(s for s in pending if elapsed >= self.settings.health_timeouts.get(s, 120.0))
             if any(name in application for name in late):
-                raise DeployError("health_timeout:" + ",".join(late))
+                raise DeployError("health_timeout:" + ",".join(n for n in late if n in application))
             for name in late:                     # an ingress service: judged after the app
                 pending.discard(name)
                 ingress_late.append(name)
@@ -1977,8 +1998,9 @@ class Deployer:
         log(f"rolling back to {previous.source_revision}")
         release, target = self._rollback_release(previous)
         self._compose_up(release, target, previous.attempt_id)
-        self._verify(release, target, previous.attempt_id)
-        return self._wait_healthy(release)    # the ingress warns, never fails the rollback
+        # The ingress warns, never fails the rollback.
+        warnings = self._verify(release, target, previous.attempt_id, gate_ingress=())
+        return warnings + self._wait_healthy(release)
 
     # ------------------------------------------------------------------ recreate
 
@@ -2030,8 +2052,9 @@ class Deployer:
             return self._finish(attempt, "failed", f"{exc.code}; running release untouched")
         try:
             self._compose_up(release, target, attempt.attempt_id, force_recreate=True)
-            self._verify(release, target, attempt.attempt_id)
-            ingress = self._wait_healthy(release)    # the ingress warns, never stops the bot
+            # The ingress warns, never stops the bot.
+            ingress = self._verify(release, target, attempt.attempt_id, gate_ingress=())
+            ingress += self._wait_healthy(release)
         except DeployError as exc:
             stopped = self._stop("bot")
             return self._finish(attempt, "failed", f"unhealthy:{exc.code}; recreate has no rollback; "

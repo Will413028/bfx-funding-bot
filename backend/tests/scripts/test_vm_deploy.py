@@ -285,6 +285,7 @@ class FakeHost:
     start_fails: set[str] = field(default_factory=set)  # containers whose `docker start` fails
     compose_fail: set[str] = field(default_factory=set)
     unhealthy: set[str] = field(default_factory=set)
+    failing: set[str] = field(default_factory=set)               # services whose own probe fails
     tampered: dict[str, Callable[[dict[str, Any]], None]] = field(default_factory=dict)
     foreign: list[str] = field(default_factory=list)
     running: dict[str, tuple[str, str, str, str]] = field(default_factory=dict)
@@ -300,6 +301,7 @@ class FakeHost:
     sequence: int = 0
     sidecar_health: str = "healthy"
     crashing: set[str] = field(default_factory=set)              # services restarting in a loop
+    health_sequence: list[str] = field(default_factory=list)     # ingress health answers, in order
     heads_by_digest: dict[str, tuple[str, ...]] = field(default_factory=dict)
     known_by_digest: dict[str, set[str]] = field(default_factory=dict)  # revisions an image's scripts have
     timeouts: set[tuple[str, ...]] = field(default_factory=set)  # argv prefixes that time out
@@ -403,7 +405,8 @@ class FakeHost:
         if call[:2] == ("docker", "exec"):
             self.probes.append(call[-1])
             service = SERVICE_OF[call[2]]
-            healthy = service in self.running and self.running[service][1] not in self.unhealthy
+            healthy = service in self.running and self.running[service][1] not in self.unhealthy \
+                and service not in self.failing
             return bfx.CommandResult(0 if healthy else 1, "", "")
         if call[:2] == ("docker", "stop"):
             container = call[-1]
@@ -590,7 +593,8 @@ class FakeHost:
         if "--format" in call and call[call.index("--format") + 1] == bfx.HEALTH_FORMAT:
             assert len(names) == 1 and SERVICE_OF[names[0]] not in bfx.ROLE_CONTAINERS
             running = SERVICE_OF[names[0]] in self.running
-            return bfx.CommandResult(0, self.sidecar_health + "\n" if running else "", "")
+            status = self.health_sequence.pop(0) if self.health_sequence else self.sidecar_health
+            return bfx.CommandResult(0, status + "\n" if running else "", "")
         if "--format" in call and call[call.index("--format") + 1] == "{{.Name}} {{.Id}}":
             lines = [f"/{name} {self.meta[SERVICE_OF[name]]['Id']}" for name in names
                      if SERVICE_OF[name] in self.running or SERVICE_OF[name] in self.parked]
@@ -1806,6 +1810,65 @@ def test_a_first_deploy_with_nothing_to_roll_back_keeps_a_healthy_release(harnes
     assert harness.host.stopped == []
 
 
+def test_a_fresh_ingress_that_restarts_during_settle_is_rolled_back(harness: Harness) -> None:
+    _ingress_release(harness, REV_NEW)
+    harness.host.crashing = {"tailscale"}
+    assert harness.run() == 1
+    row = harness.ledger.last
+    assert row.outcome == "rolled_back" and row.detail.startswith("unhealthy:ingress_unhealthy:tailscale;")
+    assert harness.host.stopped == []
+
+
+def test_a_fresh_ingress_unhealthy_after_settle_is_rolled_back(harness: Harness) -> None:
+    _ingress_release(harness, REV_NEW)
+    harness.host.health_sequence = ["healthy", "healthy", "unhealthy", "unhealthy"]
+    assert harness.run() == 1
+    row = harness.ledger.last
+    assert row.outcome == "rolled_back" and row.detail.startswith("unhealthy:ingress_unhealthy:netns,tailscale;")
+
+
+def test_an_application_failure_wins_over_a_late_ingress(harness: Harness) -> None:
+    """The ingress times out first (120 s against the bot's 300 s), but the release itself is
+    broken: the failure is the application's, with its usual handling."""
+    _ingress_release(harness, REV_NEW)
+    harness.host.sidecar_health = "unhealthy"
+    harness.host.unhealthy = {NEW_B}
+    assert harness.run() == 1
+    # The web API's budget (120 s) runs out with the ingress's; the bot's (300 s) is later.
+    assert harness.ledger.last.detail.startswith("unhealthy:health_timeout:webapi;")
+
+
+def test_an_ingress_late_before_a_failing_bot_still_reports_the_bot(harness: Harness) -> None:
+    """The ingress runs out at 120 s, the bot at 300 s: the ingress is judged only once the
+    application is, so the broken bot is what fails the deploy."""
+    _ingress_release(harness, REV_NEW)
+    harness.host.sidecar_health = "unhealthy"
+    harness.host.failing = {"bot"}
+    assert harness.run() == 1
+    assert harness.ledger.last.detail.startswith("unhealthy:health_timeout:bot;")
+
+
+def test_an_ingress_not_as_released_never_fails_a_rollback(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ingress_release(harness, REV_OLD, REV_NEW)
+    _running_ingress(harness)
+    harness.host.unhealthy = {NEW_B}
+    original = harness.host._compose
+
+    def compose(call: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
+        result = original(call, env)
+        if COMPOSE_UP(call) and env is not None and env["BFX_BACKEND_DIGEST"] == OLD_B:
+            harness.host.running["tailscale"] = (TAILSCALE.replace("c" * 64, "d" * 64), "", "", "")
+        return result
+
+    monkeypatch.setattr(harness.host, "_compose", compose)
+    assert harness.run() == 1
+    row = harness.ledger.last
+    assert row.outcome == "rolled_back" and "ingress_unhealthy:tailscale:image" in row.detail
+    assert harness.host.stopped == []
+
+
 def test_a_third_party_container_on_another_image_fails_the_deploy(
     harness: Harness, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1822,7 +1885,7 @@ def test_a_third_party_container_on_another_image_fails_the_deploy(
     assert harness.run() == 1
     row = harness.ledger.last
     assert row.outcome == "rolled_back"
-    assert row.detail.startswith("unhealthy:container_release_mismatch:tailscale:image;")
+    assert row.detail.startswith("unhealthy:ingress_unhealthy:tailscale:image;")
 
 
 def test_pruning_never_removes_a_third_party_image(harness: Harness) -> None:

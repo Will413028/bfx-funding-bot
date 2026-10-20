@@ -196,13 +196,15 @@ compose 裡的 `netns`（`bfx-netns`）只持有 network namespace（只跑 `sle
 節點 `bfx-ops`、userspace、沒有 capability、沒有 port）以 `network_mode: service:netns` 加入它；9d-5 起
 webapi 也加入它。tailscaled 重啟、崩潰或單獨重建都不會換掉 namespace（計畫 D13，holder spike 實測）。
 兩者都要 compose healthcheck：`bfx-tailscale` 的 `/healthz` 在節點拿到 tailnet 位址後才回 200。
-**入口的健康狀態永遠不會讓 bot 被停**：bot、webapi、frontend 照舊把關；入口只在這次部署新建或重建了它
-（第一次部署、image 或 serve.json 改了、被 §1 第 7 步強制重建）時才把關，而且在 app 都通過之後才判斷，錯誤碼
-是 `ingress_unhealthy:<服務>`。這種失敗只在回滾真的做得到時才回滾（沒套用 migration、有上一個成功版本、上一版
+**入口的狀態不讓 bot 被停**：bot、webapi、frontend 照舊把關；入口（健康檢查，以及部署後檢查的 image、名稱、
+namespace）只在這次部署新建或重建了它（第一次部署、image 或 serve.json 改了、被 §1 第 7 步強制重建）時才把關，
+而且在 app 都通過之後才判斷，錯誤碼是 `ingress_unhealthy:<服務>[:<不符項>]`。這種失敗只在回滾真的做得到時才回滾（沒套用 migration、有上一個成功版本、上一版
 的 schema 就是現在的 schema；回到沒有入口的版本會移除它）——例如 auth key 錯、tailnet policy 沒有 `tag:bfx-ops`
 的 owner。回滾做不到時新版照樣留著（它的 app 是健康的），記 `deployed` 加 warning。其他情況（入口本來就壞、
 這次沒動到它；回滾；`--recreate`；docker 答不出容器 Id）入口不健康只在 ledger detail 記
 `warnings=ingress_unhealthy:<服務>` 並發 warning，bot 照跑。平常的部署不重建兩者（見 §1 第 7 步）。
+已知例外（機率低）：Compose 本身起不了入口容器（`compose_up_failed`，分不出是哪個服務）照一般失敗處理；只因入口而
+回滾、回滾卻在 schema 檢查之後（上一版的 `up` 或健康檢查）失敗時，照一般規則停 bot。
 Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.1:8000`），隨部署寫進 release 目錄；內容改了
 那次部署會重建全部服務讓它生效；
 9d-5 之前 webapi 不在這個 namespace，Serve 打過去是 502。
