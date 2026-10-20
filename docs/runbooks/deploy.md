@@ -238,7 +238,7 @@ sudo systemctl start bfx-deploy.timer
 | `failed`，`migration_partial_or_unverified` | schema **已變**、狀態不明，bot 與 webapi 已停 | 見下方「migration 之後」 |
 | `failed`，`ledger_started_unrecorded` | `started` 列寫不進去，container 沒動（有 migration 時 bot 與 webapi 已停：`bot and webapi stay stopped`） | 查 postgres，再 `--retry` |
 | `rolled_back` | 新版不健康、沒有 migration，已回到上一個成功的 digest（用它原本的 deployment id） | 查原因；修好出新 release，或 `--retry` 同一 digest |
-| `failed`，`rollback_failed:rollback_schema_mismatch` | 新版不健康，schema 已經不是上一個成功 release 的（之前的嘗試套用過 migration）：不回滾、什麼都沒建回來，bot 已停，webapi 維持新版 | roll forward（見下方「migration 之後」） |
+| `failed`，`rollback_failed:alembic_current_failed` 或 `rollback_failed:rollback_schema_mismatch` | 新版不健康，schema 已經不是上一個成功 release 的（之前的嘗試套用過 migration）：不回滾、什麼都沒建回來，bot 已停，webapi 維持新版 | roll forward（見下方「migration 之後」） |
 | `failed`，`unhealthy:*; migrations applied` 或 `no previous deployment` | 不能自動回滾，bfx-deploy 已停 bot；有 migration 時 webapi 也停（`bot stopped; webapi stopped`） | 見下方 |
 | 只有 `started`、沒有結束列 | 嘗試中途中斷（bfx-deploy 被殺、主機重開） | 看 `docker ps` 與 journal 判斷停在哪；之後 `--retry` |
 

@@ -1092,7 +1092,8 @@ class Deployer:
         Only on a tick that deploys nothing (a deploy recreates the web API anyway), and only
         when the last attempt left the last successful release running (deployed,
         rolled_back): never after `failed` (a migration may be applied and the bot stopped on
-        purpose) or `started` (interrupted). Detection is netns_stale, never health: a short
+        purpose) or `started` (interrupted). A docker inspect that answers nothing is no
+        verdict: the record is kept and nothing is sent. Detection is netns_stale, never health: a short
         database outage fails /ready with nothing to repair. The repair recreates the web API
         only, never touches the bot and writes no ledger row; after NETNS_REPAIR_LIMIT
         failures of one incident (the sidecar's Id and start) it stops trying until the
@@ -1103,7 +1104,11 @@ class Deployer:
         last = view.last_attempt
         if view.last_success is None or last is None or last.outcome not in ("deployed", "rolled_back"):
             return
-        incident = self._netns_incident()
+        try:
+            incident = self._netns_incident()
+        except DeployError as exc:
+            log(f"netns check skipped: {exc.code}")
+            return
         path = self._netns_state_path()
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
@@ -1157,8 +1162,10 @@ class Deployer:
             records = {str(record["Name"]).lstrip("/"): record
                        for record in json.loads(result.stdout or "[]")}
         except (ValueError, KeyError, TypeError):
-            log("netns check: docker inspect output unparsable")
-            return None
+            raise DeployError("netns_inspect_unparsable") from None
+        if result.returncode != 0 and not records:
+            # Docker not answering (or both gone) is no verdict: not "recovered" either.
+            raise DeployError("netns_inspect_failed")
         sidecar, joined = records.get(SIDECAR_CONTAINER), records.get(webapi)
         if sidecar is None or joined is None:
             return None
@@ -1830,8 +1837,9 @@ class Deployer:
 
         The schema can be past it with no migration in this attempt: an earlier attempt
         migrated and failed, then a --retry or a later release came. Its bot and web API
-        would refuse to boot (core/schema_head.py), the web API restart-looping; so that is
-        rollback_schema_mismatch before anything changes, as --recreate refuses.
+        would refuse to boot (core/schema_head.py), the web API restart-looping; so it fails
+        before anything changes, as --recreate refuses: usually alembic_current_failed (the old
+        image cannot locate the newer revision), rollback_schema_mismatch when it can.
         """
         log(f"rolling back to {previous.source_revision}")
         target = self._target(previous.source_revision, previous.backend_digest,

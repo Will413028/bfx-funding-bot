@@ -273,6 +273,7 @@ class FakeHost:
     sequence: int = 0
     sidecar_health: str = "healthy"
     heads_by_digest: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    known_by_digest: dict[str, set[str]] = field(default_factory=dict)  # revisions an image's scripts have
     timeouts: set[tuple[str, ...]] = field(default_factory=set)  # argv prefixes that time out
     probes: list[str] = field(default_factory=list)              # URLs probed with docker exec
 
@@ -472,6 +473,10 @@ class FakeHost:
         if args == ("heads",):
             return bfx.CommandResult(0, "".join(f"{h} (head)\n" for h in self._heads(call)), "")
         if args == ("current",):
+            known = self.known_by_digest.get(self._digest(call))
+            if known is not None and not set(self.current) <= known:
+                # Real alembic: an image whose scripts lack the database's revision fails.
+                return bfx.CommandResult(255, "", f"Can't locate revision identified by '{self.current[0]}'")
             return bfx.CommandResult(0, "".join(f"{c}\n" for c in self.current), "")
         if args == ("upgrade", "head"):
             if self.upgrade_result == "ok":
@@ -482,9 +487,12 @@ class FakeHost:
             return bfx.CommandResult(1, "", "boom")
         raise AssertionError(f"unexpected alembic: {args}")
 
+    @staticmethod
+    def _digest(call: tuple[str, ...]) -> str:
+        return call[call.index("/app/.venv/bin/alembic") - 1].rpartition("@")[2]
+
     def _heads(self, call: tuple[str, ...]) -> tuple[str, ...]:
-        image = call[call.index("/app/.venv/bin/alembic") - 1]
-        return self.heads_by_digest.get(image.rpartition("@")[2], self.heads)
+        return self.heads_by_digest.get(self._digest(call), self.heads)
 
     def _compose(self, call: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
         assert call[:5] == ("docker", "compose", "-p", "bfx-app", "-f")
@@ -1896,6 +1904,22 @@ def test_a_repaired_namespace_whose_web_api_is_not_ready_is_not_repaired_again(h
     assert not (harness.settings.state_dir / NETNS_STATE).exists()
 
 
+def test_a_docker_inspect_that_answers_nothing_is_no_verdict(harness: Harness) -> None:
+    _joined(harness)
+    _break(harness, "recreated")
+    harness.host.compose_fail = {OLD_B}
+    for _ in range(3):
+        harness.run()
+    path = harness.settings.state_dir / NETNS_STATE
+    recorded = path.read_text()
+    harness.host.timeouts = {NETNS_INSPECT}
+    assert harness.run() == 0
+    assert path.read_text() == recorded and len(harness.notices) == 3   # no false "recovered"
+    harness.host.timeouts = set()
+    assert harness.run() == 0
+    assert harness.host.count(_repair) == 3 and len(harness.notices) == 3
+
+
 def test_an_unreadable_repair_record_counts_as_none(harness: Harness) -> None:
     _joined(harness)
     _break(harness, "recreated")
@@ -1949,16 +1973,23 @@ def test_a_hung_probe_is_an_unhealthy_one_and_the_attempt_gets_its_terminal_row(
 # --------------------------------------------------------------------------- rollback schema
 
 
-def test_rollback_onto_a_schema_past_the_previous_release_is_refused(harness: Harness) -> None:
+@pytest.mark.parametrize(("known", "code"), [
+    ({"h1", "h2"}, "alembic_current_failed"),            # real alembic: h3 is unknown to it
+    ({"h1", "h2", "h3"}, "rollback_schema_mismatch"),    # it can read h3 but is not at it
+])
+def test_rollback_onto_a_schema_past_the_previous_release_is_refused(
+    harness: Harness, known: set[str], code: str,
+) -> None:
     # An earlier attempt migrated to h3 and failed; this one (a --retry or a later release) has
     # nothing left to migrate and is unhealthy. The previous release was written for h2.
     harness.host.heads, harness.host.current = ("h3",), ("h3",)
     harness.host.heads_by_digest = {OLD_B: ("h2",)}
+    harness.host.known_by_digest = {OLD_B: known}
     harness.host.unhealthy = {NEW_B}
     assert harness.run() == 1
     row = harness.ledger.last
     assert row.outcome == "failed"
-    assert "rollback_failed:rollback_schema_mismatch" in row.detail
+    assert f"rollback_failed:{code}" in row.detail
     host = harness.host
     assert host.count(COMPOSE_UP) == 1                  # the release's own; the old one never came back
     assert host.running["webapi"][1] == NEW_B and host.stopped == ["bfx-bot"]
