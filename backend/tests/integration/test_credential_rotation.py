@@ -38,11 +38,14 @@ from bfx_funding_bot.modules.execution.protocols import AccountContext
 from tests.pg_templates import alembic, stamp_realm
 
 from .test_ledger_schema_roles import _prepare
+from .test_operator_cli import PASSWORD, ROLE
 
 pytestmark = pytest.mark.integration
 
-ROLE = "bfx_operator"
-PASSWORD = "operator-rotation-test"
+# ROLE and PASSWORD come from test_operator_cli: the role is cluster-wide and both modules
+# build it, so with two passwords whichever template is built second breaks the other
+# module's CLI login (InvalidPasswordError under xdist).
+
 TAILNET = "4182486213003443"
 OPERATOR = TAILNET  # the caller's tailnet identity is the requester (9d-6)
 ACCOUNT = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
