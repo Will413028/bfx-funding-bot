@@ -119,15 +119,14 @@ CASE {cls}
 END
 """
 # Objects outside ``auth`` that depend on the schema or on an object in it: what CASCADE
-# would drop or alter outside the schema. Default privileges (pg_default_acl) are revoked
-# first and do not count; neither do comments or other catalogs CASCADE only tidies.
+# would drop or alter outside the schema. Every catalog counts (an operator, event trigger,
+# cast or publication member goes with CASCADE too; one without a schema counts as outside)
+# except default privileges (pg_default_acl), which are revoked first.
 _DEPENDENTS_OUTSIDE_AUTH = f"""
 WITH auth_ns AS (SELECT oid FROM pg_namespace WHERE nspname = '{AUTH}')
 SELECT DISTINCT pg_describe_object(d.classid, d.objid, 0)
 FROM pg_depend d, auth_ns
-WHERE d.classid IN ('pg_class'::regclass, 'pg_constraint'::regclass, 'pg_proc'::regclass,
-                    'pg_rewrite'::regclass, 'pg_trigger'::regclass, 'pg_attrdef'::regclass,
-                    'pg_type'::regclass, 'pg_policy'::regclass)
+WHERE d.classid <> 'pg_default_acl'::regclass
   AND {_NAMESPACE_OF.format(cls="d.refclassid", obj="d.refobjid")} = auth_ns.oid
   AND {_NAMESPACE_OF.format(cls="d.classid", obj="d.objid")} IS DISTINCT FROM auth_ns.oid
   AND NOT (d.classid = 'pg_constraint'::regclass AND d.objid = (
@@ -284,7 +283,9 @@ def upgrade() -> None:
         op.execute(f"DROP ROLE {WEBAUTH}")
         return
     # Another database of this cluster still references it (a test cluster's other databases;
-    # never production's one): the role stays, holding nothing here, and says why.
+    # never production's one): the role stays, holding nothing here and unable to log in
+    # (bfx_webauth was a LOGIN role with a password), and says why.
+    op.execute(f"ALTER ROLE {WEBAUTH} NOLOGIN PASSWORD NULL")
     listed = ", ".join(elsewhere).replace("'", "''")
     op.execute(f"DO $notice$ BEGIN RAISE NOTICE '{WEBAUTH} kept: still referenced by %', "
                f"'{listed}'; END $notice$")

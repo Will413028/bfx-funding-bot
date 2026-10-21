@@ -260,6 +260,16 @@ _OUTSIDE = {
         "AS $$ BEGIN RETURN NEW; END $$; "
         "CREATE TRIGGER touch_profiles BEFORE UPDATE ON public.user_profiles "
         "FOR EACH ROW EXECUTE FUNCTION auth.touch()"),
+    # Catalogs beyond tables and functions: CASCADE drops these without a word as well.
+    "operator": (
+        "CREATE FUNCTION auth.same(integer, integer) RETURNS boolean LANGUAGE sql "
+        "AS $$ SELECT $1 = $2 $$; "
+        "CREATE OPERATOR public.=== (LEFTARG = integer, RIGHTARG = integer, "
+        "FUNCTION = auth.same)"),
+    "event_trigger": (
+        "CREATE FUNCTION auth.on_ddl() RETURNS event_trigger LANGUAGE plpgsql "
+        "AS $$ BEGIN END $$; "
+        "CREATE EVENT TRIGGER auth_on_ddl ON ddl_command_end EXECUTE FUNCTION auth.on_ddl()"),
 }
 
 
@@ -356,6 +366,9 @@ def test_a_role_another_database_still_grants_stays_and_says_where(
     finally:
         event.remove(Pool, "connect", listen)
     assert _webauth_exists(own_cluster_db) and _state(own_cluster_db)["webauth_here"] == 0
+    with own_cluster_db.connect() as conn:
+        assert conn.execute(text("SELECT rolcanlogin, rolpassword IS NULL FROM pg_authid "
+                                 "WHERE rolname = :r"), {"r": WEBAUTH}).one() == (False, True)
     assert f"{WEBAUTH} kept: still referenced by retire_other" in notices
 
 
@@ -375,7 +388,8 @@ def test_a_database_without_the_role_upgrades(retire_auth_pg_proc) -> None:
     try:
         with engine.begin() as conn:
             _seed(conn)
-        alembic(url, "upgrade", _RETIRE)
+        # To head: a later migration that names bfx_webauth would fail here, as in production.
+        alembic(url, "upgrade", "head")
         assert _state(engine)["auth"] == 0 and _state(engine)["members"] == [_NODE]
     finally:
         engine.dispose()
