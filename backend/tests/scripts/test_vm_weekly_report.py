@@ -3,7 +3,8 @@
 deploy/vm/ops/docker-compose.weekly-report.yml holds the steps (checked in CI by
 compose_policy.py --kind weekly-report on Compose's own rendering), and
 deploy/vm/ops/bfx_weekly_report.py resolves what it runs: the ledger's deployed
-backend digest, three env values, and the compose file of its own release.
+backend digest, three env values (two from research.env, the research role's file),
+and the compose file of its own release.
 """
 from __future__ import annotations
 
@@ -283,9 +284,13 @@ def host(tmp_path: Path) -> dict[str, Path]:
     (release / ".installed").write_text(REV + "\n")
     runtime = tmp_path / "runtime"
     runtime.mkdir()
+    (runtime / "research.env").write_text(
+        "DATABASE_URL=postgresql://bfx_research:pw$x@bfx-postgres:5432/bfx\n"
+        "BFX_EXCHANGE_ACCOUNT_ID=00000000-0000-4000-8000-000000000001\n")
+    # The bot's file stays on the host; the runner never reads it.
     (runtime / "bot.env").write_text(
-        "DATABASE_URL=postgresql://bfx_bot:pw$x@bfx-postgres:5432/bfx\n"
-        "BFX_EXCHANGE_ACCOUNT_ID=00000000-0000-4000-8000-000000000001\n"
+        "DATABASE_URL=postgresql://bfx_bot:bot-pw@bfx-postgres:5432/bfx\n"
+        "BFX_EXCHANGE_ACCOUNT_ID=00000000-0000-4000-8000-000000000009\n"
         "BFX_VAULT_KEK=never-leaves-bot-env\nBFX_ADMIN_TOKEN=also-not\n")
     reports = tmp_path / "reports"
     reports.mkdir()
@@ -309,18 +314,18 @@ def test_plan_runs_the_deployed_digest_with_only_the_needed_env(host: dict[str, 
     ledger = FakeLedger([(OLD_REV, OLD_DIGEST, "deployed"), (REV, DIGEST, "deployed"),
                          ("c" * 40, "sha256:" + "9" * 64, "failed")])
     plan = _plan(host, ledger, checked)
-    assert checked == [host["runtime"] / "bot.env"]  # root 0600, as bfx-deploy checks it
+    assert checked == [host["runtime"] / "research.env"]  # root 0600, as bfx-deploy checks it
     assert plan.backend_image == f"{BACKEND}@{DIGEST}"
     assert plan.argv == ["docker", "compose", "-p", "bfx-weekly-report", "-f",
                          str(host["ops"] / "docker-compose.weekly-report.yml"),
                          "run", "--rm", "weekly-report"]
-    assert plan.env["DATABASE_URL"] == "postgresql://bfx_bot:pw$x@bfx-postgres:5432/bfx"  # literal
+    assert plan.env["DATABASE_URL"] == "postgresql://bfx_research:pw$x@bfx-postgres:5432/bfx"  # literal
     assert plan.env["BFX_EXCHANGE_ACCOUNT_ID"] == "00000000-0000-4000-8000-000000000001"
     assert plan.env["BFX_DEPLOYMENT_ENV"] == "prod"
     assert plan.env["BFX_BACKEND_DIGEST"] == DIGEST and plan.env["BFX_SOURCE_REVISION"] == REV
     assert "BFX_VAULT_KEK" not in plan.env and "BFX_ADMIN_TOKEN" not in plan.env
     described = json.dumps(plan.describe())
-    assert "bfx_bot:pw" not in described and "00000000-0000-4000-8000-000000000001" not in described
+    assert "bfx_research:pw" not in described and "00000000-0000-4000-8000-000000000001" not in described
     assert plan.describe()["steps_match_deployed_release"] is True
 
 
@@ -361,8 +366,8 @@ def test_heartbeat_path_is_the_one_backup_check_defaults_to() -> None:
     (lambda h, ledger: setattr(ledger, "rows", [(REV, DIGEST, "failed")]), "no_deployed_release"),
     (lambda h, ledger: setattr(ledger, "exists", False), "no_deployed_release"),
     (lambda h, ledger: setattr(ledger, "rows", [(REV, "latest", "deployed")]), "ledger_row_invalid"),
-    (lambda h, ledger: (h["runtime"] / "bot.env").write_text("DATABASE_URL=x\n"),
-     "env_key_missing:bot.env:BFX_EXCHANGE_ACCOUNT_ID"),
+    (lambda h, ledger: (h["runtime"] / "research.env").write_text("DATABASE_URL=x\n"),
+     "env_key_missing:research.env:BFX_EXCHANGE_ACCOUNT_ID"),
     (lambda h, ledger: (h["state"] / "releases" / REV / "live.env").unlink(),
      "env_file_unreadable:live.env"),
     (lambda h, ledger: (h["ops"] / "docker-compose.weekly-report.yml").unlink(), "weekly_compose_missing"),
@@ -382,15 +387,47 @@ def test_plan_refuses_instead_of_guessing(
     assert excinfo.value.code == code
 
 
-def test_an_unprotected_bot_env_stops_the_run(host: dict[str, Path]) -> None:
-    def refuse(path: Path) -> None:
-        raise bfx.DeployError(f"secret_file_mode_not_0600:{path.name}")
+def _checked_plan(host: dict[str, Path]) -> Any:
+    """The real secret check (bfx-deploy's), with the test user standing in for root."""
+    uid = os.getuid()
+    return weekly.build_plan(
+        ops_dir=host["ops"], ledger=FakeLedger([(REV, DIGEST, "deployed")]),
+        runtime_dir=host["runtime"], state_dir=host["state"], backend_repository=BACKEND,
+        reports_dir=host["reports"],
+        secret_check=lambda path: bfx.protected_secret_file(path, owner_uid=uid))
 
-    with pytest.raises(bfx.DeployError, match=r"secret_file_mode_not_0600:bot\.env"):
-        weekly.build_plan(ops_dir=host["ops"], ledger=FakeLedger([(REV, DIGEST, "deployed")]),
-                          runtime_dir=host["runtime"], state_dir=host["state"],
-                          backend_repository=BACKEND, reports_dir=host["reports"],
-                          secret_check=refuse)
+
+def test_a_protected_research_env_is_accepted_by_the_real_check(host: dict[str, Path]) -> None:
+    (host["runtime"] / "research.env").chmod(0o600)
+    assert _checked_plan(host).env["DATABASE_URL"].startswith("postgresql://bfx_research:")
+
+
+def test_without_research_env_the_run_stops_and_never_falls_back_to_bot_env(
+    host: dict[str, Path],
+) -> None:
+    (host["runtime"] / "research.env").unlink()
+    (host["runtime"] / "bot.env").chmod(0o600)  # a valid bot.env must not stand in
+    with pytest.raises(bfx.DeployError) as excinfo:
+        _checked_plan(host)
+    assert excinfo.value.code == "secret_file_missing:research.env"
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o400], ids=["0644", "0640", "0400"])
+def test_a_research_env_not_0600_stops_the_run(host: dict[str, Path], mode: int) -> None:
+    (host["runtime"] / "research.env").chmod(mode)
+    with pytest.raises(bfx.DeployError) as excinfo:
+        _checked_plan(host)
+    assert excinfo.value.code == "secret_file_mode_not_0600:research.env"
+
+
+def test_a_symlinked_research_env_stops_the_run(host: dict[str, Path]) -> None:
+    target = host["runtime"] / "elsewhere.env"
+    (host["runtime"] / "research.env").rename(target)
+    target.chmod(0o600)
+    (host["runtime"] / "research.env").symlink_to(target)
+    with pytest.raises(bfx.DeployError) as excinfo:
+        _checked_plan(host)
+    assert excinfo.value.code == "secret_file_missing:research.env"
 
 
 def test_defaults_are_the_deployers() -> None:

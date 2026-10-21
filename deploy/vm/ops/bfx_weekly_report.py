@@ -19,7 +19,10 @@ One run:
      (a tooling install failed after that deploy) the run goes ahead with the
      installed steps and says so;
   3. the secrets: DATABASE_URL and BFX_EXCHANGE_ACCOUNT_ID only, from
-     /opt/bfx/runtime/bot.env (root 0600, checked as bfx-deploy checks it);
+     /opt/bfx/runtime/research.env (root 0600, checked as bfx-deploy checks it).
+     Its DATABASE_URL is the research role `bfx_research` (migration 3c5e7a9b1d2f:
+     writes only the research tables, never the ledger or trading state); bot.env
+     is never read, and a missing research.env stops the run;
   4. the reports directory must already exist (a real directory, not a
      symlink): Compose 2.x and v5 disagree on how an unset create_host_path
      reads, so the runner, not Docker, guarantees nothing gets created;
@@ -70,8 +73,9 @@ PROJECT = "bfx-weekly-report"
 SERVICE = "weekly-report"
 COMPOSE_FILE = "docker-compose.weekly-report.yml"
 # The only runtime secrets the steps read (scripts/run_weekly_attribution.py,
-# scripts/report_interest.py, Settings.database_url); nothing else of bot.env.
+# scripts/report_interest.py, Settings.database_url), from the research role's own file.
 SECRET_KEYS = ("DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID")
+SECRET_FILE = "research.env"
 LIVE_KEYS = ("BFX_DEPLOYMENT_ENV",)
 # The bind source in docker-compose.weekly-report.yml (compose_policy.WEEKLY_REPORTS).
 REPORTS_DIR = Path("/home/ubuntu/bfx/reports")
@@ -153,7 +157,7 @@ def build_plan(
     live_env = state_dir / "releases" / deployed.source_revision / "live.env"
     env = {
         **bfx_deploy._base_env(),
-        **_values(runtime_dir / "bot.env", SECRET_KEYS, secret_check=secret_check),
+        **_values(runtime_dir / SECRET_FILE, SECRET_KEYS, secret_check=secret_check),
         **_values(live_env, LIVE_KEYS, secret_check=None),
         "BFX_BACKEND_IMAGE": image,
         "BFX_BACKEND_DIGEST": digest,
