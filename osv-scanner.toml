@@ -7,3 +7,29 @@
 id = "GHSA-g7r4-m6w7-qqqr"
 ignoreUntil = 2027-04-09T00:00:00Z
 reason = "baseline low: esbuild@0.27.x (frontend/pnpm-lock.yaml); fix 0.28.1 is outside vite 7 esbuild ^0.27, clears with vitest 5 / vite 8"
+
+# Published 2026-10-20, after the scanner baseline; each expires on its fix deadline.
+[[IgnoredVulns]]
+id = "PYSEC-2026-4320"
+ignoreUntil = 2026-10-27T00:00:00Z
+reason = "critical: certifi 2026.4.22 (backend/uv.lock) bundles emSign roots; fix 2026.10.19 was uploaded 2026-10-20, inside the 7-day cooldown until 2026-10-27"
+
+[[IgnoredVulns]]
+id = "GHSA-6q48-6c7w-9gw2"
+ignoreUntil = 2026-10-27T00:00:00Z
+reason = "alias of PYSEC-2026-4320 (certifi), same deadline"
+
+[[IgnoredVulns]]
+id = "GHSA-587h-7wmj-h5pm"
+ignoreUntil = 2026-11-19T00:00:00Z
+reason = "high: vite 7.3.6 launch-editor (frontend dev server, Windows only); fix vite 7.3.7, upgrade pending owner approval"
+
+[[IgnoredVulns]]
+id = "GHSA-698v-4r3x-3vcv"
+ignoreUntil = 2027-01-18T00:00:00Z
+reason = "medium: vite 7.3.6 launch-editor (frontend dev server, Windows only); fix vite 7.3.7, upgrade pending owner approval"
+
+[[IgnoredVulns]]
+id = "GHSA-r825-w8mm-5pxw"
+ignoreUntil = 2027-01-18T00:00:00Z
+reason = "medium: vite 7.3.6 launch-editor (frontend dev server); fix vite 7.3.7, upgrade pending owner approval"
