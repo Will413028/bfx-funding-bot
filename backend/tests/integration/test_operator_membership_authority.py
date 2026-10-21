@@ -40,6 +40,8 @@ from .test_trading_state_migration import _reset
 pytestmark = pytest.mark.integration
 
 _BEFORE = "36e59526f8cf"
+# The revision under test; f836fdee9bf3 (9d-7) after it deletes the non-numeric memberships.
+_9D1 = "e489261c10b1"
 _ACCOUNT = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 _OPERATOR = "operator-old-id"
 _NODE = "1234567890"
@@ -109,7 +111,8 @@ def before(pg_templates, pg_clone):
 def test_authority_survives_dropping_auth(head) -> None:
     with head.begin() as conn:
         _member(conn, _OPERATOR)
-        conn.exec_driver_sql("DROP SCHEMA auth CASCADE")
+        # f836fdee9bf3 (9d-7) dropped it at head.
+        assert conn.scalar(text("SELECT to_regnamespace('auth')")) is None
     assert _authorized(head, _OPERATOR)
     assert not _authorized(head, "stranger")
 
@@ -167,7 +170,7 @@ def test_the_migration_keeps_todays_operator(before) -> None:
         _user(conn, _OPERATOR)
         _member(conn, _OPERATOR)
         _member(conn, "not-in-auth", "viewer")
-    alembic(url, "upgrade", "head")
+    alembic(url, "upgrade", _9D1)
     assert _authorized(engine, _OPERATOR)
 
 
@@ -177,7 +180,7 @@ def test_the_migration_refuses_a_member_the_old_verdict_refused(before) -> None:
         _user(conn, _OPERATOR, totp=False)
         _member(conn, _OPERATOR)
     with pytest.raises(Exception, match="differs from the old verdict"):
-        alembic(url, "upgrade", "head")
+        alembic(url, "upgrade", _9D1)
 
 
 def test_the_migration_refuses_two_authorized_users(before) -> None:
@@ -187,7 +190,7 @@ def test_the_migration_refuses_two_authorized_users(before) -> None:
             _user(conn, user)
             _member(conn, user)
     with pytest.raises(Exception, match="more than one user"):
-        alembic(url, "upgrade", "head")
+        alembic(url, "upgrade", _9D1)
 
 
 async def _grant(engine, *, from_user: str = _OPERATOR, node: str = _NODE, role: str | None = None):

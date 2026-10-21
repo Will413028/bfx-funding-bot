@@ -1145,6 +1145,12 @@ def test_observation_query_scope_mismatch_fails(seeded) -> None:
         conn.exec_driver_sql(_observation_sql(str(uuid4()), query_id, accepted=False))
 
 
+# f836fdee9bf3 (9d-7) left bfx_webauth nothing at head, not even USAGE on public: a name it
+# cannot resolve fails before the privilege check.
+_DENIED = {"bfx_bot": "permission denied", "bfx_webapi": "permission denied",
+           "bfx_webauth": 'relation "ledger_observation" does not exist'}
+
+
 def test_roles_are_read_only_or_exact_writer(seeded) -> None:
     with seeded.connect() as conn:
         for table in LEDGER_TABLES:
@@ -1192,7 +1198,7 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
             "UPDATE ledger_observation SET accepted=false",
             "DELETE FROM ledger_observation",
         ):
-            with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
+            with seeded.begin() as conn, pytest.raises(Exception, match=_DENIED[role]):
                 conn.exec_driver_sql(f"SET LOCAL ROLE {role}")
                 conn.exec_driver_sql(statement)
     # The grants hold as written once the ledger is the authority (f6a7b8c9d0e1).
@@ -1225,7 +1231,7 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
     with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         conn.exec_driver_sql("SELECT evidence FROM ledger_observation")
-    with seeded.begin() as conn, pytest.raises(Exception, match="permission denied"):
+    with seeded.begin() as conn, pytest.raises(Exception, match=_DENIED["bfx_webauth"]):
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webauth")
         conn.exec_driver_sql("SELECT id FROM ledger_observation")
 

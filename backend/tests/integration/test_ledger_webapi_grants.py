@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import create_engine, text
 
-from tests.pg_templates import alembic
+from tests.pg_templates import alembic, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import (  # noqa: F401 - fixtures
     _D,
@@ -309,7 +309,7 @@ def test_upgrade_refuses_an_unusable_payload_amount(reversible_ledger_db, payloa
             _seed(conn, pre_verdict=True)
             _rewrite_payload(conn, payload)
         with pytest.raises(RuntimeError, match="refuse upgrade"):
-            alembic(url, "upgrade", "head")
+            upgrade_head_after_w3(url)
         with engine.connect() as conn:
             assert "intended_amount" not in _columns(conn, "submission_attempt_journal")
     finally:
@@ -358,7 +358,7 @@ def test_round_trip_drops_and_restores_the_objects(reversible_ledger_db) -> None
         with engine.begin() as conn:
             _seed(conn, pre_verdict=True)
             _rewrite_payload(conn, '{"amount": "12.5"}')
-        alembic(url, "upgrade", "head")
+        upgrade_head_after_w3(url)
         with engine.connect() as conn:
             assert _objects(conn) == dict.fromkeys(("column", "check", "index", "grant"), True)
             assert conn.scalar(

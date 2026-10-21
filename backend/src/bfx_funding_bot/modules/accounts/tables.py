@@ -331,11 +331,11 @@ class UserConfig(Base):
     the engine's only config source. This stores the customer knob for the FE
     and is groundwork for SP6 (engine consumption of per-tenant config).
 
-    Identity matches the post-SP1 world: user_id is the Better Auth auth.user.id
-    (TEXT), and — like UserProfile / APIKey — there is NO model-level ForeignKey
-    (the FK to user_profiles.user_id is enforced by the migration only, so
-    Base.metadata.create_all() in sqlite test fixtures doesn't need the auth
-    schema). id carries both a client-side uuid4 default (sqlite tests have no
+    Identity matches the post-SP1 world: user_id is the (retired) Better Auth
+    user ID (TEXT), and — like APIKey — there is NO model-level ForeignKey
+    (the FK to user_profiles.user_id is enforced by the migration only, keeping
+    Base.metadata.create_all() in sqlite test fixtures free of cross-table
+    ordering constraints). id carries both a client-side uuid4 default (sqlite tests have no
     gen_random_uuid()) and the Postgres server_default.
     """
 

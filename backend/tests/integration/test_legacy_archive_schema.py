@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.modules.execution.archived_execution_history import ArchivedExecutionHistory
 from bfx_funding_bot.modules.ledger import Scope
-from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, stamp_realm
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, stamp_realm, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import ledger_db, reversible_ledger_db  # noqa: F401 - fixtures
 from .test_trading_state_migration import _reset
@@ -377,7 +377,7 @@ def test_downgrade_restores_public_and_every_grant_exactly(
     assert _acl(reversible_ledger_db, "public") == expected
     assert _freeze(reversible_ledger_db) == expected_freeze
     reversible_ledger_db.dispose()
-    alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     alembic(url, "check")
 
 
@@ -390,7 +390,7 @@ def test_the_rows_move_unchanged_and_the_manifest_proves_it(reversible_ledger_db
         before = conn.execute(text(
             "SELECT to_jsonb(t)::text FROM public.event_log t ORDER BY event_seq")).scalars().all()
     reversible_ledger_db.dispose()
-    alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     digest = _migration()._digest
     with reversible_ledger_db.connect() as conn:
         after = conn.execute(text(

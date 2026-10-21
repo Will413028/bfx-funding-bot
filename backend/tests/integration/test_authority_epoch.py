@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from bfx_funding_bot.core.authority import AuthorityMismatch, require_ledger_authority
 from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES
-from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import (
     _A,
@@ -301,7 +301,7 @@ def test_downgrade_round_trip_restores_the_prior_state(reversible_ledger_db) -> 
             "SELECT authority FROM capital_authority_epoch ORDER BY epoch_seq DESC LIMIT 1"
         )) == "ledger"
     reversible_ledger_db.dispose()
-    alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     alembic(url, "check")
 
 

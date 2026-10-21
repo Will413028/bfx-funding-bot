@@ -31,7 +31,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, template_at
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, template_at, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import _A, _O, _P, _T, _build, _build_reversible, _prepare, _seed
 from .test_uncertainty_request_evidence import _quarantine
@@ -401,7 +401,7 @@ def test_the_upgrade_links_each_effect_to_the_request_that_caused_it(before) -> 
     url, engine = before
     with engine.begin() as conn:
         ids = _history(conn)
-    alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     alembic(url, "check")
     with engine.connect() as conn:
         states = dict(conn.execute(text("SELECT id, operator_request_id::text FROM trading_state")).all())
@@ -518,7 +518,7 @@ def test_each_precondition_refuses_the_upgrade_and_names_the_count(before, preco
     with engine.begin() as conn:
         _VIOLATIONS[precondition](conn)
     with pytest.raises(RuntimeError, match=f"{precondition}: 1"):
-        alembic(url, "upgrade", "head")
+        upgrade_head_after_w3(url)
     with engine.connect() as conn:  # nothing changed
         assert conn.scalar(text("SELECT version_num FROM alembic_version")) == LAST_REVERSIBLE_REVISION
         assert conn.scalar(text(
