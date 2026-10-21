@@ -16,13 +16,14 @@ Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration �
 
 ## 1. Database roles 與 grants
 
-三個 runtime login role，各自只拿需要的權限：
+四個 runtime login role，各自只拿需要的權限：
 
 | role | 誰用 | 權限來源 |
 |---|---|---|
-| `bfx_bot` | bot daemon、每週報告、研究用一次性容器 | 本節的 default privileges ＋ 各 migration 的收斂 grant |
+| `bfx_bot` | bot daemon | 本節的 default privileges ＋ 各 migration 的收斂 grant |
 | `bfx_webapi` | FastAPI web-API | migration `c74d45a54e46` 的 baseline（與之後各 migration）；不碰交易寫入 |
 | `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist：三個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
+| `bfx_research` | 每週報告（`bfx-weekly-report`）、研究用一次性容器 | migration `3c5e7a9b1d2f` 的精確 allowlist：只寫研究表（`funding_stats`、`perp_funding_rates`、`liquidations` 的 upsert，`attribution_weekly`、`fill_rate_stats` 的 delete＋insert，`fill_rate_model_artifacts` 的 insert），只讀每週步驟與研究腳本用到的表；不能寫 ledger、`trading_state`、outbox，讀不到憑證表 |
 
 Migration 對 role 的 grant 都包在 `IF EXISTS (SELECT FROM pg_roles ...)` 裡：role 不存在時
 migration 照樣成功但**不會補 grant**。所以順序是：先建 role，再第一次跑 migration。
@@ -40,6 +41,7 @@ SET log_min_error_statement = 'panic';
 CREATE ROLE bfx_bot LOGIN PASSWORD '<read from the secret file>';
 CREATE ROLE bfx_webapi LOGIN PASSWORD '<read from the secret file>';
 CREATE ROLE bfx_operator LOGIN PASSWORD '<read from the secret file>';
+CREATE ROLE bfx_research LOGIN PASSWORD '<read from the secret file>';
 
 -- bfx_bot：owner 之後建立的 public 表預設可 DML；受治理的表由各 migration 收斂
 -- （例如 capital_*、trading_*、deployments 只給 SELECT/INSERT 或欄位級 UPDATE）。
@@ -52,7 +54,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public
 ```
 
 `bfx_webapi` 在 public schema 不給任何 default privileges：webapi 的讀取
-清單與 outbox 欄位級 INSERT 全部由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand`）。`bfx_operator` 同樣不給 default privileges，它的權限由 migration `4ab02765a34b` 先 revoke 全部（含 schema CREATE）再 grant 回清單，`test_operator_privilege_allowlist.py` 比對 effective privileges。`bfx_webapi` 在 public 的權限是 migration `d0e1f2a3b4c6` 擁有的精確 allowlist（先 revoke 全部再 grant 回清單，含 `api_keys`、`user_configs` 與 `user_profiles` 的 UPDATE，不再需要手動 grant）；之後新增 webapi 權限的 migration 必須同步更新 `test_webapi_privilege_allowlist.py`。
+清單與 outbox 欄位級 INSERT 全部由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand`）。`bfx_operator` 同樣不給 default privileges，它的權限由 migration `4ab02765a34b` 先 revoke 全部（含 schema CREATE）再 grant 回清單，`test_operator_privilege_allowlist.py` 比對 effective privileges。`bfx_research` 也不給 default privileges：migration `3c5e7a9b1d2f` 先 revoke 它在 `public` 與 `legacy_archive` 的全部權限（含 schema CREATE）再 grant 回清單，`test_research_privilege_allowlist.py` 比對 effective privileges，`test_research_role_behaviour.py` 以這個 role 登入跑每週步驟的實際語句。`bfx_webapi` 在 public 的權限是 migration `d0e1f2a3b4c6` 擁有的精確 allowlist（先 revoke 全部再 grant 回清單，含 `api_keys`、`user_configs` 與 `user_profiles` 的 UPDATE，不再需要手動 grant）；之後新增 webapi 權限的 migration 必須同步更新 `test_webapi_privilege_allowlist.py`。
 
 ### 1b. 跑 migration
 
@@ -132,6 +134,15 @@ SELECT has_column_privilege(current_user, 'public.trading_control_requests', 're
        has_table_privilege(current_user, 'public.trading_state', 'INSERT')
          AS can_write_state;  -- true, false, false
 RESET ROLE;
+
+SET ROLE bfx_research;
+SELECT has_table_privilege(current_user, 'public.funding_stats', 'UPDATE') AS can_upsert_research,
+       has_table_privilege(current_user, 'public.trading_state', 'INSERT') AS can_write_state,
+       has_table_privilege(current_user, 'public.submission_attempt_journal', 'INSERT')
+         AS can_write_ledger,
+       has_any_column_privilege(current_user, 'public.exchange_account_credentials', 'SELECT')
+         AS can_read_credentials;  -- true, false, false, false
+RESET ROLE;
 ```
 
 ### 1e. 連線字串（寫進 secret 檔，不進 git）
@@ -141,6 +152,7 @@ RESET ROLE;
 | `bot.env` | `bfx_bot` | 範本 `deploy/vm/bot.env.example` |
 | `webapi.env` | `bfx_webapi` | 同檔還有開機必填的入口設定（缺任一個 webapi 拒絕開機）：`BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id，`tailscale whois --json <operator 裝置的 tailnet IP>` 的 `UserProfile.ID`；也是 operator membership 的 `user_id`）、`BFX_WEBAPI_ALLOWED_HOSTS=<ops-host>`、`BFX_FE_SENTRY_DSN`（與 repository variable `NEXT_PUBLIC_SENTRY_DSN` 同值），以及和 `bot.env` 同值的 `BFX_ADMIN_READ_TOKEN`（`openssl rand -hex 32`）；**不可**放 `BFX_ADMIN_TOKEN`，webapi 看到它會拒絕開機（halt token 只留在 `bot.env`） |
 | `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`）；誰在操作不寫這裡：`bfx-op` 每次以 `tailscale whois` 取得呼叫者的 tailnet user id 當 `requested_by`，CLI 只接受該帳戶的 member；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 `bfx-op` 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
+| `research.env` | `bfx_research` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`），只有這兩個 key。每週報告的 runner（`bfx_weekly_report.py`）每次執行時檢查 root 0600，不存在就拒跑、不會退回 `bot.env`；研究用一次性容器也讀它（[research-one-shot-jobs](research-one-shot-jobs.md)） |
 | `migrate.env` | `<owner>` | 只有 bfx-deploy 的 migration 與 operator one-shot 使用 |
 
 ## 2. Tailnet 入口（營運 UI）
