@@ -25,6 +25,9 @@ Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration �
 | `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist：三個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
 | `bfx_research` | 每週報告（`bfx-weekly-report`）、研究用一次性容器 | migration `3c5e7a9b1d2f` 的精確 allowlist：只寫研究表（`funding_stats`、`perp_funding_rates`、`liquidations` 的 upsert，`attribution_weekly`、`fill_rate_stats` 的 delete＋insert，`fill_rate_model_artifacts` 的 insert），只讀每週步驟與研究腳本用到的表；不能寫 ledger、`trading_state`、outbox，讀不到憑證表 |
 
+模擬 soak 另有第五個 login role `bfx_sim`，只連自己的 database `bfx_sim`、在那裡以 `bfx_bot` 身分執行；
+它的建立與 grants 在 [simulation-soak.md](simulation-soak.md) §2，不屬於新主機的必要步驟。
+
 Migration 對 role 的 grant 都包在 `IF EXISTS (SELECT FROM pg_roles ...)` 裡：role 不存在時
 migration 照樣成功但**不會補 grant**。所以順序是：先建 role，再第一次跑 migration。
 
@@ -52,6 +55,18 @@ ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public
 ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO bfx_bot;
 ```
+
+`bfx` 的 CONNECT 只給上面四個 runtime role（`<owner>` 是 superuser，不受影響）。官方 image 以 `POSTGRES_DB`
+建立的 database 預設對 PUBLIC 開放 CONNECT；收回後，同一 cluster 的其他 login role（例如模擬 soak 的 `bfx_sim`）
+連不進 `bfx`，role membership 也不會帶進來（membership 用 `INHERIT FALSE`）：
+
+```sql
+GRANT CONNECT ON DATABASE bfx TO bfx_bot, bfx_webapi, bfx_operator, bfx_research;
+REVOKE CONNECT ON DATABASE bfx FROM PUBLIC;
+```
+
+之後新增連 `bfx` 的 runtime role，要在這裡一併 `GRANT CONNECT`，否則它連不上（`permission denied for database "bfx"`）。
+還原演練的驗證 role 自己授予 CONNECT（`deploy/vm/pgbackrest/restore_drill.py`），不依賴 PUBLIC。
 
 `bfx_webapi` 在 public schema 不給任何 default privileges：webapi 的讀取
 清單與 outbox 欄位級 INSERT 全部由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand`）。`bfx_operator` 同樣不給 default privileges，它的權限由 migration `4ab02765a34b` 先 revoke 全部（含 schema CREATE）再 grant 回清單，`test_operator_privilege_allowlist.py` 比對 effective privileges。`bfx_research` 也不給 default privileges：migration `3c5e7a9b1d2f` 先 revoke 它在 `public` 與 `legacy_archive` 的全部權限（含 schema CREATE）再 grant 回清單，`test_research_privilege_allowlist.py` 比對 effective privileges，`test_research_role_behaviour.py` 以這個 role 登入跑每週步驟的實際語句。`bfx_webapi` 在 public 的權限是 migration `d0e1f2a3b4c6` 擁有的精確 allowlist（先 revoke 全部再 grant 回清單，含 `api_keys`、`user_configs` 與 `user_profiles` 的 UPDATE，不再需要手動 grant）；之後新增 webapi 權限的 migration 必須同步更新 `test_webapi_privilege_allowlist.py`。
@@ -143,6 +158,8 @@ SELECT has_table_privilege(current_user, 'public.funding_stats', 'UPDATE') AS ca
        has_any_column_privilege(current_user, 'public.exchange_account_credentials', 'SELECT')
          AS can_read_credentials;  -- true, false, false, false
 RESET ROLE;
+
+SELECT has_database_privilege('public', 'bfx', 'CONNECT') AS public_connects;  -- false
 ```
 
 ### 1e. 連線字串（寫進 secret 檔，不進 git）

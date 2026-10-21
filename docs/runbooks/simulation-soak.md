@@ -24,6 +24,7 @@
 | `<owner>` | Postgres owner role（`AGENTS.local.md`；`fresh-host-setup.md` §1） |
 | `$MIRROR` | VM 上 git mirror 的路徑（`AGENTS.local.md`） |
 | `$IMAGE` / `$REV` | 正在跑的 `bfx-bot` 的 image（`repo@sha256:…`）與它的 revision label |
+| `bfx_sim`（role） | sim runtime 的 login role（§2）：在 database `bfx_sim` 裡以 `bfx_bot` 身分執行，連不進 `bfx` |
 | `$SIM_ACCOUNT` | 這次 soak 的新 account UUID（每次 soak 重新產生，不重用） |
 | generation | 一個 `bfx-sim` container 的一生。每次部署後重啟或刻意重啟都換一代 |
 | `soak-ledger.jsonl` | orchestrator 的流水帳（`/home/ubuntu/bfx/reports/sim-soak/`）：時間、事件、舊／新 digest、migrate 結果、kill／resume |
@@ -49,16 +50,53 @@
    基準預期為 0。基準不是 0 時先查原因，不要開跑。
 4. 唯讀取得 prod 目前套用的 fUST policy 與 funding wallet 金額（sim 照抄，guard chain 的行為才一致）。
 
-## 2. 建立 `bfx_sim`（owner，一次）
+## 2. 建立 `bfx_sim` database 與 runtime role（owner，一次）
 
-與 [fresh-host-setup.md](fresh-host-setup.md) §1a 同樣的 role 與 default privileges，只是對象是新 database
-（default privileges 以 database 為單位）：
+sim 的 runtime（§5 的 container、§9 的報告）以自己的 login role **`bfx_sim`** 連線，不用 `bfx_bot` 的密碼：
+這個 credential 連不進 live 的 `bfx`。migrate 與 bootstrap 照舊用 owner（`sim-migrate.env`，與 prod 的
+`migrate.env` 相同）。
+
+- **為什麼是 `SET role` 而不是自己的 grants**：migration 把權限授給 role **名稱** `bfx_bot`，table owner 會跳過
+  owner-exempt trigger。`bfx_sim` 是 `bfx_bot` 的成員（`INHERIT FALSE, SET TRUE`），且只在 `bfx_sim` 這個
+  database 裡預設 `role = 'bfx_bot'`：每個連線一開始就是 `current_user = bfx_bot`，權限、欄位級 grant 與
+  trigger 的行為和 prod 的 bot 完全相同，程式不用改。pool 的 `RESET ALL`／`DISCARD ALL` 也回到這個預設。
+- **為什麼連不進 `bfx`**：CONNECT 在任何 role 設定生效前、以登入的 role 檢查；`INHERIT FALSE` 讓 `bfx_sim`
+  不繼承 `bfx_bot` 的 CONNECT。前提是 `bfx` 不再對 PUBLIC 開放 CONNECT（新建 database 的預設是開放的），
+  所以先把 CONNECT 改成只給列出的 runtime role（owner 是 superuser，不受影響）。
+- 驗證：`backend/tests/integration/test_sim_runtime_role.py`（真實 PG18，含連 `bfx` 被拒、帶 `-c role=bfx_bot`
+  也被拒、owner-exempt trigger 照樣擋 sim、模擬 bot 與報告以這個 credential 跑通）。
+
+**2a. `bfx` 的 CONNECT 只給 runtime role**（冪等；先 GRANT 再 REVOKE，中間沒有連不上的空窗；
+既有連線不受影響，CONNECT 只在建立連線時檢查）：
 
 ```bash
 docker exec -i bfx-postgres psql -U <owner> -d bfx -v ON_ERROR_STOP=1 <<'SQL'
-CREATE DATABASE bfx_sim OWNER <owner>;
-REVOKE CONNECT ON DATABASE bfx_sim FROM PUBLIC;   -- webapi／webauth 不連
-GRANT CONNECT ON DATABASE bfx_sim TO bfx_bot;
+BEGIN;
+GRANT CONNECT ON DATABASE bfx TO bfx_bot, bfx_webapi, bfx_operator, bfx_research;
+REVOKE CONNECT ON DATABASE bfx FROM PUBLIC;
+COMMIT;
+SELECT datacl FROM pg_database WHERE datname = 'bfx';   -- 不得再有 "=c/" 或 "=Tc/" 開頭的 PUBLIC 項目
+SQL
+```
+
+GRANT 失敗（某個 role 不存在）就停下：先照 [fresh-host-setup.md](fresh-host-setup.md) §1a 建好 role。
+
+**2b. role 與 database**。密碼當場產生，只留在這個 shell 變數，由 stdin 送進 psql（不上 argv、不進 PG log），
+§3 寫進 `sim.env` 後 `unset`：
+
+```bash
+umask 077
+SIM_DB_PASSWORD=$(openssl rand -hex 32)
+printf "SET log_statement = 'none';\nSET log_min_error_statement = 'panic';\nCREATE ROLE bfx_sim LOGIN PASSWORD '%s';\n" "$SIM_DB_PASSWORD" \
+  | docker exec -i bfx-postgres psql -U <owner> -d bfx -v ON_ERROR_STOP=1 -q
+# 已有 bfx_sim（前一次 soak 留下）：上面改成 ALTER ROLE bfx_sim LOGIN PASSWORD '%s';
+docker exec -i bfx-postgres psql -U <owner> -d bfx -v ON_ERROR_STOP=1 <<'SQL'
+GRANT bfx_bot TO bfx_sim WITH INHERIT FALSE, SET TRUE;
+CREATE DATABASE bfx_sim OWNER <owner>;            -- 已存在就跳過這一行
+REVOKE CONNECT ON DATABASE bfx_sim FROM PUBLIC;   -- webapi／operator／research 不連
+REVOKE CONNECT ON DATABASE bfx_sim FROM bfx_bot;  -- live 的 bot credential 也不連（舊版本 runbook 曾授予）
+GRANT CONNECT ON DATABASE bfx_sim TO bfx_sim;
+ALTER ROLE bfx_sim IN DATABASE bfx_sim SET role = 'bfx_bot';
 SQL
 docker exec -i bfx-postgres psql -U <owner> -d bfx_sim -v ON_ERROR_STOP=1 <<'SQL'
 GRANT USAGE ON SCHEMA public TO bfx_bot;
@@ -69,7 +107,27 @@ ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public
 SQL
 ```
 
+`bfx_sim` 的 default privileges 仍授給 `bfx_bot`（與 [fresh-host-setup.md](fresh-host-setup.md) §1a 相同，
+default privileges 以 database 為單位）：sim 的 session 就是 `bfx_bot`，權限來源與 prod 一致。
+
+**2c. 驗證（留輸出當 evidence）**：
+
+```bash
+docker exec -i bfx-postgres psql -U <owner> -d bfx -v ON_ERROR_STOP=1 -At <<'SQL'
+SELECT has_database_privilege('bfx_sim', 'bfx', 'CONNECT')      AS sim_reaches_live,  -- f
+       has_database_privilege('bfx_sim', 'bfx_sim', 'CONNECT')  AS sim_reaches_sim,   -- t
+       pg_has_role('bfx_sim', 'bfx_bot', 'USAGE')               AS sim_inherits_bot,  -- f
+       pg_has_role('bfx_sim', 'bfx_bot', 'SET')                 AS sim_becomes_bot,   -- t
+       has_database_privilege('bfx_bot', 'bfx', 'CONNECT')      AS bot_reaches_live;  -- t
+SQL
+```
+
+任何一欄不同就停下，不要寫 `sim.env`。§3 寫完後再以 `sim.env` 的 credential 實際連一次（§5 開機前）：連 `bfx`
+必須是 `permission denied for database "bfx"`，連 `bfx_sim` 的 `SELECT session_user, current_user` 必須是
+`bfx_sim|bfx_bot`（指令見 §4.5）。
+
 pgBackRest 備份整個 cluster，`bfx_sim` 存在期間也在備份與還原演練之內（stanza 以名稱檢查，不以 database）。
+還原演練的驗證 role 自己 `GRANT CONNECT ON DATABASE`，不依賴 PUBLIC；migration 以 owner（superuser）執行，也不受 2a 影響。
 
 ## 3. Secret env 檔（root 寫入，不印出）
 
@@ -81,17 +139,23 @@ SIM_ACCOUNT=$(cat /proc/sys/kernel/random/uuid)
 sed -n 's#^\(DATABASE_URL=[^ ]*/\)bfx$#\1bfx_sim#p' /opt/bfx/runtime/migrate.env > /opt/bfx/runtime/sim-migrate.env
 grep -c '^DATABASE_URL=.*/bfx_sim$' /opt/bfx/runtime/sim-migrate.env          # 必須印 1
 
-# bfx_bot：sim container 與報告用。sim 專用 admin token，全新 account
-{ sed -n 's#^\(DATABASE_URL=postgresql[^:/]*://bfx_bot:[^ ]*/\)bfx$#\1bfx_sim#p' /opt/bfx/runtime/bot.env
+# bfx_sim：sim container 與報告用（§2b 的密碼；URL 的 host 與 scheme 照抄 bot.env）。
+# 密碼經環境變數交給 awk，不上 argv。sim 專用 admin token，全新 account
+export SIM_DB_PASSWORD
+{ awk '/^DATABASE_URL=postgresql[^:\/]*:\/\/bfx_bot:[^@ ]*@[^\/ ]*\/bfx$/ {
+         sub(/:\/\/bfx_bot:[^@]*@/, "://bfx_sim:" ENVIRON["SIM_DB_PASSWORD"] "@"); sub(/\/bfx$/, "/bfx_sim"); print }' \
+      /opt/bfx/runtime/bot.env
   printf 'BFX_ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)"
   printf 'BFX_EXCHANGE_ACCOUNT_ID=%s\n' "$SIM_ACCOUNT"
   printf 'BFX_SIM_INITIAL_WALLETS=UST:%s\n' "<prod funding wallet 的整數金額>"
   printf 'BFX_SIM_FAULTS=%s\n' "unknown_5xx=0.01,unknown_5xx_at=1,unknown_placed_lost=0.005,history_error=0.005,seed=1"
 } > /opt/bfx/runtime/sim.env
-grep -c '^DATABASE_URL=postgresql[^:/]*://bfx_bot:.*/bfx_sim$' /opt/bfx/runtime/sim.env   # 必須印 1
+unset SIM_DB_PASSWORD
+grep -c '^DATABASE_URL=postgresql[^:/]*://bfx_sim:[0-9a-f]\{64\}@.*/bfx_sim$' /opt/bfx/runtime/sim.env   # 必須印 1
+grep -c 'bfx_bot' /opt/bfx/runtime/sim.env                                                          # 必須印 0
 ```
 
-- 兩個 `grep -c` 不是 1（例如 URL 帶 query string 使 `sed` 沒有輸出）就停下，不要繼續。`bot.env` 的 scheme 是
+- `grep -c` 的結果不符（例如 URL 帶 query string 使 `sed`／`awk` 沒有輸出）就停下，不要繼續。`bot.env` 的 scheme 是
   `postgresql+asyncpg`，所以 pattern 寫成 `postgresql[^:/]*://`。
 - `sim.env` **不得**含 `BFX_VAULT_KEK`（simulated 開機會拒絕）、`TELEGRAM_*`（sim 的告警只進 log，由 orchestrator
   每 15 分鐘檢查、每日報告；`[shadow]` 噪音不進 prod 頻道）、`BFX_OPERATOR_USER_ID`、`BFX_DEPLOYMENT_ID`
@@ -165,6 +229,32 @@ docker run --rm --name bfx-sim-bootstrap --pull=never --read-only \
 bot 一筆都不送，而 D3 的每一條安全門檻對一個閒置的 bot 都成立**（這就是活動下限存在的原因）。
 `--activate` 只在 scope 完全沒有狀態列時寫入 `ACTIVE`；已有任何一列（包括 HALT）都不動，
 輸出會是 `kept_active`／`kept_halted`。腳本從不恢復 HALT。
+
+### 4.5 以 `sim.env` 的 credential 連線檢查（§5 第一次啟動前）
+
+§2c 的實際連線。URL 只在 container 內讀，不印出：
+
+```bash
+for DB in bfx bfx_sim; do
+  docker run --rm --pull=never --read-only --user 1000:1000 --cap-drop=ALL \
+    --security-opt=no-new-privileges --network bfx_default --env-file /opt/bfx/runtime/sim.env --env DB="$DB" \
+    --entrypoint /app/.venv/bin/python "$IMAGE" -c '
+import asyncio, os, asyncpg
+url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg", "postgresql").rsplit("/", 1)[0] + "/" + os.environ["DB"]
+async def main():
+    try:
+        c = await asyncpg.connect(url)
+    except asyncpg.InsufficientPrivilegeError as e:
+        print(os.environ["DB"], "refused:", e); return
+    print(os.environ["DB"], "|".join(await c.fetchrow("SELECT session_user, current_user"))); await c.close()
+asyncio.run(main())'
+done
+# 必須印：bfx refused: permission denied for database "bfx"  以及  bfx_sim bfx_sim|bfx_bot
+```
+
+不是這兩行就停下，不要啟動：`bfx` 連得進去表示 §2a 沒有生效；`bfx_sim|bfx_sim` 表示 §2b 的
+`IN DATABASE ... SET role` 或 membership 的 `SET TRUE` 缺了（sim 會以沒有任何權限的 `bfx_sim` 執行，處處
+`permission denied`）。
 
 ## 5. 啟動
 
@@ -334,5 +424,8 @@ docker run --rm --name bfx-sim-report --pull=never --read-only \
 
 1. 照 §7 的順序存最後一代的 `/metrics`、`docker stop`、存 log、`docker rm bfx-sim`。
 2. 跑最終報告（§9），把 PASS／FAIL 與證據數字記進 plan 的 Progress，作為 S1-7 入場證據。
-3. `rm /opt/bfx/runtime/sim.env /opt/bfx/runtime/sim-migrate.env`。
+3. `rm /opt/bfx/runtime/sim.env /opt/bfx/runtime/sim-migrate.env`，再收回 sim credential 的登入（可逆；下次 soak 在 §2b 以
+   `ALTER ROLE bfx_sim LOGIN PASSWORD` 重設）：
+   `docker exec bfx-postgres psql -U <owner> -d bfx -c 'ALTER ROLE bfx_sim NOLOGIN PASSWORD NULL'`。
+   role、membership 與 `bfx_sim` 的 CONNECT 隨 database 留著；§2a 的 `bfx` CONNECT 設定是長期設定，不還原。
 4. `bfx_sim` 先保留到報告被接受；`DROP DATABASE bfx_sim` 是破壞性動作，**先問 Will**（也可以留給 S1-7 之後的回歸 soak）。
