@@ -1,0 +1,657 @@
+{
+  "profile": {
+    "status": 200,
+    "body": {
+      "data": {
+        "userId": "user_abc",
+        "email": "will@example.com",
+        "role": "operator"
+      }
+    }
+  },
+  "exchange_accounts": {
+    "status": 200,
+    "body": {
+      "data": [
+        {
+          "exchangeAccountId": "550e8400-e29b-41d4-a716-446655440000",
+          "venue": "bitfinex",
+          "label": "Primary",
+          "lifecycleStatus": "halted",
+          "role": "owner"
+        }
+      ]
+    }
+  },
+  "credentials": {
+    "status": 200,
+    "body": {
+      "data": [
+        {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "exchangeAccountId": "550e8400-e29b-41d4-a716-446655440000",
+          "label": "main",
+          "apiKey": "pub-key-1",
+          "apiSecret": "****",
+          "status": "verified",
+          "createdAt": "2026-10-01T08:30:00+00:00",
+          "verifiedAt": "2026-10-02T09:45:00+00:00",
+          "lastVerifyError": null
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000002",
+          "exchangeAccountId": "550e8400-e29b-41d4-a716-446655440000",
+          "label": "old",
+          "apiKey": "pub-key-1",
+          "apiSecret": "****",
+          "status": "revoked",
+          "createdAt": "2026-10-01T08:30:00+00:00",
+          "verifiedAt": null,
+          "lastVerifyError": "bad nonce"
+        }
+      ]
+    }
+  },
+  "attribution_weekly": {
+    "status": 200,
+    "body": {
+      "data": [
+        {
+          "cell": "fUST_a30",
+          "weekStartMs": 1782691200000,
+          "weekEndMs": 1783296000000,
+          "nFills": 2,
+          "grossInterestUsdt": "0.2",
+          "netInterestUsdt": "0.17",
+          "capitalDays": "1000",
+          "realizedAprNetPct": "6.205",
+          "baselineCloseAprNetPct": "6.205",
+          "baselineFrrAprNetPct": null,
+          "baselineFrrUtilAprNetPct": "4.34"
+        },
+        {
+          "cell": "fUST_a30",
+          "weekStartMs": 1783296000000,
+          "weekEndMs": 1783900800000,
+          "nFills": 2,
+          "grossInterestUsdt": "0.2",
+          "netInterestUsdt": "0.17",
+          "capitalDays": "1000",
+          "realizedAprNetPct": null,
+          "baselineCloseAprNetPct": "6.205",
+          "baselineFrrAprNetPct": null,
+          "baselineFrrUtilAprNetPct": "4.34"
+        }
+      ]
+    }
+  },
+  "config_draft_get": {
+    "status": 200,
+    "body": {
+      "data": {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "exchangeAccountId": "550e8400-e29b-41d4-a716-446655440000",
+        "config": {
+          "currency": "fUST",
+          "amount": {
+            "min": 150.0,
+            "max": 5000.0
+          },
+          "rate": {
+            "min": 0.0001,
+            "max": 0.002
+          },
+          "period": {
+            "min": 2.0,
+            "max": 30.0
+          },
+          "autoRenew": true
+        },
+        "revision": 3,
+        "source": "operator",
+        "createdAt": "2026-10-01T08:30:00+00:00",
+        "updatedAt": "2026-10-02T09:45:00+00:00"
+      }
+    }
+  },
+  "config_draft_put": {
+    "status": 200,
+    "body": {
+      "data": {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "exchangeAccountId": "550e8400-e29b-41d4-a716-446655440000",
+        "config": {
+          "currency": "fUSD",
+          "amount": {
+            "min": 200.0,
+            "max": 1000.0
+          },
+          "rate": {
+            "min": 0.00015,
+            "max": 0.001
+          },
+          "period": {
+            "min": 2.0,
+            "max": 7.0
+          },
+          "autoRenew": false
+        },
+        "revision": 3,
+        "source": "operator",
+        "createdAt": "2026-10-01T08:30:00+00:00",
+        "updatedAt": "2026-10-02T09:45:00+00:00"
+      }
+    }
+  },
+  "funding_status": {
+    "status": 200,
+    "body": {
+      "data": {
+        "phase": "live",
+        "account_id": "550e8400-e29b-41d4-a716-446655440000",
+        "deployment_environment": "prod",
+        "configured_cells": [
+          {
+            "symbol": "fUST",
+            "cell": "fUST_a30",
+            "strategy": "mean_reversion",
+            "period": "a30"
+          }
+        ],
+        "process_started_at": "2026-10-01T08:00:00+00:00",
+        "halt": {
+          "halted": false,
+          "reason": null,
+          "guard_installed": true,
+          "note": null,
+          "sources": {
+            "persisted": null
+          },
+          "history": []
+        },
+        "deployment": {
+          "change_class": "code"
+        },
+        "guards": [
+          {
+            "name": "manual_kill"
+          }
+        ],
+        "symbols": {
+          "fUSD": {
+            "capital_available": false,
+            "reason": "policy_disabled",
+            "policy_revision": 2,
+            "policy_digest": "d2",
+            "policy": {
+              "enabled": true,
+              "reserve_amount": "100",
+              "allocation_mode": "all_available",
+              "max_cell_fraction": "0.70",
+              "max_offer_amount": null,
+              "envelope": null
+            }
+          },
+          "fUST": {
+            "capital_available": true,
+            "policy_revision": 5,
+            "policy_digest": "d5",
+            "basis_token": "b5",
+            "policy": {
+              "enabled": true,
+              "reserve_amount": "100",
+              "allocation_mode": "all_available",
+              "max_cell_fraction": "0.70",
+              "max_offer_amount": null,
+              "envelope": null
+            },
+            "available_balance": "9007199254740993.123456789",
+            "unreflected_commitments": "0.000000001",
+            "total_capital": "1200.5",
+            "spendable": "1100.5",
+            "unattributed_credit_exposure": "0",
+            "cells": {
+              "fUST_a30": {
+                "spendable": "1100.5",
+                "cell_limit": "840.35",
+                "cell_headroom": "840.35",
+                "max_new_offer": "840.35",
+                "reason": null
+              }
+            }
+          }
+        },
+        "last_submit_attempt": null,
+        "trading_readiness": {
+          "trading_ready": true,
+          "reason": null
+        },
+        "dry_run": {
+          "account_id": "550e8400-e29b-41d4-a716-446655440000",
+          "deployment_environment": "prod",
+          "would_submit_any": false,
+          "symbols": {
+            "fUST": {
+              "would_submit": false,
+              "blocked_by": "manual_kill",
+              "cells": {
+                "fUST_a30": {
+                  "would_submit": false,
+                  "blocked_by": "manual_kill"
+                }
+              },
+              "guards": [
+                {
+                  "name": "manual_kill",
+                  "allowed": false,
+                  "reason": "halted",
+                  "internal_error": false
+                }
+              ],
+              "decision": {
+                "decision_outcome": "POST",
+                "symbol": "fUST",
+                "offer_amount_usdt": "150",
+                "offer_rate": "0.0002",
+                "offer_duration_days": 2
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "positions": {
+    "status": 200,
+    "body": {
+      "data": [
+        {
+          "symbol": "fUSD",
+          "available": "0",
+          "offered": "0",
+          "lent": "0",
+          "unattributedLent": null,
+          "nCredits": null,
+          "lastUpdatedMs": 1000,
+          "lastReconciledAtMs": null
+        },
+        {
+          "symbol": "fUST",
+          "available": "11.5",
+          "offered": "22.25",
+          "lent": "2314.03",
+          "unattributedLent": "4",
+          "nCredits": 3,
+          "lastUpdatedMs": 1000,
+          "lastReconciledAtMs": 2000
+        }
+      ]
+    }
+  },
+  "offers": {
+    "status": 200,
+    "body": {
+      "data": [
+        {
+          "offerKey": "o-2",
+          "venueOfferId": null,
+          "state": "pending",
+          "symbol": "fUST",
+          "sizeUsdt": "100",
+          "occurredAtMs": 1002,
+          "lastUpdatedMs": 2002
+        },
+        {
+          "offerKey": "o-1",
+          "venueOfferId": "v1",
+          "state": "claimed",
+          "symbol": "fUST",
+          "sizeUsdt": "1000",
+          "occurredAtMs": 1001,
+          "lastUpdatedMs": 2001
+        }
+      ]
+    }
+  },
+  "executions": {
+    "status": 200,
+    "body": {
+      "data": [
+        {
+          "eventKey": "j:3",
+          "eventType": "ORDER_FILL",
+          "occurredAtMs": 3000,
+          "symbol": "fUST",
+          "venueOfferId": "v1",
+          "cid": null,
+          "amount": "100.5",
+          "rate": 0.00017
+        },
+        {
+          "eventKey": "j:2",
+          "eventType": "SUBMIT_OUTCOME_UNKNOWN",
+          "occurredAtMs": 2000,
+          "symbol": "fUST",
+          "venueOfferId": null,
+          "cid": 42,
+          "amount": null,
+          "rate": null
+        }
+      ],
+      "pagination": {
+        "hasMore": true,
+        "nextBefore": "cursor-2"
+      }
+    }
+  },
+  "public_proof_summary": {
+    "status": 200,
+    "body": {
+      "data": {
+        "weeks": [
+          {
+            "weekStartMs": 1782691200000,
+            "realizedAprNetPct": "6.205",
+            "baselineFrrUtilAprNetPct": "4.34"
+          },
+          {
+            "weekStartMs": 1783296000000,
+            "realizedAprNetPct": "6.205",
+            "baselineFrrUtilAprNetPct": "4.34"
+          }
+        ],
+        "asOf": "2026-10-02T09:45:00"
+      }
+    }
+  },
+  "trading_control": {
+    "status": 200,
+    "body": {
+      "data": {
+        "trading_state": {
+          "id": 9,
+          "state": "HALTED",
+          "cause": "operator",
+          "actor": "user_abc",
+          "reason": "venue incident",
+          "at_ms": 1760000004000
+        },
+        "cancel_all": [
+          {
+            "currency": "UST",
+            "phase": "acknowledged",
+            "detail": null,
+            "at_ms": 1760000004500
+          },
+          {
+            "currency": "USD",
+            "phase": "requested",
+            "detail": null,
+            "at_ms": 1760000004400
+          }
+        ],
+        "running": {
+          "backend_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "source_revision": "dddddddddddddddddddddddddddddddddddddddd"
+        },
+        "latest_deployment": {
+          "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "backend_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "finished_at": "2026-10-02T09:45:00"
+        },
+        "requests": [
+          {
+            "request_id": "33333333-3333-4333-8333-333333333333",
+            "action": "kill",
+            "reason": "venue incident",
+            "requested_by": "user_abc",
+            "created_at_ms": 1760000000000,
+            "state": "applied",
+            "processed_at_ms": 1760000005000,
+            "outcome_reason": null
+          }
+        ],
+        "currencies": [
+          {
+            "symbol": "fUSD",
+            "revision": 2,
+            "policy_error": "policy_unreadable",
+            "enabled": null,
+            "max_offer_amount": null,
+            "envelope": null,
+            "requests": []
+          },
+          {
+            "symbol": "fUST",
+            "revision": 5,
+            "policy_error": null,
+            "enabled": true,
+            "max_offer_amount": "2500",
+            "envelope": {
+              "min_period_days": 2,
+              "max_period_days": 30,
+              "max_open_offers": 4,
+              "rate_floor_ratio": "0.9",
+              "min_rate_apr": "4.5"
+            },
+            "requests": [
+              {
+                "request_id": "44444444-4444-4444-8444-444444444444",
+                "symbol": "fUST",
+                "action": "disable",
+                "reason": "pause fUST",
+                "requested_by": "user_abc",
+                "created_at_ms": 1760000010000,
+                "state": "rejected",
+                "processed_at_ms": 1760000012000,
+                "outcome_reason": "policy_unchanged"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "kill": {
+    "status": 202,
+    "body": {
+      "data": {
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "action": "kill",
+        "state": "requested"
+      }
+    }
+  },
+  "currency_disable": {
+    "status": 202,
+    "body": {
+      "data": {
+        "request_id": "44444444-4444-4444-8444-444444444444",
+        "symbol": "fUST",
+        "action": "disable",
+        "state": "requested"
+      }
+    }
+  },
+  "currency_request": {
+    "status": 200,
+    "body": {
+      "data": {
+        "request_id": "44444444-4444-4444-8444-444444444444",
+        "symbol": "fUST",
+        "action": "disable",
+        "reason": "pause fUST",
+        "requested_by": "user_abc",
+        "created_at_ms": 1760000010000,
+        "state": "rejected",
+        "processed_at_ms": 1760000012000,
+        "outcome_reason": "policy_unchanged"
+      }
+    }
+  },
+  "trading_request": {
+    "status": 200,
+    "body": {
+      "data": {
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "action": "kill",
+        "reason": "venue incident",
+        "requested_by": "user_abc",
+        "created_at_ms": 1760000000000,
+        "state": "applied",
+        "processed_at_ms": 1760000005000,
+        "outcome_reason": null
+      }
+    }
+  },
+  "uncertainties": {
+    "status": 200,
+    "body": {
+      "data": [
+        {
+          "uncertaintyId": "55555555-5555-4555-8555-555555555555",
+          "kind": "submit_outcome_unknown",
+          "symbol": "fUST",
+          "intendedAmount": "150.50",
+          "state": "open",
+          "evidenceSummary": {
+            "outcomeReason": "timeout",
+            "observedAtMs": 1760000015000,
+            "candidateCount": 2,
+            "coverage": {
+              "offers": true,
+              "credits": false
+            }
+          },
+          "blockedScope": {
+            "exchangeAccountId": "550e8400-e29b-41d4-a716-446655440000",
+            "environment": "prod",
+            "symbol": "fUST"
+          },
+          "resolvedByOperatorId": null,
+          "resolutionReason": null,
+          "resolutionContext": {
+            "evidenceRef": "obs:77777777-7777-4777-8777-777777777777",
+            "queryStartedAtMs": 1760000016000,
+            "queryFinishedAtMs": 1760000017000,
+            "candidateCount": 2,
+            "candidateVenueOfferIds": [
+              "v1",
+              "v2"
+            ],
+            "unavailableReason": null
+          },
+          "resolutionRequest": {
+            "requestId": "66666666-6666-4666-8666-666666666666",
+            "uncertaintyId": "55555555-5555-4555-8555-555555555555",
+            "action": "mark_not_accepted",
+            "state": "rejected",
+            "evidenceRef": "ledger:v1:obs:77777777-7777-4777-8777-777777777777",
+            "createdAtMs": 1760000020000,
+            "processedAtMs": 1760000021000,
+            "outcomeReason": "stale_reconcile_fence"
+          }
+        },
+        {
+          "uncertaintyId": "55555555-5555-4555-8555-555555555555",
+          "kind": "submit_outcome_unknown",
+          "symbol": "fUST",
+          "intendedAmount": "150.50",
+          "state": "resolved",
+          "evidenceSummary": {
+            "outcomeReason": "timeout",
+            "observedAtMs": 1760000015000,
+            "candidateCount": 2,
+            "coverage": {
+              "offers": true,
+              "credits": false
+            }
+          },
+          "blockedScope": {
+            "exchangeAccountId": "550e8400-e29b-41d4-a716-446655440000",
+            "environment": "prod",
+            "symbol": "fUST"
+          },
+          "resolvedByOperatorId": null,
+          "resolutionReason": null,
+          "resolutionContext": {
+            "evidenceRef": "obs:77777777-7777-4777-8777-777777777777",
+            "queryStartedAtMs": 1760000016000,
+            "queryFinishedAtMs": 1760000017000,
+            "candidateCount": 2,
+            "candidateVenueOfferIds": [
+              "v1",
+              "v2"
+            ],
+            "unavailableReason": null
+          },
+          "resolutionRequest": null
+        }
+      ]
+    }
+  },
+  "uncertainty": {
+    "status": 200,
+    "body": {
+      "data": {
+        "uncertaintyId": "55555555-5555-4555-8555-555555555555",
+        "kind": "submit_outcome_unknown",
+        "symbol": "fUST",
+        "intendedAmount": "150.50",
+        "state": "open",
+        "evidenceSummary": {
+          "outcomeReason": "timeout",
+          "observedAtMs": 1760000015000,
+          "candidateCount": 2,
+          "coverage": {
+            "offers": true,
+            "credits": false
+          }
+        },
+        "blockedScope": {
+          "exchangeAccountId": "550e8400-e29b-41d4-a716-446655440000",
+          "environment": "prod",
+          "symbol": "fUST"
+        },
+        "resolvedByOperatorId": null,
+        "resolutionReason": null,
+        "resolutionContext": {
+          "evidenceRef": "obs:77777777-7777-4777-8777-777777777777",
+          "queryStartedAtMs": 1760000016000,
+          "queryFinishedAtMs": 1760000017000,
+          "candidateCount": 2,
+          "candidateVenueOfferIds": [
+            "v1",
+            "v2"
+          ],
+          "unavailableReason": null
+        },
+        "resolutionRequest": {
+          "requestId": "66666666-6666-4666-8666-666666666666",
+          "uncertaintyId": "55555555-5555-4555-8555-555555555555",
+          "action": "mark_not_accepted",
+          "state": "rejected",
+          "evidenceRef": "ledger:v1:obs:77777777-7777-4777-8777-777777777777",
+          "createdAtMs": 1760000020000,
+          "processedAtMs": 1760000021000,
+          "outcomeReason": "stale_reconcile_fence"
+        }
+      }
+    }
+  },
+  "resolution_request": {
+    "status": 200,
+    "body": {
+      "data": {
+        "requestId": "66666666-6666-4666-8666-666666666666",
+        "uncertaintyId": "55555555-5555-4555-8555-555555555555",
+        "action": "mark_not_accepted",
+        "state": "rejected",
+        "evidenceRef": "ledger:v1:obs:77777777-7777-4777-8777-777777777777",
+        "createdAtMs": 1760000020000,
+        "processedAtMs": 1760000021000,
+        "outcomeReason": "stale_reconcile_fence"
+      }
+    }
+  }
+}
