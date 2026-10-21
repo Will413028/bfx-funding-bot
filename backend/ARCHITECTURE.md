@@ -799,6 +799,7 @@ CLI 的 `rotate-credential` 從 stdin 讀新 key，只封給「scope 最新、�
 `bitfinex_user_id` 由 applied 的輪替與 bootstrap 在建立列時寫入（bootstrap 先以新 key 查 `info/user`，pending 列就帶 id，驗證通過才 promote）；
 CHECK `ck_exchange_account_credentials_active_user_id`（migration `36e59526f8cf`，加之前斷言沒有 active 且 NULL 的列）保證 active 列一定有 id，所以 worker 不需要也沒有 trust-on-first-use 回填，換憑證 worker 也從不問現行 key。
 因此現行 key 已在 Bitfinex 撤銷時仍可輪替，憑證恢復模式因此有出口。
+**寫入端點鎖定（F31，`tests/architecture/test_venue_write_endpoints.py`）**：bot 的 `v2/auth/w/` 字面值只有 `live_executor.py` 的 funding offer submit、cancel、cancel/all 三個；`sign_request` 只由 `live_executor.py`（3 處）與 `auth_rest.py`（1 處，`_signed_post`，只簽 `v2/auth/r/`）import 與呼叫；auth WebSocket 只送 auth 與 `conf` 兩種 frame。真正的防線是 key 只開 funding 寫入（`permission_error`），這個測試擋的是程式漂移。
 靜態 admin token 不能 resume live。bot `/admin` 有兩把 token（常數時間比對）：`BFX_ADMIN_TOKEN` 可讀狀態也可 halt，只在 bot 與 `bfx-op halt`；`BFX_ADMIN_READ_TOKEN` 只能讀 `trading-status`／`dry-evaluate`，webapi 的 funding status 只持有這把（9d-2）。webapi 環境裡出現 `BFX_ADMIN_TOKEN`（非空）或 `BFX_VAULT_KEK`（不論值）就拒絕開機（`apps/webapi.py` lifespan），部署因此失敗回滾：halt token 與解開憑證 vault 的 KEK 只在 bot（9g，F29）。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 
