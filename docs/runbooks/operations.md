@@ -535,9 +535,11 @@ VM 上 `/home/ubuntu/bfx-funding-bot` 的 working tree **不再被讀取**（它
 - **Image**：ledger 最新 `deployed` 列的 backend digest（`<repository>@sha256:…`，與 production
   跑的是同一個），不用 `bfx-bot:local`。步驟來自已安裝的工具版本；若兩者 revision 不同
   （部署後工具安裝失敗），照跑並在 journal 印 warning。
-- **Env**：只傳三個值——`DATABASE_URL`、`BFX_EXCHANGE_ACCOUNT_ID` 取自 `/opt/bfx/runtime/bot.env`
-  （bot 的 restricted role），`BFX_DEPLOYMENT_ENV` 取自該部署 revision 的 `live.env`
-  （`/var/lib/bfx-deploy/releases/<rev>/live.env`）。`bot.env` 其餘的 secret 不會進 container。
+- **Env**：只傳三個值——`DATABASE_URL`、`BFX_EXCHANGE_ACCOUNT_ID` 取自 `/opt/bfx/runtime/research.env`
+  （研究 role `bfx_research`：只能寫研究表，不能寫 ledger 或 `trading_state`；
+  [fresh-host-setup §1](fresh-host-setup.md#1-database-roles-與-grants)），`BFX_DEPLOYMENT_ENV` 取自該部署 revision 的 `live.env`
+  （`/var/lib/bfx-deploy/releases/<rev>/live.env`）。runner 不讀 `bot.env`；`research.env` 不存在或不是
+  root 0600 時拒跑（`cannot run: secret_file_missing:research.env`／`secret_file_mode_not_0600:research.env`），不會退回 `bot.env`。
 - **Hardening**：read-only rootfs、UID 1000、cap-drop ALL、no-new-privileges，只有 `/tmp`（tmpfs）
   與 `/home/ubuntu/bfx/reports` → `/reports` 可寫；CI 以
   `compose_policy.py --kind weekly-report` 檢查。reports 目錄必須已存在且 uid 1000 可寫

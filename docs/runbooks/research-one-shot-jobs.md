@@ -29,13 +29,16 @@ nohup uv run python -m scripts.ingest_liquidations > /tmp/ingest_liq.log 2>&1 &
 ## VM（production DB，一次性容器）
 
 以 root 執行（runtime secret 檔是 root 0600）。image 用正在跑的 bot 的 digest（和 production
-同一份程式碼，不 build、不 pull）；DB 帳號用 bot 的 restricted role，從 secret 檔讀取，不印出、
-不寫進其他檔案：
+同一份程式碼，不 build、不 pull）；DB 帳號用研究 role `bfx_research`（`/opt/bfx/runtime/research.env`，
+與每週報告同一個檔），從 secret 檔讀取，不印出、不寫進其他檔案。這個 role 只能寫研究表
+（`funding_stats`、`perp_funding_rates`、`liquidations`、`attribution_weekly`、`fill_rate_stats` 與它引用的
+`fill_rate_model_artifacts`），讀取也只限每週步驟與研究腳本用到的表（migration `3c5e7a9b1d2f`）；
+不要改用 `bot.env`：bot 的 role 能寫 ledger 與交易狀態。
 
 ```bash
 IMAGE=$(docker inspect bfx-bot --format '{{.Config.Image}}')   # <repository>@sha256:<digest>
 
-DATABASE_URL=$(sed -n 's/^DATABASE_URL=//p' /opt/bfx/runtime/bot.env) \
+DATABASE_URL=$(sed -n 's/^DATABASE_URL=//p' /opt/bfx/runtime/research.env) \
 docker run -d --name bfx-research-ingest-perp --label autoheal=false \
   --network bfx_default --read-only --tmpfs /tmp --cap-drop ALL \
   --security-opt no-new-privileges:true --user 1000:1000 -w /app \
@@ -46,6 +49,9 @@ docker run -d --name bfx-research-ingest-perp --label autoheal=false \
 liquidations 同一個 pattern，換 `--name bfx-research-ingest-liq` 與 `-m scripts.ingest_liquidations`
 （跑數小時）。其他研究腳本（例如 `-m scripts.run_signal_eda ...`）也用同一個 pattern；
 要輸出檔案時加一個 uid 1000 可寫的 bind mount，不要 mount 整個 `/app`（會蓋掉 image 內的 venv）。
+腳本讀到上述以外的表時會以 `permission denied for table …` 失敗：要它讀新表，就以 migration 擴充
+`bfx_research` 的 allowlist（同步更新 `backend/tests/integration/test_research_privilege_allowlist.py`），
+不要換成別的 role。
 
 進度與收尾：
 

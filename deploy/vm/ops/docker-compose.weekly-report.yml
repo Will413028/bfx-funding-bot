@@ -12,10 +12,11 @@
 # here (bfx-deploy already pulled it and keeps it until two releases later).
 #
 # Env: no env_file. The runner passes exactly the variables the steps read --
-# DATABASE_URL and BFX_EXCHANGE_ACCOUNT_ID from /opt/bfx/runtime/bot.env (the bot's
-# restricted role, never the migration owner), BFX_DEPLOYMENT_ENV from the deployed
-# revision's live.env -- so the rest of bot.env (vault KEK, admin token, Telegram)
-# never reaches this container. Values arrive through Compose interpolation of the
+# DATABASE_URL and BFX_EXCHANGE_ACCOUNT_ID from /opt/bfx/runtime/research.env (the
+# research role bfx_research: writes only the research tables, never the ledger or
+# trading state; never the bot's role or the migration owner), BFX_DEPLOYMENT_ENV from
+# the deployed revision's live.env -- so nothing of bot.env (vault KEK, admin token,
+# Telegram) reaches this container. Values arrive through Compose interpolation of the
 # runner's own environment, which Compose substitutes literally.
 #
 # Hardening mirrors docker-compose.app.yml (read-only rootfs, UID 1000, all
