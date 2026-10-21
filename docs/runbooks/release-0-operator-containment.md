@@ -13,5 +13,4 @@ Tailscale Serve 進入，Better Auth、登入頁、TOTP 與這兩個 one-shot �
 - 建置步驟：[fresh host setup §2](fresh-host-setup.md#2-tailnet-入口營運-ui)；高風險操作只走 CLI
   （[operations §10](operations.md#10-operator-clibfx-op)）。
 
-Better Auth 的 `auth` schema、帳號與 `bfx_webauth` role 在 9d-7 的 migration 刪除；在那之前它們只留作回滾到
-9d-5 之前版本時使用。
+Better Auth 的 `auth` schema、帳號與 `bfx_webauth` role 已由 9d-7 的 migration `f836fdee9bf3` 刪除。

@@ -16,13 +16,12 @@ Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration �
 
 ## 1. Database roles 與 grants
 
-四個 runtime login role，各自只拿需要的權限：
+三個 runtime login role，各自只拿需要的權限：
 
 | role | 誰用 | 權限來源 |
 |---|---|---|
 | `bfx_bot` | bot daemon、每週報告、研究用一次性容器 | 本節的 default privileges ＋ 各 migration 的收斂 grant |
 | `bfx_webapi` | FastAPI web-API | migration `c74d45a54e46` 的 baseline（與之後各 migration）；不碰交易寫入 |
-| `bfx_webauth` | （9d-5 起無使用者；9d-7 的 migration 刪除） | 只有 `auth` schema（本節手動 grant；migration 鏈到 9d-7 前仍會引用它） |
 | `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist：三個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
 
 Migration 對 role 的 grant 都包在 `IF EXISTS (SELECT FROM pg_roles ...)` 裡：role 不存在時
@@ -40,7 +39,6 @@ SET log_statement = 'none';
 SET log_min_error_statement = 'panic';
 CREATE ROLE bfx_bot LOGIN PASSWORD '<read from the secret file>';
 CREATE ROLE bfx_webapi LOGIN PASSWORD '<read from the secret file>';
-CREATE ROLE bfx_webauth LOGIN PASSWORD '<read from the secret file>';
 CREATE ROLE bfx_operator LOGIN PASSWORD '<read from the secret file>';
 
 -- bfx_bot：owner 之後建立的 public 表預設可 DML；受治理的表由各 migration 收斂
@@ -53,15 +51,13 @@ ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO bfx_bot;
 ```
 
-`bfx_webapi` 與 `bfx_webauth` 在 public schema 不給任何 default privileges：webapi 的讀取
-清單與 outbox 欄位級 INSERT 全部由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand`），
-webauth 在 public 什麼都沒有。`bfx_operator` 同樣不給 default privileges，它的權限由 migration `4ab02765a34b` 先 revoke 全部（含 schema CREATE）再 grant 回清單，`test_operator_privilege_allowlist.py` 比對 effective privileges。`bfx_webapi` 在 public 的權限是 migration `d0e1f2a3b4c6` 擁有的精確 allowlist（先 revoke 全部再 grant 回清單，含 `api_keys`、`user_configs` 與 `user_profiles` 的 UPDATE，不再需要手動 grant）；之後新增 webapi 權限的 migration 必須同步更新 `test_webapi_privilege_allowlist.py`。
+`bfx_webapi` 在 public schema 不給任何 default privileges：webapi 的讀取
+清單與 outbox 欄位級 INSERT 全部由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand`）。`bfx_operator` 同樣不給 default privileges，它的權限由 migration `4ab02765a34b` 先 revoke 全部（含 schema CREATE）再 grant 回清單，`test_operator_privilege_allowlist.py` 比對 effective privileges。`bfx_webapi` 在 public 的權限是 migration `d0e1f2a3b4c6` 擁有的精確 allowlist（先 revoke 全部再 grant 回清單，含 `api_keys`、`user_configs` 與 `user_profiles` 的 UPDATE，不再需要手動 grant）；之後新增 webapi 權限的 migration 必須同步更新 `test_webapi_privilege_allowlist.py`。
 
 ### 1b. 跑 migration
 
 照 [deploy runbook](deploy.md) 第一次部署；bfx-deploy 以 `migrate.env`（owner 的
-`DATABASE_URL`）跑 `alembic upgrade head`。migration `e61f3d1ed7ca` 建立 `auth` schema 與
-Better Auth 的表。
+`DATABASE_URL`）跑 `alembic upgrade head`。
 
 ### 1b-1. 蓋 database realm（migration 之後，以 `<owner>` 執行一次）
 
@@ -83,22 +79,10 @@ VALUES ('<realm>', (extract(epoch FROM clock_timestamp()) * 1000)::bigint, 'owne
 蓋章後不能 UPDATE／DELETE／TRUNCATE，執行時的 role 沒有寫入權限（`bfx_bot` 只有 SELECT）。
 用 `CREATE DATABASE ... TEMPLATE` 複製出來的資料庫會帶著原來的章，要換 realm 就在新庫重建而不是改章。
 
-### 1c. `bfx_webauth` 的 auth schema grant（migration 之後，以 `<owner>` 執行）
+### 1c. Better Auth 的 `auth` schema 與 `bfx_webauth`（已退役，9d-7）
 
-`auth` schema 要等 migration 建好才存在，所以這步在 1b 之後：
-
-```sql
-GRANT USAGE ON SCHEMA auth TO bfx_webauth;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA auth TO bfx_webauth;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA auth TO bfx_webauth;
-ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA auth
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO bfx_webauth;
-ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA auth
-  GRANT USAGE, SELECT ON SEQUENCES TO bfx_webauth;
-```
-
-`public.user_profiles` 對 `auth.user` 的 FK 檢查由 Postgres 內部執行，webapi 不需要
-`auth` 的權限。
+migration 鏈前段的 `e61f3d1ed7ca` 會建立 `auth` schema，`f836fdee9bf3` 再把它連同
+`bfx_webauth` role 一起刪除（role 不存在時略過；同一 cluster 若還有別的資料庫授權給它，role 會留下但在這個資料庫沒有任何權限）。新主機不建立 `bfx_webauth`，也不需要任何 `auth` grant。
 
 ### 1c-1. Ledger cutover reader（已退役，S1-8 PR-D）
 
@@ -132,11 +116,6 @@ migration 搬過去。
 ### 1d. 驗證隔離（留輸出當 evidence）
 
 ```sql
-SET ROLE bfx_webauth;
-SELECT count(*) FROM auth."user";                 -- OK
-SELECT 1 FROM public.trading_state LIMIT 1;       -- permission denied
-RESET ROLE;
-
 SET ROLE bfx_webapi;
 SELECT has_table_privilege(current_user, 'public.trading_state', 'SELECT') AS can_read_state,
        has_column_privilege(current_user, 'legacy_archive.event_log', 'payload', 'SELECT')
@@ -264,7 +243,7 @@ journalctl -fu bfx-deploy.service
 
 依 [deploy runbook](deploy.md) 核對 ledger 的 `started`／`deployed`、`bfx-app` 的各個 container
 （bot、webapi、netns、tailscale）的 ownership 與 digest、health、工具與 DR checkout 的 `current` revision。
-新資料庫在 migration 後完成 §1c 的 auth grants 與 §1d 的隔離驗證；再從 tailnet 打開 UI（§2）驗證
+新資料庫在 migration 後完成 §1d 的隔離驗證；再從 tailnet 打開 UI（§2）驗證
 uncertainty／history 頁面與告警。交易狀態與包絡依 [operations](operations.md) 驗證，
 部署本身不會 resume，也沒有 build 核准或限額期。
 
