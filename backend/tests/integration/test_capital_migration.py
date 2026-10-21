@@ -2,7 +2,7 @@
 import pytest
 from sqlalchemy import create_engine, inspect, text
 
-from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, stamp_realm
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, stamp_realm, upgrade_head_after_w3
 
 pytestmark = pytest.mark.integration
 
@@ -60,7 +60,7 @@ def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_templates, pg_c
                 "DELETE FROM capital_snapshot_queries", "TRUNCATE capital_snapshot_queries CASCADE"):
         with engine.begin() as connection, pytest.raises(Exception, match="immutable capital"):
             connection.exec_driver_sql(sql)
-    alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     alembic(url, "check")
     with engine.begin() as connection:
         _assert_the_bot_holds_no_capital_write(connection)

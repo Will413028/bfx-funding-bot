@@ -10,7 +10,6 @@ import pytest_asyncio
 from hypothesis import is_hypothesis_test
 from hypothesis import settings as hypothesis_settings
 from pytest_postgresql.factories import postgresql_proc
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -29,31 +28,6 @@ from tests import pg_local
 # --hypothesis-profile=nightly. A test never pins max_examples (tests/test_property_budget.py),
 # or the nightly budget would not reach it.
 hypothesis_settings.register_profile("nightly", max_examples=1000)
-
-
-async def ensure_auth_user(session: AsyncSession, user_id: str) -> None:
-    """Seed the Better Auth principal used by PG integration tests.
-
-    The application profile/vault tables deliberately enforce a DB-level FK to
-    ``auth.user``.  Migration integration tests run in the same session-scoped
-    container, so tests that exercise JIT provisioning must create the external
-    auth principal just as the real Better Auth service would first do.
-    """
-    bind = session.bind
-    if bind is None or bind.dialect.name != "postgresql":
-        return
-    exists = await session.scalar(text("SELECT to_regclass('auth.\"user\"')"))
-    if exists is None:
-        return
-    await session.execute(
-        text(
-            'INSERT INTO auth."user" '
-            '("id", "name", "email", "emailVerified", "createdAt", "updatedAt") '
-            'VALUES (:id, :name, :email, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) '
-            'ON CONFLICT ("id") DO NOTHING'
-        ),
-        {"id": user_id, "name": user_id, "email": f"{user_id}@test.invalid"},
-    )
 
 
 @pytest_asyncio.fixture
@@ -125,6 +99,14 @@ def pg_server(request: pytest.FixtureRequest) -> pg_local.LocalPostgres:
                          dbname="postgres", autocommit=True) as connection:
         running = int(connection.execute("SHOW server_version_num").fetchone()[0]) // 10000
         data_directory = Path(connection.execute("SHOW data_directory").fetchone()[0])
+        # Roles are cluster-wide. f836fdee9bf3 (9d-7) drops bfx_webauth unless another database
+        # still references it; this shared cluster always does, so at head the role is still
+        # there, holding nothing in a migrated database, and the many tests that build an older
+        # revision with it never depend on which test upgraded first. The drop itself runs on a
+        # cluster of its own (test_auth_schema_retirement).
+        connection.execute("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE "
+                           "rolname='bfx_webauth') THEN CREATE ROLE bfx_webauth; END IF; END $$")
+        connection.execute("GRANT CONNECT ON DATABASE postgres TO bfx_webauth")
     try:
         pg_local.check_major(running, expected, "the running server")
     except pg_local.PgVersionMismatchError as error:

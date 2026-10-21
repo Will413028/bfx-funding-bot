@@ -13,7 +13,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import create_engine, text
 
-from tests.pg_templates import LAST_REVERSIBLE_REVISION
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import pre_switch_url
 from .test_trading_state_migration import _alembic, _reset
@@ -97,7 +97,7 @@ def before(pg_templates, pg_clone):
 
 def test_upgrade_archives_the_retired_rules_and_stops_the_current_pause(before):
     url, engine, ids, recorded = before
-    _alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     _alembic(url, "check")
     with engine.begin() as conn:
         after = _snapshot(conn, "release_archive", "release_archive")
@@ -154,7 +154,7 @@ def test_downgrade_restores_every_recorded_row(before):
             "SELECT has_table_privilege('bfx_bot', 'deployment_approvals', 'INSERT')"))
         assert conn.scalar(text(
             "SELECT has_column_privilege('bfx_webapi', 'trading_control_requests', 'backend_digest', 'INSERT')"))
-    _alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     _alembic(url, "check")
 
 

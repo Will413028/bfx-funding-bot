@@ -305,9 +305,13 @@ def test_runtime_roles_can_only_read_the_ledger(ledger_db: Any) -> None:
             for privilege in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
                 assert not conn.scalar(text("SELECT has_table_privilege(:r, 'deployments', :p)"),
                                        {"r": role, "p": privilege}), (role, privilege)
-        for privilege in ("SELECT", "INSERT"):
-            assert not conn.scalar(text("SELECT has_table_privilege('bfx_webauth', 'deployments', :p)"),
-                                   {"p": privilege})
+        # f836fdee9bf3 (9d-7) drops bfx_webauth unless another database of the cluster still
+        # references it; where it is left, it reads nothing here.
+        if conn.scalar(text("SELECT 1 FROM pg_roles WHERE rolname = 'bfx_webauth'")):
+            for privilege in ("SELECT", "INSERT"):
+                assert not conn.scalar(
+                    text("SELECT has_table_privilege('bfx_webauth', 'deployments', :p)"),
+                    {"p": privilege})
     with engine.begin() as conn, pytest.raises(Exception, match="permission denied"):
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         conn.exec_driver_sql(

@@ -25,7 +25,7 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from bfx_funding_bot.modules.ledger.tables import LedgerObservationRow, SubmissionAttemptJournalRow
-from tests.pg_templates import alembic
+from tests.pg_templates import alembic, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import (
     _A,
@@ -490,7 +490,7 @@ def test_migration_round_trip_and_populated_downgrade(reversible_seeded) -> None
             )
     finally:
         engine.dispose()
-    alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     alembic(url, "check")
     engine = create_engine(url)
     try:

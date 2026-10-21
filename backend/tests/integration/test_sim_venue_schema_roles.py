@@ -237,8 +237,11 @@ def test_other_runtime_roles_hold_nothing(db: Any, role: str) -> None:
             assert not conn.scalar(
                 text("SELECT has_any_column_privilege(:r,'public.sim_venue_event',:p)"),
                 {"r": role, "p": privilege})
+    # f836fdee9bf3 (9d-7) left bfx_webauth nothing, not even USAGE on public: the name does
+    # not resolve before any privilege check.
+    denied = "permission denied" if role == "bfx_webapi" else "does not exist"
     for statement in ("SELECT count(*) FROM sim_venue_event", _row()):
-        with pytest.raises(ProgrammingError, match="permission denied"):
+        with pytest.raises(ProgrammingError, match=denied):
             _as(role, engine, statement)
 
 

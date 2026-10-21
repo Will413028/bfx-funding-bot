@@ -109,10 +109,6 @@ async def allow(session, *, account_id, user) -> bool:
 async def member(book_, role: str = "owner") -> None:
     async with book_.factory.begin() as session:
         await session.execute(text(
-            'INSERT INTO auth."user" (id,name,email,"emailVerified","createdAt","updatedAt",'
-            'role,banned,"twoFactorEnabled") VALUES (:u,\'operator\','
-            "'operator@test.invalid',true,now(),now(),'admin',false,true)"), {"u": OPERATOR})
-        await session.execute(text(
             "INSERT INTO exchange_account_memberships(exchange_account_id,user_id,role) "
             "VALUES (:a,:u,:r)"), {"a": ACCOUNT, "u": OPERATOR, "r": role})
 

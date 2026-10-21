@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import create_engine, inspect, text
 
-from tests.pg_templates import alembic
+from tests.pg_templates import alembic, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import (  # noqa: F401 - fixtures
     _B,
@@ -61,7 +61,7 @@ def test_upgrade_backfills_baseline_and_leaves_no_default(reversible_ledger_db) 
         with engine.begin() as conn:
             assert not set(_NEW) & _columns(conn)
             _seed(conn, pre_verdict=True)
-        alembic(url, "upgrade", "head")
+        upgrade_head_after_w3(url)
         alembic(url, "check")
         with engine.connect() as conn:
             row = conn.execute(
@@ -101,7 +101,7 @@ def test_downgrade_drops_baseline_only_rows_and_round_trips(reversible_seeded) -
         with engine.connect() as conn:
             assert not set(_NEW) & _columns(conn)
             assert conn.scalar(text(f"SELECT count(*) FROM {_TABLE}")) == 1
-        alembic(url, "upgrade", "head")
+        upgrade_head_after_w3(url)
         alembic(url, "check")
         with engine.connect() as conn:
             assert set(_NEW) <= _columns(conn)
@@ -190,6 +190,8 @@ def test_verdict_is_immutable_and_only_the_bot_writes_it(seeded) -> None:  # noq
                 text("SELECT has_column_privilege(:r, :t, :c, 'SELECT')"),
                 {"r": role, "t": _TABLE, "c": column},
             ), (role, column)
-        with pytest.raises(Exception, match="permission denied"), seeded.begin() as conn:
+        # f836fdee9bf3 (9d-7) left bfx_webauth nothing, not even USAGE on public.
+        denied = "permission denied" if role == "bfx_webapi" else "does not exist"
+        with pytest.raises(Exception, match=denied), seeded.begin() as conn:
             conn.exec_driver_sql(f"SET LOCAL ROLE {role}")
             _insert(conn, "conserved", "0", "0", symbol="fNo")

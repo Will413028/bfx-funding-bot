@@ -29,7 +29,13 @@ from sqlalchemy.exc import DBAPIError, IntegrityError, InternalError, Programmin
 
 from bfx_funding_bot.core.database_realm import DATABASE_REALM_TABLE, KNOWN_REALMS
 from bfx_funding_bot.core.schema_head import migration_scripts
-from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, stamp_realm, template_at
+from tests.pg_templates import (
+    LAST_REVERSIBLE_REVISION,
+    alembic,
+    stamp_realm,
+    template_at,
+    upgrade_head_after_w3,
+)
 
 from .test_trading_state_migration import _reset
 
@@ -93,7 +99,7 @@ def _reset_with_roles(url: str) -> None:
 
 def _build_unstamped(url: str) -> None:
     _reset_with_roles(url)
-    alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     alembic(url, "check")
 
 
@@ -264,14 +270,14 @@ def test_the_migration_stamps_prod_from_prod_data(previous_url: str, sql: str) -
 ])
 def test_the_migration_stamps_the_one_realm_it_finds(previous_url: str, sql: str, realm: str) -> None:
     _seed_previous(previous_url, sql)
-    alembic(previous_url, "upgrade", "head")
+    upgrade_head_after_w3(previous_url)
     assert _stamp_of(previous_url) == [(realm, f"migration {_REVISION}")]
 
 
 def test_the_migration_refuses_a_mixed_database_and_changes_nothing(previous_url: str) -> None:
     _seed_previous(previous_url, _nav_peak("prod"), _sim_event("shadow"))
     with pytest.raises(RuntimeError, match="more than one realm"):
-        alembic(previous_url, "upgrade", "head")
+        upgrade_head_after_w3(previous_url)
     engine = create_engine(previous_url)
     try:
         with engine.connect() as conn:
@@ -285,7 +291,7 @@ def test_the_migration_refuses_a_mixed_database_and_changes_nothing(previous_url
 def test_the_migration_refuses_a_value_that_is_no_realm(previous_url: str) -> None:
     _seed_previous(previous_url, _nav_peak("legacy"))
     with pytest.raises(RuntimeError, match="hold 'legacy'"):
-        alembic(previous_url, "upgrade", "head")
+        upgrade_head_after_w3(previous_url)
 
 
 def test_an_empty_database_stays_unstamped(unstamped: Any) -> None:
@@ -436,7 +442,7 @@ def test_alembic_check_is_clean_and_the_downgrade_round_trips(reversible_ci_db: 
         assert conn.scalar(text("SELECT to_regproc('public.reject_database_realm_mutation()')")) is None
         assert conn.scalar(text("SELECT count(*) FROM pg_trigger WHERE tgname = :n"), {"n": _TRIGGER}) == 0
         assert conn.scalar(text("SELECT count(*) FROM nav_peak")) == 1  # row data untouched
-    alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     alembic(url, "check")
     assert _stamp_of(url) == [("ci", f"migration {_REVISION}")]  # derived again from the data
     with reversible_ci_db.connect() as conn:

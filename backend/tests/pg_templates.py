@@ -160,6 +160,42 @@ def upgrade_head(url: str) -> None:
     stamp_realm(url, "ci")
 
 
+# The head before f836fdee9bf3 (9d-7), which refuses a live account without an owner/operator
+# membership keyed by a tailnet (numeric) user ID: production got one from W3 before it.
+BEFORE_AUTH_RETIREMENT = "89886d27750b"
+W3_OPERATOR = "1000000001"
+
+
+def upgrade_head_after_w3(url: str) -> None:
+    """``upgrade head`` for a database seeded before 9d-7, in production's order: up to
+    :data:`BEFORE_AUTH_RETIREMENT`, then W3's numeric owner membership on every live account
+    that has none, then head. A database already past it just upgrades."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import text
+
+    after = {rev.revision for rev in ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
+             .iterate_revisions("heads", BEFORE_AUTH_RETIREMENT)} - {BEFORE_AUTH_RETIREMENT}
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            current = conn.scalar(text("SELECT version_num FROM alembic_version")) if conn.scalar(
+                text("SELECT to_regclass('alembic_version')")) else None
+        if current not in after:
+            alembic(url, "upgrade", BEFORE_AUTH_RETIREMENT)
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "INSERT INTO exchange_account_memberships (exchange_account_id, user_id, role) "
+                    "SELECT a.id, :u, 'owner' FROM exchange_accounts a "
+                    "WHERE a.lifecycle_status IN ('active', 'halted') AND NOT EXISTS ("
+                    "  SELECT 1 FROM exchange_account_memberships m WHERE m.exchange_account_id = a.id"
+                    "  AND m.role IN ('owner', 'operator') AND m.user_id ~ '^[0-9]+$')"),
+                    {"u": W3_OPERATOR})
+    finally:
+        engine.dispose()
+    alembic(url, "upgrade", "head")
+
+
 # The last migration written before docs/adr/2026-10-08-forward-only-migrations.md: downgrades
 # from it down the chain still run, a downgrade from any later migration raises.
 LAST_REVERSIBLE_REVISION = "8ac3b44460fc"
