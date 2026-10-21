@@ -12,7 +12,9 @@ from sentry_sdk.integrations.starlette import StarletteIntegration
 from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.core.authority import require_ledger_authority
 from bfx_funding_bot.core.db import make_engine, make_session_factory
+from bfx_funding_bot.core.log_format import configure_logging
 from bfx_funding_bot.core.schema_head import SchemaHeadMismatch, assert_schema_head
+from bfx_funding_bot.core.security_log import BOOT_REFUSED, security_event
 from bfx_funding_bot.core.settings import IngressSettings, Settings
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.attribution import build_attribution_router
@@ -33,18 +35,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if os.environ.get("BFX_ADMIN_TOKEN", "").strip():
         # The daemon's halt credential; the web API reads with BFX_ADMIN_READ_TOKEN only
         # (9d-2). Refusing to start makes a left-over key fail the deploy, which rolls back.
-        logging.critical("Startup refused: BFX_ADMIN_TOKEN must not be in the web API's env")
+        security_event(BOOT_REFUSED, reason="admin_token_in_webapi_env", level=logging.CRITICAL)
         raise RuntimeError("bfx_admin_token_in_webapi_env")
     # Outside the try below: a missing or invalid ingress value refuses to start, so the
     # deploy fails (and rolls back) instead of every request answering 503 (9d-5).
     try:
         app.state.ingress = IngressSettings()
     except Exception:
-        logging.critical("Startup refused: the tailnet ingress settings are missing or invalid")
+        security_event(BOOT_REFUSED, reason="ingress_settings_invalid", level=logging.CRITICAL)
         raise
     try:
         settings = Settings()
-        logging.basicConfig(level=settings.log_level)
+        configure_logging("webapi", level=settings.log_level)
         engine = make_engine(settings)
         app.state.engine = engine
         app.state.session_factory = make_session_factory(engine)
@@ -65,9 +67,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await require_ledger_authority(session)
             app.state.read_models = build_read_models()
         except Exception as exc:
-            reason = (str(exc) if isinstance(exc, SchemaHeadMismatch)
-                      else "capital authority unreadable or unsupported")
-            logging.critical("Startup refused: %s", reason)
+            if isinstance(exc, SchemaHeadMismatch):
+                security_event(BOOT_REFUSED, reason="schema_head_mismatch", detail=str(exc),
+                               level=logging.CRITICAL)
+            else:
+                security_event(BOOT_REFUSED, reason="capital_authority_unreadable",
+                               level=logging.CRITICAL)
             await app.state.engine.dispose()
             raise
     try:
@@ -81,6 +86,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await existing_engine.dispose()
 
 
+# At import: uvicorn has configured its own loggers by now and hands them to the root's
+# JSON handler; a root someone else configured (pytest) is left alone. The lifespan sets
+# the configured level.
+configure_logging("webapi")
 # Before the app exists, so the FastAPI integration sees every request.
 init_error_tracking("webapi", os.environ,
                     integrations=(StarletteIntegration(), FastApiIntegration()))

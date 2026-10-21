@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -110,3 +111,41 @@ def test_startup_refuses_a_database_at_another_schema_head(
     with pytest.raises(SchemaHeadMismatch, match=match), TestClient(app):
         pass
     assert getattr(app.state, "read_models", None) is None
+
+
+def _boot_refusals(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str]]:
+    return [(r.event, r.reason) for r in caplog.records
+            if r.name == "bfx.security" and r.levelno == logging.CRITICAL]
+
+
+@pytest.mark.parametrize(("setup", "error", "reason"), [
+    pytest.param({"BFX_ADMIN_TOKEN": "halt-secret"}, RuntimeError, "admin_token_in_webapi_env",
+                 id="halt-token"),
+    pytest.param({"BFX_WEBAPI_ALLOWED_HOSTS": None}, Exception, "ingress_settings_invalid",
+                 id="ingress"),
+    pytest.param({"heads": ("ffffffffffff",)}, SchemaHeadMismatch, "schema_head_mismatch",
+                 id="schema-head"),
+    pytest.param({"epoch": "legacy"}, AuthorityMismatch, "capital_authority_unreadable",
+                 id="authority"),
+])
+def test_each_boot_refusal_is_a_critical_security_event(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    setup: dict[str, object], error: type[Exception], reason: str,
+) -> None:
+    """9j: ``boot_refused`` with a stable reason code; the halt token's value never logged."""
+    env = {k: v for k, v in setup.items() if k.startswith("BFX_")}
+    heads = setup.get("heads")
+    monkeypatch.setenv("DATABASE_URL", _authority_db(
+        tmp_path / "db.db", str(setup.get("epoch", "ledger")),
+        heads=heads if isinstance(heads, tuple) else None))
+    for key, value in env.items():
+        if value is None:
+            monkeypatch.delenv(key)
+        else:
+            monkeypatch.setenv(key, str(value))
+
+    with caplog.at_level(logging.WARNING), pytest.raises(error), TestClient(app):
+        pass
+
+    assert _boot_refusals(caplog) == [("boot_refused", reason)]
+    assert "halt-secret" not in caplog.text

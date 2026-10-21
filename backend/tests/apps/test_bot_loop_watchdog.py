@@ -15,6 +15,7 @@ Mutation checks (one at a time; revert after each):
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -273,3 +274,40 @@ async def test_a_key_refused_while_running_exits_78_as_a_fatal_error(
     assert exited.value.code == EXIT_CODE_AUTH_FAILED == 78
     assert [event for event, _ in sent] == ["daemon_fatal"]
     assert _RunRecord.events[-1] == "finish:fatal"
+
+
+def _boot_refusals(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str, list[str]]]:
+    return [(r.event, r.reason, r.error_types) for r in caplog.records
+            if r.name == "bfx.security" and r.levelno == logging.CRITICAL]
+
+
+async def test_a_refused_build_is_a_boot_refused_security_event(
+    monkeypatch: pytest.MonkeyPatch, watchdogs: list[_Watchdog], caplog: pytest.LogCaptureFixture,
+) -> None:
+    """9j: exception types only; the message (which may name a secret) stays in the alert,
+    which scrubs it."""
+    async def refuse(**_: object) -> None:
+        raise ValueError("config_fatal password=S3cret")
+
+    monkeypatch.setattr(bot, "build_daemon", refuse)
+    with caplog.at_level(logging.WARNING), pytest.raises(ValueError):
+        await bot._run()
+
+    assert _boot_refusals(caplog) == [("boot_refused", "boot_failed", ["ValueError"])]
+    assert all("S3cret" not in r.getMessage() for r in caplog.records if r.name == "bfx.security")
+
+
+@pytest.mark.parametrize("booted", [False, True])
+async def test_a_task_group_failure_is_a_boot_refusal_only_before_the_boot(
+    monkeypatch: pytest.MonkeyPatch, watchdogs: list[_Watchdog], caplog: pytest.LogCaptureFixture,
+    booted: bool,
+) -> None:
+    async def build_daemon(*, stop_event: asyncio.Event) -> Any:
+        return _fake_daemon(stop_event, [], fail=RuntimeError("refused"), booted=booted)
+
+    monkeypatch.setattr(bot, "build_daemon", build_daemon)
+    with caplog.at_level(logging.WARNING), pytest.raises(ExceptionGroup):
+        await bot._run()
+
+    expected = [] if booted else [("boot_refused", "boot_failed", ["RuntimeError"])]
+    assert _boot_refusals(caplog) == expected
