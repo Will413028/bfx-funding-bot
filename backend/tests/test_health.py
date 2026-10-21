@@ -90,6 +90,18 @@ def test_startup_refuses_the_daemon_halt_token(
         pass
 
 
+@pytest.mark.parametrize("value", ["a2V5LW1hdGVyaWFs", ""], ids=["set", "empty"])
+def test_startup_refuses_the_vault_kek(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: str
+) -> None:
+    """9g (F29): only the bot opens the credential vault. A KEK in the web API's env, even an
+    empty one, fails the boot so the deploy rolls back instead of leaving it there."""
+    monkeypatch.setenv("DATABASE_URL", _authority_db(tmp_path / "ledger.db", "ledger"))
+    monkeypatch.setenv("BFX_VAULT_KEK", value)
+    with pytest.raises(RuntimeError, match="bfx_vault_kek_in_webapi_env"), TestClient(app):
+        pass
+
+
 @pytest.mark.parametrize(
     ("heads", "database"),
     [
