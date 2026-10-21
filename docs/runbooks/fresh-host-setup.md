@@ -31,6 +31,12 @@ Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration �
 Migration 對 role 的 grant 都包在 `IF EXISTS (SELECT FROM pg_roles ...)` 裡：role 不存在時
 migration 照樣成功但**不會補 grant**。所以順序是：先建 role，再第一次跑 migration。
 
+**已上線的主機加新 role**（例如 `bfx_research`）：merge 進 `main` 就會由 bfx-deploy 自動部署並跑 migration，
+所以 role 與它的 secret 檔（`research.env`）要在**合併那個 PR 之前**於 VM 建好（§1a、§1e），部署後照 §1d 核對。
+若已部署才建 role，migration 不會重跑：以 `<owner>` 執行該 migration 的 REVOKE／GRANT（`3c5e7a9b1d2f` 的
+`RESEARCH_TABLE_PRIVILEGES`，逐表 `GRANT ... ON public.<table> TO bfx_research`，另加 `GRANT USAGE ON SCHEMA public`），
+再跑 §1d。
+
 ### 1a. 建 role（migration 之前，以 `<owner>` 執行）
 
 密碼當場產生，直接寫進主機上的 runtime secret 檔（`/opt/bfx/runtime/*.env`，root 0600），

@@ -97,7 +97,8 @@ async def test_an_offer_only_the_journal_knows_is_attributed_to_its_cell(gate_st
 
 
 def test_the_weekly_job_role_reads_the_ledger_columns_the_port_selects(ledger_db: Any) -> None:  # noqa: F811
-    """The weekly connects as ``bfx_bot``: the port's columns are granted, no migration needed."""
+    """``bfx_bot`` keeps the port's ledger columns (the weekly now reads them as ``bfx_research``:
+    ``test_research_role_behaviour.py``)."""
     reads = {
         "submission_attempt_journal": ("exchange_account_id", "deployment_environment", "cell_id",
                                        "execution_decision_id", "attempt_seq", "seed_provenance",

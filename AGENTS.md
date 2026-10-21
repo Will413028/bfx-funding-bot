@@ -22,7 +22,7 @@ Bitfinex 自動放貸 SaaS 平台。
 |------|------|
 | 營運 UI 與 webapi | VM `bfx-webapi`：只聽 `127.0.0.1:8000`，在 holder `bfx-netns` 的 network namespace 裡；唯一入口是 tailnet 節點 `bfx-tailscale` 的 Tailscale Serve（`https://bfx-ops.<tailnet>.ts.net`，只有 tailnet 內、policy 授予 operator capability 的人連得到；實際 host 見 `AGENTS.local.md`，入口說明見 `docs/runbooks/deploy.md`「Tailnet 入口」）。webapi 同時提供前端的 static export |
 | Bot | VM `bfx-bot` |
-| Database | 自托 Postgres 18（`bfx-postgres`，volume `bfx_pgdata`；roles：bot owner、`bfx_webapi`） |
+| Database | 自托 Postgres 18（`bfx-postgres`，volume `bfx_pgdata`；roles：owner、`bfx_bot`、`bfx_webapi`、`bfx_operator`、`bfx_research`；模擬 soak 另有 `bfx_sim`） |
 
 - 備份與 DR 見 `docs/runbooks/offsite-dr.md`，定期與背景工作（含每週報告）見 `docs/runbooks/operations.md` §8；systemd unit 在 `deploy/vm/systemd/`，實際啟用與健康狀態須查目標環境。
 

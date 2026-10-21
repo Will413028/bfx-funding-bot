@@ -63,6 +63,9 @@ sim 的 runtime（§5 的 container、§9 的報告）以自己的 login role **
 - **為什麼連不進 `bfx`**：CONNECT 在任何 role 設定生效前、以登入的 role 檢查；`INHERIT FALSE` 讓 `bfx_sim`
   不繼承 `bfx_bot` 的 CONNECT。前提是 `bfx` 不再對 PUBLIC 開放 CONNECT（新建 database 的預設是開放的），
   所以先把 CONNECT 改成只給列出的 runtime role（owner 是 superuser，不受影響）。
+- **隔離的範圍**：這個 credential 連不進 `bfx`、讀寫不到 live 的表；但在 `bfx_sim` 裡它就是 `bfx_bot`，而
+  `pg_stat_activity` 與 `pg_cancel_backend`／`pg_terminate_backend` 以 role 判斷、作用於整個 cluster，所以它看得到 live bot
+  連線的 query 文字，也能中斷它們。比舊做法（sim 直接拿 `bfx_bot` 的密碼）窄，但不是完整隔離。
 - 驗證：`backend/tests/integration/test_sim_runtime_role.py`（真實 PG18，含連 `bfx` 被拒、帶 `-c role=bfx_bot`
   也被拒、owner-exempt trigger 照樣擋 sim、模擬 bot 與報告以這個 credential 跑通）。
 
@@ -92,9 +95,11 @@ printf "SET log_statement = 'none';\nSET log_min_error_statement = 'panic';\nCRE
 # 已有 bfx_sim（前一次 soak 留下）：上面改成 ALTER ROLE bfx_sim LOGIN PASSWORD '%s';
 docker exec -i bfx-postgres psql -U <owner> -d bfx -v ON_ERROR_STOP=1 <<'SQL'
 GRANT bfx_bot TO bfx_sim WITH INHERIT FALSE, SET TRUE;
-CREATE DATABASE bfx_sim OWNER <owner>;            -- 已存在就跳過這一行
+SELECT 'CREATE DATABASE bfx_sim OWNER <owner>'
+  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'bfx_sim') \gexec
 REVOKE CONNECT ON DATABASE bfx_sim FROM PUBLIC;   -- webapi／operator／research 不連
-REVOKE CONNECT ON DATABASE bfx_sim FROM bfx_bot;  -- live 的 bot credential 也不連（舊版本 runbook 曾授予）
+REVOKE CONNECT ON DATABASE bfx_sim FROM bfx_bot;  -- live 的 bot credential 也不連（舊版本 runbook 曾授予；
+                                                  -- 仍用舊 sim.env 跑的 soak 之後的新連線會被拒，先停掉它）
 GRANT CONNECT ON DATABASE bfx_sim TO bfx_sim;
 ALTER ROLE bfx_sim IN DATABASE bfx_sim SET role = 'bfx_bot';
 SQL
