@@ -468,18 +468,26 @@ class GhAttestationVerifier:
 
     The attestation bundle comes from the registry (`--bundle-from-oci`, pushed there by
     release.yml's actions/attest); the Sigstore trust root comes from its TUF CDN, cached
-    under `home`. gh runs with an environment built from nothing: no GitHub token, no
-    gh login, and an empty DOCKER_CONFIG, so neither ghcr.env's pull token nor root's
-    docker login reaches it (the package is read anonymously). Any failure -- gh missing,
-    another version, a registry or Sigstore outage, no or a wrong signature -- raises
+    under `home`. gh runs with an environment built from nothing: no gh login, an empty
+    DOCKER_CONFIG (neither ghcr.env's pull token nor root's docker login reaches it; the
+    package is read anonymously), and one credential, GH_TOKEN from `token_file`
+    (attest.env, root 0600). gh refuses to run any API command without a token, even for
+    public data (measured 2026-10-22 under `env -i`: "To get started with GitHub CLI,
+    please run: gh auth login"); the token is a fine-grained one with read-only access
+    to public repositories and no permissions, so it can read nothing a stranger could
+    not. Any failure -- gh missing, another version, the token file missing or not root
+    0600, a registry or Sigstore outage, no or a wrong signature -- raises
     DiscoveryError: fail closed, no bypass (one would need root, which can do anything).
     """
 
     def __init__(
         self, runner: Runner, *, gh: str, home: Path, repository: str, ref: str,
+        token_file: Path, secret_check: Callable[[Path], None],
         version: str = GH_VERSION,
     ) -> None:
         self._runner = runner
+        self._token_file = token_file
+        self._secret_check = secret_check
         self._gh = gh
         self._home = home
         self._repository = repository
@@ -498,6 +506,24 @@ class GhAttestationVerifier:
             "GH_PROMPT_DISABLED": "1",
             "NO_COLOR": "1",
         }
+
+    def _token(self) -> str:
+        """GH_TOKEN, the only key of a root 0600 attest.env (protected_secret_file)."""
+        try:
+            self._secret_check(self._token_file)
+            values = parse_env_file(self._token_file.read_text(encoding="utf-8"),
+                                    name=self._token_file.name, compose=False)
+        except DeployError as exc:
+            log(f"attestation token unusable: {exc.code}")
+            raise DiscoveryError("attestation_token_missing") from None
+        except OSError as exc:
+            log(f"attestation token unusable: {type(exc).__name__}:{self._token_file.name}")
+            raise DiscoveryError("attestation_token_missing") from None
+        token = values.get("GH_TOKEN", "")
+        if set(values) != {"GH_TOKEN"} or not token.strip():
+            log(f"attestation token unusable: {self._token_file.name} must hold exactly GH_TOKEN")
+            raise DiscoveryError("attestation_token_missing")
+        return token
 
     def argv(self, image: str) -> list[str]:
         return [
@@ -523,14 +549,16 @@ class GhAttestationVerifier:
         if found is None or found.group(1) != self._version:
             log(f"gh at {self._gh} is not {self._version}: {version.stdout.strip()[:120]}")
             raise DiscoveryError("attestation_verifier_wrong_version")
+        token = self._token()
         try:
-            result = self._runner(self.argv(image), timeout=180.0, env=env)
+            result = self._runner(self.argv(image), timeout=180.0, env={**env, "GH_TOKEN": token})
         except CommandError as exc:
             log(f"attestation verify of {image} failed: {exc.code}")
             raise DiscoveryError("attestation_unverified") from None
         if result.returncode != 0:
-            log(f"attestation verify of {image} exited {result.returncode}: "
-                f"{result.stderr.strip()[-600:]}")
+            # gh does not echo the token; replace it anyway before stderr reaches the journal.
+            stderr = result.stderr.replace(token, "[GH_TOKEN]").strip()[-600:]
+            log(f"attestation verify of {image} exited {result.returncode}: {stderr}")
             raise DiscoveryError("attestation_unverified")
         try:
             verified = json.loads(result.stdout)
@@ -985,7 +1013,8 @@ class Deployer:
         self.settings = settings
         self._attestations = attestations or GhAttestationVerifier(
             runner, gh=settings.gh, home=settings.state_dir / "gh",
-            repository=settings.source_repository, ref=f"refs/heads/{settings.branch}")
+            repository=settings.source_repository, ref=f"refs/heads/{settings.branch}",
+            token_file=settings.runtime_dir / "attest.env", secret_check=secret_check)
         self._runner = runner
         self._registry = registry
         self._ledger = ledger

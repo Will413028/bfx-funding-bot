@@ -674,7 +674,7 @@ class Harness:
     notices: list[tuple[str, str]]
     settings: Any
 
-    def deployer(self, **overrides: Any) -> Any:
+    def deployer(self, secret_check: Callable[[Path], None] | None = None, **overrides: Any) -> Any:
         settings = self.settings
         if overrides:
             fields = {name: getattr(settings, name) for name in settings.__dataclass_fields__}
@@ -683,12 +683,15 @@ class Harness:
             settings, runner=self.host, registry=self.registry, ledger=self.ledger,
             notify=lambda level, text: self.notices.append((level, text)),
             clock=self.clock.time, sleep=self.clock.sleep,
-            secret_check=lambda path: None,
+            secret_check=secret_check or (lambda path: None),
         )
 
     def run(self, **overrides: Any) -> int:
         return int(self.deployer(**overrides).run())
 
+
+# attest.env's zero-permission fine-grained token: the one credential gh gets.
+ATTEST_TOKEN = "github_pat_attest_public_read_only"
 
 VALID_ENV = {
     "bot.env": "DATABASE_URL=postgresql://bfx_bot:x@bfx-postgres:5432/bfx\nBFX_ADMIN_TOKEN=t\n",
@@ -703,6 +706,7 @@ def harness(tmp_path: Path) -> Harness:
     runtime.mkdir()
     for name, text in VALID_ENV.items():
         (runtime / name).write_text(text)
+    (runtime / "attest.env").write_text(f"GH_TOKEN={ATTEST_TOKEN}\n")
     mirror = tmp_path / "mirror"
     units = tmp_path / "units"
     units.mkdir()
@@ -2586,15 +2590,24 @@ def test_the_candidate_digest_is_verified_before_the_mirror_the_pull_or_any_run(
     assert harness.ledger.last.outcome == "deployed"
 
 
-def test_gh_gets_no_github_token_and_not_the_registry_pull_credentials(harness: Harness) -> None:
+def test_gh_gets_exactly_attest_env_token_and_not_the_registry_pull_credentials(harness: Harness) -> None:
+    (harness.settings.runtime_dir / "ghcr.env").write_text(
+        "GHCR_USERNAME=will413028\nGHCR_TOKEN=ghcr-pull-token\n")
     deployer = harness.deployer()
-    deployer._registry_credentials = ("will413028", "ghcr-pull-token")
+    deployer._registry_credentials = bfx.load_registry_credentials(
+        harness.settings.runtime_dir / "ghcr.env", lambda path: None)
     assert deployer.run() == 0
     host = harness.host
     env = host.envs[host.index(GH_VERIFY)]
     assert env is not None
-    assert not {"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "DOCKER_HOST"} & set(env)
-    assert "ghcr-pull-token" not in json.dumps(env)
+    assert env["GH_TOKEN"] == ATTEST_TOKEN
+    assert not {"GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "DOCKER_HOST"} & set(env)
+    assert set(env) == {"PATH", "HOME", "GH_CONFIG_DIR", "DOCKER_CONFIG", "GH_NO_UPDATE_NOTIFIER",
+                        "GH_PROMPT_DISABLED", "NO_COLOR", "GH_TOKEN"}
+    assert "ghcr-pull-token" not in json.dumps(env) and "will413028" not in json.dumps(env)
+    # Only gh's verify sees the token: not `gh --version`, nor any other command.
+    assert [call for call, seen in zip(host.calls, host.envs, strict=True)
+            if seen is not None and ATTEST_TOKEN in json.dumps(seen)] == [host.calls[host.index(GH_VERIFY)]]
     home = harness.settings.state_dir / "gh"
     assert (env["HOME"], env["GH_CONFIG_DIR"]) == (str(home), str(home / "config"))
     # An empty docker config: the package is read anonymously, never with ghcr.env's token.
@@ -2612,6 +2625,10 @@ def test_gh_gets_no_github_token_and_not_the_registry_pull_credentials(harness: 
     (lambda h: setattr(h.host, "gh_present", False), "attestation_verifier_missing"),
     (lambda h: setattr(h.host, "gh_version", "2.102.1"), "attestation_verifier_wrong_version"),
     (lambda h: setattr(h.host, "gh_version", "2.101.0"), "attestation_verifier_wrong_version"),
+    (lambda h: (h.settings.runtime_dir / "attest.env").unlink(), "attestation_token_missing"),
+    (lambda h: (h.settings.runtime_dir / "attest.env").write_text("GH_TOKEN=\n"), "attestation_token_missing"),
+    (lambda h: (h.settings.runtime_dir / "attest.env").write_text(
+        "GH_TOKEN=t\nGHCR_TOKEN=ghcr-pull-token\n"), "attestation_token_missing"),
 ])
 def test_an_image_that_cannot_be_verified_is_never_run(
         harness: Harness, setup: Callable[[Harness], None], code: str) -> None:
@@ -2686,8 +2703,11 @@ def test_gh_verifier_accepts_only_its_pinned_version(tmp_path: Path) -> None:
                env: Mapping[str, str] | None = None) -> Any:
         return answers.get(tuple(argv), bfx.CommandResult(0, '[{"verificationResult": {}}]', ""))
 
+    token_file = tmp_path / "attest.env"
+    token_file.write_text("GH_TOKEN=t\n")
     verifier = bfx.GhAttestationVerifier(runner, gh="gh", home=tmp_path, repository="o/r",
-                                         ref="refs/heads/main")
+                                         ref="refs/heads/main", token_file=token_file,
+                                         secret_check=lambda path: None)
     verifier.verify(f"{BACKEND}@{NEW_B}")
     answers[("gh", "--version")] = bfx.CommandResult(0, "gh version 2.102.0-rc1 (2026-09-30)\n", "")
     with pytest.raises(bfx.DiscoveryError, match="attestation_verifier_wrong_version"):
@@ -2695,6 +2715,54 @@ def test_gh_verifier_accepts_only_its_pinned_version(tmp_path: Path) -> None:
     answers[("gh", "--version")] = bfx.CommandResult(127, "", "not found")
     with pytest.raises(bfx.DiscoveryError, match="attestation_verifier_missing"):
         verifier.verify(f"{BACKEND}@{NEW_B}")
+
+
+def _owner_checked(path: Path) -> None:
+    """protected_secret_file with the test user standing in for root."""
+    bfx.protected_secret_file(path, owner_uid=os.getuid())
+
+
+@pytest.mark.parametrize("break_file", [
+    lambda path: path.chmod(0o640),
+    lambda path: path.chmod(0o604),
+    lambda path: (path.rename(path.with_name("real.env")), path.symlink_to(path.with_name("real.env"))),
+])
+def test_an_attest_env_that_is_not_a_private_regular_file_refuses(
+        harness: Harness, break_file: Callable[[Path], Any]) -> None:
+    token_file = harness.settings.runtime_dir / "attest.env"
+    token_file.chmod(0o600)
+    break_file(token_file)
+    assert harness.deployer(secret_check=_owner_checked).run() == 1
+    host = harness.host
+    assert host.count(GH_VERIFY) == host.count(PULL) == host.count(DOCKER_RUN) == 0
+    assert _discovery_code(harness) == "attestation_token_missing"
+
+
+def test_a_root_0600_attest_env_passes_the_real_check(harness: Harness) -> None:
+    (harness.settings.runtime_dir / "attest.env").chmod(0o600)
+    for name in VALID_ENV:
+        (harness.settings.runtime_dir / name).chmod(0o600)
+    assert harness.deployer(secret_check=_owner_checked).run() == 0
+    env = harness.host.envs[harness.host.index(GH_VERIFY)]
+    assert env is not None and env["GH_TOKEN"] == ATTEST_TOKEN
+
+
+def test_gh_stderr_reaches_the_journal_without_the_token(
+        harness: Harness, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    host = harness.host
+
+    def leaky(args: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
+        if args == ("--version",):
+            return bfx.CommandResult(0, f"gh version {bfx.GH_VERSION} (2026-09-30)\n", "")
+        assert env is not None
+        return bfx.CommandResult(1, "", f"HTTP 401: Bad credentials (token {env['GH_TOKEN']})")
+
+    monkeypatch.setattr(host, "_gh", leaky)
+    assert harness.run() == 1
+    err = capsys.readouterr().err
+    assert "Bad credentials (token [GH_TOKEN])" in err and ATTEST_TOKEN not in err
+    assert ATTEST_TOKEN not in json.dumps(harness.notices)
+    assert _discovery_code(harness) == "attestation_unverified"
 
 
 # --------------------------------------------------------------------------- downgrade (9i)
