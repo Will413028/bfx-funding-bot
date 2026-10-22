@@ -4,7 +4,9 @@ Each test writes real files and points BFX_SECRETS_DIR at them, as Compose mount
 /run/secrets. Mutations (one at a time; revert after each): read the env before the file in
 read_secret (test_file_mode_reads_the_file_and_ignores_the_env fails); return None for a
 missing file (test_file_mode_refuses_a_missing_empty_or_unreadable_file fails); make
-load_kek read os.environ (test_the_vault_key_is_read_from_its_file fails).
+load_kek read os.environ (test_the_vault_key_is_read_from_its_file fails); build a bare
+``Settings()`` in g3.py (test_settings_with_a_file_secret_are_built_only_through_the_reader
+fails).
 """
 from __future__ import annotations
 
@@ -197,6 +199,58 @@ def test_no_resident_code_reads_a_file_secret_from_the_env() -> None:
         if reads:
             offenders[relative] = reads
     assert offenders == {}
+
+
+def _secret_settings_classes(tree: ast.AST) -> set[str]:
+    """pydantic BaseSettings subclasses with a field that names a file secret (by field
+    name or a string validation_alias/alias): building one fills it from the env."""
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or not any(
+                (base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")) == "BaseSettings"
+                for base in node.bases):
+            continue
+        for item in node.body:
+            if not isinstance(item, ast.AnnAssign) or not isinstance(item.target, ast.Name):
+                continue
+            names = {item.target.id.upper()}
+            if isinstance(item.value, ast.Call):
+                names |= {kw.value.value for kw in item.value.keywords
+                          if kw.arg in ("alias", "validation_alias")
+                          and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str)}
+            if names & FILE_SECRET_KEYS:
+                found.add(node.name)
+    return found
+
+
+def _constructions(tree: ast.AST, classes: set[str]) -> list[str]:
+    return [f"{name}@{node.lineno}" for node in ast.walk(tree) if isinstance(node, ast.Call)
+            for name in [node.func.id if isinstance(node.func, ast.Name)
+                         else getattr(node.func, "attr", None)] if name in classes]
+
+
+def test_settings_with_a_file_secret_are_built_only_through_the_reader() -> None:
+    """pydantic-settings reads DATABASE_URL from the env on its own: a bare ``Settings()``
+    in file mode would take a leftover env value. Only core/settings.py (load_settings,
+    which passes the reader's value) may build such a class; everything else calls
+    load_settings."""
+    trees = {path.relative_to(SRC).as_posix(): ast.parse(path.read_text(encoding="utf-8"))
+             for path in sorted(SRC.rglob("*.py"))}
+    classes = set().union(*(_secret_settings_classes(tree) for tree in trees.values()))
+    assert "Settings" in classes                    # the scan sees the real class
+    offenders = {relative: found for relative, tree in trees.items()
+                 if relative != "core/settings.py" and (found := _constructions(tree, classes))}
+    assert offenders == {}
+
+
+def test_the_settings_scan_sees_a_secret_field_and_a_construction() -> None:
+    source = '\n'.join([
+        "class A(BaseSettings):", "    database_url: str", "class B(pydantic_settings.BaseSettings):",
+        "    token: str = Field(validation_alias='BFX_ADMIN_TOKEN')", "class C(BaseSettings):",
+        "    log_level: str = 'INFO'", "a = A()", "b = mod.B(x=1)", "c = C()"])
+    tree = ast.parse(source)
+    assert _secret_settings_classes(tree) == {"A", "B"}
+    assert _constructions(tree, {"A", "B"}) == ["A@7", "B@8"]
 
 
 def test_the_scan_sees_each_way_of_reading_the_env() -> None:
