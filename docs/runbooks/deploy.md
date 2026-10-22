@@ -46,7 +46,7 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    以 DB owner（`migrate.env`）跑 alembic。驗不過就跟「release 還找不到」一樣處理：不寫 ledger、什麼都不動、
    每一輪重驗，連續失敗 30 分鐘發一次 warning（見 §5「Provenance 驗不過」）。沒有略過驗證的旗標。
    gh 的環境從零建立：沒有 gh login，`DOCKER_CONFIG` 是空目錄，所以 `ghcr.env` 的
-   pull 憑證與 root 的 docker login 都不會交給 gh（GHCR package 以匿名讀取）。唯一的憑證是 `attest.env` 的
+   pull 憑證與 root 的 docker login 都不會交給 gh：gh 以匿名方式讀 GHCR 的 attestation，所以 **GHCR package `bfx-funding-bot-backend` 必須是 public**（package 設定頁 → Danger Zone → Change visibility）；還是 private 時每個 release 都以 `attestation_unverified` 擋下，stderr 是 registry 的 401／denied。唯一的憑證是 `attest.env` 的
    `GH_TOKEN`：gh 沒有 token 就拒絕執行，連讀公開資料也一樣，所以給它一把沒有任何權限、只能讀公開 repo 的
    fine-grained token（見下方「Env 檔規則」）。這把 token 只出現在 `gh attestation verify` 的環境裡，
    journal 印 gh stderr 前會把它換成 `[GH_TOKEN]`。gh 的 TUF cache 在
@@ -237,6 +237,14 @@ Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.
 - 換節點（state 壞掉）：admin console 刪節點 → `docker rm -f bfx-tailscale`（還有容器引用時 volume 刪不掉）→
   `docker volume rm bfx_tsstate` → 放一把新 auth key →
   `--recreate`。
+
+### 第一次啟用 provenance 驗證（9i，一次性，順序不能換）
+
+1. Will 在 GitHub 建 fine-grained token（`fresh-host-setup.md` 3b），寫進 `/opt/bfx/runtime/attest.env`（root 0600）。
+2. GHCR package `bfx-funding-bot-backend` 改成 public。
+3. 9i 的 PR merge；它自己的 release 由舊工具部署（舊工具不驗簽）。
+4. 部署成功後照下方 §4 重跑一次 `install.sh`（裝釘版的 gh）。
+5. 用 §5 的「手動重驗」對目前部署的 digest 跑一次，exit 0 才算完成；之前的任何一步漏掉，下一個 release 都會停在 `attestation_token_missing`／`attestation_unverified`／`attestation_verifier_missing`（fail closed，bot 與 webapi 不受影響）。
 
 ## 4. 主機工具與 DR 腳本的版本
 

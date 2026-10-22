@@ -457,6 +457,10 @@ class Attestations(Protocol):
     def verify(self, image: str) -> None: ...
 
 
+# Only releases built from main are trusted. Fixed here, not taken from --branch, so no
+# command-line flag can widen what the attestation must prove.
+SIGNED_SOURCE_REF = "refs/heads/main"
+
 class GhAttestationVerifier:
     """A release image's SLSA build provenance, verified with the pinned GitHub CLI.
 
@@ -1013,7 +1017,7 @@ class Deployer:
         self.settings = settings
         self._attestations = attestations or GhAttestationVerifier(
             runner, gh=settings.gh, home=settings.state_dir / "gh",
-            repository=settings.source_repository, ref=f"refs/heads/{settings.branch}",
+            repository=settings.source_repository, ref=SIGNED_SOURCE_REF,
             token_file=settings.runtime_dir / "attest.env", secret_check=secret_check)
         self._runner = runner
         self._registry = registry

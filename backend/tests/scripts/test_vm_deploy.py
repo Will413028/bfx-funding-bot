@@ -3040,3 +3040,12 @@ def test_managed_units_file_names_only_units_that_exist() -> None:
     names = bfx.managed_units(ROOT / "deploy/vm/systemd/managed-units")
     assert all((ROOT / "deploy/vm/systemd" / name).is_file() for name in names)
     assert "bfx-restore-test@.service" in names and "bfx-deploy.service" in names
+
+
+def test_the_branch_flag_cannot_change_the_ref_the_attestation_must_prove(harness: Harness) -> None:
+    """Only releases built from main are trusted: ``--branch`` moves which remote ref the
+    deployer fetches, never the ``--source-ref`` gh verifies against.
+
+    Mutation: build the verifier's ref from ``settings.branch`` again: this test fails."""
+    deployer = harness.deployer(branch="feature")
+    assert deployer._attestations._ref == bfx.SIGNED_SOURCE_REF == "refs/heads/main"
