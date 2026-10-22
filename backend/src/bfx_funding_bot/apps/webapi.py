@@ -38,6 +38,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # (9d-2). Refusing to start makes a left-over key fail the deploy, which rolls back.
         security_event(BOOT_REFUSED, reason="admin_token_in_webapi_env", level=logging.CRITICAL)
         raise RuntimeError("bfx_admin_token_in_webapi_env")
+    if "BFX_VAULT_KEK" in os.environ:
+        # The vault key opens every exchange credential; only the bot decrypts (9g, F29).
+        # Present at all, even empty, is a misplaced env file: refuse, as above.
+        logging.critical("Startup refused: BFX_VAULT_KEK must not be in the web API's env")
+        raise RuntimeError("bfx_vault_kek_in_webapi_env")
     # Outside the try below: a missing or invalid ingress value refuses to start, so the
     # deploy fails (and rolls back) instead of every request answering 503 (9d-5).
     try:

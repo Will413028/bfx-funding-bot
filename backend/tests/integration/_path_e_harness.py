@@ -56,6 +56,7 @@ def _detach_network(d: Any) -> None:
     d.periodic_reconcile = None
     d.interest_ledger_sync = None
     d.credit_history_sync = None
+    d.credential_compliance = None  # its key check is a signed read
 
 
 async def _patched_build_daemon(*args: Any, **kwargs: Any) -> Any:

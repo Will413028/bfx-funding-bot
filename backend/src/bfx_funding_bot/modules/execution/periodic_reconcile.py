@@ -13,7 +13,8 @@ silently breaks.
   blocks new offers (never trade on a stale ledger). Cleared on recovery.
 - The venue refusing the account's key is not a fetch failure: it raises out of the loop
   (the daemon exits 78) and the next boot holds in credential recovery mode, where the
-  credential rotation worker can replace the key.
+  credential rotation worker can replace the key. A submit the venue answers the same way
+  (the deployment raises it after the UNKNOWN is durable) ends the loop alike.
 """
 from __future__ import annotations
 
@@ -33,6 +34,20 @@ from bfx_funding_bot.modules.ledger import CycleResult, ObservationSink, Scope
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
+
+def _raise_if_key_refused(exc: Exception, event: str) -> None:
+    """Re-raise ``exc`` as the venue's own refusal of the key (body code 10100), if it is one.
+
+    Raised as the :class:`VenueCredentialRejectedError` itself (unwrapped from the chain), so
+    ``apps.bot`` exits 78 on it whoever raised it."""
+    rejected = credential_rejection(exc)
+    if rejected is None or not rejected.venue_coded:
+        return
+    log.critical("%s err=%r", event, exc)
+    if rejected is exc:
+        raise exc
+    raise rejected from exc
+
 
 class _Probe(Protocol):
     def record_heartbeat(self, sub_task: str) -> None: ...
@@ -155,15 +170,10 @@ class PeriodicReconcile:
         try:
             cycle = await self._recovery.run(self._scope)
         except Exception as exc:  # never let the backbone crash the daemon...
-            rejected = credential_rejection(exc)
-            if rejected is not None and rejected.venue_coded:
-                # ...except on a key the venue itself refused: retrying it changes nothing, and
-                # only a boot (credential recovery mode) runs without trading while it is
-                # replaced. A bare 401/403 (a WAF page can send one) counts as a failure below.
-                log.critical("periodic_reconcile_credential_rejected err=%r", exc)
-                if rejected is exc:
-                    raise
-                raise rejected from exc
+            # ...except on a key the venue itself refused: retrying it changes nothing, and
+            # only a boot (credential recovery mode) runs without trading while it is
+            # replaced. A bare 401/403 (a WAF page can send one) counts as a failure below.
+            _raise_if_key_refused(exc, "periodic_reconcile_credential_rejected")
             self._consecutive_failures += 1
             log.warning(
                 "periodic_reconcile_failed attempt=%d/%d err=%r",
@@ -197,5 +207,8 @@ class PeriodicReconcile:
             await self._deployment.deploy(
                 venue_offers=await self._deployment_input.offers(cycle),
             )
-        except Exception:  # deployment must never crash the reconcile backbone
+        except Exception as exc:  # deployment must never crash the reconcile backbone...
+            # ...except on a submit the venue answered by refusing the key (9g): the same exit
+            # as a refused read, without waiting for the next cycle to read it.
+            _raise_if_key_refused(exc, "deployment_credential_rejected")
             log.exception("deployment_phase_failed")

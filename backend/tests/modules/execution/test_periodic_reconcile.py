@@ -358,3 +358,46 @@ async def test_other_venue_refusals_still_count_as_fetch_failures():
     await pr._tick()  # swallowed, as before
     assert pr._consecutive_failures == 1
     assert _reconcile_statuses(probe, HealthTarget.EXECUTOR) == [HealthStatus.DOWN]
+
+
+# --- a submit refused for the key (9g) ---------------------------------------------------------
+# Mutation: drop ``_raise_if_key_refused`` from ``PeriodicReconcile._deploy``: the first test
+# fails (the refusal is logged as ``deployment_phase_failed`` and the loop goes on).
+
+@pytest.mark.asyncio
+async def test_a_submit_refused_for_the_key_ends_the_loop_like_a_refused_read():
+    from bfx_funding_bot.external.bitfinex.errors import VenueCredentialRejectedError
+
+    refused = VenueCredentialRejectedError(500, "Internal Server Error", _DIGEST_INVALID)
+
+    class _RefusedDeployment:
+        async def deploy(self, *, venue_offers=()) -> None:
+            raise refused
+
+    probe = _FakeProbe()
+    pr = _make_periodic(recovery=_FakeRecovery(results=[ACCEPTED]), probe=probe,
+                        interval_s=0.005, deployment=_RefusedDeployment())
+
+    with pytest.raises(VenueCredentialRejectedError) as raised:
+        await pr._tick()
+    assert raised.value is refused
+
+
+@pytest.mark.asyncio
+async def test_a_bare_403_from_the_deployment_is_still_only_logged():
+    from bfx_funding_bot.external.bitfinex.errors import VenueCredentialRejectedError
+
+    class _GatewayDeployment:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def deploy(self, *, venue_offers=()) -> None:
+            self.calls += 1
+            raise VenueCredentialRejectedError(403, "Forbidden", "<html>waf</html>")
+
+    deployment = _GatewayDeployment()
+    pr = _make_periodic(recovery=_FakeRecovery(results=[ACCEPTED]), probe=_FakeProbe(),
+                        interval_s=0.005, deployment=deployment)
+
+    await pr._tick()  # swallowed, as any deployment failure
+    assert deployment.calls == 1

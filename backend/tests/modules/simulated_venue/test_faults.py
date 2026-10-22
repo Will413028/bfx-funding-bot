@@ -83,6 +83,16 @@ async def test_realistic_rejection_is_5xx_with_error_body_and_places_nothing() -
     assert await _active_ids(w) == []
 
 
+async def test_a_key_refused_on_submit_is_the_revoked_key_answer_and_places_nothing() -> None:
+    w = await make_world(funds={"UST": "1000"},
+                         faults=once(FaultTarget.SUBMIT, FaultKind.KEY_REFUSED))
+    response = await w.submit(amount="150")
+    assert response.status_code == 500 and response.json() == ["error", 10100, "apikey: invalid"]
+    outcome = classify_submit_response(response.status_code, response.json(), True)
+    assert isinstance(outcome, SubmitOutcomeUnknown) and outcome.venue_error_code == 10100
+    assert await _active_ids(w) == []
+
+
 async def test_documented_rejection_is_a_200_error_notification_and_places_nothing() -> None:
     w = await make_world(funds={"UST": "1000"},
                          faults=once(FaultTarget.SUBMIT, FaultKind.REJECTED))

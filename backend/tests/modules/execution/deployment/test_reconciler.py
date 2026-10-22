@@ -952,6 +952,66 @@ async def test_per_cell_safety_block_does_not_stop_other_cell():
     assert len(safety.calls) == 2  # both cells consulted
 
 
+async def test_a_submit_refused_for_the_key_stops_the_tick_after_recording_its_unknown() -> None:
+    """9g: the venue answering a submit with 10100 means the key itself is refused. The
+    attempt stays UNKNOWN (recorded and emitted as any UNKNOWN), and the tick ends there by
+    raising the rejection the periodic reconcile turns into exit 78: no second submit goes
+    out on the refused key. Mutation: drop the raise -- the second cell is submitted."""
+    from bfx_funding_bot.external.bitfinex.errors import VenueCredentialRejectedError
+
+    class _KeyRefusedThenAck(_FakeExecutor):
+        async def submit(self, decision, ctx) -> SubmittedOrder:
+            await super().submit(decision, ctx)
+            if len(self.submitted) == 1:
+                return SubmittedOrder(
+                    outcome=SubmitOutcomeUnknown(
+                        "http_5xx", True, venue_error_code=10100,
+                        venue_error_message="apikey: invalid"),
+                    raw_response={"http_status": 500, "response_digest": "d"},
+                )
+            return SubmittedOrder(outcome=SubmitAcknowledged("unexpected"))
+
+    sink = _CapturingSink()
+    executor = _KeyRefusedThenAck()
+    rec, _executor, _safety = _build(
+        exposure=D("0"), quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
+        executor=executor, event_sink=sink,
+    )
+
+    with pytest.raises(VenueCredentialRejectedError) as raised:
+        await rec.deploy()
+
+    assert raised.value.venue_coded and raised.value.status_code == 500
+    assert "apikey" not in str(raised.value) and "apikey" not in (raised.value.raw or "")
+    assert len(executor.submitted) == 1
+    submits = [e for e in sink.events if e["event_type"] == "order_submit"]
+    assert len(submits) == 1
+
+
+@pytest.mark.parametrize("outcome", [
+    SubmitOutcomeUnknown("http_5xx", True, venue_error_code=10001, venue_error_message="x"),
+    SubmitOutcomeUnknown("timeout", True),
+    SubmitRejected("venue_rejected:10100:apikey: invalid"),
+], ids=["other_code", "no_answer", "rejected"])
+async def test_any_other_submit_outcome_keeps_the_tick_going(outcome) -> None:
+    class _OnceThenAck(_FakeExecutor):
+        async def submit(self, decision, ctx) -> SubmittedOrder:
+            await super().submit(decision, ctx)
+            if len(self.submitted) == 1:
+                return SubmittedOrder(outcome=outcome)
+            return SubmittedOrder(outcome=SubmitAcknowledged("second"))
+
+    executor = _OnceThenAck()
+    rec, _executor, _safety = _build(
+        exposure=D("0"), quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
+        executor=executor,
+    )
+
+    await rec.deploy()
+
+    assert len(executor.submitted) == 2
+
+
 class _RejectingExecutor:
     """Live-executor behaviour on a venue reject (e.g. 10001 not-enough-balance):
     returns a typed SubmitRejected rather than raising."""
