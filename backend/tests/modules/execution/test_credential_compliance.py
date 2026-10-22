@@ -155,14 +155,14 @@ async def test_a_key_that_is_no_longer_the_active_one_is_superseded_not_refused(
     assert client.asked == []
 
 
-async def test_no_active_credential_at_all_is_superseded_too(engine) -> None:
+async def test_no_active_credential_at_all_stops_the_key(engine) -> None:
     async with async_sessionmaker(engine).begin() as session:
         await session.execute(update(ExchangeAccountCredential).values(
             lifecycle_status="retired"))
     client = Client()
-    with pytest.raises(CredentialSupersededError) as superseded:
+    with pytest.raises(CredentialNoncompliantError) as refused:
         await _check(engine, client).check()
-    assert superseded.value.reason == "no_active_credential"
+    assert refused.value.reason == "no_active_credential"
     assert client.asked == []
 
 

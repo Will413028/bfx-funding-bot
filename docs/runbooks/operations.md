@@ -481,7 +481,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 <a id="alert-credential_recheck_failing"></a>
 #### `credential_recheck_failing`（warning；`recovered=true` 時 info）
 
-- 代表：執行中每 6 小時的 key 重查連續 12 次（第一次失敗後約 55 分鐘，每 5 分鐘重試一次）沒有得到結論：Bitfinex 沒回答、回答解析不了、拒絕的原因不是 key（例如 nonce 10114），或 DB 裡的 active 憑證已不是這把 key（`error=credential_superseded:replaced_by_rotation`／`no_active_credential`）。`error` 只有例外型別，venue 原文在 `docker logs bfx-bot` 的 `credential_recheck_failed`。每段連續失敗只發一則；之後重查通過時發一則 `recovered=true`（info，附 `after` 次數），重新計數。
+- 代表：執行中每 6 小時的 key 重查連續 12 次（第一次失敗後約 55 分鐘，每 5 分鐘重試一次）沒有得到結論：Bitfinex 沒回答、回答解析不了、拒絕的原因不是 key（例如 nonce 10114），或 DB 裡的 active 憑證已不是這把 key（`error=credential_superseded:replaced_by_rotation`；完全沒有 active 憑證不在此列，它是不合規、直接進恢復模式）。`error` 只有例外型別，venue 原文在 `docker logs bfx-bot` 的 `credential_recheck_failed`。每段連續失敗只發一則；之後重查通過時發一則 `recovered=true`（info，附 `after` 次數），重新計數。
 - 系統會做：照常放貸，每 5 分鐘再查一次；不停單、不結束 process。這段期間 key 的權限與帳號沒有被驗證（key 被改成可提領也要等重查恢復才會發現）。key 被輪替換掉時，正常情況下換憑證 worker 在幾秒內重啟 bot，不會累積到這則。
 - operator 判斷：看 `docker logs bfx-bot` 的 `credential_recheck_failed`／`credential_recheck_key_superseded`。Bitfinex 維護或連線問題通常自己恢復；同一個 venue 錯誤代碼反覆出現（例如 10114）是 bug，交給開發。`credential_superseded` 持續出現代表輪替後的重啟沒發生，看 [`credential_rotation_applied`](#alert-credential_rotation_applied) 與 bot 的 `credential_rotation_restart` log。同時到 Bitfinex 的 API key 頁面確認這把 key 仍只開 funding 寫入。
 

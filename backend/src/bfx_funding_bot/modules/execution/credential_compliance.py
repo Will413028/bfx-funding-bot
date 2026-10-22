@@ -66,9 +66,11 @@ class CredentialNoncompliantError(Exception):
 
 
 class CredentialSupersededError(Exception):
-    """The key in use is not the account's active credential (``reason``:
-    ``replaced_by_rotation`` when another key is active, ``no_active_credential`` when none
-    is). Not a verdict on the key: the caller retries, and a rotation's restart ends the run."""
+    """Another key became the account's active credential (``reason``
+    ``replaced_by_rotation``). Not a verdict on the key in use: the caller retries, and the
+    rotation's restart ends the run. No active credential at all is a verdict instead
+    (:class:`CredentialNoncompliantError` ``no_active_credential``): a rotation swaps the rows in
+    one transaction, so none active means the key was withdrawn, and the bot stops using it."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(f"credential_superseded:{reason}")
@@ -105,7 +107,7 @@ class CredentialCompliance:
                     ExchangeAccountCredential.lifecycle_status == "active",
                 ))).first()
         if active is None:
-            raise CredentialSupersededError("no_active_credential")
+            raise CredentialNoncompliantError("no_active_credential")
         if active.api_key != self.ctx.credentials.api_key:
             raise CredentialSupersededError("replaced_by_rotation")
         stored_user_id: int | None = active.bitfinex_user_id
