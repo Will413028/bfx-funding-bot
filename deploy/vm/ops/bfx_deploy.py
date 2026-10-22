@@ -312,7 +312,7 @@ def protected_secret_file(path: Path, *, owner_uid: int = 0) -> None:
 
 def shared_secret_file(path: Path, *, owner_uid: int = 0, group_gid: int = SECRET_GID) -> None:
     """A service's secret file (9h): regular, not a symlink, not empty, root-owned, group
-    SECRET_GID, 0640.
+    SECRET_GID, 0640, under directories only root can change (secret_directory).
 
     Compose bind-mounts the host file and ignores uid/gid/mode, so these host bits are
     the only protection: group read for the container's supplementary group, nothing
@@ -331,6 +331,25 @@ def shared_secret_file(path: Path, *, owner_uid: int = 0, group_gid: int = SECRE
         raise DeployError(f"secret_file_mode_not_0640:{name}")
     if info.st_size == 0:
         raise DeployError(f"secret_file_empty:{name}")
+    for directory in (path.parent.parent, path.parent):
+        secret_directory(directory, owner_uid=owner_uid)
+
+
+def secret_directory(directory: Path, *, owner_uid: int = 0) -> None:
+    """`secrets/` or `secrets/<service>/`: a real directory (not a link), root-owned, not
+    group or other writable.
+
+    A secret file's own bits are only as good as the directories above it: whoever can
+    write or swap one can replace the file between the check and the mount.
+    """
+    label = f"{directory.name}/"
+    if directory.is_symlink() or not directory.is_dir():
+        raise DeployError(f"secret_dir_missing:{label}")
+    info = directory.lstat()
+    if info.st_uid != owner_uid:
+        raise DeployError(f"secret_dir_not_root_owned:{label}")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise DeployError(f"secret_dir_writable_by_others:{label}")
 
 
 def _write_private(path: Path, content: str) -> None:
