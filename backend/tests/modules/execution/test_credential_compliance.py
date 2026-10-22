@@ -8,7 +8,10 @@ Mutation checks (one at a time; revert after each):
 * skip ``permission_error`` in ``CredentialCompliance.check``: the withdraw and the
   missing-funding cases pass silently, ``test_a_key_that_may_*`` fails.
 * skip the user id comparison: ``test_a_key_of_another_bitfinex_user_*`` fails.
-* read the stored id without the ``api_key`` condition: ``test_a_key_without_*`` fails.
+* compare the running key with no active row (or drop the comparison):
+  ``test_a_key_that_is_no_longer_the_active_one_is_superseded_*`` fails.
+* turn a ``BitfinexShapeError`` from either read into a ``CredentialNoncompliantError``:
+  ``test_an_answer_that_does_not_parse_is_no_verdict[*]`` fails.
 """
 from __future__ import annotations
 
@@ -19,6 +22,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
@@ -33,6 +37,7 @@ from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAcc
 from bfx_funding_bot.modules.execution.credential_compliance import (
     CredentialCompliance,
     CredentialNoncompliantError,
+    CredentialSupersededError,
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 
@@ -120,22 +125,44 @@ async def test_a_key_that_may_write_anything_but_funding_does_not_comply(
     assert client.asked == ["permissions"]  # the identity is not asked of a refused key
 
 
-@pytest.mark.parametrize(("user", "reason"), [
-    (9999, "credential_account_mismatch"),
-    (BitfinexShapeError("info/user row"), "account_identity_unavailable"),
-], ids=["other_user", "unreadable"])
-async def test_a_key_of_another_bitfinex_user_does_not_comply(engine, user, reason) -> None:
+async def test_a_key_of_another_bitfinex_user_does_not_comply(engine) -> None:
     with pytest.raises(CredentialNoncompliantError) as refused:
-        await _check(engine, Client(user=user)).check()
-    assert refused.value.reason == reason
+        await _check(engine, Client(user=9999)).check()
+    assert refused.value.reason == "credential_account_mismatch"
 
 
-async def test_a_key_without_its_own_active_row_cannot_be_compared(engine) -> None:
-    """The stored id is read for the key in use, not for whichever key is active."""
+@pytest.mark.parametrize("client", [
+    Client(scopes=BitfinexShapeError("permission row malformed")),
+    Client(user=BitfinexShapeError("user info id is not a positive int: str")),
+], ids=["permissions", "user"])
+async def test_an_answer_that_does_not_parse_is_no_verdict(engine, client) -> None:
+    """Non-compliance is a well-formed answer that breaks the rule; an unparseable one, from
+    either read, propagates for the caller to retry."""
+    error = client.scopes if isinstance(client.scopes, BaseException) else client.user
+    with pytest.raises(BitfinexShapeError) as raised:
+        await _check(engine, client).check()
+    assert raised.value is error
+
+
+async def test_a_key_that_is_no_longer_the_active_one_is_superseded_not_refused(
+        engine) -> None:
+    """A rotation committed another key: not a verdict on this one, nothing is asked."""
     client = Client()
-    with pytest.raises(CredentialNoncompliantError) as refused:
+    with pytest.raises(CredentialSupersededError) as superseded:
         await _check(engine, client, key="FAKE-OTHER-KEY").check()
-    assert refused.value.reason == "account_identity_unavailable"
+    assert superseded.value.reason == "replaced_by_rotation"
+    assert not isinstance(superseded.value, CredentialNoncompliantError)
+    assert client.asked == []
+
+
+async def test_no_active_credential_at_all_is_superseded_too(engine) -> None:
+    async with async_sessionmaker(engine).begin() as session:
+        await session.execute(update(ExchangeAccountCredential).values(
+            lifecycle_status="retired"))
+    client = Client()
+    with pytest.raises(CredentialSupersededError) as superseded:
+        await _check(engine, client).check()
+    assert superseded.value.reason == "no_active_credential"
     assert client.asked == []
 
 

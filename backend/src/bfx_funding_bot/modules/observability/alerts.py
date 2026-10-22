@@ -107,6 +107,11 @@ CREDENTIAL_ROTATION_FAILED: Final = "credential_rotation_failed"
 # credential rotation worker and its liveness until the key works again or is replaced
 # (marketfeed/daemon.py, credential recovery mode).
 CREDENTIAL_RECOVERY_MODE: Final = "credential_recovery_mode"
+# The running bot's 6-hourly key recheck has reached no verdict N times in a row (the venue
+# did not answer, an unparseable answer, a refusal other than the key's): the bot keeps
+# trading and retrying, but the key's permissions are not being verified. Sent once per
+# streak; ``recovered=True`` (INFO) once a recheck passes again (marketfeed/daemon.py).
+CREDENTIAL_RECHECK_FAILING: Final = "credential_recheck_failing"
 # A venue history stream could not be read completely (execution/venue_observation.py).
 VENUE_OBSERVATION_HISTORY_INCOMPLETE: Final = "venue_observation_history_incomplete"
 # The UNKNOWN resolver refused a resolution (ledger/_internal/resolver.py).
@@ -150,6 +155,7 @@ ALERT_EVENTS: Final[Mapping[str, str]] = {
     CREDENTIAL_ROTATION_REJECTED: WARNING,
     CREDENTIAL_ROTATION_FAILED: CRITICAL,
     CREDENTIAL_RECOVERY_MODE: CRITICAL,
+    CREDENTIAL_RECHECK_FAILING: WARNING,   # INFO when recovered
     VENUE_OBSERVATION_HISTORY_INCOMPLETE: WARNING,
     LEDGER_UNKNOWN_RESOLUTION_REJECTED: WARNING,
     VENUE_SUBMIT_REJECTED: WARNING,
@@ -171,6 +177,7 @@ DEDUP_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     OFFER_END_UNCONFIRMED: ("venue_offer_id",),
     OFFER_END_JUDGED: ("venue_offer_id", "outcome"),
     CREDENTIAL_RECOVERY_MODE: ("account",),        # one per account, whatever the error text
+    CREDENTIAL_RECHECK_FAILING: ("account", "recovered"),
     VENUE_SUBMIT_REJECTED: ("symbol", "reason"),   # a refusal loop is one alert per window
 }
 
@@ -436,6 +443,8 @@ def default_level(event: str, fields: Mapping[str, object]) -> str:
         return CRITICAL if fields.get("state") == "HALTED" else INFO
     if event == KILL_SWITCH_ENGAGED:
         return WARNING if fields.get("complete") is True else CRITICAL
+    if event == CREDENTIAL_RECHECK_FAILING and fields.get("recovered") is True:
+        return INFO
     return ALERT_EVENTS.get(event, WARNING)
 
 
@@ -475,6 +484,11 @@ def title(event: str, fields: Mapping[str, object]) -> str:
                     "waiting for a compliant key or a credential rotation")
         return ("venue refused the account's key: not trading, waiting for the key to work "
                 "or for a credential rotation")
+    if event == CREDENTIAL_RECHECK_FAILING:
+        if fields.get("recovered") is True:
+            return "key recheck passes again"
+        return ("key recheck keeps failing: the key's permissions are not being verified "
+                "(lending continues, retrying)")
     if event == ALERT_TEST:
         return "test alert (no action needed)"
     return event
@@ -530,6 +544,7 @@ __all__ = [
     "CAPITAL_POLICY_REQUEST_FAILED",
     "CAPITAL_POLICY_REQUEST_REJECTED",
     "COMMAND_THROTTLED",
+    "CREDENTIAL_RECHECK_FAILING",
     "CREDENTIAL_RECOVERY_MODE",
     "CREDENTIAL_ROTATION_APPLIED",
     "CREDENTIAL_ROTATION_FAILED",

@@ -11,9 +11,16 @@ same rule, at boot and every :data:`CREDENTIAL_RECHECK_INTERVAL_S` while the bot
 
 A key that fails is :class:`CredentialNoncompliantError`. It is handled exactly like the venue
 refusing the key (ADR 2026-10-18 D11: no separate stop state): at boot the daemon holds in
-credential recovery mode, and mid-run the daemon exits 78 so the next boot does. What the
-venue itself answers is not decided here: the client's errors propagate unchanged (10100 is
-the venue refusing the key; an unanswered request is transient), as in the boot observation.
+credential recovery mode, and mid-run the daemon exits 78 so the next boot does. Only a
+well-formed answer that breaks the rule is a verdict. What the venue itself answers is not
+decided here: the client's errors propagate unchanged (10100 is the venue refusing the key;
+an unanswered request is transient; an answer that does not parse, ``BitfinexShapeError``
+from either read, says nothing about the key), as in the boot observation.
+
+A key that is no longer the account's active credential is
+:class:`CredentialSupersededError`, not a verdict either: a rotation committed a new key and
+its restart (the rotation worker sets the stop event, ``CredentialRotationWorker.committed``
+or its catch-up) has not ended this run yet. That restart, not an exit here, loads the new key.
 """
 from __future__ import annotations
 
@@ -26,7 +33,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
-from bfx_funding_bot.external.bitfinex.errors import BitfinexShapeError
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccountCredential
 from bfx_funding_bot.modules.accounts.vault import permission_error
 from bfx_funding_bot.modules.execution.credential_rotation import (
@@ -40,8 +46,13 @@ log = logging.getLogger(__name__)
 # How often a running bot rechecks its key (plan step 9g). A permission change needs the
 # account owner at Bitfinex, so this bounds how long a widened key keeps trading unnoticed.
 CREDENTIAL_RECHECK_INTERVAL_S = 6 * 3600.0
-# After a recheck the venue did not answer: try again sooner than the interval.
+# After a recheck that reached no verdict (the venue did not answer, an answer that does not
+# parse, a refusal other than the key's, the key just replaced): try again sooner.
 CREDENTIAL_RECHECK_RETRY_S = 300.0
+# Rechecks in a row without a verdict before the operator is told the check is not running:
+# 12 x 300 s, the first failure plus 55 minutes. Longer than a venue outage or maintenance
+# window the bot rides out on its own, short against the 6-hour bound the recheck exists for.
+CREDENTIAL_RECHECK_ALERT_AFTER = 12
 
 
 class CredentialNoncompliantError(Exception):
@@ -51,6 +62,16 @@ class CredentialNoncompliantError(Exception):
 
     def __init__(self, reason: str) -> None:
         super().__init__(f"credential_noncompliant:{reason}")
+        self.reason = reason
+
+
+class CredentialSupersededError(Exception):
+    """The key in use is not the account's active credential (``reason``:
+    ``replaced_by_rotation`` when another key is active, ``no_active_credential`` when none
+    is). Not a verdict on the key: the caller retries, and a rotation's restart ends the run."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"credential_superseded:{reason}")
         self.reason = reason
 
 
@@ -73,15 +94,21 @@ class CredentialCompliance:
 
     async def check(self) -> None:
         """Return when the key complies; raise :class:`CredentialNoncompliantError` when it does
-        not. Venue errors (refused, unanswered) propagate as the client raised them."""
+        not, :class:`CredentialSupersededError` when it is no longer the active key. Venue
+        errors (refused, unanswered, unparseable) propagate as the client raised them."""
         async with self.session_factory() as session:
-            stored_user_id = await session.scalar(
-                select(ExchangeAccountCredential.bitfinex_user_id).where(
+            active = (await session.execute(
+                select(ExchangeAccountCredential.api_key,
+                       ExchangeAccountCredential.bitfinex_user_id).where(
                     ExchangeAccountCredential.exchange_account_id == self.exchange_account_id,
                     ExchangeAccountCredential.venue == "bitfinex",
                     ExchangeAccountCredential.lifecycle_status == "active",
-                    ExchangeAccountCredential.api_key == self.ctx.credentials.api_key,
-                ))
+                ))).first()
+        if active is None:
+            raise CredentialSupersededError("no_active_credential")
+        if active.api_key != self.ctx.credentials.api_key:
+            raise CredentialSupersededError("replaced_by_rotation")
+        stored_user_id: int | None = active.bitfinex_user_id
         # The rotation's order: the stored identity first (nothing is asked without it), then
         # the permissions, then the key's own user id.
         if stored_user_id is None:
@@ -89,10 +116,6 @@ class CredentialCompliance:
         refusal = permission_error(await self.client.get_key_permissions(ctx=self.ctx))
         if refusal is not None:
             raise CredentialNoncompliantError(refusal)
-        try:
-            user_id = await self.client.get_user_id(ctx=self.ctx)
-        except BitfinexShapeError:
-            raise CredentialNoncompliantError(ACCOUNT_IDENTITY_UNAVAILABLE) from None
-        if user_id != stored_user_id:
+        if await self.client.get_user_id(ctx=self.ctx) != stored_user_id:
             raise CredentialNoncompliantError(CREDENTIAL_ACCOUNT_MISMATCH)
         log.info("credential_compliance_ok account=%s", self.exchange_account_id)

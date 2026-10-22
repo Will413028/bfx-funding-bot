@@ -63,10 +63,12 @@ from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate
 from bfx_funding_bot.modules.execution.credential_compliance import (
+    CREDENTIAL_RECHECK_ALERT_AFTER,
     CREDENTIAL_RECHECK_INTERVAL_S,
     CREDENTIAL_RECHECK_RETRY_S,
     CredentialCompliance,
     CredentialNoncompliantError,
+    CredentialSupersededError,
 )
 from bfx_funding_bot.modules.execution.credential_rotation import (
     BOT_SETTLE_WINDOW,
@@ -560,6 +562,12 @@ class Daemon:
                     await self._end_credential_recovery("active_credential_changed")
                     return
                 await self._boot_attempt()
+            except CredentialSupersededError as exc:
+                # A rotation landed between the comparison above and the check: the next
+                # attempt's comparison ends recovery mode (or the worker's restart does).
+                log.info("credential_recovery_key_superseded attempt=%d reason=%s",
+                         attempt, exc.reason)
+                continue
             except Exception as exc:
                 refusal = credential_refusal(exc)
                 if refusal is not None:
@@ -580,12 +588,19 @@ class Daemon:
 
         Non-compliant, or refused by the venue itself (its body says 10100): raise, so the
         daemon exits 78 and the next boot holds in credential recovery mode (the same exit as a
-        refused reconcile read; ADR 2026-10-18 D11, no separate stop state). Anything else
-        (the venue did not answer, a bare 401/403 a gateway can send) is retried after
-        :data:`CREDENTIAL_RECHECK_RETRY_S`: a recheck never stops trading on a guess."""
+        refused reconcile read; ADR 2026-10-18 D11, no separate stop state). The key replaced
+        by a rotation (``CredentialSupersededError``): the rotation's own restart ends the run,
+        so wait for it. Anything else (the venue did not answer, an answer that does not
+        parse, a bare 401/403 a gateway can send, another refusal such as nonce 10114) is
+        retried after :data:`CREDENTIAL_RECHECK_RETRY_S`: a recheck never stops trading on a
+        guess. :data:`CREDENTIAL_RECHECK_ALERT_AFTER` such rechecks in a row send one
+        ``credential_recheck_failing`` alert, so a recheck that can never pass is not silent;
+        the next recheck that passes says so and starts a new streak."""
         compliance = self.credential_compliance
         assert compliance is not None
         delay = self.credential_recheck_interval_s
+        failures = 0
+        account = self.account_bootstrap.account_id
         while not self._stop_event.is_set():
             await self.credential_recheck_wait(self._stop_event, delay)
             if self._stop_event.is_set():
@@ -602,9 +617,26 @@ class Daemon:
                     if rejected is exc:
                         raise
                     raise rejected from exc
-                log.warning("credential_recheck_failed error=%r", exc)
+                failures += 1
+                if isinstance(exc, CredentialSupersededError):
+                    log.warning("credential_recheck_key_superseded reason=%s failures=%d",
+                                exc.reason, failures)
+                else:
+                    log.warning("credential_recheck_failed failures=%d error=%r", failures, exc)
+                if failures == CREDENTIAL_RECHECK_ALERT_AFTER:
+                    alerts.emit(alerts.CREDENTIAL_RECHECK_FAILING, level=alerts.WARNING,
+                                account=account, recovered=False, consecutive=failures,
+                                # The type only: a venue body can echo what it was sent.
+                                error=(str(exc) if isinstance(exc, CredentialSupersededError)
+                                       else type(exc).__name__))
                 delay = CREDENTIAL_RECHECK_RETRY_S
                 continue
+            if failures >= CREDENTIAL_RECHECK_ALERT_AFTER:
+                alerts.emit(alerts.CREDENTIAL_RECHECK_FAILING, level=alerts.INFO,
+                            account=account, recovered=True, after=failures)
+            if failures:
+                log.info("credential_recheck_passed_again after=%d", failures)
+            failures = 0
             delay = self.credential_recheck_interval_s
         log.info("sub_task_exit name=credential_recheck")
 

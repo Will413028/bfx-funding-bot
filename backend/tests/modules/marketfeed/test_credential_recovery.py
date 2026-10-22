@@ -563,3 +563,92 @@ async def test_a_recheck_the_venue_did_not_answer_is_retried_sooner_not_fatal(
     assert compliance.calls == 4
     assert fake.waits == [21_600.0, CREDENTIAL_RECHECK_RETRY_S, CREDENTIAL_RECHECK_RETRY_S,
                           21_600.0]
+
+
+# --- a recheck that reaches no verdict, a key a rotation replaced (9g review) ----------------
+# Mutation: never emit ``credential_recheck_failing`` (or emit it on every failure): the streak
+# test fails. Mutation: drop the ``CredentialSupersededError`` branch of the recovery retry
+# loop: the superseded-in-recovery test raises out of ``Daemon.run``.
+
+NONCE_SMALL = '["error",10114,"nonce: small"]'
+
+
+async def test_a_recheck_that_keeps_failing_alerts_once_and_says_when_it_passes_again(
+        engine, sent, caplog) -> None:
+    """A refusal that is not the key's (10114) never passes: trading continues, the loop keeps
+    retrying, and the operator hears it once the streak reaches the threshold."""
+    from bfx_funding_bot.modules.execution.credential_compliance import (
+        CREDENTIAL_RECHECK_ALERT_AFTER,
+        CREDENTIAL_RECHECK_RETRY_S,
+    )
+    n = CREDENTIAL_RECHECK_ALERT_AFTER
+    fake = _daemon(engine, Venue("accepted"))
+    failing = BitfinexAPIError(500, "Internal Server Error", NONCE_SMALL)
+    # n + 2 failures (the alert is sent once), a pass, then one more failure (a new streak,
+    # far from the threshold); the stop at the next call ends the test.
+    outcomes: list[BaseException | None] = [failing] * (n + 2) + [None, failing, None]
+    compliance = Compliance(*outcomes, on_call=lambda c: c == len(outcomes) and
+                            fake._stop_event.set())
+    loop = _recheck(fake, compliance)
+
+    with caplog.at_level(logging.INFO):
+        await loop()  # never raises: nothing here is a verdict on the key
+
+    assert sent == [
+        ("credential_recheck_failing", {
+            "level": "warning", "account": str(ACCOUNT), "recovered": False,
+            "consecutive": n, "error": "BitfinexAPIError"}),
+        ("credential_recheck_failing", {
+            "level": "info", "account": str(ACCOUNT), "recovered": True, "after": n + 2}),
+    ]
+    assert fake.waits == ([21_600.0] + [CREDENTIAL_RECHECK_RETRY_S] * (n + 2)
+                          + [21_600.0, CREDENTIAL_RECHECK_RETRY_S])
+    assert f"credential_recheck_passed_again after={n + 2}" in caplog.text
+
+
+async def test_a_recheck_on_a_key_a_rotation_replaced_waits_for_the_restart(
+        engine, sent, caplog) -> None:
+    from bfx_funding_bot.modules.execution.credential_compliance import (
+        CREDENTIAL_RECHECK_RETRY_S,
+        CredentialSupersededError,
+    )
+    fake = _daemon(engine, Venue("accepted"))
+    loop = _recheck(fake, Compliance(CredentialSupersededError("replaced_by_rotation"),
+                                     on_call=lambda c: c == 2 and fake._stop_event.set()))
+
+    with caplog.at_level(logging.INFO):
+        await loop()  # no exit 78: the rotation's restart ends the run
+
+    assert fake.waits == [21_600.0, CREDENTIAL_RECHECK_RETRY_S]
+    assert "credential_recheck_key_superseded reason=replaced_by_rotation" in caplog.text
+    assert sent == []
+
+
+async def test_a_key_superseded_during_recovery_ends_it_as_a_changed_credential(
+        engine, sent, caplog) -> None:
+    """The rotation lands between the retry's credential comparison and the check: the next
+    attempt's comparison ends recovery mode, as for any replaced key."""
+    from bfx_funding_bot.modules.execution.credential_compliance import (
+        CredentialSupersededError,
+    )
+
+    class Rotated(Compliance):
+        async def check(self) -> None:
+            if self.calls == 1:  # the first retry: the rotation commits now
+                async with engine.begin() as conn:
+                    await conn.execute(text(
+                        "UPDATE exchange_account_credentials SET api_key = :k"), {"k": NEW_KEY})
+            await super().check()
+
+    compliance = Rotated(_noncompliant(), CredentialSupersededError("replaced_by_rotation"),
+                         on_call=lambda c: c == 5 and fake._stop_event.set())
+    fake = _daemon(engine, Venue("accepted"), compliance=compliance,
+                   run_started_at_ms=T0 - SETTLE_MS)
+
+    with caplog.at_level(logging.INFO):
+        await Daemon.run(fake)
+
+    assert compliance.calls == 2  # the boot, then the retry that met the rotation
+    assert "credential_recovery_key_superseded attempt=1 reason=replaced_by_rotation" in caplog.text
+    assert "credential_recovery_resolved reason=active_credential_changed" in caplog.text
+    _trading_untouched(fake)
