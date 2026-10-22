@@ -62,6 +62,8 @@ describe("API keys page", () => {
         apiSecret: "****",
         status: "verified",
         createdAt: "2026-01-01",
+        verifiedAt: null,
+        lastVerifyError: null,
       },
     ];
     renderPage();

@@ -62,6 +62,9 @@ export function StrategyForm({
   const tc = useTranslations("common");
   const saveMutation = useSaveConfig(exchangeAccountId);
   const resetMutation = useResetConfig(exchangeAccountId);
+  // A draft stored under another schema arrives with config null and configError set:
+  // the form starts from the defaults, and saving overwrites it.
+  const stored = userConfig?.config ?? null;
 
   const {
     register,
@@ -70,14 +73,14 @@ export function StrategyForm({
     formState: { errors },
   } = useForm<StrategyConfigInput>({
     resolver: zodResolver(strategyConfigSchema),
-    defaultValues: userConfig ? toFormValues(userConfig.config) : DEFAULTS,
+    defaultValues: stored ? toFormValues(stored) : DEFAULTS,
   });
 
   useEffect(() => {
-    if (userConfig) {
-      reset(toFormValues(userConfig.config));
+    if (stored) {
+      reset(toFormValues(stored));
     }
-  }, [userConfig, reset]);
+  }, [stored, reset]);
 
   function onSave(data: StrategyConfigInput) {
     saveMutation.mutate(toApiPayload(data), {
@@ -99,6 +102,11 @@ export function StrategyForm({
   return (
     <form onSubmit={handleSubmit(onSave)} className="space-y-6">
       <p className="rounded-lg border p-3 text-sm">{t("draftNotice")}</p>
+      {userConfig?.configError ? (
+        <p role="alert" className="rounded-lg border p-3 text-sm">
+          {t("draftUnreadable", { revision: userConfig.revision })}
+        </p>
+      ) : null}
       {/* Basic Settings */}
       <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
         <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-400">

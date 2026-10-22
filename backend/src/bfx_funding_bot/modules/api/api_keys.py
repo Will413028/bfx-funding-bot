@@ -21,10 +21,15 @@ from bfx_funding_bot.modules.api.account_scope import (
 )
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
-from bfx_funding_bot.modules.api.schemas import AccountCredentialResponse
+from bfx_funding_bot.modules.api.schemas import (
+    AccountCredentialResponse,
+    Envelope,
+)
 
 
 def _credential_status(row: ExchangeAccountCredential) -> str:
+    """One of ``CredentialStatus``: a non-active lifecycle is pending, revoked or retired
+    (ck_exchange_account_credentials_lifecycle_status); the response refuses any other."""
     if row.lifecycle_status != "active":
         return row.lifecycle_status
     if row.last_verify_error:
@@ -36,7 +41,7 @@ def _credential_status(row: ExchangeAccountCredential) -> str:
 
 def _account_credential_to_response(
     row: ExchangeAccountCredential,
-) -> dict[str, object]:
+) -> AccountCredentialResponse:
     return AccountCredentialResponse(
         id=str(row.id),
         exchange_account_id=str(row.exchange_account_id),
@@ -46,7 +51,7 @@ def _account_credential_to_response(
         created_at=row.created_at.isoformat() if row.created_at else "",
         verified_at=row.verified_at.isoformat() if row.verified_at else None,
         last_verify_error=row.last_verify_error,
-    ).model_dump(by_alias=True)
+    )
 
 
 def _scope_not_found(exc: Exception) -> HTTPException:
@@ -63,7 +68,7 @@ def build_api_keys_router() -> APIRouter:
     async def list_account_keys(
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
-    ) -> dict[str, object]:
+    ) -> Envelope[list[AccountCredentialResponse]]:
         try:
             rows = await vault.list_account_credentials(
                 session,
@@ -72,6 +77,6 @@ def build_api_keys_router() -> APIRouter:
             )
         except (AccountRetired, MembershipDenied) as exc:
             raise _scope_not_found(exc) from exc
-        return {"data": [_account_credential_to_response(row) for row in rows]}
+        return Envelope(data=[_account_credential_to_response(row) for row in rows])
 
     return router

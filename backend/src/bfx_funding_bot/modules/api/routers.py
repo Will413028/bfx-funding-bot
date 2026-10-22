@@ -15,7 +15,11 @@ from bfx_funding_bot.modules.accounts.tables import (
 )
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
-from bfx_funding_bot.modules.api.schemas import ExchangeAccountResponse
+from bfx_funding_bot.modules.api.schemas import (
+    Envelope,
+    ExchangeAccountResponse,
+    ProfileResponse,
+)
 
 
 def build_router() -> APIRouter:
@@ -25,20 +29,16 @@ def build_router() -> APIRouter:
     )
 
     @router.get("/profile")
-    async def get_profile(user: Principal = Depends(require_operator)) -> dict[str, object]:  # noqa: B008
-        return {
-            "data": {
-                "userId": user.user_id,
-                "email": user.email,
-                "role": user.role,
-            }
-        }
+    async def get_profile(
+        user: Principal = Depends(require_operator),  # noqa: B008
+    ) -> Envelope[ProfileResponse]:
+        return Envelope(data=ProfileResponse(user_id=user.user_id, email=user.email, role=user.role))
 
     @router.get("/exchange-accounts")
     async def list_exchange_accounts(
         user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
-    ) -> dict[str, object]:
+    ) -> Envelope[list[ExchangeAccountResponse]]:
         """Bootstrap the explicit account selector for the operator console."""
         rows = (
             await session.execute(
@@ -54,17 +54,15 @@ def build_router() -> APIRouter:
                 .order_by(ExchangeAccount.label, ExchangeAccount.id)
             )
         ).all()
-        return {
-            "data": [
-                ExchangeAccountResponse(
-                    exchange_account_id=str(account.id),
-                    venue=account.venue,
-                    label=account.label,
-                    lifecycle_status=account.lifecycle_status,
-                    role=role,
-                ).model_dump(by_alias=True)
-                for account, role in rows
-            ]
-        }
+        return Envelope(data=[
+            ExchangeAccountResponse(
+                exchange_account_id=str(account.id),
+                venue=account.venue,
+                label=account.label,
+                lifecycle_status=account.lifecycle_status,
+                role=role,
+            )
+            for account, role in rows
+        ])
 
     return router
