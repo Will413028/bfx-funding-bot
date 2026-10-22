@@ -5,6 +5,7 @@ const accountId =
 	"550e8400-e29b-41d4-a716-446655440000";
 
 test.describe("symbol-scoped uncertainty console", () => {
+	// biome-ignore lint/suspicious/noSkippedTests: env-gated, runs only against the full stack
 	test.skip(
 		!process.env.E2E_FULL_STACK,
 		"requires authenticated full stack — see e2e/README.md",

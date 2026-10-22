@@ -4,7 +4,7 @@
     "ruff: ignore": 2,
     "type: ignore": 303,
     "pyright: ignore": 0,
-    "biome-ignore": 0,
+    "biome-ignore": 1,
     "eslint-disable": 0,
     "ts-expect-error": 0,
     "ts-ignore": 0,
