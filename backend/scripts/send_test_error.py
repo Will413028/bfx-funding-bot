@@ -8,7 +8,8 @@ synthetic email and IP address; the event in Sentry must show them as
 to the SDK and flushed, 1 when SENTRY_DSN is not set. Whether it arrived is read in
 Sentry (the printed event id).
 
-On the VM, inside the running containers (their environment is bot.env / webapi.env):
+On the VM, inside the running containers (bot.env / webapi.env plus their secret files,
+which the scrub list covers):
   sudo docker exec bfx-bot /app/.venv/bin/python -m scripts.send_test_error --service bot
   sudo docker exec bfx-webapi /app/.venv/bin/python -m scripts.send_test_error --service webapi
 """

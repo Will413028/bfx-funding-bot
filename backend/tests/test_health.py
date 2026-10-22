@@ -9,6 +9,7 @@ from sqlalchemy import text
 from bfx_funding_bot.apps.webapi import app
 from bfx_funding_bot.core.authority import AuthorityMismatch
 from bfx_funding_bot.core.schema_head import SchemaHeadMismatch, build_head
+from bfx_funding_bot.core.secret_files import SecretFileError
 
 
 def _authority_db(path: Path, epoch: str, *, heads: tuple[str, ...] | None = None) -> str:
@@ -87,6 +88,83 @@ def test_startup_refuses_the_daemon_halt_token(
     so the deploy rolls back instead of quietly keeping the web API able to halt."""
     monkeypatch.setenv("DATABASE_URL", _authority_db(tmp_path / "ledger.db", "ledger"))
     monkeypatch.setenv("BFX_ADMIN_TOKEN", "halt-secret")
+    with pytest.raises(RuntimeError, match="bfx_admin_token_in_webapi_env"), TestClient(app):
+        pass
+
+
+# --------------------------------------------------------------------------- secret files (9h)
+#
+# Mutations (one at a time; revert after each): drop the file branch of the vault key
+# refusal (test_startup_refuses_the_vault_kek[file] fails); make load_settings read the
+# env first (test_startup_reads_its_secrets_from_the_files_only fails).
+
+
+def _secrets(tmp_path: Path, values: dict[str, str]) -> Path:
+    directory = tmp_path / "run-secrets"
+    directory.mkdir()
+    for key, value in values.items():
+        (directory / key).write_text(value + "\n")
+    return directory
+
+
+def test_startup_reads_its_secrets_from_the_files_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With BFX_SECRETS_DIR the database URL is the file's; the env's (here a database the
+    web API would refuse) is ignored, not a fallback."""
+    directory = _secrets(tmp_path, {
+        "DATABASE_URL": _authority_db(tmp_path / "ledger.db", "ledger"),
+        "BFX_ADMIN_READ_TOKEN": "read-token"})
+    monkeypatch.setenv("BFX_SECRETS_DIR", str(directory))
+    monkeypatch.setenv("DATABASE_URL", _authority_db(tmp_path / "legacy.db", "legacy"))
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert app.state.session_factory is not None
+        assert str(app.state.engine.url).endswith("ledger.db")
+
+
+@pytest.mark.parametrize("missing", ["DATABASE_URL", "BFX_ADMIN_READ_TOKEN"])
+@pytest.mark.parametrize("content", [None, ""], ids=["missing", "empty"])
+def test_startup_refuses_a_secret_file_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, missing: str, content: str | None
+) -> None:
+    values = {"DATABASE_URL": _authority_db(tmp_path / "ledger.db", "ledger"),
+              "BFX_ADMIN_READ_TOKEN": "read-token"}
+    values.pop(missing)
+    directory = _secrets(tmp_path, values)
+    if content is not None:
+        (directory / missing).write_text(content)
+    monkeypatch.setenv("BFX_SECRETS_DIR", str(directory))
+    monkeypatch.setenv(missing, "env-value-is-no-fallback")
+    with pytest.raises(SecretFileError, match=f"{missing} is (missing|empty)"), TestClient(app):
+        pass
+
+
+@pytest.mark.parametrize("where", ["env", "empty_env", "file", "empty_file"])
+def test_startup_refuses_the_vault_kek(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, where: str
+) -> None:
+    """9g/9h (ADR 2026-08-31 D5'): only the bot opens the credential vault. The key in the
+    web API's env or mounted as one of its secret files, even empty, fails the boot so the
+    deploy rolls back."""
+    values = {"DATABASE_URL": _authority_db(tmp_path / "ledger.db", "ledger"),
+              "BFX_ADMIN_READ_TOKEN": "read-token"}
+    if where.endswith("file"):
+        values["BFX_VAULT_KEK"] = "" if where == "empty_file" else "a2V5LW1hdGVyaWFs"
+    monkeypatch.setenv("BFX_SECRETS_DIR", str(_secrets(tmp_path, values)))
+    if where.endswith("env"):
+        monkeypatch.setenv("BFX_VAULT_KEK", "" if where == "empty_env" else "a2V5LW1hdGVyaWFs")
+    with pytest.raises(RuntimeError, match="bfx_vault_kek_in_webapi_env"), TestClient(app):
+        pass
+
+
+def test_startup_refuses_a_mounted_halt_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    directory = _secrets(tmp_path, {
+        "DATABASE_URL": _authority_db(tmp_path / "ledger.db", "ledger"),
+        "BFX_ADMIN_READ_TOKEN": "read-token", "BFX_ADMIN_TOKEN": "halt-secret"})
+    monkeypatch.setenv("BFX_SECRETS_DIR", str(directory))
     with pytest.raises(RuntimeError, match="bfx_admin_token_in_webapi_env"), TestClient(app):
         pass
 

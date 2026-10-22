@@ -1,13 +1,13 @@
 """Send one test alert down the bot's own alert path (alerts.emit -> Telegram).
 
-Proves that TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in the bot's environment
-deliver, the way a real alert does: the sink is built by
+Proves that the bot's TELEGRAM_BOT_TOKEN (its secret file /run/secrets/TELEGRAM_BOT_TOKEN
+when BFX_SECRETS_DIR is set, else the env) and TELEGRAM_CHAT_ID deliver, the way a real alert does: the sink is built by
 AlertSink.from_environment and the alert goes through alerts.emit
 (de-duplication, rate limit, secret scrubbing, queue). Touches no database and
 no venue. Exit 0 when Telegram accepted the message, 1 when it was only logged
 (keys missing or malformed) or delivery failed.
 
-On the VM, inside the running bot container (its environment is bot.env):
+On the VM, inside the running bot container (bot.env plus its secret files):
   sudo docker exec bfx-bot /app/.venv/bin/python -m scripts.send_test_alert
 Locally, from backend/:
   uv run python -m scripts.send_test_alert [--note TEXT]

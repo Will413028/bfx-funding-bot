@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 import secrets
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -38,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from bfx_funding_bot.apps.sim_faults import FAULT_KNOBS, SimFaultSpec
 from bfx_funding_bot.core.crypto import VaultNotConfiguredError, load_kek
 from bfx_funding_bot.core.errors import ConfigurationError
+from bfx_funding_bot.core.secret_files import secret_present
 from bfx_funding_bot.core.venue import Venue, VenueCapabilities
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
 from bfx_funding_bot.external.bitfinex.funding_trades_ws import FundingTradesWSClient
@@ -180,10 +180,12 @@ async def _vault_credentials(
 
 
 def _throwaway_credentials() -> Credentials:
-    if "BFX_VAULT_KEK" in os.environ:
+    if secret_present("BFX_VAULT_KEK"):
+        # In the env (even empty) or mounted as a secret file: either way it is the wrong
+        # env file or compose file for a simulation.
         raise ConfigurationError(
-            "BFX_VAULT_KEK must not be set for a simulated venue boot: the simulation "
-            "never opens the credential vault"
+            "BFX_VAULT_KEK must not be set or mounted for a simulated venue boot: the "
+            "simulation never opens the credential vault"
         )
     return Credentials(secrets.token_hex(16), secrets.token_hex(32))
 

@@ -13,7 +13,6 @@ an unreachable daemon, never forwarded.
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
@@ -21,6 +20,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import ConfigDict, ValidationError
 
+from bfx_funding_bot.core.secret_files import read_secret
 from bfx_funding_bot.modules.api.account_scope import ExchangeAccountContext, require_account_member
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.api.schemas import Envelope, ResponseModel, field_paths
@@ -115,8 +115,10 @@ class FundingStatus(_Forwarded):
 
 
 async def _read_daemon(path: str) -> dict[str, Any]:
-    token = os.environ.get("BFX_ADMIN_READ_TOKEN")
-    if not token:
+    # The web API's secret file in production (BFX_SECRETS_DIR; missing or empty raises,
+    # answered 503 below like any failure), else the env.
+    token = read_secret("BFX_ADMIN_READ_TOKEN")
+    if token is None:
         raise RuntimeError("daemon_status_unconfigured")
     async with httpx.AsyncClient(base_url="http://bfx-bot:8080", timeout=15,
                                 follow_redirects=False, trust_env=False) as client:

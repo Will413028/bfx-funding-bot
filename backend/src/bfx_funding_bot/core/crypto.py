@@ -1,9 +1,10 @@
 """SP2 vault crypto: app-managed envelope encryption for Bitfinex api secrets.
 
-Per-record DEK (AES-256-GCM) wrapped by an env-held KEK. AAD binds the row to
+Per-record DEK (AES-256-GCM) wrapped by a KEK. AAD binds the row to
 its user_id so a ciphertext can't be replayed under another user. Pure
 functions take the KEK as an argument (testable without env / DATABASE_URL);
-load_kek() reads BFX_VAULT_KEK from the process env at call time.
+load_kek() reads BFX_VAULT_KEK at call time through core.secret_files: the bot's
+mounted secret file (BFX_SECRETS_DIR), else the process env.
 """
 from __future__ import annotations
 
@@ -13,13 +14,15 @@ from dataclasses import dataclass
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from bfx_funding_bot.core.secret_files import SecretFileError, read_secret
+
 _NONCE_LEN = 12
 _DEK_LEN = 32
 _CURRENT_KEY_VERSION = 1
 
 
 class VaultNotConfiguredError(Exception):
-    """BFX_VAULT_KEK missing or malformed."""
+    """BFX_VAULT_KEK missing (env unset, or its secret file missing or empty) or malformed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,8 +35,11 @@ class Envelope:
 
 
 def load_kek() -> bytes:
-    raw = os.environ.get("BFX_VAULT_KEK", "")
-    if not raw:
+    try:
+        raw = read_secret("BFX_VAULT_KEK")
+    except SecretFileError as exc:
+        raise VaultNotConfiguredError(str(exc)) from None
+    if raw is None:
         raise VaultNotConfiguredError("BFX_VAULT_KEK not set")
     try:
         kek = base64.b64decode(raw, validate=True)

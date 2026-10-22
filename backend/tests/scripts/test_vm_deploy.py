@@ -639,6 +639,9 @@ class Harness:
             notify=lambda level, text: self.notices.append((level, text)),
             clock=self.clock.time, sleep=self.clock.sleep,
             secret_check=lambda path: None,
+            # The real check, with this test's user and group standing in for root and 4600.
+            secret_file_check=lambda path: bfx.shared_secret_file(
+                path, owner_uid=os.getuid(), group_gid=os.getgid()),
         )
 
     def run(self, **overrides: Any) -> int:
@@ -652,12 +655,31 @@ VALID_ENV = {
 }
 
 
+# The real file's secret files (9h), as the cutover writes them: <runtime>/secrets/<service>/<KEY>.
+SECRET_FILES = {
+    f"{service}/{key}": f"value-of-{service}-{key}"
+    for service, keys in (("bot", ("BFX_ADMIN_READ_TOKEN", "BFX_ADMIN_TOKEN", "BFX_VAULT_KEK",
+                                    "DATABASE_URL", "TELEGRAM_BOT_TOKEN")),
+                          ("webapi", ("BFX_ADMIN_READ_TOKEN", "DATABASE_URL")))
+    for key in keys
+}
+
+
+def write_secret_files(runtime: Path) -> None:
+    for relative, value in SECRET_FILES.items():
+        path = runtime / "secrets" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value)
+        path.chmod(0o640)
+
+
 @pytest.fixture
 def harness(tmp_path: Path) -> Harness:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     for name, text in VALID_ENV.items():
         (runtime / name).write_text(text)
+    write_secret_files(runtime)
     mirror = tmp_path / "mirror"
     units = tmp_path / "units"
     units.mkdir()
@@ -1550,6 +1572,115 @@ def test_a_compose_file_the_deployer_cannot_run_is_refused_before_any_change(
     assert harness.host.count(PULL) == harness.host.count(COMPOSE_UP) == 0
 
 
+# --------------------------------------------------------------------------- secret files (9h)
+#
+# Mutations (one at a time; revert after each): drop the group check from
+# shared_secret_file (test_a_secret_file_must_be_root_group_4600_0640_and_not_empty
+# fails); stop checking secret files in _validate_env_files
+# (test_every_secret_file_the_release_names_is_checked_before_any_change fails);
+# drop the own-service check (test_a_secret_the_deployer_cannot_check_is_refused[other] fails).
+
+REAL_SECRET_NAMES = sorted(SECRET_FILES)
+# The next release file (9h, mounts the secret files): this tool ships one release before
+# it, so it must already run it (see the module docstring of bfx_deploy).
+SECRETS_TEXT = (FIXTURES / "docker-compose.app.9h.yml").read_text(encoding="utf-8")
+
+
+def test_a_secret_file_must_be_root_group_4600_0640_and_not_empty(tmp_path: Path) -> None:
+    uid, gid = os.getuid(), os.getgid()
+    secret = tmp_path / "secrets/bot/BFX_VAULT_KEK"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("kek")
+    secret.chmod(0o640)
+    bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+    with pytest.raises(bfx.DeployError, match=r"^secret_file_not_root_owned:bot/BFX_VAULT_KEK$"):
+        bfx.shared_secret_file(secret, owner_uid=uid + 1, group_gid=gid)
+    with pytest.raises(bfx.DeployError, match=r"^secret_file_group_not_4600:bot/BFX_VAULT_KEK$"):
+        bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid + 1)
+    for mode in (0o600, 0o644, 0o660, 0o440):
+        secret.chmod(mode)
+        with pytest.raises(bfx.DeployError, match=r"^secret_file_mode_not_0640:bot/BFX_VAULT_KEK$"):
+            bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+    secret.chmod(0o640)
+    secret.write_text("")
+    with pytest.raises(bfx.DeployError, match=r"^secret_file_empty:bot/BFX_VAULT_KEK$"):
+        bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+    secret.write_text("kek")
+    link = tmp_path / "secrets/bot/BFX_ADMIN_TOKEN"
+    link.symlink_to(secret)
+    with pytest.raises(bfx.DeployError, match=r"^secret_file_missing:bot/BFX_ADMIN_TOKEN$"):
+        bfx.shared_secret_file(link, owner_uid=uid, group_gid=gid)
+    directory = tmp_path / "secrets/bot/TELEGRAM_BOT_TOKEN"
+    directory.mkdir()
+    with pytest.raises(bfx.DeployError, match=r"^secret_file_missing:bot/TELEGRAM_BOT_TOKEN$"):
+        bfx.shared_secret_file(directory, owner_uid=uid, group_gid=gid)
+    with pytest.raises(bfx.DeployError, match=r"^secret_file_missing:bot/DATABASE_URL$"):
+        bfx.shared_secret_file(tmp_path / "secrets/bot/DATABASE_URL", owner_uid=uid, group_gid=gid)
+
+
+def test_every_secret_file_the_release_names_is_checked_before_any_change(harness: Harness) -> None:
+    _ingress_release(harness, REV_NEW, text=SECRETS_TEXT)
+    checked: list[Path] = []
+    deployer = harness.deployer()
+    deployer._secret_file_check = checked.append
+    assert deployer.run() == 0
+    secrets = harness.settings.runtime_dir / "secrets"
+    assert sorted(path.relative_to(secrets).as_posix() for path in checked) == REAL_SECRET_NAMES
+
+
+@pytest.mark.parametrize(("relative", "damage", "code"), [
+    ("bot/BFX_VAULT_KEK", lambda path: path.chmod(0o644), "secret_file_mode_not_0640:bot/BFX_VAULT_KEK"),
+    ("webapi/DATABASE_URL", lambda path: path.unlink(), "secret_file_missing:webapi/DATABASE_URL"),
+    ("bot/BFX_ADMIN_TOKEN", lambda path: path.write_text(""), "secret_file_empty:bot/BFX_ADMIN_TOKEN"),
+])
+def test_an_unprotected_or_missing_secret_file_fails_the_precheck(
+    harness: Harness, relative: str, damage: Callable[[Path], None], code: str,
+) -> None:
+    _ingress_release(harness, REV_NEW, text=SECRETS_TEXT)
+    damage(harness.settings.runtime_dir / "secrets" / relative)
+    assert harness.run() == 1
+    assert harness.ledger.last.detail == f"precheck:{code}; running release untouched"
+    assert harness.host.count(PULL) == harness.host.count(COMPOSE_UP) == 0
+    assert harness.host.stopped == []
+
+
+_BOT_KEK = "      - {source: bot_BFX_VAULT_KEK, target: BFX_VAULT_KEK}\n"
+_WEBAPI_URL = "      - {source: webapi_DATABASE_URL, target: DATABASE_URL}\n"
+_KEK_FILE = "    file: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/secrets/bot/BFX_VAULT_KEK\n"
+
+
+@pytest.mark.parametrize(("old", "new", "code"), [
+    (_KEK_FILE, "    file: /etc/shadow\n", "compose_secret_outside_runtime:bot_BFX_VAULT_KEK"),
+    (_KEK_FILE, "    file: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/secrets/webapi/BFX_VAULT_KEK\n",
+     "compose_secret_outside_runtime:bot_BFX_VAULT_KEK"),
+    (_KEK_FILE, "    environment: BFX_VAULT_KEK\n", "compose_secret_not_file:bot_BFX_VAULT_KEK"),
+    (_KEK_FILE, "    external: true\n", "compose_secret_not_file:bot_BFX_VAULT_KEK"),
+    (_WEBAPI_URL, _WEBAPI_URL + _BOT_KEK, "compose_secret_not_own:webapi"),       # other
+    (_BOT_KEK, "      - {source: bot_BFX_VAULT_KEK, target: /etc/kek}\n",
+     "compose_secret_target:bot:bot_BFX_VAULT_KEK"),
+    (_BOT_KEK, "      - {source: bot_BFX_VAULT_KEK, target: BFX_VAULT_KEK, mode: 0444}\n",
+     "compose_secret_target:bot:bot_BFX_VAULT_KEK"),
+], ids=["absolute", "another_service_dir", "environment", "external", "other",
+        "target", "mode"])
+def test_a_secret_the_deployer_cannot_check_is_refused(
+    harness: Harness, old: str, new: str, code: str,
+) -> None:
+    assert SECRETS_TEXT.count(old) == 1
+    _ingress_release(harness, REV_NEW, text=SECRETS_TEXT.replace(old, new))
+    assert harness.run() == 1
+    assert harness.ledger.last.detail == f"precheck:{code}; running release untouched"
+    assert harness.host.count(PULL) == harness.host.count(COMPOSE_UP) == 0
+
+
+def test_a_release_without_secrets_still_deploys_for_a_rollback(harness: Harness) -> None:
+    """A release from before 9h (env-file secrets only) checks no secret file: the rollback
+    target of the first release that has them."""
+    checked: list[Path] = []
+    deployer = harness.deployer()
+    deployer._secret_file_check = checked.append
+    assert deployer.run() == 0 and checked == []
+
+
 def test_a_third_party_image_is_pulled_by_digest_without_the_registry_token(harness: Harness) -> None:
     harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT, configs=False)
     deployer = harness.deployer()
@@ -1987,7 +2118,6 @@ def test_a_referenced_config_file_the_revision_lacks_fails_the_precheck(harness:
      "compose_config_not_file:ts-serve"),
     (lambda t: t.replace("file: ./tailscale/serve.json", "environment: HOME"),
      "compose_config_not_file:ts-serve"),
-    (lambda t: t + "secrets:\n  key:\n    file: ./tailscale/serve.json\n", "compose_secrets_refused"),
 ])
 def test_a_config_that_is_not_a_release_file_is_refused(
     harness: Harness, change: Callable[[str], str], code: str,
