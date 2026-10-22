@@ -25,6 +25,7 @@ from uuid import UUID
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from fastapi.exceptions import ResponseValidationError
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -520,6 +521,7 @@ def test_every_api_route_is_called_here() -> None:
     routes = _api_routes(production)
     assert _api_routes(build_app()) == routes
     assert ValidationError in production.exception_handlers
+    assert ResponseValidationError in production.exception_handlers
     not_json = {("DELETE", "/api/v1/exchange-accounts/{exchange_account_id}/config-draft"),
                 ("GET", "/api/v1/public/funding-rates.csv")}
     called = {_template(method, path, routes) for _, method, path, _ in CALLS}
