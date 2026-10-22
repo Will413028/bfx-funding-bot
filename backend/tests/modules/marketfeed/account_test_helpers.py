@@ -198,7 +198,8 @@ def go_offline(daemon) -> None:  # type: ignore[no-untyped-def]
     """Detach what would reach the network when ``daemon.run()`` runs in a test.
 
     The book and auth WebSockets become idle tasks that exit on the stop event, and the
-    venue observation loops (boot recovery, periodic reconcile, income syncs) are dropped.
+    venue observation loops (boot recovery, periodic reconcile, income syncs) and the key's
+    compliance check are dropped.
     Everything else (scheduler, writer, healthz, workers, supervision) stays as composed.
     """
     async def idle(stop_event) -> None:  # type: ignore[no-untyped-def]
@@ -212,6 +213,7 @@ def go_offline(daemon) -> None:  # type: ignore[no-untyped-def]
     daemon.periodic_reconcile = None
     daemon.interest_ledger_sync = None
     daemon.credit_history_sync = None
+    daemon.credential_compliance = None  # its key check is a signed read
 
 
 __all__ = [

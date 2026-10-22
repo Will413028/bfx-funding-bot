@@ -88,7 +88,8 @@ async def test_a_simulated_boot_on_a_database_stamped_prod_is_refused(
 async def test_both_venues_compose_the_same_guard_chain_and_workers(
         ledger_db, monkeypatch, httpx_mock, tmp_path) -> None:  # noqa: F811
     """Mutations: omit or reorder ``CapitalPolicyGuard`` / a pre-trade guard / the writer-lock
-    guard for one venue; leave the reconciler out of one venue's composition."""
+    guard for one venue; leave the reconciler out of one venue's composition; leave the key's
+    compliance check out of the Bitfinex composition (``credential_compliance=None``)."""
     sim, engine = await make_sim_env(ledger_db, monkeypatch, httpx_mock, tmp_path)
     try:
         simulated = await sim.build()
@@ -117,6 +118,13 @@ async def test_both_venues_compose_the_same_guard_chain_and_workers(
         # Only vault credentials can be rotated; the simulated venue's are throwaway.
         assert simulated.credential_rotation is None
         assert type(bitfinex.credential_rotation).__name__ == "CredentialRotationWorker"
+        # Only a vault key has a stored Bitfinex user id to check against (9g); the check signs
+        # on the process's one gate, through the same client as the observation.
+        assert simulated.credential_compliance is None
+        compliance = bitfinex.credential_compliance
+        assert type(compliance).__name__ == "CredentialCompliance"
+        assert compliance.ctx is bitfinex.account_ctx
+        assert compliance.exchange_account_id == bitfinex.account_bootstrap.exchange_account_id
     finally:
         await close_sim_env(sim, engine)
 
