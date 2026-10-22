@@ -822,3 +822,18 @@ def test_an_unreadable_sim_faults_refuses_the_boot(tmp_path, monkeypatch):
     monkeypatch.setenv("BFX_SIM_FAULTS", "unknown_5xx=2")
     with pytest.raises(ValueError, match="BFX_SIM_FAULTS"):
         load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+
+
+def test_the_database_url_comes_from_its_secret_file_only(tmp_path, monkeypatch):
+    """9h: the bot reads DATABASE_URL from /run/secrets when BFX_SECRETS_DIR is set; the env
+    value (left in bot.env during the cutover) is ignored, and a missing file is an error."""
+    _set_required_config_env(monkeypatch, phase="live", policy="book_guarded")
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    (secrets / "DATABASE_URL").write_text("postgresql://bfx_bot:p@bfx-postgres:5432/bfx\n")
+    monkeypatch.setenv("BFX_SECRETS_DIR", str(secrets))
+    config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+    assert config.database_url == "postgresql://bfx_bot:p@bfx-postgres:5432/bfx"
+    (secrets / "DATABASE_URL").unlink()
+    with pytest.raises(ValueError, match="DATABASE_URL is missing"):
+        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))

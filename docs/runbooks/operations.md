@@ -117,7 +117,8 @@ sudo bfx-op --dry-run halt --reason "為什麼停"   # 只印出要跑的命令
 或 `tailscale whois` 失敗時照樣執行，actor 為 `host-root`，journal 標 `identity=none`。它不經 operator
 container、不讀 ledger、`operator.env` 或資料庫，而是 `docker exec bfx-bot` 呼叫 bot healthz server
 （container 內 port 8080，未對 host 公開）的 `POST /admin/halt`，與 kill 同一條路徑（HALTED ＋ 每個
-幣別的 cancel-all）。token 從 container 自己的環境讀，不印出；reason 由 bot 記進 `trading_state`，
+幣別的 cancel-all）。token 在 container 內讀，不印出：9h 之後讀 bot 的秘密檔 `/run/secrets/BFX_ADMIN_TOKEN`，
+9h 之前的 bot 讀 env。沒有 token 時 exit 1、什麼都不送。reason 由 bot 記進 `trading_state`，
 不進 host journal。
 
 | exit | 意義 |
@@ -207,21 +208,21 @@ sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
 
 | 來源 | 設定檔 | 內容 |
 |---|---|---|
-| bot 內的 sink（`observability/alerts.py`，非阻塞） | `/opt/bfx/runtime/bot.env` 的 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` | 交易狀態轉換、自動保護、kill 結果、恢復結果、幣別啟停結果（`capital_policy_request_*`）、憑證輪替結果（`credential_rotation_*`）、`foreign_exposure`、`foreign_lending`、`unknown_quarantine_aged`、`nav_drop`、`venue_offers_may_remain` |
+| bot 內的 sink（`observability/alerts.py`，非阻塞） | 秘密檔 `/opt/bfx/runtime/secrets/bot/TELEGRAM_BOT_TOKEN` 與 `bot.env` 的 `TELEGRAM_CHAT_ID` | 交易狀態轉換、自動保護、kill 結果、恢復結果、幣別啟停結果（`capital_policy_request_*`）、憑證輪替結果（`credential_rotation_*`）、key 重查持續失敗（`credential_recheck_failing`）、`foreign_exposure`、`foreign_lending`、`unknown_quarantine_aged`、`nav_drop`、`venue_offers_may_remain` |
 | host 工具 `bfx-notify` | `/opt/bfx/runtime/notify.env`（同樣兩個 key） | bfx-deploy 結果、bfx-backup-check（RPO>300s、evidence 超過 15 分鐘、restore heartbeat 超過 35 天、磁碟 ≥95% 為 critical；restore timer 停用、weekly report 超過 8 天沒成功、磁碟 ≥85% 為 warning）、`bfx-alert@` 的 unit 失敗（pgBackRest 備份、restore test） |
 
 - 兩個都空 → bot 只記 log（開機時會說一次）；`bfx-notify` 永遠 exit 0，送不出去只記 journal。
-- **換 token 或 chat id 要兩個檔都改**：改 `notify.env` 立即生效；改 `bot.env` 後
-  `sudo bfx-deploy --recreate`（§7）。
+- **換 token 或 chat id 兩條路徑都要改**：改 `notify.env` 立即生效；bot 這一側改完後要
+  `sudo bfx-deploy --recreate`（§7）。換 token 的步驟見 [secret-rotation](secret-rotation.md#telegram-bot-token)。
 - **為什麼是兩條、兩份檔**（design review #14，刻意保留）：兩條路徑在容器／主機的邊界兩側，
   各自要在對方掛掉時還能發出告警——bot 死掉或起不來時由主機的 bfx-deploy／`bfx-alert@` 通報，
   主機 timer 停擺時交易事件仍由 bot 自己通報；合成一條就會讓其中一邊失去告警。token 分兩份檔是
-  最小權限：`bot.env` 只給 bot container，`notify.env` 只給 root 的主機工具，DR unit（`ubuntu`）
+  最小權限：bot 的秘密檔只掛給 bot container，`notify.env` 只給 root 的主機工具，DR unit（`ubuntu`）
   兩份都讀不到。
 - 測試 host 路徑：`sudo bfx-notify --level info "test"`。
 - <a id="alert-alert_test"></a>測試 bot 路徑（`alert_test`，info）：在執行中的 bot container 裡跑
-  `sudo docker exec bfx-bot /app/.venv/bin/python -m scripts.send_test_alert`。它用 bot 自己的環境
-  （`bot.env`）建 sink，經 `alerts.emit` 送出（dedup、速率限制、secret 遮罩都照常），不碰資料庫與 venue；
+  `sudo docker exec bfx-bot /app/.venv/bin/python -m scripts.send_test_alert`。它用 bot 自己的設定
+  （秘密檔與 `bot.env`）建 sink，經 `alerts.emit` 送出（dedup、速率限制、secret 遮罩都照常），不碰資料庫與 venue；
   Telegram 收下時 exit 0，只記 log（key 缺或格式錯）或送不出去時 exit 1。
 - Grafana 仍是第二條觀測路徑。
 - **停機後仍送單**（Grafana 規則 `bfx-trading-halted-submits`，critical）：bot 的 `/metrics` 匯出
@@ -343,9 +344,9 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 <a id="alert-daemon_fatal"></a>
 #### `daemon_fatal`（critical）
 
-- 代表：已完成開機的 bot 因致命錯誤停下：writer lock refresh 後仍未持有、送單結果無法寫入 DB（`submit_outcome_lost`）、periodic reconcile 遇到 venue 拒絕 API key（`VenueCredentialRejectedError`，exit 78），或任一 sub-task 拋出例外（exit 1）。`error` 說明是哪一種。
+- 代表：已完成開機的 bot 因致命錯誤停下：writer lock refresh 後仍未持有、送單結果無法寫入 DB（`submit_outcome_lost`）、periodic reconcile 的讀取或送單、或每 6 小時的 key 重查遇到 venue 拒絕 API key（`VenueCredentialRejectedError`，exit 78）、key 重查發現 key 不合規（`CredentialNoncompliantError`，exit 78），或任一 sub-task 拋出例外（exit 1）。`error` 說明是哪一種。
 - 系統會做：process 退出、container 重啟；不寫交易狀態。結果沒寫下的送單在重啟後變成 UNKNOWN 並隔離該幣別（§4 第 2 級）；lock 仍被其他 writer 持有時開機以 exit 75 反覆重試。
-- operator 判斷：看 `error` 與 `docker logs bfx-bot`。資料庫斷線造成的 lock 遺失在 DB 恢復後自己好；`VenueCredentialRejectedError` 時重啟後的開機會進憑證恢復模式，接著收到 [`credential_recovery_mode`](#alert-credential_recovery_mode)，照那則處理；同一錯誤反覆出現就是 bug，要查清楚。venue 上的受管 offer 仍在包絡內，要撤用 kill（§3）。
+- operator 判斷：看 `error` 與 `docker logs bfx-bot`。資料庫斷線造成的 lock 遺失在 DB 恢復後自己好；`VenueCredentialRejectedError` 或 `CredentialNoncompliantError` 時重啟後的開機會進憑證恢復模式，接著收到 [`credential_recovery_mode`](#alert-credential_recovery_mode)，照那則處理；同一錯誤反覆出現就是 bug，要查清楚。venue 上的受管 offer 仍在包絡內，要撤用 kill（§3）。
 
 <a id="alert-foreign_exposure"></a>
 #### `foreign_exposure`（warning）
@@ -499,9 +500,16 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 <a id="alert-credential_recovery_mode"></a>
 #### `credential_recovery_mode`（critical）
 
-- 代表：開機時 Bitfinex 拒絕帳戶的 API key（回應 `["error",10100,"apikey: …"]`，或 HTTP 401／403），bot 進入憑證恢復模式。例如 key 被撤銷或刪除、key 與 secret 對調。執行中被拒（只認 body 帶 10100；不帶 body 的 401／403 可能是閘道頁面，照一般抓取失敗累計）時 bot 先以 exit 78 結束（`daemon_fatal`，`error=VenueCredentialRejectedError`），重啟後的開機才發這則。每個帳戶一則（dedup 欄位 `account`）。
-- 系統會做：被拒期間不送單、不撤單、不寫帳本（重試的開機觀測成功那一次照常寫入觀測）；只跑換憑證 worker（照常發佈收件公鑰，CLI 可以封裝新 key 送進來）、writer lock、`health_check`、`db_keepalive` 與 healthz。`/healthz` 回 200（部署進恢復模式算部署成功，bfx-deploy 不會停掉 bot），`/readyz` 回 503。kill 等交易控制請求留在佇列，下次以可用的 key 開機後才套用並撤單。在 process 內每 1、2、4 分鐘、之後每 5 分鐘重試一次開機觀測；以下任一發生時乾淨重啟（`bot_runs` 記 `clean_stop`、exit 0），重啟後正常開機：輪替 applied、重試成功（key 在 Bitfinex 端恢復）、DB 裡的 active 憑證已換成另一把 key。重啟一律等這次 bot 開機滿 10 分鐘（部署 settle 期間不重啟）。其他錯誤（nonce 10114、invariant）照舊拒絕開機（`boot_refused`）。
-- operator 判斷：先判斷 key 是不是外洩或被人改動（Bitfinex 的 API key 頁面、帳號安全紀錄）。到 Bitfinex 產生一把新 key（只開 funding 寫入，IP 白名單照舊），以 `sudo bfx-op rotate-credential` 送出（§11）。bot 開機未滿 10 分鐘或部署進行中時請求會被拒（`bot_recently_started`／`deployment_in_progress`，見 [`credential_rotation_rejected`](#alert-credential_rotation_rejected)），屆時重送。輪替比對的是舊憑證列存下的 Bitfinex user id，所以舊 key 已撤銷也能換；active 憑證列一定存有 id（migration `36e59526f8cf` 的 CHECK），被換掉的列沒有 id 只可能是它在 id 寫入前就已 retired，此時回 `account_identity_unavailable`，以現在的 active 憑證重送（§11）。
+- 代表：開機時 Bitfinex 拒絕帳戶的 API key（回應 `["error",10100,"apikey: …"]`，或 HTTP 401／403；`reason=venue_refused_key`），或 key 不合規（`reason=credential_noncompliant:<原因>`：`withdraw_must_be_disabled`、`funding_write_required`、`unexpected_write_scope:<scope>` 是權限不是只有 funding 可寫，`credential_account_mismatch` 是 key 屬於另一個 Bitfinex 帳號，`account_identity_unavailable` 是憑證列沒有存 user id；Bitfinex 的回答解析不了不算不合規，照沒回答重試），bot 進入憑證恢復模式。key 的權限與帳號在開機時檢查，執行中每 6 小時再查一次；執行中查到不合規時 bot 先以 exit 78 結束（`daemon_fatal`，`error=CredentialNoncompliantError: …`），重啟後的開機才發這則。例如 key 被撤銷或刪除、key 與 secret 對調。執行中被拒（reconcile 的讀取或送單；只認 body 帶 10100，不帶 body 的 401／403 可能是閘道頁面，照一般抓取失敗累計）時 bot 先以 exit 78 結束（`daemon_fatal`，`error=VenueCredentialRejectedError`），重啟後的開機才發這則。每個帳戶一則（dedup 欄位 `account`）。
+- 系統會做：被拒期間不送單、不撤單、不寫帳本（重試的開機觀測成功那一次照常寫入觀測）；只跑換憑證 worker（照常發佈收件公鑰，CLI 可以封裝新 key 送進來）、writer lock、`health_check`、`db_keepalive` 與 healthz。`/healthz` 回 200（部署進恢復模式算部署成功，bfx-deploy 不會停掉 bot），`/readyz` 回 503。kill 等交易控制請求留在佇列，下次以可用的 key 開機後才套用並撤單。在 process 內每 1、2、4 分鐘、之後每 5 分鐘重試一次開機觀測；以下任一發生時乾淨重啟（`bot_runs` 記 `clean_stop`、exit 0），重啟後正常開機：輪替 applied、重試成功（key 在 Bitfinex 端恢復）、DB 裡的 active 憑證已換成另一把 key。重啟一律等這次 bot 開機滿 10 分鐘（部署 settle 期間不重啟）。其他錯誤（nonce 10114、invariant）照舊拒絕開機（`boot_refused`）。送單被拒而結束的那一筆送單記成 UNKNOWN（該幣別暫停），換上可用的 key 開機後由觀測自動結案（`not_accepted`），不需要裁決。
+- operator 判斷：先判斷 key 是不是外洩或被人改動（Bitfinex 的 API key 頁面、帳號安全紀錄）；`credential_noncompliant` 時 key 的權限或帳號被改過，視同外洩處理。到 Bitfinex 產生一把新 key（只開 funding 寫入，IP 白名單照舊），以 `sudo bfx-op rotate-credential` 送出（§11）。bot 開機未滿 10 分鐘或部署進行中時請求會被拒（`bot_recently_started`／`deployment_in_progress`，見 [`credential_rotation_rejected`](#alert-credential_rotation_rejected)），屆時重送。輪替比對的是舊憑證列存下的 Bitfinex user id，所以舊 key 已撤銷也能換；active 憑證列一定存有 id（migration `36e59526f8cf` 的 CHECK），被換掉的列沒有 id 只可能是它在 id 寫入前就已 retired，此時回 `account_identity_unavailable`，以現在的 active 憑證重送（§11）。
+
+<a id="alert-credential_recheck_failing"></a>
+#### `credential_recheck_failing`（warning；`recovered=true` 時 info）
+
+- 代表：執行中每 6 小時的 key 重查連續 12 次（第一次失敗後約 55 分鐘，每 5 分鐘重試一次）沒有得到結論：Bitfinex 沒回答、回答解析不了、拒絕的原因不是 key（例如 nonce 10114），或 DB 裡的 active 憑證已不是這把 key（`error=credential_superseded:replaced_by_rotation`）。完全沒有 active 憑證不在此列：重查判它不合規、exit 78，但重啟時讀不到憑證，開機被拒（`boot_refused`，每次重啟一則），不進恢復模式、不交易；只有人手改 DB 會造成這個狀態，恢復方式是把原本的憑證列改回 `active`（operator bootstrap 在帳號已有任何憑證列時會拒絕，不能用來重建）。`error` 只有例外型別，venue 原文在 `docker logs bfx-bot` 的 `credential_recheck_failed`。每段連續失敗只發一則；之後重查通過時發一則 `recovered=true`（info，附 `after` 次數），重新計數。
+- 系統會做：照常放貸，每 5 分鐘再查一次；不停單、不結束 process。這段期間 key 的權限與帳號沒有被驗證（key 被改成可提領也要等重查恢復才會發現）。key 被輪替換掉時，正常情況下換憑證 worker 在幾秒內重啟 bot，不會累積到這則。
+- operator 判斷：看 `docker logs bfx-bot` 的 `credential_recheck_failed`／`credential_recheck_key_superseded`。Bitfinex 維護或連線問題通常自己恢復；同一個 venue 錯誤代碼反覆出現（例如 10114）是 bug，交給開發。`credential_superseded` 持續出現代表輪替後的重啟沒發生，看 [`credential_rotation_applied`](#alert-credential_rotation_applied) 與 bot 的 `credential_rotation_restart` log。同時到 Bitfinex 的 API key 頁面確認這把 key 仍只開 funding 寫入。
 
 <a id="alert-venue_observation_history_incomplete"></a>
 #### `venue_observation_history_incomplete`（warning）
@@ -527,7 +535,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 ## 7. 改了 runtime env 之後重建 container
 
 bfx-deploy 只在有新 release（或 `--retry`）時自動重建 container；只改 `/opt/bfx/runtime/*.env`
-不會觸發。改完後：
+或 `/opt/bfx/runtime/secrets/` 不會觸發。換秘密見 [secret-rotation](secret-rotation.md)。改完後：
 
 ```bash
 sudo bfx-deploy --recreate --dry-run   # 預覽：同一個 release

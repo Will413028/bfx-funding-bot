@@ -14,8 +14,15 @@ from bfx_funding_bot.core.authority import require_ledger_authority
 from bfx_funding_bot.core.db import make_engine, make_session_factory
 from bfx_funding_bot.core.log_format import configure_logging
 from bfx_funding_bot.core.schema_head import SchemaHeadMismatch, assert_schema_head
+from bfx_funding_bot.core.secret_files import (
+    SecretFileError,
+    read_secret,
+    secret_file_mounted,
+    secret_present,
+    warn_ignored_env_keys,
+)
 from bfx_funding_bot.core.security_log import BOOT_REFUSED, security_event
-from bfx_funding_bot.core.settings import IngressSettings, Settings
+from bfx_funding_bot.core.settings import IngressSettings, load_settings
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.attribution import build_attribution_router
 from bfx_funding_bot.modules.api.config import build_config_router
@@ -33,11 +40,27 @@ from bfx_funding_bot.modules.observability.error_tracking import init_error_trac
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    if os.environ.get("BFX_ADMIN_TOKEN", "").strip():
+    warn_ignored_env_keys(logging.getLogger(__name__))
+    if os.environ.get("BFX_ADMIN_TOKEN", "").strip() or secret_file_mounted("BFX_ADMIN_TOKEN"):
         # The daemon's halt credential; the web API reads with BFX_ADMIN_READ_TOKEN only
         # (9d-2). Refusing to start makes a left-over key fail the deploy, which rolls back.
         security_event(BOOT_REFUSED, reason="admin_token_in_webapi_env", level=logging.CRITICAL)
         raise RuntimeError("bfx_admin_token_in_webapi_env")
+    if secret_present("BFX_VAULT_KEK"):
+        # The vault key opens every exchange credential; only the bot decrypts (9g, F29;
+        # ADR 2026-08-31 D5'). In the env (even empty) or mounted as a secret file, it is a
+        # misplaced env or compose file: refuse, as above.
+        security_event(BOOT_REFUSED, reason="vault_kek_in_webapi", level=logging.CRITICAL)
+        raise RuntimeError("bfx_vault_kek_in_webapi_env")
+    try:
+        # With BFX_SECRETS_DIR (production) both files must read, or the deploy fails here
+        # instead of every request answering 503.
+        read_secret("DATABASE_URL")
+        read_secret("BFX_ADMIN_READ_TOKEN")
+    except SecretFileError as exc:
+        security_event(BOOT_REFUSED, reason="secret_file_unreadable", detail=str(exc),
+                       level=logging.CRITICAL)
+        raise
     # Outside the try below: a missing or invalid ingress value refuses to start, so the
     # deploy fails (and rolls back) instead of every request answering 503 (9d-5).
     try:
@@ -46,7 +69,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         security_event(BOOT_REFUSED, reason="ingress_settings_invalid", level=logging.CRITICAL)
         raise
     try:
-        settings = Settings()
+        settings = load_settings()
         configure_logging("webapi", level=settings.log_level)
         engine = make_engine(settings)
         app.state.engine = engine

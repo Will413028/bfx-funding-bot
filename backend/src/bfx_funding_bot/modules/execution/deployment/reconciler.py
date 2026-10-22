@@ -24,7 +24,10 @@ from bfx_funding_bot.external.bitfinex.funding_rules import (
     FundingRuleProvider,
     submit_amount,
 )
-from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitOutcomeKind
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitOutcomeKind,
+    key_refused_on_submit,
+)
 from bfx_funding_bot.modules.execution.audit import AuditContext
 from bfx_funding_bot.modules.execution.contracts import (
     BlockedExecution,
@@ -148,6 +151,15 @@ class FillModelEvidenceProvider(Protocol):
         period_agg: str,
         horizon_h: int,
     ) -> FillModelEvidence | FillModelUnavailable | None: ...
+
+
+def _http_status(raw_response: object) -> int | None:
+    """The HTTP status the executor recorded next to a failed submit, when it did."""
+    if isinstance(raw_response, Mapping):
+        status = raw_response.get("http_status")
+        if isinstance(status, int) and not isinstance(status, bool):
+            return status
+    return None
 
 
 class DeploymentReconciler:
@@ -627,6 +639,16 @@ class DeploymentReconciler:
                             reason=getattr(result.outcome, "reason", "submit_outcome_unknown"),
                         )
                     await self._emit_submit(cell_id, outcome, result, reconcile_id)
+                    # The venue refused the key itself (10100): every further submit on it
+                    # would add another UNKNOWN. Stop now, as a refused read does: the daemon
+                    # exits 78 and boots into credential recovery mode. The attempt is
+                    # already durable as UNKNOWN (the command gate wrote it).
+                    refused = key_refused_on_submit(
+                        result.outcome, http_status=_http_status(result.raw_response))
+                    if refused is not None:
+                        log.critical("deployment_submit_key_refused cell=%s amount=%s",
+                                     cell_id, amount)
+                        raise refused
                     continue
                 if result.outcome_kind in {
                     SubmitOutcomeKind.REJECTED,

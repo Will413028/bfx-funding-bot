@@ -22,7 +22,7 @@ Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration �
 |---|---|---|
 | `bfx_bot` | bot daemon | 本節的 default privileges ＋ 各 migration 的收斂 grant |
 | `bfx_webapi` | FastAPI web-API | migration `c74d45a54e46` 的 baseline（與之後各 migration）；不碰交易寫入 |
-| `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist：三個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
+| `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist（換憑證 outbox 由 `1db83367918c` 加上）：四個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
 | `bfx_research` | 每週報告（`bfx-weekly-report`）、研究用一次性容器 | migration `3c5e7a9b1d2f` 的精確 allowlist：只寫研究表（`funding_stats`、`perp_funding_rates`、`liquidations` 的 upsert，`attribution_weekly`、`fill_rate_stats` 的 delete＋insert，`fill_rate_model_artifacts` 的 insert），只讀每週步驟與研究腳本用到的表；不能寫 ledger、`trading_state`、outbox，讀不到憑證表 |
 
 模擬 soak 另有第五個 login role `bfx_sim`，只連自己的 database `bfx_sim`、在那裡以 `bfx_bot` 身分執行；
@@ -39,8 +39,10 @@ migration 照樣成功但**不會補 grant**。所以順序是：先建 role，�
 
 ### 1a. 建 role（migration 之前，以 `<owner>` 執行）
 
-密碼當場產生，直接寫進主機上的 runtime secret 檔（`/opt/bfx/runtime/*.env`，root 0600），
-不要貼到終端機歷史、chat 或任何檔案以外的地方。`<owner>` 必須是 superuser（官方 image 的
+密碼當場產生，直接寫進主機上的 runtime secret 檔：`bfx_bot`、`bfx_webapi` 寫秘密檔
+`/opt/bfx/runtime/secrets/<service>/DATABASE_URL`（root:4600 0640），其他 role 寫 `/opt/bfx/runtime/*.env`（root 0600）。
+不要貼到終端機歷史、chat 或任何檔案以外的地方；含密碼的 `CREATE ROLE` 不在互動式 psql 裡打（psql 會寫 history），
+照 §1e 在 root shell 裡經 stdin 送進去。`<owner>` 必須是 superuser（官方 image 的
 `POSTGRES_USER` 就是）：下面兩個 `SET` 是 superuser 參數，讓失敗的 `CREATE ROLE` 不會把含明文密碼的
 STATEMENT 寫進 PG log。
 
@@ -170,10 +172,26 @@ SELECT has_database_privilege('public', 'bfx', 'CONNECT') AS public_connects;  -
 
 ### 1e. 連線字串（寫進 secret 檔，不進 git）
 
+bot 與 webapi 的 `DATABASE_URL` 是秘密檔，格式與規則見 [deploy「秘密檔」](deploy.md#秘密檔botwebapi9h)。先建
+group 4600 與目錄（[deploy 9h 切換第 1 步](deploy.md#9h-切換一次性依序在-merge-9h-的-pr-之前做第-13-步)），再寫入。
+每個 role 一個 root shell，用 [secret-rotation「通用寫法」](secret-rotation.md#通用寫法) 的範本（值不上 argv、不進 history），
+把範本最後的 `V=...` 與 `swap` 換成：
+
+```bash
+P=$(openssl rand -hex 32)                     # role 的密碼
+V="<scheme>://bfx_bot:$P@<host>:5432/bfx"     # 寫進檔案的 URL（root shell 裡的字串組合，不上 argv）
+swap /opt/bfx/runtime/secrets/bot/DATABASE_URL root:4600 0640 printf '%s' "$V"
+# env 檔的 role（operator.env、research.env）：檔裡先放一行 `DATABASE_URL=`，上一行改成 setkey <env 檔> DATABASE_URL
+printf "SET log_statement='none'; SET log_min_error_statement='panic'; CREATE ROLE bfx_bot LOGIN PASSWORD '%s';\n" "$P" \
+  | docker exec -i --user postgres bfx-postgres psql -U <owner> -d bfx -v ON_ERROR_STOP=1 -q
+```
+
+其他 role 的連線字串照舊寫在 env 檔，也用上面這段（換 role 名稱與檔案）。
+
 | 檔案（`/opt/bfx/runtime/`） | `DATABASE_URL` 的 role | 備註 |
 |---|---|---|
-| `bot.env` | `bfx_bot` | 範本 `deploy/vm/bot.env.example` |
-| `webapi.env` | `bfx_webapi` | 同檔還有開機必填的入口設定（缺任一個 webapi 拒絕開機）：`BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id，`tailscale whois --json <operator 裝置的 tailnet IP>` 的 `UserProfile.ID`；也是 operator membership 的 `user_id`）、`BFX_WEBAPI_ALLOWED_HOSTS=<ops-host>`、`BFX_FE_SENTRY_DSN`（與 repository variable `NEXT_PUBLIC_SENTRY_DSN` 同值），以及和 `bot.env` 同值的 `BFX_ADMIN_READ_TOKEN`（`openssl rand -hex 32`）；**不可**放 `BFX_ADMIN_TOKEN`，webapi 看到它會拒絕開機（halt token 只留在 `bot.env`） |
+| `secrets/bot/DATABASE_URL` | `bfx_bot` | bot 的其他秘密檔（`BFX_ADMIN_TOKEN`、`BFX_ADMIN_READ_TOKEN`、`BFX_VAULT_KEK`、`TELEGRAM_BOT_TOKEN`）同目錄；非秘密設定在 `bot.env`（範本 `deploy/vm/bot.env.example`） |
+| `secrets/webapi/DATABASE_URL` | `bfx_webapi` | 同目錄還有 `BFX_ADMIN_READ_TOKEN`（與 bot 的同值，`openssl rand -hex 32`）。`webapi.env` 放開機必填的入口設定（缺任一個 webapi 拒絕開機）：`BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id，`tailscale whois --json <operator 裝置的 tailnet IP>` 的 `UserProfile.ID`；也是 operator membership 的 `user_id`）、`BFX_WEBAPI_ALLOWED_HOSTS=<ops-host>`、`BFX_FE_SENTRY_DSN`（與 repository variable `NEXT_PUBLIC_SENTRY_DSN` 同值）。webapi **不可**有 `BFX_ADMIN_TOKEN` 或 `BFX_VAULT_KEK`（env 的 key 或秘密檔都不行），看到任一個（即使值是空的）就拒絕開機（halt token 與 KEK 只給 bot） |
 | `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`）；誰在操作不寫這裡：`bfx-op` 每次以 `tailscale whois` 取得呼叫者的 tailnet user id 當 `requested_by`，CLI 只接受該帳戶的 member；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 `bfx-op` 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
 | `research.env` | `bfx_research` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`），只有這兩個 key。每週報告的 runner（`bfx_weekly_report.py`）每次執行時檢查 root 0600，不存在就拒跑、不會退回 `bot.env`；研究用一次性容器也讀它（[research-one-shot-jobs](research-one-shot-jobs.md)） |
 | `migrate.env` | `<owner>` | 只有 bfx-deploy 的 migration 與 operator one-shot 使用 |
@@ -205,6 +223,21 @@ SELECT has_database_privilege('public', 'bfx', 'CONNECT') AS public_connects;  -
 
 驗證：從 tailnet 裡的 operator 裝置開 `https://<ops-host>/`（轉到 `/en/overview/`、讀取正常）；不在 tailnet 時
 連不到；帶外站 `Origin` 的 POST 回 403。回滾：見 [deploy runbook](deploy.md) 的「Tailnet 入口」；bot 不受影響。
+
+### 2a. 主機節點的 Tailscale SSH
+
+主機本身（不是 `bfx-tailscale` 容器）也是 tailnet 節點，operator 經它的 Tailscale SSH 跑 `sudo bfx-op`
+（[operations §10](operations.md#10-operator-clibfx-op)）：
+
+1. 主機上 `sudo tailscale set --ssh`；admin console 關閉這個節點的 key 到期。
+2. tailnet policy 的 SSH 規則：`"action": "check"`（不設 `checkPeriod`，用預設 12 小時，ADR 2026-10-15 Amendment D4d）、
+   `users` 只有 `autogroup:nonroot`。
+3. 現況（2026-10-16 讀 admin console，以 admin console 為準）：主機節點仍是 operator 自己擁有的節點（未 tagged），所以規則的
+   `dst` 是 `autogroup:self`。ADR 2026-10-15 D1 的終態是 tagged node。主機改成 tagged（或新主機直接以 tag 登入）之前，policy 要先有該 tag 的 `tagOwners`，以及一條
+   `dst` 是該 tag 的 SSH 規則（`autogroup:self` 不涵蓋 tagged node），否則 Tailscale SSH 被拒，只剩
+   [Console Connection](operations.md#12-break-glass)。
+
+驗證：`tailscale ssh ubuntu@<vm-node>` 要求 IdP 驗證後進得去；`tailscale ssh root@<vm-node>` 被 policy 拒絕。
 
 ## 3. 首次安裝主機工具
 
@@ -243,11 +276,18 @@ sbin 入口、sudoers 與 gh 例外，見 [deploy runbook §4](deploy.md#4-主�
 
 - `/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr,attest}.env` 依
   [deploy env 規則](deploy.md#env-檔規則) 準備，root 擁有且 mode `0600`。
+- bot 與 webapi 的七個秘密檔依 [deploy「秘密檔」](deploy.md#秘密檔botwebapi9h) 準備（`root:4600 0640`，不是空檔）：
+  - 新主機沒有舊的 env 檔可以搬，每個值照 [secret-rotation「通用寫法」](secret-rotation.md#通用寫法) 在 root shell 裡產生並寫入（不上 argv）；
+  - `BFX_VAULT_KEK` 用 `openssl rand -base64 32` 產生新值，再以 `bfx-op rotate-credential` 存一把 Bitfinex key
+    （[secret-rotation](secret-rotation.md#vault-kekbfx_vault_kek)）；
+  - 舊主機的 KEK 不沿用。
+- mirror `/home/ubuntu/bfx-funding-bot` 以匿名 HTTPS clone（`https://github.com/Will413028/bfx-funding-bot.git`），
+  不建 deploy key（[deploy「Mirror」](deploy.md#mirrorgit-fetch-走匿名-https9h)）。
   bot 與 `operator.env` 使用已核對的 canonical `BFX_EXCHANGE_ACCOUNT_ID`；不沿用舊 launcher 的 `BFX_RELEASE_*`。
 - `tailscale.env` 放一把新的 tagged（`tag:bfx-ops`）、單次使用的 auth key；新主機的 `bfx_tsstate` 是空的，
   節點會重新登入（舊節點先在 admin console 刪掉，名稱 `bfx-ops` 才不會變成 `bfx-ops-1`）。
-- 告警所需 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` 同時配置到 `notify.env` 與
-  `bot.env`；GHCR 憑證只需 `read:packages`。設定方式見 [operations](operations.md#6-告警)。
+- 告警的 bot token 配置到 `notify.env` 的 `TELEGRAM_BOT_TOKEN` 與秘密檔 `secrets/bot/TELEGRAM_BOT_TOKEN`；chat id 配置到 `notify.env` 與
+  `bot.env` 的 `TELEGRAM_CHAT_ID`；GHCR 憑證只需 `read:packages`。設定方式見 [operations](operations.md#6-告警)。
 - `attest.env` 只放 `GH_TOKEN`：bfx-deploy 驗 build provenance 的 gh 沒有 token 就不執行（連公開資料也一樣），
   所以給它一把**沒有任何權限**的 fine-grained token。在 GitHub → Settings → Developer settings →
   Personal access tokens → Fine-grained tokens → Generate new token：

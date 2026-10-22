@@ -144,12 +144,13 @@ SIM_ACCOUNT=$(cat /proc/sys/kernel/random/uuid)
 sed -n 's#^\(DATABASE_URL=[^ ]*/\)bfx$#\1bfx_sim#p' /opt/bfx/runtime/migrate.env > /opt/bfx/runtime/sim-migrate.env
 grep -c '^DATABASE_URL=.*/bfx_sim$' /opt/bfx/runtime/sim-migrate.env          # 必須印 1
 
-# bfx_sim：sim container 與報告用（§2b 的密碼；URL 的 host 與 scheme 照抄 bot.env）。
+# bfx_sim：sim container 與報告用（§2b 的密碼；URL 的 host 與 scheme 照抄 bot 的秘密檔
+# secrets/bot/DATABASE_URL，只有值、沒有 `DATABASE_URL=`）。
 # 密碼經環境變數交給 awk，不上 argv。sim 專用 admin token，全新 account
 export SIM_DB_PASSWORD
-{ awk '/^DATABASE_URL=postgresql[^:\/]*:\/\/bfx_bot:[^@ ]*@[^\/ ]*\/bfx$/ {
-         sub(/:\/\/bfx_bot:[^@]*@/, "://bfx_sim:" ENVIRON["SIM_DB_PASSWORD"] "@"); sub(/\/bfx$/, "/bfx_sim"); print }' \
-      /opt/bfx/runtime/bot.env
+{ awk '/^postgresql[^:\/]*:\/\/bfx_bot:[^@ ]*@[^\/ ]*\/bfx$/ {
+         sub(/:\/\/bfx_bot:[^@]*@/, "://bfx_sim:" ENVIRON["SIM_DB_PASSWORD"] "@"); sub(/\/bfx$/, "/bfx_sim"); print "DATABASE_URL=" $0 }' \
+      /opt/bfx/runtime/secrets/bot/DATABASE_URL
   printf 'BFX_ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)"
   printf 'BFX_EXCHANGE_ACCOUNT_ID=%s\n' "$SIM_ACCOUNT"
   printf 'BFX_SIM_INITIAL_WALLETS=UST:%s\n' "<prod funding wallet 的整數金額>"
@@ -160,7 +161,7 @@ grep -c '^DATABASE_URL=postgresql[^:/]*://bfx_sim:[0-9a-f]\{64\}@.*/bfx_sim$' /o
 grep -c 'bfx_bot' /opt/bfx/runtime/sim.env                                                          # 必須印 0
 ```
 
-- `grep -c` 的結果不符（例如 URL 帶 query string 使 `sed`／`awk` 沒有輸出）就停下，不要繼續。`bot.env` 的 scheme 是
+- `grep -c` 的結果不符（例如 URL 帶 query string 使 `sed`／`awk` 沒有輸出）就停下，不要繼續。bot 的 URL scheme 是
   `postgresql+asyncpg`，所以 pattern 寫成 `postgresql[^:/]*://`。
 - `sim.env` **不得**含 `BFX_VAULT_KEK`（simulated 開機會拒絕）、`TELEGRAM_*`（sim 的告警只進 log，由 orchestrator
   每 15 分鐘檢查、每日報告；`[shadow]` 噪音不進 prod 頻道）、`BFX_OPERATOR_USER_ID`、`BFX_DEPLOYMENT_ID`

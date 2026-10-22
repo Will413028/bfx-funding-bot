@@ -228,3 +228,27 @@ def test_webapi_starts_error_tracking_with_the_fastapi_integration(
         monkeypatch.undo()
         importlib.reload(webapi)
     assert calls == [("webapi", ("starlette", "fastapi"))]
+
+
+def test_secret_file_values_are_scrubbed_on_the_wire(ingest: str, tmp_path: Any) -> None:
+    """9h: the bot's secrets live in files (BFX_SECRETS_DIR), not in its env; the Sentry
+    scrub list still covers them, end to end. Mutation: secret_values without the file
+    values fails this test."""
+    directory = tmp_path / "secrets"
+    directory.mkdir()
+    admin = "fake-" + "file-admin-token-" + "q" * 10
+    for key, value in {"TELEGRAM_BOT_TOKEN": TOKEN, "BFX_ADMIN_TOKEN": admin,
+                       "DATABASE_URL": f"postgresql://bfx_bot:{DB_PASSWORD}@bfx-postgres:5432/bfx"
+                       }.items():
+        (directory / key).write_text(value)
+    environ = {"SENTRY_DSN": ingest, "BFX_SECRETS_DIR": str(directory),
+               "BFX_DEPLOYMENT_ENV": "ci", "BFX_SERVICE_VERSION": "aaaaaaa"}
+    assert init_error_tracking("bot", environ) is True
+    try:
+        raise RuntimeError(f"boot failed with {TOKEN} {admin} password={DB_PASSWORD}")
+    except RuntimeError:
+        sentry_sdk.capture_exception()
+    sentry_sdk.flush(timeout=5)
+    wire = b"\n".join(_Ingest.bodies).decode()
+    assert "boot failed with" in wire
+    _assert_clean(wire, (TOKEN, admin, DB_PASSWORD))

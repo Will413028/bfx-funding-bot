@@ -57,7 +57,7 @@ async def test_lifespan_stores_the_authority_and_its_read_models(monkeypatch) ->
         required.append(session)
         return "migration b1c2d3e4f5a6 genesis"
 
-    monkeypatch.setattr(webapi, "Settings", lambda: SimpleNamespace(log_level="WARNING"))
+    monkeypatch.setattr(webapi, "load_settings", lambda: SimpleNamespace(log_level="WARNING"))
     monkeypatch.setattr(webapi, "make_engine", lambda _settings: _Engine())
     monkeypatch.setattr(webapi, "make_session_factory", lambda _engine: _Session)
     monkeypatch.setattr(webapi, "require_ledger_authority", require_ledger_authority)
@@ -73,7 +73,7 @@ async def test_lifespan_still_refuses_an_unreadable_authority(monkeypatch) -> No
     async def require_ledger_authority(_session: object) -> str:
         raise authority_module.AuthorityMismatch("authority_unsupported")
 
-    monkeypatch.setattr(webapi, "Settings", lambda: SimpleNamespace(log_level="WARNING"))
+    monkeypatch.setattr(webapi, "load_settings", lambda: SimpleNamespace(log_level="WARNING"))
     monkeypatch.setattr(webapi, "make_engine", lambda _settings: _Engine())
     monkeypatch.setattr(webapi, "make_session_factory", lambda _engine: _Session)
     monkeypatch.setattr(webapi, "require_ledger_authority", require_ledger_authority)
@@ -97,7 +97,7 @@ async def test_lifespan_checks_the_schema_head_first(monkeypatch) -> None:
         order.append("authority")
         return "migration b1c2d3e4f5a6 genesis"
 
-    monkeypatch.setattr(webapi, "Settings", lambda: SimpleNamespace(log_level="WARNING"))
+    monkeypatch.setattr(webapi, "load_settings", lambda: SimpleNamespace(log_level="WARNING"))
     monkeypatch.setattr(webapi, "make_engine", lambda _settings: _Engine())
     monkeypatch.setattr(webapi, "make_session_factory", lambda _engine: _Session)
     monkeypatch.setattr(webapi, "require_ledger_authority", require_ledger_authority)
