@@ -33,8 +33,16 @@ updates:
       default-days: 7
     open-pull-requests-limit: 5
     groups:
+      # react-dom must match react exactly; bumping one alone breaks rendering.
+      react:
+        patterns: ["react", "react-dom"]
       npm-patch:
         update-types: ["patch"]
+    ignore:
+      # Types follow the Node runtime (node:22 in backend/Dockerfile, CI node-version 22);
+      # a major moves with the runtime, not as a weekly bump.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "docker"
     directories: ["/backend", "/frontend", "/deploy/vm/postgres"]
