@@ -92,3 +92,9 @@ auth 選型半年後值得複查 Neon Auth 是否 GA、要不要卸 ops。
   - SP3 spec：`2026-06-16-sp3-strategy-config-crud-design.md`（原文已不在 repo，本 ADR 即紀錄）
   - SP3 plan：`2026-06-17-sp3-strategy-config-crud.md`（原文已不在 repo，本 ADR 即紀錄）
 - 子專案 ADR：[2026-06-07-sp2-bfx-key-vault](2026-06-07-sp2-bfx-key-vault.md)；部署拓樸：[2026-06-07-web-tier-hosting-funnel-scoped-roles](2026-06-07-web-tier-hosting-funnel-scoped-roles.md)。
+
+## Amendment (2026-10-22): 後端 pydantic 是 API 契約的唯一來源（取代 D11 的「前端是契約」）
+
+- **D11'**（修訂 Amendment 2026-09-27 的 D11；品質計畫 9k，Will 2026-10-21 拍板）：`/api/v1` 的契約以後端 pydantic model 為唯一來源。每個 JSON route 宣告 response model，`backend/openapi.json` 進版控；前端型別由 `openapi-typescript` 從它產生（`frontend/src/types/api.gen.ts`），手寫型別改為別名；CI 的 Frontend job 重新產生兩個檔，有差異就失敗。前端 Zod 只負責表單提示，並以編譯期檢查要求表單值能指派給產生的請求型別，所以兩邊不一致時是 build 失敗，不是送出後才回 400。D11 的「刻意不加領域上下限」與「config 只儲存、daemon 不讀」不變。
+- 理由：D11 定在前端先寫完、後端從零補 route 的時候；BFF 與 app 登入移除後（[2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md)），前端成為 webapi 提供的 static export，19 個 JSON 回應在 9k 之前的 OpenAPI 都是開放 object、前端 14 處以泛型 cast 讀取，契約沒有任何機器檢查。
+- 實作：PR #248（merge `c9798cda`）。回應的 `Literal` 綁到 domain 型別或以測試比對 DB CHECK；回應形狀不符時回 500／503 並只記欄位路徑。

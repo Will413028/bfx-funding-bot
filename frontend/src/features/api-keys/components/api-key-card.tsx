@@ -2,7 +2,6 @@
 
 import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/badge";
-import { formatUSD } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { ApiKey, ApiKeyStatus } from "@/types";
 
@@ -64,21 +63,6 @@ export function ApiKeyCard({ apiKey }: ApiKeyCardProps) {
         >
           {t("verifyFailedReason")}: {apiKey.lastVerifyError}
         </p>
-      )}
-
-      {apiKey.status === "verified" && apiKey.fundingBalance && (
-        <div className="mt-3 rounded-lg bg-white/[0.02] px-3 py-2">
-          <p className="text-xs text-zinc-400">{t("fundingBalance")}</p>
-          <p className="font-medium tabular-nums text-foreground">
-            {formatUSD(apiKey.fundingBalance.balance)}{" "}
-            <span className="text-xs text-zinc-500">
-              {apiKey.fundingBalance.currency}
-            </span>
-          </p>
-          <p className="text-xs text-zinc-500">
-            {t("available")}: {formatUSD(apiKey.fundingBalance.available)}
-          </p>
-        </div>
       )}
     </div>
   );

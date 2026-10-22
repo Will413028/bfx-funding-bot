@@ -7,6 +7,7 @@ pnpm dev          # 開發（Turbopack HMR）
 pnpm build        # Static export → out/（由 web API 提供）
 pnpm lint         # tsc + biome check
 pnpm format       # biome format --write
+pnpm gen:api      # 從 ../backend/openapi.json 產生 src/types/api.gen.ts
 pnpm knip         # 找未使用的 exports
 pnpm test         # Vitest 單次執行
 pnpm test:watch   # Vitest watch mode
@@ -41,6 +42,18 @@ const keys = await apiClient.getList<ApiKey[]>("/api-keys");
 ```
 
 - 錯誤拋出 `ApiError`（含 `status`, `code`, `message`）
+- API 回應型別是產生的：後端 pydantic response model → `backend/openapi.json` →
+  `src/types/api.gen.ts`（openapi-typescript，不要手改）。`src/types/index.ts` 只把產生的
+  schema 取 console 用的名稱（`components["schemas"][...]`），只有 API 不描述的型別才手寫。
+  改了後端回應 model 後重新產生並一起 commit：
+
+  ```bash
+  cd backend && uv run python scripts/dump_openapi.py   # 寫 backend/openapi.json
+  cd frontend && pnpm gen:api                            # 寫 src/types/api.gen.ts
+  ```
+
+  CI 的 Frontend job 會重跑這兩步，有差異就失敗。`lib/validations.ts` 的 Zod 只管表單 UX，
+  它的值在編譯期必須可指派給產生的 `StrategyConfigBody`。
 - 寫入請求一律 JSON；web API 拒絕跨站、非同源（`Origin`）或非 JSON 的寫入。
 
 ### Static export 與身分（9d-5）

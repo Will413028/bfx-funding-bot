@@ -38,7 +38,7 @@ export function FundingPanel({
           {!capital.capital_available ? (
             <>
               <output>{capital.reason}</output>
-              {capital.policy_revision !== undefined && (
+              {capital.policy_revision != null && (
                 <p>{t("revision", { revision: capital.policy_revision })}</p>
               )}
             </>

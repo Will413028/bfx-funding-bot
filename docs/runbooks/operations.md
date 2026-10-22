@@ -191,7 +191,7 @@ sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
 | uncertainty kind | 可用動作 |
 |---|---|
 | `submit_outcome_unknown`（UNKNOWN 送單） | `bind-to-venue`：綁到 venue 上唯一且完全符合的 offer；`mark-not-accepted`：有完整 venue history 證明 venue 沒收下 |
-| `unattributed_venue_offer`、`unsupported_venue_exposure`（2026-09-25 前留下的舊紀錄） | `manual-resolution`：`closed_at_venue` 或 `accepted_external_exposure`。新的外來 offer 不再產生這種紀錄 |
+| `unattributed_venue_offer`、`unsupported_venue_exposure`（2026-09-25 前留下的舊紀錄） | `manual-resolution`：`closed_at_venue` 或 `accepted_external_exposure`。新的外來 offer 不再產生這種紀錄；ledger 只從 attempt 與 quarantine 產生 uncertainty，舊表 `execution_uncertainties` 已不讀，所以 API 與 UI 不再列出這兩種 |
 
 `uncertainties` 回 `uncertainties_unavailable` 時看輸出的 `cause` 與 `sqlstate`：`42501` 是 `bfx_operator` 少了讀取權限（migration 的 grant 沒補上），不是一般的拒絕。
 
