@@ -13,14 +13,20 @@ from __future__ import annotations
 from collections.abc import Collection
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
-from bfx_funding_bot.modules.ledger import OfferView, PositionView, Scope, UncertaintyView
+from bfx_funding_bot.modules.ledger import (
+    OfferState,
+    OfferView,
+    PositionView,
+    Scope,
+    UncertaintyState,
+    UncertaintyView,
+)
 from bfx_funding_bot.modules.ledger._internal import reads
 from bfx_funding_bot.modules.ledger._internal.attempts import attempts_by_id, fresh_all
 from bfx_funding_bot.modules.ledger._internal.basis import previous_basis
@@ -270,7 +276,7 @@ class LedgerOperatorReads:
         session: AsyncSession,
         scope: Scope,
         *,
-        state: Literal["open", "resolved"] | None,
+        state: UncertaintyState | None,
         limit: int,
     ) -> tuple[UncertaintyView, ...]:
         views: list[UncertaintyView] = []
@@ -427,7 +433,7 @@ class LedgerOperatorReads:
         views: list[OfferView] = []
 
         def add(
-            attempt: _OfferAttempt, state: str, venue_offer_id: str | None, updated_ms: int
+            attempt: _OfferAttempt, state: OfferState, venue_offer_id: str | None, updated_ms: int
         ) -> None:
             if state in states:
                 views.append(

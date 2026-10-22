@@ -145,3 +145,9 @@ plane 為不同 process boundary、D4 已定 control-plane commands 走 outbox�
 ## Updates (2026-10-19)
 
 - [2026-10-19-runtime-roles-and-necessity-gated-module-boundaries](2026-10-19-runtime-roles-and-necessity-gated-module-boundaries.md) 修訂 D3：市場資料錄製獨立成全系統一個的 `marketdata` process（book snapshot 唯一寫入者），與 control plane、account worker、reporting 並列。
+
+## Amendment (2026-10-22): KEK 不上 KMS，改為秘密檔（修訂 D5 的「外部 key 前改 KMS」時程）
+
+- **D5'**（品質計畫 9g／9h，Will 2026-10-21 拍板「照建議」）：在只有 Will 自己一把 Bitfinex key 的期間，KEK 不移進 OCI Vault／KMS，與 bot、webapi 的其他常駐秘密一起改成 compose 秘密檔（專用 gid、0640）；換 KEK 的做法是產生新 KEK 並以 `bfx-op rotate-credential` 換一把新的 Bitfinex key，不做 re-wrap migration。D5 的「credential 只有一個 `CredentialProvider` SoT」不變。
+- 理由：KMS 擋不住 VM 被 root 入侵（instance principal 照樣能解密，明文 secret 本來就在 bot 記憶體），它擋的是 boot volume 或備份外洩並提供解密紀錄；代價是 bot 每次開機依賴 OCI KMS 與 metadata service、新增 `oci` SDK 與其傳遞依賴、以及 vault／key／dynamic group／policy 的管理。A1 機型沒有 TPM，systemd-creds 無效（Oracle shielded instance 文件）。
+- 終局與觸發條件：第一把不是 Will 的 Bitfinex key 進系統（即 D7 的外部 real-money beta gate 之前），或需要解密稽核紀錄時，改用 KMS multi-version 包每把 key 的 DEK。

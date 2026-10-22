@@ -104,13 +104,12 @@
     "revoked": "Revoked",
     "retired": "Retired",
     "verifyFailedReason": "Reason",
-    "fundingBalance": "Funding Balance",
-    "available": "Available",
     "empty": "No API keys yet. Add one with the operator CLI bootstrap, or replace the active key with bfx-op rotate-credential.",
     "loadFailed": "Failed to load API keys"
   },
   "strategy": {
     "draftNotice": "Saving this draft does not change the applied capital policy or activate lending. Check the applied revision and the trading state on Overview.",
+    "draftUnreadable": "The stored draft (revision {revision}) was saved under an earlier settings format and cannot be shown. The form starts from the defaults; saving replaces the stored draft.",
     "title": "Strategy Configuration",
     "signalParams": "Signal Parameters",
     "executionParams": "Execution Parameters",

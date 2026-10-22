@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.account_scope import ExchangeAccountContext, require_account_member
 from tests.ingress_support import attach_ingress
+from tests.modules.api.test_response_contract import funding_dry_run, funding_snapshot
 
 
 @pytest.mark.parametrize("scope_error", [None, "account", "realm", "missing_realm"])
@@ -15,16 +16,14 @@ async def test_funding_status_preserves_decimals_only_for_both_matching_scopes(s
     from bfx_funding_bot.modules.api.funding_status import build_funding_status_router
 
     account = uuid4()
-    observed = {"account_id": str(account), "deployment_environment": "prod",
-        "symbols": {"fUST": {"capital_available": True, "spendable": "9007199254740993.123456789",
-            "unreflected_commitments": "0.000000001", "policy_revision": 7}},
-        "halt": {"halted": True}}
+    observed = funding_snapshot() | {"account_id": str(account)}
+    observed["halt"] = observed["halt"] | {"halted": True}
+    observed["symbols"]["fUST"]["spendable"] = "9007199254740993.123456789"
     paths = []
     async def read(path):
         paths.append(path)
-        value = dict(observed) if path == "/admin/trading-status" else {
-            "account_id": str(account), "deployment_environment": "prod",
-            "symbols": {"fUST": {"blocked_by": "manual_kill"}}}
+        value = dict(observed) if path == "/admin/trading-status" else (
+            funding_dry_run() | {"account_id": str(account)})
         if path == scope_endpoint:
             if scope_error == "account":
                 value["account_id"] = str(uuid4())
@@ -64,3 +63,18 @@ async def test_funding_status_has_no_anonymous_access():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(f"/api/v1/exchange-accounts/{uuid4()}/funding-status")
     assert response.status_code == 401
+
+
+async def test_the_daemons_own_status_parses_and_is_forwarded_unchanged():
+    """The producer of the forwarded body is the daemon's TradingStatusService: its real
+    snapshot and dry run parse as the console's model, and nothing is added or lost."""
+    import json
+
+    from bfx_funding_bot.modules.api.funding_status import FundingStatus
+    from tests.modules.admin.test_trading_status import _FakeTradingState, _halt_state, _service
+
+    service = _service(trading_state=_FakeTradingState(_halt_state(True)))
+    body = json.loads(json.dumps({**await service.snapshot(), "dry_run": await service.dry_run()}))
+    status = FundingStatus.model_validate(body)
+    assert status.halt.halted is True
+    assert status.model_dump(mode="json", by_alias=True, exclude_unset=True) == body

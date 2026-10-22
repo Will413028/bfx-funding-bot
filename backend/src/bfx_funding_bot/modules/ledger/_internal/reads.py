@@ -50,6 +50,7 @@ from bfx_funding_bot.modules.ledger import (
     OpenUncertainty,
     ProvenanceConflict,
     Scope,
+    UncertaintyKind,
 )
 from bfx_funding_bot.modules.ledger._internal.attempts import (
     MAX_TAIL_ATTEMPTS,
@@ -84,7 +85,7 @@ _DECISIONS = table(
     column("signal_correlation_id", Text),
 )
 # The operator-visible code per subject: OperatorReads and the consumer port share it.
-UNCERTAINTY_KINDS: dict[str, str] = {
+UNCERTAINTY_KINDS: dict[str, UncertaintyKind] = {
     "attempt": "submit_outcome_unknown",
     "quarantine": "unattributed_venue_offer",
 }

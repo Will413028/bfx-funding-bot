@@ -9,6 +9,7 @@
     "lint": "tsc --noEmit && biome check --error-on-warnings src/",
     "lint:e2e": "biome lint --error-on-warnings e2e/",
     "format": "biome format --write",
+    "gen:api": "openapi-typescript ../backend/openapi.json -o src/types/api.gen.ts",
     "knip": "knip",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -46,6 +47,7 @@
     "babel-plugin-react-compiler": "1.0.0",
     "jsdom": "^30.1.2",
     "knip": "^6.39.0",
+    "openapi-typescript": "7.13.0",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.11"

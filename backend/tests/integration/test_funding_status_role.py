@@ -11,6 +11,7 @@ from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountMembership
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.funding_status import build_funding_status_router
+from tests.modules.api.test_response_contract import funding_dry_run, funding_snapshot
 
 
 @pytest.mark.integration
@@ -33,8 +34,10 @@ async def test_status_membership_uses_only_existing_restricted_webapi_grants(pg_
     scoped_endpoint = "/admin/trading-status"
     async def reader(path):
         calls.append(path)
-        value = {"account_id": str(account), "deployment_environment": "ci",
-            "symbols": {"fUST": {"capital_available": False, "reason": "policy_unavailable"}}}
+        scope = {"account_id": str(account), "deployment_environment": "ci"}
+        value = (funding_snapshot() if path == "/admin/trading-status" else funding_dry_run()) | scope
+        if path == "/admin/trading-status":
+            value["symbols"]["fUST"] = {"capital_available": False, "reason": "policy_unavailable"}
         if path == scoped_endpoint:
             if daemon_realm is None:
                 value.pop("deployment_environment")

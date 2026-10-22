@@ -9,7 +9,10 @@ from bfx_funding_bot.modules.api.attribution import _dec_str
 from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models, get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.api.schemas import (
+    Envelope,
     ExecutionEventResponse,
+    ExecutionsPage,
+    ExecutionsPagination,
     OfferClaimResponse,
     PositionResponse,
 )
@@ -29,12 +32,11 @@ def build_projections_router() -> APIRouter:
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
         models: ReadModels = Depends(get_read_models),  # noqa: B008
-    ) -> dict[str, object]:
+    ) -> Envelope[list[PositionResponse]]:
         views = await models.operator_reads.list_positions(
             session, Scope(context.exchange_account_id, context.deployment_environment)
         )
-        return {
-            "data": [
+        return Envelope(data=[
                 PositionResponse(
                     symbol=view.symbol,
                     available=_dec_str(view.available),
@@ -48,10 +50,9 @@ def build_projections_router() -> APIRouter:
                     n_credits=view.n_credits,
                     last_updated_ms=view.last_updated_ms,
                     last_reconciled_at=view.last_reconciled_at_ms,
-                ).model_dump(by_alias=True)
+                )
                 for view in views
-            ]
-        }
+        ])
 
     @router.get("/exchange-accounts/{exchange_account_id}/offers")
     async def account_offers(
@@ -59,14 +60,13 @@ def build_projections_router() -> APIRouter:
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
         models: ReadModels = Depends(get_read_models),  # noqa: B008
-    ) -> dict[str, object]:
+    ) -> Envelope[list[OfferClaimResponse]]:
         views = await models.operator_reads.list_offers(
             session,
             Scope(context.exchange_account_id, context.deployment_environment),
             states=_ACTIVE_CLAIM_STATES if state is None else (state,),
         )
-        return {
-            "data": [
+        return Envelope(data=[
                 OfferClaimResponse(
                     offer_key=view.offer_key,
                     venue_offer_id=view.venue_offer_id,
@@ -75,10 +75,9 @@ def build_projections_router() -> APIRouter:
                     size_usdt=_dec_str(view.size_usdt),
                     occurred_at_ms=view.occurred_at_ms,
                     last_updated_ms=view.last_updated_ms,
-                ).model_dump(by_alias=True)
+                )
                 for view in views
-            ]
-        }
+        ])
 
     @router.get("/exchange-accounts/{exchange_account_id}/executions")
     async def account_executions(
@@ -88,7 +87,7 @@ def build_projections_router() -> APIRouter:
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
         models: ReadModels = Depends(get_read_models),  # noqa: B008
-    ) -> dict[str, object]:
+    ) -> ExecutionsPage:
         try:
             page = await models.execution_history.list_executions(
                 session,
@@ -99,8 +98,8 @@ def build_projections_router() -> APIRouter:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid_cursor"
             ) from None
-        return {
-            "data": [
+        return ExecutionsPage(
+            data=[
                 ExecutionEventResponse(
                     event_key=event.event_key,
                     event_type=event.event_type,
@@ -110,13 +109,13 @@ def build_projections_router() -> APIRouter:
                     cid=event.cid,
                     amount=event.amount,
                     rate=event.rate,
-                ).model_dump(by_alias=True)
+                )
                 for event in page.events
             ],
-            "pagination": {
-                "hasMore": page.next_before is not None,
-                "nextBefore": page.next_before,
-            },
-        }
+            pagination=ExecutionsPagination(
+                has_more=page.next_before is not None,
+                next_before=page.next_before,
+            ),
+        )
 
     return router

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { StrategyConfig } from "@/types";
 
 const rangeSchema = (_label: string) =>
   z
@@ -20,3 +21,11 @@ export const strategyConfigSchema = z.object({
 });
 
 export type StrategyConfigInput = z.infer<typeof strategyConfigSchema>;
+
+// The form schema is UX only; the backend's StrategyConfigBody is the contract.
+// Valid form values must be a valid PUT body, or tsc fails here.
+type AssertAssignable<T extends U, U> = T;
+type _FormValuesAreAConfigBody = AssertAssignable<
+  StrategyConfigInput,
+  StrategyConfig
+>;

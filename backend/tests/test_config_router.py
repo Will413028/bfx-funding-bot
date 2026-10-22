@@ -1,5 +1,7 @@
+import logging
 from uuid import UUID
 
+import pytest
 import pytest_asyncio
 from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
@@ -9,7 +11,10 @@ import bfx_funding_bot.modules.accounts.tables  # side-effect: registers ORM mod
 import bfx_funding_bot.modules.accounts.user_profile  # noqa: F401  # side-effect: registers ORM models
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    grant_membership,
+    upsert_account_config_draft,
+)
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.api.config import build_config_router
 from bfx_funding_bot.modules.api.deps import get_session
@@ -69,6 +74,7 @@ async def app_client(sqlite_engine, monkeypatch):
 
     app.dependency_overrides[require_operator] = _fake_operator
     app.dependency_overrides[get_session] = _override_session
+    app.state.session_factory = factory
     return TestClient(app)
 
 
@@ -98,6 +104,47 @@ def test_put_twice_updates_in_place(app_client):
     ).json()["data"]
     assert second["id"] == first["id"]
     assert second["config"]["currency"] == "UST"
+
+
+async def _store_draft(app_client, config):
+    """A draft written as an earlier schema left it: the domain writer stores any mapping."""
+    async with app_client.app.state.session_factory() as session:
+        await upsert_account_config_draft(
+            session, exchange_account_id=_ACCOUNT_ID, config=config, source="operator")
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored", [
+    pytest.param({k: v for k, v in _VALID.items() if k != "autoRenew"}, id="missing-field"),
+    pytest.param({**_VALID, "rate": {"min": 0.002, "max": 0.0001}}, id="invalid-value"),
+    pytest.param({**_VALID, "maxOffers": 4}, id="key-no-longer-in-schema"),
+])
+async def test_a_draft_stored_under_another_schema_is_listed_unreadable_and_overwritable(
+        app_client, caplog, stored):
+    """GET never fails on a stored draft: an operator must still see that it exists and be
+    able to overwrite it. The log names the fields, never the stored values."""
+    await _store_draft(app_client, stored)
+    caplog.set_level(logging.ERROR, logger="bfx_funding_bot.modules.api.config")
+
+    response = app_client.get(_CONFIG_PATH)
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["config"] is None
+    assert body["configError"] == "config_unreadable"
+    assert body["revision"] == 1
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "config_draft_unreadable" in logged
+    assert "0.0001" not in logged and "10000" not in logged
+
+    overwritten = app_client.put(_CONFIG_PATH, json=_VALID)
+    assert overwritten.status_code == 200, overwritten.text
+    readable = app_client.get(_CONFIG_PATH).json()["data"]
+    assert readable["revision"] == 2
+    assert readable["configError"] is None
+    assert readable["config"] == {**_VALID, "amount": {"min": 50.0, "max": 10000.0},
+                                  "period": {"min": 2.0, "max": 30.0}}
 
 
 def test_put_invalid_returns_422_or_400(app_client):
