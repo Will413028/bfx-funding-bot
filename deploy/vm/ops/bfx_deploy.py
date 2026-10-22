@@ -15,8 +15,13 @@ One run:
      tick first recreates the web API alone when the netns holder's restart or
      recreation left it in a dead network namespace (Deployer._repair_netns);
   3. read the revision and CI-run labels, require `backend:sha-<rev>` to be the
-     same digest;
-  4. fetch the VM mirror, require <rev> on origin/main, and take the compose
+     same digest, and verify the digest's build provenance with the pinned gh
+     (GhAttestationVerifier): signed by release.yml on main of this repository,
+     on a GitHub-hosted runner -- before anything runs the image (step 6 runs
+     its alembic as the database owner). Refused, it is a discovery failure;
+  4. fetch the VM mirror, require <rev> on origin/main and the last successful
+     deployment's revision to be <rev> or an ancestor of it (no downgrade to an
+     older, also validly signed, release), and take the compose
      file, live.env and the config files the compose file references from <rev>
      itself; render that compose file (`docker compose config`) for the services
      to deploy, their containers, images and env files (below);
@@ -170,6 +175,16 @@ PROBE = (
     "sys.exit(0 if urllib.request.urlopen(sys.argv[1],timeout=5).status==200 else 1)"
 )
 IMAGETOOLS_FORMAT = '{"manifest":{{json .Manifest}},"image":{{json .Image}}}'
+# The GitHub CLI that verifies a release's build provenance: installed by install.sh at
+# exactly this version (and sha256) to exactly this path, never from apt (unattended
+# upgrades would bypass the 7-day cooldown). 2.102.0 fixes --signer-workflow prefix
+# matching (GHSA-wjmr-j3rp-mh2g) and case-insensitive --source-ref (GHSA-4mq3-hpgx-9cx8).
+# A version bump is a release that changes both files; run install.sh after it deploys.
+GH_VERSION = "2.102.0"
+GH_BINARY = f"/usr/local/lib/bfx-ops/gh/{GH_VERSION}/bin/gh"
+# The repository whose release.yml, run on main, must have signed the image.
+SOURCE_REPOSITORY = "Will413028/bfx-funding-bot"
+RELEASE_WORKFLOW = ".github/workflows/release.yml"
 PLATFORM = "linux/arm64"
 _MAX_DETAIL = 1800
 
@@ -435,6 +450,97 @@ class ImagetoolsRegistry:
         return ImageInfo(digest=digest, labels={str(k): str(v) for k, v in labels.items()})
 
 
+# --------------------------------------------------------------------------- provenance
+
+
+class Attestations(Protocol):
+    def verify(self, image: str) -> None: ...
+
+
+class GhAttestationVerifier:
+    """A release image's SLSA build provenance, verified with the pinned GitHub CLI.
+
+    Necessary because a `write:packages` credential can push an image whose labels and
+    both tags name a real main revision (threat model F32): the label and ancestry checks
+    pass, and the image runs as the database owner before anything else looks at it.
+    Only release.yml, run by GitHub on main, can obtain a Sigstore certificate for this
+    repository's workflow identity, so a valid attestation proves the digest came from it.
+
+    The attestation bundle comes from the registry (`--bundle-from-oci`, pushed there by
+    release.yml's actions/attest); the Sigstore trust root comes from its TUF CDN, cached
+    under `home`. gh runs with an environment built from nothing: no GitHub token, no
+    gh login, and an empty DOCKER_CONFIG, so neither ghcr.env's pull token nor root's
+    docker login reaches it (the package is read anonymously). Any failure -- gh missing,
+    another version, a registry or Sigstore outage, no or a wrong signature -- raises
+    DiscoveryError: fail closed, no bypass (one would need root, which can do anything).
+    """
+
+    def __init__(
+        self, runner: Runner, *, gh: str, home: Path, repository: str, ref: str,
+        version: str = GH_VERSION,
+    ) -> None:
+        self._runner = runner
+        self._gh = gh
+        self._home = home
+        self._repository = repository
+        self._ref = ref
+        self._version = version
+
+    def _env(self) -> dict[str, str]:
+        docker_config = self._home / "docker"
+        docker_config.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return {
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME": str(self._home),
+            "GH_CONFIG_DIR": str(self._home / "config"),
+            "DOCKER_CONFIG": str(docker_config),
+            "GH_NO_UPDATE_NOTIFIER": "1",
+            "GH_PROMPT_DISABLED": "1",
+            "NO_COLOR": "1",
+        }
+
+    def argv(self, image: str) -> list[str]:
+        return [
+            self._gh, "attestation", "verify", f"oci://{image}",
+            "--repo", self._repository,
+            "--signer-workflow", f"{self._repository}/{RELEASE_WORKFLOW}",
+            "--source-ref", self._ref,
+            "--deny-self-hosted-runners",
+            "--bundle-from-oci",
+            "--format", "json",
+        ]
+
+    def verify(self, image: str) -> None:
+        env = self._env()
+        try:
+            version = self._runner([self._gh, "--version"], timeout=30.0, env=env)
+        except CommandError as exc:
+            log(f"gh unusable: {exc.code}")
+            raise DiscoveryError("attestation_verifier_missing") from None
+        if version.returncode != 0:
+            raise DiscoveryError("attestation_verifier_missing")
+        found = re.match(r"gh version (\S+) ", version.stdout)
+        if found is None or found.group(1) != self._version:
+            log(f"gh at {self._gh} is not {self._version}: {version.stdout.strip()[:120]}")
+            raise DiscoveryError("attestation_verifier_wrong_version")
+        try:
+            result = self._runner(self.argv(image), timeout=180.0, env=env)
+        except CommandError as exc:
+            log(f"attestation verify of {image} failed: {exc.code}")
+            raise DiscoveryError("attestation_unverified") from None
+        if result.returncode != 0:
+            log(f"attestation verify of {image} exited {result.returncode}: "
+                f"{result.stderr.strip()[-600:]}")
+            raise DiscoveryError("attestation_unverified")
+        try:
+            verified = json.loads(result.stdout)
+        except ValueError:
+            verified = None
+        if not isinstance(verified, list) or not verified:
+            log(f"attestation verify of {image} exited 0 without a verified attestation")
+            raise DiscoveryError("attestation_unverified")
+
+
 # --------------------------------------------------------------------------- ledger
 
 
@@ -599,6 +705,9 @@ class Settings:
     unit_dir: Path = Path("/etc/systemd/system")
     uv: str = "/usr/local/bin/uv"
     system_python: str = "/usr/bin/python3"
+    # Not a command-line option: pointing it elsewhere would be a verification bypass.
+    gh: str = GH_BINARY
+    source_repository: str = SOURCE_REPOSITORY
     healthz_port: int = 8080
     health_timeouts: Mapping[str, float] = field(
         default_factory=lambda: {"bot": 300.0, "webapi": 120.0}
@@ -871,8 +980,12 @@ class Deployer:
         sleep: Callable[[float], None] = time.sleep,
         secret_check: Callable[[Path], None] = protected_secret_file,
         registry_credentials: tuple[str, str] | None = None,
+        attestations: Attestations | None = None,
     ) -> None:
         self.settings = settings
+        self._attestations = attestations or GhAttestationVerifier(
+            runner, gh=settings.gh, home=settings.state_dir / "gh",
+            repository=settings.source_repository, ref=f"refs/heads/{settings.branch}")
         self._runner = runner
         self._registry = registry
         self._ledger = ledger
@@ -992,7 +1105,10 @@ class Deployer:
             raise DiscoveryError("registry_revision_label_missing")
         if self._registry.inspect(f"{settings.backend_repository}:sha-{revision}").digest != main.digest:
             raise DiscoveryError("registry_main_and_revision_tag_disagree")
-        return self._target(revision, main.digest)
+        target = self._target(revision, main.digest)
+        # Before anything runs the image: _schema runs its alembic as the database owner.
+        self._attestations.verify(target.backend_image)
+        return target
 
     def _target(self, revision: str, backend_digest: str) -> Target:
         return Target(revision=revision, backend_digest=backend_digest,
@@ -1405,7 +1521,8 @@ class Deployer:
 
     def _prepare(self, view: LedgerView, attempt: Attempt) -> Prepared:
         target = attempt.target
-        self._fetch_and_require_on_main(target.revision)
+        self._fetch_and_require_on_main(
+            target.revision, view.last_success.source_revision if view.last_success else None)
         release = self._materialize(target, attempt.attempt_id)
         changed_paths, why = self._changed_paths(view, target.revision)
         if changed_paths is None:
@@ -1416,7 +1533,14 @@ class Deployer:
         return Prepared(release=release, current=current, heads=heads,
                         changed_paths=changed_paths)
 
-    def _fetch_and_require_on_main(self, revision: str) -> None:
+    def _fetch_and_require_on_main(self, revision: str, deployed: str | None) -> None:
+        """<revision> on main and, when something deployed, at or after `deployed`.
+
+        The second check refuses a downgrade: the `main` tag pointed back at an older
+        release, whose attestation and ancestry are both valid; equal (a rebuild of the
+        deployed revision) passes. Undoing a release is a
+        revert commit (roll forward), never an older digest.
+        """
         remote_ref = f"refs/remotes/{self.settings.remote}/{self.settings.branch}"
         self._git("fetch", "--quiet", "--no-tags", self.settings.remote,
                   f"+refs/heads/{self.settings.branch}:{remote_ref}", code="git_fetch_failed",
@@ -1427,6 +1551,20 @@ class Deployer:
         if ancestry == 1:
             raise DeployError("revision_not_on_main")
         if ancestry != 0:
+            raise DeployError("git_merge_base_failed")
+        if deployed is None:
+            return
+        if self._git_try("cat-file", "-e", f"{deployed}^{{commit}}").returncode != 0:
+            # Only a mirror that lost main's history gets here (every deployed revision was
+            # on main); nobody who can push an image can cause it, and _changed_paths then
+            # treats the release as a DR change. A ledger the deployer wrote is no input an
+            # image controls.
+            log(f"deployed revision {deployed} is not in the mirror; downgrade check skipped")
+            return
+        newer = self._git_try("merge-base", "--is-ancestor", deployed, revision).returncode
+        if newer == 1:
+            raise DeployError("release_not_descendant_of_deployed")
+        if newer != 0:
             raise DeployError("git_merge_base_failed")
 
     def _schema(self, release: Release, target: Target) -> tuple[tuple[str, ...], tuple[str, ...]]:

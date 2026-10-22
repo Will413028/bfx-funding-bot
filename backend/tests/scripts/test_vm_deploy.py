@@ -262,6 +262,15 @@ class FakeHost:
     envs: list[Mapping[str, str] | None] = field(default_factory=list)
     commits: set[str] = field(default_factory=lambda: {REV_OLD, REV_NEW})
     on_main: set[str] = field(default_factory=lambda: {REV_OLD, REV_NEW})
+    # The commit graph: child -> parent (`git merge-base --is-ancestor` walks it).
+    parents: dict[str, str] = field(default_factory=lambda: {REV_NEW: REV_OLD})
+    # The pinned gh: whether it exists, the version it reports, the digests carrying a valid
+    # attestation from release.yml on main, and what `attestation verify` answers otherwise.
+    gh_present: bool = True
+    gh_version: str = bfx.GH_VERSION
+    attested: set[str] = field(default_factory=lambda: {OLD_B, NEW_B})
+    gh_verify_stdout: str | None = None   # overrides the JSON a successful verify prints
+    gh_verify_exit: int = 0               # the exit code that goes with it
     files: dict[tuple[str, str], str] = field(default_factory=dict)
     diffs: dict[tuple[str, str], list[str]] = field(default_factory=dict)
     heads: tuple[str, ...] = ("h2",)
@@ -356,6 +365,8 @@ class FakeHost:
         if any(call[:len(prefix)] == prefix for prefix in self.timeouts):
             raise bfx.CommandError(f"timeout:{bfx._describe(call)}", timed_out=True)
         ok = bfx.CommandResult(0, "", "")
+        if call[0] == bfx.GH_BINARY:
+            return self._gh(call[1:], env)
         if call[:4] == ("runuser", "-u", "ubuntu", "--") and call[4] == "git":
             assert call[5] == "-C"
             return self._git(Path(call[6]), call[7:])
@@ -429,6 +440,30 @@ class FakeHost:
             return ok
         raise AssertionError(f"unexpected command: {call}")
 
+    def _gh(self, args: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
+        """gh 2.102.0's answers: `--version`, and `attestation verify` of an OCI digest."""
+        if not self.gh_present:
+            raise bfx.CommandError("not_executable:gh:FileNotFoundError")
+        assert env is not None
+        if args == ("--version",):
+            return bfx.CommandResult(0, f"gh version {self.gh_version} (2026-09-30)\n"
+                                        f"https://github.com/cli/cli/releases/tag/v{self.gh_version}\n", "")
+        assert args[:3] == ("attestation", "verify", args[2]) and args[2].startswith("oci://")
+        digest = args[2].rpartition("@")[2]
+        options = dict(zip(args[3::2], args[4::2], strict=False))
+        policy_ok = (
+            options.get("--repo") == "Will413028/bfx-funding-bot"
+            and options.get("--signer-workflow") == "Will413028/bfx-funding-bot/.github/workflows/release.yml"
+            and options.get("--source-ref") == "refs/heads/main"
+            and "--deny-self-hosted-runners" in args and "--bundle-from-oci" in args
+            and "--source-digest" not in args
+        )
+        if digest not in self.attested or not policy_ok:
+            return bfx.CommandResult(1, "", "Error: verifying with issuer \"sigstore.dev\": no matching attestations")
+        stdout = self.gh_verify_stdout if self.gh_verify_stdout is not None else json.dumps(
+            [{"verificationResult": {"statement": {"subject": [{"digest": {"sha256": digest[7:]}}]}}}])
+        return bfx.CommandResult(self.gh_verify_exit, stdout, "")
+
     def _git(self, where: Path, args: tuple[str, ...]) -> Any:
         if where != self.mirror:
             assert where.parent == self.dr_root, where
@@ -443,7 +478,17 @@ class FakeHost:
         if args[:2] == ("cat-file", "-e"):
             return bfx.CommandResult(0 if args[2].removesuffix("^{commit}") in self.commits else 128, "", "")
         if args[:2] == ("merge-base", "--is-ancestor"):
-            return bfx.CommandResult(0 if args[2] in self.on_main else 1, "", "")
+            ancestor, descendant = args[2], args[3]
+            if descendant == "refs/remotes/origin/main":
+                return bfx.CommandResult(0 if ancestor in self.on_main else 1, "", "")
+            if ancestor not in self.commits or descendant not in self.commits:
+                return bfx.CommandResult(128, "", "fatal: Not a valid commit name")
+            walk: str | None = descendant
+            while walk is not None:
+                if walk == ancestor:
+                    return bfx.CommandResult(0, "", "")
+                walk = self.parents.get(walk)
+            return bfx.CommandResult(1, "", "")
         if args[0] == "show":
             revision, _, path = args[1].partition(":")
             content = self.files.get((revision, path))
@@ -2506,6 +2551,202 @@ def test_main_tag_and_revision_tag_must_agree(harness: Harness,
     mutate(harness.registry)
     assert harness.run() == 1
     assert harness.host.calls == []
+
+
+# --------------------------------------------------------------------------- provenance (9i)
+
+
+GH = bfx.GH_BINARY
+GH_VERIFY = _is((GH, "attestation", "verify"))
+GIT_ANY = _is(("runuser", "-u", "ubuntu", "--", "git"))
+DOCKER_RUN = _is(("docker", "run"))
+REBUILT_B = "sha256:" + "4" * 64
+
+
+def _discovery_code(harness: Harness) -> str:
+    state = json.loads((harness.settings.state_dir / "discovery-failure.json").read_text())
+    return str(state["code"])
+
+
+def test_the_candidate_digest_is_verified_before_the_mirror_the_pull_or_any_run(harness: Harness) -> None:
+    deployer = harness.deployer()
+    deployer._registry_credentials = ("will413028", "ghcr-pull-token")
+    assert deployer.run() == 0
+    host = harness.host
+    verify = host.index(GH_VERIFY)
+    assert host.calls[verify] == (
+        GH, "attestation", "verify", f"oci://{BACKEND}@{NEW_B}",
+        "--repo", "Will413028/bfx-funding-bot",
+        "--signer-workflow", "Will413028/bfx-funding-bot/.github/workflows/release.yml",
+        "--source-ref", "refs/heads/main",
+        "--deny-self-hosted-runners", "--bundle-from-oci", "--format", "json")
+    assert host.index(_is((GH, "--version"))) < verify
+    assert verify < host.index(GIT_ANY) < host.index(PULL) < host.index(DOCKER_RUN)
+    assert host.count(GH_VERIFY) == 1
+    assert harness.ledger.last.outcome == "deployed"
+
+
+def test_gh_gets_no_github_token_and_not_the_registry_pull_credentials(harness: Harness) -> None:
+    deployer = harness.deployer()
+    deployer._registry_credentials = ("will413028", "ghcr-pull-token")
+    assert deployer.run() == 0
+    host = harness.host
+    env = host.envs[host.index(GH_VERIFY)]
+    assert env is not None
+    assert not {"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "DOCKER_HOST"} & set(env)
+    assert "ghcr-pull-token" not in json.dumps(env)
+    home = harness.settings.state_dir / "gh"
+    assert (env["HOME"], env["GH_CONFIG_DIR"]) == (str(home), str(home / "config"))
+    # An empty docker config: the package is read anonymously, never with ghcr.env's token.
+    assert env["DOCKER_CONFIG"] == str(home / "docker") and list((home / "docker").iterdir()) == []
+
+
+@pytest.mark.parametrize(("setup", "code"), [
+    (lambda h: h.host.attested.discard(NEW_B), "attestation_unverified"),
+    # A Sigstore TUF or registry outage: the same refusal, no bypass.
+    (lambda h: h.host.timeouts.add((GH, "attestation")), "attestation_unverified"),
+    (lambda h: setattr(h.host, "gh_verify_stdout", "[]"), "attestation_unverified"),
+    (lambda h: setattr(h.host, "gh_verify_stdout", "verified"), "attestation_unverified"),
+    # A failed exit is a refusal whatever it printed.
+    (lambda h: setattr(h.host, "gh_verify_exit", 1), "attestation_unverified"),
+    (lambda h: setattr(h.host, "gh_present", False), "attestation_verifier_missing"),
+    (lambda h: setattr(h.host, "gh_version", "2.102.1"), "attestation_verifier_wrong_version"),
+    (lambda h: setattr(h.host, "gh_version", "2.101.0"), "attestation_verifier_wrong_version"),
+])
+def test_an_image_that_cannot_be_verified_is_never_run(
+        harness: Harness, setup: Callable[[Harness], None], code: str) -> None:
+    setup(harness)
+    rows = len(harness.ledger.rows)
+    assert harness.run() == 1
+    host = harness.host
+    assert all(call[0] == GH for call in host.calls), host.calls  # nothing but gh ran
+    assert host.count(PULL) == host.count(DOCKER_RUN) == host.count(GIT_ANY) == 0
+    assert len(harness.ledger.rows) == rows and host.stopped == []
+    assert _discovery_code(harness) == code
+    # The existing discovery alert: once, after the threshold, naming the code.
+    assert harness.notices == []
+    harness.clock.now += harness.settings.discovery_alert_after + 1
+    assert harness.run() == 1
+    assert len(harness.notices) == 1
+    level, text = harness.notices[0]
+    assert level == "warning" and code in text and "no deploy is happening" in text
+
+
+def test_a_dry_run_refuses_an_unverified_image_too(harness: Harness) -> None:
+    harness.host.attested.discard(NEW_B)
+    assert harness.run(dry_run=True) == 1
+    assert harness.host.count(PULL) == harness.host.count(DOCKER_RUN) == 0
+
+
+def test_rollback_and_recreate_reuse_the_ledger_digest_without_verifying_again(harness: Harness) -> None:
+    harness.host.unhealthy.add(NEW_B)
+    assert harness.run() == 1
+    assert harness.ledger.last.outcome == "rolled_back"
+    assert harness.host.count(GH_VERIFY) == 1          # the candidate only, not the rollback
+    harness.host.calls.clear()
+    harness.host.attested.clear()
+    assert harness.run(recreate=True) == 0
+    assert harness.host.count(GH_VERIFY) == 0
+
+
+def test_install_sh_pins_the_gh_the_deployer_runs() -> None:
+    script = (ROOT / "deploy/vm/ops/install.sh").read_text(encoding="utf-8")
+    version = re.search(r"^GH_VERSION=([0-9.]+)$", script, re.MULTILINE)
+    digest = re.search(r"^GH_SHA256=([0-9a-f]{64})$", script, re.MULTILINE)
+    assert version is not None and digest is not None
+    assert version.group(1) == bfx.GH_VERSION
+    assert re.search(r'^GH_DIR="\$OPS_ROOT/gh/\$GH_VERSION"$', script, re.MULTILINE)
+    assert Path(bfx.GH_BINARY) == bfx.Settings().ops_root / "gh" / bfx.GH_VERSION / "bin" / "gh"
+    assert "--gh" not in {option for action in bfx._parser()._actions for option in action.option_strings}
+
+
+def test_release_yml_attests_exactly_the_digest_the_deployer_verifies() -> None:
+    """The signer identity bfx-deploy requires is the workflow that attests the pushed digest."""
+    workflow = yaml.safe_load((ROOT / bfx.RELEASE_WORKFLOW).read_text(encoding="utf-8"))
+    job = workflow["jobs"]["publish"]
+    assert job["permissions"] == {"contents": "read", "packages": "write",
+                                  "id-token": "write", "attestations": "write"}
+    steps = job["steps"]
+    names = [step.get("id") for step in steps]
+    (attest,) = [step for step in steps if str(step.get("uses", "")).startswith("actions/attest@")]
+    assert names.index("backend") < names.index("attest")
+    assert attest["with"] == {
+        "subject-name": "${{ steps.names.outputs.backend }}",
+        "subject-digest": "${{ steps.backend.outputs.digest }}",
+        "push-to-registry": True, "create-storage-record": False,
+    }
+    # The deployer's --source-ref: a workflow_run release runs on the default branch.
+    assert workflow[True]["workflow_run"]["branches"] == ["main"]
+
+
+def test_gh_verifier_accepts_only_its_pinned_version(tmp_path: Path) -> None:
+    answers = {("gh", "--version"): bfx.CommandResult(0, "gh version 2.102.0 (2026-09-30)\n", "")}
+
+    def runner(argv: Sequence[str], *, timeout: float, input_text: str | None = None,
+               env: Mapping[str, str] | None = None) -> Any:
+        return answers.get(tuple(argv), bfx.CommandResult(0, '[{"verificationResult": {}}]', ""))
+
+    verifier = bfx.GhAttestationVerifier(runner, gh="gh", home=tmp_path, repository="o/r",
+                                         ref="refs/heads/main")
+    verifier.verify(f"{BACKEND}@{NEW_B}")
+    answers[("gh", "--version")] = bfx.CommandResult(0, "gh version 2.102.0-rc1 (2026-09-30)\n", "")
+    with pytest.raises(bfx.DiscoveryError, match="attestation_verifier_wrong_version"):
+        verifier.verify(f"{BACKEND}@{NEW_B}")
+    answers[("gh", "--version")] = bfx.CommandResult(127, "", "not found")
+    with pytest.raises(bfx.DiscoveryError, match="attestation_verifier_missing"):
+        verifier.verify(f"{BACKEND}@{NEW_B}")
+
+
+# --------------------------------------------------------------------------- downgrade (9i)
+
+
+def test_a_main_tag_pointed_back_at_an_older_signed_release_is_refused(harness: Harness) -> None:
+    # REV_NEW is deployed; `main` is moved back to REV_OLD's (validly signed) digest.
+    harness.ledger.seed(REV_NEW, NEW_B, "deployed", attempt_id="n")
+    harness.registry.refs[f"{BACKEND}:main"] = OLD_B
+    assert harness.run() == 1
+    host = harness.host
+    assert host.count(PULL) == host.count(DOCKER_RUN) == host.count(STOP_ANY) == 0
+    row = harness.ledger.last
+    assert (row.outcome, row.source_revision) == ("failed", REV_OLD)
+    assert "precheck:release_not_descendant_of_deployed" in row.detail
+    assert _started(harness) == []
+    assert harness.notices[-1][0] == "critical"
+    assert ("runuser", "-u", "ubuntu", "--", "git", "-C", str(harness.settings.mirror),
+            "merge-base", "--is-ancestor", REV_NEW, REV_OLD) in host.calls
+    # Recorded as attempted: the next tick does not refuse (and alert) again.
+    calls, notices = len(host.calls), len(harness.notices)
+    assert harness.run() == 0
+    assert (len(host.calls), len(harness.notices)) == (calls, notices)
+
+
+def test_a_revision_on_main_beside_the_deployed_one_is_refused(harness: Harness) -> None:
+    # Both on main per the fake's origin check, but REV_NEW does not descend from REV_OLD.
+    harness.host.parents.clear()
+    assert harness.run() == 1
+    assert "precheck:release_not_descendant_of_deployed" in harness.ledger.last.detail
+    assert harness.host.count(PULL) == 0
+
+
+def test_a_rebuild_of_the_deployed_revision_and_a_descendant_both_deploy(harness: Harness) -> None:
+    # Equal: CI rebuilt the deployed revision under a new digest.
+    harness.registry.refs[f"{BACKEND}:main"] = REBUILT_B
+    harness.registry.refs[f"{BACKEND}:sha-{REV_OLD}"] = REBUILT_B
+    harness.registry.labels[REBUILT_B] = {bfx.REVISION_LABEL: REV_OLD}
+    harness.host.attested.add(REBUILT_B)
+    assert harness.run() == 0
+    assert (harness.ledger.last.outcome, harness.ledger.last.backend_digest) == ("deployed", REBUILT_B)
+    # Descendant: REV_NEW's parent is the deployed REV_OLD.
+    harness.registry.refs[f"{BACKEND}:main"] = NEW_B
+    assert harness.run() == 0
+    assert (harness.ledger.last.outcome, harness.ledger.last.source_revision) == ("deployed", REV_NEW)
+
+
+def test_a_first_deployment_has_no_downgrade_to_check(harness: Harness) -> None:
+    harness.ledger.rows.clear()
+    assert harness.run() == 0
+    assert not any(call[-4:-2] == ("merge-base", "--is-ancestor") and call[-1] != "refs/remotes/origin/main"
+                   for call in harness.host.calls)
 
 
 def test_ledger_write_failure_is_reported_not_swallowed(harness: Harness) -> None:
