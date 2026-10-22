@@ -43,6 +43,8 @@ from typing import Any, Final, Protocol
 
 import httpx
 
+from bfx_funding_bot.core.secret_files import file_secret_values, read_secret
+
 log = logging.getLogger(__name__)
 
 INFO: Final = "info"
@@ -301,13 +303,14 @@ class AlertSink:
     @classmethod
     def from_environment(cls, environ: Mapping[str, str], **options: Any) -> AlertSink:
         """Telegram when both keys are valid; otherwise log-only (said once, at boot)."""
-        token = environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+        # The bot's secret file in production (BFX_SECRETS_DIR), else the env.
+        token = read_secret("TELEGRAM_BOT_TOKEN", environ) or ""
         chat_id = environ.get("TELEGRAM_CHAT_ID", "").strip()
         context = options.pop("context", None) or environ.get("BFX_DEPLOYMENT_ENV", "")
         options.setdefault("secrets", secret_values(environ))
         if not token and not chat_id:
             log.warning("alerts_telegram_not_configured: alerts are logged only "
-                        "(set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in bot.env)")
+                        "(set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)")
             return cls(transport=None, context=context, **options)
         if _TOKEN.fullmatch(token) is None or _CHAT_ID.fullmatch(chat_id) is None:
             log.warning("alerts_telegram_misconfigured: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID "
@@ -428,11 +431,15 @@ class AlertSink:
 
 
 def secret_values(environ: Mapping[str, str]) -> tuple[str, ...]:
-    """Secret values present in the environment, including the database password
-    and the Sentry DSN's key on its own."""
+    """Secret values this process holds: in its environment and in its secret files
+    (``BFX_SECRETS_DIR``, core.secret_files), including each database password and the
+    Sentry DSN's key on their own."""
+    files = file_secret_values(environ)
     values = [environ.get(key, "") for key in SECRET_ENV_KEYS]
-    with contextlib.suppress(ValueError):
-        values.append(urllib.parse.urlsplit(environ.get("DATABASE_URL", "")).password or "")
+    values += files.values()
+    for url in (environ.get("DATABASE_URL", ""), files.get("DATABASE_URL", "")):
+        with contextlib.suppress(ValueError):
+            values.append(urllib.parse.urlsplit(url).password or "")
     with contextlib.suppress(ValueError):
         values.append(urllib.parse.urlsplit(environ.get("SENTRY_DSN", "")).username or "")
     return tuple(value for value in values if value)

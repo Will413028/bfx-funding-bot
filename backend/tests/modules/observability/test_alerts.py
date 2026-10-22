@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -23,6 +24,7 @@ import bfx_funding_bot.modules.execution.safety.tables
 import bfx_funding_bot.modules.execution.uncertainty_tables
 import bfx_funding_bot.modules.ledger.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.secret_files import SecretFileError
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.protocols import FundingCancelAllResult
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
@@ -418,6 +420,42 @@ def test_secret_values_never_reach_an_alert() -> None:
     for secret in ("S3cretPassw0rd", "api-secret-value", TOKEN):
         assert secret not in text
     assert text.count("[redacted]") == 3
+
+
+def _secret_files(directory: Path, values: dict[str, str]) -> dict[str, str]:
+    directory.mkdir(exist_ok=True)
+    for key, value in values.items():
+        (directory / key).write_text(value + "\n")
+    return {"BFX_SECRETS_DIR": str(directory)}
+
+
+def test_secret_file_values_never_reach_an_alert(tmp_path: Path) -> None:
+    """9h: with BFX_SECRETS_DIR the secrets are only in files, and the sink built the way
+    the bot builds it (from_environment) scrubs them; a stale env value is scrubbed too.
+    Mutation: secret_values without the file values fails this test."""
+    environ = _secret_files(tmp_path / "secrets", {
+        "DATABASE_URL": "postgresql://bfx_bot:F1lePassw0rd@bfx-postgres:5432/bfx",
+        "BFX_ADMIN_TOKEN": "file-admin-token-value", "BFX_ADMIN_READ_TOKEN": "file-read-token-value",
+        "BFX_VAULT_KEK": "ZmlsZS1rZWstdmFsdWUtMzItYnl0ZXMtbG9uZy4uLi4=",
+        "TELEGRAM_BOT_TOKEN": TOKEN})
+    environ |= {"TELEGRAM_CHAT_ID": "-100123", "BFX_ADMIN_TOKEN": "stale-env-admin-token"}
+    sink = alerts.AlertSink.from_environment(environ)
+    assert sink.delivers and isinstance(sink.transport, alerts.TelegramTransport)
+    assert sink.transport._url == f"https://api.telegram.org/bot{TOKEN}/sendMessage"  # no newline
+    leaks = ("F1lePassw0rd", "file-admin-token-value", "file-read-token-value",
+             "ZmlsZS1rZWstdmFsdWUtMzItYnl0ZXMtbG9uZy4uLi4=", TOKEN, "stale-env-admin-token")
+    sink.emit(alerts.BOOT_REFUSED, error=" ".join(leaks))
+    text = sink._queue.get_nowait().text
+    assert [leak for leak in leaks if leak in text] == []
+
+
+def test_a_missing_telegram_token_file_refuses_the_sink(tmp_path: Path) -> None:
+    """In file mode the token file is mounted by the compose file; missing is a broken
+    deployment, not 'alerts off'. The env token is no fallback."""
+    environ = _secret_files(tmp_path / "secrets", {})
+    with pytest.raises(SecretFileError, match="TELEGRAM_BOT_TOKEN is missing"):
+        alerts.AlertSink.from_environment({**environ, "TELEGRAM_BOT_TOKEN": TOKEN,
+                                           "TELEGRAM_CHAT_ID": "-100123"})
 
 
 @pytest.mark.asyncio

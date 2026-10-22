@@ -35,6 +35,7 @@ from bfx_funding_bot.core.health import DB_FRESHNESS, MARKET_DATA_FRESHNESS, Hea
 from bfx_funding_bot.core.log_format import configure_logging
 from bfx_funding_bot.core.loop_watchdog import LoopWatchdog, loop_watchdog_timeout_s
 from bfx_funding_bot.core.schema_head import assert_schema_head
+from bfx_funding_bot.core.secret_files import read_secret, warn_ignored_env_keys
 from bfx_funding_bot.core.security_log import BOOT_REFUSED, security_event
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
@@ -199,12 +200,13 @@ _BITFINEX_REST_BASE_URL = "https://api-pub.bitfinex.com"
 
 
 def admin_tokens(env: Mapping[str, str]) -> tuple[str | None, str | None]:
-    """The bot's /admin tokens: (halt and read, read only).
+    """The bot's /admin tokens: (halt and read, read only), from its secret files in
+    production (BFX_SECRETS_DIR in ``env``), else from ``env`` (core.secret_files).
 
     A read token equal to the admin token would let the web API's read credential halt, so
     it is dropped (the admin token keeps /admin working for the operator)."""
-    admin = env.get("BFX_ADMIN_TOKEN", "").strip() or None
-    read = env.get("BFX_ADMIN_READ_TOKEN", "").strip() or None
+    admin = read_secret("BFX_ADMIN_TOKEN", env)
+    read = read_secret("BFX_ADMIN_READ_TOKEN", env)
     if read is not None and read == admin:
         log.error("admin_read_token_ignored reason=equals_admin_token")
         read = None
@@ -1103,6 +1105,7 @@ async def build_daemon(
 
 def main() -> None:
     configure_logging("bot")
+    warn_ignored_env_keys(log)
     init_error_tracking("bot", os.environ)
     try:
         asyncio.run(_run())

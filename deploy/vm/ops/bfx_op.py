@@ -36,8 +36,9 @@ the OCI console left. So it needs no tailnet identity and no ledger, operator.en
 or DB: with a tailnet peer that whois names, the login is the actor; without one
 (console, whois failing) the actor is host-root and the journal says identity=none.
 It runs HALT_SCRIPT in the running bot (`docker exec bfx-bot`), which posts to the
-bot's own /admin/halt with the container's BFX_ADMIN_TOKEN (never read or printed
-here) and exits 0 (HALTED, every cancel-all acknowledged), 3 (HALTED, cancel-all
+bot's own /admin/halt with the container's admin token -- its secret file
+/run/secrets/BFX_ADMIN_TOKEN, or BFX_ADMIN_TOKEN in the env of a bot from before 9h --
+(never read or printed here) and exits 0 (HALTED, every cancel-all acknowledged), 3 (HALTED, cancel-all
 incomplete: run it again to retry) or 1 (any other answer, or none).
 
 Trust boundary: any root-equivalent shell can set SSH_CONNECTION and pass as
@@ -111,14 +112,31 @@ HALT_ACTOR_WITHOUT_IDENTITY = "host-root"
 # on the host's python without the backend package, so the value is restated here.
 HALT_REASON_MAX = 500
 HALT_URL = "http://127.0.0.1:8080/admin/halt"  # the bot's healthz server, inside the container
-# Runs in the bot container: argv is (reason, actor); the token stays in its environment.
+# Runs in the bot container: argv is (reason, actor); the token never leaves the container.
+# It reads the token the way the bot does (core/secret_files.py): with BFX_SECRETS_DIR in the
+# container's env (the release's compose file sets it), only the file <dir>/BFX_ADMIN_TOKEN;
+# without it (a bot of a release before 9h), the env. Self-contained, not an import of the
+# image's reader: this script ships with the host tool and must work against the image of
+# the release that is running, whichever that is.
 # stdout is the response body; exit 0 on 200, 3 on 502 (HALTED, cancel-all incomplete),
 # 1 on any other status or no answer.
 HALT_SCRIPT = """\
 import os, sys, urllib.error, urllib.parse, urllib.request
-token = os.environ.get("BFX_ADMIN_TOKEN", "")
-if not token.strip():
-    print("halt: BFX_ADMIN_TOKEN is not set in this container", file=sys.stderr)
+directory = os.environ.get("BFX_SECRETS_DIR", "").strip()
+if directory:
+    try:
+        with open(os.path.join(directory, "BFX_ADMIN_TOKEN"), encoding="utf-8") as stream:
+            token = stream.read().strip()
+    except OSError as error:
+        token = ""
+        print("halt: cannot read the secret file BFX_ADMIN_TOKEN: " + type(error).__name__,
+              file=sys.stderr)
+    where = "the secret file " + os.path.join(directory, "BFX_ADMIN_TOKEN")
+else:
+    token = os.environ.get("BFX_ADMIN_TOKEN", "").strip()
+    where = "BFX_ADMIN_TOKEN in this container's env"
+if not token:
+    print("halt: no admin token (" + where + " is missing or empty)", file=sys.stderr)
     sys.exit(1)
 query = urllib.parse.urlencode({"reason": sys.argv[1], "actor": sys.argv[2]})
 request = urllib.request.Request("__HALT_URL__?" + query, method="POST",

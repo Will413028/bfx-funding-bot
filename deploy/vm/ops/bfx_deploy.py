@@ -22,8 +22,8 @@ One run:
      to deploy, their containers, images and env files (below);
   5. read `git diff --name-only --no-renames <last deployed>..<rev>` for the
      DR trigger paths (a diff that cannot be read counts as a DR change);
-  6. pull every image the release names by digest, validate the env files it
-     names, compare `alembic current` with `alembic heads` in a one-shot of the
+  6. pull every image the release names by digest, validate the env files and
+     secret files it names, compare `alembic current` with `alembic heads` in a one-shot of the
      new image;
   7. migrations pending: stop the web API, then the bot (the writer) -- a full
      stop (ADR 2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-
@@ -59,7 +59,7 @@ change, through the same started row, identity check, health wait and ledger.
 The release's own compose file decides what runs (9d-tailscale-ingress brief §5
 "9e"; this tool is installed one release before the compose file changes shape):
 the services `up` creates and --remove-orphans keeps, the containers checked,
-the env files validated, the images pulled -- the release's backend digest
+the env files and secret files validated, the images pulled -- the release's backend digest
 with the GHCR token, an allowlisted third-party digest (THIRD_PARTY_IMAGE)
 without it -- and the top-level `configs` files written next to it. Every
 rendered property is refused unless this tool can run it
@@ -131,6 +131,12 @@ TOOLING_PATHS = ("deploy/vm/ops", "deploy/vm/systemd")
 # The writer and the web API every release has; compose_policy.py pins their container
 # names, and the migration path stops and starts them by role.
 ROLE_CONTAINERS = {"bot": "bfx-bot", "webapi": "bfx-webapi"}
+# The group of the services' secret files (compose_policy.SECRET_GID; tests keep them
+# equal): Compose ignores a file secret's uid/gid/mode, so the host file itself is
+# root:SECRET_GID 0640 and the services (UID 1000) join the group to read it.
+SECRET_GID = 4600
+# `<runtime dir>/secrets/<service>/<KEY>`, top-level name `<service>_<KEY>` (9h).
+SECRETS_SUBDIR = "secrets"
 # The only images a release's compose file may name besides its own backend digest;
 # pulled by digest without the registry token (the 9d tailscale sidecar).
 THIRD_PARTY_IMAGE = re.compile(r"docker\.io/tailscale/tailscale@sha256:[0-9a-f]{64}")
@@ -302,6 +308,48 @@ def protected_secret_file(path: Path, *, owner_uid: int = 0) -> None:
         raise DeployError(f"secret_file_not_root_owned:{path.name}")
     if stat.S_IMODE(info.st_mode) != 0o600:
         raise DeployError(f"secret_file_mode_not_0600:{path.name}")
+
+
+def shared_secret_file(path: Path, *, owner_uid: int = 0, group_gid: int = SECRET_GID) -> None:
+    """A service's secret file (9h): regular, not a symlink, not empty, root-owned, group
+    SECRET_GID, 0640, under directories only root can change (secret_directory).
+
+    Compose bind-mounts the host file and ignores uid/gid/mode, so these host bits are
+    the only protection: group read for the container's supplementary group, nothing
+    for other host users (the mirror's `ubuntu` is UID 1000 too, but not in the group).
+    The error names `<service>/<KEY>`, never the content.
+    """
+    name = f"{path.parent.name}/{path.name}"
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise DeployError(f"secret_file_missing:{name}")
+    info = path.lstat()
+    if info.st_uid != owner_uid:
+        raise DeployError(f"secret_file_not_root_owned:{name}")
+    if info.st_gid != group_gid:
+        raise DeployError(f"secret_file_group_not_{SECRET_GID}:{name}")
+    if stat.S_IMODE(info.st_mode) != 0o640:
+        raise DeployError(f"secret_file_mode_not_0640:{name}")
+    if info.st_size == 0:
+        raise DeployError(f"secret_file_empty:{name}")
+    for directory in (path.parent.parent, path.parent):
+        secret_directory(directory, owner_uid=owner_uid)
+
+
+def secret_directory(directory: Path, *, owner_uid: int = 0) -> None:
+    """`secrets/` or `secrets/<service>/`: a real directory (not a link), root-owned, not
+    group or other writable.
+
+    A secret file's own bits are only as good as the directories above it: whoever can
+    write or swap one can replace the file between the check and the mount.
+    """
+    label = f"{directory.name}/"
+    if directory.is_symlink() or not directory.is_dir():
+        raise DeployError(f"secret_dir_missing:{label}")
+    info = directory.lstat()
+    if info.st_uid != owner_uid:
+        raise DeployError(f"secret_dir_not_root_owned:{label}")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise DeployError(f"secret_dir_writable_by_others:{label}")
 
 
 def _write_private(path: Path, content: str) -> None:
@@ -630,6 +678,7 @@ class ComposeService:
     image: str
     env_files: tuple[Path, ...]
     joins: str | None = None  # `network_mode: service:<joins>`: runs in that service's netns
+    secret_files: tuple[Path, ...] = ()  # its Compose file secrets, validated before `up`
 
 
 @dataclass(frozen=True, slots=True)
@@ -760,15 +809,15 @@ def release_services(
     Each needs a container name and an image that is the target's own backend digest or an
     allowlisted third-party digest; every env file must be required and be the
     service's own `<runtime dir>/<service>.env` (validated before `up`) or the release's
-    live.env; the
+    live.env; every file secret must be the service's own
+    `<runtime dir>/secrets/<service>/<KEY>`, named `<service>_<KEY>` and mounted at
+    /run/secrets/<KEY> (validated before `up`, shared_secret_file); the
     bot and the web API must be there under their role names, and any other service must
-    declare a compose healthcheck. Top-level `secrets` are refused: nothing
-    writes or rotates them (configs: release_config_files).
+    declare a compose healthcheck (configs: release_config_files).
     """
     if rendered.get("name") != PROJECT:
         raise DeployError("compose_project_name")
-    if rendered.get("secrets"):
-        raise DeployError("compose_secrets_refused")
+    secret_paths = release_secret_files(rendered, runtime_dir)
     services = rendered.get("services")
     if not isinstance(services, dict) or not services:
         raise DeployError("compose_services_missing")
@@ -797,6 +846,20 @@ def release_services(
             if path != runtime_dir / f"{name}.env" and path != release_dir / "live.env":
                 raise DeployError(f"compose_env_file_outside_runtime:{name}")
             env_files.append(path)
+        secret_files = []
+        for entry in spec.get("secrets") or []:
+            source = entry.get("source") if isinstance(entry, dict) else entry
+            target = entry.get("target", source) if isinstance(entry, dict) else entry
+            # A service mounts only its own secret files (as with env files: the web API
+            # never gets the bot's halt token or vault key), at /run/secrets/<KEY>.
+            if not isinstance(source, str) or source not in secret_paths \
+                    or not source.startswith(f"{name}_"):
+                raise DeployError(f"compose_secret_not_own:{name}")
+            if target not in (source.removeprefix(f"{name}_"),
+                              f"/run/secrets/{source.removeprefix(f'{name}_')}") \
+                    or (isinstance(entry, dict) and set(entry) - {"source", "target"}):
+                raise DeployError(f"compose_secret_target:{name}:{source}")
+            secret_files.append(secret_paths[source])
         mode = spec.get("network_mode")
         joins = mode.removeprefix("service:") if isinstance(mode, str) and mode.startswith("service:") \
             else None
@@ -808,7 +871,8 @@ def release_services(
             # Its compose healthcheck is its only probe (_probe): without one a sidecar that
             # never joins the tailnet would pass the deploy.
             raise DeployError(f"compose_healthcheck_missing:{name}")
-        found.append(ComposeService(name, container, image, tuple(env_files), joins))
+        found.append(ComposeService(name, container, image, tuple(env_files), joins,
+                                    tuple(secret_files)))
     names = {service.name: service for service in found}
     for role, container in ROLE_CONTAINERS.items():
         if names[role].container != container:
@@ -819,6 +883,30 @@ def release_services(
             # would be validated, so refuse rather than deploy unchecked.
             raise DeployError(f"compose_env_files_not_rendered:{role}")
     return tuple(found)
+
+
+def release_secret_files(rendered: Mapping[str, Any], runtime_dir: Path) -> dict[str, Path]:
+    """The top-level `secrets` of a rendered compose file, by name: each a file only, at
+    `<runtime dir>/secrets/<service>/<KEY>` for the name `<service>_<KEY>`.
+
+    A `content`, `environment` or `external` secret would come from somewhere this tool
+    does not check; a path elsewhere could mount any host file into a container.
+    """
+    secrets = rendered.get("secrets") or {}
+    if not isinstance(secrets, dict):
+        raise DeployError("compose_secrets_invalid")
+    paths = {}
+    for name, secret in sorted(secrets.items()):
+        service, _, key = str(name).partition("_")
+        if not isinstance(secret, dict) or set(secret) - {"name", "file"} or not secret.get("file"):
+            raise DeployError(f"compose_secret_not_file:{name}")
+        file = Path(str(secret["file"]))
+        if not service or ENV_KEY.fullmatch(key) is None \
+                or os.path.normpath(file) != str(file) \
+                or file != runtime_dir / SECRETS_SUBDIR / service / key:
+            raise DeployError(f"compose_secret_outside_runtime:{name}")
+        paths[str(name)] = file
+    return paths
 
 
 def _started_at(record: Mapping[str, Any]) -> tuple[datetime, int] | None:
@@ -870,6 +958,7 @@ class Deployer:
         notify: Notifier, clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
         secret_check: Callable[[Path], None] = protected_secret_file,
+        secret_file_check: Callable[[Path], None] = shared_secret_file,
         registry_credentials: tuple[str, str] | None = None,
     ) -> None:
         self.settings = settings
@@ -880,6 +969,7 @@ class Deployer:
         self._clock = clock
         self._sleep = sleep
         self._secret_check = secret_check
+        self._secret_file_check = secret_file_check
         self._registry_credentials = registry_credentials
         self.plan: dict[str, Any] | None = None
         self._dry_run_blockers: list[str] = []
@@ -912,8 +1002,9 @@ class Deployer:
         return result
 
     def _as_mirror_user(self, *argv: str) -> list[str]:
-        # The mirror's deploy key and ~/.ssh live in that user's home, and
-        # root-owned objects would break the owner's own git later. runuser sets
+        # The mirror belongs to that user (it fetches the public repository over anonymous
+        # HTTPS, no deploy key: docs/runbooks/deploy.md "Mirror"), and root-owned objects
+        # would break the owner's own git later. runuser sets
         # HOME to the target user's home; nothing relies on root's.
         return ["runuser", "-u", self.settings.mirror_user, "--", *argv]
 
@@ -1506,7 +1597,11 @@ class Deployer:
         return tuple(path for path in diff.stdout.split("\0") if path), ""
 
     def _validate_env_files(self, release: Release) -> None:
-        """The env files the release's compose file names, migrate.env and live.env."""
+        """The env files the release's compose file names, migrate.env and live.env; and
+        its secret files (shared_secret_file), so a missing or unprotected one fails the
+        precheck with the running release untouched instead of failing `up`."""
+        for path in sorted({path for service in release.services for path in service.secret_files}):
+            self._secret_file_check(path)
         live = release.directory / "live.env"
         named = sorted({path for service in release.services for path in service.env_files} - {live})
         files = [(path, True) for path in named] + [(self.settings.runtime_dir / "migrate.env", False)]
@@ -2184,7 +2279,7 @@ def _parser() -> argparse.ArgumentParser:
     defaults = Settings()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mirror", type=Path, default=defaults.mirror,
-                        help="git clone of the repository with a read-only deploy key")
+                        help="git clone of the repository, fetching origin over anonymous HTTPS")
     parser.add_argument("--mirror-user", help="run git as this user (default: mirror owner)")
     parser.add_argument("--remote", default=defaults.remote)
     parser.add_argument("--branch", default=defaults.branch)

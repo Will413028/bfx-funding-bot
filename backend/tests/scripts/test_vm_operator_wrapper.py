@@ -592,12 +592,15 @@ class _Bot:
         self.server.server_close()
 
 
-def _run_halt_script(url: str, *, token: str | None = "t0kenNEVERshown") -> Any:
+def _run_halt_script(url: str, *, token: str | None = "t0kenNEVERshown",
+                     secrets_dir: Path | None = None) -> Any:
     assert op.HALT_SCRIPT.count(op.HALT_URL) == 1
     script = op.HALT_SCRIPT.replace(op.HALT_URL, url)  # the only test-side change
     env = {"PATH": "/usr/bin:/bin"}
     if token is not None:
         env["BFX_ADMIN_TOKEN"] = token
+    if secrets_dir is not None:
+        env["BFX_SECRETS_DIR"] = str(secrets_dir)  # as the 9h compose file sets it
     return subprocess.run([sys.executable, "-I", "-c", script, HALT_REASON, "Will413028@github"],
                           env=env, capture_output=True, text=True, timeout=60, check=False)
 
@@ -641,3 +644,83 @@ def test_the_halt_script_without_a_token_sends_nothing() -> None:
         bot.close()
     assert result.returncode == 1 and bot.seen == []
     assert "BFX_ADMIN_TOKEN" in result.stderr
+
+
+# --------------------------------------------------------------------------- halt with secret files (9h)
+#
+# The emergency stop after 9h: the bot container has BFX_SECRETS_DIR and the token only as
+# a file. Mutations (one at a time; revert after each): make HALT_SCRIPT read the env first
+# (test_the_halt_script_sends_the_token_file_not_the_env fails); drop the file branch
+# (test_the_halt_reaches_a_bot_that_took_its_token_from_the_same_file fails).
+
+
+def _token_dir(tmp_path: Path, content: str | None) -> Path:
+    directory = tmp_path / "run-secrets"
+    directory.mkdir()
+    if content is not None:
+        (directory / "BFX_ADMIN_TOKEN").write_text(content)
+    return directory
+
+
+def test_the_halt_script_sends_the_token_file_not_the_env(tmp_path: Path) -> None:
+    secrets_dir = _token_dir(tmp_path, "fileTOKENneverShown\n")  # a trailing newline is not part of it
+    bot = _Bot(200)
+    try:
+        result = _run_halt_script(bot.url, token="stale-env-token", secrets_dir=secrets_dir)
+    finally:
+        bot.close()
+    assert result.returncode == 0, result.stderr
+    (method, _path, authorization), = bot.seen
+    assert method == "POST" and authorization == "Bearer fileTOKENneverShown"
+    assert "fileTOKENneverShown" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("content", [None, "", " \n"], ids=["missing", "empty", "blank"])
+def test_the_halt_script_without_its_token_file_sends_nothing(tmp_path: Path, content: str | None) -> None:
+    secrets_dir = _token_dir(tmp_path, content)
+    bot = _Bot(200)
+    try:
+        # An env token is no fallback: the container's env is not where its token lives.
+        result = _run_halt_script(bot.url, token="env-token", secrets_dir=secrets_dir)
+    finally:
+        bot.close()
+    assert result.returncode == 1 and bot.seen == []
+    assert "secret file" in result.stderr and "BFX_ADMIN_TOKEN" in result.stderr
+    assert "env-token" not in result.stderr
+
+
+def test_the_halt_reaches_a_bot_that_took_its_token_from_the_same_file(tmp_path: Path) -> None:
+    """Both ends read one file: the bot's /admin token (apps/bot.admin_tokens, through
+    core/secret_files) and the token HALT_SCRIPT sends. The stand-in bot answers 200 only
+    to the token the bot itself would accept, 401 to anything else."""
+    from bfx_funding_bot.apps.bot import admin_tokens
+
+    secrets_dir = _token_dir(tmp_path, "the-one-halt-token")
+    (secrets_dir / "BFX_ADMIN_READ_TOKEN").write_text("the-web-api-read-token")
+    accepted, read_only = admin_tokens({"BFX_SECRETS_DIR": str(secrets_dir),
+                                        "BFX_ADMIN_TOKEN": "ignored-env-token"})
+    assert (accepted, read_only) == ("the-one-halt-token", "the-web-api-read-token")
+    seen: list[str | None] = []
+
+    def answer(handler: http.server.BaseHTTPRequestHandler) -> None:
+        authorization = handler.headers.get("Authorization")
+        seen.append(authorization)
+        status = 200 if authorization == f"Bearer {accepted}" else 401
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json")
+        handler.end_headers()
+        handler.wfile.write(json.dumps({"state": "HALTED"}).encode())
+
+    handler = type("Handler", (http.server.BaseHTTPRequestHandler,),
+                   {"do_POST": answer, "log_message": lambda *_args: None})
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = _run_halt_script(f"http://127.0.0.1:{server.server_address[1]}/admin/halt",
+                                  token=None, secrets_dir=secrets_dir)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert result.returncode == 0, result.stderr
+    assert seen == ["Bearer the-one-halt-token"]

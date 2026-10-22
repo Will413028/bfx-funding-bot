@@ -1,7 +1,11 @@
 """Bootstrap one existing UUID account from operator-injected environment secrets.
 
 Requires BFX_BOOTSTRAP_API_KEY, BFX_BOOTSTRAP_API_SECRET, BFX_VAULT_KEK and
-DATABASE_URL. Default is rollback-only; --apply explicitly commits. No secret
+DATABASE_URL. The KEK is read by core.crypto.load_kek (core/secret_files.py): from the env,
+or -- with BFX_SECRETS_DIR=/run/secrets and the bot's file mounted read-only at
+/run/secrets/BFX_VAULT_KEK (`--group-add 4600`) -- from that file, which keeps it out of
+this one-shot's env now that the bot's KEK lives only in
+/opt/bfx/runtime/secrets/bot/BFX_VAULT_KEK (9h). DATABASE_URL always comes from the env. Default is rollback-only; --apply explicitly commits. No secret
 arguments, environment dumps, remote error text, or traceback are emitted.
 """
 
