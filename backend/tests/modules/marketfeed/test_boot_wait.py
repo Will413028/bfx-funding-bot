@@ -90,7 +90,7 @@ def _daemon(venue: _Venue, *, delay: Callable[[int], float] = lambda _n: 0.0,
         credential_compliance=None, credential_recovery_reason=None,
     )
     fake._run_boot_recovery = lambda: Daemon._run_boot_recovery(fake)  # type: ignore[arg-type]
-    fake._boot_attempt = lambda: Daemon._boot_attempt(fake)  # type: ignore[arg-type]
+    fake._boot_attempt = Daemon._boot_attempt.__get__(fake)
     fake._boot_until_observed = lambda: Daemon._boot_until_observed(fake)  # type: ignore[arg-type]
     return fake
 
