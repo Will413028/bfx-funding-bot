@@ -38,6 +38,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The API contract (9k): backend/openapi.json and src/types/api.gen.ts are generated
+      # from the backend's response models and committed; a model change without them fails.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.23"
+          # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz (all these jobs run on x64).
+          checksum: "9167d72b3319674b6303c4cbe071854bba13ebdf3d76b1a7cbdc175471fb66d6"
+          enable-cache: true
+      - name: API contract is current (OpenAPI document and generated types)
+        run: |
+          uv run --project ../backend --frozen --no-dev python ../backend/scripts/dump_openapi.py
+          pnpm gen:api
+          git diff --exit-code -- ../backend/openapi.json src/types/api.gen.ts
+
       - name: Type check
         run: pnpm tsc --noEmit
 
