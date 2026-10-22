@@ -22,7 +22,7 @@ Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration �
 |---|---|---|
 | `bfx_bot` | bot daemon | 本節的 default privileges ＋ 各 migration 的收斂 grant |
 | `bfx_webapi` | FastAPI web-API | migration `c74d45a54e46` 的 baseline（與之後各 migration）；不碰交易寫入 |
-| `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist：三個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
+| `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist（換憑證 outbox 由 `1db83367918c` 加上）：四個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
 | `bfx_research` | 每週報告（`bfx-weekly-report`）、研究用一次性容器 | migration `3c5e7a9b1d2f` 的精確 allowlist：只寫研究表（`funding_stats`、`perp_funding_rates`、`liquidations` 的 upsert，`attribution_weekly`、`fill_rate_stats` 的 delete＋insert，`fill_rate_model_artifacts` 的 insert），只讀每週步驟與研究腳本用到的表；不能寫 ledger、`trading_state`、outbox，讀不到憑證表 |
 
 模擬 soak 另有第五個 login role `bfx_sim`，只連自己的 database `bfx_sim`、在那裡以 `bfx_bot` 身分執行；
@@ -223,6 +223,21 @@ printf "SET log_statement='none'; SET log_min_error_statement='panic'; CREATE RO
 
 驗證：從 tailnet 裡的 operator 裝置開 `https://<ops-host>/`（轉到 `/en/overview/`、讀取正常）；不在 tailnet 時
 連不到；帶外站 `Origin` 的 POST 回 403。回滾：見 [deploy runbook](deploy.md) 的「Tailnet 入口」；bot 不受影響。
+
+### 2a. 主機節點的 Tailscale SSH
+
+主機本身（不是 `bfx-tailscale` 容器）也是 tailnet 節點，operator 經它的 Tailscale SSH 跑 `sudo bfx-op`
+（[operations §10](operations.md#10-operator-clibfx-op)）：
+
+1. 主機上 `sudo tailscale set --ssh`；admin console 關閉這個節點的 key 到期。
+2. tailnet policy 的 SSH 規則：`"action": "check"`（不設 `checkPeriod`，用預設 12 小時，ADR 2026-10-15 Amendment D4d）、
+   `users` 只有 `autogroup:nonroot`。
+3. 現況（2026-10-16 讀 admin console，以 admin console 為準）：主機節點仍是 operator 自己擁有的節點（未 tagged），所以規則的
+   `dst` 是 `autogroup:self`。ADR 2026-10-15 D1 的終態是 tagged node。主機改成 tagged（或新主機直接以 tag 登入）之前，policy 要先有該 tag 的 `tagOwners`，以及一條
+   `dst` 是該 tag 的 SSH 規則（`autogroup:self` 不涵蓋 tagged node），否則 Tailscale SSH 被拒，只剩
+   [Console Connection](operations.md#12-break-glass)。
+
+驗證：`tailscale ssh ubuntu@<vm-node>` 要求 IdP 驗證後進得去；`tailscale ssh root@<vm-node>` 被 policy 拒絕。
 
 ## 3. 首次安裝主機工具
 
