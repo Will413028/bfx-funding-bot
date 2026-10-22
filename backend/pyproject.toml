@@ -26,8 +26,8 @@ dependencies = [
     "pandas>=3.0.2",
     "ruamel.yaml>=0.18",
     "prometheus-client>=0.25.0",
-    "opentelemetry-sdk>=1.44.0",
-    "opentelemetry-exporter-otlp-proto-grpc>=1.44.0",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.45.1",
     "sentry-sdk[fastapi]>=2.71.0",
 ]
 
