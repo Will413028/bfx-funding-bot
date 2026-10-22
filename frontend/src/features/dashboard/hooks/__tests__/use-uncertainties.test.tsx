@@ -47,6 +47,8 @@ function row(
       environment: "ci",
       symbol: "fUST",
     },
+    resolvedByOperatorId: null,
+    resolutionReason: null,
     resolutionContext: null,
     resolutionRequest:
       requestState === null

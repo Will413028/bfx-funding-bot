@@ -104,8 +104,6 @@
     "revoked": "Revoked",
     "retired": "Retired",
     "verifyFailedReason": "Reason",
-    "fundingBalance": "Funding Balance",
-    "available": "Available",
     "empty": "No API keys yet. Add one with the operator CLI bootstrap, or replace the active key with bfx-op rotate-credential.",
     "loadFailed": "Failed to load API keys"
   },

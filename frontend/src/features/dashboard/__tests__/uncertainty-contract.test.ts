@@ -32,7 +32,10 @@ const BLOCKED: Uncertainty = {
     environment: "ci",
     symbol: "fUST",
   },
+  resolvedByOperatorId: null,
+  resolutionReason: null,
   resolutionContext: RESOLUTION_CONTEXT,
+  resolutionRequest: null,
 };
 
 function request(

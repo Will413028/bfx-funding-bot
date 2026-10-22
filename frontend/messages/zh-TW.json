@@ -104,8 +104,6 @@
     "revoked": "已撤銷",
     "retired": "已封存",
     "verifyFailedReason": "原因",
-    "fundingBalance": "放貸餘額",
-    "available": "可用",
     "empty": "尚未有 API 金鑰。請以 operator CLI bootstrap 新增，或以 bfx-op rotate-credential 替換現行金鑰。",
     "loadFailed": "載入 API 金鑰失敗"
   },

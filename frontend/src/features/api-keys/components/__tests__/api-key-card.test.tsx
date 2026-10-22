@@ -12,6 +12,8 @@ function makeKey(overrides: Partial<ApiKey> = {}): ApiKey {
     apiSecret: "****",
     status: "verified",
     createdAt: "2026-01-01",
+    verifiedAt: null,
+    lastVerifyError: null,
     ...overrides,
   };
 }
