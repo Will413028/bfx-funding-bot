@@ -2945,6 +2945,10 @@ UNVERIFIED = "attestation_unverified:"
      UNVERIFIED + "api_unavailable"),
     (lambda h: h.github.answers.__setitem__(NEW_LIST, bfx.HttpResponse(200, b"<html>", {})),
      UNVERIFIED + "api_unavailable"),
+    # A hostile, deeply nested list or bundle refuses like any other bad answer (RecursionError).
+    (lambda h: h.github.answers.__setitem__(NEW_LIST, bfx.HttpResponse(200, b"[" * 100000, {})),
+     UNVERIFIED + "api_unavailable"),
+    (_bundle_body(snappy_literals(b"[" * 100000)), UNVERIFIED + "bundle_unreadable"),
     (lambda h: setattr(h.github, "down", True), UNVERIFIED + "api_unreachable"),
     # Bundles that cannot be read: a non-https URL is never fetched, a body that is not
     # snappy, too large, or not a JSON object.
@@ -3161,6 +3165,15 @@ def test_snappy_decodes_a_bundle_github_served() -> None:
 def test_snappy_decodes_each_element_kind(encoded: bytes, decoded: bytes) -> None:
     assert bfx.snappy_decompress(encoded, limit=1024) == decoded
     assert bfx.snappy_decompress(snappy_literals(decoded), limit=1024) == decoded
+
+
+def test_snappy_stops_a_copy_at_the_declared_length() -> None:
+    """The copy is refused while decoding, not after the output has grown: a small input must
+    not expand far past what it declared before the final length check.
+
+    Mutation: drop the in-loop ``exceeds the declared length`` check: this test fails."""
+    with pytest.raises(ValueError, match="exceeds the declared length"):
+        bfx.snappy_decompress(b"\x06\x00a\x0d\x01", limit=1 << 20)
 
 
 @pytest.mark.parametrize("encoded", [

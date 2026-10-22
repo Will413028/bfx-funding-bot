@@ -761,7 +761,8 @@ class GhAttestationVerifier:
             listed = json.loads(response.body)["attestations"]
             if not isinstance(listed, list):
                 raise TypeError
-        except (ValueError, KeyError, TypeError):
+        # RecursionError: a hostile, deeply nested list must refuse like any other bad answer.
+        except (ValueError, KeyError, TypeError, RecursionError):
             raise DiscoveryError("attestation_unverified:api_unavailable") from None
         if not listed:
             log(f"no attestation for {digest} in {self._repository}")
@@ -770,7 +771,7 @@ class GhAttestationVerifier:
         for n, item in enumerate(listed[:_MAX_BUNDLES]):
             try:
                 bundles.append(self._bundle(item))
-            except (OSError, ValueError, TypeError) as exc:
+            except (OSError, ValueError, TypeError, RecursionError) as exc:
                 log(f"attestation {n} for {digest} unreadable: {type(exc).__name__}: {str(exc)[:200]}")
         if not bundles:
             raise DiscoveryError("attestation_unverified:bundle_unreadable")
