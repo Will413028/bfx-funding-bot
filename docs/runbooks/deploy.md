@@ -19,7 +19,7 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
                 （workflow_run 可能亂序完成，舊 revision 不得把 main tag 拉回去）
                 labels: org.opencontainers.image.revision、bfx.ci-run-url（通過的 CI run）
                 provenance：actions/attest 對推上去的 digest 簽 SLSA build provenance
-                （Sigstore public-good keyless），attestation 以 OCI referrer 存在 GHCR
+                （Sigstore public-good keyless），attestation 存在 repo 的 GitHub attestation API
           ──► VM bfx-deploy.timer（每 5 分鐘，*:2/5）→ bfx-deploy
 ```
 
@@ -39,18 +39,25 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
 2. 解析 GHCR `backend:main` 的 digest；若 ledger 最新的成功部署已是它就結束。
    **上次失敗、rolled_back 或中斷（只有 `started` 列）的 digest 不會自動重試**，要 `--retry`。
 3. 讀 image label 的 revision 與 CI run，要求 `backend:sha-<rev>` 是同一個 digest；
-   接著用釘版的 gh（`/usr/local/lib/bfx-ops/gh/2.102.0/bin/gh`）驗這個 digest 的 build provenance：
-   `gh attestation verify oci://<repo>@<digest> --repo Will413028/bfx-funding-bot
-   --signer-workflow Will413028/bfx-funding-bot/.github/workflows/release.yml --source-ref refs/heads/main
-   --deny-self-hosted-runners --bundle-from-oci --format json`。必須在第 5 步之前：那一步會在新 image 裡
-   以 DB owner（`migrate.env`）跑 alembic。驗不過就跟「release 還找不到」一樣處理：不寫 ledger、什麼都不動、
-   每一輪重驗，連續失敗 30 分鐘發一次 warning（見 §5「Provenance 驗不過」）。沒有略過驗證的旗標。
-   gh 的環境從零建立：沒有 gh login，`DOCKER_CONFIG` 是空目錄，所以 `ghcr.env` 的
-   pull 憑證與 root 的 docker login 都不會交給 gh：gh 以匿名方式讀 GHCR 的 attestation，所以 **GHCR package `bfx-funding-bot-backend` 必須是 public**（package 設定頁 → Danger Zone → Change visibility）；還是 private 時每個 release 都以 `attestation_unverified` 擋下，stderr 是 registry 的 401／denied。唯一的憑證是 `attest.env` 的
-   `GH_TOKEN`：gh 沒有 token 就拒絕執行，連讀公開資料也一樣，所以給它一把沒有任何權限、只能讀公開 repo 的
-   fine-grained token（見下方「Env 檔規則」）。這把 token 只出現在 `gh attestation verify` 的環境裡，
-   journal 印 gh stderr 前會把它換成 `[GH_TOKEN]`。gh 的 TUF cache 在
-   `/var/lib/bfx-deploy/gh/`。
+   接著驗這個 digest 的 build provenance，**不用任何 GitHub token，GHCR package 可以維持 private**：
+   1. 用 bfx-deploy 自己的 registry 存取（`ghcr.env` 的 pull 憑證，和 pull 用的是同一份）以
+      `docker buildx imagetools inspect <repo>@<digest> --raw` 讀出 manifest（多平台 push 時是 index）
+      的原始 bytes，要求 sha256 等於該 digest，寫成暫存檔；
+   2. 匿名讀 `https://api.github.com/repos/Will413028/bfx-funding-bot/attestations/<digest>`，逐一下載每筆的
+      `bundle_url`（只接受 https、上限 2 MiB；內容是 snappy 壓縮，bfx-deploy 用內建的解碼器解開）；
+   3. 用釘版的 gh（`/usr/local/lib/bfx-ops/gh/2.102.0/bin/gh`）逐一驗，直到有一筆通過：
+      `gh attestation verify <manifest 檔> --bundle <bundle 檔> --repo Will413028/bfx-funding-bot
+      --signer-workflow Will413028/bfx-funding-bot/.github/workflows/release.yml --source-ref refs/heads/main
+      --deny-self-hosted-runners --format json`。同一個 digest 可能有別種 attestation（例如 SBOM），
+      gh 會拒絕那些，所以一筆筆試；全部被拒才算驗不過。
+
+   gh 的環境從零建立：沒有 token、沒有 gh login、沒有 docker 設定，`ghcr.env` 的 pull 憑證只給 registry 那一步，
+   不交給 gh，也不送到 GitHub API。`gh attestation verify --bundle` 不需要登入（實測 2026-10-22：`env -i` 下 rc 0）；
+   gh 只連 Sigstore 的 TUF CDN 取信任根，cache 在 `/var/lib/bfx-deploy/gh/`。匿名 GitHub API 每個 IP 每小時
+   60 次；bfx-deploy 只在有未部署的新 release 時每輪打 1 次（最多每小時 12 次）。
+   必須在第 5 步之前：那一步會在新 image 裡以 DB owner（`migrate.env`）跑 alembic。驗不過就跟「release 還找不到」
+   一樣處理：不寫 ledger、什麼都不動、每一輪重驗，連續失敗 30 分鐘發一次 warning（見 §5「Provenance 驗不過」）。
+   沒有略過驗證的旗標。同一套檢查可以手動跑：`sudo bfx-deploy verify-provenance <digest>`。
 4. 在 VM mirror（`/home/ubuntu/bfx-funding-bot`，以 `ubuntu` 身分跑 git）fetch，要求 `<rev>`
    在 `origin/main` 上，而且 ledger 最新成功部署的 revision 等於 `<rev>` 或是它的祖先（不降版：
    `main` tag 被指回一個較舊、簽章同樣有效的 digest 時 precheck `release_not_descendant_of_deployed`）；compose 檔與 `live.env` 都取自 `<rev>` 本身（git 物件，不讀 working tree），
@@ -186,7 +193,7 @@ schema 不在該 release 的 head 時拒絕。
 
 ### Env 檔規則
 
-`/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr,attest}.env`：root 擁有、mode `0600`、
+`/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr}.env`：root 擁有、mode `0600`、
 不可是 symlink（`ubuntu` 使用者的 checkout 由 DR unit 執行，secret 不能讓它讀到）。
 bfx-deploy 啟動前會檢查，違反即 `precheck` 失敗：
 
@@ -200,12 +207,8 @@ bfx-deploy 啟動前會檢查，違反即 `precheck` 失敗：
   自己檢查過的 `--runtime-dir`；CI 用放了空檔的暫存目錄 render。預設值必須維持 `/opt/bfx/runtime`
   （CI 在 `config --no-interpolate` 的輸出上由 `compose_policy.py` 檢查，也要求 `required: true`），env 檔也維持必填，缺秘密檔時 `up` 會失敗而不是無聲啟動；
 - `ghcr.env`：`GHCR_USERNAME`、`GHCR_TOKEN`（read-only `read:packages`）；檔案不存在＝匿名 pull。
-  9h 不動它：拿掉 `ghcr.env` 與撤銷 PAT 要等 9i 確認驗證 provenance 不需要 GitHub token 之後。
-- `attest.env`：只有 `GH_TOKEN`，給驗 provenance 的 gh 用的 fine-grained token（Public repositories
-  read-only、沒有任何 permission、效期 1 年；建立方式見
-  [fresh host setup 3b](fresh-host-setup.md#3b-runtime-設定與首次驗證)）。**必填**：不存在、不是 root `0600`
-  的一般檔、是 symlink，或除了非空的 `GH_TOKEN` 還有別的 key，每個新 release 都以
-  `attestation_token_missing` 擋下（discovery 失敗，不寫 ledger）。它不交給任何 container，也不交給 gh 以外的指令。
+  9i 的 provenance 驗證也用它讀 manifest（只給 registry，不給 gh）；驗證本身不需要任何 GitHub token。
+  要拿掉 `ghcr.env`（並撤銷 PAT）就得先把 GHCR package 改成 public，那是 9h 的選項，不是 9i 的前提。
 - `bot.env`／`webapi.env` 從 9h 起**不放秘密**：秘密改成下一節的秘密檔。留下的是 `TELEGRAM_CHAT_ID`、
   `SENTRY_DSN`（依設計公開，見 [secret-rotation](secret-rotation.md#sentry-dsn)）、`BFX_EXCHANGE_ACCOUNT_ID`
   與 webapi 的入口設定這類識別值。
@@ -422,11 +425,21 @@ Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.
 
 ### 第一次啟用 provenance 驗證（9i，一次性，順序不能換）
 
-1. Will 在 GitHub 建 fine-grained token（`fresh-host-setup.md` 3b），寫進 `/opt/bfx/runtime/attest.env`（root 0600）。
-2. GHCR package `bfx-funding-bot-backend` 改成 public。
-3. 9i 的 PR merge；它自己的 release 由舊工具部署（舊工具不驗簽）。
-4. 部署成功後照下方 §4 重跑一次 `install.sh`（裝釘版的 gh）。
-5. 用 §5 的「手動重驗」對目前部署的 digest 跑一次，exit 0 才算完成；之前的任何一步漏掉，下一個 release 都會停在 `attestation_token_missing`／`attestation_unverified`／`attestation_verifier_missing`（fail closed，bot 與 webapi 不受影響）。
+不需要 GitHub token，也不需要把 GHCR package 改成 public。
+
+1. 9i 的 PR merge；它自己的 release 由舊工具部署（舊工具不驗簽）。
+2. 部署成功後照下方 §4 重跑一次 `install.sh`（裝釘版的 gh；新工具找不到 gh 時，下一個 release 會停在
+   `attestation_verifier_missing`，fail closed，bot 與 webapi 不受影響）。
+3. 對目前部署的 digest 手動重驗一次，印出 `verified:`、exit 0 才算完成：
+
+   ```bash
+   # bot 正在跑的 image 是 <repository>@sha256:<digest>，取 @ 後面那段
+   D=$(sudo docker inspect bfx-bot --format '{{.Config.Image}}'); D=${D#*@}
+   sudo bfx-deploy verify-provenance "$D"; echo "exit=$?"
+   ```
+
+   9i 的 release 本身就是 9i 的 `release.yml` 簽的，所以這一步驗的就是它。`NOT verified: attestation_unverified:no_attestation`
+   表示該 release run 的 `Attest build provenance` step 沒成功，見 §5「Provenance 驗不過」。
 
 ## 4. 主機工具與 DR 腳本的版本
 
@@ -510,58 +523,32 @@ Telegram 發一次 warning（`bfx-deploy cannot identify or read the release …
 |---|---|---|
 | `attestation_verifier_missing` | `/usr/local/lib/bfx-ops/gh/<GH_VERSION>/bin/gh` 不存在或跑不起來 | 照 §4 重跑 `install.sh`（它會依 sha256 裝上釘版 gh） |
 | `attestation_verifier_wrong_version` | 該路徑的 gh 回報的版本不是 `GH_VERSION` | 同上；不要手動放別的版本 |
-| `attestation_token_missing` | `/opt/bfx/runtime/attest.env` 不存在、不是 root `0600` 的一般檔（含 symlink），或內容不是恰好一個非空的 `GH_TOKEN`；journal 的 `attestation token unusable: <原因>` 說是哪一個 | 照 [fresh host setup 3b](fresh-host-setup.md#3b-runtime-設定與首次驗證) 重寫這個檔（不需要重新部署或重啟，下一輪自動重驗） |
-| `attestation_unverified` | `gh attestation verify` 失敗、逾時（180 秒）或沒有回報任何通過驗證的 attestation | 見下方 |
+| `attestation_unverified:manifest_digest_mismatch` | registry 給的 manifest bytes 的 sha256 不是該 digest | 不正常：registry 或中間人改了內容。當成下方第 3 點處理 |
+| `attestation_unverified:no_attestation` | GitHub attestation API 對這個 digest 回 404 或空清單 | 見下方第 2 點 |
+| `attestation_unverified:rate_limited` | 匿名 GitHub API 的額度用完（403 且 `x-ratelimit-remaining: 0`，或 429）；journal 印出重置時間 | 什麼都不用做，額度重置後下一輪自動重驗。同一個 IP 上別的程式也在匿名打 GitHub API 時才可能發生 |
+| `attestation_unverified:api_unreachable`／`api_unavailable` | 連不到 GitHub API，或它回了 200 以外（含非 rate limit 的 403）、或看不懂的內容 | 外部中斷，見下方第 1 點 |
+| `attestation_unverified:bundle_unreadable` | 清單有 attestation，但沒有一筆 bundle 讀得出來（下載失敗、不是 https、超過 2 MiB、snappy 解不開、不是 JSON 物件）；journal 逐筆記原因 | 多半是外部中斷，下一輪重試；持續發生就看 journal 的原因 |
+| `attestation_unverified:gh_rejected` | 每一筆 bundle gh 都拒絕（或 exit 0 卻沒回報通過的 attestation）；journal 逐筆記 gh 的 stderr | 見下方第 3 點 |
+| `attestation_unverified:gh_unavailable` | `gh attestation verify` 逾時（180 秒）或跑不起來 | 多半是 Sigstore TUF CDN 中斷，見下方第 1 點 |
 
-`attestation_unverified` 的判斷（journal 的 `attestation verify of … exited …` 後面是 gh 的 stderr）：
+判斷方式（journal 的 `attestation N of M for … not accepted (exit …)` 後面是 gh 的 stderr）：
 
-1. **外部中斷**（GHCR、Sigstore TUF CDN `tuf-repo-cdn.sigstore.dev` 連不到，stderr 是連線或 TUF 錯誤）：
+1. **外部中斷**（GHCR、GitHub API、attestation 下載點、Sigstore TUF CDN `tuf-repo-cdn.sigstore.dev` 連不到）：
    什麼都不用做，恢復後下一輪自動部署。中斷期間就是不部署，這是預期的 fail-closed；
    [GitHub status](https://www.githubstatus.com/) 與 [Sigstore status](https://status.sigstore.dev/) 可確認。
    不要為了趕部署關掉驗證：要繞過只能改 root 擁有的工具，這本身就是事故。
-2. **這個 digest 沒有 attestation**（`no attestations found` 之類）：看 image label 的 `bfx.ci-run-url` 那次
-   release run 的 `Attest build provenance` step。release 推完 image 才簽，所以剛推完的幾分鐘內可能先失敗一輪，
-   之後自己好；若那個 step 失敗了，重跑該 release run 或推下一個 commit。
-3. **簽章存在但身分不符**（signer workflow、source ref、self-hosted runner、repo 不符）或
-   `main` tag 指向一個 CI 從沒建過的 digest：**當成供應鏈事件處理**——有人用 `write:packages` 憑證推了 image。
-   不要部署；撤銷可疑的 PAT／token，查 GHCR package 的版本歷史，重跑最新 main 的 release 把 `main` tag 推回正確的 digest。
+2. **這個 digest 沒有 attestation**：看 image label 的 `bfx.ci-run-url` 那次 release run 的
+   `Attest build provenance` step。release 推完 image 才簽，所以剛推完的幾分鐘內可能先失敗一輪，之後自己好；
+   若那個 step 失敗了，重跑該 release run 或推下一個 commit。
+3. **簽章存在但身分不符**（stderr 是 `expected BuildSignerURI`、`expected SourceRepositoryRef`、self-hosted
+   runner、repo 不符）、manifest 對不上 digest，或 `main` tag 指向一個 CI 從沒建過的 digest：
+   **當成供應鏈事件處理**——有人用 `write:packages` 憑證推了 image。不要部署；撤銷可疑的 PAT／token，
+   查 GHCR package 的版本歷史，重跑最新 main 的 release 把 `main` tag 推回正確的 digest。
 
-手動重驗（root，同一個環境）：
-
-```bash
-# token 由 root shell 從 attest.env 讀進環境，不會出現在指令列或輸出
-sudo sh -c '. /opt/bfx/runtime/attest.env && exec env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
-  HOME=/var/lib/bfx-deploy/gh GH_TOKEN="$GH_TOKEN" \
-  GH_CONFIG_DIR=/var/lib/bfx-deploy/gh/config DOCKER_CONFIG=/var/lib/bfx-deploy/gh/docker \
-  /usr/local/lib/bfx-ops/gh/2.102.0/bin/gh attestation verify \
-  oci://ghcr.io/will413028/bfx-funding-bot-backend@sha256:<digest> \
-  --repo Will413028/bfx-funding-bot \
-  --signer-workflow Will413028/bfx-funding-bot/.github/workflows/release.yml \
-  --source-ref refs/heads/main --deny-self-hosted-runners --bundle-from-oci'
-```
-
-#### `attest.env` 的 token 到期與每年輪替
-
-token 效期 1 年，到期日記在 [operations §8「人工定期事項」](operations.md#人工定期事項)。到期或被撤銷時，
-gh 拿得到 token（不是 `attestation_token_missing`），預期是向 GitHub API 認證失敗，journal 會是：
-
-```text
-bfx-deploy: attestation verify of ghcr.io/will413028/bfx-funding-bot-backend@sha256:… exited 1: … HTTP 401: Bad credentials …
-bfx-deploy: release not discoverable yet: attestation_unverified
-```
-
-（這段輸出是依 gh 對失效 token 的一般行為推得，沒有在本機實測；`--bundle-from-oci` 下 gh 是否一定會打
-GitHub API 也沒有實測過。所以不要等 journal 才發現：以到期日為準，提前換。）bot 與 webapi 不受影響，
-只是新 release 不會部署。
-
-輪替步驟（到期前至少一週做）：
-
-1. 在 GitHub 照 [fresh host setup 3b](fresh-host-setup.md#3b-runtime-設定與首次驗證) 的設定建一把新的
-   fine-grained token（同樣 Public repositories read-only、沒有任何 permission、效期 1 年）。
-2. 在 VM 用同一節的指令覆寫 `/opt/bfx/runtime/attest.env`，核對仍是 `root 600`。不用停 timer 或重啟：
-   下一輪 bfx-deploy 才讀它。
-3. 用上方「手動重驗」對目前已部署的 digest 跑一次，exit 0 才算換好。
-4. 在 GitHub 刪掉舊 token，更新 operations §8 的到期日。
+手動重驗：`sudo bfx-deploy verify-provenance sha256:<digest>`。它跑的就是 bfx-deploy 第 3 步的同一段程式
+（同一個釘版 gh、同一組 `--repo`／`--signer-workflow`／`--source-ref`、同樣用 `ghcr.env` 讀 manifest、不用任何
+GitHub token），不寫 ledger、不動任何容器；通過印 `verified: <image>` 並 exit 0，否則印
+`NOT verified: <code>`（code 同上表）並 exit 1。
 
 降版（`precheck:release_not_descendant_of_deployed`）走的是 ledger：寫一列 `failed`、發 critical、現行 release
 沒動，同一個 digest 之後不會再試。代表 `main` tag 指向的 revision 不在已部署 revision 之後；正常的 release

@@ -558,12 +558,6 @@ sudo bfx-deploy --recreate
 
 `systemctl list-timers 'bfx-*'` 看實際啟用狀態。
 
-### 人工定期事項
-
-| 事項 | 期限 | 做法 |
-|---|---|---|
-| 換 `/opt/bfx/runtime/attest.env` 的 GitHub token（驗 provenance 用，效期 1 年） | 到期日前至少一週；到期日：`<建立時填 YYYY-MM-DD>` | [deploy runbook「token 到期與每年輪替」](deploy.md#attestenv-的-token-到期與每年輪替)；過期後預期新 release 會以 `attestation_unverified` 停在 discovery（未實測），換 token 前不會恢復 |
-
 ### 每週報告（`bfx-weekly-report`）
 
 步驟定義在 `deploy/vm/ops/docker-compose.weekly-report.yml`，和主機工具一起由 bfx-deploy 在每次

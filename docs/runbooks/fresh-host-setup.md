@@ -274,7 +274,7 @@ sbin 入口、sudoers 與 gh 例外，見 [deploy runbook §4](deploy.md#4-主�
 
 ### 3b. Runtime 設定與首次驗證
 
-- `/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr,attest}.env` 依
+- `/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr}.env` 依
   [deploy env 規則](deploy.md#env-檔規則) 準備，root 擁有且 mode `0600`。
 - bot 與 webapi 的七個秘密檔依 [deploy「秘密檔」](deploy.md#秘密檔botwebapi9h) 準備（`root:4600 0640`，不是空檔）：
   - 新主機沒有舊的 env 檔可以搬，每個值照 [secret-rotation「通用寫法」](secret-rotation.md#通用寫法) 在 root shell 裡產生並寫入（不上 argv）；
@@ -288,27 +288,6 @@ sbin 入口、sudoers 與 gh 例外，見 [deploy runbook §4](deploy.md#4-主�
   節點會重新登入（舊節點先在 admin console 刪掉，名稱 `bfx-ops` 才不會變成 `bfx-ops-1`）。
 - 告警的 bot token 配置到 `notify.env` 的 `TELEGRAM_BOT_TOKEN` 與秘密檔 `secrets/bot/TELEGRAM_BOT_TOKEN`；chat id 配置到 `notify.env` 與
   `bot.env` 的 `TELEGRAM_CHAT_ID`；GHCR 憑證只需 `read:packages`。設定方式見 [operations](operations.md#6-告警)。
-- `attest.env` 只放 `GH_TOKEN`：bfx-deploy 驗 build provenance 的 gh 沒有 token 就不執行（連公開資料也一樣），
-  所以給它一把**沒有任何權限**的 fine-grained token。在 GitHub → Settings → Developer settings →
-  Personal access tokens → Fine-grained tokens → Generate new token：
-  - Token name：`bfx-deploy attestation (<主機>)`；Resource owner：個人帳號（`Will413028`）；
-  - Expiration：1 年（custom，填一年後的日期）；
-  - Repository access：**Public repositories (read-only)**；
-  - Permissions：**全部不選**（Repository 與 Account 都是 No access）。
-
-  token 只顯示一次，直接貼進 VM，不要印出來、不要存到別處、不要貼進對話或 ticket：
-
-  ```bash
-  sudo install -m 600 -o root -g root /dev/null /opt/bfx/runtime/attest.env
-  # read -rs 不回顯；貼上 token 後按 Enter
-  sudo sh -c 'IFS= read -rs t && printf "GH_TOKEN=%s\n" "$t" > /opt/bfx/runtime/attest.env'
-  sudo stat -c '%U %a %F' /opt/bfx/runtime/attest.env    # root 600 regular file
-  sudo grep -c '^GH_TOKEN=.' /opt/bfx/runtime/attest.env  # 1（只印行數，不印值）
-  ```
-
-  把到期日記到 [operations §8「人工定期事項」](operations.md#人工定期事項)；輪替步驟見
-  [deploy runbook](deploy.md#attestenv-的-token-到期與每年輪替)。缺這個檔時 `--dry-run` 會以
-  `attestation_token_missing` 擋下。
 - error tracking 的 `SENTRY_DSN`（`bfx-backend`）同時配置到 `bot.env` 與 `webapi.env`；空值等於關閉。
   部署後依 [operations](operations.md#error-tracking-test) 各送一筆測試例外。
 
@@ -327,7 +306,7 @@ journalctl -fu bfx-restore-test@current.service
 產生的新 evidence。再執行 `sudo bfx-notify --level info "bfx setup: notify test"`，
 確認告警送達；最後執行 `sudo bfx-deploy --dry-run`，核對 revision、CI run、
 migration／restore 計畫、rollback target 與所有 blockers。dry run 同樣先驗 provenance：
-`release not discoverable yet: attestation_*` 表示 gh 沒裝好或該 digest 驗不過，處理方式見
+`release not discoverable yet: attestation_*` 表示 gh 沒裝好或該 digest 驗不過（驗證不需要任何 GitHub token），處理方式見
 [deploy runbook「Provenance 驗不過」](deploy.md#provenance-驗不過discovery-失敗不寫-ledger)。
 
 若出現 `foreign_container_holds_name:bfx-*`，表示同名 container 不屬於 `bfx-app`。
