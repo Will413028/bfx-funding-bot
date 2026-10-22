@@ -41,7 +41,8 @@ migration 照樣成功但**不會補 grant**。所以順序是：先建 role，�
 
 密碼當場產生，直接寫進主機上的 runtime secret 檔：`bfx_bot`、`bfx_webapi` 寫秘密檔
 `/opt/bfx/runtime/secrets/<service>/DATABASE_URL`（root:4600 0640），其他 role 寫 `/opt/bfx/runtime/*.env`（root 0600）。
-不要貼到終端機歷史、chat 或任何檔案以外的地方。`<owner>` 必須是 superuser（官方 image 的
+不要貼到終端機歷史、chat 或任何檔案以外的地方；含密碼的 `CREATE ROLE` 不在互動式 psql 裡打（psql 會寫 history），
+照 §1e 在 root shell 裡經 stdin 送進去。`<owner>` 必須是 superuser（官方 image 的
 `POSTGRES_USER` 就是）：下面兩個 `SET` 是 superuser 參數，讓失敗的 `CREATE ROLE` 不會把含明文密碼的
 STATEMENT 寫進 PG log。
 
@@ -172,9 +173,20 @@ SELECT has_database_privilege('public', 'bfx', 'CONNECT') AS public_connects;  -
 ### 1e. 連線字串（寫進 secret 檔，不進 git）
 
 bot 與 webapi 的 `DATABASE_URL` 是秘密檔，格式與規則見 [deploy「秘密檔」](deploy.md#秘密檔botwebapi9h)。先建
-group 4600 與目錄（[deploy 9h 切換第 1 步](deploy.md#9h-切換一次性依序在-merge-9h-的-pr-之前做第-13-步)），再寫入：
-`printf '%s' "$URL" | sudo install -o root -g 4600 -m 0640 /dev/stdin /opt/bfx/runtime/secrets/<service>/DATABASE_URL`。
-其他 role 的連線字串照舊寫在 env 檔。
+group 4600 與目錄（[deploy 9h 切換第 1 步](deploy.md#9h-切換一次性依序在-merge-9h-的-pr-之前做第-13-步)），再寫入。
+每個 role 一個 root shell，用 [secret-rotation「通用寫法」](secret-rotation.md#通用寫法) 的範本（值不上 argv、不進 history），
+把範本最後的 `V=...` 與 `swap` 換成：
+
+```bash
+P=$(openssl rand -hex 32)                     # role 的密碼
+V="<scheme>://bfx_bot:$P@<host>:5432/bfx"     # 寫進檔案的 URL（root shell 裡的字串組合，不上 argv）
+swap /opt/bfx/runtime/secrets/bot/DATABASE_URL root:4600 0640 printf '%s' "$V"
+# env 檔的 role（operator.env、research.env）：檔裡先放一行 `DATABASE_URL=`，上一行改成 setkey <env 檔> DATABASE_URL
+printf "SET log_statement='none'; SET log_min_error_statement='panic'; CREATE ROLE bfx_bot LOGIN PASSWORD '%s';\n" "$P" \
+  | docker exec -i --user postgres bfx-postgres psql -U <owner> -d bfx -v ON_ERROR_STOP=1 -q
+```
+
+其他 role 的連線字串照舊寫在 env 檔，也用上面這段（換 role 名稱與檔案）。
 
 | 檔案（`/opt/bfx/runtime/`） | `DATABASE_URL` 的 role | 備註 |
 |---|---|---|
@@ -246,7 +258,7 @@ sbin 入口與 sudoers 例外，見 [deploy runbook §4](deploy.md#4-主機工�
 - `/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr}.env` 依
   [deploy env 規則](deploy.md#env-檔規則) 準備，root 擁有且 mode `0600`。
 - bot 與 webapi 的七個秘密檔依 [deploy「秘密檔」](deploy.md#秘密檔botwebapi9h) 準備（`root:4600 0640`，不是空檔）：
-  - 新主機沒有舊的 env 檔可以搬，每個值直接以 `install` 從 stdin 寫入；
+  - 新主機沒有舊的 env 檔可以搬，每個值照 [secret-rotation「通用寫法」](secret-rotation.md#通用寫法) 在 root shell 裡產生並寫入（不上 argv）；
   - `BFX_VAULT_KEK` 用 `openssl rand -base64 32` 產生新值，再以 `bfx-op rotate-credential` 存一把 Bitfinex key
     （[secret-rotation](secret-rotation.md#vault-kekbfx_vault_kek)）；
   - 舊主機的 KEK 不沿用。

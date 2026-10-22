@@ -836,6 +836,9 @@ CHECK `ck_exchange_account_credentials_active_user_id`（migration `36e59526f8cf
 - 沒有 `BFX_SECRETS_DIR` 的 process 照舊從 env 讀同樣的 key。這是依 process 劃分，不是過渡期：一次性容器（operator
   CLI、每週報告、研究、模擬 soak、migration、DR）、測試與本機執行都屬於這一類。
 - 遮蔽：`alerts.secret_values` 同時涵蓋 env 與秘密檔的值（含各 DB 密碼），告警與 Sentry 的 scrub 都用它。
+- pydantic-settings 會自己從 env 填 `DATABASE_URL`：含秘密欄位的 `BaseSettings`（`Settings`）只在 `core/settings.py`
+  的 `load_settings()` 裡建，它把 reader 讀到的值明確傳進去；`tests/core/test_secret_files.py` 的 AST 測試擋住 `src/`
+  其他地方的直接建構（`scripts/` 與 `alembic/env.py` 是 one-shot，照舊讀 env）。
 - 拒絕條件（`secret_present`，env 的 key 即使是空值、或秘密檔即使是空檔都算）：
   - webapi 拿到 `BFX_VAULT_KEK` 或 `BFX_ADMIN_TOKEN` 就拒絕開機；
   - simulated venue 開機時有 KEK 就拒絕。
@@ -843,7 +846,8 @@ CHECK `ck_exchange_account_credentials_active_user_id`（migration `36e59526f8cf
   因為主機工具與 image 的版本可能不同。
 - 主機檔案是 `root:4600 0640`。compose 的檔案型 secret 會忽略 uid／mode，所以兩個服務以 `group_add` 加入 4600。
   - compose 檔的形狀由 `compose_policy.py` 鎖住；
-  - 檔案在每次部署前由 `bfx_deploy.shared_secret_file` 檢查。
+  - 檔案在每次部署前由 `bfx_deploy.shared_secret_file` 檢查，連同上面兩層目錄（`secret_directory`：root 擁有、
+    group／other 不可寫、不是 symlink）。
 - one-shot 與 `SENTRY_DSN`（依設計公開）留在 env。輪替見 `docs/runbooks/secret-rotation.md`。
 
 **關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`（bot／webapi 是秘密檔，見上）、

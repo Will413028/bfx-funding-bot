@@ -210,8 +210,9 @@ bot 與 webapi 的常駐秘密是 compose 的檔案型 secret，不放在 env：
   - 主機上的 `ubuntu`（也是 UID 1000）不在這個 group，目錄又是 0700，讀不到。
 - gid 固定是 4600：`compose_policy.SECRET_GID` 與 `bfx_deploy.SECRET_GID` 兩處寫死，測試要求兩者相等。
 - **bfx-deploy 部署前檢查**每個 release 掛載的檔案。檢查項目：root 擁有、group 4600、mode 0640、一般檔案、不是
-  symlink、不是空檔。
-  - 違反時 `precheck` 失敗，錯誤碼是 `secret_file_<原因>:<service>/<KEY>`，跑中的版本不受影響。
+  symlink、不是空檔；上面兩層目錄（`secrets/`、`secrets/<service>/`）是真的目錄（不是 symlink）、root 擁有、
+  group 與 other 都不能寫（能寫目錄的人就能在檢查之後換掉檔案）。
+  - 違反時 `precheck` 失敗，錯誤碼是 `secret_file_<原因>:<service>/<KEY>` 或 `secret_dir_<原因>:<目錄>/`，跑中的版本不受影響。
   - compose 檔裡的 secret 只能是 `<runtime dir>/secrets/<service>/<KEY>`，而且只能由該 service 掛載
     （`compose_secret_*` 錯誤碼）。
   - 就算檢查沒擋到，Docker 也不會建立缺 secret 檔的容器。
@@ -219,18 +220,22 @@ bot 與 webapi 的常駐秘密是 compose 的檔案型 secret，不放在 env：
   - 缺檔或空檔就拒絕開機，exit 1，log 是 `config_fatal secret file ... is missing`。
   - env 檔裡還留著這些 key 時照樣開機，但 log 會印 `secret_env_keys_ignored keys=...`（只印名稱）。
 - one-shot 容器（operator CLI、每週報告、研究、模擬 soak、migration、DR）照舊用各自的 env 檔，不受影響。
-- 換值：見 [secret-rotation](secret-rotation.md)。寫入一律用 `install`，把值從 stdin 讀進去，不要印出來：
-
-```bash
-# 例：值已在 shell 變數 V（不要 echo），寫成 bot 的 admin token
-printf '%s' "$V" | sudo install -o root -g 4600 -m 0640 /dev/stdin /opt/bfx/runtime/secrets/bot/BFX_ADMIN_TOKEN
-```
+- 換值與寫入：照 [secret-rotation「通用寫法」](secret-rotation.md#通用寫法)。值不上任何 argv（`sudo` 會把整行指令記進
+  auth.log），整步在 `sudo bash -euo pipefail <<'SH'` 的 root shell 裡做；先寫同目錄的暫存檔，非空才 `mv`。
 
 #### 9h 切換（一次性，依序；在 merge 9h 的 PR 之前做第 1–3 步）
 
 9h 分兩個 release 出貨，因為 bfx-deploy 跑的是**上一個成功 release** 的主機工具（§1 第 10 步）：
 - 第一個 release（`feat(deploy): read resident secrets through one reader ...`）讓 bfx-deploy 接受並檢查秘密檔、
-  讓 backend 會讀秘密檔，但 compose 還不用它們，所以 production 行為不變；
+  讓 backend 會讀秘密檔，但 compose 還不用它們。沒有 `BFX_SECRETS_DIR` 的 bot 與 webapi 照舊從 env 讀，
+  唯一的行為差異是：**webapi 的 env 裡有 `BFX_VAULT_KEK`（即使是空值）就拒絕開機**（`boot_refused`，部署失敗、自動回滾）。
+  所以 merge 第一個 release 之前，先確認 webapi 沒有這個 key（只數名稱、不印值；兩行都必須印 0）：
+
+  ```bash
+  sudo grep -c '^BFX_VAULT_KEK=' /opt/bfx/runtime/webapi.env
+  docker inspect bfx-webapi --format '{{range .Config.Env}}{{println .}}{{end}}' | cut -d= -f1 | grep -cx BFX_VAULT_KEK
+  ```
+
 - 第二個 release（`feat(deploy): mount the bot's and web api's secrets as files`）才把 compose 改成掛秘密檔。
   這一節說的「9h 的 PR」指第二個。
 
@@ -256,11 +261,15 @@ printf '%s' "$V" | sudo install -o root -g 4600 -m 0640 /dev/stdin /opt/bfx/runt
 
    ```bash
    sudo bash -euo pipefail <<'SH'
-   move() {  # <service> <KEY>：把 <service>.env 的 KEY 值寫成 secrets/<service>/<KEY>
-     src=/opt/bfx/runtime/$1.env
+   umask 077
+   move() {  # <service> <KEY>：把 <service>.env 的 KEY 值寫成 secrets/<service>/<KEY>（先寫同目錄的暫存檔，非空才 mv）
+     src=/opt/bfx/runtime/$1.env dst=/opt/bfx/runtime/secrets/$1/$2
      [ "$(grep -c "^$2=." "$src")" = 1 ] || { echo "STOP: $1.env has no single non-empty $2"; exit 1; }
-     grep "^$2=" "$src" | cut -d= -f2- | tr -d '\n' \
-       | install -o root -g 4600 -m 0640 /dev/stdin "/opt/bfx/runtime/secrets/$1/$2"
+     tmp=$(mktemp "$dst.XXXXXX")
+     if ! grep "^$2=" "$src" | cut -d= -f2- | tr -d '\n' > "$tmp" || [ ! -s "$tmp" ]; then
+       rm -f "$tmp"; echo "STOP: $1/$2 not written"; exit 1
+     fi
+     chown root:4600 "$tmp"; chmod 0640 "$tmp"; mv "$tmp" "$dst"
    }
    for k in DATABASE_URL BFX_ADMIN_TOKEN BFX_ADMIN_READ_TOKEN BFX_VAULT_KEK TELEGRAM_BOT_TOKEN; do move bot "$k"; done
    for k in DATABASE_URL BFX_ADMIN_READ_TOKEN; do move webapi "$k"; done
@@ -268,10 +277,11 @@ printf '%s' "$V" | sudo install -o root -g 4600 -m 0640 /dev/stdin /opt/bfx/runt
    ```
 
    印出 `STOP` 就停下，例如 `bot.env` 沒有 `TELEGRAM_BOT_TOKEN`：先補好 env 檔，或先決定不要這個 key。這個 release
-   要求七個檔都在、都不是空的。
+   要求七個檔都在、都不是空的。值只在 root shell 的 pipe 與檔案之間流動，不上任何 argv（`grep` 的參數只有 key 名稱）。
 
 3. 核對秘密檔（只比對、不印值），然後用跑中的 image 實際讀一次。這一步驗證 gid 機制：Docker Desktop 上量不到，
-   只有在 VM 上才算數：
+   只有在 VM 上才算數。`bfx-op halt` 走的 `docker exec bfx-bot` 這時還驗不到：第一個 release 的 bot 容器沒有
+   `group_add`，也沒有掛秘密檔，所以那一項留到第 4 步、第二個 release 部署之後第一件事做：
 
    ```bash
    sudo stat -c '%U:%g %a %s %F %n' /opt/bfx/runtime/secrets/*/*
@@ -290,6 +300,17 @@ printf '%s' "$V" | sudo install -o root -g 4600 -m 0640 /dev/stdin /opt/bfx/runt
 
 4. merge PR。bfx-deploy 在 5 分鐘內部署；要立刻部署就 `sudo systemctl start bfx-deploy.service`。部署後核對：
    - ledger 最新列是 `deployed`（§3 的查詢）；
+   - **在其他任何核對之前**，確認 `docker exec` 進跑中的 bot 讀得到秘密檔（`bfx-op halt` 就是這樣讀 token 的；
+     exec 出來的行程要帶到容器的 group 4600 才讀得到）。只印長度，必須是大於 0 的數字：
+
+     ```bash
+     sudo docker exec bfx-bot /app/.venv/bin/python -c 'print(len(open("/run/secrets/BFX_ADMIN_TOKEN","rb").read()))'
+     ```
+
+     印出 `PermissionError` 或 0：**不要做第 5 步**。這時 bot 本身照跑，kill 的主路徑 `sudo bfx-op kill`（經資料庫，
+     不用 admin token）照常可用，只有緊急備用的 `bfx-op halt` 讀不到 token。回到第一個 release 的 compose：在 `main`
+     revert 第二個 release 的 merge commit（PR → CI → bfx-deploy 部署），env 檔裡的舊 key 還在（第 5 步還沒做），
+     所以它照常開機；再查 exec 為什麼沒帶到 group 4600。
    - `docker logs --since 15m bfx-bot 2>&1 | grep -c secret_env_keys_ignored` 印 1：env 檔裡還有舊 key，這時是預期的；
    - **緊急停止（kill path）**：`bfx-op halt` 在 bot 容器裡改讀 `/run/secrets/BFX_ADMIN_TOKEN`。
      不真的 halt，也能確認 bot 收這個檔的 token：用同一個檔打唯讀的 `/admin/trading-status`，必須印 200：
@@ -324,7 +345,7 @@ printf '%s' "$V" | sudo install -o root -g 4600 -m 0640 /dev/stdin /opt/bfx/runt
    ```
 
 回滾：
-- 第 5 步之前，自動回滾到 9h 之前的版本照常可行，因為舊版讀的 env 還在。
+- 第 5 步之前，自動回滾到 9h 之前的版本照常可行，因為舊版讀的 env 還在；第 4 步的 exec 檢查失敗時也是走這條（revert）。
 - 第 5 步之後，9h 之前的版本開不了機（env 裡沒有 `DATABASE_URL`）。要回到那種版本，先從 `/root/pre-9h/` 把那幾行補回
   env 檔，再部署。
 - 9h 之後的 release 成為「上一個成功版本」時，`/root/pre-9h/` 就不再需要：`sudo rm -r /root/pre-9h`。
