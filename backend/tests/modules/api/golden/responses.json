@@ -107,6 +107,7 @@
           },
           "autoRenew": true
         },
+        "configError": null,
         "revision": 3,
         "source": "operator",
         "createdAt": "2026-10-01T08:30:00+00:00",
@@ -136,6 +137,7 @@
           },
           "autoRenew": false
         },
+        "configError": null,
         "revision": 3,
         "source": "operator",
         "createdAt": "2026-10-01T08:30:00+00:00",

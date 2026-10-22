@@ -109,6 +109,7 @@
   },
   "strategy": {
     "draftNotice": "儲存草稿不會更改已套用的資金政策，也不會啟動放貸。請在總覽確認已套用版本與交易狀態。",
+    "draftUnreadable": "已儲存的草稿（第 {revision} 版）使用較早的設定格式，無法顯示。表單從預設值開始，儲存後會取代該草稿。",
     "title": "策略設定",
     "signalParams": "信號參數",
     "executionParams": "執行參數",

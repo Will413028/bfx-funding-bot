@@ -1071,7 +1071,26 @@
             "title": "Exchangeaccountid"
           },
           "config": {
-            "$ref": "#/components/schemas/StrategyConfigBody"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StrategyConfigBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "configError": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "config_unreadable"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Configerror"
           },
           "revision": {
             "type": "integer",
@@ -1095,13 +1114,14 @@
           "id",
           "exchangeAccountId",
           "config",
+          "configError",
           "revision",
           "source",
           "createdAt",
           "updatedAt"
         ],
         "title": "AccountConfigDraftResponse",
-        "description": "Explicitly account-scoped, not-yet-applied strategy configuration.\n\n``config`` is the stored ``StrategyConfigBody`` (the PUT is its only writer)."
+        "description": "Explicitly account-scoped, not-yet-applied strategy configuration.\n\n``config`` is the stored ``StrategyConfigBody`` (the PUT is its only writer). A draft\nstored under another schema is still listed, with ``config`` null and ``configError``\nset, so the console can show it exists and overwrite it."
       },
       "AccountCredentialResponse": {
         "properties": {

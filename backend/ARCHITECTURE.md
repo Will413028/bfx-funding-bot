@@ -55,7 +55,8 @@ trading-control 與 funding-status 維持 snake_case。值域封閉的欄位是 
 `tests/integration/test_api_literal_checks.py` 再與 migrate 後的 CHECK 比對，來源單邊改動就失敗。
 值域外的值讓回應 500（`schemas.install_response_shape_handler`：記 route、model 與欄位路徑，
 不記值，回 `response_shape_mismatch`；FastAPI 自己的 `ResponseValidationError` 同樣處理），不送到 console；uncertainties 的讀取照 `_rendered`
-回 503。`funding-status` 只在 daemon 的 `/admin/trading-status` 與
+回 503。config draft 的 GET 不因存檔與現行 `StrategyConfigBody` 不符而失敗：`config` 為 null、
+`configError` 為 `config_unreadable`（只記欄位名），console 仍看得到草稿並可覆寫。`funding-status` 只在 daemon 的 `/admin/trading-status` 與
 `/admin/dry-evaluate` 符合 `FundingStatus` 時轉送（console 讀的欄位有型別，其餘照原樣
 轉送）；形狀不符時記下欄位路徑（不含值），回 503，和 daemon 連不到的情況一樣。prod 不提供
 `/openapi.json`；`scripts/dump_openapi.py` 離線以 `app.openapi()` 寫出 commit 進 repo 的

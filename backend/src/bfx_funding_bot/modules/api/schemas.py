@@ -116,11 +116,14 @@ class AccountCredentialResponse(ResponseModel):
 class AccountConfigDraftResponse(ResponseModel):
     """Explicitly account-scoped, not-yet-applied strategy configuration.
 
-    ``config`` is the stored ``StrategyConfigBody`` (the PUT is its only writer)."""
+    ``config`` is the stored ``StrategyConfigBody`` (the PUT is its only writer). A draft
+    stored under another schema is still listed, with ``config`` null and ``configError``
+    set, so the console can show it exists and overwrite it."""
 
     id: str
     exchange_account_id: str = Field(serialization_alias="exchangeAccountId")
-    config: StrategyConfigBody
+    config: StrategyConfigBody | None
+    config_error: Literal["config_unreadable"] | None = Field(serialization_alias="configError")
     revision: int
     source: str
     created_at: str = Field(serialization_alias="createdAt")

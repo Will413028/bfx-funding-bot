@@ -5,7 +5,11 @@ and is always addressed through an explicit ExchangeAccount UUID.
 """
 from __future__ import annotations
 
+import logging
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.accounts import config_service
@@ -22,14 +26,41 @@ from bfx_funding_bot.modules.api.schemas import (
     AccountConfigDraftResponse,
     Envelope,
     StrategyConfigBody,
+    field_paths,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _stored_config(stored: Any) -> StrategyConfigBody | None:
+    """The stored draft, or None when it is not exactly a ``StrategyConfigBody``.
+
+    The PUT stores ``StrategyConfigBody.model_dump(by_alias=True)``, so a draft that does not
+    parse, or does not dump back to what is stored (a key this schema no longer has), was
+    written under another schema. It is reported as unreadable rather than failing the read,
+    so the console still shows that a draft exists and can overwrite it; the log names the
+    fields, never their values.
+    """
+    try:
+        config = StrategyConfigBody.model_validate(stored)
+    except ValidationError as exc:
+        logger.error("config_draft_unreadable: %s", field_paths(exc))
+        return None
+    dumped = config.model_dump(by_alias=True)
+    if dumped != stored:
+        logger.error("config_draft_unreadable: %s", sorted(
+            key for key in set(dumped) | set(stored) if dumped.get(key) != stored.get(key)))
+        return None
+    return config
 
 
 def _account_to_response(row: AccountConfigDraft) -> Envelope[AccountConfigDraftResponse]:
+    config = _stored_config(row.config)
     return Envelope(data=AccountConfigDraftResponse(
         id=str(row.id),
         exchange_account_id=str(row.exchange_account_id),
-        config=StrategyConfigBody.model_validate(row.config),
+        config=config,
+        config_error=None if config is not None else "config_unreadable",
         revision=row.revision,
         source=row.source,
         created_at=row.created_at.isoformat() if row.created_at else "",

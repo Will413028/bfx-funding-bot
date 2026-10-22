@@ -374,14 +374,18 @@ export interface components {
          * AccountConfigDraftResponse
          * @description Explicitly account-scoped, not-yet-applied strategy configuration.
          *
-         *     ``config`` is the stored ``StrategyConfigBody`` (the PUT is its only writer).
+         *     ``config`` is the stored ``StrategyConfigBody`` (the PUT is its only writer). A draft
+         *     stored under another schema is still listed, with ``config`` null and ``configError``
+         *     set, so the console can show it exists and overwrite it.
          */
         AccountConfigDraftResponse: {
             /** Id */
             id: string;
             /** Exchangeaccountid */
             exchangeAccountId: string;
-            config: components["schemas"]["StrategyConfigBody"];
+            config: components["schemas"]["StrategyConfigBody"] | null;
+            /** Configerror */
+            configError: "config_unreadable" | null;
             /** Revision */
             revision: number;
             /** Source */

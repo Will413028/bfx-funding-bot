@@ -109,6 +109,7 @@
   },
   "strategy": {
     "draftNotice": "Saving this draft does not change the applied capital policy or activate lending. Check the applied revision and the trading state on Overview.",
+    "draftUnreadable": "The stored draft (revision {revision}) was saved under an earlier settings format and cannot be shown. The form starts from the defaults; saving replaces the stored draft.",
     "title": "Strategy Configuration",
     "signalParams": "Signal Parameters",
     "executionParams": "Execution Parameters",

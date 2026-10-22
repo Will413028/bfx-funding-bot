@@ -70,6 +70,7 @@ SOURCES: dict[tuple[str, str], Callable[[], frozenset[object]]] = {
     ("AccountCredentialResponse", "status"): lambda: (  # api_keys._credential_status
         values(CredentialLifecycleStatus) - {"active"} | {"verified", "unverified", "failed"}),
     ("OfferClaimResponse", "state"): lambda: values(OfferState),
+    ("AccountConfigDraftResponse", "config_error"): lambda: frozenset({"config_unreadable"}),
     # uncertainties: the ledger's own types.
     ("UncertaintyResponse", "kind"): lambda: values(UncertaintyKind),
     ("UncertaintyResponse", "state"): lambda: values(UncertaintyState),
