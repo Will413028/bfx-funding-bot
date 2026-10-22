@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -18,6 +21,8 @@ from pydantic import ValidationError
 from pytest_httpx import HTTPXMock
 from starlette.requests import ClientDisconnect
 
+from bfx_funding_bot.core.auth import LOGIN_HEADER
+from bfx_funding_bot.core.log_format import JsonFormatter
 from bfx_funding_bot.modules.api import ingress
 from bfx_funding_bot.modules.api.ingress import (
     FE_EVENTS_PATH,
@@ -222,3 +227,41 @@ def test_fe_events_answer_a_client_disconnect_without_an_error(
     monkeypatch.setattr(ingress, "_read_limited", disconnected)
     response = client.post(FE_EVENTS_PATH, content=ENVELOPE, headers={"Origin": ORIGIN})
     assert response.status_code == 400 and response.json()["detail"] == "client_disconnected"
+
+
+# ------------------------------------------------------- security log (9j)
+
+
+@pytest.mark.parametrize(("send", "status", "reason", "header", "value"), [
+    pytest.param(lambda c: c.get("/en/overview/", headers={"Host": "evil.example\r\nX: y",
+                                                           LOGIN_HEADER: "will@github"}),
+                 400, "host_not_allowed", "host", "evil.example\r\nX: y", id="host"),
+    pytest.param(lambda c: _post(c, Sec_Fetch_Site="cross-site", **{LOGIN_HEADER: "will@github"}),
+                 403, "cross_site_refused", "sec-fetch-site", "cross-site", id="sec-fetch-site"),
+    pytest.param(lambda c: _post(c, Origin="https://evil.example", **{LOGIN_HEADER: "will@github"}),
+                 403, "cross_site_refused", "origin", "https://evil.example", id="origin"),
+    pytest.param(lambda c: _post(c, Content_Type="text/plain", **{LOGIN_HEADER: "will@github"}),
+                 415, "json_required", "content-type", "text/plain", id="content-type"),
+])
+def test_each_refusal_is_logged_with_the_header_that_failed_and_the_login(
+    client: TestClient, caplog: pytest.LogCaptureFixture,
+    send: Callable[[TestClient], Any], status: int, reason: str, header: str, value: str,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="bfx.security"):
+        response = send(client)
+
+    assert response.status_code == status
+    [record] = [r for r in caplog.records if r.name == "bfx.security"]
+    assert (record.event, record.reason, record.status) == ("request_rejected", reason, status)
+    assert (record.header, record.value, record.login) == (header, value, "will@github")
+    line = JsonFormatter("webapi").format(record)
+    assert line.splitlines() == [line]
+
+
+def test_an_accepted_request_logs_no_refusal(
+    client: TestClient, caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="bfx.security"):
+        assert _post(client).status_code == 200
+
+    assert [r for r in caplog.records if r.name == "bfx.security"] == []

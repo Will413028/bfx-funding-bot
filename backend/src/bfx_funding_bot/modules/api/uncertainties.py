@@ -220,7 +220,7 @@ def build_uncertainties_router() -> APIRouter:
                 session, context, models.operator_reads, models.operator_evidence,
                 state=state, limit=limit)
         except OperatorCommandError as exc:
-            raise command_error(exc) from exc
+            raise command_error(exc, context=context) from exc
         return Envelope(data=_rendered(lambda: [_response(d, context.scope) for d in details]))
 
     @router.get("/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}")
@@ -235,7 +235,7 @@ def build_uncertainties_router() -> APIRouter:
                 session, context, models.operator_reads, models.operator_evidence,
                 uncertainty_id)
         except OperatorCommandError as exc:
-            raise command_error(exc) from exc
+            raise command_error(exc, context=context) from exc
         return Envelope(data=_rendered(lambda: _response(detail, context.scope)))
 
     @router.get(
@@ -249,7 +249,7 @@ def build_uncertainties_router() -> APIRouter:
         try:
             row = await commands.get_resolution_request(session, context, request_id)
         except OperatorCommandError as exc:
-            raise command_error(exc) from exc
+            raise command_error(exc, context=context) from exc
         return Envelope(data=_request_model(row))
 
     return router

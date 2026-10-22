@@ -32,8 +32,10 @@ from bfx_funding_bot.core.errors import (
     WriterLockUnacquired,
 )
 from bfx_funding_bot.core.health import DB_FRESHNESS, MARKET_DATA_FRESHNESS, HealthProbe
+from bfx_funding_bot.core.log_format import configure_logging
 from bfx_funding_bot.core.loop_watchdog import LoopWatchdog, loop_watchdog_timeout_s
 from bfx_funding_bot.core.schema_head import assert_schema_head
+from bfx_funding_bot.core.security_log import BOOT_REFUSED, security_event
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
@@ -1086,10 +1088,7 @@ async def build_daemon(
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging("bot")
     init_error_tracking("bot", os.environ)
     try:
         asyncio.run(_run())
@@ -1115,6 +1114,7 @@ async def _run() -> None:
     try:
         watchdog = LoopWatchdog(timeout_s=loop_watchdog_timeout_s(os.environ))
     except Exception as exc:
+        _log_boot_refused(type(exc).__name__)
         alerts.emit(alerts.BOOT_REFUSED, error=_error_text([exc]))
         await alerts.shutdown()
         raise
@@ -1135,6 +1135,7 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
     try:
         daemon = await build_daemon(stop_event=stop)
     except Exception as exc:
+        _log_boot_refused(type(exc).__name__)
         alerts.emit(alerts.BOOT_REFUSED, error=_error_text([exc]))
         await alerts.shutdown()
         raise
@@ -1199,6 +1200,8 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         log.critical(
             "executor_auth_failed — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )
+        if not daemon.booted:
+            _log_boot_refused("ExecutorAuthError")
         alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
                     error="ExecutorAuthError: venue credentials rejected")
         end_reason = "fatal" if daemon.booted else "boot_refused"
@@ -1211,6 +1214,8 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         log.critical(
             "venue_credential_rejected — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )
+        if not daemon.booted:
+            _log_boot_refused("VenueCredentialRejectedError")
         alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
                     error="VenueCredentialRejectedError: venue refused the account's key")
         end_reason = "fatal" if daemon.booted else "boot_refused"
@@ -1220,6 +1225,8 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
             "daemon_taskgroup_fatal exceptions=%s",
             [type(e).__name__ for e in eg.exceptions],
         )
+        if not daemon.booted:
+            _log_boot_refused(*(type(e).__name__ for e in eg.exceptions))
         alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
                     error=_error_text(eg.exceptions))
         end_reason = "fatal" if daemon.booted else "boot_refused"
@@ -1260,6 +1267,13 @@ _RELEASE_TIMEOUT_S = 5.0
 
 def _error_text(exceptions: Sequence[BaseException]) -> str:
     return "; ".join(f"{type(exc).__name__}: {exc}" for exc in exceptions)[:300]
+
+
+def _log_boot_refused(*error_types: str) -> None:
+    """The security log's line for a refused boot: exception types only. The text, scrubbed
+    of secrets, is in the ``boot_refused`` alert that follows."""
+    security_event(BOOT_REFUSED, reason="boot_failed", error_types=list(error_types),
+                   level=logging.CRITICAL)
 
 
 
