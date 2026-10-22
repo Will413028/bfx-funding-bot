@@ -218,7 +218,8 @@ roles／連線設定，以及 [offsite DR](offsite-dr.md) 的備份與 restore �
 
 在 Linux VM 的乾淨 checkout `/home/ubuntu/bfx-funding-bot`，核對 HEAD 是要安裝的
 release revision；CI 與 Release images 必須已成功。主機需要 root 擁有的
-`/usr/local/bin/uv`（版本與 CI 的 `setup-uv` `version` 相同，從 GitHub release 下載 `uv-aarch64-unknown-linux-gnu.tar.gz` 並核對 `.sha256` 後安裝）、Docker buildx 與 Python 3.12 以上：
+`/usr/local/bin/uv`（版本與 CI 的 `setup-uv` `version` 相同，從 GitHub release 下載 `uv-aarch64-unknown-linux-gnu.tar.gz` 並核對 `.sha256` 後安裝）、Docker buildx、Python 3.12 以上、`curl`，
+以及連得到 `github.com` release 下載（安裝器自己下載釘版 gh）：
 
 ```bash
 /usr/local/bin/uv --version
@@ -226,14 +227,17 @@ docker buildx version
 /usr/bin/python3 --version
 sudo /home/ubuntu/bfx-funding-bot/deploy/vm/ops/install.sh
 ls -l /usr/local/lib/bfx-ops/current /home/ubuntu/bfx-releases/current
+/usr/local/lib/bfx-ops/gh/2.102.0/bin/gh --version    # gh version 2.102.0 (...)
 ```
 
 安裝器從 git 物件寫出 `/usr/local/lib/bfx-ops/releases/<rev>`，依 `ops/uv.lock`
 執行 `uv sync --frozen`，建立 `bfx-deploy`／`bfx-notify`／`bfx-op` wrappers、
 `/etc/sudoers.d/bfx-op`（sudo 只為 `bfx-op` 保留 `SSH_CONNECTION`，寫入前 `visudo -c` 驗證）與
 `/home/ubuntu/bfx-releases/<rev>` DR checkout，再安裝 `systemd/managed-units`
-列出的 units。它不會啟用或啟動任何 timer。之後工具由成功部署的 release 自動更新；
-sbin 入口與 sudoers 例外，見 [deploy runbook §4](deploy.md#4-主機工具與-dr-腳本的版本)。
+列出的 units。它也把 `install.sh` 的 `GH_VERSION` 那一版 GitHub CLI（linux arm64 tarball，核對
+`GH_SHA256` 後才解開）裝到 `/usr/local/lib/bfx-ops/gh/<版本>/bin/gh`，bfx-deploy 用它驗每個 release 的
+build provenance；已經是該版本就不重裝。它不會啟用或啟動任何 timer。之後工具由成功部署的 release 自動更新；
+sbin 入口、sudoers 與 gh 例外，見 [deploy runbook §4](deploy.md#4-主機工具與-dr-腳本的版本)。
 
 ### 3b. Runtime 設定與首次驗證
 
@@ -261,7 +265,9 @@ journalctl -fu bfx-restore-test@current.service
 確認該 service 成功，且 `/home/ubuntu/bfx/dr-evidence/restore-heartbeat.json` 是本次
 產生的新 evidence。再執行 `sudo bfx-notify --level info "bfx setup: notify test"`，
 確認告警送達；最後執行 `sudo bfx-deploy --dry-run`，核對 revision、CI run、
-migration／restore 計畫、rollback target 與所有 blockers。
+migration／restore 計畫、rollback target 與所有 blockers。dry run 同樣先驗 provenance：
+`release not discoverable yet: attestation_*` 表示 gh 沒裝好或該 digest 驗不過，處理方式見
+[deploy runbook「Provenance 驗不過」](deploy.md#provenance-驗不過discovery-失敗不寫-ledger)。
 
 若出現 `foreign_container_holds_name:bfx-*`，表示同名 container 不屬於 `bfx-app`。
 先記錄其 image、restart policy 與用途，安排停機並保留回復副本後才釋放名稱；
