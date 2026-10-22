@@ -18,15 +18,3 @@ reason = "critical: certifi 2026.4.22 (backend/uv.lock) bundles emSign roots; fi
 id = "GHSA-6q48-6c7w-9gw2"
 ignoreUntil = 2026-10-27T00:00:00Z
 reason = "alias of PYSEC-2026-4320 (certifi), same deadline"
-
-# Published 2026-10-21 (vitest, dev-only test runner in frontend/pnpm-lock.yaml); medium,
-# deadline 90 days. The fix @vitest/mocker 4.1.12 clears the 7-day cooldown on 2026-10-22.
-[[IgnoredVulns]]
-id = "GHSA-qxg6-89mg-rqv8"
-ignoreUntil = 2027-01-19T00:00:00Z
-reason = "medium: @vitest/mocker 4.1.11 (frontend/pnpm-lock.yaml, dev-only) manual mock registration code injection; fix 4.1.12 needs the owner's upgrade approval"
-
-[[IgnoredVulns]]
-id = "GHSA-xp26-3454-mjgp"
-ignoreUntil = 2027-01-19T00:00:00Z
-reason = "medium: @vitest/mocker 4.1.11 (frontend/pnpm-lock.yaml, dev-only) Windows backslash traversal; fix 4.1.12 needs the owner's upgrade approval"
