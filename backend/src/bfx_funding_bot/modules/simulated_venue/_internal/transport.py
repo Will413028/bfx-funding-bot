@@ -18,7 +18,10 @@ from typing import Any
 import httpx
 
 from bfx_funding_bot.modules.simulated_venue._internal import decide, wire
-from bfx_funding_bot.modules.simulated_venue._internal.auth import RequestAuthenticator
+from bfx_funding_bot.modules.simulated_venue._internal.auth import (
+    ERR_APIKEY_INVALID,
+    RequestAuthenticator,
+)
 from bfx_funding_bot.modules.simulated_venue._internal.faults import FaultInjector
 from bfx_funding_bot.modules.simulated_venue._internal.state import VenueState, apply
 from bfx_funding_bot.modules.simulated_venue.contracts import (
@@ -450,6 +453,8 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         if fault is FaultKind.REJECTED:
             return _json(200, wire.notification(
                 now, type_, None, "ERROR", "simulated: rejected by the venue"))
+        if fault is FaultKind.KEY_REFUSED:
+            return _json(500, wire.error_body(*ERR_APIKEY_INVALID))
         return None
 
     async def _write(

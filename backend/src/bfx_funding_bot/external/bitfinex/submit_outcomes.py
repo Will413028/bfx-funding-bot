@@ -20,6 +20,7 @@ from uuid import UUID, uuid5
 
 import httpx
 
+from bfx_funding_bot.external.bitfinex.errors import ERR_AUTH_FAIL, VenueCredentialRejectedError
 from bfx_funding_bot.external.bitfinex.submit_wire import (
     _VENUE_ERROR_TEXT_MAX,
     _canonical_json,
@@ -42,6 +43,7 @@ __all__ = [
     "SubmitRejected",
     "classify_submit_response",
     "fingerprint_submit_payload",
+    "key_refused_on_submit",
     "normalize_submit_payload",
     "payload_sha256",
     "response_digest",
@@ -465,6 +467,26 @@ def _unknown(
         raw_response_digest=(response_digest(parsed_body) if parsed_body is not None else None),
         venue_error_code=None if venue is None else venue[0],
         venue_error_message=None if venue is None else venue[1],
+    )
+
+
+def key_refused_on_submit(
+    outcome: object, *, http_status: int | None = None,
+) -> VenueCredentialRejectedError | None:
+    """The venue refusing the key on a submit, as the error the periodic reconcile raises for
+    a refused read (the daemon exits 78 and boots into credential recovery mode), or None.
+
+    Only an UNKNOWN whose body was ``["error", ERR_AUTH_FAIL, ...]`` qualifies, whatever its
+    HTTP status (Bitfinex sends it with 500). The outcome stays UNKNOWN: a refused key is not
+    recorded evidence that the offer was not placed (ADR 2026-08-31 D5); this only stops the
+    caller from sending more on that key. The venue's message is not carried: the response
+    may echo a credential, and the code alone names the refusal."""
+    if not isinstance(outcome, SubmitOutcomeUnknown) or outcome.venue_error_code != ERR_AUTH_FAIL:
+        return None
+    return VenueCredentialRejectedError(
+        http_status if http_status is not None and http_status >= 400 else 500,
+        "venue refused the key on a funding offer submit",
+        f'["error",{ERR_AUTH_FAIL},"submit: key refused"]',
     )
 
 

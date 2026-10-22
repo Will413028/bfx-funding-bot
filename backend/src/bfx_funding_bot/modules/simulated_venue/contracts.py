@@ -251,6 +251,9 @@ class FaultKind(StrEnum):
     UNKNOWN_5XX_ERROR = "unknown_5xx_error"
     # Not applied; the documented 200 notification with STATUS "ERROR".
     REJECTED = "rejected"
+    # Not applied; the venue refuses the request's key (revoked between two requests), as
+    # Bitfinex answers a revoked key: HTTP 500 + ["error", 10100, "apikey: invalid"].
+    KEY_REFUSED = "key_refused"
     # History pages silently lack their newest row (the client sees a complete page).
     HISTORY_OMIT_NEWEST = "history_omit_newest"
     # History read answers HTTP 503 (the client certifies nothing: coverage incomplete).

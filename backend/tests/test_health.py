@@ -158,6 +158,18 @@ def test_startup_refuses_the_vault_kek(
         pass
 
 
+@pytest.mark.parametrize("value", ["a2V5LW1hdGVyaWFs", ""], ids=["set", "empty"])
+def test_startup_refuses_the_vault_kek_without_secret_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: str
+) -> None:
+    """9g (F29): in env mode (no BFX_SECRETS_DIR) a KEK in the web API's env, even empty, fails
+    the boot too."""
+    monkeypatch.setenv("DATABASE_URL", _authority_db(tmp_path / "ledger.db", "ledger"))
+    monkeypatch.setenv("BFX_VAULT_KEK", value)
+    with pytest.raises(RuntimeError, match="bfx_vault_kek_in_webapi_env"), TestClient(app):
+        pass
+
+
 def test_startup_refuses_a_mounted_halt_token(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
