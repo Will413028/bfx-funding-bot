@@ -117,7 +117,8 @@ sudo bfx-op --dry-run halt --reason "為什麼停"   # 只印出要跑的命令
 或 `tailscale whois` 失敗時照樣執行，actor 為 `host-root`，journal 標 `identity=none`。它不經 operator
 container、不讀 ledger、`operator.env` 或資料庫，而是 `docker exec bfx-bot` 呼叫 bot healthz server
 （container 內 port 8080，未對 host 公開）的 `POST /admin/halt`，與 kill 同一條路徑（HALTED ＋ 每個
-幣別的 cancel-all）。token 從 container 自己的環境讀，不印出；reason 由 bot 記進 `trading_state`，
+幣別的 cancel-all）。token 在 container 內讀，不印出：9h 之後讀 bot 的秘密檔 `/run/secrets/BFX_ADMIN_TOKEN`，
+9h 之前的 bot 讀 env。沒有 token 時 exit 1、什麼都不送。reason 由 bot 記進 `trading_state`，
 不進 host journal。
 
 | exit | 意義 |
@@ -207,21 +208,21 @@ sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
 
 | 來源 | 設定檔 | 內容 |
 |---|---|---|
-| bot 內的 sink（`observability/alerts.py`，非阻塞） | `/opt/bfx/runtime/bot.env` 的 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` | 交易狀態轉換、自動保護、kill 結果、恢復結果、幣別啟停結果（`capital_policy_request_*`）、憑證輪替結果（`credential_rotation_*`）、`foreign_exposure`、`foreign_lending`、`unknown_quarantine_aged`、`nav_drop`、`venue_offers_may_remain` |
+| bot 內的 sink（`observability/alerts.py`，非阻塞） | 秘密檔 `/opt/bfx/runtime/secrets/bot/TELEGRAM_BOT_TOKEN` 與 `bot.env` 的 `TELEGRAM_CHAT_ID` | 交易狀態轉換、自動保護、kill 結果、恢復結果、幣別啟停結果（`capital_policy_request_*`）、憑證輪替結果（`credential_rotation_*`）、`foreign_exposure`、`foreign_lending`、`unknown_quarantine_aged`、`nav_drop`、`venue_offers_may_remain` |
 | host 工具 `bfx-notify` | `/opt/bfx/runtime/notify.env`（同樣兩個 key） | bfx-deploy 結果、bfx-backup-check（RPO>300s、evidence 超過 15 分鐘、restore heartbeat 超過 35 天、磁碟 ≥95% 為 critical；restore timer 停用、weekly report 超過 8 天沒成功、磁碟 ≥85% 為 warning）、`bfx-alert@` 的 unit 失敗（pgBackRest 備份、restore test） |
 
 - 兩個都空 → bot 只記 log（開機時會說一次）；`bfx-notify` 永遠 exit 0，送不出去只記 journal。
-- **換 token 或 chat id 要兩個檔都改**：改 `notify.env` 立即生效；改 `bot.env` 後
-  `sudo bfx-deploy --recreate`（§7）。
+- **換 token 或 chat id 兩條路徑都要改**：改 `notify.env` 立即生效；bot 這一側改完後要
+  `sudo bfx-deploy --recreate`（§7）。換 token 的步驟見 [secret-rotation](secret-rotation.md#telegram-bot-token)。
 - **為什麼是兩條、兩份檔**（design review #14，刻意保留）：兩條路徑在容器／主機的邊界兩側，
   各自要在對方掛掉時還能發出告警——bot 死掉或起不來時由主機的 bfx-deploy／`bfx-alert@` 通報，
   主機 timer 停擺時交易事件仍由 bot 自己通報；合成一條就會讓其中一邊失去告警。token 分兩份檔是
-  最小權限：`bot.env` 只給 bot container，`notify.env` 只給 root 的主機工具，DR unit（`ubuntu`）
+  最小權限：bot 的秘密檔只掛給 bot container，`notify.env` 只給 root 的主機工具，DR unit（`ubuntu`）
   兩份都讀不到。
 - 測試 host 路徑：`sudo bfx-notify --level info "test"`。
 - <a id="alert-alert_test"></a>測試 bot 路徑（`alert_test`，info）：在執行中的 bot container 裡跑
-  `sudo docker exec bfx-bot /app/.venv/bin/python -m scripts.send_test_alert`。它用 bot 自己的環境
-  （`bot.env`）建 sink，經 `alerts.emit` 送出（dedup、速率限制、secret 遮罩都照常），不碰資料庫與 venue；
+  `sudo docker exec bfx-bot /app/.venv/bin/python -m scripts.send_test_alert`。它用 bot 自己的設定
+  （秘密檔與 `bot.env`）建 sink，經 `alerts.emit` 送出（dedup、速率限制、secret 遮罩都照常），不碰資料庫與 venue；
   Telegram 收下時 exit 0，只記 log（key 缺或格式錯）或送不出去時 exit 1。
 - Grafana 仍是第二條觀測路徑。
 - **停機後仍送單**（Grafana 規則 `bfx-trading-halted-submits`，critical）：bot 的 `/metrics` 匯出
@@ -527,7 +528,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 ## 7. 改了 runtime env 之後重建 container
 
 bfx-deploy 只在有新 release（或 `--retry`）時自動重建 container；只改 `/opt/bfx/runtime/*.env`
-不會觸發。改完後：
+或 `/opt/bfx/runtime/secrets/` 不會觸發。換秘密見 [secret-rotation](secret-rotation.md)。改完後：
 
 ```bash
 sudo bfx-deploy --recreate --dry-run   # 預覽：同一個 release

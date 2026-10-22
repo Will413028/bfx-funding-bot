@@ -161,6 +161,20 @@ def test_wrong_or_optional_env_files_are_detected(
     assert violation in policy.env_file_violations(_uninterpolated(runtime_dir, mutated))
 
 
+def test_policy_deployer_and_backend_agree_on_the_secret_files() -> None:
+    """One gid (the files' group = the services' group_add) and one key set (what the
+    backend reads from files = what the compose file mounts)."""
+    from bfx_funding_bot.core.secret_files import FILE_SECRET_KEYS, SECRETS_DIR_ENV
+
+    assert str(bfx.SECRET_GID) == policy.SECRET_GID
+    assert policy.SECRET_KEYS == FILE_SECRET_KEYS
+    assert set(policy.SERVICE_SECRETS) == set(bfx.ROLE_CONTAINERS)
+    for service in ("bot", "webapi"):
+        assert COMPOSE["services"][service]["environment"][SECRETS_DIR_ENV] == policy.SECRETS_DIR
+    # The web API never holds the halt token or the vault key (9d-2, 9g).
+    assert {"BFX_ADMIN_TOKEN", "BFX_VAULT_KEK"}.isdisjoint(policy.SERVICE_SECRETS["webapi"])
+
+
 def test_policy_and_deployer_agree_on_names_and_commands() -> None:
     assert {role: policy.CONTAINERS[role] for role in bfx.ROLE_CONTAINERS} == bfx.ROLE_CONTAINERS
     # The netns repair inspects the holder by name; a renamed holder would never be repaired.
@@ -208,6 +222,10 @@ def test_deployer_reads_the_release_from_the_real_rendering(rendered: dict[str, 
     assert [[p.name for p in s.env_files] for s in services] == [
         ["bot.env", "live.env"], [], ["tailscale.env"], ["webapi.env"]]
     assert all(p.parent in (runtime_dir, COMPOSE_PATH.parent) for s in services for p in s.env_files)
+    assert [sorted(p.relative_to(runtime_dir / "secrets").as_posix() for p in s.secret_files)
+            for s in services] == [
+        [f"bot/{key}" for key in policy.SERVICE_SECRETS["bot"]], [], [],
+        [f"webapi/{key}" for key in policy.SERVICE_SECRETS["webapi"]]]
     assert [str(p) for p in bfx.release_config_files(rendered, COMPOSE_PATH.parent)] == [
         "tailscale/serve.json"]
 
@@ -225,7 +243,15 @@ def test_a_frontend_service_is_refused(rendered: dict[str, Any]) -> None:
     (lambda r: r["services"].pop("bot"), "services"),
     (lambda r: r["services"].pop("webapi"), "services"),
     (lambda r: r["services"].__setitem__("extra", copy.deepcopy(r["services"]["webapi"])), "services"),
-    (lambda r: r.__setitem__("secrets", {"key": {"name": "bfx-app_key", "file": "/x"}}), "no_secrets"),
+    (lambda r: r["secrets"].__setitem__("key", {"name": "bfx-app_key", "file": "/x"}), "secrets"),
+    (lambda r: r["secrets"].pop("webapi_DATABASE_URL"), "secrets"),
+    (lambda r: r["secrets"]["bot_BFX_VAULT_KEK"].__setitem__("file", "/etc/kek"),
+     "secret_file:bot_BFX_VAULT_KEK"),
+    (lambda r: r["secrets"].__setitem__("bot_BFX_VAULT_KEK", {"name": "bfx-app_bot_BFX_VAULT_KEK",
+                                                              "environment": "BFX_VAULT_KEK"}),
+     "secret_file:bot_BFX_VAULT_KEK"),
+    (lambda r: r["secrets"]["webapi_DATABASE_URL"].__setitem__(
+        "file", r["secrets"]["bot_DATABASE_URL"]["file"]), "secret_file:webapi_DATABASE_URL"),
     (lambda r: r.__setitem__("configs", {"c": {"name": "bfx-app_c", "content": "x"}}), "configs_file_only"),
     (lambda r: r.__setitem__("configs", {"c": {"name": "bfx-app_c", "environment": "HOME"}}),
      "configs_file_only"),
@@ -375,6 +401,15 @@ def test_policy_cli_is_what_ci_runs(
     completed = subprocess.run(argv, input=json.dumps(rendered), capture_output=True, text=True,
                                check=False, env=env)
     assert completed.returncode == 1 and "uninterpolated:volumes" in completed.stderr
+    # ... and the secret files' production default (9h).
+    uninterpolated_broken = copy.deepcopy(uninterpolated)
+    secret = uninterpolated_broken["secrets"]["webapi_DATABASE_URL"]
+    secret["file"] = secret["file"].replace("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}", "/srv")
+    snapshot.write_text(json.dumps(uninterpolated_broken))
+    completed = subprocess.run(argv, input=json.dumps(rendered), capture_output=True, text=True,
+                               check=False, env=env)
+    assert completed.returncode == 1
+    assert "uninterpolated:secret_file:webapi_DATABASE_URL" in completed.stderr
 
 
 REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
@@ -399,6 +434,10 @@ REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
     "identity_env": lambda s: s["environment"].pop("BFX_DEPLOYMENT_ID"),
     "loader_injection_blanked": lambda s: s["environment"].pop("LD_PRELOAD"),
     "interpreter_injection_blanked": lambda s: s["environment"].pop("PYTHONPATH"),
+    "secrets_dir_env": lambda s: s["environment"].pop("BFX_SECRETS_DIR"),
+    "no_secret_env_keys": lambda s: s["environment"].__setitem__("DATABASE_URL", "postgresql://x"),
+    "secret_group": lambda s: s.pop("group_add"),
+    "exact_secrets": lambda s: s["secrets"].pop(),
 }
 # The bot keeps its own network; the web API lives in the holder's namespace (9d-5).
 BOT_REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
@@ -413,6 +452,45 @@ WEBAPI_REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
         "--host", "0.0.0.0", "--port", "8000"]),
     "ready_healthcheck": lambda s: s.pop("healthcheck"),
 }
+# Ways to get a secret file wrong that the removals above do not cover.
+SECRET_MUTATIONS: list[tuple[str, Callable[[dict[str, Any]], None], str]] = [
+    ("webapi", lambda s: s["secrets"].append({"source": "bot_BFX_VAULT_KEK", "target": "BFX_VAULT_KEK"}),
+     "webapi:exact_secrets"),
+    ("webapi", lambda s: s["secrets"].append({"source": "bot_BFX_ADMIN_TOKEN", "target": "BFX_ADMIN_TOKEN"}),
+     "webapi:exact_secrets"),
+    ("bot", lambda s: s["secrets"][0].__setitem__("target", "/etc/db"), "bot:exact_secrets"),
+    ("bot", lambda s: s["secrets"][0].__setitem__("mode", 0o444), "bot:exact_secrets"),
+    ("bot", lambda s: s["environment"].__setitem__("BFX_VAULT_KEK", ""), "bot:no_secret_env_keys"),
+    ("bot", lambda s: s["environment"].__setitem__("BFX_SECRETS_DIR", "/tmp"), "bot:secrets_dir_env"),
+    ("bot", lambda s: s.__setitem__("group_add", ["4600", "0"]), "bot:secret_group"),
+    ("webapi", lambda s: s.__setitem__("group_add", ["1000"]), "webapi:secret_group"),
+    ("tailscale", lambda s: s.__setitem__("secrets", [{"source": "bot_BFX_VAULT_KEK",
+                                                       "target": "BFX_VAULT_KEK"}]),
+     "tailscale:no_secrets"),
+    ("netns", lambda s: s.__setitem__("group_add", ["4600"]), "netns:no_group_add"),
+]
+
+
+@needs_compose
+@pytest.mark.parametrize(("service", "mutate", "violation"), SECRET_MUTATIONS,
+                         ids=[f"{v}-{i}" for i, (_, _, v) in enumerate(SECRET_MUTATIONS)])
+def test_a_secret_file_mount_out_of_shape_is_a_violation(
+    rendered: dict[str, Any], service: str, mutate: Callable[[dict[str, Any]], None], violation: str,
+) -> None:
+    broken = copy.deepcopy(rendered)
+    mutate(broken["services"][service])
+    assert violation in policy.violations(broken)
+
+
+@needs_compose
+def test_the_secret_files_default_to_the_production_runtime_dir(
+    uninterpolated: dict[str, Any],
+) -> None:
+    assert policy.secret_violations(uninterpolated, uninterpolated=True) == []
+    broken = copy.deepcopy(uninterpolated)
+    secret = broken["secrets"]["bot_BFX_VAULT_KEK"]
+    secret["file"] = secret["file"].replace("/opt/bfx/runtime", "/home/ubuntu")
+    assert policy.secret_violations(broken, uninterpolated=True) == ["secret_file:bot_BFX_VAULT_KEK"]
 PROPERTY_CASES = [
     *((service, prop, mutate) for service in ("bot", "webapi") for prop, mutate in sorted(REMOVALS.items())),
     *(("bot", prop, mutate) for prop, mutate in sorted(BOT_REMOVALS.items())),
@@ -482,6 +560,10 @@ def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> Non
     runtime.mkdir()
     for name in ("bot.env", "webapi.env", "tailscale.env"):
         (runtime / name).write_text("EXAMPLE=1\n")
+    for service, keys in policy.SERVICE_SECRETS.items():
+        (runtime / "secrets" / service).mkdir(parents=True)
+        for key in keys:
+            (runtime / "secrets" / service / key).write_text("example")
     text = (COMPOSE_TEXT.replace("name: bfx_default", f"name: {network}")
             .replace("name: bfx-app", f"name: bfx-app-test-{suffix}")
             .replace("name: bfx_tsstate", f"name: bfx_tsstate-{suffix}")
