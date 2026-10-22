@@ -470,6 +470,9 @@ def title(event: str, fields: Mapping[str, object]) -> str:
     if event == FOREIGN_LENDING:
         return "lending no bot offer explains (foreign offer filled unseen)"
     if event == CREDENTIAL_RECOVERY_MODE:
+        if str(fields.get("reason", "")).startswith("credential_noncompliant"):
+            return ("the account's key is not one the bot may trade with: not trading, "
+                    "waiting for a compliant key or a credential rotation")
         return ("venue refused the account's key: not trading, waiting for the key to work "
                 "or for a credential rotation")
     if event == ALERT_TEST:

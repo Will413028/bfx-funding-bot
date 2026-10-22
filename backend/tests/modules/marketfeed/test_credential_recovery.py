@@ -78,7 +78,8 @@ SETTLE_MS = int(BOT_SETTLE_WINDOW.total_seconds() * 1000)
 DIGEST_INVALID = '["error",10100,"apikey: digest invalid"]'
 
 _METHODS = (
-    "run", "_boot_until_observed", "_run_boot_recovery", "_run_credential_recovery",
+    "run", "_boot_until_observed", "_boot_attempt", "_run_boot_recovery",
+    "_run_credential_recovery",
     "_credential_recovery_tasks", "_credential_recovery_retry_loop",
     "_active_credential_changed", "_end_credential_recovery", "_recovery_started_at_ms",
     "_heartbeat_scan_loop", "_db_keepalive_loop", "_dependency_answered",
@@ -169,7 +170,8 @@ def _daemon(engine: AsyncEngine, venue: Venue, *, clock: Clock | None = None,
             run_started_at_ms: int | None = T0, boot_key: str | None = BOOT_KEY,
             rotation: Any = None, writer_lock: Any = None,
             wait: Callable[..., Any] | None = None,
-            delay: Callable[[int], float] = credential_recovery_retry_delay_s) -> Any:
+            delay: Callable[[int], float] = credential_recovery_retry_delay_s,
+            compliance: Any = None) -> Any:
     clock = clock or Clock()
     waits: list[float] = []
 
@@ -195,7 +197,8 @@ def _daemon(engine: AsyncEngine, venue: Venue, *, clock: Clock | None = None,
         boot_credential_api_key=boot_key, run_started_at_ms=run_started_at_ms, clock=clock,
         credential_recovery_retry_delay_s=delay,
         credential_recovery_wait=wait or advance, waits=waits,
-        credential_rotation=rotation,
+        credential_rotation=rotation, credential_compliance=compliance,
+        credential_recovery_reason=None,
         # Trading wiring recovery mode must never touch.
         trading_control=Recorder(), capital_policy_control=Recorder(),
         uncertainty_worker=Recorder(), periodic_reconcile_recorder=Recorder(),
@@ -233,7 +236,8 @@ async def test_recovery_mode_runs_the_rotation_worker_and_liveness_only(engine, 
 
     _trading_untouched(fake)
     rotation.run.assert_awaited_once_with(fake._stop_event)
-    assert sent == [("credential_recovery_mode", {"level": "critical", "account": str(ACCOUNT)})]
+    assert sent == [("credential_recovery_mode", {
+        "level": "critical", "account": str(ACCOUNT), "reason": "venue_refused_key"})]
 
 
 async def test_healthz_answers_200_and_readyz_503_in_recovery_mode(engine, sent) -> None:
@@ -433,3 +437,129 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
     assert row.state == "applied", row.outcome_reason
     assert restarts == [1]  # the worker's own restart ended the run
     _trading_untouched(fake)
+
+
+# --- a key that is not compliant (9g) ---------------------------------------------------------
+# Mutation: drop the compliance check from ``Daemon._boot_attempt``: the boot test fails (the
+# daemon boots and trades). Mutation: have ``credential_refusal`` ignore
+# ``CredentialNoncompliantError``: the boot raises instead of holding in recovery mode.
+# Mutation: let ``_credential_recheck_loop`` swallow ``CredentialNoncompliantError``: the
+# recheck test fails.
+
+class Compliance:
+    """The key's compliance check: each call takes the next outcome (an exception to raise, or
+    None for compliant); the last one repeats."""
+
+    def __init__(self, *outcomes: BaseException | None,
+                 on_call: Callable[[int], None] | None = None) -> None:
+        self.outcomes = outcomes or (None,)
+        self.calls = 0
+        self.on_call = on_call
+
+    async def check(self) -> None:
+        self.calls += 1
+        if self.on_call is not None:
+            self.on_call(self.calls)
+        outcome = self.outcomes[min(self.calls, len(self.outcomes)) - 1]
+        if outcome is not None:
+            raise outcome
+
+
+def _noncompliant(reason: str = "withdraw_must_be_disabled") -> BaseException:
+    from bfx_funding_bot.modules.execution.credential_compliance import (
+        CredentialNoncompliantError,
+    )
+    return CredentialNoncompliantError(reason)
+
+
+async def test_a_noncompliant_key_at_boot_holds_in_recovery_mode_without_trading(
+        engine, sent) -> None:
+    compliance = Compliance(_noncompliant(),
+                            on_call=lambda n: n == 3 and fake._stop_event.set())
+    venue = Venue("accepted")
+    fake = _daemon(engine, venue, compliance=compliance)
+
+    await Daemon.run(fake)
+
+    _trading_untouched(fake)
+    assert venue.calls == 0  # the boot observation never ran on the non-compliant key
+    assert compliance.calls == 3  # the boot, then the retries
+    assert sent == [("credential_recovery_mode", {
+        "level": "critical", "account": str(ACCOUNT),
+        "reason": "credential_noncompliant:withdraw_must_be_disabled"})]
+
+
+async def test_a_key_made_compliant_again_ends_recovery_mode(engine, sent, caplog) -> None:
+    """D11: no separate stop state; once the whole boot passes, the run restarts and trades."""
+    compliance = Compliance(_noncompliant(), None)
+    fake = _daemon(engine, Venue("accepted"), compliance=compliance,
+                   run_started_at_ms=T0 - SETTLE_MS)
+
+    with caplog.at_level(logging.INFO):
+        await Daemon.run(fake)
+
+    assert fake._stop_event.is_set()
+    assert "credential_recovery_resolved reason=boot_observation_succeeded" in caplog.text
+    _trading_untouched(fake)
+
+
+def _recheck(fake: Any, compliance: Compliance) -> Any:
+    waits: list[float] = []
+
+    async def wait(stop: asyncio.Event, seconds: float) -> None:
+        waits.append(seconds)
+        await asyncio.sleep(0)
+
+    fake.credential_compliance = compliance
+    fake.credential_recheck_interval_s = 21_600.0
+    fake.credential_recheck_wait = wait
+    fake.waits = waits
+    return Daemon._credential_recheck_loop.__get__(fake)
+
+
+async def test_the_running_recheck_raises_on_a_noncompliant_key(engine, sent) -> None:
+    from bfx_funding_bot.modules.execution.credential_compliance import (
+        CredentialNoncompliantError,
+    )
+    fake = _daemon(engine, Venue("accepted"))
+    # The stop at the third call only ends a loop that wrongly kept going (no hang).
+    loop = _recheck(fake, Compliance(None, _noncompliant("credential_account_mismatch"),
+                                     on_call=lambda n: n >= 3 and fake._stop_event.set()))
+
+    with pytest.raises(CredentialNoncompliantError) as raised:
+        await loop()
+
+    assert raised.value.reason == "credential_account_mismatch"
+    assert fake.waits == [21_600.0, 21_600.0]  # every 6 hours
+
+
+async def test_the_running_recheck_raises_on_a_key_the_venue_refused(engine, sent) -> None:
+    wrapped = RuntimeError("permissions read failed")
+    wrapped.__cause__ = BitfinexAPIError(500, "Internal Server Error", DIGEST_INVALID)
+    fake = _daemon(engine, Venue("accepted"))
+    loop = _recheck(fake, Compliance(wrapped))
+
+    with pytest.raises(VenueCredentialRejectedError) as raised:
+        await loop()
+
+    assert raised.value.venue_coded and raised.value.__cause__ is wrapped
+
+
+async def test_a_recheck_the_venue_did_not_answer_is_retried_sooner_not_fatal(
+        engine, sent) -> None:
+    from bfx_funding_bot.modules.execution.credential_compliance import (
+        CREDENTIAL_RECHECK_RETRY_S,
+    )
+    fake = _daemon(engine, Venue("accepted"))
+    compliance = Compliance(
+        BitfinexAPIError(0, "transport error"),
+        VenueCredentialRejectedError(403, "Forbidden", "<html>waf</html>"),
+        None,
+        on_call=lambda n: n == 4 and fake._stop_event.set())
+    loop = _recheck(fake, compliance)
+
+    await loop()
+
+    assert compliance.calls == 4
+    assert fake.waits == [21_600.0, CREDENTIAL_RECHECK_RETRY_S, CREDENTIAL_RECHECK_RETRY_S,
+                          21_600.0]

@@ -87,8 +87,10 @@ def _daemon(venue: _Venue, *, delay: Callable[[int], float] = lambda _n: 0.0,
         writer_lock_watch=lock_watch, boot_retry_delay_s=delay,
         _stop_event=asyncio.Event(), booted=False,
         config=SimpleNamespace(cells=[]), scheduler=MagicMock(), executor=executor,
+        credential_compliance=None, credential_recovery_reason=None,
     )
     fake._run_boot_recovery = lambda: Daemon._run_boot_recovery(fake)  # type: ignore[arg-type]
+    fake._boot_attempt = lambda: Daemon._boot_attempt(fake)  # type: ignore[arg-type]
     fake._boot_until_observed = lambda: Daemon._boot_until_observed(fake)  # type: ignore[arg-type]
     return fake
 

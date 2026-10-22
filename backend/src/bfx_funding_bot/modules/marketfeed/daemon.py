@@ -62,6 +62,12 @@ from bfx_funding_bot.modules.execution.audit import AuditContext
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate
+from bfx_funding_bot.modules.execution.credential_compliance import (
+    CREDENTIAL_RECHECK_INTERVAL_S,
+    CREDENTIAL_RECHECK_RETRY_S,
+    CredentialCompliance,
+    CredentialNoncompliantError,
+)
 from bfx_funding_bot.modules.execution.credential_rotation import (
     BOT_SETTLE_WINDOW,
     CredentialRotationWorker,
@@ -292,8 +298,22 @@ class BootOutcome(Enum):
     OBSERVED = "observed"
     # A stop was requested while waiting for an unreachable venue.
     STOPPED = "stopped"
-    # The venue refused the account's key: the boot holds in credential recovery mode.
+    # The venue refused the account's key, or the key is not one the bot may trade with
+    # (``CredentialNoncompliantError``): the boot holds in credential recovery mode.
     CREDENTIAL_REJECTED = "credential_rejected"
+
+
+def credential_refusal(exc: BaseException) -> str | None:
+    """Why the account's key cannot be used, or None: the venue refused it (10100 or
+    401/403 anywhere in the chain) or it fails the compliance rule. Recovery mode's reason."""
+    if credential_rejection(exc) is not None:
+        return "venue_refused_key"
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, CredentialNoncompliantError):
+            return str(current)
+        current = current.__cause__ or current.__context__
+    return None
 
 
 async def _wait_or_stop(stop: asyncio.Event, seconds: float) -> None:
@@ -380,6 +400,13 @@ class Daemon:
     credential_recovery_retry_delay_s: Callable[[int], float] = credential_recovery_retry_delay_s
     # How recovery mode waits (a backoff, the settle window): returns early on the stop event.
     credential_recovery_wait: Callable[[asyncio.Event, float], Awaitable[None]] = _wait_or_stop
+    # The key's compliance (``execution.credential_compliance``; Bitfinex vault keys only, None
+    # for the simulated venue): part of every boot attempt, and rechecked while running.
+    credential_compliance: CredentialCompliance | None = None
+    credential_recheck_interval_s: float = CREDENTIAL_RECHECK_INTERVAL_S
+    credential_recheck_wait: Callable[[asyncio.Event, float], Awaitable[None]] = _wait_or_stop
+    # Why the boot holds in credential recovery mode (set when it enters it).
+    credential_recovery_reason: str | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     def bind_run(self, started_at_ms: int) -> None:
@@ -414,6 +441,14 @@ class Daemon:
                 await self.protection.run_pending()
             raise
 
+    async def _boot_attempt(self) -> None:
+        """One boot: the key's compliance (when the venue has a vault key), then the boot
+        observation. Recovery mode retries this same attempt, so a key that is refused or
+        non-compliant ends recovery mode only once the whole boot would pass."""
+        if self.credential_compliance is not None:
+            await self.credential_compliance.check()
+        await self._run_boot_recovery()
+
     async def _boot_until_observed(self) -> BootOutcome:
         """Run the boot observation until it completes, a stop is requested while waiting, or
         the venue refuses the account's key.
@@ -423,8 +458,9 @@ class Daemon:
         capped backoff instead of exiting: a restart would meet the same outage
         and crash-loop. Nothing trades meanwhile — no sub-task exists yet. The venue
         refusing the key (``external.bitfinex.errors.credential_rejection``: 10100 or
-        HTTP 401/403, anywhere in the chain) returns ``CREDENTIAL_REJECTED`` for
-        credential recovery mode. Every other failure (a refusal such as nonce 10114,
+        HTTP 401/403, anywhere in the chain) or the key failing its compliance check
+        (``CredentialNoncompliantError``, see :meth:`_boot_attempt`) returns
+        ``CREDENTIAL_REJECTED`` for credential recovery mode. Every other failure (a refusal such as nonce 10114,
         an invariant) propagates and refuses the boot. Before each retry the writer lock is re-checked
         (``WriterLockWatch.check``: re-acquire if its connection dropped, exit if
         another writer holds it), so the observation only ever runs as the
@@ -435,10 +471,13 @@ class Daemon:
             if wait.failures and self.writer_lock_watch is not None:
                 await self.writer_lock_watch.check()
             try:
-                await self._run_boot_recovery()
+                await self._boot_attempt()
             except Exception as exc:
-                if credential_rejection(exc) is not None:
-                    log.critical("boot_venue_credential_rejected error=%r", exc)
+                refusal = credential_refusal(exc)
+                if refusal is not None:
+                    log.critical("boot_venue_credential_rejected reason=%s error=%r",
+                                 refusal, exc)
+                    self.credential_recovery_reason = refusal
                     return BootOutcome.CREDENTIAL_REJECTED
                 if not is_transient_dependency_error(exc):
                     raise
@@ -487,8 +526,10 @@ class Daemon:
         -- and the run is at least :data:`BOT_SETTLE_WINDOW` old. A SIGTERM ends it too.
         """
         account = self.account_bootstrap.account_id
-        log.critical("credential_recovery_mode_entered account=%s", account)
-        alerts.emit(alerts.CREDENTIAL_RECOVERY_MODE, level=alerts.CRITICAL, account=account)
+        reason = self.credential_recovery_reason or "venue_refused_key"
+        log.critical("credential_recovery_mode_entered account=%s reason=%s", account, reason)
+        alerts.emit(alerts.CREDENTIAL_RECOVERY_MODE, level=alerts.CRITICAL, account=account,
+                    reason=reason)
         self._recovery_started_at_ms()  # pinned now when bot_runs gave no start
         async with asyncio.TaskGroup() as tg:
             for name, task in self._credential_recovery_tasks():
@@ -518,10 +559,12 @@ class Daemon:
                 if await self._active_credential_changed():
                     await self._end_credential_recovery("active_credential_changed")
                     return
-                await self._run_boot_recovery()
+                await self._boot_attempt()
             except Exception as exc:
-                if credential_rejection(exc) is not None:
-                    log.warning("credential_recovery_still_rejected attempt=%d", attempt)
+                refusal = credential_refusal(exc)
+                if refusal is not None:
+                    log.warning("credential_recovery_still_rejected attempt=%d reason=%s",
+                                attempt, refusal)
                     continue
                 if is_transient_dependency_error(exc):
                     log.warning("credential_recovery_venue_unreachable attempt=%d error=%r",
@@ -531,6 +574,39 @@ class Daemon:
             await self._end_credential_recovery("boot_observation_succeeded")
             return
         log.info("sub_task_exit name=credential_recovery_retry")
+
+    async def _credential_recheck_loop(self) -> None:
+        """Recheck the key every :data:`CREDENTIAL_RECHECK_INTERVAL_S` while trading.
+
+        Non-compliant, or refused by the venue itself (its body says 10100): raise, so the
+        daemon exits 78 and the next boot holds in credential recovery mode (the same exit as a
+        refused reconcile read; ADR 2026-10-18 D11, no separate stop state). Anything else
+        (the venue did not answer, a bare 401/403 a gateway can send) is retried after
+        :data:`CREDENTIAL_RECHECK_RETRY_S`: a recheck never stops trading on a guess."""
+        compliance = self.credential_compliance
+        assert compliance is not None
+        delay = self.credential_recheck_interval_s
+        while not self._stop_event.is_set():
+            await self.credential_recheck_wait(self._stop_event, delay)
+            if self._stop_event.is_set():
+                break
+            try:
+                await compliance.check()
+            except CredentialNoncompliantError as exc:
+                log.critical("credential_recheck_noncompliant reason=%s", exc.reason)
+                raise
+            except Exception as exc:
+                rejected = credential_rejection(exc)
+                if rejected is not None and rejected.venue_coded:
+                    log.critical("credential_recheck_rejected error=%r", exc)
+                    if rejected is exc:
+                        raise
+                    raise rejected from exc
+                log.warning("credential_recheck_failed error=%r", exc)
+                delay = CREDENTIAL_RECHECK_RETRY_S
+                continue
+            delay = self.credential_recheck_interval_s
+        log.info("sub_task_exit name=credential_recheck")
 
     async def _active_credential_changed(self) -> bool:
         """Whether the account's active Bitfinex credential is no longer the key this process
@@ -615,6 +691,8 @@ class Daemon:
             if self.credential_rotation is not None:
                 tg.create_task(self.credential_rotation.run(self._stop_event),
                                name="credential_rotation")
+            if self.credential_compliance is not None:
+                tg.create_task(self._credential_recheck_loop(), name="credential_recheck")
             if self.uncertainty_worker is not None:
                 tg.create_task(
                     self.uncertainty_worker.run(self._stop_event), name="uncertainty_resolution",

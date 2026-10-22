@@ -273,3 +273,34 @@ async def test_a_key_refused_while_running_exits_78_as_a_fatal_error(
     assert exited.value.code == EXIT_CODE_AUTH_FAILED == 78
     assert [event for event, _ in sent] == ["daemon_fatal"]
     assert _RunRecord.events[-1] == "finish:fatal"
+
+
+async def test_a_key_found_noncompliant_while_running_exits_78_as_a_fatal_error(
+    monkeypatch: pytest.MonkeyPatch, watchdogs: list[_Watchdog],
+) -> None:
+    """9g: the 6-hour recheck raises ``CredentialNoncompliantError`` out of the TaskGroup; the
+    exit is the refused key's (78), so the restarted process boots into credential recovery
+    mode, never exit 1.
+
+    Mutation: drop (or move after ``except* Exception``) the
+    ``except* CredentialNoncompliantError`` branch: this test fails (ExceptionGroup)."""
+    from bfx_funding_bot.core.errors import EXIT_CODE_AUTH_FAILED
+    from bfx_funding_bot.modules.execution.credential_compliance import (
+        CredentialNoncompliantError,
+    )
+
+    sent: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(alerts, "emit", lambda event, **fields: sent.append((event, fields)))
+    noncompliant = ExceptionGroup("taskgroup", [
+        CredentialNoncompliantError("withdraw_must_be_disabled")])
+
+    async def build_daemon(*, stop_event: asyncio.Event) -> Any:
+        return _fake_daemon(stop_event, [], fail=noncompliant, booted=True)
+
+    monkeypatch.setattr(bot, "build_daemon", build_daemon)
+    with pytest.raises(SystemExit) as exited:
+        await bot._run()
+    assert exited.value.code == EXIT_CODE_AUTH_FAILED == 78
+    assert sent == [("daemon_fatal", {
+        "error": "CredentialNoncompliantError: credential_noncompliant:withdraw_must_be_disabled"})]
+    assert _RunRecord.events[-1] == "finish:fatal"
