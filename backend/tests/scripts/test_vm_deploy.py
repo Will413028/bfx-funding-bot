@@ -1585,9 +1585,8 @@ def test_a_compose_file_the_deployer_cannot_run_is_refused_before_any_change(
 # (test_a_secret_file_is_trusted_only_under_root_owned_unwritable_directories fails).
 
 REAL_SECRET_NAMES = sorted(SECRET_FILES)
-# The next release file (9h, mounts the secret files): this tool ships one release before
-# it, so it must already run it (see the module docstring of bfx_deploy).
-SECRETS_TEXT = (FIXTURES / "docker-compose.app.9h.yml").read_text(encoding="utf-8")
+# The release file with the secret files (9h): the tracked one.
+SECRETS_TEXT = REAL_COMPOSE_TEXT
 
 
 def test_a_secret_file_must_be_root_group_4600_0640_and_not_empty(tmp_path: Path) -> None:

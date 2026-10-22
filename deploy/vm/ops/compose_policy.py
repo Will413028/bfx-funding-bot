@@ -20,9 +20,15 @@ web API are required and no other application service is allowed (9d-5 removed t
 frontend: the web API serves the UI). The tailnet ingress is required too and pinned
 to its exact shape: `netns` only holds the network namespace (plan D13), `tailscale`
 joins it with the state volume, the Serve config and tailscale.env as its only inputs,
-and the web API joins it listening on 127.0.0.1 only, with no network of its own. Top-level `secrets` are
-refused, the one top-level volume is the fixed-name node state and the one
-config is the tracked serve.json. Every other
+and the web API joins it listening on 127.0.0.1 only, with no network of its own.
+Secrets (9h): the bot and the web API mount exactly their SERVICE_SECRETS as Compose
+file secrets `<service>_<KEY>` at /run/secrets/<KEY>, each from
+`${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/secrets/<service>/<KEY>` (the production default,
+checked on the uninterpolated rendering), join group SECRET_GID (Compose ignores a file
+secret's uid/gid/mode, so the host file is root:SECRET_GID 0640), set
+BFX_SECRETS_DIR=/run/secrets so the backend reads only the files, and name none of those
+keys in `environment`; no other top-level secret exists. The one top-level volume is
+the fixed-name node state and the one config is the tracked serve.json. Every other
 hardening property is checked on the interpolated rendering. Checking Compose's
 own rendering rather than the YAML text means an anchor, an override or a
 changed Compose default cannot slip a property past the check. This replaces
@@ -106,6 +112,18 @@ COMMANDS = {
                "--host", "127.0.0.1", "--port", "8000"],
 }
 USERS = {"bot": "1000:1000", "webapi": "1000:1000"}
+# The group of the host's secret files (root:4600 0640) that the services join to read
+# them; bfx_deploy.SECRET_GID checks the files with the same number (tests keep them equal).
+SECRET_GID = "4600"
+SECRETS_DIR = "/run/secrets"
+# Each resident service's file secrets, mounted at /run/secrets/<KEY>
+# (backend core/secret_files.FILE_SECRET_KEYS is their union; tests keep them equal).
+SERVICE_SECRETS = {
+    "bot": ("BFX_ADMIN_READ_TOKEN", "BFX_ADMIN_TOKEN", "BFX_VAULT_KEK", "DATABASE_URL",
+            "TELEGRAM_BOT_TOKEN"),
+    "webapi": ("BFX_ADMIN_READ_TOKEN", "DATABASE_URL"),
+}
+SECRET_KEYS = frozenset(key for keys in SERVICE_SECRETS.values() for key in keys)
 WEBAPI_NETWORK_MODE = "service:netns"
 WEBAPI_HEALTHCHECK = ["CMD", "/app/.venv/bin/python", "-c",
                       "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen("
@@ -184,6 +202,16 @@ def service_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
     need(all(env.get(key) == "" for key in LOADER_INJECTION), "loader_injection_blanked")
     need(all(env.get(key) == "" for key in PYTHON_INJECTION)
          and env.get("PYTHONDONTWRITEBYTECODE") == "1", "interpreter_injection_blanked")
+    need(env.get("BFX_SECRETS_DIR") == SECRETS_DIR, "secrets_dir_env")
+    need(not SECRET_KEYS & set(env), "no_secret_env_keys")
+    need([str(gid) for gid in spec.get("group_add") or []] == [SECRET_GID], "secret_group")
+    # Exactly its own, each at /run/secrets/<KEY>, without uid/gid/mode (ignored for a file
+    # secret, so a value there would only pretend to restrict it).
+    wanted = sorted((f"{service}_{key}", key) for key in SERVICE_SECRETS[service])
+    mounted = spec.get("secrets") or []
+    need(all(isinstance(m, dict) and set(m) == {"source", "target"} for m in mounted)
+         and sorted((str(m.get("source")), str(m.get("target"))) for m in mounted
+                    if isinstance(m, dict)) == wanted, "exact_secrets")
     return found
 
 
@@ -396,17 +424,39 @@ def violations(rendered: Mapping[str, Any]) -> list[str]:
     return found
 
 
-def top_level_violations(rendered: Mapping[str, Any]) -> list[str]:
+def secret_violations(rendered: Mapping[str, Any], *, uninterpolated: bool = False) -> list[str]:
+    """Top-level secrets: exactly `<service>_<KEY>` for SERVICE_SECRETS, each a file only.
+
+    The interpolated rendering shows where the file is under the runtime dir CI passes
+    (`.../secrets/<service>/<KEY>`); the uninterpolated one that the default is the
+    production `${BFX_RUNTIME_DIR:-/opt/bfx/runtime}`. Never a `content`, `environment`
+    or `external` secret: the operator writes the files (docs/runbooks/deploy.md)."""
+    secrets = rendered.get("secrets") or {}
+    wanted = {f"{service}_{key}": f"secrets/{service}/{key}"
+              for service, keys in SERVICE_SECRETS.items() for key in keys}
+    if not isinstance(secrets, dict) or set(secrets) != set(wanted):
+        return ["secrets"]
+    found = []
+    prefix = f"/{RUNTIME_REFERENCE}" if uninterpolated else "/"
+    for name, tail in sorted(wanted.items()):
+        secret = secrets[name]
+        file = str(secret.get("file", "")) if isinstance(secret, dict) else ""
+        if not isinstance(secret, dict) or set(secret) - {"name", "file"} \
+                or not file.startswith("/") or not file.endswith(prefix + tail) \
+                or secret.get("name", f"bfx-app_{name}") != f"bfx-app_{name}":
+            found.append(f"secret_file:{name}")
+    return found
+
+
+def top_level_violations(rendered: Mapping[str, Any], *, uninterpolated: bool = False) -> list[str]:
     """Top-level volumes, secrets and configs; checked on both renderings."""
     found = []
     # The node state, under a fixed name so a renamed project never registers a new node.
     if rendered.get("volumes") != {STATE_VOLUME: {"name": STATE_VOLUME}}:
         found.append("volumes")
-    # Nothing writes or rotates a Compose secret; a config is a tracked file that
-    # bfx-deploy writes from the release's own revision, never an interpolated
-    # `content`/`environment` value.
-    if rendered.get("secrets"):
-        found.append("no_secrets")
+    found += secret_violations(rendered, uninterpolated=uninterpolated)
+    # A config is a tracked file that bfx-deploy writes from the release's own revision,
+    # never an interpolated `content`/`environment` value.
     configs = rendered.get("configs") or {}
     if not isinstance(configs, dict) or any(
             not isinstance(c, dict) or set(c) - {"name", "file"} or not c.get("file")
@@ -448,7 +498,7 @@ def main(argv: list[str] | None = None) -> int:
         found = operator_violations(rendered) + operator_uninterpolated_violations(uninterpolated)
     else:
         found = violations(rendered) + env_file_violations(uninterpolated) \
-            + [f"uninterpolated:{v}" for v in top_level_violations(uninterpolated)]
+            + [f"uninterpolated:{v}" for v in top_level_violations(uninterpolated, uninterpolated=True)]
     for item in found:
         print(f"compose-policy: violation {item}", file=sys.stderr)
     if not found:

@@ -719,7 +719,7 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 
 **Venue 軸（`core/venue.py`、`apps/venue.py`）**：`Venue = "bitfinex" | "simulated"` 是 `MarketfeedConfig.phase` 的計算屬性（`live→bitfinex`、`shadow→simulated`），不儲存也不能單獨設定。`BFX_ALLOCATION_CAP_USDT`、`BFX_BALANCE_BUFFER_USDT`、`BFX_CONCENTRATION_PCT`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`、`BFX_EXECUTOR` 任何 phase 設了都在 `load_config` 拒絕（資金上限是已套用 CapitalPolicy 的，venue 由 phase 決定）。兩個 venue 的開機順序相同：schema head → `database_realm` → authority（該 venue 的集合）→ 之後才碰 vault、憑證與任何 client。simulated 的任何拒絕都 dispose engine 並擲出（不寫、不碰 venue）；Bitfinex 路徑另走 `_refuse_live_boot` 告警。
 
-`build_venue(config, ...)`（`apps/venue.py`，唯一 import `simulated_venue.wiring` 的地方，也是唯一決定 venue 差異的地方）對兩個 venue 回傳同形的 `VenueWiring`：憑證（來源也在此：Bitfinex 讀 vault，simulated 每次開機以 `secrets.token_hex` 產生，且 `BFX_VAULT_KEK` 出現在環境中就拒絕開機）、auth REST 與 executor（含 kill switch 的 cancel-all）使用的 `httpx` client、每個 process 一個 `AuthRequestGate`、`VenueCapabilities`（`auth_ws` required／forbidden；`build_executor` 檢查 capabilities，不比對 venue 字串）、venue 自己的 task 與 `aclose`（`Daemon.venue_tasks`／`venue_aclose`，開機時先啟動並等 ready）。`load_account_bootstrap` 只讀帳戶列與 config draft，憑證由 wiring 提供。架構測試禁止 `apps/venue.py` 以外的程式比對 venue 名稱。
+`build_venue(config, ...)`（`apps/venue.py`，唯一 import `simulated_venue.wiring` 的地方，也是唯一決定 venue 差異的地方）對兩個 venue 回傳同形的 `VenueWiring`：憑證（來源也在此：Bitfinex 讀 vault，simulated 每次開機以 `secrets.token_hex` 產生，且 `BFX_VAULT_KEK` 出現在環境中或掛成秘密檔就拒絕開機）、auth REST 與 executor（含 kill switch 的 cancel-all）使用的 `httpx` client、每個 process 一個 `AuthRequestGate`、`VenueCapabilities`（`auth_ws` required／forbidden；`build_executor` 檢查 capabilities，不比對 venue 字串）、venue 自己的 task 與 `aclose`（`Daemon.venue_tasks`／`venue_aclose`，開機時先啟動並等 ready）。`load_account_bootstrap` 只讀帳戶列與 config draft，憑證由 wiring 提供。架構測試禁止 `apps/venue.py` 以外的程式比對 venue 名稱。
 - **bitfinex**：process 共用的真 client，requires auth WS（由 `VenueCapabilities.auth_ws` 決定，無 env flag）。
 - **simulated**：`SqlVenueEventStore.open(engine)` 開在同一個資料庫（log 是 `sim_venue_event`），realm 必須是 `shadow`／`ci` 且 epoch 為 `ledger`；auth REST／executor 走 `httpx.AsyncClient(transport=<venue>)`，因此不會有任何 authenticated request 離開 process；公開 client 仍是真的（`FundingRules`、蠟燭、book）。沒有 auth WS（`VenueCapabilities.auth_ws="forbidden"`）；漏掉的 fill 靠週期 reconcile 與 resync 補上。`BFX_SIM_INITIAL_WALLETS=UST:1000,...` 只在 venue log 為空時以一次 append（`expected_seq=0`）入帳，重啟不重複入帳，賽跑輸家得 `ConcurrentAppendError`；Bitfinex wiring 設了它就拒絕。
 - **兩者相同**：同一條 safety config（`configs/safety.live.yaml`）、同一條 guard chain（含 `CapitalPolicyGuard`、pre-trade guards、`WriterLockGuard`）、reconciler、`InterestLedgerSync`／`CreditHistorySync`、kill switch（`venue=executor`）；每個 symbol 都必須讀得到已套用的 ledger CapitalPolicy；capital ports 也是同一組（`build_capital_ports`，3e）。兩個 venue 的開機拒絕都走 `_refuse_live_boot` 告警（告警路由是設定，`AlertSink` 已加 realm 前綴）。
@@ -824,8 +824,35 @@ CHECK `ck_exchange_account_credentials_active_user_id`（migration `36e59526f8cf
 靜態 admin token 不能 resume live。bot `/admin` 有兩把 token（常數時間比對）：`BFX_ADMIN_TOKEN` 可讀狀態也可 halt，只在 bot 與 `bfx-op halt`；`BFX_ADMIN_READ_TOKEN` 只能讀 `trading-status`／`dry-evaluate`，webapi 的 funding status 只持有這把（9d-2）。webapi 環境裡出現 `BFX_ADMIN_TOKEN`（非空）或 `BFX_VAULT_KEK`（不論值）就拒絕開機（`apps/webapi.py` lifespan），部署因此失敗回滾：halt token 與解開憑證 vault 的 KEK 只在 bot（9g，F29）。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 
-**關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`、
-`BFX_EXCHANGE_ACCOUNT_ID`、`BFX_VAULT_KEK`、
+**秘密的來源（9h，`core/secret_files.py`）**：
+- 常駐的 bot 與 webapi 以 `BFX_SECRETS_DIR=/run/secrets` 執行。秘密是 compose 的檔案型 secret，掛在 `/run/secrets/<KEY>`。
+  - 在這個模式下，`FILE_SECRET_KEYS`（`DATABASE_URL`、`BFX_ADMIN_TOKEN`、`BFX_ADMIN_READ_TOKEN`、`BFX_VAULT_KEK`、
+    `TELEGRAM_BOT_TOKEN`）**只**從檔案讀。缺檔或空檔是 `SecretFileError`（ValueError：bot exit 1，webapi 拒絕開機）。
+  - env 裡同名的 key 一律忽略，不是 fallback；開機時以 `secret_env_keys_ignored` 列出名稱。
+  - 值不寫回 `os.environ`，所以 `docker inspect`、`docker exec env` 與 exec 出來的子行程都看不到秘密。
+- 唯一的 reader 是 `read_secret`。consumer 有：`load_config`、`load_settings`（webapi）、`load_kek`、`admin_tokens`、
+  `AlertSink.from_environment`、funding status 的 read token。
+  - `tests/core/test_secret_files.py` 以 AST 掃描，禁止 `src/` 其他地方直接從 env 讀這些 key。
+  - 例外是一次性的 `operator_cli`、`restore_boot_check`。
+- 沒有 `BFX_SECRETS_DIR` 的 process 照舊從 env 讀同樣的 key。這是依 process 劃分，不是過渡期：一次性容器（operator
+  CLI、每週報告、研究、模擬 soak、migration、DR）、測試與本機執行都屬於這一類。
+- 遮蔽：`alerts.secret_values` 同時涵蓋 env 與秘密檔的值（含各 DB 密碼），告警與 Sentry 的 scrub 都用它。
+- pydantic-settings 會自己從 env 填 `DATABASE_URL`：含秘密欄位的 `BaseSettings`（`Settings`）只在 `core/settings.py`
+  的 `load_settings()` 裡建，它把 reader 讀到的值明確傳進去；`tests/core/test_secret_files.py` 的 AST 測試擋住 `src/`
+  其他地方的直接建構（`scripts/` 與 `alembic/env.py` 是 one-shot，照舊讀 env）。
+- 拒絕條件（`secret_present`，env 的 key 即使是空值、或秘密檔即使是空檔都算）：
+  - webapi 拿到 `BFX_VAULT_KEK` 或 `BFX_ADMIN_TOKEN` 就拒絕開機；
+  - simulated venue 開機時有 KEK 就拒絕。
+- `bfx-op halt` 的 HALT_SCRIPT 在 bot 容器內用同一條規則讀 admin token。它是自帶的程式，不 import image 裡的 reader，
+  因為主機工具與 image 的版本可能不同。
+- 主機檔案是 `root:4600 0640`。compose 的檔案型 secret 會忽略 uid／mode，所以兩個服務以 `group_add` 加入 4600。
+  - compose 檔的形狀由 `compose_policy.py` 鎖住；
+  - 檔案在每次部署前由 `bfx_deploy.shared_secret_file` 檢查，連同上面兩層目錄（`secret_directory`：root 擁有、
+    group／other 不可寫、不是 symlink）。
+- one-shot 與 `SENTRY_DSN`（依設計公開）留在 env。輪替見 `docs/runbooks/secret-rotation.md`。
+
+**關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`（bot／webapi 是秘密檔，見上）、
+`BFX_EXCHANGE_ACCOUNT_ID`、`BFX_VAULT_KEK`（bot 是秘密檔）、
 `BFX_SIM_INITIAL_WALLETS`、`BFX_SIM_FAULTS`（simulated 專用，Bitfinex 組裝設了就拒絕開機）、
 `BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_SCHEDULER_BUFFER_S`、
 `BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`、`BFX_LOOP_WATCHDOG_S`（event loop watchdog 秒數，預設 120）。已退役、設了就拒絕開機：`BFX_EXECUTOR` 與舊資金 env（`BFX_ALLOCATION_CAP_USDT`、`BFX_BALANCE_BUFFER_USDT`、`BFX_CONCENTRATION_PCT`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`）。
