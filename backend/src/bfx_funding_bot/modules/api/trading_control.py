@@ -109,7 +109,7 @@ def build_trading_control_router() -> APIRouter:
             request_id = await commands.request_trading_control(
                 session, context, action="kill", reason=body.reason, now_ms=_now_ms())
         except OperatorCommandError as exc:
-            raise command_error(exc) from exc
+            raise command_error(exc, context=context) from exc
         return {"data": {"request_id": str(request_id), "action": "kill", "state": "requested"}}
 
     @router.post("/currencies/{symbol}/disable", status_code=202)
@@ -123,7 +123,7 @@ def build_trading_control_router() -> APIRouter:
                 session, context, symbol=symbol, action="disable", reason=body.reason,
                 now_ms=_now_ms())
         except OperatorCommandError as exc:
-            raise command_error(exc) from exc
+            raise command_error(exc, context=context) from exc
         return {"data": {"request_id": str(request_id), "symbol": symbol, "action": "disable",
                          "state": "requested"}}
 
@@ -135,7 +135,7 @@ def build_trading_control_router() -> APIRouter:
         try:
             row = await commands.get_currency_request(session, context, request_id)
         except OperatorCommandError as exc:
-            raise command_error(exc) from exc
+            raise command_error(exc, context=context) from exc
         return {"data": commands.currency_request_view(row)}
 
     @router.get("/requests/{request_id}")
@@ -145,7 +145,7 @@ def build_trading_control_router() -> APIRouter:
         try:
             row = await commands.get_trading_request(session, context, request_id)
         except OperatorCommandError as exc:
-            raise command_error(exc) from exc
+            raise command_error(exc, context=context) from exc
         return {"data": commands.trading_request_view(row)}
 
     return router

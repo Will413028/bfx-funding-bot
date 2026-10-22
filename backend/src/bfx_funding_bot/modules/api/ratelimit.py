@@ -19,6 +19,7 @@ from typing import Literal
 from fastapi import Depends, HTTPException, Request, Response, status
 
 from bfx_funding_bot.core.auth import Principal, require_operator
+from bfx_funding_bot.core.security_log import RATE_LIMITED, clip, security_event
 
 Scope = Literal["read", "write"]
 
@@ -97,10 +98,14 @@ def build_rate_limit_dependency(
         scope: Scope = "read" if request.method in ("GET", "HEAD") else "write"
         retry_in = _limiter.acquire(user.user_id, scope)
         if retry_in is not None:
+            retry_after = max(1, math.ceil(retry_in))
+            security_event(RATE_LIMITED, reason=f"{scope}_bucket_empty", method=request.method,
+                           path=clip(request.url.path), user_id=user.user_id,
+                           login=clip(user.email), retry_after_s=retry_after)
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="rate_limited",
-                headers={"Retry-After": str(max(1, math.ceil(retry_in)))},
+                headers={"Retry-After": str(retry_after)},
             )
 
     return enforce_rate_limit

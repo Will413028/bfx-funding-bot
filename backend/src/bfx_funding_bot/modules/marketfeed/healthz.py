@@ -159,6 +159,9 @@ async def run_healthz_server(
     config = uvicorn.Config(
         app=app, host=host, port=port,
         log_level="warning", access_log=False,
+        # uvicorn's own dictConfig would give its loggers text handlers again; without it
+        # they propagate to the bot's JSON root handler (core/log_format.py).
+        log_config=None,
         loop="asyncio",
         # uvicorn default is None = wait forever for in-flight connections.
         # In a run-duration exit this hung daemon TaskGroup drain indefinitely

@@ -1,4 +1,5 @@
 """SP5 rate limiting — pure token bucket + FastAPI dependency wiring."""
+import logging
 from decimal import Decimal  # noqa: F401  (parity with sibling test modules)
 
 import pytest
@@ -87,3 +88,17 @@ def test_write_bucket_independent_of_read(client: TestClient) -> None:
     assert client.get("/thing").status_code == 429
     assert client.post("/thing").status_code == 200   # write bucket untouched
     assert client.post("/thing").status_code == 429   # write cap 1
+
+
+def test_a_429_is_logged_with_the_operator(client: TestClient, caplog: pytest.LogCaptureFixture) -> None:
+    """9j: who hit the limit, on which bucket, and when to retry."""
+    with caplog.at_level(logging.WARNING, logger="bfx.security"):
+        client.post("/thing")
+        assert [r for r in caplog.records if r.name == "bfx.security"] == []
+        assert client.post("/thing").status_code == 429
+
+    [record] = [r for r in caplog.records if r.name == "bfx.security"]
+    assert (record.event, record.reason) == ("rate_limited", "write_bucket_empty")
+    assert (record.user_id, record.login) == ("user_abc", "w@e.com")
+    assert (record.method, record.path) == ("POST", "/thing")
+    assert record.retry_after_s >= 1
