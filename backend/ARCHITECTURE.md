@@ -20,7 +20,7 @@ bfx-funding-bot 在 Bitfinex 的 funding（放貸）市場上自動掛單放貸�
 3. **單一寫入者曝險（single-writer exposure）**：`DeploymentReconciler` 是 venue 提交的唯一寫入者；訊號層不送單。
 4. **Reconcile 即正確性骨幹（reconcile-as-correctness-backbone）**：venue（透過 REST）是曝險真相的權威來源；90s 週期的觀測 cycle 保證 ledger 收斂。WebSocket 只產生 venue hint（要求提早 reconcile），不寫任何資金狀態。
 
-部署形態：單一長駐 daemon，以 `asyncio.TaskGroup` 並行跑多個 sub-task；全 stack 自托於單一 Oracle Cloud VM（下稱 `<vm-host>`；docker compose：`bfx-bot`/`bfx-webapi`/`bfx-netns`/`bfx-tailscale`/`bfx-postgres`(PG 18)/`bfx-redis`）。Koyeb/Neon/Upstash 為歷史平台（2026-05-31 Koyeb cutover、2026-06-23 Neon/Vercel 歸零）。
+部署形態：單一長駐 daemon，以 `asyncio.TaskGroup` 並行跑多個 sub-task；全 stack 自托於單一 Oracle Cloud VM（下稱 `<vm-host>`；docker compose：`bfx-bot`/`bfx-webapi`/`bfx-netns`/`bfx-tailscale`/`bfx-postgres`(PG 18)）。Koyeb/Neon/Upstash 為歷史平台（2026-05-31 Koyeb cutover、2026-06-23 Neon/Vercel 歸零）。
 
 ### Web API identity (9d-5) and Halt 1 identity
 
@@ -44,6 +44,25 @@ operator identity、UUID path、membership/lifecycle，再進入 handler；不�
 沒有 membership 的帳號都回 non-enumerating 404。daemon 只接受
 `BFX_EXCHANGE_ACCOUNT_ID`，啟動時載入 active account、credential 與 config
 draft；缺少、未知、retired 或 halted account 都 fail closed。
+
+**API 契約（9k）**：後端的 pydantic response model 是 `/api/v1` 回應形狀的唯一來源。每個
+JSON route 宣告回應型別（`modules/api/schemas.py` 的 `Envelope[T]` 包成 `{"data": ...}`；
+executions 另帶 `pagination`）；多數欄位用 `serialization_alias` 輸出 camelCase，
+trading-control 與 funding-status 維持 snake_case。值域封閉的欄位是 `Literal`，有 domain
+型別就直接用（`TradingAction`、`RequestState`、`AccountRole`、ledger 的 `OfferState`／
+`UncertaintyState`／`UncertaintyKind` 等；`UNCERTAINTY_KINDS` 由 mypy 綁到 `UncertaintyKind`）；只有常數或 DB CHECK constraint 的，由
+`tests/modules/api/test_literal_sources.py` 逐欄位綁到來源（每個 response `Literal` 都要登記），
+`tests/integration/test_api_literal_checks.py` 再與 migrate 後的 CHECK 比對，來源單邊改動就失敗。
+值域外的值讓回應 500（`schemas.install_response_shape_handler`：記 route、model 與欄位路徑，
+不記值，回 `response_shape_mismatch`；FastAPI 自己的 `ResponseValidationError` 同樣處理），不送到 console；uncertainties 的讀取照 `_rendered`
+回 503。config draft 的 GET 不因存檔與現行 `StrategyConfigBody` 不符而失敗：`config` 為 null、
+`configError` 為 `config_unreadable`（只記欄位名），console 仍看得到草稿並可覆寫。`funding-status` 只在 daemon 的 `/admin/trading-status` 與
+`/admin/dry-evaluate` 符合 `FundingStatus` 時轉送（console 讀的欄位有型別，其餘照原樣
+轉送）；形狀不符時記下欄位路徑（不含值），回 503，和 daemon 連不到的情況一樣。prod 不提供
+`/openapi.json`；`scripts/dump_openapi.py` 離線以 `app.openapi()` 寫出 commit 進 repo 的
+`backend/openapi.json`，前端用 openapi-typescript 從它產生 `frontend/src/types/api.gen.ts`
+（`pnpm gen:api`）。CI 的 Frontend job 重新產生兩者，有差異就失敗；回應形狀由
+`tests/modules/api/test_response_contract.py` 對 `golden/responses.json` 逐 route 比對。
 
 `account_id` text 欄位在 Halt 1 contract migration 後只保留為 immutable
 legacy/audit provenance；新讀寫的 owner/filter 是 `exchange_account_id`。credentials
@@ -221,7 +240,7 @@ WS 與 REST 都不再以 delta 改寫任何資金數字：fill、撤單、credit
 - **Grace**：`ledger.BOOT_GRACE_MS`=0、`RUNTIME_GRACE_MS`=120 000。無 outcome 的 attempt 早於 grace 就以 `unknown`（reason `unresolved_at_boot`）結束（`journal.close_dangling`）；同一個 grace 也用在無 provenance 的 venue offer 告警。boot 時持有 writer lock、沒有 in-flight 的 submit，所以 grace 0。
 - **Boot（`Daemon._run_boot_recovery`）**：`query_admission_refused` 擲 `BootInvariantError`（grace 0 下所有無 outcome 的 attempt 都已關閉，不應發生）；`fenced`／`incomplete_or_unequal` 記 WARNING、`periodic_reconcile.note_boot(decision)` 並繼續（沒有 accepted basis，交易由 `snapshot_query_pending`／`snapshot_unavailable` 擋下）；`accepted` 繼續。
 - **Boot 等待不可達的依賴（`Daemon._boot_until_observed`、`marketfeed/boot_wait.py`）**：boot observation 因 venue 不可達而失敗（`is_transient_dependency_error`，兩步判斷：先沿整條例外鏈——`__cause__` 與 `__context__`，連 `from None` 隱藏的 context 也看——找明確的拒絕，任何一環是拒絕就不重試、拒絕開機：`FatalError`、`ssl.SSLCertVerificationError`、`PermissionError`、venue 的回答（`BitfinexAPIError` 帶 `["error", CODE, …]` body 且 CODE 不是 rate limit 11010／not ready 11000／maintenance 20060——見 `external/bitfinex/errors.TRANSIENT_VENUE_ERROR_CODES`，Bitfinex 以 HTTP 500 回 `apikey: invalid`、`nonce: small`——或 429 以外的 4xx）。所以 TLS 憑證驗證失敗即使被包成 `httpx.ConnectError`、再包成 status 0 的 `BitfinexAPIError`，仍是拒絕。沒有任何拒絕時，`raise ... from` 鏈上有一環是連不上才算 transient：status 0（transport 錯誤或 deadline）、沒有上述 body 的 429／5xx、連線層 `OSError`（`ConnectionError`、`socket.gaierror`、`TimeoutError`、網路 errno 或無 errno 的 plain `OSError`）、`httpx.TransportError`、`TransientError`、asyncpg 的 `CannotConnectNowError`／`ConnectionDoesNotExistError`、`connection_invalidated` 的 `DBAPIError`；其他一律拒絕開機）時，在 process 內以 1、2、4… 秒、上限 60 秒的 backoff 重試，不退出（退出只會重啟進同一個 outage、crash-loop）；每次記 WARNING，每段等待只發一次 `boot_waiting` 告警。等待期間 TaskGroup 尚未啟動，沒有任何會送單的 task；SIGTERM 設 stop event 即結束等待、乾淨退出。每次重試前以 `WriterLockWatch.check()` 確認仍持有 writer lock（斷線則重取，被別人持有則 `WriterLockLostError` 退出），所以 observation 只以 single writer 身分執行。因此資料庫在 boot observation 時不可達，並不會在這裡等：第一次重試前的 check 重取不到鎖 → `WriterLockLostError`（`daemon_fatal` 與 `boot_refused` 告警）→ 退出一次、container 重啟 → 新的 process 在 `wait_for_database` 等資料庫；這是 single-writer fencing，刻意保留。在這一步於 process 內等待的只有 venue 不可達。venue 拒絕帳戶的 key（10100 或 401／403，見下一條）不結束開機，改進憑證恢復模式；其他失敗（nonce 10114 等拒絕、invariant）照舊拒絕開機。
-- **憑證恢復模式（`Daemon._run_credential_recovery`，ADR `2026-10-18-venue-credential-rejection-recovery-mode`）**：分類在 `external/bitfinex/errors.py`：`VenueCredentialRejectedError`（`BitfinexAPIError` 的子類）＝body 的 venue code 為 `ERR_AUTH_FAIL` 10100，或 HTTP 401／403；所有簽名讀取經 `_signed_post` 依此選型別，`credential_rejection(exc)` 沿 `__cause__`／`__context__` 找它（同 boot wait 的走法）。`is_transient_dependency_error` 仍判它非 transient。開機觀測遇到它時 `_boot_until_observed` 回 `CREDENTIAL_REJECTED`，`Daemon.run` 不建立任何交易 task，改跑一個只有 `CredentialRotationWorker`（Bitfinex 才有）、`health_check`、`db_keepalive`、healthz 與 writer lock liveness 的 TaskGroup，外加重試迴圈；不跑 trading control（kill 的 cancel-all 會用被拒的 key、被記成 `failed`，所以 kill 留在佇列，下次以可用的 key 開機才套用並撤單）。狀態：`booted=False`、`/healthz` 200（只看已 beat 的 liveness key，部署閘門判成功）、`/readyz` 503（market data 從未 fresh）、CRITICAL `credential_recovery_mode` 告警一則（dedup 欄位 `account`）；worker 收到 `note_credential_recovery()`，照常發佈收件公鑰、套用輪替（仍守 `BOT_SETTLE_WINDOW`），但不以被拒的 key 補 user id。重試迴圈以 60、120、240 秒、之後每 300 秒的 backoff（`credential_recovery_retry_delay_s`），每次先 `WriterLockWatch.check()`，再讀 active 憑證的 `api_key`：與開機載入的不同 → 出口；相同才重跑開機觀測：仍被拒或 venue 不可達 → 繼續等，其他例外 → 往外丟、照舊拒絕開機，成功 → 出口。出口（含輪替 applied 的 worker 重啟）一律是 stop event → `clean_stop`、exit 0 → restart policy 開新 process 正常開機；重試的出口先等到 run（`Daemon.bind_run`，取自 `bot_runs.started_at_ms`；沒有紀錄時從進入恢復模式起算）滿 `BOT_SETTLE_WINDOW`，因為部署進恢復模式時 bfx-deploy 照樣 health wait 與 settle。執行中被拒（只認 `venue_coded`，即 body 帶 10100；不帶 body 的 401／403 可能是閘道頁面，照一般抓取失敗累計）：`PeriodicReconcile._tick` 不把它算成抓取失敗，往外丟（包在別的例外裡時以 `VenueCredentialRejectedError` 重丟），`apps.bot._run_daemon` 的 `except* VenueCredentialRejectedError`（排在 `except* Exception` 之前）發 `daemon_fatal`、記 `fatal`、exit 78，重啟後由開機進恢復模式；偵測延遲最多一個 reconcile 週期。送單結果的分類不變（被拒期間的送單仍記 UNKNOWN，恢復後由既有 uncertainty 流程收斂）。終局：權限重查與 IP 白名單的「不合規」併入同一個進入點與告警，不另開停單狀態。`build_daemon` 第一次碰資料庫前同樣以 `wait_for_database`（`SELECT 1`）等資料庫可連線；非 transient 錯誤（密碼、資料庫不存在）照舊走 `_refuse_live_boot`。
+- **憑證恢復模式（`Daemon._run_credential_recovery`，ADR `2026-10-18-venue-credential-rejection-recovery-mode`）**：分類在 `external/bitfinex/errors.py`：`VenueCredentialRejectedError`（`BitfinexAPIError` 的子類）＝body 的 venue code 為 `ERR_AUTH_FAIL` 10100，或 HTTP 401／403；所有簽名讀取經 `_signed_post` 依此選型別，`credential_rejection(exc)` 沿 `__cause__`／`__context__` 找它（同 boot wait 的走法）。`is_transient_dependency_error` 仍判它非 transient。開機觀測遇到它、或 key 不合規（見下面的權限重查）時 `_boot_until_observed` 回 `CREDENTIAL_REJECTED`，`Daemon.run` 不建立任何交易 task，改跑一個只有 `CredentialRotationWorker`（Bitfinex 才有）、`health_check`、`db_keepalive`、healthz 與 writer lock liveness 的 TaskGroup，外加重試迴圈；不跑 trading control（kill 的 cancel-all 會用被拒的 key、被記成 `failed`，所以 kill 留在佇列，下次以可用的 key 開機才套用並撤單）。狀態：`booted=False`、`/healthz` 200（只看已 beat 的 liveness key，部署閘門判成功）、`/readyz` 503（market data 從未 fresh）、CRITICAL `credential_recovery_mode` 告警一則（dedup 欄位 `account`；`reason` 為 `venue_refused_key` 或 `credential_noncompliant:<原因>`）；worker 收到 `note_credential_recovery()`，照常發佈收件公鑰、套用輪替（仍守 `BOT_SETTLE_WINDOW`），但不以被拒的 key 補 user id。重試迴圈以 60、120、240 秒、之後每 300 秒的 backoff（`credential_recovery_retry_delay_s`），每次先 `WriterLockWatch.check()`，再讀 active 憑證的 `api_key`：與開機載入的不同 → 出口；相同才重跑開機觀測：仍被拒或 venue 不可達 → 繼續等，其他例外 → 往外丟、照舊拒絕開機，成功 → 出口。出口（含輪替 applied 的 worker 重啟）一律是 stop event → `clean_stop`、exit 0 → restart policy 開新 process 正常開機；重試的出口先等到 run（`Daemon.bind_run`，取自 `bot_runs.started_at_ms`；沒有紀錄時從進入恢復模式起算）滿 `BOT_SETTLE_WINDOW`，因為部署進恢復模式時 bfx-deploy 照樣 health wait 與 settle。執行中被拒（只認 `venue_coded`，即 body 帶 10100；不帶 body 的 401／403 可能是閘道頁面，照一般抓取失敗累計）：`PeriodicReconcile._tick` 不把它算成抓取失敗，往外丟（包在別的例外裡時以 `VenueCredentialRejectedError` 重丟），`apps.bot._run_daemon` 的 `except* VenueCredentialRejectedError`（排在 `except* Exception` 之前）發 `daemon_fatal`、記 `fatal`、exit 78，重啟後由開機進恢復模式；讀取被拒的偵測延遲最多一個 reconcile 週期。送單被拒（9g）不等下一個週期：送單結果的分類不變（HTTP 500 帶 10100 仍是 UNKNOWN，command gate 照常耐久寫入，因為被拒的 key 不是「沒掛上」的證據），但 `DeploymentReconciler` 記完這筆 UNKNOWN 後以 `submit_outcomes.key_refused_on_submit` 判出 10100，立刻丟出 `VenueCredentialRejectedError`（不帶 venue 原文，可能回顯憑證），這個 tick 不再送下一筆；`PeriodicReconcile._deploy` 與 `_tick` 共用 `_raise_if_key_refused`（只認 `venue_coded`），讓它穿過「deployment 不打掛骨幹」的 catch，走同一個 exit 78。換上可用的 key 重啟後，這筆 UNKNOWN 由被接受的觀測自動結案（`not_accepted`；venue 從未掛上），不寫 HALTED（`tests/integration/test_submit_key_refused.py`）。**Key 權限重查（9g，`execution/credential_compliance.py`）**：`CredentialCompliance.check` 用輪替驗證的同一條規則檢查現行 key：`permission_error`（只准 funding 寫入，withdraw 等其他寫入一律拒），再比對 `info/user` 與 active 憑證列存下的 `bitfinex_user_id`（沒有 id、或 id 不同都拒）；不合規丟 `CredentialNoncompliantError`，只有格式正確、違反規則的回答才算不合規。venue 的回答（10100、沒回答、任一讀取解析不了的 `BitfinexShapeError`）原樣往外丟。執行中的 key 已被輪替換掉（輪替已 commit、它的重啟還沒結束這個 run：`replaced_by_rotation`）丟 `CredentialSupersededError`，不是對 key 的判決（完全沒有 active 列則是判決 `no_active_credential`：輪替在同一個交易裡換列，沒有 active 列代表 key 被人撤下，bot 停止使用它；執行中 exit 78，重啟時 `load_account_credentials` 讀不到憑證、開機被拒而不進恢復模式，fail closed）：輪替的重啟（`CredentialRotationWorker.committed` 或它的 catch-up 設 stop event、exit 0）才是換 key 的路，重查不自己結束 process；恢復模式的重試迴圈遇到它就進下一輪，由下一輪的 active 憑證比對出口。只接 vault 憑證的 venue（Bitfinex），經共用的 `auth_rest`（同一個 nonce gate）。開機：`Daemon._boot_attempt` 先跑它再跑開機觀測，`_boot_until_observed` 與恢復模式的重試迴圈都跑同一個 attempt（`credential_refusal` 把不合規與被拒都歸成恢復模式），所以不合規的 key 進同一個恢復模式、同一則告警，key 改好（重試通過）或換掉（輪替／active 憑證換了）才出口，不另開停單狀態（ADR 2026-10-18 D11）。執行中：`credential_recheck` sub-task 每 6 小時（`CREDENTIAL_RECHECK_INTERVAL_S`）跑一次，不合規或 venue 帶 10100 拒絕 → 往外丟，`_run_daemon` 的 `except* CredentialNoncompliantError`／`except* VenueCredentialRejectedError`（都排在 `except* Exception` 之前）發 `daemon_fatal`、exit 78，重啟後由開機進恢復模式；其他情況（venue 沒回答、回答解析不了、不帶 body 的 401／403、10114 之類不是 key 的拒絕、`CredentialSupersededError`）→ 300 秒後再查，不停單；連續 `CREDENTIAL_RECHECK_ALERT_AFTER`=12 次（第一次失敗後約 55 分鐘）發一則 WARNING `credential_recheck_failing`（dedup 欄位 `account`、`recovered`），之後一次通過發 `recovered=true`（INFO）並歸零，讓永遠過不了的重查不會無聲停擺。IP 白名單 bot 讀不到（permissions 只有 scope 三欄），是人做的控制（Bitfinex key 設白名單），不在程式裡。`build_daemon` 第一次碰資料庫前同樣以 `wait_for_database`（`SELECT 1`）等資料庫可連線；非 transient 錯誤（密碼、資料庫不存在）照舊走 `_refuse_live_boot`。
 - **未接受與失敗**：只有 `accepted` 的 cycle 之後才 deploy。連續未接受 → `HealthTarget.RECONCILE=DEGRADED`，連續數達 `max_consecutive_failures=3` 時發 `reconcile_not_accepted` 告警；下一個 accepted 清除。cycle 擲例外連續 3 次 → `HealthTarget.EXECUTOR=DOWN`，由 `AuthHealthGuard` 擋新單；失敗計數與 DOWN 只在下一個 accepted cycle 清除（fenced／incomplete／refused 不清）。reconcile 迴圈絕不讓例外打掛 daemon。
 - **Resync 觸發**：`ResyncChannel` 是唯一的提早 reconcile 入口。authenticated WS（`external/bitfinex/auth_ws.py`）在非首次連線（`reconnect`，含 venue 以 20051/20061 要求重連後的那次）與 SEQ_ALL 序號 gap（`seq_gap`）時要求；ledger hint sink 在 WS `foc`／`fcc` 時要求（每個 `(kind, venue id)` 5 秒 leading-edge 窗口）。多次請求合併成一次，並受 `BFX_RESYNC_MIN_INTERVAL_S`（預設 10 s）debounce。首次連線由 boot cycle 涵蓋。
 
@@ -423,7 +442,9 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 **Execution observability**：固定 structured event names 為 `funding.execution.eligibility`、`funding.execution.blocked`、`funding.execution.submitted`、`funding.book.snapshot_invalid`、`funding.fill_model.unavailable` 與 `funding.optimizer.no_recommendation`。每筆帶 decision/reconcile id、policy、outcome、reason 與 bounded evidence；不含 secret 或未界定 exception text。Prometheus 使用 `bfx_execution_decisions_total{outcome,reason,policy}`、`bfx_execution_audit_persist_failures_total`、`bfx_funding_book_snapshots_total{result}`、`bfx_funding_book_snapshot_age_seconds`、`bfx_execution_gate_duration_seconds`、`bfx_trading_ready`。cell、symbol、candidate rate、artifact hash 與完整 book evidence 僅留在 logs/audit，絕不成為 metric label。
 
-**Telemetry 與 diagnostics 分流**：operational telemetry（SIGNAL／HEALTH_CHECK／ORDER_SUBMIT／lifecycle 與上述 execution events）只寫 stdout 的 JSON line（`observability/stdout_sink.py`，logger `bfx_funding_bot.events`），由容器 log driver 收集，沒有第三方 log 平台 client；metrics 走 Prometheus，OTLP tracing（`observability/tracing.py`）預設關閉且 fail-open。forensic 的 DECISION／SAFETY_TRIGGER／CANCEL_AUDIT 由 `DiagnosticsSink`（`execution/diagnostics/sink.py`）寫 `diagnostics` 表：每筆**自己開一個 transaction**（`session_scope`，絕不搭 command transaction），失敗只記 log、永不往上拋，未列在 `_KIND_BY_EVENT_TYPE` 的事件直接丟棄。
+**Telemetry 與 diagnostics 分流**：operational telemetry（SIGNAL／HEALTH_CHECK／ORDER_SUBMIT／lifecycle 與上述 execution events）只寫成 log record（`observability/stdout_sink.py`，logger `bfx_funding_bot.events`，訊息本身是事件的 JSON，落在 process log 那一行的 `msg` 字串裡），由容器 log driver 收集，沒有第三方 log 平台 client；metrics 走 Prometheus，OTLP tracing（`observability/tracing.py`）預設關閉且 fail-open。forensic 的 DECISION／SAFETY_TRIGGER／CANCEL_AUDIT 由 `DiagnosticsSink`（`execution/diagnostics/sink.py`）寫 `diagnostics` 表：每筆**自己開一個 transaction**（`session_scope`，絕不搭 command transaction），失敗只記 log、永不往上拋，未列在 `_KIND_BY_EVENT_TYPE` 的事件直接丟棄。
+
+**Process log 與安全事件（9j，`core/log_format.py`、`core/security_log.py`）**：bot（`apps/bot.py:main`）與 web API（`apps/webapi.py` import 時；lifespan 只套 `LOG_LEVEL`）都呼叫 `configure_logging(service)`：root logger 掛一個寫 stderr 的 handler，每筆 record 一行 JSON：`ts`（UTC ISO-8601、毫秒、`Z`）、`level`、`service`（`bot`／`webapi`）、`logger`、`msg`（`record.getMessage()`，原本的訊息文字），traceback 在 `exc`，呼叫端 `extra=` 的欄位原樣成為欄位（與核心欄位同名時改名 `extra_<名>`）。編碼用 `json.dumps(ensure_ascii=True)`：CR、LF、其他控制字元與 U+2028／U+0085 都被跳脫，request 帶進來的值無法另起一行偽造 log（F37）。沒有新依賴。uvicorn 的 logger 交給 root：web API 在 uvicorn 設定完自己的 logger 之後才 import app，所以 `configure_logging` 清掉它們的 handler、改成往上傳；bot 的 healthz 以 `log_config=None` 建 `uvicorn.Config`，不再裝回文字 handler。root 已經有別人的 handler（pytest 的 capture、CLI 的 `basicConfig`）時不接管，與 `basicConfig` 相同。遮罩不在 formatter：alert 文字在送進 log 前已去掉 secret，httpx 的 Telegram URL filter 改寫 record，Sentry 的 `before_send` 照舊處理 breadcrumb（含 extra 欄位）。Grafana 規則（homelab，`{container="bfx-bot"}` 的行數、`|= "deployment_skip"`、`|~ "deployment_submit_rejected|deployment_submit_error"`）比對的是整行原文，事件名仍在 `msg` 裡，所以不受影響。安全事件由 logger `bfx.security` 以 WARNING（開機拒絕為 CRITICAL）寫出，欄位 `event`、`reason`，以及已知時的呼叫者（Serve 轉送的 tailnet login、capability 帶的 node user ID、operator `user_id`），從不記 token、帶 token 的 header 或 request body，request 來的字串截到 200 字：`access_denied`（web API `require_operator` 的兩種 401、帳戶不是成員或 viewer 寫入的 `account_write_required`、bot `/admin/*` 的 401／403 含 peer 位址）、`request_rejected`（ingress 的 `host_not_allowed`／`cross_site_refused`／`json_required`，含失敗的 header 名與值）、`rate_limited`（429，含 bucket 與 `retry_after_s`）、`boot_refused`（web API 的四種拒絕開機；bot 未開機前的拒絕只記例外型別，訊息在已遮罩的 `boot_refused` 告警裡）、`admin_halt`（`actor`、`halt_reason` 是欄位，不進訊息）。uvicorn access log 仍有每個請求的狀態碼，安全事件補上原因與身分。
 
 **Writer lock（`core/writer_lock.py`）**：兩個 venue 的 daemon 開機時對 Postgres 取 session-level advisory lock，key 為 `blake2b("bfx-writer:{exchange_account_id}:{env}")` 的 signed int64（不用 process-salted `hash()`）；被別人持有 → `WriterLockUnacquired` → exit code 75（`EXIT_CODE_WRITER_LOCKED`）。ledger 寫入者的 per-transaction scope lock（`pg_advisory_xact_lock`，`ledger/_internal/clock.lock_scope`）用不同 namespace（`bfx-writer-xact`），兩者不互等。每筆真錢 submit 前 `WriterLockGuard.verify_held()` fail closed；`_writer_lock_liveness_loop` 每 30 s 以 `WriterLockWatch.check()` refresh（連線斷掉時重取），refresh 後仍未持有 → `WriterLockLostError`，daemon 退出、container 重啟；不寫 trading state。重啟後開機時若鎖仍被別人持有，`acquire` 以 exit 75 退出，由 restart policy 再啟動、再試，開機不會在 process 內等鎖。資料庫斷線撐過一次 refresh 也走這條（refresh 重取失敗）：這是 single-writer fencing（租約失去就立刻停止行動），刻意保留；重啟後由 `wait_for_database` 在 process 內等資料庫回來，不會 crash-loop。boot observation 重試前同樣先 `WriterLockWatch.check()`。
 
@@ -698,7 +719,7 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 
 **Venue 軸（`core/venue.py`、`apps/venue.py`）**：`Venue = "bitfinex" | "simulated"` 是 `MarketfeedConfig.phase` 的計算屬性（`live→bitfinex`、`shadow→simulated`），不儲存也不能單獨設定。`BFX_ALLOCATION_CAP_USDT`、`BFX_BALANCE_BUFFER_USDT`、`BFX_CONCENTRATION_PCT`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`、`BFX_EXECUTOR` 任何 phase 設了都在 `load_config` 拒絕（資金上限是已套用 CapitalPolicy 的，venue 由 phase 決定）。兩個 venue 的開機順序相同：schema head → `database_realm` → authority（該 venue 的集合）→ 之後才碰 vault、憑證與任何 client。simulated 的任何拒絕都 dispose engine 並擲出（不寫、不碰 venue）；Bitfinex 路徑另走 `_refuse_live_boot` 告警。
 
-`build_venue(config, ...)`（`apps/venue.py`，唯一 import `simulated_venue.wiring` 的地方，也是唯一決定 venue 差異的地方）對兩個 venue 回傳同形的 `VenueWiring`：憑證（來源也在此：Bitfinex 讀 vault，simulated 每次開機以 `secrets.token_hex` 產生，且 `BFX_VAULT_KEK` 出現在環境中就拒絕開機）、auth REST 與 executor（含 kill switch 的 cancel-all）使用的 `httpx` client、每個 process 一個 `AuthRequestGate`、`VenueCapabilities`（`auth_ws` required／forbidden；`build_executor` 檢查 capabilities，不比對 venue 字串）、venue 自己的 task 與 `aclose`（`Daemon.venue_tasks`／`venue_aclose`，開機時先啟動並等 ready）。`load_account_bootstrap` 只讀帳戶列與 config draft，憑證由 wiring 提供。架構測試禁止 `apps/venue.py` 以外的程式比對 venue 名稱。
+`build_venue(config, ...)`（`apps/venue.py`，唯一 import `simulated_venue.wiring` 的地方，也是唯一決定 venue 差異的地方）對兩個 venue 回傳同形的 `VenueWiring`：憑證（來源也在此：Bitfinex 讀 vault，simulated 每次開機以 `secrets.token_hex` 產生，且 `BFX_VAULT_KEK` 出現在環境中或掛成秘密檔就拒絕開機）、auth REST 與 executor（含 kill switch 的 cancel-all）使用的 `httpx` client、每個 process 一個 `AuthRequestGate`、`VenueCapabilities`（`auth_ws` required／forbidden；`build_executor` 檢查 capabilities，不比對 venue 字串）、venue 自己的 task 與 `aclose`（`Daemon.venue_tasks`／`venue_aclose`，開機時先啟動並等 ready）。`load_account_bootstrap` 只讀帳戶列與 config draft，憑證由 wiring 提供。架構測試禁止 `apps/venue.py` 以外的程式比對 venue 名稱。
 - **bitfinex**：process 共用的真 client，requires auth WS（由 `VenueCapabilities.auth_ws` 決定，無 env flag）。
 - **simulated**：`SqlVenueEventStore.open(engine)` 開在同一個資料庫（log 是 `sim_venue_event`），realm 必須是 `shadow`／`ci` 且 epoch 為 `ledger`；auth REST／executor 走 `httpx.AsyncClient(transport=<venue>)`，因此不會有任何 authenticated request 離開 process；公開 client 仍是真的（`FundingRules`、蠟燭、book）。沒有 auth WS（`VenueCapabilities.auth_ws="forbidden"`）；漏掉的 fill 靠週期 reconcile 與 resync 補上。`BFX_SIM_INITIAL_WALLETS=UST:1000,...` 只在 venue log 為空時以一次 append（`expected_seq=0`）入帳，重啟不重複入帳，賽跑輸家得 `ConcurrentAppendError`；Bitfinex wiring 設了它就拒絕。
 - **兩者相同**：同一條 safety config（`configs/safety.live.yaml`）、同一條 guard chain（含 `CapitalPolicyGuard`、pre-trade guards、`WriterLockGuard`）、reconciler、`InterestLedgerSync`／`CreditHistorySync`、kill switch（`venue=executor`）；每個 symbol 都必須讀得到已套用的 ledger CapitalPolicy；capital ports 也是同一組（`build_capital_ports`，3e）。兩個 venue 的開機拒絕都走 `_refuse_live_boot` 告警（告警路由是設定，`AlertSink` 已加 realm 前綴）。
@@ -712,6 +733,8 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 時間：`SignalEngine`、command gate／middleware 的 `clock` 與 `BitfinexLiveExecutor`（`clock`、cancel 時間戳）都來自組裝時鐘 `now_ms_utc`；telemetry 的 ISO 時間戳仍是牆鐘。
 
 `scripts/bootstrap_simulation_db.py`（owner 執行、冪等）：資料庫必須已 migrate 並 stamp 為 `shadow`（realm stamp 與各表的 realm trigger 是唯一權威，腳本不另外掃內容）；最新 epoch 必須已是 `ledger`（fresh 資料庫由 genesis migration 取得；腳本不寫 epoch），然後在同一個 transaction 內建立 `simulation` 帳戶（無 credential 列；label 只是描述）、在 scope lock 下宣告式寫入每個 symbol 的目標 `CapitalPolicy`（`--symbol` enabled，含單筆上限與五個包絡選項；`--disabled-symbol` disabled；與已套用的 digest 相同就不寫 revision；能不能 enabled 由 `PolicyStore.apply_policy` 決定）。
+
+模擬 soak 的 DB role：migrate 與 bootstrap 以 owner 執行（`sim-migrate.env`，與 prod 的 `migrate.env` 相同）；sim 的 runtime（bot container 與 `scripts/sim_soak_report.py`）以 login role `bfx_sim` 連線，它是 `bfx_bot` 的成員（`INHERIT FALSE, SET TRUE`），只在 database `bfx_sim` 裡預設 `role = 'bfx_bot'`，所以 session 的 `current_user` 是 `bfx_bot`：權限、欄位級 grant 與 owner-exempt trigger 與 prod 的 bot 相同，程式不知道差異。live 的 `bfx` 不對 PUBLIC 開放 CONNECT，CONNECT 以登入 role 檢查且不經 membership 繼承，所以這個 credential 連不進 `bfx`（`docs/runbooks/simulation-soak.md` §2，`tests/integration/test_sim_runtime_role.py`）。它在 `bfx_sim` 裡就是 `bfx_bot`，`pg_stat_activity` 與 `pg_cancel_backend`／`pg_terminate_backend` 作用於整個 cluster，所以看得到、也中斷得了 live bot 的連線；隔離的是資料，不是連線。
 
 **切換工具（已刪除，S1-8 PR-D）**：S1-7 切換（2026-10-05，run `switch-20261005T182054Z-fe1cc4`）用過的 legacy closure seed（`apps/ledger_seed.py`）、capture-point closure verifier、cutover comparison（`apps/capital_comparison*`、`modules/trading_shadow`、S0 shadow baseline）、comparison rehearsal（`restore_drill.py --rehearsal`）、主機端 `bfx_ledger_switch.py` 與 reader 群組 `bfx_cutover_reader` 都已刪除；seed 寫下的列（`origin='legacy_seed'` 的 observation 與其 basis、`seed_provenance`）照舊是 ledger 資料，開機規則見上方「Epoch 開機規則」。
 
@@ -739,7 +762,6 @@ deployment reconciler 在 ledger 的 `spendable` 內、依各 cell 的 `max_new_
 |---|---|
 | Backend daemon | VM 自托（`<vm-host>`，Docker，Python 3.13 + uv；`bfx-bot`/`bfx-webapi`。Koyeb 已於 2026-05-31 cutover 至 VM） |
 | Database | VM 自托 Postgres 18（`bfx-postgres`。Neon 已於 2026-06-23 棄用歸零） |
-| Cache | VM 自托 Redis 7（`bfx-redis`）：9d-5 起沒有使用者，W9 移除 |
 | 營運 UI | 前端 static export build 進 backend image，由 webapi 提供；入口是 tailnet 節點 `bfx-tailscale`（Tailscale Serve，只限 tailnet 內），見上方「Web API identity」 |
 
 **跨 migration 的契約（`core/schema_head.py`）**：serialized projector 的 seeded cursor 與 projection archive 各由一個 migration 建立；之後每個 migration 以模組屬性 `ledger_contract = "preserved" | "changed"` 宣告是否改變它，契約成立的 revision 集合由此推導（從 head 往回到最近一個 changed，或到建立它的那個），不再有人工維護的清單。`tests/test_schema_head.py` 拒絕沒宣告的 migration 與多個 head。
@@ -753,8 +775,8 @@ recreate 後查健康，失敗就回到前一個 digest，每次結果寫進 app
 無法關掉自己的觸發）時，先跑該版本 DR 腳本的 isolated restore test；有 migration 時先停 webapi、再停 bot，然後備份（全停，ADR 2026-10-15 D6）。
 停下之後任何失敗兩者都維持停止，唯一例外是 restore test 的 receipt 為 `migration_rehearsal_failed`
 （備份可還原、prod schema 沒動）：依序重新啟動舊 bot 與舊 webapi。webapi 開機時比對 schema head，不符就拒絕啟動（與 bot 相同）。
-部署哪些服務、檢查哪些 container 與 env 檔、pull 哪些 image，都由該 release 自己的 compose 檔渲染結果（`docker compose config --no-env-resolution`）決定，`up --remove-orphans` 移除 compose 不再有的服務；Compose 會沿用沒變的第三方容器，只有它掛載的設定檔內容與這次 release 不同、或加入者卡在已死的 namespace 時才 `--force-recreate`（平常的部署不重啟 tailnet 節點）；第三方 image 只允許 allowlist 的 digest、不帶 GHCR 憑證；沒有 frontend 服務的 release 不需要 frontend image，ledger 的 `frontend_digest` 為 NULL。
-health wait：bot `/healthz` 300 s、webapi `/ready` 120 s、有 frontend 時（9d-5 之前的回滾目標）`127.0.0.1:3001` 120 s、其他服務（9d 的 `netns` holder 與 `tailscale` sidecar）必須宣告的 compose healthcheck 120 s，再 60 s settle；入口服務只在這次部署新建它時、於 app 通過之後才把關（`ingress_unhealthy:`），且只在回滾做得到時（沒套用 migration、有上一個成功版本、schema 是上一版的）才回滾，做不到就保留健康的新版並記 warning；回滾、`--recreate` 與沒動到的入口不健康或不符（部署後檢查）只記 warning；例外只有 Compose 起不了入口容器、或只因入口而回滾卻在 schema 檢查之後失敗（照一般規則）。加入另一服務 network namespace 的服務（`tailscale`、9d-5 起的 webapi，都加入只持有 namespace 的 `netns`，計畫 D13）與它在同一次 `up`，部署檢查它在活的 namespace 裡；沒有要部署的那一輪若 holder 重啟或重建讓加入者留在死 namespace，只重建卡住的加入者（tailscale、9d-5 起的 webapi；不碰 bot，同一事件最多 3 次）。
+部署哪些服務、檢查哪些 container 與 env 檔、pull 哪些 image，都由該 release 自己的 compose 檔渲染結果（`docker compose config --no-env-resolution`）決定，`up --remove-orphans` 移除 compose 不再有的服務；Compose 會沿用沒變的第三方容器，只有它掛載的設定檔內容與這次 release 不同、或加入者卡在已死的 namespace 時才 `--force-recreate`（平常的部署不重啟 tailnet 節點）；第三方 image 只允許 allowlist 的 digest、不帶 GHCR 憑證；只有 backend 自己的 digest 與 allowlist 的第三方 image，帶 frontend 服務的 compose 在 precheck 被拒；ledger 的 `frontend_digest` 只是 9d-5 之前的歷史，新列為 NULL。
+health wait：bot `/healthz` 300 s、webapi `/ready` 120 s、其他服務（9d 的 `netns` holder 與 `tailscale` sidecar）必須宣告的 compose healthcheck 120 s，再 60 s settle；入口服務只在這次部署新建它時、於 app 通過之後才把關（`ingress_unhealthy:`），且只在回滾做得到時（沒套用 migration、有上一個成功版本、schema 是上一版的）才回滾，做不到就保留健康的新版並記 warning；回滾、`--recreate` 與沒動到的入口不健康或不符（部署後檢查）只記 warning；例外只有 Compose 起不了入口容器、或只因入口而回滾卻在 schema 檢查之後失敗（照一般規則）。加入另一服務 network namespace 的服務（`tailscale`、9d-5 起的 webapi，都加入只持有 namespace 的 `netns`，計畫 D13）與它在同一次 `up`，部署檢查它在活的 namespace 裡；沒有要部署的那一輪若 holder 重啟或重建讓加入者留在死 namespace，只重建卡住的加入者（tailscale、9d-5 起的 webapi；不碰 bot，同一事件最多 3 次）。
 已套用 migration 後失敗不回滾（舊碼未必能跑新 schema），停 bot 與 webapi、roll forward；schema 已不是上一個成功 release 的（先前嘗試套用過 migration）也不回滾。
 部署工具注入 `BFX_IMAGE_DIGEST`／`BFX_SOURCE_REVISION`／`BFX_DEPLOYMENT_ID`：只用來標示每筆
 execution audit 的 `config_hash`／`service_version` 與狀態報告，部署永遠不改變 trading state（§6）。
@@ -786,8 +808,7 @@ resume、enable、裁決與換憑證只由 CLI 排入（ADR 2026-10-15 D4，migr
 請求的驗證與排入只有一份：`execution/operator_commands.py`，operator CLI（`apps/operator_cli.py`）與 webapi 的 kill／disable handler 都是它的 adapter。
 CLI 以 one-off compose service `bfx-operator`（`deploy/vm/ops/docker-compose.operator.yml`）執行，連線用專屬 role `bfx_operator`：
 migration `4ab02765a34b`（輪替另由 `1db83367918c` 加上）的精確 allowlist，只有四個 outbox 請求欄位的 INSERT 與驗證所需的讀取，沒有 UPDATE／DELETE（`test_operator_privilege_allowlist.py`）。
-CLI 開頭比對 wrapper 傳入的 tailnet 身分與 `operator.env` 設定的值，不符就 exit 77、不連 DB；之後同 webapi 檢查 schema head 與 ledger authority。
-請求一律以 `BFX_OPERATOR_USER_ID` 送出（9d 前），daemon 照樣以 `operator_authorized` 重驗。9d 改用 tailnet node user ID 之前，由 owner 腳本 `scripts/grant_operator_membership.py` 把現有 membership 複製給 node user ID（冪等、授權的相異 user 上限 2）。
+誰在操作是 wrapper 以 `tailscale whois` 取得、傳入的 tailnet user ID（`BFX_OPERATOR_TAILNET_IDENTITY`），它就是請求的 `requested_by`（9d-6）；`operator.env` 不設定 operator。格式不是 tailnet user ID 就 exit 77、不連 DB；之後同 webapi 檢查 schema head 與 ledger authority，再確認它是帳戶的 member（不是就 exit 77、不寫入），daemon 套用時照樣以 `operator_authorized` 重驗。node user ID 的 membership 由 owner 腳本 `scripts/grant_operator_membership.py` 寫入（W3，冪等、授權的相異 user 上限 2）。
 **憑證輪替（`execution/credential_rotation.py`、`core/sealed_credential.py`，migration `1db83367918c`）**：
 CLI 不持有 KEK。bot 每次開機（`bot_runs` 寫入後）產生一把 X25519 收件 key，私鑰只在記憶體，公鑰寫進 `credential_rotation_recipients`；
 CLI 的 `rotate-credential` 從 stdin 讀新 key，只封給「scope 最新、尚未結束的 run」的收件 key（HPKE base mode，`info` 綁帳號、環境、收件 key 與 request id），
@@ -799,11 +820,39 @@ CLI 的 `rotate-credential` 從 stdin 讀新 key，只封給「scope 最新、�
 `bitfinex_user_id` 由 applied 的輪替與 bootstrap 在建立列時寫入（bootstrap 先以新 key 查 `info/user`，pending 列就帶 id，驗證通過才 promote）；
 CHECK `ck_exchange_account_credentials_active_user_id`（migration `36e59526f8cf`，加之前斷言沒有 active 且 NULL 的列）保證 active 列一定有 id，所以 worker 不需要也沒有 trust-on-first-use 回填，換憑證 worker 也從不問現行 key。
 因此現行 key 已在 Bitfinex 撤銷時仍可輪替，憑證恢復模式因此有出口。
-靜態 admin token 不能 resume live。bot `/admin` 有兩把 token（常數時間比對）：`BFX_ADMIN_TOKEN` 可讀狀態也可 halt，只在 bot 與 `bfx-op halt`；`BFX_ADMIN_READ_TOKEN` 只能讀 `trading-status`／`dry-evaluate`，webapi 的 funding status 只持有這把（9d-2）。TOTP 真實 enrollment／production acceptance
+**寫入端點鎖定（F31，`tests/architecture/test_venue_write_endpoints.py`）**：bot 的 `v2/auth/w/` 字面值只有 `live_executor.py` 的 funding offer submit、cancel、cancel/all 三個；`sign_request` 只由 `live_executor.py`（3 處）與 `auth_rest.py`（1 處，`_signed_post`，只簽 `v2/auth/r/`）import 與呼叫；auth WebSocket 只送 auth 與 `conf` 兩種 frame。真正的防線是 key 只開 funding 寫入（`permission_error`），這個測試擋的是程式漂移。
+靜態 admin token 不能 resume live。bot `/admin` 有兩把 token（常數時間比對）：`BFX_ADMIN_TOKEN` 可讀狀態也可 halt，只在 bot 與 `bfx-op halt`；`BFX_ADMIN_READ_TOKEN` 只能讀 `trading-status`／`dry-evaluate`，webapi 的 funding status 只持有這把（9d-2）。webapi 環境裡出現 `BFX_ADMIN_TOKEN`（非空）或 `BFX_VAULT_KEK`（不論值）就拒絕開機（`apps/webapi.py` lifespan），部署因此失敗回滾：halt token 與解開憑證 vault 的 KEK 只在 bot（9g，F29）。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 
-**關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`、
-`BFX_EXCHANGE_ACCOUNT_ID`、`BFX_VAULT_KEK`、
+**秘密的來源（9h，`core/secret_files.py`）**：
+- 常駐的 bot 與 webapi 以 `BFX_SECRETS_DIR=/run/secrets` 執行。秘密是 compose 的檔案型 secret，掛在 `/run/secrets/<KEY>`。
+  - 在這個模式下，`FILE_SECRET_KEYS`（`DATABASE_URL`、`BFX_ADMIN_TOKEN`、`BFX_ADMIN_READ_TOKEN`、`BFX_VAULT_KEK`、
+    `TELEGRAM_BOT_TOKEN`）**只**從檔案讀。缺檔或空檔是 `SecretFileError`（ValueError：bot exit 1，webapi 拒絕開機）。
+  - env 裡同名的 key 一律忽略，不是 fallback；開機時以 `secret_env_keys_ignored` 列出名稱。
+  - 值不寫回 `os.environ`，所以 `docker inspect`、`docker exec env` 與 exec 出來的子行程都看不到秘密。
+- 唯一的 reader 是 `read_secret`。consumer 有：`load_config`、`load_settings`（webapi）、`load_kek`、`admin_tokens`、
+  `AlertSink.from_environment`、funding status 的 read token。
+  - `tests/core/test_secret_files.py` 以 AST 掃描，禁止 `src/` 其他地方直接從 env 讀這些 key。
+  - 例外是一次性的 `operator_cli`、`restore_boot_check`。
+- 沒有 `BFX_SECRETS_DIR` 的 process 照舊從 env 讀同樣的 key。這是依 process 劃分，不是過渡期：一次性容器（operator
+  CLI、每週報告、研究、模擬 soak、migration、DR）、測試與本機執行都屬於這一類。
+- 遮蔽：`alerts.secret_values` 同時涵蓋 env 與秘密檔的值（含各 DB 密碼），告警與 Sentry 的 scrub 都用它。
+- pydantic-settings 會自己從 env 填 `DATABASE_URL`：含秘密欄位的 `BaseSettings`（`Settings`）只在 `core/settings.py`
+  的 `load_settings()` 裡建，它把 reader 讀到的值明確傳進去；`tests/core/test_secret_files.py` 的 AST 測試擋住 `src/`
+  其他地方的直接建構（`scripts/` 與 `alembic/env.py` 是 one-shot，照舊讀 env）。
+- 拒絕條件（`secret_present`，env 的 key 即使是空值、或秘密檔即使是空檔都算）：
+  - webapi 拿到 `BFX_VAULT_KEK` 或 `BFX_ADMIN_TOKEN` 就拒絕開機；
+  - simulated venue 開機時有 KEK 就拒絕。
+- `bfx-op halt` 的 HALT_SCRIPT 在 bot 容器內用同一條規則讀 admin token。它是自帶的程式，不 import image 裡的 reader，
+  因為主機工具與 image 的版本可能不同。
+- 主機檔案是 `root:4600 0640`。compose 的檔案型 secret 會忽略 uid／mode，所以兩個服務以 `group_add` 加入 4600。
+  - compose 檔的形狀由 `compose_policy.py` 鎖住；
+  - 檔案在每次部署前由 `bfx_deploy.shared_secret_file` 檢查，連同上面兩層目錄（`secret_directory`：root 擁有、
+    group／other 不可寫、不是 symlink）。
+- one-shot 與 `SENTRY_DSN`（依設計公開）留在 env。輪替見 `docs/runbooks/secret-rotation.md`。
+
+**關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`（bot／webapi 是秘密檔，見上）、
+`BFX_EXCHANGE_ACCOUNT_ID`、`BFX_VAULT_KEK`（bot 是秘密檔）、
 `BFX_SIM_INITIAL_WALLETS`、`BFX_SIM_FAULTS`（simulated 專用，Bitfinex 組裝設了就拒絕開機）、
 `BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_SCHEDULER_BUFFER_S`、
 `BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`、`BFX_LOOP_WATCHDOG_S`（event loop watchdog 秒數，預設 120）。已退役、設了就拒絕開機：`BFX_EXECUTOR` 與舊資金 env（`BFX_ALLOCATION_CAP_USDT`、`BFX_BALANCE_BUFFER_USDT`、`BFX_CONCENTRATION_PCT`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`）。
@@ -815,6 +864,7 @@ credential vault 解密。public read model 另以明確的
 
 - **Weekly chain**：VM systemd timer `bfx-weekly-report.timer`（Mon 04:17 UTC，unit 檔在 `deploy/vm/systemd/`）→ `bfx-weekly-report.service` 以主機工具的 `deploy/vm/ops/bfx_weekly_report.py` 跑 compose one-shot `weekly-report`（`deploy/vm/ops/docker-compose.weekly-report.yml`，隨每次部署安裝；image＝ledger 的 backend digest）：`ingest_funding_stats`（AlwaysFRR arm 資料）→ `run_weekly_attribution`（per-cell fee-adjusted APR → `attribution_weekly` 表，全量重算 delete-then-insert；2026-09-27 起來源是 bot 的 `CreditHistorySync` 每小時同步的 `funding_credit_history`／`funding_trades`（venue credit/loan history 的 實際持有時間（每筆自 max(MTS_OPENING, MTS_CREATE) 起算，loan 轉成的 credit 不重複計），以 (symbol, period, MTS_OPENING) 對到 MTS_CREATE 同一時刻的 trade（rate／amount／id 不是 key：credit rate 精度不同，loan 會轉成新 id、拆分金額的 credit），trade 的 OFFER_ID 對回 execution decision 的 cell，對不上歸 `unattributed`；authority 切到 ledger 後新 offer 只存在 ledger journal、open credit 只在 `venue_credit_mirror`，loader 經 `modules/ledger/attribution_reads.py`（公開讀 port，ack outcome 的 attempt → cell；mirror 的 open credit）與切換前 offer 的 cell 取聯集（切換前的 offer → cell 由 migration `a0b1c2d3e4f5` 在 epoch 為 `ledger` 後，從凍結的 `offer_claims`／`venue_offer_state`／`event_log` ORDER_FILL 經 `execution_decisions`／`diagnostics` 解析一次，寫進 attribution 自己的 `attribution_legacy_offer_cells`；同一 offer 解出多個 cell 則全部寫入、當 conflict；loader 不再讀 legacy 表與 diagnostics，`bfx_bot` 只有 SELECT），同一 offer 被 legacy 紀錄及／或 journal 放在多個 cell 則列入報告的 `OFFER CELL CONFLICTS` 並歸 `unattributed`，不擇一；offer 來源是 ledger 的 provenance＝ack outcome ∪ `bound_to_venue` resolution，同一 offer 多個 attempt 同 cell 合併、不同 cell 算 conflict；尚未進 history 的 credit 以 mirror 為準（opening 用 `mts_opening`，所以 loan 轉成的 credit 會落到原始 trade 的週與 cell；已結束但 history 未同步者以 `mts_updated` 為結束），G3 報告與 json 也列出 conflict），不再用 ORDER_FILL×held-to-term 或 CREDIT_CLOSED 的 rate/period/close；同一步輸出每週「credit 推得的 net 利息 vs `funding_interest_payments` 帳本」對帳 `<date>-attribution-reconciliation.md`，帳本窗 = credit 週往後平移一天（每日利息隔日 ~01:30Z 入帳），|diff| > max(5%, 0.01) 標 FLAG；規則見 `modules/live_validation/credit_attribution.py`）→ `report_interest`（帳本週報）→ `run_g3_live_validation`（報告 → VM `~/bfx/reports/<date>-g3-live-validation.{md,json}`；2026-09-27 起 active arm 同樣用 bot cell 的 venue credits × 實際持有時間（按日曆週切分；分到多個 cell 的 credit 依上述 amount 分配的比例計入各 cell），C = 帳本 funding wallet 餘額（`--capital` 可覆寫），信任 gate 由 deployment/NAV anchor 改為上述帳本對帳：只看最近 8 個已結算週，其中 FLAG → UNRELIABLE，除非 operator 以 `--ack-week YYYY-MM-DD=理由` 確認（加進 `deploy/vm/ops/docker-compose.weekly-report.yml` 的 G3 指令，隨部署生效並留在 git，報告回顯），更舊的 FLAG 只列出不擋；MR-alpha 每個 bot cell 對自己 period_agg 的市場利率序列、另有 total 列（缺序列的 cell 標 unavailable、不進 total，total 註明覆蓋的 capital-days 比例）；資料門檻 = 評估窗平均帳本錢包餘額 × 7 天；over-deploy clamp 移除改報 peak；此前的 G3 報告與之後不可比，報告內有 Methodology change 段。程式在 `modules/live_validation/{attribution_loader,g3,g3_report}.py`，scripts 只是 CLI）。報告不進本 repo。
 - **研究重驗（Proposal E，2026-09-22）**：同一個 `weekly-report` 在 G3 之後接研究步驟，每步 `timeout` + fail-soft、絕不阻斷營運報告：外部訊號 topup（`ingest_perp_funding`、`ingest_liquidations`）→ `learn_book_fill_rate`（book-replay artifact，`source="book"`）→ `run_period_structure_backtest`（`--fill-model book` 與 linear 各一份）→ `run_oos_profitability` → `diff_research_report`（champion 漂移＝最近 12 窗中位數跌破全歷史 p25；challenger 反超＝配對 CI 下界連續 3 週 >0；只開 registry review，永不 auto-promote）。報告落 VM `~/bfx/reports/<date>-{period-structure-book,period-structure-linear,oos-profitability,weekly-research-*}.md`。systemd `TimeoutStartSec=5400`。
+- **DB role**：weekly chain 與研究用一次性容器都以 `bfx_research` 連線（`/opt/bfx/runtime/research.env`，不用 `bot.env`）。migration `3c5e7a9b1d2f` 給它精確 allowlist：寫入只限研究表（`funding_stats`／`perp_funding_rates`／`liquidations` upsert，`attribution_weekly`／`fill_rate_stats` delete＋insert，`fill_rate_model_artifacts` insert），讀取只限上述步驟用到的表；不能寫 ledger、`trading_state` 與 outbox，讀不到憑證表。`tests/integration/test_research_privilege_allowlist.py` 釘住 effective privileges，`test_research_role_behaviour.py` 以這個 role 登入跑實際語句。
 - **儀表**：webapi `GET /api/v1/exchange-accounts/{exchange_account_id}/attribution/weekly`（`bfx_webapi` 需 `GRANT SELECT ON attribution_weekly`，非 migration）→ FE `/attribution` 頁三線圖（bot net APR / always-close / AlwaysFRR）。webapi 與 weekly job 必須使用同一個 account UUID 與 `BFX_DEPLOYMENT_ENV`；不再依 process-global `BFX_ACCOUNT_ID` 選 scope。
 - **歷史政策（per-symbol cap 加碼 gate，非現行 all_available authority）**：舊政策要求調高（已刪除的）`safety.canary.yaml` 的 `allocation_cap.caps[symbol]` 前，最新 weekly G3 verdict = PASS **且** AlwaysFRR benchmark spread 非負（`frr_benchmark` unavailable 時不加碼）。fUST 3000→10000（`aa4842c`）是在 INSUFFICIENT_DATA 上拉的；保留此失敗歷史與 G3 績效證據。現行沒有提高固定 cap 的操作，也不能把 policy conversion 或 canary 成功解讀為績效通過。
 - **FRR 單位**：AlwaysFRR arm 的 rate = `funding_stats.frr × 365`（≈ ticker per-day FRR，2026-07-06 實測誤差 <0.5%；`live_attribution.FRR_ANNUALIZATION`），換算後必過 `assert_market_rate_band`。`funding_stats.frr` 原值仍非市場利率（ADR 2026-05-28 不變）。
@@ -846,6 +896,116 @@ credential vault 解密。public read model 另以明確的
 
 ---
 
-## 10. Related
+## 10. 安全文件：授權、通訊、資料分級、高成本工作
+
+本節只寫現行設定，每一項附出處（路徑相對於 repo root）。tailnet policy（ACL grants、SSH 規則）存在
+Tailscale admin console，**不在 repo**；以下照 runbook 與 ADR 的描述寫，實際內容以 admin console 為準。
+
+### 10a. 授權矩陣
+
+| 主體 | 怎麼證明身分 | DB role 與權限 | bot `/admin` | venue 寫入 | 主機 |
+|---|---|---|---|---|---|
+| operator，經 tailnet 用 UI | Tailscale Serve 轉送 tailnet policy 給的 app capability（`deploy/vm/tailscale/serve.json`）；`require_operator` 比對 capability 的 `user_id`（`backend/src/bfx_funding_bot/core/auth.py:65-76`），再查該帳戶的 membership，非成員一律 404、viewer 不能寫（`modules/api/account_scope.py:48-77`） | 經 webapi 的 `bfx_webapi`（下一列） | 無 | 間接：只有 kill（`modules/api/trading_control.py:214`）與停用幣別（`:227`）寫進 outbox，由 bot 套用；另可改 config draft（`modules/api/config.py:98,116`），draft 不是生效的資金 policy | 無 |
+| operator，CLI `sudo bfx-op` | Tailscale SSH（check mode）登入 `ubuntu`；`bfx-op` 取 `SSH_CONNECTION` 的 tailnet peer（`deploy/vm/ops/bfx_op.py:184-190`）、`tailscale whois` 得到 user ID（`:202-215`），CLI 再確認是該帳戶的 member（`apps/operator_cli.py:284`） | `bfx_operator`：四個 operator outbox（交易控制、幣別、UNKNOWN 裁決、換憑證）的 request 欄位 INSERT 與讀取，沒有 UPDATE／DELETE（migration `4ab02765a34b`、`1db83367918c`，`docs/runbooks/fresh-host-setup.md:25`） | `halt` 子命令在 bot 容器內以 `BFX_ADMIN_TOKEN` 呼叫 `/admin/halt`，不要求 tailnet 身分（`bfx_op.py:403-412`） | 間接：resume、kill、啟停幣別、UNKNOWN 裁決、換憑證都寫 outbox，由 bot 以 `operator_authorized` 重驗後套用（ADR 2026-10-15 D4） | `ubuntu` 有 NOPASSWD sudo（`docs/runbooks/operations.md:657-661`） |
+| bot（`bfx-bot`） | 容器身分；秘密檔 `/run/secrets/*` | `bfx_bot`：public schema 的 default DML，受治理的表由各 migration 收斂（`fresh-host-setup.md:23,57-64`） | 持有兩把 token：`BFX_ADMIN_TOKEN`（三個 route 都可）與 `BFX_ADMIN_READ_TOKEN`（只能讀），常數時間比對（`modules/admin/router.py:34-46,77,97,125`） | 唯一的 venue 寫入者；已簽章的寫入只有 funding offer 的 submit、cancel、cancel-all（`external/bitfinex/live_executor.py:66-69`，由 `tests/architecture/test_venue_write_endpoints.py:149` 鎖住）；開機與每 6 小時重查 key 權限（`modules/execution/credential_compliance.py:48`） | 無 |
+| webapi（`bfx-webapi`） | 容器身分 | `bfx_webapi`：migration 擁有的精確 allowlist，ledger 零寫入（`fresh-host-setup.md:24,80`） | 只有 `BFX_ADMIN_READ_TOKEN`（`modules/api/funding_status.py:120-123`）：`/admin/trading-status`、`/admin/dry-evaluate`；halt 只收 `BFX_ADMIN_TOKEN`（`modules/admin/router.py:125`）。env 或秘密檔出現 `BFX_ADMIN_TOKEN`、`BFX_VAULT_KEK` 就拒絕開機（`apps/webapi.py:44-53`） | 無（不持有 KEK） | 無 |
+| 每週報告、研究一次性容器 | root 啟動的一次性容器，讀 `research.env` | `bfx_research`：只寫研究表、只讀用到的表，讀不到憑證表、不能寫 ledger 或 outbox（migration `3c5e7a9b1d2f`，`fresh-host-setup.md:26`） | 無 | 無（週報只打 Bitfinex public；研究的 ingest 另打 Binance public） | 無 |
+| 模擬 soak | `sim.env` | `bfx_sim`：只能 CONNECT 自己的 database `bfx_sim`，在那裡以 `bfx_bot` 身分執行（`docs/runbooks/simulation-soak.md:27,53-63`）；`bfx` 收回 PUBLIC CONNECT 的步驟在 `fresh-host-setup.md:67-73` | 自己的 8080，不碰 live bot | 無（模擬 venue；見到 KEK 拒絕開機） | 無 |
+| `bfx-deploy`（systemd，root） | root | `migrate.env` 的 owner role，只跑 migration 與 owner one-shot（`fresh-host-setup.md:197`） | 不用 token；部署只看 bot 的 `:8080/healthz`（`deploy/vm/ops/bfx_deploy.py:650`）。root 讀得到所有秘密檔 | 無 | root：docker、`/opt/bfx/runtime`、寫 ledger 的 `deployments` 表（`deploy/vm/systemd/bfx-deploy.service:25` 沒有 `User=`） |
+| DR：備份與 restore test | `ubuntu`（`deploy/vm/systemd/bfx-restore-test@.service:15`、`bfx-pgbackrest-backup.service:12`） | 在隔離的還原副本上跑唯讀 boot check；不碰 production DB 的寫入（`docs/runbooks/offsite-dr.md:21`） | 無 | 無 | R2 bucket 的讀寫憑證在 `~/bfx/pgbackrest/conf.d`（`offsite-dr.md:107-140`） |
+| homelab 觀測 | 不在本 repo | 無 | 無；bot `/metrics`、`/healthz` 不需 token（`modules/marketfeed/healthz.py:114`） | 無 | alloy 讀 container log（`operations.md:240`）、Grafana 規則讀 bot `/metrics`（`operations.md:227-230`）；Prometheus 與 alloy 的設定不在 repo（`simulation-soak.md:289`） |
+
+帳戶內的角色與欄位（UI 與 CLI 相同，都經 `resolve_context`）：
+
+- UI 只認一個 operator：`require_operator` 比對設定裡唯一的 `BFX_OPERATOR_TAILNET_USER_ID`（`core/auth.py:71-76`）。
+- membership 的角色是 `owner`／`operator`／`viewer`（`modules/accounts/exchange_accounts.py:26`）；`owner` 與 `operator` 能寫，
+  `viewer` 只能讀，寫入回 `account_write_required`（`modules/execution/operator_commands.py:129-131,188-191`）。帳戶不存在、
+  已 retired 或不是成員，一律 404（`modules/api/account_scope.py:48-68`）。
+- 動作的分界：UI 只有讀取與降低風險的寫入（kill、停用幣別、config draft）；resume、啟用幣別、UNKNOWN 裁決、換憑證只走 CLI
+  （ADR 2026-10-15 D4），DB 層以收回 `bfx_webapi` 的權限擋住（同 ADR Amendment 2026-10-18 D4a'）。
+- 欄位：憑證回應的 `apiSecret` 固定是 `****`，只回 key、標籤與狀態（`modules/api/schemas.py:102-111`）；config draft 只收
+  `StrategyConfigBody` 宣告的欄位；`bfx_webapi`、`bfx_operator` 對 outbox 只有 request 欄位的欄位級 INSERT（`fresh-host-setup.md:25,80`），
+  結果欄位只有 bot 能寫。
+
+tailnet policy（admin console）：
+
+- **UI 的 grant**：`tagOwners` 有 `tag:bfx-ops`；唯一一條 grant 只讓 operator 連 `tag:bfx-ops` 的 `tcp:443`，並帶
+  operator capability（`docs/runbooks/fresh-host-setup.md:206-210`、`docs/runbooks/release-0-operator-containment.md:9`）。
+  Serve 只把這個 capability 轉給 webapi（`deploy/vm/tailscale/serve.json` 的 `AcceptAppCaps`）。
+- **SSH 規則**：check mode，採 Tailscale 預設的 12 小時重新驗證；只允許非 root 使用者（ADR 2026-10-15 Amendment D4d）。
+  ADR 2026-10-15 D1 的終態是主機節點為 tagged node、不設 key 到期；2026-10-16 讀 admin console 時主機節點還不是 tagged，
+  規則的 `dst` 是擁有者自己的裝置（`autogroup:self`）。這是 admin console 的狀態，repo 裡沒有，以 admin console 為準；
+  改成 tagged 需要 tailnet 管理者操作。
+- 主機的入口：Tailscale SSH（上一條），break-glass 是 OCI Console Connection（不經 tailnet；Console 下 `bfx-op` 除了 `halt` 都拒絕）。
+  公網 sshd 的終態是停用、UFW 與 OCI security list 都不開 22，現況以主機上 `systemctl is-active ssh.socket ssh.service` 為準
+  （`operations.md:707-731`）。
+
+已接受的殘餘風險：所有容器在同一個 `bfx_default` 網路（下一節），同網路的容器連得到 bot 8080（`/admin` 要 token，
+`/metrics`、`/healthz` 不用）；主機上 `ubuntu` 的 sudo 與掛 docker.sock 的監控容器等同 root。不做網路分段、egress
+allowlist 或第二個 postgres，理由是單一 VM 的管理成本；最小權限改由每個工作自己的 DB role 承擔（10a）。
+
+### 10b. 通訊矩陣
+
+| 來源 → 目的 | 網路 | port／協定 | 認證 | 加密 |
+|---|---|---|---|---|
+| operator 瀏覽器 → Tailscale Serve（`bfx-tailscale`，`tag:bfx-ops`） | tailnet（WireGuard） | 443／HTTPS | tailnet 身分＋grant（10a） | WireGuard＋Serve 的 TLS（10e） |
+| Serve → webapi | holder `bfx-netns` 的 namespace 內 loopback（`deploy/vm/docker-compose.app.yml:102,127-129`） | 127.0.0.1:8000／HTTP | Serve 轉送的 capability header | 無（同一個 namespace） |
+| webapi → bot | `bfx_default`（webapi 經 holder 的介面，`docker-compose.app.yml:160-161`） | `bfx-bot:8080`／HTTP（`modules/api/funding_status.py:123`） | `BFX_ADMIN_READ_TOKEN` | 無 |
+| bot、webapi、CLI、週報、研究 → Postgres | `bfx_default`（`docker-compose.bot.yml` 未指定 network，用 project 預設網路） | 5432／PostgreSQL；主機另有 `127.0.0.1:5432`（`docker-compose.bot.yml:44-45`） | 各自的 role 密碼（10a） | 無（`DATABASE_URL` 不帶 sslmode；`core/settings.py:43` 只接受 `disable`／`verify-ca`／`verify-full`） |
+| `bfx-op` → bot | `docker exec` 進 bot 容器再連 `127.0.0.1:8080`（`deploy/vm/ops/bfx_op.py:114,411-412`） | HTTP | `BFX_ADMIN_TOKEN` | 無（容器內） |
+| homelab → bot | `/metrics` 由 homelab 的 Prometheus 讀；設定不在 repo | 8080／HTTP | 無 | 依 homelab 設定 |
+| bot → OTLP tracing | `deploy/vm/live.env:20` 開啟，預設 `http://tempo:4317`（`modules/observability/tracing.py:49`）；collector 不在 repo | 4317／OTLP gRPC | 無 | 無；送不出去時 fail-open |
+| operator 裝置 → 主機 tailscaled | tailnet | Tailscale SSH | tailnet 身分＋SSH 規則（check mode） | WireGuard |
+| bot → Bitfinex | 對外 | 443／HTTPS `api.bitfinex.com`、`api-pub.bitfinex.com`；WSS `api.bitfinex.com/ws/2`、`api-pub.bitfinex.com/ws/2`（`external/bitfinex/auth_rest.py:425`、`auth_ws.py:368`、`ws.py:25`、`apps/bot.py:198`） | API key＋HMAC-SHA384（只有寫入與帳戶讀取） | TLS，驗證憑證 |
+| 週報、研究 → Bitfinex public、Binance | 對外 | 443／HTTPS（`modules/external_signals/client.py:40`、`docs/runbooks/research-one-shot-jobs.md:10-11`） | 無 | TLS |
+| bot、`bfx-notify` → Telegram | 對外 | 443／HTTPS `api.telegram.org`（`modules/observability/alerts.py:237`、`deploy/vm/ops/bfx_notify.py:112`） | bot token（在 URL，log 會遮蔽：`alerts.py:222`） | TLS |
+| bot、webapi → Sentry；瀏覽器 → webapi `/fe-events` → Sentry | 對外 | 443／HTTPS；`/fe-events` 只轉給設定的 DSN（`modules/api/ingress.py:170,203-221`） | DSN（依設計公開） | TLS |
+| Postgres 容器（pgBackRest）、restore test → R2 | 對外 | 443／S3 API（`deploy/vm/pgbackrest/pgbackrest.conf`、`docs/runbooks/offsite-dr.md:107-140`） | bucket 範圍的 R2 S3 憑證 | TLS；備份另以 `repo1-cipher-type=aes-256-cbc` 加密（`pgbackrest.conf:8`） |
+| `bfx-deploy` → GHCR | 對外 | 443／HTTPS `ghcr.io`，以 digest pull（`deploy/vm/ops/bfx_deploy.py:634`） | `ghcr.env` 的 read-only token，檔案不存在就匿名（`bfx_deploy.py:2267-2272`；`docs/runbooks/deploy.md:187-188`） | TLS |
+| `bfx-deploy` → Docker Hub | 對外 | 443／HTTPS，只 pull allowlist 的 tailscale digest（`docker-compose.app.yml:144,169`） | 無 | TLS |
+| `bfx-deploy` → GitHub | 對外 | 443／HTTPS，mirror 匿名 `git fetch`（`docs/runbooks/deploy.md:353`）；CI run 的連結從 GHCR image 的 label 讀，不呼叫 GitHub | 無 | TLS |
+| `bfx-deploy` → GitHub attestation（Sigstore） | 對外 | **9i 尚未 merge（PR #251）**：merge 後部署前以 `gh attestation verify` 驗 provenance | 待 9i | 待 9i |
+| tailscaled（主機與 `bfx-tailscale`）→ Tailscale control plane、DERP | 對外 | Tailscale 管理 | node key | Tailscale 管理 |
+
+應用程式碼沒有可由使用者指定的對外位址：所有對外目的地都是常數或部署設定（上表）。容器沒有 egress allowlist，
+這與 10a 的扁平網路同屬已接受的殘餘風險。
+
+### 10c. 資料分級
+
+| 等級 | 資料 | 存放位置 | 控制 |
+|---|---|---|---|
+| 秘密：常駐服務 | bot：`DATABASE_URL`、`BFX_ADMIN_TOKEN`、`BFX_ADMIN_READ_TOKEN`、`BFX_VAULT_KEK`、`TELEGRAM_BOT_TOKEN`；webapi：`DATABASE_URL`、`BFX_ADMIN_READ_TOKEN` | `/opt/bfx/runtime/secrets/<service>/<KEY>`，`root:4600 0640`，掛在 `/run/secrets`（`deploy/vm/docker-compose.app.yml:35-47,214-228`） | 只從檔案讀、不看 env（`core/secret_files.py:62`）；部署前檢查擁有者與權限（`docs/runbooks/deploy.md:196-226`）；輪替見 `docs/runbooks/secret-rotation.md` |
+| 秘密：一次性工作與主機工具 | `operator.env`（`bfx_operator`）、`research.env`（`bfx_research`）、`sim.env`（`bfx_sim`）、`migrate.env`（owner）、`notify.env`（Telegram）、`ghcr.env`（GHCR token）、`tailscale.env`（第一次登入的 auth key）、`.env.postgres.runtime`（初始化密碼） | `/opt/bfx/runtime/*.env`，root 0600；資料服務的在 compose 檔旁，0600（`docs/runbooks/deploy.md:172-195`、`docs/runbooks/fresh-host-setup.md:10-15`） | 以 env 傳進一次性容器（`docker inspect` 看得到，已接受）；9i 的 provenance 驗證不需要 GitHub token（`gh attestation verify --bundle`，bundle 匿名讀自 GitHub attestation API）；`ghcr.env` 留著是因為 package 是 private，pull 與讀 manifest 都用它，GHCR 改 public 後才能刪 |
+| 秘密：備份 | R2 S3 憑證、repo cipher passphrase | `~/bfx/pgbackrest/conf.d/r2.conf`；passphrase 另有離線保管（`docs/runbooks/offsite-dr.md:107-128`） | bucket 範圍的權限；cipher 加密 |
+| 交易所憑證 | Bitfinex API key／secret | `exchange_account_credentials`，AES-256-GCM 信封加密，AAD 為帳戶 UUID，KEK 只在 bot（`core/crypto.py:53-85`、`apps/webapi.py:49-53`）；換憑證時以 bot 的公鑰 sealed box 傳入（`core/sealed_credential.py:100-113`） | withdraw 權限關閉，開機與每 6 小時重查（`modules/execution/credential_compliance.py:48`）；webapi 讀不到 secret；明文不進 log、outbox 或 argv（`docs/runbooks/operations.md:693-697`） |
+| 帳務：ledger 與交易狀態 | journal、觀測、basis、policy、outbox、`trading_state` | Postgres `bfx`；離機備份在 R2（加密） | 寫入者限定（10a）；journal 與觀測表 insert-once（§9 I-IDEM）；restore test 每月驗證（`docs/runbooks/operations.md:549-556`） |
+| 市場與研究資料 | candles、`funding_stats`、`perp_funding_rates`、`liquidations`、研究結果 | Postgres `bfx`、`/home/ubuntu/bfx/reports` | 公開市場資料；public 端點只輸出百分比，不輸出絕對金額（§9 I-PUB） |
+| 個人資料 | operator 的 tailnet user ID 與 login、裝置名稱、tailnet IP | membership 的 `user_id`、outbox 的 `requested_by`；安全事件 log（`core/auth.py:56-62`）；`bfx-op` 的 journald 行（`deploy/vm/ops/bfx_op.py:165-167`） | Sentry 不帶預設的 PII（`send_default_pii=False`，`modules/observability/error_tracking.py:106`），但遮蔽只針對 secret：安全事件的 login／user ID 可能以 breadcrumb 進到 Sentry 事件（推論，未實測） |
+| log | bot、webapi 的 JSON log（UTC、跳脫控制字元，`core/log_format.py:54,75`）；安全事件 logger `bfx.security`（`core/security_log.py:32`）；`bfx-op` journald；Sentry 事件；Telegram 告警 | 主機的 docker log 與 journald；homelab 的 Loki（保留 30 天，`docs/adr/2026-09-23-venue-refusal-kept-before-classified.md:66`） | 不記 token、帶 token 的 header 或 request body（§6「Process log 與安全事件」）；Sentry 與 Telegram 送出前遮蔽 secret（`error_tracking.py:60`、`alerts.py:196,438`）；沒有防竄改的離機保存 |
+
+### 10d. 高成本工作
+
+| 工作 | 在哪裡跑 | 成本與上限 |
+|---|---|---|
+| restore test（每月 1 日，及部署前的 change-triggered） | VM，`bfx-restore-test@`（`ubuntu`） | 隔離還原的 RTO 上限 3600 秒，加 migration 演練 1200 秒，unit 上限 7200 秒（`deploy/vm/systemd/bfx-restore-test@.service:22-24`）；從 R2 拉整個備份 |
+| 備份 | VM，`bfx-pgbackrest-backup` | unit 上限 7200 秒（`bfx-pgbackrest-backup.service:11`）；上傳 R2 |
+| 每週報告 | VM，`bfx-weekly-report`（每週一） | unit 上限 5400 秒（`bfx-weekly-report.service:24`）；研究與 ingest 步驟有自己的 `timeout`（600–1200 秒，`deploy/vm/ops/docker-compose.weekly-report.yml:71-89`），研究步驟失敗不擋報告 |
+| 研究資料回補 | VM 一次性容器 | liquidations 預設每 25 秒一個 request、429 後睡 240 秒，完整回補數小時（`backend/scripts/ingest_liquidations.py:50-53`）；deriv status 客戶端每分鐘 18 個 request（`docs/runbooks/research-one-shot-jobs.md:17-19`） |
+| 整合測試全量 | CI（`-n 4`，job 上限 30 分鐘，`.github/workflows/ci.yml:212,249`）；本機 `-n 6` | 每個 worker 一台拋棄式 PG18 |
+| Bitfinex 已驗證端點 | bot | 每個 key 一個 gate 排序 nonce，背景讀取 10 秒截斷（`external/bitfinex/auth_rest.py:54,460-468`）；每個觀測 cycle 有 request 上限（`modules/execution/venue_observation.py:49,313`）；送單 token bucket（`pre_trade_limits.command_rate`，`modules/execution/safety/pre_trade.py:249-250`）；同一把 key 的其他使用者會撞 nonce（`docs/runbooks/operations.md:625`） |
+| public CSV 與 proof summary | webapi，只在 tailnet 內 | CSV 一次讀約 87,600 列（`modules/api/public.py:172`），沒有 per-user 限流，回應帶 `Cache-Control: public, max-age=3600`（`public.py:42`）；9b 移到 Cloudflare Pages 後從 webapi 移除 |
+| webapi 私有 API | webapi | 每個 operator 每分鐘 120 次讀、30 次寫，超過回 429（`modules/api/ratelimit.py:4-5,61-62`） |
+
+### 10e. TLS（已接受的控制）
+
+營運 UI 唯一的入口是 Tailscale Serve，只在 tailnet 內（Funnel 已關閉，ADR 2026-10-15 D1 與 Amendment D1b）。
+TLS 由 Serve 終結，憑證是 Tailscale 為 tailnet 名稱（`*.ts.net`）自動申請與更新的；協定版本與 cipher 由 Tailscale
+決定，repo 與 VM 都不能設定。接受的理由：流量在進 Serve 之前已經走 WireGuard，只有 tailnet 內、被 grant 允許的裝置
+連得到（10a），TLS 是第二層。我們依賴的是：Tailscale 的憑證自動更新、WireGuard 傳輸，以及 tailnet 開著 MagicDNS 與
+HTTPS certificates（`fresh-host-setup.md:204`）。Serve 之後的 hop 是同一個 namespace 的 loopback（10b）。
+
+---
+
+## 11. Related
 
 設計決策紀錄（ADR）在 `docs/adr/`；本文件只記錄現行、由程式碼驗證過的規則。ledger 取代 event sourcing 的決策與切換見 `docs/adr/2026-09-28-ledger-journal-and-venue-mirror-replace-event-sourcing.md` 及其後的 ledger ADR。

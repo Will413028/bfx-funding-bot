@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
-from tests.pg_templates import alembic, template_at
+from tests.pg_templates import alembic, template_at, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import _P, _prepare
 from .test_operator_request_causation import (
@@ -81,7 +81,7 @@ def test_the_upgrade_drops_the_columns_and_keeps_the_outcome_checks(before) -> N
         resume = _trading(conn, reason="r", created=130,
                           settle="state='applied', processed_at_ms=131, outcome_reason='resumed'")
         _state(conn, state="ACTIVE", reason="resumed: r", at=132, request=resume)
-    alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     alembic(url, "check")
     with engine.connect() as conn:
         assert conn.scalar(text(

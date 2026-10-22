@@ -14,6 +14,8 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from bfx_funding_bot.core.secret_files import read_secret
+
 VALID_DEPLOYMENT_ENVIRONMENTS = frozenset({"prod", "shadow", "ci"})
 
 
@@ -53,34 +55,6 @@ def database_sslmode(query: dict[str, list[str]]) -> str:
             "(sslrootcert= for a private CA), or disable on a private network"
         )
     return mode
-
-
-class AuthSettings(BaseSettings):
-    """Runtime configuration needed by the auth boundary without a database.
-
-    Keeping this model separate from :class:`Settings` lets the web process
-    import its liveness endpoint even when the database URL is absent or
-    malformed.  Database configuration remains required by ``Settings`` and
-    is checked by the startup/readiness path instead of at module import time.
-    """
-
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-    )
-
-    operator_user_id: str = Field(default="", validation_alias="BFX_OPERATOR_USER_ID")
-    operator_role: str = Field(default="admin", validation_alias="BFX_OPERATOR_ROLE")
-
-    @model_validator(mode="after")
-    def _validate_production_operator_role(self) -> "AuthSettings":
-        """Production is deliberately locked to the sole admin operator role."""
-        phase = os.environ.get("BFX_PHASE", "").lower()
-        if phase == "live" and self.operator_role != "admin":
-            raise ValueError("BFX_OPERATOR_ROLE must be 'admin' in live")
-        return self
 
 
 class IngressSettings(BaseSettings):
@@ -128,18 +102,23 @@ class IngressSettings(BaseSettings):
         return self
 
 
-class Settings(AuthSettings):
+class Settings(BaseSettings):
     """Full application settings, including the required database URL."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     database_url: str = Field(repr=False)
     bitfinex_api_base_url: str = "https://api-pub.bitfinex.com"
     log_level: str = "INFO"
 
-    # SP2 vault: the api-key envelope KEK is the env var BFX_VAULT_KEK
-    # (base64-encoded 32 bytes), read DIRECTLY from os.environ by
-    # core.crypto.load_kek() — intentionally NOT a Settings field, so crypto
-    # unit tests don't require DATABASE_URL (which Settings() needs via the
-    # .env symlink). Deploy presence is enforced by deploy-vm.sh preflight.
+    # SP2 vault: the api-key envelope KEK (BFX_VAULT_KEK, base64-encoded 32 bytes) is
+    # read by core.crypto.load_kek() through core.secret_files -- intentionally NOT a
+    # Settings field, so crypto unit tests don't require DATABASE_URL.
 
     @property
     def database_url_sync(self) -> str:
@@ -162,3 +141,15 @@ class Settings(AuthSettings):
         query["sslmode"] = [database_sslmode(query)]
         new_query = urlencode({k: v[0] for k, v in query.items()})
         return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+
+
+def load_settings() -> Settings:
+    """``Settings`` for a resident service: DATABASE_URL through core.secret_files.
+
+    With ``BFX_SECRETS_DIR`` (the web API in production) the URL comes only from its
+    secret file (missing or empty raises ``SecretFileError``). Without it, the env value
+    when set, else pydantic's own sources (the ``.env`` file of a local run)."""
+    database_url = read_secret("DATABASE_URL")
+    if database_url is None:
+        return Settings()
+    return Settings(database_url=database_url)

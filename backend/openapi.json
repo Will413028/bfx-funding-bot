@@ -1,0 +1,3249 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "bfx-funding-bot",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/profile": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "summary": "Get Profile",
+        "operationId": "get_profile_api_v1_profile_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ProfileResponse_"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "summary": "List Exchange Accounts",
+        "description": "Bootstrap the explicit account selector for the operator console.",
+        "operationId": "list_exchange_accounts_api_v1_exchange_accounts_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_list_ExchangeAccountResponse__"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/credentials": {
+      "get": {
+        "tags": [
+          "api-keys"
+        ],
+        "summary": "List Account Keys",
+        "operationId": "list_account_keys_api_v1_exchange_accounts__exchange_account_id__credentials_get",
+        "parameters": [
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_list_AccountCredentialResponse__"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/attribution/weekly": {
+      "get": {
+        "tags": [
+          "attribution"
+        ],
+        "summary": "Account Weekly",
+        "operationId": "account_weekly_api_v1_exchange_accounts__exchange_account_id__attribution_weekly_get",
+        "parameters": [
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          },
+          {
+            "name": "cell",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cell"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_list_WeeklyAttributionResponse__"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/config-draft": {
+      "get": {
+        "tags": [
+          "configs"
+        ],
+        "summary": "Get Account Config",
+        "operationId": "get_account_config_api_v1_exchange_accounts__exchange_account_id__config_draft_get",
+        "parameters": [
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_AccountConfigDraftResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "configs"
+        ],
+        "summary": "Put Account Config",
+        "operationId": "put_account_config_api_v1_exchange_accounts__exchange_account_id__config_draft_put",
+        "parameters": [
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyConfigBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_AccountConfigDraftResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "configs"
+        ],
+        "summary": "Delete Account Config",
+        "operationId": "delete_account_config_api_v1_exchange_accounts__exchange_account_id__config_draft_delete",
+        "parameters": [
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/funding-status": {
+      "get": {
+        "tags": [
+          "funding"
+        ],
+        "summary": "Funding Status",
+        "operationId": "funding_status_api_v1_exchange_accounts__exchange_account_id__funding_status_get",
+        "parameters": [
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_FundingStatus_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/positions": {
+      "get": {
+        "tags": [
+          "projections"
+        ],
+        "summary": "Account Positions",
+        "operationId": "account_positions_api_v1_exchange_accounts__exchange_account_id__positions_get",
+        "parameters": [
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_list_PositionResponse__"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/offers": {
+      "get": {
+        "tags": [
+          "projections"
+        ],
+        "summary": "Account Offers",
+        "operationId": "account_offers_api_v1_exchange_accounts__exchange_account_id__offers_get",
+        "parameters": [
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_list_OfferClaimResponse__"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/executions": {
+      "get": {
+        "tags": [
+          "projections"
+        ],
+        "summary": "Account Executions",
+        "operationId": "account_executions_api_v1_exchange_accounts__exchange_account_id__executions_get",
+        "parameters": [
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "opaque cursor (nextBefore)",
+              "title": "Before"
+            },
+            "description": "opaque cursor (nextBefore)"
+          },
+          {
+            "name": "event_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Event Type"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionsPage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/public/proof-summary": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Proof Summary",
+        "operationId": "proof_summary_api_v1_public_proof_summary_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_PublicProofSummaryResponse_"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/public/funding-rates.csv": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Funding Rates Csv",
+        "operationId": "funding_rates_csv_api_v1_public_funding_rates_csv_get",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "enum": [
+                "fUST",
+                "fUSD"
+              ],
+              "type": "string",
+              "title": "Symbol"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/uncertainties": {
+      "get": {
+        "tags": [
+          "uncertainties"
+        ],
+        "summary": "List Account Uncertainties",
+        "operationId": "list_account_uncertainties_api_v1_exchange_accounts__exchange_account_id__uncertainties_get",
+        "parameters": [
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/UncertaintyState"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_list_UncertaintyResponse__"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}": {
+      "get": {
+        "tags": [
+          "uncertainties"
+        ],
+        "summary": "Get Account Uncertainty",
+        "operationId": "get_account_uncertainty_api_v1_exchange_accounts__exchange_account_id__uncertainties__uncertainty_id__get",
+        "parameters": [
+          {
+            "name": "uncertainty_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Uncertainty Id"
+            }
+          },
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_UncertaintyResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/uncertainty-resolution-requests/{request_id}": {
+      "get": {
+        "tags": [
+          "uncertainties"
+        ],
+        "summary": "Get Resolution Request",
+        "operationId": "get_resolution_request_api_v1_exchange_accounts__exchange_account_id__uncertainty_resolution_requests__request_id__get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ResolutionRequestResponse_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/trading-control": {
+      "get": {
+        "tags": [
+          "trading-control"
+        ],
+        "summary": "Overview",
+        "operationId": "overview_api_v1_exchange_accounts__exchange_account_id__trading_control_get",
+        "parameters": [
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_TradingControlOverview_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/trading-control/kill": {
+      "post": {
+        "tags": [
+          "trading-control"
+        ],
+        "summary": "Request Kill",
+        "operationId": "request_kill_api_v1_exchange_accounts__exchange_account_id__trading_control_kill_post",
+        "parameters": [
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ControlBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_KillRequested_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/trading-control/currencies/{symbol}/disable": {
+      "post": {
+        "tags": [
+          "trading-control"
+        ],
+        "summary": "Request Currency Disable",
+        "operationId": "request_currency_disable_api_v1_exchange_accounts__exchange_account_id__trading_control_currencies__symbol__disable_post",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^f[A-Z0-9]{2,15}$",
+              "title": "Symbol"
+            }
+          },
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ControlBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_CurrencyDisableRequested_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/trading-control/currency-requests/{request_id}": {
+      "get": {
+        "tags": [
+          "trading-control"
+        ],
+        "summary": "Get Currency Request",
+        "operationId": "get_currency_request_api_v1_exchange_accounts__exchange_account_id__trading_control_currency_requests__request_id__get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_CurrencyRequest_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exchange-accounts/{exchange_account_id}/trading-control/requests/{request_id}": {
+      "get": {
+        "tags": [
+          "trading-control"
+        ],
+        "summary": "Get Request",
+        "operationId": "get_request_api_v1_exchange_accounts__exchange_account_id__trading_control_requests__request_id__get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "exchange_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Exchange Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_TradingControlRequest_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "summary": "Ready",
+        "operationId": "ready_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AccountConfigDraftResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "exchangeAccountId": {
+            "type": "string",
+            "title": "Exchangeaccountid"
+          },
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StrategyConfigBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "configError": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "config_unreadable"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Configerror"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "createdAt": {
+            "type": "string",
+            "title": "Createdat"
+          },
+          "updatedAt": {
+            "type": "string",
+            "title": "Updatedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "exchangeAccountId",
+          "config",
+          "configError",
+          "revision",
+          "source",
+          "createdAt",
+          "updatedAt"
+        ],
+        "title": "AccountConfigDraftResponse",
+        "description": "Explicitly account-scoped, not-yet-applied strategy configuration.\n\n``config`` is the stored ``StrategyConfigBody`` (the PUT is its only writer). A draft\nstored under another schema is still listed, with ``config`` null and ``configError``\nset, so the console can show it exists and overwrite it."
+      },
+      "AccountCredentialResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "exchangeAccountId": {
+            "type": "string",
+            "title": "Exchangeaccountid"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "apiKey": {
+            "type": "string",
+            "title": "Apikey"
+          },
+          "apiSecret": {
+            "type": "string",
+            "title": "Apisecret",
+            "default": "****"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "verified",
+              "unverified",
+              "failed",
+              "revoked",
+              "retired"
+            ],
+            "title": "Status"
+          },
+          "createdAt": {
+            "type": "string",
+            "title": "Createdat"
+          },
+          "verifiedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verifiedat"
+          },
+          "lastVerifyError": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lastverifyerror"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "exchangeAccountId",
+          "label",
+          "apiKey",
+          "apiSecret",
+          "status",
+          "createdAt",
+          "verifiedAt",
+          "lastVerifyError"
+        ],
+        "title": "AccountCredentialResponse",
+        "description": "Masked account-owned credential lifecycle record."
+      },
+      "BlockedScope": {
+        "properties": {
+          "exchangeAccountId": {
+            "type": "string",
+            "title": "Exchangeaccountid"
+          },
+          "environment": {
+            "type": "string",
+            "title": "Environment"
+          },
+          "symbol": {
+            "type": "string",
+            "title": "Symbol"
+          }
+        },
+        "type": "object",
+        "required": [
+          "exchangeAccountId",
+          "environment",
+          "symbol"
+        ],
+        "title": "BlockedScope",
+        "description": "The account, environment and symbol an open uncertainty blocks."
+      },
+      "BuildIdentity": {
+        "properties": {
+          "backend_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend Digest"
+          },
+          "source_revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Revision"
+          }
+        },
+        "type": "object",
+        "required": [
+          "backend_digest",
+          "source_revision"
+        ],
+        "title": "BuildIdentity"
+      },
+      "CancelAllPhase": {
+        "properties": {
+          "currency": {
+            "type": "string",
+            "title": "Currency"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "requested",
+              "acknowledged",
+              "rejected",
+              "failed",
+              "skipped"
+            ],
+            "title": "Phase"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "at_ms": {
+            "type": "integer",
+            "title": "At Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "currency",
+          "phase",
+          "detail",
+          "at_ms"
+        ],
+        "title": "CancelAllPhase",
+        "description": "The latest venue cancel-all phase of one currency for the HALTED in force."
+      },
+      "CapitalAvailable": {
+        "properties": {
+          "capital_available": {
+            "type": "boolean",
+            "const": true,
+            "title": "Capital Available"
+          },
+          "policy_revision": {
+            "type": "integer",
+            "title": "Policy Revision"
+          },
+          "policy_digest": {
+            "type": "string",
+            "title": "Policy Digest"
+          },
+          "basis_token": {
+            "type": "string",
+            "title": "Basis Token"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/CapitalPolicyStatus"
+          },
+          "available_balance": {
+            "type": "string",
+            "title": "Available Balance"
+          },
+          "unreflected_commitments": {
+            "type": "string",
+            "title": "Unreflected Commitments"
+          },
+          "total_capital": {
+            "type": "string",
+            "title": "Total Capital"
+          },
+          "spendable": {
+            "type": "string",
+            "title": "Spendable"
+          },
+          "unattributed_credit_exposure": {
+            "type": "string",
+            "title": "Unattributed Credit Exposure"
+          },
+          "cells": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CapitalBudgetStatus"
+            },
+            "type": "object",
+            "title": "Cells"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "capital_available",
+          "policy_revision",
+          "policy_digest",
+          "basis_token",
+          "policy",
+          "available_balance",
+          "unreflected_commitments",
+          "total_capital",
+          "spendable",
+          "unattributed_credit_exposure",
+          "cells"
+        ],
+        "title": "CapitalAvailable"
+      },
+      "CapitalBudgetStatus": {
+        "properties": {
+          "spendable": {
+            "type": "string",
+            "title": "Spendable"
+          },
+          "cell_limit": {
+            "type": "string",
+            "title": "Cell Limit"
+          },
+          "cell_headroom": {
+            "type": "string",
+            "title": "Cell Headroom"
+          },
+          "max_new_offer": {
+            "type": "string",
+            "title": "Max New Offer"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "spendable",
+          "cell_limit",
+          "cell_headroom",
+          "max_new_offer",
+          "reason"
+        ],
+        "title": "CapitalBudgetStatus"
+      },
+      "CapitalPolicyStatus": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "reserve_amount": {
+            "type": "string",
+            "title": "Reserve Amount"
+          },
+          "allocation_mode": {
+            "type": "string",
+            "const": "all_available",
+            "title": "Allocation Mode"
+          },
+          "max_cell_fraction": {
+            "type": "string",
+            "title": "Max Cell Fraction"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "enabled",
+          "reserve_amount",
+          "allocation_mode",
+          "max_cell_fraction"
+        ],
+        "title": "CapitalPolicyStatus"
+      },
+      "CapitalUnavailable": {
+        "properties": {
+          "capital_available": {
+            "type": "boolean",
+            "const": false,
+            "title": "Capital Available"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "policy_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Revision"
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CapitalPolicyStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "capital_available",
+          "reason"
+        ],
+        "title": "CapitalUnavailable"
+      },
+      "ConfiguredCell": {
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "title": "Symbol"
+          },
+          "cell": {
+            "type": "string",
+            "title": "Cell"
+          },
+          "strategy": {
+            "type": "string",
+            "title": "Strategy"
+          },
+          "period": {
+            "type": "string",
+            "title": "Period"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "symbol",
+          "cell",
+          "strategy",
+          "period"
+        ],
+        "title": "ConfiguredCell"
+      },
+      "ControlBody": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "ControlBody"
+      },
+      "CurrencyDisableRequested": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "symbol": {
+            "type": "string",
+            "title": "Symbol"
+          },
+          "action": {
+            "type": "string",
+            "const": "disable",
+            "title": "Action"
+          },
+          "state": {
+            "type": "string",
+            "const": "requested",
+            "title": "State"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "symbol",
+          "action",
+          "state"
+        ],
+        "title": "CurrencyDisableRequested"
+      },
+      "CurrencyPolicy": {
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "title": "Symbol"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision"
+          },
+          "policy_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Error"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "max_offer_amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Offer Amount"
+          },
+          "envelope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OfferEnvelope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/CurrencyRequest"
+            },
+            "type": "array",
+            "title": "Requests"
+          }
+        },
+        "type": "object",
+        "required": [
+          "symbol",
+          "revision",
+          "policy_error",
+          "enabled",
+          "max_offer_amount",
+          "envelope",
+          "requests"
+        ],
+        "title": "CurrencyPolicy",
+        "description": "A currency with an applied policy; an unreadable one has ``policy_error`` and nulls."
+      },
+      "CurrencyRequest": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "symbol": {
+            "type": "string",
+            "title": "Symbol"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "enable",
+              "disable"
+            ],
+            "title": "Action"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "requested_by": {
+            "type": "string",
+            "title": "Requested By"
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "title": "Created At Ms"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "requested",
+              "applied",
+              "rejected",
+              "failed"
+            ],
+            "title": "State"
+          },
+          "processed_at_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Processed At Ms"
+          },
+          "outcome_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "symbol",
+          "action",
+          "reason",
+          "requested_by",
+          "created_at_ms",
+          "state",
+          "processed_at_ms",
+          "outcome_reason"
+        ],
+        "title": "CurrencyRequest"
+      },
+      "DeployedBuild": {
+        "properties": {
+          "backend_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend Digest"
+          },
+          "source_revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Revision"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "backend_digest",
+          "source_revision",
+          "finished_at"
+        ],
+        "title": "DeployedBuild"
+      },
+      "DryRun": {
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "title": "Account Id"
+          },
+          "deployment_environment": {
+            "type": "string",
+            "title": "Deployment Environment"
+          },
+          "symbols": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/DryRunSymbol"
+            },
+            "type": "object",
+            "title": "Symbols"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "account_id",
+          "deployment_environment",
+          "symbols"
+        ],
+        "title": "DryRun"
+      },
+      "DryRunCell": {
+        "properties": {
+          "would_submit": {
+            "type": "boolean",
+            "title": "Would Submit"
+          },
+          "blocked_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked By"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "would_submit",
+          "blocked_by"
+        ],
+        "title": "DryRunCell"
+      },
+      "DryRunSymbol": {
+        "properties": {
+          "blocked_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked By"
+          },
+          "cells": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/DryRunCell"
+            },
+            "type": "object",
+            "title": "Cells"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "blocked_by",
+          "cells"
+        ],
+        "title": "DryRunSymbol"
+      },
+      "Envelope_AccountConfigDraftResponse_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AccountConfigDraftResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[AccountConfigDraftResponse]"
+      },
+      "Envelope_CurrencyDisableRequested_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/CurrencyDisableRequested"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[CurrencyDisableRequested]"
+      },
+      "Envelope_CurrencyRequest_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/CurrencyRequest"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[CurrencyRequest]"
+      },
+      "Envelope_FundingStatus_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/FundingStatus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[FundingStatus]"
+      },
+      "Envelope_KillRequested_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/KillRequested"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[KillRequested]"
+      },
+      "Envelope_ProfileResponse_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ProfileResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[ProfileResponse]"
+      },
+      "Envelope_PublicProofSummaryResponse_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/PublicProofSummaryResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[PublicProofSummaryResponse]"
+      },
+      "Envelope_ResolutionRequestResponse_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ResolutionRequestResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[ResolutionRequestResponse]"
+      },
+      "Envelope_TradingControlOverview_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/TradingControlOverview"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[TradingControlOverview]"
+      },
+      "Envelope_TradingControlRequest_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/TradingControlRequest"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[TradingControlRequest]"
+      },
+      "Envelope_UncertaintyResponse_": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/UncertaintyResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[UncertaintyResponse]"
+      },
+      "Envelope_list_AccountCredentialResponse__": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/AccountCredentialResponse"
+            },
+            "type": "array",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[list[AccountCredentialResponse]]"
+      },
+      "Envelope_list_ExchangeAccountResponse__": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/ExchangeAccountResponse"
+            },
+            "type": "array",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[list[ExchangeAccountResponse]]"
+      },
+      "Envelope_list_OfferClaimResponse__": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/OfferClaimResponse"
+            },
+            "type": "array",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[list[OfferClaimResponse]]"
+      },
+      "Envelope_list_PositionResponse__": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/PositionResponse"
+            },
+            "type": "array",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[list[PositionResponse]]"
+      },
+      "Envelope_list_UncertaintyResponse__": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/UncertaintyResponse"
+            },
+            "type": "array",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[list[UncertaintyResponse]]"
+      },
+      "Envelope_list_WeeklyAttributionResponse__": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/WeeklyAttributionResponse"
+            },
+            "type": "array",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "Envelope[list[WeeklyAttributionResponse]]"
+      },
+      "ExchangeAccountResponse": {
+        "properties": {
+          "exchangeAccountId": {
+            "type": "string",
+            "title": "Exchangeaccountid"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "lifecycleStatus": {
+            "type": "string",
+            "enum": [
+              "active",
+              "halted"
+            ],
+            "title": "Lifecyclestatus"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "operator",
+              "viewer"
+            ],
+            "title": "Role"
+          }
+        },
+        "type": "object",
+        "required": [
+          "exchangeAccountId",
+          "venue",
+          "label",
+          "lifecycleStatus",
+          "role"
+        ],
+        "title": "ExchangeAccountResponse",
+        "description": "One account visible to the authenticated operator bootstrap (never a retired one)."
+      },
+      "ExecutionEventResponse": {
+        "properties": {
+          "eventKey": {
+            "type": "string",
+            "title": "Eventkey"
+          },
+          "eventType": {
+            "type": "string",
+            "title": "Eventtype"
+          },
+          "occurredAtMs": {
+            "type": "integer",
+            "title": "Occurredatms"
+          },
+          "symbol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Symbol"
+          },
+          "venueOfferId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Venueofferid"
+          },
+          "cid": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cid"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amount"
+          },
+          "rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "eventKey",
+          "eventType",
+          "occurredAtMs",
+          "symbol",
+          "venueOfferId",
+          "cid",
+          "amount",
+          "rate"
+        ],
+        "title": "ExecutionEventResponse",
+        "description": "One execution-history row: a ledger journal row, or below the switch a row of the frozen\n``legacy_archive.event_log``. ``eventKey`` is opaque (ADR 2026-10-02 D4)."
+      },
+      "ExecutionsPage": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionEventResponse"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/ExecutionsPagination"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "pagination"
+        ],
+        "title": "ExecutionsPage",
+        "description": "``GET /executions``: the envelope plus the opaque cursor of the next page."
+      },
+      "ExecutionsPagination": {
+        "properties": {
+          "hasMore": {
+            "type": "boolean",
+            "title": "Hasmore"
+          },
+          "nextBefore": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nextbefore"
+          }
+        },
+        "type": "object",
+        "required": [
+          "hasMore",
+          "nextBefore"
+        ],
+        "title": "ExecutionsPagination"
+      },
+      "FundingStatus": {
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "title": "Account Id"
+          },
+          "deployment_environment": {
+            "type": "string",
+            "title": "Deployment Environment"
+          },
+          "halt": {
+            "$ref": "#/components/schemas/HaltStatus"
+          },
+          "symbols": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/CapitalUnavailable"
+                },
+                {
+                  "$ref": "#/components/schemas/CapitalAvailable"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Symbols"
+          },
+          "configured_cells": {
+            "items": {
+              "$ref": "#/components/schemas/ConfiguredCell"
+            },
+            "type": "array",
+            "title": "Configured Cells"
+          },
+          "dry_run": {
+            "$ref": "#/components/schemas/DryRun"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "account_id",
+          "deployment_environment",
+          "halt",
+          "symbols",
+          "configured_cells",
+          "dry_run"
+        ],
+        "title": "FundingStatus",
+        "description": "``/admin/trading-status`` with the dry run of ``/admin/dry-evaluate`` under ``dry_run``."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HaltStatus": {
+        "properties": {
+          "halted": {
+            "type": "boolean",
+            "title": "Halted"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "sources": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Sources"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "halted",
+          "reason",
+          "sources"
+        ],
+        "title": "HaltStatus"
+      },
+      "KillRequested": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "action": {
+            "type": "string",
+            "const": "kill",
+            "title": "Action"
+          },
+          "state": {
+            "type": "string",
+            "const": "requested",
+            "title": "State"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "action",
+          "state"
+        ],
+        "title": "KillRequested"
+      },
+      "OfferClaimResponse": {
+        "properties": {
+          "offerKey": {
+            "type": "string",
+            "title": "Offerkey"
+          },
+          "venueOfferId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Venueofferid"
+          },
+          "state": {
+            "$ref": "#/components/schemas/OfferState"
+          },
+          "symbol": {
+            "type": "string",
+            "title": "Symbol"
+          },
+          "sizeUsdt": {
+            "type": "string",
+            "title": "Sizeusdt"
+          },
+          "occurredAtMs": {
+            "type": "integer",
+            "title": "Occurredatms"
+          },
+          "lastUpdatedMs": {
+            "type": "integer",
+            "title": "Lastupdatedms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "offerKey",
+          "venueOfferId",
+          "state",
+          "symbol",
+          "sizeUsdt",
+          "occurredAtMs",
+          "lastUpdatedMs"
+        ],
+        "title": "OfferClaimResponse",
+        "description": "One managed offer. ``offerKey`` is opaque and stable for the offer's life."
+      },
+      "OfferEnvelope": {
+        "properties": {
+          "min_period_days": {
+            "type": "integer",
+            "title": "Min Period Days"
+          },
+          "max_period_days": {
+            "type": "integer",
+            "title": "Max Period Days"
+          },
+          "max_open_offers": {
+            "type": "integer",
+            "title": "Max Open Offers"
+          },
+          "rate_floor_ratio": {
+            "type": "string",
+            "title": "Rate Floor Ratio"
+          },
+          "min_rate_apr": {
+            "type": "string",
+            "title": "Min Rate Apr"
+          }
+        },
+        "type": "object",
+        "required": [
+          "min_period_days",
+          "max_period_days",
+          "max_open_offers",
+          "rate_floor_ratio",
+          "min_rate_apr"
+        ],
+        "title": "OfferEnvelope",
+        "description": "The terms every new offer must stay inside; decimals stay strings."
+      },
+      "OfferState": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "unknown",
+          "claimed"
+        ]
+      },
+      "PositionResponse": {
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "title": "Symbol"
+          },
+          "available": {
+            "type": "string",
+            "title": "Available"
+          },
+          "offered": {
+            "type": "string",
+            "title": "Offered"
+          },
+          "lent": {
+            "type": "string",
+            "title": "Lent"
+          },
+          "unattributedLent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unattributedlent"
+          },
+          "nCredits": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ncredits"
+          },
+          "lastUpdatedMs": {
+            "type": "integer",
+            "title": "Lastupdatedms"
+          },
+          "lastReconciledAtMs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lastreconciledatms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "symbol",
+          "available",
+          "offered",
+          "lent",
+          "unattributedLent",
+          "nCredits",
+          "lastUpdatedMs",
+          "lastReconciledAtMs"
+        ],
+        "title": "PositionResponse",
+        "description": "One symbol's capital as disjoint components, in the symbol's own units.\n\n``available + offered + lent`` is the symbol's total. ``unattributedLent`` is a\nsubset of ``lent`` (never an addend); null when the authority has no such fact."
+      },
+      "ProfileResponse": {
+        "properties": {
+          "userId": {
+            "type": "string",
+            "title": "Userid"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          }
+        },
+        "type": "object",
+        "required": [
+          "userId",
+          "email",
+          "role"
+        ],
+        "title": "ProfileResponse",
+        "description": "The operator identity Tailscale Serve forwards."
+      },
+      "PublicProofSummaryResponse": {
+        "properties": {
+          "weeks": {
+            "items": {
+              "$ref": "#/components/schemas/PublicWeeklyPoint"
+            },
+            "type": "array",
+            "title": "Weeks"
+          },
+          "asOf": {
+            "type": "string",
+            "title": "Asof"
+          }
+        },
+        "type": "object",
+        "required": [
+          "weeks",
+          "asOf"
+        ],
+        "title": "PublicProofSummaryResponse"
+      },
+      "PublicWeeklyPoint": {
+        "properties": {
+          "weekStartMs": {
+            "type": "integer",
+            "title": "Weekstartms"
+          },
+          "realizedAprNetPct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Realizedaprnetpct"
+          },
+          "baselineFrrUtilAprNetPct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baselinefrrutilaprnetpct"
+          }
+        },
+        "type": "object",
+        "required": [
+          "weekStartMs",
+          "realizedAprNetPct",
+          "baselineFrrUtilAprNetPct"
+        ],
+        "title": "PublicWeeklyPoint",
+        "description": "One week of the public proof-page series — percent-only, no absolute\n$ fields (see modules/api/public.py for the compliance rationale)."
+      },
+      "Range": {
+        "properties": {
+          "min": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Min"
+          },
+          "max": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Max"
+          }
+        },
+        "type": "object",
+        "required": [
+          "min",
+          "max"
+        ],
+        "title": "Range",
+        "description": "A {min, max} bound. min/max must be positive and min <= max. Used for\namount, rate (daily ratio) and period. Modelled as float to keep zero\ndivergence from the FE's single rangeSchema (which types all three as\nnumber); period values are integers by convention (FE step=1)."
+      },
+      "ResolutionRequestResponse": {
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "title": "Requestid"
+          },
+          "uncertaintyId": {
+            "type": "string",
+            "title": "Uncertaintyid"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "bind_to_venue",
+              "mark_not_accepted",
+              "manual_resolution"
+            ],
+            "title": "Action"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "requested",
+              "applied",
+              "rejected",
+              "failed"
+            ],
+            "title": "State"
+          },
+          "evidenceRef": {
+            "type": "string",
+            "title": "Evidenceref"
+          },
+          "createdAtMs": {
+            "type": "integer",
+            "title": "Createdatms"
+          },
+          "processedAtMs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Processedatms"
+          },
+          "outcomeReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcomereason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "requestId",
+          "uncertaintyId",
+          "action",
+          "state",
+          "evidenceRef",
+          "createdAtMs",
+          "processedAtMs",
+          "outcomeReason"
+        ],
+        "title": "ResolutionRequestResponse",
+        "description": "One queued adjudication and, once the daemon has settled it, its outcome."
+      },
+      "StrategyConfigBody": {
+        "properties": {
+          "currency": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Currency"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Range"
+          },
+          "rate": {
+            "$ref": "#/components/schemas/Range"
+          },
+          "period": {
+            "$ref": "#/components/schemas/Range"
+          },
+          "autoRenew": {
+            "type": "boolean",
+            "title": "Autorenew"
+          }
+        },
+        "type": "object",
+        "required": [
+          "currency",
+          "amount",
+          "rate",
+          "period",
+          "autoRenew"
+        ],
+        "title": "StrategyConfigBody",
+        "description": "Validated PUT /configs body. Mirrors the FE Zod strategyConfigSchema\n(positive ranges, min<=max, non-empty currency). Stored verbatim as the\nuser_configs.config JSONB blob. The backend is unit-agnostic on rate; it\nstores the daily ratio the FE sends and never converts."
+      },
+      "TradingControlOverview": {
+        "properties": {
+          "trading_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TradingStateView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cancel_all": {
+            "items": {
+              "$ref": "#/components/schemas/CancelAllPhase"
+            },
+            "type": "array",
+            "title": "Cancel All"
+          },
+          "running": {
+            "$ref": "#/components/schemas/BuildIdentity"
+          },
+          "latest_deployment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeployedBuild"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/TradingControlRequest"
+            },
+            "type": "array",
+            "title": "Requests"
+          },
+          "currencies": {
+            "items": {
+              "$ref": "#/components/schemas/CurrencyPolicy"
+            },
+            "type": "array",
+            "title": "Currencies"
+          }
+        },
+        "type": "object",
+        "required": [
+          "trading_state",
+          "cancel_all",
+          "running",
+          "latest_deployment",
+          "requests",
+          "currencies"
+        ],
+        "title": "TradingControlOverview"
+      },
+      "TradingControlRequest": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "resume",
+              "kill"
+            ],
+            "title": "Action"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "requested_by": {
+            "type": "string",
+            "title": "Requested By"
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "title": "Created At Ms"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "requested",
+              "applied",
+              "rejected",
+              "failed"
+            ],
+            "title": "State"
+          },
+          "processed_at_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Processed At Ms"
+          },
+          "outcome_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "action",
+          "reason",
+          "requested_by",
+          "created_at_ms",
+          "state",
+          "processed_at_ms",
+          "outcome_reason"
+        ],
+        "title": "TradingControlRequest"
+      },
+      "TradingStateView": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "HALTED"
+            ],
+            "title": "State"
+          },
+          "cause": {
+            "type": "string",
+            "enum": [
+              "operator",
+              "auto"
+            ],
+            "title": "Cause"
+          },
+          "actor": {
+            "type": "string",
+            "title": "Actor"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "at_ms": {
+            "type": "integer",
+            "title": "At Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "state",
+          "cause",
+          "actor",
+          "reason",
+          "at_ms"
+        ],
+        "title": "TradingStateView"
+      },
+      "UncertaintyKind": {
+        "type": "string",
+        "enum": [
+          "submit_outcome_unknown",
+          "unattributed_venue_offer"
+        ]
+      },
+      "UncertaintyResolutionContext": {
+        "properties": {
+          "evidenceRef": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidenceref"
+          },
+          "queryStartedAtMs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Querystartedatms"
+          },
+          "queryFinishedAtMs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queryfinishedatms"
+          },
+          "candidateCount": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidatecount"
+          },
+          "candidateVenueOfferIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "title": "Candidatevenueofferids"
+          },
+          "unavailableReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unavailablereason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "evidenceRef",
+          "queryStartedAtMs",
+          "queryFinishedAtMs",
+          "candidateCount",
+          "candidateVenueOfferIds",
+          "unavailableReason"
+        ],
+        "title": "UncertaintyResolutionContext",
+        "description": "Server-derived, bounded inputs for one audited operator action."
+      },
+      "UncertaintyResponse": {
+        "properties": {
+          "uncertaintyId": {
+            "type": "string",
+            "title": "Uncertaintyid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/UncertaintyKind"
+          },
+          "symbol": {
+            "type": "string",
+            "title": "Symbol"
+          },
+          "intendedAmount": {
+            "type": "string",
+            "title": "Intendedamount"
+          },
+          "state": {
+            "$ref": "#/components/schemas/UncertaintyState"
+          },
+          "evidenceSummary": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "items": {},
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Evidencesummary"
+          },
+          "blockedScope": {
+            "$ref": "#/components/schemas/BlockedScope"
+          },
+          "resolvedByOperatorId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolvedbyoperatorid"
+          },
+          "resolutionReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolutionreason"
+          },
+          "resolutionContext": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UncertaintyResolutionContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resolutionRequest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResolutionRequestResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "uncertaintyId",
+          "kind",
+          "symbol",
+          "intendedAmount",
+          "state",
+          "evidenceSummary",
+          "blockedScope",
+          "resolvedByOperatorId",
+          "resolutionReason",
+          "resolutionContext",
+          "resolutionRequest"
+        ],
+        "title": "UncertaintyResponse",
+        "description": "Bounded operator-console uncertainty DTO (never raw event payload)."
+      },
+      "UncertaintyState": {
+        "type": "string",
+        "enum": [
+          "open",
+          "resolved"
+        ]
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "WeeklyAttributionResponse": {
+        "properties": {
+          "cell": {
+            "type": "string",
+            "title": "Cell"
+          },
+          "weekStartMs": {
+            "type": "integer",
+            "title": "Weekstartms"
+          },
+          "weekEndMs": {
+            "type": "integer",
+            "title": "Weekendms"
+          },
+          "nFills": {
+            "type": "integer",
+            "title": "Nfills"
+          },
+          "grossInterestUsdt": {
+            "type": "string",
+            "title": "Grossinterestusdt"
+          },
+          "netInterestUsdt": {
+            "type": "string",
+            "title": "Netinterestusdt"
+          },
+          "capitalDays": {
+            "type": "string",
+            "title": "Capitaldays"
+          },
+          "realizedAprNetPct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Realizedaprnetpct"
+          },
+          "baselineCloseAprNetPct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baselinecloseaprnetpct"
+          },
+          "baselineFrrAprNetPct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baselinefrraprnetpct"
+          },
+          "baselineFrrUtilAprNetPct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baselinefrrutilaprnetpct"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cell",
+          "weekStartMs",
+          "weekEndMs",
+          "nFills",
+          "grossInterestUsdt",
+          "netInterestUsdt",
+          "capitalDays",
+          "realizedAprNetPct",
+          "baselineCloseAprNetPct",
+          "baselineFrrAprNetPct",
+          "baselineFrrUtilAprNetPct"
+        ],
+        "title": "WeeklyAttributionResponse"
+      }
+    }
+  }
+}

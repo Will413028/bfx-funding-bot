@@ -114,7 +114,9 @@ def test_include_object_filters_legacy_and_migration_managed_objects() -> None:
         True,
         None,
     )
-    assert not include_object(
+    # f836fdee9bf3 dropped ``auth`` and with it the FK to ``auth."user"``: one that
+    # reappears is drift, no longer exempt.
+    assert include_object(
         _foreign_key("user_profiles", "public", "fk_user_profiles_user"),
         "fk_user_profiles_user",
         "foreign_key_constraint",

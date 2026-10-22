@@ -6,13 +6,12 @@ Bitfinex 自動放貸 SaaS 平台，自動化管理融資放貸、資金配置�
 
 | 層級 | 技術 |
 |------|------|
-| Frontend | Next.js 16 (App Router) + Tailwind CSS v4 + shadcn/ui |
-| Backend | Python 3.13（長駐 daemon，asyncio + SQLAlchemy 2.0 async + httpx + Alembic） |
-| Database | PostgreSQL（Oracle VM，Better Auth `auth` schema + bot data） |
-| Cache | Redis（Oracle VM，session/rate-limit secondary storage） |
-| Auth | Better Auth EdDSA JWT (server-to-server only) + HttpOnly Cookie |
+| Frontend | Next.js 16 (App Router，static export) + Tailwind CSS v4 + shadcn/ui；build 進 backend image，由 web API 提供 |
+| Backend | Python 3.13（長駐 daemon，asyncio + SQLAlchemy 2.0 async + httpx + Alembic）與 FastAPI web API |
+| Database | PostgreSQL 18（Oracle VM，自托） |
+| Auth | 沒有 app 登入：營運 UI 只經 Tailscale Serve 進入，web API 認 tailnet policy 授予的 operator capability；高風險操作走 Tailscale SSH 上的 operator CLI（`bfx-op`） |
 | i18n | next-intl (en + zh-TW) |
-| Deploy | Oracle Cloud VM（Docker Compose：Frontend + Python web-API + PostgreSQL + Redis） |
+| Deploy | Oracle Cloud VM（Docker Compose：bot + web API + Tailscale 節點 + PostgreSQL） |
 
 ## 專案結構
 

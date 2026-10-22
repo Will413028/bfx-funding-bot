@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from bfx_funding_bot.apps.sim_faults import ENV_NAME, parse_sim_faults
+from bfx_funding_bot.core.secret_files import read_secret
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
@@ -65,10 +66,10 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         )
     phase = Phase(phase_str)
 
-    database_url = os.environ.get("DATABASE_URL", "")
-    if not database_url:
+    # The bot's secret file in production (BFX_SECRETS_DIR), else the env (core.secret_files).
+    database_url = read_secret("DATABASE_URL")
+    if database_url is None:
         raise ValueError("DATABASE_URL required")
-    redis_url = os.environ.get("REDIS_URL") or None
 
     deployment_env_str = os.environ.get("BFX_DEPLOYMENT_ENV", "").strip()
     if not deployment_env_str:
@@ -264,7 +265,6 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         "book_max_down_pct": book_max_down_pct,
         "optimizer_fee_rate": optimizer_fee_rate,
         "fill_model_artifact": fill_model_artifact or None,
-        "redis_url": redis_url,
         "run_duration_hours": run_duration_h,
         "scheduler_buffer_s": scheduler_buffer_s,
     }

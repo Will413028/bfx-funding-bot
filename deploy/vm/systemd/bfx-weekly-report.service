@@ -7,7 +7,7 @@ OnFailure=bfx-alert@%n.service
 
 [Service]
 Type=oneshot
-# Root: reads /opt/bfx/runtime/bot.env (root 0600) and the deployments ledger, and
+# Root: reads /opt/bfx/runtime/research.env (root 0600) and the deployments ledger, and
 # drives docker; the container itself runs as uid 1000. The job's steps and this
 # runner come from the deployed tooling release (bfx-deploy installs both after
 # each successful deploy); the image is the ledger's deployed backend digest.

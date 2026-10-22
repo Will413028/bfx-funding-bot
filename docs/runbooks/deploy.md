@@ -18,11 +18,13 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
                 tags: sha-<40 位 revision>；main 只在該 revision 仍是 main 的 head 時才推
                 （workflow_run 可能亂序完成，舊 revision 不得把 main tag 拉回去）
                 labels: org.opencontainers.image.revision、bfx.ci-run-url（通過的 CI run）
+                provenance：actions/attest 對推上去的 digest 簽 SLSA build provenance
+                （Sigstore public-good keyless），attestation 存在 repo 的 GitHub attestation API
           ──► VM bfx-deploy.timer（每 5 分鐘，*:2/5）→ bfx-deploy
 ```
 
-- Image：`ghcr.io/will413028/bfx-funding-bot-backend`（9d-5 起不再建 `…-frontend`；舊 revision 的 frontend image
-  仍在 GHCR，供回滾到 9d-5 之前用）。
+- Image：`ghcr.io/will413028/bfx-funding-bot-backend`（9d-5 起不再建 `…-frontend`；9d-6 起 bfx-deploy 也不查它，
+  compose 檔帶 frontend 服務的 revision 會在 precheck 被拒）。
   `main` tag 只用來「發現」最新 release；部署一律以 `repository@sha256:<digest>`。
 - Registry 查詢用 `docker buildx imagetools inspect`（GHCR 憑證只放在每次呼叫的暫時
   `DOCKER_CONFIG`，不留下 `docker login`）。
@@ -37,21 +39,39 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
 2. 解析 GHCR `backend:main` 的 digest；若 ledger 最新的成功部署已是它就結束。
    **上次失敗、rolled_back 或中斷（只有 `started` 列）的 digest 不會自動重試**，要 `--retry`。
 3. 讀 image label 的 revision 與 CI run，要求 `backend:sha-<rev>` 是同一個 digest；
-   `frontend:sha-<rev>` 存在時要帶同一個 revision。
+   接著驗這個 digest 的 build provenance，**不用任何 GitHub token，GHCR package 可以維持 private**：
+   1. 用 bfx-deploy 自己的 registry 存取（`ghcr.env` 的 pull 憑證，和 pull 用的是同一份）以
+      `docker buildx imagetools inspect <repo>@<digest> --raw` 讀出 manifest（多平台 push 時是 index）
+      的原始 bytes，要求 sha256 等於該 digest，寫成暫存檔；
+   2. 匿名讀 `https://api.github.com/repos/Will413028/bfx-funding-bot/attestations/<digest>`，逐一下載每筆的
+      `bundle_url`（只接受 https、上限 2 MiB；內容是 snappy 壓縮，bfx-deploy 用內建的解碼器解開）；
+   3. 用釘版的 gh（`/usr/local/lib/bfx-ops/gh/2.102.0/bin/gh`）逐一驗，直到有一筆通過：
+      `gh attestation verify <manifest 檔> --bundle <bundle 檔> --repo Will413028/bfx-funding-bot
+      --signer-workflow Will413028/bfx-funding-bot/.github/workflows/release.yml --source-ref refs/heads/main
+      --deny-self-hosted-runners --format json`。同一個 digest 可能有別種 attestation（例如 SBOM），
+      gh 會拒絕那些，所以一筆筆試；全部被拒才算驗不過。
+
+   gh 的環境從零建立：沒有 token、沒有 gh login、沒有 docker 設定，`ghcr.env` 的 pull 憑證只給 registry 那一步，
+   不交給 gh，也不送到 GitHub API。`gh attestation verify --bundle` 不需要登入（實測 2026-10-22：`env -i` 下 rc 0）；
+   gh 只連 Sigstore 的 TUF CDN 取信任根，cache 在 `/var/lib/bfx-deploy/gh/`。匿名 GitHub API 每個 IP 每小時
+   60 次；bfx-deploy 只在有未部署的新 release 時每輪打 1 次（最多每小時 12 次）。
+   必須在第 5 步之前：那一步會在新 image 裡以 DB owner（`migrate.env`）跑 alembic。驗不過就跟「release 還找不到」
+   一樣處理：不寫 ledger、什麼都不動、每一輪重驗，連續失敗 30 分鐘發一次 warning（見 §5「Provenance 驗不過」）。
+   沒有略過驗證的旗標。同一套檢查可以手動跑：`sudo bfx-deploy verify-provenance <digest>`。
 4. 在 VM mirror（`/home/ubuntu/bfx-funding-bot`，以 `ubuntu` 身分跑 git）fetch，要求 `<rev>`
-   在 `origin/main` 上；compose 檔與 `live.env` 都取自 `<rev>` 本身（git 物件，不讀 working tree），
+   在 `origin/main` 上，而且 ledger 最新成功部署的 revision 等於 `<rev>` 或是它的祖先（不降版：
+   `main` tag 被指回一個較舊、簽章同樣有效的 digest 時 precheck `release_not_descendant_of_deployed`）；compose 檔與 `live.env` 都取自 `<rev>` 本身（git 物件，不讀 working tree），
    寫進 `/var/lib/bfx-deploy/releases/<rev>/`。**要跑什麼由這份 compose 檔決定**：
    `docker compose config --no-env-resolution --format json`（不讀 env 檔內容）渲染出服務、
-   `container_name`、image 與 env 檔，部署、檢查、健康等待都只針對這些服務。compose 有 frontend 服務
-   而 `frontend:sha-<rev>` 還沒推上來時，跟 CI 推到一半一樣靜默重試、30 分鐘後告警；compose 沒有
-   frontend（9d-5 起）就不需要 frontend image，ledger 的 `frontend_digest` 記 NULL。
-   頂層 `configs` 的 `file`（只接受 release 目錄內的檔案；`content`／`environment` 形式與頂層
-   `secrets` 一律拒絕）同樣從 `<rev>` 的 git 物件寫到 release 目錄的同一個相對路徑；
+   `container_name`、image 與 env 檔，部署、檢查、健康等待都只針對這些服務。ledger 的 `frontend_digest`
+   只是 9d-5 之前的歷史，新列一律記 NULL、部署不讀它。
+   頂層 `configs` 的 `file`（只接受 release 目錄內的檔案；`content`／`environment` 形式一律拒絕；頂層
+   `secrets` 只接受 `<runtime dir>/secrets/<service>/<KEY>` 的檔案，見 [秘密檔](#秘密檔botwebapi9h)）同樣從 `<rev>` 的 git 物件寫到 release 目錄的同一個相對路徑；
    compose 沒有 `configs` 就什麼都不多寫，所以回滾或 `--recreate` 到沒有這些檔的舊 revision 照常運作。
    引用了但 `<rev>` 沒有這個檔：`release_file_missing`，什麼都還沒停。
-5. 以 digest pull compose 裡的每個 image：release 自己的 backend／frontend 帶 GHCR 憑證，
+5. 以 digest pull compose 裡的每個 image：release 自己的 backend 帶 GHCR 憑證，
    第三方 image 只允許 `docker.io/tailscale/tailscale@sha256:…`（`THIRD_PARTY_IMAGE`）且不帶憑證；
-   其他 image 一律拒絕。檢查 compose 引用的 env 檔、`migrate.env` 與 `live.env`；在新 image 的 one-shot
+   其他 image 一律拒絕。9d-5 之前、帶 frontend 服務的 revision 在 precheck 被拒、什麼都還沒停（它的 `${BFX_FRONTEND_IMAGE:?}` 已沒人提供，渲染即失敗；寫死 digest 的則是 `compose_image_not_allowed:frontend`）。檢查 compose 引用的秘密檔與 env 檔、`migrate.env` 與 `live.env`；在新 image 的 one-shot
    （`migrate.env`，owner role）比較 `alembic current` 與 `alembic heads`。
 6. **有待套用的 migration**（Will 2026-09-25；全停：ADR
    `2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations` D6）：
@@ -72,7 +92,7 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    沒有 migration 的部署與回滾路徑不停 webapi。
 7. 寫入 ledger 的 `started` 列（attempt id、digest、revision、CI run；之後不可修改），
    再 `docker compose -p bfx-app -f <release>/docker-compose.app.yml up -d --no-deps --remove-orphans <compose 的服務>`；
-   compose 不再有的服務（9d-5 之後的 frontend）以 `--remove-orphans` 移除，回滾到舊版會再建回來。
+   compose 不再有的服務以 `--remove-orphans` 移除。
    自家服務每次都會重建（身分 env 每次不同）；沒變的第三方容器（holder、tailscale）Compose 會沿用，所以平常的
    部署不會重啟 tailnet 節點。只有兩種情況加 `--force-recreate` 重建全部：它掛載的設定檔（serve.json）和這次
    release 的內容不同（Compose 自己不會因此重建），或加入者卡在已死的 namespace（holder 被單獨重啟或停掉過）。
@@ -83,8 +103,7 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    目前的 namespace 裡（`HostConfig.NetworkMode` 等於 `container:<X 的 Id>`，且晚於 `<X>` 啟動），否則
    `container_release_mismatch:<服務>:netns`。兩者一定在同一次 `up`：`<X>` 被重建時 Compose 會連帶重建加入它的
    服務（Compose v5.1.4 實測），這條檢查證明它真的發生。
-   等健康（bot `:8080/healthz`、webapi `:8000/ready`（會連 DB；`/health` 在死掉的 netns 裡仍回 ok）、有 frontend 時
-   （9d-5 之前的回滾目標）`127.0.0.1:3001`；其他服務一定要在 compose 宣告 `healthcheck`，看 Docker 的 `State.Health.Status` 是
+   等健康（bot `:8080/healthz`、webapi `:8000/ready`（會連 DB；`/health` 在死掉的 netns 裡仍回 ok）；其他服務一定要在 compose 宣告 `healthcheck`，看 Docker 的 `State.Health.Status` 是
    `healthy`，沒宣告就 precheck `compose_healthcheck_missing:<服務>`），再 settle 60 秒。
    webapi 與 bot 一樣，開機時比對 image 內 migrations 的唯一 head（`core/schema_head.py`）與
    `alembic_version`，不一致就拒絕開機（uvicorn 結束、health 不會通過）：舊 webapi 不會在
@@ -98,9 +117,11 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
     並發 Telegram（deployed＝info、有 warning 或 rolled_back＝warning、其他＝critical）。
     在變更任何 container 之前就失敗的嘗試只有結束列。
 
-PostgreSQL 與 Redis 在 `docker-compose.bot.yml`（project `bfx`），bfx-deploy 從不碰；
-app 只加入既有的 `bfx_default` network。這個檔只定義 `postgres` 與 `redis`
-（`test_offsite_dr_image.py` 守住）；app 的舊 compose 定義已刪除。
+PostgreSQL 在 `docker-compose.bot.yml`（project `bfx`），bfx-deploy 從不碰；
+app 只加入既有的 `bfx_default` network。這個檔只定義 `postgres`
+（`test_offsite_dr_image.py` 守住）；app 的舊 compose 定義已刪除。Redis 隨 app 登入移除（9d-6）：
+容器以 `docker rm -f bfx-redis` 移除（compose 檔已沒有這個服務，`compose rm redis` 找不到它），
+volume（`docker volume ls --filter name=redisdata`）保留 30 天後再刪。
 
 ### 套用資料服務的 compose 變更
 
@@ -123,7 +144,7 @@ docker exec --user postgres bfx-postgres pgbackrest --stanza=bfx check          
 docker start bfx-bot && sudo systemctl start bfx-deploy.timer
 ```
 
-dry run 只能列出 `bfx-postgres Recreate`；出現 redis 或其他服務就停下來查。`pgbackrest check`
+dry run 只能列出 `bfx-postgres Recreate`；出現其他服務或 orphan 容器就停下來查。`pgbackrest check`
 失敗時 bot 維持停止，先修 archive（RPO 由 `bfx-backup-check` 監看）。
 
 ## 2. 部署與交易狀態
@@ -164,7 +185,7 @@ docker exec --user postgres bfx-postgres psql -U bfx -d bfx -c \
 
 ### `--recreate`（改了 runtime env 之後）
 
-只改 `/opt/bfx/runtime/*.env` 不會觸發部署。`--recreate` 用 ledger 最新 `deployed` 列的
+只改 `/opt/bfx/runtime/*.env` 或 `/opt/bfx/runtime/secrets/` 不會觸發部署。`--recreate` 用 ledger 最新 `deployed` 列的
 digest 與 revision，走同樣的 env 檢查、`started` 列、`--force-recreate`、身分檢查、健康等待與
 結束列。
 recreate 沒有 rollback（舊 env 已經不在了）：不健康就停 bot、記 `failed`，修好 env 再 `--recreate`。
@@ -186,9 +207,192 @@ bfx-deploy 啟動前會檢查，違反即 `precheck` 失敗：
   自己檢查過的 `--runtime-dir`；CI 用放了空檔的暫存目錄 render。預設值必須維持 `/opt/bfx/runtime`
   （CI 在 `config --no-interpolate` 的輸出上由 `compose_policy.py` 檢查，也要求 `required: true`），env 檔也維持必填，缺秘密檔時 `up` 會失敗而不是無聲啟動；
 - `ghcr.env`：`GHCR_USERNAME`、`GHCR_TOKEN`（read-only `read:packages`）；檔案不存在＝匿名 pull。
+  9i 的 provenance 驗證也用它讀 manifest（只給 registry，不給 gh）；驗證本身不需要任何 GitHub token。
+  要拿掉 `ghcr.env`（並撤銷 PAT）就得先把 GHCR package 改成 public，那是 9h 的選項，不是 9i 的前提。
+- `bot.env`／`webapi.env` 從 9h 起**不放秘密**：秘密改成下一節的秘密檔。留下的是 `TELEGRAM_CHAT_ID`、
+  `SENTRY_DSN`（依設計公開，見 [secret-rotation](secret-rotation.md#sentry-dsn)）、`BFX_EXCHANGE_ACCOUNT_ID`
+  與 webapi 的入口設定這類識別值。
 - `notify.env`：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`（見 [operations §6](operations.md#6-告警)）。
 - `tailscale.env`：只有 `TS_AUTHKEY`（tagged `tag:bfx-ops`、非 ephemeral、單次使用、短效期）。只在節點第一次
   登入時用（`TS_AUTH_ONCE=true`），之後節點的 key 存在 volume `bfx_tsstate`；key 過期或用過都不影響已登入的節點。
+
+### 秘密檔（bot、webapi；9h）
+
+bot 與 webapi 的常駐秘密是 compose 的檔案型 secret，不放在 env：
+
+| 主機檔案（`/opt/bfx/runtime/secrets/`） | 容器內 | 誰讀 |
+|---|---|---|
+| `bot/DATABASE_URL`（`bfx_bot`）、`bot/BFX_ADMIN_TOKEN`、`bot/BFX_ADMIN_READ_TOKEN`、`bot/BFX_VAULT_KEK`、`bot/TELEGRAM_BOT_TOKEN` | `/run/secrets/<KEY>` | bot |
+| `webapi/DATABASE_URL`（`bfx_webapi`）、`webapi/BFX_ADMIN_READ_TOKEN`（與 bot 的同值） | `/run/secrets/<KEY>` | webapi |
+
+- 每個檔只有值本身（不含 `KEY=`，結尾換行無所謂）。
+- 擁有者與權限：`root:4600`、mode `0640`。目錄 `secrets/`、`secrets/bot`、`secrets/webapi` 是 `root:root 0700`。
+  - 為什麼不是 root 0600：compose 的檔案型 secret 是把主機檔案直接 bind mount 進容器，`uid`／`gid`／`mode` 設定會被
+    默默忽略（Docker 文件），bot 與 webapi 以 UID 1000 執行，讀不到 root 0600 的檔。
+  - 所以兩個服務以 `group_add: ["4600"]` 加入 group 4600（主機上的名稱是 `bfx-secrets`，沒有任何成員），靠 group 讀權讀檔。
+  - 主機上的 `ubuntu`（也是 UID 1000）不在這個 group，目錄又是 0700，讀不到。
+- gid 固定是 4600：`compose_policy.SECRET_GID` 與 `bfx_deploy.SECRET_GID` 兩處寫死，測試要求兩者相等。
+- **bfx-deploy 部署前檢查**每個 release 掛載的檔案。檢查項目：root 擁有、group 4600、mode 0640、一般檔案、不是
+  symlink、不是空檔；上面兩層目錄（`secrets/`、`secrets/<service>/`）是真的目錄（不是 symlink）、root 擁有、
+  group 與 other 都不能寫（能寫目錄的人就能在檢查之後換掉檔案）。
+  - 違反時 `precheck` 失敗，錯誤碼是 `secret_file_<原因>:<service>/<KEY>` 或 `secret_dir_<原因>:<目錄>/`，跑中的版本不受影響。
+  - compose 檔裡的 secret 只能是 `<runtime dir>/secrets/<service>/<KEY>`，而且只能由該 service 掛載
+    （`compose_secret_*` 錯誤碼）。
+  - 就算檢查沒擋到，Docker 也不會建立缺 secret 檔的容器。
+- 容器以 `BFX_SECRETS_DIR=/run/secrets` 讀檔（`core/secret_files.py`），**完全不看 env 裡同名的 key**：
+  - 缺檔或空檔就拒絕開機，exit 1，log 是 `config_fatal secret file ... is missing`。
+  - env 檔裡還留著這些 key 時照樣開機，但 log 會印 `secret_env_keys_ignored keys=...`（只印名稱）。
+- one-shot 容器（operator CLI、每週報告、研究、模擬 soak、migration、DR）照舊用各自的 env 檔，不受影響。
+- 換值與寫入：照 [secret-rotation「通用寫法」](secret-rotation.md#通用寫法)。值不上任何 argv（`sudo` 會把整行指令記進
+  auth.log），整步在 `sudo bash -euo pipefail <<'SH'` 的 root shell 裡做；先寫同目錄的暫存檔，非空才 `mv`。
+
+#### 9h 切換（一次性，依序；在 merge 9h 的 PR 之前做第 1–3 步）
+
+9h 分兩個 release 出貨，因為 bfx-deploy 跑的是**上一個成功 release** 的主機工具（§1 第 10 步）：
+- 第一個 release（`feat(deploy): read resident secrets through one reader ...`）讓 bfx-deploy 接受並檢查秘密檔、
+  讓 backend 會讀秘密檔，但 compose 還不用它們。沒有 `BFX_SECRETS_DIR` 的 bot 與 webapi 照舊從 env 讀，
+  唯一的行為差異是：**webapi 的 env 裡有 `BFX_VAULT_KEK`（即使是空值）就拒絕開機**（`boot_refused`，部署失敗、自動回滾）。
+  所以 merge 第一個 release 之前，先確認 webapi 沒有這個 key（只數名稱、不印值；兩行都必須印 0）：
+
+  ```bash
+  sudo grep -c '^BFX_VAULT_KEK=' /opt/bfx/runtime/webapi.env
+  docker inspect bfx-webapi --format '{{range .Config.Env}}{{println .}}{{end}}' | cut -d= -f1 | grep -cx BFX_VAULT_KEK
+  ```
+
+- 第二個 release（`feat(deploy): mount the bot's and web api's secrets as files`）才把 compose 改成掛秘密檔。
+  這一節說的「9h 的 PR」指第二個。
+
+第二個 release 沒有 env fallback：VM 上沒有秘密檔，新版 bot／webapi 就開不了機（precheck 會先擋下，舊版照跑）。
+
+0. 確認第一個 release 已部署成功，而且它的工具已經裝上（必須印 1；印 0 就是舊工具，它會以
+   `compose_secrets_refused` 拒絕第二個 release）：
+
+   ```bash
+   sudo grep -c '^def shared_secret_file' /usr/local/lib/bfx-ops/current/ops/bfx_deploy.py
+   ```
+
+1. 建 group 與目錄（root）：
+
+   ```bash
+   getent group 4600                      # 必須沒有輸出；有輸出代表 4600 已被佔用：停下回報
+   sudo groupadd --gid 4600 bfx-secrets
+   sudo install -d -o root -g root -m 0700 /opt/bfx/runtime/secrets \
+     /opt/bfx/runtime/secrets/bot /opt/bfx/runtime/secrets/webapi
+   ```
+
+2. 從現有的 env 檔寫出秘密檔，過程不印值：
+
+   ```bash
+   sudo bash -euo pipefail <<'SH'
+   umask 077
+   move() {  # <service> <KEY>：把 <service>.env 的 KEY 值寫成 secrets/<service>/<KEY>（先寫同目錄的暫存檔，非空才 mv）
+     src=/opt/bfx/runtime/$1.env dst=/opt/bfx/runtime/secrets/$1/$2
+     [ "$(grep -c "^$2=." "$src")" = 1 ] || { echo "STOP: $1.env has no single non-empty $2"; exit 1; }
+     tmp=$(mktemp "$dst.XXXXXX")
+     if ! grep "^$2=" "$src" | cut -d= -f2- | tr -d '\n' > "$tmp" || [ ! -s "$tmp" ]; then
+       rm -f "$tmp"; echo "STOP: $1/$2 not written"; exit 1
+     fi
+     chown root:4600 "$tmp"; chmod 0640 "$tmp"; mv "$tmp" "$dst"
+   }
+   for k in DATABASE_URL BFX_ADMIN_TOKEN BFX_ADMIN_READ_TOKEN BFX_VAULT_KEK TELEGRAM_BOT_TOKEN; do move bot "$k"; done
+   for k in DATABASE_URL BFX_ADMIN_READ_TOKEN; do move webapi "$k"; done
+   SH
+   ```
+
+   印出 `STOP` 就停下，例如 `bot.env` 沒有 `TELEGRAM_BOT_TOKEN`：先補好 env 檔，或先決定不要這個 key。這個 release
+   要求七個檔都在、都不是空的。值只在 root shell 的 pipe 與檔案之間流動，不上任何 argv（`grep` 的參數只有 key 名稱）。
+
+3. 核對秘密檔（只比對、不印值），然後用跑中的 image 實際讀一次。這一步驗證 gid 機制：Docker Desktop 上量不到，
+   只有在 VM 上才算數。`bfx-op halt` 走的 `docker exec bfx-bot` 這時還驗不到：第一個 release 的 bot 容器沒有
+   `group_add`，也沒有掛秘密檔，所以那一項留到第 4 步、第二個 release 部署之後第一件事做：
+
+   ```bash
+   sudo stat -c '%U:%g %a %s %F %n' /opt/bfx/runtime/secrets/*/*
+   # 每行都要是 root:4600 640 <大於 0> regular file
+   sudo bash -c 'for f in /opt/bfx/runtime/secrets/*/*; do s=$(basename "$(dirname "$f")"); k=$(basename "$f");
+     cmp -s <(grep "^$k=" /opt/bfx/runtime/$s.env | cut -d= -f2- | tr -d "\n") "$f" && echo "same $s/$k" || echo "DIFF $s/$k"; done'
+   # 七行都要是 same
+   IMG=$(docker inspect bfx-bot --format '{{.Config.Image}}')
+   sudo docker run --rm --pull=never --read-only --user 1000:1000 --group-add 4600 --network none --entrypoint /app/.venv/bin/python \
+     -v /opt/bfx/runtime/secrets/bot/BFX_VAULT_KEK:/run/secrets/BFX_VAULT_KEK:ro "$IMG" \
+     -c 'print(len(open("/run/secrets/BFX_VAULT_KEK").read().strip()) > 0)'     # 必須印 True
+   sudo docker run --rm --pull=never --read-only --user 1000:1000 --network none --entrypoint /app/.venv/bin/python \
+     -v /opt/bfx/runtime/secrets/bot/BFX_VAULT_KEK:/run/secrets/BFX_VAULT_KEK:ro "$IMG" \
+     -c 'open("/run/secrets/BFX_VAULT_KEK")' 2>&1 | grep -c PermissionError   # 沒有 group 時必須讀不到：印 1
+   ```
+
+4. merge PR。bfx-deploy 在 5 分鐘內部署；要立刻部署就 `sudo systemctl start bfx-deploy.service`。部署後核對：
+   - ledger 最新列是 `deployed`（§3 的查詢）；
+   - **在其他任何核對之前**，確認 `docker exec` 進跑中的 bot 讀得到秘密檔（`bfx-op halt` 就是這樣讀 token 的；
+     exec 出來的行程要帶到容器的 group 4600 才讀得到）。只印長度，必須是大於 0 的數字：
+
+     ```bash
+     sudo docker exec bfx-bot /app/.venv/bin/python -c 'print(len(open("/run/secrets/BFX_ADMIN_TOKEN","rb").read()))'
+     ```
+
+     印出 `PermissionError` 或 0：**不要做第 5 步**。這時 bot 本身照跑，kill 的主路徑 `sudo bfx-op kill`（經資料庫，
+     不用 admin token）照常可用，只有緊急備用的 `bfx-op halt` 讀不到 token。回到第一個 release 的 compose：在 `main`
+     revert 第二個 release 的 merge commit（PR → CI → bfx-deploy 部署），env 檔裡的舊 key 還在（第 5 步還沒做），
+     所以它照常開機；再查 exec 為什麼沒帶到 group 4600。
+   - `docker logs --since 15m bfx-bot 2>&1 | grep -c secret_env_keys_ignored` 印 1：env 檔裡還有舊 key，這時是預期的；
+   - **緊急停止（kill path）**：`bfx-op halt` 在 bot 容器裡改讀 `/run/secrets/BFX_ADMIN_TOKEN`。
+     不真的 halt，也能確認 bot 收這個檔的 token：用同一個檔打唯讀的 `/admin/trading-status`，必須印 200：
+
+     ```bash
+     sudo docker exec bfx-bot /app/.venv/bin/python -c 'import os,urllib.request as u
+     t=open(os.path.join(os.environ["BFX_SECRETS_DIR"],"BFX_ADMIN_TOKEN")).read().strip()
+     print(u.urlopen(u.Request("http://127.0.0.1:8080/admin/trading-status",headers={"Authorization":"Bearer "+t}),timeout=30).status)'
+     ```
+
+     真的跑一次 `sudo bfx-op halt` 只在排定的演練時做：它會讓交易停下，而且不能用 CLI 恢復。
+   - Telegram：`sudo docker exec bfx-bot /app/.venv/bin/python -m scripts.send_test_alert` exit 0；
+     funding 狀態：UI 的 funding 面板（webapi 用 `webapi/BFX_ADMIN_READ_TOKEN` 讀 bot）有資料。
+
+5. 備份並移除 env 檔裡已搬走的 key，再 recreate：
+
+   ```bash
+   sudo install -d -o root -g root -m 0700 /root/pre-9h
+   sudo cp -p /opt/bfx/runtime/bot.env /opt/bfx/runtime/webapi.env /root/pre-9h/
+   sudo sed -i -E '/^(DATABASE_URL|BFX_ADMIN_TOKEN|BFX_ADMIN_READ_TOKEN|BFX_VAULT_KEK|TELEGRAM_BOT_TOKEN)=/d' /opt/bfx/runtime/bot.env
+   sudo sed -i -E '/^(DATABASE_URL|BFX_ADMIN_READ_TOKEN)=/d' /opt/bfx/runtime/webapi.env
+   sudo stat -c '%U %a %n' /opt/bfx/runtime/bot.env /opt/bfx/runtime/webapi.env   # 都要是 root 600
+   sudo bfx-deploy --recreate
+   ```
+
+6. 核對 env 已經沒有秘密（只數 key 名稱，三個指令都必須印 0）：
+
+   ```bash
+   for c in bfx-bot bfx-webapi; do docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' | cut -d= -f1 \
+     | grep -cE '^(DATABASE_URL|BFX_ADMIN_TOKEN|BFX_ADMIN_READ_TOKEN|BFX_VAULT_KEK|TELEGRAM_BOT_TOKEN)$'; done
+   docker logs --since 10m bfx-bot 2>&1 | grep -c secret_env_keys_ignored
+   ```
+
+回滾：
+- 第 5 步之前，自動回滾到 9h 之前的版本照常可行，因為舊版讀的 env 還在；第 4 步的 exec 檢查失敗時也是走這條（revert）。
+- 第 5 步之後，9h 之前的版本開不了機（env 裡沒有 `DATABASE_URL`）。要回到那種版本，先從 `/root/pre-9h/` 把那幾行補回
+  env 檔，再部署。
+- 9h 之後的 release 成為「上一個成功版本」時，`/root/pre-9h/` 就不再需要：`sudo rm -r /root/pre-9h`。
+
+### Mirror（git fetch 走匿名 HTTPS；9h）
+
+bfx-deploy 以 `ubuntu` 身分在 mirror `/home/ubuntu/bfx-funding-bot` 執行 `git fetch origin`。remote URL 在 VM 的 mirror 設定裡，
+不在 repo 的 code 裡。repo 是 public，所以 fetch 走匿名 HTTPS：
+- TLS 驗證的是 github.com 的身分，與 SSH host key 驗證等價；
+- 不需要長期憑證；
+- 部署只認 `origin/main` 上的 commit。
+
+一次性切換（root；可逆，改回原本的 URL 即可）：
+
+```bash
+sudo -u ubuntu git -C /home/ubuntu/bfx-funding-bot remote get-url origin       # 記下原值（git@github.com:...）
+sudo -u ubuntu git -C /home/ubuntu/bfx-funding-bot remote set-url origin https://github.com/Will413028/bfx-funding-bot.git
+sudo -u ubuntu env GIT_TERMINAL_PROMPT=0 git -C /home/ubuntu/bfx-funding-bot fetch --dry-run origin main   # 必須 exit 0、不問密碼
+```
+
+下一次 bfx-deploy 成功後（`journalctl -u bfx-deploy` 沒有 `git_fetch_failed`）再移除 deploy key：
+1. GitHub repo Settings → Deploy keys 刪掉 VM 那把；
+2. VM 上刪掉 `ubuntu` 的那把私鑰，以及 `~/.ssh/config` 裡對應 github.com 的設定（先 `ls -l ~ubuntu/.ssh` 確認
+   是哪個檔，只刪 deploy key 那一組）。
 
 ### Tailnet 入口（netns、tailscale）
 
@@ -196,7 +400,7 @@ compose 裡的 `netns`（`bfx-netns`）只持有 network namespace（只跑 `sle
 節點 `bfx-ops`、userspace、沒有 capability、沒有 port）以 `network_mode: service:netns` 加入它；9d-5 起
 webapi 也加入它。tailscaled 重啟、崩潰或單獨重建都不會換掉 namespace（計畫 D13，holder spike 實測）。
 兩者都要 compose healthcheck：`bfx-tailscale` 的 `/healthz` 在節點拿到 tailnet 位址後才回 200。
-**入口的狀態不讓 bot 被停**：bot、webapi（與 9d-5 之前的 frontend）照舊把關；入口（健康檢查，以及部署後檢查的 image、名稱、
+**入口的狀態不讓 bot 被停**：bot、webapi 照舊把關；入口（健康檢查，以及部署後檢查的 image、名稱、
 namespace）只在這次部署新建或重建了它（第一次部署、image 或 serve.json 改了、被 §1 第 7 步強制重建）時才把關，
 而且在 app 都通過之後才判斷，錯誤碼是 `ingress_unhealthy:<服務>[:<不符項>]`。這種失敗只在回滾真的做得到時才回滾（沒套用 migration、有上一個成功版本、上一版
 的 schema 就是現在的 schema；回到沒有入口的版本會移除它）——例如 auth key 錯、tailnet policy 沒有 `tag:bfx-ops`
@@ -219,11 +423,30 @@ Serve 設定是 tracked 的 `deploy/vm/tailscale/serve.json`（443 → `127.0.0.
   `docker volume rm bfx_tsstate` → 放一把新 auth key →
   `--recreate`。
 
+### 第一次啟用 provenance 驗證（9i，一次性，順序不能換）
+
+不需要 GitHub token，也不需要把 GHCR package 改成 public。
+
+1. 9i 的 PR merge；它自己的 release 由舊工具部署（舊工具不驗簽）。
+2. 部署成功後照下方 §4 重跑一次 `install.sh`（裝釘版的 gh；新工具找不到 gh 時，下一個 release 會停在
+   `attestation_verifier_missing`，fail closed，bot 與 webapi 不受影響）。
+3. 對目前部署的 digest 手動重驗一次，印出 `verified:`、exit 0 才算完成：
+
+   ```bash
+   # bot 正在跑的 image 是 <repository>@sha256:<digest>，取 @ 後面那段
+   D=$(sudo docker inspect bfx-bot --format '{{.Config.Image}}'); D=${D#*@}
+   sudo bfx-deploy verify-provenance "$D"; echo "exit=$?"
+   ```
+
+   9i 的 release 本身就是 9i 的 `release.yml` 簽的，所以這一步驗的就是它。`NOT verified: attestation_unverified:no_attestation`
+   表示該 release run 的 `Attest build provenance` step 沒成功，見 §5「Provenance 驗不過」。
+
 ## 4. 主機工具與 DR 腳本的版本
 
 bfx-deploy 自己維護主機上的工具，不再依賴手動 `install.sh`。例外：bfx-deploy 不寫 `/usr/local/sbin`
-的入口（`bfx-deploy`、`bfx-notify`、`bfx-op`）與 `/etc/sudoers.d/bfx-op`，所以 release 新增 sbin 入口或
-改了 sudoers drop-in 時，要在部署成功後重跑一次 `install.sh`：
+的入口（`bfx-deploy`、`bfx-notify`、`bfx-op`）、`/etc/sudoers.d/bfx-op` 與釘版的 gh，所以 release 新增 sbin 入口、
+改了 sudoers drop-in 或改了 `GH_VERSION`（`install.sh` 與 `bfx_deploy.py` 同時改）時，要在部署成功後重跑一次
+`install.sh`（在那之前，新工具找不到它要的 gh，每個新 release 都以 `attestation_verifier_missing` 擋下）：
 
 ```bash
 sudo systemctl stop bfx-deploy.timer
@@ -239,6 +462,7 @@ sudo systemctl start bfx-deploy.timer
 |---|---|---|
 | `/usr/local/lib/bfx-ops/releases/<rev>/{ops,systemd}` | 從 `<rev>` 的 git 物件寫出，root 擁有 | release 部署成功後 |
 | `/usr/local/lib/bfx-ops/releases/<rev>/ops/.venv` | `uv sync --frozen`（`deploy/vm/ops/uv.lock`：PyYAML、pathspec） | 同上 |
+| `/usr/local/lib/bfx-ops/gh/<版本>/bin/gh` | 驗 provenance 的 GitHub CLI，`install.sh` 依 `GH_VERSION`＋`GH_SHA256` 下載（不用 apt：unattended-upgrades 會繞過 7 天冷卻期） | **bfx-deploy 不裝**：升 gh 版本的 release 部署成功後重跑 `install.sh` |
 | `/usr/local/lib/bfx-ops/current` → `releases/<rev>` | wrapper `bfx-deploy`／`bfx-notify`／`bfx-op` 與 unit 都執行這裡（含每週報告的 runner 與 `docker-compose.weekly-report.yml`） | 同上，**下一輪 bfx-deploy 才用新版** |
 | `/etc/systemd/system/<deploy/vm/systemd/managed-units>` | 複製後 `daemon-reload`，從不 enable/start/stop | 同上 |
 | `/home/ubuntu/bfx-releases/<rev>` | mirror 的乾淨 git worktree（`ubuntu` 擁有），DR 腳本與 `docker-compose.dr.yml` | 需要備份或 restore test 時先建目標版本 |
@@ -262,6 +486,7 @@ sudo systemctl start bfx-deploy.timer
 |---|---|---|
 | `deployed` | 成功 | 無 |
 | `failed`，detail `precheck:*` | 部署前檢查失敗，現行 release 沒動 | 依 code 修（env、registry、git、foreign container…），再 `--retry` |
+| `failed`，`precheck:release_not_descendant_of_deployed` | `main` tag 指向比已部署 revision 舊（或不在其後）的 release，現行 release 沒動 | 不要 `--retry`；見下方「Provenance 驗不過」末段 |
 | `failed`，`dr_checkout_failed` | 建不出目標的 DR checkout，現行 release 沒動 | 查 mirror／`/home/ubuntu/bfx-releases` 權限，再 `--retry` |
 | `failed`，`webapi_stop_failed` | 有 migration 但停不了 webapi，什麼都沒做，bot 照跑 | 查 docker，再 `--retry` |
 | `failed`，`bot_stop_failed` | 有 migration 但停不了 bot，什麼都沒做；detail 含 `webapi restarted` 表示剛停的 webapi 已重新啟動，含 `webapi_restart_failed:<why>` 表示 webapi 沒起來 | 查 docker，再 `--retry` |
@@ -287,6 +512,48 @@ image 內 migrations 推導出的唯一 head（`core/schema_head.build_head`）�
 1. roll forward：修正後出新 release（新 commit → CI → GHCR → bfx-deploy）；或
 2. 把 migration 前的備份還原到**隔離**資料庫比對，再決定。**不要把舊備份蓋回 production**
    ——venue 可能已有寫入，見 [rollback after a venue write](rollback-after-venue-write.md)。
+
+### Provenance 驗不過（discovery 失敗，不寫 ledger）
+
+這些 code 記在 `/var/lib/bfx-deploy/discovery-failure.json` 與 `journalctl -u bfx-deploy`，連續 30 分鐘後
+Telegram 發一次 warning（`bfx-deploy cannot identify or read the release … (<code>); no deploy is happening`），
+恢復時發 info。**bot 與 webapi 不受影響**：驗不過的 image 從沒被 pull 或執行，現行 release 照跑。
+
+| code | 意思 | 要做什麼 |
+|---|---|---|
+| `attestation_verifier_missing` | `/usr/local/lib/bfx-ops/gh/<GH_VERSION>/bin/gh` 不存在或跑不起來 | 照 §4 重跑 `install.sh`（它會依 sha256 裝上釘版 gh） |
+| `attestation_verifier_wrong_version` | 該路徑的 gh 回報的版本不是 `GH_VERSION` | 同上；不要手動放別的版本 |
+| `attestation_unverified:manifest_digest_mismatch` | registry 給的 manifest bytes 的 sha256 不是該 digest | 不正常：registry 或中間人改了內容。當成下方第 3 點處理 |
+| `attestation_unverified:no_attestation` | GitHub attestation API 對這個 digest 回 404 或空清單 | 見下方第 2 點 |
+| `attestation_unverified:rate_limited` | 匿名 GitHub API 的額度用完（403 且 `x-ratelimit-remaining: 0`，或 429）；journal 印出重置時間 | 什麼都不用做，額度重置後下一輪自動重驗。同一個 IP 上別的程式也在匿名打 GitHub API 時才可能發生 |
+| `attestation_unverified:api_unreachable`／`api_unavailable` | 連不到 GitHub API，或它回了 200 以外（含非 rate limit 的 403）、或看不懂的內容 | 外部中斷，見下方第 1 點 |
+| `attestation_unverified:bundle_unreadable` | 清單有 attestation，但沒有一筆 bundle 讀得出來（下載失敗、不是 https、超過 2 MiB、snappy 解不開、不是 JSON 物件）；journal 逐筆記原因 | 多半是外部中斷，下一輪重試；持續發生就看 journal 的原因 |
+| `attestation_unverified:gh_rejected` | 每一筆 bundle gh 都拒絕（或 exit 0 卻沒回報通過的 attestation）；journal 逐筆記 gh 的 stderr | 見下方第 3 點 |
+| `attestation_unverified:gh_unavailable` | `gh attestation verify` 逾時（180 秒）或跑不起來 | 多半是 Sigstore TUF CDN 中斷，見下方第 1 點 |
+
+判斷方式（journal 的 `attestation N of M for … not accepted (exit …)` 後面是 gh 的 stderr）：
+
+1. **外部中斷**（GHCR、GitHub API、attestation 下載點、Sigstore TUF CDN `tuf-repo-cdn.sigstore.dev` 連不到）：
+   什麼都不用做，恢復後下一輪自動部署。中斷期間就是不部署，這是預期的 fail-closed；
+   [GitHub status](https://www.githubstatus.com/) 與 [Sigstore status](https://status.sigstore.dev/) 可確認。
+   不要為了趕部署關掉驗證：要繞過只能改 root 擁有的工具，這本身就是事故。
+2. **這個 digest 沒有 attestation**：看 image label 的 `bfx.ci-run-url` 那次 release run 的
+   `Attest build provenance` step。release 推完 image 才簽，所以剛推完的幾分鐘內可能先失敗一輪，之後自己好；
+   若那個 step 失敗了，重跑該 release run 或推下一個 commit。
+3. **簽章存在但身分不符**（stderr 是 `expected BuildSignerURI`、`expected SourceRepositoryRef`、self-hosted
+   runner、repo 不符）、manifest 對不上 digest，或 `main` tag 指向一個 CI 從沒建過的 digest：
+   **當成供應鏈事件處理**——有人用 `write:packages` 憑證推了 image。不要部署；撤銷可疑的 PAT／token，
+   查 GHCR package 的版本歷史，重跑最新 main 的 release 把 `main` tag 推回正確的 digest。
+
+手動重驗：`sudo bfx-deploy verify-provenance sha256:<digest>`。它跑的就是 bfx-deploy 第 3 步的同一段程式
+（同一個釘版 gh、同一組 `--repo`／`--signer-workflow`／`--source-ref`、同樣用 `ghcr.env` 讀 manifest、不用任何
+GitHub token），不寫 ledger、不動任何容器；通過印 `verified: <image>` 並 exit 0，否則印
+`NOT verified: <code>`（code 同上表）並 exit 1。
+
+降版（`precheck:release_not_descendant_of_deployed`）走的是 ledger：寫一列 `failed`、發 critical、現行 release
+沒動，同一個 digest 之後不會再試。代表 `main` tag 指向的 revision 不在已部署 revision 之後；正常的 release
+流程不會發生（CI 只在 head 時推 `main`），要退回舊行為請推 revert commit（roll forward）。查 GHCR 的 `main`
+tag 是誰推的，處理方式同上面第 3 點。
 
 ### 加入者留在 holder 已死的 network namespace
 

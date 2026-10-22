@@ -15,15 +15,14 @@ Bitfinex 自動放貸 SaaS 平台。
 應用程式與資料服務自托於 Oracle Cloud VM（單機 Docker）；外部服務包含 Bitfinex venue、GHCR（image registry）與 Cloudflare R2 offsite backup。
 
 - **應用程式**（bot／webapi，與 tailnet 入口 netns／tailscale）：compose project `bfx-app`（`deploy/vm/docker-compose.app.yml`）。CI（`.github/workflows/release.yml`）在綠燈的 `main` commit 建 arm64 backend image（含前端 static export）推到 GHCR；VM 的 `bfx-deploy` timer 只以 digest 部署，VM 不 build image，部署不改變交易狀態。一次部署的步驟（migration 前停 webapi 與 bot、備份與 restore test、ledger、回滾、通知）見 `docs/runbooks/deploy.md`。
-- **資料服務**（Postgres／Redis）：compose project `bfx`，`docker-compose.bot.yml`（只有 postgres 與 redis）。
-- Runbook：部署 `docs/runbooks/deploy.md`；交易狀態／包絡／停機／告警 `docs/runbooks/operations.md`；新主機的 DB roles／公開入口／首次安裝工具 `docs/runbooks/fresh-host-setup.md`；研究用一次性容器 `docs/runbooks/research-one-shot-jobs.md`。
+- **資料服務**（Postgres）：compose project `bfx`，`docker-compose.bot.yml`（只有 postgres）。
+- Runbook：部署 `docs/runbooks/deploy.md`；交易狀態／包絡／停機／告警 `docs/runbooks/operations.md`；新主機的 DB roles／公開入口／首次安裝工具 `docs/runbooks/fresh-host-setup.md`；研究用一次性容器 `docs/runbooks/research-one-shot-jobs.md`；換秘密 `docs/runbooks/secret-rotation.md`（bot／webapi 的秘密是 `/opt/bfx/runtime/secrets/` 下的檔案，見 deploy runbook「秘密檔」）。
 
 | 服務 | 平台 |
 |------|------|
 | 營運 UI 與 webapi | VM `bfx-webapi`：只聽 `127.0.0.1:8000`，在 holder `bfx-netns` 的 network namespace 裡；唯一入口是 tailnet 節點 `bfx-tailscale` 的 Tailscale Serve（`https://bfx-ops.<tailnet>.ts.net`，只有 tailnet 內、policy 授予 operator capability 的人連得到；實際 host 見 `AGENTS.local.md`，入口說明見 `docs/runbooks/deploy.md`「Tailnet 入口」）。webapi 同時提供前端的 static export |
 | Bot | VM `bfx-bot` |
-| Database | 自托 Postgres 18（`bfx-postgres`，volume `bfx_pgdata`；roles：bot owner、`bfx_webapi`、`bfx_webauth`（9d-7 刪除）） |
-| Cache | 自托 Redis 7（`bfx-redis`）：9d-5 起沒有使用者（原本是 Better Auth 的 session），W9 移除 |
+| Database | 自托 Postgres 18（`bfx-postgres`，volume `bfx_pgdata`；roles：owner、`bfx_bot`、`bfx_webapi`、`bfx_operator`、`bfx_research`；模擬 soak 另有 `bfx_sim`） |
 
 - 備份與 DR 見 `docs/runbooks/offsite-dr.md`，定期與背景工作（含每週報告）見 `docs/runbooks/operations.md` §8；systemd unit 在 `deploy/vm/systemd/`，實際啟用與健康狀態須查目標環境。
 

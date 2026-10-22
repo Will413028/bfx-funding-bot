@@ -76,6 +76,7 @@ from bfx_funding_bot.modules.ledger import (
     ResolutionIntent,
     ResolutionSubject,
     Scope,
+    UncertaintyState,
     UncertaintyView,
 )
 from bfx_funding_bot.modules.ledger import ResolutionRejected as EvidenceRejected
@@ -654,7 +655,7 @@ async def _details(
 
 async def list_uncertainties(
     session: AsyncSession, context: OperatorContext, reads: OperatorReads,
-    evidence: OperatorEvidence, *, state: Literal["open", "resolved"] | None, limit: int,
+    evidence: OperatorEvidence, *, state: UncertaintyState | None, limit: int,
 ) -> list[UncertaintyDetail]:
     """The account's uncertainties; any failure to read them is one bounded refusal."""
     try:

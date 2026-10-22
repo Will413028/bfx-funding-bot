@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
-from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import (  # noqa: F401 - fixture re-exports
     ledger_db,
@@ -113,7 +113,7 @@ def test_the_upgrade_rewrites_every_literal(before) -> None:
             "SELECT count(*) FROM pg_constraint WHERE conname LIKE 'ck\\_%\\_json'"))
         assert set(_literals(conn).values()) == {0}
     engine.dispose()
-    alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     alembic(url, "check")
 
 
@@ -125,7 +125,7 @@ def test_the_upgrade_refuses_a_table_with_a_disabled_trigger(before) -> None:
             "ALTER TABLE public.ledger_observation_credit DISABLE TRIGGER immutable_ledger_write")
     engine.dispose()
     with pytest.raises(Exception, match=r"refuse to rewrite public\.ledger_observation_credit"):
-        alembic(url, "upgrade", "head")
+        upgrade_head_after_w3(url)
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT version_num FROM alembic_version")) == _PREVIOUS
 
@@ -138,7 +138,7 @@ def test_the_upgrade_refuses_a_literal_it_cannot_rewrite(before) -> None:
         conn.exec_driver_sql("ALTER TABLE public.ledger_observation_credit ENABLE TRIGGER USER")
     engine.dispose()
     with pytest.raises(Exception, match=r"refuse to rewrite public\.ledger_observation_credit\.raw"):
-        alembic(url, "upgrade", "head")
+        upgrade_head_after_w3(url)
 
 
 def test_an_attempt_names_exactly_one_of_policy_and_seed(seeded) -> None:  # noqa: F811

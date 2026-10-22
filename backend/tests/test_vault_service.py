@@ -19,7 +19,6 @@ from bfx_funding_bot.modules.accounts.vault import (
     list_api_keys,
     verify_api_key,
 )
-from tests.conftest import ensure_auth_user
 
 pytestmark = pytest.mark.integration
 
@@ -29,7 +28,6 @@ _KEK = base64.b64decode(base64.b64encode(bytes(range(32))))
 async def _create_key(
     session, *, user_id: str, label: str, api_key: str, api_secret: str,
 ):
-    await ensure_auth_user(session, user_id)
     return await create_api_key(
         session,
         user_id=user_id,

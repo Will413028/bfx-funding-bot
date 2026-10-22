@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.execution.uncertainty_tables import UncertaintyResolutionRequestRow
-from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, stamp_realm
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, stamp_realm, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import (
     _A,
@@ -363,7 +363,7 @@ def test_contract_refuses_a_request_with_pre_switch_evidence(before_contract) ->
             conn.exec_driver_sql(
                 f"UPDATE {_TABLE} SET state='applied', processed_at_ms=2, resolved_event_seq=8")
         with pytest.raises(Exception, match="refuse to close the pre-switch evidence columns: 1"):
-            alembic(before_contract, "upgrade", "head")
+            upgrade_head_after_w3(before_contract)
         with engine.connect() as conn:
             assert conn.scalar(text("SELECT version_num FROM alembic_version")) == _BEFORE_CONTRACT
             assert conn.scalar(text(
@@ -397,7 +397,7 @@ def test_drop_round_trip_restores_the_closed_catalog(closed, reversible_ledger_d
     assert _catalog(head_url) == before
     alembic(head_url, "upgrade", LAST_REVERSIBLE_REVISION)
     assert _catalog(head_url) == head
-    alembic(head_url, "upgrade", "head")
+    upgrade_head_after_w3(head_url)
     alembic(head_url, "check")
 
 
@@ -411,7 +411,7 @@ def test_drop_refuses_a_request_with_pre_switch_evidence(closed) -> None:
             conn.exec_driver_sql(f"ALTER TABLE {_TABLE} ALTER COLUMN observation_id DROP NOT NULL")
             conn.exec_driver_sql(_request(seq=7))
         with pytest.raises(Exception, match="refuse to drop the pre-switch evidence columns: 1"):
-            alembic(closed, "upgrade", "head")
+            upgrade_head_after_w3(closed)
         with engine.connect() as conn:
             assert conn.scalar(text("SELECT version_num FROM alembic_version")) == _CLOSED
             assert conn.scalar(text(f"SELECT count(reconcile_event_seq) FROM {_TABLE}")) == 1
@@ -444,7 +444,7 @@ def test_migration_round_trip_and_populated_downgrade(reversible_seeded) -> None
         )
         conn.rollback()
     reversible_seeded.dispose()
-    alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     alembic(url, "check")
     with reversible_seeded.connect() as conn:
         assert "observation_id" in {c["name"] for c in inspect(conn).get_columns(_TABLE)}

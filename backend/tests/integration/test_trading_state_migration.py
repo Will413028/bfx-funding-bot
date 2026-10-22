@@ -14,7 +14,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import create_engine, text
 
-from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic
+from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, upgrade_head_after_w3
 
 pytestmark = pytest.mark.integration
 
@@ -100,7 +100,10 @@ def _build_migrated(url: str, target: str = "head") -> dict[str, int]:
         ids["resumed"] = _halt(conn, _B, "prod", False, "safety", "release_promoted:x", "will", 600)
         ids["release"] = _halt(conn, _C, "prod", True, "release", "release_command_terminal", "worker", 700)
     engine.dispose()
-    _alembic(url, "upgrade", target)
+    if target == "head":
+        upgrade_head_after_w3(url)
+    else:
+        _alembic(url, "upgrade", target)
     if target == "head":
         _alembic(url, "check")
     return ids
@@ -418,9 +421,6 @@ def test_the_operator_check_runs_for_the_bot(migrated):
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO exchange_account_memberships(exchange_account_id,user_id,role) "
                           "VALUES (:a,'operator','owner')"), {"a": _A})
-        conn.exec_driver_sql('''INSERT INTO auth."user" (id,name,email,"emailVerified","createdAt","updatedAt",
-            role,banned,"twoFactorEnabled") VALUES ('operator','op','op@test.invalid',false,now(),now(),
-            'admin',false,true)''')
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         assert conn.scalar(text("SELECT public.operator_authorized(:a, 'operator')"), {"a": _A})
         assert not conn.scalar(text("SELECT public.operator_authorized(:a, 'nobody')"), {"a": _A})
@@ -484,7 +484,7 @@ def test_archiving_the_release_ceremony_is_lossless_both_ways(migrated_reversibl
         assert {table: _content(conn, "public", table, key) for table, key in _ARCHIVED} == archived
         assert conn.scalar(text("SELECT version_num FROM alembic_version")) == "1c435a35dcb4"
         assert conn.scalar(text("SELECT to_regclass('public.deployments')")) is None
-    _alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     _alembic(url, "check")
     with engine.begin() as conn:
         assert {table: _content(conn, "release_archive", table, key) for table, key in _ARCHIVED} == archived
@@ -503,7 +503,7 @@ def test_the_web_api_baseline_is_granted_by_migration_not_by_hand(pg_templates, 
                 conn.exec_driver_sql(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM {role}")
                 conn.exec_driver_sql(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM {role}")
                 conn.exec_driver_sql(f"REVOKE ALL ON SCHEMA public FROM {role}")
-        _alembic(url, "upgrade", "head")
+        upgrade_head_after_w3(url)
         expected = {
             # d0e1f2a3b4c6 owns what the psql runbook steps used to grant.
             "user_profiles": {"SELECT", "INSERT", "UPDATE"},

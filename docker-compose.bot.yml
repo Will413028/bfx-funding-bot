@@ -1,10 +1,10 @@
 name: bfx
 
-# Infrastructure definition (PostgreSQL, Redis), NOT the application deployer.
-# bot/webapi/frontend are deployed by bfx-deploy as compose project `bfx-app`
+# Infrastructure definition (PostgreSQL), NOT the application deployer.
+# The application is deployed by bfx-deploy as compose project `bfx-app`
 # (deploy/vm/docker-compose.app.yml, docs/runbooks/deploy.md). Never broad
-# `up --build`/`down`/`--remove-orphans` here. Existing PG18, Redis, env files and
-# volumes must remain unchanged.
+# `up --build`/`down`/`--remove-orphans` here. The existing PG18, its env file and
+# volume must remain unchanged. Redis left with the app login (9d-6).
 # The weekly-report job moved to the release-managed host tooling
 # (deploy/vm/ops/docker-compose.weekly-report.yml, bfx-weekly-report.service).
 
@@ -60,22 +60,5 @@ services:
       retries: 5
       start_period: 30s
 
-  redis:
-    image: redis:7-alpine
-    container_name: bfx-redis
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - bfx_redisdata:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    labels:
-      autoheal: "true"
-
 volumes:
   bfx_pgdata:
-  bfx_redisdata:

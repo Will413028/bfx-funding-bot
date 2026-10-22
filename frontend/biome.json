@@ -12,7 +12,8 @@
       "**/e2e/**/*.ts",
       "!**/dist",
       "!**/.next",
-      "!**/node_modules"
+      "!**/node_modules",
+      "!**/src/types/api.gen.ts"
     ]
   },
   "formatter": {

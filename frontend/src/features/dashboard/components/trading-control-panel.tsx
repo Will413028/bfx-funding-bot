@@ -91,7 +91,7 @@ export function TradingControlPanel({
       )}
       {state?.state === "HALTED" && <CancelAllView data={data} />}
 
-      <p className="text-sm text-muted-foreground">{t("mfa")}</p>
+      <p className="text-sm text-muted-foreground">{t("applied")}</p>
       {pending && (
         <output className="block">
           {t("waiting", { action: t(`action.${pending.action}`) })}

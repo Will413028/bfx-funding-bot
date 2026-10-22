@@ -2,27 +2,14 @@
 
 import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
-import type { User } from "@/types";
-
-const statusConfig = {
-  active: {
-    className: "text-emerald-400 border-emerald-400/30",
-  },
-  suspended: {
-    className: "text-rose-500 border-rose-500/30",
-  },
-} as const;
+import type { Profile } from "@/types";
 
 interface ProfileCardProps {
-  user: User;
+  user: Profile;
 }
 
 export function ProfileCard({ user }: ProfileCardProps) {
   const t = useTranslations("settings");
-  const status = statusConfig[user.status] ?? statusConfig.active;
-  const statusLabel =
-    user.status === "suspended" ? t("suspended") : t("active");
 
   return (
     <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
@@ -31,30 +18,21 @@ export function ProfileCard({ user }: ProfileCardProps) {
       </h3>
       <dl className="mt-4 space-y-3">
         <div className="flex items-center justify-between">
-          <dt className="text-sm text-zinc-400">{t("email")}</dt>
-          <dd className="text-sm text-foreground">{user.email}</dd>
+          <dt className="text-sm text-zinc-400">{t("login")}</dt>
+          <dd className="text-sm text-foreground">{user.email ?? "—"}</dd>
         </div>
         <div className="flex items-center justify-between">
-          <dt className="text-sm text-zinc-400">{t("statusLabel")}</dt>
+          <dt className="text-sm text-zinc-400">{t("userId")}</dt>
+          <dd className="font-mono text-sm text-zinc-500">{user.userId}</dd>
+        </div>
+        <div className="flex items-center justify-between">
+          <dt className="text-sm text-zinc-400">{t("role")}</dt>
           <dd>
-            <Badge variant="outline" className={cn(status.className)}>
-              {statusLabel}
-            </Badge>
-          </dd>
-        </div>
-        <div className="flex items-center justify-between">
-          <dt className="text-sm text-zinc-400">{t("plan")}</dt>
-          <dd>
-            <Badge variant="secondary">{user.plan}</Badge>
-          </dd>
-        </div>
-        <div className="flex items-center justify-between">
-          <dt className="text-sm text-zinc-400">{t("memberSince")}</dt>
-          <dd className="text-sm text-zinc-500">
-            {new Date(user.createdAt).toLocaleDateString()}
+            <Badge variant="secondary">{user.role}</Badge>
           </dd>
         </div>
       </dl>
+      <p className="mt-4 text-sm text-muted-foreground">{t("identity")}</p>
     </div>
   );
 }

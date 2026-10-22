@@ -32,8 +32,11 @@ from bfx_funding_bot.core.errors import (
     WriterLockUnacquired,
 )
 from bfx_funding_bot.core.health import DB_FRESHNESS, MARKET_DATA_FRESHNESS, HealthProbe
+from bfx_funding_bot.core.log_format import configure_logging
 from bfx_funding_bot.core.loop_watchdog import LoopWatchdog, loop_watchdog_timeout_s
 from bfx_funding_bot.core.schema_head import assert_schema_head
+from bfx_funding_bot.core.secret_files import read_secret, warn_ignored_env_keys
+from bfx_funding_bot.core.security_log import BOOT_REFUSED, security_event
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
@@ -61,6 +64,10 @@ from bfx_funding_bot.modules.execution.audit import ExecutionDecisionRecorder
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_boundary import CommandOutcomeNotice
+from bfx_funding_bot.modules.execution.credential_compliance import (
+    CredentialCompliance,
+    CredentialNoncompliantError,
+)
 from bfx_funding_bot.modules.execution.credential_rotation import CredentialRotationWorker
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
@@ -193,12 +200,13 @@ _BITFINEX_REST_BASE_URL = "https://api-pub.bitfinex.com"
 
 
 def admin_tokens(env: Mapping[str, str]) -> tuple[str | None, str | None]:
-    """The bot's /admin tokens: (halt and read, read only).
+    """The bot's /admin tokens: (halt and read, read only), from its secret files in
+    production (BFX_SECRETS_DIR in ``env``), else from ``env`` (core.secret_files).
 
     A read token equal to the admin token would let the web API's read credential halt, so
     it is dropped (the admin token keeps /admin working for the operator)."""
-    admin = env.get("BFX_ADMIN_TOKEN", "").strip() or None
-    read = env.get("BFX_ADMIN_READ_TOKEN", "").strip() or None
+    admin = read_secret("BFX_ADMIN_TOKEN", env)
+    read = read_secret("BFX_ADMIN_READ_TOKEN", env)
     if read is not None and read == admin:
         log.error("admin_read_token_ignored reason=equals_admin_token")
         read = None
@@ -678,6 +686,15 @@ async def build_daemon(
             kek_loader=load_kek, restart=stop_event.set,
             clock=now_ms_utc, ownership=writer_lock.verify_held,
         )
+    # The key in use, checked by the rotation's rule at boot and every 6 hours (9g); only a
+    # vault key has a stored Bitfinex user id to compare with. Signed on the shared gate.
+    credential_compliance = (
+        CredentialCompliance(
+            session_factory=session_factory,
+            exchange_account_id=account_bootstrap.exchange_account_id,
+            client=auth_rest, ctx=account_ctx)
+        if venue_wiring.credential_vault else None
+    )
     deployment_reconciler = DeploymentReconciler(
         capital=capital.capital_authority,
         offers=managed_offers,
@@ -1071,6 +1088,7 @@ async def build_daemon(
         trading_control=trading_control,
         capital_policy_control=capital_policy_control,
         credential_rotation=credential_rotation,
+        credential_compliance=credential_compliance,
         writer_lock_watch=WriterLockWatch(lock=writer_lock),
         boot_mts=now_mts,
         venue_tasks=venue_wiring.tasks,
@@ -1086,10 +1104,8 @@ async def build_daemon(
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging("bot")
+    warn_ignored_env_keys(log)
     init_error_tracking("bot", os.environ)
     try:
         asyncio.run(_run())
@@ -1115,6 +1131,7 @@ async def _run() -> None:
     try:
         watchdog = LoopWatchdog(timeout_s=loop_watchdog_timeout_s(os.environ))
     except Exception as exc:
+        _log_boot_refused(type(exc).__name__)
         alerts.emit(alerts.BOOT_REFUSED, error=_error_text([exc]))
         await alerts.shutdown()
         raise
@@ -1135,6 +1152,7 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
     try:
         daemon = await build_daemon(stop_event=stop)
     except Exception as exc:
+        _log_boot_refused(type(exc).__name__)
         alerts.emit(alerts.BOOT_REFUSED, error=_error_text([exc]))
         await alerts.shutdown()
         raise
@@ -1199,20 +1217,37 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         log.critical(
             "executor_auth_failed — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )
+        if not daemon.booted:
+            _log_boot_refused("ExecutorAuthError")
         alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
                     error="ExecutorAuthError: venue credentials rejected")
         end_reason = "fatal" if daemon.booted else "boot_refused"
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* VenueCredentialRejectedError:
-        # The venue refused the key while running (the periodic reconcile raises it; a
-        # refusal at boot never gets here, it holds the boot in credential recovery mode).
+        # The venue refused the key while running (the periodic reconcile raises it for a
+        # refused read or submit, the 6-hour recheck for its own read; a refusal at boot never
+        # gets here, it holds the boot in credential recovery mode).
         # Ordered before ``except* Exception``, which would otherwise take it as an ordinary
         # fatal error and exit 1. The restarted process boots into credential recovery mode.
         log.critical(
             "venue_credential_rejected — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )
+        if not daemon.booted:
+            _log_boot_refused("VenueCredentialRejectedError")
         alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
                     error="VenueCredentialRejectedError: venue refused the account's key")
+        end_reason = "fatal" if daemon.booted else "boot_refused"
+        sys.exit(EXIT_CODE_AUTH_FAILED)
+    except* CredentialNoncompliantError as eg:
+        # The 6-hour recheck found the key no longer compliant (a write scope beyond funding,
+        # another Bitfinex user): the same exit as a refused key, and the restarted process
+        # holds in credential recovery mode until a compliant key is in place (9g). Ordered
+        # before ``except* Exception`` for the same reason as above.
+        log.critical(
+            "credential_noncompliant — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
+        )
+        alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
+                    error=_error_text(eg.exceptions))
         end_reason = "fatal" if daemon.booted else "boot_refused"
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* Exception as eg:
@@ -1220,6 +1255,8 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
             "daemon_taskgroup_fatal exceptions=%s",
             [type(e).__name__ for e in eg.exceptions],
         )
+        if not daemon.booted:
+            _log_boot_refused(*(type(e).__name__ for e in eg.exceptions))
         alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
                     error=_error_text(eg.exceptions))
         end_reason = "fatal" if daemon.booted else "boot_refused"
@@ -1260,6 +1297,13 @@ _RELEASE_TIMEOUT_S = 5.0
 
 def _error_text(exceptions: Sequence[BaseException]) -> str:
     return "; ".join(f"{type(exc).__name__}: {exc}" for exc in exceptions)[:300]
+
+
+def _log_boot_refused(*error_types: str) -> None:
+    """The security log's line for a refused boot: exception types only. The text, scrubbed
+    of secrets, is in the ``boot_refused`` alert that follows."""
+    security_event(BOOT_REFUSED, reason="boot_failed", error_types=list(error_types),
+                   level=logging.CRITICAL)
 
 
 

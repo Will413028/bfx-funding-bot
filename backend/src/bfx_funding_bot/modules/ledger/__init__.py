@@ -51,6 +51,13 @@ type OutcomeKind = Literal["ack", "rejected", "not_sent", "unknown"]
 type ResolutionAction = Literal["bound_to_venue", "not_accepted", "manual"]
 type CreditKind = Literal["credit", "loan"]
 type AcceptanceDecision = Literal["accepted", "fenced", "incomplete_or_unequal"]
+# The operator console's vocabularies (``OperatorReads``): the web API's response types
+# use these, so a state added here reaches the API schema and the generated console types.
+type OfferState = Literal["pending", "unknown", "claimed"]
+type UncertaintyState = Literal["open", "resolved"]
+# The operator-visible code of an uncertainty's subject (``_internal.reads.UNCERTAINTY_KINDS``
+# maps each subject to one, and mypy holds that map to this type).
+type UncertaintyKind = Literal["submit_outcome_unknown", "unattributed_venue_offer"]
 
 # Closed status vocabularies. The port normalizes Bitfinex strings into these;
 # ledger never parses venue text.
@@ -990,9 +997,9 @@ class UncertaintyView:
     """
 
     uncertainty_id: UUID
-    kind: str
+    kind: UncertaintyKind
     symbol: str
-    state: str
+    state: UncertaintyState
     intended_amount: Decimal
     evidence: Mapping[str, object]
     attempt_id: UUID | None = None
@@ -1027,7 +1034,7 @@ class OfferView:
 
     offer_key: str
     venue_offer_id: str | None
-    state: str
+    state: OfferState
     symbol: str
     size_usdt: Decimal
     occurred_at_ms: int
@@ -1045,7 +1052,7 @@ class OperatorReads(Protocol):
         session: AsyncSession,
         scope: Scope,
         *,
-        state: Literal["open", "resolved"] | None,
+        state: UncertaintyState | None,
         limit: int,
     ) -> tuple[UncertaintyView, ...]:
         """Newest first (open by opening, resolved by resolution), at most ``limit``."""
@@ -1336,6 +1343,7 @@ __all__ = [
     "OfferCloseHint",
     "OfferFill",
     "OfferHistory",
+    "OfferState",
     "OfferStatus",
     "OfferTerminalKind",
     "OfferView",
@@ -1370,8 +1378,10 @@ __all__ = [
     "ScopeLock",
     "SymbolConservation",
     "Trade",
+    "UncertaintyKind",
     "UncertaintyReader",
     "UncertaintyRecord",
+    "UncertaintyState",
     "UncertaintyView",
     "UnknownMatch",
     "UnknownMatchKind",

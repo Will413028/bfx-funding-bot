@@ -229,3 +229,31 @@ def test_weekly_report_writes_its_heartbeat_where_backup_check_reads_it() -> Non
     for name in ("bfx-weekly-report.service", "bfx-backup-check.service"):
         assert _unit(name).one("Service", "StateDirectory") == "bfx-ops"
         assert _unit(name).one("Service", "StateDirectoryMode") == "0700"
+
+
+@pytest.mark.parametrize(("output", "installed"), [
+    ("gh version 2.102.0 (2026-09-30)\nhttps://github.com/cli/cli/releases/tag/v2.102.0\n", True),
+    ("gh version 2.102.1 (2026-10-20)\n", False),
+    ("gh version 2.102.0-rc1 (2026-09-29)\n", False),
+    ("https://example\ngh version 2.102.0 (2026-09-30)\n", False),
+    (None, False),  # no binary at the pinned path
+])
+def test_installer_keeps_a_gh_only_when_it_reports_the_pinned_version(
+        tmp_path: Path, output: str | None, installed: bool) -> None:
+    """install.sh's own check (its gh_reports, run by bash): a gh at the pinned path that
+    reports another version, or none, is (re)installed from the sha256-checked download."""
+    installer = (ROOT / "deploy/vm/ops/install.sh").read_text(encoding="utf-8")
+    (definition,) = [line for line in installer.splitlines() if line.startswith("gh_reports() {")]
+    version = re.search(r"^GH_VERSION=([0-9.]+)$", installer, re.MULTILINE)
+    assert version is not None and version.group(1) == "2.102.0"
+    assert 'if ! gh_reports "$GH_DIR/bin/gh"; then' in installer
+    assert 'sha256sum --check --strict' in installer
+    gh = tmp_path / "gh"
+    if output is not None:
+        gh.write_text(f"#!/bin/sh\nprintf '%s' '{output}'\n")
+        gh.chmod(0o755)
+    completed = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail; GH_VERSION={version.group(1)}; {definition}\n"
+                       f"gh_reports {gh}"],
+        capture_output=True, text=True, check=False)
+    assert (completed.returncode == 0) is installed, completed.stderr

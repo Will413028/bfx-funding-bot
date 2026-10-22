@@ -1,4 +1,12 @@
-// ── API Response Wrappers ──
+// API payload types are generated from the web API's OpenAPI document
+// (`api.gen.ts`; regenerate with `pnpm gen:api`, see frontend/AGENTS.md). The
+// names below are the console's names for those schemas; only types the API
+// does not describe are written by hand.
+import type { components } from "./api.gen";
+
+type Schemas = components["schemas"];
+
+// ── API Response Wrappers (the api-client's view of every response) ──
 
 export interface ApiResponse<T> {
   data: T;
@@ -11,262 +19,72 @@ export interface ApiErrorResponse {
   };
 }
 
-// ── User ──
+// ── Profile ──
 
-export interface User {
-  id: string;
-  email: string;
-  status: "active" | "suspended";
-  plan: "free" | "starter" | "pro" | "enterprise";
-  createdAt: string;
-  updatedAt: string;
-}
+/** GET /api/v1/profile: the operator identity Tailscale Serve forwards. */
+export type Profile = Schemas["ProfileResponse"];
 
 // ── API Key ──
 
-/**
- * Account credential lifecycle as returned by the account-scoped API.
- * `unverified` is retained for legacy rows during the staged contract
- * migration; new credentials start in `pending` and are fail-closed until a
- * successful permission check promotes them to `verified`.
- */
-export type ApiKeyStatus =
-  | "pending"
-  | "verified"
-  | "unverified"
-  | "failed"
-  | "revoked"
-  | "retired";
+/** Account credential lifecycle as returned by the account-scoped API. */
+export type ApiKey = Schemas["AccountCredentialResponse"];
+export type ApiKeyStatus = ApiKey["status"];
 
-export interface ApiKey {
-  id: string;
-  exchangeAccountId: string;
-  label: string;
-  apiKey: string;
-  apiSecret: string; // always "****" (masked by backend)
-  /** Account credential lifecycle/verification status. */
-  status: ApiKeyStatus;
-  /** Legacy response field kept only while the contract migration is staged. */
-  exchangeStatus?: string;
-  verifiedAt?: string | null;
-  lastVerifyError?: string | null; // reason the last verify failed (when exchangeStatus is "failed")
-  createdAt: string;
-  fundingBalance?: {
-    currency: string;
-    balance: number;
-    available: number;
-  };
-}
-
-export interface ExchangeAccount {
-  exchangeAccountId: string;
-  venue: string;
-  label: string;
-  lifecycleStatus: "active" | "halted";
-  role: "owner" | "operator" | "viewer";
-}
+export type ExchangeAccount = Schemas["ExchangeAccountResponse"];
 
 // ── Strategy Config ──
 
-export interface AmountConfig {
-  min: number;
-  max: number;
-}
+export type AmountConfig = Schemas["Range"];
+export type RateConfig = Schemas["Range"];
+export type PeriodConfig = Schemas["Range"];
+export type StrategyConfig = Schemas["StrategyConfigBody"];
+export type UserConfig = Schemas["AccountConfigDraftResponse"];
 
-export interface RateConfig {
-  min: number;
-  max: number;
-}
-
-export interface PeriodConfig {
-  min: number;
-  max: number;
-}
-
-export interface StrategyConfig {
-  currency: string;
-  amount: AmountConfig;
-  rate: RateConfig;
-  period: PeriodConfig;
-  autoRenew: boolean;
-}
-
-export interface UserConfig {
-  id: string;
-  exchangeAccountId: string;
-  config: StrategyConfig;
-  revision: number;
-  source: string;
-  createdAt: string;
-  updatedAt: string;
-}
+// ── Funding status (the daemon's status, forwarded by the web API) ──
 
 // Canonical live authority: Decimal values stay strings throughout the UI.
-export interface CapitalPolicy {
-  enabled: boolean;
-  reserve_amount: string;
-  allocation_mode: "all_available";
-  max_cell_fraction: string;
-}
-
-export interface CapitalBudget {
-  spendable: string;
-  cell_limit: string;
-  cell_headroom: string;
-  max_new_offer: string;
-  reason: string | null;
-}
-
+export type CapitalPolicy = Schemas["CapitalPolicyStatus"];
+export type CapitalBudget = Schemas["CapitalBudgetStatus"];
 export type CapitalStatus =
-  | {
-      capital_available: false;
-      reason: string;
-      policy_revision?: number;
-      policy?: CapitalPolicy;
-    }
-  | {
-      capital_available: true;
-      policy_revision: number;
-      policy_digest: string;
-      basis_token: string;
-      policy: CapitalPolicy;
-      available_balance: string;
-      unreflected_commitments: string;
-      total_capital: string;
-      spendable: string;
-      unattributed_credit_exposure: string;
-      cells: Record<string, CapitalBudget>;
-    };
-
-export interface FundingStatus {
-  account_id: string;
-  deployment_environment: string;
-  halt: { halted: boolean; reason: string | null; sources: unknown };
-  symbols: Record<string, CapitalStatus>;
-  configured_cells: {
-    symbol: string;
-    cell: string;
-    strategy: string;
-    period: string;
-  }[];
-  dry_run: {
-    account_id: string;
-    deployment_environment: string;
-    symbols: Record<
-      string,
-      {
-        blocked_by: string | null;
-        cells: Record<
-          string,
-          { would_submit: boolean; blocked_by: string | null }
-        >;
-      }
-    >;
-  };
-}
+  | Schemas["CapitalUnavailable"]
+  | Schemas["CapitalAvailable"];
+export type FundingStatus = Schemas["FundingStatus"];
 
 // ── Trading control (lending envelope ADR 2026-09-25 D4: state, resume, kill) ──
 
-export type TradingStateName = "ACTIVE" | "HALTED";
-export type TradingCause = "operator" | "auto";
+export type TradingStateView = Schemas["TradingStateView"];
+export type TradingStateName = TradingStateView["state"];
+export type TradingCause = TradingStateView["cause"];
 
-export interface TradingStateView {
-  id: number;
-  state: TradingStateName;
-  cause: TradingCause;
-  actor: string;
-  reason: string;
-  at_ms: number;
-}
-
-export type TradingControlAction = "resume" | "kill";
-export type TradingControlRequestState =
-  | "requested"
-  | "applied"
-  | "rejected"
-  | "failed";
-
-export interface TradingControlRequest {
-  request_id: string;
-  action: TradingControlAction;
-  reason: string;
-  requested_by: string;
-  created_at_ms: number;
-  state: TradingControlRequestState;
-  processed_at_ms: number | null;
-  outcome_reason: string | null;
-}
+export type TradingControlRequest = Schemas["TradingControlRequest"];
+export type TradingControlAction = TradingControlRequest["action"];
+export type TradingControlRequestState = TradingControlRequest["state"];
 
 /** The latest venue cancel-all phase per currency for the HALTED in force. */
-export interface CancelAllPhase {
-  currency: string;
-  phase: "requested" | "acknowledged" | "rejected" | "failed" | "skipped";
-  detail: string | null;
-  at_ms: number;
-}
+export type CancelAllPhase = Schemas["CancelAllPhase"];
+export type BuildIdentity = Schemas["BuildIdentity"];
+export type TradingControlOverview = Schemas["TradingControlOverview"];
 
-export interface BuildIdentity {
-  backend_digest: string | null;
-  source_revision: string | null;
-}
-
-export interface TradingControlOverview {
-  trading_state: TradingStateView | null;
-  cancel_all: CancelAllPhase[];
-  running: BuildIdentity;
-  latest_deployment: (BuildIdentity & { finished_at: string | null }) | null;
-  requests: TradingControlRequest[];
-  /** Every currency with an applied CapitalPolicy (its own request outbox). */
-  currencies: CurrencyPolicy[];
-}
-
-export type CurrencyAction = "enable" | "disable";
-
-export interface CurrencyRequest {
-  request_id: string;
-  symbol: string;
-  action: CurrencyAction;
-  reason: string;
-  requested_by: string;
-  created_at_ms: number;
-  state: TradingControlRequestState;
-  processed_at_ms: number | null;
-  outcome_reason: string | null;
-}
-
+export type CurrencyRequest = Schemas["CurrencyRequest"];
+export type CurrencyAction = CurrencyRequest["action"];
 /** The terms every new offer must stay inside; decimals stay strings. */
-export interface OfferEnvelope {
-  min_period_days: number;
-  max_period_days: number;
-  max_open_offers: number;
-  rate_floor_ratio: string;
-  min_rate_apr: string;
-}
-
-export interface CurrencyPolicy {
-  symbol: string;
-  revision: number;
-  /** Set when the applied policy cannot be read; the other fields are null. */
-  policy_error: string | null;
-  enabled: boolean | null;
-  max_offer_amount: string | null;
-  /** null: never set, and every offer for the currency is refused. */
-  envelope: OfferEnvelope | null;
-  /** Latest first. */
-  requests: CurrencyRequest[];
-}
+export type OfferEnvelope = Schemas["OfferEnvelope"];
+/** Every currency with an applied CapitalPolicy (its own request outbox). */
+export type CurrencyPolicy = Schemas["CurrencyPolicy"];
 
 // ── SP4 Projections (operator console read models) ──
 
-/** offer_claims FSM states (backend RegistryState). */
-export type OfferClaimState =
-  | "pending"
-  | "unknown"
-  | "claimed"
-  | "released"
-  | "failed";
+/** GET /positions: per-symbol capital as disjoint components. */
+export type Position = Schemas["PositionResponse"];
+/** GET /offers: managed offer (default: pending/unknown/claimed only). */
+export type OfferClaim = Schemas["OfferClaimResponse"];
+export type OfferClaimState = OfferClaim["state"];
 
-/** event_log event types (backend serialization registry). */
+/**
+ * The event types the history filter offers. The API types `eventType` as a
+ * string: the history also carries other names (`SUBMIT_OUTCOME_UNKNOWN`, the
+ * frozen legacy archive's), which the table shows as they are.
+ */
 export type ExecutionEventType =
   | "RESERVATION_INTENT"
   | "RESERVATION_CLAIMED"
@@ -278,88 +96,19 @@ export type ExecutionEventType =
   | "UNCERTAINTY_MARKED_NOT_ACCEPTED"
   | "UNCERTAINTY_MANUALLY_RESOLVED";
 
-/**
- * GET /positions — per-symbol capital as disjoint components, in the symbol's
- * own units. `available + offered + lent` is the symbol's total.
- */
-export interface Position {
-  symbol: string;
-  /** Decimal string. */
-  available: string;
-  /** Decimal string. */
-  offered: string;
-  /** Decimal string. */
-  lent: string;
-  /**
-   * Decimal string: the part of `lent` no managed offer owns (a SUBSET of
-   * `lent`, never an addend); null when the backend has no such fact.
-   */
-  unattributedLent: string | null;
-  nCredits: number | null;
-  lastUpdatedMs: number;
-  /** Epoch ms of the last reconcile checkpoint; null if never reconciled. */
-  lastReconciledAtMs: number | null;
-}
-
-/**
- * GET /offers — managed offer (default: pending/unknown/claimed only).
- * `offerKey` is opaque and stable for the offer's life.
- */
-export interface OfferClaim {
-  offerKey: string;
-  venueOfferId: string | null;
-  state: OfferClaimState;
-  symbol: string;
-  /** Decimal string (USDT). */
-  sizeUsdt: string;
-  occurredAtMs: number;
-  lastUpdatedMs: number;
-}
-
-/**
- * GET /executions — one history row, newest first (the event log under the
- * legacy authority; the journal, then the frozen event log, under the ledger).
- */
-export interface ExecutionEvent {
-  /** Opaque, unique within the history (ADR 2026-10-02 D4). */
-  eventKey: string;
-  eventType: ExecutionEventType;
-  occurredAtMs: number;
-  symbol: string | null;
-  venueOfferId: string | null;
-  cid: number | null;
-  /** Decimal string (USDT); null when the payload carries no amount. */
-  amount: string | null;
-  /** Daily rate (e.g. 0.00017); null when the payload carries no rate. */
-  rate: number | null;
-}
-
-/**
- * GET /executions pagination (contract v2) — server envelope replaces the
- * old "full page => more" client heuristic.
- */
-export interface ExecutionEventsPagination {
-  hasMore: boolean;
-  /** Opaque cursor for the next page, sent back as is; null when exhausted. */
-  nextBefore: string | null;
-}
-
-/** GET /executions — full response envelope. */
-export interface ExecutionEventsResponse {
-  data: ExecutionEvent[];
-  pagination: ExecutionEventsPagination;
-}
+/** GET /executions: one history row, newest first. */
+export type ExecutionEvent = Schemas["ExecutionEventResponse"];
+export type ExecutionEventsPagination = Schemas["ExecutionsPagination"];
+/** GET /executions: full response envelope. */
+export type ExecutionEventsResponse = Schemas["ExecutionsPage"];
 
 // ── Execution uncertainties (operator resolution) ──
 
-export type UncertaintyKind =
-  | "submit_outcome_unknown"
-  | "unattributed_venue_offer"
-  | "unsupported_venue_exposure";
-
-export type UncertaintyState = "open" | "resolved";
-
-/** Deliberately bounded values exposed by the backend operator DTO. */
+/**
+ * The bounded evidence keys the backend allowlists
+ * (`operator_commands.evidence_summary`). The API types the summary as an open
+ * map of scalars, so this narrowing is the console's.
+ */
 export interface UncertaintyEvidenceSummary {
   outcomeReason?: string | null;
   observedAtMs?: number | null;
@@ -369,76 +118,27 @@ export interface UncertaintyEvidenceSummary {
   coverage?: Record<string, boolean>;
 }
 
-export interface UncertaintyBlockedScope {
-  exchangeAccountId: string;
-  environment: string;
-  symbol: string;
-}
-
+export type UncertaintyBlockedScope = Schemas["BlockedScope"];
 /** Latest server-derived evidence that can authorize an operator resolution. */
-export interface UncertaintyResolutionContext {
-  evidenceRef: string | null;
-  queryStartedAtMs: number | null;
-  queryFinishedAtMs: number | null;
-  candidateCount: number | null;
-  candidateVenueOfferIds: string[];
-  unavailableReason: string | null;
-}
+export type UncertaintyResolutionContext =
+  Schemas["UncertaintyResolutionContext"];
 
 /** Account/environment/symbol-scoped execution block. */
-export interface Uncertainty {
-  uncertaintyId: string;
-  kind: UncertaintyKind;
-  symbol: string;
-  /** Decimal string (venue-native intended amount). */
-  intendedAmount: string;
-  state: UncertaintyState;
-  evidenceSummary: UncertaintyEvidenceSummary;
-  blockedScope: UncertaintyBlockedScope;
-  resolutionContext: UncertaintyResolutionContext | null;
-  resolvedByOperatorId?: string | null;
-  resolutionReason?: string | null;
-  /**
-   * Newest operator adjudication for this row: `requested` while the account
-   * daemon has yet to apply it, otherwise its outcome. The only status source.
-   */
-  resolutionRequest?: UncertaintyResolutionRequest | null;
-}
-
-export type UncertaintyResolutionRequestState =
-  | "requested"
-  | "applied"
-  | "rejected"
-  | "failed";
+export type Uncertainty = Omit<
+  Schemas["UncertaintyResponse"],
+  "evidenceSummary"
+> & { evidenceSummary: UncertaintyEvidenceSummary };
+export type UncertaintyKind = Uncertainty["kind"];
+export type UncertaintyState = Uncertainty["state"];
 
 /**
  * One queued operator adjudication. The web API only records the request; the
  * account daemon applies it and reports the outcome here (ADR D4').
  */
-export interface UncertaintyResolutionRequest {
-  requestId: string;
-  uncertaintyId: string;
-  action: "bind_to_venue" | "mark_not_accepted" | "manual_resolution";
-  state: UncertaintyResolutionRequestState;
-  evidenceRef: string;
-  createdAtMs: number;
-  processedAtMs: number | null;
-  /** Bounded code, e.g. `stale_reconcile_fence`; set when rejected or failed. */
-  outcomeReason: string | null;
-}
+export type UncertaintyResolutionRequest = Schemas["ResolutionRequestResponse"];
+export type UncertaintyResolutionRequestState =
+  UncertaintyResolutionRequest["state"];
 
 // ── Attribution ──
 
-export interface WeeklyAttributionPoint {
-  cell: string;
-  weekStartMs: number;
-  weekEndMs: number;
-  nFills: number;
-  grossInterestUsdt: string;
-  netInterestUsdt: string;
-  capitalDays: string;
-  realizedAprNetPct: string | null;
-  baselineCloseAprNetPct: string | null;
-  baselineFrrAprNetPct: string | null;
-  baselineFrrUtilAprNetPct: string | null;
-}
+export type WeeklyAttributionPoint = Schemas["WeeklyAttributionResponse"];

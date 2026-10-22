@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from uuid import UUID
 
@@ -325,3 +326,29 @@ def test_unscoped_private_routes_are_not_registered(scoped_app: TestClient) -> N
         "/api/v1/attribution/weekly",
     ):
         assert scoped_app.get(path).status_code == 404, path
+
+
+def _security(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "bfx.security"]
+
+
+def test_a_nonmember_and_a_viewer_write_are_logged_as_access_denied(
+    scoped_app: TestClient, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """9j: the 404 hides the account from the caller, not from the log."""
+    other_id = UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+    with caplog.at_level(logging.WARNING, logger="bfx.security"):
+        assert scoped_app.get(f"/api/v1/exchange-accounts/{other_id}/positions").status_code == 404
+        scoped_app.current_user["value"] = "viewer-1"
+        assert scoped_app.get(f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/positions").status_code == 200
+        assert scoped_app.put(f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/config-draft", json={
+            "currency": "USD", "amount": {"min": 50, "max": 100},
+            "rate": {"min": 0.0001, "max": 0.001}, "period": {"min": 2, "max": 30},
+            "autoRenew": True,
+        }).status_code == 403
+
+    nonmember, viewer = _security(caplog)
+    assert (nonmember.event, nonmember.reason) == ("access_denied", "account_not_found_or_not_member")
+    assert (nonmember.user_id, nonmember.exchange_account_id) == ("operator-1", str(other_id))
+    assert (viewer.event, viewer.reason) == ("access_denied", "account_write_required")
+    assert (viewer.user_id, viewer.exchange_account_id) == ("viewer-1", str(_ACCOUNT_ID))

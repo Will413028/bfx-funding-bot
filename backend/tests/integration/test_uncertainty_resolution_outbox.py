@@ -315,15 +315,10 @@ async def _set_member_role(owner, role: str) -> None:
 
 
 async def _seed_open_submit_unknown(book_) -> tuple[UUID, str]:
-    """The configured sole admin operator, TOTP enrolled and a member of the account (what
-    ``operator_authorized`` requires of whoever asked), and an UNKNOWN submit with the ref of
+    """The operator, an owner member of the account (what ``operator_authorized`` requires
+    of whoever asked), and an UNKNOWN submit with the ref of
     the ledger observation an operator cites to mark it not accepted."""
     async with book_.factory.begin() as session:
-        await session.execute(text(
-            'INSERT INTO auth."user" (id,name,email,"emailVerified","createdAt","updatedAt",'
-            'role,banned,"twoFactorEnabled") VALUES (\'operator-1\',\'operator\','
-            "'operator@test.invalid',true,now(),now(),'admin',false,true)"
-        ))
         await session.execute(text(
             "INSERT INTO exchange_account_memberships(exchange_account_id,user_id,role) "
             "VALUES (:id,'operator-1','owner')"
@@ -485,9 +480,8 @@ def test_account_writer_can_ask_the_shared_operator_authority(migrated) -> None:
         assert not _privilege(
             conn, "SELECT has_function_privilege('bfx_webapi', :f, 'EXECUTE')", f=signature
         )
-        assert not _privilege(
-            conn, "SELECT has_table_privilege('bfx_bot', 'auth.\"user\"', 'SELECT')"
-        )
+        # Nothing to read: f836fdee9bf3 (9d-7) dropped the auth schema.
+        assert conn.scalar(text("SELECT to_regnamespace('auth')")) is None
 
 
 def test_revoked_operator_request_is_rejected_by_the_account_writer(

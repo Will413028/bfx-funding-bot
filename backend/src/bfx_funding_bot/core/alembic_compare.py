@@ -1,7 +1,7 @@
 """Project-specific Alembic autogenerate comparison policy.
 
-The application metadata intentionally omits a few Better Auth foreign keys
-that are owned by hand-crafted migrations. PostgreSQL also renders a generic
+The application metadata intentionally omits the vault tables' foreign keys to
+``user_profiles``, which are owned by hand-crafted migrations. PostgreSQL also renders a generic
 JSON server default with a ``::json`` cast, while SQLAlchemy metadata keeps the
 same default uncast. Compare those textual defaults after removing only the
 trailing dialect type cast so a real default change still remains visible to
@@ -20,7 +20,6 @@ _MIGRATION_MANAGED_FOREIGN_KEYS = frozenset(
     {
         ("public", "api_keys", "fk_api_keys_user_profile"),
         ("public", "user_configs", "fk_user_configs_user_profile"),
-        ("public", "user_profiles", "fk_user_profiles_user"),
     }
 )
 _IDENTITY_CONTRACT_TABLES = frozenset(

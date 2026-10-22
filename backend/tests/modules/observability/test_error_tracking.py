@@ -91,6 +91,21 @@ def test_scrub_removes_secrets_emails_ips_and_identity_fields() -> None:
     assert scrubbed["tags"] == {"service": "bot", "peer": REDACTED}
 
 
+def test_scrub_redacts_the_security_events_identity_fields() -> None:
+    event: Any = {"breadcrumbs": {"values": [{
+        "category": "bfx.security", "message": "access_denied",
+        "data": {"event": "access_denied", "reason": "missing_capability",
+                 "login": "operator@github", "tailnet_user_ids": ["123456"], "user_id": "123456"},
+    }]}}
+
+    scrubbed = scrub_event(event, ())
+
+    assert scrubbed is not None
+    data = scrubbed["breadcrumbs"]["values"][0]["data"]
+    assert data == {"event": "access_denied", "reason": "missing_capability",
+                    "login": REDACTED, "tailnet_user_ids": REDACTED, "user_id": REDACTED}
+
+
 def test_scrub_keeps_ordinary_text() -> None:
     text = "deployment_skip symbol=fUSD rate=0.00021 period=2 at 12:30:45 v1.2.3"
     assert error_tracking.scrub_text(text, ()) == text
@@ -213,3 +228,27 @@ def test_webapi_starts_error_tracking_with_the_fastapi_integration(
         monkeypatch.undo()
         importlib.reload(webapi)
     assert calls == [("webapi", ("starlette", "fastapi"))]
+
+
+def test_secret_file_values_are_scrubbed_on_the_wire(ingest: str, tmp_path: Any) -> None:
+    """9h: the bot's secrets live in files (BFX_SECRETS_DIR), not in its env; the Sentry
+    scrub list still covers them, end to end. Mutation: secret_values without the file
+    values fails this test."""
+    directory = tmp_path / "secrets"
+    directory.mkdir()
+    admin = "fake-" + "file-admin-token-" + "q" * 10
+    for key, value in {"TELEGRAM_BOT_TOKEN": TOKEN, "BFX_ADMIN_TOKEN": admin,
+                       "DATABASE_URL": f"postgresql://bfx_bot:{DB_PASSWORD}@bfx-postgres:5432/bfx"
+                       }.items():
+        (directory / key).write_text(value)
+    environ = {"SENTRY_DSN": ingest, "BFX_SECRETS_DIR": str(directory),
+               "BFX_DEPLOYMENT_ENV": "ci", "BFX_SERVICE_VERSION": "aaaaaaa"}
+    assert init_error_tracking("bot", environ) is True
+    try:
+        raise RuntimeError(f"boot failed with {TOKEN} {admin} password={DB_PASSWORD}")
+    except RuntimeError:
+        sentry_sdk.capture_exception()
+    sentry_sdk.flush(timeout=5)
+    wire = b"\n".join(_Ingest.bodies).decode()
+    assert "boot failed with" in wire
+    _assert_clean(wire, (TOKEN, admin, DB_PASSWORD))

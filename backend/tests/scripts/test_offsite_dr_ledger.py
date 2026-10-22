@@ -283,12 +283,15 @@ def test_boot_output_is_bound_to_the_restored_bounds() -> None:
     pending = ledger.parse_boot(_boot(reads=[{"symbol": "fUST", "cell_id": "c1", "basis_id": None,
                                               "result": "blocked:snapshot_query_pending"}]), _bounds())
     assert pending["scopes"][0]["reads"][0]["basis_id"] is None
+    # A drained account: the newest basis has no cells, so nothing is read.
+    assert ledger.parse_boot(_boot(reads=[]), _bounds())["scopes"][0]["reads"] == []
 
 
 @pytest.mark.parametrize(("output", "code"), [
     (_boot().replace(HEAD, "a1b2c3d4e5f6"), "boot_schema_head_mismatch"),
     (_boot(deployment_environment="shadow"), "restore_output_invalid"),     # another scope set
-    (_boot(reads=[]), "restore_output_invalid"),                            # nothing was read
+    (_boot(reads=[{"symbol": "fUST", "cell_id": "c1", "basis_id": BASIS, "result": "unknown"}]),
+     "restore_output_invalid"),                                             # neither available nor blocked
     (_boot(reads=[{"symbol": "fUST", "cell_id": "c1", "basis_id": None, "result": "available"}]),
      "restore_output_invalid"),                                             # no basis folded
     (_boot().replace('"ledger"', '"legacy"'), "restore_output_invalid"),
@@ -585,7 +588,7 @@ def test_acceptance_drill_restores_the_named_backup_and_target(tmp_path: Path) -
     (FakeDocker(boot=(3, '{"error": "boot_check_failed", "type": "ImportError"}\n')),
      "boot_check_failed"),
     (FakeDocker(boot=(125, "")), "restore_command_failed"),
-    (FakeDocker(boot=(0, _boot(reads=[]))), "restore_output_invalid"),
+    (FakeDocker(boot=(0, _boot().replace('"ledger"', '"legacy"'))), "restore_output_invalid"),
 ])
 def test_ledger_drill_failures_write_unmeasured_evidence_and_still_clean_up(
     tmp_path: Path, fake: FakeDocker, code: str, capsys: pytest.CaptureFixture[str],

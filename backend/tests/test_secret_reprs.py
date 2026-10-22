@@ -15,7 +15,6 @@ from bfx_funding_bot.modules.marketfeed.daemon import Daemon
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 
 DATABASE_URL = "postgresql://u:fake-db-password@h/db"
-REDIS_URL = "redis://u:fake-redis-password@h/0"
 
 
 @pytest.fixture
@@ -26,7 +25,6 @@ def config() -> MarketfeedConfig:
         database_url=DATABASE_URL,
         deployment_environment=DeploymentEnvironment.CI,
         execution_policy=ExecutionPolicy.BOOK_GUARDED,
-        redis_url=REDIS_URL,
     )
 
 
@@ -75,12 +73,10 @@ def test_settings_dsn_hidden_and_serialization_preserved(
 
 
 @pytest.mark.parametrize("render", [repr, str], ids=["repr", "str"])
-def test_marketfeed_dsns_hidden_and_serialization_preserved(
+def test_marketfeed_dsn_hidden_and_serialization_preserved(
     config: MarketfeedConfig, render: Callable[[object], str],
 ) -> None:
-    for name, value in (("database_url", DATABASE_URL), ("redis_url", REDIS_URL)):
-        assert getattr(config, name) == value
-        assert config.model_dump()[name] == value
-        assert json.loads(config.model_dump_json())[name] == value
-    for secret in ("fake-db-password", "fake-redis-password"):
-        assert secret not in render(config)
+    assert config.database_url == DATABASE_URL
+    assert config.model_dump()["database_url"] == DATABASE_URL
+    assert json.loads(config.model_dump_json())["database_url"] == DATABASE_URL
+    assert "fake-db-password" not in render(config)

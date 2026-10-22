@@ -20,18 +20,29 @@ Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration �
 
 | role | 誰用 | 權限來源 |
 |---|---|---|
-| `bfx_bot` | bot daemon、每週報告、研究用一次性容器 | 本節的 default privileges ＋ 各 migration 的收斂 grant |
+| `bfx_bot` | bot daemon | 本節的 default privileges ＋ 各 migration 的收斂 grant |
 | `bfx_webapi` | FastAPI web-API | migration `c74d45a54e46` 的 baseline（與之後各 migration）；不碰交易寫入 |
-| `bfx_webauth` | （9d-5 起無使用者；9d-7 的 migration 刪除） | 只有 `auth` schema（本節手動 grant；migration 鏈到 9d-7 前仍會引用它） |
-| `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist：三個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
+| `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist（換憑證 outbox 由 `1db83367918c` 加上）：四個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
+| `bfx_research` | 每週報告（`bfx-weekly-report`）、研究用一次性容器 | migration `3c5e7a9b1d2f` 的精確 allowlist：只寫研究表（`funding_stats`、`perp_funding_rates`、`liquidations` 的 upsert，`attribution_weekly`、`fill_rate_stats` 的 delete＋insert，`fill_rate_model_artifacts` 的 insert），只讀每週步驟與研究腳本用到的表；不能寫 ledger、`trading_state`、outbox，讀不到憑證表 |
+
+模擬 soak 另有第五個 login role `bfx_sim`，只連自己的 database `bfx_sim`、在那裡以 `bfx_bot` 身分執行；
+它的建立與 grants 在 [simulation-soak.md](simulation-soak.md) §2，不屬於新主機的必要步驟。
 
 Migration 對 role 的 grant 都包在 `IF EXISTS (SELECT FROM pg_roles ...)` 裡：role 不存在時
 migration 照樣成功但**不會補 grant**。所以順序是：先建 role，再第一次跑 migration。
 
+**已上線的主機加新 role**（例如 `bfx_research`）：merge 進 `main` 就會由 bfx-deploy 自動部署並跑 migration，
+所以 role 與它的 secret 檔（`research.env`）要在**合併那個 PR 之前**於 VM 建好（§1a、§1e），部署後照 §1d 核對。
+若已部署才建 role，migration 不會重跑：以 `<owner>` 執行該 migration 的 REVOKE／GRANT（`3c5e7a9b1d2f` 的
+`RESEARCH_TABLE_PRIVILEGES`，逐表 `GRANT ... ON public.<table> TO bfx_research`，另加 `GRANT USAGE ON SCHEMA public`），
+再跑 §1d。
+
 ### 1a. 建 role（migration 之前，以 `<owner>` 執行）
 
-密碼當場產生，直接寫進主機上的 runtime secret 檔（`/opt/bfx/runtime/*.env`，root 0600），
-不要貼到終端機歷史、chat 或任何檔案以外的地方。`<owner>` 必須是 superuser（官方 image 的
+密碼當場產生，直接寫進主機上的 runtime secret 檔：`bfx_bot`、`bfx_webapi` 寫秘密檔
+`/opt/bfx/runtime/secrets/<service>/DATABASE_URL`（root:4600 0640），其他 role 寫 `/opt/bfx/runtime/*.env`（root 0600）。
+不要貼到終端機歷史、chat 或任何檔案以外的地方；含密碼的 `CREATE ROLE` 不在互動式 psql 裡打（psql 會寫 history），
+照 §1e 在 root shell 裡經 stdin 送進去。`<owner>` 必須是 superuser（官方 image 的
 `POSTGRES_USER` 就是）：下面兩個 `SET` 是 superuser 參數，讓失敗的 `CREATE ROLE` 不會把含明文密碼的
 STATEMENT 寫進 PG log。
 
@@ -40,8 +51,8 @@ SET log_statement = 'none';
 SET log_min_error_statement = 'panic';
 CREATE ROLE bfx_bot LOGIN PASSWORD '<read from the secret file>';
 CREATE ROLE bfx_webapi LOGIN PASSWORD '<read from the secret file>';
-CREATE ROLE bfx_webauth LOGIN PASSWORD '<read from the secret file>';
 CREATE ROLE bfx_operator LOGIN PASSWORD '<read from the secret file>';
+CREATE ROLE bfx_research LOGIN PASSWORD '<read from the secret file>';
 
 -- bfx_bot：owner 之後建立的 public 表預設可 DML；受治理的表由各 migration 收斂
 -- （例如 capital_*、trading_*、deployments 只給 SELECT/INSERT 或欄位級 UPDATE）。
@@ -53,15 +64,25 @@ ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO bfx_bot;
 ```
 
-`bfx_webapi` 與 `bfx_webauth` 在 public schema 不給任何 default privileges：webapi 的讀取
-清單與 outbox 欄位級 INSERT 全部由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand`），
-webauth 在 public 什麼都沒有。`bfx_operator` 同樣不給 default privileges，它的權限由 migration `4ab02765a34b` 先 revoke 全部（含 schema CREATE）再 grant 回清單，`test_operator_privilege_allowlist.py` 比對 effective privileges。`bfx_webapi` 在 public 的權限是 migration `d0e1f2a3b4c6` 擁有的精確 allowlist（先 revoke 全部再 grant 回清單，含 `api_keys`、`user_configs` 與 `user_profiles` 的 UPDATE，不再需要手動 grant）；之後新增 webapi 權限的 migration 必須同步更新 `test_webapi_privilege_allowlist.py`。
+`bfx` 的 CONNECT 只給上面四個 runtime role（`<owner>` 是 superuser，不受影響）。官方 image 以 `POSTGRES_DB`
+建立的 database 預設對 PUBLIC 開放 CONNECT；收回後，同一 cluster 的其他 login role（例如模擬 soak 的 `bfx_sim`）
+連不進 `bfx`，role membership 也不會帶進來（membership 用 `INHERIT FALSE`）：
+
+```sql
+GRANT CONNECT ON DATABASE bfx TO bfx_bot, bfx_webapi, bfx_operator, bfx_research;
+REVOKE CONNECT ON DATABASE bfx FROM PUBLIC;
+```
+
+之後新增連 `bfx` 的 runtime role，要在這裡一併 `GRANT CONNECT`，否則它連不上（`permission denied for database "bfx"`）。
+還原演練的驗證 role 自己授予 CONNECT（`deploy/vm/pgbackrest/restore_drill.py`），不依賴 PUBLIC。
+
+`bfx_webapi` 在 public schema 不給任何 default privileges：webapi 的讀取
+清單與 outbox 欄位級 INSERT 全部由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand`）。`bfx_operator` 同樣不給 default privileges，它的權限由 migration `4ab02765a34b` 先 revoke 全部（含 schema CREATE）再 grant 回清單，`test_operator_privilege_allowlist.py` 比對 effective privileges。`bfx_research` 也不給 default privileges：migration `3c5e7a9b1d2f` 先 revoke 它在 `public` 與 `legacy_archive` 的全部權限（含 schema CREATE）再 grant 回清單，`test_research_privilege_allowlist.py` 比對 effective privileges，`test_research_role_behaviour.py` 以這個 role 登入跑每週步驟的實際語句。`bfx_webapi` 在 public 的權限是 migration `d0e1f2a3b4c6` 擁有的精確 allowlist（先 revoke 全部再 grant 回清單，含 `api_keys`、`user_configs` 與 `user_profiles` 的 UPDATE，不再需要手動 grant）；之後新增 webapi 權限的 migration 必須同步更新 `test_webapi_privilege_allowlist.py`。
 
 ### 1b. 跑 migration
 
 照 [deploy runbook](deploy.md) 第一次部署；bfx-deploy 以 `migrate.env`（owner 的
-`DATABASE_URL`）跑 `alembic upgrade head`。migration `e61f3d1ed7ca` 建立 `auth` schema 與
-Better Auth 的表。
+`DATABASE_URL`）跑 `alembic upgrade head`。
 
 ### 1b-1. 蓋 database realm（migration 之後，以 `<owner>` 執行一次）
 
@@ -83,22 +104,10 @@ VALUES ('<realm>', (extract(epoch FROM clock_timestamp()) * 1000)::bigint, 'owne
 蓋章後不能 UPDATE／DELETE／TRUNCATE，執行時的 role 沒有寫入權限（`bfx_bot` 只有 SELECT）。
 用 `CREATE DATABASE ... TEMPLATE` 複製出來的資料庫會帶著原來的章，要換 realm 就在新庫重建而不是改章。
 
-### 1c. `bfx_webauth` 的 auth schema grant（migration 之後，以 `<owner>` 執行）
+### 1c. Better Auth 的 `auth` schema 與 `bfx_webauth`（已退役，9d-7）
 
-`auth` schema 要等 migration 建好才存在，所以這步在 1b 之後：
-
-```sql
-GRANT USAGE ON SCHEMA auth TO bfx_webauth;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA auth TO bfx_webauth;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA auth TO bfx_webauth;
-ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA auth
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO bfx_webauth;
-ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA auth
-  GRANT USAGE, SELECT ON SEQUENCES TO bfx_webauth;
-```
-
-`public.user_profiles` 對 `auth.user` 的 FK 檢查由 Postgres 內部執行，webapi 不需要
-`auth` 的權限。
+migration 鏈前段的 `e61f3d1ed7ca` 會建立 `auth` schema，`f836fdee9bf3` 再把它連同
+`bfx_webauth` role 一起刪除（role 不存在時略過；同一 cluster 若還有別的資料庫授權給它，role 會留下但在這個資料庫沒有任何權限）。新主機不建立 `bfx_webauth`，也不需要任何 `auth` grant。
 
 ### 1c-1. Ledger cutover reader（已退役，S1-8 PR-D）
 
@@ -132,11 +141,6 @@ migration 搬過去。
 ### 1d. 驗證隔離（留輸出當 evidence）
 
 ```sql
-SET ROLE bfx_webauth;
-SELECT count(*) FROM auth."user";                 -- OK
-SELECT 1 FROM public.trading_state LIMIT 1;       -- permission denied
-RESET ROLE;
-
 SET ROLE bfx_webapi;
 SELECT has_table_privilege(current_user, 'public.trading_state', 'SELECT') AS can_read_state,
        has_column_privilege(current_user, 'legacy_archive.event_log', 'payload', 'SELECT')
@@ -153,15 +157,43 @@ SELECT has_column_privilege(current_user, 'public.trading_control_requests', 're
        has_table_privilege(current_user, 'public.trading_state', 'INSERT')
          AS can_write_state;  -- true, false, false
 RESET ROLE;
+
+SET ROLE bfx_research;
+SELECT has_table_privilege(current_user, 'public.funding_stats', 'UPDATE') AS can_upsert_research,
+       has_table_privilege(current_user, 'public.trading_state', 'INSERT') AS can_write_state,
+       has_table_privilege(current_user, 'public.submission_attempt_journal', 'INSERT')
+         AS can_write_ledger,
+       has_any_column_privilege(current_user, 'public.exchange_account_credentials', 'SELECT')
+         AS can_read_credentials;  -- true, false, false, false
+RESET ROLE;
+
+SELECT has_database_privilege('public', 'bfx', 'CONNECT') AS public_connects;  -- false
 ```
 
 ### 1e. 連線字串（寫進 secret 檔，不進 git）
 
+bot 與 webapi 的 `DATABASE_URL` 是秘密檔，格式與規則見 [deploy「秘密檔」](deploy.md#秘密檔botwebapi9h)。先建
+group 4600 與目錄（[deploy 9h 切換第 1 步](deploy.md#9h-切換一次性依序在-merge-9h-的-pr-之前做第-13-步)），再寫入。
+每個 role 一個 root shell，用 [secret-rotation「通用寫法」](secret-rotation.md#通用寫法) 的範本（值不上 argv、不進 history），
+把範本最後的 `V=...` 與 `swap` 換成：
+
+```bash
+P=$(openssl rand -hex 32)                     # role 的密碼
+V="<scheme>://bfx_bot:$P@<host>:5432/bfx"     # 寫進檔案的 URL（root shell 裡的字串組合，不上 argv）
+swap /opt/bfx/runtime/secrets/bot/DATABASE_URL root:4600 0640 printf '%s' "$V"
+# env 檔的 role（operator.env、research.env）：檔裡先放一行 `DATABASE_URL=`，上一行改成 setkey <env 檔> DATABASE_URL
+printf "SET log_statement='none'; SET log_min_error_statement='panic'; CREATE ROLE bfx_bot LOGIN PASSWORD '%s';\n" "$P" \
+  | docker exec -i --user postgres bfx-postgres psql -U <owner> -d bfx -v ON_ERROR_STOP=1 -q
+```
+
+其他 role 的連線字串照舊寫在 env 檔，也用上面這段（換 role 名稱與檔案）。
+
 | 檔案（`/opt/bfx/runtime/`） | `DATABASE_URL` 的 role | 備註 |
 |---|---|---|
-| `bot.env` | `bfx_bot` | 範本 `deploy/vm/bot.env.example` |
-| `webapi.env` | `bfx_webapi` | 同檔還有開機必填的入口設定（缺任一個 webapi 拒絕開機）：`BFX_OPERATOR_TAILNET_USER_ID`（與 `operator.env` 同值）、`BFX_WEBAPI_ALLOWED_HOSTS=<ops-host>`、`BFX_FE_SENTRY_DSN`（與 repository variable `NEXT_PUBLIC_SENTRY_DSN` 同值），以及和 `bot.env` 同值的 `BFX_ADMIN_READ_TOKEN`（`openssl rand -hex 32`）；**不可**放 `BFX_ADMIN_TOKEN`，webapi 看到它會拒絕開機（halt token 只留在 `bot.env`） |
-| `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`、`BFX_OPERATOR_USER_ID`（兩者照抄 `bot.env`）與 `BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id，`tailscale whois --json <operator 裝置的 tailnet IP>` 的 `UserProfile.ID`）；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 `bfx-op` 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
+| `secrets/bot/DATABASE_URL` | `bfx_bot` | bot 的其他秘密檔（`BFX_ADMIN_TOKEN`、`BFX_ADMIN_READ_TOKEN`、`BFX_VAULT_KEK`、`TELEGRAM_BOT_TOKEN`）同目錄；非秘密設定在 `bot.env`（範本 `deploy/vm/bot.env.example`） |
+| `secrets/webapi/DATABASE_URL` | `bfx_webapi` | 同目錄還有 `BFX_ADMIN_READ_TOKEN`（與 bot 的同值，`openssl rand -hex 32`）。`webapi.env` 放開機必填的入口設定（缺任一個 webapi 拒絕開機）：`BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id，`tailscale whois --json <operator 裝置的 tailnet IP>` 的 `UserProfile.ID`；也是 operator membership 的 `user_id`）、`BFX_WEBAPI_ALLOWED_HOSTS=<ops-host>`、`BFX_FE_SENTRY_DSN`（與 repository variable `NEXT_PUBLIC_SENTRY_DSN` 同值）。webapi **不可**有 `BFX_ADMIN_TOKEN` 或 `BFX_VAULT_KEK`（env 的 key 或秘密檔都不行），看到任一個（即使值是空的）就拒絕開機（halt token 與 KEK 只給 bot） |
+| `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`）；誰在操作不寫這裡：`bfx-op` 每次以 `tailscale whois` 取得呼叫者的 tailnet user id 當 `requested_by`，CLI 只接受該帳戶的 member；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 `bfx-op` 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
+| `research.env` | `bfx_research` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`），只有這兩個 key。每週報告的 runner（`bfx_weekly_report.py`）每次執行時檢查 root 0600，不存在就拒跑、不會退回 `bot.env`；研究用一次性容器也讀它（[research-one-shot-jobs](research-one-shot-jobs.md)） |
 | `migrate.env` | `<owner>` | 只有 bfx-deploy 的 migration 與 operator one-shot 使用 |
 
 ## 2. Tailnet 入口（營運 UI）
@@ -192,9 +224,24 @@ RESET ROLE;
 驗證：從 tailnet 裡的 operator 裝置開 `https://<ops-host>/`（轉到 `/en/overview/`、讀取正常）；不在 tailnet 時
 連不到；帶外站 `Origin` 的 POST 回 403。回滾：見 [deploy runbook](deploy.md) 的「Tailnet 入口」；bot 不受影響。
 
+### 2a. 主機節點的 Tailscale SSH
+
+主機本身（不是 `bfx-tailscale` 容器）也是 tailnet 節點，operator 經它的 Tailscale SSH 跑 `sudo bfx-op`
+（[operations §10](operations.md#10-operator-clibfx-op)）：
+
+1. 主機上 `sudo tailscale set --ssh`；admin console 關閉這個節點的 key 到期。
+2. tailnet policy 的 SSH 規則：`"action": "check"`（不設 `checkPeriod`，用預設 12 小時，ADR 2026-10-15 Amendment D4d）、
+   `users` 只有 `autogroup:nonroot`。
+3. 現況（2026-10-16 讀 admin console，以 admin console 為準）：主機節點仍是 operator 自己擁有的節點（未 tagged），所以規則的
+   `dst` 是 `autogroup:self`。ADR 2026-10-15 D1 的終態是 tagged node。主機改成 tagged（或新主機直接以 tag 登入）之前，policy 要先有該 tag 的 `tagOwners`，以及一條
+   `dst` 是該 tag 的 SSH 規則（`autogroup:self` 不涵蓋 tagged node），否則 Tailscale SSH 被拒，只剩
+   [Console Connection](operations.md#12-break-glass)。
+
+驗證：`tailscale ssh ubuntu@<vm-node>` 要求 IdP 驗證後進得去；`tailscale ssh root@<vm-node>` 被 policy 拒絕。
+
 ## 3. 首次安裝主機工具
 
-本節安裝 `bfx-deploy`、告警與 DR units；不會建立 Postgres／Redis、runtime secrets、
+本節安裝 `bfx-deploy`、告警與 DR units；不會建立 Postgres、runtime secrets、
 帳戶資料或 pgBackRest repository。先完成資料服務與 `bfx_default` network、上面的
 roles／連線設定，以及 [offsite DR](offsite-dr.md) 的備份與 restore 前置作業。
 部署前須有可用的 restore test；空資料庫與缺少 verifier image 的主機不能直接套用
@@ -204,7 +251,8 @@ roles／連線設定，以及 [offsite DR](offsite-dr.md) 的備份與 restore �
 
 在 Linux VM 的乾淨 checkout `/home/ubuntu/bfx-funding-bot`，核對 HEAD 是要安裝的
 release revision；CI 與 Release images 必須已成功。主機需要 root 擁有的
-`/usr/local/bin/uv`（版本與 CI 的 `setup-uv` `version` 相同，從 GitHub release 下載 `uv-aarch64-unknown-linux-gnu.tar.gz` 並核對 `.sha256` 後安裝）、Docker buildx 與 Python 3.12 以上：
+`/usr/local/bin/uv`（版本與 CI 的 `setup-uv` `version` 相同，從 GitHub release 下載 `uv-aarch64-unknown-linux-gnu.tar.gz` 並核對 `.sha256` 後安裝）、Docker buildx、Python 3.12 以上、`curl`，
+以及連得到 `github.com` release 下載（安裝器自己下載釘版 gh）：
 
 ```bash
 /usr/local/bin/uv --version
@@ -212,25 +260,34 @@ docker buildx version
 /usr/bin/python3 --version
 sudo /home/ubuntu/bfx-funding-bot/deploy/vm/ops/install.sh
 ls -l /usr/local/lib/bfx-ops/current /home/ubuntu/bfx-releases/current
+/usr/local/lib/bfx-ops/gh/2.102.0/bin/gh --version    # gh version 2.102.0 (...)
 ```
 
 安裝器從 git 物件寫出 `/usr/local/lib/bfx-ops/releases/<rev>`，依 `ops/uv.lock`
 執行 `uv sync --frozen`，建立 `bfx-deploy`／`bfx-notify`／`bfx-op` wrappers、
 `/etc/sudoers.d/bfx-op`（sudo 只為 `bfx-op` 保留 `SSH_CONNECTION`，寫入前 `visudo -c` 驗證）與
 `/home/ubuntu/bfx-releases/<rev>` DR checkout，再安裝 `systemd/managed-units`
-列出的 units。它不會啟用或啟動任何 timer。之後工具由成功部署的 release 自動更新；
-sbin 入口與 sudoers 例外，見 [deploy runbook §4](deploy.md#4-主機工具與-dr-腳本的版本)。
+列出的 units。它也把 `install.sh` 的 `GH_VERSION` 那一版 GitHub CLI（linux arm64 tarball，核對
+`GH_SHA256` 後才解開）裝到 `/usr/local/lib/bfx-ops/gh/<版本>/bin/gh`，bfx-deploy 用它驗每個 release 的
+build provenance；已經是該版本就不重裝。它不會啟用或啟動任何 timer。之後工具由成功部署的 release 自動更新；
+sbin 入口、sudoers 與 gh 例外，見 [deploy runbook §4](deploy.md#4-主機工具與-dr-腳本的版本)。
 
 ### 3b. Runtime 設定與首次驗證
 
 - `/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr}.env` 依
   [deploy env 規則](deploy.md#env-檔規則) 準備，root 擁有且 mode `0600`。
-  bot／webapi 使用已核對的 canonical `BFX_EXCHANGE_ACCOUNT_ID` 與相同的
-  `BFX_OPERATOR_USER_ID`；不沿用舊 launcher 的 `BFX_RELEASE_*`。
+- bot 與 webapi 的七個秘密檔依 [deploy「秘密檔」](deploy.md#秘密檔botwebapi9h) 準備（`root:4600 0640`，不是空檔）：
+  - 新主機沒有舊的 env 檔可以搬，每個值照 [secret-rotation「通用寫法」](secret-rotation.md#通用寫法) 在 root shell 裡產生並寫入（不上 argv）；
+  - `BFX_VAULT_KEK` 用 `openssl rand -base64 32` 產生新值，再以 `bfx-op rotate-credential` 存一把 Bitfinex key
+    （[secret-rotation](secret-rotation.md#vault-kekbfx_vault_kek)）；
+  - 舊主機的 KEK 不沿用。
+- mirror `/home/ubuntu/bfx-funding-bot` 以匿名 HTTPS clone（`https://github.com/Will413028/bfx-funding-bot.git`），
+  不建 deploy key（[deploy「Mirror」](deploy.md#mirrorgit-fetch-走匿名-https9h)）。
+  bot 與 `operator.env` 使用已核對的 canonical `BFX_EXCHANGE_ACCOUNT_ID`；不沿用舊 launcher 的 `BFX_RELEASE_*`。
 - `tailscale.env` 放一把新的 tagged（`tag:bfx-ops`）、單次使用的 auth key；新主機的 `bfx_tsstate` 是空的，
   節點會重新登入（舊節點先在 admin console 刪掉，名稱 `bfx-ops` 才不會變成 `bfx-ops-1`）。
-- 告警所需 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` 同時配置到 `notify.env` 與
-  `bot.env`；GHCR 憑證只需 `read:packages`。設定方式見 [operations](operations.md#6-告警)。
+- 告警的 bot token 配置到 `notify.env` 的 `TELEGRAM_BOT_TOKEN` 與秘密檔 `secrets/bot/TELEGRAM_BOT_TOKEN`；chat id 配置到 `notify.env` 與
+  `bot.env` 的 `TELEGRAM_CHAT_ID`；GHCR 憑證只需 `read:packages`。設定方式見 [operations](operations.md#6-告警)。
 - error tracking 的 `SENTRY_DSN`（`bfx-backend`）同時配置到 `bot.env` 與 `webapi.env`；空值等於關閉。
   部署後依 [operations](operations.md#error-tracking-test) 各送一筆測試例外。
 
@@ -248,7 +305,9 @@ journalctl -fu bfx-restore-test@current.service
 確認該 service 成功，且 `/home/ubuntu/bfx/dr-evidence/restore-heartbeat.json` 是本次
 產生的新 evidence。再執行 `sudo bfx-notify --level info "bfx setup: notify test"`，
 確認告警送達；最後執行 `sudo bfx-deploy --dry-run`，核對 revision、CI run、
-migration／restore 計畫、rollback target 與所有 blockers。
+migration／restore 計畫、rollback target 與所有 blockers。dry run 同樣先驗 provenance：
+`release not discoverable yet: attestation_*` 表示 gh 沒裝好或該 digest 驗不過（驗證不需要任何 GitHub token），處理方式見
+[deploy runbook「Provenance 驗不過」](deploy.md#provenance-驗不過discovery-失敗不寫-ledger)。
 
 若出現 `foreign_container_holds_name:bfx-*`，表示同名 container 不屬於 `bfx-app`。
 先記錄其 image、restart policy 與用途，安排停機並保留回復副本後才釋放名稱；
@@ -265,7 +324,7 @@ journalctl -fu bfx-deploy.service
 
 依 [deploy runbook](deploy.md) 核對 ledger 的 `started`／`deployed`、`bfx-app` 的各個 container
 （bot、webapi、netns、tailscale）的 ownership 與 digest、health、工具與 DR checkout 的 `current` revision。
-新資料庫在 migration 後完成 §1c 的 auth grants 與 §1d 的隔離驗證；再從 tailnet 打開 UI（§2）驗證
+新資料庫在 migration 後完成 §1d 的隔離驗證；再從 tailnet 打開 UI（§2）驗證
 uncertainty／history 頁面與告警。交易狀態與包絡依 [operations](operations.md) 驗證，
 部署本身不會 resume，也沒有 build 核准或限額期。
 

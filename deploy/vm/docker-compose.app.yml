@@ -7,8 +7,8 @@
 #   docker compose -p bfx-app -f <release>/docker-compose.app.yml \
 #     up -d --no-deps --remove-orphans <every service defined here>
 #
-# PostgreSQL and Redis stay in docker-compose.bot.yml (project `bfx`) and are never
-# defined, recreated or touched here. This project only joins their existing
+# PostgreSQL stays in docker-compose.bot.yml (project `bfx`) and is never
+# defined, recreated or touched here. This project only joins its existing
 # `bfx_default` network.
 #
 # Images: bfx-deploy supplies complete `<repository>@sha256:<digest>` references
@@ -32,13 +32,25 @@
 # BFX_SOURCE_REVISION and BFX_DEPLOYMENT_ID, the attempt_id of the `started` row
 # in the deployments ledger for this deployment.
 #
-# Env precedence: `environment` > later env_file > earlier env_file. Secrets stay in
-# /opt/bfx/runtime/*.env (root 0600, never in git); non-secret bot settings come
-# from live.env at the same commit as this file. BFX_RUNTIME_DIR exists only so CI
-# can render this file without the secret directory (older Compose stats env files
-# even with --no-env-resolution); bfx-deploy passes its own --runtime-dir, and the
-# default must stay /opt/bfx/runtime (compose_policy.py checks it). The files stay
-# required: a missing secret file must stop `up`, never start without it.
+# Secrets (9h): the bot's and the web API's are Compose file secrets, one file per key
+# under /opt/bfx/runtime/secrets/<service>/<KEY>, mounted at /run/secrets/<KEY>; the
+# services read them through core/secret_files.py because BFX_SECRETS_DIR is set (never
+# from the env: a key left in an env file is ignored and named in a boot warning).
+# Compose ignores uid/gid/mode for a file secret (it is a bind mount of the host file),
+# so the host file is root:4600 0640 and the services, UID 1000, join group 4600
+# (group_add) to read it; no host user is in that group. bfx-deploy checks every file
+# (root, group 4600, 0640, regular, not a link, not empty) before `up`, and Docker
+# refuses to create a container whose secret file is missing. The other env-file
+# values -- SENTRY_DSN (public by design), TELEGRAM_CHAT_ID, the account and ingress ids
+# -- are not secrets and stay in <service>.env (root 0600, never in git); non-secret bot
+# settings come from live.env at the same commit as this file. The secret names and
+# which service gets which are pinned in compose_policy.py (SERVICE_SECRETS, SECRET_GID).
+#
+# Env precedence: `environment` > later env_file > earlier env_file. BFX_RUNTIME_DIR
+# exists only so CI can render this file without the secret directory (older Compose
+# stats env files even with --no-env-resolution); bfx-deploy passes its own
+# --runtime-dir, and the default must stay /opt/bfx/runtime (compose_policy.py checks
+# it). The env files stay required: a missing one must stop `up`, never start without it.
 
 name: bfx-app
 
@@ -56,10 +68,18 @@ services:
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     stop_grace_period: 30s
+    group_add: ["4600"]
+    secrets:
+      - {source: bot_DATABASE_URL, target: DATABASE_URL}
+      - {source: bot_BFX_ADMIN_TOKEN, target: BFX_ADMIN_TOKEN}
+      - {source: bot_BFX_ADMIN_READ_TOKEN, target: BFX_ADMIN_READ_TOKEN}
+      - {source: bot_BFX_VAULT_KEK, target: BFX_VAULT_KEK}
+      - {source: bot_TELEGRAM_BOT_TOKEN, target: TELEGRAM_BOT_TOKEN}
     env_file:
       - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/bot.env
       - live.env
     environment:
+      BFX_SECRETS_DIR: /run/secrets
       BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
       BFX_DEPLOYMENT_ID: ${BFX_DEPLOYMENT_ID:?BFX_DEPLOYMENT_ID is required}
@@ -86,9 +106,14 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
+    group_add: ["4600"]
+    secrets:
+      - {source: webapi_DATABASE_URL, target: DATABASE_URL}
+      - {source: webapi_BFX_ADMIN_READ_TOKEN, target: BFX_ADMIN_READ_TOKEN}
     env_file:
       - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env
     environment:
+      BFX_SECRETS_DIR: /run/secrets
       BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
       BFX_DEPLOYMENT_ID: ${BFX_DEPLOYMENT_ID:?BFX_DEPLOYMENT_ID is required}
@@ -182,6 +207,25 @@ volumes:
 configs:
   ts-serve:
     file: ./tailscale/serve.json
+
+# <service>_<KEY>: only that service mounts it (bfx_deploy.release_services refuses
+# another's), at /run/secrets/<KEY>. Written and rotated by the operator:
+# docs/runbooks/deploy.md "Secret files", docs/runbooks/secret-rotation.md.
+secrets:
+  bot_DATABASE_URL:
+    file: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/secrets/bot/DATABASE_URL
+  bot_BFX_ADMIN_TOKEN:
+    file: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/secrets/bot/BFX_ADMIN_TOKEN
+  bot_BFX_ADMIN_READ_TOKEN:
+    file: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/secrets/bot/BFX_ADMIN_READ_TOKEN
+  bot_BFX_VAULT_KEK:
+    file: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/secrets/bot/BFX_VAULT_KEK
+  bot_TELEGRAM_BOT_TOKEN:
+    file: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/secrets/bot/TELEGRAM_BOT_TOKEN
+  webapi_DATABASE_URL:
+    file: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/secrets/webapi/DATABASE_URL
+  webapi_BFX_ADMIN_READ_TOKEN:
+    file: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/secrets/webapi/BFX_ADMIN_READ_TOKEN
 
 networks:
   bfx_default:

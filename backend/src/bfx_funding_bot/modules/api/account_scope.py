@@ -12,6 +12,7 @@ from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.auth import Principal, require_operator
+from bfx_funding_bot.core.security_log import ACCESS_DENIED, security_event
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.execution.operator_commands import (
     OperatorCommandError,
@@ -32,8 +33,15 @@ _STATUS = {
 }
 
 
-def command_error(exc: OperatorCommandError) -> HTTPException:
-    """An operator command's refusal as the HTTP status of its kind and its code."""
+def command_error(exc: OperatorCommandError, *,
+                  context: ExchangeAccountContext | None = None) -> HTTPException:
+    """An operator command's refusal as the HTTP status of its kind and its code; a
+    ``forbidden`` one (a viewer's write, another principal's identity) is logged as
+    ``access_denied``."""
+    if exc.kind == "forbidden":
+        security_event(ACCESS_DENIED, reason=exc.code,
+                       user_id=context.user_id if context else None,
+                       exchange_account_id=str(context.exchange_account_id) if context else None)
     return HTTPException(status_code=_STATUS[exc.kind], detail=exc.code)
 
 
@@ -53,6 +61,10 @@ async def require_account_member(
         return await resolve_context(
             session, exchange_account_id=exchange_account_id, user_id=user.user_id)
     except OperatorCommandError as exc:
+        if exc.kind == "not_found":
+            # Absent, retired and foreign accounts look alike to the caller, not here.
+            security_event(ACCESS_DENIED, reason="account_not_found_or_not_member", user_id=user.user_id,
+                           exchange_account_id=str(exchange_account_id))
         raise command_error(exc) from exc
 
 
@@ -61,7 +73,7 @@ def require_account_write(context: ExchangeAccountContext) -> None:
     try:
         require_write(context)
     except OperatorCommandError as exc:
-        raise command_error(exc) from exc
+        raise command_error(exc, context=context) from exc
 
 
 __all__ = [

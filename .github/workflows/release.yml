@@ -6,6 +6,11 @@ name: Release images
 # tag exists so the VM can discover the newest release, never as deploy input.
 # `bfx.ci-run-url` names the CI run that passed this commit; bfx-deploy writes it
 # into the deployments ledger (ci_run).
+# The pushed digest gets a signed SLSA build provenance attestation (actions/attest,
+# Sigstore public-good: the repository is public), stored in the repository's attestation
+# API; bfx-deploy reads it there anonymously and verifies it with `gh attestation verify
+# --bundle` against the manifest it read from GHCR, before it runs anything from the image
+# (plan 9i, threat model F32). No SBOM yet (follow-up).
 # See wiki ADR 2026-09-25-ci-registry-digest-deploy.
 
 # zizmor: workflow_run runs with the base repository's token. Safe here because the
@@ -34,7 +39,13 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+      # Push the image.
       packages: write
+      # Mint the OIDC token Sigstore turns into the signing certificate: its identity is
+      # this workflow on main, which is what bfx-deploy's --signer-workflow requires.
+      id-token: write
+      # Record the attestation in the repository's attestations API.
+      attestations: write
     env:
       REVISION: ${{ github.event.workflow_run.head_sha }}
     steps:
@@ -110,11 +121,24 @@ jobs:
           cache-from: type=gha,scope=backend
           cache-to: type=gha,scope=backend,mode=max
 
+      # Sign the digest the VM will deploy (the subject is that digest: the sha256 of the
+      # manifest the registry serves for it). subject-name has no tag (actions/attest
+      # README). Stored only in the attestation API, which bfx-deploy reads: no copy is
+      # pushed to GHCR (push-to-registry defaults to false; nothing reads it there, and
+      # the storage record exists only with it).
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.names.outputs.backend }}
+          subject-digest: ${{ steps.backend.outputs.digest }}
+
       - name: Record release
         env:
           MAIN_TAG: ${{ steps.head.outputs.main_tag }}
           BACKEND_IMAGE: ${{ steps.names.outputs.backend }}
           BACKEND_DIGEST: ${{ steps.backend.outputs.digest }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
         run: |
           {
             echo "### Release ${REVISION} (main tag: ${MAIN_TAG})"
@@ -122,4 +146,6 @@ jobs:
             echo "| image | digest |"
             echo "|---|---|"
             echo "| ${BACKEND_IMAGE} | \`${BACKEND_DIGEST}\` |"
+            echo ""
+            echo "Provenance: ${ATTESTATION_URL}"
           } >> "$GITHUB_STEP_SUMMARY"

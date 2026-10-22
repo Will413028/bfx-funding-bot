@@ -7,11 +7,12 @@ operator under the account lock. It connects as ``bfx_operator``, whose grants a
 those reads and the outboxes' request columns (``4ab02765a34b``).
 
 Who asks is the tailnet identity the host wrapper resolved for this call
-(``BFX_OPERATOR_TAILNET_IDENTITY``); it must equal the one ``operator.env`` names
-(``BFX_OPERATOR_TAILNET_USER_ID``) before anything connects. There is no flag naming an
-actor: every request is made by ``BFX_OPERATOR_USER_ID`` (D10 Q2, until 9d), and the
-daemon's ``operator_authorized`` requires that user to be an owner/operator member of the
-live account (9d-1).
+(``BFX_OPERATOR_TAILNET_IDENTITY``, the caller's tailnet user ID): it is the request's
+``requested_by`` (9d-6). There is no flag naming an actor and no configured operator to
+compare it with: a malformed identity exits before anything connects, and one that is not
+a member of the configured account exits before anything is queued. The daemon's
+``operator_authorized`` re-checks the owner/operator membership when it applies the
+request (9d-1).
 
 Before any command: the database's schema head must be this image's, and the capital
 authority ``ledger`` -- the same boot checks as the web API's.
@@ -30,7 +31,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
-import hmac
 import json
 import os
 import re
@@ -73,7 +73,7 @@ EXIT: Final = {
     "rejected": 3,  # refused by the command checks, or rejected by the daemon
     "failed": 4,  # the daemon could not apply it
     "timeout": 5,  # still waiting after --wait-seconds
-    "identity": 77,  # the tailnet identity is missing or not the configured operator's
+    "identity": 77,  # the tailnet identity is malformed, or not a member of the account
     "boot": 78,  # schema head or capital authority is not what this image runs on
 }
 DEFAULT_WAIT_SECONDS: Final = 120
@@ -111,32 +111,32 @@ def read_credential(stdin: TextIO, *, prompt: Callable[[str], str] = getpass.get
     return EnteredCredential(api_key, api_secret)
 
 
+# A tailnet user ID, as `tailscale whois` reports it (the membership key from 9d-1).
+TAILNET_USER_ID: Final = re.compile(r"[0-9]+")
+
+
 @dataclass(frozen=True, slots=True)
 class Operator:
     """Who this run acts as, all from the environment."""
 
-    tailnet_identity: str
-    user_id: str
+    tailnet_identity: str  # the requests' requested_by
     exchange_account_id: UUID
     database_url: str
 
 
 def resolve_operator(env: Mapping[str, str]) -> Operator:
-    """The configured operator, once the wrapper's tailnet identity matches it."""
+    """The wrapper's tailnet identity and the configured account; nothing is compared yet."""
     identity = env.get("BFX_OPERATOR_TAILNET_IDENTITY", "").strip()
-    configured = env.get("BFX_OPERATOR_TAILNET_USER_ID", "").strip()
-    if not identity or not configured or not hmac.compare_digest(
-            identity.encode(), configured.encode()):
-        raise CliExitError("identity", {"error": "operator_identity_mismatch"})
-    user_id = env.get("BFX_OPERATOR_USER_ID", "").strip()
+    if TAILNET_USER_ID.fullmatch(identity) is None:
+        raise CliExitError("identity", {"error": "operator_identity_invalid"})
     database_url = env.get("DATABASE_URL", "").strip()
     try:
         account = UUID(env.get("BFX_EXCHANGE_ACCOUNT_ID", "").strip())
     except ValueError:
         account = None
-    if not user_id or not database_url or account is None:
+    if not database_url or account is None:
         raise CliExitError("internal", {"error": "operator_env_incomplete"})
-    return Operator(identity, user_id, account, database_url)
+    return Operator(identity, account, database_url)
 
 
 # --- rendering ------------------------------------------------------------------------------
@@ -273,8 +273,15 @@ async def run(args: argparse.Namespace, operator: Operator, factory: Session, *,
     """One command; returns the outcome name (a key of :data:`EXIT`) and the JSON payload."""
     async with factory() as session:
         await _boot(session)
-        context = await commands.resolve_context(
-            session, exchange_account_id=operator.exchange_account_id, user_id=operator.user_id)
+        try:
+            context = await commands.resolve_context(
+                session, exchange_account_id=operator.exchange_account_id,
+                user_id=operator.tailnet_identity)
+        except OperatorCommandError as exc:
+            # Not a member (or no such live account; the two look alike on purpose).
+            if exc.kind != "not_found":
+                raise
+            raise CliExitError("identity", {"error": "operator_not_member"}) from exc
         if args.command not in WRITES:
             return "ok", await _read(session, context, args)
         queued = await _queue(session, context, args, credential)

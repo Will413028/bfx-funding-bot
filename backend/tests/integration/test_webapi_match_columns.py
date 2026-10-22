@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import create_engine, text
 
-from tests.pg_templates import alembic
+from tests.pg_templates import alembic, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import (  # noqa: F401 - fixtures
     _O,
@@ -127,7 +127,7 @@ def test_upgrade_refuses_an_unreadable_rate_or_period(reversible_ledger_db, payl
             _seed(conn, pre_verdict=True)
             _rewrite_payload(conn, payload)
         with pytest.raises(RuntimeError, match="refuse upgrade"):
-            alembic(url, "upgrade", "head")
+            upgrade_head_after_w3(url)
         with engine.connect() as conn:
             assert not set(_ATTEMPT_COLUMNS) & set(_columns(conn, "submission_attempt_journal"))
             assert not set(_OBSERVATION_COLUMNS) & set(_columns(conn, "ledger_observation"))
@@ -166,7 +166,7 @@ def test_upgrade_from_the_previous_head_fills_existing_rows(reversible_ledger_db
                 f"WHERE id = '{_O}'"
             )
             conn.exec_driver_sql("ALTER TABLE ledger_observation ENABLE TRIGGER USER")
-        alembic(url, "upgrade", "head")
+        upgrade_head_after_w3(url)
         with engine.connect() as conn:
             assert _terms(conn) == _TERMS
             symbols, counts = conn.execute(
@@ -235,7 +235,7 @@ def test_round_trip_drops_and_restores_the_objects(reversible_ledger_db) -> None
         with engine.begin() as conn:
             _seed(conn, pre_verdict=True)
             _rewrite_payload(conn, _PAYLOADS["full"])
-        alembic(url, "upgrade", "head")
+        upgrade_head_after_w3(url)
         with engine.connect() as conn:
             assert all(_objects(conn).values())
             assert conn.scalar(text("SELECT match_rate::text FROM submission_attempt_journal")) == "0.0003"

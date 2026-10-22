@@ -19,6 +19,7 @@ from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitRejected,
     classify_submit_response,
     fingerprint_submit_payload,
+    key_refused_on_submit,
     normalize_submit_payload,
     response_digest,
 )
@@ -319,3 +320,32 @@ def test_submission_attempt_missing_identity_uses_deterministic_legacy_fallback(
     second = SubmissionAttemptPayload(**common)
 
     assert first.attempt_id == second.attempt_id
+
+
+def test_a_submit_answered_with_the_key_refusal_stays_unknown_and_names_the_refusal() -> None:
+    """9g: HTTP 500 ``["error", 10100, ...]`` on a submit is still UNKNOWN (a refused key is
+    not evidence the offer was not placed); ``key_refused_on_submit`` turns it into the error
+    the daemon exits 78 on, without the venue's text (it may echo a credential)."""
+    body = ["error", 10100, "apikey: invalid FAKE-KEY-ECHO"]
+    outcome = classify_submit_response(500, body, transport_started=True)
+    assert isinstance(outcome, SubmitOutcomeUnknown) and outcome.venue_error_code == 10100
+
+    refused = key_refused_on_submit(outcome, http_status=500)
+    assert refused is not None and refused.venue_coded and refused.status_code == 500
+    assert "FAKE-KEY-ECHO" not in f"{refused} {refused.raw}"
+    # A 4xx carrying the same body is the same refusal (and the same UNKNOWN).
+    four = classify_submit_response(401, body, transport_started=True)
+    assert isinstance(four, SubmitOutcomeUnknown)
+    assert key_refused_on_submit(four, http_status=401).status_code == 401
+
+
+@pytest.mark.parametrize("outcome", [
+    SubmitOutcomeUnknown("http_5xx", True, venue_error_code=10001, venue_error_message="x"),
+    SubmitOutcomeUnknown("http_5xx", True, venue_error_code=10114, venue_error_message="nonce"),
+    SubmitOutcomeUnknown("timeout", True),
+    SubmitRejected("venue_rejected:10100"),
+    SubmitAcknowledged("1"),
+    SubmitNotSent("not_sent"),
+])
+def test_no_other_submit_outcome_is_a_key_refusal(outcome) -> None:
+    assert key_refused_on_submit(outcome, http_status=500) is None

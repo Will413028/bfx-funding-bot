@@ -43,6 +43,8 @@ from typing import Any, Final, Protocol
 
 import httpx
 
+from bfx_funding_bot.core.secret_files import file_secret_values, read_secret
+
 log = logging.getLogger(__name__)
 
 INFO: Final = "info"
@@ -107,6 +109,11 @@ CREDENTIAL_ROTATION_FAILED: Final = "credential_rotation_failed"
 # credential rotation worker and its liveness until the key works again or is replaced
 # (marketfeed/daemon.py, credential recovery mode).
 CREDENTIAL_RECOVERY_MODE: Final = "credential_recovery_mode"
+# The running bot's 6-hourly key recheck has reached no verdict N times in a row (the venue
+# did not answer, an unparseable answer, a refusal other than the key's): the bot keeps
+# trading and retrying, but the key's permissions are not being verified. Sent once per
+# streak; ``recovered=True`` (INFO) once a recheck passes again (marketfeed/daemon.py).
+CREDENTIAL_RECHECK_FAILING: Final = "credential_recheck_failing"
 # A venue history stream could not be read completely (execution/venue_observation.py).
 VENUE_OBSERVATION_HISTORY_INCOMPLETE: Final = "venue_observation_history_incomplete"
 # The UNKNOWN resolver refused a resolution (ledger/_internal/resolver.py).
@@ -150,6 +157,7 @@ ALERT_EVENTS: Final[Mapping[str, str]] = {
     CREDENTIAL_ROTATION_REJECTED: WARNING,
     CREDENTIAL_ROTATION_FAILED: CRITICAL,
     CREDENTIAL_RECOVERY_MODE: CRITICAL,
+    CREDENTIAL_RECHECK_FAILING: WARNING,   # INFO when recovered
     VENUE_OBSERVATION_HISTORY_INCOMPLETE: WARNING,
     LEDGER_UNKNOWN_RESOLUTION_REJECTED: WARNING,
     VENUE_SUBMIT_REJECTED: WARNING,
@@ -171,6 +179,7 @@ DEDUP_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     OFFER_END_UNCONFIRMED: ("venue_offer_id",),
     OFFER_END_JUDGED: ("venue_offer_id", "outcome"),
     CREDENTIAL_RECOVERY_MODE: ("account",),        # one per account, whatever the error text
+    CREDENTIAL_RECHECK_FAILING: ("account", "recovered"),
     VENUE_SUBMIT_REJECTED: ("symbol", "reason"),   # a refusal loop is one alert per window
 }
 
@@ -294,13 +303,14 @@ class AlertSink:
     @classmethod
     def from_environment(cls, environ: Mapping[str, str], **options: Any) -> AlertSink:
         """Telegram when both keys are valid; otherwise log-only (said once, at boot)."""
-        token = environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+        # The bot's secret file in production (BFX_SECRETS_DIR), else the env.
+        token = read_secret("TELEGRAM_BOT_TOKEN", environ) or ""
         chat_id = environ.get("TELEGRAM_CHAT_ID", "").strip()
         context = options.pop("context", None) or environ.get("BFX_DEPLOYMENT_ENV", "")
         options.setdefault("secrets", secret_values(environ))
         if not token and not chat_id:
             log.warning("alerts_telegram_not_configured: alerts are logged only "
-                        "(set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in bot.env)")
+                        "(set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)")
             return cls(transport=None, context=context, **options)
         if _TOKEN.fullmatch(token) is None or _CHAT_ID.fullmatch(chat_id) is None:
             log.warning("alerts_telegram_misconfigured: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID "
@@ -421,11 +431,15 @@ class AlertSink:
 
 
 def secret_values(environ: Mapping[str, str]) -> tuple[str, ...]:
-    """Secret values present in the environment, including the database password
-    and the Sentry DSN's key on its own."""
+    """Secret values this process holds: in its environment and in its secret files
+    (``BFX_SECRETS_DIR``, core.secret_files), including each database password and the
+    Sentry DSN's key on their own."""
+    files = file_secret_values(environ)
     values = [environ.get(key, "") for key in SECRET_ENV_KEYS]
-    with contextlib.suppress(ValueError):
-        values.append(urllib.parse.urlsplit(environ.get("DATABASE_URL", "")).password or "")
+    values += files.values()
+    for url in (environ.get("DATABASE_URL", ""), files.get("DATABASE_URL", "")):
+        with contextlib.suppress(ValueError):
+            values.append(urllib.parse.urlsplit(url).password or "")
     with contextlib.suppress(ValueError):
         values.append(urllib.parse.urlsplit(environ.get("SENTRY_DSN", "")).username or "")
     return tuple(value for value in values if value)
@@ -436,6 +450,8 @@ def default_level(event: str, fields: Mapping[str, object]) -> str:
         return CRITICAL if fields.get("state") == "HALTED" else INFO
     if event == KILL_SWITCH_ENGAGED:
         return WARNING if fields.get("complete") is True else CRITICAL
+    if event == CREDENTIAL_RECHECK_FAILING and fields.get("recovered") is True:
+        return INFO
     return ALERT_EVENTS.get(event, WARNING)
 
 
@@ -470,8 +486,16 @@ def title(event: str, fields: Mapping[str, object]) -> str:
     if event == FOREIGN_LENDING:
         return "lending no bot offer explains (foreign offer filled unseen)"
     if event == CREDENTIAL_RECOVERY_MODE:
+        if str(fields.get("reason", "")).startswith("credential_noncompliant"):
+            return ("the account's key is not one the bot may trade with: not trading, "
+                    "waiting for a compliant key or a credential rotation")
         return ("venue refused the account's key: not trading, waiting for the key to work "
                 "or for a credential rotation")
+    if event == CREDENTIAL_RECHECK_FAILING:
+        if fields.get("recovered") is True:
+            return "key recheck passes again"
+        return ("key recheck keeps failing: the key's permissions are not being verified "
+                "(lending continues, retrying)")
     if event == ALERT_TEST:
         return "test alert (no action needed)"
     return event
@@ -527,6 +551,7 @@ __all__ = [
     "CAPITAL_POLICY_REQUEST_FAILED",
     "CAPITAL_POLICY_REQUEST_REJECTED",
     "COMMAND_THROTTLED",
+    "CREDENTIAL_RECHECK_FAILING",
     "CREDENTIAL_RECOVERY_MODE",
     "CREDENTIAL_ROTATION_APPLIED",
     "CREDENTIAL_ROTATION_FAILED",

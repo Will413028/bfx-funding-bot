@@ -25,8 +25,6 @@ def env(monkeypatch) -> dict[str, str]:
     values = {
         "DATABASE_URL": URL,
         "BFX_EXCHANGE_ACCOUNT_ID": ACCOUNT,
-        "BFX_OPERATOR_USER_ID": "operator-1",
-        "BFX_OPERATOR_TAILNET_USER_ID": "4182486213003443",
         "BFX_OPERATOR_TAILNET_IDENTITY": "4182486213003443",
         "BFX_DEPLOYMENT_ENV": "ci",
     }
@@ -52,30 +50,22 @@ def _main(argv: list[str]) -> tuple[int, dict[str, Any], str]:
     return code, json.loads(out.getvalue()), log.getvalue()
 
 
-@pytest.mark.parametrize("change", [
-    {"BFX_OPERATOR_TAILNET_IDENTITY": "999"},
-    {"BFX_OPERATOR_TAILNET_IDENTITY": ""},
-    {"BFX_OPERATOR_TAILNET_IDENTITY": None},
-    {"BFX_OPERATOR_TAILNET_USER_ID": None},
-    {"BFX_OPERATOR_TAILNET_USER_ID": "", "BFX_OPERATOR_TAILNET_IDENTITY": ""},
-])
+@pytest.mark.parametrize("identity", ["", " ", "operator-1", "4182486213003443x", "-1", None])
 @pytest.mark.parametrize("argv", [["status"], ["kill", "--reason", "stop"]])
-def test_an_unmatched_tailnet_identity_exits_77_without_connecting(
-        env, monkeypatch, change, argv) -> None:
-    for key, value in change.items():
-        if value is None:
-            monkeypatch.delenv(key)
-        else:
-            monkeypatch.setenv(key, value)
+def test_a_malformed_tailnet_identity_exits_77_without_connecting(
+        env, monkeypatch, identity, argv) -> None:
+    if identity is None:
+        monkeypatch.delenv("BFX_OPERATOR_TAILNET_IDENTITY")
+    else:
+        monkeypatch.setenv("BFX_OPERATOR_TAILNET_IDENTITY", identity)
     engine = NoEngine()
     monkeypatch.setattr(operator_cli, "make_async_engine_from_url", engine)
     code, payload, log = _main(argv)
-    assert (code, payload, log) == (77, {"error": "operator_identity_mismatch"}, "")
+    assert (code, payload, log) == (77, {"error": "operator_identity_invalid"}, "")
     assert engine.calls == 0
 
 
-@pytest.mark.parametrize("missing", ["DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID",
-                                     "BFX_OPERATOR_USER_ID"])
+@pytest.mark.parametrize("missing", ["DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID"])
 def test_an_incomplete_operator_env_never_connects(env, monkeypatch, missing) -> None:
     monkeypatch.delenv(missing)
     engine = NoEngine()
@@ -195,23 +185,16 @@ def test_other_refusals_never_name_a_cause(env, monkeypatch) -> None:
     assert _main(["kill", "--reason", "stop"])[1] == {"error": "request_pending", "kind": "conflict"}
 
 
-def test_the_identity_comparison_is_constant_time(monkeypatch) -> None:
-    """``hmac.compare_digest``, not ``==``: the mutation of this check fails here."""
-    seen = []
-    real = operator_cli.hmac.compare_digest
-
-    def spy(a, b):
-        seen.append((a, b))
-        return real(a, b)
-
-    monkeypatch.setattr(operator_cli.hmac, "compare_digest", spy)
+def test_the_tailnet_identity_is_who_asks() -> None:
+    """The wrapper's identity is the requester; the keys operator.env keeps until W10
+    (the old configured ids) are ignored."""
     operator = operator_cli.resolve_operator({
-        "BFX_OPERATOR_TAILNET_IDENTITY": "1", "BFX_OPERATOR_TAILNET_USER_ID": "1",
-        "BFX_OPERATOR_USER_ID": "operator-1", "DATABASE_URL": URL,
-        "BFX_EXCHANGE_ACCOUNT_ID": ACCOUNT,
+        "BFX_OPERATOR_TAILNET_IDENTITY": "4182486213003443",
+        "BFX_OPERATOR_TAILNET_USER_ID": "999", "BFX_OPERATOR_USER_ID": "operator-1",
+        "DATABASE_URL": URL, "BFX_EXCHANGE_ACCOUNT_ID": ACCOUNT,
     })
-    assert seen == [(b"1", b"1")]
-    assert (operator.user_id, str(operator.exchange_account_id)) == ("operator-1", ACCOUNT)
+    assert (operator.tailnet_identity, str(operator.exchange_account_id)) == (
+        "4182486213003443", ACCOUNT)
 
 
 # --- rotate-credential ------------------------------------------------------------------------
@@ -280,8 +263,8 @@ def test_a_missing_key_or_secret_is_refused_before_connecting(env, monkeypatch, 
 
 
 def test_stdin_is_read_only_after_the_identity_check(env, monkeypatch) -> None:
-    monkeypatch.setenv("BFX_OPERATOR_TAILNET_IDENTITY", "999")
+    monkeypatch.setenv("BFX_OPERATOR_TAILNET_IDENTITY", "operator-1")
     stdin = Stdin(f"{KEY}\n{SECRET}\n")
     code, payload, _ = _rotate(stdin)
-    assert (code, payload) == (77, {"error": "operator_identity_mismatch"})
+    assert (code, payload) == (77, {"error": "operator_identity_invalid"})
     assert stdin.tell() == 0

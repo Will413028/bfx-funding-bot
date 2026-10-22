@@ -32,6 +32,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 from starlette.routing import Match
 
+from bfx_funding_bot.core.auth import LOGIN_HEADER
+from bfx_funding_bot.core.security_log import REQUEST_REJECTED, clip, security_event
 from bfx_funding_bot.core.settings import IngressSettings
 
 PROBE_PATHS = frozenset({"/health", "/ready"})
@@ -125,20 +127,29 @@ class IngressMiddleware:
             return _refuse(503, "ingress_not_configured")
         host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip().lower()
         if host not in settings.allowed_hosts:
-            return _refuse(400, "host_not_allowed")
+            return _reject(request, 400, "host_not_allowed", "host")
         if request.method in SAFE_METHODS:
             return None
         fetch_site = request.headers.get("sec-fetch-site")
         if fetch_site is not None and fetch_site.lower() not in SAME_SITE_FETCH:
-            return _refuse(403, "cross_site_refused")
+            return _reject(request, 403, "cross_site_refused", "sec-fetch-site")
         origin = request.headers.get("origin")
         if origin is None or origin.lower() not in {f"https://{h}" for h in settings.allowed_hosts}:
-            return _refuse(403, "cross_site_refused")
+            return _reject(request, 403, "cross_site_refused", "origin")
         if request.url.path != FE_EVENTS_PATH and _has_body(request):
             media = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
             if media != "application/json":
-                return _refuse(415, "json_required")
+                return _reject(request, 415, "json_required", "content-type")
         return None
+
+
+def _reject(request: Request, status: int, reason: str, header: str) -> Response:
+    """A refusal of the checks above, logged with the request line, the tailnet login Serve
+    forwarded (when the caller has one) and the header that failed with its value."""
+    security_event(REQUEST_REJECTED, reason=reason, status=status, method=request.method,
+                   path=clip(request.url.path), login=clip(request.headers.get(LOGIN_HEADER)),
+                   header=header, value=clip(request.headers.get(header)))
+    return _refuse(status, reason)
 
 
 def _has_body(request: Request) -> bool:

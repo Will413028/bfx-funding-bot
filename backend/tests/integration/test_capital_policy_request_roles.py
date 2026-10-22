@@ -21,7 +21,13 @@ from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store, build_scope_lock
 from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
-from tests.pg_templates import LAST_REVERSIBLE_REVISION, stamp_realm, template_at
+from tests.pg_templates import (
+    LAST_REVERSIBLE_REVISION,
+    W3_OPERATOR,
+    stamp_realm,
+    template_at,
+    upgrade_head_after_w3,
+)
 
 from .test_ledger_schema_roles import pre_switch_url
 from .test_trading_state_migration import _alembic, _alembic_cli, _reset
@@ -45,7 +51,7 @@ def _prepare(url: str) -> None:
 
 def _build_migrated(url: str) -> None:
     _prepare(url)
-    _alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     _alembic(url, "check")
     stamp_realm(url, "ci")
 
@@ -98,13 +104,10 @@ def _request_sql(request_id: str = "00000000-0000-0000-0000-0000000000e1", actio
 
 
 def _operator(engine) -> None:
-    """``operator``: an enrolled admin owning the account (public.operator_authorized)."""
+    """``operator``: an owner member of the account (public.operator_authorized)."""
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO exchange_account_memberships(exchange_account_id,user_id,role) "
                           "VALUES (:a,'operator','owner')"), {"a": _A})
-        conn.exec_driver_sql('''INSERT INTO auth."user" (id,name,email,"emailVerified","createdAt",
-            "updatedAt",role,banned,"twoFactorEnabled") VALUES ('operator','op','op@test.invalid',false,
-            now(),now(),'admin',false,true)''')
 
 
 async def _seed(url: str) -> None:
@@ -334,10 +337,12 @@ def test_downgrade_round_trip_and_refusal(migrated_reversible):
     _alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)
     stamp_realm(url, "ci")  # the downgrade dropped the stamp; the tables hold no rows to derive it from
     with engine.begin() as conn:
-        conn.exec_driver_sql(_request_sql())
+        # Keyed by the tailnet ID: f836fdee9bf3 on the way to head refuses a pending request
+        # from an old identity.
+        conn.exec_driver_sql(_request_sql(by=W3_OPERATOR))
     pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     result = _alembic_cli(url, "downgrade", _BEFORE)
     assert result.returncode != 0
     assert "refuse downgrade of recorded capital policy requests" in result.stdout + result.stderr
-    _alembic(url, "upgrade", "head")
+    upgrade_head_after_w3(url)
     _alembic(url, "check")

@@ -116,6 +116,15 @@ D4a 寫「由 DB trigger 拒絕 webapi role 寫入 resume、啟用幣別與 UNKN
 - **代價**：這三項第一次在 prod 使用時才算真正驗過。第一次使用就照 runbook 操作並記錄結果。若失敗，修好之前，該操作沒有其他路徑。
 - **Revocation trigger**：網路分段那一批若會改到 `operator` 容器接的網路，或 CLI 改成經過 webapi 或 sidecar，該批完成前要先演練受影響的操作。
 
+## Amendment (2026-10-20)：D1 的授權改看 app capability，webapi 在 tailnet 節點的 namespace 裡（9d-5）
+
+D1 寫「身分取自 Serve 注入的身分 header，穩定鍵是 node user ID」。9d-0 spike 實測後改成下面的形狀，9d-5（PR #237）實作並部署：
+
+- **D1a 授權看 app capability**：tailnet policy 的 grant 把 capability `github.com/Will413028/bfx-funding-bot/cap/operator` 授予 operator 對 `tag:bfx-ops` 的連線，值是 `{"user_id": "<operator 的 node user ID>"}`；serve.json 的 `AcceptAppCaps` 讓 Serve 以 `Tailscale-App-Capabilities` header 轉送。webapi 只在這個 capability 裡有一筆 `user_id` 等於 `BFX_OPERATOR_TAILNET_USER_ID` 時放行，否則 401；`Tailscale-User-Login` 只拿來顯示。Serve 會覆寫 client 自己送的 `Tailscale-*` header（spike 實測）。
+- **D1b webapi 只聽 tailnet 節點 namespace 裡的 127.0.0.1**：webapi 以 `network_mode: service:netns` 加入 holder 的 network namespace（計畫 D13），與 tailscale 共用，所以 Serve 是唯一入口；前端 static export 由同一個 webapi 同源提供。主機的 443 Funnel 已在 2026-10-20 關閉。
+- **Rationale**：capability 而非 login header：授權條件寫在 tailnet policy 裡，換裝置或 login 改名都不必動 app，policy 拿掉 grant 就立即撤權；node user ID 帶在 capability 的值裡，app 不用另外解析身分 header 的格式。不選「只比對 `Tailscale-User-Login`」：login 字串可改名，而且任何能連到節點的 tailnet 成員都會帶這個 header，等於把授權交給 ACL 一層。**代價**：policy 的 grant 值與 webapi 設定必須一致，任一邊改錯 UI 全部 401（部署前以 `tailscale whois` 核對）；capability 需要 tailscale ≥ v1.92。
+- **Revocation trigger**：Tailscale 不再轉送 app capability，或 Serve 不再覆寫 client 送的 `Tailscale-*` header → 退回 D1 原文的身分 header 比對，並重新評估 Revocation Triggers 裡的 identity-aware proxy。
+
 ## Followup
 
 - 依對真錢的風險分批實作，每批一個 PR：公開頁靜態化 → CLI 對等與 break-glass 演練 → 營運入口切換 → 部署全停 → 網路分段 → KEK 與交易所憑證 → 秘密管理、供應鏈、安全 log、API 契約與文件。

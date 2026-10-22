@@ -15,16 +15,22 @@ One run:
      tick first recreates the web API alone when the netns holder's restart or
      recreation left it in a dead network namespace (Deployer._repair_netns);
   3. read the revision and CI-run labels, require `backend:sha-<rev>` to be the
-     same digest and `frontend:sha-<rev>`, when it exists, to carry the same
-     revision;
-  4. fetch the VM mirror, require <rev> on origin/main, and take the compose
+     same digest, and verify the digest's build provenance with the pinned gh
+     (GhAttestationVerifier, no GitHub token: the manifest through the registry,
+     the bundles from GitHub's public attestation API): signed by release.yml on
+     main of this repository, on a GitHub-hosted runner -- before anything runs
+     the image (step 6 runs its alembic as the database owner). Refused, it is a
+     discovery failure;
+  4. fetch the VM mirror, require <rev> on origin/main and the last successful
+     deployment's revision to be <rev> or an ancestor of it (no downgrade to an
+     older, also validly signed, release), and take the compose
      file, live.env and the config files the compose file references from <rev>
      itself; render that compose file (`docker compose config`) for the services
      to deploy, their containers, images and env files (below);
   5. read `git diff --name-only --no-renames <last deployed>..<rev>` for the
      DR trigger paths (a diff that cannot be read counts as a DR change);
-  6. pull every image the release names by digest, validate the env files it
-     names, compare `alembic current` with `alembic heads` in a one-shot of the
+  6. pull every image the release names by digest, validate the env files and
+     secret files it names, compare `alembic current` with `alembic heads` in a one-shot of the
      new image;
   7. migrations pending: stop the web API, then the bot (the writer) -- a full
      stop (ADR 2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-
@@ -43,9 +49,8 @@ One run:
      --remove-orphans` with the release's services, check each container runs
      the expected image (and, for the release's own images, identity env; for
      one that joins another's network namespace, the live one), wait for health
-     (bot healthz, webapi ready -- it reads the database --, frontend
-     127.0.0.1:3001 when the release has one, any other service its compose
-     healthcheck) and a settle window;
+     (bot healthz, webapi ready -- it reads the database --, any other service
+     its compose healthcheck) and a settle window;
   9. on failure without applied migrations: recreate the previous successful
      digests (rolled_back) if the schema is still theirs. With applied
      migrations, or nothing to roll back to:
@@ -55,17 +60,19 @@ One run:
      next run) and point the DR checkout `current` at <rev>;
  11. append the terminal ledger row and alert.
 
+`bfx-deploy verify-provenance <digest>` runs step 3's verification alone, for an
+operator re-checking a digest (docs/runbooks/deploy.md); it changes nothing.
+
 `--recreate` redeploys the running release (same digests) after a runtime env
 change, through the same started row, identity check, health wait and ledger.
 
 The release's own compose file decides what runs (9d-tailscale-ingress brief §5
 "9e"; this tool is installed one release before the compose file changes shape):
 the services `up` creates and --remove-orphans keeps, the containers checked,
-the env files validated, the images pulled -- the release's backend and
-frontend digests with the GHCR token, an allowlisted third-party digest
-(THIRD_PARTY_IMAGE) without it -- and the top-level `configs` files written
-next to it. A release without a frontend service needs no frontend image and
-records none. Every rendered property is refused unless this tool can run it
+the env files and secret files validated, the images pulled -- the release's backend digest
+with the GHCR token, an allowlisted third-party digest (THIRD_PARTY_IMAGE)
+without it -- and the top-level `configs` files written next to it. Every
+rendered property is refused unless this tool can run it
 (release_services, release_config_files); the hardening itself is CI's
 (compose_policy.py).
 
@@ -80,6 +87,7 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -93,11 +101,12 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -136,13 +145,14 @@ TOOLING_PATHS = ("deploy/vm/ops", "deploy/vm/systemd")
 # The writer and the web API every release has; compose_policy.py pins their container
 # names, and the migration path stops and starts them by role.
 ROLE_CONTAINERS = {"bot": "bfx-bot", "webapi": "bfx-webapi"}
-# Transitional: releases before 9d-5 have a frontend service, and a rollback may return
-# to one. End state: once two releases without it have deployed in a row, no rollback
-# target can have one -- then delete FRONTEND, the frontend registry lookup, probe and
-# settings, and compose_policy.OPTIONAL_SERVICES (the ledger column stays, as history).
-FRONTEND = "frontend"
-# The only images a release's compose file may name besides its own backend and frontend
-# digests; pulled by digest without the registry token (the 9d tailscale sidecar).
+# The group of the services' secret files (compose_policy.SECRET_GID; tests keep them
+# equal): Compose ignores a file secret's uid/gid/mode, so the host file itself is
+# root:SECRET_GID 0640 and the services (UID 1000) join the group to read it.
+SECRET_GID = 4600
+# `<runtime dir>/secrets/<service>/<KEY>`, top-level name `<service>_<KEY>` (9h).
+SECRETS_SUBDIR = "secrets"
+# The only images a release's compose file may name besides its own backend digest;
+# pulled by digest without the registry token (the 9d tailscale sidecar).
 THIRD_PARTY_IMAGE = re.compile(r"docker\.io/tailscale/tailscale@sha256:[0-9a-f]{64}")
 # The container holding the ingress network namespace (plan D13): the tailscale sidecar
 # joins it from 9d-4 and the web API from 9d-5 (`network_mode: service:netns`;
@@ -180,6 +190,16 @@ PROBE = (
     "sys.exit(0 if urllib.request.urlopen(sys.argv[1],timeout=5).status==200 else 1)"
 )
 IMAGETOOLS_FORMAT = '{"manifest":{{json .Manifest}},"image":{{json .Image}}}'
+# The GitHub CLI that verifies a release's build provenance: installed by install.sh at
+# exactly this version (and sha256) to exactly this path, never from apt (unattended
+# upgrades would bypass the 7-day cooldown). 2.102.0 fixes --signer-workflow prefix
+# matching (GHSA-wjmr-j3rp-mh2g) and case-insensitive --source-ref (GHSA-4mq3-hpgx-9cx8).
+# A version bump is a release that changes both files; run install.sh after it deploys.
+GH_VERSION = "2.102.0"
+GH_BINARY = f"/usr/local/lib/bfx-ops/gh/{GH_VERSION}/bin/gh"
+# The repository whose release.yml, run on main, must have signed the image.
+SOURCE_REPOSITORY = "Will413028/bfx-funding-bot"
+RELEASE_WORKFLOW = ".github/workflows/release.yml"
 PLATFORM = "linux/arm64"
 _MAX_DETAIL = 1800
 
@@ -314,6 +334,48 @@ def protected_secret_file(path: Path, *, owner_uid: int = 0) -> None:
         raise DeployError(f"secret_file_mode_not_0600:{path.name}")
 
 
+def shared_secret_file(path: Path, *, owner_uid: int = 0, group_gid: int = SECRET_GID) -> None:
+    """A service's secret file (9h): regular, not a symlink, not empty, root-owned, group
+    SECRET_GID, 0640, under directories only root can change (secret_directory).
+
+    Compose bind-mounts the host file and ignores uid/gid/mode, so these host bits are
+    the only protection: group read for the container's supplementary group, nothing
+    for other host users (the mirror's `ubuntu` is UID 1000 too, but not in the group).
+    The error names `<service>/<KEY>`, never the content.
+    """
+    name = f"{path.parent.name}/{path.name}"
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise DeployError(f"secret_file_missing:{name}")
+    info = path.lstat()
+    if info.st_uid != owner_uid:
+        raise DeployError(f"secret_file_not_root_owned:{name}")
+    if info.st_gid != group_gid:
+        raise DeployError(f"secret_file_group_not_{SECRET_GID}:{name}")
+    if stat.S_IMODE(info.st_mode) != 0o640:
+        raise DeployError(f"secret_file_mode_not_0640:{name}")
+    if info.st_size == 0:
+        raise DeployError(f"secret_file_empty:{name}")
+    for directory in (path.parent.parent, path.parent):
+        secret_directory(directory, owner_uid=owner_uid)
+
+
+def secret_directory(directory: Path, *, owner_uid: int = 0) -> None:
+    """`secrets/` or `secrets/<service>/`: a real directory (not a link), root-owned, not
+    group or other writable.
+
+    A secret file's own bits are only as good as the directories above it: whoever can
+    write or swap one can replace the file between the check and the mount.
+    """
+    label = f"{directory.name}/"
+    if directory.is_symlink() or not directory.is_dir():
+        raise DeployError(f"secret_dir_missing:{label}")
+    info = directory.lstat()
+    if info.st_uid != owner_uid:
+        raise DeployError(f"secret_dir_not_root_owned:{label}")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise DeployError(f"secret_dir_writable_by_others:{label}")
+
+
 def _write_private(path: Path, content: str) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     _write_atomic(path, content, 0o600)
@@ -404,6 +466,7 @@ class ImageInfo:
 
 class Registry(Protocol):
     def inspect(self, reference: str) -> ImageInfo: ...
+    def manifest(self, reference: str) -> bytes: ...
 
 
 class ImagetoolsRegistry:
@@ -444,6 +507,331 @@ class ImagetoolsRegistry:
             raise DiscoveryError("registry_inspect_unparsable")
         return ImageInfo(digest=digest, labels={str(k): str(v) for k, v in labels.items()})
 
+    def manifest(self, reference: str) -> bytes:
+        """The manifest (or index) exactly as the registry serves it: `--raw` prints the
+        fetched bytes unchanged (measured 2026-10-22, buildx 0.30: sha256 of the output is the
+        digest, no newline added). The caller checks that; a JSON manifest is ASCII, so text
+        mode round-trips it."""
+        with self._auth() as env:
+            result = self._runner(["docker", "buildx", "imagetools", "inspect", reference, "--raw"],
+                                  timeout=120.0, env=env or None)
+        if result.returncode != 0:
+            log(f"imagetools inspect --raw {reference} exited {result.returncode}: "
+                f"{result.stderr.strip()[-300:]}")
+            raise DiscoveryError("registry_inspect_failed")
+        return result.stdout.encode("utf-8")
+
+
+# --------------------------------------------------------------------------- provenance
+
+
+# Only releases built from main are trusted. Fixed here, not taken from --branch, so no
+# command-line flag can widen what the attestation must prove.
+SIGNED_SOURCE_REF = "refs/heads/main"
+# GitHub's attestation store for a digest, readable without a token for a public
+# repository (measured 2026-10-22 for cli/cli: 200, `bundle` null, the bundle at
+# `bundle_url`). Anonymous calls share 60 requests an hour per IP; bfx-deploy makes one
+# per tick only while a new release is undeployed (12 an hour at most).
+ATTESTATIONS_API = "https://api.github.com/repos/{repository}/attestations/{digest}?per_page=100"
+USER_AGENT = "bfx-deploy (+https://github.com/Will413028/bfx-funding-bot)"
+_MAX_MANIFEST = 1024 * 1024
+_MAX_ATTESTATION_LIST = 4 * 1024 * 1024
+_MAX_BUNDLE = 2 * 1024 * 1024           # one bundle as downloaded (snappy-compressed)
+_MAX_BUNDLE_JSON = 8 * 1024 * 1024      # and decompressed
+_MAX_BUNDLES = 10
+
+
+def snappy_decompress(data: bytes, *, limit: int) -> bytes:
+    """Snappy's raw block format (no framing): what GitHub serves at an attestation's
+    `bundle_url` (Content-Type application/x-snappy). A preamble varint names the output
+    length, then literal and copy elements (format_description.txt in google/snappy).
+
+    Every read is bounds-checked and the output may never exceed the declared length nor
+    `limit`, so a hostile or truncated body raises ValueError instead of growing without
+    bound. stdlib only: the deployer adds no dependency for this.
+    """
+    length = shift = i = 0
+    while True:
+        if i >= len(data) or i >= 5:
+            raise ValueError("snappy: bad length preamble")
+        byte = data[i]
+        i += 1
+        length |= (byte & 0x7F) << shift
+        shift += 7
+        if byte < 0x80:
+            break
+    if length > limit:
+        raise ValueError(f"snappy: declared length {length} exceeds {limit}")
+    out = bytearray()
+    while i < len(data):
+        tag = data[i]
+        i += 1
+        kind = tag & 3
+        if kind == 0:                                   # literal
+            size = tag >> 2
+            if size >= 60:
+                width = size - 59
+                if i + width > len(data):
+                    raise ValueError("snappy: truncated literal length")
+                size = int.from_bytes(data[i:i + width], "little")
+                i += width
+            size += 1
+            if i + size > len(data):
+                raise ValueError("snappy: truncated literal")
+            if len(out) + size > length:
+                raise ValueError("snappy: output exceeds the declared length")
+            out += data[i:i + size]
+            i += size
+            continue
+        if kind == 1:                                   # copy, 1-byte offset
+            if i + 1 > len(data):
+                raise ValueError("snappy: truncated copy")
+            size = ((tag >> 2) & 7) + 4
+            offset = ((tag >> 5) << 8) | data[i]
+            i += 1
+        else:                                           # copy, 2- or 4-byte offset
+            width = 2 if kind == 2 else 4
+            if i + width > len(data):
+                raise ValueError("snappy: truncated copy")
+            size = (tag >> 2) + 1
+            offset = int.from_bytes(data[i:i + width], "little")
+            i += width
+        if offset == 0 or offset > len(out):
+            raise ValueError("snappy: copy offset outside the output")
+        if len(out) + size > length:
+            raise ValueError("snappy: output exceeds the declared length")
+        start = len(out) - offset
+        if offset >= size:
+            out += out[start:start + size]
+        else:                                           # overlapping: a repeated run
+            for k in range(size):
+                out.append(out[start + k])
+    if len(out) != length:
+        raise ValueError(f"snappy: {len(out)} bytes, declared {length}")
+    return bytes(out)
+
+
+@dataclass(frozen=True, slots=True)
+class HttpResponse:
+    status: int
+    body: bytes                    # at most `limit` + 1 bytes: longer means too long
+    headers: Mapping[str, str]     # names in lower case
+
+
+class HttpGet(Protocol):
+    def __call__(self, url: str, *, headers: Mapping[str, str], timeout: float,
+                 limit: int) -> HttpResponse: ...
+
+
+class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any,
+                         newurl: str) -> Any:
+        if urllib.parse.urlsplit(newurl).scheme != "https":
+            raise urllib.error.URLError("redirect to a non-https URL")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def https_get(url: str, *, headers: Mapping[str, str], timeout: float, limit: int) -> HttpResponse:
+    """GET over https only (redirects included), without credentials; an HTTP error status
+    is an answer, a failure to get one raises OSError."""
+    if urllib.parse.urlsplit(url).scheme != "https":
+        raise OSError(f"not an https URL: {url[:80]}")
+    opener = urllib.request.build_opener(_HttpsOnlyRedirects)
+    request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    try:
+        response = opener.open(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        response = exc
+    with response:
+        return HttpResponse(status=int(response.status), body=response.read(limit + 1),
+                            headers={k.lower(): v for k, v in response.headers.items()})
+
+
+class GhAttestationVerifier:
+    """A release image's SLSA build provenance, verified with the pinned GitHub CLI and no
+    credential at all.
+
+    Necessary because a `write:packages` credential can push an image whose labels and
+    both tags name a real main revision (threat model F32): the label and ancestry checks
+    pass, and the image runs as the database owner before anything else looks at it.
+    Only release.yml, run by GitHub on main, can obtain a Sigstore certificate for this
+    repository's workflow identity, so a valid attestation proves the digest came from it.
+
+    gh refuses every API command without a login, even for public data, but not
+    `attestation verify --bundle <file>` (measured 2026-10-22 under `env -i`, gh 2.101.0:
+    rc 0 with no token; rc 1 for a wrong --signer-workflow or a changed file). So the
+    deployer fetches what gh would have fetched and hands it over as files:
+      1. the subject: the image's manifest (the index, for a multi-platform push) exactly
+         as the registry serves it, read with the deployer's own registry access (ghcr.env;
+         the package may stay private), refused unless its sha256 is the digest. The
+         attestation's subject is that digest (actions/attest subject-digest = the pushed
+         digest), and gh verifies a file against the sha256 of its bytes;
+      2. the bundles: GitHub's attestation list for the digest, read anonymously, each
+         bundle from its https `bundle_url` (snappy-compressed, snappy_decompress);
+      3. `gh attestation verify <manifest> --bundle <one bundle>` per bundle until one
+         verifies -- a digest can carry other attestations (an SBOM, another predicate) that
+         gh rejects for this policy -- with an environment built from nothing: no token, no
+         docker config, no registry credential. The Sigstore trust root comes from its TUF
+         CDN, cached under `home`.
+    Any failure -- gh missing or another version, a manifest that does not hash to the
+    digest, no attestation, GitHub's rate limit, an unreadable bundle, none verifying --
+    raises DiscoveryError: fail closed, no bypass (one would need root, which can do
+    anything).
+    """
+
+    def __init__(
+        self, runner: Runner, registry: Registry, http: HttpGet, *, gh: str, home: Path,
+        work: Path, repository: str, ref: str, version: str = GH_VERSION,
+    ) -> None:
+        self._runner = runner
+        self._registry = registry
+        self._http = http
+        self._gh = gh
+        self._home = home
+        self._work = work
+        self._repository = repository
+        self._ref = ref
+        self._version = version
+
+    def _env(self) -> dict[str, str]:
+        return {
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME": str(self._home),
+            "GH_CONFIG_DIR": str(self._home / "config"),
+            "GH_NO_UPDATE_NOTIFIER": "1",
+            "GH_PROMPT_DISABLED": "1",
+            "NO_COLOR": "1",
+        }
+
+    def argv(self, manifest: Path, bundle: Path) -> list[str]:
+        return [
+            self._gh, "attestation", "verify", str(manifest),
+            "--bundle", str(bundle),
+            "--repo", self._repository,
+            "--signer-workflow", f"{self._repository}/{RELEASE_WORKFLOW}",
+            "--source-ref", self._ref,
+            "--deny-self-hosted-runners",
+            "--format", "json",
+        ]
+
+    def _require_pinned_gh(self, env: Mapping[str, str]) -> None:
+        try:
+            version = self._runner([self._gh, "--version"], timeout=30.0, env=env)
+        except CommandError as exc:
+            log(f"gh unusable: {exc.code}")
+            raise DiscoveryError("attestation_verifier_missing") from None
+        if version.returncode != 0:
+            raise DiscoveryError("attestation_verifier_missing")
+        found = re.match(r"gh version (\S+) ", version.stdout)
+        if found is None or found.group(1) != self._version:
+            log(f"gh at {self._gh} is not {self._version}: {version.stdout.strip()[:120]}")
+            raise DiscoveryError("attestation_verifier_wrong_version")
+
+    def _manifest(self, image: str, digest: str) -> bytes:
+        manifest = self._registry.manifest(image)
+        if len(manifest) > _MAX_MANIFEST or f"sha256:{hashlib.sha256(manifest).hexdigest()}" != digest:
+            log(f"the manifest the registry served for {image} does not hash to its digest")
+            raise DiscoveryError("attestation_unverified:manifest_digest_mismatch")
+        return manifest
+
+    def _get(self, url: str, *, limit: int, api: bool) -> HttpResponse:
+        headers = {"User-Agent": USER_AGENT}
+        if api:
+            headers |= {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+        return self._http(url, headers=headers, timeout=30.0, limit=limit)
+
+    def _bundles(self, digest: str) -> list[bytes]:
+        url = ATTESTATIONS_API.format(repository=self._repository, digest=digest)
+        try:
+            response = self._get(url, limit=_MAX_ATTESTATION_LIST, api=True)
+        except OSError as exc:
+            log(f"attestation list for {digest} unreachable: {type(exc).__name__}: {str(exc)[:200]}")
+            raise DiscoveryError("attestation_unverified:api_unreachable") from None
+        if response.status == 429 or (
+                response.status == 403 and response.headers.get("x-ratelimit-remaining") == "0"):
+            log(f"GitHub API rate limit reached; resets at {response.headers.get('x-ratelimit-reset', '?')}")
+            raise DiscoveryError("attestation_unverified:rate_limited")
+        if response.status == 404:
+            log(f"no attestation for {digest} in {self._repository}")
+            raise DiscoveryError("attestation_unverified:no_attestation")
+        if response.status != 200 or len(response.body) > _MAX_ATTESTATION_LIST:
+            log(f"attestation list for {digest} answered {response.status} ({len(response.body)} bytes)")
+            raise DiscoveryError("attestation_unverified:api_unavailable")
+        try:
+            listed = json.loads(response.body)["attestations"]
+            if not isinstance(listed, list):
+                raise TypeError
+        # RecursionError: a hostile, deeply nested list must refuse like any other bad answer.
+        except (ValueError, KeyError, TypeError, RecursionError):
+            raise DiscoveryError("attestation_unverified:api_unavailable") from None
+        if not listed:
+            log(f"no attestation for {digest} in {self._repository}")
+            raise DiscoveryError("attestation_unverified:no_attestation")
+        bundles = []
+        for n, item in enumerate(listed[:_MAX_BUNDLES]):
+            try:
+                bundles.append(self._bundle(item))
+            except (OSError, ValueError, TypeError, RecursionError) as exc:
+                log(f"attestation {n} for {digest} unreadable: {type(exc).__name__}: {str(exc)[:200]}")
+        if not bundles:
+            raise DiscoveryError("attestation_unverified:bundle_unreadable")
+        return bundles
+
+    def _bundle(self, item: object) -> bytes:
+        """One Sigstore bundle as JSON bytes: inline, or downloaded from its bundle_url."""
+        if not isinstance(item, dict):
+            raise TypeError("attestation entry is not an object")
+        inline = item.get("bundle")
+        if isinstance(inline, dict):
+            return json.dumps(inline).encode()
+        url = item.get("bundle_url")
+        if not isinstance(url, str) or urllib.parse.urlsplit(url).scheme != "https":
+            raise ValueError("no https bundle_url")
+        response = self._get(url, limit=_MAX_BUNDLE, api=False)
+        if response.status != 200 or len(response.body) > _MAX_BUNDLE:
+            raise ValueError(f"bundle download answered {response.status} ({len(response.body)} bytes)")
+        body = response.body
+        if "json" not in response.headers.get("content-type", ""):
+            body = snappy_decompress(body, limit=_MAX_BUNDLE_JSON)
+        if not isinstance(json.loads(body), dict):
+            raise ValueError("bundle is not a JSON object")
+        return body
+
+    def verify(self, image: str) -> None:
+        digest = image.rpartition("@")[2]
+        if DIGEST.fullmatch(digest) is None:
+            raise DiscoveryError("attestation_unverified:not_a_digest")
+        env = self._env()
+        self._require_pinned_gh(env)
+        manifest = self._manifest(image, digest)
+        bundles = self._bundles(digest)
+        self._work.mkdir(mode=0o700, parents=True, exist_ok=True)
+        work = Path(tempfile.mkdtemp(prefix="provenance-", dir=self._work))
+        try:
+            subject = work / "manifest.json"
+            subject.write_bytes(manifest)
+            for n, bundle in enumerate(bundles):
+                path = work / f"bundle-{n}.json"
+                path.write_bytes(bundle)
+                try:
+                    result = self._runner(self.argv(subject, path), timeout=180.0, env=env)
+                except CommandError as exc:
+                    # A timeout is Sigstore's TUF CDN (the only network gh uses here) or gh.
+                    log(f"attestation verify of {image} failed: {exc.code}")
+                    raise DiscoveryError("attestation_unverified:gh_unavailable") from None
+                try:
+                    verified = json.loads(result.stdout) if result.returncode == 0 else None
+                except ValueError:
+                    verified = None
+                if isinstance(verified, list) and verified:
+                    log(f"provenance of {image} verified (attestation {n + 1} of {len(bundles)})")
+                    return
+                log(f"attestation {n + 1} of {len(bundles)} for {image} not accepted "
+                    f"(exit {result.returncode}): {result.stderr.strip()[-600:]}")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        raise DiscoveryError("attestation_unverified:gh_rejected")
+
 
 # --------------------------------------------------------------------------- ledger
 
@@ -454,7 +842,6 @@ class LedgerRow:
     attempt_id: str
     source_revision: str
     backend_digest: str
-    frontend_digest: str | None  # None: the release's compose file has no frontend service
     outcome: str
     migrations_applied: bool
     ci_run: str | None = None
@@ -474,7 +861,6 @@ class LedgerEntry:
     finished_at: str | None  # None exactly for the `started` row
     source_revision: str
     backend_digest: str
-    frontend_digest: str | None
     migrations_applied: bool
     outcome: str
     detail: str
@@ -487,8 +873,7 @@ class Ledger(Protocol):
 
 
 _LEDGER_COLUMNS = (
-    "id, attempt_id, source_revision, backend_digest, frontend_digest, outcome, "
-    "migrations_applied, ci_run"
+    "id, attempt_id, source_revision, backend_digest, outcome, migrations_applied, ci_run"
 )
 # last_attempt is the newest row of any phase: a `started` row with no terminal
 # row is an interrupted attempt and counts as tried (no automatic retry).
@@ -503,11 +888,13 @@ SELECT json_build_object(
 SELECT 'absent';
 \\endif
 """
+# frontend_digest stays as history: rows before 9d-5 carry the frontend image they ran;
+# no release has one since, so every new row records NULL (and none is read back).
 _LEDGER_APPEND = """INSERT INTO public.deployments (
   attempt_id, started_at, finished_at, source_revision, backend_digest, frontend_digest,
   migrations_applied, outcome, detail, ci_run)
 VALUES (:'attempt_id', :'started_at', NULLIF(:'finished_at', '')::timestamptz,
-  :'source_revision', :'backend_digest', NULLIF(:'frontend_digest', ''),
+  :'source_revision', :'backend_digest', NULL,
   :'migrations_applied', :'outcome', :'detail', NULLIF(:'ci_run', ''))
 RETURNING id;
 """
@@ -557,7 +944,6 @@ class PsqlLedger:
             "attempt_id": entry.attempt_id,
             "started_at": entry.started_at, "finished_at": entry.finished_at or "",
             "source_revision": entry.source_revision, "backend_digest": entry.backend_digest,
-            "frontend_digest": entry.frontend_digest or "",
             "migrations_applied": "true" if entry.migrations_applied else "false",
             "outcome": entry.outcome, "detail": entry.detail, "ci_run": entry.ci_run or "",
         })
@@ -572,12 +958,11 @@ def _ledger_row(value: object) -> LedgerRow | None:
         return None
     if not isinstance(value, dict):
         raise TypeError
-    ci_run, frontend = value.get("ci_run"), value["frontend_digest"]
+    ci_run = value.get("ci_run")
     return LedgerRow(
         id=int(value["id"]), attempt_id=str(value["attempt_id"]),
         source_revision=str(value["source_revision"]),
         backend_digest=str(value["backend_digest"]),
-        frontend_digest=str(frontend) if frontend is not None else None,
         outcome=str(value["outcome"]),
         migrations_applied=bool(value["migrations_applied"]),
         ci_run=str(ci_run) if ci_run is not None else None,
@@ -597,7 +982,6 @@ class Settings:
     state_dir: Path = Path("/var/lib/bfx-deploy")
     lock_file: Path = Path("/run/lock/bfx-deploy.lock")
     backend_repository: str = "ghcr.io/will413028/bfx-funding-bot-backend"
-    frontend_repository: str = "ghcr.io/will413028/bfx-funding-bot-frontend"
     network: str = "bfx_default"
     postgres_container: str = "bfx-postgres"
     db_user: str = "bfx"
@@ -613,10 +997,12 @@ class Settings:
     unit_dir: Path = Path("/etc/systemd/system")
     uv: str = "/usr/local/bin/uv"
     system_python: str = "/usr/bin/python3"
+    # Not a command-line option: pointing it elsewhere would be a verification bypass.
+    gh: str = GH_BINARY
+    source_repository: str = SOURCE_REPOSITORY
     healthz_port: int = 8080
-    frontend_url: str = "http://127.0.0.1:3001/"
     health_timeouts: Mapping[str, float] = field(
-        default_factory=lambda: {"bot": 300.0, "webapi": 120.0, "frontend": 120.0}
+        default_factory=lambda: {"bot": 300.0, "webapi": 120.0}
     )
     health_interval: float = 5.0
     settle_seconds: float = 60.0
@@ -633,9 +1019,7 @@ class Settings:
 class Target:
     revision: str
     backend_digest: str
-    frontend_digest: str | None  # None: no frontend image (the compose file has no frontend)
     backend_image: str
-    frontend_image: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -647,6 +1031,7 @@ class ComposeService:
     image: str
     env_files: tuple[Path, ...]
     joins: str | None = None  # `network_mode: service:<joins>`: runs in that service's netns
+    secret_files: tuple[Path, ...] = ()  # its Compose file secrets, validated before `up`
 
 
 @dataclass(frozen=True, slots=True)
@@ -708,17 +1093,6 @@ class Attempt:
 
 
 Notifier = Callable[[str, str], None]
-HttpStatus = Callable[[str, float], int]
-
-
-def http_status(url: str, timeout: float) -> int:
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
-            return int(response.status)
-    except urllib.error.HTTPError as exc:
-        return int(exc.code)
-    except (urllib.error.URLError, OSError):
-        return 0
 
 
 def _now_iso(clock: Callable[[], float]) -> str:
@@ -744,13 +1118,10 @@ def _alembic_revisions(output: str) -> tuple[str, ...]:
 
 def identity_env(target: Target, *, image: str, deployment_id: str) -> dict[str, str] | None:
     """The identity a container of `image` runs with; None for a third-party image."""
-    digests = {target.backend_image: target.backend_digest}
-    if target.frontend_image is not None and target.frontend_digest is not None:
-        digests[target.frontend_image] = target.frontend_digest
-    if image not in digests:
+    if image != target.backend_image:
         return None
     return {
-        "BFX_IMAGE_DIGEST": digests[image],
+        "BFX_IMAGE_DIGEST": target.backend_digest,
         "BFX_SOURCE_REVISION": target.revision,
         "BFX_DEPLOYMENT_ID": deployment_id,
     }
@@ -788,25 +1159,25 @@ def release_services(
 ) -> tuple[ComposeService, ...]:
     """The services of a release's rendered compose file, refused unless bfx-deploy can run them.
 
-    Each needs a container name and an image that is the target's own backend or frontend
-    digest or an allowlisted third-party digest; every env file must be required and be the
+    Each needs a container name and an image that is the target's own backend digest or an
+    allowlisted third-party digest; every env file must be required and be the
     service's own `<runtime dir>/<service>.env` (validated before `up`) or the release's
-    live.env; the
-    bot and the web API must be there under their role names, and any other service besides
-    the frontend must declare a compose healthcheck. Top-level `secrets` are refused: nothing
-    writes or rotates them (configs: release_config_files).
+    live.env; every file secret must be the service's own
+    `<runtime dir>/secrets/<service>/<KEY>`, named `<service>_<KEY>` and mounted at
+    /run/secrets/<KEY> (validated before `up`, shared_secret_file); the
+    bot and the web API must be there under their role names, and any other service must
+    declare a compose healthcheck (configs: release_config_files).
     """
     if rendered.get("name") != PROJECT:
         raise DeployError("compose_project_name")
-    if rendered.get("secrets"):
-        raise DeployError("compose_secrets_refused")
+    secret_paths = release_secret_files(rendered, runtime_dir)
     services = rendered.get("services")
     if not isinstance(services, dict) or not services:
         raise DeployError("compose_services_missing")
     for role in ROLE_CONTAINERS:
         if role not in services:
             raise DeployError(f"compose_service_missing:{role}")
-    own = {target.backend_image, *([target.frontend_image] if target.frontend_image else [])}
+    own = {target.backend_image}
     found = []
     for name in sorted(services):
         spec = services[name]
@@ -828,18 +1199,33 @@ def release_services(
             if path != runtime_dir / f"{name}.env" and path != release_dir / "live.env":
                 raise DeployError(f"compose_env_file_outside_runtime:{name}")
             env_files.append(path)
+        secret_files = []
+        for entry in spec.get("secrets") or []:
+            source = entry.get("source") if isinstance(entry, dict) else entry
+            target = entry.get("target", source) if isinstance(entry, dict) else entry
+            # A service mounts only its own secret files (as with env files: the web API
+            # never gets the bot's halt token or vault key), at /run/secrets/<KEY>.
+            if not isinstance(source, str) or source not in secret_paths \
+                    or not source.startswith(f"{name}_"):
+                raise DeployError(f"compose_secret_not_own:{name}")
+            if target not in (source.removeprefix(f"{name}_"),
+                              f"/run/secrets/{source.removeprefix(f'{name}_')}") \
+                    or (isinstance(entry, dict) and set(entry) - {"source", "target"}):
+                raise DeployError(f"compose_secret_target:{name}:{source}")
+            secret_files.append(secret_paths[source])
         mode = spec.get("network_mode")
         joins = mode.removeprefix("service:") if isinstance(mode, str) and mode.startswith("service:") \
             else None
         if joins is not None and joins not in services:
             raise DeployError(f"compose_network_mode_service_missing:{name}")
         check = spec.get("healthcheck")
-        if name not in ROLE_CONTAINERS and name != FRONTEND and not (
+        if name not in ROLE_CONTAINERS and not (
                 isinstance(check, dict) and check.get("test") and not check.get("disable")):
             # Its compose healthcheck is its only probe (_probe): without one a sidecar that
             # never joins the tailnet would pass the deploy.
             raise DeployError(f"compose_healthcheck_missing:{name}")
-        found.append(ComposeService(name, container, image, tuple(env_files), joins))
+        found.append(ComposeService(name, container, image, tuple(env_files), joins,
+                                    tuple(secret_files)))
     names = {service.name: service for service in found}
     for role, container in ROLE_CONTAINERS.items():
         if names[role].container != container:
@@ -850,6 +1236,30 @@ def release_services(
             # would be validated, so refuse rather than deploy unchecked.
             raise DeployError(f"compose_env_files_not_rendered:{role}")
     return tuple(found)
+
+
+def release_secret_files(rendered: Mapping[str, Any], runtime_dir: Path) -> dict[str, Path]:
+    """The top-level `secrets` of a rendered compose file, by name: each a file only, at
+    `<runtime dir>/secrets/<service>/<KEY>` for the name `<service>_<KEY>`.
+
+    A `content`, `environment` or `external` secret would come from somewhere this tool
+    does not check; a path elsewhere could mount any host file into a container.
+    """
+    secrets = rendered.get("secrets") or {}
+    if not isinstance(secrets, dict):
+        raise DeployError("compose_secrets_invalid")
+    paths = {}
+    for name, secret in sorted(secrets.items()):
+        service, _, key = str(name).partition("_")
+        if not isinstance(secret, dict) or set(secret) - {"name", "file"} or not secret.get("file"):
+            raise DeployError(f"compose_secret_not_file:{name}")
+        file = Path(str(secret["file"]))
+        if not service or ENV_KEY.fullmatch(key) is None \
+                or os.path.normpath(file) != str(file) \
+                or file != runtime_dir / SECRETS_SUBDIR / service / key:
+            raise DeployError(f"compose_secret_outside_runtime:{name}")
+        paths[str(name)] = file
+    return paths
 
 
 def _started_at(record: Mapping[str, Any]) -> tuple[datetime, int] | None:
@@ -899,19 +1309,22 @@ class Deployer:
     def __init__(
         self, settings: Settings, *, runner: Runner, registry: Registry, ledger: Ledger,
         notify: Notifier, clock: Callable[[], float] = time.time,
-        sleep: Callable[[float], None] = time.sleep, http: HttpStatus = http_status,
+        sleep: Callable[[float], None] = time.sleep,
         secret_check: Callable[[Path], None] = protected_secret_file,
+        secret_file_check: Callable[[Path], None] = shared_secret_file,
         registry_credentials: tuple[str, str] | None = None,
+        http: HttpGet = https_get,
     ) -> None:
         self.settings = settings
+        self._attestations = provenance_verifier(settings, runner, registry, http)
         self._runner = runner
         self._registry = registry
         self._ledger = ledger
         self._notify = notify
         self._clock = clock
         self._sleep = sleep
-        self._http = http
         self._secret_check = secret_check
+        self._secret_file_check = secret_file_check
         self._registry_credentials = registry_credentials
         self.plan: dict[str, Any] | None = None
         self._dry_run_blockers: list[str] = []
@@ -944,8 +1357,9 @@ class Deployer:
         return result
 
     def _as_mirror_user(self, *argv: str) -> list[str]:
-        # The mirror's deploy key and ~/.ssh live in that user's home, and
-        # root-owned objects would break the owner's own git later. runuser sets
+        # The mirror belongs to that user (it fetches the public repository over anonymous
+        # HTTPS, no deploy key: docs/runbooks/deploy.md "Mirror"), and root-owned objects
+        # would break the owner's own git later. runuser sets
         # HOME to the target user's home; nothing relies on root's.
         return ["runuser", "-u", self.settings.mirror_user, "--", *argv]
 
@@ -1024,25 +1438,14 @@ class Deployer:
             raise DiscoveryError("registry_revision_label_missing")
         if self._registry.inspect(f"{settings.backend_repository}:sha-{revision}").digest != main.digest:
             raise DiscoveryError("registry_main_and_revision_tag_disagree")
-        try:
-            frontend = self._registry.inspect(f"{settings.frontend_repository}:sha-{revision}")
-        except DiscoveryError as exc:
-            if not exc.code.startswith("registry_not_found:"):
-                raise
-            # From 9d-5 CI builds no frontend image; whether this revision needs one is its
-            # compose file's call (_materialize), which also keeps waiting while CI pushes.
-            return self._target(revision, main.digest, None)
-        if frontend.labels.get(REVISION_LABEL) != revision:
-            raise DiscoveryError("registry_frontend_revision_mismatch")
-        return self._target(revision, main.digest, frontend.digest)
+        target = self._target(revision, main.digest)
+        # Before anything runs the image: _schema runs its alembic as the database owner.
+        self._attestations.verify(target.backend_image)
+        return target
 
-    def _target(self, revision: str, backend_digest: str, frontend_digest: str | None) -> Target:
-        return Target(
-            revision=revision, backend_digest=backend_digest, frontend_digest=frontend_digest,
-            backend_image=f"{self.settings.backend_repository}@{backend_digest}",
-            frontend_image=(f"{self.settings.frontend_repository}@{frontend_digest}"
-                            if frontend_digest is not None else None),
-        )
+    def _target(self, revision: str, backend_digest: str) -> Target:
+        return Target(revision=revision, backend_digest=backend_digest,
+                      backend_image=f"{self.settings.backend_repository}@{backend_digest}")
 
     # ------------------------------------------------------------------ discovery state
 
@@ -1198,8 +1601,7 @@ class Deployer:
         the failure code, or None. Not _recreate, which recreates every service and stops the
         bot when it fails.
         """
-        target = self._target(previous.source_revision, previous.backend_digest,
-                              previous.frontend_digest)
+        target = self._target(previous.source_revision, previous.backend_digest)
         try:
             release = self._materialize(target, previous.attempt_id)
             missing = [service for service in services if service not in release.names]
@@ -1222,12 +1624,9 @@ class Deployer:
 
     def _deploy(self, view: LedgerView, attempt: Attempt) -> int:
         target = attempt.target
-        log(f"target {target.revision} backend {target.backend_digest} frontend {target.frontend_digest}")
+        log(f"target {target.revision} backend {target.backend_digest}")
         try:
             prepared = self._prepare(view, attempt)
-        except DiscoveryError as exc:
-            # The compose file needs a frontend image CI has not pushed (yet).
-            return self._discovery_failed(exc)
         except DeployError as exc:
             self._discovery_ok()
             if self.settings.dry_run:
@@ -1241,7 +1640,7 @@ class Deployer:
         if self.settings.dry_run:
             self.plan = {
                 "revision": target.revision, "backend_image": target.backend_image,
-                "frontend_image": target.frontend_image, "ci_run": attempt.ci_run,
+                "ci_run": attempt.ci_run,
                 "services": list(release.names),
                 "schema_current": list(prepared.current), "schema_heads": list(prepared.heads),
                 "migrations_pending": prepared.pending,
@@ -1290,7 +1689,7 @@ class Deployer:
         try:
             created = self._compose_up(release, target, attempt.attempt_id)
             # The application is judged first: an ingress that is not as released waits until
-            # the bot, web API and frontend passed their health checks.
+            # the bot and the web API passed their health checks.
             mismatch = None
             try:
                 ingress = self._verify(release, target, attempt.attempt_id, gate_ingress=created)
@@ -1455,11 +1854,9 @@ class Deployer:
 
     def _prepare(self, view: LedgerView, attempt: Attempt) -> Prepared:
         target = attempt.target
-        self._fetch_and_require_on_main(target.revision)
+        self._fetch_and_require_on_main(
+            target.revision, view.last_success.source_revision if view.last_success else None)
         release = self._materialize(target, attempt.attempt_id)
-        if target.frontend_digest is not None and FRONTEND not in release.names:
-            # CI still pushed a frontend image, but this release does not run one.
-            attempt.target = target = replace(target, frontend_digest=None, frontend_image=None)
         changed_paths, why = self._changed_paths(view, target.revision)
         if changed_paths is None:
             log(f"changed paths unavailable ({why}); treated as a DR change")
@@ -1469,7 +1866,14 @@ class Deployer:
         return Prepared(release=release, current=current, heads=heads,
                         changed_paths=changed_paths)
 
-    def _fetch_and_require_on_main(self, revision: str) -> None:
+    def _fetch_and_require_on_main(self, revision: str, deployed: str | None) -> None:
+        """<revision> on main and, when something deployed, at or after `deployed`.
+
+        The second check refuses a downgrade: the `main` tag pointed back at an older
+        release, whose attestation and ancestry are both valid; equal (a rebuild of the
+        deployed revision) passes. Undoing a release is a
+        revert commit (roll forward), never an older digest.
+        """
         remote_ref = f"refs/remotes/{self.settings.remote}/{self.settings.branch}"
         self._git("fetch", "--quiet", "--no-tags", self.settings.remote,
                   f"+refs/heads/{self.settings.branch}:{remote_ref}", code="git_fetch_failed",
@@ -1480,6 +1884,20 @@ class Deployer:
         if ancestry == 1:
             raise DeployError("revision_not_on_main")
         if ancestry != 0:
+            raise DeployError("git_merge_base_failed")
+        if deployed is None:
+            return
+        if self._git_try("cat-file", "-e", f"{deployed}^{{commit}}").returncode != 0:
+            # Only a mirror that lost main's history gets here (every deployed revision was
+            # on main); nobody who can push an image can cause it, and _changed_paths then
+            # treats the release as a DR change. A ledger the deployer wrote is no input an
+            # image controls.
+            log(f"deployed revision {deployed} is not in the mirror; downgrade check skipped")
+            return
+        newer = self._git_try("merge-base", "--is-ancestor", deployed, revision).returncode
+        if newer == 1:
+            raise DeployError("release_not_descendant_of_deployed")
+        if newer != 0:
             raise DeployError("git_merge_base_failed")
 
     def _schema(self, release: Release, target: Target) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1508,8 +1926,6 @@ class Deployer:
             content = self._git("show", f"{revision}:{path}", code=f"release_file_missing:{path}").stdout
             _write_private(release_dir / Path(path).name, content)
         compose_file = release_dir / Path(COMPOSE_PATH).name
-        if target.frontend_digest is None and FRONTEND in self._compose_services(compose_file):
-            raise DiscoveryError("registry_frontend_image_missing")
         rendered = self._render(compose_file, target, deployment_id)
         services = release_services(rendered, target=target, runtime_dir=self.settings.runtime_dir,
                                     release_dir=release_dir)
@@ -1527,13 +1943,6 @@ class Deployer:
             content = self._git("show", f"{revision}:{path}", code=f"release_file_missing:{path}").stdout
             _write_private(destination, content)
         return Release(directory=release_dir, services=services)
-
-    def _compose_services(self, compose_file: Path) -> set[str]:
-        """The service names of a compose file, without interpolating it (no variable needed)."""
-        result = self._check(["docker", "compose", "-p", PROJECT, "-f", str(compose_file), "config",
-                              "--no-interpolate", "--services"],
-                             code="compose_config_failed", timeout=60.0, env=_base_env())
-        return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
     def _render(self, compose_file: Path, target: Target, deployment_id: str) -> dict[str, Any]:
         """`docker compose config` with the environment `up` gets.
@@ -1568,7 +1977,11 @@ class Deployer:
         return tuple(path for path in diff.stdout.split("\0") if path), ""
 
     def _validate_env_files(self, release: Release) -> None:
-        """The env files the release's compose file names, migrate.env and live.env."""
+        """The env files the release's compose file names, migrate.env and live.env; and
+        its secret files (shared_secret_file), so a missing or unprotected one fails the
+        precheck with the running release untouched instead of failing `up`."""
+        for path in sorted({path for service in release.services for path in service.secret_files}):
+            self._secret_file_check(path)
         live = release.directory / "live.env"
         named = sorted({path for service in release.services for path in service.env_files} - {live})
         files = [(path, True) for path in named] + [(self.settings.runtime_dir / "migrate.env", False)]
@@ -1603,8 +2016,7 @@ class Deployer:
         allowlisted third-party ones without it (the token never goes to another registry)."""
         images = sorted({service.image for service in release.services})
         third_party = [image for image in images if THIRD_PARTY_IMAGE.fullmatch(image)]
-        hosts = (self.settings.backend_repository.split("/", 1)[0],
-                 self.settings.frontend_repository.split("/", 1)[0])
+        hosts = (self.settings.backend_repository.split("/", 1)[0],)
         with docker_auth(self.settings.state_dir, self._registry_credentials, hosts) as env:
             for image in images:
                 if image not in third_party:
@@ -1714,7 +2126,6 @@ class Deployer:
             self._ledger.append(LedgerEntry(
                 attempt_id=attempt.attempt_id, started_at=attempt.started_at, finished_at=None,
                 source_revision=target.revision, backend_digest=target.backend_digest,
-                frontend_digest=target.frontend_digest,
                 migrations_applied=attempt.migrations_applied, outcome="started", detail=detail,
                 ci_run=attempt.ci_run))
         except DeployError as exc:
@@ -1722,13 +2133,8 @@ class Deployer:
         attempt.started_recorded = True
 
     def _compose_env(self, target: Target, deployment_id: str) -> dict[str, str]:
-        frontend = ({"BFX_FRONTEND_IMAGE": target.frontend_image,
-                     "BFX_FRONTEND_DIGEST": target.frontend_digest}
-                    if target.frontend_image is not None and target.frontend_digest is not None
-                    else {})
         return {**_base_env(), "BFX_BACKEND_IMAGE": target.backend_image,
                 "BFX_BACKEND_DIGEST": target.backend_digest,
-                **frontend,
                 "BFX_SOURCE_REVISION": target.revision,
                 "BFX_DEPLOYMENT_ID": deployment_id,
                 # The env files Compose reads are the ones validated above.
@@ -1738,14 +2144,11 @@ class Deployer:
                     *, force_recreate: bool = False) -> frozenset[str]:
         """`up` every service of `release`; returns the services whose container it created
         (a new container Id), which the deploy holds to their health check."""
-        pinned = [(target.backend_image, target.backend_digest)]
-        if target.frontend_image is not None or target.frontend_digest is not None:
-            pinned.append((target.frontend_image or "", target.frontend_digest or ""))
-        for image, digest in pinned:
-            if DIGEST.fullmatch(digest) is None or not image.endswith("@" + digest):
-                raise DeployError("image_reference_not_digest_pinned")
-        # --remove-orphans: a service the release no longer has (the frontend from 9d-5)
-        # is removed instead of running on, and a rollback creates it again.
+        image, digest = target.backend_image, target.backend_digest
+        if DIGEST.fullmatch(digest) is None or not image.endswith("@" + digest):
+            raise DeployError("image_reference_not_digest_pinned")
+        # --remove-orphans: a service the release no longer has is removed instead of
+        # running on, and a rollback creates it again.
         # Every service in one `up`, never a sidecar alone: Compose recreates a service that
         # joins a recreated one's network namespace in the same `up` (measured, v5.1.4), and
         # _verify proves it (netns_stale).
@@ -1832,7 +2235,7 @@ class Deployer:
                 gate_ingress: Collection[str] | None = None) -> list[str]:
         """Each (or each `only`) service's container runs the release, and one that joins
         another's network namespace is in the live one. With `gate_ingress` given, an ingress
-        service (not the bot, web API or frontend) fails it only when listed -- with the
+        service (not the bot or web API) fails it only when listed -- with the
         ingress code, as _wait_healthy does -- and is otherwise returned as an
         `ingress_unhealthy:<service>:<mismatch>` warning."""
         by_name = {service.name: service for service in release.services}
@@ -1863,7 +2266,7 @@ class Deployer:
                     found.append("netns")
 
         def ingress(name: str) -> bool:
-            return gate_ingress is not None and name not in ROLE_CONTAINERS and name != FRONTEND
+            return gate_ingress is not None and name not in ROLE_CONTAINERS
 
         fatal = [f"{name}:{m}" for name, found in problems.items() for m in found if not ingress(name)]
         if fatal:
@@ -1879,8 +2282,6 @@ class Deployer:
         return warnings
 
     def _probe(self, service: str, container: str) -> bool:
-        if service == FRONTEND:
-            return self._http(self.settings.frontend_url, 5.0) == 200
         if service not in ROLE_CONTAINERS:
             # Its compose healthcheck, which release_services requires: the 9d sidecar's
             # TS_ENABLE_HEALTH_CHECK /healthz, 200 once the node has a tailnet address
@@ -1906,7 +2307,7 @@ class Deployer:
         return counts
 
     def _wait_healthy(self, release: Release, *, gate_ingress: Collection[str] = ()) -> list[str]:
-        """The bot, the web API and the frontend must turn and stay healthy (a failure raises
+        """The bot and the web API must turn and stay healthy (a failure raises
         as always). The ingress services (anything else: the tailnet node) are held to it only
         when in `gate_ingress` -- the ones this deploy created -- and only after the
         application passed, with a code of their own (`ingress_unhealthy:...`) so the caller
@@ -1916,7 +2317,7 @@ class Deployer:
         """
         started = self._clock()
         containers = {service.name: service.container for service in release.services}
-        application = [name for name in release.names if name in ROLE_CONTAINERS or name == FRONTEND]
+        application = [name for name in release.names if name in ROLE_CONTAINERS]
         ingress = [name for name in release.names if name in gate_ingress and name not in application]
         pending, ingress_late = set(application + ingress), []
         while pending:
@@ -2007,8 +2408,7 @@ class Deployer:
 
     def _rollback_release(self, previous: LedgerRow) -> tuple[Release, Target]:
         """The previous release on disk, refused unless the schema is its own."""
-        target = self._target(previous.source_revision, previous.backend_digest,
-                              previous.frontend_digest)
+        target = self._target(previous.source_revision, previous.backend_digest)
         release = self._materialize(target, previous.attempt_id)
         current, heads = self._schema(release, target)
         if set(current) != set(heads):
@@ -2052,8 +2452,7 @@ class Deployer:
             return 1
         attempt = Attempt(
             started_at=started_at, action="recreate", ci_run=previous.ci_run,
-            target=self._target(previous.source_revision, previous.backend_digest,
-                                previous.frontend_digest),
+            target=self._target(previous.source_revision, previous.backend_digest),
         )
         target = attempt.target
         try:
@@ -2072,7 +2471,7 @@ class Deployer:
             return self._finish(attempt, "failed", f"precheck:{exc.code}; running release untouched")
         if self.settings.dry_run:
             self.plan = {"action": "recreate", "revision": target.revision,
-                         "backend_image": target.backend_image, "frontend_image": target.frontend_image,
+                         "backend_image": target.backend_image,
                          "services": list(release.names), "blockers": list(self._dry_run_blockers)}
             print(json.dumps(self.plan, indent=2, sort_keys=True))
             return 0
@@ -2118,28 +2517,27 @@ class Deployer:
     def _prune_images(self, view: LedgerView, target: Target) -> list[str]:
         """Remove local images other than the target's and the last successful release's.
 
-        Only the release's own repositories are listed: a third-party image (the sidecar's)
+        Only the release's own repository is listed: a third-party image (the sidecar's)
         is never removed here, so a rollback always finds the one it ran. Known cost: each
         sidecar upgrade leaves its previous image (one per manual digest bump in the compose
         file); prune them by the target's and last success's compose files when a second
         upgrade lands or disk use calls for it.
         """
         warnings = []
-        keep = {target.backend_digest, target.frontend_digest}
+        keep = {target.backend_digest}
         if view.last_success is not None:
-            keep |= {view.last_success.backend_digest, view.last_success.frontend_digest}
-        for repository in (self.settings.backend_repository, self.settings.frontend_repository):
-            listed = self._run(["docker", "image", "ls", "--digests", "--no-trunc", "--format",
-                                "{{.Digest}}", repository], timeout=60.0)
-            if listed.returncode != 0:
-                warnings.append("image_prune_list_failed")
-                continue
-            for digest in sorted(set(listed.stdout.split())):
-                if DIGEST.fullmatch(digest) and digest not in keep:
-                    removed = self._run(["docker", "image", "rm", f"{repository}@{digest}"],
-                                        timeout=120.0)
-                    if removed.returncode != 0:
-                        warnings.append("image_prune_failed")
+            keep.add(view.last_success.backend_digest)
+        repository = self.settings.backend_repository
+        listed = self._run(["docker", "image", "ls", "--digests", "--no-trunc", "--format",
+                            "{{.Digest}}", repository], timeout=60.0)
+        if listed.returncode != 0:
+            return ["image_prune_list_failed"]
+        for digest in sorted(set(listed.stdout.split())):
+            if DIGEST.fullmatch(digest) and digest not in keep:
+                removed = self._run(["docker", "image", "rm", f"{repository}@{digest}"],
+                                    timeout=120.0)
+                if removed.returncode != 0:
+                    warnings.append("image_prune_failed")
         return warnings
 
     def _install_tooling(self, revision: str) -> None:
@@ -2217,7 +2615,6 @@ class Deployer:
             attempt_id=attempt.attempt_id, started_at=attempt.started_at,
             finished_at=_now_iso(self._clock),
             source_revision=target.revision, backend_digest=target.backend_digest,
-            frontend_digest=target.frontend_digest,
             migrations_applied=attempt.migrations_applied, outcome=outcome, detail=text,
             ci_run=attempt.ci_run,
         )
@@ -2236,6 +2633,16 @@ class Deployer:
         log(message)
         self._notify(level, message)
         return 0 if outcome == "deployed" and recorded else 1
+
+
+def provenance_verifier(settings: Settings, runner: Runner, registry: Registry,
+                        http: HttpGet) -> GhAttestationVerifier:
+    """The one verifier bfx-deploy and `verify-provenance` use: pinned gh, this repository,
+    main; nothing here comes from the command line."""
+    return GhAttestationVerifier(
+        runner, registry, http, gh=settings.gh, home=settings.state_dir / "gh",
+        work=settings.state_dir / "provenance", repository=settings.source_repository,
+        ref=SIGNED_SOURCE_REF)
 
 
 def _base_env() -> dict[str, str]:
@@ -2262,7 +2669,7 @@ def _parser() -> argparse.ArgumentParser:
     defaults = Settings()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mirror", type=Path, default=defaults.mirror,
-                        help="git clone of the repository with a read-only deploy key")
+                        help="git clone of the repository, fetching origin over anonymous HTTPS")
     parser.add_argument("--mirror-user", help="run git as this user (default: mirror owner)")
     parser.add_argument("--remote", default=defaults.remote)
     parser.add_argument("--branch", default=defaults.branch)
@@ -2270,7 +2677,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", type=Path, default=defaults.state_dir)
     parser.add_argument("--lock-file", type=Path, default=defaults.lock_file)
     parser.add_argument("--backend-repository", default=defaults.backend_repository)
-    parser.add_argument("--frontend-repository", default=defaults.frontend_repository)
     parser.add_argument("--network", default=defaults.network)
     parser.add_argument("--postgres-container", default=defaults.postgres_container)
     parser.add_argument("--db-user", default=defaults.db_user)
@@ -2294,7 +2700,45 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def verify_provenance(argv: Sequence[str]) -> int:
+    """`bfx-deploy verify-provenance <digest>`: the deployer's own provenance check of one
+    backend digest, with the same verifier, registry access and gh; changes nothing."""
+    defaults = Settings()
+    parser = argparse.ArgumentParser(prog="bfx-deploy verify-provenance",
+                                     description=verify_provenance.__doc__)
+    parser.add_argument("digest", help="sha256:<64 hex>, e.g. the deployed backend_digest")
+    parser.add_argument("--runtime-dir", type=Path, default=defaults.runtime_dir)
+    parser.add_argument("--state-dir", type=Path, default=defaults.state_dir)
+    args = parser.parse_args(argv)
+    if DIGEST.fullmatch(args.digest) is None:
+        log("the digest must be sha256:<64 lowercase hex>")
+        return 2
+    if os.geteuid() != 0:
+        log("must run as root (reads ghcr.env for the registry)")
+        return 2
+    settings = Settings(runtime_dir=args.runtime_dir, state_dir=args.state_dir)
+    try:
+        credentials = load_registry_credentials(settings.runtime_dir / "ghcr.env", protected_secret_file)
+    except (DeployError, OSError) as exc:
+        log(f"registry credentials unusable: {exc.code if isinstance(exc, DeployError) else type(exc).__name__}")
+        return 1
+    hosts = (settings.backend_repository.split("/", 1)[0],)
+    registry = ImagetoolsRegistry(
+        subprocess_runner, lambda: docker_auth(settings.state_dir, credentials, hosts))
+    image = f"{settings.backend_repository}@{args.digest}"
+    try:
+        provenance_verifier(settings, subprocess_runner, registry, https_get).verify(image)
+    except DeployError as exc:
+        log(f"NOT verified: {exc.code}")
+        return 1
+    print(f"verified: {image}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["verify-provenance"]:
+        return verify_provenance(argv[1:])
     args = _parser().parse_args(argv)
     if args.recreate and (args.retry or args.rollback_drill):
         log("--recreate cannot be combined with --retry or --rollback-drill")
@@ -2312,7 +2756,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         mirror=mirror, mirror_user=args.mirror_user or owner, remote=args.remote,
         branch=args.branch, runtime_dir=args.runtime_dir, state_dir=args.state_dir,
         lock_file=args.lock_file, backend_repository=args.backend_repository,
-        frontend_repository=args.frontend_repository, network=args.network,
+        network=args.network,
         postgres_container=args.postgres_container, db_user=args.db_user, db_name=args.db_name,
         dr_root=args.dr_root, ops_root=args.ops_root, uv=args.uv,
         backup_user=args.backup_user or owner, dry_run=args.dry_run, retry=args.retry,
@@ -2332,7 +2776,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not settings.dry_run:
             notify("critical", f"bfx-deploy cannot use registry credentials ({code})")
         return 1
-    hosts = (settings.backend_repository.split("/", 1)[0], settings.frontend_repository.split("/", 1)[0])
+    hosts = (settings.backend_repository.split("/", 1)[0],)
     deployer = Deployer(
         settings, runner=subprocess_runner,
         registry=ImagetoolsRegistry(

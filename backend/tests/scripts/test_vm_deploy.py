@@ -12,14 +12,19 @@ migration ran, and the target's tooling is installed only once it deployed.
 """
 from __future__ import annotations
 
+import base64
+import contextlib
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import shutil
 import sys
-from collections.abc import Callable, Mapping, Sequence
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -43,26 +48,34 @@ def _load(name: str, path: Path) -> ModuleType:
 bfx = _load("vm_ops_bfx_deploy_under_test", ROOT / "deploy/vm/ops/bfx_deploy.py")
 
 BACKEND = "ghcr.io/will413028/bfx-funding-bot-backend"
-FRONTEND = "ghcr.io/will413028/bfx-funding-bot-frontend"
 REV_OLD = "a" * 40
 REV_NEW = "b" * 40
-OLD_B, OLD_F = "sha256:" + "1" * 64, "sha256:" + "2" * 64
-NEW_B, NEW_F = "sha256:" + "3" * 64, "sha256:" + "4" * 64
+
+
+def _manifest(name: str) -> bytes:
+    """An image index as the registry serves it; its digest is the sha256 of these bytes."""
+    return json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
+                       "annotations": {"test": name}}, indent=2).encode()
+
+
+def _digest(manifest: bytes) -> str:
+    return "sha256:" + hashlib.sha256(manifest).hexdigest()
+
+
+MANIFESTS = {_digest(m): m for m in (_manifest("old"), _manifest("new"), _manifest("rebuilt"))}
+OLD_B, NEW_B, REBUILT_B = MANIFESTS
 OLD_ATTEMPT = "11111111-1111-4111-8111-111111111111"
 CI_RUN = "https://github.com/Will413028/bfx-funding-bot/actions/runs/123456789"
 REAL_COMPOSE_TEXT = (ROOT / "deploy/vm/docker-compose.app.yml").read_text(encoding="utf-8")
 FIXTURES = Path(__file__).parent / "fixtures"
-# The release shapes the deployer still meets as rollback targets, frozen from main: before
-# 9d-4 (bot, webapi, frontend; most tests vary this one) and 9d-4 (plus the ingress, the
-# web API still on bfx_default). The real file (9d-5: the web API in the holder's
-# namespace, no frontend) is deployed on its own (test_the_real_release_file_deploys...).
+# Earlier release shapes, frozen from main without their frontend service (9d-5 removed
+# it): before 9d-4 (bot and webapi only; most tests vary this one) and 9d-4 (plus the
+# ingress, the web API still on bfx_default). The real file (9d-5: the web API in the
+# holder's namespace) is deployed on its own (test_the_real_release_file_deploys...).
 COMPOSE_TEXT = (FIXTURES / "docker-compose.app.pre-9d4.yml").read_text(encoding="utf-8")
 INGRESS_9D4_TEXT = (FIXTURES / "docker-compose.app.9d4.yml").read_text(encoding="utf-8")
 assert "tailscale" not in COMPOSE_TEXT.partition("\nservices:")[2]
 LIVE_ENV_TEXT = (ROOT / "deploy/vm/live.env").read_text(encoding="utf-8")
-# From 9d-5 the compose file has no frontend service (and CI builds no frontend image).
-NO_FRONTEND_TEXT = COMPOSE_TEXT[:COMPOSE_TEXT.index("  frontend:\n")] \
-    + COMPOSE_TEXT[COMPOSE_TEXT.index("networks:\n  bfx_default:\n    external"):]
 TAILSCALE = "docker.io/tailscale/tailscale@sha256:" + "c" * 64
 SERVE_PATH = "deploy/vm/tailscale/serve.json"
 # The 9d-4 shape in miniature: a third-party sidecar and a file-backed config.
@@ -94,7 +107,7 @@ HOLDER = f"""  netns:
 
 """
 CONFIGS = "configs:\n  ts-serve:\n    file: ./tailscale/serve.json\n"
-CONTAINER_NAMES = {"bot": "bfx-bot", "webapi": "bfx-webapi", "frontend": "bfx-frontend",
+CONTAINER_NAMES = {"bot": "bfx-bot", "webapi": "bfx-webapi",
                    "tailscale": "bfx-tailscale", "netns": "bfx-netns"}
 SERVICE_OF = {container: service for service, container in CONTAINER_NAMES.items()}
 
@@ -110,9 +123,10 @@ def with_holder(text: str) -> str:
 
 
 # The 9d-5 shape: the web API runs in the holder's network namespace.
-WEBAPI_NETWORKS = "    networks:\n      bfx_default: {}\n\n  frontend:"
-JOINED_TEXT = with_holder(COMPOSE_TEXT).replace(
-    WEBAPI_NETWORKS, "    network_mode: service:netns\n\n  frontend:")
+WEBAPI_NETWORKS = "    networks:\n      bfx_default: {}\n\nnetworks:\n"
+assert COMPOSE_TEXT.count(WEBAPI_NETWORKS) == 1
+JOINED_TEXT = with_holder(COMPOSE_TEXT.replace(
+    WEBAPI_NETWORKS, "    network_mode: service:netns\n\nnetworks:\n"))
 assert JOINED_TEXT.count("network_mode: service:netns") == 1
 
 
@@ -172,15 +186,24 @@ class FakeRegistry:
     def __init__(self) -> None:
         self.refs = {
             f"{BACKEND}:main": NEW_B, f"{BACKEND}:sha-{REV_NEW}": NEW_B,
-            f"{FRONTEND}:sha-{REV_NEW}": NEW_F,
-            f"{BACKEND}:sha-{REV_OLD}": OLD_B, f"{FRONTEND}:sha-{REV_OLD}": OLD_F,
+            f"{BACKEND}:sha-{REV_OLD}": OLD_B,
         }
         self.labels: dict[str, dict[str, str]] = {
             NEW_B: {bfx.REVISION_LABEL: REV_NEW, bfx.CI_RUN_LABEL: CI_RUN},
-            NEW_F: {bfx.REVISION_LABEL: REV_NEW},
-            OLD_B: {bfx.REVISION_LABEL: REV_OLD}, OLD_F: {bfx.REVISION_LABEL: REV_OLD},
+            OLD_B: {bfx.REVISION_LABEL: REV_OLD},
         }
         self.inspected: list[str] = []
+        # What `imagetools inspect --raw <repository>@<digest>` serves, by digest.
+        self.manifests: dict[str, bytes] = dict(MANIFESTS)
+        self.raw_reads: list[str] = []
+
+    def manifest(self, reference: str) -> bytes:
+        self.raw_reads.append(reference)
+        repository, _, digest = reference.partition("@")
+        assert repository == BACKEND and digest.startswith("sha256:"), reference
+        if digest not in self.manifests:
+            raise bfx.DiscoveryError("registry_inspect_failed")
+        return self.manifests[digest]
 
     def inspect(self, reference: str) -> Any:
         self.inspected.append(reference)
@@ -196,12 +219,11 @@ class FakeLedger:
         self.rows: list[Any] = []
         self.fail_append: set[str] = set()  # outcomes whose append fails
 
-    def seed(self, revision: str, backend: str, frontend: str, outcome: str,
-             attempt_id: str = OLD_ATTEMPT) -> None:
+    def seed(self, revision: str, backend: str, outcome: str, attempt_id: str = OLD_ATTEMPT) -> None:
         self.rows.append(bfx.LedgerEntry(
             attempt_id=attempt_id,
             started_at="2026-09-24T00:00:00+00:00", finished_at="2026-09-24T00:01:00+00:00",
-            source_revision=revision, backend_digest=backend, frontend_digest=frontend,
+            source_revision=revision, backend_digest=backend,
             migrations_applied=False, outcome=outcome, detail="seed"))
 
     def _row(self, index: int) -> Any:
@@ -209,7 +231,6 @@ class FakeLedger:
         return bfx.LedgerRow(id=index + 1, attempt_id=entry.attempt_id,
                              source_revision=entry.source_revision,
                              backend_digest=entry.backend_digest,
-                             frontend_digest=entry.frontend_digest,
                              outcome=entry.outcome,
                              migrations_applied=entry.migrations_applied, ci_run=entry.ci_run)
 
@@ -269,6 +290,14 @@ class FakeHost:
     envs: list[Mapping[str, str] | None] = field(default_factory=list)
     commits: set[str] = field(default_factory=lambda: {REV_OLD, REV_NEW})
     on_main: set[str] = field(default_factory=lambda: {REV_OLD, REV_NEW})
+    # The commit graph: child -> parent (`git merge-base --is-ancestor` walks it).
+    parents: dict[str, str] = field(default_factory=lambda: {REV_NEW: REV_OLD})
+    # The pinned gh: whether it exists, the version it reports, and what a successful
+    # `attestation verify` prints (the bundles themselves come from FakeGitHub).
+    gh_present: bool = True
+    gh_version: str = bfx.GH_VERSION
+    gh_verify_stdout: str | None = None   # overrides the JSON a successful verify prints
+    gh_verify_exit: int = 0               # the exit code that goes with it
     files: dict[tuple[str, str], str] = field(default_factory=dict)
     diffs: dict[tuple[str, str], list[str]] = field(default_factory=dict)
     heads: tuple[str, ...] = ("h2",)
@@ -317,13 +346,11 @@ class FakeHost:
             for path, text in TOOLING.items():
                 self.files[(revision, path)] = text
         self.diffs.setdefault((REV_OLD, REV_NEW), ["docs/runbooks/offsite-dr.md"])
-        self.start_release(REV_OLD, OLD_B, OLD_F, OLD_ATTEMPT)
+        self.start_release(REV_OLD, OLD_B, OLD_ATTEMPT)
 
-    def start_release(self, revision: str, backend: str, frontend: str, deployment_id: str) -> None:
+    def start_release(self, revision: str, backend: str, deployment_id: str) -> None:
         for service in ("bot", "webapi"):
             self.running[service] = (f"{BACKEND}@{backend}", backend, revision, deployment_id)
-        self.running["frontend"] = (f"{FRONTEND}@{frontend}", frontend, revision, deployment_id)
-        for service in ("bot", "webapi", "frontend"):
             self.create(service)
 
     def _tick(self) -> int:
@@ -365,6 +392,8 @@ class FakeHost:
         if any(call[:len(prefix)] == prefix for prefix in self.timeouts):
             raise bfx.CommandError(f"timeout:{bfx._describe(call)}", timed_out=True)
         ok = bfx.CommandResult(0, "", "")
+        if call[0] == bfx.GH_BINARY:
+            return self._gh(call[1:], env)
         if call[:4] == ("runuser", "-u", "ubuntu", "--") and call[4] == "git":
             assert call[5] == "-C"
             return self._git(Path(call[6]), call[7:])
@@ -438,10 +467,44 @@ class FakeHost:
             return ok
         raise AssertionError(f"unexpected command: {call}")
 
-    def frontend_status(self, url: str, timeout: float) -> int:
-        assert url == "http://127.0.0.1:3001/"
-        running = self.running.get("frontend")
-        return 200 if running and running[1] not in self.unhealthy else 503
+    def _gh(self, args: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
+        """gh 2.102.0's answers: `--version`, and `attestation verify <file> --bundle <file>`
+        the way gh decides it: the subject is the sha256 of the file's bytes, and the bundle
+        must name that digest and satisfy every policy flag (SLSA provenance by default)."""
+        if not self.gh_present:
+            raise bfx.CommandError("not_executable:gh:FileNotFoundError")
+        assert env is not None
+        if args == ("--version",):
+            return bfx.CommandResult(0, f"gh version {self.gh_version} (2026-09-30)\n"
+                                        f"https://github.com/cli/cli/releases/tag/v{self.gh_version}\n", "")
+        assert args[:2] == ("attestation", "verify") and not args[2].startswith("-"), args
+        subject = "sha256:" + hashlib.sha256(Path(args[2]).read_bytes()).hexdigest()
+        flags = {"--deny-self-hosted-runners"}
+        options: dict[str, str] = {}
+        rest = list(args[3:])
+        while rest:
+            name = rest.pop(0)
+            if name in flags:
+                options[name] = ""
+            else:
+                options[name] = rest.pop(0)
+        bundle = json.loads(Path(options["--bundle"]).read_text())
+        refusal = (
+            "no attestations found with predicate type https://slsa.dev/provenance/v1"
+            if bundle["predicateType"] != options.get("--predicate-type", SLSA)
+            else "no matching attestations: the subject digest differs" if bundle["subject"] != subject
+            else "expected repository" if bundle["repository"] != options.get("--repo")
+            else "expected BuildSignerURI" if bundle["signerWorkflow"] != options.get("--signer-workflow")
+            else "expected SourceRepositoryRef" if bundle["sourceRef"] != options.get("--source-ref")
+            else "self-hosted runner" if "--deny-self-hosted-runners" in options
+            and bundle["runner"] != "github-hosted"
+            else None
+        )
+        if refusal is not None:
+            return bfx.CommandResult(1, "", f"Error: verifying with issuer \"sigstore.dev\": {refusal}")
+        stdout = self.gh_verify_stdout if self.gh_verify_stdout is not None else json.dumps(
+            [{"verificationResult": {"statement": {"subject": [{"digest": {"sha256": subject[7:]}}]}}}])
+        return bfx.CommandResult(self.gh_verify_exit, stdout, "")
 
     def _git(self, where: Path, args: tuple[str, ...]) -> Any:
         if where != self.mirror:
@@ -457,7 +520,17 @@ class FakeHost:
         if args[:2] == ("cat-file", "-e"):
             return bfx.CommandResult(0 if args[2].removesuffix("^{commit}") in self.commits else 128, "", "")
         if args[:2] == ("merge-base", "--is-ancestor"):
-            return bfx.CommandResult(0 if args[2] in self.on_main else 1, "", "")
+            ancestor, descendant = args[2], args[3]
+            if descendant == "refs/remotes/origin/main":
+                return bfx.CommandResult(0 if ancestor in self.on_main else 1, "", "")
+            if ancestor not in self.commits or descendant not in self.commits:
+                return bfx.CommandResult(128, "", "fatal: Not a valid commit name")
+            walk: str | None = descendant
+            while walk is not None:
+                if walk == ancestor:
+                    return bfx.CommandResult(0, "", "")
+                walk = self.parents.get(walk)
+            return bfx.CommandResult(1, "", "")
         if args[0] == "show":
             revision, _, path = args[1].partition(":")
             content = self.files.get((revision, path))
@@ -588,7 +661,7 @@ class FakeHost:
                 self.running[service] = (image, "", "", "")
             else:
                 digest = image.rpartition("@")[2]
-                assert digest in {env["BFX_BACKEND_DIGEST"], env.get("BFX_FRONTEND_DIGEST")}
+                assert digest == env["BFX_BACKEND_DIGEST"]
                 self.running[service] = (image, digest, *identity)
         return bfx.CommandResult(0, "", "")
 
@@ -623,6 +696,74 @@ class FakeHost:
         return bfx.CommandResult(1 if missing else 0, json.dumps(records), "no such container" if missing else "")
 
 
+SLSA = "https://slsa.dev/provenance/v1"
+API = "https://api.github.com/repos/Will413028/bfx-funding-bot/attestations/"
+BUNDLE_HOST = "https://tmaproduction.blob.core.windows.net/attestations/"
+
+
+def snappy_literals(data: bytes) -> bytes:
+    """Snappy raw block made of literals only (a valid encoding; the real fixture has copies)."""
+    out, n = bytearray(), len(data)
+    while True:
+        out.append((n & 0x7F) | (0x80 if n >= 0x80 else 0))
+        n >>= 7
+        if not n:
+            break
+    for start in range(0, len(data), 65536):
+        chunk = data[start:start + 65536]
+        size = len(chunk) - 1
+        if size < 60:
+            out.append(size << 2)
+        elif size < 256:
+            out += bytes([60 << 2, size])
+        else:
+            out += bytes([61 << 2]) + size.to_bytes(2, "little")
+        out += chunk
+    return bytes(out)
+
+
+def bundle(digest: str, **changes: str) -> dict[str, str]:
+    """What FakeHost's gh reads from a bundle: release.yml on main, GitHub-hosted, SLSA."""
+    return {"subject": digest, "predicateType": SLSA, "repository": "Will413028/bfx-funding-bot",
+            "signerWorkflow": "Will413028/bfx-funding-bot/.github/workflows/release.yml",
+            "sourceRef": "refs/heads/main", "runner": "github-hosted", **changes}
+
+
+class FakeGitHub:
+    """api.github.com's attestation list and the bundle store, as bfx-deploy reads them:
+    anonymous, the list naming each bundle by `bundle_url`, the bundle snappy-compressed."""
+
+    def __init__(self) -> None:
+        # digest -> the bundles listed for it, in the API's order.
+        self.attestations: dict[str, list[dict[str, str]]] = {
+            digest: [bundle(digest)] for digest in (OLD_B, NEW_B, REBUILT_B)}
+        self.answers: dict[str, bfx.HttpResponse] = {}     # URL -> a canned answer
+        self.down = False
+        self.requests: list[tuple[str, dict[str, str]]] = []
+
+    def __call__(self, url: str, *, headers: Mapping[str, str], timeout: float,
+                 limit: int) -> Any:
+        self.requests.append((url, dict(headers)))
+        assert url.startswith("https://") and timeout <= 60
+        if self.down:
+            raise OSError("Temporary failure in name resolution")
+        if url in self.answers:
+            return self.answers[url]
+        if url.startswith(API):
+            digest = url.removeprefix(API).partition("?")[0]
+            listed = self.attestations.get(digest)
+            if listed is None:
+                return bfx.HttpResponse(404, b'{"message":"Not Found"}', {})
+            body = json.dumps({"attestations": [
+                {"repository_id": 1, "bundle": None, "initiator": "unknown",
+                 "bundle_url": f"{BUNDLE_HOST}{digest}/{n}?sig=x"} for n in range(len(listed))]})
+            return bfx.HttpResponse(200, body.encode()[:limit + 1], {"content-type": "application/json"})
+        assert url.startswith(BUNDLE_HOST), url
+        digest, _, n = url.removeprefix(BUNDLE_HOST).partition("?")[0].partition("/")
+        body = snappy_literals(json.dumps(self.attestations[digest][int(n)]).encode())
+        return bfx.HttpResponse(200, body[:limit + 1], {"content-type": "application/x-snappy"})
+
+
 class FakeClock:
     def __init__(self) -> None:
         self.now = 1_790_000_000.0
@@ -642,6 +783,7 @@ class Harness:
     clock: FakeClock
     notices: list[tuple[str, str]]
     settings: Any
+    github: FakeGitHub = field(default_factory=FakeGitHub)
 
     def deployer(self, **overrides: Any) -> Any:
         settings = self.settings
@@ -651,8 +793,12 @@ class Harness:
         return bfx.Deployer(
             settings, runner=self.host, registry=self.registry, ledger=self.ledger,
             notify=lambda level, text: self.notices.append((level, text)),
-            clock=self.clock.time, sleep=self.clock.sleep, http=self.host.frontend_status,
+            clock=self.clock.time, sleep=self.clock.sleep,
             secret_check=lambda path: None,
+            http=self.github,
+            # The real check, with this test's user and group standing in for root and 4600.
+            secret_file_check=lambda path: bfx.shared_secret_file(
+                path, owner_uid=os.getuid(), group_gid=os.getgid()),
         )
 
     def run(self, **overrides: Any) -> int:
@@ -662,9 +808,28 @@ class Harness:
 VALID_ENV = {
     "bot.env": "DATABASE_URL=postgresql://bfx_bot:x@bfx-postgres:5432/bfx\nBFX_ADMIN_TOKEN=t\n",
     "webapi.env": "DATABASE_URL=postgresql://bfx_webapi:x@bfx-postgres:5432/bfx\n",
-    "frontend.env": "DATABASE_URL=postgresql://bfx_webauth:x@bfx-postgres:5432/bfx\n",
     "migrate.env": "DATABASE_URL=postgresql://bfx:x@bfx-postgres:5432/bfx\n",
 }
+
+
+# The real file's secret files (9h), as the cutover writes them: <runtime>/secrets/<service>/<KEY>.
+SECRET_FILES = {
+    f"{service}/{key}": f"value-of-{service}-{key}"
+    for service, keys in (("bot", ("BFX_ADMIN_READ_TOKEN", "BFX_ADMIN_TOKEN", "BFX_VAULT_KEK",
+                                    "DATABASE_URL", "TELEGRAM_BOT_TOKEN")),
+                          ("webapi", ("BFX_ADMIN_READ_TOKEN", "DATABASE_URL")))
+    for key in keys
+}
+
+
+def write_secret_files(runtime: Path) -> None:
+    for relative, value in SECRET_FILES.items():
+        path = runtime / "secrets" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value)
+        path.chmod(0o640)
+        for directory in (path.parent, path.parent.parent):
+            directory.chmod(0o700)          # root:root 0700 on the VM (deploy.md)
 
 
 @pytest.fixture
@@ -673,6 +838,7 @@ def harness(tmp_path: Path) -> Harness:
     runtime.mkdir()
     for name, text in VALID_ENV.items():
         (runtime / name).write_text(text)
+    write_secret_files(runtime)
     mirror = tmp_path / "mirror"
     units = tmp_path / "units"
     units.mkdir()
@@ -683,7 +849,7 @@ def harness(tmp_path: Path) -> Harness:
         uv="uv", backup_user="ubuntu", restore_evidence=tmp_path / "dr-evidence/restore-ledger.json",
     )
     ledger = FakeLedger()
-    ledger.seed(REV_OLD, OLD_B, OLD_F, "deployed")
+    ledger.seed(REV_OLD, OLD_B, "deployed")
     host = FakeHost(mirror=mirror, dr_root=settings.dr_root,
                     restore_evidence=settings.restore_evidence)
     return Harness(host=host, registry=FakeRegistry(),
@@ -725,7 +891,7 @@ def _started(harness: Harness) -> list[Any]:
 
 
 def test_nothing_happens_when_main_already_runs(harness: Harness) -> None:
-    harness.ledger.seed(REV_NEW, NEW_B, NEW_F, "deployed", attempt_id="n")
+    harness.ledger.seed(REV_NEW, NEW_B, "deployed", attempt_id="n")
     rows = len(harness.ledger.rows)
     assert harness.run() == 0
     assert harness.host.calls == [NETNS_INSPECT]       # no holder yet: nothing else
@@ -735,7 +901,7 @@ def test_nothing_happens_when_main_already_runs(harness: Harness) -> None:
 @pytest.mark.parametrize("outcome", ["rolled_back", "failed", "started"])
 def test_a_digest_already_attempted_is_not_retried_every_tick(harness: Harness, outcome: str) -> None:
     # `started` without a terminal row: the attempt was interrupted (crash, kill).
-    harness.ledger.seed(REV_NEW, NEW_B, NEW_F, outcome, attempt_id="n")
+    harness.ledger.seed(REV_NEW, NEW_B, outcome, attempt_id="n")
     assert harness.run() == 0
     assert harness.host.calls == ([NETNS_INSPECT] if outcome == "rolled_back" else [])
     assert harness.notices == []
@@ -763,14 +929,14 @@ def test_release_without_migration_deploys_by_digest(harness: Harness) -> None:
     env = host.envs[host.index(COMPOSE_UP)]
     assert env is not None
     assert env["BFX_BACKEND_IMAGE"] == f"{BACKEND}@{NEW_B}"
-    assert env["BFX_FRONTEND_IMAGE"] == f"{FRONTEND}@{NEW_F}"
+    assert not any(key.startswith("BFX_FRONTEND") for key in env)
     assert env["BFX_SOURCE_REVISION"] == REV_NEW and "BFX_CHANGE_CLASS" not in env
     # Compose reads the env files bfx-deploy validated, not a separate default.
     assert env["BFX_RUNTIME_DIR"] == str(harness.settings.runtime_dir)
     row = harness.ledger.last
     assert (row.outcome, row.migrations_applied) == ("deployed", False)
     assert "class=" not in row.detail and "class=" not in harness.notices[-1][1]
-    assert (row.backend_digest, row.frontend_digest, row.source_revision) == (NEW_B, NEW_F, REV_NEW)
+    assert (row.backend_digest, row.source_revision) == (NEW_B, REV_NEW)
     assert harness.notices[-1][0] == "info"
     assert host.stopped == []
     assert host.count(_is(("docker", "tag", f"{BACKEND}@{NEW_B}", "bfx-bot:local"))) == 1
@@ -792,10 +958,8 @@ def test_started_row_precedes_the_containers_and_names_their_deployment_id(harne
     assert ledger_rows_at_compose == [len(harness.ledger.rows) - 1]  # started row already there
     assert started.attempt_id == finished.attempt_id
     assert started.finished_at is None and finished.finished_at is not None
-    assert (started.source_revision, started.backend_digest, started.frontend_digest,
-            started.started_at) == (
-        finished.source_revision, finished.backend_digest, finished.frontend_digest,
-        finished.started_at)
+    assert (started.source_revision, started.backend_digest, started.started_at) == (
+        finished.source_revision, finished.backend_digest, finished.started_at)
     env = harness.host.envs[harness.host.index(COMPOSE_UP)]
     assert env is not None and env["BFX_DEPLOYMENT_ID"] == started.attempt_id
     assert harness.host.running["bot"][3] == started.attempt_id
@@ -850,7 +1014,8 @@ def test_pull_uses_a_throwaway_docker_config_when_credentials_exist(harness: Har
     deployer = harness.deployer()
     deployer._registry_credentials = ("will413028", "ghp_token")
     assert deployer.run() == 0
-    assert len(harness.host.docker_configs) == 2
+    assert harness.host.pulls == [(f"{BACKEND}@{NEW_B}", True)]
+    assert len(harness.host.docker_configs) == 1
     assert set(harness.host.docker_configs[0]["auths"]) == {"ghcr.io"}
     leftovers = list((harness.settings.state_dir).glob("docker-auth-*"))
     assert leftovers == []
@@ -1195,13 +1360,13 @@ def test_a_restore_test_first_drops_other_digests_so_the_candidate_is_unambiguou
     host = harness.host
     host.current = ("h1",)
     stale = "sha256:" + "9" * 64
-    host.local_digests = {BACKEND: [OLD_B, NEW_B, stale], FRONTEND: [OLD_F, NEW_F]}
+    host.local_digests = {BACKEND: [OLD_B, NEW_B, stale]}
     assert harness.run() == 0
     removed = host.index(_is(("docker", "image", "rm", f"{BACKEND}@{stale}")))
     assert removed < host.index(RESTORE_TEST)
     assert not any(call[:3] == ("docker", "image", "rm") and call[-1].endswith(digest)
                    for call in host.calls[:host.index(RESTORE_TEST)]
-                   for digest in (OLD_B, NEW_B, OLD_F, NEW_F))
+                   for digest in (OLD_B, NEW_B))
 
 
 def test_a_failed_rehearsal_without_a_migration_leaves_the_running_release_alone(
@@ -1345,7 +1510,6 @@ def test_unhealthy_release_without_migration_rolls_back_to_previous_digests(harn
     rollback_env = host.envs[ups[1]]
     assert rollback_env is not None
     assert rollback_env["BFX_BACKEND_IMAGE"] == f"{BACKEND}@{OLD_B}"
-    assert rollback_env["BFX_FRONTEND_IMAGE"] == f"{FRONTEND}@{OLD_F}"
     assert rollback_env["BFX_SOURCE_REVISION"] == REV_OLD
     # The previous release comes back under its own deployment id.
     assert rollback_env["BFX_DEPLOYMENT_ID"] == OLD_ATTEMPT and "BFX_CHANGE_CLASS" not in rollback_env
@@ -1378,7 +1542,7 @@ def test_unhealthy_release_after_migration_stops_the_bot_and_webapi_without_roll
 
 def test_unhealthy_first_deployment_stops_the_bot(harness: Harness) -> None:
     harness.ledger.rows.clear()
-    harness.host.unhealthy = {NEW_F}
+    harness.host.unhealthy = {NEW_B}
     assert harness.run() == 1
     assert harness.host.count(COMPOSE_UP) == 1
     assert harness.host.stopped == ["bfx-bot"]
@@ -1426,11 +1590,13 @@ def test_compose_failure_on_rollback_too_stops_the_bot(harness: Harness) -> None
 
 
 def test_health_timeout_waits_the_configured_budget_then_rolls_back(harness: Harness) -> None:
-    harness.host.unhealthy = {NEW_F}
+    harness.host.unhealthy = {NEW_B}
     start = harness.clock.now
     assert harness.run() == 1
-    assert "health_timeout:frontend" in harness.ledger.last.detail
-    assert harness.clock.now - start >= harness.settings.health_timeouts["frontend"]
+    row = harness.ledger.last
+    # The web API's budget (120 s) runs out before the bot's (300 s).
+    assert row.outcome == "rolled_back" and "health_timeout:webapi" in row.detail
+    assert harness.clock.now - start >= harness.settings.health_timeouts["webapi"]
 
 
 @pytest.mark.parametrize("setup", [
@@ -1447,7 +1613,7 @@ def test_a_deploy_without_a_migration_never_stops_the_webapi(harness: Harness, s
         host.unhealthy = {NEW_B, OLD_B}
     elif setup == "first_deployment":
         harness.ledger.rows.clear()
-        host.unhealthy = {NEW_F}
+        host.unhealthy = {NEW_B}
     elif setup == "recreate_failed":
         host.unhealthy = {OLD_B}
     harness.run(recreate=setup == "recreate_failed")
@@ -1487,49 +1653,35 @@ def _release(harness: Harness, revision: str = REV_NEW) -> Path:
     return harness.settings.state_dir / "releases" / revision
 
 
-def _without_frontend(harness: Harness, revision: str = REV_NEW) -> None:
-    """A 9d-5-style release: no frontend service, and CI built no frontend image."""
-    harness.host.files[(revision, bfx.COMPOSE_PATH)] = NO_FRONTEND_TEXT
-    harness.registry.refs.pop(f"{FRONTEND}:sha-{revision}")
+# The 9d-4 frontend's service, as a release that brought one back would name it.
+FRONTEND_IMAGE = "ghcr.io/will413028/bfx-funding-bot-frontend@sha256:" + "4" * 64
+FRONTEND_SERVICE = f"""  frontend:
+    image: {FRONTEND_IMAGE}
+    pull_policy: never
+    container_name: bfx-frontend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "true"]
+    networks:
+      bfx_default: {{}}
+
+"""
 
 
-def test_a_release_without_a_frontend_deploys_and_removes_the_old_frontend(harness: Harness) -> None:
-    _without_frontend(harness)
-    # Its env file is not the release's any more: an unreadable one blocks nothing.
-    (harness.settings.runtime_dir / "frontend.env").write_text("BROKEN='quoted'\n")
-    assert harness.run() == 0
-    host = harness.host
-    up = host.calls[host.index(COMPOSE_UP)]
-    assert up[-2:] == ("bot", "webapi") and "--remove-orphans" in up
-    assert "frontend" not in host.running          # the orphan went with --remove-orphans
-    env = host.envs[host.index(COMPOSE_UP)]
-    assert env is not None and "BFX_FRONTEND_IMAGE" not in env
-    row = harness.ledger.last
-    assert (row.outcome, row.frontend_digest) == ("deployed", None)
-    assert [s.frontend_digest for s in _started(harness)] == [None]
-    assert all(image != f"{FRONTEND}@{NEW_F}" for image, _ in host.pulls)
-
-
-def test_a_release_with_a_frontend_still_deploys_all_three(harness: Harness) -> None:
-    assert harness.run() == 0
-    host = harness.host
-    assert host.calls[host.index(COMPOSE_UP)][-3:] == ("bot", "frontend", "webapi")
-    assert harness.ledger.last.frontend_digest == NEW_F
-
-
-def test_rollback_to_a_release_with_a_frontend_brings_it_back(harness: Harness) -> None:
-    _without_frontend(harness)
-    harness.host.unhealthy = {NEW_B}
+def test_a_release_with_a_frontend_service_is_refused_before_any_change(harness: Harness) -> None:
+    """9d-5 removed the frontend and 9d-6 its transitional support: a frontend image is no
+    image of the release's own, so its compose file is refused like any other."""
+    at = COMPOSE_TEXT.index("networks:\n  bfx_default:\n    external")
+    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = COMPOSE_TEXT[:at] + FRONTEND_SERVICE + COMPOSE_TEXT[at:]
+    running = dict(harness.host.running)
     assert harness.run() == 1
-    assert harness.ledger.last.outcome == "rolled_back"
-    assert harness.host.running["frontend"] == (f"{FRONTEND}@{OLD_F}", OLD_F, REV_OLD, OLD_ATTEMPT)
-
-
-def test_a_frontend_image_of_a_release_without_a_frontend_is_not_recorded(harness: Harness) -> None:
-    harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = NO_FRONTEND_TEXT
-    assert harness.run() == 0
-    assert harness.ledger.last.frontend_digest is None
-    assert all(image != f"{FRONTEND}@{NEW_F}" for image, _ in harness.host.pulls)
+    row = harness.ledger.last
+    assert (row.outcome, row.detail) == (
+        "failed", "precheck:compose_image_not_allowed:frontend; running release untouched")
+    assert _bot_untouched(harness) and harness.host.running == running
+    assert harness.host.count(PULL) == harness.host.count(COMPOSE_UP) == 0
+    assert not any(ref.startswith("ghcr.io/will413028/bfx-funding-bot-frontend")
+                   for ref in harness.registry.inspected)
 
 
 def test_env_files_are_the_ones_the_release_compose_file_names(harness: Harness) -> None:
@@ -1548,8 +1700,7 @@ def test_env_files_are_the_ones_the_release_compose_file_names(harness: Harness)
     (harness.settings.runtime_dir / "tailscale.env").write_text("TS_HOSTNAME=bfx-ops\n")
     assert deployer.run() == 0
     runtime = harness.settings.runtime_dir
-    assert sorted(p.name for p in checked) == ["bot.env", "frontend.env", "migrate.env",
-                                               "tailscale.env", "webapi.env"]
+    assert sorted(p.name for p in checked) == ["bot.env", "migrate.env", "tailscale.env", "webapi.env"]
     assert all(p.parent == runtime for p in checked)
 
 
@@ -1580,15 +1731,166 @@ def test_a_compose_file_the_deployer_cannot_run_is_refused_before_any_change(
     assert harness.host.count(PULL) == harness.host.count(COMPOSE_UP) == 0
 
 
+# --------------------------------------------------------------------------- secret files (9h)
+#
+# Mutations (one at a time; revert after each): drop the group check from
+# shared_secret_file (test_a_secret_file_must_be_root_group_4600_0640_and_not_empty
+# fails); stop checking secret files in _validate_env_files
+# (test_every_secret_file_the_release_names_is_checked_before_any_change fails);
+# drop the own-service check (test_a_secret_the_deployer_cannot_check_is_refused[other] fails);
+# drop the directory loop from shared_secret_file or the write check from secret_directory
+# (test_a_secret_file_is_trusted_only_under_root_owned_unwritable_directories fails).
+
+REAL_SECRET_NAMES = sorted(SECRET_FILES)
+# The release file with the secret files (9h): the tracked one.
+SECRETS_TEXT = REAL_COMPOSE_TEXT
+
+
+def test_a_secret_file_must_be_root_group_4600_0640_and_not_empty(tmp_path: Path) -> None:
+    uid, gid = os.getuid(), os.getgid()
+    secret = tmp_path / "secrets/bot/BFX_VAULT_KEK"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("kek")
+    secret.chmod(0o640)
+    bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+    with pytest.raises(bfx.DeployError, match=r"^secret_file_not_root_owned:bot/BFX_VAULT_KEK$"):
+        bfx.shared_secret_file(secret, owner_uid=uid + 1, group_gid=gid)
+    with pytest.raises(bfx.DeployError, match=r"^secret_file_group_not_4600:bot/BFX_VAULT_KEK$"):
+        bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid + 1)
+    for mode in (0o600, 0o644, 0o660, 0o440):
+        secret.chmod(mode)
+        with pytest.raises(bfx.DeployError, match=r"^secret_file_mode_not_0640:bot/BFX_VAULT_KEK$"):
+            bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+    secret.chmod(0o640)
+    secret.write_text("")
+    with pytest.raises(bfx.DeployError, match=r"^secret_file_empty:bot/BFX_VAULT_KEK$"):
+        bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+    secret.write_text("kek")
+    link = tmp_path / "secrets/bot/BFX_ADMIN_TOKEN"
+    link.symlink_to(secret)
+    with pytest.raises(bfx.DeployError, match=r"^secret_file_missing:bot/BFX_ADMIN_TOKEN$"):
+        bfx.shared_secret_file(link, owner_uid=uid, group_gid=gid)
+    directory = tmp_path / "secrets/bot/TELEGRAM_BOT_TOKEN"
+    directory.mkdir()
+    with pytest.raises(bfx.DeployError, match=r"^secret_file_missing:bot/TELEGRAM_BOT_TOKEN$"):
+        bfx.shared_secret_file(directory, owner_uid=uid, group_gid=gid)
+    with pytest.raises(bfx.DeployError, match=r"^secret_file_missing:bot/DATABASE_URL$"):
+        bfx.shared_secret_file(tmp_path / "secrets/bot/DATABASE_URL", owner_uid=uid, group_gid=gid)
+
+
+def test_a_secret_file_is_trusted_only_under_root_owned_unwritable_directories(
+    tmp_path: Path,
+) -> None:
+    """Whoever can write `secrets/` or `secrets/<service>/` can swap the file after the
+    check, so both must be real directories, root-owned and not group or other writable."""
+    uid, gid = os.getuid(), os.getgid()
+    secrets, service = tmp_path / "secrets", tmp_path / "secrets/bot"
+    secret = service / "BFX_VAULT_KEK"
+    service.mkdir(parents=True)
+    secret.write_text("kek")
+    secret.chmod(0o640)
+    for directory in (secrets, service):
+        directory.chmod(0o700)
+    bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+    for directory, label in ((secrets, "secrets/"), (service, "bot/")):
+        for mode in (0o720, 0o702, 0o777):
+            directory.chmod(mode)
+            with pytest.raises(bfx.DeployError, match=rf"^secret_dir_writable_by_others:{label}$"):
+                bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+        directory.chmod(0o750)          # group or other may read or traverse, not write
+        bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+        directory.chmod(0o700)
+    with pytest.raises(bfx.DeployError, match=r"^secret_dir_not_root_owned:secrets/$"):
+        bfx.secret_directory(secrets, owner_uid=uid + 1)
+    with pytest.raises(bfx.DeployError, match=r"^secret_dir_not_root_owned:bot/$"):
+        bfx.secret_directory(service, owner_uid=uid + 1)
+    # A linked service directory (or secrets/ itself) points somewhere unchecked.
+    real = tmp_path / "elsewhere"
+    service.rename(real)
+    service.symlink_to(real)
+    with pytest.raises(bfx.DeployError, match=r"^secret_dir_missing:bot/$"):
+        bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+    service.unlink()
+    real.rename(service)
+    moved = tmp_path / "secrets-real"
+    secrets.rename(moved)
+    secrets.symlink_to(moved)
+    with pytest.raises(bfx.DeployError, match=r"^secret_dir_missing:secrets/$"):
+        bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+
+
+def test_every_secret_file_the_release_names_is_checked_before_any_change(harness: Harness) -> None:
+    _ingress_release(harness, REV_NEW, text=SECRETS_TEXT)
+    checked: list[Path] = []
+    deployer = harness.deployer()
+    deployer._secret_file_check = checked.append
+    assert deployer.run() == 0
+    secrets = harness.settings.runtime_dir / "secrets"
+    assert sorted(path.relative_to(secrets).as_posix() for path in checked) == REAL_SECRET_NAMES
+
+
+@pytest.mark.parametrize(("relative", "damage", "code"), [
+    ("bot/BFX_VAULT_KEK", lambda path: path.chmod(0o644), "secret_file_mode_not_0640:bot/BFX_VAULT_KEK"),
+    ("webapi/DATABASE_URL", lambda path: path.unlink(), "secret_file_missing:webapi/DATABASE_URL"),
+    ("bot/BFX_ADMIN_TOKEN", lambda path: path.write_text(""), "secret_file_empty:bot/BFX_ADMIN_TOKEN"),
+    ("webapi/DATABASE_URL", lambda path: path.parent.chmod(0o770), "secret_dir_writable_by_others:webapi/"),
+])
+def test_an_unprotected_or_missing_secret_file_fails_the_precheck(
+    harness: Harness, relative: str, damage: Callable[[Path], None], code: str,
+) -> None:
+    _ingress_release(harness, REV_NEW, text=SECRETS_TEXT)
+    damage(harness.settings.runtime_dir / "secrets" / relative)
+    assert harness.run() == 1
+    assert harness.ledger.last.detail == f"precheck:{code}; running release untouched"
+    assert harness.host.count(PULL) == harness.host.count(COMPOSE_UP) == 0
+    assert harness.host.stopped == []
+
+
+_BOT_KEK = "      - {source: bot_BFX_VAULT_KEK, target: BFX_VAULT_KEK}\n"
+_WEBAPI_URL = "      - {source: webapi_DATABASE_URL, target: DATABASE_URL}\n"
+_KEK_FILE = "    file: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/secrets/bot/BFX_VAULT_KEK\n"
+
+
+@pytest.mark.parametrize(("old", "new", "code"), [
+    (_KEK_FILE, "    file: /etc/shadow\n", "compose_secret_outside_runtime:bot_BFX_VAULT_KEK"),
+    (_KEK_FILE, "    file: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/secrets/webapi/BFX_VAULT_KEK\n",
+     "compose_secret_outside_runtime:bot_BFX_VAULT_KEK"),
+    (_KEK_FILE, "    environment: BFX_VAULT_KEK\n", "compose_secret_not_file:bot_BFX_VAULT_KEK"),
+    (_KEK_FILE, "    external: true\n", "compose_secret_not_file:bot_BFX_VAULT_KEK"),
+    (_WEBAPI_URL, _WEBAPI_URL + _BOT_KEK, "compose_secret_not_own:webapi"),       # other
+    (_BOT_KEK, "      - {source: bot_BFX_VAULT_KEK, target: /etc/kek}\n",
+     "compose_secret_target:bot:bot_BFX_VAULT_KEK"),
+    (_BOT_KEK, "      - {source: bot_BFX_VAULT_KEK, target: BFX_VAULT_KEK, mode: 0444}\n",
+     "compose_secret_target:bot:bot_BFX_VAULT_KEK"),
+], ids=["absolute", "another_service_dir", "environment", "external", "other",
+        "target", "mode"])
+def test_a_secret_the_deployer_cannot_check_is_refused(
+    harness: Harness, old: str, new: str, code: str,
+) -> None:
+    assert SECRETS_TEXT.count(old) == 1
+    _ingress_release(harness, REV_NEW, text=SECRETS_TEXT.replace(old, new))
+    assert harness.run() == 1
+    assert harness.ledger.last.detail == f"precheck:{code}; running release untouched"
+    assert harness.host.count(PULL) == harness.host.count(COMPOSE_UP) == 0
+
+
+def test_a_release_without_secrets_still_deploys_for_a_rollback(harness: Harness) -> None:
+    """A release from before 9h (env-file secrets only) checks no secret file: the rollback
+    target of the first release that has them."""
+    checked: list[Path] = []
+    deployer = harness.deployer()
+    deployer._secret_file_check = checked.append
+    assert deployer.run() == 0 and checked == []
+
+
 def test_a_third_party_image_is_pulled_by_digest_without_the_registry_token(harness: Harness) -> None:
     harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT, configs=False)
     deployer = harness.deployer()
     deployer._registry_credentials = ("will", "ghcr-token")
     assert deployer.run() == 0
     host = harness.host
-    assert sorted(host.pulls) == sorted([(f"{BACKEND}@{NEW_B}", True), (f"{FRONTEND}@{NEW_F}", True),
-                                         (TAILSCALE, False)])
-    assert host.calls[host.index(COMPOSE_UP)][-4:] == ("bot", "frontend", "tailscale", "webapi")
+    assert sorted(host.pulls) == sorted([(f"{BACKEND}@{NEW_B}", True), (TAILSCALE, False)])
+    assert host.calls[host.index(COMPOSE_UP)][-3:] == ("bot", "tailscale", "webapi")
     assert host.running["tailscale"][0] == TAILSCALE
     # bfx-deploy verified it like the others (name, project, image), without identity env.
     inspected = host.calls[host.index(_is(("docker", "inspect", "--type", "container", "bfx-bot")))]
@@ -1621,7 +1923,6 @@ def test_the_real_release_file_deploys_the_ingress_beside_the_app(harness: Harne
     assert (TAILSCALE, False) in host.pulls
     for joiner in ("tailscale", "webapi"):
         assert host.meta[joiner]["NetworkMode"] == "container:" + host.meta["netns"]["Id"]
-    assert "frontend" not in host.running                          # the orphan, removed
     assert (_release(harness) / "tailscale/serve.json").read_text() == serve
     assert harness.ledger.last.outcome == "deployed"
 
@@ -1914,7 +2215,7 @@ def test_the_cutover_moves_the_web_api_into_the_holder_without_restarting_the_in
     assert "--force-recreate" not in host.calls[host.index(COMPOSE_UP)]
     assert (host.meta["tailscale"]["Id"], host.meta["netns"]["Id"]) == (sidecar, holder)
     assert host.meta["webapi"]["NetworkMode"] == "container:" + holder
-    assert "frontend" not in host.running and harness.ledger.last.outcome == "deployed"
+    assert harness.ledger.last.outcome == "deployed"
 
 
 def test_a_third_party_container_on_another_image_fails_the_deploy(
@@ -1938,12 +2239,12 @@ def test_a_third_party_container_on_another_image_fails_the_deploy(
 
 def test_pruning_never_removes_a_third_party_image(harness: Harness) -> None:
     harness.host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT, configs=False)
-    harness.host.local_digests = {BACKEND: [OLD_B, NEW_B, "sha256:" + "8" * 64], FRONTEND: [OLD_F, NEW_F]}
+    harness.host.local_digests = {BACKEND: [OLD_B, NEW_B, "sha256:" + "8" * 64]}
     assert harness.run() == 0
     removed = [call[-1] for call in harness.host.calls if call[:3] == ("docker", "image", "rm")]
     assert removed == [f"{BACKEND}@sha256:" + "8" * 64]
     listed = [call[-1] for call in harness.host.calls if call[:3] == ("docker", "image", "ls")]
-    assert set(listed) == {BACKEND, FRONTEND}
+    assert listed == [BACKEND]
 
 
 @pytest.mark.parametrize("image", [
@@ -2019,7 +2320,6 @@ def test_a_referenced_config_file_the_revision_lacks_fails_the_precheck(harness:
      "compose_config_not_file:ts-serve"),
     (lambda t: t.replace("file: ./tailscale/serve.json", "environment: HOME"),
      "compose_config_not_file:ts-serve"),
-    (lambda t: t + "secrets:\n  key:\n    file: ./tailscale/serve.json\n", "compose_secrets_refused"),
 ])
 def test_a_config_that_is_not_a_release_file_is_refused(
     harness: Harness, change: Callable[[str], str], code: str,
@@ -2041,7 +2341,7 @@ def test_a_config_tracked_as_a_symlink_is_refused(harness: Harness) -> None:
 
 
 def test_a_foreign_frontend_does_not_block_a_release_without_one(harness: Harness) -> None:
-    _without_frontend(harness)
+    """Only a name the release's own containers take is refused (a launcher-era leftover)."""
     harness.host.foreign = ["bfx-frontend"]
     assert harness.run() == 0
     assert harness.ledger.last.outcome == "deployed"
@@ -2087,7 +2387,7 @@ def test_the_web_api_and_the_holder_it_joins_are_created_in_one_up(harness: Harn
     assert harness.run() == 0
     host = harness.host
     assert host.count(COMPOSE_UP) == 1
-    assert host.calls[host.index(COMPOSE_UP)][-4:] == ("bot", "frontend", "netns", "webapi")
+    assert host.calls[host.index(COMPOSE_UP)][-3:] == ("bot", "netns", "webapi")
     assert host.meta["webapi"]["NetworkMode"] == "container:" + host.meta["netns"]["Id"]
     assert harness.ledger.last.outcome == "deployed"
 
@@ -2197,7 +2497,7 @@ def test_a_dead_namespace_is_repaired_by_recreating_the_web_api_alone(harness: H
 def test_the_already_attempted_branch_repairs_too(harness: Harness) -> None:
     _joined(harness)
     harness.registry.refs[f"{BACKEND}:main"] = NEW_B
-    harness.ledger.seed(REV_NEW, NEW_B, NEW_F, "rolled_back", attempt_id="n")
+    harness.ledger.seed(REV_NEW, NEW_B, "rolled_back", attempt_id="n")
     _break(harness, "restarted")
     assert harness.run() == 0
     assert harness.host.count(_repair) == 1 and harness.host.count(COMPOSE_UP) == 1
@@ -2208,7 +2508,7 @@ def test_no_repair_after_a_failed_or_interrupted_attempt(harness: Harness, outco
     # A failed migration path keeps the bot and the web API stopped on purpose.
     _joined(harness)
     harness.registry.refs[f"{BACKEND}:main"] = NEW_B
-    harness.ledger.seed(REV_NEW, NEW_B, NEW_F, outcome, attempt_id="n")
+    harness.ledger.seed(REV_NEW, NEW_B, outcome, attempt_id="n")
     _break(harness, "recreated")
     assert harness.run() == 0
     assert harness.host.calls == []
@@ -2481,8 +2781,7 @@ def test_recreate_redeploys_the_running_release_through_the_ledger(harness: Harn
     assert "--force-recreate" in compose
     env = host.envs[host.index(COMPOSE_UP)]
     assert env is not None
-    assert (env["BFX_BACKEND_DIGEST"], env["BFX_FRONTEND_DIGEST"], env["BFX_SOURCE_REVISION"]) == (
-        OLD_B, OLD_F, REV_OLD)
+    assert (env["BFX_BACKEND_DIGEST"], env["BFX_SOURCE_REVISION"]) == (OLD_B, REV_OLD)
     assert "BFX_CHANGE_CLASS" not in env
     started, finished = harness.ledger.rows[-2:]
     assert (started.outcome, finished.outcome) == ("started", "deployed")
@@ -2513,10 +2812,9 @@ def test_recreate_refuses_without_a_deployment_or_with_a_pending_schema(harness:
 
 
 def test_release_not_yet_fully_published_is_retried_and_alerted_once(harness: Harness) -> None:
-    del harness.registry.refs[f"{FRONTEND}:sha-{REV_NEW}"]
+    del harness.registry.refs[f"{BACKEND}:sha-{REV_NEW}"]
     rows = len(harness.ledger.rows)
     assert harness.run() == 1
-    # Whether the revision needs a frontend image is its compose file's call: it does.
     assert harness.host.count(PULL) == harness.host.count(COMPOSE_UP) == 0
     assert harness.notices == []
     harness.clock.now += harness.settings.discovery_alert_after + 1
@@ -2525,7 +2823,7 @@ def test_release_not_yet_fully_published_is_retried_and_alerted_once(harness: Ha
     assert harness.run() == 1
     assert len(harness.notices) == 1
     assert len(harness.ledger.rows) == rows
-    harness.registry.refs[f"{FRONTEND}:sha-{REV_NEW}"] = NEW_F
+    harness.registry.refs[f"{BACKEND}:sha-{REV_NEW}"] = NEW_B
     assert harness.run() == 0
     assert harness.notices[1][0] == "info"
     assert not (harness.settings.state_dir / "discovery-failure.json").exists()
@@ -2533,14 +2831,457 @@ def test_release_not_yet_fully_published_is_retried_and_alerted_once(harness: Ha
 
 @pytest.mark.parametrize("mutate", [
     lambda r: r.refs.__setitem__(f"{BACKEND}:sha-{REV_NEW}", "sha256:" + "9" * 64),
-    lambda r: r.labels[NEW_F].__setitem__(bfx.REVISION_LABEL, REV_OLD),
     lambda r: r.labels[NEW_B].pop(bfx.REVISION_LABEL),
 ])
-def test_main_tag_revision_tag_and_frontend_must_agree(harness: Harness,
-                                                       mutate: Callable[[FakeRegistry], None]) -> None:
+def test_main_tag_and_revision_tag_must_agree(harness: Harness,
+                                              mutate: Callable[[FakeRegistry], None]) -> None:
     mutate(harness.registry)
     assert harness.run() == 1
     assert harness.host.calls == []
+
+
+# --------------------------------------------------------------------------- provenance (9i)
+
+
+GH = bfx.GH_BINARY
+GH_VERIFY = _is((GH, "attestation", "verify"))
+GIT_ANY = _is(("runuser", "-u", "ubuntu", "--", "git"))
+DOCKER_RUN = _is(("docker", "run"))
+NEW_LIST = f"{API}{NEW_B}?per_page=100"
+
+
+def _discovery_code(harness: Harness) -> str:
+    state = json.loads((harness.settings.state_dir / "discovery-failure.json").read_text())
+    return str(state["code"])
+
+
+def test_the_candidate_digest_is_verified_before_the_mirror_the_pull_or_any_run(harness: Harness) -> None:
+    deployer = harness.deployer()
+    deployer._registry_credentials = ("will413028", "ghcr-pull-token")
+    assert deployer.run() == 0
+    host = harness.host
+    verify = host.index(GH_VERIFY)
+    work = harness.settings.state_dir / "provenance"
+    (call,) = [c for c in host.calls if GH_VERIFY(c)]
+    manifest, bundle_file = Path(call[3]), Path(call[5])
+    assert call == (
+        GH, "attestation", "verify", str(manifest), "--bundle", str(bundle_file),
+        "--repo", "Will413028/bfx-funding-bot",
+        "--signer-workflow", "Will413028/bfx-funding-bot/.github/workflows/release.yml",
+        "--source-ref", "refs/heads/main",
+        "--deny-self-hosted-runners", "--format", "json")
+    assert manifest.parent == bundle_file.parent and manifest.parent.parent == work
+    assert not manifest.parent.exists()           # the per-run files are removed afterwards
+    assert host.index(_is((GH, "--version"))) < verify
+    # Before the mirror, the pull and the alembic one-shot (_schema): nothing ran the image.
+    assert verify < host.index(GIT_ANY) < host.index(PULL) < host.index(DOCKER_RUN)
+    assert harness.registry.raw_reads == [f"{BACKEND}@{NEW_B}"]
+    assert [url for url, _ in harness.github.requests] == [NEW_LIST, f"{BUNDLE_HOST}{NEW_B}/0?sig=x"]
+    assert harness.ledger.last.outcome == "deployed"
+
+
+def test_gh_and_github_get_no_credential_at_all(harness: Harness) -> None:
+    (harness.settings.runtime_dir / "ghcr.env").write_text(
+        "GHCR_USERNAME=will413028\nGHCR_TOKEN=ghcr-pull-token\n")
+    deployer = harness.deployer()
+    deployer._registry_credentials = bfx.load_registry_credentials(
+        harness.settings.runtime_dir / "ghcr.env", lambda path: None)
+    assert deployer.run() == 0
+    host = harness.host
+    home = harness.settings.state_dir / "gh"
+    for call, env in zip(host.calls, host.envs, strict=True):
+        if call[0] == GH:
+            assert env == {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": str(home),
+                           "GH_CONFIG_DIR": str(home / "config"), "GH_NO_UPDATE_NOTIFIER": "1",
+                           "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"}
+    assert host.count(GH_VERIFY) == 1
+    # The registry pull credentials reach the pulls, never GitHub.
+    assert all(set(headers) <= {"User-Agent", "Accept", "X-GitHub-Api-Version"}
+               for _, headers in harness.github.requests)
+    assert "ghcr-pull-token" not in json.dumps(harness.github.requests)
+
+
+def _rate_limited(status: int, remaining: str) -> Callable[[Harness], None]:
+    def setup(h: Harness) -> None:
+        h.github.answers[NEW_LIST] = bfx.HttpResponse(
+            status, b'{"message":"API rate limit exceeded"}',
+            {"x-ratelimit-remaining": remaining, "x-ratelimit-reset": "1790003600"})
+    return setup
+
+
+def _listed(*bundles: dict[str, str]) -> Callable[[Harness], None]:
+    def setup(h: Harness) -> None:
+        h.github.attestations[NEW_B] = list(bundles)
+    return setup
+
+
+def _bundle_body(body: bytes, content_type: str = "application/x-snappy") -> Callable[[Harness], None]:
+    def setup(h: Harness) -> None:
+        h.github.answers[f"{BUNDLE_HOST}{NEW_B}/0?sig=x"] = bfx.HttpResponse(
+            200, body, {"content-type": content_type})
+    return setup
+
+
+def _bundle_urls(*urls: str) -> Callable[[Harness], None]:
+    def setup(h: Harness) -> None:
+        h.github.answers[NEW_LIST] = bfx.HttpResponse(200, json.dumps({"attestations": [
+            {"bundle": None, "bundle_url": url} for url in urls]}).encode(), {})
+    return setup
+
+
+UNVERIFIED = "attestation_unverified:"
+
+
+@pytest.mark.parametrize(("setup", "code"), [
+    # The registry served bytes that are not the digest's manifest.
+    (lambda h: h.registry.manifests.__setitem__(NEW_B, _manifest("pushed by someone else")),
+     UNVERIFIED + "manifest_digest_mismatch"),
+    (lambda h: h.github.attestations.pop(NEW_B), UNVERIFIED + "no_attestation"),
+    (_listed(), UNVERIFIED + "no_attestation"),
+    (_rate_limited(403, "0"), UNVERIFIED + "rate_limited"),
+    (_rate_limited(429, "12"), UNVERIFIED + "rate_limited"),
+    (_rate_limited(403, "41"), UNVERIFIED + "api_unavailable"),
+    (lambda h: h.github.answers.__setitem__(NEW_LIST, bfx.HttpResponse(502, b"", {})),
+     UNVERIFIED + "api_unavailable"),
+    (lambda h: h.github.answers.__setitem__(NEW_LIST, bfx.HttpResponse(200, b"<html>", {})),
+     UNVERIFIED + "api_unavailable"),
+    # A hostile, deeply nested list or bundle refuses like any other bad answer (RecursionError).
+    (lambda h: h.github.answers.__setitem__(NEW_LIST, bfx.HttpResponse(200, b"[" * 100000, {})),
+     UNVERIFIED + "api_unavailable"),
+    (_bundle_body(snappy_literals(b"[" * 100000)), UNVERIFIED + "bundle_unreadable"),
+    (lambda h: setattr(h.github, "down", True), UNVERIFIED + "api_unreachable"),
+    # Bundles that cannot be read: a non-https URL is never fetched, a body that is not
+    # snappy, too large, or not a JSON object.
+    (_bundle_urls(f"http://{BUNDLE_HOST.removeprefix('https://')}x", "file:///etc/shadow"),
+     UNVERIFIED + "bundle_unreadable"),
+    (_bundle_body(b"\x10\x00garbage"), UNVERIFIED + "bundle_unreadable"),
+    # A valid bundle, but over the 2 MiB download cap.
+    (_bundle_body(snappy_literals(json.dumps(bundle(NEW_B, pad="x" * 2 * 1024 * 1024)).encode())),
+     UNVERIFIED + "bundle_unreadable"),
+    (_bundle_body(snappy_literals(b"[1, 2]")), UNVERIFIED + "bundle_unreadable"),
+    # Signed, but not by release.yml on main of this repository on a GitHub-hosted runner, or
+    # for another digest, or another predicate: gh refuses each one.
+    (_listed(bundle(NEW_B, signerWorkflow="Will413028/bfx-funding-bot/.github/workflows/ci.yml")),
+     UNVERIFIED + "gh_rejected"),
+    (_listed(bundle(NEW_B, sourceRef="refs/heads/feature")), UNVERIFIED + "gh_rejected"),
+    (_listed(bundle(NEW_B, runner="self-hosted")), UNVERIFIED + "gh_rejected"),
+    (_listed(bundle(NEW_B, repository="attacker/fork")), UNVERIFIED + "gh_rejected"),
+    (_listed(bundle(OLD_B)), UNVERIFIED + "gh_rejected"),
+    (_listed(bundle(NEW_B, predicateType="https://spdx.dev/Document/v2.3")), UNVERIFIED + "gh_rejected"),
+    # A Sigstore TUF outage (gh hangs): the same refusal, no bypass.
+    (lambda h: h.host.timeouts.add((GH, "attestation")), UNVERIFIED + "gh_unavailable"),
+    (lambda h: setattr(h.host, "gh_verify_stdout", "[]"), UNVERIFIED + "gh_rejected"),
+    (lambda h: setattr(h.host, "gh_verify_stdout", "verified"), UNVERIFIED + "gh_rejected"),
+    # A failed exit is a refusal whatever it printed.
+    (lambda h: setattr(h.host, "gh_verify_exit", 1), UNVERIFIED + "gh_rejected"),
+    (lambda h: setattr(h.host, "gh_present", False), "attestation_verifier_missing"),
+    (lambda h: setattr(h.host, "gh_version", "2.102.1"), "attestation_verifier_wrong_version"),
+    (lambda h: setattr(h.host, "gh_version", "2.101.0"), "attestation_verifier_wrong_version"),
+])
+def test_an_image_that_cannot_be_verified_is_never_run(
+        harness: Harness, setup: Callable[[Harness], None], code: str) -> None:
+    setup(harness)
+    rows = len(harness.ledger.rows)
+    assert harness.run() == 1
+    host = harness.host
+    assert all(call[0] == GH for call in host.calls), host.calls  # nothing but gh ran
+    assert host.count(PULL) == host.count(DOCKER_RUN) == host.count(GIT_ANY) == 0
+    assert len(harness.ledger.rows) == rows and host.stopped == []
+    assert _discovery_code(harness) == code
+    assert not any(url.startswith(("http://", "file:")) for url, _ in harness.github.requests)
+    # The existing discovery alert: once, after the threshold, naming the code.
+    assert harness.notices == []
+    harness.clock.now += harness.settings.discovery_alert_after + 1
+    assert harness.run() == 1
+    assert len(harness.notices) == 1
+    level, text = harness.notices[0]
+    assert level == "warning" and code in text and "no deploy is happening" in text
+
+
+def test_the_second_bundle_verifies_when_the_first_does_not(harness: Harness) -> None:
+    # A digest can carry other attestations (measured for cli/cli: a release attestation
+    # listed before the SLSA provenance); each is tried until one verifies.
+    harness.github.attestations[NEW_B] = [
+        bundle(NEW_B, predicateType="https://in-toto.io/attestation/release/v0.2"), bundle(NEW_B)]
+    assert harness.run() == 0
+    assert harness.host.count(GH_VERIFY) == 2
+    assert harness.ledger.last.outcome == "deployed"
+
+
+def test_an_inline_bundle_needs_no_download(harness: Harness) -> None:
+    harness.github.answers[NEW_LIST] = bfx.HttpResponse(
+        200, json.dumps({"attestations": [{"bundle": bundle(NEW_B), "bundle_url": None}]}).encode(), {})
+    assert harness.run() == 0
+    assert [url for url, _ in harness.github.requests] == [NEW_LIST]
+
+
+def test_a_dry_run_refuses_an_unverified_image_too(harness: Harness) -> None:
+    harness.github.attestations.pop(NEW_B)
+    assert harness.run(dry_run=True) == 1
+    assert harness.host.count(PULL) == harness.host.count(DOCKER_RUN) == 0
+
+
+def test_rollback_and_recreate_reuse_the_ledger_digest_without_verifying_again(harness: Harness) -> None:
+    harness.host.unhealthy.add(NEW_B)
+    assert harness.run() == 1
+    assert harness.ledger.last.outcome == "rolled_back"
+    assert harness.host.count(GH_VERIFY) == 1          # the candidate only, not the rollback
+    harness.host.calls.clear()
+    harness.github.attestations.clear()
+    assert harness.run(recreate=True) == 0
+    assert harness.host.count(GH_VERIFY) == 0
+
+
+def test_install_sh_pins_the_gh_the_deployer_runs() -> None:
+    script = (ROOT / "deploy/vm/ops/install.sh").read_text(encoding="utf-8")
+    version = re.search(r"^GH_VERSION=([0-9.]+)$", script, re.MULTILINE)
+    digest = re.search(r"^GH_SHA256=([0-9a-f]{64})$", script, re.MULTILINE)
+    assert version is not None and digest is not None
+    assert version.group(1) == bfx.GH_VERSION
+    assert re.search(r'^GH_DIR="\$OPS_ROOT/gh/\$GH_VERSION"$', script, re.MULTILINE)
+    assert Path(bfx.GH_BINARY) == bfx.Settings().ops_root / "gh" / bfx.GH_VERSION / "bin" / "gh"
+    assert "--gh" not in {option for action in bfx._parser()._actions for option in action.option_strings}
+
+
+def test_release_yml_attests_exactly_the_digest_the_deployer_verifies() -> None:
+    """The signer identity bfx-deploy requires is the workflow that attests the pushed digest,
+    and the attestation lands in GitHub's attestation API (actions/attest's default), which
+    is what bfx-deploy reads."""
+    workflow = yaml.safe_load((ROOT / bfx.RELEASE_WORKFLOW).read_text(encoding="utf-8"))
+    job = workflow["jobs"]["publish"]
+    assert job["permissions"] == {"contents": "read", "packages": "write",
+                                  "id-token": "write", "attestations": "write"}
+    steps = job["steps"]
+    names = [step.get("id") for step in steps]
+    (attest,) = [step for step in steps if str(step.get("uses", "")).startswith("actions/attest@")]
+    assert names.index("backend") < names.index("attest")
+    assert attest["with"] == {
+        "subject-name": "${{ steps.names.outputs.backend }}",
+        "subject-digest": "${{ steps.backend.outputs.digest }}",
+    }
+    # The deployer's --source-ref: a workflow_run release runs on the default branch.
+    assert workflow[True]["workflow_run"]["branches"] == ["main"]
+
+
+class _Registry:
+    def __init__(self, manifests: Mapping[str, bytes]) -> None:
+        self.manifests = manifests
+
+    def inspect(self, reference: str) -> Any:
+        raise AssertionError(reference)
+
+    def manifest(self, reference: str) -> bytes:
+        return self.manifests[reference.rpartition("@")[2]]
+
+
+def _verifier(tmp_path: Path, runner: Any, github: Any) -> Any:
+    return bfx.GhAttestationVerifier(
+        runner, _Registry(MANIFESTS), github, gh="gh", home=tmp_path / "gh",
+        work=tmp_path / "work", repository="Will413028/bfx-funding-bot", ref="refs/heads/main")
+
+
+def test_gh_verifier_accepts_only_its_pinned_version(tmp_path: Path) -> None:
+    answers = {("gh", "--version"): bfx.CommandResult(0, "gh version 2.102.0 (2026-09-30)\n", "")}
+
+    def runner(argv: Sequence[str], *, timeout: float, input_text: str | None = None,
+               env: Mapping[str, str] | None = None) -> Any:
+        return answers.get(tuple(argv), bfx.CommandResult(0, '[{"verificationResult": {}}]', ""))
+
+    verifier = _verifier(tmp_path, runner, FakeGitHub())
+    verifier.verify(f"{BACKEND}@{NEW_B}")
+    answers[("gh", "--version")] = bfx.CommandResult(0, "gh version 2.102.0-rc1 (2026-09-30)\n", "")
+    with pytest.raises(bfx.DiscoveryError, match="attestation_verifier_wrong_version"):
+        verifier.verify(f"{BACKEND}@{NEW_B}")
+    answers[("gh", "--version")] = bfx.CommandResult(127, "", "not found")
+    with pytest.raises(bfx.DiscoveryError, match="attestation_verifier_missing"):
+        verifier.verify(f"{BACKEND}@{NEW_B}")
+
+
+def test_imagetools_registry_reads_the_raw_manifest_with_the_registry_credentials() -> None:
+    seen: list[tuple[tuple[str, ...], Mapping[str, str] | None]] = []
+
+    def runner(argv: Sequence[str], *, timeout: float, input_text: str | None = None,
+               env: Mapping[str, str] | None = None) -> Any:
+        seen.append((tuple(argv), env))
+        return bfx.CommandResult(0, MANIFESTS[NEW_B].decode(), "")
+
+    @contextlib.contextmanager
+    def auth() -> Iterator[dict[str, str]]:
+        yield {"DOCKER_CONFIG": "/state/docker-auth-x"}
+
+    registry = bfx.ImagetoolsRegistry(runner, auth)
+    assert registry.manifest(f"{BACKEND}@{NEW_B}") == MANIFESTS[NEW_B]
+    assert seen == [(("docker", "buildx", "imagetools", "inspect", f"{BACKEND}@{NEW_B}", "--raw"),
+                     {"DOCKER_CONFIG": "/state/docker-auth-x"})]
+
+
+def test_https_get_refuses_anything_but_https() -> None:
+    with pytest.raises(OSError, match="not an https URL"):
+        bfx.https_get("http://example.invalid/x", headers={}, timeout=1.0, limit=10)
+    with pytest.raises(OSError, match="not an https URL"):
+        bfx.https_get("file:///etc/shadow", headers={}, timeout=1.0, limit=10)
+    handler = bfx._HttpsOnlyRedirects()
+    request = urllib.request.Request("https://api.github.com/x")
+    with pytest.raises(urllib.error.URLError, match="non-https"):
+        handler.redirect_request(request, None, 302, "Found", {}, "http://example.invalid/x")
+    assert handler.redirect_request(request, None, 302, "Found", {}, "https://example.invalid/x") is not None
+
+
+# --------------------------------------------------------------------------- snappy
+
+
+SNAPPY_FIXTURE = FIXTURES / "cli-cli-v2.101.0-attestation.snappy"
+
+
+def test_snappy_decodes_a_bundle_github_served() -> None:
+    """The bundle_url body of a cli/cli v2.101.0 attestation (downloaded 2026-10-22,
+    application/x-snappy, encoded by GitHub's own snappy): literals and copies."""
+    raw = SNAPPY_FIXTURE.read_bytes()
+    decoded = bfx.snappy_decompress(raw, limit=1 << 20)
+    assert len(raw) < len(decoded) == 6404
+    assert hashlib.sha256(decoded).hexdigest() == \
+        "9e90a239f4416afa2721ef5249c4786800448346a780632822084c36de829aa9"
+    bundle_json = json.loads(decoded)
+    assert bundle_json["mediaType"] == "application/vnd.dev.sigstore.bundle.v0.3+json"
+    statement = json.loads(base64.b64decode(bundle_json["dsseEnvelope"]["payload"]))
+    assert {"name": "gh_2.101.0_checksums.txt", "digest": {
+        "sha256": "f8bbc37fc5568a6a162d1a67b1e9c1afa9139f7b5a46dcde4a57bdaa0db33b60"}} in statement["subject"]
+
+
+@pytest.mark.parametrize(("encoded", "decoded"), [
+    (b"\x00", b""),
+    (b"\x03\x08abc", b"abc"),
+    # literal "abcd", then copy-1 (len 4, offset 4) -> "abcdabcd"
+    (b"\x08\x0cabcd\x01\x04", b"abcdabcd"),
+    # literal "a", copy-1 len 7 offset 1: an overlapping run
+    (b"\x08\x00a\x0d\x01", b"a" * 8),
+    # literal "xy", copy-2 len 6 offset 2
+    (b"\x08\x04xy\x16\x02\x00", b"xy" * 4),
+    # literal "xyz", copy-4 len 3 offset 3
+    (b"\x06\x08xyz\x0b\x03\x00\x00\x00", b"xyzxyz"),
+    # a 70-byte literal: length in one extra byte (tag 60)
+    (b"\x46\xf0\x45" + b"q" * 70, b"q" * 70),
+])
+def test_snappy_decodes_each_element_kind(encoded: bytes, decoded: bytes) -> None:
+    assert bfx.snappy_decompress(encoded, limit=1024) == decoded
+    assert bfx.snappy_decompress(snappy_literals(decoded), limit=1024) == decoded
+
+
+def test_snappy_stops_a_copy_at_the_declared_length() -> None:
+    """The copy is refused while decoding, not after the output has grown: a small input must
+    not expand far past what it declared before the final length check.
+
+    Mutation: drop the in-loop ``exceeds the declared length`` check: this test fails."""
+    with pytest.raises(ValueError, match="exceeds the declared length"):
+        bfx.snappy_decompress(b"\x06\x00a\x0d\x01", limit=1 << 20)
+
+
+@pytest.mark.parametrize("encoded", [
+    b"",                                   # no length
+    b"\xff\xff\xff\xff\xff\x01",           # length varint longer than 5 bytes
+    b"\x05\x08abc",                        # declared 5, produced 3
+    b"\x02\x08abc",                        # literal longer than declared
+    b"\x03\x10ab",                         # truncated literal
+    b"\x46\xf0",                           # truncated literal length
+    b"\x04\x01\x00",                       # copy before any output
+    b"\x08\x00a\x0d\x00",                  # copy offset 0
+    b"\x08\x00a\x0d\x02",                  # copy offset beyond the output
+    b"\x08\x04xy\x16\x02",                 # truncated copy-2
+    b"\x06\x00a\x0d\x01",                  # copy past the declared length
+    b"\x80\x80\x80\x80\x08",               # declares 2 GiB: over the limit
+])
+def test_snappy_rejects_malformed_input(encoded: bytes) -> None:
+    with pytest.raises(ValueError, match="snappy"):
+        bfx.snappy_decompress(encoded, limit=1 << 20)
+
+
+# --------------------------------------------------------------------------- verify-provenance
+
+
+def test_verify_provenance_runs_the_deployers_verifier_on_one_digest(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    built: list[tuple[Any, str]] = []
+
+    class Verifier:
+        def __init__(self, fails: bool) -> None:
+            self.fails = fails
+
+        def verify(self, image: str) -> None:
+            built.append((image, "verify"))
+            if self.fails:
+                raise bfx.DiscoveryError("attestation_unverified:gh_rejected")
+
+    outcome = {"fails": False}
+
+    def factory(settings: Any, runner: Any, registry: Any, http: Any) -> Any:
+        assert (runner, http) == (bfx.subprocess_runner, bfx.https_get)
+        assert isinstance(registry, bfx.ImagetoolsRegistry)
+        assert (settings.gh, settings.source_repository) == (bfx.GH_BINARY, bfx.SOURCE_REPOSITORY)
+        assert settings.state_dir == tmp_path / "state"
+        return Verifier(outcome["fails"])
+
+    monkeypatch.setattr(bfx, "provenance_verifier", factory)
+    monkeypatch.setattr(bfx.os, "geteuid", lambda: 0)
+    args = ["verify-provenance", NEW_B, "--runtime-dir", str(tmp_path), "--state-dir", str(tmp_path / "state")]
+    assert bfx.main(args) == 0
+    assert built == [(f"{BACKEND}@{NEW_B}", "verify")]
+    assert f"verified: {BACKEND}@{NEW_B}" in capsys.readouterr().out
+    outcome["fails"] = True
+    assert bfx.main(args) == 1
+    assert "NOT verified: attestation_unverified:gh_rejected" in capsys.readouterr().err
+    assert bfx.main(["verify-provenance", "sha256:abc"]) == 2
+    assert len(built) == 2
+
+
+# --------------------------------------------------------------------------- downgrade (9i)
+
+
+def test_a_main_tag_pointed_back_at_an_older_signed_release_is_refused(harness: Harness) -> None:
+    # REV_NEW is deployed; `main` is moved back to REV_OLD's (validly signed) digest.
+    harness.ledger.seed(REV_NEW, NEW_B, "deployed", attempt_id="n")
+    harness.registry.refs[f"{BACKEND}:main"] = OLD_B
+    assert harness.run() == 1
+    host = harness.host
+    assert host.count(PULL) == host.count(DOCKER_RUN) == host.count(STOP_ANY) == 0
+    row = harness.ledger.last
+    assert (row.outcome, row.source_revision) == ("failed", REV_OLD)
+    assert "precheck:release_not_descendant_of_deployed" in row.detail
+    assert _started(harness) == []
+    assert harness.notices[-1][0] == "critical"
+    assert ("runuser", "-u", "ubuntu", "--", "git", "-C", str(harness.settings.mirror),
+            "merge-base", "--is-ancestor", REV_NEW, REV_OLD) in host.calls
+    # Recorded as attempted: the next tick does not refuse (and alert) again.
+    calls, notices = len(host.calls), len(harness.notices)
+    assert harness.run() == 0
+    assert (len(host.calls), len(harness.notices)) == (calls, notices)
+
+
+def test_a_revision_on_main_beside_the_deployed_one_is_refused(harness: Harness) -> None:
+    # Both on main per the fake's origin check, but REV_NEW does not descend from REV_OLD.
+    harness.host.parents.clear()
+    assert harness.run() == 1
+    assert "precheck:release_not_descendant_of_deployed" in harness.ledger.last.detail
+    assert harness.host.count(PULL) == 0
+
+
+def test_a_rebuild_of_the_deployed_revision_and_a_descendant_both_deploy(harness: Harness) -> None:
+    # Equal: CI rebuilt the deployed revision under a new digest.
+    harness.registry.refs[f"{BACKEND}:main"] = REBUILT_B
+    harness.registry.refs[f"{BACKEND}:sha-{REV_OLD}"] = REBUILT_B
+    harness.registry.labels[REBUILT_B] = {bfx.REVISION_LABEL: REV_OLD}
+    assert harness.run() == 0
+    assert (harness.ledger.last.outcome, harness.ledger.last.backend_digest) == ("deployed", REBUILT_B)
+    # Descendant: REV_NEW's parent is the deployed REV_OLD.
+    harness.registry.refs[f"{BACKEND}:main"] = NEW_B
+    assert harness.run() == 0
+    assert (harness.ledger.last.outcome, harness.ledger.last.source_revision) == ("deployed", REV_NEW)
+
+
+def test_a_first_deployment_has_no_downgrade_to_check(harness: Harness) -> None:
+    harness.ledger.rows.clear()
+    assert harness.run() == 0
+    assert not any(call[-4:-2] == ("merge-base", "--is-ancestor") and call[-1] != "refs/remotes/origin/main"
+                   for call in harness.host.calls)
 
 
 def test_ledger_write_failure_is_reported_not_swallowed(harness: Harness) -> None:
@@ -2561,7 +3302,7 @@ def test_unexpected_exception_alerts_instead_of_dying_silently(harness: Harness)
 
 def test_dry_run_reports_the_plan_and_changes_nothing(harness: Harness, capsys: pytest.CaptureFixture[str]) -> None:
     harness.host.current = ("h1",)
-    harness.host.foreign = ["bfx-bot", "bfx-webapi", "bfx-frontend"]
+    harness.host.foreign = ["bfx-bot", "bfx-webapi"]
     rows = len(harness.ledger.rows)
     assert harness.run(dry_run=True) == 0
     host = harness.host
@@ -2575,31 +3316,28 @@ def test_dry_run_reports_the_plan_and_changes_nothing(harness: Harness, capsys: 
     assert plan["restore_test_before_deploy"] == "migration_pending"
     assert harness.host.count(RESTORE_TEST) == 0
     assert plan["rollback_target"] == REV_OLD
-    assert not {"change_class", "class_detail"} & set(plan)
-    assert plan["blockers"] == [f"foreign_container_holds_name:{n}"
-                                for n in ("bfx-bot", "bfx-webapi", "bfx-frontend")]
+    assert not {"change_class", "class_detail", "frontend_image"} & set(plan)
+    assert plan["blockers"] == [f"foreign_container_holds_name:{n}" for n in ("bfx-bot", "bfx-webapi")]
 
 
 # --------------------------------------------------------------------------- container check unit
 
 
 def _target() -> Any:
-    return bfx.Target(REV_NEW, NEW_B, NEW_F, f"{BACKEND}@{NEW_B}", f"{FRONTEND}@{NEW_F}")
+    return bfx.Target(REV_NEW, NEW_B, f"{BACKEND}@{NEW_B}")
 
 
 def _mismatches(record: dict[str, Any], service: str, target: Any, deployment_id: str) -> list[str]:
-    image = target.frontend_image if service == "frontend" else target.backend_image
+    image = target.backend_image
     return list(bfx.container_mismatches(
         record, container=CONTAINER_NAMES[service], image=image,
         identity=bfx.identity_env(target, image=image, deployment_id=deployment_id)))
 
 
-@pytest.mark.parametrize("service", ["bot", "webapi", "frontend"])
+@pytest.mark.parametrize("service", ["bot", "webapi"])
 def test_container_running_the_recorded_release_has_no_mismatch(service: str) -> None:
     target = _target()
-    backend = service != "frontend"
-    running = (target.backend_image if backend else target.frontend_image,
-               NEW_B if backend else NEW_F, REV_NEW, "dep-1")
+    running = (target.backend_image, NEW_B, REV_NEW, "dep-1")
     assert _mismatches(inspect_record(service, running), service, target, "dep-1") == []
 
 
@@ -2630,16 +3368,16 @@ def test_a_third_party_container_is_checked_by_name_project_and_image_alone() ->
 @pytest.mark.parametrize(("mutate", "mismatch"), [
     (lambda r: r.__setitem__("Name", "/other"), "name"),
     (lambda r: r["Config"].__setitem__("Labels", {}), "project"),
-    (lambda r: r["Config"].__setitem__("Image", f"{FRONTEND}@{NEW_B}"), "image"),
-    (lambda r: r["Config"]["Env"].__setitem__(0, "BFX_IMAGE_DIGEST=" + NEW_B), "identity_env"),
+    (lambda r: r["Config"].__setitem__("Image", f"{BACKEND}@{OLD_B}"), "image"),
+    (lambda r: r["Config"]["Env"].__setitem__(0, "BFX_IMAGE_DIGEST=" + OLD_B), "identity_env"),
     (lambda r: r["Config"]["Env"].__setitem__(1, "BFX_SOURCE_REVISION=" + REV_OLD), "identity_env"),
     (lambda r: r["Config"]["Env"].__setitem__(2, "BFX_DEPLOYMENT_ID=other"), "identity_env"),
 ])
 def test_each_release_mismatch_is_reported(mutate: Callable[[dict[str, Any]], None], mismatch: str) -> None:
     target = _target()
-    record = inspect_record("frontend", (target.frontend_image, NEW_F, REV_NEW, "dep-1"))
+    record = inspect_record("webapi", (target.backend_image, NEW_B, REV_NEW, "dep-1"))
     mutate(record)
-    assert mismatch in _mismatches(record, "frontend", target, "dep-1")
+    assert mismatch in _mismatches(record, "webapi", target, "dep-1")
 
 
 # --------------------------------------------------------------------------- imagetools registry
@@ -2684,12 +3422,12 @@ def test_imagetools_reads_the_index_digest_and_the_arm64_labels() -> None:
 
 
 def test_imagetools_reads_a_single_platform_manifest() -> None:
-    single = json.dumps({"manifest": {"digest": NEW_F},
+    single = json.dumps({"manifest": {"digest": NEW_B},
                          "image": {"architecture": "arm64", "config": {"Labels": {bfx.REVISION_LABEL: REV_NEW}}}})
-    runner, _ = _imagetools({f"{FRONTEND}@{NEW_F}": (0, single, "")})
+    runner, _ = _imagetools({f"{BACKEND}@{NEW_B}": (0, single, "")})
     info = bfx.ImagetoolsRegistry(runner, lambda: __import__("contextlib").nullcontext({})).inspect(
-        f"{FRONTEND}@{NEW_F}")
-    assert (info.digest, info.labels[bfx.REVISION_LABEL]) == (NEW_F, REV_NEW)
+        f"{BACKEND}@{NEW_B}")
+    assert (info.digest, info.labels[bfx.REVISION_LABEL]) == (NEW_B, REV_NEW)
 
 
 @pytest.mark.parametrize(("output", "code"), [
@@ -2723,7 +3461,7 @@ def test_psql_ledger_passes_values_as_psql_variables_never_as_sql() -> None:
     detail = "unhealthy:x'; DROP TABLE deployments; --"
     ledger_id = ledger.append(bfx.LedgerEntry(
         attempt_id=OLD_ATTEMPT, started_at="2026-09-25T00:00:00+00:00", finished_at=None,
-        source_revision=REV_NEW, backend_digest=NEW_B, frontend_digest=NEW_F,
+        source_revision=REV_NEW, backend_digest=NEW_B,
         migrations_applied=True, outcome="started", detail=detail))
     assert ledger_id == 7
     assert seen["argv"][:6] == ["docker", "exec", "-i", "--user", "postgres", "bfx-postgres"]
@@ -2731,6 +3469,8 @@ def test_psql_ledger_passes_values_as_psql_variables_never_as_sql() -> None:
     assert detail not in seen["sql"] and ":'detail'" in seen["sql"]
     # The retired change_class column is never written (left NULL until it is dropped).
     assert "change_class" not in seen["sql"]
+    # frontend_digest is history: written NULL, never from a variable.
+    assert not any(str(arg).startswith("frontend_digest=") for arg in seen["argv"])
     assert not any(arg.startswith("change_class=") for arg in seen["argv"])
 
 
@@ -2767,3 +3507,12 @@ def test_managed_units_file_names_only_units_that_exist() -> None:
     names = bfx.managed_units(ROOT / "deploy/vm/systemd/managed-units")
     assert all((ROOT / "deploy/vm/systemd" / name).is_file() for name in names)
     assert "bfx-restore-test@.service" in names and "bfx-deploy.service" in names
+
+
+def test_the_branch_flag_cannot_change_the_ref_the_attestation_must_prove(harness: Harness) -> None:
+    """Only releases built from main are trusted: ``--branch`` moves which remote ref the
+    deployer fetches, never the ``--source-ref`` gh verifies against.
+
+    Mutation: build the verifier's ref from ``settings.branch`` again: this test fails."""
+    deployer = harness.deployer(branch="feature")
+    assert deployer._attestations._ref == bfx.SIGNED_SOURCE_REF == "refs/heads/main"

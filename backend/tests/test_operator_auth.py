@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -11,7 +12,8 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from bfx_funding_bot.core import auth
-from bfx_funding_bot.core.settings import AuthSettings, Settings
+from bfx_funding_bot.core.log_format import JsonFormatter
+from bfx_funding_bot.core.settings import Settings
 from tests.ingress_support import (
     INGRESS_ENV,
     OPERATOR_TAILNET_USER_ID,
@@ -64,26 +66,6 @@ def test_missing_ingress_settings_fail_closed():
     assert exc.value.detail == "auth_not_configured"
 
 
-@pytest.mark.parametrize("phase", ["live"])
-def test_production_phase_rejects_non_admin_operator_role(monkeypatch, phase):
-    """Rejects the regression that allows a non-admin production role setting."""
-    monkeypatch.setenv("BFX_PHASE", phase)
-    monkeypatch.setenv("BFX_OPERATOR_ROLE", "user")
-
-    with pytest.raises(ValueError, match="BFX_OPERATOR_ROLE must be 'admin'"):
-        AuthSettings()
-
-
-def test_auth_settings_does_not_require_database_url(monkeypatch):
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setenv("BFX_OPERATOR_USER_ID", "operator-1")
-
-    settings = AuthSettings()
-
-    assert settings.operator_user_id == "operator-1"
-    assert settings.operator_role == "admin"
-
-
 def test_settings_never_require_the_ingress_values(monkeypatch):
     """IngressSettings stays off the Settings chain: other processes build Settings without
     the web API's keys."""
@@ -98,7 +80,7 @@ def test_main_import_is_db_independent() -> None:
     """Importing the web API needs neither a database nor the ingress values: they are read
     in the lifespan only."""
     environment = os.environ.copy()
-    for key in ("DATABASE_URL", "BFX_OPERATOR_USER_ID", *INGRESS_ENV):
+    for key in ("DATABASE_URL", *INGRESS_ENV):
         environment.pop(key, None)
     backend_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
@@ -124,3 +106,31 @@ def test_the_web_api_refuses_to_start_without_each_ingress_value(monkeypatch, mi
 
     with pytest.raises(Exception, match=missing), TestClient(app):
         pass
+
+
+@pytest.mark.parametrize(("headers", "reason", "presented"), [
+    pytest.param({auth.LOGIN_HEADER: "intruder@github"}, "operator_identity_missing", None,
+                 id="no-capability"),
+    pytest.param(operator_headers(user_id="someone-else", login="intruder@github"),
+                 "operator_required", ["someone-else"], id="another-user"),
+])
+def test_a_refused_caller_is_logged_with_the_identity_serve_forwarded(
+    caplog, headers, reason, presented,
+):
+    """9j: the access log has the 401; this line adds why and who (login and the node user
+    IDs the capability named), never the raw capability header."""
+    with caplog.at_level(logging.WARNING, logger="bfx.security"), pytest.raises(HTTPException):
+        asyncio.run(auth.require_operator(_request(headers)))
+
+    [record] = [r for r in caplog.records if r.name == "bfx.security"]
+    assert (record.event, record.reason, record.login) == ("access_denied", reason, "intruder@github")
+    assert (record.method, record.path) == ("GET", "/api/v1/profile")
+    assert getattr(record, "tailnet_user_ids", None) == presented
+    assert auth.OPERATOR_CAPABILITY not in JsonFormatter("webapi").format(record)
+
+
+def test_the_operator_is_not_logged_as_refused(caplog):
+    with caplog.at_level(logging.WARNING, logger="bfx.security"):
+        asyncio.run(auth.require_operator(_request(operator_headers())))
+
+    assert [r for r in caplog.records if r.name == "bfx.security"] == []
