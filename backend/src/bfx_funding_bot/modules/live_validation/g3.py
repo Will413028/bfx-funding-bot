@@ -20,7 +20,7 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
-from bfx_funding_bot.core.settings import Settings, require_deployment_environment
+from bfx_funding_bot.core.settings import load_settings, require_deployment_environment
 from bfx_funding_bot.external.bitfinex.auth_rest import InterestPayment
 from bfx_funding_bot.modules.backtest.oos_profitability import (
     WindowOutcome,
@@ -119,7 +119,7 @@ async def build_g3_report(
     now = now_ms if now_ms is not None else int(datetime.now(UTC).timestamp() * 1000)
     engine = None
     if session_factory is None:
-        engine = make_engine(Settings())
+        engine = make_engine(load_settings())
         session_factory = make_session_factory(engine)
 
     try:
