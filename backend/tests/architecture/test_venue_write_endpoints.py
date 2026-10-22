@@ -15,16 +15,20 @@ Mutation checks (one at a time; revert after each):
 * point an ``auth_rest.py`` path constant at ``v2/auth/w/...``: both of the above fail.
 * send ``json.dumps([0, "fon", None, {...}])`` on the authenticated WebSocket:
   ``test_the_authenticated_websocket_sends_only_its_handshake`` fails.
-* let :func:`auth_path_violations` skip assembled pieces (or files other than the two
-  clients): ``test_an_assembled_authenticated_path_is_caught[*]`` fails.
+* let :func:`auth_path_violations` skip ``+``-assembled pieces in a signing client:
+  ``test_an_assembled_authenticated_path_is_caught[read_client_concat]`` fails (the other
+  cases are caught by the whole-literal rules as well).
 * let :func:`signing_modules` ignore ``hmac.new`` or ``sha384``:
   ``test_a_hand_rolled_signature_is_caught[*]`` fails.
 
-A path is checked as the string pieces the source holds, so a path built at run time is
-refused by its pieces: any piece naming ``auth/`` outside the two signing clients, and in
-them any piece that is joined (``+``, an f-string) instead of written whole. A signature is
-checked by its primitives: ``hmac`` beyond ``compare_digest`` and SHA-384 (Bitfinex's
-signing hash) appear only in the signing module.
+A path is checked as the string pieces the source holds: any piece naming ``auth/`` outside
+the two signing clients, and in them any piece joined with ``+``, ``%`` or an f-string instead
+of written whole. A signature is checked by its primitives: ``hmac`` beyond
+``compare_digest`` and SHA-384 (Bitfinex's signing hash) appear only in the signing module.
+This is a tripwire against an accidental new write, not a proof: a path split so that no
+piece names ``auth/`` (``"/".join([...])``, ``str.format``, an interpolated constant), a
+signature built with ``cryptography``'s HMAC, or a direct call of ``auth_rest._signed_post``
+from another module is not caught; review still owns those.
 """
 from __future__ import annotations
 
