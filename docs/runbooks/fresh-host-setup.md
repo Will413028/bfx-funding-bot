@@ -241,13 +241,34 @@ sbin 入口、sudoers 與 gh 例外，見 [deploy runbook §4](deploy.md#4-主�
 
 ### 3b. Runtime 設定與首次驗證
 
-- `/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr}.env` 依
+- `/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr,attest}.env` 依
   [deploy env 規則](deploy.md#env-檔規則) 準備，root 擁有且 mode `0600`。
   bot 與 `operator.env` 使用已核對的 canonical `BFX_EXCHANGE_ACCOUNT_ID`；不沿用舊 launcher 的 `BFX_RELEASE_*`。
 - `tailscale.env` 放一把新的 tagged（`tag:bfx-ops`）、單次使用的 auth key；新主機的 `bfx_tsstate` 是空的，
   節點會重新登入（舊節點先在 admin console 刪掉，名稱 `bfx-ops` 才不會變成 `bfx-ops-1`）。
 - 告警所需 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` 同時配置到 `notify.env` 與
   `bot.env`；GHCR 憑證只需 `read:packages`。設定方式見 [operations](operations.md#6-告警)。
+- `attest.env` 只放 `GH_TOKEN`：bfx-deploy 驗 build provenance 的 gh 沒有 token 就不執行（連公開資料也一樣），
+  所以給它一把**沒有任何權限**的 fine-grained token。在 GitHub → Settings → Developer settings →
+  Personal access tokens → Fine-grained tokens → Generate new token：
+  - Token name：`bfx-deploy attestation (<主機>)`；Resource owner：個人帳號（`Will413028`）；
+  - Expiration：1 年（custom，填一年後的日期）；
+  - Repository access：**Public repositories (read-only)**；
+  - Permissions：**全部不選**（Repository 與 Account 都是 No access）。
+
+  token 只顯示一次，直接貼進 VM，不要印出來、不要存到別處、不要貼進對話或 ticket：
+
+  ```bash
+  sudo install -m 600 -o root -g root /dev/null /opt/bfx/runtime/attest.env
+  # read -rs 不回顯；貼上 token 後按 Enter
+  sudo sh -c 'IFS= read -rs t && printf "GH_TOKEN=%s\n" "$t" > /opt/bfx/runtime/attest.env'
+  sudo stat -c '%U %a %F' /opt/bfx/runtime/attest.env    # root 600 regular file
+  sudo grep -c '^GH_TOKEN=.' /opt/bfx/runtime/attest.env  # 1（只印行數，不印值）
+  ```
+
+  把到期日記到 [operations §8「人工定期事項」](operations.md#人工定期事項)；輪替步驟見
+  [deploy runbook](deploy.md#attestenv-的-token-到期與每年輪替)。缺這個檔時 `--dry-run` 會以
+  `attestation_token_missing` 擋下。
 - error tracking 的 `SENTRY_DSN`（`bfx-backend`）同時配置到 `bot.env` 與 `webapi.env`；空值等於關閉。
   部署後依 [operations](operations.md#error-tracking-test) 各送一筆測試例外。
 

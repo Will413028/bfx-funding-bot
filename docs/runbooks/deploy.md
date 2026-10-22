@@ -45,8 +45,11 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
    --deny-self-hosted-runners --bundle-from-oci --format json`。必須在第 5 步之前：那一步會在新 image 裡
    以 DB owner（`migrate.env`）跑 alembic。驗不過就跟「release 還找不到」一樣處理：不寫 ledger、什麼都不動、
    每一輪重驗，連續失敗 30 分鐘發一次 warning（見 §5「Provenance 驗不過」）。沒有略過驗證的旗標。
-   gh 的環境從零建立：沒有 GitHub token、沒有 gh login，`DOCKER_CONFIG` 是空目錄，所以 `ghcr.env` 的
-   pull 憑證與 root 的 docker login 都不會交給 gh（GHCR package 以匿名讀取）。gh 的 TUF cache 在
+   gh 的環境從零建立：沒有 gh login，`DOCKER_CONFIG` 是空目錄，所以 `ghcr.env` 的
+   pull 憑證與 root 的 docker login 都不會交給 gh（GHCR package 以匿名讀取）。唯一的憑證是 `attest.env` 的
+   `GH_TOKEN`：gh 沒有 token 就拒絕執行，連讀公開資料也一樣，所以給它一把沒有任何權限、只能讀公開 repo 的
+   fine-grained token（見下方「Env 檔規則」）。這把 token 只出現在 `gh attestation verify` 的環境裡，
+   journal 印 gh stderr 前會把它換成 `[GH_TOKEN]`。gh 的 TUF cache 在
    `/var/lib/bfx-deploy/gh/`。
 4. 在 VM mirror（`/home/ubuntu/bfx-funding-bot`，以 `ubuntu` 身分跑 git）fetch，要求 `<rev>`
    在 `origin/main` 上，而且 ledger 最新成功部署的 revision 等於 `<rev>` 或是它的祖先（不降版：
@@ -183,7 +186,7 @@ schema 不在該 release 的 head 時拒絕。
 
 ### Env 檔規則
 
-`/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr}.env`：root 擁有、mode `0600`、
+`/opt/bfx/runtime/{bot,webapi,tailscale,migrate,notify,ghcr,attest}.env`：root 擁有、mode `0600`、
 不可是 symlink（`ubuntu` 使用者的 checkout 由 DR unit 執行，secret 不能讓它讀到）。
 bfx-deploy 啟動前會檢查，違反即 `precheck` 失敗：
 
@@ -197,6 +200,11 @@ bfx-deploy 啟動前會檢查，違反即 `precheck` 失敗：
   自己檢查過的 `--runtime-dir`；CI 用放了空檔的暫存目錄 render。預設值必須維持 `/opt/bfx/runtime`
   （CI 在 `config --no-interpolate` 的輸出上由 `compose_policy.py` 檢查，也要求 `required: true`），env 檔也維持必填，缺秘密檔時 `up` 會失敗而不是無聲啟動；
 - `ghcr.env`：`GHCR_USERNAME`、`GHCR_TOKEN`（read-only `read:packages`）；檔案不存在＝匿名 pull。
+- `attest.env`：只有 `GH_TOKEN`，給驗 provenance 的 gh 用的 fine-grained token（Public repositories
+  read-only、沒有任何 permission、效期 1 年；建立方式見
+  [fresh host setup 3b](fresh-host-setup.md#3b-runtime-設定與首次驗證)）。**必填**：不存在、不是 root `0600`
+  的一般檔、是 symlink，或除了非空的 `GH_TOKEN` 還有別的 key，每個新 release 都以
+  `attestation_token_missing` 擋下（discovery 失敗，不寫 ledger）。它不交給任何 container，也不交給 gh 以外的指令。
 - `notify.env`：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`（見 [operations §6](operations.md#6-告警)）。
 - `tailscale.env`：只有 `TS_AUTHKEY`（tagged `tag:bfx-ops`、非 ephemeral、單次使用、短效期）。只在節點第一次
   登入時用（`TS_AUTH_ONCE=true`），之後節點的 key 存在 volume `bfx_tsstate`；key 過期或用過都不影響已登入的節點。
@@ -312,6 +320,7 @@ Telegram 發一次 warning（`bfx-deploy cannot identify or read the release …
 |---|---|---|
 | `attestation_verifier_missing` | `/usr/local/lib/bfx-ops/gh/<GH_VERSION>/bin/gh` 不存在或跑不起來 | 照 §4 重跑 `install.sh`（它會依 sha256 裝上釘版 gh） |
 | `attestation_verifier_wrong_version` | 該路徑的 gh 回報的版本不是 `GH_VERSION` | 同上；不要手動放別的版本 |
+| `attestation_token_missing` | `/opt/bfx/runtime/attest.env` 不存在、不是 root `0600` 的一般檔（含 symlink），或內容不是恰好一個非空的 `GH_TOKEN`；journal 的 `attestation token unusable: <原因>` 說是哪一個 | 照 [fresh host setup 3b](fresh-host-setup.md#3b-runtime-設定與首次驗證) 重寫這個檔（不需要重新部署或重啟，下一輪自動重驗） |
 | `attestation_unverified` | `gh attestation verify` 失敗、逾時（180 秒）或沒有回報任何通過驗證的 attestation | 見下方 |
 
 `attestation_unverified` 的判斷（journal 的 `attestation verify of … exited …` 後面是 gh 的 stderr）：
@@ -330,14 +339,39 @@ Telegram 發一次 warning（`bfx-deploy cannot identify or read the release …
 手動重驗（root，同一個環境）：
 
 ```bash
-sudo env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/var/lib/bfx-deploy/gh \
+# token 由 root shell 從 attest.env 讀進環境，不會出現在指令列或輸出
+sudo sh -c '. /opt/bfx/runtime/attest.env && exec env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  HOME=/var/lib/bfx-deploy/gh GH_TOKEN="$GH_TOKEN" \
   GH_CONFIG_DIR=/var/lib/bfx-deploy/gh/config DOCKER_CONFIG=/var/lib/bfx-deploy/gh/docker \
   /usr/local/lib/bfx-ops/gh/2.102.0/bin/gh attestation verify \
   oci://ghcr.io/will413028/bfx-funding-bot-backend@sha256:<digest> \
   --repo Will413028/bfx-funding-bot \
   --signer-workflow Will413028/bfx-funding-bot/.github/workflows/release.yml \
-  --source-ref refs/heads/main --deny-self-hosted-runners --bundle-from-oci
+  --source-ref refs/heads/main --deny-self-hosted-runners --bundle-from-oci'
 ```
+
+#### `attest.env` 的 token 到期與每年輪替
+
+token 效期 1 年，到期日記在 [operations §8「人工定期事項」](operations.md#人工定期事項)。到期或被撤銷時，
+gh 拿得到 token（不是 `attestation_token_missing`），預期是向 GitHub API 認證失敗，journal 會是：
+
+```text
+bfx-deploy: attestation verify of ghcr.io/will413028/bfx-funding-bot-backend@sha256:… exited 1: … HTTP 401: Bad credentials …
+bfx-deploy: release not discoverable yet: attestation_unverified
+```
+
+（這段輸出是依 gh 對失效 token 的一般行為推得，沒有在本機實測；`--bundle-from-oci` 下 gh 是否一定會打
+GitHub API 也沒有實測過。所以不要等 journal 才發現：以到期日為準，提前換。）bot 與 webapi 不受影響，
+只是新 release 不會部署。
+
+輪替步驟（到期前至少一週做）：
+
+1. 在 GitHub 照 [fresh host setup 3b](fresh-host-setup.md#3b-runtime-設定與首次驗證) 的設定建一把新的
+   fine-grained token（同樣 Public repositories read-only、沒有任何 permission、效期 1 年）。
+2. 在 VM 用同一節的指令覆寫 `/opt/bfx/runtime/attest.env`，核對仍是 `root 600`。不用停 timer 或重啟：
+   下一輪 bfx-deploy 才讀它。
+3. 用上方「手動重驗」對目前已部署的 digest 跑一次，exit 0 才算換好。
+4. 在 GitHub 刪掉舊 token，更新 operations §8 的到期日。
 
 降版（`precheck:release_not_descendant_of_deployed`）走的是 ledger：寫一列 `failed`、發 critical、現行 release
 沒動，同一個 digest 之後不會再試。代表 `main` tag 指向的 revision 不在已部署 revision 之後；正常的 release
