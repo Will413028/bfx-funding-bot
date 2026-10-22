@@ -44,6 +44,9 @@ _IPV6 = re.compile(r"(?<![0-9A-Za-z:])(?:[0-9A-Fa-f]{1,4}:){3,7}[0-9A-Fa-f]{1,4}
                    r"|(?<![0-9A-Za-z:])[0-9A-Fa-f:]*::[0-9A-Fa-f:]*[0-9A-Fa-f](?![0-9A-Za-z:])")
 _DROPPED_HEADERS: Final = frozenset({"authorization", "cookie", "set-cookie", "x-forwarded-for",
                                      "x-real-ip", "cf-connecting-ip", "true-client-ip"})
+# Fields of the security events (core/security_log.py) that name a person: a tailnet login
+# such as ``user@github`` has no TLD, so _EMAIL alone would let it through a breadcrumb.
+_IDENTITY_KEYS: Final = frozenset({"login", "tailnet_user_ids", "user_id"})
 
 
 def scrub_text(text: str, secrets: Sequence[str]) -> str:
@@ -58,7 +61,8 @@ def _scrub(value: Any, secrets: Sequence[str]) -> Any:
     if isinstance(value, str):
         return scrub_text(value, secrets)
     if isinstance(value, Mapping):
-        return {key: _scrub(item, secrets) for key, item in value.items()}
+        return {key: REDACTED if key in _IDENTITY_KEYS else _scrub(item, secrets)
+                for key, item in value.items()}
     if isinstance(value, list | tuple):
         return [_scrub(item, secrets) for item in value]
     return value

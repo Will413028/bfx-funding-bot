@@ -91,6 +91,21 @@ def test_scrub_removes_secrets_emails_ips_and_identity_fields() -> None:
     assert scrubbed["tags"] == {"service": "bot", "peer": REDACTED}
 
 
+def test_scrub_redacts_the_security_events_identity_fields() -> None:
+    event: Any = {"breadcrumbs": {"values": [{
+        "category": "bfx.security", "message": "access_denied",
+        "data": {"event": "access_denied", "reason": "missing_capability",
+                 "login": "operator@github", "tailnet_user_ids": ["123456"], "user_id": "123456"},
+    }]}}
+
+    scrubbed = scrub_event(event, ())
+
+    assert scrubbed is not None
+    data = scrubbed["breadcrumbs"]["values"][0]["data"]
+    assert data == {"event": "access_denied", "reason": "missing_capability",
+                    "login": REDACTED, "tailnet_user_ids": REDACTED, "user_id": REDACTED}
+
+
 def test_scrub_keeps_ordinary_text() -> None:
     text = "deployment_skip symbol=fUSD rate=0.00021 period=2 at 12:30:45 v1.2.3"
     assert error_tracking.scrub_text(text, ()) == text

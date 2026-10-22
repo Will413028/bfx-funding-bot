@@ -238,14 +238,14 @@ sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
 
 `bfx-bot` 與 `bfx-webapi` 的 log 每行是一個 JSON 物件（寫 stderr，`docker logs` 與 homelab alloy 照常讀得到）：
 `ts`（UTC，結尾 `Z`）、`level`、`service`（`bot`／`webapi`）、`logger`、`msg`（訊息文字）、有 traceback 時的 `exc`，
-以及事件自己的欄位（`event`、`reason` 等）。值裡的換行與控制字元都被跳脫，一筆 log 永遠只佔一行。
+以及事件自己的欄位（`event`、`reason` 等）。值裡的換行與控制字元都被跳脫，一筆 log 只佔一行；例外是 bot 未攔下的例外在程序結束時由直譯器印出的多行純文字 traceback。
 
 - 照舊用事件名 grep：事件名在 `msg` 裡，例如 `docker logs bfx-bot --since 1h 2>&1 | grep deployment_skip`。
   Grafana 的 bfx 規則比對整行原文，不受格式影響。
-- 取欄位用 `jq`（要先裝）：`docker logs bfx-webapi --since 1h 2>&1 | jq -c 'select(.logger == "bfx.security")'`。
+- 取欄位用 `jq`（要先裝）：`docker logs bfx-webapi --since 1h 2>&1 | jq -R -c 'fromjson? | select(.logger == "bfx.security")'`（`fromjson?` 跳過非 JSON 行）。
   operational telemetry（logger `bfx_funding_bot.events`）的事件 JSON 是 `msg` 字串，要再解一次：
-  `jq -c 'select(.logger == "bfx_funding_bot.events") | .msg | fromjson'`。
-- web API 的 access log（logger `uvicorn.access`）client 一律是 `127.0.0.1`（Serve 代理），看身分要看安全事件。
+  `jq -R -c 'fromjson? | select(.logger == "bfx_funding_bot.events") | .msg | fromjson'`。
+- web API 的 access log（logger `uvicorn.access`）的 client 是 Serve 代理轉來的位址（`127.0.0.1`，或 Serve 帶 `X-Forwarded-For` 時的 tailnet IP），不代表身分；看身分要看安全事件。
 
 安全事件（logger `bfx.security`；查法 `docker logs bfx-webapi --since 24h 2>&1 | grep bfx.security`，bot 同理）：
 
