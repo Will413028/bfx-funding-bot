@@ -7,11 +7,16 @@ balance figures, and /dry-evaluate runs the guard chain on demand.
 """
 from __future__ import annotations
 
+import json
+import logging
+import re
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from bfx_funding_bot.core.log_format import JsonFormatter
 from bfx_funding_bot.modules.admin.router import build_router
 
 
@@ -297,3 +302,57 @@ def test_tokens_are_compared_in_constant_time() -> None:
             names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
             assert not names & token_names, ast.unparse(node)
     assert "compare_digest" in inspect.getsource(router._auth_error)
+
+
+# ------------------------------------------------------- security log (9j)
+
+
+def _security(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "bfx.security"]
+
+
+@pytest.mark.parametrize(("headers", "status", "reason"), [
+    ({}, 401, "missing_auth"),
+    ({"Authorization": "Bearer wrong-token-value"}, 403, "unauthorized"),
+    ({"Authorization": "Basic secret"}, 403, "unauthorized"),
+])
+def test_a_refused_admin_call_is_logged_without_the_credential(
+    caplog: pytest.LogCaptureFixture, headers: dict[str, str], status: int, reason: str,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="bfx.security"):
+        resp = TestClient(_app(_HaltableStatus())).post("/admin/halt?reason=x", headers=headers)
+
+    assert resp.status_code == status
+    [record] = _security(caplog)
+    assert (record.event, record.reason, record.status) == ("access_denied", reason, status)
+    assert (record.method, record.path) == ("POST", "/admin/halt")
+    line = JsonFormatter("bot").format(record)
+    assert "wrong-token-value" not in line and "secret" not in line
+
+
+def test_an_authorized_admin_call_logs_no_refusal(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="bfx.security"):
+        TestClient(_app(_FakeStatus())).get(
+            "/admin/trading-status", headers={"Authorization": "Bearer secret"})
+
+    assert _security(caplog) == []
+
+
+def test_halt_reason_and_actor_cannot_forge_a_log_line(caplog: pytest.LogCaptureFixture) -> None:
+    """F37: reason and actor come from the query string. They are fields of one JSON
+    line, escaped, and never part of the message."""
+    forged = "x\n2026-10-21 CRITICAL bfx forged\r\x1b[2K\x00"
+    with caplog.at_level(logging.WARNING, logger="bfx.security"):
+        resp = TestClient(_app(_HaltableStatus())).post(
+            "/admin/halt", params={"reason": forged, "actor": f"will\n{forged}"},
+            headers={"Authorization": "Bearer secret"})
+
+    assert resp.status_code == 200
+    [record] = _security(caplog)
+    assert record.getMessage() == "admin_halt halt_requested"
+    line = JsonFormatter("bot").format(record)
+    assert line.splitlines() == [line]
+    assert re.search(r"[\x00-\x1f]", line) is None
+    payload = json.loads(line)
+    assert (payload["halt_reason"], payload["actor"]) == (forged, f"will\n{forged}")
+    assert payload["cancel_all_complete"] is True

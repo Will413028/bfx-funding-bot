@@ -5,12 +5,14 @@ status service, and no admin route may ever be reachable without a token.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 from fastapi.testclient import TestClient
 
 from bfx_funding_bot.core.health import HealthProbe
-from bfx_funding_bot.modules.marketfeed.healthz import make_app
+from bfx_funding_bot.modules.marketfeed.healthz import make_app, run_healthz_server
 
 
 class _FakeStatus:
@@ -89,3 +91,19 @@ def test_a_read_token_equal_to_the_admin_token_is_dropped() -> None:
     assert admin_tokens({"BFX_ADMIN_TOKEN": "a", "BFX_ADMIN_READ_TOKEN": "r"}) == ("a", "r")
     assert admin_tokens({"BFX_ADMIN_TOKEN": "a", "BFX_ADMIN_READ_TOKEN": "a"}) == ("a", None)
     assert admin_tokens({"BFX_ADMIN_TOKEN": " ", "BFX_ADMIN_READ_TOKEN": ""}) == (None, None)
+
+
+async def test_the_healthz_server_leaves_uvicorn_logging_to_the_bot_root() -> None:
+    """9j: uvicorn's own dictConfig would put text handlers back on its loggers (after the
+    bot's ``configure_logging``); with ``log_config=None`` they keep propagating to the root."""
+    uvicorn_logger = logging.getLogger("uvicorn")
+    saved = (list(uvicorn_logger.handlers), uvicorn_logger.propagate)
+    uvicorn_logger.handlers.clear()
+    uvicorn_logger.propagate = True
+    stop = asyncio.Event()
+    stop.set()
+    try:
+        await run_healthz_server(probe=HealthProbe(), host="127.0.0.1", port=0, stop_event=stop)
+        assert (uvicorn_logger.handlers, uvicorn_logger.propagate) == ([], True)
+    finally:
+        uvicorn_logger.handlers[:], uvicorn_logger.propagate = saved

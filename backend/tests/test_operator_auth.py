@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from bfx_funding_bot.core import auth
+from bfx_funding_bot.core.log_format import JsonFormatter
 from bfx_funding_bot.core.settings import Settings
 from tests.ingress_support import (
     INGRESS_ENV,
@@ -104,3 +106,31 @@ def test_the_web_api_refuses_to_start_without_each_ingress_value(monkeypatch, mi
 
     with pytest.raises(Exception, match=missing), TestClient(app):
         pass
+
+
+@pytest.mark.parametrize(("headers", "reason", "presented"), [
+    pytest.param({auth.LOGIN_HEADER: "intruder@github"}, "operator_identity_missing", None,
+                 id="no-capability"),
+    pytest.param(operator_headers(user_id="someone-else", login="intruder@github"),
+                 "operator_required", ["someone-else"], id="another-user"),
+])
+def test_a_refused_caller_is_logged_with_the_identity_serve_forwarded(
+    caplog, headers, reason, presented,
+):
+    """9j: the access log has the 401; this line adds why and who (login and the node user
+    IDs the capability named), never the raw capability header."""
+    with caplog.at_level(logging.WARNING, logger="bfx.security"), pytest.raises(HTTPException):
+        asyncio.run(auth.require_operator(_request(headers)))
+
+    [record] = [r for r in caplog.records if r.name == "bfx.security"]
+    assert (record.event, record.reason, record.login) == ("access_denied", reason, "intruder@github")
+    assert (record.method, record.path) == ("GET", "/api/v1/profile")
+    assert getattr(record, "tailnet_user_ids", None) == presented
+    assert auth.OPERATOR_CAPABILITY not in JsonFormatter("webapi").format(record)
+
+
+def test_the_operator_is_not_logged_as_refused(caplog):
+    with caplog.at_level(logging.WARNING, logger="bfx.security"):
+        asyncio.run(auth.require_operator(_request(operator_headers())))
+
+    assert [r for r in caplog.records if r.name == "bfx.security"] == []
