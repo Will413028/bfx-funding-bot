@@ -27,7 +27,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-import bfx_funding_bot.modules.live_validation.tables  # noqa: F401  # registers ORM
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts import config_service, vault
@@ -251,8 +250,9 @@ def build_app(funding_reader: Any = None) -> FastAPI:
     app.include_router(build_uncertainties_router())
     app.include_router(build_trading_control_router())
     unused: Any = object()
-    app.state.read_models = ReadModels(_Reads(), unused, unused, _History(),  # type: ignore[arg-type]
-                                       lambda scope: unused)
+    reads: Any = _Reads()
+    history: Any = _History()
+    app.state.read_models = ReadModels(reads, unused, unused, history, lambda scope: unused)
     return app
 
 
@@ -348,8 +348,13 @@ def client_for(app: FastAPI, factory: async_sessionmaker[Any]) -> TestClient:
 
 
 @pytest_asyncio.fixture
-async def client(sqlite_engine: AsyncEngine, patched_ports: None) -> AsyncIterator[TestClient]:
-    factory = await _seed(sqlite_engine)
+async def factory(sqlite_engine: AsyncEngine) -> async_sessionmaker[Any]:
+    return await _seed(sqlite_engine)
+
+
+@pytest_asyncio.fixture
+async def client(factory: async_sessionmaker[Any], patched_ports: None,
+                 ) -> AsyncIterator[TestClient]:
     with client_for(build_app(), factory) as c:
         yield c
 
@@ -405,3 +410,70 @@ def test_every_response_matches_the_golden_wire_format(client: TestClient, subte
             response = client.request(method, path, json=body)
             assert response.status_code == golden[name]["status"], response.text
             assert canonical(response.json()) == canonical(golden[name]["body"])
+
+
+def test_a_shape_the_console_could_misread_is_refused_not_served(
+        client: TestClient, monkeypatch: pytest.MonkeyPatch, subtests: Any) -> None:
+    """A value outside a declared union, or a renamed field, fails the response."""
+
+    async def overview(*args: Any) -> dict[str, Any]:
+        return _overview(phase="cancelled")
+
+    async def offers(self: Any, session: Any, scope: Any, *, states: Any) -> tuple[OfferView, ...]:
+        return (OfferView("o-1", "v1", "expired", "fUST", Decimal("1"), 1, 1),)
+
+    async def request(*args: Any) -> UncertaintyResolutionRequestRow:
+        return _resolution_request(state="superseded")
+
+    async def uncertainty(*args: Any) -> UncertaintyDetail:
+        detail = _uncertainty()
+        view = detail.view
+        return UncertaintyDetail(
+            view=UncertaintyView(view.uncertainty_id, "venue_said_maybe", view.symbol, view.state,
+                                 view.intended_amount, view.evidence),
+            context=detail.context, latest_request=None)
+
+    monkeypatch.setattr(operator_commands, "trading_overview", overview)
+    monkeypatch.setattr(_Reads, "list_offers", offers)
+    monkeypatch.setattr(operator_commands, "get_resolution_request", request)
+    monkeypatch.setattr(operator_commands, "get_uncertainty", uncertainty)
+    for name, path, status in (
+        ("cancel-all phase", f"{BASE}/trading-control", 500),
+        ("offer state", f"{BASE}/offers", 500),
+        ("request state", f"{BASE}/uncertainty-resolution-requests/{RESOLUTION_REQUEST}", 500),
+        # An uncertainty that cannot be rendered is unavailable (_rendered), never a 500.
+        ("uncertainty kind", f"{BASE}/uncertainties/{UNCERTAINTY}", 503),
+    ):
+        with subtests.test(msg=name):
+            response = client.get(path)
+            assert response.status_code == status
+            assert "cancelled" not in response.text and "expired" not in response.text
+
+
+@pytest.mark.parametrize("mutate", ["rename", "retype", "drop"])
+def test_a_daemon_status_of_another_shape_is_unavailable(
+        factory: async_sessionmaker[Any], patched_ports: None, mutate: str,
+        caplog: pytest.LogCaptureFixture) -> None:
+    """The daemon's body is forwarded only once it parses: refused like an unreachable daemon,
+    logged by field path without its value."""
+
+    async def daemon(path: str) -> dict[str, Any]:
+        if path != "/admin/trading-status":
+            return funding_dry_run()
+        body = funding_snapshot()
+        fust = body["symbols"]["fUST"]
+        if mutate == "rename":
+            fust["spendable_amount"] = fust.pop("spendable")
+        elif mutate == "retype":
+            fust["spendable"] = 1100.5
+        else:
+            del body["halt"]["halted"]
+        return body
+
+    with client_for(build_app(funding_reader=daemon), factory) as c:
+        response = c.get(f"{BASE}/funding-status")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "funding_status_unavailable"}
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "funding_status_shape_mismatch" in logged
+    assert "1100.5" not in logged and "9007199254740993" not in logged

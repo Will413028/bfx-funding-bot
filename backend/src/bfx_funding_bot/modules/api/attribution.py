@@ -13,7 +13,7 @@ from bfx_funding_bot.modules.api.account_scope import (
 )
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
-from bfx_funding_bot.modules.api.schemas import WeeklyAttributionResponse
+from bfx_funding_bot.modules.api.schemas import Envelope, WeeklyAttributionResponse
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
 
 
@@ -32,7 +32,7 @@ def _dec_str(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
-def _to_response(row: AttributionWeeklyRow) -> dict[str, object]:
+def _to_response(row: AttributionWeeklyRow) -> WeeklyAttributionResponse:
     return WeeklyAttributionResponse(
         cell=row.cell,
         week_start_ms=row.week_start_ms,
@@ -57,7 +57,7 @@ def _to_response(row: AttributionWeeklyRow) -> dict[str, object]:
             _dec_str(row.baseline_frr_util_apr_net_pct)
             if row.baseline_frr_util_apr_net_pct is not None else None
         ),
-    ).model_dump(by_alias=True)
+    )
 
 
 def build_attribution_router() -> APIRouter:
@@ -70,7 +70,7 @@ def build_attribution_router() -> APIRouter:
         cell: str | None = None,
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
-    ) -> dict[str, object]:
+    ) -> Envelope[list[WeeklyAttributionResponse]]:
         stmt = (
             select(AttributionWeeklyRow)
             .where(
@@ -82,6 +82,6 @@ def build_attribution_router() -> APIRouter:
         if cell is not None:
             stmt = stmt.where(AttributionWeeklyRow.cell == cell)
         rows = (await session.execute(stmt)).scalars().all()
-        return {"data": [_to_response(row) for row in rows]}
+        return Envelope(data=[_to_response(row) for row in rows])
 
     return router

@@ -18,7 +18,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.api.account_scope import (
@@ -28,20 +28,29 @@ from bfx_funding_bot.modules.api.account_scope import (
 )
 from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models, get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
+from bfx_funding_bot.modules.api.schemas import Envelope, ResponseModel
 from bfx_funding_bot.modules.execution import operator_commands as commands
 from bfx_funding_bot.modules.execution.operator_commands import (
     OperatorCommandError,
     UncertaintyDetail,
 )
-from bfx_funding_bot.modules.execution.uncertainty_tables import UncertaintyResolutionRequestRow
+from bfx_funding_bot.modules.execution.operator_requests import RequestState
+from bfx_funding_bot.modules.execution.uncertainty_tables import (
+    ResolutionAction,
+    UncertaintyResolutionRequestRow,
+)
 from bfx_funding_bot.modules.ledger import Scope, observation_evidence_ref
 
 _MAX_LIMIT = 100
 _MAX_CANDIDATE_VENUE_OFFER_IDS = 16
 _EvidenceValue = str | int | float | bool | None | dict[str, Any] | list[Any]
+# The ledger's kinds (``ledger._internal.reads.UNCERTAINTY_KINDS``) and the one the console
+# also knows; a kind outside it fails the read as unavailable rather than reaching the console.
+UncertaintyKind = Literal[
+    "submit_outcome_unknown", "unattributed_venue_offer", "unsupported_venue_exposure"]
 
 
-class UncertaintyResolutionContext(BaseModel):
+class UncertaintyResolutionContext(ResponseModel):
     """Server-derived, bounded inputs for one audited operator action."""
 
     model_config = ConfigDict(populate_by_name=True)
@@ -70,28 +79,36 @@ class UncertaintyResolutionContext(BaseModel):
     )
 
 
-class ResolutionRequestResponse(BaseModel):
+class BlockedScope(ResponseModel):
+    """The account, environment and symbol an open uncertainty blocks."""
+
+    exchange_account_id: str = Field(serialization_alias="exchangeAccountId")
+    environment: str
+    symbol: str
+
+
+class ResolutionRequestResponse(ResponseModel):
     """One queued adjudication and, once the daemon has settled it, its outcome."""
 
     model_config = ConfigDict(populate_by_name=True)
 
     request_id: str = Field(serialization_alias="requestId")
     uncertainty_id: str = Field(serialization_alias="uncertaintyId")
-    action: str
-    state: Literal["requested", "applied", "rejected", "failed"]
+    action: ResolutionAction
+    state: RequestState
     evidence_ref: str = Field(serialization_alias="evidenceRef")
     created_at_ms: int = Field(serialization_alias="createdAtMs")
     processed_at_ms: int | None = Field(default=None, serialization_alias="processedAtMs")
     outcome_reason: str | None = Field(default=None, serialization_alias="outcomeReason")
 
 
-class UncertaintyResponse(BaseModel):
+class UncertaintyResponse(ResponseModel):
     """Bounded operator-console uncertainty DTO (never raw event payload)."""
 
     model_config = ConfigDict(populate_by_name=True)
 
     uncertainty_id: str = Field(serialization_alias="uncertaintyId")
-    kind: str
+    kind: UncertaintyKind
     symbol: str
     intended_amount: str = Field(serialization_alias="intendedAmount")
     state: Literal["open", "resolved"]
@@ -99,7 +116,7 @@ class UncertaintyResponse(BaseModel):
         default_factory=dict,
         serialization_alias="evidenceSummary",
     )
-    blocked_scope: dict[str, str] = Field(serialization_alias="blockedScope")
+    blocked_scope: BlockedScope = Field(serialization_alias="blockedScope")
     resolved_by_operator_id: str | None = Field(
         default=None,
         serialization_alias="resolvedByOperatorId",
@@ -132,7 +149,7 @@ def _resolution_context(detail: UncertaintyDetail) -> UncertaintyResolutionConte
     )
 
 
-def _response(detail: UncertaintyDetail, scope: Scope) -> dict[str, object]:
+def _response(detail: UncertaintyDetail, scope: Scope) -> UncertaintyResponse:
     row = detail.view
     state = row.state
     if state not in {"open", "resolved"}:
@@ -146,18 +163,18 @@ def _response(detail: UncertaintyDetail, scope: Scope) -> dict[str, object]:
         intended_amount=str(Decimal(str(row.intended_amount))),
         state=state,
         evidence_summary=commands.evidence_summary(row.evidence),
-        blocked_scope={
-            "exchangeAccountId": str(scope.exchange_account_id),
-            "environment": scope.deployment_environment,
-            "symbol": row.symbol,
-        },
+        blocked_scope=BlockedScope(
+            exchange_account_id=str(scope.exchange_account_id),
+            environment=scope.deployment_environment,
+            symbol=row.symbol,
+        ),
         resolved_by_operator_id=row.resolved_by_operator_id,
         resolution_reason=row.resolution_reason,
         resolution_context=_resolution_context(detail),
         resolution_request=(
             _request_model(detail.latest_request) if detail.latest_request is not None else None
         ),
-    ).model_dump(by_alias=True)
+    )
 
 
 def _request_model(row: UncertaintyResolutionRequestRow) -> ResolutionRequestResponse:
@@ -171,11 +188,6 @@ def _request_model(row: UncertaintyResolutionRequestRow) -> ResolutionRequestRes
         processed_at_ms=row.processed_at_ms,
         outcome_reason=row.outcome_reason,
     )
-
-
-def _request_response(row: UncertaintyResolutionRequestRow) -> dict[str, object]:
-    return _request_model(row).model_dump(by_alias=True)
-
 
 
 def _rendered[T](render: Callable[[], T]) -> T:
@@ -201,14 +213,14 @@ def build_uncertainties_router() -> APIRouter:
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
         models: ReadModels = Depends(get_read_models),  # noqa: B008
-    ) -> dict[str, object]:
+    ) -> Envelope[list[UncertaintyResponse]]:
         try:
             details = await commands.list_uncertainties(
                 session, context, models.operator_reads, models.operator_evidence,
                 state=state, limit=limit)
         except OperatorCommandError as exc:
             raise command_error(exc) from exc
-        return {"data": _rendered(lambda: [_response(d, context.scope) for d in details])}
+        return Envelope(data=_rendered(lambda: [_response(d, context.scope) for d in details]))
 
     @router.get("/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}")
     async def get_account_uncertainty(
@@ -216,14 +228,14 @@ def build_uncertainties_router() -> APIRouter:
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
         models: ReadModels = Depends(get_read_models),  # noqa: B008
-    ) -> dict[str, object]:
+    ) -> Envelope[UncertaintyResponse]:
         try:
             detail = await commands.get_uncertainty(
                 session, context, models.operator_reads, models.operator_evidence,
                 uncertainty_id)
         except OperatorCommandError as exc:
             raise command_error(exc) from exc
-        return {"data": _rendered(lambda: _response(detail, context.scope))}
+        return Envelope(data=_rendered(lambda: _response(detail, context.scope)))
 
     @router.get(
         "/exchange-accounts/{exchange_account_id}/uncertainty-resolution-requests/{request_id}"
@@ -232,12 +244,12 @@ def build_uncertainties_router() -> APIRouter:
         request_id: UUID,
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
-    ) -> dict[str, object]:
+    ) -> Envelope[ResolutionRequestResponse]:
         try:
             row = await commands.get_resolution_request(session, context, request_id)
         except OperatorCommandError as exc:
             raise command_error(exc) from exc
-        return {"data": _request_response(row)}
+        return Envelope(data=_request_model(row))
 
     return router
 

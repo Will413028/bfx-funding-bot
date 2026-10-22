@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.core.settings import require_deployment_environment
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.schemas import (
+    Envelope,
     PublicProofSummaryResponse,
     PublicWeeklyPoint,
 )
@@ -126,7 +127,7 @@ def build_public_router() -> APIRouter:
     async def proof_summary(
         response: Response,
         session: AsyncSession = Depends(get_session),  # noqa: B008
-    ) -> dict[str, object]:
+    ) -> Envelope[PublicProofSummaryResponse]:
         response.headers["Cache-Control"] = _CACHE_CONTROL
         account_id = _public_exchange_account_id()
         try:
@@ -147,8 +148,7 @@ def build_public_router() -> APIRouter:
         rows = list((await session.execute(stmt)).scalars().all())
         weeks = _aggregate_weeks(rows)
         as_of = max((r.computed_at for r in rows), default=datetime.now(UTC))
-        payload = PublicProofSummaryResponse(weeks=weeks, as_of=as_of.isoformat())
-        return {"data": payload.model_dump(by_alias=True)}
+        return Envelope(data=PublicProofSummaryResponse(weeks=weeks, as_of=as_of.isoformat()))
 
     @router.get("/funding-rates.csv")
     async def funding_rates_csv(
