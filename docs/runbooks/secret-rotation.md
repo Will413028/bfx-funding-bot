@@ -5,7 +5,7 @@
 
 ## 何時換
 
-由事件觸發，不排定期輪替（品質計畫 9h，D15）。唯一的例外是 `attest.env` 的 GitHub token，它每年到期，見文末。
+由事件觸發，不排定期輪替（品質計畫 9h，D15）。
 符合任一條件就換：
 
 - 疑似外洩：
@@ -261,10 +261,8 @@ log 與 Telegram 仍然會遮蔽它。真的要換：
 
 - `TS_AUTHKEY`（`tailscale.env`）：只在節點第一次登入時使用；節點已登入時可以是空檔。換節點見
   [deploy「Tailnet 入口」](deploy.md#tailnet-入口netnstailscale)。
-- `ghcr.env`（GHCR PAT）：9i 確認驗證 provenance 不需要 token 之後，刪檔並在 GitHub 撤銷 PAT（見 deploy「Env 檔規則」）。
-  在那之前要換，就到 GitHub 重發 `read:packages` 的 classic PAT，照 Telegram 一節的 `read -rs` 寫法讀進 `V`，再
+- `ghcr.env`（GHCR PAT）：9i 的 provenance 驗證不需要 GitHub token，但 package 是 private 時 bfx-deploy 的 pull
+  與讀 manifest 都要用它；要刪檔並撤銷 PAT，先把 GHCR package 改成 public（見 deploy「Env 檔規則」）。
+  要換，就到 GitHub 重發 `read:packages` 的 classic PAT，照 Telegram 一節的 `read -rs` 寫法讀進 `V`，再
   `setkey /opt/bfx/runtime/ghcr.env GHCR_TOKEN`。下一輪 bfx-deploy 就會用新值。
 - mirror 的 deploy key：9h 起 mirror 改用匿名 HTTPS，deploy key 應該已刪除（[deploy「Mirror」](deploy.md#mirrorgit-fetch-走匿名-https9h)）。
-- `attest.env`（9i 的 GitHub token，fine-grained、只讀公開資料、不授予任何權限）：每年到期前換一次：
-  1. 在 GitHub 建新 token，照 Telegram 一節的 `read -rs` 寫法讀進 `V`，再用 `setkey` 寫進 `attest.env`；
-  2. 下一輪 bfx-deploy 驗證 provenance 成功之後，撤銷舊 token。

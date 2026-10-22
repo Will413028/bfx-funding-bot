@@ -7,7 +7,9 @@
 # On a running host, run it from the DR checkout of the deployed release
 # (/home/ubuntu/bfx-releases/current) with bfx-deploy.timer stopped and
 # bfx-deploy.service inactive. Re-run it whenever a release adds an entry point in
-# /usr/local/sbin or changes the sudoers drop-in: bfx-deploy never writes those.
+# /usr/local/sbin, changes the sudoers drop-in or bumps GH_VERSION: bfx-deploy never
+# writes those (until the pinned gh is installed, bfx-deploy refuses every new release
+# with attestation_verifier_missing).
 #
 # Lays out exactly what bfx-deploy maintains afterwards (it re-installs from each
 # release it deploys, effective from its next run), so this script is needed once:
@@ -15,6 +17,9 @@
 #   /usr/local/lib/bfx-ops/releases/<rev>/{ops,systemd}   root-owned, from git objects
 #   /usr/local/lib/bfx-ops/releases/<rev>/ops/.venv       uv sync --frozen (ops/uv.lock)
 #   /usr/local/lib/bfx-ops/current -> releases/<rev>
+#   /usr/local/lib/bfx-ops/gh/<GH_VERSION>/bin/gh            the pinned GitHub CLI that verifies
+#                                                           each release's provenance (bfx_deploy.py
+#                                                           GH_BINARY); bfx-deploy never installs it
 #   /usr/local/sbin/bfx-deploy, bfx-notify, bfx-op          wrappers into current
 #   /etc/sudoers.d/bfx-op                                   sudo keeps SSH_CONNECTION for bfx-op
 #   /home/ubuntu/bfx-releases/<rev>, current -> <rev>       clean git worktree (DR scripts)
@@ -32,6 +37,13 @@ SBIN=/usr/local/sbin
 UNIT_DESTINATION=/etc/systemd/system
 UV=/usr/local/bin/uv
 SYSTEM_PYTHON=/usr/bin/python3
+# The GitHub CLI release bfx-deploy verifies provenance with: an exact version from
+# https://github.com/cli/cli/releases (published >= 7 days before it is pinned) and the
+# sha256 of gh_<version>_linux_arm64.tar.gz from that release's checksums file. A bump
+# changes GH_VERSION here and in bfx_deploy.py (a test keeps them equal).
+GH_VERSION=2.102.0
+GH_SHA256=7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484
+GH_DIR="$OPS_ROOT/gh/$GH_VERSION"
 
 if [[ "$(uname -s)" != Linux ]]; then
   echo "Linux is required." >&2
@@ -43,6 +55,27 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 [[ -x "$UV" ]] || { echo "uv is required at $UV (see docs/runbooks/fresh-host-setup.md)." >&2; exit 1; }
 docker buildx version >/dev/null 2>&1 || { echo "docker buildx is required." >&2; exit 1; }
+[[ "$(uname -m)" == aarch64 ]] || { echo "The pinned gh is linux_arm64; this host is $(uname -m)." >&2; exit 1; }
+
+# Idempotent: an installed gh that reports the pinned version stays; anything else at
+# that path is replaced, from a download whose sha256 must match before it is unpacked.
+gh_reports() { local found; found=$("$1" --version 2>/dev/null) || return 1; [[ "${found%%$'\n'*}" == "gh version $GH_VERSION ("*")" ]]; }
+if ! gh_reports "$GH_DIR/bin/gh"; then
+  gh_download=$(mktemp -d)
+  gh_archive="$gh_download/gh_${GH_VERSION}_linux_arm64.tar.gz"
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --output "$gh_archive" \
+    "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_arm64.tar.gz"
+  echo "$GH_SHA256  $gh_archive" | sha256sum --check --strict --quiet
+  tar -x -z -f "$gh_archive" -C "$gh_download" --no-same-owner "gh_${GH_VERSION}_linux_arm64/bin/gh"
+  gh_stage="$OPS_ROOT/gh/.$GH_VERSION.staging"
+  rm -rf -- "$gh_stage"
+  install -d -o root -g root -m 0755 "$OPS_ROOT/gh" "$gh_stage" "$gh_stage/bin"
+  install -o root -g root -m 0755 "$gh_download/gh_${GH_VERSION}_linux_arm64/bin/gh" "$gh_stage/bin/gh"
+  rm -rf -- "$gh_download"
+  gh_reports "$gh_stage/bin/gh" || { echo "The downloaded gh does not report $GH_VERSION." >&2; exit 1; }
+  rm -rf -- "$GH_DIR"
+  mv -T -- "$gh_stage" "$GH_DIR"
+fi
 
 MIRROR_USER=$(stat -c %U "$ROOT")
 as_owner() { runuser -u "$MIRROR_USER" -- "$@"; }
@@ -106,4 +139,5 @@ done <"$RELEASE/systemd/managed-units"
 systemctl daemon-reload
 
 echo "Installed release $REV: tooling in $RELEASE, DR checkout in $DR_ROOT/$REV, units in $UNIT_DESTINATION."
+echo "Provenance verifier: $GH_DIR/bin/gh ($GH_VERSION)."
 echo "No timer was enabled or started."
