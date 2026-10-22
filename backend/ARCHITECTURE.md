@@ -48,9 +48,14 @@ draft；缺少、未知、retired 或 halted account 都 fail closed。
 **API 契約（9k）**：後端的 pydantic response model 是 `/api/v1` 回應形狀的唯一來源。每個
 JSON route 宣告回應型別（`modules/api/schemas.py` 的 `Envelope[T]` 包成 `{"data": ...}`；
 executions 另帶 `pagination`）；多數欄位用 `serialization_alias` 輸出 camelCase，
-trading-control 與 funding-status 維持 snake_case。值域封閉的欄位是 `Literal`（取 DB
-CHECK constraint 的值域），值域外的值讓回應 500，不送到 console；uncertainties 的讀取照
-`_rendered` 回 503。`funding-status` 只在 daemon 的 `/admin/trading-status` 與
+trading-control 與 funding-status 維持 snake_case。值域封閉的欄位是 `Literal`，有 domain
+型別就直接用（`TradingAction`、`RequestState`、`AccountRole`、ledger 的 `OfferState`／
+`UncertaintyState`／`UncertaintyKind` 等；`UNCERTAINTY_KINDS` 由 mypy 綁到 `UncertaintyKind`）；只有常數或 DB CHECK constraint 的，由
+`tests/modules/api/test_literal_sources.py` 逐欄位綁到來源（每個 response `Literal` 都要登記），
+`tests/integration/test_api_literal_checks.py` 再與 migrate 後的 CHECK 比對，來源單邊改動就失敗。
+值域外的值讓回應 500（`schemas.install_response_shape_handler`：記 route、model 與欄位路徑，
+不記值，回 `response_shape_mismatch`；FastAPI 自己的 `ResponseValidationError` 同樣處理），不送到 console；uncertainties 的讀取照 `_rendered`
+回 503。`funding-status` 只在 daemon 的 `/admin/trading-status` 與
 `/admin/dry-evaluate` 符合 `FundingStatus` 時轉送（console 讀的欄位有型別，其餘照原樣
 轉送）；形狀不符時記下欄位路徑（不含值），回 503，和 daemon 連不到的情況一樣。prod 不提供
 `/openapi.json`；`scripts/dump_openapi.py` 離線以 `app.openapi()` 寫出 commit 進 repo 的

@@ -378,16 +378,16 @@
         },
         "cancel_all": [
           {
-            "currency": "UST",
-            "phase": "acknowledged",
-            "detail": null,
-            "at_ms": 1760000004500
-          },
-          {
             "currency": "USD",
             "phase": "requested",
             "detail": null,
             "at_ms": 1760000004400
+          },
+          {
+            "currency": "UST",
+            "phase": "acknowledged",
+            "detail": null,
+            "at_ms": 1760000004500
           }
         ],
         "running": {
@@ -401,7 +401,7 @@
         },
         "requests": [
           {
-            "request_id": "33333333-3333-4333-8333-333333333333",
+            "request_id": "33333333-3333-4333-8333-33333333333a",
             "action": "kill",
             "reason": "venue incident",
             "requested_by": "user_abc",
@@ -432,11 +432,11 @@
               "max_period_days": 30,
               "max_open_offers": 4,
               "rate_floor_ratio": "0.9",
-              "min_rate_apr": "4.5"
+              "min_rate_apr": "0.045"
             },
             "requests": [
               {
-                "request_id": "44444444-4444-4444-8444-444444444444",
+                "request_id": "44444444-4444-4444-8444-44444444444a",
                 "symbol": "fUST",
                 "action": "disable",
                 "reason": "pause fUST",
@@ -456,7 +456,7 @@
     "status": 202,
     "body": {
       "data": {
-        "request_id": "33333333-3333-4333-8333-333333333333",
+        "request_id": "33333333-3333-4333-8333-33333333333a",
         "action": "kill",
         "state": "requested"
       }
@@ -466,7 +466,7 @@
     "status": 202,
     "body": {
       "data": {
-        "request_id": "44444444-4444-4444-8444-444444444444",
+        "request_id": "44444444-4444-4444-8444-44444444444a",
         "symbol": "fUST",
         "action": "disable",
         "state": "requested"
@@ -477,7 +477,7 @@
     "status": 200,
     "body": {
       "data": {
-        "request_id": "44444444-4444-4444-8444-444444444444",
+        "request_id": "44444444-4444-4444-8444-44444444444a",
         "symbol": "fUST",
         "action": "disable",
         "reason": "pause fUST",
@@ -493,7 +493,7 @@
     "status": 200,
     "body": {
       "data": {
-        "request_id": "33333333-3333-4333-8333-333333333333",
+        "request_id": "33333333-3333-4333-8333-33333333333a",
         "action": "kill",
         "reason": "venue incident",
         "requested_by": "user_abc",
@@ -652,6 +652,87 @@
         "processedAtMs": 1760000021000,
         "outcomeReason": "stale_reconcile_fence"
       }
+    }
+  },
+  "profile_without_email": {
+    "status": 200,
+    "body": {
+      "data": {
+        "userId": "user_new",
+        "email": null,
+        "role": "operator"
+      }
+    }
+  },
+  "exchange_accounts_empty": {
+    "status": 200,
+    "body": {
+      "data": []
+    }
+  },
+  "credentials_empty": {
+    "status": 200,
+    "body": {
+      "data": []
+    }
+  },
+  "attribution_weekly_empty": {
+    "status": 200,
+    "body": {
+      "data": []
+    }
+  },
+  "positions_empty": {
+    "status": 200,
+    "body": {
+      "data": []
+    }
+  },
+  "offers_empty": {
+    "status": 200,
+    "body": {
+      "data": []
+    }
+  },
+  "executions_empty": {
+    "status": 200,
+    "body": {
+      "data": [],
+      "pagination": {
+        "hasMore": false,
+        "nextBefore": null
+      }
+    }
+  },
+  "public_proof_summary_empty": {
+    "status": 200,
+    "body": {
+      "data": {
+        "weeks": [],
+        "asOf": "2026-10-03T00:00:00+00:00"
+      }
+    }
+  },
+  "trading_control_empty": {
+    "status": 200,
+    "body": {
+      "data": {
+        "trading_state": null,
+        "cancel_all": [],
+        "running": {
+          "backend_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "source_revision": "dddddddddddddddddddddddddddddddddddddddd"
+        },
+        "latest_deployment": null,
+        "requests": [],
+        "currencies": []
+      }
+    }
+  },
+  "uncertainties_empty": {
+    "status": 200,
+    "body": {
+      "data": []
     }
   }
 }

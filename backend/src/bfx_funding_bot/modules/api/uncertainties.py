@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -39,15 +39,16 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ResolutionAction,
     UncertaintyResolutionRequestRow,
 )
-from bfx_funding_bot.modules.ledger import Scope, observation_evidence_ref
+from bfx_funding_bot.modules.ledger import (
+    Scope,
+    UncertaintyKind,
+    UncertaintyState,
+    observation_evidence_ref,
+)
 
 _MAX_LIMIT = 100
 _MAX_CANDIDATE_VENUE_OFFER_IDS = 16
 _EvidenceValue = str | int | float | bool | None | dict[str, Any] | list[Any]
-# The ledger's kinds (``ledger._internal.reads.UNCERTAINTY_KINDS``) and the one the console
-# also knows; a kind outside it fails the read as unavailable rather than reaching the console.
-UncertaintyKind = Literal[
-    "submit_outcome_unknown", "unattributed_venue_offer", "unsupported_venue_exposure"]
 
 
 class UncertaintyResolutionContext(ResponseModel):
@@ -111,7 +112,7 @@ class UncertaintyResponse(ResponseModel):
     kind: UncertaintyKind
     symbol: str
     intended_amount: str = Field(serialization_alias="intendedAmount")
-    state: Literal["open", "resolved"]
+    state: UncertaintyState
     evidence_summary: dict[str, _EvidenceValue] = Field(
         default_factory=dict,
         serialization_alias="evidenceSummary",
@@ -208,7 +209,7 @@ def build_uncertainties_router() -> APIRouter:
 
     @router.get("/exchange-accounts/{exchange_account_id}/uncertainties")
     async def list_account_uncertainties(
-        state: Literal["open", "resolved"] | None = Query(default=None),
+        state: Annotated[UncertaintyState | None, Query()] = None,
         limit: int = Query(default=50, ge=1, le=_MAX_LIMIT),
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008

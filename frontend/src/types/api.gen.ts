@@ -854,11 +854,7 @@ export interface components {
             offerKey: string;
             /** Venueofferid */
             venueOfferId: string | null;
-            /**
-             * State
-             * @enum {string}
-             */
-            state: "pending" | "unknown" | "claimed" | "released" | "failed";
+            state: components["schemas"]["OfferState"];
             /** Symbol */
             symbol: string;
             /** Sizeusdt */
@@ -884,6 +880,8 @@ export interface components {
             /** Min Rate Apr */
             min_rate_apr: string;
         };
+        /** @enum {string} */
+        OfferState: "pending" | "unknown" | "claimed";
         /**
          * PositionResponse
          * @description One symbol's capital as disjoint components, in the symbol's own units.
@@ -1056,6 +1054,8 @@ export interface components {
             /** At Ms */
             at_ms: number;
         };
+        /** @enum {string} */
+        UncertaintyKind: "submit_outcome_unknown" | "unattributed_venue_offer";
         /**
          * UncertaintyResolutionContext
          * @description Server-derived, bounded inputs for one audited operator action.
@@ -1081,20 +1081,12 @@ export interface components {
         UncertaintyResponse: {
             /** Uncertaintyid */
             uncertaintyId: string;
-            /**
-             * Kind
-             * @enum {string}
-             */
-            kind: "submit_outcome_unknown" | "unattributed_venue_offer" | "unsupported_venue_exposure";
+            kind: components["schemas"]["UncertaintyKind"];
             /** Symbol */
             symbol: string;
             /** Intendedamount */
             intendedAmount: string;
-            /**
-             * State
-             * @enum {string}
-             */
-            state: "open" | "resolved";
+            state: components["schemas"]["UncertaintyState"];
             /** Evidencesummary */
             evidenceSummary: {
                 [key: string]: string | number | boolean | {
@@ -1109,6 +1101,8 @@ export interface components {
             resolutionContext: components["schemas"]["UncertaintyResolutionContext"] | null;
             resolutionRequest: components["schemas"]["ResolutionRequestResponse"] | null;
         };
+        /** @enum {string} */
+        UncertaintyState: "open" | "resolved";
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -1540,7 +1534,7 @@ export interface operations {
     list_account_uncertainties_api_v1_exchange_accounts__exchange_account_id__uncertainties_get: {
         parameters: {
             query?: {
-                state?: ("open" | "resolved") | null;
+                state?: components["schemas"]["UncertaintyState"] | null;
                 limit?: number;
             };
             header?: never;

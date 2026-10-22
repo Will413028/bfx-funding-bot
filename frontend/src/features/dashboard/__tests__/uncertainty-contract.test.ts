@@ -108,7 +108,6 @@ describe("uncertainty contract", () => {
     ["submit_outcome_unknown", 1, ["venue-12"]],
     ["submit_outcome_unknown", 0, []],
     ["unattributed_venue_offer", null, []],
-    ["unsupported_venue_exposure", null, []],
   ] as const)(
     "offers no verdict control, only the CLI command (%s, %s candidates)",
     (kind, candidateCount, candidateVenueOfferIds) => {

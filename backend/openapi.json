@@ -602,11 +602,7 @@
             "schema": {
               "anyOf": [
                 {
-                  "enum": [
-                    "open",
-                    "resolved"
-                  ],
-                  "type": "string"
+                  "$ref": "#/components/schemas/UncertaintyState"
                 },
                 {
                   "type": "null"
@@ -2354,15 +2350,7 @@
             "title": "Venueofferid"
           },
           "state": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "unknown",
-              "claimed",
-              "released",
-              "failed"
-            ],
-            "title": "State"
+            "$ref": "#/components/schemas/OfferState"
           },
           "symbol": {
             "type": "string",
@@ -2427,6 +2415,14 @@
         ],
         "title": "OfferEnvelope",
         "description": "The terms every new offer must stay inside; decimals stay strings."
+      },
+      "OfferState": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "unknown",
+          "claimed"
+        ]
       },
       "PositionResponse": {
         "properties": {
@@ -2891,6 +2887,13 @@
         ],
         "title": "TradingStateView"
       },
+      "UncertaintyKind": {
+        "type": "string",
+        "enum": [
+          "submit_outcome_unknown",
+          "unattributed_venue_offer"
+        ]
+      },
       "UncertaintyResolutionContext": {
         "properties": {
           "evidenceRef": {
@@ -2976,13 +2979,7 @@
             "title": "Uncertaintyid"
           },
           "kind": {
-            "type": "string",
-            "enum": [
-              "submit_outcome_unknown",
-              "unattributed_venue_offer",
-              "unsupported_venue_exposure"
-            ],
-            "title": "Kind"
+            "$ref": "#/components/schemas/UncertaintyKind"
           },
           "symbol": {
             "type": "string",
@@ -2993,12 +2990,7 @@
             "title": "Intendedamount"
           },
           "state": {
-            "type": "string",
-            "enum": [
-              "open",
-              "resolved"
-            ],
-            "title": "State"
+            "$ref": "#/components/schemas/UncertaintyState"
           },
           "evidenceSummary": {
             "additionalProperties": {
@@ -3093,6 +3085,13 @@
         ],
         "title": "UncertaintyResponse",
         "description": "Bounded operator-console uncertainty DTO (never raw event payload)."
+      },
+      "UncertaintyState": {
+        "type": "string",
+        "enum": [
+          "open",
+          "resolved"
+        ]
       },
       "ValidationError": {
         "properties": {

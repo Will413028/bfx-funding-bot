@@ -46,6 +46,7 @@ from bfx_funding_bot.modules.execution.operator_commands import (
     SYMBOL_PATTERN,
     CurrencyAction,
     OperatorCommandError,
+    TradingAction,
 )
 from bfx_funding_bot.modules.execution.operator_requests import RequestState
 
@@ -66,13 +67,20 @@ class ControlBody(BaseModel):
 
 
 # The responses keep the snake_case of ``execution.operator_commands``' views, which the
-# operator CLI prints too. Each Literal is the column's CHECK constraint.
+# operator CLI prints too. A closed value set is the domain's type where one exists; these
+# three have only a constant or a CHECK constraint, and tests/modules/api/
+# test_literal_sources.py (constants) and tests/integration/test_api_literal_checks.py
+# (the migrated CHECKs) fail when either side changes alone.
+TradingStateValue = Literal["ACTIVE", "HALTED"]  # trading_state.STATES, ck_trading_state_state
+TradingStateCause = Literal["operator", "auto"]  # trading_state.CAUSES, ck_trading_state_cause
+# ck_funding_cancel_all_audit_phase
+CancelAllPhaseValue = Literal["requested", "acknowledged", "rejected", "failed", "skipped"]
 
 
 class TradingStateView(ResponseModel):
     id: int
-    state: Literal["ACTIVE", "HALTED"]
-    cause: Literal["operator", "auto"]
+    state: TradingStateValue
+    cause: TradingStateCause
     actor: str
     reason: str
     at_ms: int
@@ -82,7 +90,7 @@ class CancelAllPhase(ResponseModel):
     """The latest venue cancel-all phase of one currency for the HALTED in force."""
 
     currency: str
-    phase: Literal["requested", "acknowledged", "rejected", "failed", "skipped"]
+    phase: CancelAllPhaseValue
     detail: str | None
     at_ms: int
 
@@ -99,7 +107,7 @@ class DeployedBuild(BuildIdentity):
 
 class TradingControlRequest(ResponseModel):
     request_id: str
-    action: Literal["resume", "kill"]
+    action: TradingAction
     reason: str
     requested_by: str
     created_at_ms: int

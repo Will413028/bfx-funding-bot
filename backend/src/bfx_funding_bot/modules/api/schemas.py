@@ -9,12 +9,52 @@ union and a value outside it fails the response (500) instead of reaching the co
 """
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from fastapi import FastAPI, Request
+from fastapi.exceptions import ResponseValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from bfx_funding_bot.modules.accounts.exchange_accounts import AccountRole
+from bfx_funding_bot.modules.ledger import OfferState
+
+_logger = logging.getLogger(__name__)
+
+# Closed value sets with no domain type of their own; tests/modules/api/
+# test_literal_sources.py pins each to the domain type it narrows, so a value added there
+# fails until it is added here.
+# CredentialLifecycleStatus without "active", which api_keys._credential_status splits.
 CredentialStatus = Literal["pending", "verified", "unverified", "failed", "revoked", "retired"]
-OfferClaimState = Literal["pending", "unknown", "claimed", "released", "failed"]
+# AccountLifecycleStatus without "retired", which the account list never returns.
+ListedAccountStatus = Literal["active", "halted"]
+
+
+def field_paths(exc: ValidationError | ResponseValidationError) -> list[str]:
+    """Where a payload failed its model, as dotted field paths: loggable, unlike the values
+    pydantic's own message repeats."""
+    return [".".join(map(str, error["loc"])) for error in exc.errors()]
+
+
+def install_response_shape_handler(app: FastAPI) -> None:
+    """A response model a handler cannot build (a value outside a ``Literal``, a missing
+    field), or FastAPI's own check of the returned model, is a 500 logged by route, model and
+    field path, never with the values: without this, Starlette logs the traceback, whose
+    message repeats every input. Request bodies are FastAPI's ``RequestValidationError``
+    (422), neither class."""
+
+    async def refuse(request: Request, exc: Exception) -> JSONResponse:
+        # Registered for these two only; Starlette types the handler for any exception.
+        fields = (field_paths(exc) if isinstance(exc, ValidationError | ResponseValidationError)
+                  else [])
+        _logger.error("response_shape_mismatch route=%s model=%s fields=%s",
+                      getattr(request.scope.get("route"), "path", "?"),
+                      getattr(exc, "title", type(exc).__name__), fields)
+        return JSONResponse({"detail": "response_shape_mismatch"}, status_code=500)
+
+    app.add_exception_handler(ValidationError, refuse)
+    app.add_exception_handler(ResponseValidationError, refuse)
 
 
 class ResponseModel(BaseModel):
@@ -55,8 +95,8 @@ class ExchangeAccountResponse(ResponseModel):
     exchange_account_id: str = Field(serialization_alias="exchangeAccountId")
     venue: str
     label: str
-    lifecycle_status: Literal["active", "halted"] = Field(serialization_alias="lifecycleStatus")
-    role: Literal["owner", "operator", "viewer"]
+    lifecycle_status: ListedAccountStatus = Field(serialization_alias="lifecycleStatus")
+    role: AccountRole
 
 
 class AccountCredentialResponse(ResponseModel):
@@ -186,7 +226,7 @@ class OfferClaimResponse(ResponseModel):
 
     offer_key: str = Field(serialization_alias="offerKey")
     venue_offer_id: str | None = Field(default=None, serialization_alias="venueOfferId")
-    state: OfferClaimState
+    state: OfferState
     symbol: str
     size_usdt: str = Field(serialization_alias="sizeUsdt")
     occurred_at_ms: int = Field(serialization_alias="occurredAtMs")

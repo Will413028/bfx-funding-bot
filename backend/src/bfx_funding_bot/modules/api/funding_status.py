@@ -23,7 +23,7 @@ from pydantic import ConfigDict, ValidationError
 
 from bfx_funding_bot.modules.api.account_scope import ExchangeAccountContext, require_account_member
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
-from bfx_funding_bot.modules.api.schemas import Envelope, ResponseModel
+from bfx_funding_bot.modules.api.schemas import Envelope, ResponseModel, field_paths
 
 logger = logging.getLogger(__name__)
 
@@ -151,8 +151,7 @@ def build_funding_status_router(*,
         except ValidationError as exc:
             # The daemon and this adapter ship in one image, so this is a build whose two
             # halves disagree: logged (field paths only, never the values) and refused.
-            logger.error("funding_status_shape_mismatch: %s",
-                         [".".join(map(str, e["loc"])) for e in exc.errors()])
+            logger.error("funding_status_shape_mismatch: %s", field_paths(exc))
             raise HTTPException(status_code=503, detail="funding_status_unavailable") from None
         except Exception:
             # Never return internal URLs, credentials, a different account, or cached amounts.
