@@ -671,6 +671,8 @@ def write_secret_files(runtime: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(value)
         path.chmod(0o640)
+        for directory in (path.parent, path.parent.parent):
+            directory.chmod(0o700)          # root:root 0700 on the VM (deploy.md)
 
 
 @pytest.fixture
@@ -1578,7 +1580,9 @@ def test_a_compose_file_the_deployer_cannot_run_is_refused_before_any_change(
 # shared_secret_file (test_a_secret_file_must_be_root_group_4600_0640_and_not_empty
 # fails); stop checking secret files in _validate_env_files
 # (test_every_secret_file_the_release_names_is_checked_before_any_change fails);
-# drop the own-service check (test_a_secret_the_deployer_cannot_check_is_refused[other] fails).
+# drop the own-service check (test_a_secret_the_deployer_cannot_check_is_refused[other] fails);
+# drop the directory loop from shared_secret_file or the write check from secret_directory
+# (test_a_secret_file_is_trusted_only_under_root_owned_unwritable_directories fails).
 
 REAL_SECRET_NAMES = sorted(SECRET_FILES)
 # The release file with the secret files (9h): the tracked one.
@@ -1617,6 +1621,47 @@ def test_a_secret_file_must_be_root_group_4600_0640_and_not_empty(tmp_path: Path
         bfx.shared_secret_file(tmp_path / "secrets/bot/DATABASE_URL", owner_uid=uid, group_gid=gid)
 
 
+def test_a_secret_file_is_trusted_only_under_root_owned_unwritable_directories(
+    tmp_path: Path,
+) -> None:
+    """Whoever can write `secrets/` or `secrets/<service>/` can swap the file after the
+    check, so both must be real directories, root-owned and not group or other writable."""
+    uid, gid = os.getuid(), os.getgid()
+    secrets, service = tmp_path / "secrets", tmp_path / "secrets/bot"
+    secret = service / "BFX_VAULT_KEK"
+    service.mkdir(parents=True)
+    secret.write_text("kek")
+    secret.chmod(0o640)
+    for directory in (secrets, service):
+        directory.chmod(0o700)
+    bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+    for directory, label in ((secrets, "secrets/"), (service, "bot/")):
+        for mode in (0o720, 0o702, 0o777):
+            directory.chmod(mode)
+            with pytest.raises(bfx.DeployError, match=rf"^secret_dir_writable_by_others:{label}$"):
+                bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+        directory.chmod(0o750)          # group or other may read or traverse, not write
+        bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+        directory.chmod(0o700)
+    with pytest.raises(bfx.DeployError, match=r"^secret_dir_not_root_owned:secrets/$"):
+        bfx.secret_directory(secrets, owner_uid=uid + 1)
+    with pytest.raises(bfx.DeployError, match=r"^secret_dir_not_root_owned:bot/$"):
+        bfx.secret_directory(service, owner_uid=uid + 1)
+    # A linked service directory (or secrets/ itself) points somewhere unchecked.
+    real = tmp_path / "elsewhere"
+    service.rename(real)
+    service.symlink_to(real)
+    with pytest.raises(bfx.DeployError, match=r"^secret_dir_missing:bot/$"):
+        bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+    service.unlink()
+    real.rename(service)
+    moved = tmp_path / "secrets-real"
+    secrets.rename(moved)
+    secrets.symlink_to(moved)
+    with pytest.raises(bfx.DeployError, match=r"^secret_dir_missing:secrets/$"):
+        bfx.shared_secret_file(secret, owner_uid=uid, group_gid=gid)
+
+
 def test_every_secret_file_the_release_names_is_checked_before_any_change(harness: Harness) -> None:
     _ingress_release(harness, REV_NEW, text=SECRETS_TEXT)
     checked: list[Path] = []
@@ -1631,6 +1676,7 @@ def test_every_secret_file_the_release_names_is_checked_before_any_change(harnes
     ("bot/BFX_VAULT_KEK", lambda path: path.chmod(0o644), "secret_file_mode_not_0640:bot/BFX_VAULT_KEK"),
     ("webapi/DATABASE_URL", lambda path: path.unlink(), "secret_file_missing:webapi/DATABASE_URL"),
     ("bot/BFX_ADMIN_TOKEN", lambda path: path.write_text(""), "secret_file_empty:bot/BFX_ADMIN_TOKEN"),
+    ("webapi/DATABASE_URL", lambda path: path.parent.chmod(0o770), "secret_dir_writable_by_others:webapi/"),
 ])
 def test_an_unprotected_or_missing_secret_file_fails_the_precheck(
     harness: Harness, relative: str, damage: Callable[[Path], None], code: str,
