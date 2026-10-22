@@ -12,14 +12,19 @@ migration ran, and the target's tooling is installed only once it deployed.
 """
 from __future__ import annotations
 
+import base64
+import contextlib
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import shutil
 import sys
-from collections.abc import Callable, Mapping, Sequence
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -45,8 +50,20 @@ bfx = _load("vm_ops_bfx_deploy_under_test", ROOT / "deploy/vm/ops/bfx_deploy.py"
 BACKEND = "ghcr.io/will413028/bfx-funding-bot-backend"
 REV_OLD = "a" * 40
 REV_NEW = "b" * 40
-OLD_B = "sha256:" + "1" * 64
-NEW_B = "sha256:" + "3" * 64
+
+
+def _manifest(name: str) -> bytes:
+    """An image index as the registry serves it; its digest is the sha256 of these bytes."""
+    return json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
+                       "annotations": {"test": name}}, indent=2).encode()
+
+
+def _digest(manifest: bytes) -> str:
+    return "sha256:" + hashlib.sha256(manifest).hexdigest()
+
+
+MANIFESTS = {_digest(m): m for m in (_manifest("old"), _manifest("new"), _manifest("rebuilt"))}
+OLD_B, NEW_B, REBUILT_B = MANIFESTS
 OLD_ATTEMPT = "11111111-1111-4111-8111-111111111111"
 CI_RUN = "https://github.com/Will413028/bfx-funding-bot/actions/runs/123456789"
 REAL_COMPOSE_TEXT = (ROOT / "deploy/vm/docker-compose.app.yml").read_text(encoding="utf-8")
@@ -176,6 +193,17 @@ class FakeRegistry:
             OLD_B: {bfx.REVISION_LABEL: REV_OLD},
         }
         self.inspected: list[str] = []
+        # What `imagetools inspect --raw <repository>@<digest>` serves, by digest.
+        self.manifests: dict[str, bytes] = dict(MANIFESTS)
+        self.raw_reads: list[str] = []
+
+    def manifest(self, reference: str) -> bytes:
+        self.raw_reads.append(reference)
+        repository, _, digest = reference.partition("@")
+        assert repository == BACKEND and digest.startswith("sha256:"), reference
+        if digest not in self.manifests:
+            raise bfx.DiscoveryError("registry_inspect_failed")
+        return self.manifests[digest]
 
     def inspect(self, reference: str) -> Any:
         self.inspected.append(reference)
@@ -264,11 +292,10 @@ class FakeHost:
     on_main: set[str] = field(default_factory=lambda: {REV_OLD, REV_NEW})
     # The commit graph: child -> parent (`git merge-base --is-ancestor` walks it).
     parents: dict[str, str] = field(default_factory=lambda: {REV_NEW: REV_OLD})
-    # The pinned gh: whether it exists, the version it reports, the digests carrying a valid
-    # attestation from release.yml on main, and what `attestation verify` answers otherwise.
+    # The pinned gh: whether it exists, the version it reports, and what a successful
+    # `attestation verify` prints (the bundles themselves come from FakeGitHub).
     gh_present: bool = True
     gh_version: str = bfx.GH_VERSION
-    attested: set[str] = field(default_factory=lambda: {OLD_B, NEW_B})
     gh_verify_stdout: str | None = None   # overrides the JSON a successful verify prints
     gh_verify_exit: int = 0               # the exit code that goes with it
     files: dict[tuple[str, str], str] = field(default_factory=dict)
@@ -441,27 +468,42 @@ class FakeHost:
         raise AssertionError(f"unexpected command: {call}")
 
     def _gh(self, args: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
-        """gh 2.102.0's answers: `--version`, and `attestation verify` of an OCI digest."""
+        """gh 2.102.0's answers: `--version`, and `attestation verify <file> --bundle <file>`
+        the way gh decides it: the subject is the sha256 of the file's bytes, and the bundle
+        must name that digest and satisfy every policy flag (SLSA provenance by default)."""
         if not self.gh_present:
             raise bfx.CommandError("not_executable:gh:FileNotFoundError")
         assert env is not None
         if args == ("--version",):
             return bfx.CommandResult(0, f"gh version {self.gh_version} (2026-09-30)\n"
                                         f"https://github.com/cli/cli/releases/tag/v{self.gh_version}\n", "")
-        assert args[:3] == ("attestation", "verify", args[2]) and args[2].startswith("oci://")
-        digest = args[2].rpartition("@")[2]
-        options = dict(zip(args[3::2], args[4::2], strict=False))
-        policy_ok = (
-            options.get("--repo") == "Will413028/bfx-funding-bot"
-            and options.get("--signer-workflow") == "Will413028/bfx-funding-bot/.github/workflows/release.yml"
-            and options.get("--source-ref") == "refs/heads/main"
-            and "--deny-self-hosted-runners" in args and "--bundle-from-oci" in args
-            and "--source-digest" not in args
+        assert args[:2] == ("attestation", "verify") and not args[2].startswith("-"), args
+        subject = "sha256:" + hashlib.sha256(Path(args[2]).read_bytes()).hexdigest()
+        flags = {"--deny-self-hosted-runners"}
+        options: dict[str, str] = {}
+        rest = list(args[3:])
+        while rest:
+            name = rest.pop(0)
+            if name in flags:
+                options[name] = ""
+            else:
+                options[name] = rest.pop(0)
+        bundle = json.loads(Path(options["--bundle"]).read_text())
+        refusal = (
+            "no attestations found with predicate type https://slsa.dev/provenance/v1"
+            if bundle["predicateType"] != options.get("--predicate-type", SLSA)
+            else "no matching attestations: the subject digest differs" if bundle["subject"] != subject
+            else "expected repository" if bundle["repository"] != options.get("--repo")
+            else "expected BuildSignerURI" if bundle["signerWorkflow"] != options.get("--signer-workflow")
+            else "expected SourceRepositoryRef" if bundle["sourceRef"] != options.get("--source-ref")
+            else "self-hosted runner" if "--deny-self-hosted-runners" in options
+            and bundle["runner"] != "github-hosted"
+            else None
         )
-        if digest not in self.attested or not policy_ok:
-            return bfx.CommandResult(1, "", "Error: verifying with issuer \"sigstore.dev\": no matching attestations")
+        if refusal is not None:
+            return bfx.CommandResult(1, "", f"Error: verifying with issuer \"sigstore.dev\": {refusal}")
         stdout = self.gh_verify_stdout if self.gh_verify_stdout is not None else json.dumps(
-            [{"verificationResult": {"statement": {"subject": [{"digest": {"sha256": digest[7:]}}]}}}])
+            [{"verificationResult": {"statement": {"subject": [{"digest": {"sha256": subject[7:]}}]}}}])
         return bfx.CommandResult(self.gh_verify_exit, stdout, "")
 
     def _git(self, where: Path, args: tuple[str, ...]) -> Any:
@@ -654,6 +696,74 @@ class FakeHost:
         return bfx.CommandResult(1 if missing else 0, json.dumps(records), "no such container" if missing else "")
 
 
+SLSA = "https://slsa.dev/provenance/v1"
+API = "https://api.github.com/repos/Will413028/bfx-funding-bot/attestations/"
+BUNDLE_HOST = "https://tmaproduction.blob.core.windows.net/attestations/"
+
+
+def snappy_literals(data: bytes) -> bytes:
+    """Snappy raw block made of literals only (a valid encoding; the real fixture has copies)."""
+    out, n = bytearray(), len(data)
+    while True:
+        out.append((n & 0x7F) | (0x80 if n >= 0x80 else 0))
+        n >>= 7
+        if not n:
+            break
+    for start in range(0, len(data), 65536):
+        chunk = data[start:start + 65536]
+        size = len(chunk) - 1
+        if size < 60:
+            out.append(size << 2)
+        elif size < 256:
+            out += bytes([60 << 2, size])
+        else:
+            out += bytes([61 << 2]) + size.to_bytes(2, "little")
+        out += chunk
+    return bytes(out)
+
+
+def bundle(digest: str, **changes: str) -> dict[str, str]:
+    """What FakeHost's gh reads from a bundle: release.yml on main, GitHub-hosted, SLSA."""
+    return {"subject": digest, "predicateType": SLSA, "repository": "Will413028/bfx-funding-bot",
+            "signerWorkflow": "Will413028/bfx-funding-bot/.github/workflows/release.yml",
+            "sourceRef": "refs/heads/main", "runner": "github-hosted", **changes}
+
+
+class FakeGitHub:
+    """api.github.com's attestation list and the bundle store, as bfx-deploy reads them:
+    anonymous, the list naming each bundle by `bundle_url`, the bundle snappy-compressed."""
+
+    def __init__(self) -> None:
+        # digest -> the bundles listed for it, in the API's order.
+        self.attestations: dict[str, list[dict[str, str]]] = {
+            digest: [bundle(digest)] for digest in (OLD_B, NEW_B, REBUILT_B)}
+        self.answers: dict[str, bfx.HttpResponse] = {}     # URL -> a canned answer
+        self.down = False
+        self.requests: list[tuple[str, dict[str, str]]] = []
+
+    def __call__(self, url: str, *, headers: Mapping[str, str], timeout: float,
+                 limit: int) -> Any:
+        self.requests.append((url, dict(headers)))
+        assert url.startswith("https://") and timeout <= 60
+        if self.down:
+            raise OSError("Temporary failure in name resolution")
+        if url in self.answers:
+            return self.answers[url]
+        if url.startswith(API):
+            digest = url.removeprefix(API).partition("?")[0]
+            listed = self.attestations.get(digest)
+            if listed is None:
+                return bfx.HttpResponse(404, b'{"message":"Not Found"}', {})
+            body = json.dumps({"attestations": [
+                {"repository_id": 1, "bundle": None, "initiator": "unknown",
+                 "bundle_url": f"{BUNDLE_HOST}{digest}/{n}?sig=x"} for n in range(len(listed))]})
+            return bfx.HttpResponse(200, body.encode()[:limit + 1], {"content-type": "application/json"})
+        assert url.startswith(BUNDLE_HOST), url
+        digest, _, n = url.removeprefix(BUNDLE_HOST).partition("?")[0].partition("/")
+        body = snappy_literals(json.dumps(self.attestations[digest][int(n)]).encode())
+        return bfx.HttpResponse(200, body[:limit + 1], {"content-type": "application/x-snappy"})
+
+
 class FakeClock:
     def __init__(self) -> None:
         self.now = 1_790_000_000.0
@@ -673,8 +783,9 @@ class Harness:
     clock: FakeClock
     notices: list[tuple[str, str]]
     settings: Any
+    github: FakeGitHub = field(default_factory=FakeGitHub)
 
-    def deployer(self, secret_check: Callable[[Path], None] | None = None, **overrides: Any) -> Any:
+    def deployer(self, **overrides: Any) -> Any:
         settings = self.settings
         if overrides:
             fields = {name: getattr(settings, name) for name in settings.__dataclass_fields__}
@@ -683,7 +794,8 @@ class Harness:
             settings, runner=self.host, registry=self.registry, ledger=self.ledger,
             notify=lambda level, text: self.notices.append((level, text)),
             clock=self.clock.time, sleep=self.clock.sleep,
-            secret_check=secret_check or (lambda path: None),
+            secret_check=lambda path: None,
+            http=self.github,
             # The real check, with this test's user and group standing in for root and 4600.
             secret_file_check=lambda path: bfx.shared_secret_file(
                 path, owner_uid=os.getuid(), group_gid=os.getgid()),
@@ -692,9 +804,6 @@ class Harness:
     def run(self, **overrides: Any) -> int:
         return int(self.deployer(**overrides).run())
 
-
-# attest.env's zero-permission fine-grained token: the one credential gh gets.
-ATTEST_TOKEN = "github_pat_attest_public_read_only"
 
 VALID_ENV = {
     "bot.env": "DATABASE_URL=postgresql://bfx_bot:x@bfx-postgres:5432/bfx\nBFX_ADMIN_TOKEN=t\n",
@@ -729,7 +838,6 @@ def harness(tmp_path: Path) -> Harness:
     runtime.mkdir()
     for name, text in VALID_ENV.items():
         (runtime / name).write_text(text)
-    (runtime / "attest.env").write_text(f"GH_TOKEN={ATTEST_TOKEN}\n")
     write_secret_files(runtime)
     mirror = tmp_path / "mirror"
     units = tmp_path / "units"
@@ -2739,7 +2847,7 @@ GH = bfx.GH_BINARY
 GH_VERIFY = _is((GH, "attestation", "verify"))
 GIT_ANY = _is(("runuser", "-u", "ubuntu", "--", "git"))
 DOCKER_RUN = _is(("docker", "run"))
-REBUILT_B = "sha256:" + "4" * 64
+NEW_LIST = f"{API}{NEW_B}?per_page=100"
 
 
 def _discovery_code(harness: Harness) -> str:
@@ -2753,19 +2861,26 @@ def test_the_candidate_digest_is_verified_before_the_mirror_the_pull_or_any_run(
     assert deployer.run() == 0
     host = harness.host
     verify = host.index(GH_VERIFY)
-    assert host.calls[verify] == (
-        GH, "attestation", "verify", f"oci://{BACKEND}@{NEW_B}",
+    work = harness.settings.state_dir / "provenance"
+    (call,) = [c for c in host.calls if GH_VERIFY(c)]
+    manifest, bundle_file = Path(call[3]), Path(call[5])
+    assert call == (
+        GH, "attestation", "verify", str(manifest), "--bundle", str(bundle_file),
         "--repo", "Will413028/bfx-funding-bot",
         "--signer-workflow", "Will413028/bfx-funding-bot/.github/workflows/release.yml",
         "--source-ref", "refs/heads/main",
-        "--deny-self-hosted-runners", "--bundle-from-oci", "--format", "json")
+        "--deny-self-hosted-runners", "--format", "json")
+    assert manifest.parent == bundle_file.parent and manifest.parent.parent == work
+    assert not manifest.parent.exists()           # the per-run files are removed afterwards
     assert host.index(_is((GH, "--version"))) < verify
+    # Before the mirror, the pull and the alembic one-shot (_schema): nothing ran the image.
     assert verify < host.index(GIT_ANY) < host.index(PULL) < host.index(DOCKER_RUN)
-    assert host.count(GH_VERIFY) == 1
+    assert harness.registry.raw_reads == [f"{BACKEND}@{NEW_B}"]
+    assert [url for url, _ in harness.github.requests] == [NEW_LIST, f"{BUNDLE_HOST}{NEW_B}/0?sig=x"]
     assert harness.ledger.last.outcome == "deployed"
 
 
-def test_gh_gets_exactly_attest_env_token_and_not_the_registry_pull_credentials(harness: Harness) -> None:
+def test_gh_and_github_get_no_credential_at_all(harness: Harness) -> None:
     (harness.settings.runtime_dir / "ghcr.env").write_text(
         "GHCR_USERNAME=will413028\nGHCR_TOKEN=ghcr-pull-token\n")
     deployer = harness.deployer()
@@ -2773,37 +2888,91 @@ def test_gh_gets_exactly_attest_env_token_and_not_the_registry_pull_credentials(
         harness.settings.runtime_dir / "ghcr.env", lambda path: None)
     assert deployer.run() == 0
     host = harness.host
-    env = host.envs[host.index(GH_VERIFY)]
-    assert env is not None
-    assert env["GH_TOKEN"] == ATTEST_TOKEN
-    assert not {"GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "DOCKER_HOST"} & set(env)
-    assert set(env) == {"PATH", "HOME", "GH_CONFIG_DIR", "DOCKER_CONFIG", "GH_NO_UPDATE_NOTIFIER",
-                        "GH_PROMPT_DISABLED", "NO_COLOR", "GH_TOKEN"}
-    assert "ghcr-pull-token" not in json.dumps(env) and "will413028" not in json.dumps(env)
-    # Only gh's verify sees the token: not `gh --version`, nor any other command.
-    assert [call for call, seen in zip(host.calls, host.envs, strict=True)
-            if seen is not None and ATTEST_TOKEN in json.dumps(seen)] == [host.calls[host.index(GH_VERIFY)]]
     home = harness.settings.state_dir / "gh"
-    assert (env["HOME"], env["GH_CONFIG_DIR"]) == (str(home), str(home / "config"))
-    # An empty docker config: the package is read anonymously, never with ghcr.env's token.
-    assert env["DOCKER_CONFIG"] == str(home / "docker") and list((home / "docker").iterdir()) == []
+    for call, env in zip(host.calls, host.envs, strict=True):
+        if call[0] == GH:
+            assert env == {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": str(home),
+                           "GH_CONFIG_DIR": str(home / "config"), "GH_NO_UPDATE_NOTIFIER": "1",
+                           "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"}
+    assert host.count(GH_VERIFY) == 1
+    # The registry pull credentials reach the pulls, never GitHub.
+    assert all(set(headers) <= {"User-Agent", "Accept", "X-GitHub-Api-Version"}
+               for _, headers in harness.github.requests)
+    assert "ghcr-pull-token" not in json.dumps(harness.github.requests)
+
+
+def _rate_limited(status: int, remaining: str) -> Callable[[Harness], None]:
+    def setup(h: Harness) -> None:
+        h.github.answers[NEW_LIST] = bfx.HttpResponse(
+            status, b'{"message":"API rate limit exceeded"}',
+            {"x-ratelimit-remaining": remaining, "x-ratelimit-reset": "1790003600"})
+    return setup
+
+
+def _listed(*bundles: dict[str, str]) -> Callable[[Harness], None]:
+    def setup(h: Harness) -> None:
+        h.github.attestations[NEW_B] = list(bundles)
+    return setup
+
+
+def _bundle_body(body: bytes, content_type: str = "application/x-snappy") -> Callable[[Harness], None]:
+    def setup(h: Harness) -> None:
+        h.github.answers[f"{BUNDLE_HOST}{NEW_B}/0?sig=x"] = bfx.HttpResponse(
+            200, body, {"content-type": content_type})
+    return setup
+
+
+def _bundle_urls(*urls: str) -> Callable[[Harness], None]:
+    def setup(h: Harness) -> None:
+        h.github.answers[NEW_LIST] = bfx.HttpResponse(200, json.dumps({"attestations": [
+            {"bundle": None, "bundle_url": url} for url in urls]}).encode(), {})
+    return setup
+
+
+UNVERIFIED = "attestation_unverified:"
 
 
 @pytest.mark.parametrize(("setup", "code"), [
-    (lambda h: h.host.attested.discard(NEW_B), "attestation_unverified"),
-    # A Sigstore TUF or registry outage: the same refusal, no bypass.
-    (lambda h: h.host.timeouts.add((GH, "attestation")), "attestation_unverified"),
-    (lambda h: setattr(h.host, "gh_verify_stdout", "[]"), "attestation_unverified"),
-    (lambda h: setattr(h.host, "gh_verify_stdout", "verified"), "attestation_unverified"),
+    # The registry served bytes that are not the digest's manifest.
+    (lambda h: h.registry.manifests.__setitem__(NEW_B, _manifest("pushed by someone else")),
+     UNVERIFIED + "manifest_digest_mismatch"),
+    (lambda h: h.github.attestations.pop(NEW_B), UNVERIFIED + "no_attestation"),
+    (_listed(), UNVERIFIED + "no_attestation"),
+    (_rate_limited(403, "0"), UNVERIFIED + "rate_limited"),
+    (_rate_limited(429, "12"), UNVERIFIED + "rate_limited"),
+    (_rate_limited(403, "41"), UNVERIFIED + "api_unavailable"),
+    (lambda h: h.github.answers.__setitem__(NEW_LIST, bfx.HttpResponse(502, b"", {})),
+     UNVERIFIED + "api_unavailable"),
+    (lambda h: h.github.answers.__setitem__(NEW_LIST, bfx.HttpResponse(200, b"<html>", {})),
+     UNVERIFIED + "api_unavailable"),
+    (lambda h: setattr(h.github, "down", True), UNVERIFIED + "api_unreachable"),
+    # Bundles that cannot be read: a non-https URL is never fetched, a body that is not
+    # snappy, too large, or not a JSON object.
+    (_bundle_urls(f"http://{BUNDLE_HOST.removeprefix('https://')}x", "file:///etc/shadow"),
+     UNVERIFIED + "bundle_unreadable"),
+    (_bundle_body(b"\x10\x00garbage"), UNVERIFIED + "bundle_unreadable"),
+    # A valid bundle, but over the 2 MiB download cap.
+    (_bundle_body(snappy_literals(json.dumps(bundle(NEW_B, pad="x" * 2 * 1024 * 1024)).encode())),
+     UNVERIFIED + "bundle_unreadable"),
+    (_bundle_body(snappy_literals(b"[1, 2]")), UNVERIFIED + "bundle_unreadable"),
+    # Signed, but not by release.yml on main of this repository on a GitHub-hosted runner, or
+    # for another digest, or another predicate: gh refuses each one.
+    (_listed(bundle(NEW_B, signerWorkflow="Will413028/bfx-funding-bot/.github/workflows/ci.yml")),
+     UNVERIFIED + "gh_rejected"),
+    (_listed(bundle(NEW_B, sourceRef="refs/heads/feature")), UNVERIFIED + "gh_rejected"),
+    (_listed(bundle(NEW_B, runner="self-hosted")), UNVERIFIED + "gh_rejected"),
+    (_listed(bundle(NEW_B, repository="attacker/fork")), UNVERIFIED + "gh_rejected"),
+    (_listed(bundle(OLD_B)), UNVERIFIED + "gh_rejected"),
+    (_listed(bundle(NEW_B, predicateType="https://spdx.dev/Document/v2.3")), UNVERIFIED + "gh_rejected"),
+    # A Sigstore TUF outage (gh hangs): the same refusal, no bypass.
+    (lambda h: h.host.timeouts.add((GH, "attestation")), UNVERIFIED + "gh_unavailable"),
+    (lambda h: setattr(h.host, "gh_verify_stdout", "[]"), UNVERIFIED + "gh_rejected"),
+    (lambda h: setattr(h.host, "gh_verify_stdout", "verified"), UNVERIFIED + "gh_rejected"),
     # A failed exit is a refusal whatever it printed.
-    (lambda h: setattr(h.host, "gh_verify_exit", 1), "attestation_unverified"),
+    (lambda h: setattr(h.host, "gh_verify_exit", 1), UNVERIFIED + "gh_rejected"),
     (lambda h: setattr(h.host, "gh_present", False), "attestation_verifier_missing"),
     (lambda h: setattr(h.host, "gh_version", "2.102.1"), "attestation_verifier_wrong_version"),
     (lambda h: setattr(h.host, "gh_version", "2.101.0"), "attestation_verifier_wrong_version"),
-    (lambda h: (h.settings.runtime_dir / "attest.env").unlink(), "attestation_token_missing"),
-    (lambda h: (h.settings.runtime_dir / "attest.env").write_text("GH_TOKEN=\n"), "attestation_token_missing"),
-    (lambda h: (h.settings.runtime_dir / "attest.env").write_text(
-        "GH_TOKEN=t\nGHCR_TOKEN=ghcr-pull-token\n"), "attestation_token_missing"),
 ])
 def test_an_image_that_cannot_be_verified_is_never_run(
         harness: Harness, setup: Callable[[Harness], None], code: str) -> None:
@@ -2815,6 +2984,7 @@ def test_an_image_that_cannot_be_verified_is_never_run(
     assert host.count(PULL) == host.count(DOCKER_RUN) == host.count(GIT_ANY) == 0
     assert len(harness.ledger.rows) == rows and host.stopped == []
     assert _discovery_code(harness) == code
+    assert not any(url.startswith(("http://", "file:")) for url, _ in harness.github.requests)
     # The existing discovery alert: once, after the threshold, naming the code.
     assert harness.notices == []
     harness.clock.now += harness.settings.discovery_alert_after + 1
@@ -2824,8 +2994,25 @@ def test_an_image_that_cannot_be_verified_is_never_run(
     assert level == "warning" and code in text and "no deploy is happening" in text
 
 
+def test_the_second_bundle_verifies_when_the_first_does_not(harness: Harness) -> None:
+    # A digest can carry other attestations (measured for cli/cli: a release attestation
+    # listed before the SLSA provenance); each is tried until one verifies.
+    harness.github.attestations[NEW_B] = [
+        bundle(NEW_B, predicateType="https://in-toto.io/attestation/release/v0.2"), bundle(NEW_B)]
+    assert harness.run() == 0
+    assert harness.host.count(GH_VERIFY) == 2
+    assert harness.ledger.last.outcome == "deployed"
+
+
+def test_an_inline_bundle_needs_no_download(harness: Harness) -> None:
+    harness.github.answers[NEW_LIST] = bfx.HttpResponse(
+        200, json.dumps({"attestations": [{"bundle": bundle(NEW_B), "bundle_url": None}]}).encode(), {})
+    assert harness.run() == 0
+    assert [url for url, _ in harness.github.requests] == [NEW_LIST]
+
+
 def test_a_dry_run_refuses_an_unverified_image_too(harness: Harness) -> None:
-    harness.host.attested.discard(NEW_B)
+    harness.github.attestations.pop(NEW_B)
     assert harness.run(dry_run=True) == 1
     assert harness.host.count(PULL) == harness.host.count(DOCKER_RUN) == 0
 
@@ -2836,7 +3023,7 @@ def test_rollback_and_recreate_reuse_the_ledger_digest_without_verifying_again(h
     assert harness.ledger.last.outcome == "rolled_back"
     assert harness.host.count(GH_VERIFY) == 1          # the candidate only, not the rollback
     harness.host.calls.clear()
-    harness.host.attested.clear()
+    harness.github.attestations.clear()
     assert harness.run(recreate=True) == 0
     assert harness.host.count(GH_VERIFY) == 0
 
@@ -2853,7 +3040,9 @@ def test_install_sh_pins_the_gh_the_deployer_runs() -> None:
 
 
 def test_release_yml_attests_exactly_the_digest_the_deployer_verifies() -> None:
-    """The signer identity bfx-deploy requires is the workflow that attests the pushed digest."""
+    """The signer identity bfx-deploy requires is the workflow that attests the pushed digest,
+    and the attestation lands in GitHub's attestation API (actions/attest's default), which
+    is what bfx-deploy reads."""
     workflow = yaml.safe_load((ROOT / bfx.RELEASE_WORKFLOW).read_text(encoding="utf-8"))
     job = workflow["jobs"]["publish"]
     assert job["permissions"] == {"contents": "read", "packages": "write",
@@ -2865,10 +3054,26 @@ def test_release_yml_attests_exactly_the_digest_the_deployer_verifies() -> None:
     assert attest["with"] == {
         "subject-name": "${{ steps.names.outputs.backend }}",
         "subject-digest": "${{ steps.backend.outputs.digest }}",
-        "push-to-registry": True, "create-storage-record": False,
     }
     # The deployer's --source-ref: a workflow_run release runs on the default branch.
     assert workflow[True]["workflow_run"]["branches"] == ["main"]
+
+
+class _Registry:
+    def __init__(self, manifests: Mapping[str, bytes]) -> None:
+        self.manifests = manifests
+
+    def inspect(self, reference: str) -> Any:
+        raise AssertionError(reference)
+
+    def manifest(self, reference: str) -> bytes:
+        return self.manifests[reference.rpartition("@")[2]]
+
+
+def _verifier(tmp_path: Path, runner: Any, github: Any) -> Any:
+    return bfx.GhAttestationVerifier(
+        runner, _Registry(MANIFESTS), github, gh="gh", home=tmp_path / "gh",
+        work=tmp_path / "work", repository="Will413028/bfx-funding-bot", ref="refs/heads/main")
 
 
 def test_gh_verifier_accepts_only_its_pinned_version(tmp_path: Path) -> None:
@@ -2878,11 +3083,7 @@ def test_gh_verifier_accepts_only_its_pinned_version(tmp_path: Path) -> None:
                env: Mapping[str, str] | None = None) -> Any:
         return answers.get(tuple(argv), bfx.CommandResult(0, '[{"verificationResult": {}}]', ""))
 
-    token_file = tmp_path / "attest.env"
-    token_file.write_text("GH_TOKEN=t\n")
-    verifier = bfx.GhAttestationVerifier(runner, gh="gh", home=tmp_path, repository="o/r",
-                                         ref="refs/heads/main", token_file=token_file,
-                                         secret_check=lambda path: None)
+    verifier = _verifier(tmp_path, runner, FakeGitHub())
     verifier.verify(f"{BACKEND}@{NEW_B}")
     answers[("gh", "--version")] = bfx.CommandResult(0, "gh version 2.102.0-rc1 (2026-09-30)\n", "")
     with pytest.raises(bfx.DiscoveryError, match="attestation_verifier_wrong_version"):
@@ -2892,52 +3093,131 @@ def test_gh_verifier_accepts_only_its_pinned_version(tmp_path: Path) -> None:
         verifier.verify(f"{BACKEND}@{NEW_B}")
 
 
-def _owner_checked(path: Path) -> None:
-    """protected_secret_file with the test user standing in for root."""
-    bfx.protected_secret_file(path, owner_uid=os.getuid())
+def test_imagetools_registry_reads_the_raw_manifest_with_the_registry_credentials() -> None:
+    seen: list[tuple[tuple[str, ...], Mapping[str, str] | None]] = []
+
+    def runner(argv: Sequence[str], *, timeout: float, input_text: str | None = None,
+               env: Mapping[str, str] | None = None) -> Any:
+        seen.append((tuple(argv), env))
+        return bfx.CommandResult(0, MANIFESTS[NEW_B].decode(), "")
+
+    @contextlib.contextmanager
+    def auth() -> Iterator[dict[str, str]]:
+        yield {"DOCKER_CONFIG": "/state/docker-auth-x"}
+
+    registry = bfx.ImagetoolsRegistry(runner, auth)
+    assert registry.manifest(f"{BACKEND}@{NEW_B}") == MANIFESTS[NEW_B]
+    assert seen == [(("docker", "buildx", "imagetools", "inspect", f"{BACKEND}@{NEW_B}", "--raw"),
+                     {"DOCKER_CONFIG": "/state/docker-auth-x"})]
 
 
-@pytest.mark.parametrize("break_file", [
-    lambda path: path.chmod(0o640),
-    lambda path: path.chmod(0o604),
-    lambda path: (path.rename(path.with_name("real.env")), path.symlink_to(path.with_name("real.env"))),
+def test_https_get_refuses_anything_but_https() -> None:
+    with pytest.raises(OSError, match="not an https URL"):
+        bfx.https_get("http://example.invalid/x", headers={}, timeout=1.0, limit=10)
+    with pytest.raises(OSError, match="not an https URL"):
+        bfx.https_get("file:///etc/shadow", headers={}, timeout=1.0, limit=10)
+    handler = bfx._HttpsOnlyRedirects()
+    request = urllib.request.Request("https://api.github.com/x")
+    with pytest.raises(urllib.error.URLError, match="non-https"):
+        handler.redirect_request(request, None, 302, "Found", {}, "http://example.invalid/x")
+    assert handler.redirect_request(request, None, 302, "Found", {}, "https://example.invalid/x") is not None
+
+
+# --------------------------------------------------------------------------- snappy
+
+
+SNAPPY_FIXTURE = FIXTURES / "cli-cli-v2.101.0-attestation.snappy"
+
+
+def test_snappy_decodes_a_bundle_github_served() -> None:
+    """The bundle_url body of a cli/cli v2.101.0 attestation (downloaded 2026-10-22,
+    application/x-snappy, encoded by GitHub's own snappy): literals and copies."""
+    raw = SNAPPY_FIXTURE.read_bytes()
+    decoded = bfx.snappy_decompress(raw, limit=1 << 20)
+    assert len(raw) < len(decoded) == 6404
+    assert hashlib.sha256(decoded).hexdigest() == \
+        "9e90a239f4416afa2721ef5249c4786800448346a780632822084c36de829aa9"
+    bundle_json = json.loads(decoded)
+    assert bundle_json["mediaType"] == "application/vnd.dev.sigstore.bundle.v0.3+json"
+    statement = json.loads(base64.b64decode(bundle_json["dsseEnvelope"]["payload"]))
+    assert {"name": "gh_2.101.0_checksums.txt", "digest": {
+        "sha256": "f8bbc37fc5568a6a162d1a67b1e9c1afa9139f7b5a46dcde4a57bdaa0db33b60"}} in statement["subject"]
+
+
+@pytest.mark.parametrize(("encoded", "decoded"), [
+    (b"\x00", b""),
+    (b"\x03\x08abc", b"abc"),
+    # literal "abcd", then copy-1 (len 4, offset 4) -> "abcdabcd"
+    (b"\x08\x0cabcd\x01\x04", b"abcdabcd"),
+    # literal "a", copy-1 len 7 offset 1: an overlapping run
+    (b"\x08\x00a\x0d\x01", b"a" * 8),
+    # literal "xy", copy-2 len 6 offset 2
+    (b"\x08\x04xy\x16\x02\x00", b"xy" * 4),
+    # literal "xyz", copy-4 len 3 offset 3
+    (b"\x06\x08xyz\x0b\x03\x00\x00\x00", b"xyzxyz"),
+    # a 70-byte literal: length in one extra byte (tag 60)
+    (b"\x46\xf0\x45" + b"q" * 70, b"q" * 70),
 ])
-def test_an_attest_env_that_is_not_a_private_regular_file_refuses(
-        harness: Harness, break_file: Callable[[Path], Any]) -> None:
-    token_file = harness.settings.runtime_dir / "attest.env"
-    token_file.chmod(0o600)
-    break_file(token_file)
-    assert harness.deployer(secret_check=_owner_checked).run() == 1
-    host = harness.host
-    assert host.count(GH_VERIFY) == host.count(PULL) == host.count(DOCKER_RUN) == 0
-    assert _discovery_code(harness) == "attestation_token_missing"
+def test_snappy_decodes_each_element_kind(encoded: bytes, decoded: bytes) -> None:
+    assert bfx.snappy_decompress(encoded, limit=1024) == decoded
+    assert bfx.snappy_decompress(snappy_literals(decoded), limit=1024) == decoded
 
 
-def test_a_root_0600_attest_env_passes_the_real_check(harness: Harness) -> None:
-    (harness.settings.runtime_dir / "attest.env").chmod(0o600)
-    for name in VALID_ENV:
-        (harness.settings.runtime_dir / name).chmod(0o600)
-    assert harness.deployer(secret_check=_owner_checked).run() == 0
-    env = harness.host.envs[harness.host.index(GH_VERIFY)]
-    assert env is not None and env["GH_TOKEN"] == ATTEST_TOKEN
+@pytest.mark.parametrize("encoded", [
+    b"",                                   # no length
+    b"\xff\xff\xff\xff\xff\x01",           # length varint longer than 5 bytes
+    b"\x05\x08abc",                        # declared 5, produced 3
+    b"\x02\x08abc",                        # literal longer than declared
+    b"\x03\x10ab",                         # truncated literal
+    b"\x46\xf0",                           # truncated literal length
+    b"\x04\x01\x00",                       # copy before any output
+    b"\x08\x00a\x0d\x00",                  # copy offset 0
+    b"\x08\x00a\x0d\x02",                  # copy offset beyond the output
+    b"\x08\x04xy\x16\x02",                 # truncated copy-2
+    b"\x06\x00a\x0d\x01",                  # copy past the declared length
+    b"\x80\x80\x80\x80\x08",               # declares 2 GiB: over the limit
+])
+def test_snappy_rejects_malformed_input(encoded: bytes) -> None:
+    with pytest.raises(ValueError, match="snappy"):
+        bfx.snappy_decompress(encoded, limit=1 << 20)
 
 
-def test_gh_stderr_reaches_the_journal_without_the_token(
-        harness: Harness, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
-    host = harness.host
+# --------------------------------------------------------------------------- verify-provenance
 
-    def leaky(args: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
-        if args == ("--version",):
-            return bfx.CommandResult(0, f"gh version {bfx.GH_VERSION} (2026-09-30)\n", "")
-        assert env is not None
-        return bfx.CommandResult(1, "", f"HTTP 401: Bad credentials (token {env['GH_TOKEN']})")
 
-    monkeypatch.setattr(host, "_gh", leaky)
-    assert harness.run() == 1
-    err = capsys.readouterr().err
-    assert "Bad credentials (token [GH_TOKEN])" in err and ATTEST_TOKEN not in err
-    assert ATTEST_TOKEN not in json.dumps(harness.notices)
-    assert _discovery_code(harness) == "attestation_unverified"
+def test_verify_provenance_runs_the_deployers_verifier_on_one_digest(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    built: list[tuple[Any, str]] = []
+
+    class Verifier:
+        def __init__(self, fails: bool) -> None:
+            self.fails = fails
+
+        def verify(self, image: str) -> None:
+            built.append((image, "verify"))
+            if self.fails:
+                raise bfx.DiscoveryError("attestation_unverified:gh_rejected")
+
+    outcome = {"fails": False}
+
+    def factory(settings: Any, runner: Any, registry: Any, http: Any) -> Any:
+        assert (runner, http) == (bfx.subprocess_runner, bfx.https_get)
+        assert isinstance(registry, bfx.ImagetoolsRegistry)
+        assert (settings.gh, settings.source_repository) == (bfx.GH_BINARY, bfx.SOURCE_REPOSITORY)
+        assert settings.state_dir == tmp_path / "state"
+        return Verifier(outcome["fails"])
+
+    monkeypatch.setattr(bfx, "provenance_verifier", factory)
+    monkeypatch.setattr(bfx.os, "geteuid", lambda: 0)
+    args = ["verify-provenance", NEW_B, "--runtime-dir", str(tmp_path), "--state-dir", str(tmp_path / "state")]
+    assert bfx.main(args) == 0
+    assert built == [(f"{BACKEND}@{NEW_B}", "verify")]
+    assert f"verified: {BACKEND}@{NEW_B}" in capsys.readouterr().out
+    outcome["fails"] = True
+    assert bfx.main(args) == 1
+    assert "NOT verified: attestation_unverified:gh_rejected" in capsys.readouterr().err
+    assert bfx.main(["verify-provenance", "sha256:abc"]) == 2
+    assert len(built) == 2
 
 
 # --------------------------------------------------------------------------- downgrade (9i)
@@ -2976,7 +3256,6 @@ def test_a_rebuild_of_the_deployed_revision_and_a_descendant_both_deploy(harness
     harness.registry.refs[f"{BACKEND}:main"] = REBUILT_B
     harness.registry.refs[f"{BACKEND}:sha-{REV_OLD}"] = REBUILT_B
     harness.registry.labels[REBUILT_B] = {bfx.REVISION_LABEL: REV_OLD}
-    harness.host.attested.add(REBUILT_B)
     assert harness.run() == 0
     assert (harness.ledger.last.outcome, harness.ledger.last.backend_digest) == ("deployed", REBUILT_B)
     # Descendant: REV_NEW's parent is the deployed REV_OLD.
