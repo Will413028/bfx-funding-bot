@@ -103,3 +103,9 @@ tar、rsync 1.5GB 到 VM，再以自製程式驗證 archive（`image_artifact.py
 - 修正對象：[2026-09-19-dynamic-capital-and-release-canary](2026-09-19-dynamic-capital-and-release-canary.md) D5、D5'（Amendment 2026-09-22）、D7。
 - 同批：[2026-09-25-automated-probation-replaces-release-ceremony](2026-09-25-automated-probation-replaces-release-ceremony.md)。
 - 實作：release workflow `1a56aee`、VM tooling `5030e5d`（merge `97c7612`），兩階段 ledger／DR 腳本取目標版本等 design-review 修正記於 plan：`2026-09-25-release-governance-refactor.md`（原文已不在 repo，本 ADR 即紀錄）。
+
+## Amendment (2026-10-22): 簽章現在就做（SLSA Build L2），部署前驗證
+
+- **D5''**（修訂 D5 的「cosign 簽章延到多租戶」；品質計畫 9i，Will 2026-10-21 拍板）：release workflow 以 `actions/attest`（釘 commit SHA）為推上 GHCR 的 digest 產生 build provenance，attestation 存在 registry；VM 的 bfx-deploy 在決定部署哪個 image 的那一步（任何以新 image 執行的動作之前，含以 DB owner 跑 alembic）用釘版的 gh（`install.sh` 依版本與 sha256 安裝）以 `gh attestation verify --signer-workflow <repo>/.github/workflows/release.yml --source-ref refs/heads/main --bundle-from-oci` 驗證；驗證失敗或 GitHub／Sigstore 斷線時拒絕部署、照常告警，不留跳過開關。另加降版檢查：上次成功部署的 revision 必須是新 revision 的祖先。gh 需要 GitHub 身分（實測：空環境下 `gh attestation verify` 要求 `gh auth login`），用一把只讀公開資料、不授予任何權限的 fine-grained token（`/opt/bfx/runtime/attest.env`，每年換一次）。
+- 理由：原先延後的兩個理由已不成立：repo 已是 public（GitHub artifact attestations 對 public repo 免費），且 Sigstore keyless 用每次發的短期憑證，不需要自管金鑰。單一 operator 下，被盜的 GHCR 寫入權限原本可在 5 分鐘內上線任意指向 main revision 的 image（threat model F32）。
+- 未做：SBOM（`docker/buildkit-syft-scanner` 待列 digest 核准）；GitHub 帳號改硬體金鑰或 passkey 為主（F38，Will 親手）。
