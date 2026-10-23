@@ -55,7 +55,10 @@ uv run python -m bfx_funding_bot.apps.bot  # 跑 daemon（phase 由 BFX_PHASE �
 - [Operations runbook](docs/runbooks/operations.md) — 幣別啟停、放貸包絡、交易狀態、UI（經 tailnet）
   kill、自動保護、UNKNOWN 處理與 Telegram 告警。
 - [Fresh host setup](docs/runbooks/fresh-host-setup.md) — 新主機的 DB roles、tailnet 入口與首次安裝工具。
-- [Release 0 operator-only containment runbook](docs/runbooks/release-0-operator-containment.md)
+- [Release 0 operator-only containment runbook](docs/runbooks/release-0-operator-containment.md)（已失效，只說明現在誰是 operator）
+- [資安事故與外洩](docs/runbooks/security-incident.md) — 停止曝險、保存證據、換秘密、紀錄。
+- [上線清單](docs/runbooks/launch-checklist.md) — 某個幣別開始用真錢放貸之前的放行關卡。
+- [SLO](docs/slo.md) — bot 存活、reconcile 成功率、告警送達率的目標與查詢；事故紀錄範本在 [docs/incidents](docs/incidents/TEMPLATE.md)。
 - [Research one-shot jobs](docs/runbooks/research-one-shot-jobs.md) — 研究資料補齊與一次性容器。
 - [Rollback after a venue write](docs/runbooks/rollback-after-venue-write.md) — Venue 寫入後的回滾與還原判斷。
 - [Offsite DR Terraform module](infra/terraform/r2/README.md) and

@@ -16,7 +16,7 @@ Bitfinex 自動放貸 SaaS 平台。
 
 - **應用程式**（bot／webapi，與 tailnet 入口 netns／tailscale）：compose project `bfx-app`（`deploy/vm/docker-compose.app.yml`）。CI（`.github/workflows/release.yml`）在綠燈的 `main` commit 建 arm64 backend image（含前端 static export）推到 GHCR；VM 的 `bfx-deploy` timer 只以 digest 部署，VM 不 build image，部署不改變交易狀態。一次部署的步驟（migration 前停 webapi 與 bot、備份與 restore test、ledger、回滾、通知）見 `docs/runbooks/deploy.md`。
 - **資料服務**（Postgres）：compose project `bfx`，`docker-compose.bot.yml`（只有 postgres）。
-- Runbook：部署 `docs/runbooks/deploy.md`；交易狀態／包絡／停機／告警 `docs/runbooks/operations.md`；新主機的 DB roles／公開入口／首次安裝工具 `docs/runbooks/fresh-host-setup.md`；研究用一次性容器 `docs/runbooks/research-one-shot-jobs.md`；換秘密 `docs/runbooks/secret-rotation.md`（bot／webapi 的秘密是 `/opt/bfx/runtime/secrets/` 下的檔案，見 deploy runbook「秘密檔」）。
+- Runbook：部署 `docs/runbooks/deploy.md`；交易狀態／包絡／停機／告警 `docs/runbooks/operations.md`；新主機的 DB roles／公開入口／首次安裝工具 `docs/runbooks/fresh-host-setup.md`；研究用一次性容器 `docs/runbooks/research-one-shot-jobs.md`；真錢放貸前的放行關卡 `docs/runbooks/launch-checklist.md`；服務目標 `docs/slo.md`；資安事故 `docs/runbooks/security-incident.md`；換秘密 `docs/runbooks/secret-rotation.md`（bot／webapi 的秘密是 `/opt/bfx/runtime/secrets/` 下的檔案，見 deploy runbook「秘密檔」）。
 
 | 服務 | 平台 |
 |------|------|
@@ -62,6 +62,7 @@ Bitfinex 自動放貸 SaaS 平台。
 ### 測試與品質（強制）
 
 - **行為變更補對應的回歸測試**；純文件改動核對指令、路徑與規格即可，不為文件或格式改動新增機械測試
+- **每個事故一份紀錄、一條先紅後綠的回歸測試**：紀錄照 `docs/incidents/TEMPLATE.md` 寫在 `docs/incidents/`；修補 PR 帶的回歸測試要在修補前的 commit 上失敗、修補後通過，證據寫進紀錄
 - **suppression 與測試數只往好的方向動**：`backend/quality-ratchet.json` 鎖住各類 suppression（`noqa`、`type: ignore`、`biome-ignore`、skip 等）的數量與 CI 實際執行的測試數，由 CI 的 `Quality ratchet` job 檢查（本機：`cd backend && uv run python scripts/quality_ratchet.py`）；import-linter 的 `ignore_imports` 由 `tests/architecture/test_import_contracts.py` 鎖住。移除 suppression 要把鎖定值調低；要放寬（多一個 suppression、測試數變少）時，PR 裡要有 commit 帶 `Ratchet-Reason:` trailer，測試數變少還要用 `Removed-Test:` trailer 列出每個被刪的測試
 - **套用 migration 一律使用 `cd backend && uv run alembic upgrade head`，不可用 MCP 直接執行 SQL**
 - 後端架構詳見 `backend/ARCHITECTURE.md`（runtime 架構/資料流/放貸演算法）；測試慣例與 SQLAlchemy/Alembic 工作流以各 module 註解與既有測試為準
