@@ -1096,6 +1096,9 @@ class Attempt:
     webapi_stopped: bool = False
     # A release that came up unhealthy and stayed (no rollback, or the rollback failed).
     degraded: bool = False
+    # The services this attempt stopped and has not started again; one that was already
+    # absent is not this attempt's doing.
+    held: set[str] = field(default_factory=set)
     started_recorded: bool = False
 
 
@@ -1737,6 +1740,8 @@ class Deployer:
             return self._finish(attempt, "failed", "webapi_stop_failed; nothing migrated; "
                                 "running release untouched")
         attempt.webapi_stopped = True
+        if webapi == "webapi stopped":
+            attempt.held.add("webapi")
         stopped = self._stop("bot")
         if stopped == "BOT_STOP_FAILED":
             # Nothing migrated and the running release keeps its schema: the web API
@@ -1746,11 +1751,14 @@ class Deployer:
                 restarted = self._restart("webapi")
                 if restarted == "restarted":
                     attempt.webapi_stopped = False
+                    attempt.held.discard("webapi")
                     note += "; webapi restarted"
                 else:
                     note = f"webapi_restart_failed:{restarted}"
             return self._finish(attempt, "failed", f"bot_stop_failed; nothing migrated; {note}")
         attempt.bot_stopped = True
+        if stopped == "bot stopped":
+            attempt.held.add("bot")
         held = "bot and webapi stopped until a release deploys (roll forward or --retry)"
         try:
             self._backup(dr_checkout)
@@ -1778,6 +1786,7 @@ class Deployer:
                     notes.append(f"{service}_restart_failed:{restarted}")
                     continue
                 setattr(attempt, f"{service}_stopped", False)
+                attempt.held.discard(service)
                 notes.append(f"{service} restarted on the running release")
             return self._finish(attempt, "failed", f"{failed}; schema unchanged; "
                                 + "; ".join(notes))
@@ -2629,8 +2638,7 @@ class Deployer:
             ci_run=attempt.ci_run,
             # A deploy that went through stopped both on purpose (the migration path) and
             # brought them back; a rollback restored the previous release.
-            service_degraded=outcome == "failed" and (
-                attempt.degraded or attempt.bot_stopped or attempt.webapi_stopped),
+            service_degraded=outcome == "failed" and (attempt.degraded or bool(attempt.held)),
         )
         level = {"deployed": "info", "rolled_back": "warning"}.get(outcome, "critical")
         if outcome == "deployed" and "warnings=" in detail:

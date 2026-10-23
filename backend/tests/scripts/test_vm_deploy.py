@@ -978,6 +978,7 @@ def test_started_row_that_cannot_be_written_changes_no_container(harness: Harnes
     assert harness.host.count(COMPOSE_UP) == 0
     row = harness.ledger.last
     assert row.outcome == "failed" and "ledger_started_unrecorded" in row.detail
+    assert row.service_degraded is False
     assert harness.host.running["bot"][1] == OLD_B
 
 
@@ -1147,6 +1148,7 @@ def test_bot_that_cannot_be_stopped_blocks_the_migration_and_starts_the_webapi_a
     assert host.running["webapi"] == (f"{BACKEND}@{OLD_B}", OLD_B, REV_OLD, OLD_ATTEMPT)
     assert harness.ledger.last.detail == (
         "bot_stop_failed; nothing migrated; running release untouched; webapi restarted")
+    assert harness.ledger.last.service_degraded is False
 
 
 def test_webapi_that_cannot_be_stopped_blocks_the_migration_with_the_bot_running(
@@ -1162,6 +1164,7 @@ def test_webapi_that_cannot_be_stopped_blocks_the_migration_with_the_bot_running
     row = harness.ledger.last
     assert (row.outcome, row.migrations_applied) == ("failed", False)
     assert row.detail == "webapi_stop_failed; nothing migrated; running release untouched"
+    assert row.service_degraded is False
 
 
 @pytest.mark.parametrize("service", ["bot", "webapi"])
@@ -1170,6 +1173,21 @@ def test_absent_container_does_not_block_a_first_migration(harness: Harness, ser
     del harness.host.running[service]
     assert harness.run() == 0
     assert harness.ledger.last.outcome == "deployed"
+
+
+@pytest.mark.parametrize("service", ["bot", "webapi"])
+def test_a_container_already_absent_is_not_degraded_by_a_failed_rehearsal(
+    harness: Harness, service: str,
+) -> None:
+    """The attempt stops nothing that was not running; the other one comes back."""
+    host = harness.host
+    host.current = ("h1",)
+    del host.running[service]
+    host.restore_test_ok = False
+    host.restore_receipt = _receipt()
+    assert harness.run() == 1
+    assert f"{service} absent; nothing to restart" in harness.ledger.last.detail
+    assert harness.ledger.last.service_degraded is False
 
 
 def test_started_row_that_cannot_be_written_after_a_migration_keeps_both_stopped(
@@ -1181,6 +1199,7 @@ def test_started_row_that_cannot_be_written_after_a_migration_keeps_both_stopped
     assert harness.run() == 1
     assert host.count(COMPOSE_UP) == 0 and not {"bot", "webapi"} & set(host.running)
     assert harness.ledger.last.detail.endswith("; bot and webapi stay stopped")
+    assert harness.ledger.last.service_degraded is True
 
 
 @pytest.mark.parametrize(("setup", "code", "migrated"), [
@@ -1332,6 +1351,7 @@ def test_a_bot_that_does_not_come_back_is_left_stopped(
         host.stop_ok_after_start = False
     assert harness.run() == 1
     assert detail in harness.ledger.last.detail
+    assert harness.ledger.last.service_degraded is True
     if setup == "unhealthy":
         assert host.stopped == ["bfx-webapi", "bfx-bot", "bfx-bot", "bfx-webapi"]
         assert not {"bot", "webapi"} & set(host.running)
@@ -1354,6 +1374,7 @@ def test_a_webapi_that_does_not_come_back_leaves_the_restarted_bot_running(
     assert harness.ledger.last.detail.endswith(
         "schema unchanged; bot restarted on the running release; "
         "webapi_restart_failed:start_failed; webapi stopped until a release deploys")
+    assert harness.ledger.last.service_degraded is True
 
 
 def test_a_restore_test_first_drops_other_digests_so_the_candidate_is_unambiguous(
@@ -2743,6 +2764,7 @@ def test_a_docker_start_that_times_out_is_a_failed_start_not_a_crash(harness: Ha
     assert harness.run() == 1
     assert harness.ledger.last.detail.startswith("bot_stop_failed; nothing migrated; webapi_restart_failed:"
                                                  "start_failed")
+    assert harness.ledger.last.service_degraded is True
     assert not any("crashed" in text for _, text in harness.notices)
 
 
