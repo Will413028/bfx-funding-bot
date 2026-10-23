@@ -6,13 +6,14 @@
   `observability/`，不在本 repo。
 - 查詢在 VM 上跑：`docker exec prometheus wget -qO- 'http://localhost:9090/api/v1/query' --post-data 'query=<查詢>'`
   （或 Grafana Explore）。
-- 現值是第一次量測的結果；目標依現值訂，之後只往嚴格的方向調。
+- 現值是第一次量測的結果；目標依現值訂，之後只往嚴格的方向調。第一次量測的 28 天包含品質計畫期間密集的部署
+  （ledger 至今累計 216 次 `deployed`），存活率的計畫停機比平常多。
 
 | SLI | 好事件 ÷ 有效事件 | 目標 | 現值（量測日） |
 |---|---|---|---|
-| bot 存活 | Prometheus 抓得到 bot 的次數 ÷ 抓取次數 | TBD | TBD |
-| reconcile 成功率 | `result="ok"` 的 reconcile tick ÷ 全部 tick | TBD | TBD |
-| bot 告警送達率 | `outcome="sent"` ÷（`sent`＋`failed`＋`queue_full`） | TBD | TBD |
+| bot 存活 | Prometheus 抓得到 bot 的次數 ÷ 抓取次數 | 98.5% | 98.63%（2026-10-23） |
+| reconcile 成功率 | `result="ok"` 的 reconcile tick ÷ 全部 tick | 99% | 99.40%（2026-10-23） |
+| bot 告警送達率 | `outcome="sent"` ÷（`sent`＋`failed`＋`queue_full`） | 99% | 100%（2026-10-23） |
 
 ## 查詢
 
