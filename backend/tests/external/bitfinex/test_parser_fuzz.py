@@ -47,6 +47,7 @@ from bfx_funding_bot.external.bitfinex.observations import (
 )
 from bfx_funding_bot.external.bitfinex.rest import ROW_CONVERSION_ERRORS, FundingTrade
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitAcknowledged,
     SubmitOutcomeUnknown,
     classify_submit_response,
 )
@@ -240,3 +241,45 @@ def test_response_digest_falls_back_to_a_fixed_marker_when_repr_fails() -> None:
     assert response_digest(_Unrepresentable()) == sha256(
         b"<response nested too deep to represent>"
     ).hexdigest()
+
+
+def _success_with_offer_id(offer_id: Any) -> list[Any]:
+    return [0, "on-req", None, None, [offer_id, "fUST"], None, "SUCCESS", "ok"]
+
+
+@pytest.mark.parametrize(("offer_id", "expected"), [
+    pytest.param(42, "42", id="int"),
+    pytest.param("42", "42", id="digit_string"),
+    pytest.param(" 42 ", "42", id="padded_digit_string"),
+    pytest.param("0042", "0042", id="digit_string_kept_as_sent"),
+    pytest.param("9" * 5000, "9" * 5000, id="longer_than_int_parses"),
+])
+def test_success_acknowledges_an_integer_offer_id(offer_id: Any, expected: str) -> None:
+    outcome = classify_submit_response(
+        http_status=200, parsed_body=_success_with_offer_id(offer_id), transport_started=True,
+    )
+    assert isinstance(outcome, SubmitAcknowledged)
+    assert outcome.venue_offer_id == expected
+
+
+@pytest.mark.parametrize("offer_id", [
+    # F44: anything but an integer id was str()-ed into a venue offer id and acknowledged.
+    pytest.param([[1]], id="list"),
+    pytest.param({"id": 1}, id="dict"),
+    pytest.param(42.0, id="float"),
+    pytest.param(0, id="zero"),
+    pytest.param(-5, id="negative"),
+    pytest.param("0", id="zero_string"),
+    pytest.param("00", id="zeros_string"),
+    pytest.param("abc", id="text"),
+    pytest.param("4 2", id="spaced"),
+    pytest.param("٤٢", id="non_ascii_digits"),
+    pytest.param(True, id="bool"),
+    pytest.param(None, id="none"),
+])
+def test_success_with_a_non_integer_offer_id_is_unknown(offer_id: Any) -> None:
+    outcome = classify_submit_response(
+        http_status=200, parsed_body=_success_with_offer_id(offer_id), transport_started=True,
+    )
+    assert isinstance(outcome, SubmitOutcomeUnknown)
+    assert outcome.reason == "malformed_response"
