@@ -11,12 +11,9 @@ function accountScopedPath(resourcePath: `/${string}`): string {
 	return `/exchange-accounts/${SEEDED_EXCHANGE_ACCOUNT_ID.toLowerCase()}${resourcePath}`;
 }
 
+// `/` has no page in the static export: the web API redirects it to the default
+// locale (backend/tests/modules/api/test_ingress.py), so `next dev` cannot test it.
 test.describe("Smoke tests", () => {
-	test("root redirects to the default locale", async ({ page }) => {
-		await page.goto("/");
-		await expect(page).toHaveURL(/\/en/);
-	});
-
 	test("overview page loads", async ({ page }) => {
 		await page.goto("/en/overview/");
 		await expect(page.getByRole("navigation", { name: "Main navigation" })).toBeVisible();
