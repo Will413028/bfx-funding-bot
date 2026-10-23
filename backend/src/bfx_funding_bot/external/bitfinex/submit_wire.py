@@ -90,8 +90,13 @@ def response_digest(response: Any) -> str:
     """Hash a parsed response without retaining arbitrary response text."""
     try:
         encoded = _canonical_json(response)
-    except (TypeError, ValueError):
-        encoded = repr(response).encode("utf-8", errors="replace")
+    except (TypeError, ValueError, RecursionError):
+        # RecursionError: json.loads accepts bodies nested deeper than _normalize_value
+        # can recurse, and this runs after transport, where a raise ends the process.
+        try:
+            encoded = repr(response).encode("utf-8", errors="replace")
+        except RecursionError:
+            encoded = b"<response nested too deep to represent>"
     return sha256(encoded).hexdigest()
 
 

@@ -3,11 +3,11 @@ raises the error the caller handles, never an unhandled exception.
 
 Each parser's defined error is the one its callers catch: ``BitfinexShapeError`` for
 the row parsers, ``InvariantViolation`` for the cancel-all classifier, and none at all
-for the submit parser (it returns UNKNOWN) and the venue-error readers (they return
-None). ``BitfinexREST`` wraps ``ValueError``/``TypeError`` from the candle and stat rows.
+for the submit classification (once transport started, every answer is an outcome)
+and the venue-error readers (they return None). ``BitfinexREST`` turns
+``ROW_CONVERSION_ERRORS`` from the candle and stat rows into ``BitfinexShapeError``.
 
-Parsers that leak another exception are pinned below as known defects, one shrunk
-counterexample each, until they are fixed.
+Defects the fuzz found (F40-F43) keep their shrunk counterexamples as regression cases.
 """
 from __future__ import annotations
 
@@ -45,6 +45,10 @@ from bfx_funding_bot.external.bitfinex.observations import (
     parse_wallet_observations,
 )
 from bfx_funding_bot.external.bitfinex.rest import ROW_CONVERSION_ERRORS, FundingTrade
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitOutcomeUnknown,
+    classify_submit_response,
+)
 from bfx_funding_bot.external.bitfinex.submit_wire import venue_error
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
 
@@ -170,24 +174,55 @@ def test_former_defect_raises_its_defined_error(
         parse(raw)
 
 
-# Known defects (plan step 2b reports them; fixing is a separate change). Each case is
-# the shrunk counterexample, so it fails on every run. strict: a fixed parser makes its
-# case pass, which fails the run until the case is deleted and the parser joins the
-# fuzz above.
-_NOTHING: tuple[type[Exception], ...] = ()
-
-KNOWN_DEFECTS = [
-    # F43: the submit parser promises UNKNOWN for any malformed body, but a list in the
-    # STATUS slot raises (submit_outcomes._structured_rejection_reason's set lookup).
-    pytest.param(parse_offer_response, [None, None, None, None, None, None, []], _NOTHING,
-                 id="F43-submit_response",
-                 marks=pytest.mark.xfail(raises=TypeError, strict=True, reason="F43")),
-]
+# The submit boundary: once the request may have reached the venue, every answer is
+# classified, never raised. An exception there would end the process (the command
+# gate fences an outcome it cannot persist) and cost a restart plus an UNKNOWN.
+_HTTP_STATUS = st.one_of(
+    st.none(), st.sampled_from([200, 201, 204, 400, 401, 403, 404, 409, 422, 429, 500, 502, 503]),
+    st.integers(-1, 700),
+)
 
 
-@pytest.mark.parametrize(("parse", "raw", "defined"), KNOWN_DEFECTS)
-def test_known_defect_raises_only_its_defined_error(
-    parse: Callable[[Any], object], raw: Any, defined: tuple[type[Exception], ...],
-) -> None:
-    with contextlib.suppress(defined):
-        parse(raw)
+@given(status=_HTTP_STATUS, raw=_BODY)
+def test_submit_classification_never_raises_after_transport(status: int | None, raw: Any) -> None:
+    classify_submit_response(http_status=status, parsed_body=raw, transport_started=True)
+
+
+@given(raw=_BODY)
+def test_submit_response_parser_never_raises(raw: Any) -> None:
+    parse_offer_response(raw)
+
+
+@pytest.mark.parametrize(("status", "raw", "reason"), [
+    # F43: a list or dict in the STATUS slot raised TypeError in the rejection check.
+    pytest.param(200, [None, None, None, None, None, None, []], "malformed_response", id="F43-2xx"),
+    pytest.param(401, [{}, "x", None, False, None, "x", {}], "unrecognized_response", id="F43-4xx"),
+])
+def test_unhashable_status_slot_is_unknown(status: int, raw: list[Any], reason: str) -> None:
+    outcome = classify_submit_response(http_status=status, parsed_body=raw, transport_started=True)
+    assert isinstance(outcome, SubmitOutcomeUnknown)
+    assert outcome.reason == reason
+
+
+
+def _nested(depth: int) -> Any:
+    body: Any = 0
+    for _ in range(depth):
+        body = [body]
+    return body
+
+
+# Built inside the test: pytest would render a parametrized value this deep in its report.
+_DEEP_BODIES: dict[str, Callable[[], Any]] = {
+    "deep_body": lambda: _nested(1500),
+    "deep_offer": lambda: [0, "on-req", None, None, _nested(1500), None, "SUCCESS", "ok"],
+}
+
+
+@pytest.mark.parametrize("status", [200, 401, 500])
+@pytest.mark.parametrize("shape", _DEEP_BODIES)
+def test_deeply_nested_submit_body_is_classified(status: int, shape: str) -> None:
+    # json.loads accepts thousands of levels; the response digest's normaliser recursed
+    # past the interpreter limit and raised RecursionError after transport.
+    classify_submit_response(http_status=status, parsed_body=_DEEP_BODIES[shape](),
+                             transport_started=True)
