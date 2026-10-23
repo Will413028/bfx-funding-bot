@@ -3,11 +3,6 @@
 # medium 90 / low 180 days); after that the scan fails until the upgrade lands.
 # Remove an entry when its fix merges; never extend a date without a written reason.
 
-[[IgnoredVulns]]
-id = "GHSA-g7r4-m6w7-qqqr"
-ignoreUntil = 2027-04-09T00:00:00Z
-reason = "baseline low: esbuild@0.27.x (frontend/pnpm-lock.yaml); fix 0.28.1 is outside vite 7 esbuild ^0.27, clears with vitest 5 / vite 8"
-
 # Published 2026-10-20, after the scanner baseline; each expires on its fix deadline.
 [[IgnoredVulns]]
 id = "PYSEC-2026-4320"
