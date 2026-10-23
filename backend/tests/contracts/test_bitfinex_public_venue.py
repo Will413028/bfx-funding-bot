@@ -28,6 +28,8 @@ DAY_MS = 86_400_000
 # A daily rate above 1% is 3650% APR; Bitfinex has never cleared that for USD or UST.
 MAX_DAILY_RATE = Decimal("0.01")
 PERIODS = range(2, 121)
+# The field's default, not Settings(): the workflow has no DATABASE_URL or .env.
+BASE_URL: str = Settings.model_fields["bitfinex_api_base_url"].default
 
 
 def _now_ms() -> int:
@@ -39,7 +41,7 @@ async def rest() -> AsyncIterator[BitfinexREST]:
     async with httpx.AsyncClient() as http:
         # One wait on a 429, so a shared runner IP being throttled is not reported as drift.
         yield BitfinexREST(
-            http=http, base_url=Settings().bitfinex_api_base_url,
+            http=http, base_url=BASE_URL,
             limiter=FundingRateLimiter(), rate_limit_backoff=(60.0,),
         )
 
