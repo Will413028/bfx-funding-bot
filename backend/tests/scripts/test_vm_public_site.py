@@ -17,7 +17,7 @@ import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 
 import pytest
 
@@ -288,3 +288,29 @@ def test_main_exits_zero_only_once_pages_serves_the_upload(
     assert pages.calls("deployments")
     err = capsys.readouterr().err
     assert TOKEN not in err and JWT not in err
+
+
+def test_every_request_names_its_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # pages.dev refuses urllib's default agent with 403; the verify step then fails a good upload.
+    sent = []
+
+    class Response:
+        status = 200
+        headers: Mapping[str, str] = MappingProxyType({})
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"{}"
+
+    def urlopen(request, timeout):
+        sent.append(request)
+        return Response()
+
+    monkeypatch.setattr(site.urllib.request, "urlopen", urlopen)
+    site.urllib_transport("GET", "https://borrowrate.pages.dev/proof-summary.json", {}, None)
+    assert sent[0].get_header("User-agent") == site.USER_AGENT

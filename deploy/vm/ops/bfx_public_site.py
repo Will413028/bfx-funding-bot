@@ -88,6 +88,9 @@ VERIFY_SECONDS = 120
 CONTENT_TYPES = {"html": "text/html; charset=utf-8", "json": "application/json",
                  "csv": "text/csv; charset=utf-8"}
 CSP_MARKER = "default-src 'none'"
+# pages.dev answers urllib's default `Python-urllib/3.x` with 403 (measured 2026-10-24 from
+# the VM: the same URL is 200 for curl and for this agent), so every request names itself.
+USER_AGENT = "bfx-public-site/1"
 
 # (method, url, headers, body) -> (status, body, response headers)
 Transport = Callable[[str, str, Mapping[str, str], bytes | None], tuple[int, bytes, Mapping[str, str]]]
@@ -213,7 +216,8 @@ def load_config(runtime_dir: Path, *, secret_check: Callable[[Path], None]) -> C
 
 def urllib_transport(method: str, url: str, headers: Mapping[str, str],
                      body: bytes | None) -> tuple[int, bytes, Mapping[str, str]]:
-    request = urllib.request.Request(url, data=body, method=method, headers=dict(headers))
+    request = urllib.request.Request(url, data=body, method=method,
+                                     headers={"User-Agent": USER_AGENT, **headers})
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             return response.status, response.read(), dict(response.headers)
