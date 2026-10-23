@@ -54,6 +54,7 @@ dev = [
     "import-linter==2.15",
     "pytest-xdist>=3.8.0",
     "pytest-postgresql>=9.1.0",
+    "diff-cover==10.6.0",
 ]
 
 [project.scripts]
