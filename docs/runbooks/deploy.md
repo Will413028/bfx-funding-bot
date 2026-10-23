@@ -141,7 +141,7 @@ docker compose -p bfx -f docker-compose.bot.yml up -d --no-deps --no-build postg
 docker inspect -f '{{.State.Health.Status}} init={{.HostConfig.Init}}' bfx-postgres   # healthy init=true
 docker exec bfx-postgres ps -o pid,comm | sed -n 2p                                   # 1 docker-init
 docker exec --user postgres bfx-postgres pgbackrest --stanza=bfx check                # 推得出 WAL
-docker exec --user postgres bfx-postgres psql -d bfx -Atc "CREATE EXTENSION IF NOT EXISTS pg_stat_statements; SELECT count(*) >= 0 FROM pg_stat_statements"   # t（慢查詢，operations §8）
+docker exec --user postgres bfx-postgres psql -U bfx -d bfx -Atc "CREATE EXTENSION IF NOT EXISTS pg_stat_statements; SELECT count(*) >= 0 FROM pg_stat_statements"   # t（慢查詢，operations §8）
 docker start bfx-bot && sudo systemctl start bfx-deploy.timer
 ```
 

@@ -634,11 +634,11 @@ postgres 開機時載入 `pg_stat_statements` 與 `auto_explain`（`docker-compo
 
 ```bash
 # 累計時間最多的 10 個 statement
-docker exec --user postgres bfx-postgres psql -d bfx -c "SELECT calls, round(total_exec_time) AS total_ms, round(mean_exec_time) AS mean_ms, rows, left(query, 120) AS query FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10"
+docker exec --user postgres bfx-postgres psql -U bfx -d bfx -c "SELECT calls, round(total_exec_time) AS total_ms, round(mean_exec_time) AS mean_ms, rows, left(query, 120) AS query FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10"
 # 最近一天超過 1 秒的 statement 與計畫
 docker logs --since 24h bfx-postgres 2>&1 | grep -A20 'duration: .* plan:'
 # 調查完要重新起算
-docker exec --user postgres bfx-postgres psql -d bfx -c "SELECT pg_stat_statements_reset()"
+docker exec --user postgres bfx-postgres psql -U bfx -d bfx -c "SELECT pg_stat_statements_reset()"
 ```
 
 `pg_stat_statements` 的 `query` 是正規化後的文字（值換成 `$1`）。`auto_explain` 的計畫不一定：custom plan 會把參數值代入條件（例如 account id），所以這些 log 和其他 postgres log 一樣只留在 VM 與既有的 log 管道，不貼到 issue 或對外的地方。
