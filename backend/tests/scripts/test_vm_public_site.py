@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import time
 from collections.abc import Mapping
@@ -101,6 +102,29 @@ def test_collect_refuses_anything_but_the_site(tmp_path: Path, mutate, code: str
     with pytest.raises(site.PublishError) as caught:
         site.collect(out, now=time.time())
     assert caught.value.code == code
+
+
+def test_collect_never_follows_a_symlinked_directory(tmp_path: Path) -> None:
+    # A same-named file behind the link: only O_NOFOLLOW on the directory stops the read.
+    out = _build(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "index.html").write_text("ROOT-ONLY")
+    shutil.rmtree(out / "en")
+    (out / "en").symlink_to(elsewhere)
+    with pytest.raises(site.PublishError) as caught:
+        site.collect(out, now=time.time())
+    assert caught.value.code == "site_symlink:en"
+
+
+def test_collect_reports_an_unopenable_entry_as_unreadable(tmp_path: Path) -> None:
+    out = _build(tmp_path)
+    (out / "_headers").chmod(0)
+    if os.geteuid() == 0:
+        pytest.skip("root opens a 0000 file")
+    with pytest.raises(site.PublishError) as caught:
+        site.collect(out, now=time.time())
+    assert caught.value.code == "site_unreadable:_headers"
 
 
 def test_collect_refuses_a_stale_build(tmp_path: Path) -> None:

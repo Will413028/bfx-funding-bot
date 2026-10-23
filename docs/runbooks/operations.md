@@ -622,7 +622,7 @@ sudo systemctl disable --now bfx-weekly-report.timer   # 暫停
   且首頁帶 CSP 才算成功。設定在 `public-site.env` 與 token 檔（[secret-rotation](secret-rotation.md#cloudflare-pages-token公開站)）。
 - 收到 `bfx-public-site.service` 失敗告警：看 `journalctl -u bfx-public-site.service -n 50`，錯誤碼說明在哪一步：
   `site_build_stale`／`site_files_mismatch` 是每週報告那一步沒產生（看 `bfx-weekly-report` 的 journal 裡
-  `build_public_site` 的 WARN）；`*_failed:http_403` 多半是 token 被撤銷或 VM 換了出口 IP；`verify_failed` 是
+  `build_public_site` 的 WARN）；`site_symlink`／`site_not_regular`／`site_unreadable` 表示 build 目錄裡出現了不是 build 寫的東西，先查是誰動了 `/home/ubuntu/bfx/reports/public-site`，不要直接重跑；`*_failed:http_403` 多半是 token 被撤銷或 VM 換了出口 IP；`verify_failed` 是
   Pages 沒在 120 秒內送出新版，先重跑一次。重跑：`sudo systemctl start bfx-public-site.service`。
 - 預覽而不上傳：`sudo /usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_public_site.py --dry-run`。
 

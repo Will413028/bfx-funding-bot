@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
 import importlib.util
 import json
@@ -120,33 +121,53 @@ class Asset:
         return hashlib.sha256((self.b64 + self.extension).encode()).hexdigest()[:32]
 
 
-def _read_regular(path: Path, relative: str) -> bytes:
-    """Read through the descriptor that was checked: uid 1000 owns the reports dir, so a
-    path swapped for a symlink between a check and an open must not reach a root-only file."""
+_NOFOLLOW = os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _open_at(name: str, flags: int, *, dir_fd: int | None, relative: str) -> int:
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        raise PublishError(f"site_symlink:{relative}") from None
-    with os.fdopen(fd, "rb") as stream:
-        info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode):
-            raise PublishError(f"site_not_regular:{relative}")
-        if info.st_size > MAX_FILE_BYTES:
-            raise PublishError(f"site_file_too_large:{relative}")
-        return stream.read(MAX_FILE_BYTES + 1)
+        return os.open(name, flags | _NOFOLLOW, dir_fd=dir_fd)
+    except OSError as exc:
+        kind = "site_symlink" if exc.errno in (errno.ELOOP, errno.ENOTDIR) else "site_unreadable"
+        raise PublishError(f"{kind}:{relative}") from None
+
+
+def _read_tree(dir_fd: int, prefix: str, found: dict[str, bytes]) -> None:
+    """Walk by descriptor, never by path: uid 1000 owns the reports dir, so a file or a
+    directory swapped for a symlink mid-walk must not lead a root reader anywhere else.
+    Every component is opened with O_NOFOLLOW relative to the directory already open."""
+    for name in sorted(os.listdir(dir_fd)):
+        relative = f"{prefix}{name}"
+        fd = _open_at(name, os.O_RDONLY | os.O_NONBLOCK, dir_fd=dir_fd, relative=relative)
+        try:
+            info = os.fstat(fd)
+            if stat.S_ISDIR(info.st_mode):
+                _read_tree(fd, f"{relative}/", found)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise PublishError(f"site_not_regular:{relative}")
+            if info.st_size > MAX_FILE_BYTES:
+                raise PublishError(f"site_file_too_large:{relative}")
+            with os.fdopen(os.dup(fd), "rb") as stream:
+                body = stream.read(MAX_FILE_BYTES + 1)
+            if len(body) > MAX_FILE_BYTES:
+                raise PublishError(f"site_file_too_large:{relative}")
+            found[relative] = body
+        finally:
+            os.close(fd)
 
 
 def collect(site_dir: Path, *, now: float) -> dict[str, bytes]:
     """The build, by published path; refuses anything but a fresh, exact SITE_FILES."""
-    if site_dir.is_symlink() or not site_dir.is_dir():
-        raise PublishError("site_dir_missing")
-    found = {}
-    for path in sorted(site_dir.rglob("*")):
-        relative = path.relative_to(site_dir).as_posix()
-        if path.is_symlink():
-            raise PublishError(f"site_symlink:{relative}")
-        if not path.is_dir():
-            found[relative] = _read_regular(path, relative)
+    try:
+        root = os.open(site_dir, os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW)
+    except OSError:
+        raise PublishError("site_dir_missing") from None
+    found: dict[str, bytes] = {}
+    try:
+        _read_tree(root, "", found)
+    finally:
+        os.close(root)
     if set(found) != set(SITE_FILES):
         extra = sorted(set(found) - set(SITE_FILES))
         missing = sorted(set(SITE_FILES) - set(found))

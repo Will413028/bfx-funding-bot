@@ -192,7 +192,7 @@ def test_weekly_report_runs_the_deployed_tooling_never_the_vm_checkout() -> None
     assert unit.one("Service", "ExecStart") == f"{OPS_PYTHON} {OPS}/bfx_weekly_report.py"
     assert "WorkingDirectory" not in unit["Service"]
     assert "bfx-funding-bot" not in (SYSTEMD / "bfx-weekly-report.service").read_text()
-    assert unit.one("Service", "TimeoutStartSec") == "5400"  # the whole chain's budget
+    assert unit.one("Service", "TimeoutStartSec") == "5700"  # the whole chain's budget
     assert (ROOT / "deploy/vm/ops/bfx_weekly_report.py").is_file()
     assert _unit("bfx-weekly-report.timer").one("Timer", "OnCalendar") == "Mon *-*-* 04:17:00 UTC"
 

@@ -20,8 +20,9 @@ UMask=0077
 # The success heartbeat bfx-backup-check reads (bfx_weekly_report.HEARTBEAT).
 StateDirectory=bfx-ops
 StateDirectoryMode=0700
-# 整條 chain 上限 90min：營運三步（ingest 600 + attribution + G3）之後接研究步驟
-# （perp 900 + liquidations 1200 + book learn 600 + 兩次 period-structure 600 + OOS 600 +
-# diff），每步 fail-soft；防 systemd 端無限掛住。
-TimeoutStartSec=5400
+# 整條 chain 上限 95min：營運步驟（ingest 600 + attribution + G3 + delivery + 公開站 300）
+# 之後接研究步驟（perp 900 + liquidations 1200 + book learn 600 + 兩次 period-structure 600 +
+# OOS 600 + diff），每步 fail-soft；有 timeout 的步驟合計 5400，留 300 給沒有 timeout 的步驟；
+# 防 systemd 端無限掛住。
+TimeoutStartSec=5700
 ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_weekly_report.py

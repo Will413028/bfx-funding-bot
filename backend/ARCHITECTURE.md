@@ -989,7 +989,7 @@ allowlist 或第二個 postgres，理由是單一 VM 的管理成本；最小權
 |---|---|---|
 | restore test（每月 1 日，及部署前的 change-triggered） | VM，`bfx-restore-test@`（`ubuntu`） | 隔離還原的 RTO 上限 3600 秒，加 migration 演練 1200 秒，unit 上限 7200 秒（`deploy/vm/systemd/bfx-restore-test@.service:22-24`）；從 R2 拉整個備份 |
 | 備份 | VM，`bfx-pgbackrest-backup` | unit 上限 7200 秒（`bfx-pgbackrest-backup.service:11`）；上傳 R2 |
-| 每週報告 | VM，`bfx-weekly-report`（每週一） | unit 上限 5400 秒（`bfx-weekly-report.service:24`）；研究與 ingest 步驟有自己的 `timeout`（600–1200 秒，`deploy/vm/ops/docker-compose.weekly-report.yml:71-89`），研究步驟失敗不擋報告 |
+| 每週報告 | VM，`bfx-weekly-report`（每週一） | unit 上限 5700 秒（`bfx-weekly-report.service:27`）；研究、ingest 與公開站步驟有自己的 `timeout`（300–1200 秒，`deploy/vm/ops/docker-compose.weekly-report.yml:76-94`），研究步驟失敗不擋報告 |
 | 研究資料回補 | VM 一次性容器 | liquidations 預設每 25 秒一個 request、429 後睡 240 秒，完整回補數小時（`backend/scripts/ingest_liquidations.py:50-53`）；deriv status 客戶端每分鐘 18 個 request（`docs/runbooks/research-one-shot-jobs.md:17-19`） |
 | 整合測試全量 | CI（`-n 4`，job 上限 30 分鐘，`.github/workflows/ci.yml:212,249`）；本機 `-n 6` | 每個 worker 一台拋棄式 PG18 |
 | Bitfinex 已驗證端點 | bot | 每個 key 一個 gate 排序 nonce，背景讀取 10 秒截斷（`external/bitfinex/auth_rest.py:54,460-468`）；每個觀測 cycle 有 request 上限（`modules/execution/venue_observation.py:49,313`）；送單 token bucket（`pre_trade_limits.command_rate`，`modules/execution/safety/pre_trade.py:249-250`）；同一把 key 的其他使用者會撞 nonce（`docs/runbooks/operations.md:625`） |

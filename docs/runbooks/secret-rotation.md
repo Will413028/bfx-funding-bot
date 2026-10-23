@@ -188,7 +188,7 @@ BotFather 的 `/revoke` 會讓舊 token 立刻失效，所以兩條告警路徑�
 1. Cloudflare dashboard → My Profile → API Tokens → Create Custom Token：Account → Cloudflare Pages → Edit，
    Account Resources 只選這個帳戶，Client IP Address Filtering 填 VM 的出口 IP（`curl -4 ifconfig.me`）。
 2. 在 VM 用「通用寫法」的範本，把 `V=$(openssl rand ...)` 與最後的 `swap` 換成下面幾行；跑到 `read` 時貼上新 token、按 Enter（不回顯）。
-   第一次（新主機）的 `install -d` 與 `public-site.env` 兩行也照做，之後輪替時已存在、不影響：
+   第一次（新主機）的 `install -d` 與 `public-site.env` 兩行也照做（先把 `<帳戶 id>` 換成 Cloudflare dashboard 首頁右側的 Account ID；這一行只在檔案不存在時寫入，寫錯了要直接改檔），之後輪替時已存在、不影響：
 
    ```bash
    install -d -m 0700 -o root -g root /opt/bfx/runtime/secrets/public-site
