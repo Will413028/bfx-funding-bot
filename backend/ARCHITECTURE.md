@@ -896,7 +896,7 @@ credential vault 解密。public read model 另以明確的
 
 ---
 
-## 10. 安全文件：授權、通訊、資料分級、高成本工作
+## 10. 安全文件：授權、通訊、資料分級、高成本工作、個資
 
 本節只寫現行設定，每一項附出處（路徑相對於 repo root）。tailnet policy（ACL grants、SSH 規則）存在
 Tailscale admin console，**不在 repo**；以下照 runbook 與 ADR 的描述寫，實際內容以 admin console 為準。
@@ -1003,6 +1003,40 @@ TLS 由 Serve 終結，憑證是 Tailscale 為 tailnet 名稱（`*.ts.net`）自
 決定，repo 與 VM 都不能設定。接受的理由：流量在進 Serve 之前已經走 WireGuard，只有 tailnet 內、被 grant 允許的裝置
 連得到（10a），TLS 是第二層。我們依賴的是：Tailscale 的憑證自動更新、WireGuard 傳輸，以及 tailnet 開著 MagicDNS 與
 HTTPS certificates（`fresh-host-setup.md:204`）。Serve 之後的 hop 是同一個 namespace 的 loopback（10b）。
+
+### 10f. 個人資料：盤點、保存、刪除、外洩通報
+
+**盤點。** 目前唯一的當事人是 operator 本人。個人資料是 10c「個人資料」列（tailnet user ID 與 login、裝置名稱、
+tailnet IP），加上 operator 自己 Bitfinex 帳戶的帳務資料（餘額、offer、借出、利息；10c「帳務」列）。沒有其他使用者的
+資料，沒有 email、電話或身分證件。
+
+**保存。**
+
+| 資料 | 保存多久 | 出處 |
+|---|---|---|
+| Postgres（membership、outbox、帳務） | 不刪：journal 與觀測表 insert-once，是帳務的依據 | §9 I-IDEM |
+| 離機備份（R2，加密） | pgBackRest 保留 4 份 full、6 份 diff，之前的自動過期 | `deploy/vm/pgbackrest/pgbackrest.conf:9-10` |
+| container log（Loki） | 30 天 | 10c「log」列 |
+| Sentry 事件 | 依 Sentry SaaS 方案的保留期 | 10c |
+| Telegram 告警 | 留在 Telegram 對話，不由本系統管理 | `docs/runbooks/operations.md`「6. 告警」 |
+
+**刪除。** 只有 operator 本人的資料時，刪除就是 operator 自己移除 membership 或整個帳戶。對其他使用者的刪除請求流程
+與實作延到 SP6（開放第二個使用者），屆時要處理 insert-once 帳務與備份中的副本。
+
+**外洩通報。** 秘密或交易所憑證外洩時，照 `docs/runbooks/secret-rotation.md` 換掉，在 Bitfinex 撤銷舊 key，並寫一份
+事故紀錄（`docs/incidents/TEMPLATE.md`）。目前當事人只有 operator 本人，不需要對外通報；SP6 之後要依個資法第 12 條
+在查明後通知當事人。
+
+**法規對照（P4，2026-10-23 查核）。**
+
+- 個資法：第 51 條第 1 項第 1 款，自然人為單純個人或家庭活動之目的蒐集、處理或利用個人資料，不適用本法
+  （[全國法規資料庫](https://law.moj.gov.tw/LawClass/LawSingle.aspx?pcode=I0050021&flno=51)）。目前只處理 operator
+  自己的資料，屬這一款；開放第二個使用者（SP6）後就是非公務機關蒐集他人資料，告知（第 8 條）、外洩通知（第 12 條）、
+  當事人請求（第 3 條）都要做到。
+- Bitfinex：官方的 margin lending 頁說明第三方工具可以透過 API key 接入，Bitfinex 不背書，API 權限由客戶自己負責，
+  並建議用權限受限的 key；P2P 放貸市場依 Terms of Service 提供（[margin lending](https://www.bitfinex.com/margin-lending/)）。
+  本系統的 key 關閉 withdraw 權限並定期重查（10c）。Terms of Service 全文 Bitfinex 擋自動抓取，**尚未逐條核對**；
+  代他人操作帳戶（SP6）前必須核對。
 
 ---
 
