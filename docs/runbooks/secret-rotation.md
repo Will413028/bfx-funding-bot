@@ -155,7 +155,8 @@ sudo bfx-deploy --recreate               # 4. bot／webapi 才需要；precheck 
 
 BotFather 的 `/revoke` 會讓舊 token 立刻失效，所以兩條告警路徑要一起換：
 - bot 內的 sink：`secrets/bot/TELEGRAM_BOT_TOKEN`；
-- 主機工具 `bfx-notify`：`notify.env` 的 `TELEGRAM_BOT_TOKEN`。
+- 主機工具 `bfx-notify`：`notify.env` 的 `TELEGRAM_BOT_TOKEN`；
+- GitHub Actions 的每日合約檢查（`venue-contract.yml`）：repository secret `TELEGRAM_BOT_TOKEN`。
 
 `TELEGRAM_CHAT_ID` 不是秘密，留在 `bot.env`／`notify.env`。
 
@@ -170,7 +171,9 @@ BotFather 的 `/revoke` 會讓舊 token 立刻失效，所以兩條告警路徑�
    ```
 
 3. `sudo bfx-deploy --recreate`。
-4. 驗證：
+4. GitHub secret 從 VM 的新檔直接 pipe，不經過終端機：在 Mac 上跑
+   `tailscale ssh ubuntu@<vm-node> 'sudo cat /opt/bfx/runtime/secrets/bot/TELEGRAM_BOT_TOKEN' | gh secret set TELEGRAM_BOT_TOKEN -R Will413028/bfx-funding-bot`。
+5. 驗證：
    - `sudo bfx-notify --level info "token rotated"` 收得到；
    - `sudo docker exec bfx-bot /app/.venv/bin/python -m scripts.send_test_alert` exit 0。
 
