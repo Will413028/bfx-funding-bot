@@ -266,7 +266,7 @@ def _response_json_or_text(response: httpx.Response) -> tuple[Any, str]:
     text = response.text[:1000]
     try:
         return response.json(), text
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):  # RecursionError: nested past the decoder's limit
         return text, text
 
 
@@ -501,7 +501,7 @@ class BitfinexLiveExecutor:
 
         try:
             parsed_body = resp.json()
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):  # RecursionError: nested past the decoder's limit
             outcome = SubmitOutcomeUnknown(
                 reason="malformed_response",
                 transport_started=True,

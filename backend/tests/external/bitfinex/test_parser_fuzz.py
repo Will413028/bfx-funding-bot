@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import json
 from collections.abc import Callable
+from hashlib import sha256
 from typing import Any
 
 import pytest
@@ -49,7 +50,7 @@ from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitOutcomeUnknown,
     classify_submit_response,
 )
-from bfx_funding_bot.external.bitfinex.submit_wire import venue_error
+from bfx_funding_bot.external.bitfinex.submit_wire import response_digest, venue_error
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
 
 # Values a Bitfinex row slot can hold after json.loads (which also yields inf and
@@ -226,3 +227,16 @@ def test_deeply_nested_submit_body_is_classified(status: int, shape: str) -> Non
     # past the interpreter limit and raised RecursionError after transport.
     classify_submit_response(http_status=status, parsed_body=_DEEP_BODIES[shape](),
                              transport_started=True)
+
+
+class _Unrepresentable:
+    """Not JSON-compatible, and its repr fails the way a list nested 9998 deep does."""
+
+    def __repr__(self) -> str:
+        raise RecursionError
+
+
+def test_response_digest_falls_back_to_a_fixed_marker_when_repr_fails() -> None:
+    assert response_digest(_Unrepresentable()) == sha256(
+        b"<response nested too deep to represent>"
+    ).hexdigest()
