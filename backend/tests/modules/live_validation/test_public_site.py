@@ -117,6 +117,8 @@ def test_pages_show_the_trailing_stats_chart_and_both_downloads() -> None:
     assert "36.50%" in zh and "+6.50%" in zh and "<polyline" in zh
     assert 'href="funding-rates-fUST.csv"' in zh and 'href="../funding-rates-fUSD.csv"' in en
     assert 'href="en/"' in zh and 'href="../"' in en
+    # Each CSV names its last hour, so a symbol whose ingest stopped shows it.
+    assert "(fUST, 資料到 2026-06-29)" in zh and "(fUSD, data through 2026-06-29)" in en
     assert "資料截至 2026-10-19" in zh and "Data as of 2026-10-19" in en
 
 

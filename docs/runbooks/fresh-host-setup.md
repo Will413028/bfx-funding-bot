@@ -84,6 +84,15 @@ REVOKE CONNECT ON DATABASE bfx FROM PUBLIC;
 照 [deploy runbook](deploy.md) 第一次部署；bfx-deploy 以 `migrate.env`（owner 的
 `DATABASE_URL`）跑 `alembic upgrade head`。
 
+### 1b-0. 慢查詢的 extension（以 `<owner>` 執行一次）
+
+postgres 開機就預載 `pg_stat_statements` 與 `auto_explain`（`docker-compose.bot.yml`），extension 本身要在 database 裡建一次
+（從 DR 還原的主機已經帶著它）；查法見 [operations §8「慢查詢」](operations.md#慢查詢)：
+
+```bash
+docker exec --user postgres bfx-postgres psql -U <owner> -d bfx -Atc "CREATE EXTENSION IF NOT EXISTS pg_stat_statements; SELECT count(*) >= 0 FROM pg_stat_statements"   # t
+```
+
 ### 1b-1. 蓋 database realm（migration 之後，以 `<owner>` 執行一次）
 
 每個資料庫只屬於一個 realm。`database_realm` 是單列、只能插入的表（migration `a7c3e9f1b2d4`），

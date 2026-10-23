@@ -170,6 +170,7 @@ TEXT: Final[Mapping[str, Mapping[str, str]]] = {
         "csv_title": "免費利率歷史資料",
         "csv_body": "fUST／fUSD 的 Bitfinex 每小時放貸利率（2 天期），免費下載，無需註冊。",
         "csv_cta": "下載 CSV",
+        "csv_through": "資料到 {date}",
         "disclaimer_title": "過去績效不代表未來表現",
         "disclaimer_body": "本頁面所有數字皆為歷史資料，並非對未來報酬的預測、承諾或保證，本頁內容亦不構成"
                            "投資建議。Bitfinex 放貸利率波動劇烈，可能歸零；過去表現不保證未來績效。",
@@ -197,6 +198,7 @@ TEXT: Final[Mapping[str, Mapping[str, str]]] = {
         "csv_title": "Free funding-rate history",
         "csv_body": "Hourly Bitfinex fUST/fUSD funding rates (2-day period). Free download, no signup.",
         "csv_cta": "Download CSV",
+        "csv_through": "data through {date}",
         "disclaimer_title": "Past performance is not indicative of future results",
         "disclaimer_body": "The figures on this page are historical data only. They are not a projection, "
                            "prediction, promise, or guarantee of future returns, and nothing here is "
@@ -283,7 +285,8 @@ def _chart(weeks: Sequence[ProofWeek]) -> str:
     return f'<svg viewBox="0 0 {width} {height}" role="img">{"".join(body)}</svg>'
 
 
-def render_page(weeks: Sequence[ProofWeek], *, as_of: datetime, lang: str) -> bytes:
+def render_page(weeks: Sequence[ProofWeek], *, as_of: datetime, lang: str,
+                csv_through: Mapping[str, int]) -> bytes:
     t = TEXT[lang]
     e = html.escape
     stats = proof_stats(weeks)
@@ -310,8 +313,10 @@ def render_page(weeks: Sequence[ProofWeek], *, as_of: datetime, lang: str) -> by
 </section>"""
     else:
         results = f'<section class="panel muted">{e(t["empty"])}</section>'
+    # Each dataset says where it ends: one symbol's ingest can stop while the other runs.
     downloads = "".join(
-        f'<a class="button" href="{csv_prefix}funding-rates-{s}.csv" download>{e(t["csv_cta"])} ({s})</a>'
+        f'<a class="button" href="{csv_prefix}funding-rates-{s}.csv" download>{e(t["csv_cta"])} ({s}, '
+        f'{e(t["csv_through"].format(date=_date(csv_through[s])))})</a>'
         for s in CSV_SYMBOLS)
     page = f"""<!doctype html>
 <html lang="{lang}"><head><meta charset="utf-8">
@@ -332,13 +337,14 @@ def render_page(weeks: Sequence[ProofWeek], *, as_of: datetime, lang: str) -> by
 
 
 def render_site(
-    weeks: Sequence[ProofWeek], csv_rows: Mapping[str, Iterable[tuple[int, float]]], *,
+    weeks: Sequence[ProofWeek], csv_rows: Mapping[str, Sequence[tuple[int, float]]], *,
     as_of: datetime, generated_at: datetime,
 ) -> dict[str, bytes]:
-    """Every file in SITE_FILES, by published path."""
+    """Every file in SITE_FILES, by published path. Each symbol needs at least one row."""
+    through = {s: csv_rows[s][-1][0] for s in CSV_SYMBOLS}
     files = {
-        "index.html": render_page(weeks, as_of=as_of, lang="zh-TW"),
-        "en/index.html": render_page(weeks, as_of=as_of, lang="en"),
+        "index.html": render_page(weeks, as_of=as_of, lang="zh-TW", csv_through=through),
+        "en/index.html": render_page(weeks, as_of=as_of, lang="en", csv_through=through),
         "proof-summary.json": proof_summary_json(weeks, as_of=as_of, generated_at=generated_at),
         **{f"funding-rates-{s}.csv": funding_rates_csv(csv_rows[s]) for s in CSV_SYMBOLS},
         "_headers": HEADERS.encode(),
