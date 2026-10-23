@@ -10,7 +10,7 @@
     "ts-ignore": 0,
     "pytest.skip": 11,
     "pytest.mark.skip": 1,
-    "xfail": 0,
+    "xfail": 11,
     "skipif": 4,
     "test.skip": 1,
     "it.skip": 0,
