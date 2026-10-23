@@ -176,9 +176,13 @@ journalctl -u bfx-deploy.service -n 200 --no-pager
 ```bash
 docker exec --user postgres bfx-postgres psql -U bfx -d bfx -c \
   "SELECT id, attempt_id, outcome, left(source_revision,12) rev, migrations_applied,
-          finished_at, detail, ci_run
+          finished_at, service_degraded, detail, ci_run
      FROM deployments ORDER BY id DESC LIMIT 10"
 ```
+
+`service_degraded`（結束列）：這次嘗試結束時 bot 或 webapi 是否停著或不健康。`failed` 而 `false` 的是沒動到
+正式環境（precheck、停機前的 restore test）或已重新啟動回原 release；`started` 列與欄位出現前的列是 NULL。
+每週報告的交付指標（`scripts/report_delivery_metrics.py`）用它算 change failure rate 與恢復時間。
 
 目前在跑的 digest 也可用 `docker inspect bfx-bot --format '{{.Config.Image}}'` 或 UI 交易狀態面板的
 「後端 image」確認。

@@ -76,6 +76,7 @@ services:
         python -m scripts.run_weekly_attribution --out "/reports/$$(date +%F)-attribution-reconciliation.md"
         python -m scripts.report_interest --out "/reports/$$(date +%F)-realized-interest.md" || echo "WARN report_interest failed (non-blocking)"
         python -m scripts.run_g3_live_validation --out "/reports/$$(date +%F)-g3-live-validation.md"
+        python -m scripts.report_delivery_metrics --out "/reports/$$(date +%F)-delivery-metrics.md" || echo "WARN report_delivery_metrics failed (non-blocking)"
         # ── research re-validation (Proposal E, 2026-09-22): runs AFTER the operational
         # report, every step fail-soft, nothing here promotes anything. Budget: see
         # deploy/vm/systemd/bfx-weekly-report.service TimeoutStartSec.

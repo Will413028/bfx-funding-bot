@@ -43,12 +43,13 @@ FAKE_ENV = {
 }
 
 # The chain exactly as docker-compose.bot.yml defined it before the move
-# (including report_interest): moving the job must not change a single step.
+# (including report_interest), plus the delivery metrics: moving the job must not change a step.
 EXPECTED_STEPS = [
     'timeout 600 python -m scripts.ingest_funding_stats --symbols fUST,fUSD || echo "WARN ingest_funding_stats failed/timed out (frr arm may be stale — non-blocking)"',
     'python -m scripts.run_weekly_attribution --out "/reports/$$(date +%F)-attribution-reconciliation.md"',
     'python -m scripts.report_interest --out "/reports/$$(date +%F)-realized-interest.md" || echo "WARN report_interest failed (non-blocking)"',
     'python -m scripts.run_g3_live_validation --out "/reports/$$(date +%F)-g3-live-validation.md"',
+    'python -m scripts.report_delivery_metrics --out "/reports/$$(date +%F)-delivery-metrics.md" || echo "WARN report_delivery_metrics failed (non-blocking)"',
     "# ── research re-validation (Proposal E, 2026-09-22): runs AFTER the operational",
     "# report, every step fail-soft, nothing here promotes anything. Budget: see",
     "# deploy/vm/systemd/bfx-weekly-report.service TimeoutStartSec.",

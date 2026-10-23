@@ -569,7 +569,7 @@ VM 上 `/home/ubuntu/bfx-funding-bot` 的 working tree **不再被讀取**（它
   跑的是同一個），不用 `bfx-bot:local`。步驟來自已安裝的工具版本；若兩者 revision 不同
   （部署後工具安裝失敗），照跑並在 journal 印 warning。
 - **Env**：只傳三個值——`DATABASE_URL`、`BFX_EXCHANGE_ACCOUNT_ID` 取自 `/opt/bfx/runtime/research.env`
-  （研究 role `bfx_research`：只能寫研究表，不能寫 ledger 或 `trading_state`；
+  （研究 role `bfx_research`：只能寫研究表，不能寫 ledger 或 `trading_state`；`deployments` 唯讀，給交付指標；
   [fresh-host-setup §1](fresh-host-setup.md#1-database-roles-與-grants)），`BFX_DEPLOYMENT_ENV` 取自該部署 revision 的 `live.env`
   （`/var/lib/bfx-deploy/releases/<rev>/live.env`）。runner 不讀 `bot.env`；`research.env` 不存在或不是
   root 0600 時拒跑（`cannot run: secret_file_missing:research.env`／`secret_file_mode_not_0600:research.env`），不會退回 `bot.env`。

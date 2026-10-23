@@ -59,6 +59,8 @@ EXPECTED_TABLES: dict[str, set[str]] = {
     "execution_resolution_journal": _R,
     "funding_candles": _R,
     "funding_book_snapshots": _R,
+    # The delivery metrics (migration 638455da00bb).
+    "deployments": _R,
 }
 EXPECTED: set[tuple[str, ...]] = (
     {("table", t, p) for t, ps in EXPECTED_TABLES.items() for p in ps}

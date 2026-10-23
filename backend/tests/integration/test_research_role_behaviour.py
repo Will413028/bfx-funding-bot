@@ -67,6 +67,7 @@ from bfx_funding_bot.modules.marketfeed.tables import FundingBookSnapshotRow
 from scripts import (
     ingest_liquidations,
     ingest_perp_funding,
+    report_delivery_metrics,
     report_interest,
     run_g3_live_validation,
     run_period_structure_backtest,
@@ -275,6 +276,8 @@ async def test_the_weekly_operational_reports_run(
     monkeypatch.setattr("sys.argv", ["run_g3_live_validation", "--out", str(out)])
     assert await run_g3_live_validation._amain() == 0  # capital from the ledger's payouts
     assert out.is_file()
+    assert await report_delivery_metrics._amain(
+        argparse.Namespace(days=28, out=str(tmp_path / "delivery.md"))) == 0
 
 
 async def test_the_research_reads_and_backtests_run(
