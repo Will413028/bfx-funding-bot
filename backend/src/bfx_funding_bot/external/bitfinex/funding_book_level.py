@@ -21,7 +21,10 @@ class FundingBookLevel:
     def from_bitfinex(cls, entry: list[Any]) -> "FundingBookLevel":
         if not isinstance(entry, list) or len(entry) < 4:
             raise BitfinexShapeError(f"funding book row too short: {entry!r}")
-        return cls(
-            rate=float(entry[0]), period=int(entry[1]),
-            count=int(entry[2]), amount=float(entry[3]),
-        )
+        try:
+            return cls(
+                rate=float(entry[0]), period=int(entry[1]),
+                count=int(entry[2]), amount=float(entry[3]),
+            )
+        except (ArithmeticError, TypeError, ValueError) as e:
+            raise BitfinexShapeError(f"funding book row has invalid values: {entry!r}") from e

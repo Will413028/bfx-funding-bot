@@ -48,7 +48,7 @@ class FundingTrade:
                 trade_id=int(entry[0]), mts=int(entry[1]), amount=float(entry[2]),
                 rate=float(entry[3]), period=int(entry[4]),
             )
-        except (TypeError, ValueError) as e:
+        except (ArithmeticError, TypeError, ValueError) as e:  # int(inf) is an OverflowError
             raise BitfinexShapeError(f"funding trade parse failed: {e}; raw={entry!r}") from e
 
 

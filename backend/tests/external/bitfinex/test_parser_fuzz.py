@@ -76,11 +76,19 @@ _BODY = st.one_of(_JSON, st.lists(_ROW, max_size=4), _ROW)
 
 ROW_PARSERS: dict[str, Callable[[Any], object]] = {
     "active_funding_offers": parse_active_funding_offers,
+    "active_funding_credits": parse_active_funding_credits,
+    "wallets": parse_wallets,
+    "key_permissions": parse_key_permissions,
     "user_id": parse_user_id,
+    "interest_payments": parse_interest_payments,
+    "funding_credit_history": parse_funding_credit_history,
+    "funding_trades": parse_funding_trades,
     "funding_offer_row": parse_funding_offer_row,
     "wallet_observations": parse_wallet_observations,
     "offer_observations": parse_offer_observations,
     "credit_observations": lambda raw: parse_credit_observations(raw, source_kind="credit"),
+    "public_funding_trade": FundingTrade.from_bitfinex,
+    "public_funding_book_level": FundingBookLevel.from_bitfinex,
 }
 
 
@@ -88,6 +96,27 @@ ROW_PARSERS: dict[str, Callable[[Any], object]] = {
 @given(raw=_BODY)
 def test_row_parsers_raise_only_shape_errors(parse: Callable[[Any], object], raw: Any) -> None:
     with contextlib.suppress(BitfinexShapeError):
+        parse(raw)
+
+
+# BitfinexREST wraps ValueError and TypeError from the candle and stat rows.
+_CLIENT_WRAPS = (ValueError, TypeError)
+
+
+def _candle(raw: Any) -> object:
+    return FundingCandle.from_bitfinex(raw, symbol="fUSD", timeframe="1h", period_agg="p2")
+
+
+def _stat(raw: Any) -> object:
+    return FundingStat.from_bitfinex(raw, symbol="fUSD")
+
+
+@pytest.mark.parametrize("parse", [_candle, _stat], ids=["public_candle", "public_stat"])
+@given(raw=_ROW)
+def test_public_candle_and_stat_rows_raise_only_what_the_client_wraps(
+    parse: Callable[[Any], object], raw: Any,
+) -> None:
+    with contextlib.suppress(*_CLIENT_WRAPS):
         parse(raw)
 
 
@@ -108,53 +137,43 @@ def test_parsed_venue_error_never_raises_on_raw_text(text: str) -> None:
     parsed_venue_error(text)
 
 
+# The counterexamples the fuzz shrank for F40-F42, kept so each fix is checked on
+# every run, not only when the fuzz happens to draw a similar body.
+INF = float("inf")
+FORMER_DEFECTS = [
+    pytest.param(parse_active_funding_credits, [[None] * 13], BitfinexShapeError, id="F40-credits"),
+    pytest.param(parse_wallets, [["funding", "UST", "x", 0, 0]], BitfinexShapeError, id="F40-wallets"),
+    pytest.param(parse_key_permissions, [[None, INF, None]], BitfinexShapeError, id="F40-permissions"),
+    pytest.param(parse_interest_payments, [[None, None, None, False, None, None, None, None, None]],
+                 BitfinexShapeError, id="F40-interest_payments"),
+    pytest.param(parse_funding_credit_history,
+                 [[False, False, None, False, False, False, None, None, None, None, None, False, False,
+                   None, None]], BitfinexShapeError, id="F40-credit_history"),
+    pytest.param(parse_funding_trades, [[False] * 7], BitfinexShapeError, id="F40-funding_trades"),
+    pytest.param(FundingTrade.from_bitfinex, [False, INF, None, None, None], BitfinexShapeError,
+                 id="F41-public_funding_trade"),
+    pytest.param(FundingBookLevel.from_bitfinex, [None, None, None, None], BitfinexShapeError,
+                 id="F41-public_funding_book_level"),
+    pytest.param(_candle, [1, "x", 1, 1, 1, 1], ValueError, id="F42-public_candle"),
+    pytest.param(_stat, [1, 0, 0, "x", 0, 0, 0, 0, 0, 0, 0, 0], ValueError, id="F42-public_stat"),
+]
+
+
+@pytest.mark.parametrize(("parse", "raw", "defined"), FORMER_DEFECTS)
+def test_former_defect_raises_its_defined_error(
+    parse: Callable[[Any], object], raw: Any, defined: type[Exception],
+) -> None:
+    with pytest.raises(defined):
+        parse(raw)
+
+
 # Known defects (plan step 2b reports them; fixing is a separate change). Each case is
 # the shrunk counterexample, so it fails on every run. strict: a fixed parser makes its
 # case pass, which fails the run until the case is deleted and the parser joins the
 # fuzz above.
-_SHAPE = (BitfinexShapeError,)
-_CLIENT_WRAPS = (ValueError, TypeError)
 _NOTHING: tuple[type[Exception], ...] = ()
-INF = float("inf")
-
-
-def _candle(raw: Any) -> object:
-    return FundingCandle.from_bitfinex(raw, symbol="fUSD", timeframe="1h", period_agg="p2")
-
-
-def _stat(raw: Any) -> object:
-    return FundingStat.from_bitfinex(raw, symbol="fUSD")
-
 
 KNOWN_DEFECTS = [
-    # F40: authenticated REST row parsers let a conversion error escape unwrapped.
-    pytest.param(parse_active_funding_credits, [[None] * 13], _SHAPE, id="F40-active_funding_credits",
-                 marks=pytest.mark.xfail(raises=ArithmeticError, strict=True, reason="F40")),
-    pytest.param(parse_wallets, [["funding", "UST", "x", 0, 0]], _SHAPE, id="F40-wallets",
-                 marks=pytest.mark.xfail(raises=ArithmeticError, strict=True, reason="F40")),
-    pytest.param(parse_key_permissions, [[None, INF, None]], _SHAPE, id="F40-key_permissions",
-                 marks=pytest.mark.xfail(raises=OverflowError, strict=True, reason="F40")),
-    pytest.param(parse_interest_payments, [[None, None, None, False, None, None, None, None, None]],
-                 _SHAPE, id="F40-interest_payments",
-                 marks=pytest.mark.xfail(raises=TypeError, strict=True, reason="F40")),
-    pytest.param(parse_funding_credit_history,
-                 [[False, False, None, False, False, False, None, None, None, None, None, False, False,
-                   None, None]], _SHAPE, id="F40-funding_credit_history",
-                 marks=pytest.mark.xfail(raises=ArithmeticError, strict=True, reason="F40")),
-    pytest.param(parse_funding_trades, [[False] * 7], _SHAPE, id="F40-funding_trades",
-                 marks=pytest.mark.xfail(raises=ArithmeticError, strict=True, reason="F40")),
-    # F41: public trade and book rows; get_funding_book and the marketfeed do not wrap.
-    pytest.param(FundingTrade.from_bitfinex, [False, INF, None, None, None], _SHAPE,
-                 id="F41-public_funding_trade",
-                 marks=pytest.mark.xfail(raises=OverflowError, strict=True, reason="F41")),
-    pytest.param(FundingBookLevel.from_bitfinex, [None, None, None, None], _SHAPE,
-                 id="F41-public_funding_book_level",
-                 marks=pytest.mark.xfail(raises=TypeError, strict=True, reason="F41")),
-    # F42: decimal.InvalidOperation is outside what BitfinexREST wraps.
-    pytest.param(_candle, [1, "x", 1, 1, 1, 1], _CLIENT_WRAPS, id="F42-public_candle",
-                 marks=pytest.mark.xfail(raises=ArithmeticError, strict=True, reason="F42")),
-    pytest.param(_stat, [1, 0, 0, "x", 0, 0, 0, 0, 0, 0, 0, 0], _CLIENT_WRAPS, id="F42-public_stat",
-                 marks=pytest.mark.xfail(raises=ArithmeticError, strict=True, reason="F42")),
     # F43: the submit parser promises UNKNOWN for any malformed body, but a list in the
     # STATUS slot raises (submit_outcomes._structured_rejection_reason's set lookup).
     pytest.param(parse_offer_response, [None, None, None, None, None, None, []], _NOTHING,
