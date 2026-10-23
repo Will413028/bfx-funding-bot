@@ -198,18 +198,21 @@ def parse_active_funding_credits(raw: Any) -> list[ActiveFundingCredit]:
             raise BitfinexShapeError(f"funding credit row malformed: {o!r}")
         rate = o[11]
         period = o[12]
-        out.append(ActiveFundingCredit(
-            credit_id=str(o[0]),
-            symbol=str(o[1]),
-            amount=abs(Decimal(str(o[5]))),
-            status=str(o[7]),
-            rate=float(rate) if rate is not None else 0.0,
-            period_days=int(period) if period is not None else 0,
-            mts_created=int(o[3]) if o[3] is not None else None,
-            mts_updated=int(o[4]) if o[4] is not None else None,
-            flags=o[6] if isinstance(o[6], (dict, int)) else None,
-            mts_opening=int(o[13]) if len(o) > 13 and o[13] is not None else None,
-        ))
+        try:
+            out.append(ActiveFundingCredit(
+                credit_id=str(o[0]),
+                symbol=str(o[1]),
+                amount=abs(Decimal(str(o[5]))),
+                status=str(o[7]),
+                rate=float(rate) if rate is not None else 0.0,
+                period_days=int(period) if period is not None else 0,
+                mts_created=int(o[3]) if o[3] is not None else None,
+                mts_updated=int(o[4]) if o[4] is not None else None,
+                flags=o[6] if isinstance(o[6], (dict, int)) else None,
+                mts_opening=int(o[13]) if len(o) > 13 and o[13] is not None else None,
+            ))
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise BitfinexShapeError(f"funding credit row has invalid values: {o!r}") from exc
     return out
 
 
@@ -240,12 +243,15 @@ def parse_wallets(raw: Any) -> list[FundingWallet]:
         if not isinstance(w, list) or len(w) < _WALLET_MIN_ROW_LEN:
             raise BitfinexShapeError(f"wallet row malformed: {w!r}")
         available_raw = w[4]
-        out.append(FundingWallet(
-            wallet_type=str(w[0]),
-            currency=str(w[1]),
-            balance=Decimal(str(w[2])),
-            available=Decimal(str(available_raw)) if available_raw is not None else Decimal("0"),
-        ))
+        try:
+            out.append(FundingWallet(
+                wallet_type=str(w[0]),
+                currency=str(w[1]),
+                balance=Decimal(str(w[2])),
+                available=Decimal(str(available_raw)) if available_raw is not None else Decimal("0"),
+            ))
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise BitfinexShapeError(f"wallet row has invalid values: {w!r}") from exc
     return out
 
 
@@ -272,7 +278,7 @@ def parse_key_permissions(raw: Any) -> KeyPermissions:
             raise BitfinexShapeError(f"permission row malformed: {row!r}")
         try:
             scopes[str(row[0])] = (bool(int(row[1])), bool(int(row[2])))
-        except (ValueError, TypeError) as exc:
+        except (ArithmeticError, TypeError, ValueError) as exc:  # int(inf) is an OverflowError
             raise BitfinexShapeError(
                 f"permission flag not int-coercible in row {row!r}"
             ) from exc
@@ -322,12 +328,15 @@ def parse_interest_payments(raw: Any) -> list[InterestPayment]:
     for row in raw:
         if not isinstance(row, list) or len(row) < _LEDGER_MIN_ROW_LEN or row[3] is None:
             raise BitfinexShapeError(f"ledger row malformed: {row!r}")
-        out.append(InterestPayment(
-            ledger_id=int(row[0]), currency=str(row[1]),
-            wallet=str(row[2]) if row[2] is not None else None, mts=int(row[3]),
-            amount=Decimal(str(row[5])), balance=Decimal(str(row[6])),
-            description=str(row[8]),
-        ))
+        try:
+            out.append(InterestPayment(
+                ledger_id=int(row[0]), currency=str(row[1]),
+                wallet=str(row[2]) if row[2] is not None else None, mts=int(row[3]),
+                amount=Decimal(str(row[5])), balance=Decimal(str(row[6])),
+                description=str(row[8]),
+            ))
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise BitfinexShapeError(f"ledger row has invalid values: {row!r}") from exc
     return out
 
 
@@ -369,15 +378,18 @@ def parse_funding_credit_history(raw: Any) -> list[FundingCreditRecord]:
         if (not isinstance(row, list) or len(row) < _CREDIT_HIST_MIN_ROW_LEN
                 or any(row[i] is None for i in (0, 1, 3, 4, 5, 11, 12))):
             raise BitfinexShapeError(f"credit history row malformed: {row!r}")
-        out.append(FundingCreditRecord(
-            credit_id=int(row[0]), symbol=str(row[1]),
-            side=int(row[2]) if row[2] is not None else None,
-            mts_create=int(row[3]), mts_update=int(row[4]),
-            amount=abs(Decimal(str(row[5]))), status=str(row[7]),
-            rate=Decimal(str(row[11])), period_days=int(row[12]),
-            mts_opening=int(row[13]) if row[13] is not None else int(row[3]),
-            mts_last_payout=int(row[14]) if row[14] is not None else None,
-        ))
+        try:
+            out.append(FundingCreditRecord(
+                credit_id=int(row[0]), symbol=str(row[1]),
+                side=int(row[2]) if row[2] is not None else None,
+                mts_create=int(row[3]), mts_update=int(row[4]),
+                amount=abs(Decimal(str(row[5]))), status=str(row[7]),
+                rate=Decimal(str(row[11])), period_days=int(row[12]),
+                mts_opening=int(row[13]) if row[13] is not None else int(row[3]),
+                mts_last_payout=int(row[14]) if row[14] is not None else None,
+            ))
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise BitfinexShapeError(f"credit history row has invalid values: {row!r}") from exc
     return out
 
 
@@ -413,12 +425,15 @@ def parse_funding_trades(raw: Any) -> list[FundingTrade]:
                 or any(row[i] is None for i in range(_TRADE_MIN_ROW_LEN))):
             raise BitfinexShapeError(f"funding trade row malformed: {row!r}")
         maker = row[7] if len(row) > 7 else None
-        out.append(FundingTrade(
-            trade_id=int(row[0]), symbol=str(row[1]), mts_create=int(row[2]),
-            offer_id=int(row[3]), amount=abs(Decimal(str(row[4]))),
-            rate=Decimal(str(row[5])), period_days=int(row[6]),
-            maker=bool(maker) if maker is not None else None,
-        ))
+        try:
+            out.append(FundingTrade(
+                trade_id=int(row[0]), symbol=str(row[1]), mts_create=int(row[2]),
+                offer_id=int(row[3]), amount=abs(Decimal(str(row[4]))),
+                rate=Decimal(str(row[5])), period_days=int(row[6]),
+                maker=bool(maker) if maker is not None else None,
+            ))
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise BitfinexShapeError(f"funding trade row has invalid values: {row!r}") from exc
     return out
 
 

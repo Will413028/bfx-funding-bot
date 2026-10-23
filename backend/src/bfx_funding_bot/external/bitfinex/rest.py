@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 # book fetch fails closed and the next cycle tries again.
 BATCH_RATE_LIMIT_BACKOFF: tuple[float, ...] = (60.0, 120.0, 240.0, 240.0)
 
+# What a candle or stats row raises on a value it cannot convert, which the client
+# turns into BitfinexShapeError: int(inf) is an OverflowError and Decimal("x") an
+# InvalidOperation, both ArithmeticErrors rather than ValueErrors.
+ROW_CONVERSION_ERRORS: tuple[type[Exception], ...] = (ArithmeticError, TypeError, ValueError)
+
 
 @dataclass(frozen=True, slots=True)
 class FundingTrade:
@@ -48,7 +53,7 @@ class FundingTrade:
                 trade_id=int(entry[0]), mts=int(entry[1]), amount=float(entry[2]),
                 rate=float(entry[3]), period=int(entry[4]),
             )
-        except (TypeError, ValueError) as e:
+        except (ArithmeticError, TypeError, ValueError) as e:  # int(inf) is an OverflowError
             raise BitfinexShapeError(f"funding trade parse failed: {e}; raw={entry!r}") from e
 
 
@@ -180,7 +185,7 @@ class BitfinexREST:
                         period_agg=period_agg,
                     )
                 )
-            except (ValueError, TypeError) as e:
+            except ROW_CONVERSION_ERRORS as e:
                 raise BitfinexShapeError(f"candle parse failed: {e}; raw={entry!r}") from e
 
         return candles
@@ -242,7 +247,7 @@ class BitfinexREST:
                 )
             try:
                 stats.append(FundingStat.from_bitfinex(entry, symbol=sym))
-            except (ValueError, TypeError) as e:
+            except ROW_CONVERSION_ERRORS as e:
                 raise BitfinexShapeError(
                     f"funding_stats parse failed: {e}; raw={entry!r}"
                 ) from e

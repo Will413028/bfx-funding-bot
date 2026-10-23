@@ -360,3 +360,45 @@ async def test_batch_backoff_gives_up_after_its_schedule(httpx_mock: HTTPXMock) 
     assert waits == [60.0, 120.0]
     assert exc_info.value.retry_after_seconds == 5.0
     assert len(httpx_mock.get_requests()) == 3
+
+
+@pytest.mark.asyncio
+async def test_get_funding_candles_unconvertible_value_raises_shape_error(
+    httpx_mock: HTTPXMock,
+) -> None:
+    # F42: Decimal("x") is an InvalidOperation, not a ValueError.
+    httpx_mock.add_response(
+        url="https://api-pub.bitfinex.com/v2/candles/trade:1h:fUST:p2/hist?limit=10&start=0&end=0",
+        json=[[1, "x", 1, 1, 1, 1]],
+    )
+
+    async with httpx.AsyncClient() as http:
+        client = BitfinexREST(
+            http=http,
+            base_url="https://api-pub.bitfinex.com",
+            limiter=FundingRateLimiter(max_rate=1000, time_period=1.0),
+        )
+        with pytest.raises(BitfinexShapeError):
+            await client.get_funding_candles(
+                symbol="fUST", timeframe="1h", period_agg="p2", start=0, end=0, limit=10,
+            )
+
+
+@pytest.mark.asyncio
+async def test_get_funding_stats_infinite_timestamp_raises_shape_error(
+    httpx_mock: HTTPXMock,
+) -> None:
+    # F42: int(inf) is an OverflowError, not a ValueError.
+    httpx_mock.add_response(
+        url="https://api-pub.bitfinex.com/v2/funding/stats/fUSD/hist?limit=10&end=0",
+        content=b"[[Infinity, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]",
+    )
+
+    async with httpx.AsyncClient() as http:
+        client = BitfinexREST(
+            http=http,
+            base_url="https://api-pub.bitfinex.com",
+            limiter=FundingRateLimiter(max_rate=1000, time_period=1.0),
+        )
+        with pytest.raises(BitfinexShapeError):
+            await client.get_funding_stats(symbol="fUSD", end=0, limit=10)
