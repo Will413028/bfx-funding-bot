@@ -264,6 +264,53 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  migration_lint:
+    name: Migration lint (squawk)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    if: github.event_name == 'pull_request'
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      BFX_TEST_PG_BIN: /usr/lib/postgresql/18/bin
+      SQUAWK_VERSION: 2.67.0
+      # GitHub's asset digest for squawk-linux-x64 (the release ships no checksum file).
+      SQUAWK_SHA256: 03efe0e666b63bf33e2493693ee0aa9dbed07cbdcd20f7a8292245c1da9d790a
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The new revisions are the ones added since origin/main.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.23"
+          # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz (all these jobs run on x64).
+          checksum: "9167d72b3319674b6303c4cbe071854bba13ebdf3d76b1a7cbdc175471fb66d6"
+          enable-cache: true
+      - run: uv sync --all-groups
+      - uses: ./.github/actions/postgres-18
+      - name: Install squawk
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/squawk" \
+            "https://github.com/sbdchd/squawk/releases/download/v${SQUAWK_VERSION}/squawk-linux-x64"
+          echo "${SQUAWK_SHA256}  $RUNNER_TEMP/squawk" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/squawk"
+      # Online, not `alembic upgrade --sql`: the migrations read and assert on data, which
+      # offline mode cannot render (scripts/migration_ddl.py).
+      - name: Collect the new revisions' SQL
+        run: uv run python scripts/migration_ddl.py --base-ref origin/main --out "$RUNNER_TEMP/migration.sql"
+      - name: Lint it
+        run: |
+          if [ ! -s "$RUNNER_TEMP/migration.sql" ]; then
+            echo "no new Alembic revision" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          "$RUNNER_TEMP/squawk" --pg-version=18.0 "$RUNNER_TEMP/migration.sql"
+
   # Suppression counts must equal backend/quality-ratchet.json and the executed tests
   # of the four jobs above must not drop below it; see scripts/quality_ratchet.py.
   quality_ratchet:
