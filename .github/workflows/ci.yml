@@ -143,8 +143,7 @@ jobs:
   backend_unit:
     name: Backend (Python) — unit
     runs-on: ubuntu-latest
-    # Coverage tracing roughly doubles the run (12 min vs 5.5 min locally under load).
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: read
     defaults:
