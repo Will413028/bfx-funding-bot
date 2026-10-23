@@ -119,9 +119,7 @@ def test_collect_never_follows_a_symlinked_directory(tmp_path: Path) -> None:
 
 def test_collect_reports_an_unopenable_entry_as_unreadable(tmp_path: Path) -> None:
     out = _build(tmp_path)
-    (out / "_headers").chmod(0)
-    if os.geteuid() == 0:
-        pytest.skip("root opens a 0000 file")
+    (out / "_headers").chmod(0)  # the suite never runs as root, which would open it anyway
     with pytest.raises(site.PublishError) as caught:
         site.collect(out, now=time.time())
     assert caught.value.code == "site_unreadable:_headers"
