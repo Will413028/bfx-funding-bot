@@ -570,3 +570,25 @@ async def test_submit_refuses_a_reference_for_another_request() -> None:
     with pytest.raises(InvariantViolation, match="reservation_ref conflicts"):
         await _echo_executor(httpx.Response(500)).submit(
             ready, _make_ctx(), reservation_ref=other)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 500])
+async def test_submit_returns_unknown_on_a_body_too_deep_to_decode(status: int) -> None:
+    # json.loads raises RecursionError (neither TypeError nor ValueError) past ~10000
+    # levels; after transport that must be UNKNOWN, not a raise that ends the process.
+    deep = b"[" * 20000 + b"0" + b"]" * 20000
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, content=deep)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = BitfinexLiveExecutor(
+        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
+        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
+        configured_symbols=frozenset({"fUST"}), cell="C-1",
+        auth_gate=AuthRequestGate(lambda: 1000),
+    )
+    result = await _submit(executor, _ready(_make_decision()), _make_ctx())
+    assert result.status == "unknown"
+    assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN

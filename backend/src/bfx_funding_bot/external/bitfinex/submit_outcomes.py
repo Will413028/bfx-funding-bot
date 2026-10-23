@@ -370,7 +370,9 @@ def _structured_rejection_reason(body: Any) -> str | None:
     """Extract a bounded reason only from known Bitfinex error shapes."""
     if isinstance(body, list):
         # Funding REST responses use [mts, type, message_id, _, offer, code, status, text].
-        if len(body) < 7 or body[6] not in {"ERROR", "FAILURE"}:
+        # isinstance first: a list or dict in the slot is unhashable, and a raise here
+        # after transport would end the process instead of recording UNKNOWN.
+        if len(body) < 7 or not isinstance(body[6], str) or body[6] not in {"ERROR", "FAILURE"}:
             return None
         code = _bounded_text(body[1] if len(body) > 1 else None)
         text = _bounded_text(body[7] if len(body) > 7 else None)
