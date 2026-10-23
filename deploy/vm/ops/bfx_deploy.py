@@ -865,6 +865,8 @@ class LedgerEntry:
     outcome: str
     detail: str
     ci_run: str | None = None
+    # Terminal rows only: the attempt left the bot or the web API stopped or unhealthy.
+    service_degraded: bool | None = None
 
 
 class Ledger(Protocol):
@@ -892,10 +894,11 @@ SELECT 'absent';
 # no release has one since, so every new row records NULL (and none is read back).
 _LEDGER_APPEND = """INSERT INTO public.deployments (
   attempt_id, started_at, finished_at, source_revision, backend_digest, frontend_digest,
-  migrations_applied, outcome, detail, ci_run)
+  migrations_applied, outcome, detail, ci_run, service_degraded)
 VALUES (:'attempt_id', :'started_at', NULLIF(:'finished_at', '')::timestamptz,
   :'source_revision', :'backend_digest', NULL,
-  :'migrations_applied', :'outcome', :'detail', NULLIF(:'ci_run', ''))
+  :'migrations_applied', :'outcome', :'detail', NULLIF(:'ci_run', ''),
+  NULLIF(:'service_degraded', '')::boolean)
 RETURNING id;
 """
 
@@ -946,6 +949,8 @@ class PsqlLedger:
             "source_revision": entry.source_revision, "backend_digest": entry.backend_digest,
             "migrations_applied": "true" if entry.migrations_applied else "false",
             "outcome": entry.outcome, "detail": entry.detail, "ci_run": entry.ci_run or "",
+            "service_degraded": ("" if entry.service_degraded is None
+                                 else "true" if entry.service_degraded else "false"),
         })
         lines = [line for line in output.splitlines() if line.strip()]
         if not lines or not lines[-1].strip().isdigit():
@@ -1089,6 +1094,11 @@ class Attempt:
     migrations_applied: bool = False
     bot_stopped: bool = False
     webapi_stopped: bool = False
+    # A release that came up unhealthy and stayed (no rollback, or the rollback failed).
+    degraded: bool = False
+    # The services this attempt stopped and has not started again; one that was already
+    # absent is not this attempt's doing.
+    held: set[str] = field(default_factory=set)
     started_recorded: bool = False
 
 
@@ -1730,6 +1740,8 @@ class Deployer:
             return self._finish(attempt, "failed", "webapi_stop_failed; nothing migrated; "
                                 "running release untouched")
         attempt.webapi_stopped = True
+        if webapi == "webapi stopped":
+            attempt.held.add("webapi")
         stopped = self._stop("bot")
         if stopped == "BOT_STOP_FAILED":
             # Nothing migrated and the running release keeps its schema: the web API
@@ -1739,11 +1751,14 @@ class Deployer:
                 restarted = self._restart("webapi")
                 if restarted == "restarted":
                     attempt.webapi_stopped = False
+                    attempt.held.discard("webapi")
                     note += "; webapi restarted"
                 else:
                     note = f"webapi_restart_failed:{restarted}"
             return self._finish(attempt, "failed", f"bot_stop_failed; nothing migrated; {note}")
         attempt.bot_stopped = True
+        if stopped == "bot stopped":
+            attempt.held.add("bot")
         held = "bot and webapi stopped until a release deploys (roll forward or --retry)"
         try:
             self._backup(dr_checkout)
@@ -1771,6 +1786,7 @@ class Deployer:
                     notes.append(f"{service}_restart_failed:{restarted}")
                     continue
                 setattr(attempt, f"{service}_stopped", False)
+                attempt.held.discard(service)
                 notes.append(f"{service} restarted on the running release")
             return self._finish(attempt, "failed", f"{failed}; schema unchanged; "
                                 + "; ".join(notes))
@@ -2382,12 +2398,14 @@ class Deployer:
                 # Full stop (D6): after a migration path the web API stays down with the bot;
                 # whatever web API compose left running is not trusted on this schema.
                 stopped += "; " + self._stop("webapi")
+            attempt.degraded = True
             return self._finish(attempt, "failed", f"unhealthy:{reason}; {why}; no automatic "
                                 f"rollback; {stopped}")
         try:
             ingress = self._rollback_to(previous)
         except DeployError as rollback:
             stopped = self._stop("bot")
+            attempt.degraded = True
             return self._finish(attempt, "failed", f"unhealthy:{reason}; rollback_failed:"
                                 f"{rollback.code}; {stopped}")
         warned = "" if not ingress else "; warnings=" + ",".join(ingress)
@@ -2486,6 +2504,7 @@ class Deployer:
             ingress += self._wait_healthy(release)
         except DeployError as exc:
             stopped = self._stop("bot")
+            attempt.degraded = True
             return self._finish(attempt, "failed", f"unhealthy:{exc.code}; recreate has no rollback; "
                                 f"{stopped}; fix the runtime env and --recreate")
         return self._finish(attempt, "deployed", "ok" if not ingress else "ok; warnings=" + ",".join(ingress))
@@ -2617,6 +2636,9 @@ class Deployer:
             source_revision=target.revision, backend_digest=target.backend_digest,
             migrations_applied=attempt.migrations_applied, outcome=outcome, detail=text,
             ci_run=attempt.ci_run,
+            # A deploy that went through stopped both on purpose (the migration path) and
+            # brought them back; a rollback restored the previous release.
+            service_degraded=outcome == "failed" and (attempt.degraded or bool(attempt.held)),
         )
         level = {"deployed": "info", "rolled_back": "warning"}.get(outcome, "critical")
         if outcome == "deployed" and "warnings=" in detail:

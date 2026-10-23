@@ -61,6 +61,9 @@ class DeploymentRow(Base):
     detail: Mapped[str] = mapped_column(Text, nullable=False)
     # The CI run that passed this revision (image label bfx.ci-run-url), when known.
     ci_run: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Terminal rows: whether the attempt left the bot or the web API stopped or unhealthy.
+    # NULL on `started` rows and on rows written before bfx-deploy recorded it.
+    service_degraded: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     __table_args__ = (
         # Regex CHECKs are PostgreSQL's (the authority); SQLite fixtures skip them.
@@ -77,6 +80,8 @@ class DeploymentRow(Base):
         CheckConstraint("length(detail) <= 2000", name="ck_deployments_detail"),
         CheckConstraint("ci_run IS NULL OR length(ci_run) BETWEEN 1 AND 200",
                         name="ck_deployments_ci_run"),
+        CheckConstraint("outcome <> 'started' OR service_degraded IS NULL",
+                        name="ck_deployments_service_degraded"),
         Index("uq_deployments_attempt_started", "attempt_id", unique=True,
               postgresql_where=text("outcome = 'started'"), sqlite_where=text("outcome = 'started'")),
         Index("uq_deployments_attempt_finished", "attempt_id", unique=True,
