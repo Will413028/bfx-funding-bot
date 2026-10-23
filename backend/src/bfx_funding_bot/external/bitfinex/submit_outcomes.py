@@ -402,9 +402,16 @@ def _venue_offer_id(body: Any) -> str | None:
     if not isinstance(offer, list) or not offer:
         return None
     value = offer[0]
-    if isinstance(value, bool) or value is None:
-        return None
-    return str(value).strip() or None
+    # Bitfinex offer ids are positive integers, and reconciliation matches the venue's
+    # rows by str(id). Anything else (a float, a list, text) would acknowledge an id no
+    # row will ever carry; it stays None, so the answer is UNKNOWN (malformed_response).
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value) if value > 0 else None
+    if isinstance(value, str):
+        digits = value.strip()
+        # isascii: str.isdigit also accepts other scripts' digits ("٤٢").
+        return digits if digits.isascii() and digits.isdigit() else None
+    return None
 
 
 def fingerprint_submit_payload(payload: Mapping[str, Any]) -> str:
