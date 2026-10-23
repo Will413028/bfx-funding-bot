@@ -17,7 +17,6 @@ model — see the explicit "never leaks" tests in tests/test_public_router.py.
 from __future__ import annotations
 
 import os
-from collections import defaultdict
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -37,11 +36,10 @@ from bfx_funding_bot.modules.api.schemas import (
     PublicWeeklyPoint,
 )
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
+from bfx_funding_bot.modules.live_validation.public_site import aggregate_weeks, dec_str
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
 
 _CACHE_CONTROL = "public, max-age=3600"
-_DAYS_PER_YEAR = Decimal("365")
-_HUNDRED = Decimal("100")
 
 
 def _public_exchange_account_id() -> UUID:
@@ -60,63 +58,15 @@ def _public_exchange_account_id() -> UUID:
         ) from exc
 
 
-def _dec_str(value: Decimal) -> str:
-    """Canonical decimal string (mirrors modules/api/attribution.py._dec_str —
-    `normalize()` alone emits scientific notation for whole numbers on
-    sqlite's Numeric round-trip; fixed-point `format` avoids that)."""
-    return format(value.normalize(), "f")
-
-
 def _aggregate_weeks(rows: list[AttributionWeeklyRow]) -> list[PublicWeeklyPoint]:
-    """Blend every cell in the realm into one bot-vs-baseline weekly series.
+    """The proof series (live_validation.public_site.aggregate_weeks) as response points."""
+    def pct(value: Decimal | None) -> str | None:
+        return dec_str(value) if value is not None else None
 
-    realized_apr_net_pct: capital-days-weighted APR across cells for that
-    week — Σnet_interest / Σcapital_days × 365 × 100 (the correct blended
-    yield; a naive per-cell average would misweight small vs large cells).
-    None when the week's total capital_days is 0 (no fills that week).
-
-    baseline_frr_util_apr_net_pct: plain mean of each cell's own
-    util-adjusted FRR baseline for that week (cells can carry different
-    symbols/utilization, so there is no single "market" baseline to sum).
-    None when no cell has a baseline for that week.
-
-    `net_interest_usdt` / `capital_days` are read here purely as internal
-    weights — the returned PublicWeeklyPoint never carries them.
-    """
-    by_week: dict[int, list[AttributionWeeklyRow]] = defaultdict(list)
-    for row in rows:
-        by_week[row.week_start_ms].append(row)
-
-    points: list[PublicWeeklyPoint] = []
-    for week_start_ms in sorted(by_week):
-        week_rows = by_week[week_start_ms]
-        net_total = sum((r.net_interest_usdt for r in week_rows), Decimal("0"))
-        capital_days_total = sum((r.capital_days for r in week_rows), Decimal("0"))
-        realized = (
-            net_total / capital_days_total * _DAYS_PER_YEAR * _HUNDRED
-            if capital_days_total > 0
-            else None
-        )
-        baselines = [
-            r.baseline_frr_util_apr_net_pct
-            for r in week_rows
-            if r.baseline_frr_util_apr_net_pct is not None
-        ]
-        baseline = (
-            sum(baselines, Decimal("0")) / Decimal(len(baselines))
-            if baselines
-            else None
-        )
-        points.append(
-            PublicWeeklyPoint(
-                week_start_ms=week_start_ms,
-                realized_apr_net_pct=_dec_str(realized) if realized is not None else None,
-                baseline_frr_util_apr_net_pct=(
-                    _dec_str(baseline) if baseline is not None else None
-                ),
-            )
-        )
-    return points
+    return [PublicWeeklyPoint(week_start_ms=w.week_start_ms,
+                              realized_apr_net_pct=pct(w.realized_apr_net_pct),
+                              baseline_frr_util_apr_net_pct=pct(w.baseline_frr_util_apr_net_pct))
+            for w in aggregate_weeks(rows)]
 
 
 def build_public_router() -> APIRouter:

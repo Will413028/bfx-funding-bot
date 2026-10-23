@@ -17,3 +17,4 @@ bfx-pgbackrest-backup.timer
 bfx-pgbackrest-status.service
 bfx-pgbackrest-status.timer
 bfx-weekly-report.service
+bfx-public-site.service

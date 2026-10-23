@@ -17,7 +17,7 @@ SYSTEMD = ROOT / "deploy/vm/systemd"
 NEW_UNITS = ("bfx-deploy.service", "bfx-deploy.timer", "bfx-alert@.service",
              "bfx-backup-check.service", "bfx-backup-check.timer",
              "bfx-restore-test@.service", "bfx-restore-test.timer",
-             "bfx-weekly-report.service")
+             "bfx-weekly-report.service", "bfx-public-site.service")
 PGBACKREST_UNITS = ("bfx-pgbackrest-backup.service", "bfx-pgbackrest-backup.timer",
                     "bfx-pgbackrest-status.service", "bfx-pgbackrest-status.timer")
 OPS_PYTHON = "/usr/local/lib/bfx-ops/current/ops/.venv/bin/python"
@@ -106,6 +106,7 @@ def test_failures_that_cannot_alert_themselves_use_the_alert_template() -> None:
     assert "OnFailure" not in _unit("bfx-deploy.service")["Unit"]
     assert "OnFailure" not in _unit("bfx-backup-check.service")["Unit"]
     assert _unit("bfx-weekly-report.service").one("Unit", "OnFailure") == "bfx-alert@%n.service"
+    assert _unit("bfx-public-site.service").one("Unit", "OnFailure") == "bfx-alert@%n.service"
     alert = _unit("bfx-alert@.service").one("Service", "ExecStart")
     assert alert.startswith(f"{OPS_PYTHON} {OPS}/bfx_notify.py --level critical")
     assert "%i" in alert
@@ -191,9 +192,22 @@ def test_weekly_report_runs_the_deployed_tooling_never_the_vm_checkout() -> None
     assert unit.one("Service", "ExecStart") == f"{OPS_PYTHON} {OPS}/bfx_weekly_report.py"
     assert "WorkingDirectory" not in unit["Service"]
     assert "bfx-funding-bot" not in (SYSTEMD / "bfx-weekly-report.service").read_text()
-    assert unit.one("Service", "TimeoutStartSec") == "5400"  # the whole chain's budget
+    assert unit.one("Service", "TimeoutStartSec") == "5700"  # the whole chain's budget
     assert (ROOT / "deploy/vm/ops/bfx_weekly_report.py").is_file()
     assert _unit("bfx-weekly-report.timer").one("Timer", "OnCalendar") == "Mon *-*-* 04:17:00 UTC"
+
+
+def test_the_public_site_uploads_after_a_successful_weekly_chain() -> None:
+    # The weekly container builds the files; the upload is its own unit so it holds the
+    # Cloudflare token without the database, and alerts on its own failure.
+    assert _unit("bfx-weekly-report.service").one("Unit", "OnSuccess") == "bfx-public-site.service"
+    unit = _unit("bfx-public-site.service")
+    assert unit.one("Service", "ExecStart") == f"{OPS_PYTHON} {OPS}/bfx_public_site.py"
+    assert unit.one("Service", "Type") == "oneshot"
+    assert "User" not in unit["Service"]  # the token is root 0600
+    assert "Install" not in unit  # never on a schedule of its own
+    compose = (ROOT / "deploy/vm/ops/docker-compose.weekly-report.yml").read_text()
+    assert "timeout 300 python -m scripts.build_public_site --out /reports/public-site" in compose
 
 
 def test_the_wrappers_default_paths_are_what_the_backup_check_watches(monkeypatch) -> None:

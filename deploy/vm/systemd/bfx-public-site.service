@@ -1,0 +1,16 @@
+[Unit]
+Description=bfx public proof site: upload the weekly build to Cloudflare Pages and check it is served
+Documentation=file:///usr/local/lib/bfx-ops/current/ops/bfx_public_site.py
+# Started by bfx-weekly-report.service's OnSuccess= (the build is one of its steps);
+# by hand: `sudo systemctl start bfx-public-site.service`.
+OnFailure=bfx-alert@%n.service
+
+[Service]
+Type=oneshot
+# Root: reads the root-only Cloudflare token and public-site.env under /opt/bfx/runtime.
+# Never the database: the build it uploads was written by the weekly container.
+Environment=HOME=/root
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+TimeoutStartSec=600
+ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_public_site.py

@@ -57,6 +57,7 @@ from bfx_funding_bot.modules.lending.tracking.tables import (
     FillRateModelArtifactRow,
     FillRateStatsRow,
 )
+from bfx_funding_bot.modules.live_validation.public_site import SITE_FILES
 from bfx_funding_bot.modules.live_validation.tables import (
     AttributionWeeklyRow,
     FundingCreditHistoryRow,
@@ -65,6 +66,7 @@ from bfx_funding_bot.modules.live_validation.tables import (
 )
 from bfx_funding_bot.modules.marketfeed.tables import FundingBookSnapshotRow
 from scripts import (
+    build_public_site,
     ingest_liquidations,
     ingest_perp_funding,
     report_delivery_metrics,
@@ -278,6 +280,18 @@ async def test_the_weekly_operational_reports_run(
     assert out.is_file()
     assert await report_delivery_metrics._amain(
         argparse.Namespace(days=28, out=str(tmp_path / "delivery.md"))) == 0
+    # The public site reads both symbols' candles; without fUSD it keeps the last build.
+    site = tmp_path / "public-site"
+    assert await build_public_site._amain(argparse.Namespace(out=site)) == 1
+    assert not site.exists()
+    async with owner() as s:
+        s.add(FundingCandleRow(symbol="fUSD", timeframe="1h", period_agg="p2", mts=_T0, open=0.0003,
+                               close=0.0003, high=0.0003, low=0.0003, volume=1.0, is_final=True))
+        await s.commit()
+    assert await build_public_site._amain(argparse.Namespace(out=site)) == 0
+    assert sorted(p.relative_to(site).as_posix() for p in site.rglob("*") if p.is_file()) \
+        == sorted(SITE_FILES)
+    assert "public site built: 6 files" in capsys.readouterr().out
 
 
 async def test_the_research_reads_and_backtests_run(
