@@ -512,71 +512,6 @@
         }
       }
     },
-    "/api/v1/public/proof-summary": {
-      "get": {
-        "tags": [
-          "public"
-        ],
-        "summary": "Proof Summary",
-        "operationId": "proof_summary_api_v1_public_proof_summary_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Envelope_PublicProofSummaryResponse_"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/public/funding-rates.csv": {
-      "get": {
-        "tags": [
-          "public"
-        ],
-        "summary": "Funding Rates Csv",
-        "operationId": "funding_rates_csv_api_v1_public_funding_rates_csv_get",
-        "parameters": [
-          {
-            "name": "symbol",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "enum": [
-                "fUST",
-                "fUSD"
-              ],
-              "type": "string",
-              "title": "Symbol"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/exchange-accounts/{exchange_account_id}/uncertainties": {
       "get": {
         "tags": [
@@ -1902,18 +1837,6 @@
         ],
         "title": "Envelope[ProfileResponse]"
       },
-      "Envelope_PublicProofSummaryResponse_": {
-        "properties": {
-          "data": {
-            "$ref": "#/components/schemas/PublicProofSummaryResponse"
-          }
-        },
-        "type": "object",
-        "required": [
-          "data"
-        ],
-        "title": "Envelope[PublicProofSummaryResponse]"
-      },
       "Envelope_ResolutionRequestResponse_": {
         "properties": {
           "data": {
@@ -2544,65 +2467,6 @@
         ],
         "title": "ProfileResponse",
         "description": "The operator identity Tailscale Serve forwards."
-      },
-      "PublicProofSummaryResponse": {
-        "properties": {
-          "weeks": {
-            "items": {
-              "$ref": "#/components/schemas/PublicWeeklyPoint"
-            },
-            "type": "array",
-            "title": "Weeks"
-          },
-          "asOf": {
-            "type": "string",
-            "title": "Asof"
-          }
-        },
-        "type": "object",
-        "required": [
-          "weeks",
-          "asOf"
-        ],
-        "title": "PublicProofSummaryResponse"
-      },
-      "PublicWeeklyPoint": {
-        "properties": {
-          "weekStartMs": {
-            "type": "integer",
-            "title": "Weekstartms"
-          },
-          "realizedAprNetPct": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Realizedaprnetpct"
-          },
-          "baselineFrrUtilAprNetPct": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Baselinefrrutilaprnetpct"
-          }
-        },
-        "type": "object",
-        "required": [
-          "weekStartMs",
-          "realizedAprNetPct",
-          "baselineFrrUtilAprNetPct"
-        ],
-        "title": "PublicWeeklyPoint",
-        "description": "One week of the public proof-page series — percent-only, no absolute\n$ fields (see modules/api/public.py for the compliance rationale)."
       },
       "Range": {
         "properties": {

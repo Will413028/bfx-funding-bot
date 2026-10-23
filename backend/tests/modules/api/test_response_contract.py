@@ -39,7 +39,6 @@ from bfx_funding_bot.modules.accounts.tables import (
     ExchangeAccount,
     ExchangeAccountCredential,
 )
-from bfx_funding_bot.modules.api import public
 from bfx_funding_bot.modules.api.account_scope import require_account_member
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.attribution import build_attribution_router
@@ -47,7 +46,6 @@ from bfx_funding_bot.modules.api.config import build_config_router
 from bfx_funding_bot.modules.api.deps import ReadModels, get_session
 from bfx_funding_bot.modules.api.funding_status import build_funding_status_router
 from bfx_funding_bot.modules.api.projections import build_projections_router
-from bfx_funding_bot.modules.api.public import build_public_router
 from bfx_funding_bot.modules.api.routers import build_router
 from bfx_funding_bot.modules.api.schemas import OfferClaimResponse, install_response_shape_handler
 from bfx_funding_bot.modules.api.trading_control import build_trading_control_router
@@ -294,7 +292,6 @@ def build_app(funding_reader: Any = None, *, empty: bool = False) -> FastAPI:
     app.include_router(build_config_router())
     app.include_router(build_funding_status_router(reader=funding_reader or daemon))
     app.include_router(build_projections_router())
-    app.include_router(build_public_router())
     app.include_router(build_uncertainties_router())
     app.include_router(build_trading_control_router())
     unused: Any = object()
@@ -354,7 +351,6 @@ async def _seed(engine: AsyncEngine) -> async_sessionmaker[Any]:
 @pytest.fixture
 def patched_ports(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
-    monkeypatch.setenv("BFX_PUBLIC_EXCHANGE_ACCOUNT_ID", str(ACCOUNT))
     monkeypatch.setenv("BFX_IMAGE_DIGEST", "sha256:" + "c" * 64)
     monkeypatch.setenv("BFX_SOURCE_REVISION", "d" * 40)
 
@@ -442,17 +438,9 @@ async def empty_client(sqlite_engine: AsyncEngine, patched_ports: None,
 
     monkeypatch.setattr(vault, "list_account_credentials", nothing)
     monkeypatch.setattr(operator_commands, "list_uncertainties", nothing)
-    # The proof page stamps an empty series with the time of the request.
-    monkeypatch.setattr(public, "datetime", _FrozenDatetime)
     with client_for(build_app(empty=True), factory,
                     Principal("user_new", None, "operator")) as c:
         yield c
-
-
-class _FrozenDatetime(datetime):
-    @classmethod
-    def now(cls, tz: Any = None) -> _FrozenDatetime:
-        return cls(2026, 10, 3, 0, 0, tzinfo=tz)
 
 
 CALLS: list[tuple[str, str, str, dict[str, Any] | None]] = [
@@ -466,7 +454,6 @@ CALLS: list[tuple[str, str, str, dict[str, Any] | None]] = [
     ("positions", "GET", f"{BASE}/positions", None),
     ("offers", "GET", f"{BASE}/offers", None),
     ("executions", "GET", f"{BASE}/executions", None),
-    ("public_proof_summary", "GET", "/api/v1/public/proof-summary", None),
     ("trading_control", "GET", f"{BASE}/trading-control", None),
     ("kill", "POST", f"{BASE}/trading-control/kill", {"reason": "venue incident"}),
     ("currency_disable", "POST", f"{BASE}/trading-control/currencies/fUST/disable",
@@ -489,7 +476,6 @@ EMPTY_CALLS: list[tuple[str, str, str, dict[str, Any] | None]] = [
     ("positions_empty", "GET", f"{BASE}/positions", None),
     ("offers_empty", "GET", f"{BASE}/offers", None),
     ("executions_empty", "GET", f"{BASE}/executions", None),
-    ("public_proof_summary_empty", "GET", "/api/v1/public/proof-summary", None),
     ("trading_control_empty", "GET", f"{BASE}/trading-control", None),
     ("uncertainties_empty", "GET", f"{BASE}/uncertainties", None),
 ]
@@ -522,8 +508,7 @@ def test_every_api_route_is_called_here() -> None:
     assert _api_routes(build_app()) == routes
     assert ValidationError in production.exception_handlers
     assert ResponseValidationError in production.exception_handlers
-    not_json = {("DELETE", "/api/v1/exchange-accounts/{exchange_account_id}/config-draft"),
-                ("GET", "/api/v1/public/funding-rates.csv")}
+    not_json = {("DELETE", "/api/v1/exchange-accounts/{exchange_account_id}/config-draft")}
     called = {_template(method, path, routes) for _, method, path, _ in CALLS}
     assert len(called) == len(CALLS)
     assert called == routes - not_json
