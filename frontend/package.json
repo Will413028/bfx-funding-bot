@@ -16,7 +16,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@hookform/resolvers": "^5.2.2",
+    "@hookform/resolvers": "^5.9.1",
     "@sentry/nextjs": "^10.76.0",
     "@tanstack/react-query": "^5.104.3",
     "@tanstack/react-query-devtools": "^5.91.3",
