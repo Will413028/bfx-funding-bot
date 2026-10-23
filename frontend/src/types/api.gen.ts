@@ -162,40 +162,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/public/proof-summary": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Proof Summary */
-        get: operations["proof_summary_api_v1_public_proof_summary_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/public/funding-rates.csv": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Funding Rates Csv */
-        get: operations["funding_rates_csv_api_v1_public_funding_rates_csv_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/exchange-accounts/{exchange_account_id}/uncertainties": {
         parameters: {
             query?: never;
@@ -685,10 +651,6 @@ export interface components {
         Envelope_ProfileResponse_: {
             data: components["schemas"]["ProfileResponse"];
         };
-        /** Envelope[PublicProofSummaryResponse] */
-        Envelope_PublicProofSummaryResponse_: {
-            data: components["schemas"]["PublicProofSummaryResponse"];
-        };
         /** Envelope[ResolutionRequestResponse] */
         Envelope_ResolutionRequestResponse_: {
             data: components["schemas"]["ResolutionRequestResponse"];
@@ -922,26 +884,6 @@ export interface components {
             email: string | null;
             /** Role */
             role: string;
-        };
-        /** PublicProofSummaryResponse */
-        PublicProofSummaryResponse: {
-            /** Weeks */
-            weeks: components["schemas"]["PublicWeeklyPoint"][];
-            /** Asof */
-            asOf: string;
-        };
-        /**
-         * PublicWeeklyPoint
-         * @description One week of the public proof-page series — percent-only, no absolute
-         *     $ fields (see modules/api/public.py for the compliance rationale).
-         */
-        PublicWeeklyPoint: {
-            /** Weekstartms */
-            weekStartMs: number;
-            /** Realizedaprnetpct */
-            realizedAprNetPct: string | null;
-            /** Baselinefrrutilaprnetpct */
-            baselineFrrUtilAprNetPct: string | null;
         };
         /**
          * Range
@@ -1471,57 +1413,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ExecutionsPage"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    proof_summary_api_v1_public_proof_summary_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Envelope_PublicProofSummaryResponse_"];
-                };
-            };
-        };
-    };
-    funding_rates_csv_api_v1_public_funding_rates_csv_get: {
-        parameters: {
-            query: {
-                symbol: "fUST" | "fUSD";
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

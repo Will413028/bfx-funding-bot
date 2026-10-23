@@ -346,26 +346,6 @@
       }
     }
   },
-  "public_proof_summary": {
-    "status": 200,
-    "body": {
-      "data": {
-        "weeks": [
-          {
-            "weekStartMs": 1782691200000,
-            "realizedAprNetPct": "6.205",
-            "baselineFrrUtilAprNetPct": "4.34"
-          },
-          {
-            "weekStartMs": 1783296000000,
-            "realizedAprNetPct": "6.205",
-            "baselineFrrUtilAprNetPct": "4.34"
-          }
-        ],
-        "asOf": "2026-10-02T09:45:00"
-      }
-    }
-  },
   "trading_control": {
     "status": 200,
     "body": {
@@ -703,15 +683,6 @@
       "pagination": {
         "hasMore": false,
         "nextBefore": null
-      }
-    }
-  },
-  "public_proof_summary_empty": {
-    "status": 200,
-    "body": {
-      "data": {
-        "weeks": [],
-        "asOf": "2026-10-03T00:00:00+00:00"
       }
     }
   },

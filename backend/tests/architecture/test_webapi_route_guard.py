@@ -1,4 +1,4 @@
-"""Every private webapi route admits only the operator; the public surface is a fixed list.
+"""Every webapi route admits only the operator, except the probes and the ingress's own routes.
 
 Walks each mounted ``APIRoute``'s effective dependency tree (router-level ``dependencies=``
 included) through ``iter_route_contexts``: since FastAPI 0.142 ``include_router`` mounts a
@@ -20,10 +20,9 @@ from bfx_funding_bot.apps.webapi import app
 from bfx_funding_bot.core.auth import require_operator
 from bfx_funding_bot.modules.api.ingress import API_FALLBACK_PATH, FE_EVENTS_PATH
 
-PUBLIC_API_PATHS = frozenset({
-    "/api/v1/public/proof-summary",
-    "/api/v1/public/funding-rates.csv",
-})
+# Empty since 9b-2: the public proof site is static files on Cloudflare Pages (ADR
+# 2026-08-31 D6), so no /api route answers without the operator.
+PUBLIC_API_PATHS: frozenset[str] = frozenset()
 PROBE_PATHS = frozenset({"/health", "/ready"})
 # The ingress's own routes (9d-5): `/` redirects to the UI, /fe-events forwards browser
 # Sentry events, the API fallback answers an unknown /api path with a JSON 404; none is
@@ -86,6 +85,8 @@ def test_public_routes_exist_and_carry_no_auth() -> None:
         if set(_calls(by_path[path].dependant)) & set(_AUTH_DEPENDENCIES)
     )
     assert authed == []
+    # The proof page and CSVs left the webapi for Cloudflare Pages (9b-2).
+    assert not [path for path in by_path if path.startswith("/api/v1/public")]
 
 
 def test_the_walk_catches_an_unguarded_route() -> None:

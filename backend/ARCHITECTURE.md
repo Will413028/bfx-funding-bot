@@ -857,8 +857,7 @@ CHECK `ck_exchange_account_credentials_active_user_id`（migration `36e59526f8cf
 `BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_SCHEDULER_BUFFER_S`、
 `BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`、`BFX_LOOP_WATCHDOG_S`（event loop watchdog 秒數，預設 120）。已退役、設了就拒絕開機：`BFX_EXECUTOR` 與舊資金 env（`BFX_ALLOCATION_CAP_USDT`、`BFX_BALANCE_BUFFER_USDT`、`BFX_CONCENTRATION_PCT`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`）。
 Bitfinex secret 不再從 `BFX_API_KEY`/`BFX_API_SECRET` 讀取；由 account-owned
-credential vault 解密。public read model 另以明確的
-`BFX_PUBLIC_EXCHANGE_ACCOUNT_ID` 綁定 UUID。
+credential vault 解密。公開站（I-PUB）不經 webapi：每週報告為它量測的帳戶產生靜態檔。
 
 ### 量測自動化（E3，2026-07-06）
 
@@ -891,7 +890,7 @@ credential vault 解密。public read model 另以明確的
 - **fail-closed**：任何 guard timeout（2s）或 exception → `allowed=False` + `safety_trigger(critical)`。
 - **TaskGroup 監督**：任何 sub-task 例外 → ExceptionGroup 傳播 → daemon 非零退出，無 silent task death。
 - **I-RP reprice-down only**：sweep 只砍「高於現行 active quote 超過 tolerance 且夠老」的 offer；不砍低於 quote 的、不砍 spike 當小時的（min-age）、無 active quote 不砍。cancel 失敗 fail-safe（offer 留在 book）；`ExecutorAuthError` 從 sweep 往外丟，但 `PeriodicReconcile._deploy` 的 catch-all 會吞掉（`deployment_phase_failed`），不會走到 exit 78；venue 拒絕 key 由 reconcile 的觀測偵測（3d 憑證恢復模式）。sweep 不直接改 ledger。
-- **I-PUB public read model（`modules/live_validation/public_site.py`；舊的 `modules/api/public.py` 在 9b-2 移除）**：公開站是 Cloudflare Pages 上的靜態檔（ADR `2026-08-31` D6）：每週報告以 `bfx_research` 產生（`scripts/build_public_site.py`），`bfx-public-site.service` 只帶 Pages token、不碰 DB 地上傳並核對；頁面沒有 script，`_headers` 的 CSP 是 `default-src 'none'`。公開的帳戶就是每週報告量測的帳戶（`research.env` 的 `BFX_EXCHANGE_ACCOUNT_ID`，runner 缺值就拒跑，不 fallback）；attribution 只為這個帳戶計算。只輸出百分比，聚合與舊端點共用 `aggregate_weeks`。過渡期的舊端點：`/api/v1/public/proof-summary` 與 `/api/v1/public/funding-rates.csv` 不需驗證、不掛 per-user rate limiter，回應帶 `Cache-Control: public, max-age=3600`。只輸出百分比（週 APR、`close_apr_pct`），絕不輸出絕對金額（資金規模、利息金額、capital-days 只在內部加總用）；CSV 的 `symbol` 以 `Literal["fUST","fUSD"]` 白名單驗證（其他值 422），只讀 1h／`p2` candle。proof account 由 `BFX_PUBLIC_EXCHANGE_ACCOUNT_ID` 明確指定，未設定回 503，不 fallback。
+- **I-PUB public read model（`modules/live_validation/public_site.py`）**：公開站是 Cloudflare Pages 上的靜態檔（ADR `2026-08-31` D6）：每週報告以 `bfx_research` 產生（`scripts/build_public_site.py`），`bfx-public-site.service` 只帶 Pages token、不碰 DB 地上傳並核對；頁面沒有 script，`_headers` 的 CSP 是 `default-src 'none'`。公開的帳戶就是每週報告量測的帳戶（`research.env` 的 `BFX_EXCHANGE_ACCOUNT_ID`，runner 缺值就拒跑，不 fallback）；attribution 只為這個帳戶計算。只輸出百分比，絕不輸出絕對金額（資金規模、利息金額；capital-days 只當內部權重）。webapi 沒有任何不需 operator 的 `/api` 路由（9b-2 移除 `/api/v1/public/*`；`tests/architecture/test_webapi_route_guard.py` 鎖住）；公開站每天由 `.github/workflows/venue-contract.yml` 從外部檢查。
 - **I-EG execution eligibility**：只有已 audit 的 `ReadyToSubmit` 能到 executor。每個 live-capable candidate 都需 fresh、symbol-matched、**sequence/checksum-consistent**（有完整 baseline 且自該 baseline 起未偵測到 gap 或 mismatch，見 7c）的 exact-period book evidence；缺少 period、depth、model、safety 或 audit 時，產生 typed blocked outcome，絕不重用 signal quote、scalar ticker 或 linear estimate。
 
 ---
@@ -906,7 +905,7 @@ Tailscale admin console，**不在 repo**；以下照 runbook 與 ADR 的描述�
 | 主體 | 怎麼證明身分 | DB role 與權限 | bot `/admin` | venue 寫入 | 主機 |
 |---|---|---|---|---|---|
 | operator，經 tailnet 用 UI | Tailscale Serve 轉送 tailnet policy 給的 app capability（`deploy/vm/tailscale/serve.json`）；`require_operator` 比對 capability 的 `user_id`（`backend/src/bfx_funding_bot/core/auth.py:65-76`），再查該帳戶的 membership，非成員一律 404、viewer 不能寫（`modules/api/account_scope.py:48-77`） | 經 webapi 的 `bfx_webapi`（下一列） | 無 | 間接：只有 kill（`modules/api/trading_control.py:214`）與停用幣別（`:227`）寫進 outbox，由 bot 套用；另可改 config draft（`modules/api/config.py:98,116`），draft 不是生效的資金 policy | 無 |
-| operator，CLI `sudo bfx-op` | Tailscale SSH（check mode）登入 `ubuntu`；`bfx-op` 取 `SSH_CONNECTION` 的 tailnet peer（`deploy/vm/ops/bfx_op.py:184-190`）、`tailscale whois` 得到 user ID（`:202-215`），CLI 再確認是該帳戶的 member（`apps/operator_cli.py:284`） | `bfx_operator`：四個 operator outbox（交易控制、幣別、UNKNOWN 裁決、換憑證）的 request 欄位 INSERT 與讀取，沒有 UPDATE／DELETE（migration `4ab02765a34b`、`1db83367918c`，`docs/runbooks/fresh-host-setup.md:25`） | `halt` 子命令在 bot 容器內以 `BFX_ADMIN_TOKEN` 呼叫 `/admin/halt`，不要求 tailnet 身分（`bfx_op.py:403-412`） | 間接：resume、kill、啟停幣別、UNKNOWN 裁決、換憑證都寫 outbox，由 bot 以 `operator_authorized` 重驗後套用（ADR 2026-10-15 D4） | `ubuntu` 有 NOPASSWD sudo（`docs/runbooks/operations.md:657-661`） |
+| operator，CLI `sudo bfx-op` | Tailscale SSH（check mode）登入 `ubuntu`；`bfx-op` 取 `SSH_CONNECTION` 的 tailnet peer（`deploy/vm/ops/bfx_op.py:184-190`）、`tailscale whois` 得到 user ID（`:202-215`），CLI 再確認是該帳戶的 member（`apps/operator_cli.py:284`） | `bfx_operator`：四個 operator outbox（交易控制、幣別、UNKNOWN 裁決、換憑證）的 request 欄位 INSERT 與讀取，沒有 UPDATE／DELETE（migration `4ab02765a34b`、`1db83367918c`，`docs/runbooks/fresh-host-setup.md:25`） | `halt` 子命令在 bot 容器內以 `BFX_ADMIN_TOKEN` 呼叫 `/admin/halt`，不要求 tailnet 身分（`bfx_op.py:403-412`） | 間接：resume、kill、啟停幣別、UNKNOWN 裁決、換憑證都寫 outbox，由 bot 以 `operator_authorized` 重驗後套用（ADR 2026-10-15 D4） | `ubuntu` 有 NOPASSWD sudo（`docs/runbooks/operations.md` §10「Operator CLI」的信任邊界） |
 | bot（`bfx-bot`） | 容器身分；秘密檔 `/run/secrets/*` | `bfx_bot`：public schema 的 default DML，受治理的表由各 migration 收斂（`fresh-host-setup.md:23,57-64`） | 持有兩把 token：`BFX_ADMIN_TOKEN`（三個 route 都可）與 `BFX_ADMIN_READ_TOKEN`（只能讀），常數時間比對（`modules/admin/router.py:34-46,77,97,125`） | 唯一的 venue 寫入者；已簽章的寫入只有 funding offer 的 submit、cancel、cancel-all（`external/bitfinex/live_executor.py:66-69`，由 `tests/architecture/test_venue_write_endpoints.py:149` 鎖住）；開機與每 6 小時重查 key 權限（`modules/execution/credential_compliance.py:48`） | 無 |
 | webapi（`bfx-webapi`） | 容器身分 | `bfx_webapi`：migration 擁有的精確 allowlist，ledger 零寫入（`fresh-host-setup.md:24,80`） | 只有 `BFX_ADMIN_READ_TOKEN`（`modules/api/funding_status.py:120-123`）：`/admin/trading-status`、`/admin/dry-evaluate`；halt 只收 `BFX_ADMIN_TOKEN`（`modules/admin/router.py:125`）。env 或秘密檔出現 `BFX_ADMIN_TOKEN`、`BFX_VAULT_KEK` 就拒絕開機（`apps/webapi.py:44-53`） | 無（不持有 KEK） | 無 |
 | 每週報告、研究一次性容器 | root 啟動的一次性容器，讀 `research.env` | `bfx_research`：只寫研究表、只讀用到的表，讀不到憑證表、不能寫 ledger 或 outbox（migration `3c5e7a9b1d2f`，`fresh-host-setup.md:26`） | 無 | 無（週報只打 Bitfinex public；研究的 ingest 另打 Binance public） | 無 |
@@ -964,7 +963,7 @@ allowlist 或第二個 postgres，理由是單一 VM 的管理成本；最小權
 | `bfx-deploy` → GHCR | 對外 | 443／HTTPS `ghcr.io`，以 digest pull（`deploy/vm/ops/bfx_deploy.py:634`） | `ghcr.env` 的 read-only token，檔案不存在就匿名（`bfx_deploy.py:2267-2272`；`docs/runbooks/deploy.md:187-188`） | TLS |
 | `bfx-deploy` → Docker Hub | 對外 | 443／HTTPS，只 pull allowlist 的 tailscale digest（`docker-compose.app.yml:144,169`） | 無 | TLS |
 | `bfx-deploy` → GitHub | 對外 | 443／HTTPS，mirror 匿名 `git fetch`（`docs/runbooks/deploy.md:353`）；CI run 的連結從 GHCR image 的 label 讀，不呼叫 GitHub | 無 | TLS |
-| `bfx-deploy` → GitHub attestation（Sigstore） | 對外 | **9i 尚未 merge（PR #251）**：merge 後部署前以 `gh attestation verify` 驗 provenance | 待 9i | 待 9i |
+| `bfx-deploy` → GitHub attestation（Sigstore） | 對外 | 443／HTTPS；部署前以 `gh attestation verify` 驗 digest 的 build provenance（9i，PR #251；`docs/runbooks/deploy.md:42-49`） | 無（不用 GitHub token） | TLS |
 | tailscaled（主機與 `bfx-tailscale`）→ Tailscale control plane、DERP | 對外 | Tailscale 管理 | node key | Tailscale 管理 |
 
 應用程式碼沒有可由使用者指定的對外位址：所有對外目的地都是常數或部署設定（上表）。容器沒有 egress allowlist，
@@ -979,7 +978,7 @@ allowlist 或第二個 postgres，理由是單一 VM 的管理成本；最小權
 | 秘密：備份 | R2 S3 憑證、repo cipher passphrase | `~/bfx/pgbackrest/conf.d/r2.conf`；passphrase 另有離線保管（`docs/runbooks/offsite-dr.md:107-128`） | bucket 範圍的權限；cipher 加密 |
 | 交易所憑證 | Bitfinex API key／secret | `exchange_account_credentials`，AES-256-GCM 信封加密，AAD 為帳戶 UUID，KEK 只在 bot（`core/crypto.py:53-85`、`apps/webapi.py:49-53`）；換憑證時以 bot 的公鑰 sealed box 傳入（`core/sealed_credential.py:100-113`） | withdraw 權限關閉，開機與每 6 小時重查（`modules/execution/credential_compliance.py:48`）；webapi 讀不到 secret；明文不進 log、outbox 或 argv（`docs/runbooks/operations.md:693-697`） |
 | 帳務：ledger 與交易狀態 | journal、觀測、basis、policy、outbox、`trading_state` | Postgres `bfx`；離機備份在 R2（加密） | 寫入者限定（10a）；journal 與觀測表 insert-once（§9 I-IDEM）；restore test 每月驗證（`docs/runbooks/operations.md:549-556`） |
-| 市場與研究資料 | candles、`funding_stats`、`perp_funding_rates`、`liquidations`、研究結果 | Postgres `bfx`、`/home/ubuntu/bfx/reports` | 公開市場資料；public 端點只輸出百分比，不輸出絕對金額（§9 I-PUB） |
+| 市場與研究資料 | candles、`funding_stats`、`perp_funding_rates`、`liquidations`、研究結果 | Postgres `bfx`、`/home/ubuntu/bfx/reports` | 公開市場資料；公開站只輸出百分比，不輸出絕對金額（§9 I-PUB） |
 | 個人資料 | operator 的 tailnet user ID 與 login、裝置名稱、tailnet IP | membership 的 `user_id`、outbox 的 `requested_by`；安全事件 log（`core/auth.py:56-62`）；`bfx-op` 的 journald 行（`deploy/vm/ops/bfx_op.py:165-167`） | Sentry 不帶預設的 PII（`send_default_pii=False`，`modules/observability/error_tracking.py:106`），但遮蔽只針對 secret：安全事件的 login／user ID 可能以 breadcrumb 進到 Sentry 事件（推論，未實測） |
 | log | bot、webapi 的 JSON log（UTC、跳脫控制字元，`core/log_format.py:54,75`）；安全事件 logger `bfx.security`（`core/security_log.py:32`）；`bfx-op` journald；Sentry 事件；Telegram 告警 | 主機的 docker log 與 journald；homelab 的 Loki（保留 30 天，`docs/adr/2026-09-23-venue-refusal-kept-before-classified.md:66`） | 不記 token、帶 token 的 header 或 request body（§6「Process log 與安全事件」）；Sentry 與 Telegram 送出前遮蔽 secret（`error_tracking.py:60`、`alerts.py:196,438`）；沒有防竄改的離機保存 |
 
@@ -993,7 +992,7 @@ allowlist 或第二個 postgres，理由是單一 VM 的管理成本；最小權
 | 研究資料回補 | VM 一次性容器 | liquidations 預設每 25 秒一個 request、429 後睡 240 秒，完整回補數小時（`backend/scripts/ingest_liquidations.py:50-53`）；deriv status 客戶端每分鐘 18 個 request（`docs/runbooks/research-one-shot-jobs.md:17-19`） |
 | 整合測試全量 | CI（`-n 4`，job 上限 30 分鐘，`.github/workflows/ci.yml:212,249`）；本機 `-n 6` | 每個 worker 一台拋棄式 PG18 |
 | Bitfinex 已驗證端點 | bot | 每個 key 一個 gate 排序 nonce，背景讀取 10 秒截斷（`external/bitfinex/auth_rest.py:54,460-468`）；每個觀測 cycle 有 request 上限（`modules/execution/venue_observation.py:49,313`）；送單 token bucket（`pre_trade_limits.command_rate`，`modules/execution/safety/pre_trade.py:249-250`）；同一把 key 的其他使用者會撞 nonce（`docs/runbooks/operations.md:625`） |
-| public CSV 與 proof summary | webapi，只在 tailnet 內 | CSV 一次讀約 87,600 列（`modules/api/public.py:122`），沒有 per-user 限流，回應帶 `Cache-Control: public, max-age=3600`（`public.py:42`）；9b-1 起公開站改為 Cloudflare Pages 的靜態檔（每週產生，網路流量不到 VM）；webapi 的這兩個端點在 9b-2 移除 |
+| public CSV 與 proof summary | Cloudflare Pages 靜態檔（`borrowrate.pages.dev`） | 每週產生一次（CSV 每幣別約 87,600 列，`scripts/build_public_site.py`），網路流量只到 Pages、不到 VM；`_headers` 帶 `Cache-Control: public, max-age=3600` |
 | webapi 私有 API | webapi | 每個 operator 每分鐘 120 次讀、30 次寫，超過回 429（`modules/api/ratelimit.py:4-5,61-62`） |
 
 ### 10e. TLS（已接受的控制）

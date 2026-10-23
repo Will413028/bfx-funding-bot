@@ -283,11 +283,12 @@ jobs:
       - uses: ./.github/actions/postgres-18
       # Keep third-party live smoke tests out of deterministic CI; run them
       # explicitly with `uv run pytest -m 'integration and live'`. The public venue
-      # contract (`venue_contract`) runs daily in venue-contract.yml instead.
+      # contract (`venue_contract`) and the public site (`public_site`) run daily in
+      # venue-contract.yml instead.
       # --durations: the suite is near its timeout; each run lists the slowest tests.
       # -n 4: the runner has 4 vCPU (public repository); loadfile keeps a module's templates on
       # one worker.
-      - run: uv run pytest -m "integration and not live and not venue_contract" -q --maxfail=3 --durations=25 -n 4 --dist loadfile --junitxml=junit/backend_integration.xml
+      - run: uv run pytest -m "integration and not live and not venue_contract and not public_site" -q --maxfail=3 --durations=25 -n 4 --dist loadfile --junitxml=junit/backend_integration.xml
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-backend_integration

@@ -560,7 +560,7 @@ sudo bfx-deploy --recreate
 
 `systemctl list-timers 'bfx-*'` 看實際啟用狀態。
 
-VM 之外還有一項每日檢查：GitHub Actions 的 `venue-contract.yml`（08:37 Asia/Taipei）用 bot 的 parser 打 Bitfinex 公開 endpoint（candles、funding stats、book、trades、UST/USD FX），回應的欄位或數值範圍不符就由 `notify` job 送 Telegram。收到時先看 run 的 pytest 輸出：是 Bitfinex 改了格式就修 `external/bitfinex` 的 parser，是暫時性的 5xx／429 就重跑（`gh run rerun <id>`）。成功不送訊息；GitHub 在 repo 60 天沒有 commit 時會停掉排程，屆時到 Actions 頁重新啟用。
+VM 之外還有一項每日檢查：GitHub Actions 的 `venue-contract.yml`（08:37 Asia/Taipei）有兩個 job：`contract` 用 bot 的 parser 打 Bitfinex 公開 endpoint（candles、funding stats、book、trades、UST/USD FX），`public-site` 從外部看公開站（`proof-summary.json` 9 天內產生、最新一週在 15 天內、兩頁帶免責聲明與 CSP、fUST CSV 到這週、fUSD CSV 存在）；任一個失敗就由 `notify` job 送 Telegram。收到時先看 run 是哪個 job：`contract` 是 Bitfinex 改了格式就修 `external/bitfinex` 的 parser；`public-site` 先看 VM 上 `bfx-weekly-report` 與 `bfx-public-site` 的 journal（下方「公開站」）；暫時性的 5xx／429 就重跑（`gh run rerun <id>`）。成功不送訊息；GitHub 在 repo 60 天沒有 commit 時會停掉排程，屆時到 Actions 頁重新啟用。
 
 ### 每週報告（`bfx-weekly-report`）
 
