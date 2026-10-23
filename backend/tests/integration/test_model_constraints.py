@@ -24,7 +24,8 @@ GOVERNANCE_TABLES = ("trading_state", "funding_cancel_all_audit", "deployments",
                      "credential_rotation_recipients")
 # 5b1e7c9d2a40 left these NOT VALID so rows recorded under the retired rules
 # stay as they were; the model states the rule every new row obeys.
-_NOT_VALID = {("trading_state", "ck_trading_state_state"), ("trading_state", "ck_trading_state_cause")}
+_NOT_VALID = {("trading_state", "ck_trading_state_state"), ("trading_state", "ck_trading_state_cause"),
+              ("deployments", "ck_deployments_service_degraded")}
 
 _CHECKS = text("""SELECT t.relname, c.conname, pg_get_constraintdef(c.oid)
     FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid

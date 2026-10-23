@@ -41,9 +41,12 @@ _ROLE = "bfx_research"
 
 def upgrade() -> None:
     op.add_column("deployments", sa.Column("service_degraded", sa.Boolean(), nullable=True))
+    # NOT VALID: no scan of the existing rows, which all hold NULL and so satisfy it;
+    # PostgreSQL still checks every row written from now on.
     op.create_check_constraint(
         "ck_deployments_service_degraded", "deployments",
         "outcome <> 'started' OR service_degraded IS NULL",
+        postgresql_not_valid=True,
     )
     if op.get_bind().execute(text("SELECT 1 FROM pg_roles WHERE rolname=:name"),
                              {"name": _ROLE}).scalar():
