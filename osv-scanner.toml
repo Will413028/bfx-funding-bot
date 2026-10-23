@@ -13,3 +13,171 @@ reason = "critical: certifi 2026.4.22 (backend/uv.lock) bundles emSign roots; fi
 id = "GHSA-6q48-6c7w-9gw2"
 ignoreUntil = 2026-10-27T00:00:00Z
 reason = "alias of PYSEC-2026-4320 (certifi), same deadline"
+
+# License allowlist: the job passes --licenses (list in .github/workflows/security.yml).
+# Global list = notice licenses plus MPL-2.0, LGPL-3.0 and CC-BY-4.0. Weak copyleft
+# and attribution duties attach on distribution; the image is private and the UI
+# is reachable only from the tailnet. Re-evaluate the list if either goes public.
+# Blind spot: only lockfiles are scanned, not the base image's OS packages or
+# libraries bundled inside wheels (libpq and OpenSSL in psycopg-binary).
+#
+# Overrides below correct packages whose metadata the scanner reads as
+# "non-standard" or "UNKNOWN". Each is pinned to the locked version so a bump
+# fails the job until someone re-reads the new version's license and updates it.
+
+# Metadata has only a "BSD License" classifier; the bundled LICENSE is BSD-3-Clause.
+[[PackageOverrides]]
+name = "colorama"
+ecosystem = "PyPI"
+version = "0.4.6"
+license.override = ["BSD-3-Clause"]
+
+[[PackageOverrides]]
+name = "jinja2"
+ecosystem = "PyPI"
+version = "3.1.6"
+license.override = ["BSD-3-Clause"]
+
+[[PackageOverrides]]
+name = "pandas"
+ecosystem = "PyPI"
+version = "3.0.6"
+license.override = ["BSD-3-Clause"]
+
+# Metadata says "MIT License" with the full text instead of an SPDX id.
+[[PackageOverrides]]
+name = "pytest-httpx"
+ecosystem = "PyPI"
+version = "0.36.2"
+license.override = ["MIT"]
+
+# Metadata says "Dual License"; the classifiers name Apache and BSD.
+[[PackageOverrides]]
+name = "python-dateutil"
+ecosystem = "PyPI"
+version = "2.9.0.post0"
+license.override = ["Apache-2.0 OR BSD-3-Clause"]
+
+# Windows-only dependency of docker (marker sys_platform == 'win32'); never installed.
+[[PackageOverrides]]
+name = "pywin32"
+ecosystem = "PyPI"
+version = "311"
+license.ignore = true
+
+# This repository's own package; it has no license field.
+[[PackageOverrides]]
+name = "bfx-funding-bot-py"
+ecosystem = "PyPI"
+license.ignore = true
+
+# Functional Source License 1.1, MIT future license: source-available, bars only
+# competing with Sentry, becomes MIT after two years. Pulled in by @sentry/nextjs.
+# Ignored per pinned version rather than allowlisted, so FSL on any other package fails.
+[[PackageOverrides]]
+name = "@sentry/cli"
+ecosystem = "npm"
+version = "2.58.5"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli"
+ecosystem = "npm"
+version = "2.58.6"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-darwin"
+ecosystem = "npm"
+version = "2.58.5"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-darwin"
+ecosystem = "npm"
+version = "2.58.6"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-linux-arm"
+ecosystem = "npm"
+version = "2.58.5"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-linux-arm"
+ecosystem = "npm"
+version = "2.58.6"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-linux-arm64"
+ecosystem = "npm"
+version = "2.58.5"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-linux-arm64"
+ecosystem = "npm"
+version = "2.58.6"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-linux-i686"
+ecosystem = "npm"
+version = "2.58.5"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-linux-i686"
+ecosystem = "npm"
+version = "2.58.6"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-linux-x64"
+ecosystem = "npm"
+version = "2.58.5"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-linux-x64"
+ecosystem = "npm"
+version = "2.58.6"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-win32-arm64"
+ecosystem = "npm"
+version = "2.58.5"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-win32-arm64"
+ecosystem = "npm"
+version = "2.58.6"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-win32-i686"
+ecosystem = "npm"
+version = "2.58.5"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-win32-i686"
+ecosystem = "npm"
+version = "2.58.6"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-win32-x64"
+ecosystem = "npm"
+version = "2.58.5"
+license.ignore = true
+
+[[PackageOverrides]]
+name = "@sentry/cli-win32-x64"
+ecosystem = "npm"
+version = "2.58.6"
+license.ignore = true

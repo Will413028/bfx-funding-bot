@@ -84,6 +84,8 @@ jobs:
     env:
       OSV_SCANNER_VERSION: 2.6.0
       OSV_SCANNER_SHA256: ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108
+      # SPDX ids a dependency may carry; why each is here: osv-scanner.toml.
+      OSV_LICENSE_ALLOWLIST: "0BSD,Apache-2.0,BlueOak-1.0.0,BSD-2-Clause,BSD-3-Clause,CC-BY-4.0,CC0-1.0,ISC,LGPL-3.0-only,LGPL-3.0-or-later,MIT,MIT-0,MPL-2.0,PSF-2.0,Python-2.0,Zlib"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -96,4 +98,5 @@ jobs:
           chmod +x "$RUNNER_TEMP/osv-scanner"
       # Recursive, so a new lockfile is scanned without editing this job.
       # osv-scanner.toml holds the dated baseline; an expired entry fails this job.
-      - run: '"$RUNNER_TEMP/osv-scanner" scan source -r --config osv-scanner.toml .'
+      # --licenses also fails on any license outside the allowlist.
+      - run: '"$RUNNER_TEMP/osv-scanner" scan source -r --config osv-scanner.toml --licenses="$OSV_LICENSE_ALLOWLIST" .'
