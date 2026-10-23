@@ -25,7 +25,8 @@
 # this file and enforces it with compose_policy.py --kind weekly-report.
 #
 # Steps: ① funding_stats forward-fill (AlwaysFRR arm data) ② attribution rows ③
-# realized interest ④ G3 report, then the research re-validation. Step ① failing
+# realized interest ④ G3 report ⑤ delivery metrics ⑥ the public proof site's files,
+# then the research re-validation. Step ① failing
 # never blocks the rest (|| echo; attribution/G3 are fail-soft on missing data).
 
 name: bfx-weekly-report
@@ -77,6 +78,9 @@ services:
         python -m scripts.report_interest --out "/reports/$$(date +%F)-realized-interest.md" || echo "WARN report_interest failed (non-blocking)"
         python -m scripts.run_g3_live_validation --out "/reports/$$(date +%F)-g3-live-validation.md"
         python -m scripts.report_delivery_metrics --out "/reports/$$(date +%F)-delivery-metrics.md" || echo "WARN report_delivery_metrics failed (non-blocking)"
+        # Public proof site (ADR 2026-08-31 D6): the files only; bfx-public-site.service
+        # uploads them after this unit succeeds and refuses a build that did not happen.
+        python -m scripts.build_public_site --out /reports/public-site || echo "WARN build_public_site failed (non-blocking; the upload refuses the stale build and alerts)"
         # ── research re-validation (Proposal E, 2026-09-22): runs AFTER the operational
         # report, every step fail-soft, nothing here promotes anything. Budget: see
         # deploy/vm/systemd/bfx-weekly-report.service TimeoutStartSec.

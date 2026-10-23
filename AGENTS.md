@@ -12,7 +12,7 @@ Bitfinex 自動放貸 SaaS 平台。
 
 ## 部署架構
 
-應用程式與資料服務自托於 Oracle Cloud VM（單機 Docker）；外部服務包含 Bitfinex venue、GHCR（image registry）與 Cloudflare R2 offsite backup。
+應用程式與資料服務自托於 Oracle Cloud VM（單機 Docker）；外部服務包含 Bitfinex venue、GHCR（image registry）、Cloudflare R2 offsite backup 與 Cloudflare Pages（公開 proof 站，每週由 VM 上傳靜態檔，見 `docs/runbooks/operations.md` §8「公開站」）。
 
 - **應用程式**（bot／webapi，與 tailnet 入口 netns／tailscale）：compose project `bfx-app`（`deploy/vm/docker-compose.app.yml`）。CI（`.github/workflows/release.yml`）在綠燈的 `main` commit 建 arm64 backend image（含前端 static export）推到 GHCR；VM 的 `bfx-deploy` timer 只以 digest 部署，VM 不 build image，部署不改變交易狀態。一次部署的步驟（migration 前停 webapi 與 bot、備份與 restore test、ledger、回滾、通知）見 `docs/runbooks/deploy.md`。
 - **資料服務**（Postgres）：compose project `bfx`，`docker-compose.bot.yml`（只有 postgres）。

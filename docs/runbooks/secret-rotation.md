@@ -179,6 +179,24 @@ BotFather 的 `/revoke` 會讓舊 token 立刻失效，所以兩條告警路徑�
 
 從 revoke 到第 3 步完成之間，bot 的告警送不出去，只記 log。
 
+## Cloudflare Pages token（公開站）
+
+`/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN`（`root:root 0600`），只有 `bfx-public-site.service` 讀。
+權限是帳戶層級的 **Pages Write**（Cloudflare 沒有只限一個 Pages 專案的權限），並限定 VM 的出口 IP；
+所以它也能改同帳戶的其他 Pages 專案，外洩時要先撤銷。VM 換公網 IP 後上傳會被拒（`upload_token_failed:http_403`），也要照這節重發。
+
+1. Cloudflare dashboard → My Profile → API Tokens → Create Custom Token：Account → Cloudflare Pages → Edit，
+   Account Resources 只選這個帳戶，Client IP Address Filtering 填 VM 的出口 IP（`curl -4 ifconfig.me`）。
+2. 在 VM 寫入（貼上新 token、按 Enter，不回顯）：
+
+   ```bash
+   sudo sh -c 'umask 077; IFS= read -rs V < /dev/tty; [ -n "$V" ] || exit 1; printf "%s" "$V" > /opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN'
+   ```
+
+3. 驗證：`sudo systemctl start bfx-public-site.service`，journal 最後一行是 `published 6 files`
+   （build 超過 26 小時會被拒，先 `sudo systemctl start bfx-weekly-report.service`，它成功後會自己接著上傳）。
+4. 在 dashboard 撤銷舊 token。
+
 ## R2（offsite backup）
 
 照 [offsite-dr「Rotation and incident posture」](offsite-dr.md#rotation-and-incident-posture)：

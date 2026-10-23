@@ -4,6 +4,8 @@ Documentation=file:///usr/local/lib/bfx-ops/current/ops/bfx_weekly_report.py
 Requires=docker.service
 After=docker.service
 OnFailure=bfx-alert@%n.service
+# The chain builds the public proof site; bfx-public-site uploads it (and alerts on its own).
+OnSuccess=bfx-public-site.service
 
 [Service]
 Type=oneshot

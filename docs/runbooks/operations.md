@@ -555,7 +555,8 @@ sudo bfx-deploy --recreate
 | `bfx-pgbackrest-backup.timer` / `bfx-pgbackrest-status.timer` | 見 unit | 備份與 RPO evidence（`OnFailure=bfx-alert@`） |
 | `bfx-backup-check.timer` | 每 5 分鐘（`*:1/5`） | evidence、restore heartbeat、weekly report heartbeat 與磁碟使用率檢查，連續兩次才告警，6 小時重發（見下方「主機檢查」） |
 | `bfx-restore-test.timer` | 每月 1 日 09:17 UTC | `bfx-restore-test@current`：用已部署 release 的 DR 腳本做 isolated restore ＋ ledger 驗證（與 production 比對有界 digest、唯讀 boot check；[offsite DR](offsite-dr.md#monthly-and-change-triggered-ledger-restore-test)） |
-| `bfx-weekly-report.timer` | 每週一 04:17 UTC | 每週量測鏈：attribution／realized interest／G3 報告＋研究重驗（見下方「每週報告」；`OnFailure=bfx-alert@`） |
+| `bfx-weekly-report.timer` | 每週一 04:17 UTC | 每週量測鏈：attribution／realized interest／G3 報告＋公開站的檔案＋研究重驗（見下方「每週報告」；`OnFailure=bfx-alert@`） |
+| `bfx-public-site.service`（沒有 timer） | 每週報告成功後（`OnSuccess=`） | 把公開站上傳到 Cloudflare Pages 並核對（見下方「公開站」；`OnFailure=bfx-alert@`） |
 
 `systemctl list-timers 'bfx-*'` 看實際啟用狀態。
 
@@ -607,6 +608,23 @@ sudo systemctl disable --now bfx-weekly-report.timer   # 暫停
 
 成功（exit 0）的一次會寫 `/var/lib/bfx-ops/weekly-report-heartbeat.json`；timer 啟用時，
 `bfx-backup-check` 在它超過 8 天時發 warning。新主機在第一次成功之前沒有 heartbeat，不告警。
+
+### 公開站（`bfx-public-site`）
+
+公開的 proof 頁與免費利率 CSV 是 Cloudflare Pages 上的靜態檔（`https://borrowrate.pages.dev`，ADR `2026-08-31` D6）：
+網路上的人只碰得到 Pages，碰不到這台 VM。
+
+- 產生：每週報告的一步（`scripts.build_public_site`，`bfx_research`），把 `index.html`、`en/index.html`、
+  `proof-summary.json`、`funding-rates-fUST.csv`、`funding-rates-fUSD.csv` 與 `_headers` 整個換進
+  `/home/ubuntu/bfx/reports/public-site`。它沒有 Cloudflare token；讀不到任一幣別的 candle 就保留上一版、只記 WARN。
+- 上傳：`bfx-public-site.service`（root，`bfx_public_site.py`）只接受剛好這六個檔、沒有 symlink、
+  `proof-summary.json` 的 `generated_at` 在 26 小時內；上傳後等到 Pages 實際送出同一份 `proof-summary.json`
+  且首頁帶 CSP 才算成功。設定在 `public-site.env` 與 token 檔（[secret-rotation](secret-rotation.md#cloudflare-pages-token公開站)）。
+- 收到 `bfx-public-site.service` 失敗告警：看 `journalctl -u bfx-public-site.service -n 50`，錯誤碼說明在哪一步：
+  `site_build_stale`／`site_files_mismatch` 是每週報告那一步沒產生（看 `bfx-weekly-report` 的 journal 裡
+  `build_public_site` 的 WARN）；`*_failed:http_403` 多半是 token 被撤銷或 VM 換了出口 IP；`verify_failed` 是
+  Pages 沒在 120 秒內送出新版，先重跑一次。重跑：`sudo systemctl start bfx-public-site.service`。
+- 預覽而不上傳：`sudo /usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_public_site.py --dry-run`。
 
 ### 主機檢查（`bfx-backup-check`）
 
