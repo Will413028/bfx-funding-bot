@@ -35,6 +35,13 @@ services:
       - archive_timeout=60s
       - -c
       - archive_command=pgbackrest --stanza=bfx archive-push %p
+      # Slow-query detection (operations.md §8 慢查詢): per-statement totals in
+      # pg_stat_statements (the extension itself is created once by hand, deploy.md),
+      # and the plan of any statement over a second in the container log.
+      - -c
+      - shared_preload_libraries=pg_stat_statements,auto_explain
+      - -c
+      - auto_explain.log_min_duration=1s
     # Bound to the VM's loopback ONLY — never 0.0.0.0. Reachable from a laptop
     # solely through an SSH tunnel:
     #   ssh -N -L 5433:127.0.0.1:5432 <ssh-user>@<vm-host>

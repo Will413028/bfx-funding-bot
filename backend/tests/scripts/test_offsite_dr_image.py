@@ -52,6 +52,10 @@ def test_production_postgres_service_uses_archive_image_and_keeps_autoheal_separ
     assert "archive_mode=on" in " ".join(postgres["command"])
     assert "archive_timeout=60s" in postgres["command"]
     assert "archive_command=pgbackrest --stanza=bfx archive-push %p" in " ".join(postgres["command"])
+    # Slow-query detection: both libraries load at start, and auto_explain has a threshold
+    # (without one it logs nothing).
+    assert "shared_preload_libraries=pg_stat_statements,auto_explain" in postgres["command"]
+    assert "auto_explain.log_min_duration=1s" in postgres["command"]
     assert any("/etc/pgbackrest/pgbackrest.conf" in item for item in postgres["volumes"])
     assert any("/etc/pgbackrest/conf.d" in item for item in postgres["volumes"])
     assert any("/var/spool/pgbackrest" in item for item in postgres["volumes"])
