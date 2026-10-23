@@ -86,7 +86,7 @@ async def test_funding_book_parses_with_both_sides(rest: BitfinexREST, symbol: s
     assert asks and bids, "the book lost a side: AMOUNT's sign no longer says ask or bid"
     for lv in levels:
         assert 0 < lv.rate <= MAX_DAILY_RATE
-        assert lv.period in PERIODS
+        assert lv.rate in PERIODS
         assert lv.count >= 1
 
 
