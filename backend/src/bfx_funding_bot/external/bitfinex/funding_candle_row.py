@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -8,12 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 def _to_decimal(value: float | int | str | Decimal | None) -> Decimal | None:
     if value is None:
         return None
-    try:
-        return Decimal(str(value))
-    except InvalidOperation as exc:
-        # A ValueError, which BitfinexREST turns into BitfinexShapeError; InvalidOperation
-        # is an ArithmeticError and would pass through it.
-        raise ValueError(f"not a decimal: {value!r}") from exc
+    return Decimal(str(value))
 
 
 class FundingCandle(BaseModel):

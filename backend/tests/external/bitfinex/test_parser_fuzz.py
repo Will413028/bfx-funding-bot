@@ -44,7 +44,7 @@ from bfx_funding_bot.external.bitfinex.observations import (
     parse_offer_observations,
     parse_wallet_observations,
 )
-from bfx_funding_bot.external.bitfinex.rest import FundingTrade
+from bfx_funding_bot.external.bitfinex.rest import ROW_CONVERSION_ERRORS, FundingTrade
 from bfx_funding_bot.external.bitfinex.submit_wire import venue_error
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
 
@@ -99,8 +99,8 @@ def test_row_parsers_raise_only_shape_errors(parse: Callable[[Any], object], raw
         parse(raw)
 
 
-# BitfinexREST wraps ValueError and TypeError from the candle and stat rows.
-_CLIENT_WRAPS = (ValueError, TypeError)
+# What BitfinexREST turns into BitfinexShapeError from the candle and stat rows.
+_CLIENT_WRAPS = ROW_CONVERSION_ERRORS
 
 
 def _candle(raw: Any) -> object:
@@ -154,14 +154,17 @@ FORMER_DEFECTS = [
                  id="F41-public_funding_trade"),
     pytest.param(FundingBookLevel.from_bitfinex, [None, None, None, None], BitfinexShapeError,
                  id="F41-public_funding_book_level"),
-    pytest.param(_candle, [1, "x", 1, 1, 1, 1], ValueError, id="F42-public_candle"),
-    pytest.param(_stat, [1, 0, 0, "x", 0, 0, 0, 0, 0, 0, 0, 0], ValueError, id="F42-public_stat"),
+    pytest.param(_candle, [1, "x", 1, 1, 1, 1], ROW_CONVERSION_ERRORS, id="F42-public_candle"),
+    pytest.param(_stat, [1, 0, 0, "x", 0, 0, 0, 0, 0, 0, 0, 0], ROW_CONVERSION_ERRORS,
+                 id="F42-public_stat"),
+    pytest.param(_stat, [INF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ROW_CONVERSION_ERRORS,
+                 id="F42-public_stat_inf_mts"),
 ]
 
 
 @pytest.mark.parametrize(("parse", "raw", "defined"), FORMER_DEFECTS)
 def test_former_defect_raises_its_defined_error(
-    parse: Callable[[Any], object], raw: Any, defined: type[Exception],
+    parse: Callable[[Any], object], raw: Any, defined: type[Exception] | tuple[type[Exception], ...],
 ) -> None:
     with pytest.raises(defined):
         parse(raw)
