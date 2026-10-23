@@ -10,6 +10,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 import time
 from collections.abc import Mapping
@@ -188,7 +189,7 @@ def test_load_config_reads_the_two_keys_and_the_root_only_token(tmp_path: Path) 
     config = site.load_config(tmp_path, secret_check=lambda p: checked.append(p.name))
     assert config == CONFIG
     assert checked == ["public-site.env", "CLOUDFLARE_API_TOKEN"]
-    assert TOKEN not in repr(site.Config.__dataclass_fields__)
+    assert TOKEN not in repr(config) and TOKEN not in str(config)
 
 
 def test_load_config_refuses_a_missing_key(tmp_path: Path) -> None:
@@ -199,3 +200,69 @@ def test_load_config_refuses_a_missing_key(tmp_path: Path) -> None:
     with pytest.raises(site.DeployError) as caught:
         site.load_config(tmp_path, secret_check=lambda _: None)
     assert caught.value.code == "env_key_missing:public-site.env:BFX_PAGES_PROJECT"
+
+
+def test_collect_refuses_an_oversized_file_and_a_fifo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    out = _build(tmp_path)
+    monkeypatch.setattr(site, "MAX_FILE_BYTES", 4)
+    with pytest.raises(site.PublishError) as caught:
+        site.collect(out, now=time.time())
+    assert caught.value.code.startswith("site_file_too_large:")
+    monkeypatch.undo()
+    (out / "_headers").unlink()
+    os.mkfifo(out / "_headers")
+    with pytest.raises(site.PublishError) as caught:
+        site.collect(out, now=time.time())
+    assert caught.value.code == "site_not_regular:_headers"
+
+
+def test_collect_refuses_a_build_without_a_readable_build_time(tmp_path: Path) -> None:
+    out = _build(tmp_path)
+    (out / "proof-summary.json").write_text('{"weeks": []}')
+    with pytest.raises(site.PublishError) as caught:
+        site.collect(out, now=time.time())
+    assert caught.value.code == "site_build_time_unreadable"
+
+
+def test_main_refuses_to_run_unprivileged(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(site.os, "geteuid", lambda: 1000)
+    assert site.main([]) == 2
+
+
+def _configured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setattr(site.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(site.bfx_deploy, "protected_secret_file", lambda _: None)
+    runtime = tmp_path / "runtime"
+    (runtime / site.TOKEN_FILE).parent.mkdir(parents=True)
+    (runtime / "public-site.env").write_text("BFX_PAGES_ACCOUNT_ID=acc\nBFX_PAGES_PROJECT=borrowrate\n")
+    (runtime / site.TOKEN_FILE).write_text(TOKEN)
+    return runtime
+
+
+def test_main_dry_run_sends_nothing_and_prints_no_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = _configured(tmp_path, monkeypatch)
+    monkeypatch.setattr(site, "urllib_transport", lambda *a: pytest.fail("dry run sent a request"))
+    assert site.main(["--site-dir", str(_build(tmp_path)), "--runtime-dir", str(runtime), "--dry-run"]) == 0
+    out = capsys.readouterr()
+    assert set(json.loads(out.out)["files"]) == set(site.SITE_FILES)
+    assert TOKEN not in out.out + out.err
+
+
+@pytest.mark.parametrize("serves_new, code", [(True, 0), (False, 1)])
+def test_main_exits_zero_only_once_pages_serves_the_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    serves_new: bool, code: int,
+) -> None:
+    runtime = _configured(tmp_path, monkeypatch)
+    out = _build(tmp_path)
+    pages = FakePages(serves={"proof-summary.json": (out / "proof-summary.json").read_bytes()
+                              if serves_new else b"old"})
+    monkeypatch.setattr(site, "urllib_transport", pages)
+    monkeypatch.setattr(site, "VERIFY_SECONDS", 0)
+    monkeypatch.setattr(site.time, "sleep", lambda _: None)
+    assert site.main(["--site-dir", str(out), "--runtime-dir", str(runtime)]) == code
+    assert pages.calls("deployments")
+    err = capsys.readouterr().err
+    assert TOKEN not in err and JWT not in err

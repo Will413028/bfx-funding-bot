@@ -44,14 +44,15 @@ import hashlib
 import importlib.util
 import json
 import os
+import stat
 import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 
@@ -119,6 +120,22 @@ class Asset:
         return hashlib.sha256((self.b64 + self.extension).encode()).hexdigest()[:32]
 
 
+def _read_regular(path: Path, relative: str) -> bytes:
+    """Read through the descriptor that was checked: uid 1000 owns the reports dir, so a
+    path swapped for a symlink between a check and an open must not reach a root-only file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        raise PublishError(f"site_symlink:{relative}") from None
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise PublishError(f"site_not_regular:{relative}")
+        if info.st_size > MAX_FILE_BYTES:
+            raise PublishError(f"site_file_too_large:{relative}")
+        return stream.read(MAX_FILE_BYTES + 1)
+
+
 def collect(site_dir: Path, *, now: float) -> dict[str, bytes]:
     """The build, by published path; refuses anything but a fresh, exact SITE_FILES."""
     if site_dir.is_symlink() or not site_dir.is_dir():
@@ -128,13 +145,8 @@ def collect(site_dir: Path, *, now: float) -> dict[str, bytes]:
         relative = path.relative_to(site_dir).as_posix()
         if path.is_symlink():
             raise PublishError(f"site_symlink:{relative}")
-        if path.is_dir():
-            continue
-        if not path.is_file():
-            raise PublishError(f"site_not_regular:{relative}")
-        if path.stat().st_size > MAX_FILE_BYTES:
-            raise PublishError(f"site_file_too_large:{relative}")
-        found[relative] = path.read_bytes()
+        if not path.is_dir():
+            found[relative] = _read_regular(path, relative)
     if set(found) != set(SITE_FILES):
         extra = sorted(set(found) - set(SITE_FILES))
         missing = sorted(set(SITE_FILES) - set(found))
@@ -152,7 +164,7 @@ def collect(site_dir: Path, *, now: float) -> dict[str, bytes]:
 class Config:
     account_id: str
     project: str
-    token: str  # never logged or printed
+    token: str = field(repr=False)  # never logged or printed
 
     @property
     def site_url(self) -> str:
@@ -253,10 +265,11 @@ def publish(files: Mapping[str, bytes], config: Config, *, transport: Transport)
 
 
 def verify(files: Mapping[str, bytes], config: Config, *, transport: Transport,
-           sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic,
-           timeout: float = VERIFY_SECONDS) -> None:
+           sleep: Callable[[float], None] | None = None, clock: Callable[[], float] = time.monotonic,
+           timeout: float | None = None) -> None:
     """Production serves the uploaded proof-summary.json, and the page carries the CSP."""
-    deadline = clock() + timeout
+    sleep = sleep or time.sleep
+    deadline = clock() + (VERIFY_SECONDS if timeout is None else timeout)
     want = hashlib.sha256(files["proof-summary.json"]).hexdigest()
     while True:
         status, body, _ = transport("GET", f"{config.site_url}/proof-summary.json?v={uuid.uuid4().hex}",

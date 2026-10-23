@@ -207,7 +207,7 @@ def test_the_public_site_uploads_after_a_successful_weekly_chain() -> None:
     assert "User" not in unit["Service"]  # the token is root 0600
     assert "Install" not in unit  # never on a schedule of its own
     compose = (ROOT / "deploy/vm/ops/docker-compose.weekly-report.yml").read_text()
-    assert "python -m scripts.build_public_site --out /reports/public-site" in compose
+    assert "timeout 300 python -m scripts.build_public_site --out /reports/public-site" in compose
 
 
 def test_the_wrappers_default_paths_are_what_the_backup_check_watches(monkeypatch) -> None:

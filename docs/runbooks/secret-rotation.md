@@ -187,10 +187,15 @@ BotFather 的 `/revoke` 會讓舊 token 立刻失效，所以兩條告警路徑�
 
 1. Cloudflare dashboard → My Profile → API Tokens → Create Custom Token：Account → Cloudflare Pages → Edit，
    Account Resources 只選這個帳戶，Client IP Address Filtering 填 VM 的出口 IP（`curl -4 ifconfig.me`）。
-2. 在 VM 寫入（貼上新 token、按 Enter，不回顯）：
+2. 在 VM 用「通用寫法」的範本，把 `V=$(openssl rand ...)` 與最後的 `swap` 換成下面幾行；跑到 `read` 時貼上新 token、按 Enter（不回顯）。
+   第一次（新主機）的 `install -d` 與 `public-site.env` 兩行也照做，之後輪替時已存在、不影響：
 
    ```bash
-   sudo sh -c 'umask 077; IFS= read -rs V < /dev/tty; [ -n "$V" ] || exit 1; printf "%s" "$V" > /opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN'
+   install -d -m 0700 -o root -g root /opt/bfx/runtime/secrets/public-site
+   [ -e /opt/bfx/runtime/public-site.env ] || printf 'BFX_PAGES_ACCOUNT_ID=<帳戶 id>\nBFX_PAGES_PROJECT=borrowrate\n' > /opt/bfx/runtime/public-site.env
+   IFS= read -rs V < /dev/tty
+   [ -n "$V" ] || { echo "STOP: empty token" >&2; exit 1; }
+   swap /opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN root:root 0600 printf '%s' "$V"
    ```
 
 3. 驗證：`sudo systemctl start bfx-public-site.service`，journal 最後一行是 `published 6 files`

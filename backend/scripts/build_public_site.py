@@ -6,6 +6,11 @@ research role, renders modules/live_validation/public_site.py, and swaps the res
 into --out whole, so the uploader (bfx_public_site.py, bfx-public-site.service) never
 sees half a build. Uploading is not this script's job: it holds no Cloudflare token.
 
+The published account is the one the weekly chain measures (BFX_EXCHANGE_ACCOUNT_ID
+from research.env; the runner refuses to start without it). The retired webapi
+endpoint had its own BFX_PUBLIC_EXCHANGE_ACCOUNT_ID because the webapi serves every
+account; attribution_weekly is computed for this one only.
+
 Run from backend/ (env: DATABASE_URL / BFX_EXCHANGE_ACCOUNT_ID / BFX_DEPLOYMENT_ENV):
   uv run python -m scripts.build_public_site --out /reports/public-site
 """

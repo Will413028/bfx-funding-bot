@@ -80,7 +80,7 @@ services:
         python -m scripts.report_delivery_metrics --out "/reports/$$(date +%F)-delivery-metrics.md" || echo "WARN report_delivery_metrics failed (non-blocking)"
         # Public proof site (ADR 2026-08-31 D6): the files only; bfx-public-site.service
         # uploads them after this unit succeeds and refuses a build that did not happen.
-        python -m scripts.build_public_site --out /reports/public-site || echo "WARN build_public_site failed (non-blocking; the upload refuses the stale build and alerts)"
+        timeout 300 python -m scripts.build_public_site --out /reports/public-site || echo "WARN build_public_site failed (non-blocking; the upload refuses the stale build and alerts)"
         # ── research re-validation (Proposal E, 2026-09-22): runs AFTER the operational
         # report, every step fail-soft, nothing here promotes anything. Budget: see
         # deploy/vm/systemd/bfx-weekly-report.service TimeoutStartSec.
