@@ -252,6 +252,7 @@ def _success_with_offer_id(offer_id: Any) -> list[Any]:
     pytest.param("42", "42", id="digit_string"),
     pytest.param(" 42 ", "42", id="padded_digit_string"),
     pytest.param("0042", "0042", id="digit_string_kept_as_sent"),
+    pytest.param("9" * 5000, "9" * 5000, id="longer_than_int_parses"),
 ])
 def test_success_acknowledges_an_integer_offer_id(offer_id: Any, expected: str) -> None:
     outcome = classify_submit_response(
@@ -268,6 +269,8 @@ def test_success_acknowledges_an_integer_offer_id(offer_id: Any, expected: str) 
     pytest.param(42.0, id="float"),
     pytest.param(0, id="zero"),
     pytest.param(-5, id="negative"),
+    pytest.param("0", id="zero_string"),
+    pytest.param("00", id="zeros_string"),
     pytest.param("abc", id="text"),
     pytest.param("4 2", id="spaced"),
     pytest.param("٤٢", id="non_ascii_digits"),

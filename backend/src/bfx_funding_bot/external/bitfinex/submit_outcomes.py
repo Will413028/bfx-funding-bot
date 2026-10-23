@@ -409,8 +409,11 @@ def _venue_offer_id(body: Any) -> str | None:
         return str(value) if value > 0 else None
     if isinstance(value, str):
         digits = value.strip()
-        # isascii: str.isdigit also accepts other scripts' digits ("٤٢").
-        return digits if digits.isascii() and digits.isdigit() else None
+        # isascii: str.isdigit also accepts other scripts' digits ("٤٢"). lstrip, not
+        # int(): "0" and "00" are not ids, and int() refuses strings past 4300 digits.
+        if digits.isascii() and digits.isdigit() and digits.lstrip("0"):
+            return digits
+        return None
     return None
 
 
