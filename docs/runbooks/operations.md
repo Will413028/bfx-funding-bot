@@ -204,16 +204,17 @@ sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
 
 ## 6. 告警
 
-兩條 Telegram 路徑，**用同一組 bot token 與 chat id**：
+三條 Telegram 路徑，**用同一組 bot token 與 chat id**：
 
 | 來源 | 設定檔 | 內容 |
 |---|---|---|
 | bot 內的 sink（`observability/alerts.py`，非阻塞） | 秘密檔 `/opt/bfx/runtime/secrets/bot/TELEGRAM_BOT_TOKEN` 與 `bot.env` 的 `TELEGRAM_CHAT_ID` | 交易狀態轉換、自動保護、kill 結果、恢復結果、幣別啟停結果（`capital_policy_request_*`）、憑證輪替結果（`credential_rotation_*`）、key 重查持續失敗（`credential_recheck_failing`）、`foreign_exposure`、`foreign_lending`、`unknown_quarantine_aged`、`nav_drop`、`venue_offers_may_remain` |
 | host 工具 `bfx-notify` | `/opt/bfx/runtime/notify.env`（同樣兩個 key） | bfx-deploy 結果、bfx-backup-check（RPO>300s、evidence 超過 15 分鐘、restore heartbeat 超過 35 天、磁碟 ≥95% 為 critical；restore timer 停用、weekly report 超過 8 天沒成功、磁碟 ≥85% 為 warning）、`bfx-alert@` 的 unit 失敗（pgBackRest 備份、restore test） |
+| GitHub Actions `venue-contract.yml` 的 `notify` job | repository secrets `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` | 每日 Bitfinex 公開 endpoint 合約檢查失敗（§8） |
 
 - 兩個都空 → bot 只記 log（開機時會說一次）；`bfx-notify` 永遠 exit 0，送不出去只記 journal。
-- **換 token 或 chat id 兩條路徑都要改**：改 `notify.env` 立即生效；bot 這一側改完後要
-  `sudo bfx-deploy --recreate`（§7）。換 token 的步驟見 [secret-rotation](secret-rotation.md#telegram-bot-token)。
+- **換 token 或 chat id 三條路徑都要改**：改 `notify.env` 立即生效；bot 這一側改完後要
+  `sudo bfx-deploy --recreate`（§7）；GitHub 那一側用 `gh secret set`，下一次排程生效。換 token 的步驟見 [secret-rotation](secret-rotation.md#telegram-bot-token)。
 - **為什麼是兩條、兩份檔**（design review #14，刻意保留）：兩條路徑在容器／主機的邊界兩側，
   各自要在對方掛掉時還能發出告警——bot 死掉或起不來時由主機的 bfx-deploy／`bfx-alert@` 通報，
   主機 timer 停擺時交易事件仍由 bot 自己通報；合成一條就會讓其中一邊失去告警。token 分兩份檔是
@@ -557,6 +558,8 @@ sudo bfx-deploy --recreate
 | `bfx-weekly-report.timer` | 每週一 04:17 UTC | 每週量測鏈：attribution／realized interest／G3 報告＋研究重驗（見下方「每週報告」；`OnFailure=bfx-alert@`） |
 
 `systemctl list-timers 'bfx-*'` 看實際啟用狀態。
+
+VM 之外還有一項每日檢查：GitHub Actions 的 `venue-contract.yml`（08:37 Asia/Taipei）用 bot 的 parser 打 Bitfinex 公開 endpoint（candles、funding stats、book、trades、UST/USD FX），回應的欄位或數值範圍不符就由 `notify` job 送 Telegram。收到時先看 run 的 pytest 輸出：是 Bitfinex 改了格式就修 `external/bitfinex` 的 parser，是暫時性的 5xx／429 就重跑（`gh run rerun <id>`）。成功不送訊息；GitHub 在 repo 60 天沒有 commit 時會停掉排程，屆時到 Actions 頁重新啟用。
 
 ### 每週報告（`bfx-weekly-report`）
 
