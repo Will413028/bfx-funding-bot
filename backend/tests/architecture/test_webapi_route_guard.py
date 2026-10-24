@@ -25,10 +25,12 @@ from bfx_funding_bot.modules.api.ingress import API_FALLBACK_PATH, FE_EVENTS_PAT
 PUBLIC_API_PATHS: frozenset[str] = frozenset()
 PROBE_PATHS = frozenset({"/health", "/ready"})
 # The ingress's own routes (9d-5): `/` redirects to the UI, /fe-events forwards browser
-# Sentry events (operator-only since the 2026-10-24 ASVS V2.4.1 fix, through its own rate
-# limit dependency), the API fallback answers an unknown /api path with a JSON 404; the
-# ingress middleware's same-origin check guards the writes.
+# Sentry events, the API fallback answers an unknown /api path with a JSON 404; the
+# ingress middleware's same-origin check guards the writes. /fe-events is operator-only
+# (2026-10-24, ASVS V2.4.1: through its own rate limit dependency); the other two need no
+# caller.
 INGRESS_PATHS = frozenset({"/", FE_EVENTS_PATH, API_FALLBACK_PATH})
+UNAUTHED_INGRESS_PATHS = INGRESS_PATHS - {FE_EVENTS_PATH}
 # The static export's mount (present only where the image ships it); generated docs are off.
 UI_MOUNT = "/"
 DOCS_PATHS = frozenset({"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"})
@@ -82,10 +84,11 @@ def test_public_routes_exist_and_carry_no_auth() -> None:
     by_path = {route.path: route for route in _api_routes(app)}
     assert by_path.keys() >= PUBLIC_API_PATHS | PROBE_PATHS | INGRESS_PATHS
     authed = sorted(
-        path for path in PUBLIC_API_PATHS | PROBE_PATHS | INGRESS_PATHS
+        path for path in PUBLIC_API_PATHS | PROBE_PATHS | UNAUTHED_INGRESS_PATHS
         if set(_calls(by_path[path].dependant)) & set(_AUTH_DEPENDENCIES)
     )
     assert authed == []
+    assert require_operator in set(_calls(by_path[FE_EVENTS_PATH].dependant))
     # The proof page and CSVs left the webapi for Cloudflare Pages (9b-2).
     assert not [path for path in by_path if path.startswith("/api/v1/public")]
 
