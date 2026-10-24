@@ -16,11 +16,13 @@ ENV NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN \
     NEXT_TELEMETRY_DISABLED=1
 RUN pnpm build && test -f out/en/overview/index.html
 
-FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f AS base
+# The builder: the compiler and uv exist only here. The runtime stage below copies the
+# finished virtualenv and the code, so the production image carries neither
+# (ASVS V15.2.3). Both stages use the same base, so the venv's interpreter path
+# (/usr/local/bin/python3.13) exists in the runtime too.
+FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f AS build
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
+ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/app/.venv
@@ -35,6 +37,20 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+# The project installs editable: the venv points at /app/src, which the runtime stage
+# copies to the same path.
+COPY src/ ./src/
+RUN uv sync --frozen --no-dev
+
+FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+COPY --from=build /app/.venv/ ./.venv/
+COPY pyproject.toml uv.lock ./
 COPY src/ ./src/
 COPY alembic/ ./alembic/
 COPY alembic.ini ./
@@ -42,14 +58,12 @@ COPY configs/ ./configs/
 COPY scripts/ ./scripts/
 COPY --from=ui /ui/out/ ./static/
 
-RUN uv sync --frozen --no-dev
-
 RUN useradd -m -u 1000 appuser && chmod -R go-w /app /usr/local
 USER appuser
 
 # GIT_SHA → BFX_SERVICE_VERSION: build arg surfaces the deployed commit as
 # the EventResource service.version envelope field. Declared here (late) so a
-# per-commit SHA change doesn't invalidate the apt / uv sync layer cache.
+# per-commit SHA change doesn't invalidate the cached layers above.
 # .github/workflows/release.yml passes GIT_SHA=<the CI run's head_sha>.
 ARG GIT_SHA=unknown
 
