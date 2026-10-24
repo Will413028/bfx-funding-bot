@@ -211,9 +211,12 @@ def test_the_public_site_builds_as_root_and_uploads_as_a_dynamic_user() -> None:
     assert unit.one("Service", "ExecStart") == f"{OPS_PYTHON} {OPS}/bfx_public_site.py publish"
     assert unit.one("Service", "DynamicUser") == "yes" and "User" not in service
     assert unit.one("Service", "RuntimeDirectory") == "bfx-public-site"
-    assert unit.one("Service", "LoadCredential") == (
-        "cloudflare-api-token:/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN")
-    assert unit.one("Service", "EnvironmentFile") == "/opt/bfx/runtime/public-site.env"
+    assert unit.one("Service", "RuntimeDirectoryMode") == "0700"  # no other host user reaches build/
+    assert service["LoadCredential"] == [
+        "cloudflare-api-token:/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN",
+        "public-site-env:/opt/bfx/runtime/public-site.env"]
+    assert "EnvironmentFile" not in service  # it would reach the root ExecStartPre=+ too
+    assert unit.one("Service", "TimeoutStartSec") == "1200"
     assert unit.one("Unit", "Requires") == "docker.service"
     assert "Install" not in unit  # started by its timer
     timer = _unit("bfx-public-site.timer")

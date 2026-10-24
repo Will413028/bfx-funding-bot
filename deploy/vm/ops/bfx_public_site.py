@@ -17,10 +17,10 @@ or by hand) runs this file twice, as two users:
   1. the build: exactly SITE_FILES (the list in modules/live_validation/public_site.py;
      tests keep the two equal), regular files only, no symlink anywhere (uid 1000 owns
      the directory), each under Pages' 25 MiB limit;
-  2. the config: BFX_PAGES_ACCOUNT_ID and BFX_PAGES_PROJECT from the environment
-     (EnvironmentFile=/opt/bfx/runtime/public-site.env), the token from
-     $CREDENTIALS_DIRECTORY/cloudflare-api-token (LoadCredential= of
-     /opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN). The token is an
+  2. the config, both as LoadCredential= files in $CREDENTIALS_DIRECTORY:
+     public-site-env (/opt/bfx/runtime/public-site.env: BFX_PAGES_ACCOUNT_ID,
+     BFX_PAGES_PROJECT) and cloudflare-api-token
+     (/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN). The token is an
      account-scoped "Pages Write" token limited to the VM's egress IP: Cloudflare has
      no per-project Pages permission;
   3. Pages Direct Upload (the API wrangler uses): an upload JWT, the assets Pages
@@ -37,9 +37,8 @@ exits 1 and the unit's OnFailure=bfx-alert@ sends the Telegram message. Errors n
 a step and an HTTP status or Cloudflare error code; the token and the upload JWT are
 never logged.
 
-`publish --dry-run` checks the build and the config and prints the plan (paths,
-sizes, keys); it sends nothing. `build` has no dry run: its directory exists only
-while the unit runs (`bfx_weekly_report.py --dry-run` shows the same plan).
+Neither step has a dry run: the build directory and the credentials exist only while
+the unit runs (`bfx_weekly_report.py --dry-run` shows the image and env the build uses).
 """
 
 from __future__ import annotations
@@ -95,7 +94,8 @@ SERVICE = "public-site-build"
 CONFIG_FILE = "public-site.env"
 CONFIG_KEYS = ("BFX_PAGES_ACCOUNT_ID", "BFX_PAGES_PROJECT")
 TOKEN_FILE = Path("secrets/public-site/CLOUDFLARE_API_TOKEN")
-CREDENTIAL = "cloudflare-api-token"  # the unit's LoadCredential= name
+CREDENTIAL = "cloudflare-api-token"  # the unit's LoadCredential= names
+CONFIG_CREDENTIAL = "public-site-env"
 API = "https://api.cloudflare.com/client/v4"
 MAX_FILE_BYTES = 25 * 1024 * 1024
 VERIFY_SECONDS = 120
@@ -211,25 +211,28 @@ def check_secret_files(runtime_dir: Path, *, secret_check: Callable[[Path], None
 
 
 def load_config(environ: Mapping[str, str]) -> Config:
-    """The unprivileged publish step's config: the unit's environment and credential."""
-    missing = [key for key in CONFIG_KEYS if not environ.get(key, "").strip()]
-    if missing:
-        raise DeployError(f"env_key_missing:{CONFIG_FILE}:{','.join(missing)}")
+    """The unprivileged publish step's config: the unit's two credentials."""
     credentials = environ.get("CREDENTIALS_DIRECTORY", "")
     if not credentials:
         raise DeployError("credential_missing")
     try:
+        values = bfx_deploy.parse_env_file(
+            (Path(credentials) / CONFIG_CREDENTIAL).read_text(encoding="utf-8"),
+            name=CONFIG_FILE, compose=False)
         token = (Path(credentials) / CREDENTIAL).read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
         raise DeployError("credential_unreadable") from None
+    missing = [key for key in CONFIG_KEYS if not values.get(key, "").strip()]
+    if missing:
+        raise DeployError(f"env_key_missing:{CONFIG_FILE}:{','.join(missing)}")
     if not token:
         raise DeployError("token_empty")
-    return Config(environ["BFX_PAGES_ACCOUNT_ID"].strip(), environ["BFX_PAGES_PROJECT"].strip(), token)
+    return Config(values["BFX_PAGES_ACCOUNT_ID"].strip(), values["BFX_PAGES_PROJECT"].strip(), token)
 
 
 def prepare_build_dir(build_dir: Path, *, uid: int = BUILD_UID) -> None:
     """The container's only writable host path: empty, owned by its uid, readable by the
-    publish step. The RuntimeDirectory is new for every run, so an existing one is refused."""
+    publish step (the 0700 RuntimeDirectory above it keeps other host users out). The RuntimeDirectory is new for every run, so an existing one is refused."""
     try:
         build_dir.mkdir(mode=0o755)
         os.chown(build_dir, uid, uid)
@@ -379,11 +382,6 @@ def run_publish(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
     except (PublishError, DeployError) as exc:
         log(f"cannot publish: {exc.code}")
         return 1
-    if args.dry_run:
-        print(json.dumps({"project": config.project, "site_url": config.site_url,
-                          "files": {path: {"bytes": len(body), "key": Asset(path, body).key}
-                                    for path, body in files.items()}}, indent=2))
-        return 0
     try:
         deployment_id = publish(files, config, transport=urllib_transport)
         log(f"deployment {deployment_id} created; checking {config.site_url}")
@@ -409,8 +407,6 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--db-name", default=defaults.db_name)
     publish_step = steps.add_parser("publish", help="unprivileged: upload the build and check it")
     publish_step.add_argument("--site-dir", type=Path, default=SITE_DIR)
-    publish_step.add_argument("--dry-run", action="store_true",
-                              help="check the build and the config, print the plan; send nothing")
     args = parser.parse_args(argv)
     if args.step == "build":
         return run_build(args)

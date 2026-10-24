@@ -622,14 +622,18 @@ sudo systemctl disable --now bfx-weekly-report.timer   # 暫停
   `funding-rates-fUSD.csv` 與 `_headers` 寫進這次執行專用的 `/run/bfx-public-site/build/site`（unit 結束時 systemd 刪掉整個目錄）。
   容器沒有 Cloudflare token；讀不到任一幣別的 candle 或任何錯誤都讓 unit 失敗，不會上傳。
 - 上傳（`ExecStart=`，systemd 的 `DynamicUser`，不是 root、碰不到 DB 與 docker）：token 以 `LoadCredential=` 交給它，
-  帳戶與專案來自 `EnvironmentFile=`。只接受剛好這六個檔、沒有 symlink；上傳後等到 Pages 實際送出同一份
+  帳戶與專案（`public-site.env`）也以 credential 交給它，不用 `EnvironmentFile=`（那會連 root 步驟一起套用）。只接受剛好這六個檔、沒有 symlink；上傳後等到 Pages 實際送出同一份
   `proof-summary.json` 且首頁帶 CSP 才算成功。設定見 [secret-rotation](secret-rotation.md#cloudflare-pages-token公開站)。
 - 排程：`bfx-public-site.timer` 由 operator 安裝與啟用（不在 `managed-units`，理由同 `bfx-weekly-report.timer`）。
+  2026-10-24 以前裝好的主機（公開站原本接在每週報告的 `OnSuccess=` 後面），部署這版之後要做一次：
+  `sudo install -m 0644 /usr/local/lib/bfx-ops/current/systemd/bfx-public-site.timer /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now bfx-public-site.timer`，
+  否則不會再有任何東西啟動它，要等每日外部檢查在 9 天後才發現。
   它不等每週報告：每週報告晚了或失敗時照樣發布上一週的資料，每日外部檢查在最新一週超過 15 天時告警。
 - 收到 `bfx-public-site.service` 失敗告警：看 `journalctl -u bfx-public-site.service -n 50`，錯誤碼說明在哪一步：
-  `cannot build:` 開頭的是產生前的檢查（`secret_file_*` 是兩個設定檔的權限、`no_deployed_release`／`env_key_missing` 同每週報告），
+  `Failed to set up credentials`（exit 243/CREDENTIALS）或 `Failed to load environment files` 是 systemd 在跑任何一步之前就找不到
+  token 檔或 `public-site.env`；`cannot build:` 開頭的是產生前的檢查（`secret_file_*` 是兩個設定檔的權限、`no_deployed_release`／`env_key_missing` 同每週報告），
   `build failed with exit code` 是容器本身失敗（上面幾行是它的 traceback）；`site_files_mismatch`／`site_symlink`／`site_not_regular`／`site_unreadable`
-  表示 build 目錄裡的檔案不是預期的六個，先看 build 的輸出，不要直接重跑；`credential_*` 是 unit 沒交出 token（檔案不見了？）；
+  表示 build 目錄裡的檔案不是預期的六個，先看 build 的輸出，不要直接重跑；`credential_*` 是上傳步驟讀不到 credential（通常是手動在 unit 外執行）；
   `*_failed:http_403` 多半是 token 被撤銷或 VM 換了出口 IP；`verify_failed` 是 Pages 沒在 120 秒內送出新版，先重跑一次。
   重跑：`sudo systemctl start bfx-public-site.service`。
 - 只看要跑什麼：`sudo /usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_weekly_report.py --dry-run`

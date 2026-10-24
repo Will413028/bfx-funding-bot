@@ -271,6 +271,15 @@ def test_the_public_site_build_file_gets_the_same_policy_with_its_own_mount() ->
     broken["services"]["public-site-build"]["volumes"][0]["source"] = "/home/ubuntu/bfx/reports"
     bad = subprocess.run(argv, input=json.dumps(broken), capture_output=True, text=True, check=False)
     assert bad.returncode == 1 and "public-site-build:reports_mount" in bad.stderr
+    # An allowlist: a secret, a config or another container's volumes never pass.
+    sneaky = json.loads(result.stdout)
+    sneaky["secrets"] = {"t": {"file": "/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN"}}
+    sneaky["services"]["public-site-build"]["secrets"] = [{"source": "t", "target": "/run/secrets/t"}]
+    sneaky["services"]["public-site-build"]["volumes_from"] = ["container:bfx-postgres"]
+    found = policy.weekly_violations(sneaky, project="bfx-public-site", service="public-site-build",
+                                     mount=policy.PUBLIC_SITE_OUT)
+    assert {"top_level_key:secrets", "public-site-build:unexpected_key:secrets",
+            "public-site-build:unexpected_key:volumes_from"} <= set(found)
     assert "--kind public-site" in (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
 

@@ -92,7 +92,8 @@ def test_the_publish_step_reads_the_directory_the_build_container_writes() -> No
     unit = (ROOT / "deploy/vm/systemd/bfx-public-site.service").read_text()
     assert f"RuntimeDirectory={site.BUILD_DIR.parent.name}\n" in unit
     assert f"LoadCredential={site.CREDENTIAL}:/opt/bfx/runtime/{site.TOKEN_FILE}\n" in unit
-    assert f"EnvironmentFile=/opt/bfx/runtime/{site.CONFIG_FILE}\n" in unit
+    assert f"LoadCredential={site.CONFIG_CREDENTIAL}:/opt/bfx/runtime/{site.CONFIG_FILE}\n" in unit
+    assert "\nEnvironmentFile=" not in unit  # it would reach the root step's interpreter too
 
 
 def test_collect_returns_exactly_the_site_files(tmp_path: Path) -> None:
@@ -205,12 +206,13 @@ def test_verify_fails_without_the_sites_csp(tmp_path: Path) -> None:
     assert caught.value.code == "verify_failed:index:http_200"
 
 
-def _credentials(tmp_path: Path, token: str = TOKEN + "\n") -> dict[str, str]:
+def _credentials(tmp_path: Path, token: str = TOKEN + "\n",
+                 config: str = "BFX_PAGES_ACCOUNT_ID=acc\nBFX_PAGES_PROJECT=borrowrate\n") -> dict[str, str]:
     credentials = tmp_path / "credentials"
     credentials.mkdir()
     (credentials / site.CREDENTIAL).write_text(token)
-    return {"BFX_PAGES_ACCOUNT_ID": "acc", "BFX_PAGES_PROJECT": "borrowrate",
-            "CREDENTIALS_DIRECTORY": str(credentials)}
+    (credentials / site.CONFIG_CREDENTIAL).write_text(config)
+    return {"CREDENTIALS_DIRECTORY": str(credentials)}
 
 
 def test_load_config_reads_the_units_environment_and_credential(tmp_path: Path) -> None:
@@ -220,7 +222,8 @@ def test_load_config_reads_the_units_environment_and_credential(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("change, code", [
-    (lambda env: env.pop("BFX_PAGES_PROJECT"), "env_key_missing:public-site.env:BFX_PAGES_PROJECT"),
+    (lambda env: (Path(env["CREDENTIALS_DIRECTORY"]) / site.CONFIG_CREDENTIAL).write_text(
+        "BFX_PAGES_ACCOUNT_ID=acc\n"), "env_key_missing:public-site.env:BFX_PAGES_PROJECT"),
     (lambda env: env.pop("CREDENTIALS_DIRECTORY"), "credential_missing"),
     (lambda env: env.update(CREDENTIALS_DIRECTORY=env["CREDENTIALS_DIRECTORY"] + "-gone"),
      "credential_unreadable"),
@@ -337,6 +340,10 @@ def test_build_runs_the_deployed_digest_with_the_weekly_jobs_env(
     assert env["BFX_BACKEND_IMAGE"].endswith("@" + str(build_host["digest"]))
     assert env["DATABASE_URL"].startswith("postgresql://bfx_research:")
     assert build_host["build_dir"].is_dir()
+    # Exactly the weekly job's keys: nothing of the unit's own environment rides along.
+    assert set(env) == set(weekly.bfx_deploy._base_env()) | {
+        *weekly.SECRET_KEYS, *weekly.LIVE_KEYS, "BFX_BACKEND_IMAGE", "BFX_BACKEND_DIGEST",
+        "BFX_SOURCE_REVISION"}
     runtime = build_host["runtime"]
     assert build_host["checked"][:2] == [runtime / "public-site.env", runtime / site.TOKEN_FILE]
     assert not any(TOKEN in value for value in env.values())
@@ -357,17 +364,6 @@ def _configured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(site.os, "geteuid", lambda: 61234)  # the unit's DynamicUser
     for key, value in _credentials(tmp_path).items():
         monkeypatch.setenv(key, value)
-
-
-def test_main_dry_run_sends_nothing_and_prints_no_token(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    _configured(tmp_path, monkeypatch)
-    monkeypatch.setattr(site, "urllib_transport", lambda *a: pytest.fail("dry run sent a request"))
-    assert site.main(["publish", "--site-dir", str(_build(tmp_path)), "--dry-run"]) == 0
-    out = capsys.readouterr()
-    assert set(json.loads(out.out)["files"]) == set(site.SITE_FILES)
-    assert TOKEN not in out.out + out.err
 
 
 @pytest.mark.parametrize("serves_new, code", [(True, 0), (False, 1)])

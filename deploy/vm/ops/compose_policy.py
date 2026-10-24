@@ -154,6 +154,12 @@ WEEKLY_REPORTS = {"type": "bind", "source": "/home/ubuntu/bfx/reports", "target"
 PUBLIC_SITE_PROJECT = "bfx-public-site"
 PUBLIC_SITE_SERVICE = "public-site-build"
 PUBLIC_SITE_OUT = {"type": "bind", "source": "/run/bfx-public-site/build", "target": "/out"}
+# An allowlist, not just the forbidden list below: secrets, configs, volumes_from,
+# group_add, runtime ... would each hand the one-shot job something it must not hold.
+WEEKLY_KEYS = frozenset({"image", "pull_policy", "entrypoint", "command", "user", "working_dir",
+                         "read_only", "tmpfs", "cap_drop", "security_opt", "restart",
+                         "environment", "volumes", "networks"})
+WEEKLY_TOP_LEVEL_KEYS = frozenset({"name", "services", "networks"})
 WEEKLY_FORBIDDEN_KEYS = (*(k for k in FORBIDDEN_KEYS if k not in ("volumes", "tmpfs")),
                          "container_name", "env_file", "ports", "healthcheck")
 OPERATOR_PROJECT = "bfx-operator"
@@ -289,7 +295,7 @@ def weekly_violations(
 ) -> list[str]:
     """The weekly-report job file (deploy/vm/ops/docker-compose.weekly-report.yml), or a
     one-shot job built the same way (the public site's build)."""
-    found = []
+    found = [f"top_level_key:{key}" for key in sorted(set(rendered) - WEEKLY_TOP_LEVEL_KEYS)]
     if rendered.get("name") != project:
         found.append("project_name")
     services = rendered.get("services") or {}
@@ -326,6 +332,8 @@ def weekly_violations(
     for key in WEEKLY_FORBIDDEN_KEYS:
         need(not spec.get(key), f"no_{key}")
     need(spec.get("tmpfs") == WEEKLY_TMPFS, "tmpfs")
+    for key in sorted(set(spec) - WEEKLY_KEYS):
+        found.append(f"{service}:unexpected_key:{key}")
     volumes = spec.get("volumes") or []
     need(len(volumes) == 1 and reports_mount_ok(volumes[0], mount), "reports_mount")
     need(set(spec.get("networks") or {}) == {NETWORK}, "network")
