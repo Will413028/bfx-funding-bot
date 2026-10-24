@@ -1039,6 +1039,18 @@ tailnet IP），加上 operator 自己 Bitfinex 帳戶的帳務資料（餘額�
 
 ---
 
+### 10g. 加密盤點（ASVS V11.1.2）
+
+每一種加密或簽章：用什麼演算法、key 在哪、保護什麼、**保護不了什麼**。輪替程序見 `docs/runbooks/secret-rotation.md`。
+
+| 用途 | 演算法 | key 與位置 | 保護 | 保護不了 |
+|---|---|---|---|---|
+| 交易所憑證落地（vault） | AES-256-GCM 信封：每筆一把 DEK 加密 secret，KEK 包住 DEK，兩層都帶帳戶 UUID 為 AAD（`core/crypto.py:53-85`） | KEK：bot 的秘密檔 `secrets/bot/BFX_VAULT_KEK`（`root:4600 0640`），webapi 拒絕持有（`apps/webapi.py:49-53`） | DB 或備份外洩時的 API secret；把密文搬到別的帳戶列（AAD 不符就解不開） | 主機 root（讀得到 KEK 檔，D14 接受「主機等同 root」）；bot 程序記憶體 |
+| 換憑證時的傳遞 | HPKE base mode：DHKEM(X25519, HKDF-SHA256)／HKDF-SHA256／ChaCha20-Poly1305，`info` 綁帳戶、環境、recipient 與 request（`core/sealed_credential.py:1-13,100-113`） | 私鑰只在這次 bot 程序的記憶體；公鑰在 `credential_rotation_recipients` | 從 operator CLI 到 bot 的路上（outbox、DB、log 都只看到密文）；重啟後舊密文永遠打不開 | operator 自己的終端機輸入；執行中的 bot 程序 |
+| Bitfinex 請求簽章 | HMAC-SHA384（`external/bitfinex/auth_ws.py:336-361`，REST 與 WS 認證） | API secret（解密後只在 bot 記憶體） | 請求的完整性與身分 | 機密性（請求內容靠 TLS）；secret 本身外洩 |
+| 異地備份 | pgBackRest `repo1-cipher-type=aes-256-cbc`，key 由 `repo1-cipher-pass` 導出（`deploy/vm/pgbackrest/pgbackrest.conf:8`） | passphrase：VM 的 `/home/ubuntu/bfx/pgbackrest/conf.d/r2.conf`，另有離線保管（`docs/runbooks/offsite-dr.md:128-129`）；新設的至少 32 字（`scripts/setup-pgbackrest-r2.sh`） | R2 上的備份內容 | 竄改偵測（CBC 沒有 AEAD；接受，靠 manifest checksum 與每月 restore test，ASVS V11.3.3 裁決）；VM 上的明文資料庫 |
+| 傳輸 | TLS：Tailscale Serve（營運入口，§10e）；R2、Bitfinex、Telegram、Sentry、Cloudflare 的 HTTPS | 各服務端的憑證；VM 不持有私鑰（Serve 的憑證由 tailscaled 管理） | 路上的竊聽與竄改 | 端點本身；VM 內部的明文連線（webapi→bot、Postgres，D14 接受） |
+
 ## 11. Related
 
 設計決策紀錄（ADR）在 `docs/adr/`；本文件只記錄現行、由程式碼驗證過的規則。ledger 取代 event sourcing 的決策與切換見 `docs/adr/2026-09-28-ledger-journal-and-venue-mirror-replace-event-sourcing.md` 及其後的 ledger ADR。

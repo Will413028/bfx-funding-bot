@@ -297,8 +297,15 @@ fi
 
 stage "Capture the repository cipher passphrase"
 say "This passphrase needs separate offline escrow; loss makes the repository unusable."
+say "A new one must be at least 32 characters; generate it with: openssl rand -base64 48"
 if ! _prompt_candidate R2_CIPHER_PASS repo1-cipher-pass "Paste the repository cipher passphrase:" true; then
   printf '%s\n' "Input ended before the candidate fragment was complete." >&2
+  exit 2
+fi
+# The key is derived from it (ASVS V11.4.4). A kept passphrase is not re-judged: the
+# repository is already encrypted with it, and changing it is a repository migration.
+if [[ "$R2_CIPHER_PASS" != "$(_existing repo1-cipher-pass || true)" ]] && (( ${#R2_CIPHER_PASS} < 32 )); then
+  printf '%s\n' "A new repository cipher passphrase must be at least 32 characters." >&2
   exit 2
 fi
 

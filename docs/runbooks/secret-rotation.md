@@ -209,7 +209,29 @@ BotFather 的 `/revoke` 會讓舊 token 立刻失效，所以兩條告警路徑�
 - 只改 VM 的 secret fragment，重跑 validator、archive check、backup preflight 與 isolated restore；
 - 新的證據通過之後，才撤銷舊 token。
 
-repository cipher 的輪替是另一個 repository migration，要保留讀舊備份需要的每一個 passphrase。
+### repository cipher passphrase（`repo1-cipher-pass`）
+
+pgBackRest 不能替既有 repository 換 passphrase：已經寫進 R2 的備份只用舊的那把打得開。所以「換」等於
+另開一個 repository 再退役舊的。以下程序寫好但**還沒演練過**，第一次照做時要邊做邊修正這一段：
+
+1. 系統維持 halt。照 [offsite-dr](offsite-dr.md) 開新的 repository（新的 `repo1-path` 或新 bucket），新 passphrase 用
+   `openssl rand -base64 48` 產生（精靈要求新的至少 32 字），先放進離線保管，再寫進 `r2.conf`。
+2. 在新 repository 跑 `stanza-create`、`check`、一次 full backup 與 isolated restore test；全部通過前不動舊的。
+3. 舊 repository 與它的 passphrase 保留到新 repository 的保留期涵蓋同樣的時間範圍（`repo1-retention-full=4` 個 full 之後），
+   期間兩把 passphrase 都在離線保管裡；之後刪除舊 repository，最後才銷毀舊 passphrase。
+
+## 秘密的持有者
+
+| 秘密 | VM 上的位置與權限 | VM 以外的副本 |
+|---|---|---|
+| bot／webapi 的秘密檔（DB 密碼、admin token、Telegram token、KEK） | `/opt/bfx/runtime/secrets/<service>/`，`root:4600 0640`（[deploy「秘密檔」](deploy.md#秘密檔botwebapi9h)） | 不保留副本，外洩或遺失就照本頁重發；KEK 遺失時舊憑證列解不開，照「Vault KEK」一節換一把新的 Bitfinex key（ADR 2026-08-31 D5'） |
+| 主機工具與一次性工作的 env 檔（`notify.env`、`research.env`、`ghcr.env`、`public-site.env`、`tailscale.env`） | `/opt/bfx/runtime/`，root 0600 | 不保留 |
+| Cloudflare Pages token | `/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN`，`root:root 0600` | 不保留（Cloudflare dashboard 可重發） |
+| R2 S3 憑證 | `/home/ubuntu/bfx/pgbackrest/conf.d/r2.conf`，`ubuntu:70 0640`（70 是容器裡的 postgres） | 不保留（R2 dashboard 可重發） |
+| `repo1-cipher-pass` | 同上 | **必須**離線保管（遺失＝備份全部打不開，`offsite-dr.md:128-129`） |
+| GitHub repository secrets（`TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID`） | 不在 VM | GitHub（與 VM 上的同一把 Telegram token） |
+
+持有者都是 Will 一人：主機 root 與 Tailscale SSH 只有他，雲端後台（GitHub、Cloudflare、Tailscale、OCI、Bitfinex）也只有他的帳號。
 
 ## Bitfinex API key
 

@@ -338,7 +338,7 @@ def _snapshot(path: Path) -> tuple[bytes, int, int, int, int]:
 
 def test_wizard_runs_from_normal_checkout_and_sets_host_group_contract(tmp_path: Path) -> None:
     env, secret_dir, secret_file, log, validator_log = _wizard_fixture(tmp_path)
-    values = ["a" * 32, "offsite-dr", "access-key", "secret-key-sentinel", "cipher-pass-sentinel"]
+    values = ["a" * 32, "offsite-dr", "access-key", "secret-key-sentinel", "cipher-pass-sentinel-0123456789ab"]
 
     completed = _run_wizard(env, values)
 
@@ -349,7 +349,7 @@ def test_wizard_runs_from_normal_checkout_and_sets_host_group_contract(tmp_path:
         "repo1-s3-bucket=offsite-dr\n"
         "repo1-s3-key=access-key\n"
         "repo1-s3-key-secret=secret-key-sentinel\n"
-        "repo1-cipher-pass=cipher-pass-sentinel\n"
+        "repo1-cipher-pass=cipher-pass-sentinel-0123456789ab\n"
     )
     assert secret_dir.stat().st_mode & 0o777 == 0o750
     assert secret_file.stat().st_mode & 0o777 == 0o640
@@ -362,7 +362,31 @@ def test_wizard_runs_from_normal_checkout_and_sets_host_group_contract(tmp_path:
     assert validator_calls.count("secret_validation.py --secret-dir") == 2
     assert f"--secret-dir {secret_dir}" in validator_calls
     assert "secret-key-sentinel" not in completed.stdout + completed.stderr
-    assert "cipher-pass-sentinel" not in completed.stdout + completed.stderr
+    assert "cipher-pass-sentinel-0123456789ab" not in completed.stdout + completed.stderr
+
+
+def test_wizard_refuses_a_short_new_cipher_passphrase(tmp_path: Path) -> None:
+    """ASVS V11.4.4: the repository key is derived from it."""
+    env, _, secret_file, _, _ = _wizard_fixture(tmp_path)
+    values = ["a" * 32, "offsite-dr", "access-key", "secret-key-sentinel", "short-cipher-pass"]
+
+    completed = _run_wizard(env, values)
+
+    assert completed.returncode == 2
+    assert "at least 32 characters" in completed.stderr
+    assert not secret_file.exists()
+    assert "short-cipher-pass" not in completed.stdout + completed.stderr
+
+
+def test_wizard_keeps_an_existing_shorter_cipher_passphrase(tmp_path: Path) -> None:
+    # The repository is already encrypted with it; changing it is a repository migration.
+    assert len("cipher-pass-old") < 32 and "repo1-cipher-pass=cipher-pass-old" in WIZARD_SECRET
+    env, _, secret_file, _, _ = _wizard_fixture(tmp_path, existing=WIZARD_SECRET)
+
+    completed = _run_wizard(env, ["", "", "", ""])
+
+    assert completed.returncode == 0, completed.stderr
+    assert "repo1-cipher-pass=cipher-pass-old" in secret_file.read_text(encoding="utf-8")
 
 
 def test_wizard_rerun_enter_keeps_all_persisted_values_and_metadata(tmp_path: Path) -> None:
@@ -395,7 +419,7 @@ def test_wizard_rejects_existing_target_directory_before_replacement(tmp_path: P
     env, _, secret_file, log, _ = _wizard_fixture(
         tmp_path, existing=WIZARD_SECRET, target_kind="directory",
     )
-    values = ["a" * 32, "offsite-dr", "access-key", "secret-key", "cipher-pass"]
+    values = ["a" * 32, "offsite-dr", "access-key", "secret-key", "cipher-pass-0123456789abcdef0123"]
 
     completed = _run_wizard(env, values)
 
