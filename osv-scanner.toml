@@ -14,6 +14,28 @@ id = "GHSA-6q48-6c7w-9gw2"
 ignoreUntil = 2026-10-27T00:00:00Z
 reason = "alias of PYSEC-2026-4320 (certifi), same deadline"
 
+# Published 2026-10-23 for fast-uri 3.1.8 (frontend/pnpm-lock.yaml, via ajv 8.20.0, build-time
+# tooling only); fix 3.1.9 was published 2026-10-19, inside the 7-day cooldown until 2026-10-26.
+[[IgnoredVulns]]
+id = "GHSA-w74x-v6f9-j3xg"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "medium (CVE-2026-110306): fast-uri 3.1.8 scheme spoofing; upgrade to 3.1.9 after 2026-10-26"
+
+[[IgnoredVulns]]
+id = "GHSA-wjr9-j795-jxcr"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "medium (CVE-2026-110180): fast-uri 3.1.8 host confusion; upgrade to 3.1.9 after 2026-10-26"
+
+[[IgnoredVulns]]
+id = "GHSA-333x-w4r6-6crp"
+ignoreUntil = 2027-04-21T00:00:00Z
+reason = "low (CVE-2026-110725): fast-uri 3.1.8 scheme injection; upgrade to 3.1.9 after 2026-10-26"
+
+[[IgnoredVulns]]
+id = "GHSA-xhq7-xmqj-769h"
+ignoreUntil = 2027-04-21T00:00:00Z
+reason = "low (CVE-2026-110095): fast-uri 3.1.8 path equivalence; upgrade to 3.1.9 after 2026-10-26"
+
 # License allowlist: the job passes --licenses (list in .github/workflows/security.yml).
 # Global list = notice licenses plus MPL-2.0, LGPL-3.0 and CC-BY-4.0. Weak copyleft
 # and attribution duties attach on distribution; the image is private and the UI
