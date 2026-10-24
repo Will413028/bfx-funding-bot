@@ -555,8 +555,8 @@ sudo bfx-deploy --recreate
 | `bfx-pgbackrest-backup.timer` / `bfx-pgbackrest-status.timer` | 見 unit | 備份與 RPO evidence（`OnFailure=bfx-alert@`） |
 | `bfx-backup-check.timer` | 每 5 分鐘（`*:1/5`） | evidence、restore heartbeat、weekly report heartbeat 與磁碟使用率檢查，連續兩次才告警，6 小時重發（見下方「主機檢查」） |
 | `bfx-restore-test.timer` | 每月 1 日 09:17 UTC | `bfx-restore-test@current`：用已部署 release 的 DR 腳本做 isolated restore ＋ ledger 驗證（與 production 比對有界 digest、唯讀 boot check；[offsite DR](offsite-dr.md#monthly-and-change-triggered-ledger-restore-test)） |
-| `bfx-weekly-report.timer` | 每週一 04:17 UTC | 每週量測鏈：attribution／realized interest／G3 報告＋公開站的檔案＋研究重驗（見下方「每週報告」；`OnFailure=bfx-alert@`） |
-| `bfx-public-site.service`（沒有 timer） | 每週報告成功後（`OnSuccess=`） | 把公開站上傳到 Cloudflare Pages 並核對（見下方「公開站」；`OnFailure=bfx-alert@`） |
+| `bfx-weekly-report.timer` | 每週一 04:17 UTC | 每週量測鏈：attribution／realized interest／G3 報告＋研究重驗（見下方「每週報告」；`OnFailure=bfx-alert@`） |
+| `bfx-public-site.timer` | 每週一 05:47 UTC | 產生公開站、上傳到 Cloudflare Pages 並核對（見下方「公開站」；`OnFailure=bfx-alert@`） |
 
 `systemctl list-timers 'bfx-*'` 看實際啟用狀態。
 
@@ -614,17 +614,26 @@ sudo systemctl disable --now bfx-weekly-report.timer   # 暫停
 公開的 proof 頁與免費利率 CSV 是 Cloudflare Pages 上的靜態檔（`https://borrowrate.pages.dev`，ADR `2026-08-31` D6）：
 網路上的人只碰得到 Pages，碰不到這台 VM。
 
-- 產生：每週報告的一步（`scripts.build_public_site`，`bfx_research`），把 `index.html`、`en/index.html`、
-  `proof-summary.json`、`funding-rates-fUST.csv`、`funding-rates-fUSD.csv` 與 `_headers` 整個換進
-  `/home/ubuntu/bfx/reports/public-site`。它沒有 Cloudflare token；讀不到任一幣別的 candle 就保留上一版、只記 WARN。
-- 上傳：`bfx-public-site.service`（root，`bfx_public_site.py`）只接受剛好這六個檔、沒有 symlink、
-  `proof-summary.json` 的 `generated_at` 在 26 小時內；上傳後等到 Pages 實際送出同一份 `proof-summary.json`
-  且首頁帶 CSP 才算成功。設定在 `public-site.env` 與 token 檔（[secret-rotation](secret-rotation.md#cloudflare-pages-token公開站)）。
+`bfx-public-site.service` 一次跑兩步，用兩個身分：
+
+- 產生（`ExecStartPre=+`，root）：先確認 `public-site.env` 與 token 檔是 root 0600，再用每週報告同一套解析
+  （已部署的 backend digest、`research.env` 的 `bfx_research`）跑一次性容器 `docker-compose.public-site.yml`
+  （`scripts.build_public_site`），把 `index.html`、`en/index.html`、`proof-summary.json`、`funding-rates-fUST.csv`、
+  `funding-rates-fUSD.csv` 與 `_headers` 寫進這次執行專用的 `/run/bfx-public-site/build/site`（unit 結束時 systemd 刪掉整個目錄）。
+  容器沒有 Cloudflare token；讀不到任一幣別的 candle 或任何錯誤都讓 unit 失敗，不會上傳。
+- 上傳（`ExecStart=`，systemd 的 `DynamicUser`，不是 root、碰不到 DB 與 docker）：token 以 `LoadCredential=` 交給它，
+  帳戶與專案來自 `EnvironmentFile=`。只接受剛好這六個檔、沒有 symlink；上傳後等到 Pages 實際送出同一份
+  `proof-summary.json` 且首頁帶 CSP 才算成功。設定見 [secret-rotation](secret-rotation.md#cloudflare-pages-token公開站)。
+- 排程：`bfx-public-site.timer` 由 operator 安裝與啟用（不在 `managed-units`，理由同 `bfx-weekly-report.timer`）。
+  它不等每週報告：每週報告晚了或失敗時照樣發布上一週的資料，每日外部檢查在最新一週超過 15 天時告警。
 - 收到 `bfx-public-site.service` 失敗告警：看 `journalctl -u bfx-public-site.service -n 50`，錯誤碼說明在哪一步：
-  `site_build_stale`／`site_files_mismatch` 是每週報告那一步沒產生（看 `bfx-weekly-report` 的 journal 裡
-  `build_public_site` 的 WARN）；`site_symlink`／`site_not_regular`／`site_unreadable` 表示 build 目錄裡出現了不是 build 寫的東西，先查是誰動了 `/home/ubuntu/bfx/reports/public-site`，不要直接重跑；`*_failed:http_403` 多半是 token 被撤銷或 VM 換了出口 IP；`verify_failed` 是
-  Pages 沒在 120 秒內送出新版，先重跑一次。重跑：`sudo systemctl start bfx-public-site.service`。
-- 預覽而不上傳：`sudo /usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_public_site.py --dry-run`。
+  `cannot build:` 開頭的是產生前的檢查（`secret_file_*` 是兩個設定檔的權限、`no_deployed_release`／`env_key_missing` 同每週報告），
+  `build failed with exit code` 是容器本身失敗（上面幾行是它的 traceback）；`site_files_mismatch`／`site_symlink`／`site_not_regular`／`site_unreadable`
+  表示 build 目錄裡的檔案不是預期的六個，先看 build 的輸出，不要直接重跑；`credential_*` 是 unit 沒交出 token（檔案不見了？）；
+  `*_failed:http_403` 多半是 token 被撤銷或 VM 換了出口 IP；`verify_failed` 是 Pages 沒在 120 秒內送出新版，先重跑一次。
+  重跑：`sudo systemctl start bfx-public-site.service`。
+- 只看要跑什麼：`sudo /usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_weekly_report.py --dry-run`
+  （公開站的 build 用同一個 image 與 env）。
 
 ### 主機檢查（`bfx-backup-check`）
 

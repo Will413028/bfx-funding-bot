@@ -1,0 +1,13 @@
+[Unit]
+Description=Weekly bfx public proof site (Mon 05:47 UTC, after the weekly chain's attribution step)
+
+[Timer]
+# The build reads attribution_weekly, which bfx-weekly-report (04:17) writes in its
+# first minutes. Not ordered after that unit: a failed or late chain still publishes
+# the previous week, and the daily venue-contract check alerts once the newest week
+# is older than 15 days.
+OnCalendar=Mon *-*-* 05:47:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

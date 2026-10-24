@@ -60,6 +60,7 @@ def test_managed_units_are_exactly_the_ones_the_tooling_owns() -> None:
     assert "systemctl enable" not in installer and "systemctl start" not in installer
     # The weekly job is managed; its timer is not (installing would undo a mask).
     assert "bfx-weekly-report.timer" not in listed
+    assert "bfx-public-site.timer" not in listed
 
 
 @pytest.mark.parametrize("name", [n for n in NEW_UNITS if n.endswith(".service")])
@@ -69,6 +70,8 @@ def test_services_state_home_and_use_absolute_paths(name: str) -> None:
     assert re.fullmatch(r"[1-9][0-9]*[hms]?", unit.one("Service", "TimeoutStartSec"))
     user = unit["Service"].get("User", ["root"])[0]
     home = "/root" if user == "root" else f"/home/{user}"
+    if unit["Service"].get("DynamicUser") == ["yes"]:
+        home = "/"  # no home of its own; the root ExecStartPre=+ shares the environment
     assert f"HOME={home}" in unit["Service"]["Environment"]
     exec_start = unit.one("Service", "ExecStart")
     # The deployed release's uv environment, never the system interpreter.
@@ -192,22 +195,30 @@ def test_weekly_report_runs_the_deployed_tooling_never_the_vm_checkout() -> None
     assert unit.one("Service", "ExecStart") == f"{OPS_PYTHON} {OPS}/bfx_weekly_report.py"
     assert "WorkingDirectory" not in unit["Service"]
     assert "bfx-funding-bot" not in (SYSTEMD / "bfx-weekly-report.service").read_text()
-    assert unit.one("Service", "TimeoutStartSec") == "5700"  # the whole chain's budget
+    assert unit.one("Service", "TimeoutStartSec") == "5400"  # the whole chain's budget
     assert (ROOT / "deploy/vm/ops/bfx_weekly_report.py").is_file()
     assert _unit("bfx-weekly-report.timer").one("Timer", "OnCalendar") == "Mon *-*-* 04:17:00 UTC"
 
 
-def test_the_public_site_uploads_after_a_successful_weekly_chain() -> None:
-    # The weekly container builds the files; the upload is its own unit so it holds the
-    # Cloudflare token without the database, and alerts on its own failure.
-    assert _unit("bfx-weekly-report.service").one("Unit", "OnSuccess") == "bfx-public-site.service"
+def test_the_public_site_builds_as_root_and_uploads_as_a_dynamic_user() -> None:
+    # Its own unit and timer: a build failure fails the unit, and the token reaches only
+    # the unprivileged upload, as a credential.
+    assert "OnSuccess" not in _unit("bfx-weekly-report.service")["Unit"]
+    assert "build_public_site" not in (ROOT / "deploy/vm/ops/docker-compose.weekly-report.yml").read_text()
     unit = _unit("bfx-public-site.service")
-    assert unit.one("Service", "ExecStart") == f"{OPS_PYTHON} {OPS}/bfx_public_site.py"
-    assert unit.one("Service", "Type") == "oneshot"
-    assert "User" not in unit["Service"]  # the token is root 0600
-    assert "Install" not in unit  # never on a schedule of its own
-    compose = (ROOT / "deploy/vm/ops/docker-compose.weekly-report.yml").read_text()
-    assert "timeout 300 python -m scripts.build_public_site --out /reports/public-site" in compose
+    service = unit["Service"]
+    assert unit.one("Service", "ExecStartPre") == f"+{OPS_PYTHON} {OPS}/bfx_public_site.py build"
+    assert unit.one("Service", "ExecStart") == f"{OPS_PYTHON} {OPS}/bfx_public_site.py publish"
+    assert unit.one("Service", "DynamicUser") == "yes" and "User" not in service
+    assert unit.one("Service", "RuntimeDirectory") == "bfx-public-site"
+    assert unit.one("Service", "LoadCredential") == (
+        "cloudflare-api-token:/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN")
+    assert unit.one("Service", "EnvironmentFile") == "/opt/bfx/runtime/public-site.env"
+    assert unit.one("Unit", "Requires") == "docker.service"
+    assert "Install" not in unit  # started by its timer
+    timer = _unit("bfx-public-site.timer")
+    assert timer.one("Timer", "OnCalendar") == "Mon *-*-* 05:47:00 UTC"
+    assert timer.one("Install", "WantedBy") == "timers.target"
 
 
 def test_the_wrappers_default_paths_are_what_the_backup_check_watches(monkeypatch) -> None:

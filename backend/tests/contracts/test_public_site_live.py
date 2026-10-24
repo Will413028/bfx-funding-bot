@@ -1,6 +1,6 @@
 """The public proof site as a visitor sees it (https://borrowrate.pages.dev).
 
-The weekly chain builds it and bfx-public-site.service uploads it (ADR 2026-08-31 D6);
+bfx-public-site.service builds and uploads it every week (ADR 2026-08-31 D6);
 these tests check from outside, once a day in venue-contract.yml, that it still answers
 and is not stale -- a weekly build that stopped happening, a revoked Pages token or a
 broken upload all end here. Network, no credentials; never in a PR's CI.

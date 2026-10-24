@@ -2,7 +2,7 @@
 
 ADR 2026-08-31 D6: the public proof page and the free funding-rate CSVs are files
 generated ahead of time, never a query on the money database from the internet.
-`scripts/build_public_site.py` reads the rows inside the weekly chain (research role)
+`scripts/build_public_site.py` reads the rows in its own one-shot container (research role)
 and calls `render_site`; `deploy/vm/ops/bfx_public_site.py` uploads the directory.
 Everything here is pure: rows in, bytes out.
 

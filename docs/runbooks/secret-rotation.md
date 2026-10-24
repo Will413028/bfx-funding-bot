@@ -181,7 +181,8 @@ BotFather 的 `/revoke` 會讓舊 token 立刻失效，所以兩條告警路徑�
 
 ## Cloudflare Pages token（公開站）
 
-`/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN`（`root:root 0600`），只有 `bfx-public-site.service` 讀。
+`/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN`（`root:root 0600`），只有 `bfx-public-site.service` 讀
+（systemd 以 `LoadCredential=` 交給上傳步驟，每次執行都重讀，換檔後不用 reload）。
 權限是帳戶層級的 **Pages Write**（Cloudflare 沒有只限一個 Pages 專案的權限），並限定 VM 的出口 IP；
 所以它也能改同帳戶的其他 Pages 專案，外洩時要先撤銷。VM 換公網 IP 後上傳會被拒（`upload_token_failed:http_403`），也要照這節重發。
 
@@ -198,8 +199,7 @@ BotFather 的 `/revoke` 會讓舊 token 立刻失效，所以兩條告警路徑�
    swap /opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN root:root 0600 printf '%s' "$V"
    ```
 
-3. 驗證：`sudo systemctl start bfx-public-site.service`，journal 最後一行是 `published 6 files`
-   （build 超過 26 小時會被拒，先 `sudo systemctl start bfx-weekly-report.service`，它成功後會自己接著上傳）。
+3. 驗證：`sudo systemctl start bfx-public-site.service`（會重新產生再上傳），journal 最後一行是 `published 6 files`。
 4. 在 dashboard 撤銷舊 token。
 
 ## R2（offsite backup）

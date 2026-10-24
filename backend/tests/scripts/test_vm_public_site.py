@@ -1,8 +1,9 @@
-"""deploy/vm/ops/bfx_public_site.py -- uploading the public proof site to Cloudflare Pages.
+"""deploy/vm/ops/bfx_public_site.py -- building the public proof site and uploading it.
 
-The uploader holds the Cloudflare token and nothing else: it publishes exactly the
-build the weekly container wrote, refuses a stale or unexpected one, and exits 0
-only once Pages serves what it uploaded.
+The root build step runs this run's one-shot build container on the weekly job's
+plan; the unprivileged publish step holds the Cloudflare token and nothing else: it
+publishes exactly that build, refuses an unexpected one, and exits 0 only once Pages
+serves what it uploaded.
 """
 from __future__ import annotations
 
@@ -13,13 +14,13 @@ import json
 import os
 import shutil
 import sys
-import time
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType, ModuleType
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 TOKEN = "cf-token-" + "x" * 40
@@ -40,9 +41,9 @@ weekly = _load("vm_ops_weekly_report_for_public_site", ROOT / "deploy/vm/ops/bfx
 CONFIG = site.Config(account_id="acc", project="borrowrate", token=TOKEN)
 
 
-def _build(tmp_path: Path, *, generated_at: datetime | None = None) -> Path:
+def _build(tmp_path: Path) -> Path:
     out = tmp_path / "public-site"
-    generated = (generated_at or datetime.now(UTC)).isoformat()
+    generated = datetime.now(UTC).isoformat()
     for name in site.SITE_FILES:
         path = out / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,12 +82,21 @@ class FakePages:
         return [r for r in self.requests if r[1].split("?")[0].endswith("/" + step)]
 
 
-def test_the_uploader_reads_the_directory_the_weekly_container_writes() -> None:
-    assert site.SITE_DIR == weekly.REPORTS_DIR / "public-site"
+def test_the_publish_step_reads_the_directory_the_build_container_writes() -> None:
+    compose = yaml.safe_load((ROOT / "deploy/vm/ops" / site.COMPOSE_FILE).read_text())
+    service = compose["services"][site.SERVICE]
+    assert compose["name"] == site.PROJECT
+    assert [(v["source"], v["target"]) for v in service["volumes"]] == [(str(site.BUILD_DIR), "/out")]
+    assert service["command"][2].endswith("python -m scripts.build_public_site --out /out/site")
+    assert site.SITE_DIR == site.BUILD_DIR / "site"
+    unit = (ROOT / "deploy/vm/systemd/bfx-public-site.service").read_text()
+    assert f"RuntimeDirectory={site.BUILD_DIR.parent.name}\n" in unit
+    assert f"LoadCredential={site.CREDENTIAL}:/opt/bfx/runtime/{site.TOKEN_FILE}\n" in unit
+    assert f"EnvironmentFile=/opt/bfx/runtime/{site.CONFIG_FILE}\n" in unit
 
 
 def test_collect_returns_exactly_the_site_files(tmp_path: Path) -> None:
-    files = site.collect(_build(tmp_path), now=time.time())
+    files = site.collect(_build(tmp_path))
     assert tuple(files) == site.SITE_FILES
 
 
@@ -100,7 +110,7 @@ def test_collect_refuses_anything_but_the_site(tmp_path: Path, mutate, code: str
     out = _build(tmp_path)
     mutate(out)
     with pytest.raises(site.PublishError) as caught:
-        site.collect(out, now=time.time())
+        site.collect(out)
     assert caught.value.code == code
 
 
@@ -113,7 +123,7 @@ def test_collect_never_follows_a_symlinked_directory(tmp_path: Path) -> None:
     shutil.rmtree(out / "en")
     (out / "en").symlink_to(elsewhere)
     with pytest.raises(site.PublishError) as caught:
-        site.collect(out, now=time.time())
+        site.collect(out)
     assert caught.value.code == "site_symlink:en"
 
 
@@ -121,27 +131,20 @@ def test_collect_reports_an_unopenable_entry_as_unreadable(tmp_path: Path) -> No
     out = _build(tmp_path)
     (out / "_headers").chmod(0)  # the suite never runs as root, which would open it anyway
     with pytest.raises(site.PublishError) as caught:
-        site.collect(out, now=time.time())
+        site.collect(out)
     assert caught.value.code == "site_unreadable:_headers"
-
-
-def test_collect_refuses_a_stale_build(tmp_path: Path) -> None:
-    out = _build(tmp_path, generated_at=datetime.now(UTC) - timedelta(hours=27))
-    with pytest.raises(site.PublishError) as caught:
-        site.collect(out, now=time.time())
-    assert caught.value.code == "site_build_stale"
 
 
 def test_collect_refuses_a_symlinked_site_dir(tmp_path: Path) -> None:
     link = tmp_path / "link"
     link.symlink_to(_build(tmp_path))
     with pytest.raises(site.PublishError) as caught:
-        site.collect(link, now=time.time())
+        site.collect(link)
     assert caught.value.code == "site_dir_missing"
 
 
 def test_publish_uploads_only_missing_assets_and_deploys_the_manifest(tmp_path: Path) -> None:
-    files = site.collect(_build(tmp_path), now=time.time())
+    files = site.collect(_build(tmp_path))
     index_key = site.Asset("index.html", files["index.html"]).key
     pages = FakePages(have={index_key})
     assert site.publish(files, CONFIG, transport=pages) == "dep-1"
@@ -171,7 +174,7 @@ def test_the_asset_key_is_the_content_key_pages_was_shown_to_accept() -> None:
 
 @pytest.mark.parametrize("step", ["upload-token", "check-missing", "upload", "upsert-hashes", "deployments"])
 def test_any_refused_step_fails_with_its_name_and_never_the_token(tmp_path: Path, step: str) -> None:
-    files = site.collect(_build(tmp_path), now=time.time())
+    files = site.collect(_build(tmp_path))
     with pytest.raises(site.PublishError) as caught:
         site.publish(files, CONFIG, transport=FakePages(fail=step))
     assert caught.value.code.endswith(":http_403:10000")
@@ -179,14 +182,14 @@ def test_any_refused_step_fails_with_its_name_and_never_the_token(tmp_path: Path
 
 
 def test_verify_waits_until_production_serves_the_upload(tmp_path: Path) -> None:
-    files = site.collect(_build(tmp_path), now=time.time())
+    files = site.collect(_build(tmp_path))
     pages = FakePages(serves={"proof-summary.json": files["proof-summary.json"]})
     site.verify(files, CONFIG, transport=pages, sleep=lambda _: None)
     assert pages.calls("proof-summary.json")[0][1].startswith("https://borrowrate.pages.dev/")
 
 
 def test_verify_fails_when_the_old_build_is_still_served(tmp_path: Path) -> None:
-    files = site.collect(_build(tmp_path), now=time.time())
+    files = site.collect(_build(tmp_path))
     ticks = iter(range(0, 1000, 10))
     with pytest.raises(site.PublishError) as caught:
         site.verify(files, CONFIG, transport=FakePages(serves={"proof-summary.json": b"old"}),
@@ -195,78 +198,173 @@ def test_verify_fails_when_the_old_build_is_still_served(tmp_path: Path) -> None
 
 
 def test_verify_fails_without_the_sites_csp(tmp_path: Path) -> None:
-    files = site.collect(_build(tmp_path), now=time.time())
+    files = site.collect(_build(tmp_path))
     pages = FakePages(serves={"proof-summary.json": files["proof-summary.json"]}, csp="")
     with pytest.raises(site.PublishError) as caught:
         site.verify(files, CONFIG, transport=pages, sleep=lambda _: None)
     assert caught.value.code == "verify_failed:index:http_200"
 
 
-def test_load_config_reads_the_two_keys_and_the_root_only_token(tmp_path: Path) -> None:
-    (tmp_path / "public-site.env").write_text("BFX_PAGES_ACCOUNT_ID=acc\nBFX_PAGES_PROJECT=borrowrate\n")
-    token = tmp_path / site.TOKEN_FILE
-    token.parent.mkdir(parents=True)
-    token.write_text(TOKEN + "\n")
-    checked: list[str] = []
-    config = site.load_config(tmp_path, secret_check=lambda p: checked.append(p.name))
+def _credentials(tmp_path: Path, token: str = TOKEN + "\n") -> dict[str, str]:
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    (credentials / site.CREDENTIAL).write_text(token)
+    return {"BFX_PAGES_ACCOUNT_ID": "acc", "BFX_PAGES_PROJECT": "borrowrate",
+            "CREDENTIALS_DIRECTORY": str(credentials)}
+
+
+def test_load_config_reads_the_units_environment_and_credential(tmp_path: Path) -> None:
+    config = site.load_config(_credentials(tmp_path))
     assert config == CONFIG
-    assert checked == ["public-site.env", "CLOUDFLARE_API_TOKEN"]
     assert TOKEN not in repr(config) and TOKEN not in str(config)
 
 
-def test_load_config_refuses_a_missing_key(tmp_path: Path) -> None:
-    (tmp_path / "public-site.env").write_text("BFX_PAGES_ACCOUNT_ID=acc\n")
-    token = tmp_path / site.TOKEN_FILE
-    token.parent.mkdir(parents=True)
-    token.write_text(TOKEN)
+@pytest.mark.parametrize("change, code", [
+    (lambda env: env.pop("BFX_PAGES_PROJECT"), "env_key_missing:public-site.env:BFX_PAGES_PROJECT"),
+    (lambda env: env.pop("CREDENTIALS_DIRECTORY"), "credential_missing"),
+    (lambda env: env.update(CREDENTIALS_DIRECTORY=env["CREDENTIALS_DIRECTORY"] + "-gone"),
+     "credential_unreadable"),
+])
+def test_load_config_refuses_instead_of_guessing(tmp_path: Path, change, code: str) -> None:
+    env = _credentials(tmp_path)
+    change(env)
     with pytest.raises(site.DeployError) as caught:
-        site.load_config(tmp_path, secret_check=lambda _: None)
-    assert caught.value.code == "env_key_missing:public-site.env:BFX_PAGES_PROJECT"
+        site.load_config(env)
+    assert caught.value.code == code
+
+
+def test_load_config_refuses_an_empty_token(tmp_path: Path) -> None:
+    with pytest.raises(site.DeployError) as caught:
+        site.load_config(_credentials(tmp_path, "\n"))
+    assert caught.value.code == "token_empty"
+
+
+def test_the_build_checks_both_files_systemd_hands_over(tmp_path: Path) -> None:
+    # systemd reads them as root whatever their mode, so the build holds them to 0600.
+    checked: list[Path] = []
+    site.check_secret_files(tmp_path, secret_check=checked.append)
+    assert checked == [tmp_path / "public-site.env", tmp_path / site.TOKEN_FILE]
 
 
 def test_collect_refuses_an_oversized_file_and_a_fifo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     out = _build(tmp_path)
     monkeypatch.setattr(site, "MAX_FILE_BYTES", 4)
     with pytest.raises(site.PublishError) as caught:
-        site.collect(out, now=time.time())
+        site.collect(out)
     assert caught.value.code.startswith("site_file_too_large:")
     monkeypatch.undo()
     (out / "_headers").unlink()
     os.mkfifo(out / "_headers")
     with pytest.raises(site.PublishError) as caught:
-        site.collect(out, now=time.time())
+        site.collect(out)
     assert caught.value.code == "site_not_regular:_headers"
 
 
-def test_collect_refuses_a_build_without_a_readable_build_time(tmp_path: Path) -> None:
-    out = _build(tmp_path)
-    (out / "proof-summary.json").write_text('{"weeks": []}')
-    with pytest.raises(site.PublishError) as caught:
-        site.collect(out, now=time.time())
-    assert caught.value.code == "site_build_time_unreadable"
-
-
-def test_main_refuses_to_run_unprivileged(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(site.os, "geteuid", lambda: 1000)
-    assert site.main([]) == 2
-
-
-def _configured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def test_publish_never_runs_as_root_and_build_only_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(site.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(site.bfx_deploy, "protected_secret_file", lambda _: None)
+    assert site.main(["publish"]) == 2
+    monkeypatch.setattr(site.os, "geteuid", lambda: 1000)
+    assert site.main(["build"]) == 2
+
+
+def test_prepare_build_dir_hands_an_empty_dir_to_the_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owners: list[tuple[Path, int, int]] = []
+    monkeypatch.setattr(site.os, "chown", lambda path, uid, gid: owners.append((path, uid, gid)))
+    build = tmp_path / "build"
+    site.prepare_build_dir(build)
+    assert owners == [(build, 1000, 1000)] and build.stat().st_mode & 0o777 == 0o755
+    with pytest.raises(site.DeployError) as caught:  # never a previous run's directory
+        site.prepare_build_dir(build)
+    assert caught.value.code == "build_dir_unusable:FileExistsError"
+
+
+@pytest.fixture
+def build_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """The weekly job's host layout, with this file's compose file installed beside it."""
+    rev, digest = "b" * 40, "sha256:" + "3" * 64
+    ops = tmp_path / "releases" / rev / "ops"
+    ops.mkdir(parents=True)
+    shutil.copy(ROOT / "deploy/vm/ops" / site.COMPOSE_FILE, ops / site.COMPOSE_FILE)
+    (ops.parent / ".installed").write_text(rev + "\n")
     runtime = tmp_path / "runtime"
-    (runtime / site.TOKEN_FILE).parent.mkdir(parents=True)
-    (runtime / "public-site.env").write_text("BFX_PAGES_ACCOUNT_ID=acc\nBFX_PAGES_PROJECT=borrowrate\n")
-    (runtime / site.TOKEN_FILE).write_text(TOKEN)
-    return runtime
+    runtime.mkdir()
+    (runtime / "research.env").write_text(
+        "DATABASE_URL=postgresql://bfx_research:pw@bfx-postgres:5432/bfx\n"
+        "BFX_EXCHANGE_ACCOUNT_ID=00000000-0000-4000-8000-000000000001\n")
+    state = tmp_path / "state"
+    (state / "releases" / rev).mkdir(parents=True)
+    shutil.copy(ROOT / "deploy/vm/live.env", state / "releases" / rev / "live.env")
+    row = weekly.bfx_deploy.LedgerRow(id=1, attempt_id="a", source_revision=rev, backend_digest=digest,
+                                      outcome="deployed", migrations_applied=False)
+
+    class Ledger:
+        def read(self) -> object:
+            return weekly.bfx_deploy.LedgerView(exists=True, last_attempt=row, last_success=row)
+
+    build_dir = tmp_path / "run" / "build"
+    build_dir.parent.mkdir()
+    checked: list[Path] = []
+    monkeypatch.setattr(site, "_HERE", ops)
+    monkeypatch.setattr(site, "BUILD_DIR", build_dir)
+    monkeypatch.setattr(site.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(site.os, "chown", lambda *_: None)
+    monkeypatch.setattr(site.bfx_deploy, "PsqlLedger", lambda *a, **k: Ledger())
+    monkeypatch.setattr(site.bfx_deploy, "protected_secret_file", checked.append)
+    return {"ops": ops, "runtime": runtime, "state": state, "build_dir": build_dir,
+            "checked": checked, "digest": digest}
+
+
+def _build_args(host: dict[str, object]) -> object:
+    return site.argparse.Namespace(
+        runtime_dir=host["runtime"], state_dir=host["state"],
+        backend_repository="ghcr.io/will413028/bfx-funding-bot-backend",
+        postgres_container="bfx-postgres", db_user="bfx", db_name="bfx")
+
+
+@pytest.mark.parametrize("exit_code, code", [(0, 0), (3, 1)])
+def test_build_runs_the_deployed_digest_with_the_weekly_jobs_env(
+    build_host: dict[str, object], exit_code: int, code: int,
+) -> None:
+    ran: list[tuple[list[str], Mapping[str, str]]] = []
+    result = site.run_build(_build_args(build_host),
+                            execute=lambda argv, env: ran.append((argv, env)) or exit_code)
+    assert result == code  # a failed build fails the unit before any upload
+    argv, env = ran[0]
+    assert argv == ["docker", "compose", "-p", "bfx-public-site", "-f",
+                    str(build_host["ops"] / site.COMPOSE_FILE), "run", "--rm", "public-site-build"]
+    assert env["BFX_BACKEND_IMAGE"].endswith("@" + str(build_host["digest"]))
+    assert env["DATABASE_URL"].startswith("postgresql://bfx_research:")
+    assert build_host["build_dir"].is_dir()
+    runtime = build_host["runtime"]
+    assert build_host["checked"][:2] == [runtime / "public-site.env", runtime / site.TOKEN_FILE]
+    assert not any(TOKEN in value for value in env.values())
+
+
+def test_build_stops_before_docker_when_a_secret_file_is_loose(
+    build_host: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def loose(path: Path) -> None:
+        raise site.DeployError(f"secret_file_mode:{path.name}")
+
+    monkeypatch.setattr(site.bfx_deploy, "protected_secret_file", loose)
+    assert site.run_build(_build_args(build_host),
+                          execute=lambda *_: pytest.fail("built with a loose secret file")) == 1
+
+
+def _configured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(site.os, "geteuid", lambda: 61234)  # the unit's DynamicUser
+    for key, value in _credentials(tmp_path).items():
+        monkeypatch.setenv(key, value)
 
 
 def test_main_dry_run_sends_nothing_and_prints_no_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    runtime = _configured(tmp_path, monkeypatch)
+    _configured(tmp_path, monkeypatch)
     monkeypatch.setattr(site, "urllib_transport", lambda *a: pytest.fail("dry run sent a request"))
-    assert site.main(["--site-dir", str(_build(tmp_path)), "--runtime-dir", str(runtime), "--dry-run"]) == 0
+    assert site.main(["publish", "--site-dir", str(_build(tmp_path)), "--dry-run"]) == 0
     out = capsys.readouterr()
     assert set(json.loads(out.out)["files"]) == set(site.SITE_FILES)
     assert TOKEN not in out.out + out.err
@@ -277,14 +375,14 @@ def test_main_exits_zero_only_once_pages_serves_the_upload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     serves_new: bool, code: int,
 ) -> None:
-    runtime = _configured(tmp_path, monkeypatch)
+    _configured(tmp_path, monkeypatch)
     out = _build(tmp_path)
     pages = FakePages(serves={"proof-summary.json": (out / "proof-summary.json").read_bytes()
                               if serves_new else b"old"})
     monkeypatch.setattr(site, "urllib_transport", pages)
     monkeypatch.setattr(site, "VERIFY_SECONDS", 0)
     monkeypatch.setattr(site.time, "sleep", lambda _: None)
-    assert site.main(["--site-dir", str(out), "--runtime-dir", str(runtime)]) == code
+    assert site.main(["publish", "--site-dir", str(out)]) == code
     assert pages.calls("deployments")
     err = capsys.readouterr().err
     assert TOKEN not in err and JWT not in err
@@ -314,3 +412,4 @@ def test_every_request_names_its_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(site.urllib.request, "urlopen", urlopen)
     site.urllib_transport("GET", "https://borrowrate.pages.dev/proof-summary.json", {}, None)
     assert sent[0].get_header("User-agent") == site.USER_AGENT
+

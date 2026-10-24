@@ -43,6 +43,10 @@ image with the app's hardening, the reports bind mount as its only writable
 host path, a small /tmp tmpfs, no env files (the runner passes exactly the keys
 the steps read) and no published ports.
 
+`--kind public-site` checks deploy/vm/ops/docker-compose.public-site.yml with the
+same rules (the same plan supplies it); its one writable host path is the
+per-run build directory bfx_public_site.py creates, mounted at /out.
+
 `--kind operator` checks deploy/vm/ops/docker-compose.operator.yml with the
 app's two renderings (it has an env file): one one-shot service whose entrypoint
 is exactly the image's operator CLI, the app's hardening, no ports, volumes or
@@ -147,6 +151,9 @@ WEEKLY_ENV = ("DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID", "BFX_DEPLOYMENT_ENV",
               "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION")
 WEEKLY_TMPFS = ["/tmp:rw,noexec,nosuid,size=64m"]
 WEEKLY_REPORTS = {"type": "bind", "source": "/home/ubuntu/bfx/reports", "target": "/reports"}
+PUBLIC_SITE_PROJECT = "bfx-public-site"
+PUBLIC_SITE_SERVICE = "public-site-build"
+PUBLIC_SITE_OUT = {"type": "bind", "source": "/run/bfx-public-site/build", "target": "/out"}
 WEEKLY_FORBIDDEN_KEYS = (*(k for k in FORBIDDEN_KEYS if k not in ("volumes", "tmpfs")),
                          "container_name", "env_file", "ports", "healthcheck")
 OPERATOR_PROJECT = "bfx-operator"
@@ -252,8 +259,9 @@ def ingress_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
     return found
 
 
-def reports_mount_ok(mount: object) -> bool:
-    """Exactly the reports dir -> /reports, a writable bind, never created by Docker.
+def reports_mount_ok(mount: object, expected: Mapping[str, str] = WEEKLY_REPORTS) -> bool:
+    """Exactly the reports dir -> /reports (or `expected`), a writable bind, never
+    created by Docker.
 
     Compose versions render `create_host_path: false` differently: v5 prints it
     (`"bind": {"create_host_path": false}`), 2.38 omits a false value and prints
@@ -266,22 +274,26 @@ def reports_mount_ok(mount: object) -> bool:
     """
     if not isinstance(mount, dict):
         return False
-    if {k: mount.get(k) for k in WEEKLY_REPORTS} != WEEKLY_REPORTS:
+    if {k: mount.get(k) for k in expected} != expected:
         return False
-    if set(mount) - {*WEEKLY_REPORTS, "bind", "read_only"} or mount.get("read_only", False) is not False:
+    if set(mount) - {*expected, "bind", "read_only"} or mount.get("read_only", False) is not False:
         return False
     bind = mount.get("bind", {})
     return isinstance(bind, dict) and not set(bind) - {"create_host_path"} \
         and bind.get("create_host_path", False) is False
 
 
-def weekly_violations(rendered: Mapping[str, Any]) -> list[str]:
-    """The weekly-report job file (deploy/vm/ops/docker-compose.weekly-report.yml)."""
+def weekly_violations(
+    rendered: Mapping[str, Any], *, project: str = WEEKLY_PROJECT, service: str = WEEKLY_SERVICE,
+    mount: Mapping[str, str] = WEEKLY_REPORTS,
+) -> list[str]:
+    """The weekly-report job file (deploy/vm/ops/docker-compose.weekly-report.yml), or a
+    one-shot job built the same way (the public site's build)."""
     found = []
-    if rendered.get("name") != WEEKLY_PROJECT:
+    if rendered.get("name") != project:
         found.append("project_name")
     services = rendered.get("services") or {}
-    if set(services) != {WEEKLY_SERVICE}:
+    if set(services) != {service}:
         found.append("services")
     if rendered.get("volumes"):
         found.append("volumes")
@@ -289,14 +301,14 @@ def weekly_violations(rendered: Mapping[str, Any]) -> list[str]:
     if set(rendered.get("networks") or {}) != {NETWORK} or network.get("external") is not True \
             or network.get("name") != NETWORK:
         found.append("external_network")
-    spec = services.get(WEEKLY_SERVICE)
+    spec = services.get(service)
     if not isinstance(spec, dict):
         return found
     env = spec.get("environment") or {}
 
     def need(ok: bool, name: str) -> None:
         if not ok:
-            found.append(f"{WEEKLY_SERVICE}:{name}")
+            found.append(f"{service}:{name}")
 
     image = str(spec.get("image", ""))
     need("@sha256:" in image and ":main" not in image, "image_digest_reference")
@@ -315,7 +327,7 @@ def weekly_violations(rendered: Mapping[str, Any]) -> list[str]:
         need(not spec.get(key), f"no_{key}")
     need(spec.get("tmpfs") == WEEKLY_TMPFS, "tmpfs")
     volumes = spec.get("volumes") or []
-    need(len(volumes) == 1 and reports_mount_ok(volumes[0]), "reports_mount")
+    need(len(volumes) == 1 and reports_mount_ok(volumes[0], mount), "reports_mount")
     need(set(spec.get("networks") or {}) == {NETWORK}, "network")
     need(all(env.get(key) for key in WEEKLY_ENV), "runtime_env")
     need(all(env.get(key) == "" for key in LOADER_INJECTION), "loader_injection_blanked")
@@ -473,9 +485,11 @@ def top_level_violations(rendered: Mapping[str, Any], *, uninterpolated: bool = 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check a rendered VM compose file.")
-    parser.add_argument("--kind", choices=("app", "weekly-report", "operator"), default="app",
+    parser.add_argument("--kind", choices=("app", "weekly-report", "public-site", "operator"),
+                        default="app",
                         help="app: deploy/vm/docker-compose.app.yml (default); weekly-report: "
-                             "deploy/vm/ops/docker-compose.weekly-report.yml; operator: "
+                             "deploy/vm/ops/docker-compose.weekly-report.yml; public-site: "
+                             "deploy/vm/ops/docker-compose.public-site.yml; operator: "
                              "deploy/vm/ops/docker-compose.operator.yml")
     parser.add_argument("--uninterpolated",
                         help="JSON of `docker compose config --no-interpolate --format json` "
@@ -492,7 +506,10 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError):
         print("compose-policy: input is not readable JSON", file=sys.stderr)
         return 1
-    if uninterpolated is None:
+    if args.kind == "public-site":
+        found = weekly_violations(rendered, project=PUBLIC_SITE_PROJECT,
+                                  service=PUBLIC_SITE_SERVICE, mount=PUBLIC_SITE_OUT)
+    elif uninterpolated is None:
         found = weekly_violations(rendered)
     elif args.kind == "operator":
         found = operator_violations(rendered) + operator_uninterpolated_violations(uninterpolated)

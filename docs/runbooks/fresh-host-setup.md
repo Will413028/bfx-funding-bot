@@ -300,8 +300,9 @@ sbin 入口、sudoers 與 gh 例外，見 [deploy runbook §4](deploy.md#4-主�
 - error tracking 的 `SENTRY_DSN`（`bfx-backend`）同時配置到 `bot.env` 與 `webapi.env`；空值等於關閉。
 - 公開站（[operations §8「公開站」](operations.md#公開站bfx-public-site)）：`public-site.env`（`BFX_PAGES_ACCOUNT_ID`、
   `BFX_PAGES_PROJECT`，root 0600）與 token 檔 `secrets/public-site/CLOUDFLARE_API_TOKEN`（目錄 `0700`、檔 `root:root 0600`，
-  建法見 [secret-rotation](secret-rotation.md#cloudflare-pages-token公開站)）。沒有這兩個檔時每週報告照跑，
-  之後的上傳失敗並告警。
+  建法見 [secret-rotation](secret-rotation.md#cloudflare-pages-token公開站)）。沒有這兩個檔時 `bfx-public-site.service`
+  不會啟動並告警。排程要另外安裝：`sudo install -m 0644 deploy/vm/systemd/bfx-public-site.timer /etc/systemd/system/`、
+  `sudo systemctl daemon-reload && sudo systemctl enable --now bfx-public-site.timer`。
   部署後依 [operations](operations.md#error-tracking-test) 各送一筆測試例外。
 
 Restore test 不需要設定檔（ledger mode 驗證 restored copy 內的每個 scope），使用本機

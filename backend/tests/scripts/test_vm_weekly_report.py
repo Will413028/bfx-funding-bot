@@ -50,9 +50,6 @@ EXPECTED_STEPS = [
     'python -m scripts.report_interest --out "/reports/$$(date +%F)-realized-interest.md" || echo "WARN report_interest failed (non-blocking)"',
     'python -m scripts.run_g3_live_validation --out "/reports/$$(date +%F)-g3-live-validation.md"',
     'python -m scripts.report_delivery_metrics --out "/reports/$$(date +%F)-delivery-metrics.md" || echo "WARN report_delivery_metrics failed (non-blocking)"',
-    "# Public proof site (ADR 2026-08-31 D6): the files only; bfx-public-site.service",
-    "# uploads them after this unit succeeds and refuses a build that did not happen.",
-    'timeout 300 python -m scripts.build_public_site --out /reports/public-site || echo "WARN build_public_site failed (non-blocking; the upload refuses the stale build and alerts)"',
     "# ── research re-validation (Proposal E, 2026-09-22): runs AFTER the operational",
     "# report, every step fail-soft, nothing here promotes anything. Budget: see",
     "# deploy/vm/systemd/bfx-weekly-report.service TimeoutStartSec.",
@@ -256,6 +253,25 @@ def test_compose_refuses_to_render_without_each_variable(missing: str) -> None:
     result = _render({k: v for k, v in FAKE_ENV.items() if k != missing})
     assert result.returncode != 0
     assert missing in result.stderr
+
+
+@needs_compose
+def test_the_public_site_build_file_gets_the_same_policy_with_its_own_mount() -> None:
+    # bfx_public_site.py runs it on this job's plan: same variables, same hardening; its one
+    # writable host path is the unit's per-run build directory.
+    path = ROOT / "deploy/vm/ops/docker-compose.public-site.yml"
+    result = subprocess.run([*COMPOSE_CMD, "-f", str(path), "config", "--format", "json"],
+                            capture_output=True, text=True, check=False, env={**_path_env(), **FAKE_ENV})
+    assert result.returncode == 0, result.stderr
+    assert set(re.findall(r"\$\{([A-Z_]+):\?", path.read_text(encoding="utf-8"))) == set(FAKE_ENV)
+    argv = [sys.executable, str(ROOT / "deploy/vm/ops/compose_policy.py"), "--kind", "public-site"]
+    ok = subprocess.run(argv, input=result.stdout, capture_output=True, text=True, check=False)
+    assert ok.returncode == 0, ok.stderr
+    broken = json.loads(result.stdout)
+    broken["services"]["public-site-build"]["volumes"][0]["source"] = "/home/ubuntu/bfx/reports"
+    bad = subprocess.run(argv, input=json.dumps(broken), capture_output=True, text=True, check=False)
+    assert bad.returncode == 1 and "public-site-build:reports_mount" in bad.stderr
+    assert "--kind public-site" in (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- runner

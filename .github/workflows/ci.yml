@@ -138,9 +138,10 @@ jobs:
             > "$RUNNER_TEMP/uninterpolated.json"
           docker compose -f deploy/vm/docker-compose.app.yml config --no-env-resolution --format json \
             | python3 deploy/vm/ops/compose_policy.py --uninterpolated "$RUNNER_TEMP/uninterpolated.json"
-      # The weekly-report job ships with the host tooling (bfx_weekly_report.py supplies
-      # these variables on the VM); same hardening, checked the same way.
-      - name: Compose hardening policy (weekly report)
+      # The weekly-report job and the public site's build ship with the host tooling
+      # (bfx_weekly_report.build_plan supplies these variables on the VM for both); same
+      # hardening, checked the same way.
+      - name: Compose hardening policy (weekly report, public site build)
         env:
           BFX_BACKEND_IMAGE: ghcr.io/ci/backend@sha256:0000000000000000000000000000000000000000000000000000000000000000
           BFX_BACKEND_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -151,6 +152,8 @@ jobs:
         run: |
           docker compose -f deploy/vm/ops/docker-compose.weekly-report.yml config --format json \
             | python3 deploy/vm/ops/compose_policy.py --kind weekly-report
+          docker compose -f deploy/vm/ops/docker-compose.public-site.yml config --format json \
+            | python3 deploy/vm/ops/compose_policy.py --kind public-site
       # The operator CLI's one-shot container (the 9c-1d host wrapper supplies these
       # variables on the VM); it has an env file, so it is checked on both
       # renderings like the app file, with an empty stand-in operator.env.

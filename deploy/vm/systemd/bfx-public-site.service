@@ -1,16 +1,26 @@
 [Unit]
-Description=bfx public proof site: upload the weekly build to Cloudflare Pages and check it is served
+Description=bfx public proof site: build it, upload it to Cloudflare Pages and check it is served
 Documentation=file:///usr/local/lib/bfx-ops/current/ops/bfx_public_site.py
-# Started by bfx-weekly-report.service's OnSuccess= (the build is one of its steps);
-# by hand: `sudo systemctl start bfx-public-site.service`.
+# Started by bfx-public-site.timer, or by hand: `sudo systemctl start bfx-public-site.service`.
+Requires=docker.service
+After=docker.service
 OnFailure=bfx-alert@%n.service
 
 [Service]
 Type=oneshot
-# Root: reads the root-only Cloudflare token and public-site.env under /opt/bfx/runtime.
-# Never the database: the build it uploads was written by the weekly container.
-Environment=HOME=/root
+# Two users. The build (ExecStartPre=+, root) reads research.env and the deployments
+# ledger and drives docker; the container runs as uid 1000 and writes only the
+# RuntimeDirectory's build/. The upload (ExecStart=) runs as a DynamicUser that holds
+# the Cloudflare token as a credential and nothing else: no database, no docker.
+DynamicUser=yes
+RuntimeDirectory=bfx-public-site
+RuntimeDirectoryMode=0755
+EnvironmentFile=/opt/bfx/runtime/public-site.env
+LoadCredential=cloudflare-api-token:/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN
+Environment=HOME=/
 Environment=PYTHONDONTWRITEBYTECODE=1
 UMask=0077
-TimeoutStartSec=600
-ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_public_site.py
+# build (the container's own timeout 300) + upload and the served check (VERIFY_SECONDS 120).
+TimeoutStartSec=900
+ExecStartPre=+/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_public_site.py build
+ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_public_site.py publish
