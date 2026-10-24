@@ -153,5 +153,6 @@ jobs:
           rc=0
           "$RUNNER_TEMP/osv-scanner" scan image "ghcr.io/${GITHUB_REPOSITORY,,}-backend:main" \
             --format markdown > "$RUNNER_TEMP/osv-image.md" || rc=$?
+          echo "osv-scanner exit $rc; $(grep -c '^|' "$RUNNER_TEMP/osv-image.md" || true) table rows in the report"
           [ "$rc" -le 1 ] || exit "$rc"
           cat "$RUNNER_TEMP/osv-image.md" >> "$GITHUB_STEP_SUMMARY"
