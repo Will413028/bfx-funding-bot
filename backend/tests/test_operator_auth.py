@@ -134,3 +134,12 @@ def test_the_operator_is_not_logged_as_refused(caplog):
         asyncio.run(auth.require_operator(_request(operator_headers())))
 
     assert [r for r in caplog.records if r.name == "bfx.security"] == []
+
+
+def test_the_operator_is_logged_as_let_through_with_the_login(caplog):
+    """ASVS V16.3.1: uvicorn's access line has only Serve's loopback address."""
+    with caplog.at_level(logging.INFO, logger="bfx.security"):
+        asyncio.run(auth.require_operator(_request(operator_headers(login="will@github"))))
+    (record,) = [r for r in caplog.records if r.name == "bfx.security"]
+    assert record.levelno == logging.INFO
+    assert (record.event, record.reason, record.login) == ("access_granted", "operator", "will@github")
