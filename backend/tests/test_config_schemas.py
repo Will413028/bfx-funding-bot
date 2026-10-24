@@ -60,3 +60,31 @@ def test_response_serializes_camelcase():
     assert resp["userId"] == "user_abc"
     assert resp["createdAt"] == "2026-06-17T00:00:00+00:00"
     assert resp["config"]["autoRenew"] is True
+
+
+@pytest.mark.parametrize("bad", [
+    {**_VALID, "extra": "x"},                                   # unknown key
+    {**_VALID, "amount": {"min": 1, "max": 10, "step": 1}},     # unknown key in a range
+    {**_VALID, "amount": {"min": 1, "max": float("inf")}},
+    {**_VALID, "rate": {"min": float("nan"), "max": 0.001}},
+    {**_VALID, "currency": "US D"},
+    {**_VALID, "currency": "<script>"},
+    {**_VALID, "currency": "f" * 17},
+])
+def test_only_the_known_finite_shape_is_accepted(bad):
+    """ASVS V2.2.1: a positive allowlist, not just `non-empty`."""
+    with pytest.raises(ValidationError):
+        StrategyConfigBody.model_validate(bad)
+
+
+def test_json_infinity_is_refused_from_the_wire():
+    # Python's json accepts Infinity and 1e999; pydantic must not store them.
+    for raw in ('{"min": 1, "max": Infinity}', '{"min": 1, "max": 1e999}'):
+        body = ('{"currency": "fUST", "amount": ' + raw + ', "rate": {"min": 0.0001, "max": 0.001},'
+                ' "period": {"min": 2, "max": 30}, "autoRenew": true}')
+        with pytest.raises(ValidationError):
+            StrategyConfigBody.model_validate_json(body)
+
+
+def test_a_funding_symbol_is_a_valid_currency():
+    assert StrategyConfigBody.model_validate({**_VALID, "currency": "fUST"}).currency == "fUST"

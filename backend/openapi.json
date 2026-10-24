@@ -2481,13 +2481,14 @@
             "title": "Max"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "min",
           "max"
         ],
         "title": "Range",
-        "description": "A {min, max} bound. min/max must be positive and min <= max. Used for\namount, rate (daily ratio) and period. Modelled as float to keep zero\ndivergence from the FE's single rangeSchema (which types all three as\nnumber); period values are integers by convention (FE step=1)."
+        "description": "A {min, max} bound. min/max must be positive and min <= max. Used for\namount, rate (daily ratio) and period. Modelled as float to keep zero\ndivergence from the FE's single rangeSchema (which types all three as\nnumber); period values are integers by convention (FE step=1). Finite only:\nJSON parsing accepts `Infinity`, `NaN` and `1e999`."
       },
       "ResolutionRequestResponse": {
         "properties": {
@@ -2567,7 +2568,7 @@
         "properties": {
           "currency": {
             "type": "string",
-            "minLength": 1,
+            "pattern": "^[A-Za-z0-9]{1,16}$",
             "title": "Currency"
           },
           "amount": {
@@ -2584,6 +2585,7 @@
             "title": "Autorenew"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "currency",
@@ -2593,7 +2595,7 @@
           "autoRenew"
         ],
         "title": "StrategyConfigBody",
-        "description": "Validated PUT /configs body. Mirrors the FE Zod strategyConfigSchema\n(positive ranges, min<=max, non-empty currency). Stored verbatim as the\nuser_configs.config JSONB blob. The backend is unit-agnostic on rate; it\nstores the daily ratio the FE sends and never converts."
+        "description": "Validated PUT /configs body. Mirrors the FE Zod strategyConfigSchema\n(positive finite ranges, min<=max, alphanumeric currency). Stored verbatim as the\nuser_configs.config JSONB blob. The backend is unit-agnostic on rate; it\nstores the daily ratio the FE sends and never converts. Unknown keys are refused,\nand the currency is a short alphanumeric code (the form sends `USD` or a funding\nsymbol such as `fUST`)."
       },
       "TradingControlOverview": {
         "properties": {

@@ -134,7 +134,10 @@ class Range(BaseModel):
     """A {min, max} bound. min/max must be positive and min <= max. Used for
     amount, rate (daily ratio) and period. Modelled as float to keep zero
     divergence from the FE's single rangeSchema (which types all three as
-    number); period values are integers by convention (FE step=1)."""
+    number); period values are integers by convention (FE step=1). Finite only:
+    JSON parsing accepts `Infinity`, `NaN` and `1e999`."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     min: float = Field(gt=0)
     max: float = Field(gt=0)
@@ -148,13 +151,15 @@ class Range(BaseModel):
 
 class StrategyConfigBody(BaseModel):
     """Validated PUT /configs body. Mirrors the FE Zod strategyConfigSchema
-    (positive ranges, min<=max, non-empty currency). Stored verbatim as the
+    (positive finite ranges, min<=max, alphanumeric currency). Stored verbatim as the
     user_configs.config JSONB blob. The backend is unit-agnostic on rate; it
-    stores the daily ratio the FE sends and never converts."""
+    stores the daily ratio the FE sends and never converts. Unknown keys are refused,
+    and the currency is a short alphanumeric code (the form sends `USD` or a funding
+    symbol such as `fUST`)."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
-    currency: str = Field(min_length=1)
+    currency: str = Field(pattern=r"^[A-Za-z0-9]{1,16}$")
     amount: Range
     rate: Range
     period: Range
