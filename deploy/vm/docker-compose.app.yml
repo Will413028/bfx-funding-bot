@@ -67,6 +67,13 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
+    # Capped json-file log (ASVS V16.1.1): at most 5 x 50 MB on the host; Alloy reads it
+    # through the Docker API into Loki (30 days). compose_policy.py pins it.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     stop_grace_period: 30s
     group_add: ["4600"]
     secrets:
@@ -106,6 +113,13 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
+    # Capped json-file log (ASVS V16.1.1): at most 5 x 50 MB on the host; Alloy reads it
+    # through the Docker API into Loki (30 days). compose_policy.py pins it.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     group_add: ["4600"]
     secrets:
       - {source: webapi_DATABASE_URL, target: DATABASE_URL}

@@ -148,6 +148,7 @@ class CheckHarness:
         self.restore_enabled = False
         self.weekly_enabled = False
         self.disk_percent = 37
+        self.clock_sync: str | None = "yes"
 
     def write(self, **overrides: Any) -> None:
         now_ms = int(self.now * 1000)
@@ -172,7 +173,7 @@ class CheckHarness:
             weekly_heartbeat=self.weekly, weekly_timer="bfx-weekly-report.timer",
             weekly_max_age_s=8 * 86_400, disk_path=Path("/"), disk_warn_percent=85,
             disk_critical_percent=95, status=status, disk_usage=disk_usage,
-            clock=lambda: self.now,
+            clock_sync=lambda: self.clock_sync, clock=lambda: self.now,
         )
         self.now += 300
         return int(result)
@@ -284,6 +285,37 @@ def test_disk_usage_thresholds(tmp_path: Path, percent: int,
         assert h.notices == []
     else:
         assert h.notices[0][0] == expected[0] and expected[1] in h.notices[0][1]
+
+
+@pytest.mark.parametrize("value, problem", [("no", "clock_not_synchronized"),
+                                            (None, "clock_sync_unknown")])
+def test_an_unsynchronized_clock_warns_once_confirmed(
+    tmp_path: Path, value: str | None, problem: str,
+) -> None:
+    h = CheckHarness(tmp_path)
+    h.write()
+    h.clock_sync = value
+    assert h.run() == 1 and h.notices == []           # first sighting
+    h.write()
+    assert h.run() == 1
+    assert h.notices == [("warning", h.notices[0][1])] and problem in h.notices[0][1]
+    h.clock_sync = "yes"
+    h.write()
+    assert h.run() == 0 and h.notices[-1][0] == "info"
+
+
+def test_the_clock_probe_reads_timedatectl(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> Any:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="yes\n", stderr="")
+
+    monkeypatch.setattr(check.subprocess, "run", run)
+    assert check._timedatectl_synchronized() == "yes"
+    assert seen == [["timedatectl", "show", "-p", "NTPSynchronized", "--value"]]
+    monkeypatch.setattr(check.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError()))
+    assert check._timedatectl_synchronized() is None
 
 
 def test_unreadable_disk_usage_is_reported_not_raised() -> None:

@@ -178,6 +178,10 @@ OPERATOR_ENV_FILES = {OPERATOR_SERVICE: (f"/{RUNTIME_REFERENCE}operator.env",)}
 OPERATOR_FORBIDDEN_KEYS = (*FORBIDDEN_KEYS, "container_name", "ports", "command", "healthcheck")
 
 
+# The bot's and the web API's log on the host: json-file, capped (ASVS V16.1.1).
+CAPPED_LOG = {"driver": "json-file", "options": {"max-size": "50m", "max-file": "5"}}
+
+
 def service_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
     env = spec.get("environment") or {}
     found = []
@@ -198,6 +202,7 @@ def service_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
     need(spec.get("cap_drop") == ["ALL"], "cap_drop_all")
     need(spec.get("security_opt") == ["no-new-privileges:true"], "no_new_privileges")
     need(spec.get("restart") == "unless-stopped", "restart")
+    need(spec.get("logging") == CAPPED_LOG, "capped_log")
     for key in FORBIDDEN_KEYS:
         if not (service == "webapi" and key == "network_mode"):
             need(not spec.get(key), f"no_{key}")

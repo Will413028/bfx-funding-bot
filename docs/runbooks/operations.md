@@ -242,6 +242,9 @@ sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
 `ts`（UTC，結尾 `Z`）、`level`、`service`（`bot`／`webapi`）、`logger`、`msg`（訊息文字）、有 traceback 時的 `exc`，
 以及事件自己的欄位（`event`、`reason` 等）。值裡的換行與控制字元都被跳脫，一筆 log 只佔一行；例外是 bot 未攔下的例外在程序結束時由直譯器印出的多行純文字 traceback。
 
+- 保存與讀取：bot 與 web API 的 log 在主機上是 Docker 的 json-file，每個容器最多 5 個 50 MB 檔（`docker-compose.app.yml` 的 `logging`，`compose_policy.py` 釘住）；
+  每次部署重建容器時清空。Alloy 經 Docker API 把它們送進 Loki，保存 30 天（homelab `observability/`）。主機上讀得到的是 root 與 `docker` group。
+  postgres 的 log 不在這個上限內（`docker-compose.bot.yml` 另外管）。
 - 照舊用事件名 grep：事件名在 `msg` 裡，例如 `docker logs bfx-bot --since 1h 2>&1 | grep deployment_skip`。
   Grafana 的 bfx 規則比對整行原文，不受格式影響。
 - 取欄位用 `jq`（要先裝）：`docker logs bfx-webapi --since 1h 2>&1 | jq -R -c 'fromjson? | select(.logger == "bfx.security")'`（`fromjson?` 跳過非 JSON 行）。
@@ -652,6 +655,7 @@ sudo systemctl disable --now bfx-weekly-report.timer   # 暫停
 | `restore_timer_disabled` | warning | heartbeat 存在（這台跑過 restore test）但 timer 停用 |
 | `weekly_report_stale` | warning | weekly timer 啟用且最後一次成功超過 8 天 |
 | `disk_usage_high`／`disk_usage_critical` | warning／critical | `/` 使用率 ≥85%／≥95%（pgBackRest repo 與 Docker volume 都在這裡） |
+| `clock_not_synchronized`／`clock_sync_unknown` | warning | `timedatectl show -p NTPSynchronized` 不是 `yes`／讀不到；時鐘不同步時 log 時間、Bitfinex nonce 與各種期限都會偏（先看 `timedatectl status` 與 `systemctl status systemd-timesyncd`） |
 
 - 系統自己會做的：只通知，不擋部署、不改交易狀態；同一問題連續兩次才告警，6 小時重發，清除時發一則 recovered。
 - operator 要判斷的：磁碟告警先看 `docker system df`（舊 image 與 build cache 通常可回收）與
