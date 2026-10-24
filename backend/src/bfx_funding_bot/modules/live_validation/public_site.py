@@ -2,7 +2,7 @@
 
 ADR 2026-08-31 D6: the public proof page and the free funding-rate CSVs are files
 generated ahead of time, never a query on the money database from the internet.
-`scripts/build_public_site.py` reads the rows inside the weekly chain (research role)
+`scripts/build_public_site.py` reads the rows in its own one-shot container (research role)
 and calls `render_site`; `deploy/vm/ops/bfx_public_site.py` uploads the directory.
 Everything here is pure: rows in, bytes out.
 
@@ -127,7 +127,7 @@ def proof_summary_json(weeks: Sequence[ProofWeek], *, as_of: datetime, generated
                    "baseline_frr_util_apr_net_pct": pct(w.baseline_frr_util_apr_net_pct)}
                   for w in weeks],
         "as_of": as_of.isoformat(),
-        # The uploader refuses a build older than a day (bfx_public_site.MAX_BUILD_AGE).
+        # Read by the daily public-site check (tests/contracts/test_public_site_live.py).
         "generated_at": generated_at.isoformat(),
     }
     return (json.dumps(body, indent=1, sort_keys=True) + "\n").encode()

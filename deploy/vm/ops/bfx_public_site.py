@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
-"""Upload the public proof site to Cloudflare Pages, then check it is what Pages serves.
+"""Build the public proof site, upload it to Cloudflare Pages, then check it is served.
 
 ADR 2026-08-31 D6: the public site is static files on Cloudflare Pages, so the
-internet never reaches the money VM. The weekly chain builds the files
-(scripts/build_public_site.py, research role, no Cloudflare token) into
-/home/ubuntu/bfx/reports/public-site; this runner, from bfx-public-site.service
-(started by bfx-weekly-report.service's OnSuccess=, or by hand), uploads them. It
-holds the token and never touches the database.
+internet never reaches the money VM. bfx-public-site.service (its own weekly timer,
+or by hand) runs this file twice, as two users:
 
-Host-side, standard library only, run as root:
+`build` -- root (the unit's `ExecStartPre=+`): checks the config and the token file
+  are root 0600 (bfx_deploy.protected_secret_file), creates BUILD_DIR (uid 1000,
+  0755) inside the unit's RuntimeDirectory, and runs docker-compose.public-site.yml
+  on the plan bfx_weekly_report.build_plan resolves for the weekly job: the deployed
+  backend digest and the research role (scripts/build_public_site.py, no Cloudflare
+  token). A failed build fails the unit. systemd removes the RuntimeDirectory when
+  the unit stops, so whatever `publish` finds there is this run's build.
+
+`publish` -- the unit's DynamicUser, never root; the stdlib and this release only:
   1. the build: exactly SITE_FILES (the list in modules/live_validation/public_site.py;
-     tests keep the two equal), regular files only, no symlink anywhere, each under
-     Pages' 25 MiB limit, and proof-summary.json's generated_at at most MAX_BUILD_AGE
-     old -- a weekly build that failed leaves an old one, which this refuses rather
-     than republish;
-  2. the config: /opt/bfx/runtime/public-site.env (BFX_PAGES_ACCOUNT_ID,
-     BFX_PAGES_PROJECT) and the token /opt/bfx/runtime/secrets/public-site/
-     CLOUDFLARE_API_TOKEN, both root 0600 (bfx_deploy.protected_secret_file). The
-     token is an account-scoped "Pages Write" token limited to the VM's egress IP:
-     Cloudflare has no per-project Pages permission;
+     tests keep the two equal), regular files only, no symlink anywhere (uid 1000 owns
+     the directory), each under Pages' 25 MiB limit;
+  2. the config, both as LoadCredential= files in $CREDENTIALS_DIRECTORY:
+     public-site-env (/opt/bfx/runtime/public-site.env: BFX_PAGES_ACCOUNT_ID,
+     BFX_PAGES_PROJECT) and cloudflare-api-token
+     (/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN). The token is an
+     account-scoped "Pages Write" token limited to the VM's egress IP: Cloudflare has
+     no per-project Pages permission;
   3. Pages Direct Upload (the API wrangler uses): an upload JWT, the assets Pages
      does not already hold, then one production deployment whose manifest maps each
      path to its asset key; `_headers` travels as its own form field, as wrangler
@@ -28,12 +32,13 @@ Host-side, standard library only, run as root:
   4. the check: https://<project>.pages.dev/proof-summary.json must return the
      uploaded bytes within VERIFY_SECONDS, and the page must carry the site's CSP.
 
-Exit 0 only after the check passes; anything else exits 1 and the unit's
-OnFailure=bfx-alert@ sends the Telegram message. Errors name a step and an HTTP
-status or Cloudflare error code; the token and the upload JWT are never logged.
+Each step exits 0 only on success (publish: after the check passes); anything else
+exits 1 and the unit's OnFailure=bfx-alert@ sends the Telegram message. Errors name
+a step and an HTTP status or Cloudflare error code; the token and the upload JWT are
+never logged.
 
-`--dry-run` checks the build and the config and prints the plan (paths, sizes,
-keys); it sends nothing.
+Neither step has a dry run: the build directory and the credentials exist only while
+the unit runs (`bfx_weekly_report.py --dry-run` shows the image and env the build uses).
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 import urllib.error
@@ -53,7 +59,6 @@ import urllib.request
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 
@@ -70,20 +75,29 @@ def _load(name: str, path: Path) -> ModuleType:
     return module
 
 
-bfx_deploy = _load("_bfx_ops_deploy", _HERE / "bfx_deploy.py")
+bfx_weekly_report = _load("_bfx_ops_weekly_report", _HERE / "bfx_weekly_report.py")
+bfx_deploy = bfx_weekly_report.bfx_deploy
 DeployError = bfx_deploy.DeployError
 
 SITE_FILES = (
     "index.html", "en/index.html", "proof-summary.json",
     "funding-rates-fUST.csv", "funding-rates-fUSD.csv", "_headers",
 )
-SITE_DIR = Path("/home/ubuntu/bfx/reports/public-site")
+# RuntimeDirectory=bfx-public-site; the bind source in docker-compose.public-site.yml
+# (compose_policy.PUBLIC_SITE_OUT), where the container writes site/.
+BUILD_DIR = Path("/run/bfx-public-site/build")
+SITE_DIR = BUILD_DIR / "site"
+BUILD_UID = 1000  # the image's appuser
+COMPOSE_FILE = "docker-compose.public-site.yml"
+PROJECT = "bfx-public-site"
+SERVICE = "public-site-build"
 CONFIG_FILE = "public-site.env"
 CONFIG_KEYS = ("BFX_PAGES_ACCOUNT_ID", "BFX_PAGES_PROJECT")
 TOKEN_FILE = Path("secrets/public-site/CLOUDFLARE_API_TOKEN")
+CREDENTIAL = "cloudflare-api-token"  # the unit's LoadCredential= names
+CONFIG_CREDENTIAL = "public-site-env"
 API = "https://api.cloudflare.com/client/v4"
 MAX_FILE_BYTES = 25 * 1024 * 1024
-MAX_BUILD_AGE_SECONDS = 26 * 3600
 VERIFY_SECONDS = 120
 CONTENT_TYPES = {"html": "text/html; charset=utf-8", "json": "application/json",
                  "csv": "text/csv; charset=utf-8"}
@@ -136,8 +150,8 @@ def _open_at(name: str, flags: int, *, dir_fd: int | None, relative: str) -> int
 
 
 def _read_tree(dir_fd: int, prefix: str, found: dict[str, bytes]) -> None:
-    """Walk by descriptor, never by path: uid 1000 owns the reports dir, so a file or a
-    directory swapped for a symlink mid-walk must not lead a root reader anywhere else.
+    """Walk by descriptor, never by path: uid 1000 owns the build dir, so a file or a
+    directory swapped for a symlink mid-walk must not lead the reader anywhere else.
     Every component is opened with O_NOFOLLOW relative to the directory already open."""
     for name in sorted(os.listdir(dir_fd)):
         relative = f"{prefix}{name}"
@@ -160,8 +174,8 @@ def _read_tree(dir_fd: int, prefix: str, found: dict[str, bytes]) -> None:
             os.close(fd)
 
 
-def collect(site_dir: Path, *, now: float) -> dict[str, bytes]:
-    """The build, by published path; refuses anything but a fresh, exact SITE_FILES."""
+def collect(site_dir: Path) -> dict[str, bytes]:
+    """The build, by published path; refuses anything but exactly SITE_FILES."""
     try:
         root = os.open(site_dir, os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW)
     except OSError:
@@ -175,12 +189,6 @@ def collect(site_dir: Path, *, now: float) -> dict[str, bytes]:
         extra = sorted(set(found) - set(SITE_FILES))
         missing = sorted(set(SITE_FILES) - set(found))
         raise PublishError(f"site_files_mismatch:extra={','.join(extra)}:missing={','.join(missing)}")
-    try:
-        generated = datetime.fromisoformat(json.loads(found["proof-summary.json"])["generated_at"])
-    except (ValueError, KeyError, TypeError):
-        raise PublishError("site_build_time_unreadable") from None
-    if generated.tzinfo is None or now - generated.timestamp() > MAX_BUILD_AGE_SECONDS:
-        raise PublishError("site_build_stale")
     return {name: found[name] for name in SITE_FILES}
 
 
@@ -195,23 +203,50 @@ class Config:
         return f"https://{self.project}.pages.dev"
 
 
-def load_config(runtime_dir: Path, *, secret_check: Callable[[Path], None]) -> Config:
-    config_path = runtime_dir / CONFIG_FILE
-    token_path = runtime_dir / TOKEN_FILE
-    for path in (config_path, token_path):
+def check_secret_files(runtime_dir: Path, *, secret_check: Callable[[Path], None]) -> None:
+    """Root, before the build: systemd reads both files whatever their mode, so the
+    mode bfx_deploy holds every secret file to is checked here."""
+    for path in (runtime_dir / CONFIG_FILE, runtime_dir / TOKEN_FILE):
         secret_check(path)
+
+
+def load_config(environ: Mapping[str, str]) -> Config:
+    """The unprivileged publish step's config: the unit's two credentials."""
+    credentials = environ.get("CREDENTIALS_DIRECTORY", "")
+    if not credentials:
+        raise DeployError("credential_missing")
     try:
-        values = bfx_deploy.parse_env_file(config_path.read_text(encoding="utf-8"),
-                                           name=CONFIG_FILE, compose=False)
-        token = token_path.read_text(encoding="utf-8").strip()
+        values = bfx_deploy.parse_env_file(
+            (Path(credentials) / CONFIG_CREDENTIAL).read_text(encoding="utf-8"),
+            name=CONFIG_FILE, compose=False)
+        token = (Path(credentials) / CREDENTIAL).read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
-        raise DeployError("config_unreadable") from None
+        raise DeployError("credential_unreadable") from None
     missing = [key for key in CONFIG_KEYS if not values.get(key, "").strip()]
     if missing:
         raise DeployError(f"env_key_missing:{CONFIG_FILE}:{','.join(missing)}")
     if not token:
         raise DeployError("token_empty")
     return Config(values["BFX_PAGES_ACCOUNT_ID"].strip(), values["BFX_PAGES_PROJECT"].strip(), token)
+
+
+def prepare_build_dir(build_dir: Path, *, uid: int = BUILD_UID) -> None:
+    """The container's only writable host path: empty, owned by its uid, readable by the
+    publish step (the 0700 RuntimeDirectory above it keeps other host users out). The RuntimeDirectory is new for every run, so an existing one is refused."""
+    try:
+        build_dir.mkdir(mode=0o755)
+        os.chown(build_dir, uid, uid)
+        build_dir.chmod(0o755)
+    except OSError as exc:
+        raise DeployError(f"build_dir_unusable:{exc.__class__.__name__}") from None
+
+
+def build_plan(*, ops_dir: Path, ledger: object, runtime_dir: Path, state_dir: Path,
+               backend_repository: str) -> bfx_weekly_report.Plan:
+    return bfx_weekly_report.build_plan(
+        ops_dir=ops_dir, ledger=ledger, runtime_dir=runtime_dir, state_dir=state_dir,
+        backend_repository=backend_repository, secret_check=bfx_deploy.protected_secret_file,
+        reports_dir=BUILD_DIR, compose_name=COMPOSE_FILE, project=PROJECT, service=SERVICE)
 
 
 def urllib_transport(method: str, url: str, headers: Mapping[str, str],
@@ -310,28 +345,43 @@ def verify(files: Mapping[str, bytes], config: Config, *, transport: Transport,
         raise PublishError(f"verify_failed:index:http_{status}")
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--site-dir", type=Path, default=SITE_DIR)
-    parser.add_argument("--runtime-dir", type=Path, default=bfx_deploy.Settings().runtime_dir)
-    parser.add_argument("--dry-run", action="store_true",
-                        help="check the build and the config, print the plan; send nothing")
-    args = parser.parse_args(argv)
+def run_build(args: argparse.Namespace, *,
+              execute: Callable[[list[str], Mapping[str, str]], int] | None = None) -> int:
     if os.geteuid() != 0:
-        log("must run as root (reads the root-only token)")
+        log("build must run as root (reads /opt/bfx/runtime and the deployments ledger, drives docker)")
+        return 2
+    ledger = bfx_deploy.PsqlLedger(bfx_deploy.subprocess_runner, container=args.postgres_container,
+                                   db_user=args.db_user, db_name=args.db_name)
+    try:
+        check_secret_files(args.runtime_dir, secret_check=bfx_deploy.protected_secret_file)
+        prepare_build_dir(BUILD_DIR)
+        plan = build_plan(ops_dir=_HERE, ledger=ledger, runtime_dir=args.runtime_dir,
+                          state_dir=args.state_dir, backend_repository=args.backend_repository)
+    except DeployError as exc:
+        log(f"cannot build: {exc.code}")
+        return 1
+    log(f"building with {plan.backend_image}")
+    if execute is None:
+        def execute(argv: list[str], env: Mapping[str, str]) -> int:
+            return subprocess.run(argv, env=dict(env), check=False).returncode
+    returncode = execute(plan.argv, plan.env)
+    if returncode != 0:
+        log(f"build failed with exit code {returncode}")
+        return 1
+    return 0
+
+
+def run_publish(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
+    if os.geteuid() == 0:
+        log("publish never runs as root: start bfx-public-site.service, whose DynamicUser "
+            "gets the token as a credential")
         return 2
     try:
-        files = collect(args.site_dir, now=time.time())
-        config = load_config(args.runtime_dir, secret_check=bfx_deploy.protected_secret_file)
+        files = collect(args.site_dir)
+        config = load_config(environ)
     except (PublishError, DeployError) as exc:
         log(f"cannot publish: {exc.code}")
         return 1
-    if args.dry_run:
-        print(json.dumps({"project": config.project, "site_url": config.site_url,
-                          "files": {path: {"bytes": len(body), "key": Asset(path, body).key}
-                                    for path, body in files.items()}}, indent=2))
-        return 0
     try:
         deployment_id = publish(files, config, transport=urllib_transport)
         log(f"deployment {deployment_id} created; checking {config.site_url}")
@@ -341,6 +391,26 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     log(f"published {len(files)} files to {config.site_url} (deployment {deployment_id})")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    defaults = bfx_deploy.Settings()
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    steps = parser.add_subparsers(dest="step", required=True)
+    build = steps.add_parser("build", help="root: run this run's one-shot build container")
+    build.add_argument("--runtime-dir", type=Path, default=defaults.runtime_dir)
+    build.add_argument("--state-dir", type=Path, default=defaults.state_dir)
+    build.add_argument("--backend-repository", default=defaults.backend_repository)
+    build.add_argument("--postgres-container", default=defaults.postgres_container)
+    build.add_argument("--db-user", default=defaults.db_user)
+    build.add_argument("--db-name", default=defaults.db_name)
+    publish_step = steps.add_parser("publish", help="unprivileged: upload the build and check it")
+    publish_step.add_argument("--site-dir", type=Path, default=SITE_DIR)
+    args = parser.parse_args(argv)
+    if args.step == "build":
+        return run_build(args)
+    return run_publish(args, os.environ)
 
 
 if __name__ == "__main__":

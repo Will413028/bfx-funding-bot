@@ -1,0 +1,66 @@
+# The public proof site's build (ADR 2026-08-31 D6), run by bfx-public-site.service
+# through bfx_public_site.py's root `build` step, from the deployed host tooling release.
+# Never run it with bare `docker compose`; start the unit instead
+# (docs/runbooks/operations.md §8「公開站」).
+#
+#   docker compose -p bfx-public-site -f <release>/ops/docker-compose.public-site.yml \
+#     run --rm public-site-build
+#
+# Image and env: exactly what docker-compose.weekly-report.yml gets, resolved by the
+# same plan (bfx_weekly_report.build_plan): the ledger's deployed backend digest, the
+# research role's DATABASE_URL and BFX_EXCHANGE_ACCOUNT_ID from research.env, and
+# BFX_DEPLOYMENT_ENV from that revision's live.env. No Cloudflare token: the unit's
+# unprivileged publish step uploads what this writes.
+#
+# Hardening is the weekly job's, enforced in CI by compose_policy.py --kind public-site.
+# The only writable paths are a small /tmp and /out, a directory the build step creates
+# inside the unit's RuntimeDirectory for this run only (systemd removes it when the
+# unit stops), so every upload is this run's build.
+
+name: bfx-public-site
+
+services:
+  public-site-build:
+    image: ${BFX_BACKEND_IMAGE:?BFX_BACKEND_IMAGE must be a repository@sha256 reference}
+    pull_policy: never
+    entrypoint: []
+    user: "1000:1000"
+    working_dir: /app
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      BFX_EXCHANGE_ACCOUNT_ID: ${BFX_EXCHANGE_ACCOUNT_ID:?BFX_EXCHANGE_ACCOUNT_ID is required}
+      BFX_DEPLOYMENT_ENV: ${BFX_DEPLOYMENT_ENV:?BFX_DEPLOYMENT_ENV is required}
+      BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
+      BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ""
+      PYTHONHOME: ""
+      PYTHONUSERBASE: ""
+      LD_PRELOAD: ""
+      LD_LIBRARY_PATH: ""
+      LD_AUDIT: ""
+    volumes:
+      # Created by bfx_public_site.py (owner uid 1000, 0755) before this runs; never by
+      # Docker (the runner refuses when it is missing).
+      - type: bind
+        source: /run/bfx-public-site/build
+        target: /out
+        bind:
+          create_host_path: false
+    command:
+      - sh
+      - -c
+      - timeout 300 python -m scripts.build_public_site --out /out/site
+    networks:
+      bfx_default: {}
+
+networks:
+  bfx_default:
+    external: true
+    name: bfx_default

@@ -857,7 +857,7 @@ CHECK `ck_exchange_account_credentials_active_user_id`（migration `36e59526f8cf
 `BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_SCHEDULER_BUFFER_S`、
 `BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`、`BFX_LOOP_WATCHDOG_S`（event loop watchdog 秒數，預設 120）。已退役、設了就拒絕開機：`BFX_EXECUTOR` 與舊資金 env（`BFX_ALLOCATION_CAP_USDT`、`BFX_BALANCE_BUFFER_USDT`、`BFX_CONCENTRATION_PCT`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`）。
 Bitfinex secret 不再從 `BFX_API_KEY`/`BFX_API_SECRET` 讀取；由 account-owned
-credential vault 解密。公開站（I-PUB）不經 webapi：每週報告為它量測的帳戶產生靜態檔。
+credential vault 解密。公開站（I-PUB）不經 webapi：`bfx-public-site` 每週為每週報告量測的帳戶產生靜態檔。
 
 ### 量測自動化（E3，2026-07-06）
 
@@ -890,7 +890,7 @@ credential vault 解密。公開站（I-PUB）不經 webapi：每週報告為它
 - **fail-closed**：任何 guard timeout（2s）或 exception → `allowed=False` + `safety_trigger(critical)`。
 - **TaskGroup 監督**：任何 sub-task 例外 → ExceptionGroup 傳播 → daemon 非零退出，無 silent task death。
 - **I-RP reprice-down only**：sweep 只砍「高於現行 active quote 超過 tolerance 且夠老」的 offer；不砍低於 quote 的、不砍 spike 當小時的（min-age）、無 active quote 不砍。cancel 失敗 fail-safe（offer 留在 book）；`ExecutorAuthError` 從 sweep 往外丟，但 `PeriodicReconcile._deploy` 的 catch-all 會吞掉（`deployment_phase_failed`），不會走到 exit 78；venue 拒絕 key 由 reconcile 的觀測偵測（3d 憑證恢復模式）。sweep 不直接改 ledger。
-- **I-PUB public read model（`modules/live_validation/public_site.py`）**：公開站是 Cloudflare Pages 上的靜態檔（ADR `2026-08-31` D6）：每週報告以 `bfx_research` 產生（`scripts/build_public_site.py`），`bfx-public-site.service` 只帶 Pages token、不碰 DB 地上傳並核對；頁面沒有 script，`_headers` 的 CSP 是 `default-src 'none'`。公開的帳戶就是每週報告量測的帳戶（`research.env` 的 `BFX_EXCHANGE_ACCOUNT_ID`，runner 缺值就拒跑，不 fallback）；attribution 只為這個帳戶計算。只輸出百分比，絕不輸出絕對金額（資金規模、利息金額；capital-days 只當內部權重）。webapi 沒有任何不需 operator 的 `/api` 路由（9b-2 移除 `/api/v1/public/*`；`tests/architecture/test_webapi_route_guard.py` 鎖住）；公開站每天由 `.github/workflows/venue-contract.yml` 從外部檢查。
+- **I-PUB public read model（`modules/live_validation/public_site.py`）**：公開站是 Cloudflare Pages 上的靜態檔（ADR `2026-08-31` D6）：`bfx-public-site.service` 每週先以 root 跑一次性容器、用 `bfx_research` 產生（`scripts/build_public_site.py`），再由 systemd `DynamicUser` 只帶 Pages token（`LoadCredential=`）、不碰 DB 地上傳並核對；頁面沒有 script，`_headers` 的 CSP 是 `default-src 'none'`。公開的帳戶就是每週報告量測的帳戶（`research.env` 的 `BFX_EXCHANGE_ACCOUNT_ID`，runner 缺值就拒跑，不 fallback）；attribution 只為這個帳戶計算。只輸出百分比，絕不輸出絕對金額（資金規模、利息金額；capital-days 只當內部權重）。webapi 沒有任何不需 operator 的 `/api` 路由（9b-2 移除 `/api/v1/public/*`；`tests/architecture/test_webapi_route_guard.py` 鎖住）；公開站每天由 `.github/workflows/venue-contract.yml` 從外部檢查。
 - **I-EG execution eligibility**：只有已 audit 的 `ReadyToSubmit` 能到 executor。每個 live-capable candidate 都需 fresh、symbol-matched、**sequence/checksum-consistent**（有完整 baseline 且自該 baseline 起未偵測到 gap 或 mismatch，見 7c）的 exact-period book evidence；缺少 period、depth、model、safety 或 audit 時，產生 typed blocked outcome，絕不重用 signal quote、scalar ticker 或 linear estimate。
 
 ---
@@ -988,7 +988,7 @@ allowlist 或第二個 postgres，理由是單一 VM 的管理成本；最小權
 |---|---|---|
 | restore test（每月 1 日，及部署前的 change-triggered） | VM，`bfx-restore-test@`（`ubuntu`） | 隔離還原的 RTO 上限 3600 秒，加 migration 演練 1200 秒，unit 上限 7200 秒（`deploy/vm/systemd/bfx-restore-test@.service:22-24`）；從 R2 拉整個備份 |
 | 備份 | VM，`bfx-pgbackrest-backup` | unit 上限 7200 秒（`bfx-pgbackrest-backup.service:11`）；上傳 R2 |
-| 每週報告 | VM，`bfx-weekly-report`（每週一） | unit 上限 5700 秒（`bfx-weekly-report.service:27`）；研究、ingest 與公開站步驟有自己的 `timeout`（300–1200 秒，`deploy/vm/ops/docker-compose.weekly-report.yml:76-94`），研究步驟失敗不擋報告 |
+| 每週報告 | VM，`bfx-weekly-report`（每週一） | unit 上限 5400 秒（`bfx-weekly-report.service:25`）；研究與 ingest 步驟有自己的 `timeout`（600–1200 秒，`deploy/vm/ops/docker-compose.weekly-report.yml:76-91`），研究步驟失敗不擋報告；公開站是另一個 unit（`bfx-public-site.service:24`，上限 900 秒，build 300 秒） |
 | 研究資料回補 | VM 一次性容器 | liquidations 預設每 25 秒一個 request、429 後睡 240 秒，完整回補數小時（`backend/scripts/ingest_liquidations.py:50-53`）；deriv status 客戶端每分鐘 18 個 request（`docs/runbooks/research-one-shot-jobs.md:17-19`） |
 | 整合測試全量 | CI（`-n 4`，job 上限 30 分鐘，`.github/workflows/ci.yml:212,249`）；本機 `-n 6` | 每個 worker 一台拋棄式 PG18 |
 | Bitfinex 已驗證端點 | bot | 每個 key 一個 gate 排序 nonce，背景讀取 10 秒截斷（`external/bitfinex/auth_rest.py:54,460-468`）；每個觀測 cycle 有 request 上限（`modules/execution/venue_observation.py:49,313`）；送單 token bucket（`pre_trade_limits.command_rate`，`modules/execution/safety/pre_trade.py:249-250`）；同一把 key 的其他使用者會撞 nonce（`docs/runbooks/operations.md:625`） |
