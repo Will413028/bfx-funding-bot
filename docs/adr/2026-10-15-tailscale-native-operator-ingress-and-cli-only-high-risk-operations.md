@@ -121,7 +121,7 @@ D4a 寫「由 DB trigger 拒絕 webapi role 寫入 resume、啟用幣別與 UNKN
 D1 寫「身分取自 Serve 注入的身分 header，穩定鍵是 node user ID」。9d-0 spike 實測後改成下面的形狀，9d-5（PR #237）實作並部署：
 
 - **D1a 授權看 app capability**：tailnet policy 的 grant 把 capability `github.com/Will413028/bfx-funding-bot/cap/operator` 授予 operator 對 `tag:bfx-ops` 的連線，值是 `{"user_id": "<operator 的 node user ID>"}`；serve.json 的 `AcceptAppCaps` 讓 Serve 以 `Tailscale-App-Capabilities` header 轉送。webapi 只在這個 capability 裡有一筆 `user_id` 等於 `BFX_OPERATOR_TAILNET_USER_ID` 時放行，否則 401；`Tailscale-User-Login` 只拿來顯示。Serve 會覆寫 client 自己送的 `Tailscale-*` header（spike 實測）。
-- **D1b webapi 只聽 tailnet 節點 namespace 裡的 127.0.0.1**：webapi 以 `network_mode: service:netns` 加入 holder 的 network namespace（計畫 D13），與 tailscale 共用，所以 Serve 是唯一入口；前端 static export 由同一個 webapi 同源提供。主機的 443 Funnel 已在 2026-10-20 關閉。
+- **D1b webapi 只聽 tailnet 節點 namespace 裡的 127.0.0.1**：webapi 以 `network_mode: service:netns` 加入 holder 的 network namespace（[2026-10-20](2026-10-20-network-namespace-held-by-a-holder-container.md)），與 tailscale 共用，所以 Serve 是唯一入口；前端 static export 由同一個 webapi 同源提供。主機的 443 Funnel 已在 2026-10-20 關閉。
 - **Rationale**：capability 而非 login header：授權條件寫在 tailnet policy 裡，換裝置或 login 改名都不必動 app，policy 拿掉 grant 就立即撤權；node user ID 帶在 capability 的值裡，app 不用另外解析身分 header 的格式。不選「只比對 `Tailscale-User-Login`」：login 字串可改名，而且任何能連到節點的 tailnet 成員都會帶這個 header，等於把授權交給 ACL 一層。**代價**：policy 的 grant 值與 webapi 設定必須一致，任一邊改錯 UI 全部 401（部署前以 `tailscale whois` 核對）；capability 需要 tailscale ≥ v1.92。
 - **Revocation trigger**：Tailscale 不再轉送 app capability，或 Serve 不再覆寫 client 送的 `Tailscale-*` header → 退回 D1 原文的身分 header 比對，並重新評估 Revocation Triggers 裡的 identity-aware proxy。
 
@@ -143,10 +143,10 @@ ASVS 對照把 V6.1.3、V6.8.4、V7.1.1–V7.1.3、V7.3.1、V7.3.2 判為不符�
 
 ## Followup
 
-- 依對真錢的風險分批實作，每批一個 PR：公開頁靜態化 → CLI 對等與 break-glass 演練 → 營運入口切換 → 部署全停 → 網路分段 → KEK 與交易所憑證 → 秘密管理、供應鏈、安全 log、API 契約與文件。
+- 依對真錢的風險分批實作，每批一個 PR：公開頁靜態化 → CLI 對等與 break-glass 演練 → 營運入口切換 → 部署全停 → 網路分段（縮成每個工作自己的 DB role，見 [2026-10-21](2026-10-21-single-vm-least-privilege-by-db-role-not-network-segmentation.md)）→ KEK 與交易所憑證 → 秘密管理、供應鏈、安全 log、API 契約與文件。
 - 交易所憑證那一批同時讓執行服務在開機與定期檢查憑證的權限與來源限制，不合規就停止送單、恢復後自動繼續；該批另以 ADR 記錄。
 - 營運入口切換前，CLI 必須已能完成 resume、啟用幣別、換憑證與 UNKNOWN 裁決；VM 演練的要求已由 Amendment (2026-10-18)「營運入口切換不再等 CLI 的 VM 演練」移除。
-- ASVS L2 對照在全部實作完成後重新判定，放進 `docs/security/`（只寫判定與控制）。
+- ~~ASVS L2 對照在全部實作完成後重新判定，放進 `docs/security/`（只寫判定與控制）~~ 已完成（PR #304）；揭露方式見 [2026-10-15-asvs-l2-scope-and-disclosure-in-a-public-repo](2026-10-15-asvs-l2-scope-and-disclosure-in-a-public-repo.md)。
 
 ## Revocation Triggers
 

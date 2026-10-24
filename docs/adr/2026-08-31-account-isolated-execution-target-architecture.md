@@ -108,7 +108,7 @@ plane 為不同 process boundary、D4 已定 control-plane commands 走 outbox�
 - 完成 money integrity：UNKNOWN submit lifecycle、per-account serialized projection、orphan quarantine。
 - 建立 offsite WAL/PITR、月度 restore drill、readiness 與主動 alerts。
 - 引入 ExchangeAccount、config versions/outbox、CredentialProvider 與 worker lease。
-- 收斂 OpenAPI contract、immutable image deploy、~~expand/contract migrations~~（改為 migration 時全停，見 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D6）；外部 beta 依 D7 gates 解鎖。
+- 收斂 OpenAPI contract、immutable image deploy、~~expand/contract migrations~~（改為 migration 時全停，見 [2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations](2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-risk-operations.md) D6）；外部 beta 依 D7 gates 解鎖，gate 含上線前的外部 pentest（[2026-10-24](2026-10-24-quality-baseline-live-tier-scope-and-kept-mechanisms.md) D2）。
 
 ## Invariants
 
@@ -133,6 +133,7 @@ plane 為不同 process boundary、D4 已定 control-plane commands 走 outbox�
 - 2026-05-26-bfx-productization-host-saas（產品方向決策，不在本 repo） — host SaaS 與準 non-custodial 產品方向。
 - [2026-08-23-funding-strategy-execution-integrity](2026-08-23-funding-strategy-execution-integrity.md) — money path execution gate 與 audit invariants。
 - [2026-05-27-reconcile-as-correctness-backbone](2026-05-27-reconcile-as-correctness-backbone.md) — REST reconcile 作 correctness backbone。
+- D6 公開頁的建置、上傳與 token 範圍：[2026-10-24-public-site-own-build-and-account-level-pages-token](2026-10-24-public-site-own-build-and-account-level-pages-token.md)。
 - Industry reference: [AWS SaaS Lens — bridge model](https://docs.aws.amazon.com/wellarchitected/latest/saas-lens/bridge-model.html).
 - Industry reference: [PostgreSQL row security](https://www.postgresql.org/docs/17/ddl-rowsecurity.html) 與 [continuous archiving/PITR](https://www.postgresql.org/docs/17/continuous-archiving.html).
 - Followup 前兩項（P0 containment、money integrity）的實作決策：[2026-08-31-production-integrity-staged-clean-cutovers](2026-08-31-production-integrity-staged-clean-cutovers.md)（分段 clean cutover、UNKNOWN、serialized projector，`7678f93^..09761bc`）；Halt 2 recovery：[2026-09-10-historical-replay-and-projection-audit-cutover](2026-09-10-historical-replay-and-projection-audit-cutover.md)。
