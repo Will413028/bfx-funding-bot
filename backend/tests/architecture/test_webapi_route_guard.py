@@ -25,8 +25,9 @@ from bfx_funding_bot.modules.api.ingress import API_FALLBACK_PATH, FE_EVENTS_PAT
 PUBLIC_API_PATHS: frozenset[str] = frozenset()
 PROBE_PATHS = frozenset({"/health", "/ready"})
 # The ingress's own routes (9d-5): `/` redirects to the UI, /fe-events forwards browser
-# Sentry events, the API fallback answers an unknown /api path with a JSON 404; none is
-# auth-guarded (the ingress middleware's same-origin check guards the writes).
+# Sentry events (operator-only since the 2026-10-24 ASVS V2.4.1 fix, through its own rate
+# limit dependency), the API fallback answers an unknown /api path with a JSON 404; the
+# ingress middleware's same-origin check guards the writes.
 INGRESS_PATHS = frozenset({"/", FE_EVENTS_PATH, API_FALLBACK_PATH})
 # The static export's mount (present only where the image ships it); generated docs are off.
 UI_MOUNT = "/"

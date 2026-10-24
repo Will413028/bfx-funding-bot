@@ -958,7 +958,7 @@ allowlist 或第二個 postgres，理由是單一 VM 的管理成本；最小權
 | bot → Bitfinex | 對外 | 443／HTTPS `api.bitfinex.com`、`api-pub.bitfinex.com`；WSS `api.bitfinex.com/ws/2`、`api-pub.bitfinex.com/ws/2`（`external/bitfinex/auth_rest.py:425`、`auth_ws.py:368`、`ws.py:25`、`apps/bot.py:198`） | API key＋HMAC-SHA384（只有寫入與帳戶讀取） | TLS，驗證憑證 |
 | 週報、研究 → Bitfinex public、Binance | 對外 | 443／HTTPS（`modules/external_signals/client.py:40`、`docs/runbooks/research-one-shot-jobs.md:10-11`） | 無 | TLS |
 | bot、`bfx-notify` → Telegram | 對外 | 443／HTTPS `api.telegram.org`（`modules/observability/alerts.py:237`、`deploy/vm/ops/bfx_notify.py:112`） | bot token（在 URL，log 會遮蔽：`alerts.py:222`） | TLS |
-| bot、webapi → Sentry；瀏覽器 → webapi `/fe-events` → Sentry | 對外 | 443／HTTPS；`/fe-events` 只轉給設定的 DSN（`modules/api/ingress.py:170,203-221`） | DSN（依設計公開） | TLS |
+| bot、webapi → Sentry；瀏覽器 → webapi `/fe-events` → Sentry | 對外 | 443／HTTPS；`/fe-events` 只收 operator（capability＋自己的限流）、只轉給設定的 DSN（`modules/api/ingress.py:184,213-241`） | DSN（依設計公開） | TLS |
 | Postgres 容器（pgBackRest）、restore test → R2 | 對外 | 443／S3 API（`deploy/vm/pgbackrest/pgbackrest.conf`、`docs/runbooks/offsite-dr.md:107-140`） | bucket 範圍的 R2 S3 憑證 | TLS；備份另以 `repo1-cipher-type=aes-256-cbc` 加密（`pgbackrest.conf:8`） |
 | `bfx-deploy` → GHCR | 對外 | 443／HTTPS `ghcr.io`，以 digest pull（`deploy/vm/ops/bfx_deploy.py:634`） | `ghcr.env` 的 read-only token，檔案不存在就匿名（`bfx_deploy.py:2267-2272`；`docs/runbooks/deploy.md:187-188`） | TLS |
 | `bfx-deploy` → Docker Hub | 對外 | 443／HTTPS，只 pull allowlist 的 tailscale digest（`docker-compose.app.yml:144,169`） | 無 | TLS |

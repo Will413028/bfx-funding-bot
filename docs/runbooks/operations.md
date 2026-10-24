@@ -280,7 +280,8 @@ webapi，以 `service` tag 區分；`bfx-frontend` 收瀏覽器）。Sentry 依 
   - 遮罩失敗時整筆不送。
 - 送出由 SDK 的背景 thread 處理，queue 有上限，不在交易路徑上等待網路；結束時最多 flush 2 秒。
   outgoing request 不加 trace header。
-- 瀏覽器的事件先送到本站的 `/fe-events`（`frontend/src/lib/sentry-tunnel.ts`），再由 webapi 轉給 `BFX_FE_SENTRY_DSN`
+- 瀏覽器的事件先送到本站的 `/fe-events`（`frontend/src/lib/sentry-tunnel.ts`），再由 webapi 轉給 `BFX_FE_SENTRY_DSN`；
+  它和私有 API 一樣要 operator capability，另有自己的限流（每個 operator 每分鐘 60 則，超過回 429，Sentry SDK 會依 `Retry-After` 退避），不佔 API 寫入額度
   的 project（`backend/.../modules/api/ingress.py`；只接受同源、DSN 相符的 envelope）；
   廣告與隱私擴充套件會擋直接送往 `*.sentry.io` 的請求（console 顯示 `ERR_BLOCKED_BY_CONTENT_BLOCKER`）。
 - <a id="error-tracking-test"></a>測試：在執行中的 container 裡各送一筆測試例外：

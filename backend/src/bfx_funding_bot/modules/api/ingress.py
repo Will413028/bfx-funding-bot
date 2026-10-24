@@ -11,7 +11,12 @@ namespace), so these checks are about the browser, not the network:
   /fe-events), carry JSON, so a cross-site form or ``no-cors`` fetch cannot reach a
   handler. A bodiless DELETE needs no content type: the Origin check already stops it.
 - The static export of the frontend is served with a hash-based CSP: the hashes of every
-  inline script in the export, computed once at start.
+  inline script in the export, computed once at start. Every other response (the JSON
+  API, /fe-events) gets a sandboxing CSP that renders nothing, and /api/ answers are
+  never stored by a cache (they are all private: the public site is static files on
+  Cloudflare Pages).
+- /fe-events needs the operator capability, like the private API, and has its own
+  token bucket, so a burst of browser errors never spends the operator's write budget.
 """
 from __future__ import annotations
 
@@ -26,7 +31,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
@@ -35,6 +40,7 @@ from starlette.routing import Match
 from bfx_funding_bot.core.auth import LOGIN_HEADER
 from bfx_funding_bot.core.security_log import REQUEST_REJECTED, clip, security_event
 from bfx_funding_bot.core.settings import IngressSettings
+from bfx_funding_bot.modules.api.ratelimit import TokenBucketLimiter, build_rate_limit_dependency
 
 PROBE_PATHS = frozenset({"/health", "/ready"})
 FE_EVENTS_PATH = "/fe-events"
@@ -43,6 +49,10 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 SAME_SITE_FETCH = frozenset({"same-origin", "none"})
 HOME = "/en/overview/"
 MAX_EVENT_BYTES = 1024 * 1024
+# Browser Sentry events per operator per minute; the SDK backs off on 429 (Retry-After).
+FE_EVENTS_PER_MIN = 60
+# Not the UI: JSON and the Sentry tunnel, which a browser must never render as a page.
+API_CSP = "sandbox; default-src 'none'; frame-ancestors 'none'"
 SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
@@ -70,7 +80,7 @@ def content_security_policy(script_hashes: frozenset[str]) -> str:
         "connect-src 'self'",
         "object-src 'none'",
         "frame-ancestors 'none'",
-        "base-uri 'self'",
+        "base-uri 'none'",
         "form-action 'self'",
     ])
 
@@ -108,11 +118,15 @@ class IngressMiddleware:
             if refusal is not None:
                 await refusal(scope, receive, send)
                 return
-        policy = None if path.startswith("/api/") or path == FE_EVENTS_PATH else self.csp()
+        api = path.startswith("/api/")
+        policy = API_CSP if api or path == FE_EVENTS_PATH else self.csp()
 
         async def send_with_headers(message: MutableMapping[str, Any]) -> None:
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
+                if api:
+                    headers = [(k, v) for k, v in headers if k.lower() != b"cache-control"]
+                    headers.append((b"cache-control", b"no-store"))
                 headers += [(k.lower().encode(), v.encode()) for k, v in SECURITY_HEADERS.items()]
                 if policy is not None:
                     headers.append((b"content-security-policy", policy.encode()))
@@ -199,10 +213,14 @@ def install_ingress(app: FastAPI, *, static_dir: Path) -> None:
     """The ingress middleware, /fe-events, `/` and the static export (when present)."""
     state: dict[str, str | None] = {"csp": None}
     app.add_middleware(IngressMiddleware, csp=lambda: state["csp"])
+    # Its own buckets (a limiter of its own): the operator's API writes are never spent here.
+    fe_events_limit = build_rate_limit_dependency(
+        TokenBucketLimiter(read_per_min=1, write_per_min=FE_EVENTS_PER_MIN))
 
-    @app.post(FE_EVENTS_PATH, include_in_schema=False)
+    @app.post(FE_EVENTS_PATH, include_in_schema=False, dependencies=[Depends(fe_events_limit)])
     async def fe_events(request: Request) -> Response:
-        """Browser Sentry events, forwarded only to the configured frontend project."""
+        """Browser Sentry events from the operator, forwarded only to the configured
+        frontend project."""
         try:
             body = await _read_limited(request, MAX_EVENT_BYTES)
         except ClientDisconnect:
