@@ -1,0 +1,19 @@
+# Debian security updates the released backend image does not have yet, each with the
+# date after which .github/workflows/security.yml (job image_os_updates) fails again.
+# The fix is a newer base digest in backend/Dockerfile (Dependabot docker-patch, 7-day
+# cooldown). Remove an entry when the image that has the update deploys; never extend a
+# date without a written reason. Script: scripts/image_os_updates.py.
+
+# The newest python:3.13-slim digest (2026-10-22) is in the cooldown until 2026-10-29;
+# Dependabot's weekly run after that opens the bump.
+[[Pending]]
+package = "ca-certificates"
+version = "20250419+deb13u1"
+ignoreUntil = 2026-11-03T00:00:00Z
+reason = "base digest bump waits for the cooldown (until 2026-10-29) and the weekly Dependabot run"
+
+[[Pending]]
+package = "liblzma5"
+version = "5.8.1-1+deb13u2"
+ignoreUntil = 2026-11-03T00:00:00Z
+reason = "base digest bump waits for the cooldown (until 2026-10-29) and the weekly Dependabot run"
