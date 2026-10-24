@@ -38,4 +38,21 @@ describe("strategyConfigSchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it.each(["US D", "<script>", "f".repeat(17)])(
+    "rejects a currency the backend refuses (%s)",
+    (currency) => {
+      expect(
+        strategyConfigSchema.safeParse({ ...validConfig, currency }).success,
+      ).toBe(false);
+    },
+  );
+
+  it("rejects a non-finite bound", () => {
+    const result = strategyConfigSchema.safeParse({
+      ...validConfig,
+      amount: { min: 1, max: Number.POSITIVE_INFINITY },
+    });
+    expect(result.success).toBe(false);
+  });
 });

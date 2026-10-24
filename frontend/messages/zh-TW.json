@@ -158,7 +158,8 @@
     "minLength": "至少需要 8 個字元",
     "invalidEmail": "請輸入有效的電子郵件",
     "passwordMismatch": "密碼不一致",
-    "rangeMinMax": "最小值必須小於或等於最大值"
+    "rangeMinMax": "最小值必須小於或等於最大值",
+    "currencyCode": "只能是英文字母與數字，最多 16 個字"
   },
   "status": {
     "running": "運行中",

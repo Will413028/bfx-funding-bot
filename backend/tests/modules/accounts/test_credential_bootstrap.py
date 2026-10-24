@@ -215,3 +215,20 @@ async def test_invalid_secret_input_does_not_write(factory, field, value):
     with pytest.raises(bootstrap.BootstrapError):
         await invoke(factory, apply=True, **{field: value})
     assert await count(factory) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field, value", [
+    ("api_key", "fixture-key\n"),         # a newline pasted from the terminal
+    ("api_key", "fixture key"),           # whitespace inside
+    ("api_secret", "fixture-secret\x00"),  # a control character
+    ("api_secret", "   "),
+])
+async def test_a_key_the_rotation_path_would_refuse_is_refused_before_bitfinex(factory, field, value):
+    """ASVS V1.3.3: the key goes into a request header; the first key gets the same check
+    as every rotated one (core.sealed_credential.validate_credential)."""
+    client = Permissions()
+    with pytest.raises(bootstrap.BootstrapError) as error:
+        await invoke(factory, apply=True, client=client, **{field: value})
+    assert str(error.value) == "bootstrap_input_invalid"
+    assert client.calls == [] and await count(factory) == 0

@@ -431,7 +431,7 @@ async def request_credential_rotation(
     """
     require_write(context)
     control_reason(reason)
-    if len(label) > LABEL_MAX:
+    if len(label) > LABEL_MAX or any(ch < " " or ch == "\x7f" for ch in label):
         raise _invalid("invalid_label")
     try:
         validate_credential(api_key, api_secret)
