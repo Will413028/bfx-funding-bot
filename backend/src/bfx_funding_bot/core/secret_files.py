@@ -5,7 +5,7 @@ secret as a file there (``deploy/vm/docker-compose.app.yml``, shape enforced by
 ``deploy/vm/ops/compose_policy.py``, host files checked by ``bfx_deploy.py``). In that mode
 a key of :data:`FILE_SECRET_KEYS` is read only from ``<dir>/<KEY>``: a missing or empty file
 is a :class:`SecretFileError`, and the environment's value of the key is ignored -- never a
-fallback, so a secret cannot silently come from the wrong place (quality plan 9h, D15).
+fallback, so a secret cannot silently come from the wrong place (ADR 2026-08-31, Amendment 2026-10-22).
 
 Every other process has no ``BFX_SECRETS_DIR`` and reads the same keys from its
 environment: the one-shot containers (operator CLI, weekly report, research jobs, the

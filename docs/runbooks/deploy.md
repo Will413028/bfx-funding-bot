@@ -403,7 +403,7 @@ sudo -u ubuntu env GIT_TERMINAL_PROMPT=0 git -C /home/ubuntu/bfx-funding-bot fet
 
 compose 裡的 `netns`（`bfx-netns`）只持有 network namespace（只跑 `sleep`），`tailscale`（`bfx-tailscale`，
 節點 `bfx-ops`、userspace、沒有 capability、沒有 port）以 `network_mode: service:netns` 加入它；9d-5 起
-webapi 也加入它。tailscaled 重啟、崩潰或單獨重建都不會換掉 namespace（計畫 D13，holder spike 實測）。
+webapi 也加入它。tailscaled 重啟、崩潰或單獨重建都不會換掉 namespace（holder spike 實測，`docs/adr/2026-10-20-network-namespace-held-by-a-holder-container.md`）。
 兩者都要 compose healthcheck：`bfx-tailscale` 的 `/healthz` 在節點拿到 tailnet 位址後才回 200。
 **入口的狀態不讓 bot 被停**：bot、webapi 照舊把關；入口（健康檢查，以及部署後檢查的 image、名稱、
 namespace）只在這次部署新建或重建了它（第一次部署、image 或 serve.json 改了、被 §1 第 7 步強制重建）時才把關，

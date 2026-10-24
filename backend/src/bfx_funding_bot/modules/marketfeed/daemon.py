@@ -282,8 +282,8 @@ class VenueDiagnostics(Protocol):
 _VENUE_TASK_READY_TIMEOUT_S = 30.0
 
 # Credential recovery mode retries the boot observation 1, 2, 4 minutes apart, then every 5
-# (plan decision D11, sub-question 2): slow, because the venue's answer only changes once
-# someone fixes or replaces the key at Bitfinex.
+# (ADR 2026-10-18-venue-credential-rejection-recovery-mode, D2): slow, because the venue's
+# answer only changes once someone fixes or replaces the key at Bitfinex.
 CREDENTIAL_RECOVERY_RETRY_BASE_S = 60.0
 CREDENTIAL_RECOVERY_RETRY_MAX_S = 300.0
 
