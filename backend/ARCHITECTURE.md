@@ -936,8 +936,8 @@ tailnet policy（admin console）：
   規則的 `dst` 是擁有者自己的裝置（`autogroup:self`）。這是 admin console 的狀態，repo 裡沒有，以 admin console 為準；
   改成 tagged 需要 tailnet 管理者操作。
 - 主機的入口：Tailscale SSH（上一條），break-glass 是 OCI Console Connection（不經 tailnet；Console 下 `bfx-op` 除了 `halt` 都拒絕）。
-  公網 sshd 的終態是停用、UFW 與 OCI security list 都不開 22，現況以主機上 `systemctl is-active ssh.socket ssh.service` 為準
-  （`operations.md:707-731`）。
+  公網 sshd 已停用（`ssh.socket`、`ssh.service` masked，2026-10-24 讀 VM），UFW 與 OCI security list 都不開 22
+  （`operations.md` §12）。各路徑的驗證強度見 10h。
 
 已接受的殘餘風險：所有容器在同一個 `bfx_default` 網路（下一節），同網路的容器連得到 bot 8080（`/admin` 要 token，
 `/metrics`、`/healthz` 不用）；主機上 `ubuntu` 的 sudo 與掛 docker.sock 的監控容器等同 root。不做網路分段、egress
@@ -1050,6 +1050,24 @@ tailnet IP），加上 operator 自己 Bitfinex 帳戶的帳務資料（餘額�
 | Bitfinex 請求簽章 | HMAC-SHA384（`external/bitfinex/auth_ws.py:336-361`，REST 與 WS 認證） | API secret（解密後只在 bot 記憶體） | 請求的完整性與身分 | 機密性（請求內容靠 TLS）；secret 本身外洩 |
 | 異地備份 | pgBackRest `repo1-cipher-type=aes-256-cbc`，key 由 `repo1-cipher-pass` 導出（`deploy/vm/pgbackrest/pgbackrest.conf:8`） | passphrase：VM 的 `/home/ubuntu/bfx/pgbackrest/conf.d/r2.conf`，另有離線保管（`docs/runbooks/offsite-dr.md:128-129`）；新設的至少 32 字（`scripts/setup-pgbackrest-r2.sh`） | R2 上的備份內容 | 竄改偵測（CBC 沒有 AEAD；接受，靠 manifest checksum 與每月 restore test，ASVS V11.3.3 裁決）；VM 上的明文資料庫 |
 | 傳輸 | TLS：Tailscale Serve（營運入口，§10e）；R2、Bitfinex、Telegram、Sentry、Cloudflare 的 HTTPS | 各服務端的憑證；VM 不持有私鑰（Serve 的憑證由 tailscaled 管理） | 路上的竊聽與竄改 | 端點本身；VM 內部的明文連線（webapi→bot、Postgres，D14 接受） |
+
+### 10h. tailnet 身分的強度與 session（ASVS V6.1.3、V7.1、V7.3）
+
+app 沒有自己的登入與 session（ADR 2026-10-15 D2）；強度與時效都由 GitHub（IdP）、Tailscale 與 OCI 的設定決定。下表的值是 2026-10-24 讀出的，決定與理由在同一 ADR 的 Amendment (2026-10-24)。
+
+| 路徑 | 第一關 | 強度 | 時效 |
+|---|---|---|---|
+| UI（Serve） | 已登錄的 operator 裝置，加上 grant 給的 capability（10a） | 登錄裝置時：GitHub 密碼＋兩步驟驗證（因子記在 maintainer 私有的威脅模型）；之後只靠持有裝置 | node key 到期：tailnet 設定 180 天（Tailscale 預設，未縮短）；不設 idle 時限，閒置由裝置螢幕鎖承擔 |
+| CLI `sudo bfx-op`（Tailscale SSH） | check mode 回 IdP 驗證 | 同上；GitHub 的 web session 還在時不會再問密碼與兩步驟驗證（廠商行為，推論，未實測） | 12 小時重新驗證（ADR D4d） |
+| `bfx-op halt`、Console 上的 shell | OCI Console Connection | OCI 帳號的密碼＋MFA | OCI Console 的 session |
+
+- **最低強度假設**：app 收不到 IdP 的 `acr`／`amr`／`auth_time`，一律假設最低強度（持有裝置＋一個可被釣魚的因子），不以 ADR D1 的「IdP 只用硬體金鑰」為前提，所以 UI 只有讀取與降低曝險的寫入（10a「動作的分界」）。
+- **各段時效的關係**：GitHub 的 web session 決定 check mode 回 IdP 時要不要重新輸入；node key 決定裝置能不能留在 tailnet（UI 與 SSH 都靠它）；check mode 的 12 小時只管 SSH。最短的一段不會延長其他段：node key 到期後，即使 GitHub session 還在，裝置也要重新登入 tailnet。
+- **允許的 operator 裝置**：一台 operator 的筆電（2026-10-24 `tailscale status --json`：除了主機節點 `oci-a1`，tailnet 沒有其他未加 tag 的節點）。新增裝置前先在這裡加列；admin console 的 Machines 出現不在清單上的裝置時，照下面的終止步驟處理，並換 GitHub 的密碼與 2FA。
+- **終止 operator 的存取**（裝置遺失、帳號疑似被盜）：
+  1. Tailscale admin console → Machines → 該裝置 → Remove：node key 立即失效，UI 與 Tailscale SSH 同時斷。
+  2. 帳號疑似被盜：GitHub 改密碼、重設 2FA、在 Settings → Sessions 登出其他 session；再到 admin console 確認沒有新登錄的裝置。
+  3. 要撤銷的是整個人（第二個 operator 出現之後才會發生）：拿掉 tailnet policy 的 grant 與 SSH 規則裡的這個人，再由 owner role 刪他的 `exchange_account_memberships` 列；webapi 的 `BFX_OPERATOR_TAILNET_USER_ID` 換成留下的 operator。
 
 ## 11. Related
 
