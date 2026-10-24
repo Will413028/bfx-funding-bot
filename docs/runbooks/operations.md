@@ -714,8 +714,7 @@ kill 的 cancel-all）被拒：
   `requested_by`（9d-6 起）；沒有指定 actor 的參數。CLI 連上 DB 後先確認它是該帳戶的 member，
   不是就拒絕、什麼都不寫；寫入另要 owner／operator，bot 套用時再以 `operator_authorized` 重驗。
 - **信任邊界**：`ubuntu` 的 sudo 是 NOPASSWD，任何 root 等價的 shell 都能自己設定
-  `SSH_CONNECTION` 冒充另一個 peer：公網 sshd 還開著時持有 key 的登入、Console 上的 `ubuntu`。
-  公網 sshd 停用後只剩 Console 這一條。誰能開 session 由 Tailscale SSH 的 check mode 決定；`bfx-op`
+  `SSH_CONNECTION` 冒充另一個 peer；公網 sshd 已停用，這樣的 shell 只剩 Console 上的 `ubuntu`。誰能開 session 由 Tailscale SSH 的 check mode 決定；`bfx-op`
   做的是把誠實 session 的身分綁進請求並留下紀錄。
 - **子命令**（`sudo bfx-op <子命令> --help` 看參數；`halt` 除外，它只收 `--reason`）：唯讀 `status`、`uncertainties`、`uncertainty`、
   `request <trading|currency|resolution|credential> <request_id>`、`credential`；寫入 `resume`、`kill`、
@@ -765,8 +764,8 @@ kill 的 cancel-all）被拒：
 
 ## 12. Break-glass
 
-順序：Tailscale SSH（§10）→ OCI Console Connection。終態是公網 sshd 停用、UFW 與 OCI security list 都不開 22；
-在那之前公網 sshd 仍是一條入口（`sudo systemctl is-active ssh.socket ssh.service` 看現況）。
+順序：Tailscale SSH（§10）→ OCI Console Connection。公網 sshd 已停用（`ssh.socket`、`ssh.service` 都是 masked，
+2026-10-24 讀 VM），UFW 與 OCI security list 都不開 22；各路徑的驗證強度見 `backend/ARCHITECTURE.md` §10h。
 
 | 元件壞了 | web UI | `bfx-op`（Tailscale SSH） | Console Connection |
 |---|---|---|---|
