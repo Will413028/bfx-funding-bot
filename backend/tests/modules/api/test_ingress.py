@@ -3,7 +3,8 @@ the static UI with its hash-based CSP, and the /fe-events Sentry tunnel.
 
 Mutations these catch: dropping the Origin check, the Sec-Fetch-Site check, the JSON check
 or the Host check; a CSP that loses the inline-script hashes; /fe-events forwarding to
-another project or accepting a cross-site POST.
+another project, accepting a cross-site POST, a caller without the operator capability or
+an unbounded burst; an API response without its sandbox CSP or with a cacheable body.
 """
 from __future__ import annotations
 
@@ -31,7 +32,13 @@ from bfx_funding_bot.modules.api.ingress import (
     install_ingress,
     sentry_envelope_target,
 )
-from tests.ingress_support import ALLOWED_HOST, INGRESS_ENV, attach_ingress, ingress_settings
+from tests.ingress_support import (
+    ALLOWED_HOST,
+    INGRESS_ENV,
+    attach_ingress,
+    ingress_settings,
+    operator_headers,
+)
 
 ORIGIN = f"https://{ALLOWED_HOST}"
 SCRIPT = b"self.__next_f.push([1,\"x\"])"
@@ -83,7 +90,7 @@ def _post(client: TestClient, path: str = "/api/v1/thing", **headers: str):
 def test_a_same_origin_json_post_reaches_the_handler(client: TestClient) -> None:
     response = _post(client)
     assert response.status_code == 200 and response.json() == {"ok": "yes"}
-    assert "content-security-policy" not in response.headers           # an API answer
+    assert response.headers["content-security-policy"] == ingress.API_CSP  # an API answer
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -121,8 +128,30 @@ def test_the_static_ui_carries_the_hash_csp_and_the_security_headers(client: Tes
     assert response.status_code == 200 and SCRIPT in response.content
     policy = response.headers["content-security-policy"]
     assert f"'sha256-{SCRIPT_HASH}'" in policy and "'unsafe-inline'" not in policy.split("script-src", 1)[1].split(";")[0]
-    assert "frame-ancestors 'none'" in policy
+    assert "frame-ancestors 'none'" in policy and "base-uri 'none'" in policy
     assert response.headers["x-content-type-options"] == "nosniff"
+    assert "cache-control" not in response.headers or "no-store" not in response.headers["cache-control"]
+
+
+def test_api_answers_render_nothing_and_are_never_stored(client: TestClient) -> None:
+    for response in (client.get("/api/v1/getonly"), _post(client), client.get("/api/v1/nope")):
+        assert response.headers["content-security-policy"] == ingress.API_CSP
+        assert response.headers.get_list("cache-control") == ["no-store"]
+    fe = client.post(FE_EVENTS_PATH, content=ENVELOPE, headers={"Origin": ORIGIN})
+    assert fe.headers["content-security-policy"] == ingress.API_CSP
+
+
+def test_an_api_handlers_own_cache_header_is_replaced(export_dir: Path) -> None:
+    app = attach_ingress(FastAPI())
+
+    @app.get("/api/v1/cached")
+    async def cached() -> Any:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({}, headers={"Cache-Control": "public, max-age=3600"})
+
+    install_ingress(app, static_dir=export_dir)
+    response = TestClient(app, base_url=f"https://{ALLOWED_HOST}").get("/api/v1/cached")
+    assert response.headers.get_list("cache-control") == ["no-store"]
 
 
 def test_root_redirects_to_the_overview(client: TestClient) -> None:
@@ -143,7 +172,7 @@ def test_the_policy_lists_exactly_the_given_hashes() -> None:
 def test_fe_events_forward_to_the_configured_project_only(client: TestClient, httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(url="https://o1.ingest.sentry.io/api/42/envelope/", status_code=200)
     response = client.post(FE_EVENTS_PATH, content=ENVELOPE,
-                           headers={"Origin": ORIGIN, "Content-Type": "text/plain;charset=UTF-8"})
+                           headers={**operator_headers(), "Origin": ORIGIN, "Content-Type": "text/plain;charset=UTF-8"})
     assert response.status_code == 200
     (forwarded,) = httpx_mock.get_requests()
     assert forwarded.content == ENVELOPE
@@ -156,8 +185,34 @@ def test_fe_events_forward_to_the_configured_project_only(client: TestClient, ht
 ])
 def test_fe_events_refuse_another_dsn(client: TestClient, dsn: str) -> None:
     body = b'{"dsn":"' + dsn.encode() + b'"}\n{}'
-    response = client.post(FE_EVENTS_PATH, content=body, headers={"Origin": ORIGIN})
+    response = client.post(FE_EVENTS_PATH, content=body, headers={**operator_headers(), "Origin": ORIGIN})
     assert response.status_code == 400 and response.json()["detail"] == "dsn_not_allowed"
+
+
+@pytest.mark.parametrize("headers", [{}, operator_headers(user_id="someone-else")])
+def test_fe_events_need_the_operator_capability(
+    client: TestClient, httpx_mock: HTTPXMock, headers: dict[str, str],
+) -> None:
+    response = client.post(FE_EVENTS_PATH, content=ENVELOPE, headers={**headers, "Origin": ORIGIN})
+    assert response.status_code == 401 and httpx_mock.get_requests() == []
+
+
+def test_fe_events_have_their_own_bucket(
+    export_dir: Path, httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frozen = ingress.TokenBucketLimiter
+    monkeypatch.setattr(ingress, "TokenBucketLimiter",
+                        lambda **kw: frozen(**kw, clock=lambda: 1000.0))  # no refill mid-test
+    app = attach_ingress(FastAPI())
+    install_ingress(app, static_dir=export_dir)
+    client = TestClient(app, base_url=f"https://{ALLOWED_HOST}")
+    httpx_mock.add_response(url="https://o1.ingest.sentry.io/api/42/envelope/", status_code=200,
+                            is_reusable=True)
+    headers = {**operator_headers(), "Origin": ORIGIN}
+    codes = [client.post(FE_EVENTS_PATH, content=ENVELOPE, headers=headers).status_code
+             for _ in range(ingress.FE_EVENTS_PER_MIN + 1)]
+    assert codes[:-1] == [200] * ingress.FE_EVENTS_PER_MIN and codes[-1] == 429
+    assert len(httpx_mock.get_requests()) == ingress.FE_EVENTS_PER_MIN
 
 
 def test_fe_events_refuse_a_cross_site_post(client: TestClient) -> None:
@@ -166,7 +221,8 @@ def test_fe_events_refuse_a_cross_site_post(client: TestClient) -> None:
 
 
 def test_fe_events_refuse_an_oversized_envelope(client: TestClient) -> None:
-    response = client.post(FE_EVENTS_PATH, content=b"x" * (MAX_EVENT_BYTES + 1), headers={"Origin": ORIGIN})
+    response = client.post(FE_EVENTS_PATH, content=b"x" * (MAX_EVENT_BYTES + 1),
+                           headers={**operator_headers(), "Origin": ORIGIN})
     assert response.status_code == 413
 
 
@@ -225,7 +281,7 @@ def test_fe_events_answer_a_client_disconnect_without_an_error(
         raise ClientDisconnect
 
     monkeypatch.setattr(ingress, "_read_limited", disconnected)
-    response = client.post(FE_EVENTS_PATH, content=ENVELOPE, headers={"Origin": ORIGIN})
+    response = client.post(FE_EVENTS_PATH, content=ENVELOPE, headers={**operator_headers(), "Origin": ORIGIN})
     assert response.status_code == 400 and response.json()["detail"] == "client_disconnected"
 
 
