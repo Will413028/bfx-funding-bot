@@ -31,7 +31,10 @@ from bfx_funding_bot.modules.api.funding_status import build_funding_status_rout
 from bfx_funding_bot.modules.api.ingress import install_ingress
 from bfx_funding_bot.modules.api.projections import build_projections_router
 from bfx_funding_bot.modules.api.routers import build_router as build_api_router
-from bfx_funding_bot.modules.api.schemas import install_response_shape_handler
+from bfx_funding_bot.modules.api.schemas import (
+    install_request_validation_log,
+    install_response_shape_handler,
+)
 from bfx_funding_bot.modules.api.trading_control import build_trading_control_router
 from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
 from bfx_funding_bot.modules.observability.error_tracking import init_error_tracking
@@ -119,6 +122,7 @@ init_error_tracking("webapi", os.environ,
 # No generated docs: the API is the UI's, behind Serve (9d-5).
 app = FastAPI(title="bfx-funding-bot", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 install_response_shape_handler(app)
+install_request_validation_log(app)
 app.include_router(build_api_router())
 app.include_router(build_api_keys_router())
 app.include_router(build_attribution_router())

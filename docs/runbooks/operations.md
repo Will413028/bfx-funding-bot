@@ -247,7 +247,7 @@ sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
 - 取欄位用 `jq`（要先裝）：`docker logs bfx-webapi --since 1h 2>&1 | jq -R -c 'fromjson? | select(.logger == "bfx.security")'`（`fromjson?` 跳過非 JSON 行）。
   operational telemetry（logger `bfx_funding_bot.events`）的事件 JSON 是 `msg` 字串，要再解一次：
   `jq -R -c 'fromjson? | select(.logger == "bfx_funding_bot.events") | .msg | fromjson'`。
-- web API 的 access log（logger `uvicorn.access`）的 client 是 Serve 代理轉來的位址（`127.0.0.1`，或 Serve 帶 `X-Forwarded-For` 時的 tailnet IP），不代表身分；看身分要看安全事件。
+- web API 的 access log（logger `uvicorn.access`）的 client 是 Serve 代理轉來的位址（`127.0.0.1`，或 Serve 帶 `X-Forwarded-For` 時的 tailnet IP），不代表身分；看身分要看安全事件（每個 operator 請求都有一行 `access_granted`）。
 
 安全事件（logger `bfx.security`；查法 `docker logs bfx-webapi --since 24h 2>&1 | grep bfx.security`，bot 同理）：
 
@@ -258,6 +258,8 @@ sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
 | `rate_limited` | 429 | `user_id`、`login`、`reason`（`read_bucket_empty`／`write_bucket_empty`）、`retry_after_s` |
 | `boot_refused` | 拒絕開機（CRITICAL）：web API 的 `admin_token_in_webapi_env`、`ingress_settings_invalid`、`schema_head_mismatch`、`capital_authority_unreadable`；bot 的 `boot_failed`（只有 `error_types`，訊息在 Telegram 的 `boot_refused` 告警） | `reason`、`detail`、`error_types` |
 | `admin_halt` | bot `/admin/halt` 被呼叫 | `actor`、`halt_reason`、`cancel_all_complete` |
+| `access_granted`（INFO） | web API：operator 通過 `require_operator` 的每個請求（一個請求一行，受限流上限） | `method`、`path`、`login` |
+| `input_rejected` | web API 422：請求不符合 model（回應仍是 FastAPI 原本的 422） | `method`、`path`、`login`、`fields`（失敗的欄位路徑，最多 20 個，不含值） |
 
 log 裡沒有 token、帶 token 的 header 或 request body；request 帶來的字串截到 200 字。
 
