@@ -98,7 +98,7 @@ def _credential(**columns: Any) -> ExchangeAccountCredential:
     values: dict[str, Any] = {
         "id": CREDENTIAL, "exchange_account_id": ACCOUNT, "venue": "bitfinex", "label": "main",
         "api_key": "pub-key-1", "lifecycle_status": "active", "verified_at": UPDATED,
-        "last_verify_error": None, "created_at": CREATED}
+        "created_at": CREATED}
     return ExchangeAccountCredential(**(values | columns))
 
 
@@ -356,8 +356,7 @@ def patched_ports(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BFX_SOURCE_REVISION", "d" * 40)
 
     async def list_credentials(session: Any, **_: Any) -> list[ExchangeAccountCredential]:
-        return [_credential(), _credential(id=UUID(int=2), label="old", lifecycle_status="revoked",
-                                           verified_at=None, last_verify_error="bad nonce")]
+        return [_credential(), _credential(id=UUID(int=2), label="old", lifecycle_status="retired")]
 
     async def get_draft(session: Any, **_: Any) -> AccountConfigDraft:
         return _draft(STORED_CONFIG)

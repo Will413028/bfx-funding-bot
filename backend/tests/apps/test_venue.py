@@ -86,8 +86,7 @@ async def _seed(factory: Any, *, credential: str | None = "active") -> None:
                 api_key="account-key", secret_ciphertext=envelope.secret_ciphertext,
                 secret_nonce=envelope.secret_nonce, wrapped_dek=envelope.wrapped_dek,
                 dek_nonce=envelope.dek_nonce, key_version=envelope.key_version,
-                lifecycle_status=credential,
-                verified_at=datetime.now(UTC) if credential == "active" else None,
+                lifecycle_status=credential, verified_at=datetime.now(UTC),
                 bitfinex_user_id=4242))
 
 
@@ -101,7 +100,7 @@ async def test_the_bitfinex_wiring_reads_the_vault(factory, monkeypatch) -> None
 
 @pytest.mark.parametrize(("credential", "kek", "message"), [
     (None, True, "active Bitfinex credential"),
-    ("pending", True, "active Bitfinex credential"),
+    ("retired", True, "active Bitfinex credential"),
     ("active", False, "BFX_VAULT_KEK is required"),
 ])
 async def test_the_bitfinex_wiring_fails_closed_without_a_usable_credential(

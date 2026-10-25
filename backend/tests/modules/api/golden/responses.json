@@ -33,10 +33,9 @@
           "label": "main",
           "apiKey": "pub-key-1",
           "apiSecret": "****",
-          "status": "verified",
+          "status": "active",
           "createdAt": "2026-10-01T08:30:00+00:00",
-          "verifiedAt": "2026-10-02T09:45:00+00:00",
-          "lastVerifyError": null
+          "verifiedAt": "2026-10-02T09:45:00+00:00"
         },
         {
           "id": "00000000-0000-0000-0000-000000000002",
@@ -44,10 +43,9 @@
           "label": "old",
           "apiKey": "pub-key-1",
           "apiSecret": "****",
-          "status": "revoked",
+          "status": "retired",
           "createdAt": "2026-10-01T08:30:00+00:00",
-          "verifiedAt": null,
-          "lastVerifyError": "bad nonce"
+          "verifiedAt": "2026-10-02T09:45:00+00:00"
         }
       ]
     }

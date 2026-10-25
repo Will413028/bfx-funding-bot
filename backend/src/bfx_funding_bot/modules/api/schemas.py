@@ -20,7 +20,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from bfx_funding_bot.core.auth import LOGIN_HEADER
 from bfx_funding_bot.core.security_log import INPUT_REJECTED, clip, security_event
-from bfx_funding_bot.modules.accounts.exchange_accounts import AccountRole
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    AccountRole,
+    CredentialLifecycleStatus,
+)
 from bfx_funding_bot.modules.ledger import OfferState
 
 _logger = logging.getLogger(__name__)
@@ -28,8 +31,6 @@ _logger = logging.getLogger(__name__)
 # Closed value sets with no domain type of their own; tests/modules/api/
 # test_literal_sources.py pins each to the domain type it narrows, so a value added there
 # fails until it is added here.
-# CredentialLifecycleStatus without "active", which api_keys._credential_status splits.
-CredentialStatus = Literal["pending", "verified", "unverified", "failed", "revoked", "retired"]
 # AccountLifecycleStatus without "retired", which the account list never returns.
 ListedAccountStatus = Literal["active", "halted"]
 
@@ -96,17 +97,6 @@ class ProfileResponse(ResponseModel):
     role: str
 
 
-class ApiKeyResponse(BaseModel):
-    id: str
-    label: str
-    api_key: str = Field(serialization_alias="apiKey")
-    api_secret: str = Field(default="****", serialization_alias="apiSecret")
-    exchange_status: str = Field(serialization_alias="exchangeStatus")
-    created_at: str = Field(serialization_alias="createdAt")
-    verified_at: str | None = Field(default=None, serialization_alias="verifiedAt")
-    last_verify_error: str | None = Field(default=None, serialization_alias="lastVerifyError")
-
-
 class ExchangeAccountResponse(ResponseModel):
     """One account visible to the authenticated operator bootstrap (never a retired one)."""
 
@@ -125,10 +115,9 @@ class AccountCredentialResponse(ResponseModel):
     label: str
     api_key: str = Field(serialization_alias="apiKey")
     api_secret: str = Field(default="****", serialization_alias="apiSecret")
-    status: CredentialStatus
+    status: CredentialLifecycleStatus
     created_at: str = Field(serialization_alias="createdAt")
-    verified_at: str | None = Field(default=None, serialization_alias="verifiedAt")
-    last_verify_error: str | None = Field(default=None, serialization_alias="lastVerifyError")
+    verified_at: str = Field(serialization_alias="verifiedAt")
 
 
 class AccountConfigDraftResponse(ResponseModel):

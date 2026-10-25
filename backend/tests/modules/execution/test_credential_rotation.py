@@ -10,9 +10,9 @@ Mutation checks (one at a time; revert after each):
   ``test_every_refusal_is_rejected_and_keeps_the_old_credential`` fails.
 * ``committed`` calls ``restart`` on a rejection: same test, and the failed one, fail.
 * the user id comparison is removed: the ``credential_account_mismatch`` case fails.
-* ``_verify`` compares with anything but the replaced row's stored id (or goes on when it has
-  none): ``test_a_stored_user_id_of_another_account_is_a_mismatch`` or
-  ``test_a_replaced_credential_without_a_stored_id_is_refused_before_bitfinex_is_asked`` fails.
+* ``_verify`` compares with anything but the replaced row's stored id (or goes on when this
+  account has no such row): ``test_a_stored_user_id_of_another_account_is_a_mismatch`` or
+  ``test_a_request_naming_another_accounts_credential_is_refused_before_bitfinex`` fails.
 """
 from __future__ import annotations
 
@@ -602,18 +602,31 @@ async def test_a_stored_user_id_of_another_account_is_a_mismatch(harness) -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_replaced_credential_without_a_stored_id_is_refused_before_bitfinex_is_asked(
+async def test_a_request_naming_another_accounts_credential_is_refused_before_bitfinex(
         harness) -> None:
-    """Only a credential retired before the id was stored can lack one (an active row always
-    has it): the identity is unavailable and no key, new or in use, is asked."""
+    """The stored id is read from this account's row only: a request that names another
+    account's credential finds none and is not the active one, so no key is asked."""
     h = harness
     request_id = await _queue(h)
+    other_account = UUID("bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee")
     async with h.factory.begin() as session:
-        await session.execute(text("UPDATE exchange_account_credentials "
-                                   "SET lifecycle_status = 'retired', bitfinex_user_id = NULL"))
+        session.add(ExchangeAccount(id=other_account, venue="bitfinex", label="other",
+                                    lifecycle_status="active"))
+        await session.flush()
+        other = ExchangeAccountCredential(
+            exchange_account_id=other_account, venue="bitfinex", label="other",
+            api_key="FAKE-OTHER-KEY-000000", secret_ciphertext=b"c", secret_nonce=b"n",
+            wrapped_dek=b"w", dek_nonce=b"d", key_version=1, lifecycle_status="active",
+            verified_at=NOW, bitfinex_user_id=USER_ID)
+        session.add(other)
+        await session.flush()
+        await session.execute(text(
+            "UPDATE credential_rotation_requests SET replaces_credential_id = :c"),
+            {"c": other.id.hex})
     row = await _settle(h, request_id)
-    assert (row.state, row.outcome_reason) == ("rejected", "account_identity_unavailable")
+    assert (row.state, row.outcome_reason) == ("rejected", "active_credential_changed")
     assert h.new_client.calls == []
+    assert set(await _credentials(h)) == {(OLD_KEY, "active"), ("FAKE-OTHER-KEY-000000", "active")}
     assert h.restarts == []
 
 

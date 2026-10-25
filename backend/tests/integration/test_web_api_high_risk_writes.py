@@ -165,12 +165,11 @@ def test_the_trigger_is_an_allowlist(head) -> None:
     _as(head, _WRITER, _currency(4, "disable"))
 
 
-def _credential(conn, status: str, user_id: int | None) -> UUID:
-    verified = "now()" if status == "active" else "NULL"
+def _credential(conn, status: str, user_id: int) -> UUID:
     return conn.scalar(text(
         f"INSERT INTO {_CREDENTIALS} (exchange_account_id, venue, api_key, secret_ciphertext, "
         "secret_nonce, wrapped_dek, dek_nonce, lifecycle_status, verified_at, bitfinex_user_id) "
-        f"VALUES (:a, 'bitfinex', :k, '\\x00', '\\x00', '\\x00', '\\x00', :s, {verified}, :u) "
+        "VALUES (:a, 'bitfinex', :k, '\\x00', '\\x00', '\\x00', '\\x00', :s, now(), :u) "
         "RETURNING id"), {"a": _ACCOUNT, "k": f"key-{status}-{user_id}", "s": status, "u": user_id})
 
 
@@ -200,21 +199,19 @@ def test_the_web_api_cannot_write_credentials_or_adjudications(head) -> None:
                             t=f"public.{table}", p=privilege), (table, privilege)
 
 
-def test_an_active_credential_always_names_its_user(head) -> None:
+def test_every_credential_is_verified_and_names_its_user(head) -> None:
+    """c3e7a91d5b20: a row is active or retired, and always has both, retired or not."""
     with head.begin() as conn:
         active = _credential(conn, "active", 4242)
-    with head.begin() as conn, pytest.raises(
-            Exception, match="ck_exchange_account_credentials_active_user_id"):
-        conn.execute(text(f"UPDATE {_CREDENTIALS} SET bitfinex_user_id = NULL WHERE id = :i"),
-                     {"i": active})
-    with head.begin() as conn:
         conn.execute(text(f"UPDATE {_CREDENTIALS} SET lifecycle_status = 'retired' WHERE id = :i"),
                      {"i": active})
-        pending = _credential(conn, "pending", None)
-    with head.begin() as conn, pytest.raises(
-            Exception, match="ck_exchange_account_credentials_active_user_id"):
-        conn.execute(text(f"UPDATE {_CREDENTIALS} SET lifecycle_status = 'active', "
-                          "verified_at = now() WHERE id = :i"), {"i": pending})
+    for change, match in (("bitfinex_user_id = NULL", "bitfinex_user_id"),
+                          ("verified_at = NULL", "verified_at"),
+                          ("lifecycle_status = 'pending'",
+                           "ck_exchange_account_credentials_lifecycle_status")):
+        with head.begin() as conn, pytest.raises(Exception, match=match):
+            conn.execute(text(f"UPDATE {_CREDENTIALS} SET {change} WHERE id = :i"),
+                         {"i": active})
 
 
 def test_the_migration_refuses_an_active_credential_without_a_user_id(before) -> None:

@@ -237,7 +237,6 @@ def test_the_payload_columns_stay_unreadable(head_db) -> None:
         ("exchange_account_credentials", "secret_nonce"),
         ("exchange_account_credentials", "wrapped_dek"),
         ("exchange_account_credentials", "dek_nonce"),
-        ("exchange_account_credentials", "last_verify_error"),
     )
     with head_db.connect() as conn:
         for table, column in never:

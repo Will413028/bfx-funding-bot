@@ -13,11 +13,9 @@ from sqlalchemy import func, select, text
 
 from bfx_funding_bot.core.db import session_scope
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
-from bfx_funding_bot.modules.accounts.exchange_accounts import (
-    create_exchange_account_credential,
-    grant_membership,
-)
+from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
+from bfx_funding_bot.modules.credentials import vault
 from bfx_funding_bot.modules.execution import credential_bootstrap as bootstrap
 
 pytestmark = pytest.mark.integration
@@ -94,11 +92,10 @@ async def test_a_credential_written_while_bitfinex_answers_is_not_joined(pg_sess
     async def race() -> None:
         async with session_scope(pg_session_factory) as other:
             await other.execute(text("SET LOCAL lock_timeout = '1s'"))
-            await create_exchange_account_credential(
-                other, exchange_account_id=ACCOUNT, venue="bitfinex", label="other",
-                api_key="OTHER-KEY", secret_ciphertext=b"c", secret_nonce=b"n" * 12,
-                wrapped_dek=b"w", dek_nonce=b"d" * 12, key_version=1, lifecycle_status="active",
-                verified_at=await other.scalar(select(func.now())), bitfinex_user_id=4242)
+            await vault.create_active_credential(
+                other, exchange_account_id=ACCOUNT, label="other", api_key="OTHER-KEY",
+                api_secret="OTHER-SECRET", kek=KEK, bitfinex_user_id=4242,
+                verified_at=await other.scalar(select(func.now())))
 
     with pytest.raises(bootstrap.BootstrapError) as raised:
         await _bootstrap(pg_session_factory, _Client(race))

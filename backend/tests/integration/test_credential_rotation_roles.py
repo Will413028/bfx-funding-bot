@@ -139,6 +139,6 @@ def test_the_stored_bitfinex_user_id_is_the_bots_to_write_and_not_the_operators(
             "VALUES ('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', 'bitfinex', 'x')")
         conn.exec_driver_sql(
             "INSERT INTO exchange_account_credentials (exchange_account_id, venue, api_key, "
-            "secret_ciphertext, secret_nonce, wrapped_dek, dek_nonce, bitfinex_user_id) VALUES "
-            "('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', 'bitfinex', 'k', '\\x00', '\\x00', '\\x00', "
-            "'\\x00', 0)")
+            "secret_ciphertext, secret_nonce, wrapped_dek, dek_nonce, lifecycle_status, "
+            "verified_at, bitfinex_user_id) VALUES ('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', "
+            "'bitfinex', 'k', '\\x00', '\\x00', '\\x00', '\\x00', 'retired', now(), 0)")

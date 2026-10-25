@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -26,10 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.core.auth import Principal, require_operator
-from bfx_funding_bot.modules.accounts.exchange_accounts import (
-    create_exchange_account_credential,
-    grant_membership,
-)
+from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
+from bfx_funding_bot.modules.accounts.tables import ExchangeAccountCredential
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.projections import build_projections_router
@@ -89,11 +88,13 @@ async def _seed(book: Book, start: int, stop: int) -> None:
     )
     async with book.factory.begin() as session:
         for i in range(start, stop):
-            await create_exchange_account_credential(
-                session, exchange_account_id=book.scope.exchange_account_id, venue="bitfinex",
+            # Retired: an account has one active key, and any number it rotated away.
+            session.add(ExchangeAccountCredential(
+                exchange_account_id=book.scope.exchange_account_id, venue="bitfinex",
                 label=f"key-{i}", api_key=f"k-{i}", secret_ciphertext=b"c", secret_nonce=b"n",
-                wrapped_dek=b"d", dek_nonce=b"n", key_version=1,
-            )
+                wrapped_dek=b"d", dek_nonce=b"n", key_version=1, lifecycle_status="retired",
+                verified_at=datetime.now(UTC), bitfinex_user_id=4242,
+            ))
             other = uuid4()
             await session.execute(
                 text("INSERT INTO exchange_accounts(id, venue, label) VALUES (:id, 'bitfinex', :l)"),

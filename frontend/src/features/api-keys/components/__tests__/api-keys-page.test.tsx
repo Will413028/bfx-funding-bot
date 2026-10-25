@@ -60,16 +60,15 @@ describe("API keys page", () => {
         label: "main",
         apiKey: "PUBKEY12345",
         apiSecret: "****",
-        status: "verified",
+        status: "active",
         createdAt: "2026-01-01",
-        verifiedAt: null,
-        lastVerifyError: null,
+        verifiedAt: "2026-01-01",
       },
     ];
     renderPage();
 
     expect(screen.getByText("main")).toBeDefined();
-    expect(screen.getByText("Verified")).toBeDefined();
+    expect(screen.getByText("Active")).toBeDefined();
     expect(screen.getByText(/sudo bfx-op rotate-credential/)).toBeDefined();
     expect(screen.queryAllByRole("button")).toHaveLength(0);
   });

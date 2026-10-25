@@ -30,18 +30,6 @@ from bfx_funding_bot.modules.api.schemas import (
 )
 
 
-def _credential_status(row: ExchangeAccountCredential) -> str:
-    """One of ``CredentialStatus``: a non-active lifecycle is pending, revoked or retired
-    (ck_exchange_account_credentials_lifecycle_status); the response refuses any other."""
-    if row.lifecycle_status != "active":
-        return row.lifecycle_status
-    if row.last_verify_error:
-        return "failed"
-    if row.verified_at is not None:
-        return "verified"
-    return "unverified"
-
-
 def _account_credential_to_response(
     row: ExchangeAccountCredential,
 ) -> AccountCredentialResponse:
@@ -50,10 +38,9 @@ def _account_credential_to_response(
         exchange_account_id=str(row.exchange_account_id),
         label=row.label,
         api_key=row.api_key,
-        status=_credential_status(row),
+        status=row.lifecycle_status,  # the CHECK and the response Literal agree
         created_at=row.created_at.isoformat() if row.created_at else "",
-        verified_at=row.verified_at.isoformat() if row.verified_at else None,
-        last_verify_error=row.last_verify_error,
+        verified_at=row.verified_at.isoformat(),
     )
 
 

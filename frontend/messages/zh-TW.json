@@ -97,13 +97,8 @@
   "apiKeys": {
     "title": "API 金鑰管理",
     "cliHint": "唯讀。金鑰由 operator CLI bootstrap 新增，以 sudo bfx-op rotate-credential 替換。",
-    "pending": "待驗證",
-    "verified": "已驗證",
-    "unverified": "未驗證",
-    "verifyFailed": "驗證失敗",
-    "revoked": "已撤銷",
+    "active": "使用中",
     "retired": "已封存",
-    "verifyFailedReason": "原因",
     "empty": "尚未有 API 金鑰。請以 operator CLI bootstrap 新增，或以 bfx-op rotate-credential 替換現行金鑰。",
     "loadFailed": "載入 API 金鑰失敗"
   },

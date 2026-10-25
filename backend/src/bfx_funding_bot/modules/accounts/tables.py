@@ -13,6 +13,7 @@ from sqlalchemy import (
     LargeBinary,
     PrimaryKeyConstraint,
     Text,
+    UniqueConstraint,
     event,
     func,
     text,
@@ -128,7 +129,7 @@ class ExchangeAccountCredential(Base):
 
     Credential rows are lifecycle records.  The partial unique index prevents
     two active execution keys for the same account and venue while retaining
-    retired/revoked rows for audit and rotation history.
+    retired rows for audit and rotation history.
     """
 
     __tablename__ = "exchange_account_credentials"
@@ -152,13 +153,11 @@ class ExchangeAccountCredential(Base):
     wrapped_dek: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     dek_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     key_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
-    lifecycle_status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'pending'")
-    )
-    verified_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_verify_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ``active`` (at most one per account and venue) or ``retired`` (terminal); every writer
+    # names it, so there is no default.
+    lifecycle_status: Mapped[str] = mapped_column(Text, nullable=False)
+    # When Bitfinex accepted the key: every row is written verified (vault).
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
@@ -180,28 +179,20 @@ class ExchangeAccountCredential(Base):
     # The Bitfinex account this key belongs to (``v2/auth/r/info/user`` column 0). Written by
     # an applied rotation and the operator bootstrap when the row is created; a rotation
     # compares the new key's account with it, so a key already revoked at Bitfinex can still
-    # be replaced. An active row always has it (``..._active_user_id``); NULL only on an
-    # inactive row written before the id was stored.
-    bitfinex_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # be replaced.
+    bitfinex_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     __table_args__ = (
         CheckConstraint(
-            "lifecycle_status IN ('pending', 'active', 'revoked', 'retired')",
+            "lifecycle_status IN ('active', 'retired')",
             name="ck_exchange_account_credentials_lifecycle_status",
         ),
         CheckConstraint(
-            "lifecycle_status <> 'active' OR "
-            "(verified_at IS NOT NULL AND last_verify_error IS NULL)",
-            name="ck_exchange_account_credentials_active_verified",
-        ),
-        CheckConstraint(
-            "bitfinex_user_id IS NULL OR bitfinex_user_id > 0",
+            "bitfinex_user_id > 0",
             name="ck_exchange_account_credentials_bitfinex_user_id_positive",
         ),
-        CheckConstraint(
-            "lifecycle_status <> 'active' OR bitfinex_user_id IS NOT NULL",
-            name="ck_exchange_account_credentials_active_user_id",
-        ),
+        # A key is stored once: a retired key never comes back, and no two accounts share one.
+        UniqueConstraint("venue", "api_key", name="uq_exchange_account_credentials_venue_api_key"),
         Index(
             "uq_exchange_account_credentials_active_venue",
             "exchange_account_id",

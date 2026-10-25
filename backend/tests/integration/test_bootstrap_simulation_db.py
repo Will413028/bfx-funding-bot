@@ -186,8 +186,9 @@ async def test_it_refuses_an_account_that_holds_credentials(db) -> None:
             {"id": ACCOUNT})
         await conn.execute(text(
             "INSERT INTO exchange_account_credentials(exchange_account_id, venue, label, api_key, "
-            "secret_ciphertext, secret_nonce, wrapped_dek, dek_nonce, key_version, lifecycle_status) "
-            "VALUES (:id, 'bitfinex', 'k', 'k', 'x'::bytea, 'x'::bytea, 'x'::bytea, 'x'::bytea, 1, 'pending')"),
+            "secret_ciphertext, secret_nonce, wrapped_dek, dek_nonce, key_version, lifecycle_status, "
+            "verified_at, bitfinex_user_id) VALUES (:id, 'bitfinex', 'k', 'k', 'x'::bytea, "
+            "'x'::bytea, 'x'::bytea, 'x'::bytea, 1, 'retired', now(), 4242)"),
             {"id": ACCOUNT})
     with pytest.raises(script.BootstrapRefused, match="simulation_account_has_credentials"):
         await script.run(_args(), database_url=url, allowed_realms=REALMS)
