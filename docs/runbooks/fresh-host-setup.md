@@ -241,9 +241,10 @@ printf "SET log_statement='none'; SET log_min_error_statement='panic'; CREATE RO
 1. 主機上 `sudo tailscale set --ssh`；admin console 關閉這個節點的 key 到期。
 2. tailnet policy 的 SSH 規則：`"action": "check"`（不設 `checkPeriod`，用預設 12 小時，ADR 2026-10-15 Amendment D4d）、
    `users` 只有 `autogroup:nonroot`。
-3. 現況（2026-10-16 讀 admin console，以 admin console 為準）：主機節點仍是 operator 自己擁有的節點（未 tagged），所以規則的
-   `dst` 是 `autogroup:self`。ADR 2026-10-15 D1 的終態是 tagged node。主機改成 tagged（或新主機直接以 tag 登入）之前，policy 要先有該 tag 的 `tagOwners`，以及一條
-   `dst` 是該 tag 的 SSH 規則（`autogroup:self` 不涵蓋 tagged node），否則 Tailscale SSH 被拒，只剩
+3. 主機節點是 tagged node `tag:server`（ADR 2026-10-15 D1；2026-10-25 起，以 admin console 為準），tagged 後不設 key 到期。
+   `autogroup:self`／`autogroup:member` 都不涵蓋 tagged node，所以新主機以 tag 登入（或既有節點改 tag）之前，policy 要先有：
+   `tagOwners` 的 `tag:server`、operator 到 `tag:server` 的 grant（Grafana、Mosh）、`dst` 是 `tag:server` 的 SSH 規則，
+   以及把 `tag:server` 加進 Funnel 的 `nodeAttrs` target（主機上若有 Funnel）。缺 SSH 規則時 Tailscale SSH 被拒，只剩
    [Console Connection](operations.md#12-break-glass)。
 
 驗證：`tailscale ssh ubuntu@<vm-node>` 要求 IdP 驗證後進得去；`tailscale ssh root@<vm-node>` 被 policy 拒絕。
