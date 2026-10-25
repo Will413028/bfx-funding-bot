@@ -39,8 +39,8 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
 2. 解析 GHCR `backend:main` 的 digest；若 ledger 最新的成功部署已是它就結束。
    **上次失敗、rolled_back 或中斷（只有 `started` 列）的 digest 不會自動重試**，要 `--retry`。
 3. 讀 image label 的 revision 與 CI run，要求 `backend:sha-<rev>` 是同一個 digest；
-   接著驗這個 digest 的 build provenance，**不用任何 GitHub token，GHCR package 可以維持 private**：
-   1. 用 bfx-deploy 自己的 registry 存取（`ghcr.env` 的 pull 憑證，和 pull 用的是同一份）以
+   接著驗這個 digest 的 build provenance，**不用任何 GitHub token**：
+   1. 用 bfx-deploy 自己的 registry 存取（和 pull 同一份：package 是 public，匿名；有 `ghcr.env` 時用它的憑證）以
       `docker buildx imagetools inspect <repo>@<digest> --raw` 讀出 manifest（多平台 push 時是 index）
       的原始 bytes，要求 sha256 等於該 digest，寫成暫存檔；
    2. 匿名讀 `https://api.github.com/repos/Will413028/bfx-funding-bot/attestations/<digest>`，逐一下載每筆的
@@ -51,7 +51,7 @@ push main ──► CI (.github/workflows/ci.yml) 綠燈
       --deny-self-hosted-runners --format json`。同一個 digest 可能有別種 attestation（例如 SBOM），
       gh 會拒絕那些，所以一筆筆試；全部被拒才算驗不過。
 
-   gh 的環境從零建立：沒有 token、沒有 gh login、沒有 docker 設定，`ghcr.env` 的 pull 憑證只給 registry 那一步，
+   gh 的環境從零建立：沒有 token、沒有 gh login、沒有 docker 設定，registry 憑證（有 `ghcr.env` 時）只給 registry 那一步，
    不交給 gh，也不送到 GitHub API。`gh attestation verify --bundle` 不需要登入（實測 2026-10-22：`env -i` 下 rc 0）；
    gh 只連 Sigstore 的 TUF CDN 取信任根，cache 在 `/var/lib/bfx-deploy/gh/`。匿名 GitHub API 每個 IP 每小時
    60 次；bfx-deploy 只在有未部署的新 release 時每輪打 1 次（最多每小時 12 次）。
@@ -211,9 +211,8 @@ bfx-deploy 啟動前會檢查，違反即 `precheck` 失敗：
 - compose 檔的 env_file 寫成 `${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/<name>.env`：bfx-deploy 傳入
   自己檢查過的 `--runtime-dir`；CI 用放了空檔的暫存目錄 render。預設值必須維持 `/opt/bfx/runtime`
   （CI 在 `config --no-interpolate` 的輸出上由 `compose_policy.py` 檢查，也要求 `required: true`），env 檔也維持必填，缺秘密檔時 `up` 會失敗而不是無聲啟動；
-- `ghcr.env`：`GHCR_USERNAME`、`GHCR_TOKEN`（read-only `read:packages`）；檔案不存在＝匿名 pull。
-  9i 的 provenance 驗證也用它讀 manifest（只給 registry，不給 gh）；驗證本身不需要任何 GitHub token。
-  要拿掉 `ghcr.env`（並撤銷 PAT）就得先把 GHCR package 改成 public，那是 9h 的選項，不是 9i 的前提。
+- `ghcr.env`：不放。backend package（`ghcr.io/will413028/bfx-funding-bot-backend`）2026-10-25 起是 public，檔案不存在＝匿名 pull
+  與匿名讀 manifest，PAT 已撤銷。package 若改回需要憑證，放 `GHCR_USERNAME`、`GHCR_TOKEN`（read-only `read:packages`）。
 - `bot.env`／`webapi.env` 從 9h 起**不放秘密**：秘密改成下一節的秘密檔。留下的是 `TELEGRAM_CHAT_ID`、
   `SENTRY_DSN`（依設計公開，見 [secret-rotation](secret-rotation.md#sentry-dsn)）、`BFX_EXCHANGE_ACCOUNT_ID`
   與 webapi 的入口設定這類識別值。
@@ -551,7 +550,7 @@ Telegram 發一次 warning（`bfx-deploy cannot identify or read the release …
    查 GHCR package 的版本歷史，重跑最新 main 的 release 把 `main` tag 推回正確的 digest。
 
 手動重驗：`sudo bfx-deploy verify-provenance sha256:<digest>`。它跑的就是 bfx-deploy 第 3 步的同一段程式
-（同一個釘版 gh、同一組 `--repo`／`--signer-workflow`／`--source-ref`、同樣用 `ghcr.env` 讀 manifest、不用任何
+（同一個釘版 gh、同一組 `--repo`／`--signer-workflow`／`--source-ref`、同樣以 bfx-deploy 的 registry 存取讀 manifest、不用任何
 GitHub token），不寫 ledger、不動任何容器；通過印 `verified: <image>` 並 exit 0，否則印
 `NOT verified: <code>`（code 同上表）並 exit 1。
 
