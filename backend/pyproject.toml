@@ -596,6 +596,8 @@ forbidden_modules = [
     "bfx_funding_bot.modules.execution.credential_bootstrap",
     "bfx_funding_bot.core.crypto",
     "bfx_funding_bot.external.bitfinex.auth_rest",
+    "bfx_funding_bot.external.bitfinex.auth_ws",
+    "bfx_funding_bot.external.bitfinex.nonce",
 ]
 ignore_imports = []
 broken_contract_guidance = "webapi and the operator API only record requests and read; the bot applies them (ADR 2026-08-31 D4'', ADR 2026-10-19 D6). Move the read you need below these modules; do not add ignores."
