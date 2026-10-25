@@ -169,7 +169,7 @@ def test_the_bot_tables_stay_unwritable(head_db) -> None:
                   "transport_outcome_journal", "execution_resolution_journal", "ledger_observation",
                   "accepted_capital_basis", "quarantine_opening", "capital_policy_revisions",
                   "capital_authority_epoch", "trading_control_requests", "exchange_account_credentials",
-                  "api_keys", "deployments", "database_realm")
+                  "deployments", "database_realm")
     with head_db.connect() as conn:
         for table in bot_tables:
             for privilege in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
@@ -180,7 +180,7 @@ def test_the_bot_tables_stay_unwritable(head_db) -> None:
                 assert conn.scalar(text("SELECT has_any_column_privilege(:r, :t, :p)"),
                                    {"r": ROLE, "t": f"public.{table}", "p": privilege}) is False, \
                     (table, privilege)
-        for table in ("exchange_account_credentials", "api_keys", "credential_rotation_requests"):
+        for table in ("exchange_account_credentials", "credential_rotation_requests"):
             assert conn.scalar(text("SELECT has_any_column_privilege(:r, :t, 'SELECT')"),
                                {"r": ROLE, "t": f"public.{table}"}) is False, table
 

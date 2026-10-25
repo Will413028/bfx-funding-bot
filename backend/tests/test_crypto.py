@@ -6,9 +6,7 @@ from cryptography.exceptions import InvalidTag
 from bfx_funding_bot.core.crypto import (
     Envelope,
     VaultNotConfiguredError,
-    decrypt_secret,
     decrypt_secret_with_aad,
-    encrypt_secret,
     encrypt_secret_with_aad,
     load_kek,
 )
@@ -18,24 +16,24 @@ _KEK = base64.b64encode(bytes(range(32))).decode()  # deterministic 32-byte KEK
 
 def test_round_trip():
     kek = base64.b64decode(_KEK)
-    env = encrypt_secret("super-secret", user_id="user_abc", kek=kek)
+    env = encrypt_secret_with_aad("super-secret", aad="user_abc", kek=kek)
     assert isinstance(env, Envelope)
     assert env.secret_ciphertext != b"super-secret"
     assert env.key_version == 1
-    assert decrypt_secret(env, user_id="user_abc", kek=kek) == "super-secret"
+    assert decrypt_secret_with_aad(env, aad="user_abc", kek=kek) == "super-secret"
 
 
 def test_nonce_is_unique_per_call():
     kek = base64.b64decode(_KEK)
-    a = encrypt_secret("x", user_id="u", kek=kek)
-    b = encrypt_secret("x", user_id="u", kek=kek)
+    a = encrypt_secret_with_aad("x", aad="u", kek=kek)
+    b = encrypt_secret_with_aad("x", aad="u", kek=kek)
     assert a.secret_nonce != b.secret_nonce
     assert a.secret_ciphertext != b.secret_ciphertext
 
 
 def test_tampered_ciphertext_fails():
     kek = base64.b64decode(_KEK)
-    env = encrypt_secret("x", user_id="u", kek=kek)
+    env = encrypt_secret_with_aad("x", aad="u", kek=kek)
     bad = Envelope(
         secret_ciphertext=env.secret_ciphertext[:-1] + bytes([env.secret_ciphertext[-1] ^ 0x01]),
         secret_nonce=env.secret_nonce,
@@ -44,14 +42,14 @@ def test_tampered_ciphertext_fails():
         key_version=env.key_version,
     )
     with pytest.raises(InvalidTag):
-        decrypt_secret(bad, user_id="u", kek=kek)
+        decrypt_secret_with_aad(bad, aad="u", kek=kek)
 
 
 def test_wrong_user_aad_fails():
     kek = base64.b64decode(_KEK)
-    env = encrypt_secret("x", user_id="alice", kek=kek)
+    env = encrypt_secret_with_aad("x", aad="alice", kek=kek)
     with pytest.raises(InvalidTag):
-        decrypt_secret(env, user_id="bob", kek=kek)
+        decrypt_secret_with_aad(env, aad="bob", kek=kek)
 
 
 def test_explicit_aad_round_trip_is_not_user_id_implicit():
@@ -67,9 +65,9 @@ def test_explicit_aad_round_trip_is_not_user_id_implicit():
 def test_wrong_kek_fails():
     kek = base64.b64decode(_KEK)
     other = bytes([b ^ 0xFF for b in kek])
-    env = encrypt_secret("x", user_id="u", kek=kek)
+    env = encrypt_secret_with_aad("x", aad="u", kek=kek)
     with pytest.raises(InvalidTag):
-        decrypt_secret(env, user_id="u", kek=other)
+        decrypt_secret_with_aad(env, aad="u", kek=other)
 
 
 def test_load_kek_missing_raises(monkeypatch):
@@ -92,5 +90,5 @@ def test_load_kek_ok(monkeypatch):
 @pytest.mark.parametrize("plaintext", ["", "密碼🔑", "super-secret", "with\nnewline"])
 def test_round_trip_various_plaintexts(plaintext):
     kek = base64.b64decode(_KEK)
-    env = encrypt_secret(plaintext, user_id="u", kek=kek)
-    assert decrypt_secret(env, user_id="u", kek=kek) == plaintext
+    env = encrypt_secret_with_aad(plaintext, aad="u", kek=kek)
+    assert decrypt_secret_with_aad(env, aad="u", kek=kek) == plaintext

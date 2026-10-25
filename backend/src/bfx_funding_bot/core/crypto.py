@@ -1,7 +1,8 @@
-"""SP2 vault crypto: app-managed envelope encryption for Bitfinex api secrets.
+"""App-managed envelope encryption for Bitfinex api secrets.
 
-Per-record DEK (AES-256-GCM) wrapped by a KEK. AAD binds the row to
-its user_id so a ciphertext can't be replayed under another user. Pure
+Per-record DEK (AES-256-GCM) wrapped by a KEK. AAD binds the row to its
+exchange account's canonical UUID so a ciphertext can't be replayed under another
+account (``modules.credentials.vault``). Pure
 functions take the KEK as an argument (testable without env / DATABASE_URL);
 load_kek() reads BFX_VAULT_KEK at call time through core.secret_files: the bot's
 mounted secret file (BFX_SECRETS_DIR), else the process env.
@@ -54,8 +55,7 @@ def encrypt_secret_with_aad(plaintext: str, *, aad: str, kek: bytes) -> Envelope
     """Encrypt a secret bound to an explicit, non-empty AAD string.
 
     Callers that use account identity must pass the canonical lowercase UUID
-    string.  Keeping this primitive separate from the legacy ``user_id``
-    wrapper prevents a migration from accidentally preserving user-scoped AAD.
+    string.
     """
     if not aad:
         raise ValueError("AAD must not be empty")
@@ -82,13 +82,3 @@ def decrypt_secret_with_aad(env: Envelope, *, aad: str, kek: bytes) -> str:
     dek = AESGCM(kek).decrypt(env.dek_nonce, env.wrapped_dek, aad_bytes)
     plaintext = AESGCM(dek).decrypt(env.secret_nonce, env.secret_ciphertext, aad_bytes)
     return plaintext.decode("utf-8")
-
-
-def encrypt_secret(plaintext: str, *, user_id: str, kek: bytes) -> Envelope:
-    """Legacy user-scoped wrapper retained for pre-cutover rows and tests."""
-    return encrypt_secret_with_aad(plaintext, aad=user_id, kek=kek)
-
-
-def decrypt_secret(env: Envelope, *, user_id: str, kek: bytes) -> str:
-    """Legacy user-scoped wrapper retained for pre-cutover rows and tests."""
-    return decrypt_secret_with_aad(env, aad=user_id, kek=kek)
