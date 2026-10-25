@@ -32,7 +32,7 @@ async def _run(args: argparse.Namespace) -> dict[str, str | bool]:
     from bfx_funding_bot.core.crypto import load_kek
     from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
     from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
-    from bfx_funding_bot.modules.accounts.credential_bootstrap import bootstrap_credential
+    from bfx_funding_bot.modules.execution.credential_bootstrap import bootstrap_credential
 
     # Explicit environment only: no automatic dotenv fallback to another DB.
     api_key = os.environ["BFX_BOOTSTRAP_API_KEY"]

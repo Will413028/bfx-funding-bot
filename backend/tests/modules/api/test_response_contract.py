@@ -32,13 +32,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.accounts import config_service, vault
+from bfx_funding_bot.modules.accounts import config_service
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import (
     AccountConfigDraft,
     ExchangeAccount,
     ExchangeAccountCredential,
 )
+from bfx_funding_bot.modules.api import api_keys
 from bfx_funding_bot.modules.api.account_scope import require_account_member
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.attribution import build_attribution_router
@@ -382,7 +383,7 @@ def patched_ports(monkeypatch: pytest.MonkeyPatch) -> None:
     async def resolution_request(*args: Any) -> UncertaintyResolutionRequestRow:
         return _resolution_request()
 
-    monkeypatch.setattr(vault, "list_account_credentials", list_credentials)
+    monkeypatch.setattr(api_keys, "list_account_credentials", list_credentials)
     monkeypatch.setattr(config_service, "get_account_config_draft", get_draft)
     monkeypatch.setattr(config_service, "upsert_account_config_draft_for_user", upsert_draft)
     monkeypatch.setattr(operator_commands, "request_trading_control", queued)
@@ -436,7 +437,7 @@ async def empty_client(sqlite_engine: AsyncEngine, patched_ports: None,
     async def nothing(*args: Any, **kwargs: Any) -> list[Any]:
         return []
 
-    monkeypatch.setattr(vault, "list_account_credentials", nothing)
+    monkeypatch.setattr(api_keys, "list_account_credentials", nothing)
     monkeypatch.setattr(operator_commands, "list_uncertainties", nothing)
     with client_for(build_app(empty=True), factory,
                     Principal("user_new", None, "operator")) as c:

@@ -70,7 +70,7 @@ async def _rotation_fixture(factory) -> tuple[UUID, UUID]:
 async def _rotate(s, *, replaces: UUID, request_id: UUID, kek: bytes = _KEK):
     from datetime import UTC, datetime
 
-    from bfx_funding_bot.modules.accounts.vault import rotate_active_credential
+    from bfx_funding_bot.modules.credentials.vault import rotate_active_credential
 
     return await rotate_active_credential(
         s, exchange_account_id=_ROTATION_ACCOUNT, replaces_credential_id=replaces,
@@ -92,7 +92,7 @@ async def _states(factory) -> list[tuple[str, str, UUID | None]]:
 @pytest.mark.asyncio
 async def test_rotate_retires_the_replaced_credential_then_inserts_the_new_active(
         pg_session_factory):
-    from bfx_funding_bot.modules.accounts.vault import load_account_credentials
+    from bfx_funding_bot.modules.credentials.vault import load_account_credentials
 
     old_id, request_id = await _rotation_fixture(pg_session_factory)
     async with session_scope(pg_session_factory) as s:
@@ -112,7 +112,7 @@ async def test_rotate_retires_the_replaced_credential_then_inserts_the_new_activ
 async def test_rotate_refuses_when_the_active_credential_is_another(pg_session_factory):
     from uuid import uuid4
 
-    from bfx_funding_bot.modules.accounts.vault import ActiveCredentialChangedError
+    from bfx_funding_bot.modules.credentials.vault import ActiveCredentialChangedError
 
     _, request_id = await _rotation_fixture(pg_session_factory)
     async with session_scope(pg_session_factory) as s:
@@ -145,7 +145,7 @@ async def test_verify_never_writes_over_a_row_retired_while_bitfinex_answered(pg
         ExchangeAccountCredential,
         ExchangeAccountMembership,
     )
-    from bfx_funding_bot.modules.accounts.vault import verify_account_credential
+    from bfx_funding_bot.modules.execution.credential_bootstrap import verify_account_credential
 
     envelope = encrypt_secret_with_aad("FAKE-SECRET", aad=str(_ROTATION_ACCOUNT), kek=_KEK)
     async with session_scope(pg_session_factory) as s:

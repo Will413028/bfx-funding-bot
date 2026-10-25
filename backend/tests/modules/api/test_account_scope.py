@@ -16,7 +16,6 @@ import bfx_funding_bot.modules.execution.uncertainty_tables
 import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
 from bfx_funding_bot.core.auth import Principal
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.accounts import vault
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.api.account_scope import (
@@ -29,6 +28,7 @@ from bfx_funding_bot.modules.api.config import build_config_router
 from bfx_funding_bot.modules.api.deps import ReadModels, get_session
 from bfx_funding_bot.modules.api.projections import build_projections_router
 from bfx_funding_bot.modules.api.routers import build_router
+from bfx_funding_bot.modules.credentials import vault
 from bfx_funding_bot.modules.ledger import PositionView
 
 _ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")

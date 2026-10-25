@@ -100,6 +100,13 @@ tags: [bfx-funding-bot, decision, architecture, refactoring]
 - 包絡改寫走 outbox 或 SECURITY DEFINER：tenant 可以改包絡時（2026-09-26 的撤銷條件）。
 - 實體 package（uv workspace）：import 層級擋不住跨模組共用狀態。
 
+## Amendment (2026-10-25)：R7a 的必要條件與落點
+
+- **必要條件改寫**：9g 已上線（PR #247），KEK 改秘密檔、不上 KMS（[2026-08-31](2026-08-31-account-isolated-execution-target-architecture.md) Amendment 2026-10-22），所以 D2 的「`credentials` 隨 9g」與 D3'' 把 `CredentialProvider` 當成多實作的前提不再成立。`credentials` 仍然拆出，必要條件改為 D6：webapi（`modules/api/api_keys.py`）只需要憑證 metadata，拆開後才能用 contract 禁止 control plane 碰到解密。
+- **落點**：解密、加密、輪替寫入與 key 權限政策在 `modules/credentials/vault.py`，只依賴 accounts、core、external。呼叫 Bitfinex 驗 key 的 `verify_account_credential` 與 `bootstrap_credential` 放在 `modules/execution/credential_bootstrap.py`，與 `credential_rotation` 共用 `KeyClient`。`credentials` 因此不 import `execution.protocols`，acyclic 在 R7a 就是 9→7（實測 `lint-imports`），不等 R4。metadata 的 `list_account_credentials` 回到 `accounts.exchange_accounts`。
+- **D6 第二段的憑證部分提前**：`control-plane-exposure` 在 R7a 就禁 `modules.credentials`、`execution.credential_bootstrap`、`core.crypto`、`external.bitfinex.auth_rest`，依 D6 第一段「今天已不可達就當天鎖」的原則。R6 剩 journal、`core.xact_lock`、recorder 與 `ledger.read`／`operator_requests`／`trading_state` 的拆分。
+- Followup 的「9g 的 OCI Vault 依賴」作廢；改用 KMS 的觸發條件見 2026-08-31 Amendment 2026-10-22。
+
 ## Related
 
 - 本 ADR 來自 2026-10-19 的架構 brief：由未看過原計畫的 subagent 從零起草，經三輪獨立審查；brief 私下保存、不在本 repo，本 ADR 已收錄其決策與理由。

@@ -5,7 +5,7 @@ A credential rotation verifies a new key before it becomes active
 same rule, at boot and every :data:`CREDENTIAL_RECHECK_INTERVAL_S` while the bot runs:
 
 1. its Bitfinex permissions allow funding writes and no other write
-   (``accounts.vault.permission_error``: withdraw, orders, an unknown write scope refuse it);
+   (``credentials.vault.permission_error``: withdraw, orders, an unknown write scope refuse it);
 2. it belongs to the Bitfinex user stored on its own active credential row
    (``bitfinex_user_id``); a row without one cannot be compared and refuses it too.
 
@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccountCredential
-from bfx_funding_bot.modules.accounts.vault import permission_error
+from bfx_funding_bot.modules.credentials.vault import permission_error
 from bfx_funding_bot.modules.execution.credential_rotation import (
     ACCOUNT_IDENTITY_UNAVAILABLE,
     CREDENTIAL_ACCOUNT_MISMATCH,

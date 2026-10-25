@@ -1,7 +1,7 @@
 """The bot's authenticated venue writes are exactly the three funding-offer endpoints (F31).
 
 The real defence is the key itself: it may write funding and nothing else
-(``modules.accounts.vault.permission_error``, rechecked at boot and every 6 hours). This test
+(``modules.credentials.vault.permission_error``, rechecked at boot and every 6 hours). This test
 stops the code drifting toward more: a new ``auth/w/`` path, a request signed outside the two
 signing clients, or an order input sent on the authenticated WebSocket fails here first.
 The simulated venue (``modules/simulated_venue``) is the venue side and is not scanned.

@@ -7,7 +7,7 @@ belong.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -187,6 +187,22 @@ async def require_account_membership(
     return membership
 
 
+async def list_account_credentials(
+    session: AsyncSession, *, exchange_account_id: UUID, user_id: str
+) -> Sequence[ExchangeAccountCredential]:
+    """List credentials only after account membership has been checked."""
+    await require_account_membership(
+        session, exchange_account_id=exchange_account_id, user_id=user_id, write=False
+    )
+    result = await session.scalars(
+        select(ExchangeAccountCredential).where(
+            ExchangeAccountCredential.exchange_account_id == exchange_account_id
+        )
+    )
+    return list(result)
+
+
+
 async def create_exchange_account_credential(
     session: AsyncSession,
     *,
@@ -309,6 +325,7 @@ __all__ = [
     "ensure_account_active",
     "get_exchange_account",
     "grant_membership",
+    "list_account_credentials",
     "require_account_membership",
     "upsert_account_config_draft",
     "validate_account_lifecycle_status",

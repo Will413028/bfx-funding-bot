@@ -43,7 +43,7 @@ from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClien
 from bfx_funding_bot.external.bitfinex.funding_trades_ws import FundingTradesWSClient
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST, FundingTrade
-from bfx_funding_bot.modules.accounts.vault import (
+from bfx_funding_bot.modules.credentials.vault import (
     AccountCredentialNotConfiguredError,
     VaultKeyMismatchError,
     load_account_credentials,

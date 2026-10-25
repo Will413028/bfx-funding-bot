@@ -36,7 +36,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.accounts.rotation_tables import CredentialRotationRequestRow
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
-from bfx_funding_bot.modules.accounts.vault import load_account_credentials
+from bfx_funding_bot.modules.credentials.vault import load_account_credentials
 from bfx_funding_bot.modules.deployments.tables import DeploymentRow
 from bfx_funding_bot.modules.execution import credential_rotation as rotation
 from bfx_funding_bot.modules.execution import operator_commands as commands
