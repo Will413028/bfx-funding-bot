@@ -25,6 +25,14 @@ reason = "alias of PYSEC-2026-4320 (certifi), same deadline"
 # "non-standard" or "UNKNOWN". Each is pinned to the locked version so a bump
 # fails the job until someone re-reads the new version's license and updates it.
 
+# Metadata puts the LICENSE text in the license field (a dev dependency, through mutmut): MIT,
+# with stdlib-derived parser files dual MIT/PSF and libcst/_add_slots.py under Apache-2.0.
+[[PackageOverrides]]
+name = "libcst"
+ecosystem = "PyPI"
+version = "1.9.0"
+license.override = ["MIT AND PSF-2.0 AND Apache-2.0"]
+
 # Metadata has only a "BSD License" classifier; the bundled LICENSE is BSD-3-Clause.
 [[PackageOverrides]]
 name = "colorama"
