@@ -1,5 +1,5 @@
 """The credential router: a read-only list since 9c-2b (writes go through the operator CLI;
-ADR 2026-10-15 D4). The vault's verify verdicts are ``tests/modules/accounts/
+ADR 2026-10-15 D4). The verify verdicts are ``tests/modules/execution/
 test_account_credential_verify.py``."""
 import base64
 from uuid import UUID
@@ -16,12 +16,13 @@ import bfx_funding_bot.modules.accounts.user_profile  # noqa: F401
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
-from bfx_funding_bot.modules.accounts import vault
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
+from bfx_funding_bot.modules.credentials import vault
+from bfx_funding_bot.modules.execution import credential_bootstrap
 from tests.ingress_support import attach_ingress, operator_headers
 
 _KEK = bytes(range(32))
@@ -92,7 +93,7 @@ async def _seed(client, *, scopes=None) -> UUID:
             session, exchange_account_id=_ACCOUNT_ID, user_id="user_abc", label="main",
             api_key="PUB", api_secret="SEC", kek=_KEK, bitfinex_user_id=4242)
         if scopes is not None:
-            await vault.verify_account_credential(
+            await credential_bootstrap.verify_account_credential(
                 session, _FakeClient(scopes), exchange_account_id=_ACCOUNT_ID,
                 user_id="user_abc", key_id=row.id, kek=_KEK)
         return row.id

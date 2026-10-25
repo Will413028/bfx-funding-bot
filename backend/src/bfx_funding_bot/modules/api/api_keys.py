@@ -12,8 +12,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.accounts import vault
-from bfx_funding_bot.modules.accounts.exchange_accounts import AccountRetired, MembershipDenied
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    AccountRetired,
+    MembershipDenied,
+    list_account_credentials,
+)
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccountCredential
 from bfx_funding_bot.modules.api.account_scope import (
     ExchangeAccountContext,
@@ -70,7 +73,7 @@ def build_api_keys_router() -> APIRouter:
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> Envelope[list[AccountCredentialResponse]]:
         try:
-            rows = await vault.list_account_credentials(
+            rows = await list_account_credentials(
                 session,
                 exchange_account_id=context.exchange_account_id,
                 user_id=context.user_id,

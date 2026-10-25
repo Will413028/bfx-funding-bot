@@ -1,4 +1,4 @@
-"""``vault.verify_account_credential``: the permission verdict the operator bootstrap promotes on.
+"""``credential_bootstrap.verify_account_credential``: the permission verdict the operator bootstrap promotes on.
 
 These were the web API's verify-route tests until 9c-2b removed the route; the bootstrap
 still verifies through this function, so its verdicts are tested here directly.
@@ -16,9 +16,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
-from bfx_funding_bot.modules.accounts import vault
 from bfx_funding_bot.modules.accounts.exchange_accounts import MembershipDenied, grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
+from bfx_funding_bot.modules.credentials import vault
+from bfx_funding_bot.modules.execution import credential_bootstrap
 
 ACCOUNT = UUID("550e8400-e29b-41d4-a716-446655440000")
 KEK = bytes(range(32))
@@ -61,7 +62,7 @@ async def create(factory, api_key: str = "P") -> UUID:
 async def verify(factory, key_id: UUID, client: Client, *, user_id: str = "owner",
                  kek: bytes = KEK) -> ExchangeAccountCredential | None:
     async with factory.begin() as session:
-        return await vault.verify_account_credential(
+        return await credential_bootstrap.verify_account_credential(
             session, client, exchange_account_id=ACCOUNT, user_id=user_id, key_id=key_id, kek=kek)
 
 

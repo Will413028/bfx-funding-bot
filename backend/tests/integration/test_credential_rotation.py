@@ -32,7 +32,7 @@ from bfx_funding_bot.apps import operator_cli
 from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
-from bfx_funding_bot.modules.accounts.vault import load_account_credentials
+from bfx_funding_bot.modules.credentials.vault import load_account_credentials
 from bfx_funding_bot.modules.execution.credential_rotation import CredentialRotationWorker
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from tests.pg_templates import alembic, stamp_realm

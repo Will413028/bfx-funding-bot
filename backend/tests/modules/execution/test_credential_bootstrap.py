@@ -10,10 +10,10 @@ from bfx_funding_bot.core.crypto import Envelope, decrypt_secret_with_aad
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
-from bfx_funding_bot.modules.accounts import credential_bootstrap as bootstrap
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
-from bfx_funding_bot.modules.accounts.vault import load_account_credentials
+from bfx_funding_bot.modules.credentials.vault import load_account_credentials
+from bfx_funding_bot.modules.execution import credential_bootstrap as bootstrap
 
 ACCOUNT = UUID("550e8400-e29b-41d4-a716-446655440000")
 KEK = bytes(range(32))

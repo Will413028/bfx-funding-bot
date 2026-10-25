@@ -49,9 +49,8 @@ async def upsert_user_config(
 
 
 async def delete_user_config(session: AsyncSession, *, user_id: str) -> bool:
-    """Fetch-then-delete mirrors vault.py's delete_api_key: session.delete() +
-    flush() avoids CursorResult.rowcount type ambiguity and is idiomatic for
-    ORM-tracked rows."""
+    """Fetch-then-delete: session.delete() + flush() avoids CursorResult.rowcount type
+    ambiguity and is idiomatic for ORM-tracked rows."""
     row: UserConfig | None = await session.scalar(
         select(UserConfig).where(UserConfig.user_id == user_id)
     )

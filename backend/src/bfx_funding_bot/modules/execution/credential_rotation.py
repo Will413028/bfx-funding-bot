@@ -65,7 +65,7 @@ from bfx_funding_bot.modules.accounts.rotation_tables import (
     CredentialRotationRequestRow,
 )
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccountCredential
-from bfx_funding_bot.modules.accounts.vault import (
+from bfx_funding_bot.modules.credentials.vault import (
     ActiveCredentialChangedError,
     permission_error,
     rotate_active_credential,
