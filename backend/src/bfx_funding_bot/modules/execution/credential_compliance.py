@@ -7,7 +7,7 @@ same rule, at boot and every :data:`CREDENTIAL_RECHECK_INTERVAL_S` while the bot
 1. its Bitfinex permissions allow funding writes and no other write
    (``credentials.vault.permission_error``: withdraw, orders, an unknown write scope refuse it);
 2. it belongs to the Bitfinex user stored on its own active credential row
-   (``bitfinex_user_id``); a row without one cannot be compared and refuses it too.
+   (``bitfinex_user_id``, NOT NULL).
 
 A key that fails is :class:`CredentialNoncompliantError`. It is handled exactly like the venue
 refusing the key (ADR 2026-10-18 D11: no separate stop state): at boot the daemon holds in
@@ -36,7 +36,6 @@ from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccountCredential
 from bfx_funding_bot.modules.credentials.vault import permission_error
 from bfx_funding_bot.modules.execution.credential_rotation import (
-    ACCOUNT_IDENTITY_UNAVAILABLE,
     CREDENTIAL_ACCOUNT_MISMATCH,
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext
@@ -58,7 +57,7 @@ CREDENTIAL_RECHECK_ALERT_AFTER = 12
 class CredentialNoncompliantError(Exception):
     """The key in use may not trade: ``reason`` is the rotation's refusal reason for it
     (``withdraw_must_be_disabled``, ``funding_write_required``, ``unexpected_write_scope:...``,
-    ``credential_account_mismatch``, ``account_identity_unavailable``)."""
+    ``credential_account_mismatch``)."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(f"credential_noncompliant:{reason}")
@@ -110,11 +109,8 @@ class CredentialCompliance:
             raise CredentialNoncompliantError("no_active_credential")
         if active.api_key != self.ctx.credentials.api_key:
             raise CredentialSupersededError("replaced_by_rotation")
-        stored_user_id: int | None = active.bitfinex_user_id
-        # The rotation's order: the stored identity first (nothing is asked without it), then
-        # the permissions, then the key's own user id.
-        if stored_user_id is None:
-            raise CredentialNoncompliantError(ACCOUNT_IDENTITY_UNAVAILABLE)
+        stored_user_id: int = active.bitfinex_user_id
+        # The rotation's order: the permissions, then the key's own user id.
         refusal = permission_error(await self.client.get_key_permissions(ctx=self.ctx))
         if refusal is not None:
             raise CredentialNoncompliantError(refusal)

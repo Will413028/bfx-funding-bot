@@ -21,8 +21,9 @@ from bfx_funding_bot.core.crypto import (
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.external.bitfinex.credentials import Credentials
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    AccountNotFound,
     account_id_canonical,
-    create_exchange_account_credential,
+    ensure_account_active,
     get_exchange_account,
 )
 from bfx_funding_bot.modules.accounts.tables import (
@@ -43,7 +44,7 @@ class VaultKeyMismatchError(Exception):
 
 
 class AccountCredentialNotConfiguredError(Exception):
-    """An account has no unrevoked Bitfinex credential available for boot."""
+    """An account has no active Bitfinex credential available for boot."""
 
 
 class ActiveCredentialChangedError(Exception):
@@ -120,8 +121,6 @@ async def load_account_credentials(
                 ExchangeAccountCredential.exchange_account_id == exchange_account_id,
                 ExchangeAccountCredential.venue == "bitfinex",
                 ExchangeAccountCredential.lifecycle_status == "active",
-                ExchangeAccountCredential.verified_at.is_not(None),
-                ExchangeAccountCredential.last_verify_error.is_(None),
             )
             .limit(2)
         )
@@ -152,26 +151,15 @@ async def create_active_credential(
     """Insert an already verified key as the account's active credential, encrypted with
     canonical ExchangeAccount AAD and naming the Bitfinex user it belongs to.
 
-    The caller (``execution.credential_bootstrap``) asked Bitfinex first and holds the
-    account lock; the one-active partial unique index refuses a second active row.
+    The caller (``execution.credential_bootstrap``) asked Bitfinex first. The account is
+    locked and must take commands (:func:`_writable`); the one-active partial unique index
+    refuses a second active row, and the venue/api_key unique constraint a reused key.
     """
-    envelope = encrypt_secret_with_aad(
-        api_secret, aad=account_id_canonical(exchange_account_id), kek=kek
-    )
-    return await create_exchange_account_credential(
-        session,
-        exchange_account_id=exchange_account_id,
-        venue="bitfinex",
-        label=label,
-        api_key=api_key,
-        secret_ciphertext=envelope.secret_ciphertext,
-        secret_nonce=envelope.secret_nonce,
-        wrapped_dek=envelope.wrapped_dek,
-        dek_nonce=envelope.dek_nonce,
-        key_version=envelope.key_version,
-        lifecycle_status="active",
-        verified_at=verified_at,
-        bitfinex_user_id=bitfinex_user_id,
+    _writable(await _lock_account(session, exchange_account_id), exchange_account_id)
+    return await _insert_active(
+        session, exchange_account_id=exchange_account_id, label=label, api_key=api_key,
+        api_secret=api_secret, kek=kek, bitfinex_user_id=bitfinex_user_id,
+        verified_at=verified_at, operator_request_id=None,
     )
 
 
@@ -197,11 +185,10 @@ async def rotate_active_credential(
     and flushed before the new one is inserted, so the one-active partial unique index
     never sees two. Raises
     :class:`ActiveCredentialChangedError` when the active credential is not
-    ``replaces_credential_id`` (or there is none).
+    ``replaces_credential_id`` (or there is none), then :func:`_writable`'s errors for an
+    account a key cannot go to.
     """
-    await session.scalar(
-        select(ExchangeAccount).where(ExchangeAccount.id == exchange_account_id).with_for_update()
-    )
+    account = await _lock_account(session, exchange_account_id)
     current = await session.scalar(
         select(ExchangeAccountCredential).where(
             ExchangeAccountCredential.exchange_account_id == exchange_account_id,
@@ -211,13 +198,51 @@ async def rotate_active_credential(
     )
     if current is None or current.id != replaces_credential_id:
         raise ActiveCredentialChangedError(str(exchange_account_id))
+    _writable(account, exchange_account_id)
     current.lifecycle_status = "retired"
     await session.flush()
+    return await _insert_active(
+        session, exchange_account_id=exchange_account_id, label=label, api_key=api_key,
+        api_secret=api_secret, kek=kek, bitfinex_user_id=bitfinex_user_id,
+        verified_at=verified_at, operator_request_id=operator_request_id,
+    )
+
+
+async def _lock_account(
+    session: AsyncSession, exchange_account_id: UUID
+) -> ExchangeAccount | None:
+    """The account row, locked: both writers serialize on it."""
+    account: ExchangeAccount | None = await session.scalar(
+        select(ExchangeAccount).where(ExchangeAccount.id == exchange_account_id).with_for_update()
+    )
+    return account
+
+
+def _writable(account: ExchangeAccount | None, exchange_account_id: UUID) -> None:
+    """A credential goes only to an account that exists and is not retired."""
+    if account is None:
+        raise AccountNotFound(str(exchange_account_id))
+    ensure_account_active(account)
+
+
+async def _insert_active(
+    session: AsyncSession,
+    *,
+    exchange_account_id: UUID,
+    label: str,
+    api_key: str,
+    api_secret: str,
+    kek: bytes,
+    bitfinex_user_id: int,
+    verified_at: datetime,
+    operator_request_id: UUID | None,
+) -> ExchangeAccountCredential:
+    """Encrypt the secret under the account's canonical UUID as AAD and insert the row active:
+    every credential is written verified, so there is no other state to insert."""
     envelope = encrypt_secret_with_aad(
         api_secret, aad=account_id_canonical(exchange_account_id), kek=kek
     )
-    return await create_exchange_account_credential(
-        session,
+    row = ExchangeAccountCredential(
         exchange_account_id=exchange_account_id,
         venue="bitfinex",
         label=label,
@@ -232,3 +257,7 @@ async def rotate_active_credential(
         operator_request_id=operator_request_id,
         bitfinex_user_id=bitfinex_user_id,
     )
+    session.add(row)
+    await session.flush()
+    await session.refresh(row)
+    return row

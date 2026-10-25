@@ -278,7 +278,7 @@ def test_owner_reads_account_credentials_and_manages_config(scoped_app: TestClie
     (credential,) = listed.json()["data"]
     assert credential["exchangeAccountId"] == str(_ACCOUNT_ID)
     assert (credential["apiKey"], credential["apiSecret"], credential["status"]) == (
-        "PUB", "****", "verified")
+        "PUB", "****", "active")
 
     config = {
         "currency": "USD",

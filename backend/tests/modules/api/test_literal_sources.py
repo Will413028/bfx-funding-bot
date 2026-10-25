@@ -67,8 +67,7 @@ SOURCES: dict[tuple[str, str], Callable[[], frozenset[object]]] = {
     ("ExchangeAccountResponse", "lifecycle_status"): lambda: (
         values(AccountLifecycleStatus) - {"retired"}),  # the list query excludes retired
     ("ExchangeAccountResponse", "role"): lambda: values(AccountRole),
-    ("AccountCredentialResponse", "status"): lambda: (  # api_keys._credential_status
-        values(CredentialLifecycleStatus) - {"active"} | {"verified", "unverified", "failed"}),
+    ("AccountCredentialResponse", "status"): lambda: values(CredentialLifecycleStatus),
     ("OfferClaimResponse", "state"): lambda: values(OfferState),
     ("AccountConfigDraftResponse", "config_error"): lambda: frozenset({"config_unreadable"}),
     # uncertainties: the ledger's own types.

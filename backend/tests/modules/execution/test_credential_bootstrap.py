@@ -141,8 +141,7 @@ async def test_the_key_is_written_active_once_bitfinex_answered(factory, monkeyp
     assert created == [("active", 4242)]
     async with factory() as session:
         row = await session.scalar(select(ExchangeAccountCredential))
-        assert (row.lifecycle_status, row.bitfinex_user_id, row.last_verify_error) == (
-            "active", 4242, None)
+        assert (row.lifecycle_status, row.bitfinex_user_id) == ("active", 4242)
         assert row.verified_at is not None
 
 
@@ -212,7 +211,7 @@ async def test_requires_owner_not_merely_operator(factory, owner):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["active", "pending", "revoked", "retired"])
+@pytest.mark.parametrize("status", ["active", "retired"])
 async def test_existing_credential_is_not_overwritten(factory, status):
     await invoke(factory, apply=True)
     async with factory.begin() as session:

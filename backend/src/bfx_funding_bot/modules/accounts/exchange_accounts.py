@@ -8,7 +8,6 @@ belong.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -25,7 +24,7 @@ from bfx_funding_bot.modules.accounts.tables import (
 
 AccountRole = Literal["owner", "operator", "viewer"]
 AccountLifecycleStatus = Literal["active", "halted", "retired"]
-CredentialLifecycleStatus = Literal["pending", "active", "revoked", "retired"]
+CredentialLifecycleStatus = Literal["active", "retired"]
 
 
 class AccountDomainError(Exception):
@@ -42,10 +41,6 @@ class AccountRetired(AccountDomainError):  # noqa: N818 - public domain name
 
 class MembershipDenied(AccountDomainError):  # noqa: N818 - public domain name
     """The principal has no permitted membership for the requested account."""
-
-
-class ActiveCredentialConflict(AccountDomainError):  # noqa: N818 - public domain name
-    """An account already has an active credential for the venue."""
 
 
 def account_id_uuid_or_none(value: UUID | str) -> UUID | None:
@@ -100,13 +95,6 @@ def validate_account_lifecycle_status(value: str) -> AccountLifecycleStatus:
     if value not in {"active", "halted", "retired"}:
         raise ValueError(f"account lifecycle status is invalid: {value!r}")
     return cast(AccountLifecycleStatus, value)
-
-
-def validate_credential_lifecycle_status(value: str) -> CredentialLifecycleStatus:
-    """Validate and narrow a credential lifecycle status."""
-    if value not in {"pending", "active", "revoked", "retired"}:
-        raise ValueError(f"credential lifecycle status is invalid: {value!r}")
-    return cast(CredentialLifecycleStatus, value)
 
 
 def ensure_account_active(account: ExchangeAccount) -> None:
@@ -202,72 +190,6 @@ async def list_account_credentials(
     return list(result)
 
 
-
-async def create_exchange_account_credential(
-    session: AsyncSession,
-    *,
-    exchange_account_id: UUID,
-    venue: str,
-    label: str,
-    api_key: str,
-    secret_ciphertext: bytes,
-    secret_nonce: bytes,
-    wrapped_dek: bytes,
-    dek_nonce: bytes,
-    key_version: int,
-    lifecycle_status: str = "pending",
-    verified_at: datetime | None = None,
-    last_verify_error: str | None = None,
-    operator_request_id: UUID | None = None,
-    bitfinex_user_id: int | None = None,
-) -> ExchangeAccountCredential:
-    """Insert an account credential while enforcing active-key uniqueness.
-
-    New credentials are always pending until the exchange permission check has
-    succeeded.  The optional verification fields exist only for an explicitly
-    verified import; an active row without that evidence is rejected here and
-    by the database check constraint.
-    """
-    typed_status = validate_credential_lifecycle_status(lifecycle_status)
-    if typed_status == "active" and (
-        verified_at is None or last_verify_error is not None
-    ):
-        raise ValueError("active credential requires successful verification")
-    await get_exchange_account(
-        session, exchange_account_id=exchange_account_id, for_command=True
-    )
-    if typed_status == "active":
-        existing = await session.scalar(
-            select(ExchangeAccountCredential).where(
-                ExchangeAccountCredential.exchange_account_id == exchange_account_id,
-                ExchangeAccountCredential.venue == venue,
-                ExchangeAccountCredential.lifecycle_status == "active",
-            )
-        )
-        if existing is not None:
-            raise ActiveCredentialConflict(str(exchange_account_id))
-    row = ExchangeAccountCredential(
-        exchange_account_id=exchange_account_id,
-        venue=venue,
-        label=label,
-        api_key=api_key,
-        secret_ciphertext=secret_ciphertext,
-        secret_nonce=secret_nonce,
-        wrapped_dek=wrapped_dek,
-        dek_nonce=dek_nonce,
-        key_version=key_version,
-        lifecycle_status=typed_status,
-        verified_at=verified_at,
-        last_verify_error=last_verify_error,
-        operator_request_id=operator_request_id,
-        bitfinex_user_id=bitfinex_user_id,
-    )
-    session.add(row)
-    await session.flush()
-    await session.refresh(row)
-    return row
-
-
 async def upsert_account_config_draft(
     session: AsyncSession,
     *,
@@ -315,13 +237,11 @@ __all__ = [
     "AccountNotFound",
     "AccountRetired",
     "AccountRole",
-    "ActiveCredentialConflict",
     "CredentialLifecycleStatus",
     "MembershipDenied",
     "account_id_canonical",
     "account_id_uuid_or_none",
     "account_scope_clause",
-    "create_exchange_account_credential",
     "ensure_account_active",
     "get_exchange_account",
     "grant_membership",
@@ -329,6 +249,5 @@ __all__ = [
     "require_account_membership",
     "upsert_account_config_draft",
     "validate_account_lifecycle_status",
-    "validate_credential_lifecycle_status",
     "validate_membership_role",
 ]

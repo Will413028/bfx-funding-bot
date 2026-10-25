@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from typing import get_args
 from uuid import UUID, uuid4
 
 import pytest
@@ -45,29 +47,30 @@ def _account(*, account_id: UUID | None = None, status: str = "active") -> Excha
     )
 
 
-def _credential(account_id: UUID, *, status: str = "active") -> ExchangeAccountCredential:
+def _credential(account_id: UUID, *, status: str = "active", api_key: str = "public",
+                verified: bool = True) -> ExchangeAccountCredential:
     return ExchangeAccountCredential(
         exchange_account_id=account_id,
         venue="bitfinex",
         label="funding",
-        api_key="public",
+        api_key=api_key,
         secret_ciphertext=b"ciphertext",
         secret_nonce=b"nonce",
         wrapped_dek=b"wrapped",
         dek_nonce=b"dek-nonce",
         key_version=1,
         lifecycle_status=status,
+        verified_at=datetime.now(UTC) if verified else None,
         bitfinex_user_id=4242,
     )
 
 
-def test_credential_lifecycle_has_pending_state() -> None:
+def test_credential_lifecycle_is_active_or_retired() -> None:
     from bfx_funding_bot.modules.accounts.exchange_accounts import (
         CredentialLifecycleStatus,
     )
 
-    assert CredentialLifecycleStatus is not None
-    assert _credential(uuid4(), status="pending").lifecycle_status == "pending"
+    assert get_args(CredentialLifecycleStatus) == ("active", "retired")
 
 
 def test_account_id_is_assigned_once_and_cannot_be_changed(session: AsyncSession) -> None:
@@ -128,20 +131,24 @@ async def test_only_one_active_credential_per_account_and_venue(session: AsyncSe
     account = _account()
     session.add(account)
     await session.flush()
-    session.add_all([_credential(account.id), _credential(account.id)])
+    # Two keys, both well formed: only the one-active partial unique index refuses the pair.
+    session.add_all([_credential(account.id, api_key="first"),
+                     _credential(account.id, api_key="second")])
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match=r"exchange_account_credentials\.exchange_account_id"):
         await session.flush()
 
 
 @pytest.mark.asyncio
-async def test_active_credential_requires_successful_verification(session: AsyncSession) -> None:
+@pytest.mark.parametrize("status", ["active", "retired"])
+async def test_every_credential_requires_successful_verification(
+        session: AsyncSession, status: str) -> None:
     account = _account()
     session.add(account)
     await session.flush()
-    session.add(_credential(account.id, status="active"))
+    session.add(_credential(account.id, status=status, verified=False))
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="verified_at"):
         await session.flush()
 
 

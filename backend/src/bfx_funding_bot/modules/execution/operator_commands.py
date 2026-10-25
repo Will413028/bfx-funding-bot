@@ -496,7 +496,7 @@ async def active_credential_view(
         "credential": None if active is None else {
             "id": str(active.id), "label": active.label,
             "lifecycle_status": active.lifecycle_status,
-            "verified_at": None if active.verified_at is None else active.verified_at.isoformat(),
+            "verified_at": active.verified_at.isoformat(),
             "created_at": active.created_at.isoformat(),
             "operator_request_id": (None if active.operator_request_id is None
                                     else str(active.operator_request_id)),

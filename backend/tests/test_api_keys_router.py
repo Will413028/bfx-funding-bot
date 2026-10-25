@@ -15,10 +15,7 @@ import bfx_funding_bot.modules.accounts.tables  # registers the account tables i
 import bfx_funding_bot.modules.accounts.user_profile  # noqa: F401
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.accounts.exchange_accounts import (
-    create_exchange_account_credential,
-    grant_membership,
-)
+from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.deps import get_session
@@ -78,15 +75,16 @@ async def app_client(sqlite_engine, monkeypatch):
     return client
 
 
-async def _seed(client, *, status: str = "pending", error: str | None = None) -> UUID:
-    """A credential row in ``status`` (an active one verified), as the operator CLI left it."""
+async def _seed(client, *, status: str = "active") -> UUID:
+    """A credential row in ``status``, as the operator CLI left it (always verified)."""
     async with client._factory.begin() as session:
-        row = await create_exchange_account_credential(
-            session, exchange_account_id=_ACCOUNT_ID, venue="bitfinex", label="main",
-            api_key="PUB", secret_ciphertext=b"c", secret_nonce=b"n" * 12, wrapped_dek=b"w",
+        row = ExchangeAccountCredential(
+            exchange_account_id=_ACCOUNT_ID, venue="bitfinex", label="main", api_key="PUB",
+            secret_ciphertext=b"c", secret_nonce=b"n" * 12, wrapped_dek=b"w",
             dek_nonce=b"d" * 12, key_version=1, lifecycle_status=status,
-            verified_at=datetime.now(UTC) if status == "active" else None,
-            last_verify_error=error, bitfinex_user_id=4242)
+            verified_at=datetime.now(UTC), bitfinex_user_id=4242)
+        session.add(row)
+        await session.flush()
         return row.id
 
 
@@ -103,29 +101,23 @@ async def test_list_masks_secret(app_client):
     items = r.json()["data"]
     assert len(items) == 1
     assert (items[0]["apiKey"], items[0]["apiSecret"], items[0]["status"]) == (
-        "PUB", "****", "pending")
+        "PUB", "****", "active")
 
 
 @pytest.mark.asyncio
-async def test_list_exposes_last_verify_error(app_client):
-    await _seed(app_client, error="withdraw_must_be_disabled")
-    items = app_client.get(_KEYS_PATH).json()["data"]
-    assert items[0]["status"] == "pending"
-    assert items[0]["lastVerifyError"] == "withdraw_must_be_disabled"
-
-
-@pytest.mark.asyncio
-async def test_list_shows_a_verified_credential(app_client):
-    await _seed(app_client, status="active")
-    assert app_client.get(_KEYS_PATH).json()["data"][0]["status"] == "verified"
+@pytest.mark.parametrize("status", ["active", "retired"])
+async def test_list_shows_the_lifecycle_status(app_client, status):
+    await _seed(app_client, status=status)
+    item = app_client.get(_KEYS_PATH).json()["data"][0]
+    assert (item["status"], item["verifiedAt"] is not None) == (status, True)
 
 
 @pytest.mark.asyncio
 async def test_credential_writes_are_not_routes(app_client):
     """Create, verify and delete went with 9c-2b: the operator CLI writes credentials, and
     the database refuses the web API's role any INSERT or UPDATE on them."""
-    key_id = await _seed(app_client, status="active")
-    before = [(c.id, c.lifecycle_status, c.verified_at, c.last_verify_error)
+    key_id = await _seed(app_client)
+    before = [(c.id, c.lifecycle_status, c.verified_at)
               for c in await _credentials(app_client)]
     for method, path, kwargs in (
             ("post", _KEYS_PATH, {"json": {"label": "a", "apiKey": "P", "apiSecret": "S"}}),
@@ -133,7 +125,7 @@ async def test_credential_writes_are_not_routes(app_client):
             ("delete", f"{_KEYS_PATH}/{key_id}", {})):
         response = getattr(app_client, method)(path, **kwargs)
         assert response.status_code in (404, 405), (method, path, response.status_code)
-    after = [(c.id, c.lifecycle_status, c.verified_at, c.last_verify_error)
+    after = [(c.id, c.lifecycle_status, c.verified_at)
              for c in await _credentials(app_client)]
     assert after == before
 

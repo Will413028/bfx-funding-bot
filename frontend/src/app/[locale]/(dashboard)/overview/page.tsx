@@ -64,7 +64,7 @@ export default function OverviewPage() {
   }
 
   const hasVerifiedKey =
-    Array.isArray(apiKeys) && apiKeys.some((k) => k.status === "verified");
+    Array.isArray(apiKeys) && apiKeys.some((k) => k.status === "active");
   // An unreadable stored draft (configError) does not count as a configured strategy.
   const hasStrategy = config?.config != null;
   const setupComplete = hasVerifiedKey && hasStrategy;

@@ -97,13 +97,8 @@
   "apiKeys": {
     "title": "API Key Management",
     "cliHint": "Read-only. Keys are added by the operator CLI bootstrap and replaced with sudo bfx-op rotate-credential.",
-    "pending": "Pending verification",
-    "verified": "Verified",
-    "unverified": "Unverified",
-    "verifyFailed": "Failed",
-    "revoked": "Revoked",
+    "active": "Active",
     "retired": "Retired",
-    "verifyFailedReason": "Reason",
     "empty": "No API keys yet. Add one with the operator CLI bootstrap, or replace the active key with bfx-op rotate-credential.",
     "loadFailed": "Failed to load API keys"
   },

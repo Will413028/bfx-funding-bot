@@ -383,13 +383,11 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "pending" | "verified" | "unverified" | "failed" | "revoked" | "retired";
+            status: "active" | "retired";
             /** Createdat */
             createdAt: string;
             /** Verifiedat */
-            verifiedAt: string | null;
-            /** Lastverifyerror */
-            lastVerifyError: string | null;
+            verifiedAt: string;
         };
         /**
          * BlockedScope

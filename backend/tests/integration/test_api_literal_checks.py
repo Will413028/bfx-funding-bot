@@ -19,7 +19,7 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
     AccountRole,
     CredentialLifecycleStatus,
 )
-from bfx_funding_bot.modules.api.schemas import CredentialStatus, ListedAccountStatus
+from bfx_funding_bot.modules.api.schemas import ListedAccountStatus
 from bfx_funding_bot.modules.api.trading_control import (
     CancelAllPhaseValue,
     TradingStateCause,
@@ -59,5 +59,3 @@ async def test_response_value_sets_equal_the_migrated_check_constraints(migrated
     assert set(get_args(ListedAccountStatus)) == account - {"retired"}
     assert set(get_args(AccountRole)) == role
     assert set(get_args(CredentialLifecycleStatus)) == credential
-    assert set(get_args(CredentialStatus)) == (
-        credential - {"active"} | {"verified", "unverified", "failed"})

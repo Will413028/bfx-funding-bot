@@ -10,8 +10,6 @@ Mutation checks (one at a time; revert after each):
 
 * ``_verify`` compares with anything but the stored user id:
   ``test_a_key_of_another_bitfinex_account_is_refused`` fails.
-* ``_verify`` goes on when the replaced row has no stored id:
-  ``test_a_replaced_credential_without_a_stored_id_is_refused`` fails.
 """
 from __future__ import annotations
 
@@ -388,17 +386,3 @@ async def test_a_key_of_another_bitfinex_account_is_refused(db, operator_env, bo
     assert bot.restarts == []
 
 
-@pytest.mark.asyncio
-async def test_a_replaced_credential_without_a_stored_id_is_refused(db, operator_env, bot) -> None:
-    """Only a credential retired before the id was stored can lack one (an active row cannot,
-    ``ck_exchange_account_credentials_active_user_id``): the identity is unavailable and
-    Bitfinex is not asked."""
-    _, queued, _ = await rotate()
-    with db.owner.begin() as conn:
-        conn.exec_driver_sql("UPDATE exchange_account_credentials SET lifecycle_status = 'retired', "
-                             "bitfinex_user_id = NULL")
-    assert await bot.worker.tick() is True
-    view = (await cli("request", "credential", queued["request_id"]))[1]
-    assert (view["state"], view["outcome_reason"]) == ("rejected", "account_identity_unavailable")
-    assert bot.client.calls == []
-    assert bot.restarts == []

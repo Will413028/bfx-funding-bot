@@ -21,10 +21,10 @@ Settling one request (``OperatorRequestWorker``):
    in the same transaction that records ``applied`` (``vault.rotate_active_credential``).
 
 The stored id lets a key already revoked at Bitfinex be replaced: a revoked key can no
-longer answer ``v2/auth/r/info/user``. An active credential always has one
-(``ck_exchange_account_credentials_active_user_id``: the bootstrap and every applied rotation
-write it); a replaced row without one is a credential retired before the id was stored, and
-the rotation is rejected as ``account_identity_unavailable``.
+longer answer ``v2/auth/r/info/user``. Every credential row has one (NOT NULL: the bootstrap
+and every applied rotation write it); a request naming a credential that is not this
+account's is ``active_credential_changed`` before anything is sent, as :meth:`apply` would
+find it.
 
 After an applied rotation commits, the process stops the way SIGTERM stops it (``restart``
 sets the daemon's stop event) and the container restart policy boots it on the new key,
@@ -355,12 +355,11 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
                                                      row.recipient_id, row.request_id))
         except SealedPayloadError:
             return Refused(SEALED_PAYLOAD_INVALID)
-        # Retired and revoked credentials are terminal; the active one is no rotation.
+        # Retired credentials are terminal; the active one is no rotation.
         reused = await session.scalar(select(func.count()).select_from(
             ExchangeAccountCredential).where(
             ExchangeAccountCredential.venue == "bitfinex",
-            ExchangeAccountCredential.api_key == opened.api_key,
-            ExchangeAccountCredential.lifecycle_status != "pending"))
+            ExchangeAccountCredential.api_key == opened.api_key))
         if reused:
             return Refused(CREDENTIAL_REUSED)
         return opened
@@ -371,10 +370,10 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
         raises: ``failed``, resend).
 
         The new key must belong to the Bitfinex user stored on the credential it replaces;
-        a replaced row without one (retired before the id was stored) leaves the identity
-        unavailable, and nothing is sent."""
+        a replaced credential that is not this account's row (no id read) is not the active
+        one, and nothing is sent."""
         if stored_user_id is None:
-            return Refused(ACCOUNT_IDENTITY_UNAVAILABLE)
+            return Refused(ACTIVE_CREDENTIAL_CHANGED)
         new_user = await ask_bitfinex(self.client_factory(), AccountContext(
             account_id=str(self.account_id),
             credentials=Credentials(api_key=opened.api_key, api_secret=opened.api_secret)))

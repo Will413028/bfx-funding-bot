@@ -1084,11 +1084,7 @@
           "status": {
             "type": "string",
             "enum": [
-              "pending",
-              "verified",
-              "unverified",
-              "failed",
-              "revoked",
+              "active",
               "retired"
             ],
             "title": "Status"
@@ -1098,26 +1094,8 @@
             "title": "Createdat"
           },
           "verifiedAt": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Verifiedat"
-          },
-          "lastVerifyError": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Lastverifyerror"
           }
         },
         "type": "object",
@@ -1129,8 +1107,7 @@
           "apiSecret",
           "status",
           "createdAt",
-          "verifiedAt",
-          "lastVerifyError"
+          "verifiedAt"
         ],
         "title": "AccountCredentialResponse",
         "description": "Masked account-owned credential lifecycle record."
