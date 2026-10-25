@@ -890,7 +890,8 @@ export interface components {
          * @description A {min, max} bound. min/max must be positive and min <= max. Used for
          *     amount, rate (daily ratio) and period. Modelled as float to keep zero
          *     divergence from the FE's single rangeSchema (which types all three as
-         *     number); period values are integers by convention (FE step=1).
+         *     number); period values are integers by convention (FE step=1). Finite only:
+         *     JSON parsing accepts `Infinity`, `NaN` and `1e999`.
          */
         Range: {
             /** Min */
@@ -929,9 +930,11 @@ export interface components {
         /**
          * StrategyConfigBody
          * @description Validated PUT /configs body. Mirrors the FE Zod strategyConfigSchema
-         *     (positive ranges, min<=max, non-empty currency). Stored verbatim as the
+         *     (positive finite ranges, min<=max, alphanumeric currency). Stored verbatim as the
          *     user_configs.config JSONB blob. The backend is unit-agnostic on rate; it
-         *     stores the daily ratio the FE sends and never converts.
+         *     stores the daily ratio the FE sends and never converts. Unknown keys are refused,
+         *     and the currency is a short alphanumeric code (the form sends `USD` or a funding
+         *     symbol such as `fUST`).
          */
         StrategyConfigBody: {
             /** Currency */

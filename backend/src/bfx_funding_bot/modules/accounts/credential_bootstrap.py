@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.core.sealed_credential import SealedPayloadError, validate_credential
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.external.bitfinex.errors import credential_rejection
 from bfx_funding_bot.modules.accounts.tables import (
@@ -51,7 +52,13 @@ async def bootstrap_credential(
     has it before verification promotes it. A key Bitfinex refuses is
     ``bootstrap_permissions_rejected`` whichever of the two calls refuses it.
     """
-    if not api_key.strip() or not api_secret.strip() or len(kek) != 32:
+    # The rotation path's rule (printable ASCII, no whitespace, bounded): the key ends up
+    # in a request header, so a stray newline or control character is refused here.
+    try:
+        validate_credential(api_key, api_secret)
+    except SealedPayloadError:
+        raise BootstrapError("bootstrap_input_invalid") from None
+    if len(kek) != 32:
         raise BootstrapError("bootstrap_input_invalid")
     try:
         async with factory() as session, session.begin():

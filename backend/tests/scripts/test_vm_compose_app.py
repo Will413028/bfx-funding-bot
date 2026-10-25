@@ -427,6 +427,7 @@ REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
     "no_new_privileges": lambda s: s.pop("security_opt"),
     "no_privileged": lambda s: s.__setitem__("privileged", True),
     "restart": lambda s: s.pop("restart"),
+    "capped_log": lambda s: s.pop("logging"),
     "no_volumes": lambda s: s.__setitem__("volumes", [{"type": "bind", "source": "/", "target": "/host"}]),
     "no_tmpfs": lambda s: s.__setitem__("tmpfs", ["/tmp"]),
     "no_pid": lambda s: s.__setitem__("pid", "host"),

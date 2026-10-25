@@ -121,16 +121,32 @@ D4a 寫「由 DB trigger 拒絕 webapi role 寫入 resume、啟用幣別與 UNKN
 D1 寫「身分取自 Serve 注入的身分 header，穩定鍵是 node user ID」。9d-0 spike 實測後改成下面的形狀，9d-5（PR #237）實作並部署：
 
 - **D1a 授權看 app capability**：tailnet policy 的 grant 把 capability `github.com/Will413028/bfx-funding-bot/cap/operator` 授予 operator 對 `tag:bfx-ops` 的連線，值是 `{"user_id": "<operator 的 node user ID>"}`；serve.json 的 `AcceptAppCaps` 讓 Serve 以 `Tailscale-App-Capabilities` header 轉送。webapi 只在這個 capability 裡有一筆 `user_id` 等於 `BFX_OPERATOR_TAILNET_USER_ID` 時放行，否則 401；`Tailscale-User-Login` 只拿來顯示。Serve 會覆寫 client 自己送的 `Tailscale-*` header（spike 實測）。
-- **D1b webapi 只聽 tailnet 節點 namespace 裡的 127.0.0.1**：webapi 以 `network_mode: service:netns` 加入 holder 的 network namespace（計畫 D13），與 tailscale 共用，所以 Serve 是唯一入口；前端 static export 由同一個 webapi 同源提供。主機的 443 Funnel 已在 2026-10-20 關閉。
+- **D1b webapi 只聽 tailnet 節點 namespace 裡的 127.0.0.1**：webapi 以 `network_mode: service:netns` 加入 holder 的 network namespace（[2026-10-20](2026-10-20-network-namespace-held-by-a-holder-container.md)），與 tailscale 共用，所以 Serve 是唯一入口；前端 static export 由同一個 webapi 同源提供。主機的 443 Funnel 已在 2026-10-20 關閉。
 - **Rationale**：capability 而非 login header：授權條件寫在 tailnet policy 裡，換裝置或 login 改名都不必動 app，policy 拿掉 grant 就立即撤權；node user ID 帶在 capability 的值裡，app 不用另外解析身分 header 的格式。不選「只比對 `Tailscale-User-Login`」：login 字串可改名，而且任何能連到節點的 tailnet 成員都會帶這個 header，等於把授權交給 ACL 一層。**代價**：policy 的 grant 值與 webapi 設定必須一致，任一邊改錯 UI 全部 401（部署前以 `tailscale whois` 核對）；capability 需要 tailscale ≥ v1.92。
 - **Revocation trigger**：Tailscale 不再轉送 app capability，或 Serve 不再覆寫 client 送的 `Tailscale-*` header → 退回 D1 原文的身分 header 比對，並重新評估 Revocation Triggers 裡的 identity-aware proxy。
 
+## Amendment (2026-10-24)：tailnet 身分的實際強度與 session 時效（ASVS V6.8.4、V7.1、V7.3）
+
+ASVS 對照把 V6.1.3、V6.8.4、V7.1.1–V7.1.3、V7.3.1、V7.3.2 判為不符合，缺的是實際值與決定。2026-10-24 的值：GitHub 帳號有開兩步驟驗證，實際的因子由 maintainer 記在私有的威脅模型，不寫進 public repo；tailnet 的登入只有 GitHub（`tailscale status --json` 的 login 是 `…@github`）；operator 裝置 2026-05-31 06:11:49 UTC 登錄、node key 2026-11-27 06:11:49 UTC 到期，正好 180 天，也就是 tailnet 的 key expiry 是 Tailscale 預設的 180 天、沒改過（`tailscale status --json` 的 `Self.Created`、`Self.KeyExpiry`）；OCI 帳號有 MFA（Will）。各路徑的強度與時效寫在 `backend/ARCHITECTURE.md` §10h。
+
+- **D1c 最低強度假設**：app 收不到也不驗 `acr`、`amr`、`auth_time`（Serve 只轉送 login 與 capability）。app 一律假設最低強度：持有已登錄的 operator 裝置，加上一個可被釣魚的 IdP 因子。因此 UI 只開讀取與降低曝險的寫入（D4、§10a「動作的分界」），會擴大曝險的操作要經 SSH check mode 再回 IdP。D1「IdP 只用硬體金鑰」是否達成，記在私有的威脅模型；它是 owner 在帳號後台的設定，repo 裡沒有可以強制它的地方，所以本假設不以它為前提。
+- **D1d node key 到期維持 180 天**：Will 2026-10-24 決定先不縮短，修訂 D1「operator 裝置的 node key 到期設短」。UI 的 session 上限就是這 180 天。
+- **D2a 不設 idle 時限**：Tailscale node key 只有 absolute 到期、沒有 idle 時限；app 層的 idle 要把 D2 移除的 app session 加回來。閒置的風險由 operator 裝置的螢幕鎖承擔。
+
+**Rationale**
+
+- **D1c 不在 app 層補驗證強度**：拿不到 IdP 的 claim，能做的只有在 app 裡再加一道自己的驗證，那等於把 D2 移除的登入加回來。動作分界已經讓最低強度下的 UI 只能讀取、kill 與停用幣別，最壞的結果是停止放貸，不是資金移動。**代價**：非硬體金鑰的因子可被即時釣魚；被釣到時攻擊者能登錄新裝置並使用 UI，也能在 12 小時的 check 窗口內用 CLI。
+- **D1d 不縮短**：縮短只影響 UI（CLI 每 12 小時本來就回 IdP），而 UI 的寫入限於降低曝險。**代價**：裝置遺失或被盜時，到移除裝置之前 UI 都可用；所以裝置遺失時的第一步是在 admin console 移除它（§10h 的終止步驟）。
+- **D2a 不選 app 層 idle**：理由同 D1c。**代價**：螢幕未鎖的裝置，閒置多久都能用 UI。
+
+**Revocation trigger**：UI 新增任何會擴大曝險的寫入、開放第二個使用者（08-31 SP6）、Tailscale 提供 idle 或裝置狀態控制，或 IdP 帳號的驗證因子改變（屆時重評 D1d 的天數）。
+
 ## Followup
 
-- 依對真錢的風險分批實作，每批一個 PR：公開頁靜態化 → CLI 對等與 break-glass 演練 → 營運入口切換 → 部署全停 → 網路分段 → KEK 與交易所憑證 → 秘密管理、供應鏈、安全 log、API 契約與文件。
+- 依對真錢的風險分批實作，每批一個 PR：公開頁靜態化 → CLI 對等與 break-glass 演練 → 營運入口切換 → 部署全停 → 網路分段（縮成每個工作自己的 DB role，見 [2026-10-21](2026-10-21-single-vm-least-privilege-by-db-role-not-network-segmentation.md)）→ KEK 與交易所憑證 → 秘密管理、供應鏈、安全 log、API 契約與文件。
 - 交易所憑證那一批同時讓執行服務在開機與定期檢查憑證的權限與來源限制，不合規就停止送單、恢復後自動繼續；該批另以 ADR 記錄。
 - 營運入口切換前，CLI 必須已能完成 resume、啟用幣別、換憑證與 UNKNOWN 裁決；VM 演練的要求已由 Amendment (2026-10-18)「營運入口切換不再等 CLI 的 VM 演練」移除。
-- ASVS L2 對照在全部實作完成後重新判定，放進 `docs/security/`（只寫判定與控制）。
+- ~~ASVS L2 對照在全部實作完成後重新判定，放進 `docs/security/`（只寫判定與控制）~~ 已完成（PR #304）；揭露方式見 [2026-10-15-asvs-l2-scope-and-disclosure-in-a-public-repo](2026-10-15-asvs-l2-scope-and-disclosure-in-a-public-repo.md)。
 
 ## Revocation Triggers
 

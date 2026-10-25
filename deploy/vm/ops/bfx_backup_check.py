@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Alert when backups miss the RPO, scheduled host jobs stop succeeding, or the disk fills.
+"""Alert when backups miss the RPO, scheduled host jobs stop succeeding, the disk fills, or
+the clock stops being synchronized.
 
 Runs as root from bfx-backup-check.timer, one minute after each
 bfx-pgbackrest-status run. It only reads what already exists:
@@ -18,7 +19,10 @@ bfx-pgbackrest-status run. It only reads what already exists:
   whether the report runs: older than 8 days is a warning. No heartbeat yet
   (a new host, or before the first run) is not a problem;
 - disk usage of the filesystem holding the pgBackRest repo and Docker volumes:
-  at or above 85% is a warning, at or above 95% critical.
+  at or above 85% is a warning, at or above 95% critical;
+- the clock: `timedatectl show -p NTPSynchronized --value` must say `yes`, or every log
+  line, nonce and deadline drifts (ASVS V16.2.2); not synchronized, or unreadable, is a
+  warning.
 
 A failed scheduled backup is alerted directly by bfx-pgbackrest-backup.service
 (OnFailure=bfx-alert@%n.service), not here. Nothing here gates a deploy or a
@@ -68,11 +72,13 @@ StatusRunner = Callable[[Sequence[str]], int]
 Notifier = Callable[[str, str], None]
 # path -> (total, used, free) bytes, as shutil.disk_usage
 DiskUsage = Callable[[Path], tuple[int, int, int]]
+# () -> timedatectl's NTPSynchronized value, or None when it cannot be read
+ClockSync = Callable[[], str | None]
 
 # Problem kinds that page as a warning; every other kind is critical.
 WARNING_KINDS = frozenset({
     "restore_timer_disabled", "weekly_report_stale", "weekly_report_heartbeat_invalid",
-    "disk_usage_high", "disk_usage_unavailable",
+    "disk_usage_high", "disk_usage_unavailable", "clock_not_synchronized", "clock_sync_unknown",
 })
 
 
@@ -163,6 +169,21 @@ def disk_problems(
     return []
 
 
+def clock_problems(synchronized: str | None) -> list[str]:
+    if synchronized is None:
+        return ["clock_sync_unknown"]
+    return [] if synchronized == "yes" else ["clock_not_synchronized"]
+
+
+def _timedatectl_synchronized() -> str | None:
+    try:
+        done = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                              capture_output=True, text=True, check=False, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
 def _kind(problem: str) -> str:
     return problem.split(":", 1)[0]
 
@@ -212,7 +233,7 @@ def run_check(
     notify: Notifier, weekly_heartbeat: Path, weekly_timer: str, weekly_max_age_s: int,
     disk_path: Path, disk_warn_percent: int, disk_critical_percent: int,
     status: StatusRunner = _systemctl_status, disk_usage: DiskUsage = shutil.disk_usage,
-    clock: Callable[[], float] = time.time,
+    clock_sync: ClockSync = _timedatectl_synchronized, clock: Callable[[], float] = time.time,
 ) -> int:
     now = clock()
     now_ms = int(now * 1000)
@@ -229,6 +250,7 @@ def run_check(
                                            max_age_s=weekly_max_age_s)
     problems += disk_problems(disk_path, warn_percent=disk_warn_percent,
                               critical_percent=disk_critical_percent, usage=disk_usage)
+    problems += clock_problems(clock_sync())
     state = _read_json(state_path) or {}
     message, next_state = decide(state, problems, now=now, realert_s=realert_s)
     if message is not None:

@@ -375,6 +375,17 @@ async def test_no_queue_without_a_running_bot_or_an_active_credential(harness) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("label", ["rotated\nforged log line", "tab\there", "bell\x07", "del\x7f"])
+async def test_a_label_with_a_control_character_is_refused(harness, label: str) -> None:
+    async with harness.factory.begin() as session:
+        with pytest.raises(commands.OperatorCommandError) as refused:
+            await commands.request_credential_rotation(
+                session, CONTEXT, api_key=NEW_KEY, api_secret=NEW_SECRET, label=label,
+                reason="scheduled rotation", now_ms=NOW_MS)
+    assert refused.value.code == "invalid_label"
+
+
+@pytest.mark.asyncio
 async def test_one_pending_rotation_at_a_time(harness) -> None:
     h = harness
     await _queue(h)

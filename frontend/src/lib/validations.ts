@@ -13,7 +13,10 @@ const rangeSchema = (_label: string) =>
     });
 
 export const strategyConfigSchema = z.object({
-  currency: z.string().min(1, "required"),
+  currency: z
+    .string()
+    .min(1, "required")
+    .regex(/^[A-Za-z0-9]{1,16}$/, "currencyCode"),
   amount: rangeSchema("Amount"),
   rate: rangeSchema("Rate"),
   period: rangeSchema("Period"),

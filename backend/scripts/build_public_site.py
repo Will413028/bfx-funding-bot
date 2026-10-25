@@ -1,10 +1,11 @@
 """Build the public proof site's static files (ADR 2026-08-31 D6) into a directory.
 
-A step of the weekly chain (deploy/vm/ops/docker-compose.weekly-report.yml), after
-attribution: reads attribution_weekly and the hourly p2 funding candles with the
-research role, renders modules/live_validation/public_site.py, and swaps the result
-into --out whole, so the uploader (bfx_public_site.py, bfx-public-site.service) never
-sees half a build. Uploading is not this script's job: it holds no Cloudflare token.
+bfx-public-site.service's one-shot build container (deploy/vm/ops/
+docker-compose.public-site.yml, the weekly chain's image and env): reads
+attribution_weekly and the hourly p2 funding candles with the research role, renders
+modules/live_validation/public_site.py, and swaps the result into --out whole, so the
+uploader (bfx_public_site.py publish) never sees half a build. Uploading is not this
+script's job: it holds no Cloudflare token. A non-zero exit fails the unit.
 
 The published account is the one the weekly chain measures (BFX_EXCHANGE_ACCOUNT_ID
 from research.env; the runner refuses to start without it). The retired webapi
@@ -12,7 +13,7 @@ endpoint had its own BFX_PUBLIC_EXCHANGE_ACCOUNT_ID because the webapi serves ev
 account; attribution_weekly is computed for this one only.
 
 Run from backend/ (env: DATABASE_URL / BFX_EXCHANGE_ACCOUNT_ID / BFX_DEPLOYMENT_ENV):
-  uv run python -m scripts.build_public_site --out /reports/public-site
+  uv run python -m scripts.build_public_site --out /tmp/public-site
 """
 from __future__ import annotations
 

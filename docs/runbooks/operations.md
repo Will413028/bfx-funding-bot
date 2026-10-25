@@ -242,12 +242,15 @@ sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
 `ts`（UTC，結尾 `Z`）、`level`、`service`（`bot`／`webapi`）、`logger`、`msg`（訊息文字）、有 traceback 時的 `exc`，
 以及事件自己的欄位（`event`、`reason` 等）。值裡的換行與控制字元都被跳脫，一筆 log 只佔一行；例外是 bot 未攔下的例外在程序結束時由直譯器印出的多行純文字 traceback。
 
+- 保存與讀取：bot 與 web API 的 log 在主機上是 Docker 的 json-file，每個容器最多 5 個 50 MB 檔（`docker-compose.app.yml` 的 `logging`，`compose_policy.py` 釘住）；
+  每次部署重建容器時清空。Alloy 經 Docker API 把它們送進 Loki，保存 30 天（homelab `observability/`）。主機上讀得到的是 root 與 `docker` group。
+  postgres 的 log 不在這個上限內（`docker-compose.bot.yml` 另外管）。
 - 照舊用事件名 grep：事件名在 `msg` 裡，例如 `docker logs bfx-bot --since 1h 2>&1 | grep deployment_skip`。
   Grafana 的 bfx 規則比對整行原文，不受格式影響。
 - 取欄位用 `jq`（要先裝）：`docker logs bfx-webapi --since 1h 2>&1 | jq -R -c 'fromjson? | select(.logger == "bfx.security")'`（`fromjson?` 跳過非 JSON 行）。
   operational telemetry（logger `bfx_funding_bot.events`）的事件 JSON 是 `msg` 字串，要再解一次：
   `jq -R -c 'fromjson? | select(.logger == "bfx_funding_bot.events") | .msg | fromjson'`。
-- web API 的 access log（logger `uvicorn.access`）的 client 是 Serve 代理轉來的位址（`127.0.0.1`，或 Serve 帶 `X-Forwarded-For` 時的 tailnet IP），不代表身分；看身分要看安全事件。
+- web API 的 access log（logger `uvicorn.access`）的 client 是 Serve 代理轉來的位址（`127.0.0.1`，或 Serve 帶 `X-Forwarded-For` 時的 tailnet IP），不代表身分；看身分要看安全事件（每個 operator 請求都有一行 `access_granted`）。
 
 安全事件（logger `bfx.security`；查法 `docker logs bfx-webapi --since 24h 2>&1 | grep bfx.security`，bot 同理）：
 
@@ -258,6 +261,8 @@ sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
 | `rate_limited` | 429 | `user_id`、`login`、`reason`（`read_bucket_empty`／`write_bucket_empty`）、`retry_after_s` |
 | `boot_refused` | 拒絕開機（CRITICAL）：web API 的 `admin_token_in_webapi_env`、`ingress_settings_invalid`、`schema_head_mismatch`、`capital_authority_unreadable`；bot 的 `boot_failed`（只有 `error_types`，訊息在 Telegram 的 `boot_refused` 告警） | `reason`、`detail`、`error_types` |
 | `admin_halt` | bot `/admin/halt` 被呼叫 | `actor`、`halt_reason`、`cancel_all_complete` |
+| `access_granted`（INFO） | web API：operator 通過 `require_operator` 的每個請求（一個請求一行，受限流上限） | `method`、`path`、`login` |
+| `input_rejected` | web API 422：請求不符合 model（回應仍是 FastAPI 原本的 422） | `method`、`path`、`login`、`fields`（失敗的欄位路徑，最多 20 個，不含值） |
 
 log 裡沒有 token、帶 token 的 header 或 request body；request 帶來的字串截到 200 字。
 
@@ -280,7 +285,8 @@ webapi，以 `service` tag 區分；`bfx-frontend` 收瀏覽器）。Sentry 依 
   - 遮罩失敗時整筆不送。
 - 送出由 SDK 的背景 thread 處理，queue 有上限，不在交易路徑上等待網路；結束時最多 flush 2 秒。
   outgoing request 不加 trace header。
-- 瀏覽器的事件先送到本站的 `/fe-events`（`frontend/src/lib/sentry-tunnel.ts`），再由 webapi 轉給 `BFX_FE_SENTRY_DSN`
+- 瀏覽器的事件先送到本站的 `/fe-events`（`frontend/src/lib/sentry-tunnel.ts`），再由 webapi 轉給 `BFX_FE_SENTRY_DSN`；
+  它和私有 API 一樣要 operator capability，另有自己的限流（每個 operator 每分鐘 60 則，超過回 429，Sentry SDK 會依 `Retry-After` 退避），不佔 API 寫入額度
   的 project（`backend/.../modules/api/ingress.py`；只接受同源、DSN 相符的 envelope）；
   廣告與隱私擴充套件會擋直接送往 `*.sentry.io` 的請求（console 顯示 `ERR_BLOCKED_BY_CONTENT_BLOCKER`）。
 - <a id="error-tracking-test"></a>測試：在執行中的 container 裡各送一筆測試例外：
@@ -555,8 +561,8 @@ sudo bfx-deploy --recreate
 | `bfx-pgbackrest-backup.timer` / `bfx-pgbackrest-status.timer` | 見 unit | 備份與 RPO evidence（`OnFailure=bfx-alert@`） |
 | `bfx-backup-check.timer` | 每 5 分鐘（`*:1/5`） | evidence、restore heartbeat、weekly report heartbeat 與磁碟使用率檢查，連續兩次才告警，6 小時重發（見下方「主機檢查」） |
 | `bfx-restore-test.timer` | 每月 1 日 09:17 UTC | `bfx-restore-test@current`：用已部署 release 的 DR 腳本做 isolated restore ＋ ledger 驗證（與 production 比對有界 digest、唯讀 boot check；[offsite DR](offsite-dr.md#monthly-and-change-triggered-ledger-restore-test)） |
-| `bfx-weekly-report.timer` | 每週一 04:17 UTC | 每週量測鏈：attribution／realized interest／G3 報告＋公開站的檔案＋研究重驗（見下方「每週報告」；`OnFailure=bfx-alert@`） |
-| `bfx-public-site.service`（沒有 timer） | 每週報告成功後（`OnSuccess=`） | 把公開站上傳到 Cloudflare Pages 並核對（見下方「公開站」；`OnFailure=bfx-alert@`） |
+| `bfx-weekly-report.timer` | 每週一 04:17 UTC | 每週量測鏈：attribution／realized interest／G3 報告＋研究重驗（見下方「每週報告」；`OnFailure=bfx-alert@`） |
+| `bfx-public-site.timer` | 每週一 05:47 UTC | 產生公開站、上傳到 Cloudflare Pages 並核對（見下方「公開站」；`OnFailure=bfx-alert@`） |
 
 `systemctl list-timers 'bfx-*'` 看實際啟用狀態。
 
@@ -614,17 +620,30 @@ sudo systemctl disable --now bfx-weekly-report.timer   # 暫停
 公開的 proof 頁與免費利率 CSV 是 Cloudflare Pages 上的靜態檔（`https://borrowrate.pages.dev`，ADR `2026-08-31` D6）：
 網路上的人只碰得到 Pages，碰不到這台 VM。
 
-- 產生：每週報告的一步（`scripts.build_public_site`，`bfx_research`），把 `index.html`、`en/index.html`、
-  `proof-summary.json`、`funding-rates-fUST.csv`、`funding-rates-fUSD.csv` 與 `_headers` 整個換進
-  `/home/ubuntu/bfx/reports/public-site`。它沒有 Cloudflare token；讀不到任一幣別的 candle 就保留上一版、只記 WARN。
-- 上傳：`bfx-public-site.service`（root，`bfx_public_site.py`）只接受剛好這六個檔、沒有 symlink、
-  `proof-summary.json` 的 `generated_at` 在 26 小時內；上傳後等到 Pages 實際送出同一份 `proof-summary.json`
-  且首頁帶 CSP 才算成功。設定在 `public-site.env` 與 token 檔（[secret-rotation](secret-rotation.md#cloudflare-pages-token公開站)）。
+`bfx-public-site.service` 一次跑兩步，用兩個身分：
+
+- 產生（`ExecStartPre=+`，root）：先確認 `public-site.env` 與 token 檔是 root 0600，再用每週報告同一套解析
+  （已部署的 backend digest、`research.env` 的 `bfx_research`）跑一次性容器 `docker-compose.public-site.yml`
+  （`scripts.build_public_site`），把 `index.html`、`en/index.html`、`proof-summary.json`、`funding-rates-fUST.csv`、
+  `funding-rates-fUSD.csv` 與 `_headers` 寫進這次執行專用的 `/run/bfx-public-site/build/site`（unit 結束時 systemd 刪掉整個目錄）。
+  容器沒有 Cloudflare token；讀不到任一幣別的 candle 或任何錯誤都讓 unit 失敗，不會上傳。
+- 上傳（`ExecStart=`，systemd 的 `DynamicUser`，不是 root、碰不到 DB 與 docker）：token 以 `LoadCredential=` 交給它，
+  帳戶與專案（`public-site.env`）也以 credential 交給它，不用 `EnvironmentFile=`（那會連 root 步驟一起套用）。只接受剛好這六個檔、沒有 symlink；上傳後等到 Pages 實際送出同一份
+  `proof-summary.json` 且首頁帶 CSP 才算成功。設定見 [secret-rotation](secret-rotation.md#cloudflare-pages-token公開站)。
+- 排程：`bfx-public-site.timer` 由 operator 安裝與啟用（不在 `managed-units`，理由同 `bfx-weekly-report.timer`）。
+  2026-10-24 以前裝好的主機（公開站原本接在每週報告的 `OnSuccess=` 後面），部署這版之後要做一次：
+  `sudo install -m 0644 /usr/local/lib/bfx-ops/current/systemd/bfx-public-site.timer /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now bfx-public-site.timer`，
+  否則不會再有任何東西啟動它，要等每日外部檢查在 9 天後才發現。
+  它不等每週報告：每週報告晚了或失敗時照樣發布上一週的資料，每日外部檢查在最新一週超過 15 天時告警。
 - 收到 `bfx-public-site.service` 失敗告警：看 `journalctl -u bfx-public-site.service -n 50`，錯誤碼說明在哪一步：
-  `site_build_stale`／`site_files_mismatch` 是每週報告那一步沒產生（看 `bfx-weekly-report` 的 journal 裡
-  `build_public_site` 的 WARN）；`site_symlink`／`site_not_regular`／`site_unreadable` 表示 build 目錄裡出現了不是 build 寫的東西，先查是誰動了 `/home/ubuntu/bfx/reports/public-site`，不要直接重跑；`*_failed:http_403` 多半是 token 被撤銷或 VM 換了出口 IP；`verify_failed` 是
-  Pages 沒在 120 秒內送出新版，先重跑一次。重跑：`sudo systemctl start bfx-public-site.service`。
-- 預覽而不上傳：`sudo /usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_public_site.py --dry-run`。
+  `Failed to set up credentials`（exit 243/CREDENTIALS）或 `Failed to load environment files` 是 systemd 在跑任何一步之前就找不到
+  token 檔或 `public-site.env`；`cannot build:` 開頭的是產生前的檢查（`secret_file_*` 是兩個設定檔的權限、`no_deployed_release`／`env_key_missing` 同每週報告），
+  `build failed with exit code` 是容器本身失敗（上面幾行是它的 traceback）；`site_files_mismatch`／`site_symlink`／`site_not_regular`／`site_unreadable`
+  表示 build 目錄裡的檔案不是預期的六個，先看 build 的輸出，不要直接重跑；`credential_*` 是上傳步驟讀不到 credential（通常是手動在 unit 外執行）；
+  `*_failed:http_403` 多半是 token 被撤銷或 VM 換了出口 IP；`verify_failed` 是 Pages 沒在 120 秒內送出新版，先重跑一次。
+  重跑：`sudo systemctl start bfx-public-site.service`。
+- 只看要跑什麼：`sudo /usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_weekly_report.py --dry-run`
+  （公開站的 build 用同一個 image 與 env）。
 
 ### 主機檢查（`bfx-backup-check`）
 
@@ -636,6 +655,7 @@ sudo systemctl disable --now bfx-weekly-report.timer   # 暫停
 | `restore_timer_disabled` | warning | heartbeat 存在（這台跑過 restore test）但 timer 停用 |
 | `weekly_report_stale` | warning | weekly timer 啟用且最後一次成功超過 8 天 |
 | `disk_usage_high`／`disk_usage_critical` | warning／critical | `/` 使用率 ≥85%／≥95%（pgBackRest repo 與 Docker volume 都在這裡） |
+| `clock_not_synchronized`／`clock_sync_unknown` | warning | `timedatectl show -p NTPSynchronized` 不是 `yes`／讀不到；時鐘不同步時 log 時間、Bitfinex nonce 與各種期限都會偏（先看 `timedatectl status` 與 `systemctl status systemd-timesyncd`） |
 
 - 系統自己會做的：只通知，不擋部署、不改交易狀態；同一問題連續兩次才告警，6 小時重發，清除時發一則 recovered。
 - operator 要判斷的：磁碟告警先看 `docker system df`（舊 image 與 build cache 通常可回收）與
@@ -694,8 +714,7 @@ kill 的 cancel-all）被拒：
   `requested_by`（9d-6 起）；沒有指定 actor 的參數。CLI 連上 DB 後先確認它是該帳戶的 member，
   不是就拒絕、什麼都不寫；寫入另要 owner／operator，bot 套用時再以 `operator_authorized` 重驗。
 - **信任邊界**：`ubuntu` 的 sudo 是 NOPASSWD，任何 root 等價的 shell 都能自己設定
-  `SSH_CONNECTION` 冒充另一個 peer：公網 sshd 還開著時持有 key 的登入、Console 上的 `ubuntu`。
-  公網 sshd 停用後只剩 Console 這一條。誰能開 session 由 Tailscale SSH 的 check mode 決定；`bfx-op`
+  `SSH_CONNECTION` 冒充另一個 peer；公網 sshd 已停用，這樣的 shell 只剩 Console 上的 `ubuntu`。誰能開 session 由 Tailscale SSH 的 check mode 決定；`bfx-op`
   做的是把誠實 session 的身分綁進請求並留下紀錄。
 - **子命令**（`sudo bfx-op <子命令> --help` 看參數；`halt` 除外，它只收 `--reason`）：唯讀 `status`、`uncertainties`、`uncertainty`、
   `request <trading|currency|resolution|credential> <request_id>`、`credential`；寫入 `resume`、`kill`、
@@ -745,8 +764,8 @@ kill 的 cancel-all）被拒：
 
 ## 12. Break-glass
 
-順序：Tailscale SSH（§10）→ OCI Console Connection。終態是公網 sshd 停用、UFW 與 OCI security list 都不開 22；
-在那之前公網 sshd 仍是一條入口（`sudo systemctl is-active ssh.socket ssh.service` 看現況）。
+順序：Tailscale SSH（§10）→ OCI Console Connection。公網 sshd 已停用（`ssh.socket`、`ssh.service` 都是 masked，
+2026-10-24 讀 VM），UFW 與 OCI security list 都不開 22；各路徑的驗證強度見 `backend/ARCHITECTURE.md` §10h。
 
 | 元件壞了 | web UI | `bfx-op`（Tailscale SSH） | Console Connection |
 |---|---|---|---|

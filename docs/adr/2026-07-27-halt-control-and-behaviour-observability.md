@@ -87,7 +87,7 @@ Prior state：daemon 自 Phase 4.2 起只暴露**輸入**（env var、yaml、log
 - ~~`/metrics` 尚未加 halted gauge~~ 已完成（2026-10-12）：`/metrics` 匯出 `bfx_trading_halted`
   （與 `halt.halted` 同一個 guard 判定），Grafana 規則 `bfx-trading-halted-submits` 在它持續為 1 時
   `bfx_executor_submits_total{status!="not_sent"}` 仍增加即 critical（runbook `operations.md` §6）。
-  halt 的強制仍只在應用層的 command gate；這條規則是事後偵測
+  halt 的強制仍只在應用層的 command gate；這條規則是事後偵測（為何不放 DB 層：[2026-10-12](2026-10-12-error-tracking-halt-detection-and-ci-alert-channel.md) D2）
 - ~~P3–P5 未做~~ 已完成：P3 cap 單一來源（PR #166 刪掉不生效的 cap 欄位）、P4 deploy 邏輯移出 shell
   （`deploy/vm/ops/bfx_deploy.py`，`05208933`）、P5 自寫 watchdog 退役，改由上一條的 Grafana 規則偵測
 

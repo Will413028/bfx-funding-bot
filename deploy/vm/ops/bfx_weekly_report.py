@@ -95,11 +95,14 @@ class Plan:
     backend_digest: str
     backend_image: str
     env: Mapping[str, str]  # holds secrets: never logged or printed
+    # bfx_public_site.py runs its own one-shot build through the same plan.
+    project: str = PROJECT
+    service: str = SERVICE
 
     @property
     def argv(self) -> list[str]:
-        return ["docker", "compose", "-p", PROJECT, "-f", str(self.compose_file),
-                "run", "--rm", SERVICE]
+        return ["docker", "compose", "-p", self.project, "-f", str(self.compose_file),
+                "run", "--rm", self.service]
 
     def describe(self) -> dict[str, object]:
         return {"compose_file": str(self.compose_file), "tooling_revision": self.tooling_revision,
@@ -137,9 +140,10 @@ def _values(path: Path, keys: Sequence[str], *, secret_check: Callable[[Path], N
 def build_plan(
     *, ops_dir: Path, ledger: Any, runtime_dir: Path, state_dir: Path,
     backend_repository: str, secret_check: Callable[[Path], None],
-    reports_dir: Path = REPORTS_DIR,
+    reports_dir: Path = REPORTS_DIR, compose_name: str = COMPOSE_FILE,
+    project: str = PROJECT, service: str = SERVICE,
 ) -> Plan:
-    compose_file = ops_dir / COMPOSE_FILE
+    compose_file = ops_dir / compose_name
     if not compose_file.is_file():
         raise DeployError("weekly_compose_missing")
     if reports_dir.is_symlink() or not reports_dir.is_dir():
@@ -165,7 +169,7 @@ def build_plan(
     }
     return Plan(compose_file=compose_file, tooling_revision=revision,
                 deployed_revision=deployed.source_revision, backend_digest=digest,
-                backend_image=image, env=env)
+                backend_image=image, env=env, project=project, service=service)
 
 
 def write_heartbeat(path: Path, plan: Plan, *, now: float) -> None:

@@ -5,7 +5,7 @@
 
 ## 何時換
 
-由事件觸發，不排定期輪替（品質計畫 9h，D15）。
+由事件觸發，不排定期輪替。
 符合任一條件就換：
 
 - 疑似外洩：
@@ -181,7 +181,8 @@ BotFather 的 `/revoke` 會讓舊 token 立刻失效，所以兩條告警路徑�
 
 ## Cloudflare Pages token（公開站）
 
-`/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN`（`root:root 0600`），只有 `bfx-public-site.service` 讀。
+`/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN`（`root:root 0600`），只有 `bfx-public-site.service` 讀
+（systemd 以 `LoadCredential=` 交給上傳步驟，每次執行都重讀，換檔後不用 reload）。
 權限是帳戶層級的 **Pages Write**（Cloudflare 沒有只限一個 Pages 專案的權限），並限定 VM 的出口 IP；
 所以它也能改同帳戶的其他 Pages 專案，外洩時要先撤銷。VM 換公網 IP 後上傳會被拒（`upload_token_failed:http_403`），也要照這節重發。
 
@@ -198,8 +199,7 @@ BotFather 的 `/revoke` 會讓舊 token 立刻失效，所以兩條告警路徑�
    swap /opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN root:root 0600 printf '%s' "$V"
    ```
 
-3. 驗證：`sudo systemctl start bfx-public-site.service`，journal 最後一行是 `published 6 files`
-   （build 超過 26 小時會被拒，先 `sudo systemctl start bfx-weekly-report.service`，它成功後會自己接著上傳）。
+3. 驗證：`sudo systemctl start bfx-public-site.service`（會重新產生再上傳），journal 最後一行是 `published 6 files`。
 4. 在 dashboard 撤銷舊 token。
 
 ## R2（offsite backup）
@@ -209,7 +209,29 @@ BotFather 的 `/revoke` 會讓舊 token 立刻失效，所以兩條告警路徑�
 - 只改 VM 的 secret fragment，重跑 validator、archive check、backup preflight 與 isolated restore；
 - 新的證據通過之後，才撤銷舊 token。
 
-repository cipher 的輪替是另一個 repository migration，要保留讀舊備份需要的每一個 passphrase。
+### repository cipher passphrase（`repo1-cipher-pass`）
+
+pgBackRest 不能替既有 repository 換 passphrase：已經寫進 R2 的備份只用舊的那把打得開。所以「換」等於
+另開一個 repository 再退役舊的。以下程序寫好但**還沒演練過**，第一次照做時要邊做邊修正這一段：
+
+1. 系統維持 halt。照 [offsite-dr](offsite-dr.md) 開新的 repository（新的 `repo1-path` 或新 bucket），新 passphrase 用
+   `openssl rand -base64 48` 產生（精靈要求新的至少 32 字），先放進離線保管，再寫進 `r2.conf`。
+2. 在新 repository 跑 `stanza-create`、`check`、一次 full backup 與 isolated restore test；全部通過前不動舊的。
+3. 舊 repository 與它的 passphrase 保留到新 repository 的保留期涵蓋同樣的時間範圍（`repo1-retention-full=4` 個 full 之後），
+   期間兩把 passphrase 都在離線保管裡；之後刪除舊 repository，最後才銷毀舊 passphrase。
+
+## 秘密的持有者
+
+| 秘密 | VM 上的位置與權限 | VM 以外的副本 |
+|---|---|---|
+| bot／webapi 的秘密檔（DB 密碼、admin token、Telegram token、KEK） | `/opt/bfx/runtime/secrets/<service>/`，`root:4600 0640`（[deploy「秘密檔」](deploy.md#秘密檔botwebapi9h)） | 不保留副本，外洩或遺失就照本頁重發；KEK 遺失時舊憑證列解不開，照「Vault KEK」一節換一把新的 Bitfinex key（ADR 2026-08-31 D5'） |
+| 主機工具與一次性工作的 env 檔（`notify.env`、`research.env`、`public-site.env`、`tailscale.env`） | `/opt/bfx/runtime/`，root 0600 | 不保留 |
+| Cloudflare Pages token | `/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN`，`root:root 0600` | 不保留（Cloudflare dashboard 可重發） |
+| R2 S3 憑證 | `/home/ubuntu/bfx/pgbackrest/conf.d/r2.conf`，`ubuntu:70 0640`（70 是容器裡的 postgres） | 不保留（R2 dashboard 可重發） |
+| `repo1-cipher-pass` | 同上 | **必須**離線保管（遺失＝備份全部打不開，`offsite-dr.md:128-129`） |
+| GitHub repository secrets（`TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID`） | 不在 VM | GitHub（與 VM 上的同一把 Telegram token） |
+
+持有者都是 Will 一人：主機 root 與 Tailscale SSH 只有他，雲端後台（GitHub、Cloudflare、Tailscale、OCI、Bitfinex）也只有他的帳號。
 
 ## Bitfinex API key
 
@@ -287,8 +309,5 @@ log 與 Telegram 仍然會遮蔽它。真的要換：
 
 - `TS_AUTHKEY`（`tailscale.env`）：只在節點第一次登入時使用；節點已登入時可以是空檔。換節點見
   [deploy「Tailnet 入口」](deploy.md#tailnet-入口netnstailscale)。
-- `ghcr.env`（GHCR PAT）：9i 的 provenance 驗證不需要 GitHub token，但 package 是 private 時 bfx-deploy 的 pull
-  與讀 manifest 都要用它；要刪檔並撤銷 PAT，先把 GHCR package 改成 public（見 deploy「Env 檔規則」）。
-  要換，就到 GitHub 重發 `read:packages` 的 classic PAT，照 Telegram 一節的 `read -rs` 寫法讀進 `V`，再
-  `setkey /opt/bfx/runtime/ghcr.env GHCR_TOKEN`。下一輪 bfx-deploy 就會用新值。
+- GHCR：backend package 2026-10-25 起是 public，bfx-deploy 匿名 pull 與讀 manifest，`ghcr.env` 已刪、PAT 已撤銷，沒有要換的秘密。
 - mirror 的 deploy key：9h 起 mirror 改用匿名 HTTPS，deploy key 應該已刪除（[deploy「Mirror」](deploy.md#mirrorgit-fetch-走匿名-https9h)）。

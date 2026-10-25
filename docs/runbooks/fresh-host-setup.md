@@ -241,9 +241,10 @@ printf "SET log_statement='none'; SET log_min_error_statement='panic'; CREATE RO
 1. 主機上 `sudo tailscale set --ssh`；admin console 關閉這個節點的 key 到期。
 2. tailnet policy 的 SSH 規則：`"action": "check"`（不設 `checkPeriod`，用預設 12 小時，ADR 2026-10-15 Amendment D4d）、
    `users` 只有 `autogroup:nonroot`。
-3. 現況（2026-10-16 讀 admin console，以 admin console 為準）：主機節點仍是 operator 自己擁有的節點（未 tagged），所以規則的
-   `dst` 是 `autogroup:self`。ADR 2026-10-15 D1 的終態是 tagged node。主機改成 tagged（或新主機直接以 tag 登入）之前，policy 要先有該 tag 的 `tagOwners`，以及一條
-   `dst` 是該 tag 的 SSH 規則（`autogroup:self` 不涵蓋 tagged node），否則 Tailscale SSH 被拒，只剩
+3. 主機節點是 tagged node `tag:server`（ADR 2026-10-15 D1；2026-10-25 起，以 admin console 為準），tagged 後不設 key 到期。
+   `autogroup:self`／`autogroup:member` 都不涵蓋 tagged node，所以新主機以 tag 登入（或既有節點改 tag）之前，policy 要先有：
+   `tagOwners` 的 `tag:server`、operator 到 `tag:server` 的 grant（Grafana、Mosh）、`dst` 是 `tag:server` 的 SSH 規則，
+   以及把 `tag:server` 加進 Funnel 的 `nodeAttrs` target（主機上若有 Funnel）。缺 SSH 規則時 Tailscale SSH 被拒，只剩
    [Console Connection](operations.md#12-break-glass)。
 
 驗證：`tailscale ssh ubuntu@<vm-node>` 要求 IdP 驗證後進得去；`tailscale ssh root@<vm-node>` 被 policy 拒絕。
@@ -296,12 +297,13 @@ sbin 入口、sudoers 與 gh 例外，見 [deploy runbook §4](deploy.md#4-主�
 - `tailscale.env` 放一把新的 tagged（`tag:bfx-ops`）、單次使用的 auth key；新主機的 `bfx_tsstate` 是空的，
   節點會重新登入（舊節點先在 admin console 刪掉，名稱 `bfx-ops` 才不會變成 `bfx-ops-1`）。
 - 告警的 bot token 配置到 `notify.env` 的 `TELEGRAM_BOT_TOKEN` 與秘密檔 `secrets/bot/TELEGRAM_BOT_TOKEN`；chat id 配置到 `notify.env` 與
-  `bot.env` 的 `TELEGRAM_CHAT_ID`；GHCR 憑證只需 `read:packages`。設定方式見 [operations](operations.md#6-告警)。
+  `bot.env` 的 `TELEGRAM_CHAT_ID`；GHCR 不需要憑證（package 是 public）。設定方式見 [operations](operations.md#6-告警)。
 - error tracking 的 `SENTRY_DSN`（`bfx-backend`）同時配置到 `bot.env` 與 `webapi.env`；空值等於關閉。
 - 公開站（[operations §8「公開站」](operations.md#公開站bfx-public-site)）：`public-site.env`（`BFX_PAGES_ACCOUNT_ID`、
   `BFX_PAGES_PROJECT`，root 0600）與 token 檔 `secrets/public-site/CLOUDFLARE_API_TOKEN`（目錄 `0700`、檔 `root:root 0600`，
-  建法見 [secret-rotation](secret-rotation.md#cloudflare-pages-token公開站)）。沒有這兩個檔時每週報告照跑，
-  之後的上傳失敗並告警。
+  建法見 [secret-rotation](secret-rotation.md#cloudflare-pages-token公開站)）。沒有這兩個檔時 `bfx-public-site.service`
+  不會啟動並告警。排程要另外安裝：`sudo install -m 0644 deploy/vm/systemd/bfx-public-site.timer /etc/systemd/system/`、
+  `sudo systemctl daemon-reload && sudo systemctl enable --now bfx-public-site.timer`。
   部署後依 [operations](operations.md#error-tracking-test) 各送一筆測試例外。
 
 Restore test 不需要設定檔（ledger mode 驗證 restored copy 內的每個 scope），使用本機

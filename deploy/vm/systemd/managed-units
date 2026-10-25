@@ -4,7 +4,8 @@
 # The other unit files in this directory are installed by hand. That includes
 # bfx-weekly-report.timer on purpose: its job (bfx-weekly-report.service) is managed
 # here, but installing a unit file replaces an operator's `systemctl mask` symlink,
-# and whether the weekly schedule runs at all is the operator's call.
+# and whether the weekly schedule runs at all is the operator's call. The same holds
+# for bfx-public-site.timer.
 bfx-alert@.service
 bfx-deploy.service
 bfx-deploy.timer

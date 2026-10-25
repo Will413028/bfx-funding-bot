@@ -10,7 +10,15 @@ name: Release images
 # Sigstore public-good: the repository is public), stored in the repository's attestation
 # API; bfx-deploy reads it there anonymously and verifies it with `gh attestation verify
 # --bundle` against the manifest it read from GHCR, before it runs anything from the image
-# (plan 9i, threat model F32). No SBOM yet (follow-up).
+# (plan 9i, threat model F32).
+# The image also carries a BuildKit SBOM attestation (SPDX, from the pinned syft scanner):
+# the inventory of its OS and Python packages (ASVS V15.1.2), read with
+# `docker buildx imagetools inspect <ref> --format '{{json .SBOM}}'`. The pushed digest was
+# already an index (BuildKit's own provenance attestation rides in it), so adding the SBOM
+# does not change what bfx-deploy reads. The SBOM is an inventory, not the vulnerability
+# scan's input: syft names the Debian ecosystem `Debian:13.7`, which matches no OSV advisory
+# (measured 2026-10-24, osv-scanner 2.6.0: 0 Debian findings from the SBOM, 164 from
+# scanning the same image).
 # See wiki ADR 2026-09-25-ci-registry-digest-deploy.
 
 # zizmor: workflow_run runs with the base repository's token. Safe here because the
@@ -112,6 +120,8 @@ jobs:
           platforms: linux/arm64
           push: true
           build-args: ${{ steps.names.outputs.build_args }}
+          # docker/buildkit-syft-scanner v1.12.0 (Will 2026-10-24).
+          sbom: generator=docker.io/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9
           labels: |
             org.opencontainers.image.revision=${{ env.REVISION }}
             bfx.ci-run-url=${{ github.event.workflow_run.html_url }}

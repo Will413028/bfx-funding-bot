@@ -11,6 +11,8 @@ on:
     branches: [main]
   schedule:
     - cron: "23 1 * * 1"  # Mondays, 09:23 Asia/Taipei
+  # Runs image_os_updates on demand (it does not run on pull requests).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -100,3 +102,57 @@ jobs:
       # osv-scanner.toml holds the dated baseline; an expired entry fails this job.
       # --licenses also fails on any license outside the allowlist.
       - run: '"$RUNNER_TEMP/osv-scanner" scan source -r --config osv-scanner.toml --licenses="$OSV_LICENSE_ALLOWLIST" .'
+
+  image_os_updates:
+    # The released image's OS layer (ASVS V15.2.1). Gate: a Debian security update the
+    # image does not have, unless image-os-updates.toml lists it with a future date
+    # (scripts/image_os_updates.py). The OSV report below never fails the job: most
+    # findings for the Debian base have no fix Debian has shipped. The report scans the
+    # image itself, not the release's SBOM: syft names the ecosystem `Debian:13.7`, which
+    # matches no OSV advisory. Not on pull requests: the image is the newest release on
+    # main, the same for every PR, so a new advisory would turn every PR red at once.
+    name: Image OS security updates
+    if: github.event_name != 'pull_request'
+    # Native arm64: the image is linux/arm64 only.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Pull the private image from GHCR.
+      packages: read
+    env:
+      OSV_SCANNER_VERSION: 2.6.0
+      OSV_SCANNER_SHA256: 2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull the newest release
+        run: docker pull --quiet "ghcr.io/${GITHUB_REPOSITORY,,}-backend:main"
+      - name: Debian security updates the image does not have
+        run: |
+          docker run --rm --user 0 --entrypoint sh "ghcr.io/${GITHUB_REPOSITORY,,}-backend:main" \
+            -c 'apt-get update -qq >/dev/null && apt list --upgradable 2>/dev/null' > "$RUNNER_TEMP/upgradable.txt"
+          python3 scripts/image_os_updates.py --baseline image-os-updates.toml < "$RUNNER_TEMP/upgradable.txt"
+      - name: Install osv-scanner
+        if: ${{ !cancelled() }}
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/osv-scanner" \
+            "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_arm64"
+          echo "${OSV_SCANNER_SHA256}  $RUNNER_TEMP/osv-scanner" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/osv-scanner"
+      # Exit 1 means findings (expected); anything else is a scanner failure.
+      - name: OSV report (does not fail the job)
+        if: ${{ !cancelled() }}
+        run: |
+          rc=0
+          "$RUNNER_TEMP/osv-scanner" scan image "ghcr.io/${GITHUB_REPOSITORY,,}-backend:main" \
+            --format markdown > "$RUNNER_TEMP/osv-image.md" || rc=$?
+          echo "osv-scanner exit $rc; $(grep -c '^|' "$RUNNER_TEMP/osv-image.md" || true) table rows in the report"
+          [ "$rc" -le 1 ] || exit "$rc"
+          cat "$RUNNER_TEMP/osv-image.md" >> "$GITHUB_STEP_SUMMARY"

@@ -13,10 +13,13 @@ import logging
 from typing import Literal
 
 from fastapi import FastAPI, Request
-from fastapi.exceptions import ResponseValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from bfx_funding_bot.core.auth import LOGIN_HEADER
+from bfx_funding_bot.core.security_log import INPUT_REJECTED, clip, security_event
 from bfx_funding_bot.modules.accounts.exchange_accounts import AccountRole
 from bfx_funding_bot.modules.ledger import OfferState
 
@@ -31,7 +34,7 @@ CredentialStatus = Literal["pending", "verified", "unverified", "failed", "revok
 ListedAccountStatus = Literal["active", "halted"]
 
 
-def field_paths(exc: ValidationError | ResponseValidationError) -> list[str]:
+def field_paths(exc: ValidationError | ResponseValidationError | RequestValidationError) -> list[str]:
     """Where a payload failed its model, as dotted field paths: loggable, unlike the values
     pydantic's own message repeats."""
     return [".".join(map(str, error["loc"])) for error in exc.errors()]
@@ -55,6 +58,21 @@ def install_response_shape_handler(app: FastAPI) -> None:
 
     app.add_exception_handler(ValidationError, refuse)
     app.add_exception_handler(ResponseValidationError, refuse)
+
+
+def install_request_validation_log(app: FastAPI) -> None:
+    """A request that fails its model (422) is a security event (ASVS V16.3.3), logged with
+    the field paths that failed and never the values; the answer is FastAPI's own 422."""
+
+    async def logged(request: Request, exc: Exception) -> JSONResponse:
+        if not isinstance(exc, RequestValidationError):  # registered for this class only
+            raise exc
+        security_event(INPUT_REJECTED, reason="request_validation", method=request.method,
+                       path=clip(request.url.path), login=clip(request.headers.get(LOGIN_HEADER)),
+                       fields=[clip(path) for path in field_paths(exc)[:20]])
+        return await request_validation_exception_handler(request, exc)
+
+    app.add_exception_handler(RequestValidationError, logged)
 
 
 class ResponseModel(BaseModel):
@@ -134,7 +152,10 @@ class Range(BaseModel):
     """A {min, max} bound. min/max must be positive and min <= max. Used for
     amount, rate (daily ratio) and period. Modelled as float to keep zero
     divergence from the FE's single rangeSchema (which types all three as
-    number); period values are integers by convention (FE step=1)."""
+    number); period values are integers by convention (FE step=1). Finite only:
+    JSON parsing accepts `Infinity`, `NaN` and `1e999`."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     min: float = Field(gt=0)
     max: float = Field(gt=0)
@@ -148,13 +169,15 @@ class Range(BaseModel):
 
 class StrategyConfigBody(BaseModel):
     """Validated PUT /configs body. Mirrors the FE Zod strategyConfigSchema
-    (positive ranges, min<=max, non-empty currency). Stored verbatim as the
+    (positive finite ranges, min<=max, alphanumeric currency). Stored verbatim as the
     user_configs.config JSONB blob. The backend is unit-agnostic on rate; it
-    stores the daily ratio the FE sends and never converts."""
+    stores the daily ratio the FE sends and never converts. Unknown keys are refused,
+    and the currency is a short alphanumeric code (the form sends `USD` or a funding
+    symbol such as `fUST`)."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
-    currency: str = Field(min_length=1)
+    currency: str = Field(pattern=r"^[A-Za-z0-9]{1,16}$")
     amount: Range
     rate: Range
     period: Range

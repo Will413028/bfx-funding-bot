@@ -158,7 +158,8 @@
     "minLength": "Must be at least 8 characters",
     "invalidEmail": "Please enter a valid email",
     "passwordMismatch": "Passwords do not match",
-    "rangeMinMax": "Min must be less than or equal to max"
+    "rangeMinMax": "Min must be less than or equal to max",
+    "currencyCode": "Letters and digits only, at most 16"
   },
   "status": {
     "running": "Running",

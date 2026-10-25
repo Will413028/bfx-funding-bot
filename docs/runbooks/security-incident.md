@@ -21,6 +21,20 @@
 3. 懷疑 operator 裝置或 tailnet 身分外洩：在 Tailscale admin console 移除該裝置，必要時暫停營運入口：
    `sudo docker stop bfx-tailscale`（UI 停用，bot 不受影響）。
 4. 懷疑主機被入侵：保持 kill，先做第 3 節，再依 `offsite-dr.md` 在新主機重建，新主機的秘密一律換新值。
+5. 懷疑 GitHub 帳號或 CI 被盜：先停自動部署，`sudo systemctl stop bfx-deploy.timer`（[deploy §7](deploy.md#7-暫停自動部署)）。
+   `bfx-deploy` 每 5 分鐘部署最新的綠燈 `main`，provenance 驗證只證明 image 由本 repo 的 release workflow 產生，
+   擋不住拿到 repo 寫入權的人自己 merge、自己觸發 release。接著：
+   - 在 GitHub 撤銷 session 與不認得的 PAT、SSH key、deploy key、OAuth app，重設密碼與第二因子。
+   - 對照 `main` 最近的 merge 與部署紀錄（[deploy §3](deploy.md#3-常用指令vmroot)「部署紀錄」）：有沒有不認得的 commit 被部署過。
+   - 有：那個 image 帶著 bot 的秘密跑過，照第 4 點當成主機被入侵，並照第 4 節換掉所有秘密。
+   - 沒有：revert 可疑的 commit（PR → CI），確認 `bfx-deploy --dry-run` 要部署的是預期的 revision 後再
+     `sudo systemctl start bfx-deploy.timer`。repository secrets（Telegram）照 `secret-rotation.md` 換掉。
+6. 懷疑公開站被竄改（`https://borrowrate.pages.dev` 的內容與 VM 產生的不同，或每日 `public-site` 檢查失敗而 VM 沒有上傳）：
+   - 先在 Cloudflare dashboard 撤銷 Pages token（它是帳戶層級，能改同帳戶的所有 Pages 專案）。
+   - 看 Pages 專案的 deployment 清單：不是 VM 上傳時間的 deployment 就是外部上傳；同帳戶的其他 Pages 專案也一起看。
+   - 照 `secret-rotation.md`「Cloudflare Pages token」發新 token，`sudo systemctl start bfx-public-site.service` 從 VM
+     重發一版；journal 最後一行是 `published 6 files` 才算還原。
+   - 公開站碰不到 VM 與 DB，交易不受影響，不需要 kill。
 
 ## 3. 保存證據
 

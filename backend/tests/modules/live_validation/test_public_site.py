@@ -134,7 +134,7 @@ def test_a_single_week_is_a_point_not_an_empty_line() -> None:
 
 def test_proof_summary_json_is_snake_case_weeks_with_the_build_time() -> None:
     # Not the API's envelope (`data`, camelCase): the static file has no consumer but the
-    # uploader's freshness check and the daily public-site check.
+    # daily public-site check.
     body = json.loads(_site([Row(WEEK_1, Decimal("1"), Decimal("1000"), Decimal("7"))])["proof-summary.json"])
     assert body == {
         "weeks": [{"week_start_ms": WEEK_1, "realized_apr_net_pct": "36.5",
