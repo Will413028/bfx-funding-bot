@@ -15,6 +15,9 @@ c. classify a foreign fill as own (``fill.foreign`` ignored): ``test_verdict_tab
    (``foreign_fill_is_an_alert``).
 d. ignore a conflict (``conflicts`` dropped from the condition):
    ``test_verdict_table`` (``conflict_*``).
+e. count a conflicting foreign fill as foreign (``conflict or filled < 0`` -> ``conflict and
+   filled < 0`` in the foreign sum): ``test_verdict_table``
+   (``conflicting_foreign_fill_is_not_foreign_executed``).
 The id-level mutations (initial amount vs previous remaining, dropping terminal-history fills,
 ignoring the trades/remaining disagreement) are in ``tests/integration/test_ledger_conservation.py``.
 """
@@ -46,8 +49,8 @@ def own(amount: str, *, conflict: bool = False) -> OfferFill:
     return OfferFill(D(amount), False, conflict)
 
 
-def foreign(amount: str) -> OfferFill:
-    return OfferFill(D(amount), True)
+def foreign(amount: str, *, conflict: bool = False) -> OfferFill:
+    return OfferFill(D(amount), True, conflict)
 
 
 def credits(**amounts: str) -> dict[str, D]:
@@ -156,6 +159,16 @@ CASES = {
         credits(),
         credits(b="60"),
         [own("60"), own("0", conflict=True)],
+        "unexplained_lending",
+        "0",
+        "0",
+        1,
+    ),
+    # A conflicting fill counts in neither sum, foreign or not (the verdict alone flags it).
+    "conflicting_foreign_fill_is_not_foreign_executed": (
+        credits(),
+        credits(),
+        [foreign("60", conflict=True)],
         "unexplained_lending",
         "0",
         "0",
