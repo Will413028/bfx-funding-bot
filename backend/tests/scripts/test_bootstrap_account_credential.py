@@ -92,6 +92,7 @@ def test_ambiguous_apply_failure_does_not_claim_no_commit(monkeypatch, capsys):
         ("flush", True, 0),
         ("commit", True, 0),
         ("http", True, 0),
+        ("rejected", True, 0),
         ("cleanup", True, 1),
     ],
 )
@@ -159,6 +160,8 @@ def test_real_cli_transaction_and_dependency_errors_are_secret_safe(
         logging.getLogger("httpx").critical(leak)
         if fault == "http":
             return httpx.Response(500, text=leak)
+        if fault == "rejected":
+            return httpx.Response(500, text=f'["error",10100,"apikey: invalid {leak}"]')
         if request.url.path == "/v2/auth/r/info/user":
             return httpx.Response(200, json=[4242, "fixture@example.invalid", "fixture"])
         return httpx.Response(200, json=[["funding", 1, 1]])
@@ -213,7 +216,14 @@ def test_real_cli_transaction_and_dependency_errors_are_secret_safe(
     for value in values.values():
         assert value not in output.out + output.err + caplog.text
     assert "Traceback" not in output.out + output.err
-    if fault != "none":
+    if fault == "http":
+        # A 500 without the venue's error body: Bitfinex did not answer, nothing was written.
+        assert json.loads(output.err) == {"status": "bootstrap_venue_unavailable",
+                                          "outcome": "not_applied"}
+    elif fault == "rejected":
+        assert json.loads(output.err) == {"status": "bootstrap_permissions_rejected",
+                                          "outcome": "not_applied"}
+    elif fault != "none":
         assert json.loads(output.err)["outcome"] == "unconfirmed"
 
     async def count_rows():
@@ -221,7 +231,7 @@ def test_real_cli_transaction_and_dependency_errors_are_secret_safe(
             return await session.scalar(select(func.count()).select_from(ExchangeAccountCredential))
 
     event.remove(engine.sync_engine, "before_cursor_execute", record_insert)
-    if fault not in ("http", "flush"):
+    if fault not in ("http", "rejected", "flush"):
         # Both asked before the row is inserted active with the id (a CHECK requires it).
         assert paths == ["/v2/auth/r/permissions", "/v2/auth/r/info/user"]
         assert len(inserted) == 1 and 4242 in tuple(inserted[0])

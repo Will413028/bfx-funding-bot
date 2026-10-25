@@ -147,7 +147,7 @@ async def test_the_key_is_written_active_once_bitfinex_answered(factory, monkeyp
 
 
 # The rotation's classification (credential_rotation.ask_bitfinex): the venue not answering
-# fails, any answer refuses.
+# is unavailable, any answer refuses.
 REFUSALS = [
     BitfinexAPIError(500, "apikey: invalid", '["error",10100,"apikey: invalid"]'),
     BitfinexAPIError(401, "unauthorized", None),
@@ -165,12 +165,12 @@ NO_ANSWERS = [
 @pytest.mark.parametrize("call", ["permissions", "user_id"])
 @pytest.mark.parametrize("error, code", [
     *((error, "bootstrap_permissions_rejected") for error in REFUSALS),
-    *((error, "bootstrap_failed") for error in NO_ANSWERS),
+    *((error, "bootstrap_venue_unavailable") for error in NO_ANSWERS),
 ])
 async def test_bitfinex_refusing_is_a_rejection_and_not_answering_a_failure(
         factory, call, error, code):
     """Either call may meet the venue's answer; a key it refuses is the operator's
-    rejection, the venue being away is a failure to run again."""
+    rejection, the venue being away is its own code: run it again later."""
     client = (Permissions(error=error) if call == "permissions"
               else Permissions(user_error=error))
     with pytest.raises(bootstrap.BootstrapError) as raised:
@@ -251,3 +251,18 @@ async def test_a_key_the_rotation_path_would_refuse_is_refused_before_bitfinex(f
         await invoke(factory, apply=True, client=client, **{field: value})
     assert str(error.value) == "bootstrap_input_invalid"
     assert client.calls == [] and await count(factory) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client, code, committed_nothing", [
+    (Permissions(scopes={}), "bootstrap_permissions_rejected", True),
+    (Permissions(error=BitfinexAPIError(0, "transport error", None)),
+     "bootstrap_venue_unavailable", True),
+    (Permissions(error=RuntimeError("fixture-secret")), "bootstrap_failed", False),
+])
+async def test_only_a_generic_failure_may_have_committed(factory, client, code, committed_nothing):
+    """Every code but ``bootstrap_failed`` is raised before the write could commit, so the
+    CLI may tell the operator nothing was applied."""
+    with pytest.raises(bootstrap.BootstrapError) as raised:
+        await invoke(factory, apply=True, client=client)
+    assert (str(raised.value), raised.value.committed_nothing) == (code, committed_nothing)
