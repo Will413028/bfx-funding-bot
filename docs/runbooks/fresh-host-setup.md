@@ -77,7 +77,7 @@ REVOKE CONNECT ON DATABASE bfx FROM PUBLIC;
 還原演練的驗證 role 自己授予 CONNECT（`deploy/vm/pgbackrest/restore_drill.py`），不依賴 PUBLIC。
 
 `bfx_webapi` 在 public schema 不給任何 default privileges：webapi 的讀取
-清單與 outbox 欄位級 INSERT 全部由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand`）。`bfx_operator` 同樣不給 default privileges，它的權限由 migration `4ab02765a34b` 先 revoke 全部（含 schema CREATE）再 grant 回清單，`test_operator_privilege_allowlist.py` 比對 effective privileges。`bfx_research` 也不給 default privileges：migration `3c5e7a9b1d2f` 先 revoke 它在 `public` 與 `legacy_archive` 的全部權限（含 schema CREATE）再 grant 回清單，`test_research_privilege_allowlist.py` 比對 effective privileges，`test_research_role_behaviour.py` 以這個 role 登入跑每週步驟的實際語句。`bfx_webapi` 在 public 的權限是 migration `d0e1f2a3b4c6` 擁有的精確 allowlist（先 revoke 全部再 grant 回清單，含 `api_keys`、`user_configs` 與 `user_profiles` 的 UPDATE，不再需要手動 grant）；之後新增 webapi 權限的 migration 必須同步更新 `test_webapi_privilege_allowlist.py`。
+清單與 outbox 欄位級 INSERT 全部由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand`）。`bfx_operator` 同樣不給 default privileges，它的權限由 migration `4ab02765a34b` 先 revoke 全部（含 schema CREATE）再 grant 回清單，`test_operator_privilege_allowlist.py` 比對 effective privileges。`bfx_research` 也不給 default privileges：migration `3c5e7a9b1d2f` 先 revoke 它在 `public` 與 `legacy_archive` 的全部權限（含 schema CREATE）再 grant 回清單，`test_research_privilege_allowlist.py` 比對 effective privileges，`test_research_role_behaviour.py` 以這個 role 登入跑每週步驟的實際語句。`bfx_webapi` 在 public 的權限是 migration `d0e1f2a3b4c6` 擁有的精確 allowlist（先 revoke 全部再 grant 回清單，含 `user_configs` 與 `user_profiles` 的 UPDATE；`api_keys` 已由 `f486e11435c9` 刪除，不再需要手動 grant）；之後新增 webapi 權限的 migration 必須同步更新 `test_webapi_privilege_allowlist.py`。
 
 ### 1b. 跑 migration
 

@@ -277,53 +277,6 @@ class LegacyAccountRealmMap(Base):
     )
 
 
-class APIKey(Base):
-    """SP2 vault row. One per user_profile.user_id. The Bitfinex api secret is
-    stored envelope-encrypted (see core.crypto). The FK to user_profiles.user_id
-    is enforced at the DB level by the migration ONLY (not as a model-level
-    ForeignKey) — mirrors UserProfile, keeping Base.metadata.create_all() in
-    tests free of cross-table ordering constraints.
-    """
-
-    __tablename__ = "api_keys"
-
-    id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4,  # client-side: ORM supplies the uuid (works on sqlite tests)
-        server_default=text("gen_random_uuid()"),  # PG DB-level default (raw SQL inserts)
-    )
-    user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    exchange_account_id: Mapped[UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True), nullable=True
-    )
-    label: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
-    api_key: Mapped[str] = mapped_column(Text, nullable=False)
-    secret_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    secret_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    wrapped_dek: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    dek_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    key_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
-    exchange_status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'unverified'")
-    )
-    verified_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_verify_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
-    )
-
-    __table_args__ = (
-        Index("idx_api_keys_user_id", "user_id", unique=True),
-        Index("idx_api_keys_exchange_account", "exchange_account_id"),
-    )
-
-
 class UserConfig(Base):
     """Per-user strategy-preference config (SP3). One row per user.
 
@@ -332,7 +285,7 @@ class UserConfig(Base):
     and is groundwork for SP6 (engine consumption of per-tenant config).
 
     Identity matches the post-SP1 world: user_id is the (retired) Better Auth
-    user ID (TEXT), and — like APIKey — there is NO model-level ForeignKey
+    user ID (TEXT), and there is NO model-level ForeignKey
     (the FK to user_profiles.user_id is enforced by the migration only, keeping
     Base.metadata.create_all() in sqlite test fixtures free of cross-table
     ordering constraints). id carries both a client-side uuid4 default (sqlite tests have no
@@ -355,7 +308,7 @@ class UserConfig(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
-    # onupdate (unlike sibling UserProfile/APIKey) is intentional: this row is
+    # onupdate (unlike sibling UserProfile) is intentional: this row is
     # re-saved on every config edit and the FE surfaces updatedAt, so it must
     # refresh. ORM-side only, which is fine — all writes go through the service.
     updated_at: Mapped[datetime] = mapped_column(

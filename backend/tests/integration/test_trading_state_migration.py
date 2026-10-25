@@ -507,7 +507,6 @@ def test_the_web_api_baseline_is_granted_by_migration_not_by_hand(pg_templates, 
         expected = {
             # d0e1f2a3b4c6 owns what the psql runbook steps used to grant.
             "user_profiles": {"SELECT", "INSERT", "UPDATE"},
-            "api_keys": {"SELECT", "INSERT", "UPDATE", "DELETE"},
             "user_configs": {"SELECT", "INSERT", "UPDATE", "DELETE"},
             "exchange_accounts": {"SELECT"}, "exchange_account_memberships": {"SELECT"},
             # c2d3e4f5a6b7 archived the legacy tables: no table-level read of any of them

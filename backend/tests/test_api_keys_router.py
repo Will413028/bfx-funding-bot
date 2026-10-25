@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-import bfx_funding_bot.modules.accounts.tables  # registers APIKey in Base.metadata
+import bfx_funding_bot.modules.accounts.tables  # registers the account tables in Base.metadata
 import bfx_funding_bot.modules.accounts.user_profile  # noqa: F401
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base

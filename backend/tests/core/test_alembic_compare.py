@@ -101,12 +101,6 @@ def _foreign_key(table_name: str, schema: str | None, name: str):
 
 def test_include_object_filters_legacy_and_migration_managed_objects() -> None:
     assert not include_object(object(), "atlas_schema_revisions", "table", True, None)
-    managed_fk = _foreign_key(
-        "api_keys", "public", "fk_api_keys_user_profile"
-    )
-    assert not include_object(
-        managed_fk, managed_fk.name, "foreign_key_constraint", True, None
-    )
     assert not include_object(
         _foreign_key("user_configs", None, "fk_user_configs_user_profile"),
         "fk_user_configs_user_profile",
@@ -114,8 +108,15 @@ def test_include_object_filters_legacy_and_migration_managed_objects() -> None:
         True,
         None,
     )
-    # f836fdee9bf3 dropped ``auth`` and with it the FK to ``auth."user"``: one that
-    # reappears is drift, no longer exempt.
+    # f836fdee9bf3 dropped ``auth`` and with it the FK to ``auth."user"``, f486e11435c9
+    # dropped ``api_keys``: an FK that reappears is drift, no longer exempt.
+    assert include_object(
+        _foreign_key("api_keys", "public", "fk_api_keys_user_profile"),
+        "fk_api_keys_user_profile",
+        "foreign_key_constraint",
+        True,
+        None,
+    )
     assert include_object(
         _foreign_key("user_profiles", "public", "fk_user_profiles_user"),
         "fk_user_profiles_user",
@@ -131,7 +132,7 @@ def test_include_object_keeps_unmanaged_or_metadata_objects() -> None:
 
     assert include_object(table, "orders", "table", False, table)
     same_name_other_table = _foreign_key(
-        "other_api_keys", "public", "fk_api_keys_user_profile"
+        "other_user_configs", "public", "fk_user_configs_user_profile"
     )
     assert include_object(
         same_name_other_table,
@@ -141,7 +142,7 @@ def test_include_object_keeps_unmanaged_or_metadata_objects() -> None:
         None,
     )
     same_name_other_schema = _foreign_key(
-        "api_keys", "other", "fk_api_keys_user_profile"
+        "user_configs", "other", "fk_user_configs_user_profile"
     )
     assert include_object(
         same_name_other_schema,
@@ -151,8 +152,8 @@ def test_include_object_keeps_unmanaged_or_metadata_objects() -> None:
         None,
     )
     assert include_object(
-        _foreign_key("api_keys", "public", "fk_api_keys_user_profile"),
-        "fk_api_keys_user_profile",
+        _foreign_key("user_configs", "public", "fk_user_configs_user_profile"),
+        "fk_user_configs_user_profile",
         "foreign_key_constraint",
         False,
         None,

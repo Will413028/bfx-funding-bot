@@ -24,7 +24,7 @@ async def test_auth_schema_and_user_profile_after_upgrade(pg_head_url) -> None:
             fks = insp.get_foreign_keys("user_profiles", schema="public")
             vault_fks = {
                 fk["name"]: fk["referred_table"]
-                for table in ("api_keys", "user_configs")
+                for table in ("user_configs",)
                 for fk in insp.get_foreign_keys(table, schema="public")
             }
     finally:
@@ -37,5 +37,5 @@ async def test_auth_schema_and_user_profile_after_upgrade(pg_head_url) -> None:
     assert not [fk for fk in fks if fk.get("referred_schema") == "auth"], (
         f"user_profiles still has an FK into auth; foreign_keys={fks}"
     )
-    assert vault_fks.get("fk_api_keys_user_profile") == "user_profiles"
+    assert "api_keys" not in public_tables  # f486e11435c9
     assert vault_fks.get("fk_user_configs_user_profile") == "user_profiles"

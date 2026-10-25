@@ -18,7 +18,6 @@ from sqlalchemy import JSON, Column
 _JSON_TYPE_CAST = re.compile(r"::jsonb?\s*$", re.IGNORECASE)
 _MIGRATION_MANAGED_FOREIGN_KEYS = frozenset(
     {
-        ("public", "api_keys", "fk_api_keys_user_profile"),
         ("public", "user_configs", "fk_user_configs_user_profile"),
     }
 )
@@ -29,7 +28,6 @@ _IDENTITY_CONTRACT_TABLES = frozenset(
         "nav_peak",
         "attribution_weekly",
         "config_regime",
-        "api_keys",
         "user_configs",
     }
 )

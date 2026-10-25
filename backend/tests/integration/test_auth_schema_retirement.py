@@ -388,8 +388,13 @@ def test_a_database_without_the_role_upgrades(retire_auth_pg_proc) -> None:
     try:
         with engine.begin() as conn:
             _seed(conn)
+            # f486e11435c9 drops api_keys only when it is empty, as it is in production.
+            conn.execute(text("DELETE FROM api_keys"))
         # To head: a later migration that names bfx_webauth would fail here, as in production.
         alembic(url, "upgrade", "head")
-        assert _state(engine)["auth"] == 0 and _state(engine)["members"] == [_NODE]
+        with engine.connect() as conn:
+            assert conn.scalar(text("SELECT count(*) FROM pg_namespace WHERE nspname='auth'")) == 0
+            assert sorted(conn.execute(text(
+                "SELECT user_id FROM exchange_account_memberships")).scalars()) == [_NODE]
     finally:
         engine.dispose()

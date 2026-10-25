@@ -179,7 +179,11 @@ REVERSIBLE_COLUMNS: dict[tuple[str, str], set[str]] = {
 # adds or removes it here, never in REVERSIBLE_*.
 # 36e59526f8cf: credentials become read-only, and adjudications are queued by the CLI alone.
 _REQUEST_INSERT = ("uncertainty_resolution_requests", "INSERT")
-EXPECTED_TABLES: dict[str, set[str]] = {**REVERSIBLE_TABLES, "exchange_account_credentials": _R}
+# f486e11435c9: api_keys is dropped.
+EXPECTED_TABLES: dict[str, set[str]] = {
+    **{table: held for table, held in REVERSIBLE_TABLES.items() if table != "api_keys"},
+    "exchange_account_credentials": _R,
+}
 EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
     key: cols for key, cols in REVERSIBLE_COLUMNS.items() if key != _REQUEST_INSERT}
 # Before e4f5a6b7c8d9 revoked it, the web API could still insert the pre-switch evidence column.
