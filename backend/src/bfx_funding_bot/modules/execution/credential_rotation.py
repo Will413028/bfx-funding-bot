@@ -160,6 +160,33 @@ class PreparedRotation:
     verdict: Verified | Refused
 
 
+async def ask_bitfinex(client: KeyClient, ctx: AccountContext) -> int | Refused:
+    """Bitfinex's view of a key the operator brought (a rotation, the bootstrap): the
+    Bitfinex user it belongs to when it may trade, funding write only, or why not.
+
+    When the venue did not answer (transport, rate limit, not ready, maintenance, a 5xx
+    without its error body) this raises: the caller retries or fails, it never refuses.
+    Its answer, even with HTTP 500 (``["error", 10100, ...]``), is a refusal. The user id
+    is asked only of a key whose permissions pass."""
+    try:
+        perms = await client.get_key_permissions(ctx=ctx)
+    except BitfinexAPIError as exc:
+        if venue_did_not_answer(exc):
+            raise
+        return Refused(INVALID_CREDENTIALS)
+    refusal = permission_error(perms)
+    if refusal is not None:
+        return Refused(refusal)
+    try:
+        return await client.get_user_id(ctx=ctx)
+    except BitfinexAPIError as exc:
+        if venue_did_not_answer(exc):
+            raise
+        return Refused(ACCOUNT_IDENTITY_UNAVAILABLE)
+    except BitfinexShapeError:
+        return Refused(ACCOUNT_IDENTITY_UNAVAILABLE)
+
+
 class CredentialStoreError(RuntimeError):
     """A database error while reading or writing credentials, named by its DBAPI type only.
 
@@ -340,36 +367,19 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
 
     async def _verify(self, opened: UnsealedCredential,
                       stored_user_id: int | None) -> Verified | Refused:
-        """Bitfinex's view of the new key. When the venue did not answer (transport, rate
-        limit, not ready, maintenance, a 5xx without its error body) this raises (``failed``, resend);
-        its answer, even with HTTP 500 (``["error", 10100, ...]``), is a refusal.
+        """Bitfinex's view of the new key (:func:`ask_bitfinex`; the venue not answering
+        raises: ``failed``, resend).
 
         The new key must belong to the Bitfinex user stored on the credential it replaces;
         a replaced row without one (retired before the id was stored) leaves the identity
         unavailable, and nothing is sent."""
         if stored_user_id is None:
             return Refused(ACCOUNT_IDENTITY_UNAVAILABLE)
-        ctx = AccountContext(account_id=str(self.account_id),
-                             credentials=Credentials(api_key=opened.api_key,
-                                                     api_secret=opened.api_secret))
-        client = self.client_factory()
-        try:
-            perms = await client.get_key_permissions(ctx=ctx)
-        except BitfinexAPIError as exc:
-            if venue_did_not_answer(exc):
-                raise
-            return Refused(INVALID_CREDENTIALS)
-        refusal = permission_error(perms)
-        if refusal is not None:
-            return Refused(refusal)
-        try:
-            new_user = await client.get_user_id(ctx=ctx)
-        except BitfinexAPIError as exc:
-            if venue_did_not_answer(exc):
-                raise
-            return Refused(ACCOUNT_IDENTITY_UNAVAILABLE)
-        except BitfinexShapeError:
-            return Refused(ACCOUNT_IDENTITY_UNAVAILABLE)
+        new_user = await ask_bitfinex(self.client_factory(), AccountContext(
+            account_id=str(self.account_id),
+            credentials=Credentials(api_key=opened.api_key, api_secret=opened.api_secret)))
+        if isinstance(new_user, Refused):
+            return new_user
         if new_user != stored_user_id:
             return Refused(CREDENTIAL_ACCOUNT_MISMATCH)
         return Verified(api_key=opened.api_key, secret=_Secret(opened.api_secret),
@@ -448,4 +458,5 @@ __all__ = [
     "PreparedRotation",
     "Refused",
     "Verified",
+    "ask_bitfinex",
 ]
