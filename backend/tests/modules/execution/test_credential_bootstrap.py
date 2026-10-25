@@ -116,46 +116,65 @@ async def test_an_unreadable_user_id_leaves_no_row(factory):
         await invoke(factory, apply=True, client=client)
     assert str(error.value) == "bootstrap_failed"
     assert "fixture-secret" not in str(error.value)
-    assert client.calls == ["user_id"]
+    assert client.calls == ["permissions", "user_id"]
     assert await count(factory) == 0
 
 
 @pytest.mark.asyncio
-async def test_the_pending_row_carries_the_user_id_before_it_is_promoted(factory, monkeypatch):
-    """An active credential always names its user (a CHECK the promotion cannot defer), so
-    the id is asked first and written with the pending row; the promotion keeps it."""
+async def test_the_key_is_written_active_once_bitfinex_answered(factory, monkeypatch):
+    """No pending row is stored first and promoted: Bitfinex is asked (permissions, then the
+    user id, as a rotation asks), and the verified key is inserted as the active credential
+    naming that user."""
     created: list[tuple[str, int | None]] = []
-    real = bootstrap.create_account_credential
+    client = Permissions()
+    real = bootstrap.create_active_credential
 
     async def spy(session, **kwargs):
+        assert client.calls == ["permissions", "user_id"]
         row = await real(session, **kwargs)
         created.append((row.lifecycle_status, row.bitfinex_user_id))
         return row
 
-    monkeypatch.setattr(bootstrap, "create_account_credential", spy)
-    client = Permissions()
+    monkeypatch.setattr(bootstrap, "create_active_credential", spy)
     assert await invoke(factory, apply=True, client=client) == {"status": "verified",
                                                                  "applied": True}
-    assert created == [("pending", 4242)]
-    assert client.calls == ["user_id", "permissions"]
+    assert created == [("active", 4242)]
     async with factory() as session:
         row = await session.scalar(select(ExchangeAccountCredential))
-        assert (row.lifecycle_status, row.bitfinex_user_id) == ("active", 4242)
+        assert (row.lifecycle_status, row.bitfinex_user_id, row.last_verify_error) == (
+            "active", 4242, None)
+        assert row.verified_at is not None
+
+
+# The rotation's classification (credential_rotation.ask_bitfinex): the venue not answering
+# fails, any answer refuses.
+REFUSALS = [
+    BitfinexAPIError(500, "apikey: invalid", '["error",10100,"apikey: invalid"]'),
+    BitfinexAPIError(401, "unauthorized", None),
+    BitfinexAPIError(500, "nonce: small", '["error",10114,"nonce: small"]'),
+]
+NO_ANSWERS = [
+    BitfinexAPIError(0, "transport error", None),
+    BitfinexAPIError(429, "rate limited", None),
+    BitfinexAPIError(503, "unavailable", None),
+    BitfinexAPIError(500, "ready: invalid", '["error",11000,"ready: invalid"]'),
+]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("call", ["permissions", "user_id"])
 @pytest.mark.parametrize("error, code", [
-    (BitfinexAPIError(500, "apikey: invalid", '["error",10100,"apikey: invalid"]'),
-     "bootstrap_permissions_rejected"),
-    (BitfinexAPIError(401, "unauthorized", None), "bootstrap_permissions_rejected"),
-    (BitfinexAPIError(0, "transport error", None), "bootstrap_failed"),
-    (BitfinexAPIError(500, "nonce: small", '["error",10114,"nonce: small"]'), "bootstrap_failed"),
+    *((error, "bootstrap_permissions_rejected") for error in REFUSALS),
+    *((error, "bootstrap_failed") for error in NO_ANSWERS),
 ])
-async def test_a_key_bitfinex_refuses_is_a_permissions_rejection(factory, error, code):
-    """The user id is the first call with the new key, so Bitfinex refusing the key shows
-    there; the operator still sees the rejection, not a generic failure."""
+async def test_bitfinex_refusing_is_a_rejection_and_not_answering_a_failure(
+        factory, call, error, code):
+    """Either call may meet the venue's answer; a key it refuses is the operator's
+    rejection, the venue being away is a failure to run again."""
+    client = (Permissions(error=error) if call == "permissions"
+              else Permissions(user_error=error))
     with pytest.raises(bootstrap.BootstrapError) as raised:
-        await invoke(factory, apply=True, client=Permissions(user_error=error))
+        await invoke(factory, apply=True, client=client)
     assert str(raised.value) == code
     assert await count(factory) == 0
 
