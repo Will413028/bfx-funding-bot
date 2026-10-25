@@ -290,10 +290,10 @@ def test_property_conserved_iff_lending_equals_fills(seed: int) -> None:
     extra = dict(after)
     extra["injected"] = injected
     assert conservation_verdict(before, extra, fills).conservation == "unexplained_lending"
-    assert (
-        conservation_verdict(before, after, [*fills, OfferFill(injected, False)]).lent_unexplained
-        == -injected
-    )
+    # A fill with no credit behind it is as unexplained as a credit with no fill.
+    overfilled = conservation_verdict(before, after, [*fills, OfferFill(injected, False)])
+    assert (overfilled.conservation, overfilled.lent_unexplained) == (
+        "unexplained_lending", -injected)
 
 
 @pytest.mark.parametrize("seed", range(300))
