@@ -225,7 +225,7 @@ pgBackRest 不能替既有 repository 換 passphrase：已經寫進 R2 的備份
 | 秘密 | VM 上的位置與權限 | VM 以外的副本 |
 |---|---|---|
 | bot／webapi 的秘密檔（DB 密碼、admin token、Telegram token、KEK） | `/opt/bfx/runtime/secrets/<service>/`，`root:4600 0640`（[deploy「秘密檔」](deploy.md#秘密檔botwebapi9h)） | 不保留副本，外洩或遺失就照本頁重發；KEK 遺失時舊憑證列解不開，照「Vault KEK」一節換一把新的 Bitfinex key（ADR 2026-08-31 D5'） |
-| 主機工具與一次性工作的 env 檔（`notify.env`、`research.env`、`ghcr.env`、`public-site.env`、`tailscale.env`） | `/opt/bfx/runtime/`，root 0600 | 不保留 |
+| 主機工具與一次性工作的 env 檔（`notify.env`、`research.env`、`public-site.env`、`tailscale.env`） | `/opt/bfx/runtime/`，root 0600 | 不保留 |
 | Cloudflare Pages token | `/opt/bfx/runtime/secrets/public-site/CLOUDFLARE_API_TOKEN`，`root:root 0600` | 不保留（Cloudflare dashboard 可重發） |
 | R2 S3 憑證 | `/home/ubuntu/bfx/pgbackrest/conf.d/r2.conf`，`ubuntu:70 0640`（70 是容器裡的 postgres） | 不保留（R2 dashboard 可重發） |
 | `repo1-cipher-pass` | 同上 | **必須**離線保管（遺失＝備份全部打不開，`offsite-dr.md:128-129`） |
@@ -309,8 +309,5 @@ log 與 Telegram 仍然會遮蔽它。真的要換：
 
 - `TS_AUTHKEY`（`tailscale.env`）：只在節點第一次登入時使用；節點已登入時可以是空檔。換節點見
   [deploy「Tailnet 入口」](deploy.md#tailnet-入口netnstailscale)。
-- `ghcr.env`（GHCR PAT）：9i 的 provenance 驗證不需要 GitHub token，但 package 是 private 時 bfx-deploy 的 pull
-  與讀 manifest 都要用它；要刪檔並撤銷 PAT，先把 GHCR package 改成 public（見 deploy「Env 檔規則」）。
-  要換，就到 GitHub 重發 `read:packages` 的 classic PAT，照 Telegram 一節的 `read -rs` 寫法讀進 `V`，再
-  `setkey /opt/bfx/runtime/ghcr.env GHCR_TOKEN`。下一輪 bfx-deploy 就會用新值。
+- GHCR：backend package 2026-10-25 起是 public，bfx-deploy 匿名 pull 與讀 manifest，`ghcr.env` 已刪、PAT 已撤銷，沒有要換的秘密。
 - mirror 的 deploy key：9h 起 mirror 改用匿名 HTTPS，deploy key 應該已刪除（[deploy「Mirror」](deploy.md#mirrorgit-fetch-走匿名-https9h)）。

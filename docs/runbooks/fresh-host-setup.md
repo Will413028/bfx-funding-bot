@@ -297,7 +297,7 @@ sbin 入口、sudoers 與 gh 例外，見 [deploy runbook §4](deploy.md#4-主�
 - `tailscale.env` 放一把新的 tagged（`tag:bfx-ops`）、單次使用的 auth key；新主機的 `bfx_tsstate` 是空的，
   節點會重新登入（舊節點先在 admin console 刪掉，名稱 `bfx-ops` 才不會變成 `bfx-ops-1`）。
 - 告警的 bot token 配置到 `notify.env` 的 `TELEGRAM_BOT_TOKEN` 與秘密檔 `secrets/bot/TELEGRAM_BOT_TOKEN`；chat id 配置到 `notify.env` 與
-  `bot.env` 的 `TELEGRAM_CHAT_ID`；GHCR 憑證只需 `read:packages`。設定方式見 [operations](operations.md#6-告警)。
+  `bot.env` 的 `TELEGRAM_CHAT_ID`；GHCR 不需要憑證（package 是 public）。設定方式見 [operations](operations.md#6-告警)。
 - error tracking 的 `SENTRY_DSN`（`bfx-backend`）同時配置到 `bot.env` 與 `webapi.env`；空值等於關閉。
 - 公開站（[operations §8「公開站」](operations.md#公開站bfx-public-site)）：`public-site.env`（`BFX_PAGES_ACCOUNT_ID`、
   `BFX_PAGES_PROJECT`，root 0600）與 token 檔 `secrets/public-site/CLOUDFLARE_API_TOKEN`（目錄 `0700`、檔 `root:root 0600`，
