@@ -25,6 +25,8 @@ import random
 from decimal import Decimal
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from bfx_funding_bot.modules import ledger
 from bfx_funding_bot.modules.execution.safety import protection
@@ -274,13 +276,16 @@ def _interval(
     return after, fills, foreign_part
 
 
-@pytest.mark.parametrize("seed", range(300))
-def test_property_conserved_iff_lending_equals_fills(seed: int) -> None:
-    rng = random.Random(seed)
+# The generator draws from a Hypothesis-controlled Random, so a failure shrinks to the fewest
+# and smallest movements; the example budget comes from the profile (tests/conftest.py).
+@pytest.mark.property
+@settings(deadline=None)
+@given(st.randoms(note_method_calls=True, use_true_random=False))
+def test_property_conserved_iff_lending_equals_fills(rng: random.Random) -> None:
     before = _world(rng)
     after, fills, foreign_part = _interval(rng, before)
     verdict = conservation_verdict(before, after, fills)
-    assert verdict.conservation in ("conserved", "foreign_lending"), (seed, verdict)
+    assert verdict.conservation in ("conserved", "foreign_lending"), verdict
     assert verdict.conservation == (
         "foreign_lending" if foreign_part > LEDGER_EPSILON else "conserved"
     )
@@ -296,9 +301,11 @@ def test_property_conserved_iff_lending_equals_fills(seed: int) -> None:
         "unexplained_lending", -injected)
 
 
-@pytest.mark.parametrize("seed", range(300))
-def test_property_an_injected_credit_is_caught_beside_cancels_and_loan_ends(seed: int) -> None:
-    rng = random.Random(10_000 + seed)
+@pytest.mark.property
+@settings(deadline=None)
+@given(st.randoms(note_method_calls=True, use_true_random=False))
+def test_property_an_injected_credit_is_caught_beside_cancels_and_loan_ends(
+        rng: random.Random) -> None:
     before = _world(rng) or {"p0": D(100)}
     after, fills, _ = _interval(rng, before)
     # A cancel and a loan end in the same interval, then an unexplained credit.
@@ -307,5 +314,5 @@ def test_property_an_injected_credit_is_caught_beside_cancels_and_loan_ends(seed
     injected = D(rng.choice(["0.05", "3", "250"]))
     after["injected"] = after.get("injected", D(0)) + injected
     verdict = conservation_verdict(before, after, fills)
-    assert verdict.conservation == "unexplained_lending", (seed, verdict)
+    assert verdict.conservation == "unexplained_lending", verdict
     assert verdict.lent_unexplained == injected
