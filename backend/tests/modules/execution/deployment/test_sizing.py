@@ -136,18 +136,25 @@ _FRACTION = st.decimals(min_value=D("0.01"), max_value=1, places=2)
 
 @st.composite
 def _symbol_views(draw: st.DrawFn) -> tuple[dict[str, CapitalAvailable], Decimal]:
+    # Every input stays within the money it competes with. Drawn independently, the
+    # reserve, exposures and min_fill left most examples with nothing to allocate, so
+    # the properties held vacuously and mutants escaped (measured 2026-10-25).
     available = draw(_AMOUNT)
     total = available + draw(_AMOUNT)
-    cells = draw(st.lists(_AMOUNT, min_size=1, max_size=5))
+    commitments = draw(st.decimals(min_value=0, max_value=available, places=8))
+    reserve = draw(st.decimals(min_value=0, max_value=available - commitments, places=8))
+    pool = available - commitments - reserve
+    cells = draw(st.lists(st.decimals(min_value=0, max_value=total - reserve, places=8),
+                          min_size=1, max_size=5))
     views = _views(
-        available=available, total=total,
-        commitments=draw(st.decimals(min_value=0, max_value=available, places=8)),
-        reserve=draw(_AMOUNT), fraction=draw(_FRACTION),
-        ceiling=draw(st.none() | st.decimals(min_value=D("0.00000001"), max_value=100_000,
+        available=available, total=total, commitments=commitments, reserve=reserve,
+        fraction=draw(_FRACTION),
+        ceiling=draw(st.none() | st.decimals(min_value=D("0.00000001"),
+                                             max_value=max(pool, D("0.00000001")),
                                              places=8)),
         exposures={f"c{index}": exposure for index, exposure in enumerate(cells)},
     )
-    min_fill = draw(st.decimals(min_value=0, max_value=1_000, places=8))
+    min_fill = draw(st.decimals(min_value=0, max_value=pool, places=8))
     return views, min_fill
 
 
