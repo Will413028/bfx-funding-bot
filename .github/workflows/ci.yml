@@ -72,9 +72,7 @@ jobs:
   # Browser smoke against `next dev`: the pages render and the shell's navigation mounts.
   e2e_smoke:
     name: Frontend — e2e smoke
-    # Playwright 1.58 has no chromium build for ubuntu-latest's 26.04 image; pinned
-    # until the Playwright upgrade that supports it.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
       run:
