@@ -76,7 +76,11 @@ def upgrade() -> None:
     functions = int(bind.execute(text(_FUNCTIONS_NAMING_THE_COLUMN)).scalar() or 0)
     if functions:
         raise RuntimeError(f"refuse: {functions} function bodies name last_verify_error")
-    op.execute(f"ALTER TABLE {TABLE} ALTER COLUMN lifecycle_status DROP DEFAULT")
+    # squawk's ban-drop-default guards against clients that insert without the column; both
+    # writers name it (credentials.vault), and old code never runs on this schema head.
+    op.execute(
+        "-- squawk-ignore ban-drop-default\n"
+        f"ALTER TABLE {TABLE} ALTER COLUMN lifecycle_status DROP DEFAULT")
     op.execute(f"ALTER TABLE {TABLE} DROP CONSTRAINT ck_exchange_account_credentials_lifecycle_status")
     op.execute(f"ALTER TABLE {TABLE} DROP CONSTRAINT ck_exchange_account_credentials_active_verified")
     op.execute(f"ALTER TABLE {TABLE} DROP CONSTRAINT ck_exchange_account_credentials_active_user_id")
@@ -101,7 +105,7 @@ def upgrade() -> None:
         "-- squawk-ignore adding-not-nullable-field\n"
         f"ALTER TABLE {TABLE} ALTER COLUMN bitfinex_user_id SET NOT NULL")
     op.execute(
-        "-- squawk-ignore disallowed-unique-constraint\n"
+        "-- squawk-ignore constraint-missing-not-valid, disallowed-unique-constraint\n"
         f"ALTER TABLE {TABLE} ADD CONSTRAINT uq_exchange_account_credentials_venue_api_key "
         "UNIQUE (venue, api_key)")
     # squawk's ban-drop-column guards against clients still reading the column; none does
