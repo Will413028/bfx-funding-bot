@@ -932,9 +932,8 @@ tailnet policy（admin console）：
   operator capability（`docs/runbooks/fresh-host-setup.md:206-210`、`docs/runbooks/release-0-operator-containment.md:9`）。
   Serve 只把這個 capability 轉給 webapi（`deploy/vm/tailscale/serve.json` 的 `AcceptAppCaps`）。
 - **SSH 規則**：check mode，採 Tailscale 預設的 12 小時重新驗證；只允許非 root 使用者（ADR 2026-10-15 Amendment D4d）。
-  ADR 2026-10-15 D1 的終態是主機節點為 tagged node、不設 key 到期；2026-10-16 讀 admin console 時主機節點還不是 tagged，
-  規則的 `dst` 是擁有者自己的裝置（`autogroup:self`）。這是 admin console 的狀態，repo 裡沒有，以 admin console 為準；
-  改成 tagged 需要 tailnet 管理者操作。
+  主機節點是 tagged node `tag:server`、不設 key 到期（ADR 2026-10-15 D1，2026-10-25 起），規則的 `dst` 是 `tag:server`。
+  這是 admin console 的狀態，repo 裡沒有，以 admin console 為準。
 - 主機的入口：Tailscale SSH（上一條），break-glass 是 OCI Console Connection（不經 tailnet；Console 下 `bfx-op` 除了 `halt` 都拒絕）。
   公網 sshd 已停用（`ssh.socket`、`ssh.service` masked，2026-10-24 讀 VM），UFW 與 OCI security list 都不開 22
   （`operations.md` §12）。各路徑的驗證強度見 10h。
