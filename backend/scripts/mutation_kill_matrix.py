@@ -4,12 +4,17 @@ mutmut (3.8.0, dev dependency) writes the mutants; this script runs them. mutmut
 the first failing test and records killed or survived per mutant, never which tests killed it,
 so it cannot say which tests are redundant. Here every selected test runs against every mutant:
 
-1. ``src/`` is copied to a temporary directory and mutmut mutates the ``--source`` files there
-   (the working tree is never touched; ``src/`` is checked unchanged at the end);
-2. the selected tests run from ``backend/`` with ``-o pythonpath=<copy> .``, so they import the
-   copy while every path a test computes from its own file stays right. A canary proves it:
-   with ``MUTANT_UNDER_TEST=fail`` every mutated function raises, so some test must fail;
-3. each mutant is switched on with ``MUTANT_UNDER_TEST`` and the whole selection runs (no
+1. the repository's tracked files are copied to a temporary directory and mutmut mutates the
+   ``--source`` files there (the working tree is never touched; the sources are checked
+   unchanged at the end);
+2. the selected tests run from the copy's ``backend/``: its ``pythonpath = ["src"]`` puts the
+   copy's package first, and a test that loads a file by its path (``deploy/vm/ops``) finds the
+   copy's. A canary proves it: with ``MUTANT_UNDER_TEST=fail`` every mutated function raises,
+   so some test must fail;
+3. each mutant is switched on with ``MUTANT_UNDER_TEST`` (``<module>.<mutant>``, where the module
+   is the name the code runs under: dotted from ``backend/src`` for the package, else
+   ``--module-name``, e.g. the name a test gives ``spec_from_file_location``) and the whole
+   selection runs (no
    ``-x``); the JUnit report names every test that failed or errored (the baseline has
    neither, so the mutant caused it). A run past ten times the baseline's duration (at least
    a minute) is stopped and listed under ``timed_out``.
@@ -21,11 +26,15 @@ greedy cover of every killed mutant does not need: candidates to remove together
 against these mutants only, so a test that guards another module or documents an incident can
 still be needed. Nothing is removed by this script.
 
-Usage:
+Usage (paths relative to the repository root; the CI workflow ``mutation-kill-matrix.yml``
+runs it on demand and uploads the report):
     cd backend
     uv run python scripts/mutation_kill_matrix.py \\
-        --source src/bfx_funding_bot/modules/ledger/conservation.py \\
+        --source backend/src/bfx_funding_bot/modules/ledger/conservation.py \\
         --out /tmp/kill-matrix.json -- -m "not integration" tests/modules/ledger
+    uv run python scripts/mutation_kill_matrix.py --source deploy/vm/ops/bfx_deploy.py \\
+        --module-name vm_ops_bfx_deploy_under_test --out /tmp/deploy.json \\
+        --pytest-args 'tests/scripts/test_vm_deploy.py'
 
 Exit codes: 0 = report written; 2 = cannot judge (baseline failing or erroring, canary not
 caught, a run without a report, or src/ changed).
@@ -38,6 +47,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -51,7 +61,8 @@ from pathlib import Path
 from typing import Any
 
 BACKEND = Path(__file__).resolve().parents[1]
-_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")
+REPO = BACKEND.parent
+PACKAGE_ROOT = Path("backend/src")
 _REGISTERED = re.compile(r"^mutants_\w+\['(?P<name>\w+__mutmut_\d+)'\] = ", re.MULTILINE)
 
 
@@ -122,30 +133,53 @@ def summarize(kills: Mapping[str, Iterable[str]]) -> dict[str, Any]:
     }
 
 
-def _tree_digest() -> str:
+def _digest(paths: Iterable[Path]) -> str:
     digest = hashlib.sha256()
-    for path in sorted((BACKEND / "src").rglob("*.py")):
+    for path in paths:
         digest.update(str(path).encode())
-        digest.update(path.read_bytes())
+        digest.update((REPO / path).read_bytes())
     return digest.hexdigest()
 
 
-def _mutate(workdir: Path, sources: Sequence[Path]) -> list[str]:
-    """Mutate ``sources`` in ``workdir/mutants/src``. mutmut reads the source and writes its
-    bookkeeping relative to the working directory, so it runs in ``workdir``, where ``src``
-    links to the real tree (read only)."""
+def module_of(source: Path, module_name: str | None) -> str:
+    """The name ``source`` runs under: dotted from ``backend/src``, else ``module_name``."""
+    if module_name:
+        return module_name
+    if source.is_relative_to(PACKAGE_ROOT):
+        return ".".join(source.relative_to(PACKAGE_ROOT).with_suffix("").parts)
+    raise MatrixError(f"{source} is outside backend/src: name the module it runs under "
+                      "with --module-name")
+
+
+def _copy_repository(copy: Path) -> None:
+    tracked = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z"], capture_output=True,
+                             check=True).stdout.decode().split("\0")
+    for name in filter(None, tracked):
+        source = REPO / name
+        if source.is_file() and not source.is_symlink():
+            target = copy / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        elif source.is_symlink():
+            target = copy / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(os.readlink(source))
+
+
+def _mutate(copy: Path, sources: Sequence[Path], module_name: str | None) -> list[str]:
+    """Mutate ``sources`` in place in the copy; mutmut keeps its bookkeeping under the copy's
+    ``mutants/``, relative to the working directory."""
     from mutmut.__main__ import create_mutants_for_file
 
-    (workdir / "src").symlink_to(BACKEND / "src", target_is_directory=True)
     names: list[str] = []
-    with contextlib.chdir(workdir):
+    with contextlib.chdir(copy):
         for source in sources:
-            output = Path("mutants") / source
-            result = create_mutants_for_file(source, output)
+            module = module_of(source, module_name)
+            (Path("mutants") / source).parent.mkdir(parents=True, exist_ok=True)
+            result = create_mutants_for_file(source, source)
             if result.error is not None:
                 raise MatrixError(f"mutmut could not mutate {source}: {result.error}")
-            module = ".".join(source.relative_to("src").with_suffix("").parts)
-            names += mutant_names(workdir / output, module)
+            names += mutant_names(copy / source, module)
     if not names:
         raise MatrixError("mutmut wrote no mutant for the given sources")
     return names
@@ -154,15 +188,14 @@ def _mutate(workdir: Path, sources: Sequence[Path]) -> list[str]:
 def _pytest(copy: Path, selection: Sequence[str], report: Path, mutant: str | None,
             timeout: float) -> subprocess.CompletedProcess[str] | None:
     command = [sys.executable, "-m", "pytest", "-q", "--tb=no", "-p", "no:randomly",
-               "-p", "no:cacheprovider", "-o", f"pythonpath={copy} .",
-               f"--junitxml={report}", *selection]
+               "-p", "no:cacheprovider", f"--junitxml={report}", *selection]
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     env.pop("MUTANT_UNDER_TEST", None)
     if mutant is not None:
         env["MUTANT_UNDER_TEST"] = mutant
     try:
-        return subprocess.run(command, cwd=BACKEND, env=env, capture_output=True, text=True,
-                              timeout=timeout, check=False)
+        return subprocess.run(command, cwd=copy / "backend", env=env, capture_output=True,
+                              text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         return None
 
@@ -180,13 +213,14 @@ def _run(copy: Path, selection: Sequence[str], workdir: Path, mutant: str | None
     return read_report(report)
 
 
-def build(sources: Sequence[Path], selection: Sequence[str], jobs: int) -> dict[str, Any]:
-    before = _tree_digest()
+def build(sources: Sequence[Path], selection: Sequence[str], jobs: int,
+          module_name: str | None = None) -> dict[str, Any]:
+    before = _digest(sources)
     with tempfile.TemporaryDirectory(prefix="mutation-kill-matrix-") as tmp:
         workdir = Path(tmp)
-        copy = workdir / "mutants" / "src"
-        shutil.copytree(BACKEND / "src", copy, ignore=_IGNORE)
-        names = _mutate(workdir, sources)
+        copy = workdir / "repo"
+        _copy_repository(copy)
+        names = _mutate(copy, sources, module_name)
         started = time.monotonic()
         baseline = _run(copy, selection, workdir, None)
         timeout = max(60.0, 10 * (time.monotonic() - started))
@@ -199,8 +233,8 @@ def build(sources: Sequence[Path], selection: Sequence[str], jobs: int) -> dict[
         with ThreadPoolExecutor(max_workers=jobs) as pool:
             runs = dict(zip(names, pool.map(
                 lambda name: _run(copy, selection, workdir, name, timeout), names), strict=True))
-    if _tree_digest() != before:
-        raise MatrixError("src/ changed while the matrix ran")
+    if _digest(sources) != before:
+        raise MatrixError("a source changed while the matrix ran")
     report = summarize({m: {function_of(t) for t in run.broken}
                         for m, run in runs.items() if run is not None})
     report["timed_out"] = sorted(m for m, run in runs.items() if run is None)
@@ -212,16 +246,23 @@ def build(sources: Sequence[Path], selection: Sequence[str], jobs: int) -> dict[
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0] if __doc__ else None)
     parser.add_argument("--source", type=Path, action="append", required=True,
-                        help="a file under src/ to mutate (repeatable)")
+                        help="a file to mutate, relative to the repository root (repeatable)")
+    parser.add_argument("--module-name",
+                        help="the module the sources run under, for a file loaded by its path")
     parser.add_argument("--out", type=Path, required=True, help="where the JSON report goes")
     parser.add_argument("--jobs", type=int, default=4, help="mutants run at once (default 4)")
-    parser.add_argument("selection", nargs="+", help="pytest arguments after --: the tests to run")
+    parser.add_argument("--pytest-args", default="",
+                        help="the tests to run as one shell-quoted string (for the workflow)")
+    parser.add_argument("selection", nargs="*", help="pytest arguments after --: the tests to run")
     args = parser.parse_args(argv)
+    selection = [*shlex.split(args.pytest_args), *args.selection]
+    if not selection:
+        parser.error("name the tests to run, after -- or with --pytest-args")
     for source in args.source:
-        if source.is_absolute() or source.parts[:1] != ("src",) or not (BACKEND / source).is_file():
-            parser.error(f"--source must be a file under src/, relative to backend/: {source}")
+        if source.is_absolute() or ".." in source.parts or not (REPO / source).is_file():
+            parser.error(f"--source must be a file relative to the repository root: {source}")
     try:
-        report = build(args.source, args.selection, args.jobs)
+        report = build(args.source, selection, args.jobs, args.module_name)
     except MatrixError as exc:
         print(f"mutation kill matrix cannot judge: {exc}", file=sys.stderr)
         return 2

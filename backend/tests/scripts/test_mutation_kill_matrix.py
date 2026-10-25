@@ -5,6 +5,8 @@ tested here; the pilot run is in the PR that added the script.
 """
 from pathlib import Path
 
+import pytest
+
 from scripts import mutation_kill_matrix as matrix
 
 
@@ -60,3 +62,10 @@ def test_two_tests_that_kill_the_same_mutants_leave_one_in_the_cover() -> None:
     summary = matrix.summarize({"m1": {"a", "b"}, "m2": {"a", "b"}})
     assert summary["tests"]["a"]["unique"] == summary["tests"]["b"]["unique"] == []
     assert len(summary["cover"]) == 1 and len(summary["not_in_cover"]) == 1
+
+
+def test_a_package_file_runs_under_its_dotted_name_and_any_other_needs_one() -> None:
+    assert matrix.module_of(Path("backend/src/pkg/sub/mod.py"), None) == "pkg.sub.mod"
+    assert matrix.module_of(Path("deploy/vm/ops/x.py"), "x_under_test") == "x_under_test"
+    with pytest.raises(matrix.MatrixError, match="--module-name"):
+        matrix.module_of(Path("deploy/vm/ops/x.py"), None)
