@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.sealed_credential import SealedPayloadError, validate_credential
 from bfx_funding_bot.external.bitfinex.credentials import Credentials
+from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.accounts.tables import (
     ExchangeAccount,
     ExchangeAccountCredential,
@@ -29,9 +30,18 @@ from bfx_funding_bot.modules.execution.credential_rotation import (
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 
+# The one code that may follow a commit: the write's own commit, or anything unforeseen.
+BOOTSTRAP_FAILED = "bootstrap_failed"
+
 
 class BootstrapError(Exception):
-    """Safe boundary: never carries database parameters or remote response text."""
+    """Safe boundary: never carries database parameters or remote response text, only one
+    of the bounded ``bootstrap_*`` codes."""
+
+    @property
+    def committed_nothing(self) -> bool:
+        """Every code but :data:`BOOTSTRAP_FAILED` is raised before the write can commit."""
+        return str(self) != BOOTSTRAP_FAILED
 
 
 async def _check_account(
@@ -80,7 +90,8 @@ async def bootstrap_credential(
     key as active: a credential that appeared while Bitfinex answered is never joined
     (the vault's one-active partial unique index also guards a concurrent activation).
     A key Bitfinex refuses, or one that may do more than funding, is
-    ``bootstrap_permissions_rejected``; the venue not answering is ``bootstrap_failed``.
+    ``bootstrap_permissions_rejected``; the venue not answering is
+    ``bootstrap_venue_unavailable``.
     Without ``apply`` the insert is rolled back.
     """
     # The rotation path's rule (printable ASCII, no whitespace, bounded): the key ends up
@@ -95,9 +106,13 @@ async def bootstrap_credential(
         async with factory() as session:  # read only: closing rolls it back
             await _check_account(session, exchange_account_id=exchange_account_id,
                                  owner_user_id=owner_user_id, lock=False)
-        bitfinex_user_id = await ask_bitfinex(client, AccountContext(
-            account_id=str(exchange_account_id),
-            credentials=Credentials(api_key=api_key, api_secret=api_secret)))
+        try:
+            bitfinex_user_id = await ask_bitfinex(client, AccountContext(
+                account_id=str(exchange_account_id),
+                credentials=Credentials(api_key=api_key, api_secret=api_secret)))
+        except BitfinexAPIError:
+            # ask_bitfinex lets one through only when the venue did not answer.
+            raise BootstrapError("bootstrap_venue_unavailable") from None
         if isinstance(bitfinex_user_id, Refused):
             raise BootstrapError("bootstrap_permissions_rejected")
         async with factory() as session, session.begin():
@@ -119,4 +134,4 @@ async def bootstrap_credential(
     except BootstrapError:
         raise
     except Exception:
-        raise BootstrapError("bootstrap_failed") from None
+        raise BootstrapError(BOOTSTRAP_FAILED) from None
