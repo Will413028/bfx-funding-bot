@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -186,11 +187,11 @@ async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
         )
         # One credential per account, as the operator CLI writes them (the web API only
         # lists them since 9c-2b): a scope leak lists the other account's.
-        for account, owner, api_key in ((_ACCOUNT_ID, "operator-1", "PUB"),
-                                        (other_id, "other-operator", "OTHER")):
-            await vault.create_account_credential(
-                seed, exchange_account_id=account, user_id=owner, label="main",
-                api_key=api_key, api_secret="SEC", kek=bytes(range(32)), bitfinex_user_id=4242)
+        for account, api_key in ((_ACCOUNT_ID, "PUB"), (other_id, "OTHER")):
+            await vault.create_active_credential(
+                seed, exchange_account_id=account, label="main", api_key=api_key,
+                api_secret="SEC", kek=bytes(range(32)), bitfinex_user_id=4242,
+                verified_at=datetime.now(UTC))
         await seed.commit()
 
     app = FastAPI()
@@ -277,7 +278,7 @@ def test_owner_reads_account_credentials_and_manages_config(scoped_app: TestClie
     (credential,) = listed.json()["data"]
     assert credential["exchangeAccountId"] == str(_ACCOUNT_ID)
     assert (credential["apiKey"], credential["apiSecret"], credential["status"]) == (
-        "PUB", "****", "pending")
+        "PUB", "****", "verified")
 
     config = {
         "currency": "USD",

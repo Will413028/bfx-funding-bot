@@ -152,7 +152,7 @@ def test_real_cli_transaction_and_dependency_errors_are_secret_safe(
     inserted: list[object] = []
 
     def transport(request):
-        # The key's Bitfinex user id (stored on the pending row), then the permissions check.
+        # The permissions check, then the key's Bitfinex user id (stored on the active row).
         assert request.url.path in ("/v2/auth/r/permissions", "/v2/auth/r/info/user")
         assert request.headers["bfx-apikey"] == "KEY-SENTINEL"
         paths.append(request.url.path)
@@ -222,8 +222,8 @@ def test_real_cli_transaction_and_dependency_errors_are_secret_safe(
 
     event.remove(engine.sync_engine, "before_cursor_execute", record_insert)
     if fault not in ("http", "flush"):
-        # The pending row is inserted with the id: an active row must name it (a CHECK).
-        assert paths[0] == "/v2/auth/r/info/user"
+        # Both asked before the row is inserted active with the id (a CHECK requires it).
+        assert paths == ["/v2/auth/r/permissions", "/v2/auth/r/info/user"]
         assert len(inserted) == 1 and 4242 in tuple(inserted[0])
     try:
         assert asyncio.run(count_rows()) == expected_count

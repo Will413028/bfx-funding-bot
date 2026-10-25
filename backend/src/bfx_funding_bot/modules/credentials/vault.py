@@ -24,7 +24,6 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
     account_id_canonical,
     create_exchange_account_credential,
     get_exchange_account,
-    require_account_membership,
 )
 from bfx_funding_bot.modules.accounts.tables import (
     ExchangeAccount,
@@ -139,23 +138,23 @@ async def load_account_credentials(
     return decrypt_credential(row, exchange_account_id=exchange_account_id, kek=kek)
 
 
-async def create_account_credential(
+async def create_active_credential(
     session: AsyncSession,
     *,
     exchange_account_id: UUID,
-    user_id: str,
     label: str,
     api_key: str,
     api_secret: str,
     kek: bytes,
     bitfinex_user_id: int,
+    verified_at: datetime,
 ) -> ExchangeAccountCredential:
-    """Create a pending credential encrypted with canonical ExchangeAccount AAD, naming the
-    Bitfinex user the key belongs to: an active credential always has it (a CHECK), so it is
-    stored before the row can be promoted."""
-    await require_account_membership(
-        session, exchange_account_id=exchange_account_id, user_id=user_id, write=True
-    )
+    """Insert an already verified key as the account's active credential, encrypted with
+    canonical ExchangeAccount AAD and naming the Bitfinex user it belongs to.
+
+    The caller (``execution.credential_bootstrap``) asked Bitfinex first and holds the
+    account lock; the one-active partial unique index refuses a second active row.
+    """
     envelope = encrypt_secret_with_aad(
         api_secret, aad=account_id_canonical(exchange_account_id), kek=kek
     )
@@ -170,6 +169,8 @@ async def create_account_credential(
         wrapped_dek=envelope.wrapped_dek,
         dek_nonce=envelope.dek_nonce,
         key_version=envelope.key_version,
+        lifecycle_status="active",
+        verified_at=verified_at,
         bitfinex_user_id=bitfinex_user_id,
     )
 
@@ -191,8 +192,8 @@ async def rotate_active_credential(
     the operator request that asked for it and the Bitfinex user the key belongs to.
 
     Both in the caller's transaction: either the account keeps its old active credential
-    or it has exactly the new one. The account row is locked first, as promotion does in
-    ``execution.credential_bootstrap.verify_account_credential``; the old row is retired
+    or it has exactly the new one. The account row is locked first, as the bootstrap's
+    write does (``execution.credential_bootstrap``); the old row is retired
     and flushed before the new one is inserted, so the one-active partial unique index
     never sees two. Raises
     :class:`ActiveCredentialChangedError` when the active credential is not

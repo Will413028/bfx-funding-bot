@@ -6,18 +6,10 @@ from sqlalchemy import select
 
 import bfx_funding_bot.modules.accounts.user_profile  # noqa: F401
 from bfx_funding_bot.core.db import session_scope
-from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 
 pytestmark = pytest.mark.integration
 
 _KEK = base64.b64decode(base64.b64encode(bytes(range(32))))
-
-
-def _perms(funding_w=True, withdraw_w=False) -> KeyPermissions:
-    return KeyPermissions(scopes={
-        "funding": (True, funding_w),
-        "withdraw": (False, withdraw_w),
-    })
 
 
 # ---------------------------------------------------------------------------
@@ -129,54 +121,3 @@ async def test_a_rotation_that_fails_midway_leaves_the_old_credential_active(pg_
         async with session_scope(pg_session_factory) as s:
             await _rotate(s, replaces=old_id, request_id=request_id, kek=b"too short")
     assert await _states(pg_session_factory) == [("FAKE-OLD-KEY", "active", None)]
-
-
-@pytest.mark.asyncio
-async def test_verify_never_writes_over_a_row_retired_while_bitfinex_answered(pg_session_factory):
-    """The webapi verify reads the row unlocked and calls Bitfinex; a rotation that retires
-    the row meanwhile wins: verify re-reads under the account lock and writes nothing."""
-    from datetime import UTC, datetime
-
-    from sqlalchemy import update
-
-    from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
-    from bfx_funding_bot.modules.accounts.tables import (
-        ExchangeAccount,
-        ExchangeAccountCredential,
-        ExchangeAccountMembership,
-    )
-    from bfx_funding_bot.modules.execution.credential_bootstrap import verify_account_credential
-
-    envelope = encrypt_secret_with_aad("FAKE-SECRET", aad=str(_ROTATION_ACCOUNT), kek=_KEK)
-    async with session_scope(pg_session_factory) as s:
-        s.add(ExchangeAccount(id=_ROTATION_ACCOUNT, venue="bitfinex", label="race"))
-        await s.flush()
-        s.add(ExchangeAccountMembership(exchange_account_id=_ROTATION_ACCOUNT, user_id="u_race",
-                                        role="owner"))
-        row = ExchangeAccountCredential(
-            exchange_account_id=_ROTATION_ACCOUNT, venue="bitfinex", label="k",
-            api_key="FAKE-KEY", secret_ciphertext=envelope.secret_ciphertext,
-            secret_nonce=envelope.secret_nonce, wrapped_dek=envelope.wrapped_dek,
-            dek_nonce=envelope.dek_nonce, key_version=envelope.key_version,
-            lifecycle_status="active", verified_at=datetime.now(UTC), bitfinex_user_id=4242)
-        s.add(row)
-        await s.flush()
-        key_id = row.id
-
-    class RetiringClient:
-        """Bitfinex answers a refusal while a rotation commits the retirement elsewhere."""
-
-        async def get_key_permissions(self, *, ctx) -> KeyPermissions:
-            async with session_scope(pg_session_factory) as other:
-                await other.execute(update(ExchangeAccountCredential).where(
-                    ExchangeAccountCredential.id == key_id).values(lifecycle_status="retired"))
-            return _perms(funding_w=False)
-
-    async with session_scope(pg_session_factory) as s:
-        assert await verify_account_credential(
-            s, RetiringClient(), exchange_account_id=_ROTATION_ACCOUNT, user_id="u_race",
-            key_id=key_id, kek=_KEK) is None
-    async with session_scope(pg_session_factory) as s:
-        got = await s.get(ExchangeAccountCredential, key_id)
-        assert got is not None
-        assert (got.lifecycle_status, got.last_verify_error) == ("retired", None)

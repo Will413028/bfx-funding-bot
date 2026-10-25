@@ -817,7 +817,7 @@ CLI 的 `rotate-credential` 從 stdin 讀新 key，只封給「scope 最新、�
 解不開；key 曾 retired／revoked；權限不是只有 funding 可寫；與被取代憑證列存下的 Bitfinex user id（`bitfinex_user_id`，migration `1d34a3306e02`）不同——被取代的列沒有存 id 時直接拒絕 `account_identity_unavailable`，不問現行 key；Bitfinex 帶錯誤代碼的 500 是回答，沒回答才算 transient，同 boot wait 的 `errors.venue_did_not_answer`），判定結果帶回鎖內才拒絕（記成 rejected）；
 通過時在記結果的同一個交易裡 retire 舊憑證、以 KEK envelope 寫入新的 active 憑證（`operator_request_id` 指回請求）。commit 後設 daemon 的 stop event，
 照 SIGTERM 的乾淨停機結束（commit 成功但確認遺失時，閒置的 worker 看到 active 憑證來自本 run 期間 applied 的請求就補做）、由 container restart policy 重啟，開機時 `load_account_credentials` 載入新憑證。重啟後舊密文永遠解不開。只有 vault 憑證的 venue（Bitfinex）接這個 worker。
-`bitfinex_user_id` 由 applied 的輪替與 bootstrap 在建立列時寫入（bootstrap 先以新 key 查 `info/user`，pending 列就帶 id，驗證通過才 promote）；
+`bitfinex_user_id` 由 applied 的輪替與 bootstrap 在建立列時寫入。bootstrap（`execution/credential_bootstrap.py`）與輪替同一個形狀：不開交易先檢查帳戶，在交易外用同一個 `credential_rotation.ask_bitfinex` 問權限與 `info/user`（分類同上），再在一個短交易裡鎖帳戶、重新檢查、直接寫入 active 列；不先存 pending 列再 promote；
 CHECK `ck_exchange_account_credentials_active_user_id`（migration `36e59526f8cf`，加之前斷言沒有 active 且 NULL 的列）保證 active 列一定有 id，所以 worker 不需要也沒有 trust-on-first-use 回填，換憑證 worker 也從不問現行 key。
 因此現行 key 已在 Bitfinex 撤銷時仍可輪替，憑證恢復模式因此有出口。
 **寫入端點鎖定（F31，`tests/architecture/test_venue_write_endpoints.py`）**：bot 的 `v2/auth/w/` 字面值只有 `live_executor.py` 的 funding offer submit、cancel、cancel/all 三個；`sign_request` 只由 `live_executor.py`（3 處）與 `auth_rest.py`（1 處，`_signed_post`，只簽 `v2/auth/r/`）import 與呼叫；auth WebSocket 只送 auth 與 `conf` 兩種 frame。真正的防線是 key 只開 funding 寫入（`permission_error`），這個測試擋的是程式漂移。

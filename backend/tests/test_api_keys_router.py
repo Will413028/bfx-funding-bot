@@ -1,7 +1,7 @@
 """The credential router: a read-only list since 9c-2b (writes go through the operator CLI;
-ADR 2026-10-15 D4). The verify verdicts are ``tests/modules/execution/
-test_account_credential_verify.py``."""
+ADR 2026-10-15 D4)."""
 import base64
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -15,28 +15,20 @@ import bfx_funding_bot.modules.accounts.tables  # registers the account tables i
 import bfx_funding_bot.modules.accounts.user_profile  # noqa: F401
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
-from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    create_exchange_account_credential,
+    grant_membership,
+)
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
-from bfx_funding_bot.modules.credentials import vault
-from bfx_funding_bot.modules.execution import credential_bootstrap
 from tests.ingress_support import attach_ingress, operator_headers
 
 _KEK = bytes(range(32))
 _KEK_B64 = base64.b64encode(_KEK).decode()
 _ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 _KEYS_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/credentials"
-
-
-class _FakeClient:
-    def __init__(self, scopes):
-        self._scopes = scopes
-
-    async def get_key_permissions(self, *, ctx):
-        return KeyPermissions(scopes=self._scopes)
 
 
 @pytest_asyncio.fixture
@@ -86,16 +78,15 @@ async def app_client(sqlite_engine, monkeypatch):
     return client
 
 
-async def _seed(client, *, scopes=None) -> UUID:
-    """A pending credential, verified with ``scopes`` when given (the bootstrap's path)."""
+async def _seed(client, *, status: str = "pending", error: str | None = None) -> UUID:
+    """A credential row in ``status`` (an active one verified), as the operator CLI left it."""
     async with client._factory.begin() as session:
-        row = await vault.create_account_credential(
-            session, exchange_account_id=_ACCOUNT_ID, user_id="user_abc", label="main",
-            api_key="PUB", api_secret="SEC", kek=_KEK, bitfinex_user_id=4242)
-        if scopes is not None:
-            await credential_bootstrap.verify_account_credential(
-                session, _FakeClient(scopes), exchange_account_id=_ACCOUNT_ID,
-                user_id="user_abc", key_id=row.id, kek=_KEK)
+        row = await create_exchange_account_credential(
+            session, exchange_account_id=_ACCOUNT_ID, venue="bitfinex", label="main",
+            api_key="PUB", secret_ciphertext=b"c", secret_nonce=b"n" * 12, wrapped_dek=b"w",
+            dek_nonce=b"d" * 12, key_version=1, lifecycle_status=status,
+            verified_at=datetime.now(UTC) if status == "active" else None,
+            last_verify_error=error, bitfinex_user_id=4242)
         return row.id
 
 
@@ -117,7 +108,7 @@ async def test_list_masks_secret(app_client):
 
 @pytest.mark.asyncio
 async def test_list_exposes_last_verify_error(app_client):
-    await _seed(app_client, scopes={"funding": (True, True), "withdraw": (False, True)})
+    await _seed(app_client, error="withdraw_must_be_disabled")
     items = app_client.get(_KEYS_PATH).json()["data"]
     assert items[0]["status"] == "pending"
     assert items[0]["lastVerifyError"] == "withdraw_must_be_disabled"
@@ -125,7 +116,7 @@ async def test_list_exposes_last_verify_error(app_client):
 
 @pytest.mark.asyncio
 async def test_list_shows_a_verified_credential(app_client):
-    await _seed(app_client, scopes={"funding": (True, True)})
+    await _seed(app_client, status="active")
     assert app_client.get(_KEYS_PATH).json()["data"][0]["status"] == "verified"
 
 
@@ -133,7 +124,7 @@ async def test_list_shows_a_verified_credential(app_client):
 async def test_credential_writes_are_not_routes(app_client):
     """Create, verify and delete went with 9c-2b: the operator CLI writes credentials, and
     the database refuses the web API's role any INSERT or UPDATE on them."""
-    key_id = await _seed(app_client, scopes={"funding": (True, True)})
+    key_id = await _seed(app_client, status="active")
     before = [(c.id, c.lifecycle_status, c.verified_at, c.last_verify_error)
               for c in await _credentials(app_client)]
     for method, path, kwargs in (
