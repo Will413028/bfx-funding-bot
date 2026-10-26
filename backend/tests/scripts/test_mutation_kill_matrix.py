@@ -69,3 +69,17 @@ def test_a_package_file_runs_under_its_dotted_name_and_any_other_needs_one() -> 
     assert matrix.module_of(Path("deploy/vm/ops/x.py"), "x_under_test") == "x_under_test"
     with pytest.raises(matrix.MatrixError, match="--module-name"):
         matrix.module_of(Path("deploy/vm/ops/x.py"), None)
+
+
+def test_a_mutant_runs_only_the_tests_that_call_its_function() -> None:
+    stats = {"t::a": ["m.x_f", "m.x_g"], "t::b": ["m.x_g"], "t::c": []}
+    assert matrix.function_of_mutant("m.x_g__mutmut_12") == "m.x_g"
+    assert matrix.tests_reaching("m.x_g__mutmut_12", stats) == ["t::a", "t::b"]
+    assert matrix.tests_reaching("m.x_h__mutmut_1", stats) == []
+
+
+def test_a_missing_or_truncated_report_is_a_crashed_run(tmp_path: Path) -> None:
+    truncated = tmp_path / "r.xml"
+    truncated.write_text("")
+    assert matrix.read_report(truncated).crashed
+    assert matrix.read_report(tmp_path / "missing.xml").crashed
