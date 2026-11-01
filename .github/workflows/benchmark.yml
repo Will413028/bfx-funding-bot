@@ -8,7 +8,7 @@ name: Benchmark
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - backend/src/bfx_funding_bot/modules/marketfeed/divergence_reporter.py
       - backend/src/bfx_funding_bot/modules/marketfeed/strategy_registry.py

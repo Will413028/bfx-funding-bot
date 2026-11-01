@@ -6,9 +6,9 @@ name: Security
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   schedule:
     - cron: "23 1 * * 1"  # Mondays, 09:23 Asia/Taipei
   # Runs image_os_updates on demand (it does not run on pull requests).
@@ -112,7 +112,8 @@ jobs:
     # matches no OSV advisory. Not on pull requests: the image is the newest release on
     # main, the same for every PR, so a new advisory would turn every PR red at once.
     name: Image OS security updates
-    if: github.event_name != 'pull_request'
+    # Also not on dev pushes: the image is main's newest release, unchanged by dev.
+    if: github.event_name != 'pull_request' && !(github.event_name == 'push' && github.ref != 'refs/heads/main')
     # Native arm64: the image is linux/arm64 only.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
