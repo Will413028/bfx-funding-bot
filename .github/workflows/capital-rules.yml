@@ -7,7 +7,7 @@ name: Capital rules
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]
     paths:
       # Unit-owned rules and their owning tests.
       - backend/src/bfx_funding_bot/modules/trading/policy.py

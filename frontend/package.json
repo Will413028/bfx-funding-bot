@@ -54,7 +54,9 @@
   },
   "pnpm": {
     "overrides": {
-      "vite": "7.3.7"
+      "vite": "7.3.7",
+      "seroval": "1.6.11",
+      "seroval-plugins": "1.6.11"
     }
   }
 }

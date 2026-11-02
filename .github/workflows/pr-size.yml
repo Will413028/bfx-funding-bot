@@ -7,7 +7,7 @@ name: PR size
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]
     types: [opened, synchronize, reopened, edited]
 
 permissions:
@@ -20,6 +20,8 @@ concurrency:
 jobs:
   pr_size:
     name: PR size
+    # A dev→main release PR carries every change already reviewed on dev; the size rule is for change PRs.
+    if: github.head_ref != 'dev'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     defaults:

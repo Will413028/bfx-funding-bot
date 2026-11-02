@@ -13,7 +13,7 @@ name: Venue contract
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - backend/tests/contracts/test_bitfinex_public_venue.py
       - backend/tests/contracts/test_public_site_live.py
