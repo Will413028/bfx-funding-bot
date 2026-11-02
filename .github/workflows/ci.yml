@@ -389,3 +389,16 @@ jobs:
           fi
           if [ "$EVENT_NAME" = pull_request ]; then args+=(--base-ref HEAD^1); fi
           python3 scripts/quality_ratchet.py "${args[@]}"
+
+  # A push to main (a dev→main merge) whose CI passed publishes the release image;
+  # bfx-deploy on the VM deploys it. dev pushes and pull requests never release.
+  release:
+    name: Release images
+    needs: [frontend, e2e_smoke, deploy_policy, backend_unit, backend_gate, backend_integration, quality_ratchet]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release.yml
