@@ -38,3 +38,20 @@ jobs:
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: python3 scripts/pr_size.py --base-ref HEAD^1
+
+  gate:
+    # The only required check on main: it passes when every other job in this workflow succeeded or was skipped.
+    name: gate (pr-size)
+    if: always()
+    needs: [pr_size]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every job succeeded or was skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do
+            case "$r" in success|skipped) ;; *) echo "a needed job ended with: $r"; exit 1 ;; esac
+          done

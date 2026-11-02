@@ -157,3 +157,20 @@ jobs:
           echo "osv-scanner exit $rc; $(grep -c '^|' "$RUNNER_TEMP/osv-image.md" || true) table rows in the report"
           [ "$rc" -le 1 ] || exit "$rc"
           cat "$RUNNER_TEMP/osv-image.md" >> "$GITHUB_STEP_SUMMARY"
+
+  gate:
+    # The only required check on main: it passes when every other job in this workflow succeeded or was skipped.
+    name: gate (security)
+    if: always()
+    needs: [gitleaks, actionlint, zizmor, osv_scanner, image_os_updates]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every job succeeded or was skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do
+            case "$r" in success|skipped) ;; *) echo "a needed job ended with: $r"; exit 1 ;; esac
+          done
