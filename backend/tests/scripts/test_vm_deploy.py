@@ -3092,8 +3092,16 @@ def test_release_yml_attests_exactly_the_digest_the_deployer_verifies() -> None:
         "subject-name": "${{ steps.names.outputs.backend }}",
         "subject-digest": "${{ steps.backend.outputs.digest }}",
     }
-    # The deployer's --source-ref: a workflow_run release runs on the default branch.
-    assert workflow[True]["workflow_run"]["branches"] == ["main"]
+    # The deployer's --source-ref is refs/heads/main: the release is called by CI's
+    # `release` job only for a push to main after every CI job passed (a workflow_run
+    # release would run on, and be signed for, the default branch, which is dev).
+    assert workflow[True] == {"workflow_call": None}
+    ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    release = ci["jobs"]["release"]
+    assert release["uses"] == f"./{bfx.RELEASE_WORKFLOW}"
+    assert release["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    assert set(release["needs"]) == set(ci["jobs"]) - {"release", "migration_lint"}
+    assert release["permissions"] == job["permissions"]
 
 
 class _Registry:
