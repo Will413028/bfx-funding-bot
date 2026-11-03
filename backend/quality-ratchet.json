@@ -2,7 +2,7 @@
   "suppressions": {
     "noqa": 441,
     "ruff: ignore": 2,
-    "type: ignore": 299,
+    "type: ignore": 298,
     "pyright: ignore": 0,
     "biome-ignore": 1,
     "eslint-disable": 0,

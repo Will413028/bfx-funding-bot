@@ -72,11 +72,6 @@ class _NoCapital:
         return CapitalBlocked("test_no_capital_answer")
 
 
-class _NoLock:
-    async def lock(self, session: Any, scope: Any) -> None:
-        return None
-
-
 class _Session:
     async def __aenter__(self) -> _Session:
         return self
@@ -88,7 +83,6 @@ class _Session:
 def _reads() -> CapitalStatusReads:
     return CapitalStatusReads(
         authority=_NoCapital(),  # type: ignore[arg-type]
-        lock=_NoLock(),  # type: ignore[arg-type]
         scope=Scope(UUID(int=1), "ci"),
         session_factory=lambda: _Session(),  # type: ignore[arg-type,return-value]
         clock=lambda: 1_000,

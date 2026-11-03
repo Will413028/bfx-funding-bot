@@ -53,7 +53,6 @@ from bfx_funding_bot.modules.ledger import (
     CapitalAvailable,
     CapitalBlocked,
     Scope,
-    ScopeLock,
 )
 from bfx_funding_bot.modules.strategy import (
     CellConfig,
@@ -91,7 +90,6 @@ class CapitalStatusReads:
     """The applied capital authority the live status reports, for one scope."""
 
     authority: CapitalAuthority
-    lock: ScopeLock
     scope: Scope
     session_factory: async_sessionmaker[AsyncSession]
     clock: Callable[[], int]
@@ -301,7 +299,6 @@ class TradingStatusService:
         try:
             async with reads.session_factory() as session:
                 if not any(cell.symbol == symbol for cell in self._cells):
-                    await reads.lock.lock(session, scope)
                     applied = await reads.authority.read_policy(session, scope, symbol)
                     if isinstance(applied, CapitalBlocked):
                         return {"capital_available": False, "reason": applied.reason}

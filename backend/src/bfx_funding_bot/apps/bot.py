@@ -975,7 +975,7 @@ async def build_daemon(
     trading_status = TradingStatusService(
         chain=safety_chain,
         exposure=CapitalStatusReads(
-            authority=capital.capital_authority, lock=capital.scope_lock, scope=capital_scope,
+            authority=capital.capital_authority, scope=capital_scope,
             session_factory=session_factory, clock=now_ms_utc),
         account_ctx=account_ctx,
         cells=config.cells,
