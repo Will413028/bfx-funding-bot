@@ -1,6 +1,6 @@
 """Public contracts of the simulated venue: scope, config, fault plan, ports.
 
-This module imports nothing from the bot (ledger, execution, trading, marketfeed):
+This module imports nothing from the bot (ledger, execution, trading, market recorders, the runtime):
 the venue is an independent counterparty and the ledger is only its test oracle.
 """
 from __future__ import annotations

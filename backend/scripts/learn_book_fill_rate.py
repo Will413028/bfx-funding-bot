@@ -38,7 +38,7 @@ from bfx_funding_bot.modules.market.book_period_coverage import (
     BookAskSnapshot,
     snapshot_from_payload,
 )
-from bfx_funding_bot.modules.marketfeed.tables import FundingBookSnapshotRow
+from bfx_funding_bot.modules.market.tables import FundingBookSnapshotRow
 from scripts.learn_fill_rate import build_fill_model_artifact
 
 _FAR_PAST_MS = 0

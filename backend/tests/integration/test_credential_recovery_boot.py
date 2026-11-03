@@ -26,12 +26,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import insert, select, text
 
 from bfx_funding_bot.apps import bot
+from bfx_funding_bot.apps.runtime.healthz import make_app
 from bfx_funding_bot.apps.venue import VenueSeam
 from bfx_funding_bot.modules.execution.protocols import Credentials
 from bfx_funding_bot.modules.execution.safety.tables import TradingControlRequestRow
-from bfx_funding_bot.modules.marketfeed.healthz import make_app
+from tests.apps.runtime.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
 from tests.async_wait import until
-from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
 
 from . import test_ledger_schema_roles as _schema_roles
 from .sim_daemon import close_sim_env, make_sim_env

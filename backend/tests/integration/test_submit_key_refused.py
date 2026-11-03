@@ -43,8 +43,8 @@ from bfx_funding_bot.modules.ledger.tables import (
     TransportOutcomeJournalRow,
 )
 from bfx_funding_bot.modules.simulated_venue import FaultKind, FaultPlan, FaultRule, FaultTarget
+from tests.apps.runtime.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
 from tests.async_wait import until
-from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
 
 from . import test_ledger_schema_roles as _schema_roles
 from .sim_daemon import HOUR, SCOPE, T0, close_sim_env, make_sim_env

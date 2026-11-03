@@ -30,7 +30,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
 )
-from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookStore
+from bfx_funding_bot.modules.market._internal.book import FundingBookStore
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from tests.modules.execution.deployment.test_reconciler import _Readiness, _valid_snapshot
 

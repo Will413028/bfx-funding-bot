@@ -17,7 +17,7 @@ from bfx_funding_bot.core.database_realm import DatabaseRealmMismatch
 from bfx_funding_bot.core.errors import ConfigurationError
 from bfx_funding_bot.core.schema_head import SchemaHeadMismatch
 from bfx_funding_bot.modules.ledger import PolicyRefused
-from tests.modules.marketfeed.account_test_helpers import TEST_VAULT_KEK_B64
+from tests.apps.runtime.account_test_helpers import TEST_VAULT_KEK_B64
 
 from .sim_daemon import close_sim_env, make_sim_env
 from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture dependency

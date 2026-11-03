@@ -12,11 +12,11 @@ from decimal import Decimal
 
 import pytest
 
-from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
-from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
+from bfx_funding_bot.apps.runtime.divergence_reporter import (
     DivergenceReporter,
     ExtractedSignal,
 )
+from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.strategy import CellConfig
 from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 

@@ -107,12 +107,12 @@ CREDENTIAL_ROTATION_REJECTED: Final = "credential_rotation_rejected"
 CREDENTIAL_ROTATION_FAILED: Final = "credential_rotation_failed"
 # The venue refused the account's key at boot: the bot trades nothing and runs only the
 # credential rotation worker and its liveness until the key works again or is replaced
-# (marketfeed/daemon.py, credential recovery mode).
+# (apps/runtime/daemon.py, credential recovery mode).
 CREDENTIAL_RECOVERY_MODE: Final = "credential_recovery_mode"
 # The running bot's 6-hourly key recheck has reached no verdict N times in a row (the venue
 # did not answer, an unparseable answer, a refusal other than the key's): the bot keeps
 # trading and retrying, but the key's permissions are not being verified. Sent once per
-# streak; ``recovered=True`` (INFO) once a recheck passes again (marketfeed/daemon.py).
+# streak; ``recovered=True`` (INFO) once a recheck passes again (apps/runtime/daemon.py).
 CREDENTIAL_RECHECK_FAILING: Final = "credential_recheck_failing"
 # A venue history stream could not be read completely (execution/venue_observation.py).
 VENUE_OBSERVATION_HISTORY_INCOMPLETE: Final = "venue_observation_history_incomplete"

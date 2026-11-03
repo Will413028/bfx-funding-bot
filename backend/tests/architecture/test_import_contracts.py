@@ -27,6 +27,7 @@ MAX_IGNORES_BY_ID = {
     "simulated-venue-no-internal-access": 0,
     "simulated-venue-wiring-is-top": 0,
     "runtime-not-simulated-venue": 0,
+    "runtime-composition-boundary": 0,
     "trading-not-ledger": 0,
     "control-plane-exposure": 0,
     "xact-lock-owner": 0,
@@ -177,8 +178,32 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     assert {
         "bfx_funding_bot.modules.ledger", "bfx_funding_bot.modules.execution",
         "bfx_funding_bot.modules.trading", "bfx_funding_bot.modules.marketfeed",
-        "bfx_funding_bot.apps",
+        "bfx_funding_bot.modules.market._internal", "bfx_funding_bot.apps",
     } <= set(independent["forbidden_modules"])
+
+
+def test_runtime_reaches_no_other_composition_root() -> None:
+    """Before R9a the runtime lived under modules, where apps-is-top kept every apps module
+    and the wiring-is-top contracts kept module wiring out of it. The contract keeps that
+    scope: every other top-level apps module (indirectly too) and module wiring, so a new
+    apps module cannot slip past it by not being listed."""
+    root = Path(__file__).resolve().parents[2]
+    with (root / "pyproject.toml").open("rb") as config_file:
+        contracts = tomllib.load(config_file)["tool"]["importlinter"]["contracts"]
+    boundary = {contract["id"]: contract for contract in contracts}["runtime-composition-boundary"]
+    apps_dir = root / "src" / "bfx_funding_bot" / "apps"
+    roots = {
+        f"bfx_funding_bot.apps.{path.stem}"
+        for path in apps_dir.iterdir()
+        if (path.suffix == ".py" and path.stem != "__init__")
+        or (path.is_dir() and (path / "__init__.py").is_file() and path.name != "runtime")
+    }
+    assert boundary["source_modules"] == ["bfx_funding_bot.apps.runtime"]
+    assert set(boundary["forbidden_modules"]) == roots | {
+        "bfx_funding_bot.modules.backtest", "bfx_funding_bot.modules.simulated_venue",
+        "bfx_funding_bot.modules.ledger.wiring", "bfx_funding_bot.modules.strategy.wiring",
+    }
+    assert boundary.get("allow_indirect_imports", False) is False
 
 
 def test_contract_modules_exist() -> None:

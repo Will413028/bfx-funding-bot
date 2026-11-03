@@ -1,7 +1,7 @@
 """In-process simulated Bitfinex funding venue (httpx transport, event-sourced).
 
 Only `apps` composes it (`apps/venue.py`). It imports nothing of ledger, execution,
-trading, marketfeed or `external`, and only composition roots import `wiring`.
+trading, market recorders or `external`, and only composition roots import `wiring`.
 
 Not simulated (the venue is optimistic and the soak must not read P&L from it
 before the fill model is calibrated against live submit-to-fill latency):

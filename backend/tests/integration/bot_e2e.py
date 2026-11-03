@@ -53,12 +53,12 @@ from bfx_funding_bot.modules.ledger import (
 )
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.trading import CapitalPolicy, CapitalScope
-from tests.modules.marketfeed.account_test_helpers import (
+from tests.apps.runtime.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
     configure_account_env,
     seed_exchange_account,
 )
-from tests.modules.marketfeed.test_daemon_wiring import _write_cells_yaml
+from tests.apps.runtime.test_daemon_wiring import _write_cells_yaml
 
 from .test_ledger_schema_roles import ledger_db
 

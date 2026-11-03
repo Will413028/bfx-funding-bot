@@ -88,7 +88,7 @@ app 本身沒有登入、密碼、MFA 或 session（見[不存在性證據](#不
 | V12.3.3 | webapi 呼叫 bot `/admin/trading-status`、`/admin/dry-evaluate` 時走明文 HTTP，帶的是只讀 token（`modules/api/funding_status.py:117-126`）。 |
 | V12.3.4 | 內部沒有 TLS，所以沒有內部 CA 或憑證 pinning。程式已支援 Postgres 的 `verify-full`＋`sslrootcert`（`core/db.py:72-87`），但部署沒有啟用。 |
 | V13.2.1 | 服務之間的憑證（DB 密碼、bot 的只讀 token）是長期憑證，事件觸發才換（`secret-rotation.md`「何時換」），不是條文要求的短效 token 或憑證。 |
-| V13.2.2 | 網路沒有分段：bot、webapi 與 tailscale 共用的 namespace、postgres 都在 `bfx_default`（`compose:100-101,174-175,244-247`），同網路的容器連得到 bot 8080 的 `/healthz`、`/readyz`、`/metrics`（不需認證；`apps/bot.py:1003-1004`、`modules/marketfeed/healthz.py:72-118`）。`/admin` 仍要 token。 |
+| V13.2.2 | 網路沒有分段：bot、webapi 與 tailscale 共用的 namespace、postgres 都在 `bfx_default`（`compose:100-101,174-175,244-247`），同網路的容器連得到 bot 8080 的 `/healthz`、`/readyz`、`/metrics`（不需認證；`apps/bot.py:1003-1004`、`apps/runtime/healthz.py:72-118`）。`/admin` 仍要 token。 |
 | V13.2.4 | 應用程式的對外目的地都是常數或部署設定（§10b），但沒有在網路層強制的 egress allowlist。 |
 | V13.2.5 | 同 V13.2.4：容器沒有可強制的對外請求 allowlist，只靠程式碼裡的常數。 |
 
@@ -271,7 +271,7 @@ app 本身沒有登入、密碼、MFA 或 session（見[不存在性證據](#不
 | V4.1.1 | L1 | 符合 | webapi 的 JSON 回 `application/json`；static export 的 HTML／JS 由 `StaticFiles` 依副檔名給 `text/*`，Starlette 對 `text/*` 自動補 `; charset=utf-8`（starlette `responses.py:77-78`；`ingress.py:261`）。webapi 已不提供下載（PR #281）。 |
 | V4.1.2 | L2 | 符合 | 唯一入口是 Serve 的 TCP 443 HTTPS，沒有 80 port handler，也沒有 Funnel（`serve.json:2-6`），所以沒有對 API 做透明的 HTTP→HTTPS redirect。webapi 只綁 `127.0.0.1:8000`，在 netns 內，沒有 published port（`compose:109,143`）。每個回應都帶 HSTS（`ingress.py:61,124-133`）。 |
 | V4.1.3 | L2 | 符合 | webapi 用到的中介 header 只有 Serve 設定的 `Tailscale-App-Capabilities` 與 `Tailscale-User-Login`（`auth.py:25-27,66-81`）。Serve 會覆寫 client 自送的 `Tailscale-*` header（ADR-1015 `:123`，實測）。webapi 只聽 netns 內的 127.0.0.1，Serve 是唯一 client（`compose:109,143`）。webapi 不讀 `X-Forwarded-*`／`X-Real-IP`：rg 只命中 Sentry 送出前刪掉這些 header 的清單（`modules/observability/error_tracking.py:45-46`）。 |
-| V4.2.1 | L2 | 符合 | 每一層都用標準 parser、沒有放寬設定：webapi 與 bot `/admin` 都跑 uvicorn，`http` 為預設的 `auto`（`compose:109`、`modules/marketfeed/healthz.py:159-170`），裝有 httptools 時就用它（`backend/pyproject.toml:8` `uvicorn[standard]`；`backend/uv.lock:839-840`）。前端是 static export，沒有 Node server（`frontend/next.config.ts:4-11`）。Serve 屬第三方。 |
+| V4.2.1 | L2 | 符合 | 每一層都用標準 parser、沒有放寬設定：webapi 與 bot `/admin` 都跑 uvicorn，`http` 為預設的 `auto`（`compose:109`、`apps/runtime/healthz.py:159-170`），裝有 httptools 時就用它（`backend/pyproject.toml:8` `uvicorn[standard]`；`backend/uv.lock:839-840`）。前端是 static export，沒有 Node server（`frontend/next.config.ts:4-11`）。Serve 屬第三方。 |
 | V4.3.1 | L2 | 不適用 | 沒有 GraphQL：`rg -i "graphql\|strawberry\|ariadne\|apollo"` 在依賴清單與程式碼無結果，API 只有 REST router（`apps/webapi.py:126-133`）。 |
 | V4.3.2 | L2 | 不適用 | 同上，沒有 GraphQL。 |
 | V4.4.1 | L1 | 符合 | 系統唯一的 WebSocket 是 bot 連到 Bitfinex 的 client 連線，URL 是 `wss://` 常數（`external/bitfinex/ws.py:25`、`external/bitfinex/auth_ws.py:368`）。`rg 'ws://' backend/src frontend/src` 無結果。 |
@@ -481,7 +481,7 @@ app 本身沒有登入、密碼、MFA 或 session（見[不存在性證據](#不
 | V13.4.2 | L2 | 符合 | webapi 沒開 debug，也沒有 docs（`apps/webapi.py:123`）；uvicorn 沒有 `--reload`（`compose:109`）；`log_level` 預設 INFO（`core/settings.py:117`）；前端以 `next build` 產生 production export（`backend/Dockerfile:17`；`frontend/package.json:8`），`next.config.ts` 沒有開 source map。 |
 | V13.4.3 | L2 | 符合 | static export 由 `StaticFiles(html=True)` 提供（`ingress.py:261`）；starlette 遇到目錄只送 `index.html` 或 `404.html`，不產生目錄列表（`staticfiles.py:140-158`）；測試 `test_ingress.py::test_an_unknown_page_is_the_export_404`。 |
 | V13.4.4 | L2 | 符合 | TRACE 不在 `SAFE_METHODS`，被當成寫入檢查，沒有同源 Origin 就回 403（`ingress.py:48,145-152`）；`/api/*` 已知路徑用別的方法回 405（`ingress.py:247-255`；`test_ingress.py::test_a_known_api_path_with_another_method_answers_405`）；static mount 對 GET/HEAD 以外回 405（starlette `staticfiles.py:119-120`）；沒有任何地方回顯請求。 |
-| V13.4.5 | L2 | 符合 | 文件端點已關閉：webapi `docs_url=None, redoc_url=None, openapi_url=None`（`apps/webapi.py:123`；`tests/architecture/test_webapi_route_guard.py` 的 `DOCS_PATHS`），bot 的 healthz app 也沒有 docs（`modules/marketfeed/healthz.py:70`）。bot 的 `/metrics`、`/healthz`、`/readyz` 不需認證、綁 `0.0.0.0:8080`（`apps/bot.py:1003-1004`），是刻意給觀測與部署健康檢查用的，寫在 `ARCHITECTURE.md` §10a／§10b；它們不經 Serve，tailnet 與 VM 外連不到，同網路容器可達的部分屬已接受的扁平網路。 |
+| V13.4.5 | L2 | 符合 | 文件端點已關閉：webapi `docs_url=None, redoc_url=None, openapi_url=None`（`apps/webapi.py:123`；`tests/architecture/test_webapi_route_guard.py` 的 `DOCS_PATHS`），bot 的 healthz app 也沒有 docs（`apps/runtime/healthz.py:70`）。bot 的 `/metrics`、`/healthz`、`/readyz` 不需認證、綁 `0.0.0.0:8080`（`apps/bot.py:1003-1004`），是刻意給觀測與部署健康檢查用的，寫在 `ARCHITECTURE.md` §10a／§10b；它們不經 Serve，tailnet 與 VM 外連不到，同網路容器可達的部分屬已接受的扁平網路。 |
 
 ## V14 Data Protection
 

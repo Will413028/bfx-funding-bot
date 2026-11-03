@@ -7,14 +7,14 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.apps.runtime.strategy_registry import StrategyRegistry
+from bfx_funding_bot.apps.runtime.warmup import warmup_cell
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.candles.repository import upsert_candles
 from bfx_funding_bot.modules.candles.tables import (
     FundingCandleRow,  # noqa: F401 — registers table with Base.metadata
 )
-from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
-from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
 from bfx_funding_bot.modules.strategy import CellConfig
 from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 

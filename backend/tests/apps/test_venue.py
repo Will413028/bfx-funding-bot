@@ -34,7 +34,7 @@ from bfx_funding_bot.core.errors import ConfigurationError
 from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.external.bitfinex.rest import FundingTrade
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
-from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookStore
+from bfx_funding_bot.modules.market._internal.book import FundingBookStore
 from bfx_funding_bot.modules.simulated_venue import LiveFeedConfig, LiveMarketFeed
 
 T0 = 1_704_067_200_000

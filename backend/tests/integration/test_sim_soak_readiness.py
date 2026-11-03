@@ -24,7 +24,7 @@ from sqlalchemy import text
 from bfx_funding_bot.apps import bot
 from bfx_funding_bot.core.errors import ConfigurationError
 from scripts import bootstrap_simulation_db as bootstrap
-from tests.modules.marketfeed.account_test_helpers import TEST_VAULT_KEK_B64
+from tests.apps.runtime.account_test_helpers import TEST_VAULT_KEK_B64
 
 from .sim_daemon import HOUR, SimEnv, close_sim_env, make_sim_env
 from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture dependency

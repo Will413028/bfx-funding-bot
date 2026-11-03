@@ -10,8 +10,8 @@ on:
   pull_request:
     branches: [main, dev]
     paths:
-      - backend/src/bfx_funding_bot/modules/marketfeed/divergence_reporter.py
-      - backend/src/bfx_funding_bot/modules/marketfeed/strategy_registry.py
+      - backend/src/bfx_funding_bot/apps/runtime/divergence_reporter.py
+      - backend/src/bfx_funding_bot/apps/runtime/strategy_registry.py
       - backend/src/bfx_funding_bot/modules/strategy/**
       - backend/tests/benchmark/**
       - .github/workflows/benchmark.yml

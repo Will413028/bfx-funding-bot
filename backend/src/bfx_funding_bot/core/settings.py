@@ -23,7 +23,7 @@ def require_deployment_environment() -> str:
     """Return an explicit, known data-isolation environment.
 
     A missing value must never silently select ``prod``.  This helper is used
-    by web/API and operator scripts, which do not pass through marketfeed's
+    by web/API and operator scripts, which do not pass through the bot runtime's
     stricter ``load_config`` startup validator.
     """
     value = os.environ.get("BFX_DEPLOYMENT_ENV", "").strip()

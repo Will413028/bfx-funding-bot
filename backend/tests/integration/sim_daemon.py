@@ -42,11 +42,11 @@ from bfx_funding_bot.modules.simulated_venue import (
 )
 from bfx_funding_bot.modules.strategy import DecisionOutcome
 from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
-from tests.modules.marketfeed.account_test_helpers import (
+from tests.apps.runtime.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
     seed_exchange_account,
 )
-from tests.modules.marketfeed.test_daemon_wiring import _write_cells_yaml
+from tests.apps.runtime.test_daemon_wiring import _write_cells_yaml
 
 _IDS = itertools.count(1)
 SCOPE = Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci")
