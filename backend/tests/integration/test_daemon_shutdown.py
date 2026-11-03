@@ -122,7 +122,8 @@ async def test_daemon_subtask_fatal_escalates(
             await asyncio.sleep(0.1)
             raise FatalError("synthetic candle_writer fatal")
 
-        daemon.writer.run = boom_run  # type: ignore[method-assign]
+        assert daemon.market_data is not None
+        daemon.market_data.writer.run = boom_run  # type: ignore[method-assign]
 
         with pytest.raises(BaseExceptionGroup) as exc_info:
             await daemon.run()
