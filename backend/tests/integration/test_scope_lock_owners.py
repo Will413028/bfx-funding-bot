@@ -102,7 +102,8 @@ async def test_the_simulation_bootstrap_activates_only_under_the_scope_lock(migr
 
     async def activate() -> str:
         async with factory.begin() as session:
-            return await bootstrap._ensure_active(session, scope=scope, now_ms=1)
+            return await bootstrap._ensure_active(
+                session, scope=scope, scope_lock=build_policy_ports(scope).scope_lock, now_ms=1)
 
     assert await _waits_behind_the_scope_lock(factory, scope, activate) == "activated"
 

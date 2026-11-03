@@ -44,7 +44,7 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.apps.bot_ports import build_policy_ports
+from bfx_funding_bot.apps.bot_ports import PolicyPorts, build_policy_ports
 from bfx_funding_bot.core.authority import AUTHORITY_TABLE
 from bfx_funding_bot.core.database_realm import DatabaseRealmMismatch, read_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
@@ -54,8 +54,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state_store import (
     append_transition,
     read_current,
 )
-from bfx_funding_bot.modules.ledger import PolicyRefused, Scope
-from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
+from bfx_funding_bot.modules.ledger import PolicyRefused, Scope, ScopeLock
 from bfx_funding_bot.modules.trading import (
     CapitalPolicy,
     OfferEnvelope,
@@ -104,10 +103,12 @@ async def _ensure_account(session: AsyncSession, account_id: UUID) -> bool:
     return True
 
 
-async def _ensure_active(session: AsyncSession, *, scope: Scope, now_ms: int) -> str:
+async def _ensure_active(
+    session: AsyncSession, *, scope: Scope, scope_lock: ScopeLock, now_ms: int,
+) -> str:
     """Append the first ``ACTIVE`` row through the domain writer; "kept_*" when the scope
     already has any state row (a HALT above all: scripts never resume)."""
-    await build_scope_lock().lock(session, scope)
+    await scope_lock.lock(session, scope)
     current = await read_current(
         session, account_id=scope.exchange_account_id, environment=scope.deployment_environment)
     if current is not None:
@@ -120,10 +121,10 @@ async def _ensure_active(session: AsyncSession, *, scope: Scope, now_ms: int) ->
 
 
 async def _ensure_policy(
-    session: AsyncSession, *, scope: Scope, symbol: str, target: CapitalPolicy,
+    session: AsyncSession, *, scope: Scope, policy: PolicyPorts, symbol: str,
+    target: CapitalPolicy,
 ) -> str:
     """Write ``target`` as the next revision unless it is already what is applied."""
-    policy = build_policy_ports(scope)
     await policy.scope_lock.lock(session, scope)
     try:
         applied = await policy.store.read_applied(session, symbol=symbol)
@@ -161,13 +162,15 @@ async def run(
                 targets = dict.fromkeys(args.symbol, enabled)
                 targets |= {symbol: CapitalPolicy(enabled=False) for symbol in args.disabled_symbol}
                 scope = Scope(args.exchange_account_id, realm)
+                policy = build_policy_ports(scope)
                 policies = {
                     symbol: await _ensure_policy(
-                        session, scope=scope, symbol=symbol, target=target)
+                        session, scope=scope, policy=policy, symbol=symbol, target=target)
                     for symbol, target in sorted(targets.items())
                 }
                 trading = (
-                    await _ensure_active(session, scope=scope, now_ms=int(time.time() * 1000))
+                    await _ensure_active(session, scope=scope, scope_lock=policy.scope_lock,
+                                         now_ms=int(time.time() * 1000))
                     if args.activate else "not_requested")
             except BaseException:
                 await session.rollback()
