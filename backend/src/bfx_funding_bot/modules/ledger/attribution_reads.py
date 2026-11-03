@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import Scope
-from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance
+from bfx_funding_bot.modules.ledger.read.provenance import offer_provenance
 from bfx_funding_bot.modules.ledger.tables import (
     SubmissionAttemptJournalRow,
     VenueCreditMirrorRow,

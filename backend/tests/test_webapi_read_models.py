@@ -23,13 +23,18 @@ from bfx_funding_bot.core import authority as authority_module
 from bfx_funding_bot.core.schema_head import SchemaHeadMismatch
 from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models
 from bfx_funding_bot.modules.api.uncertainties import _request_model
+from bfx_funding_bot.modules.ledger import Scope
 
 
 def test_build_read_models_are_the_ledgers() -> None:
     models = build_read_models()
     assert type(models.operator_reads).__name__ == "LedgerOperatorReads"
     assert type(models.operator_evidence).__name__ == "LedgerOperatorEvidence"
-    assert type(models.operator_resolution).__name__ == "LedgerOperatorResolution"
+    # Read only: the policy port has no ``apply_policy`` and no resolution port is held.
+    reader = models.policy_reader(Scope(uuid4(), "test"))
+    assert type(reader).__name__ == "LedgerPolicyReader"
+    assert not hasattr(reader, "apply_policy")
+    assert not hasattr(models, "operator_resolution")
 
 
 class _Engine:

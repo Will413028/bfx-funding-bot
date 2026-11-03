@@ -207,7 +207,7 @@ async def uncertainty_app(sqlite_engine, monkeypatch):
     ledger = _Ledger()
     app = FastAPI()
     app.include_router(build_uncertainties_router())
-    app.state.read_models = ReadModels(ledger, ledger, ledger, object(), object())  # type: ignore[arg-type]
+    app.state.read_models = ReadModels(ledger, ledger, object(), object())  # type: ignore[arg-type]
 
     async def _operator() -> Principal:
         return Principal(user_id="operator-1", email="operator@example.com", role="admin")

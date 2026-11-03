@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import event
 
 from bfx_funding_bot.modules.ledger import ObservationWindow, OfferHistory, Scope
-from bfx_funding_bot.modules.ledger._internal import reads
+from bfx_funding_bot.modules.ledger.read import reads
 from bfx_funding_bot.modules.ledger.wiring import build_ledger_observations
 
 from .test_ledger_basis import (

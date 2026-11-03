@@ -44,13 +44,14 @@ from sqlalchemy import Row, Select, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import CapitalReadRefused, LedgerCapitalRead, Scope
-from bfx_funding_bot.modules.ledger._internal.attempts import (
+from bfx_funding_bot.modules.ledger._internal.clock import holds_scope_lock
+from bfx_funding_bot.modules.ledger.read.attempts import (
     MAX_TAIL_ATTEMPTS,
     attempt_evidence,
     open_unknowns,
     tail_attempts,
 )
-from bfx_funding_bot.modules.ledger._internal.clock import holds_scope_lock
+from bfx_funding_bot.modules.ledger.read.policy import applied_policy
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisCellRow,
@@ -58,8 +59,6 @@ from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisRow,
     AcceptedCapitalBasisSymbolRow,
     CapitalCommandClockRow,
-    CapitalPolicyHeadRow,
-    CapitalPolicyRevisionRow,
     LedgerObservationQueryRow,
     LedgerObservationRow,
     QuarantineOpeningRow,
@@ -67,18 +66,14 @@ from bfx_funding_bot.modules.ledger.tables import (
 )
 from bfx_funding_bot.modules.trading import (
     AcceptedCapitalBasis,
-    AppliedPolicy,
     AttemptFact,
     AttemptOutcome,
     Blocked,
     CapitalReadContext,
     CapitalScope,
-    PolicyRejectedError,
     SymbolCapital,
     UncertaintyFact,
-    check_pointer,
     derive_capital,
-    parse_policy,
 )
 
 _NO_QUERY = UUID(int=0)
@@ -169,64 +164,6 @@ def _symbol_block(row: Row[Any]) -> Blocked | None:
     return Blocked("venue_lent_above_ledger", tuple(evidence))
 
 
-async def _policy(
-    session: AsyncSession, account: UUID, environment: str, symbol: str
-) -> AppliedPolicy | Blocked:
-    """The symbol's head -> its revision, proven (``check_pointer``) and parsed."""
-    head = (
-        await session.execute(
-            select(CapitalPolicyHeadRow.revision_id, CapitalPolicyHeadRow.revision).where(
-                CapitalPolicyHeadRow.exchange_account_id == account,
-                CapitalPolicyHeadRow.deployment_environment == environment,
-                CapitalPolicyHeadRow.symbol == symbol,
-            )
-        )
-    ).one_or_none()
-    row: Row[Any] | None = None
-    if head is not None:
-        row = await _first(
-            session,
-            select(
-                CapitalPolicyRevisionRow.id,
-                CapitalPolicyRevisionRow.exchange_account_id,
-                CapitalPolicyRevisionRow.deployment_environment,
-                CapitalPolicyRevisionRow.symbol,
-                CapitalPolicyRevisionRow.revision,
-                CapitalPolicyRevisionRow.schema_version,
-                CapitalPolicyRevisionRow.policy,
-                CapitalPolicyRevisionRow.digest,
-            ).where(CapitalPolicyRevisionRow.id == head[0]),
-        )
-    blocked = check_pointer(
-        account,
-        environment,
-        symbol,
-        None if head is None else (head[0], head[1]),
-        None
-        if row is None
-        else (
-            row.id,
-            row.exchange_account_id,
-            row.deployment_environment,
-            row.symbol,
-            row.revision,
-        ),
-    )
-    if blocked is not None:
-        return blocked
-    assert row is not None
-    try:
-        policy = parse_policy(row.schema_version, row.policy, row.digest)
-    except PolicyRejectedError as exc:
-        return Blocked(exc.reason, (("revision", str(row.id)),))
-    return AppliedPolicy(account, environment, symbol, row.revision, row.digest, row.id, policy)
-
-
-async def read_policy(session: AsyncSession, scope: Scope, symbol: str) -> AppliedPolicy | Blocked:
-    """The symbol's applied policy; no snapshot transaction and no lock (policy rows only)."""
-    return await _policy(session, scope.exchange_account_id, scope.deployment_environment, symbol)
-
-
 def _context(
     now_ms: int, max_age: int, query: Row[Any] | None, block: Blocked | None
 ) -> CapitalReadContext:
@@ -260,7 +197,7 @@ async def _read(
     session: AsyncSession, scope: CapitalScope, *, now_ms: int, max_snapshot_age_ms: int
 ) -> LedgerCapitalRead:
     account, environment = scope.account_id, scope.environment
-    policy = await _policy(session, account, environment, scope.symbol)
+    policy = await applied_policy(session, account, environment, scope.symbol)
 
     query = await _first(
         session,
@@ -489,4 +426,8 @@ def _ids(rows: list[Row[Any]], classification: str) -> frozenset[UUID]:
     return frozenset(row.attempt_id for row in rows if row.classification == classification)
 
 
-__all__ = ["MAX_TAIL_ATTEMPTS", "read_capital", "read_capital_locked", "read_policy"]
+__all__ = [
+    "MAX_TAIL_ATTEMPTS",
+    "read_capital",
+    "read_capital_locked",
+]

@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.modules.ledger import LedgerReadUnbounded, ObservationWindow, Scope
-from bfx_funding_bot.modules.ledger._internal import reads
+from bfx_funding_bot.modules.ledger.read import reads
 from bfx_funding_bot.modules.ledger.tables import SubmissionAttemptJournalRow
 
 

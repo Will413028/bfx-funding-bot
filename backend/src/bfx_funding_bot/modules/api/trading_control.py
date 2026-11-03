@@ -195,7 +195,7 @@ def build_trading_control_router() -> APIRouter:
                        models: ReadModels = Depends(get_read_models),  # noqa: B008
                        ) -> Envelope[TradingControlOverview]:
         view = await commands.trading_overview(session, context,
-                                               models.policy_store(context.scope))
+                                               models.policy_reader(context.scope))
         deployment = await session.scalar(select(DeploymentRow).where(
             DeploymentRow.outcome == "deployed").order_by(DeploymentRow.id.desc()).limit(1))
         return Envelope(data=TradingControlOverview(

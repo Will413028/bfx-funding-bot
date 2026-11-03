@@ -6,12 +6,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import Scope
-from bfx_funding_bot.modules.ledger._internal.basis import previous_basis
 from bfx_funding_bot.modules.ledger.conservation import (
     CONSERVATION_VERDICTS,
     AcceptedConservation,
     SymbolConservation,
 )
+from bfx_funding_bot.modules.ledger.read.basis import previous_basis
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisSymbolRow,
     LedgerObservationRow,

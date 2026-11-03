@@ -23,7 +23,9 @@ from bfx_funding_bot.modules.ledger import (
     UncertaintyRecord,
     encode_basis_token,
 )
-from bfx_funding_bot.modules.ledger._internal import capital_reader, clock, reads
+from bfx_funding_bot.modules.ledger._internal import capital_reader, clock
+from bfx_funding_bot.modules.ledger.read import reads
+from bfx_funding_bot.modules.ledger.read.policy import read_policy
 from bfx_funding_bot.modules.trading import (
     AppliedPolicy,
     Available,
@@ -98,7 +100,7 @@ class LedgerCapitalAuthority:
     async def read_policy(
         self, session: AsyncSession, scope: Scope, symbol: str
     ) -> AppliedPolicy | CapitalBlocked:
-        policy = await capital_reader.read_policy(session, scope, symbol)
+        policy = await read_policy(session, scope, symbol)
         return _blocked(policy) if isinstance(policy, Blocked) else policy
 
 

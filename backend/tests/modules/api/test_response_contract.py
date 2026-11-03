@@ -298,7 +298,7 @@ def build_app(funding_reader: Any = None, *, empty: bool = False) -> FastAPI:
     unused: Any = object()
     reads: Any = _Empty() if empty else _Reads()
     history: Any = _Empty() if empty else _History()
-    app.state.read_models = ReadModels(reads, unused, unused, history, lambda scope: _Store())
+    app.state.read_models = ReadModels(reads, unused, history, lambda scope: _Store())
     return app
 
 

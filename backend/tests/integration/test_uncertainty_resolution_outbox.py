@@ -29,8 +29,9 @@ from bfx_funding_bot.modules.execution.uncertainty_requests import ResolutionSco
 from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
     UncertaintyResolutionWorker,
 )
+from bfx_funding_bot.modules.ledger.read import build_operator_reads
 from bfx_funding_bot.modules.ledger.tables import ExecutionResolutionJournalRow
-from bfx_funding_bot.modules.ledger.wiring import build_operator_reads, build_operator_resolution
+from bfx_funding_bot.modules.ledger.wiring import build_operator_resolution
 from tests.pg_templates import alembic as _alembic
 from tests.pg_templates import stamp_realm
 

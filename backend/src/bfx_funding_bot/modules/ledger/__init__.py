@@ -55,7 +55,7 @@ type AcceptanceDecision = Literal["accepted", "fenced", "incomplete_or_unequal"]
 # use these, so a state added here reaches the API schema and the generated console types.
 type OfferState = Literal["pending", "unknown", "claimed"]
 type UncertaintyState = Literal["open", "resolved"]
-# The operator-visible code of an uncertainty's subject (``_internal.reads.UNCERTAINTY_KINDS``
+# The operator-visible code of an uncertainty's subject (``read.reads.UNCERTAINTY_KINDS``
 # maps each subject to one, and mypy holds that map to this type).
 type UncertaintyKind = Literal["submit_outcome_unknown", "unattributed_venue_offer"]
 
@@ -1044,7 +1044,7 @@ class OfferView:
 class OperatorReads(Protocol):
     """Operator-console reads of one account scope on the caller's session.
 
-    Implemented by ``LedgerOperatorReads`` (``ledger.wiring.build_operator_reads``).
+    Implemented by ``LedgerOperatorReads`` (``ledger.read.build_operator_reads``).
     """
 
     async def list_uncertainties(
@@ -1167,13 +1167,8 @@ class PolicyRefused(ValueError):  # noqa: N818 - a refusal, carrying the store's
     """The policy store refused to read or write; ``str(exc)`` is its reason code."""
 
 
-class PolicyStore(Protocol):
-    """The scope's applied capital policy: the policy heads and revisions.
-
-    Lock ownership: the caller holds the scope lock (``ScopeLock.lock``) across
-    ``read_applied`` and the ``apply_policy`` based on it; the store never takes it for the
-    caller. The caller owns the transaction.
-    """
+class PolicyReader(Protocol):
+    """The scope's applied capital policy, read only: what the web API may hold."""
 
     @property
     def scope(self) -> Scope: ...
@@ -1181,6 +1176,15 @@ class PolicyStore(Protocol):
     async def read_applied(self, session: AsyncSession, *, symbol: str) -> AppliedPolicy:
         """The revision ``symbol``'s head points at, proven and parsed, or ``PolicyRefused``."""
         ...
+
+
+class PolicyStore(PolicyReader, Protocol):
+    """The scope's applied capital policy: the policy heads and revisions.
+
+    Lock ownership: the caller holds the scope lock (``ScopeLock.lock``) across
+    ``read_applied`` and the ``apply_policy`` based on it; the store never takes it for the
+    caller. The caller owns the transaction.
+    """
 
     async def apply_policy(
         self, session: AsyncSession, *, symbol: str, policy: CapitalPolicy,
@@ -1355,6 +1359,7 @@ __all__ = [
     "Outcome",
     "OutcomeAlreadyRecorded",
     "OutcomeKind",
+    "PolicyReader",
     "PolicyRefused",
     "PolicyStore",
     "PositionView",
