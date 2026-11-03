@@ -31,12 +31,14 @@ from bfx_funding_bot.modules.accounts.capital_amendment import (
     amend_capital_policy,
 )
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
-from bfx_funding_bot.modules.execution.operator_requests import (
-    APPLIED,
-    REJECTED,
+from bfx_funding_bot.modules.execution.operator_request_worker import (
     OperatorAuthority,
     OperatorRequestWorker,
     Outcome,
+)
+from bfx_funding_bot.modules.execution.operator_requests import (
+    APPLIED,
+    REJECTED,
     RejectionKind,
     RequestRejected,
 )

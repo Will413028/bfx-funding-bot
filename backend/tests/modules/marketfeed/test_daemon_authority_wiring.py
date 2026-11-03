@@ -184,7 +184,7 @@ async def test_the_daemon_rotates_its_vault_credential_and_restarts_on_its_own_s
     the daemon does not stop on."""
     from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.modules.execution.credential_rotation import CredentialRotationWorker
-    from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+    from bfx_funding_bot.modules.execution.operator_request_worker import operator_authorized
 
     engine, factory, path = await _env_and_db(monkeypatch, tmp_path, httpx_mock, name="rotation")
     await _apply_policies(factory)

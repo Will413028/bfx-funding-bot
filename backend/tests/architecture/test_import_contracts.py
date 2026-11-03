@@ -179,6 +179,25 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     } <= set(independent["forbidden_modules"])
 
 
+def test_contract_modules_exist() -> None:
+    """import-linter keeps a contract naming a module that does not exist: a forbidden entry
+    whose module was renamed or moved would pass silently. Every in-package module a
+    contract names must exist, so the PR that moves it also moves the entry."""
+    root = Path(__file__).resolve().parents[2]
+    with (root / "pyproject.toml").open("rb") as config_file:
+        contracts = tomllib.load(config_file)["tool"]["importlinter"]["contracts"]
+    missing: list[str] = []
+    for contract in contracts:
+        for key in ("source_modules", "forbidden_modules", "ancestors"):
+            for module in contract.get(key, []):
+                if not module.startswith("bfx_funding_bot") or "*" in module:
+                    continue
+                path = root / "src" / module.replace(".", "/")
+                if not (path.with_suffix(".py").is_file() or (path / "__init__.py").is_file()):
+                    missing.append(f"{contract['id']}: {module}")
+    assert missing == []
+
+
 def test_research_scripts_obtain_strategy_wiring_through_apps() -> None:
     scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
     violations: list[str] = []

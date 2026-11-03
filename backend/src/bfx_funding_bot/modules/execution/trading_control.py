@@ -29,12 +29,14 @@ from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
+from bfx_funding_bot.modules.execution.operator_request_worker import (
+    OperatorRequestWorker,
+    Outcome,
+)
 from bfx_funding_bot.modules.execution.operator_requests import (
     APPLIED,
     REJECTED,
     REQUESTED,
-    OperatorRequestWorker,
-    Outcome,
     RequestRejected,
 )
 from bfx_funding_bot.modules.execution.safety.tables import (

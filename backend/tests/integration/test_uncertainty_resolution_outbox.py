@@ -24,9 +24,9 @@ from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
 from bfx_funding_bot.modules.execution import operator_commands as commands
 from bfx_funding_bot.modules.execution.operator_commands import OperatorContext, ResolutionCommand
-from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
-from bfx_funding_bot.modules.execution.uncertainty_requests import (
-    ResolutionScope,
+from bfx_funding_bot.modules.execution.operator_request_worker import operator_authorized
+from bfx_funding_bot.modules.execution.uncertainty_requests import ResolutionScope
+from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
     UncertaintyResolutionWorker,
 )
 from bfx_funding_bot.modules.ledger.tables import ExecutionResolutionJournalRow

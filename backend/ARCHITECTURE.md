@@ -381,7 +381,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 **Quarantine（`_internal/quarantine.py`）**：`quarantine_opening` 與不可變的 `quarantine_member`，開在兩種情況：(a) 已 `ack`（或已綁定）的 attempt 的 offer 由完整證據證明不在 active、history 與 trades 裡（R6，`ack_unreflected`，`basis._can_quarantine`）；(b) mirror 上已確證終結的 offer／credit id 又出現在 active（`terminal_identity_reappeared`，同 symbol 已有未解的 plain quarantine（`source_attempt_id IS NULL`）就加成 member，否則另開；不併入 `ack_unreflected`）。quarantine 讓該 symbol 的 capital read 回 `execution_unknown`，只能由 operator 的 `manual` resolution 結束。
 
-**Operator resolution outbox**：operator CLI（`bfx_operator`）只 INSERT `uncertainty_resolution_requests` 的請求欄位（必須引用該 scope 最新的 accepted observation；webapi 只讀，migration `36e59526f8cf` 收回它的 INSERT）；`prepare` 在排入的 role 以生成欄位做預覽比對（advisory），daemon 的 `UncertaintyResolutionWorker` 在 scope lock 內以 attempt payload（digest 重驗）重跑同一條 `match_unknown` 規則後寫 `execution_resolution_journal`（帶 `operator_request_id`），請求列再記下結果（`_internal/operator_resolution.py`、`execution/operator_requests.py`）。operator 的 bind 需要點名該 offer 的 exact match、not-accepted 需要 zero match，沒有 settle／near-miss／認領檢查；`manual` 只用於 quarantine。
+**Operator resolution outbox**：operator CLI（`bfx_operator`）只 INSERT `uncertainty_resolution_requests` 的請求欄位（必須引用該 scope 最新的 accepted observation；webapi 只讀，migration `36e59526f8cf` 收回它的 INSERT）；`prepare` 在排入的 role 以生成欄位做預覽比對（advisory），daemon 的 `UncertaintyResolutionWorker` 在 scope lock 內以 attempt payload（digest 重驗）重跑同一條 `match_unknown` 規則後寫 `execution_resolution_journal`（帶 `operator_request_id`），請求列再記下結果（`_internal/operator_resolution.py`、`execution/uncertainty_resolution_worker.py`、`execution/operator_request_worker.py`）。operator 的 bind 需要點名該 offer 的 exact match、not-accepted 需要 zero match，沒有 settle／near-miss／認領檢查；`manual` 只用於 quarantine。
 
 **Bus 通知（`execution/events.py`、`command_boundary.py`、`ledger/__init__.py`）**：bus 不持久化任何東西，只在對應寫入 commit 之後發：`CommandOutcomeNotice`、`UnknownResolutionNotice`、`PositionReconciled`（每個 accepted cycle、每 symbol，取自該 cycle 自己的 basis，餵 NAV 告警）、`VenueHintNotification`（hint sink，無 DB 寫入），以及 audit 用的 `CancelRequested`／`CancelAcknowledged`。publish 失敗只記 log，不影響已 durable 的事實；任何通知都不是資金來源。
 
@@ -791,7 +791,7 @@ live daemon 開機時（讀憑證與任何交易之前）比對 image 內 `alemb
 account proxy/MFA，webapi 只需既有 membership/account SELECT grants，向 daemon
 讀 canonical status＋dry-evaluate；不讀 auth.user、不推算另一套 budget。
 缺 policy、disabled、halt 分別顯示；Decimal 保留字串，draft 不等於 applied。
-**Operator requests（`execution/operator_requests.py`，ADR D4'）**：所有會改動執行狀態的人為操作——
+**Operator requests（請求端 `execution/operator_requests.py`、worker 端 `execution/operator_request_worker.py`，ADR D4'；control plane 只能 import 請求端，`control-plane-exposure` 禁 worker 端）**：所有會改動執行狀態的人為操作——
 uncertainty 裁決（bind-to-venue／mark-not-accepted／manual-resolution，`uncertainty_resolution_requests`）、
 resume／kill（`trading_control_requests`）與幣別 enable／disable（`capital_policy_requests`）——走同一套 outbox 合約：寫入者（operator CLI；webapi 只剩 kill 與 disable）只以
 `insert_request` 寫該表的請求欄位（model 的 `REQUEST_COLUMNS`＝migration 的欄位級 INSERT grant）並回 202，

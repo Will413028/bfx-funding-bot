@@ -14,11 +14,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from bfx_funding_bot.modules.execution.operator_requests import (
-    APPLIED,
+from bfx_funding_bot.modules.execution.operator_request_worker import (
     NeedsPreparation,
     OperatorRequestWorker,
     Outcome,
+)
+from bfx_funding_bot.modules.execution.operator_requests import (
+    APPLIED,
     RequestRejected,
     insert_request,
 )
