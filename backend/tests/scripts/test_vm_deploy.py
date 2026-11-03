@@ -3100,7 +3100,7 @@ def test_release_yml_attests_exactly_the_digest_the_deployer_verifies() -> None:
     release = ci["jobs"]["release"]
     assert release["uses"] == f"./{bfx.RELEASE_WORKFLOW}"
     assert release["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/main'"
-    assert set(release["needs"]) == set(ci["jobs"]) - {"release", "migration_lint"}
+    assert set(release["needs"]) == set(ci["jobs"]) - {"release", "migration_lint", "gate"}
     assert release["permissions"] == job["permissions"]
 
 

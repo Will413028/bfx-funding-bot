@@ -402,3 +402,20 @@ jobs:
       id-token: write
       attestations: write
     uses: ./.github/workflows/release.yml
+
+  gate:
+    # The only required check on main: it passes when every other job in this workflow succeeded or was skipped.
+    name: gate (ci)
+    if: always()
+    needs: [frontend, e2e_smoke, deploy_policy, backend_unit, backend_gate, backend_integration, migration_lint, quality_ratchet, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every job succeeded or was skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do
+            case "$r" in success|skipped) ;; *) echo "a needed job ended with: $r"; exit 1 ;; esac
+          done
