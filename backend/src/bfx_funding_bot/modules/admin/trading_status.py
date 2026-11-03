@@ -40,6 +40,7 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, GuardResult
+from bfx_funding_bot.modules.execution.readiness import TradingReadiness
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillResult
 from bfx_funding_bot.modules.execution.safety.trading_state import (
@@ -54,7 +55,6 @@ from bfx_funding_bot.modules.ledger import (
     Scope,
     ScopeLock,
 )
-from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from bfx_funding_bot.modules.strategy import (
     CellConfig,
     DecisionOutcome,

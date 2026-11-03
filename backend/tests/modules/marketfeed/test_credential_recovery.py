@@ -54,6 +54,7 @@ from bfx_funding_bot.modules.execution.credential_rotation import (
 )
 from bfx_funding_bot.modules.execution.operator_commands import OperatorContext
 from bfx_funding_bot.modules.execution.protocols import AccountContext
+from bfx_funding_bot.modules.execution.readiness import TradingReadiness
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.marketfeed import daemon as daemon_module
 from bfx_funding_bot.modules.marketfeed.daemon import (
@@ -62,7 +63,6 @@ from bfx_funding_bot.modules.marketfeed.daemon import (
     credential_recovery_retry_delay_s,
 )
 from bfx_funding_bot.modules.marketfeed.healthz import make_app
-from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from bfx_funding_bot.modules.observability.tables import BotRunRow
 from tests.async_wait import until
 

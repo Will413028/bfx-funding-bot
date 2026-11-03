@@ -17,15 +17,13 @@ from pathlib import Path
 import pytest
 from pytest_httpx import HTTPXMock
 
-from bfx_funding_bot.modules.observability.metrics import (
+from bfx_funding_bot.modules.execution.middleware import (
     MetricsSubmitMiddleware,
     TimedReconcileRecovery,
-)
-from bfx_funding_bot.modules.observability.tracing import (
-    DaemonTracing,
     TracedReconcileRecovery,
     TracingSubmitMiddleware,
 )
+from bfx_funding_bot.modules.observability.tracing import DaemonTracing
 from tests.modules.marketfeed.account_test_helpers import (
     boot_live_construction,
     configure_account_env,

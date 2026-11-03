@@ -14,10 +14,10 @@ from decimal import Decimal
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
-from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
+from bfx_funding_bot.modules.performance.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.strategy import ResearchStrategySpec, Strategy
 
 

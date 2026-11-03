@@ -43,7 +43,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from bfx_funding_bot.external.bitfinex.funding_stat_row import FundingStat
-from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
+from bfx_funding_bot.modules.performance.oos_profitability import WindowOutcome
 
 if TYPE_CHECKING:
     # Annotations only: credit_attribution -> weekly_attribution imports this module.

@@ -952,7 +952,7 @@ allowlist 或第二個 postgres，理由是單一 VM 的管理成本；最小權
 | bot、webapi、CLI、週報、研究 → Postgres | `bfx_default`（`docker-compose.bot.yml` 未指定 network，用 project 預設網路） | 5432／PostgreSQL；主機另有 `127.0.0.1:5432`（`docker-compose.bot.yml:44-45`） | 各自的 role 密碼（10a） | 無（`DATABASE_URL` 不帶 sslmode；`core/settings.py:43` 只接受 `disable`／`verify-ca`／`verify-full`） |
 | `bfx-op` → bot | `docker exec` 進 bot 容器再連 `127.0.0.1:8080`（`deploy/vm/ops/bfx_op.py:114,411-412`） | HTTP | `BFX_ADMIN_TOKEN` | 無（容器內） |
 | homelab → bot | `/metrics` 由 homelab 的 Prometheus 讀；設定不在 repo | 8080／HTTP | 無 | 依 homelab 設定 |
-| bot → OTLP tracing | `deploy/vm/live.env:20` 開啟，預設 `http://tempo:4317`（`modules/observability/tracing.py:49`）；collector 不在 repo | 4317／OTLP gRPC | 無 | 無；送不出去時 fail-open |
+| bot → OTLP tracing | `deploy/vm/live.env:20` 開啟，預設 `http://tempo:4317`（`modules/observability/tracing.py:44`）；collector 不在 repo | 4317／OTLP gRPC | 無 | 無；送不出去時 fail-open |
 | operator 裝置 → 主機 tailscaled | tailnet | Tailscale SSH | tailnet 身分＋SSH 規則（check mode） | WireGuard |
 | bot → Bitfinex | 對外 | 443／HTTPS `api.bitfinex.com`、`api-pub.bitfinex.com`；WSS `api.bitfinex.com/ws/2`、`api-pub.bitfinex.com/ws/2`（`external/bitfinex/auth_rest.py:425`、`auth_ws.py:368`、`ws.py:25`、`apps/bot.py:198`） | API key＋HMAC-SHA384（只有寫入與帳戶讀取） | TLS，驗證憑證 |
 | 週報、研究 → Bitfinex public、Binance | 對外 | 443／HTTPS（`modules/external_signals/client.py:40`、`docs/runbooks/research-one-shot-jobs.md:10-11`） | 無 | TLS |

@@ -32,7 +32,9 @@ from bfx_funding_bot.core.db import make_engine, make_session_factory, session_s
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
-from bfx_funding_bot.modules.backtest.oos_profitability import (
+from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
+from bfx_funding_bot.modules.candles.repository import get_candles_in_range
+from bfx_funding_bot.modules.performance.oos_profitability import (
     ActiveReturnSummary,
     OosSummary,
     WindowOutcome,
@@ -43,8 +45,6 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     sharpe_skew_kurt,
     summarize_oos,
 )
-from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
-from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.strategy import CellConfig, Strategy
 
 logger = logging.getLogger("run_oos_profitability")

@@ -87,7 +87,12 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
+    MetricsSubmitMiddleware,
     ReservationEmittingMiddleware,
+    TimedReconcileRecovery,
+    TracedReconcileRecovery,
+    TracingSubmitMiddleware,
+    instrument_ws_dispatcher,
 )
 from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
@@ -95,6 +100,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     ExecutorPort,
     GuardRule,
 )
+from bfx_funding_bot.modules.execution.readiness import TradingReadiness
 from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
@@ -159,7 +165,6 @@ from bfx_funding_bot.modules.marketfeed.daemon import (
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter
 from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookService, FundingBookStore
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
-from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     Scheduler,
     now_ms_utc,
@@ -176,19 +181,12 @@ from bfx_funding_bot.modules.observability.bot_runs import BotRunRecord
 from bfx_funding_bot.modules.observability.error_tracking import init_error_tracking
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
-    MetricsSubmitMiddleware,
-    TimedReconcileRecovery,
     attach_httpx_metrics,
     install_log_metrics_handler,
 )
 from bfx_funding_bot.modules.observability.resource import EventResource
 from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
-from bfx_funding_bot.modules.observability.tracing import (
-    TracedReconcileRecovery,
-    TracingSubmitMiddleware,
-    instrument_ws_dispatcher,
-    tracing_from_env,
-)
+from bfx_funding_bot.modules.observability.tracing import tracing_from_env
 from bfx_funding_bot.modules.strategy import CellConfig, configured_symbols
 from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 

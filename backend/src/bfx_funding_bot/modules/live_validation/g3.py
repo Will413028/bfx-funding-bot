@@ -22,11 +22,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import load_settings, require_deployment_environment
 from bfx_funding_bot.external.bitfinex.auth_rest import InterestPayment
-from bfx_funding_bot.modules.backtest.oos_profitability import (
-    WindowOutcome,
-    bootstrap_ci,
-    paired_active_returns,
-)
 from bfx_funding_bot.modules.live_validation.attribution_loader import (
     MARKET_TIMEFRAME,
     funding_stats_of,
@@ -71,6 +66,11 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
 from bfx_funding_bot.modules.live_validation.weekly_attribution import (
     WEEK_MS,
     calendar_week_start,
+)
+from bfx_funding_bot.modules.performance.oos_profitability import (
+    WindowOutcome,
+    bootstrap_ci,
+    paired_active_returns,
 )
 
 SYMBOL = "fUST"

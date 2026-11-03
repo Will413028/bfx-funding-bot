@@ -19,10 +19,10 @@ from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.eda import close_over_ema_sigma
 from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
-from bfx_funding_bot.modules.backtest.oos_profitability import active_return_summary
 from bfx_funding_bot.modules.backtest.split import compute_train_end_mts
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
+from bfx_funding_bot.modules.performance.oos_profitability import active_return_summary
 from bfx_funding_bot.modules.strategy import ResearchStrategySpec, Strategy
 
 # A scored combo: (params, mean_active, information_ratio, pct_months_outperform)

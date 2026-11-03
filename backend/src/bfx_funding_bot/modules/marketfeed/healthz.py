@@ -39,7 +39,7 @@ from bfx_funding_bot.core.health import LIVENESS_THRESHOLDS, HealthProbe
 
 if TYPE_CHECKING:
     from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
-    from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
+    from bfx_funding_bot.modules.execution.readiness import TradingReadiness
     from bfx_funding_bot.modules.observability.metrics import DaemonMetrics
 
 log = logging.getLogger(__name__)
