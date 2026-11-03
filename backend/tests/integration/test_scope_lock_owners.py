@@ -27,10 +27,10 @@ from sqlalchemy import insert, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.apps.bot_ports import build_policy_ports
-from bfx_funding_bot.modules.accounts.capital_amendment import PolicyChanges, amend_capital_policy
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.ledger import Scope
+from bfx_funding_bot.modules.ledger.capital_amendment import PolicyChanges, amend_capital_policy
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store, build_scope_lock
 from bfx_funding_bot.modules.trading import CapitalPolicy
 from scripts import bootstrap_simulation_db as bootstrap

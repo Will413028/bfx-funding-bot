@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pytest
 
-from bfx_funding_bot.modules.accounts.capital_amendment import PolicyChanges, amend_capital_policy
+from bfx_funding_bot.modules.ledger.capital_amendment import PolicyChanges, amend_capital_policy
 
 
 @pytest.mark.asyncio

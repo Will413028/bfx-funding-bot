@@ -33,11 +33,11 @@ from bfx_funding_bot.apps.bot_ports import build_policy_ports
 from bfx_funding_bot.core.authority import require_ledger_authority
 from bfx_funding_bot.core.database_realm import read_database_realm
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
-from bfx_funding_bot.modules.accounts.capital_amendment import (
+from bfx_funding_bot.modules.ledger import PolicyRefused, Scope
+from bfx_funding_bot.modules.ledger.capital_amendment import (
     PolicyChanges,
     amend_capital_policy,
 )
-from bfx_funding_bot.modules.ledger import PolicyRefused, Scope
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:

@@ -19,10 +19,6 @@ import pytest
 from sqlalchemy import create_engine, select, text
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
-from bfx_funding_bot.modules.accounts.capital_amendment import (
-    PolicyChanges,
-    amend_capital_policy,
-)
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
@@ -38,6 +34,10 @@ from bfx_funding_bot.modules.execution.safety.protection import (
 )
 from bfx_funding_bot.modules.execution.safety.tables import NavWindowSampleRow
 from bfx_funding_bot.modules.ledger import PolicyRefused
+from bfx_funding_bot.modules.ledger.capital_amendment import (
+    PolicyChanges,
+    amend_capital_policy,
+)
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.observability.alerts import NAV_DROP
