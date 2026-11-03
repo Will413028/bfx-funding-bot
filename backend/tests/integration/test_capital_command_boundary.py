@@ -30,7 +30,7 @@ from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate, C
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials, SubmittedOrder
 from bfx_funding_bot.modules.execution.safety.hard_guards import CapitalPolicyGuard, ManualKillGuard
-from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 from bfx_funding_bot.modules.ledger import CapitalAvailable, PolicyRefused
 from bfx_funding_bot.modules.ledger.tables import (
     CapitalCommandClockRow,

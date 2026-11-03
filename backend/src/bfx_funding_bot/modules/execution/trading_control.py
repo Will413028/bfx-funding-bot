@@ -50,6 +50,8 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     HALTED,
     IllegalTradingTransition,
     TransitionResult,
+)
+from bfx_funding_bot.modules.execution.safety.trading_state_store import (
     announce,
     append_transition,
     read_current,

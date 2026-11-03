@@ -150,7 +150,9 @@ class SimEnv:
 
     async def activate(self) -> None:
         """The operator's ACTIVE: a fresh account is HALTED until someone says otherwise."""
-        from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+        from bfx_funding_bot.modules.execution.safety.trading_state_store import (
+            TradingStateRepository,
+        )
 
         await TradingStateRepository(
             self.factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci",

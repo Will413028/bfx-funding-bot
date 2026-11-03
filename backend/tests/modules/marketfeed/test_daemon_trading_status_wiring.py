@@ -19,7 +19,7 @@ from pytest_httpx import HTTPXMock
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bfx_funding_bot.core.writer_lock import WriterLock
-from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 from tests.modules.marketfeed.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
     boot_live_construction,

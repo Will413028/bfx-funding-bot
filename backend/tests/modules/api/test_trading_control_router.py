@@ -160,7 +160,7 @@ async def test_a_kill_is_never_blocked_by_a_pending_resume(migrated_db, monkeypa
 @pytest.mark.asyncio
 async def test_the_overview_shows_the_state_and_the_cancel_all_of_the_halt(migrated_db, monkeypatch):
     from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
-    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
     app, factory, account = await _app(migrated_db, monkeypatch)
     repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
     await repo.transition("ACTIVE", cause="operator", actor="operator", reason="start", now_ms=1)
