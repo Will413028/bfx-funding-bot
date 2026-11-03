@@ -45,7 +45,7 @@ from bfx_funding_bot.modules.ledger import (
 from bfx_funding_bot.modules.ledger._internal import operator_resolution as resolution_module
 from bfx_funding_bot.modules.ledger.read import build_operator_evidence, build_operator_reads
 from bfx_funding_bot.modules.ledger.tables import ExecutionResolutionJournalRow
-from bfx_funding_bot.modules.ledger.wiring import build_operator_resolution
+from bfx_funding_bot.modules.ledger.wiring import build_operator_resolution, build_scope_lock
 
 from .test_ledger_capital_reader import (
     book,  # noqa: F401 - fixture re-export
@@ -87,7 +87,7 @@ class Allow:
 def make_worker(factory: Any, resolution: Any = RESOLUTION) -> UncertaintyResolutionWorker:
     return UncertaintyResolutionWorker(
         session_factory=factory, scope=RSCOPE, authority=Allow(), clock=lambda: WORKER_NOW,
-        resolution=resolution,
+        resolution=resolution, scope_lock=build_scope_lock(),
     )
 
 

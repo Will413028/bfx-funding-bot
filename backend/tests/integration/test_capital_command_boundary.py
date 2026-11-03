@@ -37,7 +37,7 @@ from bfx_funding_bot.modules.ledger.tables import (
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
 )
-from bfx_funding_bot.modules.ledger.wiring import build_policy_store
+from bfx_funding_bot.modules.ledger.wiring import build_policy_store, build_scope_lock
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.trading import CapitalPolicy, CapitalScope
 from tests.async_wait import until
@@ -97,7 +97,7 @@ async def read_capital(stack: Stack, cell_id: str, symbol: str = "fUST") -> Capi
 
 
 def status_reads(stack: Stack) -> Any:
-    from bfx_funding_bot.modules.admin.trading_status import CapitalStatusReads
+    from bfx_funding_bot.modules.execution.trading_status import CapitalStatusReads
     return CapitalStatusReads(authority=stack.capital, lock=stack.lock, scope=SCOPE,
                               session_factory=stack.factory, clock=lambda: NOW)
 
@@ -206,7 +206,7 @@ async def boundary(stack: Stack, *, available: str = "1000") -> Rig:
         market_snapshot=replace(_valid_snapshot(), snapshot_id="book", max_age_ms=30000),
         funding_amount_evidence=evidence(),
     )
-    halt = TradingStateRepository(stack.factory, account_id=ACCOUNT, deployment_environment="ci")
+    halt = TradingStateRepository(stack.factory, account_id=ACCOUNT, deployment_environment="ci", scope_lock=build_scope_lock())
     await halt.transition("ACTIVE", cause="operator", reason="isolated test only", actor="test",
                           now_ms=1200)
     venue = Venue(stack)
@@ -305,9 +305,9 @@ async def test_planner_attaches_the_status_budget_and_revision(gate_stack):
 async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(gate_stack):
     from bfx_funding_bot.core.health import HealthProbe
     from bfx_funding_bot.core.telemetry import Phase
-    from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
     from bfx_funding_bot.modules.execution.deployment.submit_attempt import SubmitAttemptRecorder
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+    from bfx_funding_bot.modules.execution.trading_status import TradingStatusService
     from bfx_funding_bot.modules.strategy import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell
     rig = await boundary(gate_stack)
@@ -362,9 +362,9 @@ async def test_status_with_an_envelope_serializes_to_json(gate_stack):
 
     from bfx_funding_bot.core.health import HealthProbe
     from bfx_funding_bot.core.telemetry import Phase
-    from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
     from bfx_funding_bot.modules.execution.deployment.submit_attempt import SubmitAttemptRecorder
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+    from bfx_funding_bot.modules.execution.trading_status import TradingStatusService
     from bfx_funding_bot.modules.strategy import StrategyName
     from bfx_funding_bot.modules.trading import OfferEnvelope
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell
@@ -455,16 +455,16 @@ async def test_cancel_admission_needs_an_evaluator_that_knows_cancel_exemptions(
 async def test_halt_writer_waits_for_authorization_lock(pg_session_factory):
     from sqlalchemy import text
 
-    from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
+    from bfx_funding_bot.modules.ledger import Scope
     factory = pg_session_factory
     account = uuid4()
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="halt-lock"))
-    halt = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    halt = TradingStateRepository(factory, account_id=account, deployment_environment="ci", scope_lock=build_scope_lock())
     task = None
     try:
         async with factory.begin() as session:
-            await acquire_transaction_lock(session, account_id=str(account), deployment_environment="ci")
+            await build_scope_lock().lock(session, Scope(account, "ci"))
             task = asyncio.create_task(halt.transition("HALTED", cause="operator", reason="stop",
                                                        actor="test"))
 

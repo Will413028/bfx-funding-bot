@@ -21,7 +21,6 @@ from uuid import UUID
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
 from bfx_funding_bot.modules.execution.operator_requests import (
     FAILED,
     OPERATOR_NOT_AUTHORIZED,
@@ -30,6 +29,7 @@ from bfx_funding_bot.modules.execution.operator_requests import (
     RequestRejected,
     RequestState,
 )
+from bfx_funding_bot.modules.ledger import Scope, ScopeLock
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +98,7 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
         account_id: UUID,
         environment: str,
         authority: OperatorAuthority,
+        scope_lock: ScopeLock,
         clock: Callable[[], int] | None = None,
         ownership: Callable[[], Awaitable[bool]] | None = None,
         poll_interval_s: float = 2.0,
@@ -105,6 +106,10 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
         self.session_factory = session_factory
         self.account_id = account_id
         self.environment = environment
+        self.ledger_scope = Scope(account_id, environment)
+        # The ledger's lock, the one every money-state write of this scope is under;
+        # nothing outside the ledger takes the primitive (ADR 2026-10-19 D4).
+        self.scope_lock = scope_lock
         # Required, not defaulted: a worker that forgot to check who asked
         # would apply a revoked operator's request.
         self.authority = authority
@@ -200,8 +205,7 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
             return request_id
 
     async def _lock(self, session: AsyncSession) -> None:
-        await acquire_transaction_lock(session, account_id=str(self.account_id),
-                                       deployment_environment=self.environment)
+        await self.scope_lock.lock(session, self.ledger_scope)
 
     async def _settle(self, request_id: UUID, *, prepared: PreparedT | None) -> str:
         row: Any = None

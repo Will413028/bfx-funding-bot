@@ -58,6 +58,7 @@ from bfx_funding_bot.modules.ledger import (
     UncertaintyView,
     observation_evidence_ref,
 )
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 
 ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 OTHER_ACCOUNT_ID = UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
@@ -182,7 +183,7 @@ def _worker(factory, ledger: _Ledger, *, account: UUID = ACCOUNT_ID,
 
     return UncertaintyResolutionWorker(
         session_factory=factory, scope=ResolutionScope(account, "ci"),
-        authority=authority or _Authority(), clock=lambda: 5_000, resolution=ledger)
+        authority=authority or _Authority(), clock=lambda: 5_000, resolution=ledger, scope_lock=build_scope_lock())
 
 
 def _apply_queued(app, *, authority: _Authority | None = None) -> bool:

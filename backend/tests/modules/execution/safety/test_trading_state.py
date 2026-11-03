@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.safety.tables import TradingStateRow
 from bfx_funding_bot.modules.execution.safety.trading_state import IllegalTradingTransition
 from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 
 
 @pytest_asyncio.fixture
@@ -34,7 +35,7 @@ async def scope(sqlite_engine):
 
 
 def _repo(factory, account: UUID, env: str = "ci") -> TradingStateRepository:
-    return TradingStateRepository(factory, account_id=account, deployment_environment=env)
+    return TradingStateRepository(factory, account_id=account, deployment_environment=env, scope_lock=build_scope_lock())
 
 
 async def _rows(factory) -> int:

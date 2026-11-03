@@ -556,6 +556,7 @@ forbidden_modules = [
     "bfx_funding_bot.external.bitfinex.funding_trades_ws",
     "bfx_funding_bot.modules.admin",
     "bfx_funding_bot.modules.simulated_venue",
+    "bfx_funding_bot.modules.execution.trading_status",
     "bfx_funding_bot.modules.execution.audit",
     "bfx_funding_bot.modules.execution.bus",
     "bfx_funding_bot.modules.execution.capital_policy_control",
@@ -610,9 +611,19 @@ forbidden_modules = [
     "bfx_funding_bot.modules.ledger.wiring",
     "bfx_funding_bot.modules.ledger._internal",
     "bfx_funding_bot.core.writer_lock",
+    "bfx_funding_bot.core.xact_lock",
 ]
 ignore_imports = []
 broken_contract_guidance = "webapi and the operator API only record requests and read; the bot applies them (ADR 2026-08-31 D4'', ADR 2026-10-19 D6). Move the read you need below these modules; do not add ignores."
+
+[[tool.importlinter.contracts]]
+id = "xact-lock-owner"
+name = "Only the ledger's clock takes the per-account transaction lock"
+type = "protected"
+protected_modules = ["bfx_funding_bot.core.xact_lock"]
+allowed_importers = ["bfx_funding_bot.modules.ledger._internal.clock"]
+ignore_imports = []
+broken_contract_guidance = "Take the scope lock through the ledger's ScopeLock (injected from apps); the lock has one owner (ADR 2026-10-19 D4). Do not add ignores."
 
 [[tool.importlinter.contracts]]
 id = "execution-acyclic"

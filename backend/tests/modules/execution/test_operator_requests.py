@@ -28,6 +28,7 @@ from bfx_funding_bot.modules.execution.safety.tables import (
     TradingControlRequestRow,
     TradingStateRow,
 )
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 
 pytestmark = pytest.mark.integration
 
@@ -43,7 +44,8 @@ class Probe(OperatorRequestWorker[TradingControlRequestRow, str]):
             return authorized
 
         super().__init__(session_factory=factory, account_id=account, environment="ci",
-                         authority=authority, clock=lambda: 5_000)
+                         authority=authority, scope_lock=build_scope_lock(),
+                         clock=lambda: 5_000)
         self.behaviour = behaviour
         self.calls: list[str | None] = []
         self.prepared = 0

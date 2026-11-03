@@ -30,6 +30,7 @@ from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
 from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from bfx_funding_bot.modules.observability import alerts
 from tests.async_wait import until
 
@@ -150,7 +151,7 @@ async def trading(sqlite_engine: Any) -> Any:
     account = uuid4()
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="alerts"))
-    return factory, TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    return factory, TradingStateRepository(factory, account_id=account, deployment_environment="ci", scope_lock=build_scope_lock())
 
 
 @pytest.mark.asyncio
@@ -255,7 +256,7 @@ async def test_no_alert_for_a_transition_that_was_not_committed(installed: Any, 
     sink = installed(transport)
     factory, repo = trading
     failing = TradingStateRepository(_CommitFails(factory), account_id=repo.account_id,  # type: ignore[arg-type]
-                                     deployment_environment="ci")
+                                     deployment_environment="ci", scope_lock=build_scope_lock())
     with pytest.raises(RuntimeError, match="commit failed"):
         await failing.transition("HALTED", cause="operator", actor="will", reason="x")
     assert await repo.current() is None

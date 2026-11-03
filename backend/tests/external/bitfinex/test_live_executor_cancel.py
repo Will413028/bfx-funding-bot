@@ -46,6 +46,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
 )
 from bfx_funding_bot.modules.ledger import CancelAdmitted, CancelProvenance, Scope
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from bfx_funding_bot.modules.strategy import DecisionPayload, StrategyName
 from tests.integration.test_ledger_schema_roles import ledger_db as ledger_db
 from tests.modules.execution.fake_boundary import Recording
@@ -131,7 +132,7 @@ async def test_cancel_retry_checks_current_scoped_uncertainty(ledger_db, monkeyp
         await stack.journal.record_outcome(
             SCOPE, attempt.attempt_id, CommandOutcome("ack", "101", None, NOW, {}))
         halt = TradingStateRepository(
-            stack.factory, account_id=ACCOUNT, deployment_environment="ci")
+            stack.factory, account_id=ACCOUNT, deployment_environment="ci", scope_lock=build_scope_lock())
         await halt.transition("ACTIVE", cause="operator", reason="test", actor="test",
                               now_ms=1200)
         if state != "ACTIVE":

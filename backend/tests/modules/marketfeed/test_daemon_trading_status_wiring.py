@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bfx_funding_bot.core.writer_lock import WriterLock
 from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from tests.modules.marketfeed.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
     boot_live_construction,
@@ -31,7 +32,7 @@ async def _build(monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock, *, active: 
         # An operator's explicit ACTIVE: without any decision the account is
         # treated as HALTED and nothing trades.
         await TradingStateRepository(async_sessionmaker(engine, expire_on_commit=False),
-            account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci",
+            account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci", scope_lock=build_scope_lock(),
         ).transition("ACTIVE", cause="operator", reason="fixture: trading", actor="test")
 
     daemon, engine = await boot_live_construction(

@@ -56,6 +56,7 @@ from bfx_funding_bot.modules.execution.operator_commands import OperatorContext
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.readiness import TradingReadiness
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from bfx_funding_bot.modules.marketfeed import daemon as daemon_module
 from bfx_funding_bot.modules.marketfeed.daemon import (
     Daemon,
@@ -404,7 +405,7 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
         session_factory=factory, account_id=ACCOUNT, environment="ci", authority=authority,
         client_factory=_NewKeyClient,
         kek_loader=lambda: KEK, restart=restart,
-        clock=lambda: T0, poll_interval_s=0.01)
+        clock=lambda: T0, poll_interval_s=0.01, scope_lock=build_scope_lock())
     worker.bind_run(run_id, started)
     fake = _daemon(engine, Venue(_refused()), rotation=worker, run_started_at_ms=started,
                    wait=_wait_or_stop, delay=lambda _n: 3600.0)

@@ -56,7 +56,6 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
     get_exchange_account,
 )
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccountCredential
-from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
 from bfx_funding_bot.modules.candles.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.audit import AuditContext
@@ -87,6 +86,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     WriterLockWatch,
 )
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
+from bfx_funding_bot.modules.execution.trading_status import TradingStatusService
 from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
     UncertaintyResolutionWorker,
 )

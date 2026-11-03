@@ -33,7 +33,7 @@ from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLeve
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuote
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger.tables import ExecutionResolutionJournalRow
-from bfx_funding_bot.modules.ledger.wiring import build_policy_store
+from bfx_funding_bot.modules.ledger.wiring import build_policy_store, build_scope_lock
 from bfx_funding_bot.modules.simulated_venue import (
     BookSnapshot,
     FaultPlan,
@@ -155,7 +155,7 @@ class SimEnv:
         )
 
         await TradingStateRepository(
-            self.factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci",
+            self.factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci", scope_lock=build_scope_lock(),
         ).transition("ACTIVE", cause="operator", actor="test", reason="simulated run",
                      now_ms=self.clock.now)
 

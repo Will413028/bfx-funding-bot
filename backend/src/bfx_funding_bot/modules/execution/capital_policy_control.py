@@ -5,7 +5,7 @@ flag is the everyday stop. The web API only inserts an ``enable`` or
 ``disable`` request (``capital_policy_requests``, the operator-request outbox);
 the :class:`CapitalPolicyRequestWorker` applies it under the account lock after
 re-checking the operator, through the amendment path
-(``accounts.capital_amendment`` → the ledger's ``PolicyStore``), and
+(``ledger.capital_amendment`` → the ledger's ``PolicyStore``), and
 records one outcome on the row; the revision it appends names the request
 (``capital_policy_revisions.operator_request_id``). An ``unchanged`` request
 appends nothing.
@@ -26,10 +26,6 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.modules.accounts.capital_amendment import (
-    PolicyChanges,
-    amend_capital_policy,
-)
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
 from bfx_funding_bot.modules.execution.operator_request_worker import (
     OperatorAuthority,
@@ -42,7 +38,11 @@ from bfx_funding_bot.modules.execution.operator_requests import (
     RejectionKind,
     RequestRejected,
 )
-from bfx_funding_bot.modules.ledger import PolicyRefused, PolicyStore, Scope, ScopeLock
+from bfx_funding_bot.modules.ledger import PolicyRefused, PolicyStore, ScopeLock
+from bfx_funding_bot.modules.ledger.capital_amendment import (
+    PolicyChanges,
+    amend_capital_policy,
+)
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
@@ -77,12 +77,11 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
         poll_interval_s: float = 2.0,
     ) -> None:
         super().__init__(session_factory=session_factory, account_id=account_id,
-                         environment=environment, authority=authority, clock=clock,
-                         ownership=ownership, poll_interval_s=poll_interval_s)
-        if policy_store.scope != Scope(account_id, environment):
+                         environment=environment, authority=authority, scope_lock=scope_lock,
+                         clock=clock, ownership=ownership, poll_interval_s=poll_interval_s)
+        if policy_store.scope != self.ledger_scope:
             raise ValueError("policy store scope differs from the worker's")
         self.policy_store = policy_store
-        self.scope_lock = scope_lock
 
     async def apply(self, session: AsyncSession, row: CapitalPolicyRequestRow,
                     prepared: None) -> Outcome:

@@ -25,10 +25,6 @@ import pytest
 
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import Phase
-from bfx_funding_bot.modules.admin.trading_status import (
-    CapitalStatusReads,
-    TradingStatusService,
-)
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
@@ -40,6 +36,10 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     TransitionResult,
     restates,
     validate_transition,
+)
+from bfx_funding_bot.modules.execution.trading_status import (
+    CapitalStatusReads,
+    TradingStatusService,
 )
 from bfx_funding_bot.modules.ledger import CapitalBlocked, Scope
 from bfx_funding_bot.modules.observability.metrics import DaemonMetrics
