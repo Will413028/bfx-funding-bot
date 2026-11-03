@@ -5,6 +5,7 @@ constant to make a new violation pass silently.
 """
 
 import ast
+import re
 import tomllib
 from pathlib import Path
 
@@ -181,20 +182,31 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
 
 def test_contract_modules_exist() -> None:
     """import-linter keeps a contract naming a module that does not exist: a forbidden entry
-    whose module was renamed or moved would pass silently. Every in-package module a
-    contract names must exist, so the PR that moves it also moves the entry."""
+    whose module was renamed or moved would pass silently. Every in-package module any
+    contract field names (a wildcard entry: the part before its first wildcard segment)
+    must exist, so the PR that moves a module also moves its entries."""
     root = Path(__file__).resolve().parents[2]
     with (root / "pyproject.toml").open("rb") as config_file:
         contracts = tomllib.load(config_file)["tool"]["importlinter"]["contracts"]
+
+    def strings(value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [item for element in value for item in strings(element)]
+        return []
+
     missing: list[str] = []
     for contract in contracts:
-        for key in ("source_modules", "forbidden_modules", "ancestors"):
-            for module in contract.get(key, []):
-                if not module.startswith("bfx_funding_bot") or "*" in module:
-                    continue
-                path = root / "src" / module.replace(".", "/")
-                if not (path.with_suffix(".py").is_file() or (path / "__init__.py").is_file()):
-                    missing.append(f"{contract['id']}: {module}")
+        for value in contract.values():
+            for text in strings(value):
+                for module in re.findall(r"bfx_funding_bot[\w.*]*", text):
+                    segments = module.split(".")
+                    if any("*" in segment for segment in segments):
+                        segments = segments[: next(i for i, seg in enumerate(segments) if "*" in seg)]
+                    path = root / "src" / "/".join(segments)
+                    if not (path.with_suffix(".py").is_file() or (path / "__init__.py").is_file()):
+                        missing.append(f"{contract['id']}: {module}")
     assert missing == []
 
 

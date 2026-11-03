@@ -24,6 +24,9 @@ The worker never holds a request hostage: a request whose outcome cannot be
 written is marked failed in its own transaction, and one that cannot even be
 marked is skipped by this process (a restart retries it), so one bad row cannot
 block the queue behind it.
+
+This module is the request-row side, which the control plane may import; the worker
+is ``execution.operator_request_worker``.
 """
 from __future__ import annotations
 
