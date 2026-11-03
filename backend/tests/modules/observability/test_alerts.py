@@ -1,6 +1,6 @@
 """Telegram alert sink (T8): never in the way of trading, de-duplicated, rate-limited.
 
-Hooks under test live in safety/trading_state.py, safety/protection.py and
+Hooks under test live in safety/trading_state_store.py, safety/protection.py and
 safety/kill_switch.py; the daemon only installs the sink and reports a refused
 boot. A hung or failing Telegram must not delay a single trading-path call.
 """
@@ -29,7 +29,7 @@ from bfx_funding_bot.external.bitfinex.order_port import FundingCancelAllResult
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
-from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 from bfx_funding_bot.modules.observability import alerts
 from tests.async_wait import until
 

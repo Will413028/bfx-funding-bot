@@ -129,9 +129,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     NavDropMonitor,
     WriterLockWatch,
 )
-from bfx_funding_bot.modules.execution.safety.trading_state import (
-    TradingStateRepository,
-)
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
 from bfx_funding_bot.modules.execution.uncertainty_requests import ResolutionScope
 from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
@@ -1115,7 +1113,7 @@ def main() -> None:
 
 async def _run() -> None:
     # T8: operator alerts. Installed before anything can refuse the boot; hooks in
-    # safety/{trading_state,protection,kill_switch}.py emit into it. Log-only
+    # safety/{trading_state_store,protection,kill_switch}.py emit into it. Log-only
     # (said once) when TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set.
     alerts.install(alerts.AlertSink.from_environment(os.environ))
     try:

@@ -18,10 +18,8 @@ import bfx_funding_bot.modules.execution.safety.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.safety.tables import TradingStateRow
-from bfx_funding_bot.modules.execution.safety.trading_state import (
-    IllegalTradingTransition,
-    TradingStateRepository,
-)
+from bfx_funding_bot.modules.execution.safety.trading_state import IllegalTradingTransition
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 
 
 @pytest_asyncio.fixture

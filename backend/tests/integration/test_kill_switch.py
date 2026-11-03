@@ -20,7 +20,7 @@ from bfx_funding_bot.modules.execution.safety.tables import (
     FundingCancelAllAuditRow,
     TradingStateRow,
 )
-from bfx_funding_bot.modules.execution.safety.trading_state import read_current
+from bfx_funding_bot.modules.execution.safety.trading_state_store import read_current
 
 from .contracts.stacks import ACCOUNT, SCOPE, Venue
 from .test_capital_command_boundary import (

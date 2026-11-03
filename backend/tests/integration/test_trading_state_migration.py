@@ -223,8 +223,8 @@ def test_repository_on_postgres_survives_restart_and_serialises_reassertion(migr
     async def scenario():
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-        from bfx_funding_bot.modules.execution.safety.trading_state import (
-            IllegalTradingTransition,
+        from bfx_funding_bot.modules.execution.safety.trading_state import IllegalTradingTransition
+        from bfx_funding_bot.modules.execution.safety.trading_state_store import (
             TradingStateRepository,
         )
 
@@ -262,8 +262,8 @@ def test_the_database_clock_decides_an_automatic_resume(migrated):
 
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-        from bfx_funding_bot.modules.execution.safety.trading_state import (
-            AutoResumeTooSoon,
+        from bfx_funding_bot.modules.execution.safety.trading_state import AutoResumeTooSoon
+        from bfx_funding_bot.modules.execution.safety.trading_state_store import (
             TradingStateRepository,
         )
 

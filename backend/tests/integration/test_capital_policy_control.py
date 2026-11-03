@@ -19,7 +19,7 @@ from bfx_funding_bot.modules.execution.safety.tables import (
     TradingControlRequestRow,
     TradingStateRow,
 )
-from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
 from bfx_funding_bot.modules.ledger import PolicyStore, Scope
 from bfx_funding_bot.modules.ledger.tables import CapitalPolicyRevisionRow

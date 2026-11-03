@@ -79,7 +79,8 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     ProtectionPort,
     capital_block_trigger,
 )
-from bfx_funding_bot.modules.execution.safety.trading_state import HALTED, read_current
+from bfx_funding_bot.modules.execution.safety.trading_state import HALTED
+from bfx_funding_bot.modules.execution.safety.trading_state_store import read_current
 from bfx_funding_bot.modules.ledger import (
     CapitalAuthority,
     CapitalAvailable,

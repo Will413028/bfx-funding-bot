@@ -35,7 +35,7 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
 
     from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
-    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
     from bfx_funding_bot.modules.ledger import Scope
     from bfx_funding_bot.modules.ledger.wiring import build_policy_store
     from bfx_funding_bot.modules.trading import CapitalPolicy
@@ -128,7 +128,7 @@ async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_p
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
     from bfx_funding_bot.core.writer_lock import WriterLock
     from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
-    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
     from bfx_funding_bot.modules.ledger import Scope
     from bfx_funding_bot.modules.ledger.wiring import build_policy_store
     from bfx_funding_bot.modules.trading import CapitalPolicy
@@ -220,7 +220,7 @@ async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, 
 
     from bfx_funding_bot.apps.bot import build_daemon
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
-    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
     from bfx_funding_bot.modules.ledger import Scope
     from bfx_funding_bot.modules.ledger.wiring import build_policy_store
     from bfx_funding_bot.modules.trading import CapitalPolicy
@@ -290,7 +290,7 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
     from bfx_funding_bot.core.schema_head import SchemaHeadMismatch, build_head
     from bfx_funding_bot.modules.execution.safety import boot_stop
-    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
@@ -344,7 +344,7 @@ async def test_live_boot_on_an_unsupported_authority_stops_trading_and_refuses(
     from bfx_funding_bot.core.authority import AuthorityMismatch
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
     from bfx_funding_bot.modules.execution.safety import boot_stop
-    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",

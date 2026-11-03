@@ -107,7 +107,7 @@ async def test_cancel_retry_checks_current_scoped_uncertainty(ledger_db, monkeyp
         ManualKillGuard,
         UncertaintyGuard,
     )
-    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
     from bfx_funding_bot.modules.ledger import Authorized, CommandOutcome
     from tests.integration.contracts.stacks import ACCOUNT, NOW, SCOPE, build_stack, seed_account
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink

@@ -36,7 +36,7 @@ from bfx_funding_bot.apps import bot
 from bfx_funding_bot.apps.venue import VenueSeam
 from bfx_funding_bot.core.errors import EXIT_CODE_AUTH_FAILED
 from bfx_funding_bot.modules.execution.protocols import Credentials
-from bfx_funding_bot.modules.execution.safety.trading_state import read_current
+from bfx_funding_bot.modules.execution.safety.trading_state_store import read_current
 from bfx_funding_bot.modules.ledger.matching import UNKNOWN_SETTLE_MS
 from bfx_funding_bot.modules.ledger.tables import (
     ExecutionResolutionJournalRow,

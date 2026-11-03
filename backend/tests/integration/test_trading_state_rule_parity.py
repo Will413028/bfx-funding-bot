@@ -16,8 +16,8 @@ import pytest
 from sqlalchemy import text
 
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-from bfx_funding_bot.modules.execution.safety.trading_state import (
-    IllegalTradingTransition,
+from bfx_funding_bot.modules.execution.safety.trading_state import IllegalTradingTransition
+from bfx_funding_bot.modules.execution.safety.trading_state_store import (
     check_transition,
     count_auto_resumes,
     read_current,

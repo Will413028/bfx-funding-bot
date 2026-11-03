@@ -52,8 +52,8 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     CAUSE_OPERATOR,
     HALTED,
     TradingState,
-    TradingStateRepository,
 )
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 from bfx_funding_bot.modules.ledger import ManagedOfferReader, Scope, UncertaintyReader
 from bfx_funding_bot.modules.observability import alerts
 

@@ -50,9 +50,8 @@ from bfx_funding_bot.core.database_realm import DatabaseRealmMismatch, read_data
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
 from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
-from bfx_funding_bot.modules.execution.safety.trading_state import (
-    ACTIVE,
-    CAUSE_OPERATOR,
+from bfx_funding_bot.modules.execution.safety.trading_state import ACTIVE, CAUSE_OPERATOR
+from bfx_funding_bot.modules.execution.safety.trading_state_store import (
     append_transition,
     read_current,
 )

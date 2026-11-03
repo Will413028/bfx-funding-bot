@@ -12,10 +12,8 @@ import pytest
 from sqlalchemy import insert
 
 from bfx_funding_bot.modules.execution.safety.tables import TradingControlRequestRow
-from bfx_funding_bot.modules.execution.safety.trading_state import (
-    IllegalTradingTransition,
-    TradingStateRepository,
-)
+from bfx_funding_bot.modules.execution.safety.trading_state import IllegalTradingTransition
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
 from bfx_funding_bot.modules.observability import alerts
 

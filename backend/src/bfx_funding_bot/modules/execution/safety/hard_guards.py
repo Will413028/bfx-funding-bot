@@ -22,10 +22,8 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     WriterLockHandle,
 )
-from bfx_funding_bot.modules.execution.safety.trading_state import (
-    TradingState,
-    TradingStateRepository,
-)
+from bfx_funding_bot.modules.execution.safety.trading_state import TradingState
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 from bfx_funding_bot.modules.ledger import (
     CapitalAuthority,
     CapitalBlocked,
