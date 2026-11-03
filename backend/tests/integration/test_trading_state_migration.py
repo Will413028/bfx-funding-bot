@@ -14,6 +14,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import create_engine, text
 
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, upgrade_head_after_w3
 
 pytestmark = pytest.mark.integration
@@ -230,7 +231,7 @@ def test_repository_on_postgres_survives_restart_and_serialises_reassertion(migr
 
         def repo(engine):
             return TradingStateRepository(async_sessionmaker(engine, expire_on_commit=False),
-                                          account_id=UUID(_B), deployment_environment="prod")
+                                          account_id=UUID(_B), deployment_environment="prod", scope_lock=build_scope_lock())
 
         first = create_async_engine(url)
         try:
@@ -269,7 +270,7 @@ def test_the_database_clock_decides_an_automatic_resume(migrated):
 
         engine = create_async_engine(url)
         repo = TradingStateRepository(async_sessionmaker(engine, expire_on_commit=False),
-                                      account_id=UUID(_E), deployment_environment="prod")
+                                      account_id=UUID(_E), deployment_environment="prod", scope_lock=build_scope_lock())
         try:
             now = int(time.time() * 1000)
             await repo.transition("ACTIVE", cause="operator", actor="will", reason="start")

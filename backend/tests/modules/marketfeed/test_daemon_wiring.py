@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 from pytest_httpx import HTTPXMock
 
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from tests.modules.marketfeed.account_test_helpers import (
     configure_account_env,
     configure_live_wiring_env,
@@ -60,7 +61,7 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
         await conn.run_sync(Base.metadata.create_all)
     await seed_exchange_account(engine, capital_policies=False)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    halt = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
+    halt = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci", scope_lock=build_scope_lock())
     await halt.transition("HALTED", cause="operator", reason="retained halt", actor="test")
     if with_policy:
         repo = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci"))
@@ -153,7 +154,7 @@ async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_p
         await conn.run_sync(Base.metadata.create_all)
     await seed_exchange_account(engine, capital_policies=False)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
+    trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci", scope_lock=build_scope_lock())
     await trading.transition("ACTIVE", cause="operator", reason="trading before the kill", actor="test")
     repo = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci"))
     async with factory.begin() as session:
@@ -246,7 +247,7 @@ async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, 
         await conn.run_sync(Base.metadata.create_all)
     await seed_exchange_account(engine, capital_policies=False)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
+    trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci", scope_lock=build_scope_lock())
     await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
     repo = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci"))
     async with factory.begin() as session:
@@ -308,7 +309,7 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
     async with engine.begin() as conn:
         await conn.execute(text("UPDATE alembic_version SET version_num = 'ffffffffffff'"))
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
+    trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci", scope_lock=build_scope_lock())
     await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
     sent: list[tuple[str, str | None]] = []
     monkeypatch.setattr(boot_stop.alerts, "emit",
@@ -369,7 +370,7 @@ async def test_live_boot_on_an_unsupported_authority_stops_trading_and_refuses(
                 "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
                 "VALUES (3, 'legacy', 1, 'test', 'restored')"))
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
+    trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci", scope_lock=build_scope_lock())
     await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
     sent: list[tuple[str, str | None]] = []
     monkeypatch.setattr(boot_stop.alerts, "emit",

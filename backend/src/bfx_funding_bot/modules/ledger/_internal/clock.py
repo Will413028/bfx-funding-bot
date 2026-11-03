@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.account_identity import account_id_canonical
-from bfx_funding_bot.core.writer_lock import acquire_transaction_lock, derive_transaction_lock_key
+from bfx_funding_bot.core.xact_lock import acquire_transaction_lock, derive_transaction_lock_key
 from bfx_funding_bot.modules.ledger import QueryAdmissionRefused, QueryHandle, Scope
 from bfx_funding_bot.modules.ledger.tables import (
     CapitalCommandClockRow,

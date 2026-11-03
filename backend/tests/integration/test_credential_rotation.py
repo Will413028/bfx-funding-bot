@@ -33,6 +33,7 @@ from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.credentials.vault import load_account_credentials
 from bfx_funding_bot.modules.execution.credential_rotation import CredentialRotationWorker
 from bfx_funding_bot.modules.execution.protocols import AccountContext
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from tests.pg_templates import alembic, stamp_realm
 
 from .test_ledger_schema_roles import _prepare
@@ -191,7 +192,7 @@ async def bot(db):
     worker = CredentialRotationWorker(
         session_factory=factory, account_id=ACCOUNT, environment="ci", authority=authority,
         client_factory=lambda: client,
-        kek_loader=lambda: KEK, restart=lambda: restarts.append(1), clock=lambda: NOW_MS)
+        kek_loader=lambda: KEK, restart=lambda: restarts.append(1), clock=lambda: NOW_MS, scope_lock=build_scope_lock())
     worker.bind_run(db.run_id, RUN_STARTED_MS)
     # As bfx_bot: the recipient insert is this role's own grant.
     await worker.idle()
@@ -344,7 +345,7 @@ async def test_a_request_sealed_to_a_previous_boot_is_stale(db, operator_env, bo
     restarted = CredentialRotationWorker(
         session_factory=bot.factory, account_id=ACCOUNT, environment="ci",
         authority=bot.worker.authority, client_factory=lambda: bot.client,
-        kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS)
+        kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS, scope_lock=build_scope_lock())
     restarted.bind_run(db.run_id, RUN_STARTED_MS)
     await restarted.idle()
     assert await restarted.tick() is True

@@ -29,6 +29,7 @@ MAX_IGNORES_BY_ID = {
     "runtime-not-simulated-venue": 0,
     "trading-not-ledger": 0,
     "control-plane-exposure": 0,
+    "xact-lock-owner": 0,
     "execution-acyclic": 0,
     "market-contracts-are-pure": 0,
     "performance-is-pure": 0,
@@ -210,19 +211,29 @@ def test_contract_modules_exist() -> None:
     assert missing == []
 
 
-def test_research_scripts_obtain_strategy_wiring_through_apps() -> None:
+# What a script (``backend/scripts``, a composition root outside the import-linter root
+# package until R11 adds it) must not import: strategy wiring comes through apps, and the
+# scope lock only through the ledger's ``ScopeLock`` (``xact-lock-owner``, ADR 2026-10-19
+# D4). Delete this test when ``scripts`` becomes a root package and the contracts see it.
+SCRIPTS_MAY_NOT_IMPORT = frozenset({
+    "bfx_funding_bot.modules.strategy.wiring",
+    "bfx_funding_bot.core.xact_lock",
+})
+
+
+def test_scripts_import_neither_strategy_wiring_nor_the_lock_primitive() -> None:
     scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
     violations: list[str] = []
     for script in scripts_dir.rglob("*.py"):
         tree = ast.parse(script.read_text())
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == (
-                "bfx_funding_bot.modules.strategy.wiring"
-            ):
-                violations.append(str(script.relative_to(scripts_dir)))
-            if isinstance(node, ast.Import) and any(
-                alias.name == "bfx_funding_bot.modules.strategy.wiring"
-                for alias in node.names
-            ):
-                violations.append(str(script.relative_to(scripts_dir)))
+            names: list[str] = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module, *(f"{node.module}.{alias.name}" for alias in node.names)]
+            elif isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            violations += [
+                f"{script.relative_to(scripts_dir)}: {name}"
+                for name in names if name in SCRIPTS_MAY_NOT_IMPORT
+            ]
     assert violations == []

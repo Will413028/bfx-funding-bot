@@ -22,6 +22,7 @@ from bfx_funding_bot.modules.execution.safety.tables import (
     TradingControlRequestRow,
     TradingStateRow,
 )
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from tests.ingress_support import attach_ingress, operator_headers
 
 pytestmark = pytest.mark.integration
@@ -162,7 +163,7 @@ async def test_the_overview_shows_the_state_and_the_cancel_all_of_the_halt(migra
     from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
     from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
     app, factory, account = await _app(migrated_db, monkeypatch)
-    repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci", scope_lock=build_scope_lock())
     await repo.transition("ACTIVE", cause="operator", actor="operator", reason="start", now_ms=1)
     base = f"/api/v1/exchange-accounts/{account}/trading-control"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:

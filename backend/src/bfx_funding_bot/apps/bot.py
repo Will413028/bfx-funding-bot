@@ -447,6 +447,7 @@ async def build_daemon(
     # degrading gracefully — see ManualKillGuard.
     trading_state = TradingStateRepository(
         session_factory, account_id=account_id, deployment_environment=env_str,
+        scope_lock=capital.scope_lock,
     )
 
     # cells[0] used for safety_chain emit envelope (phase/strategy/cell) —
@@ -652,7 +653,8 @@ async def build_daemon(
     funding_rules = FundingRules(http=bitfinex_http, clock=now_ms_utc)
     trading_control = TradingControlWorker(
         session_factory=session_factory, account_id=UUID(account_id),
-        environment=env_str, authority=operator_authorized, clock=now_ms_utc,
+        environment=env_str, authority=operator_authorized, scope_lock=capital.scope_lock,
+        clock=now_ms_utc,
         ownership=writer_lock.verify_held,
     )
     capital_policy_control = CapitalPolicyRequestWorker(
@@ -669,7 +671,7 @@ async def build_daemon(
         rotation_http = venue_wiring.auth_http
         credential_rotation = CredentialRotationWorker(
             session_factory=session_factory, account_id=UUID(account_id),
-            environment=env_str, authority=operator_authorized,
+            environment=env_str, authority=operator_authorized, scope_lock=capital.scope_lock,
             client_factory=lambda: BitfinexAuthREST(http=rotation_http,
                                                     auth_gate=AuthRequestGate()),
             kek_loader=load_kek, restart=stop_event.set,
@@ -729,7 +731,7 @@ async def build_daemon(
     uncertainty_worker = UncertaintyResolutionWorker(
         session_factory=session_factory,
         scope=ResolutionScope(account_bootstrap.exchange_account_id, env_str),
-        authority=operator_authorized,
+        authority=operator_authorized, scope_lock=capital.scope_lock,
         clock=now_ms_utc,
         ownership=writer_lock.verify_held,
         resolution=capital.operator_resolution,

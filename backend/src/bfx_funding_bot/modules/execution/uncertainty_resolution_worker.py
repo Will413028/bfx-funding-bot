@@ -33,7 +33,7 @@ from bfx_funding_bot.modules.ledger import (
     OperatorResolution,
     QueuedResolution,
     RequestColumns,
-    Scope,
+    ScopeLock,
 )
 from bfx_funding_bot.modules.ledger import (
     ResolutionRejected as EvidenceRejected,
@@ -52,13 +52,15 @@ class UncertaintyResolutionWorker(OperatorRequestWorker[UncertaintyResolutionReq
         session_factory: async_sessionmaker[AsyncSession],
         scope: ResolutionScope,
         authority: OperatorAuthority,
+        scope_lock: ScopeLock,
         clock: Callable[[], int] | None = None,
         ownership: Callable[[], Awaitable[bool]] | None = None,
         poll_interval_s: float = 2.0,
         resolution: OperatorResolution,
     ) -> None:
         super().__init__(session_factory=session_factory, account_id=scope.account_id,
-                         environment=scope.environment, authority=authority, clock=clock,
+                         environment=scope.environment, authority=authority, scope_lock=scope_lock,
+                         clock=clock,
                          ownership=ownership, poll_interval_s=poll_interval_s)
         self.scope = scope
         self.requests = UncertaintyResolutionRequests(scope, resolution)
@@ -67,7 +69,7 @@ class UncertaintyResolutionWorker(OperatorRequestWorker[UncertaintyResolutionReq
                     prepared: None) -> Outcome:
         try:
             await self.requests.resolution.apply(
-                session, Scope(self.scope.account_id, self.scope.environment),
+                session, self.ledger_scope,
                 QueuedResolution(
                     row.request_id, intent_from_request(row),
                     RequestColumns(row.observation_id),

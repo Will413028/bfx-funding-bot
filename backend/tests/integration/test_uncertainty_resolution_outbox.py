@@ -31,7 +31,7 @@ from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
 )
 from bfx_funding_bot.modules.ledger.read import build_operator_reads
 from bfx_funding_bot.modules.ledger.tables import ExecutionResolutionJournalRow
-from bfx_funding_bot.modules.ledger.wiring import build_operator_resolution
+from bfx_funding_bot.modules.ledger.wiring import build_operator_resolution, build_scope_lock
 from tests.pg_templates import alembic as _alembic
 from tests.pg_templates import stamp_realm
 
@@ -408,7 +408,7 @@ def test_the_cli_queues_the_web_api_shows_and_only_the_account_writer_applies(
                 worker = UncertaintyResolutionWorker(
                     session_factory=bot, scope=ResolutionScope(account, "ci"),
                     authority=operator_authorized, clock=lambda: 3000,
-                    resolution=build_operator_resolution())
+                    resolution=build_operator_resolution(), scope_lock=build_scope_lock())
                 assert await worker.tick() is True
                 assert await worker.tick() is False
 
@@ -436,10 +436,8 @@ def test_queueing_a_request_never_waits_for_or_holds_the_account_writer_lock(
     """Queueing (the operator CLI's ``request_resolution``) must not contend for the
     daemon's account lock: a slow or abusive request would otherwise stall reconcile and
     submit."""
-    from bfx_funding_bot.core.writer_lock import (
-        account_id_canonical,
-        derive_transaction_lock_key,
-    )
+    from bfx_funding_bot.core.account_identity import account_id_canonical
+    from bfx_funding_bot.core.xact_lock import derive_transaction_lock_key
 
     _operator_env(monkeypatch)
     url = _url(ledger_db)
@@ -521,7 +519,7 @@ def test_revoked_operator_request_is_rejected_by_the_account_writer(
 
             worker = UncertaintyResolutionWorker(
                 session_factory=bot, scope=scope, authority=operator_authorized,
-                clock=lambda: 3000, resolution=build_operator_resolution())
+                clock=lambda: 3000, resolution=build_operator_resolution(), scope_lock=build_scope_lock())
             # Accepted while a member, then demoted to viewer before the daemon applies.
             revoked = await queue(2500)
             await _set_member_role(owner, "viewer")

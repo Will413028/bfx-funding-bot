@@ -176,7 +176,7 @@ class KillSpy:
 async def test_a_kill_goes_first_and_rejects_a_waiting_enable_but_not_a_disable(migrated_db):
     factory, account = migrated_db
     await seed(factory, account, "fUST", enabled=False)
-    await TradingStateRepository(factory, account_id=account, deployment_environment="ci").transition(
+    await TradingStateRepository(factory, account_id=account, deployment_environment="ci", scope_lock=build_scope_lock()).transition(
         "ACTIVE", cause="operator", actor="t", reason="setup", now_ms=1)
     enable = await request(factory, account, "enable", at=T0 - 20)
     disable = await request(factory, account, "disable", at=T0 - 10)
@@ -187,7 +187,7 @@ async def test_a_kill_goes_first_and_rejects_a_waiting_enable_but_not_a_disable(
             request_id=kill_id, exchange_account_id=account, deployment_environment="ci",
             action="kill", reason="incident", requested_by="operator", created_at_ms=T0))
     control = TradingControlWorker(session_factory=factory, account_id=account, environment="ci",
-                                   authority=allow, clock=lambda: T0)
+                                   authority=allow, clock=lambda: T0, scope_lock=build_scope_lock())
     control.kill_switch = KillSpy()
     assert await control.tick() is True
     async with factory() as session:

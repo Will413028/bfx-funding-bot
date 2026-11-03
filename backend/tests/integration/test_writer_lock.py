@@ -5,11 +5,8 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.core.errors import WriterLockUnacquired
-from bfx_funding_bot.core.writer_lock import (
-    WriterLock,
-    derive_lock_key,
-    derive_transaction_lock_key,
-)
+from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
+from bfx_funding_bot.core.xact_lock import derive_transaction_lock_key
 
 pytestmark = pytest.mark.integration
 

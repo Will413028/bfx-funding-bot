@@ -8,7 +8,8 @@ Mutation: change a namespace string or the digest size and these fail.
 """
 from __future__ import annotations
 
-from bfx_funding_bot.core.writer_lock import derive_lock_key, derive_transaction_lock_key
+from bfx_funding_bot.core.writer_lock import derive_lock_key
+from bfx_funding_bot.core.xact_lock import derive_transaction_lock_key
 
 ACCOUNT = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 

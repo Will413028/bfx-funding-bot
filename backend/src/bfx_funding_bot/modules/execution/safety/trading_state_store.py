@@ -18,7 +18,6 @@ from uuid import UUID
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
 from bfx_funding_bot.modules.execution.safety.tables import TradingStateRow
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     ACTIVE,
@@ -33,6 +32,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     to_state,
     validate_transition,
 )
+from bfx_funding_bot.modules.ledger import Scope, ScopeLock
 from bfx_funding_bot.modules.observability import alerts
 
 # The trigger's SQLSTATEs (migration 8e4b2f6a1c37), mapped back to these types. BX004, a
@@ -165,12 +165,17 @@ class TradingStateRepository:
         *,
         account_id: str | UUID,
         deployment_environment: str,
+        scope_lock: ScopeLock,
     ) -> None:
         if not deployment_environment.strip():
             raise ValueError("deployment_environment must be non-empty")
         self._sf = session_factory
         self.account_id = account_id if isinstance(account_id, UUID) else UUID(str(account_id))
         self.environment = deployment_environment
+        self._scope = Scope(self.account_id, deployment_environment)
+        # The ledger's scope lock: transitions serialise with every other money-state
+        # write of the scope, and nothing outside the ledger takes the primitive (D4).
+        self._scope_lock = scope_lock
 
     async def current(self, session: AsyncSession | None = None) -> TradingState | None:
         """Latest decision, or None if none was ever recorded.
@@ -193,9 +198,7 @@ class TradingStateRepository:
     ) -> TransitionResult:
         """Append one transition in its own transaction, serialised per scope."""
         async with self._sf.begin() as session:
-            await acquire_transaction_lock(
-                session, account_id=str(self.account_id), deployment_environment=self.environment,
-            )
+            await self._scope_lock.lock(session, self._scope)
             result = await append_transition(
                 session, account_id=self.account_id, environment=self.environment,
                 state=state, cause=cause, actor=actor, reason=reason,
