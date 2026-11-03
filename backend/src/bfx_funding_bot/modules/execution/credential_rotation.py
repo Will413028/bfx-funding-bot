@@ -71,15 +71,13 @@ from bfx_funding_bot.modules.credentials.vault import (
     rotate_active_credential,
 )
 from bfx_funding_bot.modules.deployments.tables import DEPLOYMENT_STARTED, DeploymentRow
-from bfx_funding_bot.modules.execution.operator_requests import (
-    APPLIED,
-    REJECTED,
+from bfx_funding_bot.modules.execution.operator_request_worker import (
     NeedsPreparation,
     OperatorAuthority,
     OperatorRequestWorker,
     Outcome,
-    RequestRejected,
 )
+from bfx_funding_bot.modules.execution.operator_requests import APPLIED, REJECTED, RequestRejected
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.observability import alerts
 

@@ -94,7 +94,7 @@ from bfx_funding_bot.modules.execution.middleware import (
     TracingSubmitMiddleware,
     instrument_ws_dispatcher,
 )
-from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+from bfx_funding_bot.modules.execution.operator_request_worker import operator_authorized
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
     ExecutorPort,
@@ -133,8 +133,8 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingStateRepository,
 )
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
-from bfx_funding_bot.modules.execution.uncertainty_requests import (
-    ResolutionScope,
+from bfx_funding_bot.modules.execution.uncertainty_requests import ResolutionScope
+from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
     UncertaintyResolutionWorker,
 )
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher

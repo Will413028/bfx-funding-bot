@@ -26,6 +26,8 @@ from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionRequestPending,
     ResolutionScope,
     UncertaintyResolutionRequests,
+)
+from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
     UncertaintyResolutionWorker,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import UncertaintyResolutionRequestRow

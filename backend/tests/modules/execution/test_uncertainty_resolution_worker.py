@@ -5,8 +5,8 @@ from uuid import UUID
 
 import pytest
 
-from bfx_funding_bot.modules.execution.uncertainty_requests import (
-    ResolutionScope,
+from bfx_funding_bot.modules.execution.uncertainty_requests import ResolutionScope
+from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
     UncertaintyResolutionWorker,
 )
 from bfx_funding_bot.modules.ledger.wiring import build_operator_resolution

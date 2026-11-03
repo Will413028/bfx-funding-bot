@@ -31,7 +31,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from bfx_funding_bot.core.db import make_session_factory
-from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+from bfx_funding_bot.modules.execution.operator_request_worker import operator_authorized
 from scripts.grant_operator_membership import GrantRefusedError, grant
 from tests.pg_templates import alembic, stamp_realm
 

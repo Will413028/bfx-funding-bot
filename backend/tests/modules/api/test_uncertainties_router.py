@@ -175,8 +175,8 @@ class _Authority:
 
 def _worker(factory, ledger: _Ledger, *, account: UUID = ACCOUNT_ID,
             authority: _Authority | None = None):
-    from bfx_funding_bot.modules.execution.uncertainty_requests import (
-        ResolutionScope,
+    from bfx_funding_bot.modules.execution.uncertainty_requests import ResolutionScope
+    from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
         UncertaintyResolutionWorker,
     )
 
@@ -485,8 +485,9 @@ async def _queue_directly(factory, *, uncertainty_id: UUID, created_at_ms: int) 
 
 def _unrecordable(monkeypatch, request_id: str) -> None:
     """The worker's apply of ``request_id`` yields an outcome its row cannot hold."""
-    from bfx_funding_bot.modules.execution.operator_requests import APPLIED, Outcome
-    from bfx_funding_bot.modules.execution.uncertainty_requests import (
+    from bfx_funding_bot.modules.execution.operator_request_worker import Outcome
+    from bfx_funding_bot.modules.execution.operator_requests import APPLIED
+    from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
         UncertaintyResolutionWorker,
     )
 
@@ -523,7 +524,7 @@ def test_a_request_whose_outcome_cannot_be_written_does_not_block_the_queue(
 
 def test_worker_skips_a_request_it_cannot_even_mark_failed(uncertainty_app, monkeypatch) -> None:
     """If the fallback write also fails, the worker moves on rather than spin."""
-    from bfx_funding_bot.modules.execution.uncertainty_requests import (
+    from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
         UncertaintyResolutionWorker,
     )
 
@@ -587,7 +588,7 @@ def test_authorized_operator_request_is_applied_after_the_authority_check(
 def test_shared_operator_authority_refuses_an_empty_user_before_asking_the_database() -> None:
     from unittest.mock import AsyncMock
 
-    from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+    from bfx_funding_bot.modules.execution.operator_request_worker import operator_authorized
 
     session = AsyncMock()
     assert asyncio.run(operator_authorized(session, account_id=ACCOUNT_ID, user="")) is False
@@ -601,7 +602,7 @@ def test_shared_operator_authority_ignores_the_configured_operator(
     """Membership is the only authority (9d-1): the configured id and role no longer gate."""
     from unittest.mock import AsyncMock
 
-    from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+    from bfx_funding_bot.modules.execution.operator_request_worker import operator_authorized
 
     monkeypatch.delenv("BFX_PHASE", raising=False)
     monkeypatch.setenv("BFX_OPERATOR_USER_ID", configured)
@@ -615,7 +616,7 @@ def test_shared_operator_authority_ignores_the_configured_operator(
 def test_shared_operator_authority_defers_to_the_database_verdict(monkeypatch) -> None:
     from unittest.mock import AsyncMock
 
-    from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+    from bfx_funding_bot.modules.execution.operator_request_worker import operator_authorized
 
     monkeypatch.delenv("BFX_PHASE", raising=False)
     monkeypatch.setenv("BFX_OPERATOR_USER_ID", "operator-1")
