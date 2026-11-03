@@ -7,28 +7,25 @@ import os
 import signal
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpx
-from sqlalchemy.ext.asyncio import (
-    async_sessionmaker,
-)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.apps.authority_support import require_ledger_epoch
 from bfx_funding_bot.apps.bot_ports import ObservationVenue, build_capital_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
 from bfx_funding_bot.apps.runtime.boot_wait import wait_for_database
+from bfx_funding_bot.apps.runtime.config import MarketfeedConfig
 from bfx_funding_bot.apps.runtime.daemon import (
     Daemon,
-    _DaemonAuditContextFactory,
-    _emit_locf_degraded,
-    _refuse_live_boot,
     assert_live_guard_invariant,
     load_account_bootstrap,
-    log,
+    require_env,
 )
 from bfx_funding_bot.apps.runtime.divergence_reporter import DivergenceReporter
 from bfx_funding_bot.apps.runtime.health_monitor import HealthMonitor
@@ -82,7 +79,7 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
 from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_periods
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.deployments.identity import DeploymentIdentity
-from bfx_funding_bot.modules.execution.audit import ExecutionDecisionRecorder
+from bfx_funding_bot.modules.execution.audit import AuditContext, ExecutionDecisionRecorder
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_boundary import CommandOutcomeNotice
@@ -125,6 +122,7 @@ from bfx_funding_bot.modules.execution.protocols import (
 from bfx_funding_bot.modules.execution.readiness import TradingReadiness
 from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
+from bfx_funding_bot.modules.execution.safety.boot_stop import report_refused_boot
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.config import (
     load_safety_config,
@@ -188,7 +186,7 @@ from bfx_funding_bot.modules.observability.metrics import (
 from bfx_funding_bot.modules.observability.resource import EventResource
 from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
 from bfx_funding_bot.modules.observability.tracing import tracing_from_env
-from bfx_funding_bot.modules.strategy import CellConfig, configured_symbols
+from bfx_funding_bot.modules.strategy import CellConfig, DecisionPayload, configured_symbols
 from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
 _BITFINEX_REST_BASE_URL = "https://api-pub.bitfinex.com"
@@ -207,6 +205,84 @@ def admin_tokens(env: Mapping[str, str]) -> tuple[str | None, str | None]:
         log.error("admin_read_token_ignored reason=equals_admin_token")
         read = None
     return admin, read
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _AuditContextFactory:
+    account_id: str
+    deployment_environment: str
+    service_version: str
+    config_hash: str
+
+    def build(
+        self, *, candidate: DecisionPayload, cell_id: str, reconcile_id: str,
+    ) -> AuditContext:
+        return AuditContext(
+            account_id=self.account_id,
+            deployment_environment=self.deployment_environment,
+            reconcile_id=reconcile_id,
+            cell_id=cell_id,
+            symbol=candidate.symbol,
+            signal_correlation_id=str(candidate.signal_correlation_id),
+            service_version=self.service_version,
+            config_hash=self.config_hash,
+        )
+
+
+async def _emit_locf_degraded(
+    stdout_sink: StdoutEventSink,
+    config: MarketfeedConfig,
+    cell: CellConfig,
+    stale_seconds: int | None,
+    budget_seconds: int,
+) -> None:
+    """Emit HealthCheckPayload SIGNAL_PIPELINE DEGRADED reason=stale_exceeded.
+
+    Called from two paths: (a) no candles in lookback window (stale_seconds=None),
+    (b) source candle older than budget (stale_seconds = computed wall-clock gap).
+
+    # LOCF DEGRADED events carry cell_id in the "cell" envelope field (HealthMonitor._emit
+    # always writes "cell": None — intentional divergence to enable per-cell dashboards).
+    """
+    error_message = (
+        "stale_exceeded: no candles in lookback window"
+        if stale_seconds is None
+        else "stale_exceeded"
+    )
+    payload: dict[str, object] = {
+        "check_target": HealthTarget.SIGNAL_PIPELINE.value,
+        "status": HealthStatus.DEGRADED.value,
+        "error_message": error_message,
+        "reason": "stale_exceeded",
+        "stale_seconds": stale_seconds,
+        "budget_seconds": budget_seconds,
+    }
+    await stdout_sink.emit({
+        "timestamp": datetime.now(UTC).isoformat(),
+        "level": Level.WARN.value,
+        "phase": config.phase.value,
+        "strategy": None,
+        "cell": cell.cell_id,
+        "event_type": EventType.HEALTH_CHECK.value,
+        "correlation_id": str(uuid4()),
+        "payload": payload,
+    })
+
+
+async def _refuse_live_boot(exc: BaseException, *, config: MarketfeedConfig,
+                            session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """A live boot that refuses to run alerts (``safety/boot_stop``) before the
+    error is raised; nothing is written and nothing reaches the venue."""
+    try:
+        account_id = UUID(require_env("BFX_EXCHANGE_ACCOUNT_ID"))
+    except Exception:
+        log.critical("boot_refused_without_account account unknown")
+        return
+    report_refused_boot(account_id=account_id, environment=config.deployment_environment.value,
+                        reason=f"boot_blocked: {str(exc) or type(exc).__name__}")
+
 
 async def build_daemon(
     *,
@@ -718,7 +794,7 @@ async def build_daemon(
         ),
         # Every decision names the build that made it: the revision and
         # image digest the deploy tool injected.
-        audit_context_factory=_DaemonAuditContextFactory(
+        audit_context_factory=_AuditContextFactory(
             account_id=account_id,
             deployment_environment=env_str,
             service_version=deployment_identity.source_revision or "unidentified",

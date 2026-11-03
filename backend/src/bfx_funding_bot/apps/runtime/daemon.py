@@ -13,10 +13,9 @@ import logging
 import os
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Protocol
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import httpx
 from sqlalchemy import select
@@ -50,7 +49,7 @@ from bfx_funding_bot.core.health import (
     HealthProbe,
     assess_auth_ws_health,
 )
-from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
+from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget, Phase
 from bfx_funding_bot.core.writer_lock import WriterLock
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.errors import credential_rejection
@@ -72,7 +71,6 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccountCredential
 from bfx_funding_bot.modules.candles.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
-from bfx_funding_bot.modules.execution.audit import AuditContext
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate
@@ -92,7 +90,6 @@ from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.readiness import TradingReadiness
-from bfx_funding_bot.modules.execution.safety.boot_stop import report_refused_boot
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.config import SafetyConfig
 from bfx_funding_bot.modules.execution.safety.protection import (
@@ -117,38 +114,14 @@ from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
 )
-from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
 from bfx_funding_bot.modules.observability.tracing import (
     DaemonTracing,
 )
-from bfx_funding_bot.modules.strategy import CellConfig, DecisionPayload
 
 log = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
-class _DaemonAuditContextFactory:
-    account_id: str
-    deployment_environment: str
-    service_version: str
-    config_hash: str
-
-    def build(
-        self, *, candidate: DecisionPayload, cell_id: str, reconcile_id: str,
-    ) -> AuditContext:
-        return AuditContext(
-            account_id=self.account_id,
-            deployment_environment=self.deployment_environment,
-            reconcile_id=reconcile_id,
-            cell_id=cell_id,
-            symbol=candidate.symbol,
-            signal_correlation_id=str(candidate.signal_correlation_id),
-            service_version=self.service_version,
-            config_hash=self.config_hash,
-        )
-
-
-def _require_env(name: str) -> str:
+def require_env(name: str) -> str:
     """Return a required env value, canonicalizing the account UUID.
 
     Matches the pattern in `apps/runtime/config.py:load_config` so missing env
@@ -217,7 +190,7 @@ async def load_account_bootstrap(
     services receive the resulting canonical account string from the returned
     object; no component can silently fall back to a process-global realm.
     """
-    canonical_id = _require_env("BFX_EXCHANGE_ACCOUNT_ID")
+    canonical_id = require_env("BFX_EXCHANGE_ACCOUNT_ID")
     exchange_account_id = UUID(canonical_id)
     if phase is not None:
         AccountBootstrap.reject_legacy_realm(phase=phase)
@@ -1168,46 +1141,6 @@ class Daemon:
             # Loop continues → tries `candles()` again with new client
 
 
-async def _emit_locf_degraded(
-    stdout_sink: StdoutEventSink,
-    config: MarketfeedConfig,
-    cell: CellConfig,
-    stale_seconds: int | None,
-    budget_seconds: int,
-) -> None:
-    """Emit HealthCheckPayload SIGNAL_PIPELINE DEGRADED reason=stale_exceeded.
-
-    Called from two paths: (a) no candles in lookback window (stale_seconds=None),
-    (b) source candle older than budget (stale_seconds = computed wall-clock gap).
-
-    # LOCF DEGRADED events carry cell_id in the "cell" envelope field (HealthMonitor._emit
-    # always writes "cell": None — intentional divergence to enable per-cell dashboards).
-    """
-    error_message = (
-        "stale_exceeded: no candles in lookback window"
-        if stale_seconds is None
-        else "stale_exceeded"
-    )
-    payload: dict[str, object] = {
-        "check_target": HealthTarget.SIGNAL_PIPELINE.value,
-        "status": HealthStatus.DEGRADED.value,
-        "error_message": error_message,
-        "reason": "stale_exceeded",
-        "stale_seconds": stale_seconds,
-        "budget_seconds": budget_seconds,
-    }
-    await stdout_sink.emit({
-        "timestamp": datetime.now(UTC).isoformat(),
-        "level": Level.WARN.value,
-        "phase": config.phase.value,
-        "strategy": None,
-        "cell": cell.cell_id,
-        "event_type": EventType.HEALTH_CHECK.value,
-        "correlation_id": str(uuid4()),
-        "payload": payload,
-    })
-
-
 _LIVE_REQUIRED_HARD = ("manual_kill", "auth_health", "heartbeat")
 
 
@@ -1229,16 +1162,3 @@ def assert_live_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> None:
         raise ValueError(
             f"BFX_PHASE={phase.value} requires all safety guards enabled; disabled: {missing}"
         )
-
-
-async def _refuse_live_boot(exc: BaseException, *, config: MarketfeedConfig,
-                            session_factory: async_sessionmaker[AsyncSession]) -> None:
-    """A live boot that refuses to run alerts (``safety/boot_stop``) before the
-    error is raised; nothing is written and nothing reaches the venue."""
-    try:
-        account_id = UUID(_require_env("BFX_EXCHANGE_ACCOUNT_ID"))
-    except Exception:
-        log.critical("boot_refused_without_account account unknown")
-        return
-    report_refused_boot(account_id=account_id, environment=config.deployment_environment.value,
-                        reason=f"boot_blocked: {str(exc) or type(exc).__name__}")
