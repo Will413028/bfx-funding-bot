@@ -3,6 +3,7 @@ version: 2
 # matching uv exclude-newer and pnpm minimumReleaseAge. Patch bumps are grouped.
 updates:
   - package-ecosystem: "github-actions"
+    target-branch: "dev"
     directories: ["/", "/.github/actions/*"]
     schedule:
       interval: "weekly"
@@ -15,6 +16,7 @@ updates:
           - "*"
 
   - package-ecosystem: "uv"
+    target-branch: "dev"
     directories: ["/backend", "/deploy/vm/ops"]
     schedule:
       interval: "weekly"
@@ -26,6 +28,7 @@ updates:
         update-types: ["patch"]
 
   - package-ecosystem: "npm"
+    target-branch: "dev"
     directory: "/frontend"
     schedule:
       interval: "weekly"
@@ -45,6 +48,7 @@ updates:
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "docker"
+    target-branch: "dev"
     directories: ["/backend", "/frontend", "/deploy/vm/postgres"]
     schedule:
       interval: "weekly"

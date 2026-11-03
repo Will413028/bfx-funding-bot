@@ -11,12 +11,12 @@
 ## 1. 流程總覽
 
 ```
-push main ──► CI (.github/workflows/ci.yml) 綠燈
+dev→main 合併（push main）──► CI (.github/workflows/ci.yml) 全部 job 綠燈
               含 compose hardening policy（docker compose config → compose_policy.py）
-          ──► Release images (.github/workflows/release.yml)
+          ──► Release images（ci.yml 的 `release` job 呼叫 .github/workflows/release.yml）
                 arm64 backend image（含營運 UI 的 static export）→ GHCR
                 tags: sha-<40 位 revision>；main 只在該 revision 仍是 main 的 head 時才推
-                （workflow_run 可能亂序完成，舊 revision 不得把 main tag 拉回去）
+                （連續 main push 的 CI 可能亂序完成，舊 revision 不得把 main tag 拉回去）
                 labels: org.opencontainers.image.revision、bfx.ci-run-url（通過的 CI run）
                 provenance：actions/attest 對推上去的 digest 簽 SLSA build provenance
                 （Sigstore public-good keyless），attestation 存在 repo 的 GitHub attestation API

@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 permissions:
   contents: read
@@ -40,7 +40,7 @@ jobs:
 
       # The API contract (9k): backend/openapi.json and src/types/api.gen.ts are generated
       # from the backend's response models and committed; a model change without them fails.
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.12.23"
           # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz (all these jobs run on x64).
@@ -110,7 +110,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.12.23"
           # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz (all these jobs run on x64).
@@ -189,7 +189,7 @@ jobs:
           persist-credentials: false
           # diff-cover compares against origin/main.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.12.23"
           # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz (all these jobs run on x64).
@@ -229,7 +229,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.12.23"
           # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz (all these jobs run on x64).
@@ -275,7 +275,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.12.23"
           # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz (all these jobs run on x64).
@@ -320,7 +320,7 @@ jobs:
           persist-credentials: false
           # The new revisions are the ones added since origin/main.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.12.23"
           # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz (all these jobs run on x64).
@@ -389,3 +389,33 @@ jobs:
           fi
           if [ "$EVENT_NAME" = pull_request ]; then args+=(--base-ref HEAD^1); fi
           python3 scripts/quality_ratchet.py "${args[@]}"
+
+  # A push to main (a dev→main merge) whose CI passed publishes the release image;
+  # bfx-deploy on the VM deploys it. dev pushes and pull requests never release.
+  release:
+    name: Release images
+    needs: [frontend, e2e_smoke, deploy_policy, backend_unit, backend_gate, backend_integration, quality_ratchet]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release.yml
+
+  gate:
+    # The only required check on main: it passes when every other job in this workflow succeeded or was skipped.
+    name: gate (ci)
+    if: always()
+    needs: [frontend, e2e_smoke, deploy_policy, backend_unit, backend_gate, backend_integration, migration_lint, quality_ratchet, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every job succeeded or was skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do
+            case "$r" in success|skipped) ;; *) echo "a needed job ended with: $r"; exit 1 ;; esac
+          done

@@ -3,16 +3,16 @@
 # medium 90 / low 180 days); after that the scan fails until the upgrade lands.
 # Remove an entry when its fix merges; never extend a date without a written reason.
 
-# Published 2026-10-20, after the scanner baseline; each expires on its fix deadline.
+# Published 2026-10-30, after the scanner baseline; each expires on its fix deadline (medium: 90 days).
 [[IgnoredVulns]]
-id = "PYSEC-2026-4320"
-ignoreUntil = 2026-10-27T00:00:00Z
-reason = "critical: certifi 2026.4.22 (backend/uv.lock) bundles emSign roots; fix 2026.10.19 was uploaded 2026-10-20, inside the 7-day cooldown until 2026-10-27"
+id = "GHSA-3g3m-2fjr-6pw4"
+ignoreUntil = 2027-01-28T00:00:00Z
+reason = "medium: glob 13.0.6 (frontend/pnpm-lock.yaml) via @sentry/nextjs bundler plugins, build time only; fix is glob 14, a major the parent does not accept yet"
 
 [[IgnoredVulns]]
-id = "GHSA-6q48-6c7w-9gw2"
-ignoreUntil = 2026-10-27T00:00:00Z
-reason = "alias of PYSEC-2026-4320 (certifi), same deadline"
+id = "GHSA-g3hv-75wg-m249"
+ignoreUntil = 2027-01-28T00:00:00Z
+reason = "medium: minimatch 10.2.4 (via glob 13 above) and 5.1.9, build time only; fix is minimatch 11, a major the parents do not accept yet"
 
 # License allowlist: the job passes --licenses (list in .github/workflows/security.yml).
 # Global list = notice licenses plus MPL-2.0, LGPL-3.0 and CC-BY-4.0. Weak copyleft

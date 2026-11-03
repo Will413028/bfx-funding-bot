@@ -97,7 +97,7 @@ def test_the_cli_exits_by_the_result(tmp_path: Path) -> None:
 
 
 def test_the_tracked_baseline_parses_and_names_its_reasons() -> None:
-    entries = tomllib.loads((ROOT / "image-os-updates.toml").read_text())["Pending"]
+    entries = tomllib.loads((ROOT / "image-os-updates.toml").read_text()).get("Pending", [])
     for entry in entries:
         assert {"package", "version", "ignoreUntil", "reason"} <= entry.keys()
         assert entry["ignoreUntil"].tzinfo is not None
