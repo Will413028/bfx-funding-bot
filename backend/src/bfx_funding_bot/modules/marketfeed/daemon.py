@@ -40,6 +40,7 @@ from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget
 from bfx_funding_bot.core.writer_lock import WriterLock
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.errors import credential_rejection
+from bfx_funding_bot.external.bitfinex.order_port import VenueOrderPort
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.external.bitfinex.ws import (
     BitfinexWSClient,
@@ -76,11 +77,7 @@ from bfx_funding_bot.modules.execution.credential_rotation import (
 )
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
-from bfx_funding_bot.modules.execution.protocols import (
-    AccountContext,
-    Credentials,
-    VenueExecutorPort,
-)
+from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.safety.boot_stop import report_refused_boot
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.config import SafetyConfig
@@ -341,7 +338,7 @@ class Daemon:
     session_factory: async_sessionmaker[AsyncSession]
     # Phase 4.2 Task 20: execution + safety wiring.
     account_bootstrap: AccountBootstrap
-    executor: VenueExecutorPort
+    executor: VenueOrderPort
     safety_chain: SafetyGuardChain
     account_ctx: AccountContext
     bus: DomainEventBus

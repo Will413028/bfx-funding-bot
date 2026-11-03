@@ -1,5 +1,15 @@
+"""BitfinexLiveExecutor.submit over a fake HTTP transport.
+
+The adapter takes a venue ``OfferRequest`` and the account's credentials and
+returns a typed ``SubmitOutcome``; the account command gate owns the reservation
+reference (see ``tests/modules/execution/test_command_gate.py``). NOT_SENT is
+returned only when no byte can have reached the venue; once the request has
+started every ending is classified.
+"""
+import asyncio
 import json
 import time
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -7,25 +17,28 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from bfx_funding_bot.core.telemetry import Phase
+from bfx_funding_bot.external.bitfinex import live_executor
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
-from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitOutcomeKind
-from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.external.bitfinex.order_port import OfferRequest
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitNotSent,
+    SubmitOutcome,
+    SubmitOutcomeKind,
+    SubmitOutcomeUnknown,
+    SubmitRejected,
+)
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
-    ReservationRef,
 )
-from bfx_funding_bot.modules.execution.errors import InvariantViolation
-from bfx_funding_bot.modules.execution.events import CancelRequested
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
-    SubmittedOrder,
 )
-from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 
 def _make_decision(*, symbol: str = "fUST") -> DecisionPayload:
@@ -56,23 +69,48 @@ def _ready(decision: DecisionPayload) -> ReadyToSubmit:
     )
 
 
-def _ref(ready: ReadyToSubmit) -> ReservationRef:
-    """The reference the command gate derives for ``ready``."""
-    return ReservationRef(
-        execution_decision_id=ready.decision_id,
-        signal_correlation_id=ready.decision.signal_correlation_id,
+def _offer(ready: ReadyToSubmit) -> OfferRequest:
+    """The request the command gate builds for ``ready``."""
+    decision = ready.decision
+    assert decision.offer_amount_usdt is not None and decision.offer_rate is not None
+    assert decision.offer_duration_days is not None
+    return OfferRequest(
+        symbol=decision.symbol,
+        amount=decision.offer_amount_usdt,
+        rate=decision.offer_rate,
+        period_days=decision.offer_duration_days,
+        funding_amount_evidence=ready.funding_amount_evidence,
     )
 
 
 async def _submit(
-    executor: BitfinexLiveExecutor, ready: ReadyToSubmit, ctx: AccountContext,
-) -> SubmittedOrder:
-    return await executor.submit(ready, ctx, reservation_ref=_ref(ready))
+    executor: BitfinexLiveExecutor, ready: ReadyToSubmit, ctx: AccountContext, *,
+    pre_send: Callable[[], bool] | None = None,
+) -> SubmitOutcome:
+    return await executor.submit(_offer(ready), ctx, pre_send=pre_send)
 
 
-class _EventCapture:
-    async def emit(self, event: dict[str, Any]) -> None:
-        pass
+def _executor(
+    http: httpx.AsyncClient, *, auth_gate: AuthRequestGate | None = None,
+    clock: Callable[[], int] | None = None,
+) -> BitfinexLiveExecutor:
+    return BitfinexLiveExecutor(
+        http=http, configured_symbols=frozenset({"fUST"}),
+        auth_gate=auth_gate if auth_gate is not None else AuthRequestGate(lambda: 1000),
+        clock=clock,
+    )
+
+
+def _gate_is_free(gate: AuthRequestGate) -> bool:
+    """Another signed call can take the gate right now: its acquire finishes without yielding."""
+    acquiring = gate.acquire("order", label="next")
+    try:
+        acquiring.send(None)
+    except StopIteration:
+        gate.release()
+        return True
+    acquiring.close()
+    return False
 
 
 @pytest.mark.asyncio
@@ -84,9 +122,7 @@ async def test_submit_without_authoritative_amount_rule_is_not_sent(fault):
         requests.append(request)
         return httpx.Response(200, json=SUCCESS)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        executor = BitfinexLiveExecutor(http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-            phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
-            configured_symbols=frozenset({"fUST"}), cell="C-1")
+        executor = BitfinexLiveExecutor(http=http, configured_symbols=frozenset({"fUST"}))
         amount = Decimal({"missing": "150", "changed": "150", "below_minimum": "2",
                            "precision": "150.000000001"}[fault])
         ready = _ready(_make_decision().model_copy(update={"offer_amount_usdt": amount}))
@@ -96,7 +132,7 @@ async def test_submit_without_authoritative_amount_rule_is_not_sent(fault):
             ready = replace(ready, funding_amount_evidence=replace(ready.funding_amount_evidence,
                                                                   rule_digest="old"))
         result = await _submit(executor, ready, _make_ctx())
-    assert result.outcome_kind is SubmitOutcomeKind.NOT_SENT
+    assert result.kind is SubmitOutcomeKind.NOT_SENT
     assert requests == []
 
 
@@ -117,14 +153,12 @@ async def test_submit_rechecks_original_book_after_local_signing_work(expiring):
         requests.append(request)
         return httpx.Response(500)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        executor = BitfinexLiveExecutor(http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-            phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
-            configured_symbols=frozenset({"fUST"}), cell="C-1", auth_gate=AuthRequestGate(nonce), clock=lambda: now)
+        executor = _executor(http, auth_gate=AuthRequestGate(nonce), clock=lambda: now)
         ready = replace(_ready(_make_decision()),
                         funding_amount_evidence=evidence(now=-27900 if expiring == "fx" else 1000))
-        result = await _submit(executor, ready,
-            replace(_make_ctx(), before_submit_transport=lambda: expiring == "fx" or now <= 2100))
-    assert result.outcome_kind is SubmitOutcomeKind.NOT_SENT
+        result = await _submit(executor, ready, _make_ctx(),
+                               pre_send=lambda: expiring == "fx" or now <= 2100)
+    assert result.kind is SubmitOutcomeKind.NOT_SENT
     assert requests == []
 
 
@@ -141,16 +175,8 @@ async def test_submit_returns_submitted_on_success() -> None:
         return httpx.Response(200, json=success_response)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    bus = DomainEventBus()
-    executor = BitfinexLiveExecutor(
-        http=http, event_sink=_EventCapture(), bus=bus,
-        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
-        configured_symbols=frozenset({"fUST"}), cell="C-1",
-        auth_gate=AuthRequestGate(lambda: 1000),
-    )
-
-    result = await _submit(executor, _ready(_make_decision()), _make_ctx())
-    assert result.status == "submitted"
+    result = await _submit(_executor(http), _ready(_make_decision()), _make_ctx())
+    assert isinstance(result, SubmitAcknowledged)
     assert result.venue_offer_id == "42"
 
 
@@ -160,21 +186,15 @@ async def test_submit_returns_unknown_on_http_5xx() -> None:
         return httpx.Response(500)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    bus = DomainEventBus()
-    executor = BitfinexLiveExecutor(
-        http=http, event_sink=_EventCapture(), bus=bus,
-        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
-        configured_symbols=frozenset({"fUST"}), cell="C-1",
-        auth_gate=AuthRequestGate(lambda: 1000),
-    )
-    result = await _submit(executor, _ready(_make_decision()), _make_ctx())
-    assert result.status == "unknown"
-    assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
-    assert result.venue_offer_id is None
+    result = await _submit(_executor(http), _ready(_make_decision()), _make_ctx())
+    assert isinstance(result, SubmitOutcomeUnknown)
+    assert result.kind is SubmitOutcomeKind.UNKNOWN
+    assert result.transport_started is True
+    assert result.http_status == 500
 
 
 @pytest.mark.asyncio
-async def test_submit_returns_unbound_failure_on_http_200_error() -> None:
+async def test_submit_returns_rejected_on_http_200_error() -> None:
     venue_error = [
         1716383500000, "fon-req", None, None,
         None, None, "ERROR", "Funds insufficient",
@@ -182,20 +202,11 @@ async def test_submit_returns_unbound_failure_on_http_200_error() -> None:
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(200, json=venue_error),
     ))
-    executor = BitfinexLiveExecutor(
-        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
-        configured_symbols=frozenset({"fUST"}), cell="C-1",
-        auth_gate=AuthRequestGate(lambda: 1000),
-    )
 
-    result = await _submit(executor, _ready(_make_decision()), _make_ctx())
+    result = await _submit(_executor(http), _ready(_make_decision()), _make_ctx())
 
-    assert result.status == "failed"  # compatibility view for explicit rejection
-    assert result.outcome_kind is SubmitOutcomeKind.REJECTED
-    assert result.venue_offer_id is None
-    assert result.reservation_ref is not None
-    assert result.reservation_ref.venue_offer_id is None
+    assert isinstance(result, SubmitRejected)
+    assert result.kind is SubmitOutcomeKind.REJECTED
 
 
 SUCCESS = [
@@ -218,20 +229,14 @@ async def test_submit_fixed_point_rate_serialization() -> None:
         return httpx.Response(200, json=SUCCESS)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    executor = BitfinexLiveExecutor(
-        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
-        configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
-        auth_gate=AuthRequestGate(lambda: 1000),
-    )
     decision = DecisionPayload(
         decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
         offer_rate=5.531e-05, offer_amount_usdt=150.0, offer_duration_days=2,
         symbol="fUST",
     )
-    result = await _submit(executor, _ready(decision), _make_ctx())
+    result = await _submit(_executor(http), _ready(decision), _make_ctx())
 
-    assert result.status == "submitted"
+    assert result.kind is SubmitOutcomeKind.ACKNOWLEDGED
     assert captured["body"]["rate"] == "0.00005531"
     assert "e" not in captured["body"]["rate"].lower()
 
@@ -276,14 +281,10 @@ async def test_planned_amount_reaches_the_venue_body_unchanged(planned, fingerpr
         return httpx.Response(200, json=SUCCESS)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        executor = BitfinexLiveExecutor(
-            http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-            phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
-            configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
-        )
+        executor = BitfinexLiveExecutor(http=http, configured_symbols=frozenset({"fUST"}))
         result = await _submit(executor, _ready(decision), _make_ctx())
 
-    assert result.status == "submitted"
+    assert result.kind is SubmitOutcomeKind.ACKNOWLEDGED
     assert captured["body"]["amount"] == wire
     assert captured["body"]["rate"] == "0.00012345"
     assert captured["body"] == attempt
@@ -291,7 +292,7 @@ async def test_planned_amount_reaches_the_venue_body_unchanged(planned, fingerpr
 
 @pytest.mark.asyncio
 async def test_submit_routes_by_decision_symbol_not_constructor() -> None:
-    """Task 2: executor must route to decision.symbol, not a fixed constructor symbol."""
+    """Task 2: executor must route to the request's symbol, not a fixed constructor symbol."""
     captured: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -299,16 +300,10 @@ async def test_submit_routes_by_decision_symbol_not_constructor() -> None:
         return httpx.Response(200, json=SUCCESS)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    ex = BitfinexLiveExecutor(
-        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
-        cell="fUST_a30", configured_symbols=frozenset({"fUST"}),
-        auth_gate=AuthRequestGate(lambda: 1000),
-    )
     decision = _make_decision(symbol="fUST")
-    result = await _submit(ex, _ready(decision), _make_ctx())
+    result = await _submit(_executor(http), _ready(decision), _make_ctx())
     assert captured[0]["symbol"] == "fUST" == decision.symbol
-    assert result.status == "submitted"
+    assert result.kind is SubmitOutcomeKind.ACKNOWLEDGED
 
 
 @pytest.mark.asyncio
@@ -317,16 +312,11 @@ async def test_submit_marks_unconfigured_symbol_not_sent() -> None:
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=SUCCESS)
     ))
-    ex = BitfinexLiveExecutor(
-        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30",
-        configured_symbols=frozenset({"fUST"}),
-        auth_gate=AuthRequestGate(lambda: 1),
-    )
+    ex = _executor(http, auth_gate=AuthRequestGate(lambda: 1))
     result = await _submit(ex, _ready(_make_decision(symbol="fUSD")), _make_ctx())
-    assert result.status == "not_sent"
-    assert result.outcome_kind is SubmitOutcomeKind.NOT_SENT
-    assert isinstance(result.outcome.reason, str)
+    assert isinstance(result, SubmitNotSent)
+    assert result.kind is SubmitOutcomeKind.NOT_SENT
+    assert result.reason == "symbol_not_configured"
 
 
 @pytest.mark.asyncio
@@ -334,17 +324,13 @@ async def test_submit_marks_malformed_success_response_unknown() -> None:
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, text='{"status":"SUCCESS"}'),
     ))
-    ex = BitfinexLiveExecutor(
-        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30",
-        configured_symbols=frozenset({"fUST"}), auth_gate=AuthRequestGate(lambda: 1),
-    )
+    ex = _executor(http, auth_gate=AuthRequestGate(lambda: 1))
 
     result = await _submit(ex, _ready(_make_decision()), _make_ctx())
 
-    assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
-    assert result.status == "unknown"
-    assert result.outcome.raw_response_digest is not None
+    assert isinstance(result, SubmitOutcomeUnknown)
+    assert result.raw_response_digest is not None
+    assert result.http_status == 200
 
 
 @pytest.mark.asyncio
@@ -354,20 +340,15 @@ async def test_submit_failure_keeps_only_bounded_response_evidence() -> None:
         return httpx.Response(500, text='["error",10001,"funding: not enough balance"]')
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    executor = BitfinexLiveExecutor(
-        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
-        configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
-        auth_gate=AuthRequestGate(lambda: 1000),
-    )
-    result = await _submit(executor, _ready(_make_decision()), _make_ctx())
-    assert result.status == "unknown"
-    assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
-    assert result.venue_offer_id is None
-    assert result.raw_response is not None
-    assert result.raw_response["http_status"] == 500
-    assert len(result.raw_response["response_digest"]) == 64
-    assert "not enough balance" not in str(result.raw_response)
+    result = await _submit(_executor(http), _ready(_make_decision()), _make_ctx())
+    assert isinstance(result, SubmitOutcomeUnknown)
+    assert result.http_status == 500
+    assert result.raw_response_digest is not None
+    assert len(result.raw_response_digest) == 64
+    assert "not enough balance" not in result.raw_response_digest
+    # The structured venue error is the only text kept (bounded, credential-redacted
+    # by the gate before it is made durable); there is no raw body field at all.
+    assert not hasattr(result, "raw_response")
 
 
 @pytest.mark.asyncio
@@ -379,59 +360,12 @@ async def test_submit_settles_a_recorded_venue_refusal_as_failed() -> None:
         ))
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    executor = BitfinexLiveExecutor(
-        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
-        configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
-        auth_gate=AuthRequestGate(lambda: 1000),
-    )
-    result = await _submit(executor, _ready(_make_decision()), _make_ctx())
-    assert result.outcome_kind is SubmitOutcomeKind.REJECTED
-    assert result.status == "failed"
-    assert result.venue_offer_id is None
-    assert result.raw_response == {
-        "http_status": 500,
-        "response_digest": result.raw_response["response_digest"],
-    }
-
-
-@pytest.mark.asyncio
-async def test_cancel_publishes_cancel_requested() -> None:
-    # Bitfinex cancel SUCCESS shape (10 elements; raw[6]="SUCCESS")
-    cancel_success_resp = [
-        1700000000000, "foc-req", None, None,
-        ["42", "fUSD", "rate", "amount"],
-        "0", "SUCCESS", "Submitting cancel request",
-    ]
-    http = httpx.AsyncClient(transport=httpx.MockTransport(
-        lambda req: httpx.Response(200, json=cancel_success_resp)
-    ))
-    bus = DomainEventBus()
-    captured: list = []
-
-    async def capture(ev: CancelRequested) -> None:
-        captured.append(ev)
-    bus.subscribe(CancelRequested, capture)
-
-    executor = BitfinexLiveExecutor(
-        http=http, event_sink=_EventCapture(), bus=bus,
-        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
-        configured_symbols=frozenset({"fUST"}), cell="C-1",
-        auth_gate=AuthRequestGate(lambda: 1000),
-    )
-
-    sig_id = uuid4()
-    await executor.cancel(
-        venue_offer_id="42",
-        signal_correlation_id=sig_id,
-        account_id="default",
-        ctx=_make_ctx(),
-    )
-
-    assert len(captured) == 1
-    assert captured[0].venue_offer_id == "42"
-    assert captured[0].signal_correlation_id == sig_id
-    assert captured[0].requested_at_ms > 0
+    result = await _submit(_executor(http), _ready(_make_decision()), _make_ctx())
+    assert isinstance(result, SubmitRejected)
+    assert result.kind is SubmitOutcomeKind.REJECTED
+    assert result.raw_response is not None
+    assert result.raw_response["status"] == "HTTP_500"
+    assert len(result.raw_response["response_digest"]) == 64
 
 
 @pytest.mark.asyncio
@@ -442,9 +376,6 @@ async def test_submit_waits_for_the_shared_gate_and_rechecks_after_it(
     """A submit queued behind another signed call on the key neither signs nor
     sends until that call is done, and its final book predicate runs after the
     wait -- so a book that went stale while waiting still blocks the send."""
-    import asyncio
-    from dataclasses import replace
-
     requests: list[httpx.Request] = []
     checks: list[bool] = []
 
@@ -459,13 +390,11 @@ async def test_submit_waits_for_the_shared_gate_and_rechecks_after_it(
     gate = AuthRequestGate()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         executor = BitfinexLiveExecutor(
-            http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-            phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
-            configured_symbols=frozenset({"fUST"}), cell="C-1", auth_gate=gate,
+            http=http, configured_symbols=frozenset({"fUST"}), auth_gate=gate,
         )
-        ctx = replace(_make_ctx(), before_submit_transport=predicate)
         async with gate.nonce("read") as held_nonce:
-            task = asyncio.ensure_future(_submit(executor, _ready(_make_decision()), ctx))
+            task = asyncio.ensure_future(_submit(
+                executor, _ready(_make_decision()), _make_ctx(), pre_send=predicate))
             for _ in range(20):
                 await asyncio.sleep(0)
             assert requests == []
@@ -476,18 +405,16 @@ async def test_submit_waits_for_the_shared_gate_and_rechecks_after_it(
     if book_fresh_after_wait:
         assert len(requests) == 1
         assert int(requests[0].headers["bfx-nonce"]) > held_nonce
-        assert result.outcome_kind is not SubmitOutcomeKind.NOT_SENT
+        assert result.kind is not SubmitOutcomeKind.NOT_SENT
     else:
         assert requests == []
-        assert result.outcome_kind is SubmitOutcomeKind.NOT_SENT
+        assert result.kind is SubmitOutcomeKind.NOT_SENT
 
 
 @pytest.mark.asyncio
 async def test_submit_cancelled_while_waiting_for_the_gate_is_not_sent() -> None:
     """Cancellation during the gate wait is honoured, but carries the fact that
     nothing was sent, so the intent can close as NOT_SENT instead of UNKNOWN."""
-    import asyncio
-
     from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitCancelledNotSent
 
     requests: list[httpx.Request] = []
@@ -499,9 +426,7 @@ async def test_submit_cancelled_while_waiting_for_the_gate_is_not_sent() -> None
     gate = AuthRequestGate()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         executor = BitfinexLiveExecutor(
-            http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-            phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
-            configured_symbols=frozenset({"fUST"}), cell="C-1", auth_gate=gate,
+            http=http, configured_symbols=frozenset({"fUST"}), auth_gate=gate,
         )
         async with gate.nonce("read"):
             task = asyncio.ensure_future(_submit(executor, _ready(_make_decision()), _make_ctx()))
@@ -517,61 +442,6 @@ async def test_submit_cancelled_while_waiting_for_the_gate_is_not_sent() -> None
         assert gate.waiting("order") == 0
 
 
-def _echo_executor(response: httpx.Response) -> BitfinexLiveExecutor:
-    return BitfinexLiveExecutor(
-        http=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response)),
-        event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
-        configured_symbols=frozenset({"fUST"}), cell="C-1",
-        auth_gate=AuthRequestGate(lambda: 1000),
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("response", [
-    httpx.Response(500),
-    httpx.Response(200, json=[1716383500000, "fon-req", None, None,
-                              None, None, "ERROR", "Funds insufficient"]),
-], ids=["unknown", "rejected"])
-async def test_submit_echoes_the_given_reference_unbound(response: httpx.Response) -> None:
-    """The executor returns the gate's own reference object, never one it made."""
-    ready = _ready(_make_decision())
-    given = _ref(ready)
-
-    result = await _echo_executor(response).submit(ready, _make_ctx(), reservation_ref=given)
-
-    assert result.reservation_ref is given
-
-
-@pytest.mark.asyncio
-async def test_submit_echoes_the_given_reference_bound_to_the_acknowledged_offer() -> None:
-    success = [
-        1716383500000, "fon-req", None, None,
-        [42, "fUST", 0, 0, 150.0, 0, "REQ", None, None, 0, "ACTIVE",
-         None, None, None, 0.0005, 2, 0, 0, None, 0, None, None, None, 12345],
-        None, "SUCCESS", "Submitting",
-    ]
-    ready = _ready(_make_decision())
-    given = _ref(ready)
-
-    result = await _echo_executor(httpx.Response(200, json=success)).submit(
-        ready, _make_ctx(), reservation_ref=given)
-
-    assert result.venue_offer_id == "42"
-    assert result.reservation_ref == given.bind_venue_offer("42")
-
-
-@pytest.mark.asyncio
-async def test_submit_refuses_a_reference_for_another_request() -> None:
-    ready = _ready(_make_decision())
-    other = ReservationRef(execution_decision_id="another-decision",
-                           signal_correlation_id=ready.decision.signal_correlation_id)
-
-    with pytest.raises(InvariantViolation, match="reservation_ref conflicts"):
-        await _echo_executor(httpx.Response(500)).submit(
-            ready, _make_ctx(), reservation_ref=other)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [200, 500])
 async def test_submit_returns_unknown_on_a_body_too_deep_to_decode(status: int) -> None:
@@ -583,12 +453,181 @@ async def test_submit_returns_unknown_on_a_body_too_deep_to_decode(status: int) 
         return httpx.Response(status, content=deep)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    executor = BitfinexLiveExecutor(
-        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
-        phase=Phase.SHADOW, strategy=StrategyName.RATE_PERCENTILE,
-        configured_symbols=frozenset({"fUST"}), cell="C-1",
-        auth_gate=AuthRequestGate(lambda: 1000),
-    )
-    result = await _submit(executor, _ready(_make_decision()), _make_ctx())
-    assert result.status == "unknown"
-    assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
+    result = await _submit(_executor(http), _ready(_make_decision()), _make_ctx())
+    assert isinstance(result, SubmitOutcomeUnknown)
+    assert result.kind is SubmitOutcomeKind.UNKNOWN
+
+
+# ------------------------------------------------- R4 adapter contract (a2, b, c, d)
+
+
+def _fail_signing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(**kwargs: object) -> dict[str, str]:
+        raise ValueError("cannot sign")
+    monkeypatch.setattr(live_executor, "sign_request", refuse)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("path", "reason"), [
+    ("symbol_not_configured", "symbol_not_configured"),
+    ("signing_failed", "local_validation_failed"),
+    ("payload_unbuildable", "local_validation_failed"),
+    ("funding_rule_refused", "funding_rule_or_amount_invalid"),
+    ("pre_send_false", "decision_book_invalid_or_expired"),
+])
+async def test_every_adapter_not_sent_path_sends_no_http_and_frees_the_gate(
+    path: str, reason: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(a2)/(b): each NOT_SENT ending of the adapter sends nothing, and the per-key
+    nonce gate it may have taken is free again for the next signed call."""
+    from dataclasses import replace
+
+    requests: list[httpx.Request] = []
+    pre_send_calls: list[None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=SUCCESS)
+
+    def pre_send() -> bool:
+        pre_send_calls.append(None)
+        return path != "pre_send_false"
+
+    ready = _ready(_make_decision(symbol="fUSD" if path == "symbol_not_configured" else "fUST"))
+    if path == "payload_unbuildable":
+        # More decimals than the venue keeps: the body cannot be built exactly.
+        ready = _ready(_make_decision().model_copy(
+            update={"offer_amount_usdt": Decimal("150.000000001")}))
+    elif path == "funding_rule_refused":
+        ready = replace(ready, funding_amount_evidence=None)
+    elif path == "signing_failed":
+        _fail_signing(monkeypatch)
+
+    gate = AuthRequestGate(lambda: 1000)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await _submit(_executor(http, auth_gate=gate), ready, _make_ctx(),
+                               pre_send=pre_send)
+
+    assert isinstance(result, SubmitNotSent)
+    assert result.reason == reason
+    assert requests == []
+    # Only the last check runs the gate's predicate; earlier refusals never reach it.
+    assert len(pre_send_calls) == (1 if path == "pre_send_false" else 0)
+    assert not gate.busy
+    assert _gate_is_free(gate)
+
+
+@pytest.mark.asyncio
+async def test_pre_send_false_releases_the_nonce_gate_for_the_next_signed_request() -> None:
+    """(b): a stale book refuses the send while the adapter holds the gate; the very
+    next signed request takes the gate at once and is the only one that reaches the venue."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=SUCCESS)
+
+    gate = AuthRequestGate()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        executor = _executor(http, auth_gate=gate)
+        refused = await _submit(executor, _ready(_make_decision()), _make_ctx(),
+                                pre_send=lambda: False)
+        assert not gate.busy and gate.waiting("order") == 0
+        sent = await _submit(executor, _ready(_make_decision()), _make_ctx(),
+                             pre_send=lambda: True)
+
+    assert isinstance(refused, SubmitNotSent)
+    assert refused.reason == "decision_book_invalid_or_expired"
+    assert isinstance(sent, SubmitAcknowledged)
+    assert len(requests) == 1
+    assert not gate.busy
+
+
+def _raise(exc: BaseException) -> Callable[[httpx.Request], Any]:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise exc
+    return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("handler", "reason", "http_status"), [
+    (_raise(httpx.ReadTimeout("timed out")), "timeout", None),
+    # A protocol error is not a NetworkError: it is still UNKNOWN, under its own reason.
+    (_raise(httpx.RemoteProtocolError("server disconnected")), "submit_exception", None),
+    (_raise(httpx.ReadError("connection reset")), "connection_error", None),
+    (_raise(asyncio.CancelledError()), "cancelled_after_start", None),
+    (_raise(RuntimeError("response handling broke")), "submit_exception", None),
+    (lambda request: httpx.Response(200, text="not json"), "malformed_response", 200),
+    (lambda request: httpx.Response(200, json={"unexpected": "shape"}),
+     "unrecognized_response", 200),
+], ids=["timeout", "disconnect", "reset", "cancelled", "exception", "parse_error",
+        "unrecognized"])
+async def test_every_ending_after_transport_started_is_unknown(
+    handler: Callable[[httpx.Request], Any], reason: str, http_status: int | None,
+) -> None:
+    """(c): once the request has started, a timeout, a dropped connection, a
+    cancellation or an unparseable answer is UNKNOWN, never NOT_SENT."""
+    gate = AuthRequestGate(lambda: 1000)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await _submit(_executor(http, auth_gate=gate), _ready(_make_decision()),
+                               _make_ctx(), pre_send=lambda: True)
+
+    assert isinstance(result, SubmitOutcomeUnknown)
+    assert result.transport_started is True
+    assert result.reason == reason
+    assert result.http_status == http_status
+    assert not gate.busy
+
+
+_RECORDED_REFUSAL = "Invalid offer: not enough UST balance available in deposit wallet"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status", "body", "kind"), [
+    (500, ["error", 10001, _RECORDED_REFUSAL], SubmitOutcomeKind.REJECTED),
+    (500, ["error", 10001, "simulated: venue error"], SubmitOutcomeKind.UNKNOWN),
+    (502, ["error", 10001, _RECORDED_REFUSAL], SubmitOutcomeKind.UNKNOWN),
+    (503, None, SubmitOutcomeKind.UNKNOWN),
+], ids=["recorded_refusal", "unrecorded_message", "gateway", "unavailable"])
+async def test_a_5xx_is_rejected_only_when_the_refusal_table_names_it(
+    status: int, body: object, kind: SubmitOutcomeKind,
+) -> None:
+    """(d): only a recorded (500, code, message) refusal settles as REJECTED; every
+    other 5xx is UNKNOWN and keeps the HTTP status it came with."""
+    response = (httpx.Response(status) if body is None
+                else httpx.Response(status, text=json.dumps(body)))
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response))
+
+    result = await _submit(_executor(http), _ready(_make_decision()), _make_ctx())
+
+    assert result.kind is kind
+    if kind is SubmitOutcomeKind.UNKNOWN:
+        assert isinstance(result, SubmitOutcomeUnknown)
+        assert result.reason == "http_5xx"
+        assert result.http_status == status
+    else:
+        assert isinstance(result, SubmitRejected)
+        assert result.reason == f"venue_rejected:10001:{_RECORDED_REFUSAL}"
+
+
+@pytest.mark.parametrize(("field", "value", "reason"), [
+    ("symbol", "", "symbol_missing"),
+    ("amount", Decimal("0"), "invalid_submit_payload"),
+    ("amount", Decimal("-1"), "invalid_submit_payload"),
+    ("amount", 150.0, "invalid_submit_payload"),
+    ("rate", Decimal("0"), "invalid_submit_payload"),
+    ("rate", Decimal("-0.0001"), "invalid_submit_payload"),
+    ("rate", 0.0005, "invalid_submit_payload"),
+    ("period_days", 0, "invalid_submit_payload"),
+    ("period_days", -2, "invalid_submit_payload"),
+    ("period_days", True, "invalid_submit_payload"),
+    ("period_days", 2.0, "invalid_submit_payload"),
+])
+def test_an_offer_request_refuses_invalid_terms(field: str, value: Any, reason: str) -> None:
+    terms: dict[str, Any] = {
+        "symbol": "fUST", "amount": Decimal("150"), "rate": Decimal("0.0005"), "period_days": 2,
+    }
+    OfferRequest(**terms)  # the control: valid terms build
+    terms[field] = value
+    with pytest.raises(ValueError, match=reason):
+        OfferRequest(**terms)

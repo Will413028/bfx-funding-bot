@@ -24,7 +24,6 @@ from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPr
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
-    SubmittedOrder,
 )
 from bfx_funding_bot.modules.ledger import CapitalAvailable
 from bfx_funding_bot.modules.ledger.tables import (
@@ -79,10 +78,9 @@ class Venue:
     def __init__(self):
         self.received = []
 
-    async def submit(self, ready, ctx, *, reservation_ref):
-        self.received.append(ready)
-        return SubmittedOrder(venue_offer_id="101", outcome=SubmitAcknowledged("101"),
-                              reservation_ref=reservation_ref)
+    async def submit(self, offer, account, *, pre_send=None):
+        self.received.append(offer)
+        return SubmitAcknowledged("101")
 
 
 async def boundary(stack: Stack):
@@ -114,7 +112,7 @@ async def boundary(stack: Stack):
     )
     venue = Venue()
     gate = AccountCommandGate(
-        venue, uncertainty_reader=_NoneOpen(), safety_evaluator=_Allow(),
+        venue, bus=DomainEventBus(), uncertainty_reader=_NoneOpen(), safety_evaluator=_Allow(),
         deployment_environment=ENVIRONMENT, clock=lambda: NOW,
         boundary=stack.boundary(LedgerCommandEffects(DomainEventBus())),
         managed_offers=stack.offers,

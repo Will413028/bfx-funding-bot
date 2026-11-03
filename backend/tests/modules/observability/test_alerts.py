@@ -25,8 +25,8 @@ import bfx_funding_bot.modules.execution.uncertainty_tables
 import bfx_funding_bot.modules.ledger.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.core.secret_files import SecretFileError
+from bfx_funding_bot.external.bitfinex.order_port import FundingCancelAllResult
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-from bfx_funding_bot.modules.execution.protocols import FundingCancelAllResult
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository

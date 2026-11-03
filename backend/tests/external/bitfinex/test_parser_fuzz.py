@@ -2,7 +2,7 @@
 raises the error the caller handles, never an unhandled exception.
 
 Each parser's defined error is the one its callers catch: ``BitfinexShapeError`` for
-the row parsers, ``InvariantViolation`` for the cancel-all classifier, and none at all
+the row parsers, ``VenueResponseShapeError`` for the cancel-all classifier, and none at all
 for the submit classification (once transport started, every answer is an outcome)
 and the venue-error readers (they return None). ``BitfinexREST`` turns
 ``ROW_CONVERSION_ERRORS`` from the candle and stat rows into ``BitfinexShapeError``.
@@ -45,6 +45,7 @@ from bfx_funding_bot.external.bitfinex.observations import (
     parse_offer_observations,
     parse_wallet_observations,
 )
+from bfx_funding_bot.external.bitfinex.order_port import VenueResponseShapeError
 from bfx_funding_bot.external.bitfinex.rest import ROW_CONVERSION_ERRORS, FundingTrade
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitAcknowledged,
@@ -52,7 +53,6 @@ from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     classify_submit_response,
 )
 from bfx_funding_bot.external.bitfinex.submit_wire import response_digest, venue_error
-from bfx_funding_bot.modules.execution.errors import InvariantViolation
 
 # Values a Bitfinex row slot can hold after json.loads (which also yields inf and
 # nan), plus the strings that are hardest on numeric conversion.
@@ -127,8 +127,8 @@ def test_public_candle_and_stat_rows_raise_only_what_the_client_wraps(
 
 
 @given(raw=_BODY)
-def test_cancel_all_response_raises_only_invariant_violation(raw: Any) -> None:
-    with contextlib.suppress(InvariantViolation):
+def test_cancel_all_response_raises_only_venue_response_shape_error(raw: Any) -> None:
+    with contextlib.suppress(VenueResponseShapeError):
         classify_cancel_all_response(raw)
 
 

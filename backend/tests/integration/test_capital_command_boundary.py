@@ -18,7 +18,9 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from bfx_funding_bot.external.bitfinex.live_executor import format_offer_amount
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
+from bfx_funding_bot.external.bitfinex.order_port import CancelOutcome, CancelResult
 from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
@@ -146,17 +148,20 @@ class Venue:
         self.received: list[Any] = []
         self.cancel_clock: list[int] = []
 
-    async def submit(self, ready, ctx, *, reservation_ref):
+    async def submit(self, offer, account, *, pre_send=None):
+        # The venue request names no decision: the durable attempt is found by its terms.
         async with self.stack.factory() as session:
-            assert await session.scalar(select(SubmissionAttemptJournalRow.attempt_id).where(
-                SubmissionAttemptJournalRow.execution_decision_id == ready.decision_id)) is not None
-        self.received.append(ready)
-        return SubmittedOrder(venue_offer_id="101", outcome=SubmitAcknowledged("101"),
-                              reservation_ref=reservation_ref)
+            payloads = (await session.scalars(select(
+                SubmissionAttemptJournalRow.normalized_payload).where(
+                SubmissionAttemptJournalRow.symbol == offer.symbol))).all()
+        assert any(p["amount"] == format_offer_amount(offer.amount) for p in payloads)
+        self.received.append(offer)
+        return SubmitAcknowledged("101")
 
-    async def cancel(self, **kwargs):
+    async def cancel(self, venue_offer_id, account, *, before_transport=None):
         self.cancel_clock.append(await clock_revision(self.stack))
-        self.received.append(kwargs["venue_offer_id"])
+        self.received.append(venue_offer_id)
+        return CancelResult(CancelOutcome.SUCCESS)
 
 
 def stop_chain(halt, *guards):
@@ -205,7 +210,7 @@ async def boundary(stack: Stack, *, available: str = "1000") -> Rig:
     await halt.transition("ACTIVE", cause="operator", reason="isolated test only", actor="test",
                           now_ms=1200)
     venue = Venue(stack)
-    gate = AccountCommandGate(venue,
+    gate = AccountCommandGate(venue, bus=DomainEventBus(),
         uncertainty_reader=stack.uncertainties, safety_evaluator=stop_chain(halt),
         deployment_environment="ci", boundary=stack.boundary(LedgerCommandEffects(DomainEventBus())),
         managed_offers=stack.offers, clock=lambda: NOW)
@@ -519,7 +524,7 @@ async def test_independent_command_gates_cannot_spend_same_budget(gate_stack):
     rig = await boundary(gate_stack)
     # A distinct fingerprint: only the shared budget may decide between them.
     second = await second_ready(rig, "499.99990501")
-    competitor = AccountCommandGate(rig.venue,
+    competitor = AccountCommandGate(rig.venue, bus=DomainEventBus(),
         uncertainty_reader=gate_stack.uncertainties,
         safety_evaluator=ManualKillGuard(trading_state=rig.halt), deployment_environment="ci",
         boundary=rig.gate._boundary, managed_offers=gate_stack.offers, clock=lambda: NOW)
@@ -676,9 +681,8 @@ async def cancel_http_boundary(stack: Stack, http, *, state="ACTIVE") -> Rig:
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=str(ACCOUNT))
     rig.gate._inner = BitfinexLiveExecutor(
-        http=http, event_sink=_CapturingSink(), bus=DomainEventBus(), phase=Phase.LIVE,
-        strategy=StrategyName.MEAN_REVERSION, configured_symbols=frozenset({"fUST"}),
-        cell="a30", auth_gate=AuthRequestGate(lambda: 123456789),
+        http=http, configured_symbols=frozenset({"fUST"}),
+        auth_gate=AuthRequestGate(lambda: 123456789),
     )
     return rig
 
@@ -730,10 +734,7 @@ async def test_stop_refuses_submit_before_the_http_adapter(gate_stack, state):
     """No new offer reaches the real adapter under a stop, even one already planned."""
     import httpx
 
-    from bfx_funding_bot.core.telemetry import Phase
     from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
-    from bfx_funding_bot.modules.strategy import StrategyName
-    from tests.modules.execution.deployment.test_reconciler import _CapturingSink
 
     requests = []
 
@@ -744,9 +745,8 @@ async def test_stop_refuses_submit_before_the_http_adapter(gate_stack, state):
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
         rig = await boundary(gate_stack)
         rig.gate._inner = BitfinexLiveExecutor(
-            http=http, event_sink=_CapturingSink(), bus=DomainEventBus(), phase=Phase.LIVE,
-            strategy=StrategyName.MEAN_REVERSION, configured_symbols=frozenset({"fUST"}),
-            cell="a30", auth_gate=AuthRequestGate(lambda: 123456789),
+            http=http, configured_symbols=frozenset({"fUST"}),
+            auth_gate=AuthRequestGate(lambda: 123456789),
         )
         await rig.halt.transition(state, cause="operator", reason="stop", actor="test")
         with pytest.raises(CommandGateBlocked, match=f"trading state {state}"):
@@ -785,9 +785,9 @@ async def test_the_attempt_is_committed_without_an_outcome_when_the_venue_is_cal
     seen = []
 
     class Asserting(Venue):
-        async def submit(self, ready, ctx, *, reservation_ref):
+        async def submit(self, offer, account, *, pre_send=None):
             seen.append((await attempts(gate_stack), await outcomes(gate_stack)))
-            return await super().submit(ready, ctx, reservation_ref=reservation_ref)
+            return await super().submit(offer, account, pre_send=pre_send)
 
     rig.gate._inner = Asserting(gate_stack)
     await rig.gate.submit(rig.ready, rig.ctx)
@@ -807,9 +807,8 @@ async def test_a_rejected_submit_records_the_rejection_and_charges_nothing(gate_
     rig = await boundary(gate_stack)
 
     class Rejecting(Venue):
-        async def submit(self, ready, ctx, *, reservation_ref):
-            return SubmittedOrder(outcome=SubmitRejected("no_funds"),
-                                  reservation_ref=reservation_ref)
+        async def submit(self, offer, account, *, pre_send=None):
+            return SubmitRejected("no_funds")
 
     rig.gate._inner = Rejecting(gate_stack)
     await rig.gate.submit(rig.ready, rig.ctx)
@@ -823,7 +822,7 @@ async def test_a_crash_between_attempt_and_outcome_leaves_the_attempt_open(gate_
     rig = await boundary(gate_stack)
 
     class Crashing(Venue):
-        async def submit(self, ready, ctx, *, reservation_ref):
+        async def submit(self, offer, account, *, pre_send=None):
             raise RuntimeError("crash between the attempt and its outcome")
 
     rig.gate._inner = Crashing(gate_stack)

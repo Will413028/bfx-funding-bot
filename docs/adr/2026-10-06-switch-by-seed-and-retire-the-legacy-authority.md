@@ -107,3 +107,13 @@ tags: [bfx-funding-bot, decision, ledger, migration, postgresql, disaster-recove
   - 選寫入端：一個型別加 DB 約束就涵蓋所有 consumer，不必依賴每個讀者都記得處理。`ck_submission_attempt_policy_or_seed` 同時收緊為「恰好一個」。
   - 代價：migration `a6c7e8f9b0d1` 改寫了 append-only 列的 bytes，restore drill 的目標時點若早於它，會回報預期中的 `ledger_digest_mismatch`（`docs/runbooks/offsite-dr.md`）。
 - **重新評估條件**：Bitfinex funding submit 開始接受 client id 時，回到基準，以 attempt id 作為 client id 送出。
+
+## Amendment (2026-11-03)：R4 撤掉 reference 回傳檢查與 `VenueExecutorPort`
+
+**約束**：沿用 2026-10-07 Amendment，另加 [2026-10-19](2026-10-19-runtime-roles-and-necessity-gated-module-boundaries.md) 的 `venue-below-modules`（venue 不得 import modules，R4 起 0 ignore）。
+
+- **「reference 只由 gate 建立」改由 import 守門保證，不再靠型別與回傳比對。** R4 之後 venue adapter 的 `submit(offer, account, *, pre_send)` 只回 `SubmitOutcome`，不收也不回 `ReservationRef`；venue 連 import `ReservationRef` 都會被 import-linter 擋下，所以 adapter 結構上造不出 reference。
+  - 原本的必要條件「live executor 沒收到 reference 時會自己造一個」因此不成立，gate 自己包裝結果時再比對 reference 恆為真。
+  - 刪除 `_bind_result`、`executor_result_identity_mismatch` 的 UNKNOWN 分支與 `VenueExecutorPort`；gate 在 ack 時把自己建的 reference 綁上 venue offer id。
+  - 2026-10-07 Amendment 的「沒回傳、不一致或綁到別的 venue offer 記成 durable UNKNOWN」與「submit port 拆成兩個、`reservation_ref` 必填」兩條由本條取代；其餘不變。
+- **重新評估條件**：venue 層出現第二個實作（brief D-E 的撤銷條件「第二個真實 venue」），或 `venue-below-modules` 重新允許任何 ignore 時，回頭評估是否要恢復回傳比對。

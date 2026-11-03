@@ -58,3 +58,5 @@ def test_everything_else_stays_unknown(status: int, body: list[object]) -> None:
     assert isinstance(outcome, SubmitOutcomeUnknown)
     assert outcome.outcome_kind is SubmitOutcomeKind.UNKNOWN
     assert outcome.reason == "http_5xx"
+    # The status rides on the outcome: the deployment reconciler reads it there.
+    assert outcome.http_status == status
