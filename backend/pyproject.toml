@@ -556,6 +556,7 @@ forbidden_modules = [
     "bfx_funding_bot.external.bitfinex.funding_trades_ws",
     "bfx_funding_bot.modules.admin",
     "bfx_funding_bot.modules.simulated_venue",
+    "bfx_funding_bot.modules.execution.trading_status",
     "bfx_funding_bot.modules.execution.audit",
     "bfx_funding_bot.modules.execution.bus",
     "bfx_funding_bot.modules.execution.capital_policy_control",

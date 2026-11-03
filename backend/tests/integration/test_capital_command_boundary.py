@@ -97,7 +97,7 @@ async def read_capital(stack: Stack, cell_id: str, symbol: str = "fUST") -> Capi
 
 
 def status_reads(stack: Stack) -> Any:
-    from bfx_funding_bot.modules.admin.trading_status import CapitalStatusReads
+    from bfx_funding_bot.modules.execution.trading_status import CapitalStatusReads
     return CapitalStatusReads(authority=stack.capital, lock=stack.lock, scope=SCOPE,
                               session_factory=stack.factory, clock=lambda: NOW)
 
@@ -305,9 +305,9 @@ async def test_planner_attaches_the_status_budget_and_revision(gate_stack):
 async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(gate_stack):
     from bfx_funding_bot.core.health import HealthProbe
     from bfx_funding_bot.core.telemetry import Phase
-    from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
     from bfx_funding_bot.modules.execution.deployment.submit_attempt import SubmitAttemptRecorder
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+    from bfx_funding_bot.modules.execution.trading_status import TradingStatusService
     from bfx_funding_bot.modules.strategy import StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell
     rig = await boundary(gate_stack)
@@ -362,9 +362,9 @@ async def test_status_with_an_envelope_serializes_to_json(gate_stack):
 
     from bfx_funding_bot.core.health import HealthProbe
     from bfx_funding_bot.core.telemetry import Phase
-    from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
     from bfx_funding_bot.modules.execution.deployment.submit_attempt import SubmitAttemptRecorder
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+    from bfx_funding_bot.modules.execution.trading_status import TradingStatusService
     from bfx_funding_bot.modules.strategy import StrategyName
     from bfx_funding_bot.modules.trading import OfferEnvelope
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell

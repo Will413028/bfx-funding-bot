@@ -56,7 +56,6 @@ from bfx_funding_bot.external.bitfinex.ws import (
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     account_id_uuid_or_none,
 )
-from bfx_funding_bot.modules.admin.trading_status import CapitalStatusReads, TradingStatusService
 from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_periods
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.deployments.identity import DeploymentIdentity
@@ -131,6 +130,10 @@ from bfx_funding_bot.modules.execution.safety.protection import (
 )
 from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
+from bfx_funding_bot.modules.execution.trading_status import (
+    CapitalStatusReads,
+    TradingStatusService,
+)
 from bfx_funding_bot.modules.execution.uncertainty_requests import ResolutionScope
 from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
     UncertaintyResolutionWorker,

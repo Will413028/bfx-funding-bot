@@ -6,7 +6,7 @@ halt; user mutations use durable release sessions.
 
 The daemon's ``/admin/trading-status`` and ``/admin/dry-evaluate`` bodies are forwarded
 as they are, but only once they parse as ``FundingStatus``: the fields the console reads
-are typed (the daemon builds them in ``modules/admin/trading_status.py``), the rest passes
+are typed (the daemon builds them in ``modules/execution/trading_status.py``), the rest passes
 through untouched (``extra="allow"``). A body the console could misread is refused like
 an unreachable daemon, never forwarded.
 """

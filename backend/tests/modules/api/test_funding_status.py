@@ -71,7 +71,7 @@ async def test_the_daemons_own_status_parses_and_is_forwarded_unchanged():
     import json
 
     from bfx_funding_bot.modules.api.funding_status import FundingStatus
-    from tests.modules.admin.test_trading_status import _FakeTradingState, _halt_state, _service
+    from tests.modules.execution.test_trading_status import _FakeTradingState, _halt_state, _service
 
     service = _service(trading_state=_FakeTradingState(_halt_state(True)))
     body = json.loads(json.dumps({**await service.snapshot(), "dry_run": await service.dry_run()}))
