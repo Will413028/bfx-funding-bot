@@ -27,8 +27,8 @@ from sqlalchemy import insert, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.apps.bot_ports import build_policy_ports
-from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
-from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
+from bfx_funding_bot.modules.execution.safety.tables import TradingControlRequestRow
+from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger.capital_amendment import PolicyChanges, amend_capital_policy
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store, build_scope_lock
@@ -76,22 +76,23 @@ async def _seed_policy(factory, scope: Scope) -> None:
 
 
 async def test_an_operator_request_settles_only_under_the_scope_lock(migrated_db) -> None:
+    """A resume: its apply appends the transition with no lock of its own, so only the
+    base worker's ``_lock`` can make it wait (a capital request would also wait inside
+    ``amend_capital_policy`` and could not pin ``_lock``)."""
     factory, account = migrated_db
     scope = Scope(account, ENV)
-    await _seed_policy(factory, scope)
     request_id = uuid4()
     async with factory.begin() as session:
-        await session.execute(insert(CapitalPolicyRequestRow).values(
+        await session.execute(insert(TradingControlRequestRow).values(
             request_id=request_id, exchange_account_id=account, deployment_environment=ENV,
-            symbol="fUST", action="disable", reason="pin", requested_by="operator",
-            created_at_ms=1))
+            action="resume", reason="pin", requested_by="operator", created_at_ms=1))
 
     async def allow(session, *, account_id, user) -> bool:
         return True
 
-    worker = CapitalPolicyRequestWorker(
+    worker = TradingControlWorker(
         session_factory=factory, account_id=account, environment=ENV, authority=allow,
-        policy_store=build_policy_store(scope), scope_lock=build_scope_lock(), clock=lambda: 2)
+        scope_lock=build_scope_lock(), clock=lambda: 2)
     assert await _waits_behind_the_scope_lock(
         factory, scope, lambda: worker.process(request_id)) == "applied"
 

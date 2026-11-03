@@ -213,15 +213,16 @@ def test_contract_modules_exist() -> None:
 
 # What a script (``backend/scripts``, a composition root outside the import-linter root
 # package until R11 adds it) must not import: a module's wiring, which only apps assemble
-# (brief D-F ``wiring-is-top``), and the scope lock primitive, taken only through the
-# ledger's ``ScopeLock`` (``xact-lock-owner``, ADR 2026-10-19 D4). Delete this test when
+# (brief D-F ``wiring-is-top``); a module's ``_internal``, which includes the ledger clock
+# that ``xact-lock-owner`` lets take the lock; and the scope lock primitive itself, taken
+# only through the ledger's ``ScopeLock`` (ADR 2026-10-19 D4). Delete this test when
 # ``scripts`` becomes a root package and the contracts see it.
 SCRIPTS_MAY_NOT_IMPORT = re.compile(
-    r"bfx_funding_bot\.(modules\.\w+\.wiring|core\.xact_lock)(\..*)?"
+    r"bfx_funding_bot\.(modules\.\w+\.(wiring|_internal)|core\.xact_lock)(\..*)?"
 )
 
 
-def test_scripts_import_neither_module_wiring_nor_the_lock_primitive() -> None:
+def test_scripts_import_no_module_wiring_internals_or_the_lock_primitive() -> None:
     scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
     violations: list[str] = []
     for script in scripts_dir.rglob("*.py"):
