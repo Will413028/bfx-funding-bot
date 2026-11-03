@@ -178,14 +178,15 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     assert {
         "bfx_funding_bot.modules.ledger", "bfx_funding_bot.modules.execution",
         "bfx_funding_bot.modules.trading", "bfx_funding_bot.modules.marketfeed",
-        "bfx_funding_bot.apps",
+        "bfx_funding_bot.modules.market._internal", "bfx_funding_bot.apps",
     } <= set(independent["forbidden_modules"])
 
 
 def test_runtime_reaches_no_other_composition_root() -> None:
-    """apps.runtime is the only part of apps that is not a composition root. Every other
-    top-level apps module is forbidden to it (indirectly too), so a new root cannot slip
-    past the contract by not being listed."""
+    """Before R9a the runtime lived under modules, where apps-is-top kept every apps module
+    and the wiring-is-top contracts kept module wiring out of it. The contract keeps that
+    scope: every other top-level apps module (indirectly too) and module wiring, so a new
+    apps module cannot slip past it by not being listed."""
     root = Path(__file__).resolve().parents[2]
     with (root / "pyproject.toml").open("rb") as config_file:
         contracts = tomllib.load(config_file)["tool"]["importlinter"]["contracts"]
@@ -200,6 +201,7 @@ def test_runtime_reaches_no_other_composition_root() -> None:
     assert boundary["source_modules"] == ["bfx_funding_bot.apps.runtime"]
     assert set(boundary["forbidden_modules"]) == roots | {
         "bfx_funding_bot.modules.backtest", "bfx_funding_bot.modules.simulated_venue",
+        "bfx_funding_bot.modules.ledger.wiring", "bfx_funding_bot.modules.strategy.wiring",
     }
     assert boundary.get("allow_indirect_imports", False) is False
 

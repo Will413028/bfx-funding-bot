@@ -537,8 +537,8 @@ broken_contract_guidance = "Inject venue-facing ports from apps; the simulator i
 id = "runtime-composition-boundary"
 name = "The bot runtime reaches no other composition root, research, or the simulated venue"
 type = "forbidden"
-# apps.runtime left `modules` in R9a, so apps-is-top and the runtime-not-* contracts
-# no longer cover it. Indirect imports are checked: apps.venue wires the simulated
+# apps.runtime left `modules` in R9a, so apps-is-top, the runtime-not-* and the
+# *-wiring-is-top contracts no longer cover it. Indirect imports are checked: apps.venue wires the simulated
 # venue, so a direct-only check would let runtime -> apps.venue -> simulator through.
 source_modules = ["bfx_funding_bot.apps.runtime"]
 forbidden_modules = [
@@ -556,6 +556,9 @@ forbidden_modules = [
     "bfx_funding_bot.apps.webapi",
     "bfx_funding_bot.modules.backtest",
     "bfx_funding_bot.modules.simulated_venue",
+    # Only composition roots assemble ports; the runtime receives them.
+    "bfx_funding_bot.modules.ledger.wiring",
+    "bfx_funding_bot.modules.strategy.wiring",
 ]
 ignore_imports = []
 broken_contract_guidance = "Composition roots import the runtime, never the other way; inject what the runtime needs."
