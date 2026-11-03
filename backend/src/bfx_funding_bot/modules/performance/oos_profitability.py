@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from statistics import NormalDist
 
-from bfx_funding_bot.modules.backtest.sortino import compute_sortino
+from bfx_funding_bot.modules.performance.sortino import compute_sortino
 
 
 @dataclass(frozen=True)

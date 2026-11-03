@@ -44,7 +44,14 @@ from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.backtest.frr_series import FrrSeries
-from bfx_funding_bot.modules.backtest.oos_profitability import (
+from bfx_funding_bot.modules.backtest.wfo import WfoWindow, compute_wfo_windows
+from bfx_funding_bot.modules.candles.repository import get_candles_in_range
+from bfx_funding_bot.modules.funding_stats.repository import get_in_range
+from bfx_funding_bot.modules.live_validation.live_attribution import (
+    FRR_ANNUALIZATION,
+    assert_market_rate_band,
+)
+from bfx_funding_bot.modules.performance.oos_profitability import (
     ActiveReturnSummary,
     OosSummary,
     WindowOutcome,
@@ -52,13 +59,6 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     bootstrap_ci,
     paired_active_returns,
     summarize_oos,
-)
-from bfx_funding_bot.modules.backtest.wfo import WfoWindow, compute_wfo_windows
-from bfx_funding_bot.modules.candles.repository import get_candles_in_range
-from bfx_funding_bot.modules.funding_stats.repository import get_in_range
-from bfx_funding_bot.modules.live_validation.live_attribution import (
-    FRR_ANNUALIZATION,
-    assert_market_rate_band,
 )
 from bfx_funding_bot.modules.strategy import (
     CellConfig,

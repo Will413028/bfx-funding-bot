@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
-from bfx_funding_bot.modules.backtest.oos_profitability import (
+from bfx_funding_bot.modules.performance.oos_profitability import (
     WindowOutcome,
     active_return_summary,
     bootstrap_ci,

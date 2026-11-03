@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from bfx_funding_bot.modules.backtest.sortino import (
+from bfx_funding_bot.modules.performance.sortino import (
     compute_sortino,
     month_end_timestamps_within,
     monthly_returns_from_equity_curve,

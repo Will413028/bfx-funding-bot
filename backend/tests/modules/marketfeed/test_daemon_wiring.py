@@ -658,8 +658,8 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
 
     from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
+    from bfx_funding_bot.modules.execution.readiness import TradingReadiness
     from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookService
-    from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 
     assert isinstance(daemon.trading_readiness, TradingReadiness)
     assert isinstance(daemon.funding_book_service, FundingBookService)

@@ -25,14 +25,14 @@ from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.eda import close_over_ema_sigma
 from bfx_funding_bot.modules.backtest.engine import run_backtest
-from bfx_funding_bot.modules.backtest.oos_profitability import (
+from bfx_funding_bot.modules.backtest.split import compute_train_end_mts
+from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
+from bfx_funding_bot.modules.candles.repository import get_candles_in_range
+from bfx_funding_bot.modules.performance.oos_profitability import (
     WindowOutcome,
     active_return_summary,
     summarize_oos,
 )
-from bfx_funding_bot.modules.backtest.split import compute_train_end_mts
-from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
-from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 
 logger = logging.getLogger("explore_mr")
 

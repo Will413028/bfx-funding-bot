@@ -4,7 +4,7 @@ from statistics import NormalDist
 
 import pytest
 
-from bfx_funding_bot.modules.backtest.oos_profitability import (
+from bfx_funding_bot.modules.performance.oos_profitability import (
     ActiveReturnSummary,  # noqa: F401
     WindowOutcome,
     _percentile,

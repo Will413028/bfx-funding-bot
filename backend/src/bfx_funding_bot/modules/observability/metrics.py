@@ -33,8 +33,8 @@ Invariants (observe-only contract):
 - FAIL-OPEN: every observe_* method and every collector swallows its own
   exceptions (debug-log only). A metrics fault must never raise into an
   observed path — least of all the submit / reconcile money paths.
-- Wrappers (MetricsSubmitMiddleware / TimedReconcileRecovery) are transparent:
-  results and exceptions pass through unchanged; no behavior branches added.
+- The submit / reconcile timing wrappers live in execution.middleware.metrics
+  (MetricsSubmitMiddleware / TimedReconcileRecovery) and are transparent.
 - Per-instance CollectorRegistry (never the global REGISTRY) so tests and
   multiple build_daemon() calls cannot collide on duplicated timeseries.
 """
@@ -46,7 +46,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 import httpx
 from prometheus_client import (
@@ -68,18 +68,6 @@ from bfx_funding_bot.core.health import (
 )
 from bfx_funding_bot.core.telemetry import HealthStatus
 
-if TYPE_CHECKING:
-    from bfx_funding_bot.modules.execution.protocols import (
-        AccountContext,
-        ExecutorPort,
-        SubmittedOrder,
-    )
-
-from bfx_funding_bot.modules.execution.contracts import (
-    BlockReason,
-    ReadyToSubmit,
-)
-
 log = logging.getLogger(__name__)
 
 # Bounded label values for bfx_executor_submits_total — SubmittedOrder.status is
@@ -88,8 +76,20 @@ log = logging.getLogger(__name__)
 # NOT_SENT remain first-class labels because collapsing either into FAILED hides
 # safety state.
 _KNOWN_SUBMIT_STATUSES = frozenset({"submitted", "failed", "unknown", "not_sent"})
+# The execution-decision allowlists mirror execution.contracts' DecisionOutcome,
+# BlockReason and ExecutionPolicy as literals (observability sits below execution);
+# tests/modules/observability/test_metrics.py fails when an enum gains a value.
 _KNOWN_EXECUTION_OUTCOMES = frozenset({"ready", "blocked", "no_recommendation"})
-_KNOWN_EXECUTION_REASONS = frozenset({"none", *(reason.value for reason in BlockReason)})
+_KNOWN_EXECUTION_REASONS = frozenset({
+    "none",
+    "book_checksum_invalid", "book_fetch_failed", "book_not_initialized",
+    "book_sequence_invalid", "book_stale", "book_venue_maintenance",
+    "execution_audit_unavailable",
+    "fill_model_low_confidence", "fill_model_missing", "fill_model_scope_mismatch",
+    "fill_model_unversioned",
+    "insufficient_period_depth", "optimizer_unavailable", "period_not_found",
+    "safety_guard_blocked",
+})
 _KNOWN_EXECUTION_POLICIES = frozenset({
     "book_guarded", "optimizer_shadow", "optimizer_live",
 })
@@ -618,78 +618,6 @@ class DaemonMetrics:
     def render(self) -> bytes:
         """Prometheus text exposition of this daemon's registry."""
         return generate_latest(self.registry)
-
-
-class MetricsSubmitMiddleware:
-    """Outermost ExecutorPort wrapper — pure observation of the submit path.
-
-    Sits OUTSIDE HeartbeatMiddleware so the histogram covers the full chain
-    (intent persist + venue POST + ack). Transparent by construction: the
-    inner result/exception passes through unchanged and metric recording is
-    fail-open (observe_submit swallows its own errors).
-    """
-
-    def __init__(self, inner: ExecutorPort, *, metrics: DaemonMetrics) -> None:
-        self._inner = inner
-        self._metrics = metrics
-
-    def _safe_observe(self, status: str, start: float) -> None:
-        # Defense-in-depth on the money path: observe_submit is already
-        # fail-open, but even a fully broken metrics object must not raise here.
-        try:
-            self._metrics.observe_submit(
-                status=status, duration_s=time.perf_counter() - start,
-            )
-        except Exception:
-            log.debug("metrics_submit_observe_failed", exc_info=True)
-
-    async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext,
-    ) -> SubmittedOrder:
-        start = time.perf_counter()
-        try:
-            order = await self._inner.submit(ready, ctx)
-        except BaseException:
-            self._safe_observe("exception", start)
-            raise
-        self._safe_observe(order.status, start)
-        return order
-
-
-class _RecoveryRunner[**P, R](Protocol):
-    async def run(self, *args: P.args, **kwargs: P.kwargs) -> R: ...
-
-
-class TimedReconcileRecovery[**P, R]:
-    """Transparent timing wrapper around the reconcile backbone's recovery.run().
-
-    Injected between PeriodicReconcile and the observation sink at wiring time so the
-    reconcile module itself stays untouched. Result and exceptions pass through
-    unchanged; PeriodicReconcile's own failure handling sees exactly what the
-    raw recovery would have produced.
-    """
-
-    def __init__(self, inner: _RecoveryRunner[P, R], *, metrics: DaemonMetrics) -> None:
-        self._inner = inner
-        self._metrics = metrics
-
-    def _safe_observe(self, result: str, start: float) -> None:
-        try:
-            self._metrics.observe_reconcile_tick(
-                result=result, duration_s=time.perf_counter() - start,
-            )
-        except Exception:
-            log.debug("metrics_reconcile_observe_failed", exc_info=True)
-
-    async def run(self, *args: P.args, **kwargs: P.kwargs) -> R:
-        start = time.perf_counter()
-        try:
-            result = await self._inner.run(*args, **kwargs)
-        except BaseException:
-            self._safe_observe("error", start)
-            raise
-        self._safe_observe("ok", start)
-        return result
 
 
 class LogMetricsHandler(logging.Handler):

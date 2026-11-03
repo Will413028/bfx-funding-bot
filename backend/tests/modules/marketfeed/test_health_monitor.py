@@ -295,7 +295,7 @@ class TestStalenessScan:
     async def test_the_scan_marks_a_stale_dependency_and_never_clears_one(self, fake_sink):
         """The scan only marks staleness; clearing is the dependency's own answer
         (``Daemon._dependency_answered``), so a recovery is not delayed to a scan."""
-        from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
+        from bfx_funding_bot.modules.execution.readiness import TradingReadiness
 
         probe = HealthProbe()
         readiness = TradingReadiness()

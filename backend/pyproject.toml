@@ -142,6 +142,15 @@ ignore_imports = []
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
 
 [[tool.importlinter.contracts]]
+id = "performance-is-pure"
+name = "Performance statistics do not import I/O or runtime settings"
+type = "forbidden"
+source_modules = ["bfx_funding_bot.modules.performance"]
+forbidden_modules = ["sqlalchemy", "httpx", "asyncpg", "yaml", "bfx_funding_bot.core.settings"]
+ignore_imports = []
+broken_contract_guidance = "Keep performance pure statistics shared by backtest and live validation; do not add ignores."
+
+[[tool.importlinter.contracts]]
 id = "strategy-lower-only"
 name = "Strategy imports no sibling modules except candles"
 type = "forbidden"
@@ -163,6 +172,7 @@ forbidden_modules = [
     "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.performance",
     "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.trading",
 ]
@@ -194,6 +204,7 @@ source_modules = [
     "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.performance",
     "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.trading",
 ]
@@ -250,6 +261,7 @@ source_modules = [
     "bfx_funding_bot.modules.market",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.performance",
     "bfx_funding_bot.modules.simulated_venue",
 ]
 forbidden_modules = ["bfx_funding_bot.modules.backtest"]
@@ -262,15 +274,7 @@ name = "Modules have no cycles between siblings"
 type = "acyclic_siblings"
 ancestors = ["bfx_funding_bot.modules"]
 depth = 0
-ignore_imports = [
-    "bfx_funding_bot.modules.admin.trading_status -> bfx_funding_bot.modules.marketfeed.readiness",
-    "bfx_funding_bot.modules.live_validation.g3 -> bfx_funding_bot.modules.backtest.oos_profitability",
-    "bfx_funding_bot.modules.live_validation.live_attribution -> bfx_funding_bot.modules.backtest.oos_profitability",
-    "bfx_funding_bot.modules.observability.metrics -> bfx_funding_bot.modules.execution.contracts",
-    "bfx_funding_bot.modules.observability.metrics -> bfx_funding_bot.modules.execution.protocols",
-    "bfx_funding_bot.modules.observability.tracing -> bfx_funding_bot.modules.execution.contracts",
-    "bfx_funding_bot.modules.observability.tracing -> bfx_funding_bot.modules.execution.protocols",
-]
+ignore_imports = []
 broken_contract_guidance = "Do not add ignores to fix a violation; move the offending code or ask the reviewer."
 
 [[tool.importlinter.contracts]]
@@ -350,7 +354,9 @@ forbidden_modules = [
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.marketfeed.**",
     "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.performance",
     "bfx_funding_bot.modules.observability.**",
+    "bfx_funding_bot.modules.performance.**",
     "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.simulated_venue.**",
     "bfx_funding_bot.modules.strategy",
@@ -386,6 +392,7 @@ source_modules = [
     "bfx_funding_bot.modules.live_validation",
     "bfx_funding_bot.modules.marketfeed",
     "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.performance",
     "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.strategy",
     "bfx_funding_bot.modules.trading",
@@ -422,7 +429,7 @@ source_modules = [
     "bfx_funding_bot.modules.external_signals", "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.lending", "bfx_funding_bot.modules.live_validation",
     "bfx_funding_bot.modules.market", "bfx_funding_bot.modules.marketfeed",
-    "bfx_funding_bot.modules.observability", "bfx_funding_bot.modules.strategy",
+    "bfx_funding_bot.modules.observability", "bfx_funding_bot.modules.performance", "bfx_funding_bot.modules.strategy",
     "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.trading",
 ]
@@ -478,7 +485,7 @@ source_modules = [
     "bfx_funding_bot.modules.external_signals", "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.lending", "bfx_funding_bot.modules.ledger",
     "bfx_funding_bot.modules.live_validation", "bfx_funding_bot.modules.market",
-    "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability", "bfx_funding_bot.modules.performance",
     "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.trading",
 ]
 forbidden_modules = ["bfx_funding_bot.modules.simulated_venue._internal"]
@@ -516,7 +523,7 @@ source_modules = [
     "bfx_funding_bot.modules.external_signals", "bfx_funding_bot.modules.funding_stats",
     "bfx_funding_bot.modules.lending", "bfx_funding_bot.modules.ledger",
     "bfx_funding_bot.modules.live_validation", "bfx_funding_bot.modules.market",
-    "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability",
+    "bfx_funding_bot.modules.marketfeed", "bfx_funding_bot.modules.observability", "bfx_funding_bot.modules.performance",
     "bfx_funding_bot.modules.strategy", "bfx_funding_bot.modules.trading",
 ]
 forbidden_modules = ["bfx_funding_bot.modules.simulated_venue"]

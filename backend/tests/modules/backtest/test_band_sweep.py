@@ -22,7 +22,7 @@ from bfx_funding_bot.modules.backtest.band_sweep import (
 )
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import run_backtest
-from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
+from bfx_funding_bot.modules.performance.oos_profitability import WindowOutcome
 
 
 def _candles(closes: list[str], symbol: str = "fUST") -> list[FundingCandle]:

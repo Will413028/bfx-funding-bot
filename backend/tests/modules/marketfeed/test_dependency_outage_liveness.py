@@ -50,11 +50,11 @@ from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
 )
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
+from bfx_funding_bot.modules.execution.readiness import TradingReadiness
 from bfx_funding_bot.modules.execution.safety.hard_guards import HeartbeatGuard
 from bfx_funding_bot.modules.marketfeed.daemon import Daemon
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
 from bfx_funding_bot.modules.marketfeed.healthz import make_app
-from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from tests.modules.execution.deployment.helpers import (
     make_audit_context,
     make_candidate,

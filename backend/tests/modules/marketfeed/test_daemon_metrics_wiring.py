@@ -24,13 +24,13 @@ from pytest_httpx import HTTPXMock
 from bfx_funding_bot.modules.execution.events import CancelRequested
 from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
+    MetricsSubmitMiddleware,
     ReservationEmittingMiddleware,
+    TimedReconcileRecovery,
 )
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
     LogMetricsHandler,
-    MetricsSubmitMiddleware,
-    TimedReconcileRecovery,
 )
 from tests.modules.marketfeed.account_test_helpers import (
     boot_live_construction,

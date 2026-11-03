@@ -84,7 +84,7 @@ app 本身沒有登入、密碼、MFA 或 session（見[不存在性證據](#不
 
 | 編號 | 缺的控制 |
 |---|---|
-| V12.3.1 | 對外連線都是 TLS，但 VM 內部的連線是明文：webapi→bot（`http://bfx-bot:8080`，`modules/api/funding_status.py:123`）、各服務→Postgres（`DATABASE_URL` 不帶 sslmode，預設 `disable`：`core/settings.py:51`；§10b），以及 OTLP tracing（預設 `http://tempo:4317`，`modules/observability/tracing.py:49`）。 |
+| V12.3.1 | 對外連線都是 TLS，但 VM 內部的連線是明文：webapi→bot（`http://bfx-bot:8080`，`modules/api/funding_status.py:123`）、各服務→Postgres（`DATABASE_URL` 不帶 sslmode，預設 `disable`：`core/settings.py:51`；§10b），以及 OTLP tracing（預設 `http://tempo:4317`，`modules/observability/tracing.py:44`）。 |
 | V12.3.3 | webapi 呼叫 bot `/admin/trading-status`、`/admin/dry-evaluate` 時走明文 HTTP，帶的是只讀 token（`modules/api/funding_status.py:117-126`）。 |
 | V12.3.4 | 內部沒有 TLS，所以沒有內部 CA 或憑證 pinning。程式已支援 Postgres 的 `verify-full`＋`sslrootcert`（`core/db.py:72-87`），但部署沒有啟用。 |
 | V13.2.1 | 服務之間的憑證（DB 密碼、bot 的只讀 token）是長期憑證，事件觸發才換（`secret-rotation.md`「何時換」），不是條文要求的短效 token 或憑證。 |
@@ -444,7 +444,7 @@ app 本身沒有登入、密碼、MFA 或 session（見[不存在性證據](#不
 | V11.4.2 | L2 | 不適用 | 應用不儲存任何密碼：app 登入與 `auth` schema 已移除（PR #242；migration `backend/alembic/versions/f836fdee9bf3_retire_auth_schema.py`；`tests/integration/test_auth_schema_retirement.py::test_upgrade_drops_auth_and_the_old_memberships`）。UI 身分由 Serve 轉送 capability（`auth.py:66-81`）。DB role 密碼由 Postgres 自己雜湊，不是應用程式碼。 |
 | V11.4.3 | L2 | 符合 | 完整性用的雜湊都是 SHA-256 或 SHA-384：ledger payload digest（`journal.py:343`、`modules/ledger/_internal/resolver.py:220`）、備份 ledger digest（`ledger_digest.py:445`）。輸出長度都 ≥256 bit。 |
 | V11.4.4 | L2 | 符合 | pgBackRest 的 passphrase 是導出 key 的來源：設定精靈拒絕短於 32 字的新值並提示以 `openssl rand -base64 48` 產生（`scripts/setup-pgbackrest-r2.sh:305-308`；`tests/scripts/test_offsite_dr_bootstrap.py::test_wizard_refuses_a_short_new_cipher_passphrase`）。PR #300。 |
-| V11.5.1 | L2 | 符合 | DEK 與 nonce 用 `os.urandom`（`core/crypto.py:63-66`）；HPKE 的 key 用 `X25519PrivateKey.generate()`（`core/sealed_credential.py:80`）；`secrets.token_hex`（`apps/venue.py:190`、`deploy/vm/pgbackrest/restore_drill.py:186`）；秘密由 `openssl rand` 產生（`fresh-host-setup.md:190`）。CSP 用 inline script 的 hash，不用 nonce（`ingress.py:71-95`）。`uuid4` 只當 ID；`random` 只在離線 backtest（`modules/backtest/distortion.py:18`、`modules/backtest/oos_profitability.py:11`），不當秘密。 |
+| V11.5.1 | L2 | 符合 | DEK 與 nonce 用 `os.urandom`（`core/crypto.py:63-66`）；HPKE 的 key 用 `X25519PrivateKey.generate()`（`core/sealed_credential.py:80`）；`secrets.token_hex`（`apps/venue.py:190`、`deploy/vm/pgbackrest/restore_drill.py:186`）；秘密由 `openssl rand` 產生（`fresh-host-setup.md:190`）。CSP 用 inline script 的 hash，不用 nonce（`ingress.py:71-95`）。`uuid4` 只當 ID；`random` 只在離線的研究與報告計算（backtest 的 `modules/backtest/distortion.py:18`、backtest 與每週 G3 報告共用的 bootstrap `modules/performance/oos_profitability.py:11`），不當秘密。 |
 | V11.6.1 | L2 | 符合 | 應用層唯一的非對稱加密是換憑證用的 HPKE base mode（RFC 9180）`DHKEM(X25519, HKDF-SHA256)`（`core/sealed_credential.py:1-10,35`）：每次 bot 開機以 `X25519PrivateKey.generate()` 產生 key pair，private key 只在記憶體（`:69,80`，`repr=False`）。測試：`test_sealed_credential.py::test_another_recipient_does_not_open`、`::test_a_recipient_key_of_the_wrong_size_is_refused`。image 的 build provenance 由 GitHub attestation（Sigstore）簽章，部署前以 `gh attestation verify` 驗證（`.github/workflows/release.yml:140-141`；`deploy.md` 的部署步驟；PR #251），使用的是標準工具，不是自製簽章。 |
 
 ## V12 Secure Communication

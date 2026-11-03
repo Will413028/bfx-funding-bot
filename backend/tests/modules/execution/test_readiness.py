@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from bfx_funding_bot.modules.execution.contracts import BlockReason
-from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
+from bfx_funding_bot.modules.execution.readiness import TradingReadiness
 
 
 def test_readiness_block_does_not_change_process_liveness() -> None:
