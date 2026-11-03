@@ -98,7 +98,7 @@ async def read_capital(stack: Stack, cell_id: str, symbol: str = "fUST") -> Capi
 
 def status_reads(stack: Stack) -> Any:
     from bfx_funding_bot.modules.execution.trading_status import CapitalStatusReads
-    return CapitalStatusReads(authority=stack.capital, lock=stack.lock, scope=SCOPE,
+    return CapitalStatusReads(authority=stack.capital, scope=SCOPE,
                               session_factory=stack.factory, clock=lambda: NOW)
 
 
@@ -450,6 +450,32 @@ async def test_cancel_admission_needs_an_evaluator_that_knows_cancel_exemptions(
         await rig.gate.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
                               account_id=rig.ctx.account_id, ctx=rig.ctx)
     assert rig.venue.received == []
+
+
+async def test_status_of_a_symbol_without_cells_does_not_wait_for_the_account_writer(gate_stack):
+    """Reading the applied policy takes no lock (``CapitalAuthority.read_policy``), so the
+    status of a symbol no cell trades answers while the writer holds the scope lock.
+    (Symbols with cells take the lock on purpose: their locked capital read.)"""
+    from bfx_funding_bot.core.health import HealthProbe
+    from bfx_funding_bot.core.telemetry import Phase
+    from bfx_funding_bot.modules.execution.deployment.submit_attempt import SubmitAttemptRecorder
+    from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+    from bfx_funding_bot.modules.execution.trading_status import TradingStatusService
+    from bfx_funding_bot.modules.strategy import StrategyName
+    from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell
+    rig = await boundary(gate_stack)
+    await apply_policy(gate_stack, "fUSD", CapitalPolicy(enabled=False))
+    chain = SafetyGuardChain(guards=[ManualKillGuard(trading_state=rig.halt)],
+        probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
+        strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30", account_id=str(ACCOUNT))
+    reads = status_reads(gate_stack)
+    service = TradingStatusService(chain=chain, account_ctx=rig.ctx,
+        cells=[_cell("fUST", "a30")], phase=Phase.LIVE, attempts=SubmitAttemptRecorder(),
+        trading_state=rig.halt, exposure=reads)
+    async with gate_stack.factory.begin() as writer:
+        await build_scope_lock().lock(writer, SCOPE)  # the account writer, mid-transaction
+        status = await asyncio.wait_for(service._capital_status(reads, "fUSD"), timeout=5)
+    assert status["reason"] == "policy_disabled"
 
 
 async def test_halt_writer_waits_for_authorization_lock(pg_session_factory):
