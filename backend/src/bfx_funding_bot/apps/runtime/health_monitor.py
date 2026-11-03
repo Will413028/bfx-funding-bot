@@ -113,7 +113,7 @@ class HealthMonitor:
         marks every stale recorded dependency not ready in the readiness state
         (``core.health.dependency_is_stale``, the rule HeartbeatGuard uses). It
         never clears one: the dependency's next successful answer does that at
-        once (``Daemon._dependency_answered``), and a dependency never recorded
+        once (``apps.runtime.freshness.dependency_answered``), and a dependency never recorded
         is already not ready from boot (TradingReadiness ``dependencies``).
 
         SIGNAL_PIPELINE carve-out (Phase 4.3 Task 5):

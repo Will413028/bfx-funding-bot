@@ -85,7 +85,7 @@ def watchdogs(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[_Watchdog]]:
 
 def _fake_daemon(stop: asyncio.Event, watchdog_during_run: list[bool], *,
                  fail: BaseException | None = None, booted: bool = True,
-                 credential_rotation: Any = None) -> Any:
+                 credential_rotation: Any = None, refused_boot: bool | None = None) -> Any:
     async def run() -> None:
         watchdog_during_run.append(_Watchdog.instances[0].running)
         _RunRecord.events.append("run")
@@ -100,7 +100,8 @@ def _fake_daemon(stop: asyncio.Event, watchdog_during_run: list[bool], *,
 
     bound_runs: list[int] = []
     return SimpleNamespace(
-        run=run, metrics=None, booted=booted, writer_lock=None, venue_aclose=None,
+        run=run, metrics=None, booted=booted,
+        refused_boot=(not booted) if refused_boot is None else refused_boot, writer_lock=None, venue_aclose=None,
         tracing=None, bitfinex_http=SimpleNamespace(aclose=aclose),
         config=SimpleNamespace(phase="live", cells=[], run_duration_hours=None),
         session_factory=None, credential_rotation=credential_rotation,
@@ -342,3 +343,29 @@ async def test_a_task_group_failure_is_a_boot_refusal_only_before_the_boot(
 
     expected = [] if booted else [("boot_refused", "boot_failed", ["RuntimeError"])]
     assert _boot_refusals(caplog) == expected
+
+
+async def test_a_market_data_failure_before_the_boot_is_fatal_not_a_refused_boot(
+    monkeypatch: pytest.MonkeyPatch, watchdogs: list[_Watchdog], caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Market data runs before the boot completes: its recorder dying is a fatal error (the
+    process exits non-zero), never a refused boot in the security log. The alert names the
+    recorder's error, not the TaskGroups it was nested in."""
+    from bfx_funding_bot.core.errors import FatalError
+
+    failure = ExceptionGroup("daemon", [ExceptionGroup("market_data", [
+        FatalError("candle_writer crashed: RuntimeError('candle store gone')")])])
+
+    async def build_daemon(*, stop_event: asyncio.Event) -> Any:
+        return _fake_daemon(stop_event, [], fail=failure, booted=False, refused_boot=False)
+
+    sent: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(alerts, "emit", lambda event, **fields: sent.append((event, fields)))
+    monkeypatch.setattr(bot, "build_daemon", build_daemon)
+    with caplog.at_level(logging.WARNING), pytest.raises(ExceptionGroup):
+        await bot._run()
+
+    assert _boot_refusals(caplog) == []
+    assert [event for event, _ in sent] == ["daemon_fatal"]
+    assert str(sent[0][1]["error"]).startswith("FatalError: candle_writer crashed")
+    assert _RunRecord.events[-1] == "finish:fatal"

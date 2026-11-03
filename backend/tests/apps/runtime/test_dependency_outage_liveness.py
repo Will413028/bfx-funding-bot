@@ -18,7 +18,7 @@ away from every threshold, so no timing assumption decides the outcome.
 Mutation checks (one at a time; revert after each):
 
 * record ``ws`` only inside the "frame is fresh" branch of
-  ``Daemon._ws_freshness_tick``: ``test_a_bitfinex_ws_outage_*`` raises FatalError.
+  ``MarketDataRuntime._ws_freshness_tick``: ``test_a_bitfinex_ws_outage_*`` raises FatalError.
 * move ``on_attempt()`` into the success branch of ``keepalive_loop``:
   ``test_a_database_outage_*`` raises FatalError.
 * drop the dependency branch in ``scan_staleness``: readiness stays ready.
@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from bfx_funding_bot.apps.runtime.daemon import Daemon
 from bfx_funding_bot.apps.runtime.health_monitor import HealthMonitor
 from bfx_funding_bot.apps.runtime.healthz import make_app
+from bfx_funding_bot.apps.runtime.market_data import MarketDataRuntime
 from bfx_funding_bot.core.health import (
     DB_FRESHNESS,
     LIVENESS_THRESHOLDS,
@@ -97,7 +98,7 @@ def _daemon(probe: HealthProbe, readiness: TradingReadiness, **fields: Any) -> A
 
 
 def _tick(probe: HealthProbe, readiness: TradingReadiness, ws: _WS) -> None:
-    Daemon._ws_freshness_tick(_daemon(probe, readiness, ws_client=ws))
+    MarketDataRuntime._ws_freshness_tick(_daemon(probe, readiness, ws_client=ws))
 
 
 def _monitor(probe: HealthProbe, readiness: TradingReadiness) -> HealthMonitor:

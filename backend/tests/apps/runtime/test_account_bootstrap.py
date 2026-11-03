@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.apps.runtime.daemon import (
     AccountBootstrap,
-    _require_env,
     load_account_bootstrap,
+    require_env,
 )
 from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
 from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -92,14 +92,14 @@ async def _seed_account(
 def test_exchange_account_env_is_required_and_canonical(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BFX_EXCHANGE_ACCOUNT_ID", raising=False)
     with pytest.raises(ConfigurationError, match="BFX_EXCHANGE_ACCOUNT_ID env var required"):
-        _require_env("BFX_EXCHANGE_ACCOUNT_ID")
+        require_env("BFX_EXCHANGE_ACCOUNT_ID")
 
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", "not-a-uuid")
     with pytest.raises(ConfigurationError, match="valid UUID"):
-        _require_env("BFX_EXCHANGE_ACCOUNT_ID")
+        require_env("BFX_EXCHANGE_ACCOUNT_ID")
 
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT_ID).upper())
-    assert _require_env("BFX_EXCHANGE_ACCOUNT_ID") == str(_ACCOUNT_ID)
+    assert require_env("BFX_EXCHANGE_ACCOUNT_ID") == str(_ACCOUNT_ID)
 
 
 def test_live_boot_rejects_legacy_account_env(monkeypatch: pytest.MonkeyPatch) -> None:
