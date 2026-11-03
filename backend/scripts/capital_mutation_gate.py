@@ -1,8 +1,9 @@
 """Capital-rule mutation gate: every capital rule is killed by the test layer that owns it.
 
-Each mutant is one exact source edit of a capital rule. The gate copies ``src/`` to a
-temporary directory, applies the edit there (the working tree is never touched), and
-runs ONLY the owning layer's test file(s) against the copy. A mutant those tests do
+Each mutant is one exact source edit of a capital rule. The gate copies the repository
+to a temporary directory (``scripts/mutation_sandbox.py``, shared with the kill matrix),
+applies the edit there (the working tree is never touched), and runs ONLY the owning
+layer's test file(s) from the copy. A mutant those tests do
 not kill is a rule no owning test defends, so the gate fails.
 
 Rule ownership:
@@ -17,9 +18,9 @@ rule fails the gate loudly instead of silently skipping its mutant; update the a
 
 Usage:
     cd backend
-    uv run python scripts/capital_mutation_gate.py                        # unit-owned mutants
-    uv run python scripts/capital_mutation_gate.py --include-integration  # all mutants
-    uv run python scripts/capital_mutation_gate.py --only M10,M15
+    uv run python -m scripts.capital_mutation_gate                        # unit-owned mutants
+    uv run python -m scripts.capital_mutation_gate --include-integration  # all mutants
+    uv run python -m scripts.capital_mutation_gate --only M10,M15
 
 A mutant counts as killed only when its run reports at least one failed test and no
 test errors (read from the run's JUnit report, not from pytest's exit code: pytest also
@@ -32,9 +33,6 @@ mutant run that errored instead of passing or failing).
 from __future__ import annotations
 
 import argparse
-import hashlib
-import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -42,6 +40,8 @@ import xml.etree.ElementTree as ElementTree
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from scripts import mutation_sandbox as sandbox
 
 BACKEND = Path(__file__).resolve().parents[1]
 PACKAGE = Path("src/bfx_funding_bot")
@@ -140,7 +140,6 @@ MUTANTS: tuple[Mutant, ...] = (
 )
 
 _CANARY = 'raise ImportError("capital-mutation-gate canary")\n'
-_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")
 
 
 def check_anchors(mutants: Sequence[Mutant], root: Path = BACKEND) -> None:
@@ -154,33 +153,31 @@ def check_anchors(mutants: Sequence[Mutant], root: Path = BACKEND) -> None:
         raise GateError("; ".join(problems))
 
 
-def _apply(src_copy: Path, path: Path, old: str, new: str) -> None:
-    target = src_copy / path.relative_to("src")
+def _apply(copy: Path, path: Path, old: str, new: str) -> None:
+    target = copy / "backend" / path
     text = target.read_text()
     if text.count(old) != 1:
         raise GateError(f"anchor not unique in {path}")
     target.write_text(text.replace(old, new))
 
 
-def _pytest(src_copy: Path, tests: Sequence[str], *extra: str) -> subprocess.CompletedProcess[str]:
-    # -o pythonpath puts the copy ahead of the editable install; no cache is written.
-    command = [sys.executable, "-m", "pytest", "-q", "-x", "-rfE", "-p", "no:cacheprovider",
-               "-o", f"pythonpath={src_copy} .", *extra, *tests]
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-    return subprocess.run(command, cwd=BACKEND, env=env, capture_output=True, text=True,
-                          timeout=1800, check=False)
+def _pytest(copy: Path, tests: Sequence[str], *extra: str) -> subprocess.CompletedProcess[str]:
+    result = sandbox.pytest(copy, ["-q", "-x", "-rfE", *extra, *tests], timeout=1800)
+    if result is None:
+        raise GateError(f"pytest ran past 1800 s in {copy}")
+    return result
 
 
 def _fresh_copy(workdir: Path, name: str) -> Path:
-    copy = workdir / name / "src"
-    shutil.copytree(BACKEND / "src", copy, ignore=_IGNORE)
+    copy = workdir / name
+    sandbox.copy_repository(copy)
     return copy
 
 
 def _verify_copy_is_imported(workdir: Path) -> None:
     """A copy whose policy module cannot import must break collection, else tests read src/."""
     copy = _fresh_copy(workdir, "canary")
-    target = copy / POLICY.relative_to("src")
+    target = copy / "backend" / POLICY
     target.write_text(_CANARY + target.read_text())
     result = _pytest(copy, POLICY_TESTS, "--collect-only")
     if result.returncode == 0 or "capital-mutation-gate canary" not in result.stdout + result.stderr:
@@ -218,17 +215,10 @@ def classify(returncode: int, report: Path) -> Verdict:
     return Verdict("error", f"pytest exit {returncode}, {len(failed)} failed")
 
 
-def _tree_digest() -> str:
-    digest = hashlib.sha256()
-    for path in sorted((BACKEND / "src").rglob("*.py")):
-        digest.update(str(path).encode())
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
-
-
 def run(mutants: Sequence[Mutant]) -> int:
     check_anchors(mutants)
-    before = _tree_digest()
+    sources = sorted({Path("backend") / mutant.path for mutant in mutants})
+    before = sandbox.digest(sources)
     survivors: list[str] = []
     errors: list[str] = []
     with tempfile.TemporaryDirectory(prefix="capital-mutation-gate-") as tmp:
@@ -243,7 +233,7 @@ def run(mutants: Sequence[Mutant]) -> int:
         for mutant in mutants:
             copy = _fresh_copy(workdir, mutant.id)
             _apply(copy, mutant.path, mutant.old, mutant.new)
-            report = copy.parent / "junit.xml"
+            report = workdir / f"{mutant.id}.xml"
             result = _pytest(copy, mutant.owners, f"--junitxml={report}")
             verdict = classify(result.returncode, report)
             if verdict.status != "killed":
@@ -251,8 +241,8 @@ def run(mutants: Sequence[Mutant]) -> int:
                     f"{mutant.id} ({mutant.description}): {verdict.detail}")
                 print(result.stdout[-3000:], result.stderr[-1000:], sep="\n")
             print(f"{mutant.id:<6} {verdict.status:<8} {verdict.detail}  -- {mutant.description}")
-    if _tree_digest() != before:
-        raise GateError("src/ changed while the gate ran")
+    if sandbox.digest(sources) != before:
+        raise GateError("a mutated source changed in the working tree while the gate ran")
     if errors:
         raise GateError("mutant runs errored instead of passing or failing:\n  "
                         + "\n  ".join(errors))
