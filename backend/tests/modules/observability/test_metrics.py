@@ -3,10 +3,7 @@
 Contract under test:
 1. Every observe_* method is FAIL-OPEN: a broken metric backend or malformed
    event never raises into the observed path.
-2. Wrappers (MetricsSubmitMiddleware / TimedReconcileRecovery) are transparent:
-   results and exceptions pass through byte-identical; only counters/histograms
-   move on the side.
-3. Per-instance CollectorRegistry — no cross-test / cross-daemon collisions.
+2. Per-instance CollectorRegistry — no cross-test / cross-daemon collisions.
 """
 from __future__ import annotations
 

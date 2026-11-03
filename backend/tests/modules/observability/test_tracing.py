@@ -4,10 +4,7 @@ Contract under test:
 1. DEFAULT OFF: BFX_OTEL_ENABLED unset/false → `enabled` False and ZERO SDK
    initialization (the provider builder is never invoked).
 2. FAIL-OPEN: broken tracer internals never raise into the traced path.
-3. Wrappers (TracingSubmitMiddleware / TracedReconcileRecovery /
-   instrument_ws_dispatcher) are transparent: results and exceptions pass
-   through byte-identical; spans move on the side only.
-4. Enabled path (InMemorySpanExporter): spans exported with the agreed names,
+3. Enabled path (InMemorySpanExporter): spans exported with the agreed names,
    attrs (symbol/execution_decision_id/status …) and Resource attrs (service.name=bfx-bot,
    service.version, deployment.environment).
 """
@@ -151,15 +148,6 @@ def test_span_fail_open_when_tracer_broken() -> None:
         ran = True
     assert ran is True
     t.shutdown()
-
-
-# ── TracingSubmitMiddleware ──────────────────────────────────────────────────
-
-
-# ── TracedReconcileRecovery ──────────────────────────────────────────────────
-
-
-# ── instrument_ws_dispatcher ─────────────────────────────────────────────────
 
 
 # ── shutdown ─────────────────────────────────────────────────────────────────

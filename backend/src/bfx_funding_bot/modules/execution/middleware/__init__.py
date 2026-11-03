@@ -1,4 +1,6 @@
-"""Executor middleware chain — composable ExecutorPort decorators.
+"""Execution's wrapper decorators: the ExecutorPort submit chain (heartbeat,
+reservation, metrics, tracing), the observe-only reconcile ObservationSink
+wrappers, and the WS dispatcher span instrumentation.
 
 NOTE: there is no retry middleware around submit. A funding-offer submit is a
 once-only financial write (Bitfinex funding offers have no client cid dedup), so

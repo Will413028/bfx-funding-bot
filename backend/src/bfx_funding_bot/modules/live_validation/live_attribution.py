@@ -3,7 +3,7 @@
 Pure, I/O-free. Turns the bot's venue credits + market-rate series
 (funding_candles.close) into WindowOutcome lists for three arms — strategy
 (active), AlwaysIdle, AlwaysMarketRate — feeding the existing
-modules/backtest/oos_profitability metrics, plus a four-state verdict.
+modules/performance/oos_profitability metrics, plus a four-state verdict.
 
 Credit model (since 2026-09-27, METHODOLOGY_CHANGE_DATE). The active arm is the
 interest the venue credits actually accrued: amount x credit rate x the time
