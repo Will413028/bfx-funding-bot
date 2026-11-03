@@ -33,6 +33,7 @@ from bfx_funding_bot.apps.runtime.boot_wait import (
 from bfx_funding_bot.apps.runtime.config import MarketfeedConfig
 from bfx_funding_bot.apps.runtime.health_monitor import HealthMonitor
 from bfx_funding_bot.apps.runtime.healthz import run_healthz_server
+from bfx_funding_bot.apps.runtime.market_data import MarketDataRuntime, dependency_answered
 from bfx_funding_bot.apps.runtime.scheduler import (
     Scheduler,
     now_ms_utc,
@@ -45,22 +46,15 @@ from bfx_funding_bot.core.errors import (
 )
 from bfx_funding_bot.core.health import (
     DB_FRESHNESS,
-    MARKET_DATA_FRESHNESS,
     HealthProbe,
     assess_auth_ws_health,
 )
-from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget, Phase
+from bfx_funding_bot.core.telemetry import HealthTarget, Phase
 from bfx_funding_bot.core.writer_lock import WriterLock
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.errors import credential_rejection
 from bfx_funding_bot.external.bitfinex.order_port import VenueOrderPort
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
-from bfx_funding_bot.external.bitfinex.ws import (
-    BitfinexWSClient,
-    CandleMessage,
-    ChannelSpec,
-    compute_backoff_secs,
-)
 from bfx_funding_bot.modules.accounts.config_service import load_account_config_draft
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     AccountNotFound,
@@ -69,8 +63,6 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
     get_exchange_account,
 )
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccountCredential
-from bfx_funding_bot.modules.candles.gap_fill import fill_gap_from_rest
-from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate
@@ -108,8 +100,6 @@ from bfx_funding_bot.modules.live_validation.interest_ledger import (
     InterestLedgerSync,
 )
 from bfx_funding_bot.modules.market._internal.book import FundingBookService
-from bfx_funding_bot.modules.market._internal.recorders.book_snapshot import BookSnapshotWriter
-from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
@@ -299,15 +289,12 @@ async def _wait_or_stop(stop: asyncio.Event, seconds: float) -> None:
 class Daemon:
     config: MarketfeedConfig
     registry: StrategyRegistry
-    candle_q: asyncio.Queue[CandleMessage | None]
     diagnostics: DiagnosticsSink
     probe: HealthProbe
     monitor: HealthMonitor
     scheduler: Scheduler
     signal_engine: SignalEngine
     db_engine: AsyncEngine
-    ws_client: BitfinexWSClient | None
-    writer: CandleWriter
     bitfinex_http: httpx.AsyncClient
     bitfinex: BitfinexREST
     session_factory: async_sessionmaker[AsyncSession]
@@ -322,10 +309,15 @@ class Daemon:
     boot_recovery: ObservationSink | None = None
     observation_scope: Scope | None = None
     periodic_reconcile: PeriodicReconcile | None = None
-    book_snapshot_writer: BookSnapshotWriter | None = None
     interest_ledger_sync: InterestLedgerSync | None = None
     credit_history_sync: CreditHistorySync | None = None
     funding_book_service: FundingBookService | None = None
+    # Candle WS recording, reconnect gap-fill, book snapshot: its own TaskGroup beside the
+    # account half, started before the boot (``run``). None only in unit compositions.
+    market_data: MarketDataRuntime | None = None
+    # Set when the market data half failed: ``apps.bot`` reports it as a fatal error, never
+    # as a refused boot, even when it happened before the boot completed.
+    market_data_failed: bool = False
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
     admin_token: str | None = field(default=None, repr=False)
@@ -382,6 +374,12 @@ class Daemon:
     # Why the boot holds in credential recovery mode (set when it enters it).
     credential_recovery_reason: str | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    @property
+    def refused_boot(self) -> bool:
+        """Whether a failure now is a refused boot: the boot never completed and the failure
+        is not market data's (that half runs before the boot; its failure is a fatal error)."""
+        return not self.booted and not self.market_data_failed
 
     def bind_run(self, started_at_ms: int) -> None:
         """This process's ``bot_runs`` start: recovery mode never restarts the process before
@@ -652,13 +650,40 @@ class Daemon:
         return self.run_started_at_ms
 
     async def run(self) -> None:
-        """Main entry — sub-task supervision via TaskGroup.
+        """Main entry: market data and the account run side by side in one TaskGroup.
 
-        Phase 4.1 used asyncio.gather + create_task with no propagation,
-        producing 4hr zombie when candle_writer silently died. Per spec
-        D4: any sub-task raise → TaskGroup cancel all → ExceptionGroup
-        propagates → _run handles cleanup + exit non-zero.
+        Market data starts first and does not wait for the boot, so recording goes on while
+        the boot waits for the venue or holds in credential recovery mode. Phase 4.1 used
+        asyncio.gather + create_task with no propagation, producing a 4hr zombie when
+        candle_writer silently died. Per spec D4: any sub-task raise → its TaskGroup cancels
+        all → the ExceptionGroup propagates through this one (nested) → ``apps.bot`` handles
+        cleanup and exits non-zero.
         """
+        async with asyncio.TaskGroup() as tg:
+            if self.market_data is not None:
+                tg.create_task(self._market_data_loop(self.market_data), name="market_data")
+            tg.create_task(self._run_account(), name="account")
+
+    async def _market_data_loop(self, market_data: MarketDataRuntime) -> None:
+        try:
+            await market_data.run(self._stop_event)
+        except Exception:
+            self.market_data_failed = True
+            raise
+
+    async def _run_account(self) -> None:
+        """The account half: boot, then credential recovery mode or the trading TaskGroup.
+
+        Whichever way it ends normally, it ends the run, so the market data half never keeps
+        the process alive without a trader (every such path already set the stop event; this
+        guard keeps it so). R9d moves market data into its own process and drops the guard.
+        """
+        try:
+            await self._run_account_until_stopped()
+        finally:
+            self._stop_event.set()
+
+    async def _run_account_until_stopped(self) -> None:
         # Initial cell registration (was in startup)
         for cell in self.config.cells:
             self.scheduler.register_from_now(cell, now_ms=self.boot_mts)
@@ -701,7 +726,6 @@ class Daemon:
                 tg.create_task(
                     self.uncertainty_worker.run(self._stop_event), name="uncertainty_resolution",
                 )
-            tg.create_task(self._candle_writer_loop(), name="candle_writer")
             tg.create_task(self._scheduler_loop(),     name="scheduler")
             tg.create_task(self._monitor_loop(),       name="monitor")
             tg.create_task(self._heartbeat_scan_loop(), name="health_check")
@@ -712,21 +736,12 @@ class Daemon:
                 tg.create_task(
                     self._writer_lock_liveness_loop(), name="writer_lock",
                 )
-            if self.ws_client is not None:
-                tg.create_task(self._ws_consume_with_reconnect(), name="ws")
-                tg.create_task(self._ws_heartbeat_poll_loop(), name="ws_heartbeat")
             # Phase 4.4a Task 19: WS dispatcher sub-task only runs when
             # the venue's capabilities require the authenticated WebSocket.
             if self.ws_dispatcher is not None:
                 tg.create_task(
                     self.ws_dispatcher.run(self._stop_event),
                     name="ws_dispatcher",
-                )
-            # Book depth self-recording (observe-only; fail-open inside).
-            if self.book_snapshot_writer is not None:
-                tg.create_task(
-                    self.book_snapshot_writer.run(self._stop_event),
-                    name="book_snapshot",
                 )
             # Realized interest from the venue ledger (observe-only; fail-open inside).
             if self.interest_ledger_sync is not None:
@@ -763,46 +778,6 @@ class Daemon:
                 )
             # When _stop_event is set externally (SIGTERM), each sub-task's
             # internal loop exits cleanly; TaskGroup waits for all to drain.
-
-    async def _candle_writer_loop(self) -> None:
-        """Plumbing wrapper for self.writer.run() with FatalError pass-through.
-        Heartbeat is recorded inside CandleWriter.run() after each successful upsert.
-        Sends None sentinel to unblock queue.get() on graceful stop."""
-        try:
-            # Run writer and a stop-sentinel task concurrently; cancel the
-            # sentinel if writer exits naturally (e.g. on CancelledError).
-            async def _drain_sentinel() -> None:
-                await self._stop_event.wait()
-                await self.candle_q.put(None)
-
-            writer_task = asyncio.create_task(self.writer.run(), name="candle_writer_inner")
-            sentinel_task = asyncio.create_task(_drain_sentinel(), name="candle_writer_sentinel")
-            try:
-                done, pending = await asyncio.wait(
-                    {writer_task, sentinel_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for t in pending:
-                    t.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await t
-                # Re-raise any exception from writer_task
-                for t in done:
-                    if t is writer_task and not t.cancelled():
-                        exc = t.exception()
-                        if exc is not None:
-                            raise exc
-            except asyncio.CancelledError:
-                writer_task.cancel()
-                sentinel_task.cancel()
-                raise
-            log.info("sub_task_exit name=candle_writer")
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.exception("candle_writer_fatal")
-            from bfx_funding_bot.core.errors import FatalError
-            raise FatalError(f"candle_writer crashed: {e!r}") from e
 
     async def _scheduler_loop(self) -> None:
         await self.scheduler.start()
@@ -936,209 +911,8 @@ class Daemon:
     def _dependency_answered(self, dependency: str) -> None:
         """A dependency answered: beat its freshness and clear it in /readyz now,
         not at the next staleness scan (which only ever marks it stale)."""
-        self.probe.record_heartbeat(dependency)
-        if self.trading_readiness is not None:
-            self.trading_readiness.clear_dependency(dependency)
+        dependency_answered(self.probe, self.trading_readiness, dependency)
 
-    async def _ws_heartbeat_poll_loop(self) -> None:
-        """Run ``_ws_freshness_tick`` every 15s until stop."""
-        assert self.ws_client is not None
-        while not self._stop_event.is_set():
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=15.0)
-                log.info("sub_task_exit name=ws_heartbeat")
-                return  # stop requested
-            except TimeoutError:
-                pass
-            self._ws_freshness_tick()
-
-    def _ws_freshness_tick(self) -> None:
-        """One poll of the public WS: liveness always, data freshness if fresh.
-
-        ``ws`` (liveness) beats on every tick: it says this poller is iterating,
-        nothing about Bitfinex, so a venue outage can never age it into a restart.
-        ``ws_data`` (dependency freshness) beats only when this client actually
-        received a frame within 60s (``last_frame_age_ms``; a client that has not
-        received one yet proves nothing). Bitfinex sends `hb` frames every ~15s on subscribed channels when
-        idle; `_handle_raw` in ws.py updates state.last_msg_ts on any frame
-        (candle or hb), while candles() yields only candle data — so the frame
-        age, not the candle stream, is the freshness signal. A stale ``ws_data``
-        flips readiness and blocks submits through HeartbeatGuard; reconnecting
-        is the WS client's own job (its hb watchdog and
-        ``_ws_consume_with_reconnect``).
-
-        A fresh tick also restores BITFINEX_WS to HEALTHY (Bug B fix 5/20:
-        nothing else flips ws→healthy after a disconnect set DEGRADED, so the
-        state was sticky and health_monitor kept emitting warn every 5min).
-        """
-        self.probe.record_heartbeat("ws")
-        if self.ws_client is None:
-            return
-        frame_age_ms = self.ws_client.last_frame_age_ms()
-        if frame_age_ms is None or frame_age_ms >= 60_000:
-            return  # no frame yet from this client, or none for 60s: not fresh
-        self._dependency_answered(MARKET_DATA_FRESHNESS)
-        # Bug B fix: only emit transition (degraded/down → healthy or
-        # first-ever set) — don't spam every 15s with new last_msg_age_ms values.
-        if self.probe.current_status(HealthTarget.BITFINEX_WS) != HealthStatus.HEALTHY:
-            self.probe.update(
-                HealthTarget.BITFINEX_WS,
-                HealthStatus.HEALTHY,
-                last_msg_age_ms=self.ws_client.last_msg_age_ms(),
-                reconnect_count_last_hour=self.ws_client.reconnect_count_last_hour(),
-            )
-
-    async def _ws_consume_with_reconnect(self) -> None:
-        """WS recv + reconnect loop. Never exits unless daemon shuts down.
-
-        Spec: Flow 3 (WS disconnect → reconnect). Exponential backoff via
-        compute_backoff_secs; resets after 5min stable connection; emits
-        health_check transitions; runs REST gap-fill on reconnect success.
-        """
-        assert self.ws_client is not None
-        consecutive_failures = 0
-        while not self._stop_event.is_set():
-            try:
-                # async for would block in ws_client.candles() recv() between
-                # yields without checking stop_event — paper exit cycle 2026-05-21
-                # hung daemon TaskGroup drain because ws never noticed stop.
-                # Manual __anext__() race with stop_event each iteration ensures
-                # cancellation arrives within the recv window, not the next yield.
-                candles_iter = self.ws_client.candles().__aiter__()
-                try:
-                    while not self._stop_event.is_set():
-                        # ensure_future accepts Awaitable (anext returns Awaitable[T]
-                        # not Coroutine, so create_task fails mypy strict).
-                        msg_task = asyncio.ensure_future(candles_iter.__anext__())
-                        stop_task = asyncio.create_task(self._stop_event.wait())
-                        done, _ = await asyncio.wait(
-                            {msg_task, stop_task}, return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        if stop_task in done:
-                            msg_task.cancel()
-                            with contextlib.suppress(asyncio.CancelledError, Exception):
-                                await msg_task
-                            log.info("sub_task_exit name=ws path=stop_during_recv")
-                            return
-                        stop_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await stop_task
-                        try:
-                            msg = msg_task.result()
-                        except StopAsyncIteration:
-                            break  # generator exhausted → reconnect path below
-                        await self.candle_q.put(msg)
-                        # successful message → connection is alive; reset failure counter
-                        consecutive_failures = 0
-                        self.ws_client.maybe_reset_backoff()
-                        # ws freshness is recorded by _ws_freshness_tick based on
-                        # ws_client.last_msg_age_ms() (which counts both candle frames
-                        # and Bitfinex `hb` frames), not here — yielded candles are
-                        # sparse on 1h cells.
-                finally:
-                    # aclose only on async generators (not plain AsyncIterator).
-                    # AttributeError suppressed if candles() returns the latter.
-                    with contextlib.suppress(Exception):
-                        await candles_iter.aclose()  # type: ignore[attr-defined]
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception("ws_recv_error_will_reconnect")
-
-            if self._stop_event.is_set():
-                log.info("sub_task_exit name=ws path=stop_after_recv_exit")
-                return
-
-            # WS exited unexpectedly → enter reconnect loop
-            attempt = self.ws_client.reconnect_attempts
-            backoff = compute_backoff_secs(max(1, attempt))
-            log.info(
-                "ws_reconnect_attempt=%d backoff_s=%d", attempt, backoff,
-            )
-            self.probe.update(
-                HealthTarget.BITFINEX_WS,
-                HealthStatus.DEGRADED,
-                last_msg_age_ms=999_999,
-                reconnect_count_last_hour=self.ws_client.reconnect_count_last_hour(),
-                error_message="ws_reconnect_pending",
-            )
-            try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=backoff,
-                )
-                log.info("sub_task_exit name=ws path=stop_during_backoff")
-                return
-            except TimeoutError:
-                pass
-
-            # Recreate WS client (existing client may have _ws=None + closed state)
-            prev_attempts = attempt
-            try:
-                await self.ws_client.close()
-            except Exception:
-                log.exception("ws_reconnect_close_old_failed")
-            self.ws_client = BitfinexWSClient(
-                channels=[
-                    ChannelSpec(
-                        symbol=c.symbol,
-                        timeframe=c.timeframe,
-                        period_agg=c.period_agg,
-                    )
-                    for c in self.config.cells
-                ],
-                on_disconnect=lambda reason: self.probe.update(
-                    HealthTarget.BITFINEX_WS,
-                    HealthStatus.DEGRADED,
-                    last_msg_age_ms=999_999,
-                    reconnect_count_last_hour=0,
-                    error_message=f"ws_disconnect: {reason}",
-                ),
-            )
-            # carry over the attempt counter for backoff schedule continuity
-            self.ws_client.reconnect_attempts = prev_attempts + 1
-            consecutive_failures += 1
-
-            # Gap-fill what we missed during the outage
-            try:
-                async with self.session_factory() as session:
-                    for cell in self.config.cells:
-                        row = (
-                            await session.execute(
-                                select(FundingCandleRow.mts)
-                                .where(
-                                    FundingCandleRow.symbol == cell.symbol,
-                                    FundingCandleRow.timeframe == cell.timeframe,
-                                    FundingCandleRow.period_agg
-                                    == cell.period_agg,
-                                )
-                                .order_by(FundingCandleRow.mts.desc())
-                                .limit(1)
-                            )
-                        ).scalar_one_or_none()
-                        last_mts = int(row) if row is not None else 0
-                        if last_mts > 0:
-                            await fill_gap_from_rest(
-                                bitfinex=self.bitfinex,
-                                session=session,
-                                symbol=cell.symbol,
-                                timeframe=cell.timeframe,
-                                period_agg=cell.period_agg,
-                                last_known_mts=last_mts,
-                                now_mts=now_ms_utc(),
-                            )
-            except Exception:
-                log.exception("ws_reconnect_gap_fill_failed")
-
-            if consecutive_failures >= 5:
-                self.probe.update(
-                    HealthTarget.BITFINEX_WS,
-                    HealthStatus.DOWN,
-                    last_msg_age_ms=999_999,
-                    reconnect_count_last_hour=self.ws_client.reconnect_count_last_hour(),
-                    error_message="reconnect_failed_5_consecutive",
-                )
-
-            # Loop continues → tries `candles()` again with new client
 
 
 _LIVE_REQUIRED_HARD = ("manual_kill", "auth_health", "heartbeat")

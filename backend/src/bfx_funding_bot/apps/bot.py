@@ -29,6 +29,7 @@ from bfx_funding_bot.apps.runtime.daemon import (
 )
 from bfx_funding_bot.apps.runtime.divergence_reporter import DivergenceReporter
 from bfx_funding_bot.apps.runtime.health_monitor import HealthMonitor
+from bfx_funding_bot.apps.runtime.market_data import MarketDataRuntime
 from bfx_funding_bot.apps.runtime.scheduler import (
     Scheduler,
     now_ms_utc,
@@ -1117,15 +1118,12 @@ async def build_daemon(
         config=config,
         account_bootstrap=account_bootstrap,
         registry=registry,
-        candle_q=candle_q,
         diagnostics=diagnostics,
         probe=probe,
         monitor=monitor,
         scheduler=scheduler,
         signal_engine=signal_engine_obj,
         db_engine=db_engine,
-        ws_client=ws_client,
-        writer=writer,
         bitfinex_http=bitfinex_http,
         bitfinex=bitfinex,
         session_factory=session_factory,
@@ -1137,7 +1135,11 @@ async def build_daemon(
         ws_dispatcher=ws_dispatcher,
         boot_recovery=boot_recovery,
         observation_scope=capital_scope if boot_recovery is not None else None,
-        book_snapshot_writer=book_snapshot_writer,
+        market_data=MarketDataRuntime(
+            cells=config.cells, probe=probe, candle_q=candle_q, writer=writer,
+            ws_client=ws_client, bitfinex=bitfinex, session_factory=session_factory,
+            book_snapshot_writer=book_snapshot_writer, trading_readiness=trading_readiness,
+        ),
         interest_ledger_sync=interest_ledger_sync,
         credit_history_sync=credit_history_sync,
         funding_book_service=funding_book_service,
@@ -1286,11 +1288,11 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         log.critical(
             "executor_auth_failed — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )
-        if not daemon.booted:
+        if daemon.refused_boot:
             _log_boot_refused("ExecutorAuthError")
-        alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
+        alerts.emit(alerts.BOOT_REFUSED if daemon.refused_boot else alerts.DAEMON_FATAL,
                     error="ExecutorAuthError: venue credentials rejected")
-        end_reason = "fatal" if daemon.booted else "boot_refused"
+        end_reason = "boot_refused" if daemon.refused_boot else "fatal"
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* VenueCredentialRejectedError:
         # The venue refused the key while running (the periodic reconcile raises it for a
@@ -1301,11 +1303,11 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         log.critical(
             "venue_credential_rejected — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )
-        if not daemon.booted:
+        if daemon.refused_boot:
             _log_boot_refused("VenueCredentialRejectedError")
-        alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
+        alerts.emit(alerts.BOOT_REFUSED if daemon.refused_boot else alerts.DAEMON_FATAL,
                     error="VenueCredentialRejectedError: venue refused the account's key")
-        end_reason = "fatal" if daemon.booted else "boot_refused"
+        end_reason = "boot_refused" if daemon.refused_boot else "fatal"
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* CredentialNoncompliantError as eg:
         # The 6-hour recheck found the key no longer compliant (a write scope beyond funding,
@@ -1315,20 +1317,20 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         log.critical(
             "credential_noncompliant — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )
-        alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
-                    error=_error_text(eg.exceptions))
-        end_reason = "fatal" if daemon.booted else "boot_refused"
+        alerts.emit(alerts.BOOT_REFUSED if daemon.refused_boot else alerts.DAEMON_FATAL,
+                    error=_error_text(_leaves(eg)))
+        end_reason = "boot_refused" if daemon.refused_boot else "fatal"
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* Exception as eg:
         log.error(
             "daemon_taskgroup_fatal exceptions=%s",
-            [type(e).__name__ for e in eg.exceptions],
+            [type(e).__name__ for e in _leaves(eg)],
         )
-        if not daemon.booted:
-            _log_boot_refused(*(type(e).__name__ for e in eg.exceptions))
-        alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
-                    error=_error_text(eg.exceptions))
-        end_reason = "fatal" if daemon.booted else "boot_refused"
+        if daemon.refused_boot:
+            _log_boot_refused(*(type(e).__name__ for e in _leaves(eg)))
+        alerts.emit(alerts.BOOT_REFUSED if daemon.refused_boot else alerts.DAEMON_FATAL,
+                    error=_error_text(_leaves(eg)))
+        end_reason = "boot_refused" if daemon.refused_boot else "fatal"
         raise
     finally:
         # Cleanup after TaskGroup completes (close http client)
@@ -1362,6 +1364,15 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
 # (5s) and alerts.shutdown (5s) stay well inside the 30s stop_grace_period of
 # deploy/vm/docker-compose.app.yml.
 _RELEASE_TIMEOUT_S = 5.0
+
+
+def _leaves(group: BaseExceptionGroup[BaseException]) -> list[BaseException]:
+    """The exceptions in ``group``, nested groups opened (market data and the account each
+    run their own TaskGroup inside the daemon's)."""
+    leaves: list[BaseException] = []
+    for exc in group.exceptions:
+        leaves.extend(_leaves(exc) if isinstance(exc, BaseExceptionGroup) else [exc])
+    return leaves
 
 
 def _error_text(exceptions: Sequence[BaseException]) -> str:

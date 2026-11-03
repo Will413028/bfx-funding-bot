@@ -153,6 +153,6 @@ async def test_the_daemon_arms_the_scheduler_from_the_boot_clock() -> None:
         _boot_until_observed=AsyncMock(return_value=BootOutcome.STOPPED),
     )
 
-    await Daemon.run(fake)  # type: ignore[arg-type]
+    await Daemon._run_account_until_stopped(fake)  # type: ignore[arg-type]
 
     scheduler.register_from_now.assert_called_once_with(cell, now_ms=1_791_000_000_123)

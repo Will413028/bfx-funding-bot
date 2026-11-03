@@ -696,13 +696,12 @@ async def test_daemon_taskgroup_runs_book_service_through_its_finally_shutdown()
     daemon.config = SimpleNamespace(cells=[])
     daemon.boot_recovery = None
     daemon.writer_lock = None
-    daemon.ws_client = None
     daemon.ws_dispatcher = None
-    daemon.book_snapshot_writer = None
+    daemon.market_data = None
+    daemon.market_data_failed = False
     daemon.auth_ws = None
     daemon.periodic_reconcile = None
     daemon._stop_event = asyncio.Event()
-    daemon._candle_writer_loop = wait_for_stop
     daemon._scheduler_loop = wait_for_stop
     daemon._monitor_loop = wait_for_stop
     daemon._heartbeat_scan_loop = wait_for_stop

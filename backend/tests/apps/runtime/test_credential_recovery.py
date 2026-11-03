@@ -44,15 +44,17 @@ from bfx_funding_bot.apps.runtime.daemon import (
     credential_recovery_retry_delay_s,
 )
 from bfx_funding_bot.apps.runtime.healthz import make_app
+from bfx_funding_bot.apps.runtime.market_data import MarketDataRuntime
 from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.core.errors import BootInvariantError
+from bfx_funding_bot.core.errors import BootInvariantError, FatalError
 from bfx_funding_bot.core.health import DB_FRESHNESS, MARKET_DATA_FRESHNESS, HealthProbe
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.external.bitfinex.errors import (
     BitfinexAPIError,
     VenueCredentialRejectedError,
 )
+from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountCredential
 from bfx_funding_bot.modules.execution import operator_commands as commands
 from bfx_funding_bot.modules.execution.credential_rotation import (
@@ -64,6 +66,8 @@ from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.readiness import TradingReadiness
 from bfx_funding_bot.modules.ledger import CycleResult, Scope
 from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
+from bfx_funding_bot.modules.market._internal.recorders.book_snapshot import BookSnapshotWriter
+from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.observability.tables import BotRunRow
 from tests.async_wait import until
 
@@ -79,7 +83,7 @@ SETTLE_MS = int(BOT_SETTLE_WINDOW.total_seconds() * 1000)
 DIGEST_INVALID = '["error",10100,"apikey: digest invalid"]'
 
 _METHODS = (
-    "run", "_boot_until_observed", "_boot_attempt", "_run_boot_recovery",
+    "run", "_run_account", "_run_account_until_stopped", "_market_data_loop", "_boot_until_observed", "_boot_attempt", "_run_boot_recovery",
     "_run_credential_recovery",
     "_credential_recovery_tasks", "_credential_recovery_retry_loop",
     "_active_credential_changed", "_end_credential_recovery", "_recovery_started_at_ms",
@@ -199,7 +203,7 @@ def _daemon(engine: AsyncEngine, venue: Venue, *, clock: Clock | None = None,
         credential_recovery_retry_delay_s=delay,
         credential_recovery_wait=wait or advance, waits=waits,
         credential_rotation=rotation, credential_compliance=compliance,
-        credential_recovery_reason=None,
+        credential_recovery_reason=None, market_data=None, market_data_failed=False,
         # Trading wiring recovery mode must never touch.
         trading_control=Recorder(), capital_policy_control=Recorder(),
         uncertainty_worker=Recorder(), periodic_reconcile_recorder=Recorder(),
@@ -652,4 +656,73 @@ async def test_a_key_superseded_during_recovery_ends_it_as_a_changed_credential(
     assert compliance.calls == 2  # the boot, then the retry that met the rotation
     assert "credential_recovery_key_superseded attempt=1 reason=replaced_by_rotation" in caplog.text
     assert "credential_recovery_resolved reason=active_credential_changed" in caplog.text
+    _trading_untouched(fake)
+
+
+# --- market data runs beside the account (R9b) -----------------------------------------------
+
+class _BookRest:
+    async def get_funding_book(self, *, symbol: str, length: int = 25) -> list[FundingBookLevel]:
+        return [FundingBookLevel(rate=0.0002, period=2, count=1, amount=100.0)]
+
+
+class _CrashingCandleWriter:
+    async def run(self) -> None:
+        raise RuntimeError("candle store gone")
+
+
+def _market_data(fake: Any, *, writer: Any = None,
+                 book: BookSnapshotWriter | None = None) -> MarketDataRuntime:
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    return MarketDataRuntime(
+        cells=[], probe=fake.probe, candle_q=queue,
+        writer=writer or CandleWriter(queue=queue, session_factory=fake.session_factory,
+                                      probe=fake.probe),
+        ws_client=None, bitfinex=MagicMock(), session_factory=fake.session_factory,
+        book_snapshot_writer=book, trading_readiness=fake.trading_readiness,
+    )
+
+
+async def _snapshot_count(engine: AsyncEngine) -> int:
+    async with engine.connect() as conn:
+        return int((await conn.execute(text(
+            "SELECT count(*) FROM funding_book_snapshots"))).scalar_one())
+
+
+async def test_book_snapshots_keep_writing_in_credential_recovery_mode(engine, sent) -> None:
+    """Research recording does not depend on the account's key: while the boot holds in
+    credential recovery mode (nothing trades), the book snapshot still writes."""
+    fake = _daemon(engine, Venue(_refused()), wait=_wait_or_stop, delay=lambda _n: 3600.0)
+    book = BookSnapshotWriter(rest=_BookRest(), session_factory=fake.session_factory,
+                              symbols=["fUSD"], interval_s=3600)
+    fake.market_data = _market_data(fake, book=book)
+    task = asyncio.create_task(Daemon.run(fake))
+    await until(lambda: fake.credential_recovery_reason is not None, what="recovery mode")
+    for _ in range(200):
+        if await _snapshot_count(engine) >= 1:
+            break
+        await asyncio.sleep(0.01)
+    assert await _snapshot_count(engine) == 1
+    fake._stop_event.set()
+    await asyncio.wait_for(task, timeout=5)
+    _trading_untouched(fake)
+    assert [event for event, _ in sent] == ["credential_recovery_mode"]
+
+
+async def test_a_recorder_failure_ends_the_run_with_a_market_data_error(engine, sent) -> None:
+    """A recorder that dies is never silent: the run raises (``apps.bot`` exits non-zero)
+    even while the account half is still waiting for its boot, and the failure is marked as
+    market data's, not as a refused boot."""
+    unreachable = BitfinexAPIError(status_code=0, message="transport error: connect failed")
+    fake = _daemon(engine, Venue(unreachable), delay=lambda _n: 3600.0)
+    fake.boot_retry_delay_s = lambda _n: 3600.0
+    fake.market_data = _market_data(fake, writer=_CrashingCandleWriter())
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        await asyncio.wait_for(Daemon.run(fake), timeout=5)
+
+    assert raised.group_contains(FatalError)
+    assert fake.market_data_failed is True
+    assert fake.booted is False
+    assert Daemon.refused_boot.fget(fake) is False  # apps.bot reports it as fatal
     _trading_untouched(fake)

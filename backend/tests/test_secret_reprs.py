@@ -1,6 +1,5 @@
 """Secret fields stay usable and serializable, but never enter repr/str."""
 
-import asyncio
 import json
 from collections.abc import Callable
 from unittest.mock import Mock
@@ -35,15 +34,12 @@ def test_daemon_admin_token_hidden(
     daemon = Daemon(
         config=config,
         registry=Mock(),
-        candle_q=asyncio.Queue(),
         diagnostics=Mock(),
         probe=Mock(),
         monitor=Mock(),
         scheduler=Mock(),
         signal_engine=Mock(),
         db_engine=Mock(),
-        ws_client=None,
-        writer=Mock(),
         bitfinex_http=Mock(),
         bitfinex=Mock(),
         session_factory=Mock(),
