@@ -4,11 +4,12 @@ mutmut (3.8.0, dev dependency) writes the mutants; this script runs them. mutmut
 the first failing test and records killed or survived per mutant, never which tests killed it,
 so it cannot say which tests are redundant. Here every selected test runs against every mutant:
 
-1. the repository's tracked files are copied to a temporary directory and mutmut mutates the
+1. the repository's tracked and untracked, non-ignored files are copied to a temporary
+   directory (``scripts/mutation_sandbox.py``, shared with the capital gate) and mutmut mutates the
    ``--source`` files there (the working tree is never touched; the sources are checked
    unchanged at the end);
-2. the selected tests run from the copy's ``backend/``: its ``pythonpath = ["src"]`` puts the
-   copy's package first, and a test that loads a file by its path (``deploy/vm/ops``) finds the
+2. the selected tests run from the copy's ``backend/``: its ``pythonpath = ["src", "."]`` puts
+   the copy's package and scripts first, and a test that loads a file by its path (``deploy/vm/ops``) finds the
    copy's. A canary proves it: with ``MUTANT_UNDER_TEST=fail`` every mutated function raises,
    so some test must fail;
 3. the selection runs once with ``MUTANT_UNDER_TEST=stats`` (the originals run, so this is the
@@ -34,10 +35,10 @@ still be needed. Nothing is removed by this script.
 Usage (paths relative to the repository root; the CI workflow ``mutation-kill-matrix.yml``
 runs it on demand and uploads the report):
     cd backend
-    uv run python scripts/mutation_kill_matrix.py \\
+    uv run python -m scripts.mutation_kill_matrix \\
         --source backend/src/bfx_funding_bot/modules/ledger/conservation.py \\
         --out /tmp/kill-matrix.json -- -m "not integration" tests/modules/ledger
-    uv run python scripts/mutation_kill_matrix.py --source deploy/vm/ops/bfx_deploy.py \\
+    uv run python -m scripts.mutation_kill_matrix --source deploy/vm/ops/bfx_deploy.py \\
         --module-name vm_ops_bfx_deploy_under_test --out /tmp/deploy.json \\
         --pytest-args 'tests/scripts/test_vm_deploy.py'
 
@@ -48,12 +49,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import hashlib
 import json
-import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -65,6 +63,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from scripts import mutation_sandbox as sandbox
 
 BACKEND = Path(__file__).resolve().parents[1]
 REPO = BACKEND.parent
@@ -154,14 +154,6 @@ def summarize(kills: Mapping[str, Iterable[str]]) -> dict[str, Any]:
     }
 
 
-def _digest(paths: Iterable[Path]) -> str:
-    digest = hashlib.sha256()
-    for path in paths:
-        digest.update(str(path).encode())
-        digest.update((REPO / path).read_bytes())
-    return digest.hexdigest()
-
-
 def module_of(source: Path, module_name: str | None) -> str:
     """The name ``source`` runs under: dotted from ``backend/src``, else ``module_name``."""
     if module_name:
@@ -170,21 +162,6 @@ def module_of(source: Path, module_name: str | None) -> str:
         return ".".join(source.relative_to(PACKAGE_ROOT).with_suffix("").parts)
     raise MatrixError(f"{source} is outside backend/src: name the module it runs under "
                       "with --module-name")
-
-
-def _copy_repository(copy: Path) -> None:
-    tracked = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z"], capture_output=True,
-                             check=True).stdout.decode().split("\0")
-    for name in filter(None, tracked):
-        source = REPO / name
-        if source.is_file() and not source.is_symlink():
-            target = copy / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-        elif source.is_symlink():
-            target = copy / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.symlink_to(os.readlink(source))
 
 
 def _mutate(copy: Path, sources: Sequence[Path], module_name: str | None) -> list[str]:
@@ -208,17 +185,12 @@ def _mutate(copy: Path, sources: Sequence[Path], module_name: str | None) -> lis
 
 def _pytest(copy: Path, tests: Sequence[str], report: Path, env: Mapping[str, str],
             timeout: float) -> subprocess.CompletedProcess[str] | None:
-    command = [sys.executable, "-m", "pytest", "-q", "--tb=no", "-p", "no:randomly",
-               "-p", "no:cacheprovider", f"--junitxml={report}", *tests]
-    try:
-        return subprocess.run(command, cwd=copy / "backend", env={**os.environ, **env},
-                              capture_output=True, text=True, timeout=timeout, check=False)
-    except subprocess.TimeoutExpired:
-        return None
+    return sandbox.pytest(copy, ["-q", "--tb=no", "-p", "no:randomly",
+                                 f"--junitxml={report}", *tests], env=env, timeout=timeout)
 
 
 def _env(mutant: str) -> dict[str, str]:
-    return {"PYTHONDONTWRITEBYTECODE": "1", "MUTANT_UNDER_TEST": mutant}
+    return {"MUTANT_UNDER_TEST": mutant}
 
 
 def _baseline(copy: Path, selection: Sequence[str], workdir: Path) -> dict[str, list[str]]:
@@ -261,11 +233,11 @@ def _report(results: Mapping[str, Run | str | None], total: int) -> dict[str, An
 
 def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Path,
           module_name: str | None = None) -> dict[str, Any]:
-    before = _digest(sources)
+    before = sandbox.digest(sources)
     with tempfile.TemporaryDirectory(prefix="mutation-kill-matrix-") as tmp:
         workdir = Path(tmp)
         copy = workdir / "repo"
-        _copy_repository(copy)
+        sandbox.copy_repository(copy)
         names = _mutate(copy, sources, module_name)
         started = time.monotonic()
         stats = _baseline(copy, selection, workdir)
@@ -294,7 +266,7 @@ def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Pat
                     report = _report(results, len(names))
                     report["sources"], report["selection"] = [str(s) for s in sources], list(selection)
                     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    if _digest(sources) != before:
+    if sandbox.digest(sources) != before:
         raise MatrixError("a source changed while the matrix ran")
     report = _report(results, len(names))
     report["sources"], report["selection"] = [str(s) for s in sources], list(selection)

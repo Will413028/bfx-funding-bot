@@ -58,7 +58,7 @@ jobs:
           MODULE_NAME: ${{ inputs.module_name }}
           PYTEST_ARGS: ${{ inputs.pytest_args }}
         run: >-
-          uv run python scripts/mutation_kill_matrix.py
+          uv run python -m scripts.mutation_kill_matrix
           --source "$SOURCE" ${MODULE_NAME:+--module-name "$MODULE_NAME"}
           --pytest-args "$PYTEST_ARGS" --jobs "$(nproc)"
           --out "$RUNNER_TEMP/kill-matrix.json"

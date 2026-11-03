@@ -96,3 +96,8 @@ htmlcov/
 /ROADMAP.md
 /docs/deploy/
 /docs/reports/
+
+# Local tool output: mutmut's mutants, agent worktrees and state (never commit; the mutation
+# sandbox copies untracked, non-ignored files, so these must stay ignored)
+mutants/
+.local/
