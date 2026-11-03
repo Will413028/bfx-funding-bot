@@ -37,7 +37,7 @@ from bfx_funding_bot.modules.ledger import (
 )
 from bfx_funding_bot.modules.ledger._internal import capital_reader
 from bfx_funding_bot.modules.ledger._internal.clock import bump_locked, lock_scope
-from bfx_funding_bot.modules.ledger._internal.operator_evidence import latest_accepted
+from bfx_funding_bot.modules.ledger.read.operator_evidence import latest_accepted
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisRow,
     CapitalCommandClockRow,
@@ -254,7 +254,7 @@ async def admit_cancel(
     locked_guard: LockedCancelGuard,
 ) -> CancelAdmitted | CommandRefused:
     """Scope lock -> provenance -> uncertainty -> guard -> fence; no cancel row."""
-    from bfx_funding_bot.modules.ledger._internal.reads import cancel_provenance, open_uncertainties
+    from bfx_funding_bot.modules.ledger.read.reads import cancel_provenance, open_uncertainties
 
     await lock_scope(session, scope)
     try:

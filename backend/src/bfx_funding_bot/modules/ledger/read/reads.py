@@ -17,7 +17,7 @@ mirror, or the latest accepted basis -- never by history:
    listed ones + ``ix_quarantine_opening_scope_revision``).
 6. live mirror rows: ``ix_venue_offer_mirror_live`` (partial on
    ``present_in_latest_accepted_snapshot``), or the mirror PK for one offer.
-7. provenance of those venue ids (``_internal.provenance``: outcome and
+7. provenance of those venue ids (``read.provenance``: outcome and
    resolution ``venue_offer_id`` indexes), their attempts (PK) and decisions
    (``execution_decisions`` PK).
 
@@ -52,7 +52,7 @@ from bfx_funding_bot.modules.ledger import (
     Scope,
     UncertaintyKind,
 )
-from bfx_funding_bot.modules.ledger._internal.attempts import (
+from bfx_funding_bot.modules.ledger.read.attempts import (
     MAX_TAIL_ATTEMPTS,
     attempt_evidence,
     attempts_by_id,
@@ -61,9 +61,9 @@ from bfx_funding_bot.modules.ledger._internal.attempts import (
     payload_amount,
     tail_attempts,
 )
-from bfx_funding_bot.modules.ledger._internal.basis import previous_basis
-from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance, sole_owner
-from bfx_funding_bot.modules.ledger._internal.quarantine import (
+from bfx_funding_bot.modules.ledger.read.basis import previous_basis
+from bfx_funding_bot.modules.ledger.read.provenance import offer_provenance, sole_owner
+from bfx_funding_bot.modules.ledger.read.quarantine import (
     has_unresolved_quarantine,
     unresolved_quarantines,
 )

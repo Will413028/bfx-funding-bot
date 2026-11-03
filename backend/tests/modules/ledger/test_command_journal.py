@@ -8,7 +8,8 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.modules.ledger import Outcome, ProvenanceConflict, Scope
-from bfx_funding_bot.modules.ledger._internal import journal, reads
+from bfx_funding_bot.modules.ledger._internal import journal
+from bfx_funding_bot.modules.ledger.read import reads
 from bfx_funding_bot.modules.ledger.tables import TransportOutcomeJournalRow, VenueOfferMirrorRow
 from bfx_funding_bot.modules.ledger.wiring import build_command_journal
 

@@ -46,11 +46,11 @@ from bfx_funding_bot.modules.ledger import (
 )
 from bfx_funding_bot.modules.ledger._internal import capital_reader
 from bfx_funding_bot.modules.ledger._internal.clock import holds_scope_lock, lock_scope
+from bfx_funding_bot.modules.ledger.read import build_operator_reads
 from bfx_funding_bot.modules.ledger.wiring import (
     build_capital_authority,
     build_ledger_journal,
     build_managed_offer_reader,
-    build_operator_reads,
     build_scope_lock,
     build_uncertainty_reader,
 )

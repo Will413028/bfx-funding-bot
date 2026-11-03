@@ -39,7 +39,7 @@ from bfx_funding_bot.modules.ledger import (
     ProvenanceConflict,
     Scope,
 )
-from bfx_funding_bot.modules.ledger._internal import reads
+from bfx_funding_bot.modules.ledger.read import reads
 from bfx_funding_bot.modules.ledger.wiring import (
     build_ledger_managed_offers,
     build_ledger_uncertainties,

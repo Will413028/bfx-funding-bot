@@ -14,7 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bfx_funding_bot.modules.ledger import Quarantine, ResolutionRejected, ResolutionSubject, Scope
-from bfx_funding_bot.modules.ledger.wiring import build_operator_evidence
+from bfx_funding_bot.modules.ledger.read import build_operator_evidence
 
 from .test_ledger_journal import JOURNAL, SCOPE, _engine, _resolution
 from .test_ledger_schema_roles import (

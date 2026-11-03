@@ -545,7 +545,12 @@ broken_contract_guidance = "Inject ledger data into trading; do not add ignores.
 id = "control-plane-exposure"
 name = "The control plane cannot reach venue writes, money-state writers, or the bot runtime"
 type = "forbidden"
-source_modules = ["bfx_funding_bot.apps.webapi", "bfx_funding_bot.modules.api"]
+source_modules = [
+    "bfx_funding_bot.apps.webapi",
+    "bfx_funding_bot.modules.api",
+    # What the web API holds of the ledger: it must not reach a writer either.
+    "bfx_funding_bot.modules.ledger.read",
+]
 forbidden_modules = [
     "bfx_funding_bot.external.bitfinex.live_executor",
     "bfx_funding_bot.external.bitfinex.funding_trades_ws",
@@ -602,6 +607,9 @@ forbidden_modules = [
     "bfx_funding_bot.modules.execution.operator_request_worker",
     "bfx_funding_bot.modules.execution.uncertainty_resolution_worker",
     "bfx_funding_bot.modules.execution.safety.trading_state_store",
+    "bfx_funding_bot.modules.ledger.wiring",
+    "bfx_funding_bot.modules.ledger._internal",
+    "bfx_funding_bot.core.writer_lock",
 ]
 ignore_imports = []
 broken_contract_guidance = "webapi and the operator API only record requests and read; the bot applies them (ADR 2026-08-31 D4'', ADR 2026-10-19 D6). Move the read you need below these modules; do not add ignores."

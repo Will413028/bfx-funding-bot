@@ -13,7 +13,7 @@ deployment environment, so a non-member learns nothing about the host; write rol
 before validation; the evidence reference before the operator named in the request.
 
 The ledger's ports (``OperatorReads``, ``OperatorEvidence``, ``OperatorResolution``,
-the policy store) are passed in: only ``apps`` may build them.
+the policy reader) are passed in, so tests can replace their I/O; ``apps`` composes them.
 """
 from __future__ import annotations
 
@@ -70,8 +70,8 @@ from bfx_funding_bot.modules.ledger import (
     OperatorEvidence,
     OperatorReads,
     OperatorResolution,
+    PolicyReader,
     PolicyRefused,
-    PolicyStore,
     ResolutionEvidence,
     ResolutionIntent,
     ResolutionSubject,
@@ -288,7 +288,7 @@ async def get_currency_request(
 
 
 async def _currencies(session: AsyncSession, scope: Scope,
-                      store: PolicyStore) -> list[dict[str, Any]]:
+                      reader: PolicyReader) -> list[dict[str, Any]]:
     """Every currency with an applied policy, as the daemon reads it.
 
     An unreadable policy is shown as such (the daemon refuses its offers too);
@@ -306,7 +306,7 @@ async def _currencies(session: AsyncSession, scope: Scope,
         # Unlocked: a view only (the command boundary re-reads and binds the revision under
         # the account lock before any intent).
         try:
-            policy = (await store.read_applied(session, symbol=head.symbol)).policy
+            policy = (await reader.read_applied(session, symbol=head.symbol)).policy
         except PolicyRefused as exc:
             entry["policy_error"] = str(exc)
         else:
@@ -351,7 +351,7 @@ async def _cancel_all(session: AsyncSession, row: TradingStateRow | None) -> lis
 
 
 async def trading_overview(
-    session: AsyncSession, context: OperatorContext, store: PolicyStore,
+    session: AsyncSession, context: OperatorContext, reader: PolicyReader,
 ) -> dict[str, Any]:
     """The trading state in force, its cancel-all, the latest requests and every currency."""
     scope = context.scope
@@ -368,7 +368,7 @@ async def trading_overview(
         "trading_state": _state(state),
         "cancel_all": await _cancel_all(session, state),
         "requests": [trading_request_view(r) for r in requests],
-        "currencies": await _currencies(session, scope, store),
+        "currencies": await _currencies(session, scope, reader),
     }
 
 

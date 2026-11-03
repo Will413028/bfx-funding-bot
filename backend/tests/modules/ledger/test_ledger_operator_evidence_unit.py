@@ -7,8 +7,8 @@ from uuid import UUID, uuid4
 import pytest
 
 from bfx_funding_bot.modules.ledger import ResolutionRejected, ResolutionSubject, Scope
-from bfx_funding_bot.modules.ledger._internal.operator_evidence import observation_id
-from bfx_funding_bot.modules.ledger.wiring import build_operator_evidence
+from bfx_funding_bot.modules.ledger.read import build_operator_evidence
+from bfx_funding_bot.modules.ledger.read.operator_evidence import observation_id
 
 SCOPE = Scope(uuid4(), "ci")
 ID = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")

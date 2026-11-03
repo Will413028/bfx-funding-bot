@@ -16,9 +16,9 @@ from bfx_funding_bot.modules.ledger import (
     ForeignOffers,
     Scope,
 )
-from bfx_funding_bot.modules.ledger._internal import reads
-from bfx_funding_bot.modules.ledger._internal.basis import previous_basis
 from bfx_funding_bot.modules.ledger._internal.operator_resolution import attempt_match
+from bfx_funding_bot.modules.ledger.read import reads
+from bfx_funding_bot.modules.ledger.read.basis import previous_basis
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisCreditRow,
     AcceptedCapitalBasisRow,

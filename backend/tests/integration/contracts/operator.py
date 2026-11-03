@@ -30,11 +30,8 @@ from bfx_funding_bot.modules.ledger import (
     ResolutionSubject,
     observation_evidence_ref,
 )
-from bfx_funding_bot.modules.ledger.wiring import (
-    build_operator_evidence,
-    build_operator_reads,
-    build_operator_resolution,
-)
+from bfx_funding_bot.modules.ledger.read import build_operator_evidence, build_operator_reads
+from bfx_funding_bot.modules.ledger.wiring import build_operator_resolution
 
 from ..test_ledger_unknown_resolver_pg import (
     Clock,

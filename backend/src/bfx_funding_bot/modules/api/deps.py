@@ -19,8 +19,7 @@ from bfx_funding_bot.modules.ledger import (
     ExecutionHistory,
     OperatorEvidence,
     OperatorReads,
-    OperatorResolution,
-    PolicyStore,
+    PolicyReader,
     Scope,
 )
 
@@ -69,10 +68,9 @@ class ReadModels:
 
     operator_reads: OperatorReads
     operator_evidence: OperatorEvidence
-    operator_resolution: OperatorResolution
     execution_history: ExecutionHistory
-    # The scope's applied-policy store; the web API only reads it (``read_applied``).
-    policy_store: Callable[[Scope], PolicyStore]
+    # The scope's applied policy, read only.
+    policy_reader: Callable[[Scope], PolicyReader]
 
 
 async def get_read_models(request: Request) -> ReadModels:

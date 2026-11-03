@@ -33,8 +33,8 @@ from bfx_funding_bot.modules.ledger import (
     UncertaintyView,
     observation_evidence_ref,
 )
-from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance
-from bfx_funding_bot.modules.ledger.wiring import build_operator_evidence, build_operator_reads
+from bfx_funding_bot.modules.ledger.read import build_operator_evidence, build_operator_reads
+from bfx_funding_bot.modules.ledger.read.provenance import offer_provenance
 
 from .test_ledger_capital_reader import JOURNAL, SCOPE, Book
 from .test_ledger_capital_reader import book as book

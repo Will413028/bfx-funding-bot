@@ -49,6 +49,7 @@ from bfx_funding_bot.modules.ledger import (
     UncertaintyReader,
     VenueHintSink,
 )
+from bfx_funding_bot.modules.ledger.read import build_operator_reads
 from bfx_funding_bot.modules.ledger.wiring import (
     build_capital_authority,
     build_command_journal,
@@ -57,7 +58,6 @@ from bfx_funding_bot.modules.ledger.wiring import (
     build_ledger_managed_offers,
     build_managed_offer_reader,
     build_observation_sink,
-    build_operator_reads,
     build_operator_resolution,
     build_policy_store,
     build_scope_lock,

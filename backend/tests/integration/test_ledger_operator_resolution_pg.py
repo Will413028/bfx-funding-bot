@@ -43,12 +43,9 @@ from bfx_funding_bot.modules.ledger import (
     observation_evidence_ref,
 )
 from bfx_funding_bot.modules.ledger._internal import operator_resolution as resolution_module
+from bfx_funding_bot.modules.ledger.read import build_operator_evidence, build_operator_reads
 from bfx_funding_bot.modules.ledger.tables import ExecutionResolutionJournalRow
-from bfx_funding_bot.modules.ledger.wiring import (
-    build_operator_evidence,
-    build_operator_reads,
-    build_operator_resolution,
-)
+from bfx_funding_bot.modules.ledger.wiring import build_operator_resolution
 
 from .test_ledger_capital_reader import (
     book,  # noqa: F401 - fixture re-export

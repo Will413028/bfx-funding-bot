@@ -29,7 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import OfferView, Outcome, PositionView, Scope
-from bfx_funding_bot.modules.ledger.wiring import build_operator_reads
+from bfx_funding_bot.modules.ledger.read import build_operator_reads
 
 from .test_ledger_basis import _credit, _observation, _offer
 from .test_ledger_capital_reader import JOURNAL, Book

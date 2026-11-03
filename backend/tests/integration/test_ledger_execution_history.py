@@ -336,7 +336,7 @@ async def _archive_client(book: Book, monkeypatch: pytest.MonkeyPatch) -> httpx.
     await _plant_archive(book, ("ORDER_FILL", 99_999), environment="canary")
     unused = object()
     return await _client(book, monkeypatch, ReadModels(
-        unused, unused, unused, ArchivedExecutionHistory(), unused))  # type: ignore[arg-type]
+        unused, unused, ArchivedExecutionHistory(), unused))  # type: ignore[arg-type]
 
 
 async def test_the_archive_pages_newest_first_within_its_scope(book, monkeypatch) -> None:

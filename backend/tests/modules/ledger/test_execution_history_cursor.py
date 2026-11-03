@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from bfx_funding_bot.modules.ledger import ExecutionCursorError
-from bfx_funding_bot.modules.ledger._internal.execution_history import (
+from bfx_funding_bot.modules.ledger.read.execution_history import (
     _journal_position,
     _token,
     _untoken,
