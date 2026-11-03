@@ -204,6 +204,7 @@ def _daemon(engine: AsyncEngine, venue: Venue, *, clock: Clock | None = None,
         credential_recovery_wait=wait or advance, waits=waits,
         credential_rotation=rotation, credential_compliance=compliance,
         credential_recovery_reason=None, market_data=None, market_data_failed=False,
+        account_failed=False,
         # Trading wiring recovery mode must never touch.
         trading_control=Recorder(), capital_policy_control=Recorder(),
         uncertainty_worker=Recorder(), periodic_reconcile_recorder=Recorder(),
@@ -726,3 +727,26 @@ async def test_a_recorder_failure_ends_the_run_with_a_market_data_error(engine, 
     assert fake.booted is False
     assert Daemon.refused_boot.fget(fake) is False  # apps.bot reports it as fatal
     _trading_untouched(fake)
+
+
+class _MarketDataFailingOnTeardown:
+    async def run(self, stop: asyncio.Event) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("ws close failed") from None
+
+
+async def test_a_refused_boot_stays_refused_when_market_data_fails_while_torn_down(
+        engine, sent) -> None:
+    """The account refused the boot first; a market task raising while it is cancelled does
+    not turn the refused boot into a market data failure."""
+    fake = _daemon(engine, Venue(BootInvariantError("boot invariant broken")))
+    fake.market_data = _MarketDataFailingOnTeardown()
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        await asyncio.wait_for(Daemon.run(fake), timeout=5)
+
+    assert raised.group_contains(BootInvariantError)
+    assert fake.market_data_failed is False
+    assert Daemon.refused_boot.fget(fake) is True

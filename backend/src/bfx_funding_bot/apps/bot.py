@@ -591,7 +591,7 @@ async def build_daemon(
             # not the reactive executor/safety_chain — those are bumped only by
             # trading itself, so watching them self-suppresses trades in quiet
             # markets and was part of the 2026-05-26 canary restart loop. ws_data
-            # stays fresh in quiet markets via Daemon._ws_freshness_tick
+            # stays fresh in quiet markets via MarketDataRuntime._ws_freshness_tick
             # (Bitfinex hb ~15s); a venue outage ages it and blocks here, with
             # no restart. Never seen since boot also blocks, until the first
             # frame. A composition without the public WS (skip_ws, tests only)

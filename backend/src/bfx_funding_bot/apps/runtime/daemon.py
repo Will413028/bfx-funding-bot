@@ -319,6 +319,8 @@ class Daemon:
     # Set when the market data half failed: ``apps.bot`` reports it as a fatal error, never
     # as a refused boot, even when it happened before the boot completed.
     market_data_failed: bool = False
+    # Set when the account half failed (first): a later market data error does not reclassify.
+    account_failed: bool = False
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
     admin_token: str | None = field(default=None, repr=False)
@@ -669,7 +671,10 @@ class Daemon:
         try:
             await market_data.run(self._stop_event)
         except Exception:
-            self.market_data_failed = True
+            # A market task that raises while the account's own failure tears it down is
+            # not the cause: the run keeps the account's classification.
+            if not self.account_failed:
+                self.market_data_failed = True
             raise
 
     async def _run_account(self) -> None:
@@ -681,6 +686,9 @@ class Daemon:
         """
         try:
             await self._run_account_until_stopped()
+        except Exception:
+            self.account_failed = True
+            raise
         finally:
             self._stop_event.set()
 

@@ -17,7 +17,7 @@ from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 # with the loop stopped, neither /healthz nor scan_staleness can run.
 LIVENESS_THRESHOLDS: dict[str, int] = {
     "ws": 90,                    # the WS freshness poller iterates every 15s
-                                 # (Daemon._ws_freshness_tick)
+                                 # (MarketDataRuntime._ws_freshness_tick)
     "candle_writer": 65 * 60,    # per dequeued candle and per idle minute, whatever
                                  # the upsert outcome (CandleWriter.run)
     "scheduler": 65 * 60,        # per loop pass, whatever the callback outcome; a
