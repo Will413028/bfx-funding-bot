@@ -8,8 +8,8 @@ so it cannot say which tests are redundant. Here every selected test runs agains
    directory (``scripts/mutation_sandbox.py``, shared with the capital gate) and mutmut mutates the
    ``--source`` files there (the working tree is never touched; the sources are checked
    unchanged at the end);
-2. the selected tests run from the copy's ``backend/``: its ``pythonpath = ["src"]`` puts the
-   copy's package first, and a test that loads a file by its path (``deploy/vm/ops``) finds the
+2. the selected tests run from the copy's ``backend/``: its ``pythonpath = ["src", "."]`` puts
+   the copy's package and scripts first, and a test that loads a file by its path (``deploy/vm/ops``) finds the
    copy's. A canary proves it: with ``MUTANT_UNDER_TEST=fail`` every mutated function raises,
    so some test must fail;
 3. the selection runs once with ``MUTANT_UNDER_TEST=stats`` (the originals run, so this is the

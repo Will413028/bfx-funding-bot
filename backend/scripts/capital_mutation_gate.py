@@ -33,6 +33,7 @@ mutant run that errored instead of passing or failing).
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -174,14 +175,24 @@ def _fresh_copy(workdir: Path, name: str) -> Path:
     return copy
 
 
-def _verify_copy_is_imported(workdir: Path) -> None:
-    """A copy whose policy module cannot import must break collection, else tests read src/."""
-    copy = _fresh_copy(workdir, "canary")
-    target = copy / "backend" / POLICY
-    target.write_text(_CANARY + target.read_text())
-    result = _pytest(copy, POLICY_TESTS, "--collect-only")
-    if result.returncode == 0 or "capital-mutation-gate canary" not in result.stdout + result.stderr:
-        raise GateError("the mutated copy is not what pytest imports; mutants would be untested")
+def _verify_copy_is_imported(workdir: Path, mutants: Sequence[Mutant]) -> None:
+    """Each mutated module, made unimportable in a copy, must break its owners' collection;
+    otherwise those tests import it from elsewhere and its mutants would go untested."""
+    owners: dict[Path, tuple[str, ...]] = {}
+    for mutant in mutants:
+        owners[mutant.path] = tuple(dict.fromkeys((*owners.get(mutant.path, ()), *mutant.owners)))
+    for n, (path, tests) in enumerate(owners.items(), 1):
+        copy = _fresh_copy(workdir, f"canary{n}")
+        target = copy / "backend" / path
+        target.write_text(_CANARY + target.read_text())
+        result = _pytest(copy, tests, "--collect-only")
+        shutil.rmtree(copy)
+        output = result.stdout + result.stderr
+        # The canary raises, or (above a __future__ import) is a SyntaxError naming the file.
+        read = "capital-mutation-gate canary" in output or str(target) in output
+        if result.returncode == 0 or not read:
+            raise GateError(f"the mutated copy of {path} is not what pytest imports; "
+                            "its mutants would be untested")
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,15 +228,17 @@ def classify(returncode: int, report: Path) -> Verdict:
 
 def run(mutants: Sequence[Mutant]) -> int:
     check_anchors(mutants)
-    sources = sorted({Path("backend") / mutant.path for mutant in mutants})
+    sources = sorted(path.relative_to(sandbox.REPO) for path in (BACKEND / "src").rglob("*.py"))
     before = sandbox.digest(sources)
     survivors: list[str] = []
     errors: list[str] = []
     with tempfile.TemporaryDirectory(prefix="capital-mutation-gate-") as tmp:
         workdir = Path(tmp)
-        _verify_copy_is_imported(workdir)
+        _verify_copy_is_imported(workdir, mutants)
         owners = tuple(dict.fromkeys(test for mutant in mutants for test in mutant.owners))
-        baseline = _pytest(_fresh_copy(workdir, "baseline"), owners)
+        base = _fresh_copy(workdir, "baseline")
+        baseline = _pytest(base, owners)
+        shutil.rmtree(base)
         if baseline.returncode != 0:
             print(baseline.stdout[-4000:], baseline.stderr[-2000:], sep="\n")
             raise GateError("owning tests fail without any mutant")
@@ -235,6 +248,7 @@ def run(mutants: Sequence[Mutant]) -> int:
             _apply(copy, mutant.path, mutant.old, mutant.new)
             report = workdir / f"{mutant.id}.xml"
             result = _pytest(copy, mutant.owners, f"--junitxml={report}")
+            shutil.rmtree(copy)  # judged from the report; ~1.4k files per copy add up
             verdict = classify(result.returncode, report)
             if verdict.status != "killed":
                 (survivors if verdict.status == "survived" else errors).append(
@@ -242,7 +256,7 @@ def run(mutants: Sequence[Mutant]) -> int:
                 print(result.stdout[-3000:], result.stderr[-1000:], sep="\n")
             print(f"{mutant.id:<6} {verdict.status:<8} {verdict.detail}  -- {mutant.description}")
     if sandbox.digest(sources) != before:
-        raise GateError("a mutated source changed in the working tree while the gate ran")
+        raise GateError("src/ changed in the working tree while the gate ran")
     if errors:
         raise GateError("mutant runs errored instead of passing or failing:\n  "
                         + "\n  ".join(errors))
