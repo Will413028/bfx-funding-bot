@@ -16,7 +16,6 @@ from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitOutcomeUnknown
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
-from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
 from bfx_funding_bot.modules.execution.safety.protection import (
@@ -56,11 +55,9 @@ async def test_an_unknown_submit_blocks_its_symbol_but_never_halts(gate_stack) -
     cancel_venue = FakeVenue(gate_stack.factory, ACCOUNT, {"UST": set()})
     protection.bind(rig.halt)
 
-    async def unknown(ready_, ctx_, *, reservation_ref):
-        rig.venue.received.append(ready_)
-        return SubmittedOrder(
-            outcome=SubmitOutcomeUnknown(reason="transport_timeout", transport_started=True),
-            reservation_ref=reservation_ref)
+    async def unknown(offer_, account_, *, pre_send=None):
+        rig.venue.received.append(offer_)
+        return SubmitOutcomeUnknown(reason="transport_timeout", transport_started=True)
 
     rig.venue.submit = unknown
     result = await asyncio.wait_for(rig.gate.submit(rig.ready, rig.ctx), timeout=10)

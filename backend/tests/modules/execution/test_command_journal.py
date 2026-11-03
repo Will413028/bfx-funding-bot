@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from bfx_funding_bot.external.bitfinex.order_port import CancelOutcome, CancelResult
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary, LedgerCommandEffects
@@ -117,14 +118,15 @@ async def test_gate_port_guard_transaction_and_transport_after_commit(command):
             sessions.trace.append("transport")
             return await super().submit(*args, **kwargs)
 
-        async def cancel(self, **kwargs):
+        async def cancel(self, venue_offer_id, account, *, before_transport=None):
             assert not sessions.active and sessions.trace[-1] == "transport_guard"
             sessions.trace.append("transport")
+            return CancelResult(CancelOutcome.SUCCESS)
 
     venue, port = Venue(), Port()
     bus = DomainEventBus()
     boundary = CommandBoundary(SCOPE, sessions, port, LedgerCommandEffects(bus))
-    gate = AccountCommandGate(venue,
+    gate = AccountCommandGate(venue, bus=bus,
         uncertainty_reader=Uncertainty(), safety_evaluator=_FakeSafetyEvaluator([]),
         deployment_environment="ci", boundary=boundary, managed_offers=Offers(),
         clock=lambda: 100)

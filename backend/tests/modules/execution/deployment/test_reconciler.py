@@ -952,11 +952,17 @@ async def test_per_cell_safety_block_does_not_stop_other_cell():
     assert len(safety.calls) == 2  # both cells consulted
 
 
-async def test_a_submit_refused_for_the_key_stops_the_tick_after_recording_its_unknown() -> None:
+@pytest.mark.parametrize("http_status", [500, 403])
+async def test_a_submit_refused_for_the_key_stops_the_tick_after_recording_its_unknown(
+    http_status: int,
+) -> None:
     """9g: the venue answering a submit with 10100 means the key itself is refused. The
     attempt stays UNKNOWN (recorded and emitted as any UNKNOWN), and the tick ends there by
     raising the rejection the periodic reconcile turns into exit 78: no second submit goes
-    out on the refused key. Mutation: drop the raise -- the second cell is submitted."""
+    out on the refused key. Mutation: drop the raise -- the second cell is submitted.
+
+    The rejection carries the HTTP status the outcome recorded (``http_status`` on the
+    UNKNOWN); 403 tells reading it apart from the 500 default used when it is absent."""
     from bfx_funding_bot.external.bitfinex.errors import VenueCredentialRejectedError
 
     class _KeyRefusedThenAck(_FakeExecutor):
@@ -966,8 +972,7 @@ async def test_a_submit_refused_for_the_key_stops_the_tick_after_recording_its_u
                 return SubmittedOrder(
                     outcome=SubmitOutcomeUnknown(
                         "http_5xx", True, venue_error_code=10100,
-                        venue_error_message="apikey: invalid"),
-                    raw_response={"http_status": 500, "response_digest": "d"},
+                        venue_error_message="apikey: invalid", http_status=http_status),
                 )
             return SubmittedOrder(outcome=SubmitAcknowledged("unexpected"))
 
@@ -981,7 +986,7 @@ async def test_a_submit_refused_for_the_key_stops_the_tick_after_recording_its_u
     with pytest.raises(VenueCredentialRejectedError) as raised:
         await rec.deploy()
 
-    assert raised.value.venue_coded and raised.value.status_code == 500
+    assert raised.value.venue_coded and raised.value.status_code == http_status
     assert "apikey" not in str(raised.value) and "apikey" not in (raised.value.raw or "")
     assert len(executor.submitted) == 1
     submits = [e for e in sink.events if e["event_type"] == "order_submit"]
@@ -1029,7 +1034,6 @@ class _UnknownExecutor:
         return SubmittedOrder(
             venue_offer_id=None,
             outcome=SubmitOutcomeUnknown("timeout", True),
-            raw_response=None,
         )
 
 

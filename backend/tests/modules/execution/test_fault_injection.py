@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from hashlib import sha256
@@ -19,10 +20,12 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from bfx_funding_bot.core.telemetry import Phase
+from bfx_funding_bot.external.bitfinex.credentials import HasCredentials
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
+from bfx_funding_bot.external.bitfinex.order_port import OfferRequest
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitOutcome,
     SubmitOutcomeKind,
     SubmitOutcomeUnknown,
     SubmitRejected,
@@ -37,12 +40,10 @@ from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
-    ReservationRef,
 )
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
-    SubmittedOrder,
 )
 from bfx_funding_bot.modules.ledger import (
     Coverage,
@@ -52,7 +53,7 @@ from bfx_funding_bot.modules.ledger import (
     UnknownTerms,
     match_unknown,
 )
-from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from tests.modules.execution.fake_boundary import (  # noqa: F401  (fixture)
     AttemptAuthorized,
     OutcomeRecorded,
@@ -177,11 +178,6 @@ class FakeBitfinexTransport(httpx.AsyncBaseTransport):
         raise AssertionError(f"unsupported transport mode: {self._scenario.response_mode}")
 
 
-class _EventSink:
-    async def emit(self, event: dict[str, Any]) -> None:
-        del event
-
-
 def _recording(open_scopes: set[tuple[UUID, str, str]], environment: str) -> Recording:
     """A boundary whose committed UNKNOWN opens the symbol's uncertainty scope."""
     def opened(record: Record) -> None:
@@ -243,18 +239,14 @@ class _TypedOutcomeExecutor:
 
     async def submit(
         self,
-        ready: ReadyToSubmit,
-        context: AccountContext,
+        offer: OfferRequest,
+        account: HasCredentials,
         *,
-        reservation_ref: ReservationRef,
-    ) -> SubmittedOrder:
-        del ready, context
+        pre_send: Callable[[], bool] | None = None,
+    ) -> SubmitOutcome:
+        del offer, account, pre_send
         self.calls += 1
-        return SubmittedOrder(
-            venue_offer_id=None,
-            outcome=self.outcome,
-            reservation_ref=reservation_ref,
-        )
+        return self.outcome
 
 
 def _ready(*, decision_id: str, symbol: str = "fUST") -> ReadyToSubmit:
@@ -341,16 +333,12 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
     async with httpx.AsyncClient(transport=transport) as http:
         executor = BitfinexLiveExecutor(
             http=http,
-            event_sink=_EventSink(),
-            bus=DomainEventBus(),
-            phase=Phase.SHADOW,
-            strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUST"}),
-            cell="fault-cell",
             auth_gate=AuthRequestGate(lambda: 1),
         )
         gate = AccountCommandGate(
             executor,
+            bus=DomainEventBus(),
             uncertainty_reader=reader,
             safety_evaluator=_SafetyEvaluator(reader, environment),
             deployment_environment=environment,
@@ -408,16 +396,12 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
         else:
             inner = BitfinexLiveExecutor(
                 http=http,
-                event_sink=_EventSink(),
-                bus=DomainEventBus(),
-                phase=Phase.SHADOW,
-                strategy=StrategyName.RATE_PERCENTILE,
                 configured_symbols=frozenset({"fUST"}),
-                cell="fault-cell",
                 auth_gate=AuthRequestGate(lambda: 1),
             )
         gate = AccountCommandGate(
             inner,  # type: ignore[arg-type]
+            bus=DomainEventBus(),
             uncertainty_reader=uncertainty_reader,
             safety_evaluator=_SafetyEvaluator(uncertainty_reader, "ci"),
             deployment_environment="ci",
@@ -432,7 +416,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             result = await gate.submit(ready, context)
             outcome_kind = result.outcome_kind.value
             # Full raw response is never valid evidence, even if a venue echoes a secret.
-            assert _API_SECRET not in str(result.raw_response)
+            assert _API_SECRET not in str(getattr(result.outcome, "raw_response", None))
         except BaseException as exc:
             assert scenario.process_crash_at in {"after_intent", "during_send"}
             # The gate turns it into process fencing; the crash is the cause.
@@ -462,6 +446,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             await gate.check(_ready(decision_id=f"fault-{scenario.name}-other-account"), _context(_ADJACENT_ACCOUNT_ID))
             other_environment_gate = AccountCommandGate(
                 inner,  # type: ignore[arg-type]
+                bus=DomainEventBus(),
                 uncertainty_reader=uncertainty_reader,
                 safety_evaluator=_SafetyEvaluator(uncertainty_reader, "staging"),
                 deployment_environment="staging",
@@ -568,6 +553,7 @@ async def test_durable_outcome_reason_redacts_credentials_and_authorization(
     reader = _UncertaintyReader(open_scopes)
     gate = AccountCommandGate(
         executor,
+        bus=DomainEventBus(),
         uncertainty_reader=reader,
         safety_evaluator=_SafetyEvaluator(reader, "ci"),
         deployment_environment="ci",

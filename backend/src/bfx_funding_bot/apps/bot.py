@@ -92,11 +92,8 @@ from bfx_funding_bot.modules.execution.middleware import (
 from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
-    CancelPort,
     ExecutorPort,
-    FundingCancelAllPort,
     GuardRule,
-    VenueExecutorPort,
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
@@ -468,17 +465,12 @@ async def build_daemon(
     # (assert_live_guard_invariant). Capital limits are the applied
     # CapitalPolicy's, enforced by CapitalPolicyGuard below.
 
-    # bus is the executor's construction dependency, so it is created above.
-    # Env-driven via registry (CC4 invariant — WS client required).
+    # Env-driven via registry (CC4 invariant — WS client required). The bus
+    # created above goes to the command gate, which publishes the cancel events.
     all_symbols = frozenset(configured_symbols(config.cells))
     spec = build_executor(
-        event_sink=stdout_sink,
-        phase=config.phase,
-        strategy=first_cell.strategy,
         configured_symbols=all_symbols,
-        cell=first_cell.cell_id,
         http=venue_wiring.auth_http,
-        bus=bus,
         auth_gate=bfx_auth_gate,
         clock=now_ms_utc,
     )
@@ -555,7 +547,7 @@ async def build_daemon(
         ttl_ms=int(os.environ.get("BFX_QUOTE_TTL_MS", "3900000")),
     )
 
-    executor: VenueExecutorPort = spec.executor
+    executor = spec.executor
 
     # 3a-recovery: venue reconciliation against the real venue.
     book_snapshot_writer: BookSnapshotWriter | None = None
@@ -626,6 +618,7 @@ async def build_daemon(
     # no-retry submit contract below are untouched.
     reservation_middleware = ReservationEmittingMiddleware(
         executor,
+        bus=bus,
         safety_evaluator=safety_chain,
         boundary=capital.command_boundary,
         uncertainty_reader=uncertainty_reader,
@@ -710,7 +703,7 @@ async def build_daemon(
         clock=now_ms_utc,
         event_sink=stdout_sink,
         phase=config.phase,
-        canceller=reservation_middleware if isinstance(executor, CancelPort) else None,
+        canceller=reservation_middleware,
         reprice=reprice_policy,
         ladder=ladder_policy,
         attempt_recorder=attempt_recorder,
@@ -731,11 +724,10 @@ async def build_daemon(
             config_hash=deployment_identity.backend_digest or "unidentified",
         ),
         protection=protection,
-        managed_sweep=(ManagedOfferSweep(
+        managed_sweep=ManagedOfferSweep(
             session_factory=session_factory, account_id=UUID(account_id),
             environment=env_str, canceller=reservation_middleware, ctx=account_ctx,
-            offers=managed_offers)
-            if isinstance(executor, CancelPort) else None),
+            offers=managed_offers),
     )
     # The web API queues operator adjudications; only this writer appends them.
     uncertainty_worker = UncertaintyResolutionWorker(
@@ -962,7 +954,7 @@ async def build_daemon(
         session_factory=session_factory,
         ctx=account_ctx,
         configured_symbols=all_symbols,
-        venue=executor if isinstance(executor, FundingCancelAllPort) else None,
+        venue=executor,
         writer_lock=writer_lock,
         uncertainty=uncertainty_reader,
         offers=managed_offers,

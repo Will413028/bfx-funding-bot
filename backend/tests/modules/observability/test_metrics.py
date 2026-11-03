@@ -269,7 +269,6 @@ async def test_submit_middleware_keeps_unknown_as_first_class_metric() -> None:
     order = SubmittedOrder(
         venue_offer_id=None,
         outcome=SubmitOutcomeUnknown("timeout", True),
-        raw_response=None,
     )
     mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
 

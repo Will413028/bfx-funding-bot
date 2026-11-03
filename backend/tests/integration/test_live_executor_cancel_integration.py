@@ -1,74 +1,27 @@
 """Integration test: cancel REST path with real httpx client + respx mocks.
 
 Differs from unit tests by using real httpx.AsyncClient (no patches), tests
-the full sign_request + nonce handling on the wire.
+the full sign_request + nonce handling on the wire. The account command gate
+runs over the real adapter and publishes the cancel audit events around it.
 """
 from __future__ import annotations
-
-from typing import Any
-from uuid import uuid4
 
 import httpx
 import pytest
 import respx
 from httpx import Response
 
-from bfx_funding_bot.core.telemetry import Phase
-from bfx_funding_bot.external.bitfinex.live_executor import (
-    BITFINEX_REST_BASE,
-    BitfinexLiveExecutor,
-)
-from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
-from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.events import (
-    CancelAcknowledged,
-    CancelRequested,
-)
-from bfx_funding_bot.modules.execution.protocols import (
-    AccountContext,
-    Credentials,
-)
-from bfx_funding_bot.modules.strategy import StrategyName
+from bfx_funding_bot.external.bitfinex.live_executor import BITFINEX_REST_BASE
+from tests.external.bitfinex.test_live_executor_cancel import _CancelHarness
 
 pytestmark = pytest.mark.integration
 
 
-class _RecordingSink:
-    def __init__(self) -> None:
-        self.emitted: list[dict[str, Any]] = []
-
-    async def emit(self, event: dict[str, Any]) -> None:
-        self.emitted.append(event)
-
-
 @pytest.mark.asyncio
 async def test_cancel_success_full_chain_sends_signed_post() -> None:
-    """Verify HMAC-SHA384 signed POST reaches Bitfinex; bus emits 2 events."""
-    bus = DomainEventBus()
-    captured: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        captured.append(event)
-
-    bus.subscribe(CancelRequested, _capture)
-    bus.subscribe(CancelAcknowledged, _capture)
-
-    ctx = AccountContext(
-        account_id="default",
-        credentials=Credentials(api_key="test-key", api_secret="test-secret"),
-    )
-
+    """Verify HMAC-SHA384 signed POST reaches Bitfinex; the gate's bus emits 2 events."""
     async with httpx.AsyncClient() as http:
-        executor = BitfinexLiveExecutor(
-            http=http,
-            event_sink=_RecordingSink(),
-            bus=bus,
-            phase=Phase.SHADOW,
-            strategy=StrategyName.RATE_PERCENTILE,
-            configured_symbols=frozenset({"fUSD"}),
-            cell="fUSD_p2",
-            auth_gate=AuthRequestGate(lambda: 1700000000_000_000),
-        )
+        harness = _CancelHarness(http)
 
         with respx.mock(base_url=BITFINEX_REST_BASE) as router:
             route = router.post("/v2/auth/w/funding/offer/cancel").mock(
@@ -78,12 +31,7 @@ async def test_cancel_success_full_chain_sends_signed_post() -> None:
                     "0", "SUCCESS", "Submitting cancel request",
                 ]),
             )
-            await executor.cancel(
-                venue_offer_id="123",
-                signal_correlation_id=uuid4(),
-                account_id="default",
-                ctx=ctx,
-            )
+            await harness.cancel()
 
     # Verify request was signed
     last_request = route.calls.last.request
@@ -95,5 +43,4 @@ async def test_cancel_success_full_chain_sends_signed_post() -> None:
     assert '"id": 123' in body
 
     # Verify 2 events published
-    types = [type(e).__name__ for e in captured]
-    assert types == ["CancelRequested", "CancelAcknowledged"]
+    assert harness.types == ["CancelRequested", "CancelAcknowledged"]

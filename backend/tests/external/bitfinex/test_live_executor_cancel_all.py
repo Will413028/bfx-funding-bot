@@ -10,7 +10,6 @@ import hashlib
 import hmac
 import json
 from decimal import Decimal
-from typing import Any
 
 import httpx
 import pytest
@@ -20,33 +19,24 @@ from bfx_funding_bot.core.errors import (
     ExecutorFatalError,
     ExecutorTransientError,
 )
-from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.live_executor import (
     BITFINEX_REST_BASE,
     BitfinexLiveExecutor,
     classify_cancel_all_response,
 )
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
-from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.errors import InvariantViolation
+from bfx_funding_bot.external.bitfinex.order_port import VenueResponseShapeError
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
-from bfx_funding_bot.modules.strategy import StrategyName
 
 _PATH = "v2/auth/w/funding/offer/cancel/all"
 _OK = [1_700_000_000_000, "foc_all-req", None, None, None, None, "SUCCESS", "Cancelled all"]
 
 
-class _Sink:
-    async def emit(self, event: dict[str, Any]) -> None:
-        return None
-
-
 def _executor(handler) -> tuple[BitfinexLiveExecutor, httpx.AsyncClient]:
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return BitfinexLiveExecutor(
-        http=http, event_sink=_Sink(), bus=DomainEventBus(), phase=Phase.LIVE,
-        strategy=StrategyName.MEAN_REVERSION, configured_symbols=frozenset({"fUST"}),
-        cell="fUST_a30", auth_gate=AuthRequestGate(lambda: 1_700_000_000_000_001),
+        http=http, configured_symbols=frozenset({"fUST"}),
+        auth_gate=AuthRequestGate(lambda: 1_700_000_000_000_001),
     ), http
 
 
@@ -129,5 +119,5 @@ async def test_invalid_currency_never_reaches_the_venue(currency):
 
 @pytest.mark.parametrize("raw", [None, {}, [1, "foc_all-req"], "SUCCESS"])
 def test_malformed_response_is_not_an_acknowledgement(raw):
-    with pytest.raises(InvariantViolation):
+    with pytest.raises(VenueResponseShapeError):
         classify_cancel_all_response(raw)

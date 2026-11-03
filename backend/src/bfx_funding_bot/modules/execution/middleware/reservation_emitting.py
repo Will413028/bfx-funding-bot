@@ -10,17 +10,15 @@ import time
 from collections.abc import Callable
 from uuid import UUID
 
+from bfx_funding_bot.external.bitfinex.order_port import VenueOrderPort
+from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     AuthoritativeSafetyEvaluator,
 )
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
-from bfx_funding_bot.modules.execution.protocols import (
-    AccountContext,
-    SubmittedOrder,
-    VenueExecutorPort,
-)
+from bfx_funding_bot.modules.execution.protocols import AccountContext, SubmittedOrder
 from bfx_funding_bot.modules.ledger import ManagedOfferReader, UncertaintyReader
 
 
@@ -29,8 +27,9 @@ class ReservationEmittingMiddleware:
 
     def __init__(
         self,
-        inner: VenueExecutorPort,
+        inner: VenueOrderPort,
         *,
+        bus: DomainEventBus,
         safety_evaluator: AuthoritativeSafetyEvaluator,
         boundary: CommandBoundary,
         uncertainty_reader: UncertaintyReader,
@@ -40,6 +39,7 @@ class ReservationEmittingMiddleware:
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._command_gate = AccountCommandGate(
             inner,
+            bus=bus,
             uncertainty_reader=uncertainty_reader,
             safety_evaluator=safety_evaluator,
             deployment_environment=boundary.scope.deployment_environment,

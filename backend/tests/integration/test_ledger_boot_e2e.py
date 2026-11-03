@@ -43,7 +43,6 @@ from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardRe
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
-    SubmittedOrder,
 )
 from bfx_funding_bot.modules.ledger import (
     RUNTIME_GRACE_MS,
@@ -98,10 +97,9 @@ class _Venue:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def submit(self, ready, ctx, *, reservation_ref):
+    async def submit(self, offer, account, *, pre_send=None):
         self.calls += 1
-        return SubmittedOrder(venue_offer_id="m-1", outcome=SubmitAcknowledged("m-1"),
-                              reservation_ref=reservation_ref)
+        return SubmitAcknowledged("m-1")
 
 
 class Env:

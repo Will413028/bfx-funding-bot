@@ -79,10 +79,10 @@ class _Venue:
         self.order = order
         self.calls = 0
 
-    async def submit(self, ready, ctx, *, reservation_ref):
+    async def submit(self, offer, account, *, pre_send=None):
         self.calls += 1
         assert self.order is not None
-        return replace(self.order, reservation_ref=reservation_ref)
+        return self.order.outcome
 
 
 @dataclass
@@ -137,8 +137,9 @@ async def _rig(stack: Stack, order: SubmittedOrder | None, *, journal=None) -> _
             return False
 
     venue = _Venue(order)
+    # The gate's own bus is the capturing one too: a submit publishes nothing on it.
     gate = AccountCommandGate(
-        venue, uncertainty_reader=Reader(),
+        venue, bus=bus, uncertainty_reader=Reader(),
         safety_evaluator=_Allow(), deployment_environment=ENVIRONMENT,
         clock=lambda: NOW, boundary=boundary, managed_offers=stack.offers,
     )

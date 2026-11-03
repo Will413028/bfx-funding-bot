@@ -31,6 +31,7 @@ from bfx_funding_bot.apps.bot_ports import build_policy_ports
 from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitAcknowledged,
+    SubmitOutcome,
     SubmitOutcomeUnknown,
 )
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
@@ -42,7 +43,6 @@ from bfx_funding_bot.modules.execution.contracts import (
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
-    SubmittedOrder,
 )
 from bfx_funding_bot.modules.ledger import (
     CapitalAvailable,
@@ -149,10 +149,10 @@ class GateVenue:
         self.calls = 0
         self.outcome = outcome
 
-    async def submit(self, ready: Any, ctx: Any, *, reservation_ref: Any) -> SubmittedOrder:
+    async def submit(self, offer: Any, account: Any, *, pre_send: Any = None) -> SubmitOutcome:
         self.calls += 1
-        return SubmittedOrder(venue_offer_id=None, outcome=self.outcome(None),
-                              reservation_ref=reservation_ref)
+        outcome: SubmitOutcome = self.outcome(None)
+        return outcome
 
 
 def lost_response() -> GateVenue:
@@ -165,7 +165,7 @@ class ProcessDied(BaseException):
 
 
 class DyingVenue(GateVenue):
-    async def submit(self, ready: Any, ctx: Any, *, reservation_ref: Any) -> SubmittedOrder:
+    async def submit(self, offer: Any, account: Any, *, pre_send: Any = None) -> SubmitOutcome:
         self.calls += 1
         raise ProcessDied
 

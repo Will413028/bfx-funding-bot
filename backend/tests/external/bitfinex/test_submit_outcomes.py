@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from decimal import Decimal
+from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
@@ -89,6 +90,7 @@ def test_unstructured_4xx_is_unknown() -> None:
     assert isinstance(outcome, SubmitOutcomeUnknown)
     assert outcome.kind is SubmitOutcomeKind.UNKNOWN
     assert outcome.transport_started is True
+    assert outcome.http_status == 422
 
 
 def test_local_validation_before_transport_is_not_sent() -> None:
@@ -123,6 +125,9 @@ def test_timeout_connection_reset_5xx_and_cancel_after_start_are_unknown() -> No
     assert reset.reason == "connection_error"
     assert server_error.reason == "http_5xx"
     assert cancelled.reason == "cancelled_after_start"
+    # Only a response carries an HTTP status; none of the others had one.
+    assert server_error.http_status == 503
+    assert (timeout.http_status, reset.http_status, cancelled.http_status) == (None, None, None)
 
 
 def test_malformed_or_unrecognized_response_defaults_to_unknown_with_digest() -> None:
@@ -132,6 +137,14 @@ def test_malformed_or_unrecognized_response_defaults_to_unknown_with_digest() ->
     assert outcome.reason == "unrecognized_response"
     assert outcome.raw_response_digest is not None
     assert len(outcome.raw_response_digest) == 64
+    assert outcome.http_status == 200
+
+
+@pytest.mark.parametrize("http_status", [True, "500", 500.0])
+def test_unknown_http_status_is_an_int_or_absent(http_status: Any) -> None:
+    with pytest.raises(TypeError, match="http_status"):
+        SubmitOutcomeUnknown("http_5xx", True, http_status=http_status)
+
 
 
 def test_payload_normalization_is_fixed_point_and_order_independent() -> None:
@@ -168,12 +181,10 @@ def test_submitted_order_derives_compatibility_status_from_typed_outcome() -> No
     acknowledged = SubmittedOrder(
         venue_offer_id="42",
         outcome=SubmitAcknowledged("42"),
-        raw_response=None,
     )
     unknown = SubmittedOrder(
         venue_offer_id=None,
         outcome=SubmitOutcomeUnknown("timeout", True),
-        raw_response=None,
     )
 
     assert acknowledged.outcome_kind is SubmitOutcomeKind.ACKNOWLEDGED
@@ -330,13 +341,13 @@ def test_a_submit_answered_with_the_key_refusal_stays_unknown_and_names_the_refu
     outcome = classify_submit_response(500, body, transport_started=True)
     assert isinstance(outcome, SubmitOutcomeUnknown) and outcome.venue_error_code == 10100
 
-    refused = key_refused_on_submit(outcome, http_status=500)
+    refused = key_refused_on_submit(outcome)
     assert refused is not None and refused.venue_coded and refused.status_code == 500
     assert "FAKE-KEY-ECHO" not in f"{refused} {refused.raw}"
     # A 4xx carrying the same body is the same refusal (and the same UNKNOWN).
     four = classify_submit_response(401, body, transport_started=True)
     assert isinstance(four, SubmitOutcomeUnknown)
-    assert key_refused_on_submit(four, http_status=401).status_code == 401
+    assert key_refused_on_submit(four).status_code == 401
 
 
 @pytest.mark.parametrize("outcome", [
@@ -348,4 +359,4 @@ def test_a_submit_answered_with_the_key_refusal_stays_unknown_and_names_the_refu
     SubmitNotSent("not_sent"),
 ])
 def test_no_other_submit_outcome_is_a_key_refusal(outcome) -> None:
-    assert key_refused_on_submit(outcome, http_status=500) is None
+    assert key_refused_on_submit(outcome) is None

@@ -1,19 +1,22 @@
 """Phase 4.3 executor-middleware integration: chain composition and the no-retry contract."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import pytest
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
 from bfx_funding_bot.core.health import HealthProbe
-from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitAcknowledged
+from bfx_funding_bot.external.bitfinex.credentials import HasCredentials
+from bfx_funding_bot.external.bitfinex.order_port import OfferRequest
+from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitAcknowledged, SubmitOutcome
+from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_gate import SubmitOutcomeLostError
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
-    ReservationRef,
 )
 from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
@@ -22,7 +25,6 @@ from bfx_funding_bot.modules.execution.middleware import (
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
-    SubmittedOrder,
 )
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from tests.modules.execution.fake_boundary import (  # noqa: F401  (fixture)
@@ -51,15 +53,10 @@ class _UncertaintyNeverOpen:
 
 class _AckInner:
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: ReservationRef,
-    ) -> SubmittedOrder:
-        return SubmittedOrder(
-            venue_offer_id="venue-xyz",
-            outcome=SubmitAcknowledged("venue-xyz"),
-            raw_response=None,
-            reservation_ref=reservation_ref.bind_venue_offer("venue-xyz"),
-        )
+        self, offer: OfferRequest, account: HasCredentials, *,
+        pre_send: Callable[[], bool] | None = None,
+    ) -> SubmitOutcome:
+        return SubmitAcknowledged("venue-xyz")
 
 
 class _TransientInner:
@@ -70,9 +67,9 @@ class _TransientInner:
         self.calls = 0
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: ReservationRef,
-    ) -> SubmittedOrder:
+        self, offer: OfferRequest, account: HasCredentials, *,
+        pre_send: Callable[[], bool] | None = None,
+    ) -> SubmitOutcome:
         self.calls += 1
         raise ExecutorTransientError("network_blip")
 
@@ -114,6 +111,7 @@ def _build_chain(
     executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
             inner or _AckInner(),  # type: ignore[arg-type]
+            bus=DomainEventBus(),
             safety_evaluator=_AllowChain(),
             boundary=recording.boundary(),
             uncertainty_reader=_UncertaintyNeverOpen(),  # type: ignore[arg-type]
@@ -165,5 +163,7 @@ async def test_end_to_end_records_the_command_and_fires_the_heartbeat() -> None:
     result = await executor.submit(_ready(), _ctx())
 
     assert result.outcome_kind.value == "acknowledged"
+    assert result.reservation_ref is not None
+    assert result.reservation_ref.venue_offer_id == "venue-xyz"
     assert recording.labels == ["authorized", "ack"]
     assert probe.last_active_ts.get("executor") is not None

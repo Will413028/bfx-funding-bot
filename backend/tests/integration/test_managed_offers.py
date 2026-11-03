@@ -16,7 +16,6 @@ import pytest
 from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
-from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
 
 from .test_capital_command_boundary import (
     boundary,
@@ -51,10 +50,9 @@ async def test_gate_refuses_a_fingerprint_an_open_commitment_holds(gate_stack) -
         await rig.gate.submit(clash, rig.ctx)
     distinct = await second_ready(rig, amount="199.99990501")
 
-    async def another_offer(ready_, ctx_, *, reservation_ref):
-        rig.venue.received.append(ready_)
-        return SubmittedOrder(venue_offer_id="102", outcome=SubmitAcknowledged("102"),
-                              reservation_ref=reservation_ref)
+    async def another_offer(offer_, account_, *, pre_send=None):
+        rig.venue.received.append(offer_)
+        return SubmitAcknowledged("102")
 
     rig.venue.submit = another_offer
     await rig.gate.submit(distinct, rig.ctx)

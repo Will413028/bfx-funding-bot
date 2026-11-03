@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import select
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
-from bfx_funding_bot.modules.execution.protocols import FundingCancelAllResult
+from bfx_funding_bot.external.bitfinex.order_port import FundingCancelAllResult
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.tables import (
     FundingCancelAllAuditRow,

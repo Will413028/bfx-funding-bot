@@ -33,7 +33,6 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS
-from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
@@ -71,7 +70,7 @@ from bfx_funding_bot.modules.simulated_venue import (
     SqlVenueEventStore,
 )
 from bfx_funding_bot.modules.simulated_venue.wiring import build_simulated_venue
-from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.trading import CapitalPolicy, CapitalScope
 from tests.modules.marketfeed.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
@@ -105,11 +104,6 @@ class _Allow(AllowGuard):
 
     async def evaluate_cancel(self, decision: Any, context: Any) -> GuardResult:
         return GuardResult(allowed=True, guard_name="test")
-
-
-class _NullSink:
-    async def emit(self, event: dict[str, Any]) -> None:
-        return None
 
 
 @dataclass
@@ -312,11 +306,9 @@ async def rig_factory(ledger_db):  # noqa: F811
 
         bus = DomainEventBus()
         executor = BitfinexLiveExecutor(
-            http=http, event_sink=_NullSink(), bus=bus, phase=Phase.LIVE,
-            strategy=StrategyName.RATE_PERCENTILE, configured_symbols=frozenset({"fUST"}),
-            cell=CELL, auth_gate=auth_gate, clock=clock)
+            http=http, configured_symbols=frozenset({"fUST"}), auth_gate=auth_gate, clock=clock)
         gate = AccountCommandGate(
-            executor, uncertainty_reader=build_uncertainty_reader(factory),
+            executor, bus=bus, uncertainty_reader=build_uncertainty_reader(factory),
             safety_evaluator=_Allow(), deployment_environment="ci",
             clock=clock,
             boundary=CommandBoundary(
