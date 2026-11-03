@@ -72,7 +72,7 @@ from bfx_funding_bot.modules.simulated_venue import (
 from bfx_funding_bot.modules.simulated_venue.wiring import build_simulated_venue
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.trading import CapitalPolicy, CapitalScope
-from tests.modules.marketfeed.account_test_helpers import (
+from tests.apps.runtime.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
     seed_exchange_account,
 )

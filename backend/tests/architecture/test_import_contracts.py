@@ -27,6 +27,7 @@ MAX_IGNORES_BY_ID = {
     "simulated-venue-no-internal-access": 0,
     "simulated-venue-wiring-is-top": 0,
     "runtime-not-simulated-venue": 0,
+    "runtime-composition-boundary": 0,
     "trading-not-ledger": 0,
     "control-plane-exposure": 0,
     "xact-lock-owner": 0,
@@ -179,6 +180,28 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
         "bfx_funding_bot.modules.trading", "bfx_funding_bot.modules.marketfeed",
         "bfx_funding_bot.apps",
     } <= set(independent["forbidden_modules"])
+
+
+def test_runtime_reaches_no_other_composition_root() -> None:
+    """apps.runtime is the only part of apps that is not a composition root. Every other
+    top-level apps module is forbidden to it (indirectly too), so a new root cannot slip
+    past the contract by not being listed."""
+    root = Path(__file__).resolve().parents[2]
+    with (root / "pyproject.toml").open("rb") as config_file:
+        contracts = tomllib.load(config_file)["tool"]["importlinter"]["contracts"]
+    boundary = {contract["id"]: contract for contract in contracts}["runtime-composition-boundary"]
+    apps_dir = root / "src" / "bfx_funding_bot" / "apps"
+    roots = {
+        f"bfx_funding_bot.apps.{path.stem}"
+        for path in apps_dir.iterdir()
+        if (path.suffix == ".py" and path.stem != "__init__")
+        or (path.is_dir() and (path / "__init__.py").is_file() and path.name != "runtime")
+    }
+    assert boundary["source_modules"] == ["bfx_funding_bot.apps.runtime"]
+    assert set(boundary["forbidden_modules"]) == roots | {
+        "bfx_funding_bot.modules.backtest", "bfx_funding_bot.modules.simulated_venue",
+    }
+    assert boundary.get("allow_indirect_imports", False) is False
 
 
 def test_contract_modules_exist() -> None:

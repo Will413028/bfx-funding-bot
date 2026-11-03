@@ -8,11 +8,11 @@ from pathlib import Path
 
 import yaml
 
+from bfx_funding_bot.apps.runtime.config import MarketfeedConfig
 from bfx_funding_bot.apps.sim_faults import ENV_NAME, parse_sim_faults
 from bfx_funding_bot.core.secret_files import read_secret
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
-from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 from bfx_funding_bot.modules.strategy import CellConfig
 

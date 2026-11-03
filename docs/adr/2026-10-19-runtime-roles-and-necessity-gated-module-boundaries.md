@@ -107,6 +107,12 @@ tags: [bfx-funding-bot, decision, architecture, refactoring]
 - **D6 第二段的憑證部分提前**：`control-plane-exposure` 在 R7a 就禁 `modules.credentials`、`execution.credential_bootstrap`、`core.crypto`、`external.bitfinex.auth_rest`，以及簽章所在的 `external.bitfinex.auth_ws` 與 `external.bitfinex.nonce`，依 D6 第一段「今天已不可達就當天鎖」的原則。R6 剩 journal、`core.xact_lock`、recorder 與 `ledger.read`／`operator_requests`／`trading_state` 的拆分。
 - Followup 的「9g 的 OCI Vault 依賴」作廢；改用 KMS 的觸發條件見 2026-08-31 Amendment 2026-10-22。
 
+## Amendment (2026-11-04)：R9a 的落點與 runtime 的守門
+
+- **runtime 離開 `modules` 之後的守門**：R9a 把 daemon 等 10 個檔搬到 `apps/runtime/`。`apps-is-top`、`runtime-not-research`、`runtime-not-simulated-venue` 原本靠「runtime 在 `modules` 底下」約束它；D7 的 modules `layers` 也一樣，所以終態會在沒人察覺時失去這兩條 D2 的不變量。新增 `runtime-composition-boundary`（forbidden，source＝`apps.runtime`，forbidden＝其他每個 apps 入口、`modules.backtest`、`modules.simulated_venue`，檢查間接 import：`apps.venue` 會組裝模擬 venue，只查直接 import 會漏掉 runtime → `apps.venue` → 模擬 venue）。D7 的終態因此是 16 個 contract；R9d 新增的 `apps.marketdata` 與之後的 account worker 入口照同一規則列進 forbidden，由 `test_import_contracts.py` 的清單斷言強制。
+- **`candle_writer` 隨 R10 搬**：放進 `market/_internal/recorders` 會形成 `market ↔ candles` 循環（`candles.service` 依賴 market 的 contracts），`modules-acyclic` 擋下。R10 把 candles 併進 market 時一起搬，之前留在 `modules/marketfeed/`，marketfeed 照原計畫在 R10 刪除。`book_snapshot` 已在 `market/_internal/recorders`，`funding_book` 在 `market/_internal/book.py`。
+- **`funding_book_snapshots` 的 ORM 在 `modules/market/tables.py`**（不放 `_internal`）：research scripts 要讀這張表，而它不保護不變量（D3'' 的必要條件），單一寫入者由 recorder 的 `control-plane-exposure` 守。R10 的 candles、funding_stats tables 照同一規則決定位置。`apps/runtime/scheduler._TIMEFRAME_MS` 與 `candles/repository.py` 的重複定義也在 R10 收斂到 market 一處。
+
 ## Related
 
 - 本 ADR 來自 2026-10-19 的架構 brief：由未看過原計畫的 subagent 從零起草，經三輪獨立審查；brief 私下保存、不在本 repo，本 ADR 已收錄其決策與理由。

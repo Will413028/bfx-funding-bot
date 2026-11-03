@@ -34,6 +34,7 @@ from uuid import UUID
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.apps.runtime.config import MarketfeedConfig
 from bfx_funding_bot.apps.sim_faults import FAULT_KNOBS, SimFaultSpec
 from bfx_funding_bot.core.crypto import VaultNotConfiguredError, load_kek
 from bfx_funding_bot.core.errors import ConfigurationError
@@ -49,8 +50,7 @@ from bfx_funding_bot.modules.credentials.vault import (
     load_account_credentials,
 )
 from bfx_funding_bot.modules.execution.protocols import Credentials
-from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
-from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookService, FundingBookStore
+from bfx_funding_bot.modules.market._internal.book import FundingBookService, FundingBookStore
 from bfx_funding_bot.modules.observability.metrics import DaemonMetrics, attach_httpx_metrics
 from bfx_funding_bot.modules.simulated_venue import (
     BookFetcher,

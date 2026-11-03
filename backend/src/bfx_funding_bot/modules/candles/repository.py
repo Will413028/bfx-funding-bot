@@ -16,8 +16,8 @@ from bfx_funding_bot.modules.candles.tables import (
     FundingCandleRow,
 )
 
-# Period length per timeframe. Mirrors marketfeed.scheduler._TIMEFRAME_MS; kept
-# here so the candles layer does not import upward into marketfeed.
+# Period length per timeframe. Mirrors apps.runtime.scheduler._TIMEFRAME_MS; kept
+# here so the candles layer does not import upward into the runtime.
 _TIMEFRAME_MS = {"15m": 15 * 60_000, "30m": 30 * 60_000, "1h": 60 * 60_000}
 
 _UPSERT_INDEX = ["symbol", "timeframe", "period_agg", "mts"]

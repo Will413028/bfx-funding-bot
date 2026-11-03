@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from bfx_funding_bot.core.errors import EXIT_CODE_AUTH_FAILED
-from tests.modules.marketfeed.account_test_helpers import (
+from tests.apps.runtime.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
     TEST_VAULT_KEK_B64,
     seed_exchange_account,

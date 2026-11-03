@@ -18,7 +18,7 @@ dependencies = [
     "websockets>=14.0",
     "tenacity>=9.0",
     "pyyaml>=6.0",
-    # Runtime deps for modules.strategy (imported by marketfeed.signal_engine
+    # Runtime deps for modules.strategy (imported by apps.runtime.signal_engine
     # via strategy_registry); pandas used by backtest.eda which is in the wheel
     # tree even though not on daemon hot path. Moved from dev-group at Phase 4.1
     # deploy time after container ModuleNotFoundError.
@@ -465,6 +465,7 @@ forbidden_modules = [
     "bfx_funding_bot.modules.execution",
     "bfx_funding_bot.modules.trading",
     "bfx_funding_bot.modules.marketfeed",
+    "bfx_funding_bot.modules.market._internal",
 ]
 ignore_imports = []
 broken_contract_guidance = "The venue never peeks at bot state or parsers; inject what it needs through its contracts."
@@ -533,6 +534,33 @@ ignore_imports = []
 broken_contract_guidance = "Inject venue-facing ports from apps; the simulator is a counterparty, not a dependency."
 
 [[tool.importlinter.contracts]]
+id = "runtime-composition-boundary"
+name = "The bot runtime reaches no other composition root, research, or the simulated venue"
+type = "forbidden"
+# apps.runtime left `modules` in R9a, so apps-is-top and the runtime-not-* contracts
+# no longer cover it. Indirect imports are checked: apps.venue wires the simulated
+# venue, so a direct-only check would let runtime -> apps.venue -> simulator through.
+source_modules = ["bfx_funding_bot.apps.runtime"]
+forbidden_modules = [
+    "bfx_funding_bot.apps.authority_support",
+    "bfx_funding_bot.apps.bot",
+    "bfx_funding_bot.apps.bot_ports",
+    "bfx_funding_bot.apps.config",
+    "bfx_funding_bot.apps.operator_cli",
+    "bfx_funding_bot.apps.read_models",
+    "bfx_funding_bot.apps.research",
+    "bfx_funding_bot.apps.restore_boot_check",
+    "bfx_funding_bot.apps.schema",
+    "bfx_funding_bot.apps.sim_faults",
+    "bfx_funding_bot.apps.venue",
+    "bfx_funding_bot.apps.webapi",
+    "bfx_funding_bot.modules.backtest",
+    "bfx_funding_bot.modules.simulated_venue",
+]
+ignore_imports = []
+broken_contract_guidance = "Composition roots import the runtime, never the other way; inject what the runtime needs."
+
+[[tool.importlinter.contracts]]
 id = "trading-not-ledger"
 name = "Pure trading does not import ledger storage"
 type = "forbidden"
@@ -587,17 +615,9 @@ forbidden_modules = [
     "bfx_funding_bot.modules.execution.trading_control",
     "bfx_funding_bot.modules.execution.venue_observation",
     "bfx_funding_bot.modules.execution.ws_dispatcher",
-    "bfx_funding_bot.modules.marketfeed.book_snapshot",
-    "bfx_funding_bot.modules.marketfeed.boot_wait",
+    "bfx_funding_bot.modules.market._internal.recorders",
+    "bfx_funding_bot.apps.runtime",
     "bfx_funding_bot.modules.marketfeed.candle_writer",
-    "bfx_funding_bot.modules.marketfeed.daemon",
-    "bfx_funding_bot.modules.marketfeed.divergence_reporter",
-    "bfx_funding_bot.modules.marketfeed.health_monitor",
-    "bfx_funding_bot.modules.marketfeed.healthz",
-    "bfx_funding_bot.modules.marketfeed.scheduler",
-    "bfx_funding_bot.modules.marketfeed.signal_engine",
-    "bfx_funding_bot.modules.marketfeed.strategy_registry",
-    "bfx_funding_bot.modules.marketfeed.warmup",
     "bfx_funding_bot.modules.credentials",
     "bfx_funding_bot.modules.execution.credential_bootstrap",
     "bfx_funding_bot.core.crypto",

@@ -35,6 +35,6 @@ def test_the_registry_and_the_daemon_take_capabilities_not_venue_strings() -> No
     registry = (SRC / "modules/execution/registry.py").read_text()
     # The executor is the same on both venues; the composition root reads the capabilities.
     assert "core.venue" not in registry and "Venue," not in registry
-    daemon = (SRC / "modules/marketfeed/daemon.py").read_text()
+    daemon = (SRC / "apps/runtime/daemon.py").read_text()
     assert "venue_tasks" in daemon and "venue_aclose" in daemon
     assert "venue_feed" not in daemon and "venue_client" not in daemon

@@ -20,6 +20,29 @@ from sqlalchemy.ext.asyncio import (
 from bfx_funding_bot.apps.authority_support import require_ledger_epoch
 from bfx_funding_bot.apps.bot_ports import ObservationVenue, build_capital_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
+from bfx_funding_bot.apps.runtime.boot_wait import wait_for_database
+from bfx_funding_bot.apps.runtime.daemon import (
+    Daemon,
+    _DaemonAuditContextFactory,
+    _emit_locf_degraded,
+    _refuse_live_boot,
+    assert_live_guard_invariant,
+    load_account_bootstrap,
+    log,
+)
+from bfx_funding_bot.apps.runtime.divergence_reporter import DivergenceReporter
+from bfx_funding_bot.apps.runtime.health_monitor import HealthMonitor
+from bfx_funding_bot.apps.runtime.scheduler import (
+    Scheduler,
+    now_ms_utc,
+)
+from bfx_funding_bot.apps.runtime.signal_engine import SignalEngine
+from bfx_funding_bot.apps.runtime.strategy_registry import StrategyRegistry
+from bfx_funding_bot.apps.runtime.warmup import (
+    WarmupResult,
+    rehydrate_boot_boundary,
+    warmup_cell,
+)
 from bfx_funding_bot.apps.venue import VenueSeam, build_venue
 from bfx_funding_bot.core.bounded import run_bounded
 from bfx_funding_bot.core.crypto import load_kek
@@ -151,32 +174,9 @@ from bfx_funding_bot.modules.live_validation.interest_ledger import (
     funding_currency,
 )
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
-from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
-from bfx_funding_bot.modules.marketfeed.boot_wait import wait_for_database
+from bfx_funding_bot.modules.market._internal.book import FundingBookService, FundingBookStore
+from bfx_funding_bot.modules.market._internal.recorders.book_snapshot import BookSnapshotWriter
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
-from bfx_funding_bot.modules.marketfeed.daemon import (
-    Daemon,
-    _DaemonAuditContextFactory,
-    _emit_locf_degraded,
-    _refuse_live_boot,
-    assert_live_guard_invariant,
-    load_account_bootstrap,
-    log,
-)
-from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter
-from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookService, FundingBookStore
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
-from bfx_funding_bot.modules.marketfeed.scheduler import (
-    Scheduler,
-    now_ms_utc,
-)
-from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
-from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
-from bfx_funding_bot.modules.marketfeed.warmup import (
-    WarmupResult,
-    rehydrate_boot_boundary,
-    warmup_cell,
-)
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.observability.bot_runs import BotRunRecord
 from bfx_funding_bot.modules.observability.error_tracking import init_error_tracking
@@ -793,7 +793,7 @@ async def build_daemon(
         # that has mts = T - timeframe.
         # Discovered Phase 4.2.0 d90363fa shadow run: 56 degraded events,
         # 0 signal events because query used mts=T (always empty).
-        from bfx_funding_bot.modules.marketfeed.scheduler import _TIMEFRAME_MS
+        from bfx_funding_bot.apps.runtime.scheduler import _TIMEFRAME_MS
         candle_mts = mts - _TIMEFRAME_MS[cell.timeframe]
 
         # Phase 4.3 LOCF: fetch a lookback window and LOCF-fill gaps.

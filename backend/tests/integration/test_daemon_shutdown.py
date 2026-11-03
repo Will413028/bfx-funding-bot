@@ -12,7 +12,7 @@ import re
 import pytest
 
 from bfx_funding_bot.apps.bot import build_daemon
-from tests.modules.marketfeed.account_test_helpers import (
+from tests.apps.runtime.account_test_helpers import (
     go_offline,
     live_construction_env,
     seed_exchange_account,

@@ -64,7 +64,7 @@ from bfx_funding_bot.modules.live_validation.tables import (
     FundingInterestPaymentRow,
     FundingTradeRow,
 )
-from bfx_funding_bot.modules.marketfeed.tables import FundingBookSnapshotRow
+from bfx_funding_bot.modules.market.tables import FundingBookSnapshotRow
 from scripts import (
     build_public_site,
     ingest_liquidations,

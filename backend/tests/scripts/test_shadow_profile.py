@@ -13,7 +13,7 @@ import pytest
 
 from bfx_funding_bot.apps.config import load_config
 from bfx_funding_bot.modules.simulated_venue import SimulatedVenueConfig
-from tests.modules.marketfeed.test_deploy_profile import read_env
+from tests.apps.runtime.test_deploy_profile import read_env
 
 ROOT = Path(__file__).resolve().parents[3]
 SHADOW = ROOT / "deploy/vm/shadow.env"

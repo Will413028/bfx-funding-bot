@@ -18,16 +18,16 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from bfx_funding_bot.apps.runtime.divergence_reporter import DivergenceReporter
+from bfx_funding_bot.apps.runtime.scheduler import _TIMEFRAME_MS
+from bfx_funding_bot.apps.runtime.signal_engine import SignalEngine
+from bfx_funding_bot.apps.runtime.strategy_registry import StrategyRegistry
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.candles.repository import get_up_to, upsert_candles
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.execution.diagnostics.sink import NoopDiagnosticsSink
-from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter
-from bfx_funding_bot.modules.marketfeed.scheduler import _TIMEFRAME_MS
-from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
-from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.strategy import CellConfig
 from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
