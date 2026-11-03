@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.apps.runtime.freshness import dependency_answered
 from bfx_funding_bot.apps.runtime.scheduler import now_ms_utc
 from bfx_funding_bot.core.errors import FatalError
 from bfx_funding_bot.core.health import MARKET_DATA_FRESHNESS, HealthProbe
@@ -37,15 +38,6 @@ from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.strategy import CellConfig
 
 log = logging.getLogger(__name__)
-
-
-def dependency_answered(probe: HealthProbe, readiness: TradingReadiness | None,
-                        dependency: str) -> None:
-    """A dependency answered: beat its freshness and clear it in /readyz now,
-    not at the next staleness scan (which only ever marks it stale)."""
-    probe.record_heartbeat(dependency)
-    if readiness is not None:
-        readiness.clear_dependency(dependency)
 
 
 @dataclass

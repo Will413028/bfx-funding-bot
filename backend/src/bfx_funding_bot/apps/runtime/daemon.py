@@ -31,9 +31,10 @@ from bfx_funding_bot.apps.runtime.boot_wait import (
     is_transient_dependency_error,
 )
 from bfx_funding_bot.apps.runtime.config import MarketfeedConfig
+from bfx_funding_bot.apps.runtime.freshness import dependency_answered
 from bfx_funding_bot.apps.runtime.health_monitor import HealthMonitor
 from bfx_funding_bot.apps.runtime.healthz import run_healthz_server
-from bfx_funding_bot.apps.runtime.market_data import MarketDataRuntime, dependency_answered
+from bfx_funding_bot.apps.runtime.market_data import MarketDataRuntime
 from bfx_funding_bot.apps.runtime.scheduler import (
     Scheduler,
     now_ms_utc,
