@@ -479,3 +479,37 @@ async def test_seal_closed_periods_does_not_wait_for_the_next_candle(
             select(FundingCandleRow.is_final).where(FundingCandleRow.mts == closed)
         )
     ).scalar_one() is True
+
+
+@pytest.mark.asyncio
+async def test_repeated_observation_of_the_same_rejected_value_is_recorded_once(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """Several writers (WS reconnect gap-fill, the worker's boundary gap-fill, reruns) can
+    see the same refused value again; the table keeps its first observation only.
+    A different refused value is still new evidence."""
+    await upsert_candles(sqlite_session, [_candle(1704067200000, "0.0002")], now_ms=111)
+    await mark_candles_final(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        through_mts=1704067200000, now_ms=222,
+    )
+    await sqlite_session.commit()
+
+    for now_ms in (333, 444):
+        await upsert_candles(
+            sqlite_session, [_candle(1704067200000, "0.00014999")], now_ms=now_ms,
+        )
+        await sqlite_session.commit()
+    await upsert_candles(sqlite_session, [_candle(1704067200000, "0.0003")], now_ms=555)
+    await sqlite_session.commit()
+
+    revs = (
+        await sqlite_session.execute(
+            select(FundingCandleRevisionRow).order_by(FundingCandleRevisionRow.observed_at_ms)
+        )
+    ).scalars().all()
+    assert [(r.observed_at_ms, r.rejected_close) for r in revs] == [
+        (333, pytest.approx(0.00014999)),
+        (555, pytest.approx(0.0003)),
+    ]
