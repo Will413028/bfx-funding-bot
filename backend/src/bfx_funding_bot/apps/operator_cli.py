@@ -44,6 +44,8 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+# Every table, so a foreign key to another module's table resolves at flush (apps/schema.py).
+import bfx_funding_bot.apps.schema  # noqa: F401
 from bfx_funding_bot.core.authority import AuthorityMismatch, require_ledger_authority
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
 from bfx_funding_bot.core.schema_head import SchemaHeadMismatch, assert_schema_head
