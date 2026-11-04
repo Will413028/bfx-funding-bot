@@ -195,6 +195,19 @@ git -C "$MIRROR" show "$REV:deploy/vm/shadow.env" > /var/lib/bfx-sim/$REV/shadow
 ```
 
 `$REV` 為空就停下：沒有 `BFX_SOURCE_REVISION`，報告的重啟次數不可信（報告會判 FAIL）。
+
+**發版前 soak**（要驗的程式還在 `dev`、沒有部署，例如 R4）：image 改用 `dev` 的 soak image。在 GitHub Actions
+手動觸發 `Soak image`（`.github/workflows/soak-image.yml`，只接受 `dev`），從該 run 的 summary 取
+`ghcr.io/…-backend@sha256:…`，VM 上 `docker pull` 該 digest 後：
+
+```bash
+IMAGE=<summary 的 repo@sha256:…>
+REV=$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+```
+
+其餘步驟照舊（`shadow.env` 取自 `$REV`）。這個 image 只有 `soak-sha-<sha>` tag、沒有 release 的簽章，bfx-deploy 不會
+部署它。§9 要求的「部署重啟（新 revision）」改用下一個 `dev` commit 的 soak image 換一代（照 §7 的順序）。
+§1 的 live 基準照樣在跑 soak 前取得（live 仍是已部署的版本）。
 `shadow.env` 與 `live.env` 的差異由 `backend/tests/scripts/test_shadow_profile.py` 釘住。
 
 ### 4.2 Migrate 到 head（用**這一代的** image）
