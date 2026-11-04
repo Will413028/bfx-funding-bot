@@ -311,6 +311,7 @@ class _RestFundingBook(Protocol):
 class _FundingBookWS(Protocol):
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
+    def last_frame_age_ms(self) -> int | None: ...
 
 
 class FundingBookService(FundingBookProvider):
@@ -392,6 +393,10 @@ class FundingBookService(FundingBookProvider):
 
     def snapshot(self, symbol: str, *, now_ms: int) -> MarketSnapshot | None:
         return self._store.snapshot(symbol, now_ms=now_ms)
+
+    def last_frame_age_ms(self) -> int | None:
+        """Age of the book feed's newest frame on its current connection (None: none yet)."""
+        return self._ws.last_frame_age_ms()
 
     def unavailable_reason(self, symbol: str, *, now_ms: int) -> BookUnavailable | None:
         return self._store.unavailable_reason(symbol, now_ms=now_ms)

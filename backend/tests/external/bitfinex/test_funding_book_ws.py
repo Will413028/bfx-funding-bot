@@ -250,3 +250,43 @@ async def test_restart_and_maintenance_end_close_the_connection_to_resubscribe(
     assert connection.served == 1
     assert disconnects == [None]
     assert maintenance == expected_maintenance
+
+
+def _subscribed_client(now: list[float]) -> FundingBookWSClient:
+    client = FundingBookWSClient(symbols=("fUST",), clock=lambda: now[0])
+    client.handle_raw(json.dumps(
+        {"event": "subscribed", "channel": "book", "chanId": 7, "symbol": "fUST"}))
+    return client
+
+
+def test_frame_age_is_unknown_until_a_channel_frame_arrives() -> None:
+    """Connection events prove nothing about the market view; only channel frames do."""
+    now = [100.0]
+    client = _subscribed_client(now)
+    client.handle_raw(json.dumps({"event": "info", "version": 2, "platform": {"status": 1}}))
+
+    assert client.last_frame_age_ms() is None
+
+
+def test_heartbeats_alone_keep_a_quiet_book_fresh() -> None:
+    """A quiet book channel sends only `hb` (~15s); that still proves the feed is alive."""
+    now = [100.0]
+    client = _subscribed_client(now)
+    client.handle_raw(json.dumps([7, [[0.0002, 2, 1, 100.0]]]))
+    for _ in range(8):
+        now[0] += 15.0
+        client.handle_raw(json.dumps([7, "hb"]))
+
+    assert client.last_frame_age_ms() == 0
+    now[0] += 61.0
+    assert client.last_frame_age_ms() == 61_000
+
+
+def test_disconnect_forgets_the_last_frame() -> None:
+    """A dropped connection must not keep looking fresh from frames of the old one."""
+    now = [100.0]
+    client = _subscribed_client(now)
+    client.handle_raw(json.dumps([7, "hb"]))
+    client.mark_disconnected()
+
+    assert client.last_frame_age_ms() is None
