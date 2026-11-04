@@ -36,6 +36,7 @@ from bfx_funding_bot.apps.runtime.scheduler import (
 )
 from bfx_funding_bot.apps.runtime.signal_engine import SignalEngine
 from bfx_funding_bot.apps.runtime.strategy_registry import StrategyRegistry
+from bfx_funding_bot.apps.runtime.tick_candles import read_tick_candles
 from bfx_funding_bot.apps.runtime.warmup import (
     WarmupResult,
     rehydrate_boot_boundary,
@@ -77,7 +78,7 @@ from bfx_funding_bot.external.bitfinex.ws import (
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     account_id_uuid_or_none,
 )
-from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_periods
+from bfx_funding_bot.modules.candles.repository import get_up_to
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.deployments.identity import DeploymentIdentity
 from bfx_funding_bot.modules.execution.audit import AuditContext, ExecutionDecisionRecorder
@@ -883,27 +884,10 @@ async def build_daemon(
         # tier. Strategy state itself lives in the pre-warmed StrategyRegistry which
         # was fed during daemon startup — NOT re-fed from this small window.
         lookback = budget_hours + 1  # +1 to ensure boundary candle is included
-        async with session_factory() as s:
-            # Seal on elapsed time before reading. CandleWriter only seals when a
-            # LATER mts lands, so a slow venue push leaves mts=candle_mts unsealed
-            # at exactly the moment we need it — a final-only read then skips it,
-            # LOCF fills the slot from the previous candle, and the live observe
-            # sequence gains a hole that replay does not have.
-            await seal_closed_periods(
-                s,
-                symbol=cell.symbol,
-                timeframe=cell.timeframe,
-                period_agg=cell.period_agg,
-            )
-            await s.commit()
-            raw_candles = await get_up_to(
-                s,
-                symbol=cell.symbol,
-                timeframe=cell.timeframe,
-                period_agg=cell.period_agg,
-                mts_inclusive=candle_mts,
-                lookback=lookback,
-            )
+        raw_candles = await read_tick_candles(
+            session_factory=session_factory, bitfinex=bitfinex, cell=cell,
+            candle_mts=candle_mts, lookback=lookback,
+        )
 
         filled = reindex_and_ffill(
             raw_candles, ref_mts=candle_mts, max_gap_hours=budget_hours,
