@@ -45,8 +45,16 @@ def upgrade() -> None:
         )
         """
     )
-    op.execute("DROP INDEX idx_funding_candle_revisions_series")
+    # squawk's CONCURRENTLY rules guard against blocking writers on a live table; this one is
+    # already locked above, bfx-deploy has stopped the bot and the webapi (its only writers),
+    # it holds about 720 rows after the delete, and CONCURRENTLY cannot run inside the
+    # revision's transaction.
     op.execute(
+        "-- squawk-ignore require-concurrent-index-deletion\n"
+        "DROP INDEX idx_funding_candle_revisions_series"
+    )
+    op.execute(
+        "-- squawk-ignore require-concurrent-index-creation\n"
         f"CREATE UNIQUE INDEX uq_funding_candle_revisions_value ON {TABLE} "
         "(symbol, timeframe, period_agg, mts, rejected_close) NULLS NOT DISTINCT"
     )
