@@ -48,7 +48,7 @@
    ```
 
    基準預期為 0。基準不是 0 時先查原因，不要開跑。
-4. 唯讀取得 prod 目前套用的 fUST policy 與 funding wallet 金額（sim 照抄，guard chain 的行為才一致）。
+4. 唯讀取得 prod 目前套用的 fUST policy 與 funding wallet 金額（sim 照抄，guard chain 的行為才一致；wallet 沒有資金時見 §3）。
 
 ## 2. 建立 `bfx_sim` database 與 runtime role（owner，一次）
 
@@ -167,6 +167,8 @@ grep -c 'bfx_bot' /opt/bfx/runtime/sim.env                                      
   每 15 分鐘檢查、每日報告；`[shadow]` 噪音不進 prod 頻道）、`BFX_OPERATOR_USER_ID`、`BFX_DEPLOYMENT_ID`
   （後者是 prod ledger 的 row 名）。
 - `BFX_SIM_INITIAL_WALLETS` 只在 venue log 為空時生效（第一代）；之後各代不會再注資。
+- prod 的 funding wallet 沒有可用資金時（例如 2026-11-04 只有約 0.005 UST），照抄會讓 sim 一筆都借不出去、活動下限必定 FAIL：
+  改用 policy 上限換算，`max_offer_amount × max_open_offers`（fUST 200 × 6 ＝ 1200；Will 2026-11-04），並記進 `soak-ledger.jsonl`。
 - **`BFX_SIM_FAULTS`**（決定 A）：整個視窗（24 小時）都開，種子化、每個請求獨立抽籤。rate 與 seed 在開跑前定案。
   24 小時內要有 ≥ 1 筆注入的 UNKNOWN，但機率規則保證不了：nonce 是 bot 的掛鐘微秒，事先算不出哪個 nonce 會中，所以調 seed 也不行；
   而 24 小時的 submit 數很少（活動下限只要求 ≥ 1；prod 約 10 筆／7 天），機率 rate 低時很可能一筆都沒注入。
