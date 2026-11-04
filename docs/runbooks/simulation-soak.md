@@ -23,7 +23,7 @@
 |---|---|
 | `<owner>` | Postgres owner role（`AGENTS.local.md`；`fresh-host-setup.md` §1） |
 | `$MIRROR` | VM 上 git mirror 的路徑（`AGENTS.local.md`） |
-| `$IMAGE` / `$REV` | 正在跑的 `bfx-bot` 的 image（`repo@sha256:…`）與它的 revision label |
+| `$IMAGE` / `$REV` | 正在跑的 `bfx-bot` 的 image（`repo@sha256:…`）與它的 revision label；發版前 soak 改為 `dev` 的 soak image（§4.1） |
 | `bfx_sim`（role） | sim runtime 的 login role（§2）：在 database `bfx_sim` 裡以 `bfx_bot` 身分執行，連不進 `bfx` |
 | `$SIM_ACCOUNT` | 這次 soak 的新 account UUID（每次 soak 重新產生，不重用） |
 | generation | 一個 `bfx-sim` container 的一生。每次部署後重啟或刻意重啟都換一代 |
@@ -195,6 +195,30 @@ git -C "$MIRROR" show "$REV:deploy/vm/shadow.env" > /var/lib/bfx-sim/$REV/shadow
 ```
 
 `$REV` 為空就停下：沒有 `BFX_SOURCE_REVISION`，報告的重啟次數不可信（報告會判 FAIL）。
+
+**發版前 soak**（要驗的程式還在 `dev`、沒有部署，例如 R4）：image 改用 `dev` 的 soak image。在 GitHub Actions
+手動觸發 `Soak image`（`.github/workflows/soak-image.yml`；只接受 `dev`，且該 commit 的 CI 必須已通過），從該 run 的
+summary 取 `ghcr.io/…-backend@sha256:…`，VM 上 `docker pull` 該 digest 後：
+
+```bash
+IMAGE=<summary 的 repo@sha256:…>
+REV=$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+# mirror 平常只抓 main；dev 的 commit 要先抓進來，shadow.env 才取得到同一個 revision 的版本
+runuser -u ubuntu -- git -C "$MIRROR" fetch origin dev
+git -C "$MIRROR" cat-file -e "$REV^{commit}"        # 失敗就停下，不要用別的 revision 的 shadow.env
+```
+
+其餘步驟照舊（`shadow.env` 取自 `$REV`）。這個 image 只有 `soak-sha-<sha>` tag、沒有 release 的簽章，bfx-deploy 不會
+部署它。與一般 soak 不同的地方：
+
+- **§7 的偵測不適用**：live 的 `bfx-bot` 本來就跑另一個 image，不代表要換代；不要照 §7 第 1 步改用 `bfx-bot` 的 image。
+  §9 要求的「部署重啟（新 revision）」改用下一個 `dev` commit 的 soak image 換一代（§7 的存檔與停止順序照舊，
+  第 1 步的 `$IMAGE`／`$REV` 改取新的 soak image）。
+- **§9 的結果檔記的是 soak image**，不是之後部署的 digest（release 由 `release.yml` 從 merge commit 重建）。
+  發版前確認兩者是同一份程式：`git diff --quiet <最後一代的 $REV> <dev→main 的 merge commit>` 必須成功
+  （merge commit 的 tree 與 soak 過的 `dev` 相同）；不同就表示 soak 之後 `dev` 又進了改動，要評估是否重跑。
+- §1 的 live 基準照樣在跑 soak 前取得（live 仍是已部署的版本）。
+
 `shadow.env` 與 `live.env` 的差異由 `backend/tests/scripts/test_shadow_profile.py` 釘住。
 
 ### 4.2 Migrate 到 head（用**這一代的** image）

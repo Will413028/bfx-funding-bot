@@ -1,0 +1,114 @@
+name: Soak image
+
+# Builds the backend image from a dev commit for a simulated-venue soak before the
+# dev→main release (docs/runbooks/simulation-soak.md §4.1 "發版前 soak"). Release images
+# exist only for main (release.yml), so without this a soak could only run code that is
+# already deployed.
+#
+# It can never be deployed: bfx-deploy discovers releases through the `main` tag only and
+# runs a digest only after verifying a provenance attestation signed by release.yml on
+# refs/heads/main (bfx_deploy.py RELEASE_WORKFLOW, --source-ref). This workflow pushes only a
+# `soak-sha-<sha>` tag and attests nothing. Same package as the release (public, so the VM
+# pulls it anonymously, as it does releases).
+#
+# No build cache: dev is the default branch, so a cache written here would be readable by
+# release.yml on main, and release.yml's own cache (written on main) is not readable here.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and push the soak image (linux/arm64)
+    concurrency:
+      group: soak-image
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      # Read this commit's CI runs.
+      actions: read
+    env:
+      REVISION: ${{ github.sha }}
+    steps:
+      # Only a dev commit whose CI passed, as release.yml requires of main: anything else would
+      # soak code that is not headed for a release as it is.
+      - name: Require a dev commit with a passing CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/dev" ]; then
+            echo "::error::dispatch Soak image from dev (got $REF)"
+            exit 1
+          fi
+          passed=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${REVISION}&branch=dev&event=push" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
+          if [ "$passed" = "0" ]; then
+            echo "::error::CI has not passed on ${REVISION} (dev push); wait for it or pick a passing commit"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Resolve image names
+        id: names
+        env:
+          # Same build inputs as release.yml (keep the two `keys` lists equal).
+          NEXT_PUBLIC_SENTRY_DSN: ${{ vars.NEXT_PUBLIC_SENTRY_DSN }}
+        run: |
+          prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "backend=${prefix}-backend" >> "$GITHUB_OUTPUT"
+          keys="NEXT_PUBLIC_SENTRY_DSN"
+          for key in $keys; do
+            if [ -z "${!key}" ]; then
+              echo "::error::repository variable $key is not set"
+              exit 1
+            fi
+          done
+          {
+            echo "build_args<<EOF"
+            echo "GIT_SHA=${REVISION}"
+            for key in $keys; do echo "$key=${!key}"; done
+            echo "NEXT_PUBLIC_SENTRY_RELEASE=${REVISION}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build and push backend
+        id: backend
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: backend
+          build-contexts: frontend=frontend
+          platforms: linux/arm64
+          push: true
+          build-args: ${{ steps.names.outputs.build_args }}
+          labels: |
+            org.opencontainers.image.revision=${{ env.REVISION }}
+            bfx.soak-only=true
+          tags: ${{ steps.names.outputs.backend }}:soak-sha-${{ env.REVISION }}
+
+      - name: Record soak image
+        env:
+          BACKEND_IMAGE: ${{ steps.names.outputs.backend }}
+          BACKEND_DIGEST: ${{ steps.backend.outputs.digest }}
+        run: |
+          {
+            echo "### Soak image ${REVISION} (not deployable)"
+            echo ""
+            echo "\`${BACKEND_IMAGE}@${BACKEND_DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
