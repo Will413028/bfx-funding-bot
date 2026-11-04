@@ -50,7 +50,7 @@ class _Rest:
 async def _fill(session: AsyncSession, rest: _Rest, *, max_steps: int = 24) -> bool:
     return await fill_missing_boundary(
         bitfinex=rest, session=session, symbol="fUST", timeframe="1h", period_agg="p2",
-        boundary_mts=BOUNDARY, max_steps=max_steps, now_ms=NOW)
+        boundary_mts=BOUNDARY, max_steps=max_steps)
 
 
 async def test_a_missing_boundary_is_filled_sealed_from_a_bounded_window(

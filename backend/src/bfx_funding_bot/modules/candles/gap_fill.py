@@ -98,7 +98,6 @@ async def fill_missing_boundary(
     period_agg: str,
     boundary_mts: int,
     max_steps: int,
-    now_ms: int,
 ) -> bool:
     """Fill the candle that just closed (``boundary_mts``) from REST when nothing recorded it.
 
@@ -127,15 +126,13 @@ async def fill_missing_boundary(
     )).scalar_one_or_none()
     floor = boundary_mts - max_steps * step
     start = max(int(newest) + 1, floor) if newest is not None else floor
-    fetched = await bitfinex.get_funding_candles(
-        symbol=symbol, timeframe=timeframe, period_agg=period_agg,
-        start=start, end=boundary_mts, limit=max_steps + 1,
+    result = await fill_gap_from_rest(
+        bitfinex=bitfinex, session=session, symbol=symbol, timeframe=timeframe,
+        period_agg=period_agg, last_known_mts=start - 1, now_mts=boundary_mts,
+        limit=max_steps + 1,
     )
-    if fetched:
-        await upsert_candles(session, fetched, now_ms=now_ms)
-        await session.commit()
     log.info(
         "boundary_gap_fill symbol=%s timeframe=%s period_agg=%s boundary_mts=%d fetched=%d",
-        symbol, timeframe, period_agg, boundary_mts, len(fetched),
+        symbol, timeframe, period_agg, boundary_mts, result.candles_fetched,
     )
     return True

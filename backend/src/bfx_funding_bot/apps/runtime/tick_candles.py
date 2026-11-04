@@ -11,7 +11,6 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.apps.runtime.scheduler import now_ms_utc
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.modules.candles.gap_fill import fill_missing_boundary
@@ -39,7 +38,6 @@ async def read_tick_candles(
             await asyncio.wait_for(fill_missing_boundary(
                 bitfinex=bitfinex, session=s, symbol=cell.symbol, timeframe=cell.timeframe,
                 period_agg=cell.period_agg, boundary_mts=candle_mts, max_steps=lookback,
-                now_ms=now_ms_utc(),
             ), timeout=timeout_s)
     except Exception:
         log.warning("boundary_gap_fill_failed cell=%s candle_mts=%d",
