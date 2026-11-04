@@ -18,10 +18,10 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.apps.runtime.freshness import dependency_answered
+from bfx_funding_bot.apps.runtime.freshness import FRESHNESS_POLL_S, frame_is_fresh
 from bfx_funding_bot.apps.runtime.scheduler import now_ms_utc
 from bfx_funding_bot.core.errors import FatalError
-from bfx_funding_bot.core.health import MARKET_DATA_FRESHNESS, HealthProbe
+from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.external.bitfinex.ws import (
@@ -32,7 +32,6 @@ from bfx_funding_bot.external.bitfinex.ws import (
 )
 from bfx_funding_bot.modules.candles.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
-from bfx_funding_bot.modules.execution.readiness import TradingReadiness
 from bfx_funding_bot.modules.market._internal.recorders.book_snapshot import BookSnapshotWriter
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.strategy import CellConfig
@@ -51,8 +50,6 @@ class MarketDataRuntime:
     session_factory: async_sessionmaker[AsyncSession]
     # Book depth self-recording (observe-only; fail-open inside). None when disabled.
     book_snapshot_writer: BookSnapshotWriter | None = None
-    # Where the ws_data freshness clears readiness (the account's; R9c moves the source).
-    trading_readiness: TradingReadiness | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def run(self, stop_event: asyncio.Event) -> None:
@@ -106,11 +103,11 @@ class MarketDataRuntime:
             raise FatalError(f"candle_writer crashed: {e!r}") from e
 
     async def _ws_heartbeat_poll_loop(self) -> None:
-        """Run ``_ws_freshness_tick`` every 15s until stop."""
+        """Run ``_ws_freshness_tick`` every ``FRESHNESS_POLL_S`` until stop."""
         assert self.ws_client is not None
         while not self._stop.is_set():
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=15.0)
+                await asyncio.wait_for(self._stop.wait(), timeout=FRESHNESS_POLL_S)
                 log.info("sub_task_exit name=ws_heartbeat")
                 return  # stop requested
             except TimeoutError:
@@ -118,31 +115,23 @@ class MarketDataRuntime:
             self._ws_freshness_tick()
 
     def _ws_freshness_tick(self) -> None:
-        """One poll of the public WS: liveness always, data freshness if fresh.
+        """One poll of the candle WS: liveness always, BITFINEX_WS health if fresh.
 
         ``ws`` (liveness) beats on every tick: it says this poller is iterating,
         nothing about Bitfinex, so a venue outage can never age it into a restart.
-        ``ws_data`` (dependency freshness) beats only when this client actually
-        received a frame within 60s (``last_frame_age_ms``; a client that has not
-        received one yet proves nothing). Bitfinex sends `hb` frames every ~15s on subscribed channels when
-        idle; `_handle_raw` in ws.py updates state.last_msg_ts on any frame
-        (candle or hb), while candles() yields only candle data — so the frame
-        age, not the candle stream, is the freshness signal. A stale ``ws_data``
-        flips readiness and blocks submits through HeartbeatGuard; reconnecting
-        is the WS client's own job (its hb watchdog and
-        ``_ws_consume_with_reconnect``).
-
-        A fresh tick also restores BITFINEX_WS to HEALTHY (Bug B fix 5/20:
-        nothing else flips ws→healthy after a disconnect set DEGRADED, so the
-        state was sticky and health_monitor kept emitting warn every 5min).
+        A frame within ``FRESH_FRAME_MAX_AGE_MS`` (`hb` included; a client that has not
+        received one yet proves nothing) restores BITFINEX_WS to HEALTHY (Bug B fix
+        5/20: nothing else flips it back after a disconnect set DEGRADED).
+        Reconnecting is the WS client's own job (its hb watchdog and
+        ``_ws_consume_with_reconnect``). Trading readiness (``ws_data``) is not this
+        feed's: it follows the account's own book feed (``freshness.book_freshness_tick``).
+        BITFINEX_WS stays the candle recording's health until R9d splits the process.
         """
         self.probe.record_heartbeat("ws")
         if self.ws_client is None:
             return
-        frame_age_ms = self.ws_client.last_frame_age_ms()
-        if frame_age_ms is None or frame_age_ms >= 60_000:
-            return  # no frame yet from this client, or none for 60s: not fresh
-        dependency_answered(self.probe, self.trading_readiness, MARKET_DATA_FRESHNESS)
+        if not frame_is_fresh(self.ws_client.last_frame_age_ms()):
+            return
         # Bug B fix: only emit transition (degraded/down → healthy or
         # first-ever set) — don't spam every 15s with new last_msg_age_ms values.
         if self.probe.current_status(HealthTarget.BITFINEX_WS) != HealthStatus.HEALTHY:

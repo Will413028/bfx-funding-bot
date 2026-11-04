@@ -123,7 +123,7 @@ async def test_nothing_trades_while_the_boot_waits_and_a_stop_ends_the_wait() ->
     fake = _daemon(venue, delay=delay)
     # A SimpleNamespace daemon has none of the sub-task wiring: reaching the
     # TaskGroup (anything that could trade) would raise AttributeError here.
-    await Daemon._run_account_until_stopped(fake)
+    await Daemon._boot_and_run(fake)
 
     assert venue.calls == stop_after
     assert fake.booted is False

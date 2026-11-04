@@ -676,6 +676,7 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
 async def test_daemon_taskgroup_runs_book_service_through_its_finally_shutdown() -> None:
     """Daemon owns TaskGroup supervision; service.run owns exactly-one stop."""
     from bfx_funding_bot.apps.runtime.daemon import Daemon
+    from bfx_funding_bot.core.health import HealthProbe
 
     class _BookService:
         def __init__(self) -> None:
@@ -689,6 +690,9 @@ async def test_daemon_taskgroup_runs_book_service_through_its_finally_shutdown()
             finally:
                 self.stops += 1
 
+        def last_frame_age_ms(self) -> int | None:
+            return None
+
     async def wait_for_stop() -> None:
         await daemon._stop_event.wait()
 
@@ -698,7 +702,10 @@ async def test_daemon_taskgroup_runs_book_service_through_its_finally_shutdown()
     daemon.writer_lock = None
     daemon.ws_dispatcher = None
     daemon.market_data = None
-    daemon.market_data_failed = False
+    daemon.public_data_failed = False
+    daemon.account_failed = False
+    daemon.probe = HealthProbe()
+    daemon.trading_readiness = None
     daemon.auth_ws = None
     daemon.periodic_reconcile = None
     daemon._stop_event = asyncio.Event()

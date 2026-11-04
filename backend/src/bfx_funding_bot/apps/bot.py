@@ -36,6 +36,7 @@ from bfx_funding_bot.apps.runtime.scheduler import (
 )
 from bfx_funding_bot.apps.runtime.signal_engine import SignalEngine
 from bfx_funding_bot.apps.runtime.strategy_registry import StrategyRegistry
+from bfx_funding_bot.apps.runtime.tick_candles import read_tick_candles
 from bfx_funding_bot.apps.runtime.warmup import (
     WarmupResult,
     rehydrate_boot_boundary,
@@ -77,7 +78,7 @@ from bfx_funding_bot.external.bitfinex.ws import (
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     account_id_uuid_or_none,
 )
-from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_periods
+from bfx_funding_bot.modules.candles.repository import get_up_to
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.deployments.identity import DeploymentIdentity
 from bfx_funding_bot.modules.execution.audit import AuditContext, ExecutionDecisionRecorder
@@ -361,8 +362,9 @@ async def build_daemon(
     metrics = DaemonMetrics()
     metrics.register_probe(probe)  # heartbeat age/threshold + health_status
     install_log_metrics_handler(metrics)  # WARNING+ error-rate, idempotent
-    # Dependency freshness this process reports: the public WS's market data (when it
-    # runs one) and the database. Each starts not ready until its first beat.
+    # Dependency freshness this process reports: the account's book feed (not watched in
+    # skip_ws test compositions, which detach the network) and the database. Each starts
+    # not ready until its first beat.
     market_data_dependencies = [] if skip_ws else [MARKET_DATA_FRESHNESS]
     trading_readiness = TradingReadiness(
         on_change=metrics.set_trading_ready,
@@ -587,15 +589,16 @@ async def build_daemon(
         guards.append(HeartbeatGuard(
             probe=probe,
             # Readiness gate: block POST only when our MARKET VIEW is stale.
-            # Watch market-data freshness ("ws_data": a public WS frame seen),
+            # Watch market-data freshness ("ws_data": a frame on the account's own
+            # funding book feed, which prices the offer; ADR 2026-10-19 D1),
             # not the reactive executor/safety_chain — those are bumped only by
             # trading itself, so watching them self-suppresses trades in quiet
             # markets and was part of the 2026-05-26 canary restart loop. ws_data
-            # stays fresh in quiet markets via MarketDataRuntime._ws_freshness_tick
+            # stays fresh in quiet markets via freshness.book_freshness_tick
             # (Bitfinex hb ~15s); a venue outage ages it and blocks here, with
             # no restart. Never seen since boot also blocks, until the first
-            # frame. A composition without the public WS (skip_ws, tests only)
-            # has no such dependency to watch.
+            # frame. skip_ws compositions (tests only, which detach or replace the
+            # network) do not watch it; their book feed still runs.
             watched_sub_tasks=market_data_dependencies,
         ))
     guards.append(CapitalPolicyGuard(authority=capital.capital_authority, scope=capital_scope,
@@ -881,27 +884,10 @@ async def build_daemon(
         # tier. Strategy state itself lives in the pre-warmed StrategyRegistry which
         # was fed during daemon startup — NOT re-fed from this small window.
         lookback = budget_hours + 1  # +1 to ensure boundary candle is included
-        async with session_factory() as s:
-            # Seal on elapsed time before reading. CandleWriter only seals when a
-            # LATER mts lands, so a slow venue push leaves mts=candle_mts unsealed
-            # at exactly the moment we need it — a final-only read then skips it,
-            # LOCF fills the slot from the previous candle, and the live observe
-            # sequence gains a hole that replay does not have.
-            await seal_closed_periods(
-                s,
-                symbol=cell.symbol,
-                timeframe=cell.timeframe,
-                period_agg=cell.period_agg,
-            )
-            await s.commit()
-            raw_candles = await get_up_to(
-                s,
-                symbol=cell.symbol,
-                timeframe=cell.timeframe,
-                period_agg=cell.period_agg,
-                mts_inclusive=candle_mts,
-                lookback=lookback,
-            )
+        raw_candles = await read_tick_candles(
+            session_factory=session_factory, bitfinex=bitfinex, cell=cell,
+            candle_mts=candle_mts, lookback=lookback,
+        )
 
         filled = reindex_and_ffill(
             raw_candles, ref_mts=candle_mts, max_gap_hours=budget_hours,
@@ -1138,7 +1124,7 @@ async def build_daemon(
         market_data=MarketDataRuntime(
             cells=config.cells, probe=probe, candle_q=candle_q, writer=writer,
             ws_client=ws_client, bitfinex=bitfinex, session_factory=session_factory,
-            book_snapshot_writer=book_snapshot_writer, trading_readiness=trading_readiness,
+            book_snapshot_writer=book_snapshot_writer,
         ),
         interest_ledger_sync=interest_ledger_sync,
         credit_history_sync=credit_history_sync,

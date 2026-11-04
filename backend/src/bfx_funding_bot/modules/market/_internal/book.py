@@ -10,6 +10,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+import websockets
+
 from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.external.bitfinex.funding_book_ws import funding_book_checksum
 from bfx_funding_bot.modules.market import (
@@ -311,6 +313,7 @@ class _RestFundingBook(Protocol):
 class _FundingBookWS(Protocol):
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
+    def last_frame_age_ms(self) -> int | None: ...
 
 
 class FundingBookService(FundingBookProvider):
@@ -352,8 +355,15 @@ class FundingBookService(FundingBookProvider):
     async def run(self, stop_event: asyncio.Event) -> None:
         try:
             while not stop_event.is_set():
-                await self.start()
-                await self.reconcile_once()
+                try:
+                    await self.start()
+                except (OSError, TimeoutError, websockets.WebSocketException):
+                    # An unreachable venue is a stale market view (readiness blocks new
+                    # offers), not a reason to end: the feed runs from before the boot,
+                    # which waits such outages out in-process. Retry next interval.
+                    log.warning("funding_book_ws_connect_failed", exc_info=True)
+                else:
+                    await self.reconcile_once()
                 try:
                     await asyncio.wait_for(
                         stop_event.wait(), timeout=self._reconcile_interval_seconds
@@ -392,6 +402,10 @@ class FundingBookService(FundingBookProvider):
 
     def snapshot(self, symbol: str, *, now_ms: int) -> MarketSnapshot | None:
         return self._store.snapshot(symbol, now_ms=now_ms)
+
+    def last_frame_age_ms(self) -> int | None:
+        """Age of the book feed's newest frame on its current connection (None: none yet)."""
+        return self._ws.last_frame_age_ms()
 
     def unavailable_reason(self, symbol: str, *, now_ms: int) -> BookUnavailable | None:
         return self._store.unavailable_reason(symbol, now_ms=now_ms)
