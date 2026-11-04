@@ -581,8 +581,10 @@ funding_candles        (訊號層輸入)
   -- is_final=false 的列仍在成形中（venue 會用同一個 mts 反覆推送不同 close）。
   -- 只有 is_final=true 可餵策略；upsert 對已定稿列是 no-op（見 I-CI）。
 
-funding_candle_revisions (append-only，定稿後被拒寫入的證據)
-  PK (id)；索引 (symbol, timeframe, period_agg, mts)
+funding_candle_revisions (定稿後被拒寫入的證據，每個被拒的值一列)
+  PK (id)；UNIQUE (symbol, timeframe, period_agg, mts, rejected_close) NULLS NOT DISTINCT
+  -- 多個寫入者（WS 重連 gap-fill、worker 的 boundary gap-fill、重跑）會再看到同一個值：
+  --   ON CONFLICT DO NOTHING，只留第一次觀察；X→Y→X 的第二個 X 不留列。
   observed_at_ms(knowledge time), rejected_close, final_close
   -- 用來回答「venue 到底會不會修訂已收盤 bar」。長期為空 = bitemporal 層可降級。
 
