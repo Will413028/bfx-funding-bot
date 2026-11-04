@@ -31,7 +31,7 @@ from bfx_funding_bot.apps.runtime.boot_wait import (
     is_transient_dependency_error,
 )
 from bfx_funding_bot.apps.runtime.config import MarketfeedConfig
-from bfx_funding_bot.apps.runtime.freshness import dependency_answered
+from bfx_funding_bot.apps.runtime.freshness import book_freshness_loop, dependency_answered
 from bfx_funding_bot.apps.runtime.health_monitor import HealthMonitor
 from bfx_funding_bot.apps.runtime.healthz import run_healthz_server
 from bfx_funding_bot.apps.runtime.market_data import MarketDataRuntime
@@ -316,9 +316,10 @@ class Daemon:
     # Candle WS recording, reconnect gap-fill, book snapshot: its own TaskGroup beside the
     # account half, started before the boot (``run``). None only in unit compositions.
     market_data: MarketDataRuntime | None = None
-    # Set when the market data half failed: ``apps.bot`` reports it as a fatal error, never
-    # as a refused boot, even when it happened before the boot completed.
-    market_data_failed: bool = False
+    # Set when a public data feed failed (the market data half, or the account's book feed,
+    # both started before the boot): ``apps.bot`` reports it as a fatal error, never as a
+    # refused boot, even when it happened before the boot completed.
+    public_data_failed: bool = False
     # Set when the account half failed (first): a later market data error does not reclassify.
     account_failed: bool = False
     healthz_host: str = "0.0.0.0"
@@ -381,8 +382,8 @@ class Daemon:
     @property
     def refused_boot(self) -> bool:
         """Whether a failure now is a refused boot: the boot never completed and the failure
-        is not market data's (that half runs before the boot; its failure is a fatal error)."""
-        return not self.booted and not self.market_data_failed
+        is not a public data feed's (those run before the boot; their failure is fatal)."""
+        return not self.booted and not self.public_data_failed
 
     def bind_run(self, started_at_ms: int) -> None:
         """This process's ``bot_runs`` start: recovery mode never restarts the process before
@@ -674,7 +675,7 @@ class Daemon:
             # A market task that raises while the account's own failure tears it down is
             # not the cause: the run keeps the account's classification.
             if not self.account_failed:
-                self.market_data_failed = True
+                self.public_data_failed = True
             raise
 
     async def _run_account(self) -> None:
@@ -693,6 +694,34 @@ class Daemon:
             self._stop_event.set()
 
     async def _run_account_until_stopped(self) -> None:
+        """The account's book feed and its ``ws_data`` poll start first, before the boot, so
+        the market view can be known fresh while the boot still waits (R9c); the boot and
+        whatever follows run beside them, and ending stops them."""
+        async with asyncio.TaskGroup() as tg:
+            book = self.funding_book_service
+            if book is not None:
+                tg.create_task(self._account_feed_loop(book.run(self._stop_event)),
+                               name="funding_book")
+                tg.create_task(self._account_feed_loop(book_freshness_loop(
+                    self.probe, self.trading_readiness, book, self._stop_event)),
+                    name="book_freshness")
+            try:
+                await self._boot_and_run()
+            except Exception:
+                self.account_failed = True  # first: a feed failing in teardown is not the cause
+                raise
+            finally:
+                self._stop_event.set()
+
+    async def _account_feed_loop(self, feed: Awaitable[None]) -> None:
+        try:
+            await feed
+        except Exception:
+            if not self.account_failed:
+                self.public_data_failed = True
+            raise
+
+    async def _boot_and_run(self) -> None:
         # Initial cell registration (was in startup)
         for cell in self.config.cells:
             self.scheduler.register_from_now(cell, now_ms=self.boot_mts)
@@ -763,13 +792,6 @@ class Daemon:
                 tg.create_task(
                     self.credit_history_sync.run(self._stop_event),
                     name="credit_history",
-                )
-            # The live eligibility provider owns its own WS shutdown in run()'s
-            # finally block. TaskGroup supervision ensures that path is used once.
-            if self.funding_book_service is not None:
-                tg.create_task(
-                    self.funding_book_service.run(self._stop_event),
-                    name="funding_book",
                 )
             # Observe-only auth-WS health poll (2026-07 nonce-flap fix): surfaces
             # "enabled but never authenticates" in the HEALTH_CHECK stream. NOT a

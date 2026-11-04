@@ -19,23 +19,28 @@ Mutation checks (one at a time; revert after each):
 
 * record ``ws`` only inside the "frame is fresh" branch of
   ``MarketDataRuntime._ws_freshness_tick``: ``test_a_bitfinex_ws_outage_*`` raises FatalError.
+* beat ``ws_data`` from the candle WS again (``MarketDataRuntime._ws_freshness_tick``):
+  ``test_a_fresh_candle_feed_does_not_hide_a_silent_book``.
 * move ``on_attempt()`` into the success branch of ``keepalive_loop``:
   ``test_a_database_outage_*`` raises FatalError.
 * drop the dependency branch in ``scan_staleness``: readiness stays ready.
-* let HeartbeatGuard pass a never-recorded key, or take ``ws_data`` from
-  ``last_msg_age_ms``: ``test_nothing_trades_before_*``.
+* let HeartbeatGuard pass a never-recorded key: ``test_nothing_trades_before_*``.
+
+``ws_data`` is the account's own book feed (ADR 2026-10-19 D1, R9c): the market data
+half keeps only the ``ws`` liveness beat.
 """
 from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.apps.runtime.daemon import Daemon
+from bfx_funding_bot.apps.runtime.freshness import book_freshness_tick
 from bfx_funding_bot.apps.runtime.health_monitor import HealthMonitor
 from bfx_funding_bot.apps.runtime.healthz import make_app
 from bfx_funding_bot.apps.runtime.market_data import MarketDataRuntime
@@ -97,8 +102,12 @@ def _daemon(probe: HealthProbe, readiness: TradingReadiness, **fields: Any) -> A
     return fake
 
 
-def _tick(probe: HealthProbe, readiness: TradingReadiness, ws: _WS) -> None:
-    MarketDataRuntime._ws_freshness_tick(_daemon(probe, readiness, ws_client=ws))
+def _tick(probe: HealthProbe, readiness: TradingReadiness, ws: _WS,
+          book: _WS | None = None) -> None:
+    """One poll of each feed: the candle WS (market data's liveness) and the account's
+    book feed (``ws_data``). ``book`` defaults to a feed in the same state as ``ws``."""
+    MarketDataRuntime._ws_freshness_tick(SimpleNamespace(probe=probe, ws_client=ws))
+    book_freshness_tick(probe, readiness, ws if book is None else book)
 
 
 def _monitor(probe: HealthProbe, readiness: TradingReadiness) -> HealthMonitor:
@@ -264,3 +273,31 @@ async def test_a_database_outage_keeps_liveness_and_blocks_trading_through_readi
     # The database answers again: the successful ping itself clears /readyz.
     await _one_keepalive(probe, readiness, reachable=True)
     assert readiness.snapshot().reason != "dependency_stale"
+
+
+async def test_a_fresh_candle_feed_does_not_hide_a_silent_book() -> None:
+    """The book prices the offer: a silent book blocks however lively the candle WS is."""
+    probe = HealthProbe()
+    _fresh_liveness(probe)
+    probe.last_active_ts[MARKET_DATA_FRESHNESS] = datetime.now(UTC) - timedelta(minutes=10)
+    readiness = TradingReadiness()
+    readiness.set_ready()
+
+    _tick(probe, readiness, _WS(frame_age_ms=500), book=_WS(frame_age_ms=10 * 60 * 1000))
+    await _monitor(probe, readiness).scan_staleness()
+
+    assert readiness.snapshot().reason == "dependency_stale"
+    assert (await _guard(probe).evaluate(make_candidate(), cast(Any, None))).allowed is False
+
+
+async def test_a_silent_candle_feed_does_not_block_a_live_book() -> None:
+    """Candle recording stopping (market data down) leaves trading on the book feed."""
+    probe = HealthProbe()
+    _fresh_liveness(probe)
+    readiness = TradingReadiness(dependencies=[MARKET_DATA_FRESHNESS])
+    readiness.set_ready()
+
+    _tick(probe, readiness, _WS(frame_age_ms=None), book=_WS(frame_age_ms=500))
+
+    assert readiness.snapshot().reason != "dependency_stale"
+    assert (await _guard(probe).evaluate(make_candidate(), cast(Any, None))).allowed is True

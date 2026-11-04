@@ -83,7 +83,8 @@ SETTLE_MS = int(BOT_SETTLE_WINDOW.total_seconds() * 1000)
 DIGEST_INVALID = '["error",10100,"apikey: digest invalid"]'
 
 _METHODS = (
-    "run", "_run_account", "_run_account_until_stopped", "_market_data_loop", "_boot_until_observed", "_boot_attempt", "_run_boot_recovery",
+    "run", "_run_account", "_run_account_until_stopped", "_market_data_loop",
+    "_boot_and_run", "_account_feed_loop", "_boot_until_observed", "_boot_attempt", "_run_boot_recovery",
     "_run_credential_recovery",
     "_credential_recovery_tasks", "_credential_recovery_retry_loop",
     "_active_credential_changed", "_end_credential_recovery", "_recovery_started_at_ms",
@@ -203,7 +204,8 @@ def _daemon(engine: AsyncEngine, venue: Venue, *, clock: Clock | None = None,
         credential_recovery_retry_delay_s=delay,
         credential_recovery_wait=wait or advance, waits=waits,
         credential_rotation=rotation, credential_compliance=compliance,
-        credential_recovery_reason=None, market_data=None, market_data_failed=False,
+        credential_recovery_reason=None, market_data=None, public_data_failed=False,
+        funding_book_service=None,
         account_failed=False,
         # Trading wiring recovery mode must never touch.
         trading_control=Recorder(), capital_policy_control=Recorder(),
@@ -680,7 +682,7 @@ def _market_data(fake: Any, *, writer: Any = None,
         writer=writer or CandleWriter(queue=queue, session_factory=fake.session_factory,
                                       probe=fake.probe),
         ws_client=None, bitfinex=MagicMock(), session_factory=fake.session_factory,
-        book_snapshot_writer=book, trading_readiness=fake.trading_readiness,
+        book_snapshot_writer=book,
     )
 
 
@@ -723,7 +725,7 @@ async def test_a_recorder_failure_ends_the_run_with_a_market_data_error(engine, 
         await asyncio.wait_for(Daemon.run(fake), timeout=5)
 
     assert raised.group_contains(FatalError)
-    assert fake.market_data_failed is True
+    assert fake.public_data_failed is True
     assert fake.booted is False
     assert Daemon.refused_boot.fget(fake) is False  # apps.bot reports it as fatal
     _trading_untouched(fake)
@@ -748,5 +750,74 @@ async def test_a_refused_boot_stays_refused_when_market_data_fails_while_torn_do
         await asyncio.wait_for(Daemon.run(fake), timeout=5)
 
     assert raised.group_contains(BootInvariantError)
-    assert fake.market_data_failed is False
+    assert fake.public_data_failed is False
+    assert Daemon.refused_boot.fget(fake) is True
+
+
+class _BookFeed:
+    """The account's book feed: delivers frames ``frame_age_ms`` old until stopped, or
+    raises ``fail`` (at once, or only when cancelled with ``on_teardown``)."""
+
+    def __init__(self, frame_age_ms: int | None = 500, fail: Exception | None = None,
+                 on_teardown: bool = False) -> None:
+        self.frame_age_ms = frame_age_ms
+        self.fail = fail
+        self.on_teardown = on_teardown
+
+    def last_frame_age_ms(self) -> int | None:
+        return self.frame_age_ms
+
+    async def run(self, stop: asyncio.Event) -> None:
+        if self.fail is not None and not self.on_teardown:
+            raise self.fail
+        try:
+            await stop.wait()
+        except asyncio.CancelledError:
+            if self.fail is not None:
+                raise self.fail from None
+            raise
+
+
+async def test_the_book_feed_clears_ws_data_while_the_boot_still_waits(engine, sent) -> None:
+    """ws_data comes from the account's own book feed, which starts before the boot: by the
+    time the boot completes the market view is already known fresh (R9c)."""
+    unreachable = BitfinexAPIError(status_code=0, message="transport error: connect failed")
+    fake = _daemon(engine, Venue(unreachable))
+    fake.boot_retry_delay_s = lambda _n: 3600.0
+    fake.funding_book_service = _BookFeed(frame_age_ms=500)
+    task = asyncio.create_task(Daemon.run(fake))
+
+    await until(lambda: MARKET_DATA_FRESHNESS in fake.probe.last_active_ts, what="ws_data beat")
+    assert fake.booted is False
+    assert fake.trading_readiness.snapshot().dependency != MARKET_DATA_FRESHNESS
+    fake._stop_event.set()
+    await asyncio.wait_for(task, timeout=5)
+    _trading_untouched(fake)
+
+
+async def test_a_book_feed_failure_before_the_boot_is_fatal_not_a_refused_boot(engine, sent) -> None:
+    unreachable = BitfinexAPIError(status_code=0, message="transport error: connect failed")
+    fake = _daemon(engine, Venue(unreachable))
+    fake.boot_retry_delay_s = lambda _n: 3600.0
+    fake.funding_book_service = _BookFeed(fail=RuntimeError("book ws refused"))
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        await asyncio.wait_for(Daemon.run(fake), timeout=5)
+
+    assert raised.group_contains(RuntimeError)
+    assert fake.public_data_failed is True
+    assert Daemon.refused_boot.fget(fake) is False
+    _trading_untouched(fake)
+
+
+async def test_a_refused_boot_stays_refused_when_the_book_feed_fails_while_torn_down(
+        engine, sent) -> None:
+    fake = _daemon(engine, Venue(BootInvariantError("boot invariant broken")))
+    fake.funding_book_service = _BookFeed(fail=RuntimeError("ws close failed"), on_teardown=True)
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        await asyncio.wait_for(Daemon.run(fake), timeout=5)
+
+    assert raised.group_contains(BootInvariantError)
+    assert fake.public_data_failed is False
     assert Daemon.refused_boot.fget(fake) is True

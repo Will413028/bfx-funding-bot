@@ -361,8 +361,9 @@ async def build_daemon(
     metrics = DaemonMetrics()
     metrics.register_probe(probe)  # heartbeat age/threshold + health_status
     install_log_metrics_handler(metrics)  # WARNING+ error-rate, idempotent
-    # Dependency freshness this process reports: the public WS's market data (when it
-    # runs one) and the database. Each starts not ready until its first beat.
+    # Dependency freshness this process reports: the account's book feed (not watched in
+    # skip_ws test compositions, which detach the network) and the database. Each starts
+    # not ready until its first beat.
     market_data_dependencies = [] if skip_ws else [MARKET_DATA_FRESHNESS]
     trading_readiness = TradingReadiness(
         on_change=metrics.set_trading_ready,
@@ -587,11 +588,12 @@ async def build_daemon(
         guards.append(HeartbeatGuard(
             probe=probe,
             # Readiness gate: block POST only when our MARKET VIEW is stale.
-            # Watch market-data freshness ("ws_data": a public WS frame seen),
+            # Watch market-data freshness ("ws_data": a frame on the account's own
+            # funding book feed, which prices the offer; ADR 2026-10-19 D1),
             # not the reactive executor/safety_chain — those are bumped only by
             # trading itself, so watching them self-suppresses trades in quiet
             # markets and was part of the 2026-05-26 canary restart loop. ws_data
-            # stays fresh in quiet markets via MarketDataRuntime._ws_freshness_tick
+            # stays fresh in quiet markets via freshness.book_freshness_tick
             # (Bitfinex hb ~15s); a venue outage ages it and blocks here, with
             # no restart. Never seen since boot also blocks, until the first
             # frame. A composition without the public WS (skip_ws, tests only)
@@ -1138,7 +1140,7 @@ async def build_daemon(
         market_data=MarketDataRuntime(
             cells=config.cells, probe=probe, candle_q=candle_q, writer=writer,
             ws_client=ws_client, bitfinex=bitfinex, session_factory=session_factory,
-            book_snapshot_writer=book_snapshot_writer, trading_readiness=trading_readiness,
+            book_snapshot_writer=book_snapshot_writer,
         ),
         interest_ledger_sync=interest_ledger_sync,
         credit_history_sync=credit_history_sync,
