@@ -32,16 +32,19 @@ One run:
   6. pull every image the release names by digest, validate the env files and
      secret files it names, compare `alembic current` with `alembic heads` in a one-shot of the
      new image;
-  7. migrations pending: stop the web API, then the bot (the writer) -- a full
+  7. migrations pending: stop the web API, then every writer (each service on the
+     release's own image but the web API, the bot first; the running release's and
+     the target's, so one the target drops is stopped too) -- a full
      stop (ADR 2026-10-15-tailscale-native-operator-ingress-and-cli-only-high-
      risk-operations D6), so no build ever runs on a schema it was not written
      for -- back up with <rev>'s backup.sh, run the isolated restore test with
      <rev>'s DR scripts (which also rehearses <rev>'s migrations on the restored
      copy), `alembic upgrade head`. A web API that cannot be stopped blocks the
-     migration with the bot untouched; a bot that cannot be stopped blocks it and
-     starts the web API again. Any failure after both stopped keeps both stopped:
-     roll forward. The exception is a failed rehearsal: the backup restored and
-     production's schema is untouched, so the stopped bot and web API are
+     migration with the bot untouched; a writer that cannot be stopped blocks it and
+     starts the writers already stopped and the web API again. Any failure after
+     all stopped keeps them stopped: roll forward. The exception is a failed
+     rehearsal: the backup restored and production's schema is untouched, so the
+     stopped writers and web API are
      started again on the running release.
      No migration but a DR-path change: restore test first, nothing is stopped;
   8. append the `started` ledger row (the bot reads it at boot as its own
@@ -54,7 +57,7 @@ One run:
   9. on failure without applied migrations: recreate the previous successful
      digests (rolled_back) if the schema is still theirs. With applied
      migrations, or nothing to roll back to:
-     stop the bot (and, after a migration path, the web API), never roll back
+     stop the writers (and, after a migration path, the web API), never roll back
      (old code may not run on the new schema);
  10. on success: install <rev>'s host tooling and units (effective from the
      next run) and point the DR checkout `current` at <rev>;
@@ -143,8 +146,13 @@ LIVE_ENV_PATH = "deploy/vm/live.env"
 BACKUP_SCRIPT = "deploy/vm/pgbackrest/backup.sh"
 TOOLING_PATHS = ("deploy/vm/ops", "deploy/vm/systemd")
 # The writer and the web API every release has; compose_policy.py pins their container
-# names, and the migration path stops and starts them by role.
+# names, and each has its own HTTP probe (_probe). Which services the migration path stops,
+# and which a failed health check rolls back, is not decided here: every service on the
+# release's own image is application (ComposeService.own), every other one ingress (R9d-0).
 ROLE_CONTAINERS = {"bot": "bfx-bot", "webapi": "bfx-webapi"}
+# The one own-image service that is not a writer: stopped first and started last around a
+# migration, never stopped for an unhealthy release without one.
+WEBAPI = "webapi"
 # The group of the services' secret files (compose_policy.SECRET_GID; tests keep them
 # equal): Compose ignores a file secret's uid/gid/mode, so the host file itself is
 # root:SECRET_GID 0640 and the services (UID 1000) join the group to read it.
@@ -1037,6 +1045,7 @@ class ComposeService:
     env_files: tuple[Path, ...]
     joins: str | None = None  # `network_mode: service:<joins>`: runs in that service's netns
     secret_files: tuple[Path, ...] = ()  # its Compose file secrets, validated before `up`
+    own: bool = False  # runs the release's own backend image: application, reaches the database
 
 
 @dataclass(frozen=True, slots=True)
@@ -1059,6 +1068,23 @@ class Release:
     def containers(self) -> tuple[str, ...]:
         return tuple(service.container for service in self.services)
 
+    @property
+    def writers(self) -> tuple[ComposeService, ...]:
+        """Its own-image services but the web API, the bot first: what a migration stops
+        after the web API and what an unhealthy release without a rollback stops (in the
+        order of writers_of)."""
+        return tuple(service for service in self.services if service.own and service.name != WEBAPI)
+
+
+def writers_of(release: Release, running: Sequence[tuple[str, str]] = ()) -> tuple[tuple[str, str], ...]:
+    """(service, container) of a release's writers and of the `running` ones, each container
+    once, the bot first."""
+    found: dict[str, str] = {}
+    for name, container in [*((s.name, s.container) for s in release.writers), *running]:
+        found.setdefault(container, name)
+    return tuple(sorted(((name, container) for container, name in found.items()),
+                        key=lambda pair: (pair[0] != "bot", pair)))
+
 
 @dataclass(frozen=True, slots=True)
 class Prepared:
@@ -1066,6 +1092,9 @@ class Prepared:
     current: tuple[str, ...]
     heads: tuple[str, ...]
     changed_paths: tuple[str, ...] | None = None  # None: the diff could not be read
+    # The writers a migration stops: the running release's and this one's (a writer this
+    # release drops still runs until `up --remove-orphans`, after the migration).
+    writers: tuple[tuple[str, str], ...] = ()
 
     @property
     def pending(self) -> bool:
@@ -1092,8 +1121,11 @@ class Attempt:
     ci_run: str | None = None
     action: str = "deploy"  # deploy | recreate
     migrations_applied: bool = False
-    bot_stopped: bool = False
+    writers_stopped: bool = False  # a migration stopped the writers (or found them absent)
     webapi_stopped: bool = False
+    # The writers to stop when the attempt fails without a rollback: this release's, and for a
+    # migration the running release's too.
+    writers: tuple[tuple[str, str], ...] = ()
     # A release that came up unhealthy and stayed (no rollback, or the rollback failed).
     degraded: bool = False
     # The services this attempt stopped and has not started again; one that was already
@@ -1235,7 +1267,7 @@ def release_services(
             # never joins the tailnet would pass the deploy.
             raise DeployError(f"compose_healthcheck_missing:{name}")
         found.append(ComposeService(name, container, image, tuple(env_files), joins,
-                                    tuple(secret_files)))
+                                    tuple(secret_files), own=image in own))
     names = {service.name: service for service in found}
     for role, container in ROLE_CONTAINERS.items():
         if names[role].container != container:
@@ -1646,6 +1678,7 @@ class Deployer:
         self._discovery_ok()
         target = attempt.target
         release = prepared.release
+        attempt.writers = prepared.writers
         reason = prepared.restore_test_reason
         if self.settings.dry_run:
             self.plan = {
@@ -1654,8 +1687,8 @@ class Deployer:
                 "services": list(release.names),
                 "schema_current": list(prepared.current), "schema_heads": list(prepared.heads),
                 "migrations_pending": prepared.pending,
-                "stop_bot_before_migration": prepared.pending,
-                "stop_webapi_before_migration": prepared.pending,
+                "stop_before_migration": [WEBAPI, *(name for name, _ in prepared.writers)]
+                if prepared.pending else [],
                 "backup_before_migration": prepared.pending,
                 "restore_test_before_deploy": reason,
                 "rollback_target": view.last_success.source_revision if view.last_success else None,
@@ -1692,8 +1725,7 @@ class Deployer:
         try:
             self._record_started(attempt)
         except DeployError as exc:
-            kept = ("; bot and webapi stay stopped" if attempt.webapi_stopped
-                    else "; bot stays stopped" if attempt.bot_stopped
+            kept = ("; " + " and ".join(sorted(attempt.held)) + " stay stopped" if attempt.held
                     else "; running release untouched")
             return self._finish(attempt, "failed", f"{exc.code}{kept}")
         try:
@@ -1727,39 +1759,42 @@ class Deployer:
     def _migration_path(
         self, prepared: Prepared, attempt: Attempt, dr_checkout: Path, reason: str,
     ) -> int | None:
-        """Stop the web API and the writer, back up, restore-test, migrate (Will 2026-09-25;
+        """Stop the web API and every writer, back up, restore-test, migrate (Will 2026-09-25;
         full stop: ADR 2026-10-15 D6).
 
         The web API stops first: a web API that cannot be stopped then leaves nothing
-        stopped and nothing migrated. From the moment both are stopped every failure
+        stopped and nothing migrated. From the moment all are stopped every failure
         leaves them stopped -- an old web API never runs on a migrated schema: the way out
         is a new release (roll forward) or --retry, never the old one.
         """
-        webapi = self._stop("webapi")
+        webapi = self._stop(WEBAPI, ROLE_CONTAINERS[WEBAPI])
         if webapi == "WEBAPI_STOP_FAILED":
             return self._finish(attempt, "failed", "webapi_stop_failed; nothing migrated; "
                                 "running release untouched")
         attempt.webapi_stopped = True
         if webapi == "webapi stopped":
-            attempt.held.add("webapi")
-        stopped = self._stop("bot")
-        if stopped == "BOT_STOP_FAILED":
-            # Nothing migrated and the running release keeps its schema: the web API
-            # stopped for this migration goes back to serving it.
-            note = "running release untouched"
-            if webapi == "webapi stopped":
-                restarted = self._restart("webapi")
-                if restarted == "restarted":
-                    attempt.webapi_stopped = False
-                    attempt.held.discard("webapi")
-                    note += "; webapi restarted"
-                else:
-                    note = f"webapi_restart_failed:{restarted}"
-            return self._finish(attempt, "failed", f"bot_stop_failed; nothing migrated; {note}")
-        attempt.bot_stopped = True
-        if stopped == "bot stopped":
-            attempt.held.add("bot")
-        held = "bot and webapi stopped until a release deploys (roll forward or --retry)"
+            attempt.held.add(WEBAPI)
+        # Every writer, the bot first; one that cannot be stopped leaves nothing migrated, so
+        # the ones already stopped and the web API go back to serving the running release.
+        states: list[tuple[str, str, str]] = []
+        for service, container in prepared.writers:
+            state = self._stop(service, container)
+            if state == f"{service.upper()}_STOP_FAILED":
+                notes = self._start_again(attempt, [*states, (WEBAPI, ROLE_CONTAINERS[WEBAPI], webapi)],
+                                          quiet_absent=True)
+                if all(note.endswith(" restarted") for note in notes):
+                    notes = ["running release untouched", *notes]
+                return self._finish(attempt, "failed", f"{service}_stop_failed; nothing migrated; "
+                                    + "; ".join(notes))
+            states.append((service, container, state))
+            if state == f"{service} stopped":
+                attempt.held.add(service)
+        attempt.writers_stopped = True
+        names = [service for service, _, state in states if state == f"{service} stopped"]
+        if webapi == "webapi stopped":
+            names.append(WEBAPI)
+        held = (f"{' and '.join(names) or 'nothing'} stopped until a release deploys "
+                "(roll forward or --retry)")
         try:
             self._backup(dr_checkout)
         except DeployError as exc:
@@ -1774,20 +1809,13 @@ class Deployer:
             # Only the target's migrations failed, on the isolated copy: the running release
             # goes on as if this release had never come (D7', Will 2026-10-08).
             failed += f":{REHEARSAL_FAILED}"
-            # The bot first (the writer), then the web API; each on its own, so one that
-            # does not come back never keeps the other off the schema it runs on.
-            notes = []
-            for service, state in (("bot", stopped), ("webapi", webapi)):
-                if state != f"{service} stopped":
-                    notes.append(f"{state}; nothing to restart")
-                    continue
-                restarted = self._restart(service)
-                if restarted != "restarted":
-                    notes.append(f"{service}_restart_failed:{restarted}")
-                    continue
-                setattr(attempt, f"{service}_stopped", False)
-                attempt.held.discard(service)
-                notes.append(f"{service} restarted on the running release")
+            # The writers first, then the web API; each on its own, so one that does not come
+            # back never keeps another off the schema it runs on.
+            notes = [note + (" on the running release" if note.endswith(" restarted") else "")
+                     for note in self._start_again(
+                         attempt, [*states, (WEBAPI, ROLE_CONTAINERS[WEBAPI], webapi)])]
+            if not attempt.held & {service for service, _, _ in states}:
+                attempt.writers_stopped = False
             return self._finish(attempt, "failed", f"{failed}; schema unchanged; "
                                 + "; ".join(notes))
         return self._migrate(prepared, attempt, held)
@@ -1824,31 +1852,48 @@ class Deployer:
                 and report.get("source_revision") == revision
                 and type(observed) is int and observed >= since_ms)
 
-    def _restart(self, service: str) -> str:
+    def _start_again(self, attempt: Attempt, states: Sequence[tuple[str, str, str]], *,
+                     quiet_absent: bool = False) -> list[str]:
+        """Start again, in order, each service this attempt stopped; what happened to each."""
+        notes = []
+        for service, container, state in states:
+            if state != f"{service} stopped":
+                if not quiet_absent:
+                    notes.append(f"{state}; nothing to restart")
+                continue
+            restarted = self._restart(service, container)
+            if restarted != "restarted":
+                notes.append(f"{service}_restart_failed:{restarted}")
+                continue
+            if service == WEBAPI:
+                attempt.webapi_stopped = False
+            attempt.held.discard(service)
+            notes.append(f"{service} restarted")
+        return notes
+
+    def _restart(self, service: str, container: str) -> str:
         """Start a container stopped for this migration (the running release, unchanged); like
         a deploy, healthy, then still the same running container and healthy after the settle
         window.
 
         Returns `restarted`, or why not and what state the container is left in.
         """
-        container = ROLE_CONTAINERS[service]
         log(f"nothing migrated; starting {container} again on the running release")
         started = self._run(["docker", "start", container], timeout=90.0)
         if started.returncode != 0:
             log(f"docker start {container} failed: {started.stderr.strip()[-500:]}")
             return f"start_failed; {service} stopped until a release deploys"
-        if self._healthy_and_settled(service):
+        if self._healthy_and_settled(service, container):
             return "restarted"
         log(f"restarted {container} is not healthy; stopping it again")
         failed = f"{service.upper()}_STOP_FAILED"
-        if self._stop(service) == failed:
+        if self._stop(service, container) == failed:
             return f"unhealthy; {failed}, {service} may be running"
         return f"unhealthy; {service} stopped until a release deploys"
 
-    def _healthy_and_settled(self, service: str, container: str | None = None) -> bool:
-        """A container (a role's by default) answers its probe within its budget, then is still
-        the same running container and still answers after the settle window."""
-        container = container or ROLE_CONTAINERS[service]
+    def _healthy_and_settled(self, service: str, container: str) -> bool:
+        """A container answers its probe within its budget, then is still the same running
+        container and still answers after the settle window."""
         began = self._clock()
         while not self._probe(service, container):
             if self._clock() - began >= self.settings.health_timeouts.get(service, 120.0):
@@ -1879,8 +1924,27 @@ class Deployer:
         self._validate_env_files(release)
         self._refuse_foreign_containers(release)
         current, heads = self._schema(release, target)
+        # What a migration or a failed attempt stops is what runs now, not only what this
+        # release will run: a writer it drops runs until `up --remove-orphans`.
+        writers = writers_of(release, self._running_writers(target))
         return Prepared(release=release, current=current, heads=heads,
-                        changed_paths=changed_paths)
+                        changed_paths=changed_paths, writers=writers)
+
+    def _running_writers(self, target: Target) -> list[tuple[str, str]]:
+        """(service, container) of each running container of the project on the backend
+        repository's image, the web API's aside."""
+        repository = target.backend_image.partition("@")[0]
+        result = self._check(
+            ["docker", "ps", "--no-trunc", "--filter", f"label=com.docker.compose.project={PROJECT}",
+             "--format", '{{.Names}}\t{{.Label "com.docker.compose.service"}}\t{{.Image}}'],
+            code="docker_ps_failed", timeout=60.0,
+        )
+        found = []
+        for line in result.stdout.splitlines():
+            container, service, image = [*line.split("\t"), "", ""][:3]
+            if service and service != WEBAPI and image.partition("@")[0] == repository:
+                found.append((service, container))
+        return found
 
     def _fetch_and_require_on_main(self, revision: str, deployed: str | None) -> None:
         """<revision> on main and, when something deployed, at or after `deployed`.
@@ -2282,7 +2346,7 @@ class Deployer:
                     found.append("netns")
 
         def ingress(name: str) -> bool:
-            return gate_ingress is not None and name not in ROLE_CONTAINERS
+            return gate_ingress is not None and not by_name[name].own
 
         fatal = [f"{name}:{m}" for name, found in problems.items() for m in found if not ingress(name)]
         if fatal:
@@ -2299,9 +2363,9 @@ class Deployer:
 
     def _probe(self, service: str, container: str) -> bool:
         if service not in ROLE_CONTAINERS:
-            # Its compose healthcheck, which release_services requires: the 9d sidecar's
-            # TS_ENABLE_HEALTH_CHECK /healthz, 200 once the node has a tailnet address
-            # (the netns holder's is `true`: running is all it does).
+            # Its compose healthcheck, which release_services requires: a writer's own (R9d's
+            # marketdata), the 9d sidecar's TS_ENABLE_HEALTH_CHECK /healthz, 200 once the node
+            # has a tailnet address (the netns holder's is `true`: running is all it does).
             result = self._run(["docker", "inspect", "--type", "container", "--format", HEALTH_FORMAT,
                                 container], timeout=20.0)
             return result.returncode == 0 and result.stdout.strip() == "healthy"
@@ -2333,7 +2397,7 @@ class Deployer:
         """
         started = self._clock()
         containers = {service.name: service.container for service in release.services}
-        application = [name for name in release.names if name in ROLE_CONTAINERS]
+        application = [service.name for service in release.services if service.own]
         ingress = [name for name in release.names if name in gate_ingress and name not in application]
         pending, ingress_late = set(application + ingress), []
         while pending:
@@ -2377,9 +2441,8 @@ class Deployer:
             self._notify("warning", f"{warning}: the tailnet ingress is down; the bot is unaffected")
         return warnings
 
-    def _stop(self, service: str) -> str:
+    def _stop(self, service: str, container: str) -> str:
         """`<service> stopped`, `<service> absent`, or `<SERVICE>_STOP_FAILED`."""
-        container = ROLE_CONTAINERS[service]
         result = self._run(["docker", "stop", "--time", "30", container], timeout=90.0)
         if result.returncode == 0:
             return f"{service} stopped"
@@ -2388,23 +2451,26 @@ class Deployer:
         log(f"docker stop {container} failed: {result.stderr.strip()[-500:]}")
         return f"{service.upper()}_STOP_FAILED"
 
+    def _stop_writers(self, writers: Sequence[tuple[str, str]]) -> str:
+        return "; ".join(self._stop(service, container) for service, container in writers)
+
     def _unhealthy(self, view: LedgerView, attempt: Attempt, exc: DeployError) -> int:
         reason = exc.code
         previous = view.last_success
-        if attempt.migrations_applied or attempt.bot_stopped or previous is None:
+        if attempt.migrations_applied or attempt.writers_stopped or previous is None:
             why = "migrations applied" if attempt.migrations_applied else "no previous deployment"
-            stopped = self._stop("bot")
+            stopped = self._stop_writers(attempt.writers)
             if attempt.migrations_applied or attempt.webapi_stopped:
                 # Full stop (D6): after a migration path the web API stays down with the bot;
                 # whatever web API compose left running is not trusted on this schema.
-                stopped += "; " + self._stop("webapi")
+                stopped += "; " + self._stop(WEBAPI, ROLE_CONTAINERS[WEBAPI])
             attempt.degraded = True
             return self._finish(attempt, "failed", f"unhealthy:{reason}; {why}; no automatic "
                                 f"rollback; {stopped}")
         try:
             ingress = self._rollback_to(previous)
         except DeployError as rollback:
-            stopped = self._stop("bot")
+            stopped = self._stop_writers(attempt.writers)
             attempt.degraded = True
             return self._finish(attempt, "failed", f"unhealthy:{reason}; rollback_failed:"
                                 f"{rollback.code}; {stopped}")
@@ -2415,7 +2481,7 @@ class Deployer:
     def _rollback_possible(self, view: LedgerView, attempt: Attempt) -> bool:
         """Whether _unhealthy would roll back and the rollback would get past its schema
         check (the step that refuses before anything changes)."""
-        if attempt.migrations_applied or attempt.bot_stopped or view.last_success is None:
+        if attempt.migrations_applied or attempt.writers_stopped or view.last_success is None:
             return False
         try:
             self._rollback_release(view.last_success)
@@ -2503,7 +2569,7 @@ class Deployer:
             ingress = self._verify(release, target, attempt.attempt_id, gate_ingress=())
             ingress += self._wait_healthy(release)
         except DeployError as exc:
-            stopped = self._stop("bot")
+            stopped = self._stop_writers(writers_of(release))
             attempt.degraded = True
             return self._finish(attempt, "failed", f"unhealthy:{exc.code}; recreate has no rollback; "
                                 f"{stopped}; fix the runtime env and --recreate")
