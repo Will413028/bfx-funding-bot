@@ -107,14 +107,39 @@ HOLDER = f"""  netns:
 
 """
 CONFIGS = "configs:\n  ts-serve:\n    file: ./tailscale/serve.json\n"
-CONTAINER_NAMES = {"bot": "bfx-bot", "webapi": "bfx-webapi",
+CONTAINER_NAMES = {"bot": "bfx-bot", "webapi": "bfx-webapi", "marketdata": "bfx-marketdata",
                    "tailscale": "bfx-tailscale", "netns": "bfx-netns"}
+# R9d's shape in miniature: a second writer on the release's own image, probed through its
+# compose healthcheck (R9d-0: the deployer stops, verifies and restarts it like the bot).
+MARKETDATA = """  marketdata:
+    image: ${BFX_BACKEND_IMAGE:?BFX_BACKEND_IMAGE must be a repository@sha256 reference}
+    pull_policy: never
+    container_name: bfx-marketdata
+    restart: unless-stopped
+    env_file:
+      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/marketdata.env
+    environment:
+      BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
+      BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
+      BFX_DEPLOYMENT_ID: ${BFX_DEPLOYMENT_ID:?BFX_DEPLOYMENT_ID is required}
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "pass"]
+      interval: 5s
+    networks:
+      bfx_default: {}
+
+"""
 SERVICE_OF = {container: service for service, container in CONTAINER_NAMES.items()}
 
 
 def with_sidecar(text: str, *, configs: bool = True) -> str:
     at = text.index("networks:\n  bfx_default:\n    external")
     return text[:at] + SIDECAR + text[at:] + (CONFIGS if configs else "")
+
+
+def with_marketdata(text: str) -> str:
+    at = text.index("networks:\n  bfx_default:\n    external")
+    return text[:at] + MARKETDATA + text[at:]
 
 
 def with_holder(text: str) -> str:
@@ -318,6 +343,7 @@ class FakeHost:
     compose_fail: set[str] = field(default_factory=set)
     unhealthy: set[str] = field(default_factory=set)
     failing: set[str] = field(default_factory=set)               # services whose own probe fails
+    failing_on: set[tuple[str, str]] = field(default_factory=set)  # (service, digest) that fails
     tampered: dict[str, Callable[[dict[str, Any]], None]] = field(default_factory=dict)
     foreign: list[str] = field(default_factory=list)
     running: dict[str, tuple[str, str, str, str]] = field(default_factory=dict)
@@ -418,6 +444,10 @@ class FakeHost:
             venv.mkdir(parents=True)
             (venv / "python").write_text("")
             return ok
+        if call[:2] == ("docker", "ps") and "label=com.docker.compose.project=bfx-app" in call:
+            # The project's running containers: name, compose service, image reference.
+            return bfx.CommandResult(0, "\n".join(
+                f"{CONTAINER_NAMES[s]}\t{s}\t{running[0]}" for s, running in self.running.items()), "")
         if call[:2] == ("docker", "ps"):
             lines = [f"{name}\t" for name in self.foreign]
             lines += [f"{CONTAINER_NAMES[s]}\tbfx-app" for s in self.running]
@@ -452,7 +482,7 @@ class FakeHost:
             self.stopped.append(container)
             return ok
         if call[:2] == ("docker", "start"):
-            assert len(call) == 3 and call[2] in {"bfx-bot", "bfx-webapi"}
+            assert len(call) == 3 and call[2] in {"bfx-bot", "bfx-webapi", "bfx-marketdata"}
             container = call[2]
             service = SERVICE_OF[container]
             if not self.start_ok or container in self.start_fails or service not in self.parked:
@@ -669,7 +699,13 @@ class FakeHost:
         names = [part for part in call[2:] if part.startswith("bfx-")]
         if "--format" in call and call[call.index("--format") + 1] == bfx.HEALTH_FORMAT:
             assert len(names) == 1 and SERVICE_OF[names[0]] not in bfx.ROLE_CONTAINERS
-            running = SERVICE_OF[names[0]] in self.running
+            service = SERVICE_OF[names[0]]
+            running = service in self.running
+            if running and self.running[service][1]:      # an own-image service's healthcheck
+                digest = self.running[service][1]
+                healthy = digest not in self.unhealthy and service not in self.failing \
+                    and (service, digest) not in self.failing_on
+                return bfx.CommandResult(0, ("healthy" if healthy else "unhealthy") + "\n", "")
             status = self.health_sequence.pop(0) if self.health_sequence else self.sidecar_health
             return bfx.CommandResult(0, status + "\n" if running else "", "")
         if "--format" in call and call[call.index("--format") + 1] == "{{.Name}} {{.Id}}":
@@ -808,6 +844,7 @@ class Harness:
 VALID_ENV = {
     "bot.env": "DATABASE_URL=postgresql://bfx_bot:x@bfx-postgres:5432/bfx\nBFX_ADMIN_TOKEN=t\n",
     "webapi.env": "DATABASE_URL=postgresql://bfx_webapi:x@bfx-postgres:5432/bfx\n",
+    "marketdata.env": "DATABASE_URL=postgresql://bfx_bot:x@bfx-postgres:5432/bfx\n",
     "migrate.env": "DATABASE_URL=postgresql://bfx:x@bfx-postgres:5432/bfx\n",
 }
 
@@ -3352,8 +3389,7 @@ def test_dry_run_reports_the_plan_and_changes_nothing(harness: Harness, capsys: 
     assert len(harness.ledger.rows) == rows and harness.notices == []
     plan = json.loads(capsys.readouterr().out)
     assert plan["migrations_pending"] is True and plan["backup_before_migration"] is True
-    assert plan["stop_bot_before_migration"] is True and plan["ci_run"] == CI_RUN
-    assert plan["stop_webapi_before_migration"] is True
+    assert plan["stop_before_migration"] == ["webapi", "bot"] and plan["ci_run"] == CI_RUN
     assert plan["restore_test_before_deploy"] == "migration_pending"
     assert harness.host.count(RESTORE_TEST) == 0
     assert plan["rollback_target"] == REV_OLD
@@ -3564,3 +3600,114 @@ def test_the_branch_flag_cannot_change_the_ref_the_attestation_must_prove(harnes
     Mutation: build the verifier's ref from ``settings.branch`` again: this test fails."""
     deployer = harness.deployer(branch="feature")
     assert deployer._attestations._ref == bfx.SIGNED_SOURCE_REF == "refs/heads/main"
+
+
+# --------------------------------------------------------------------------- R9d-0: another writer
+
+
+def _with_marketdata(harness: Harness, *revisions: str) -> None:
+    """These revisions' compose files carry a marketdata service; one on REV_OLD also runs."""
+    host = harness.host
+    for revision in revisions:
+        host.files[(revision, bfx.COMPOSE_PATH)] = with_marketdata(COMPOSE_TEXT)
+    if REV_OLD in revisions:
+        host.running["marketdata"] = (f"{BACKEND}@{OLD_B}", OLD_B, REV_OLD, OLD_ATTEMPT)
+        host.create("marketdata")
+
+
+def test_a_migration_stops_every_writer_of_the_release_after_the_webapi(harness: Harness) -> None:
+    _with_marketdata(harness, REV_OLD, REV_NEW)
+    host = harness.host
+    host.current = ("h1",)
+    assert harness.run() == 0
+    assert host.stopped == ["bfx-webapi", "bfx-bot", "bfx-marketdata"]
+    assert host.index(_is(("docker", "stop", "--time", "30", "bfx-marketdata"))) < host.index(BACKUP)
+    assert harness.ledger.last.outcome == "deployed"
+    assert host.running["marketdata"][1] == NEW_B
+
+
+def test_a_writer_the_new_release_drops_is_still_stopped_before_the_migration(
+    harness: Harness,
+) -> None:
+    _with_marketdata(harness, REV_OLD)
+    host = harness.host
+    host.current = ("h1",)
+    assert harness.run() == 0
+    assert host.stopped == ["bfx-webapi", "bfx-bot", "bfx-marketdata"]
+    assert host.index(_is(("docker", "stop", "--time", "30", "bfx-marketdata"))) < host.index(BACKUP)
+    assert "marketdata" not in host.running          # --remove-orphans
+
+
+def test_a_writer_that_cannot_be_stopped_starts_the_others_again(harness: Harness) -> None:
+    _with_marketdata(harness, REV_OLD, REV_NEW)
+    host = harness.host
+    host.current = ("h1",)
+    host.stop_fails = {"bfx-marketdata"}
+    assert harness.run() == 1
+    assert host.count(BACKUP) == 0 and host.count(_alembic("upgrade", "head")) == 0
+    assert host.started == ["bfx-bot", "bfx-webapi"]
+    row = harness.ledger.last
+    assert row.detail == ("marketdata_stop_failed; nothing migrated; running release untouched; "
+                          "bot restarted; webapi restarted")
+    assert row.service_degraded is False
+
+
+def test_a_failed_rehearsal_starts_every_writer_then_the_webapi_again(harness: Harness) -> None:
+    _with_marketdata(harness, REV_OLD, REV_NEW)
+    host = harness.host
+    host.current = ("h1",)
+    host.restore_test_ok = False
+    host.restore_receipt = _receipt()
+    assert harness.run() == 1
+    assert host.started == ["bfx-bot", "bfx-marketdata", "bfx-webapi"]
+    assert "marketdata restarted on the running release" in harness.ledger.last.detail
+    assert harness.ledger.last.service_degraded is False
+
+
+def test_an_unhealthy_writer_rolls_the_release_back(harness: Harness) -> None:
+    _with_marketdata(harness, REV_OLD, REV_NEW)
+    harness.host.failing_on = {("marketdata", NEW_B)}
+    assert harness.run() == 1
+    row = harness.ledger.last
+    assert row.outcome == "rolled_back" and "health_timeout:marketdata" in row.detail
+
+
+def test_an_unhealthy_first_deployment_stops_every_writer(harness: Harness) -> None:
+    _with_marketdata(harness, REV_NEW)
+    harness.ledger.rows.clear()
+    harness.host.unhealthy = {NEW_B}
+    assert harness.run() == 1
+    assert harness.host.stopped == ["bfx-bot", "bfx-marketdata"]
+    assert "no previous deployment" in harness.ledger.last.detail
+
+
+def test_dry_run_lists_what_a_migration_stops(harness: Harness, capsys: pytest.CaptureFixture[str]) -> None:
+    _with_marketdata(harness, REV_OLD, REV_NEW)
+    harness.host.current = ("h1",)
+    assert harness.run(dry_run=True) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["stop_before_migration"] == ["webapi", "bot", "marketdata"]
+
+
+def test_a_writer_that_runs_outside_the_last_release_is_stopped_before_the_migration(
+    harness: Harness,
+) -> None:
+    """What runs decides, not the ledger's last compose file (a mirror without that revision
+    must not block a forward migration either)."""
+    host = harness.host
+    host.current = ("h1",)
+    host.running["marketdata"] = (f"{BACKEND}@{OLD_B}", OLD_B, REV_OLD, OLD_ATTEMPT)
+    host.create("marketdata")
+    assert harness.run() == 0
+    assert host.stopped == ["bfx-webapi", "bfx-bot", "bfx-marketdata"]
+
+
+def test_a_third_party_container_is_never_taken_for_a_writer(harness: Harness) -> None:
+    host = harness.host
+    host.files[(REV_NEW, bfx.COMPOSE_PATH)] = with_sidecar(COMPOSE_TEXT)
+    host.files[(REV_NEW, SERVE_PATH)] = "{}"
+    host.current = ("h1",)
+    host.running["tailscale"] = (TAILSCALE, "", "", "")
+    host.create("tailscale")
+    harness.run()
+    assert "bfx-tailscale" not in host.stopped
