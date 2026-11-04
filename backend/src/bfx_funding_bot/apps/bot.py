@@ -597,8 +597,8 @@ async def build_daemon(
             # stays fresh in quiet markets via freshness.book_freshness_tick
             # (Bitfinex hb ~15s); a venue outage ages it and blocks here, with
             # no restart. Never seen since boot also blocks, until the first
-            # frame. A composition without the public WS (skip_ws, tests only)
-            # has no such dependency to watch.
+            # frame. skip_ws compositions (tests only, which detach or replace the
+            # network) do not watch it; their book feed still runs.
             watched_sub_tasks=market_data_dependencies,
         ))
     guards.append(CapitalPolicyGuard(authority=capital.capital_authority, scope=capital_scope,

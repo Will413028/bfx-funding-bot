@@ -290,3 +290,47 @@ def test_disconnect_forgets_the_last_frame() -> None:
     client.mark_disconnected()
 
     assert client.last_frame_age_ms() is None
+
+
+class _DroppingSocket:
+    """Connects, then drops the connection while the subscriptions are being sent."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def send(self, frame: str) -> None:
+        raise ConnectionError("connection dropped during subscribe")
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def test_a_start_that_fails_mid_subscribe_can_be_retried(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A half-open connection must not make every later start() a silent no-op."""
+    sockets: list[_DroppingSocket] = []
+
+    async def connect(*_a: object, **_kw: object) -> _DroppingSocket:
+        sockets.append(_DroppingSocket())
+        return sockets[-1]
+
+    monkeypatch.setattr("bfx_funding_bot.external.bitfinex.funding_book_ws.websockets.connect",
+                        connect)
+    client = FundingBookWSClient(symbols=("fUST",))
+    for _ in range(2):
+        with pytest.raises(ConnectionError):
+            await client.start()
+
+    assert len(sockets) == 2
+    assert sockets[0].closed
+
+
+def test_a_venue_error_asks_for_a_new_connection() -> None:
+    """After an error the channels are forgotten; only a fresh connection resubscribes, so
+    the client must ask for one rather than sit on an open socket it no longer reads."""
+    client = FundingBookWSClient(symbols=("fUST",))
+    client.handle_raw(json.dumps(
+        {"event": "subscribed", "channel": "book", "chanId": 7, "symbol": "fUST"}))
+    client.handle_raw(json.dumps({"event": "error", "msg": "subscribe: dup", "code": 10301}))
+
+    assert client._reconnect_requested is True

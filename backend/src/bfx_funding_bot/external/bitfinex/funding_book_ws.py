@@ -164,9 +164,16 @@ class FundingBookWSClient:
     async def start(self) -> None:
         if self._ws is not None:
             return
-        self._ws = await websockets.connect(self._url, max_size=2**20)
-        for frame in self.subscription_frames():
-            await self._ws.send(frame)
+        ws = await websockets.connect(self._url, max_size=2**20)
+        try:
+            for frame in self.subscription_frames():
+                await ws.send(frame)
+        except BaseException:
+            # Not half-open: a later start() must connect again, not return early.
+            with contextlib.suppress(Exception):
+                await ws.close()
+            raise
+        self._ws = ws
         self._recv_task = asyncio.create_task(self._recv_loop())
 
     async def stop(self) -> None:
@@ -240,6 +247,8 @@ class FundingBookWSClient:
         elif event == "error":
             log.error("bitfinex_funding_book_error %s", frame)
             self.mark_disconnected()
+            # The channels are forgotten; only a fresh connection resubscribes them.
+            self._reconnect_requested = True
 
     def _handle_info(self, frame: dict[str, Any]) -> None:
         """Act on the venue's own connection notices.

@@ -518,3 +518,19 @@ async def test_run_retries_a_ws_that_cannot_connect_instead_of_ending() -> None:
 
     assert ws.start_calls == 3
     assert ws.stopped
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_hide_a_programming_error_as_an_outage() -> None:
+    class _BrokenWS(_CountingWS):
+        async def start(self) -> None:
+            raise TypeError("subscription frame is not serialisable")
+
+    service = FundingBookService(
+        store=FundingBookStore(max_age_seconds=30, clock=lambda: 1_000),
+        rest=_FakeRest(), ws=_BrokenWS(), symbols=("fUST",),
+        reconcile_interval_seconds=0.001,
+    )
+
+    with pytest.raises(TypeError):
+        await service.run(asyncio.Event())

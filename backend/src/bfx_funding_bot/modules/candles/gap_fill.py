@@ -124,6 +124,8 @@ async def fill_missing_boundary(
     newest = (await session.execute(
         select(func.max(FundingCandleRow.mts)).where(*series, FundingCandleRow.mts < boundary_mts)
     )).scalar_one_or_none()
+    # No transaction stays open across the REST round-trip below.
+    await session.commit()
     floor = boundary_mts - max_steps * step
     start = max(int(newest) + 1, floor) if newest is not None else floor
     result = await fill_gap_from_rest(

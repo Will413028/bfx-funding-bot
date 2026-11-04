@@ -10,6 +10,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+import websockets
+
 from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.external.bitfinex.funding_book_ws import funding_book_checksum
 from bfx_funding_bot.modules.market import (
@@ -355,7 +357,7 @@ class FundingBookService(FundingBookProvider):
             while not stop_event.is_set():
                 try:
                     await self.start()
-                except Exception:
+                except (OSError, TimeoutError, websockets.WebSocketException):
                     # An unreachable venue is a stale market view (readiness blocks new
                     # offers), not a reason to end: the feed runs from before the boot,
                     # which waits such outages out in-process. Retry next interval.
