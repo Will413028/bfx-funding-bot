@@ -353,8 +353,15 @@ class FundingBookService(FundingBookProvider):
     async def run(self, stop_event: asyncio.Event) -> None:
         try:
             while not stop_event.is_set():
-                await self.start()
-                await self.reconcile_once()
+                try:
+                    await self.start()
+                except Exception:
+                    # An unreachable venue is a stale market view (readiness blocks new
+                    # offers), not a reason to end: the feed runs from before the boot,
+                    # which waits such outages out in-process. Retry next interval.
+                    log.warning("funding_book_ws_connect_failed", exc_info=True)
+                else:
+                    await self.reconcile_once()
                 try:
                     await asyncio.wait_for(
                         stop_event.wait(), timeout=self._reconcile_interval_seconds

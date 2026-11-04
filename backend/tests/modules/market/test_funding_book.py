@@ -489,3 +489,32 @@ def test_venue_maintenance_withholds_the_book_until_a_new_baseline() -> None:
     assert store.unavailable_reason("fUST", now_ms=1_000) is BookUnavailable.NO_BASELINE
     assert store.apply_rest_snapshot("fUST", _book_snapshot())
     assert store.snapshot("fUST", now_ms=1_000) is not None
+
+
+@pytest.mark.asyncio
+async def test_run_retries_a_ws_that_cannot_connect_instead_of_ending() -> None:
+    """The book feed runs from before the boot: a Bitfinex outage must leave it retrying
+    (the market view goes stale and readiness blocks new offers), never end the process."""
+    stop_event = asyncio.Event()
+
+    class _UnreachableWS(_CountingWS):
+        async def start(self) -> None:
+            await super().start()
+            if self.start_calls == 3:
+                stop_event.set()
+                return
+            raise OSError("connect failed")
+
+    ws = _UnreachableWS()
+    service = FundingBookService(
+        store=FundingBookStore(max_age_seconds=30, clock=lambda: 1_000),
+        rest=_FakeRest(),
+        ws=ws,
+        symbols=("fUST",),
+        reconcile_interval_seconds=0.001,
+    )
+
+    await service.run(stop_event)
+
+    assert ws.start_calls == 3
+    assert ws.stopped
