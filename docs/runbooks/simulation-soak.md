@@ -214,8 +214,8 @@ git -C "$MIRROR" cat-file -e "$REV^{commit}"        # 失敗就停下，不要�
 部署它。與一般 soak 不同的地方：
 
 - **§7 的偵測不適用**：live 的 `bfx-bot` 本來就跑另一個 image，不代表要換代；不要照 §7 第 1 步改用 `bfx-bot` 的 image。
-  §9 要求的「部署重啟（新 revision）」改用下一個 `dev` commit 的 soak image 換一代（§7 的存檔與停止順序照舊，
-  第 1 步的 `$IMAGE`／`$REV` 改取新的 soak image）。
+  換版不在 soak 視窗內驗：視窗只跑這一個 soak image，換版由 §11 的升級測試（已部署 release → 這個 soak image）驗。
+  soak 期間不要為了換代再推 `dev` commit。
 - **§9 的結果檔記的是 soak image**，不是之後部署的 digest（release 由 `release.yml` 從 merge commit 重建）。
   發版前確認兩者是同一份程式：`git diff --quiet <最後一代的 $REV> <dev→main 的 merge commit>` 必須成功
   （merge commit 的 tree 與 soak 過的 `dev` 相同）；不同就表示 soak 之後 `dev` 又進了改動，要評估是否重跑。
@@ -358,7 +358,8 @@ docker rm bfx-sim
    - 停機超過 `retention_ms` 時，無法補回的區段不會被悄悄截掉：計入 `source="trades_beyond_retention"` 並寫 ERROR log，
      報告的 `extra.trades_backfill_gaps` 為 FAIL（成交偏悲觀，那段範圍等於沒有 trades）。
 
-同一個 digest 的重啟**不算**部署重啟（報告以 `service_version` 變動計）；視窗內要有 ≥ 1 次部署重啟（新 revision）：orchestrator 在部署後對新 digest 重跑 one-shot job（§7），沒有自然部署時就刻意部署一次，不靠延長視窗。
+soak 視窗只能有一個 revision（ADR 2026-11-06 修訂，`d3.revisions`）：視窗中途換到新 revision 等於 soak 重新計時，
+從新 revision 開一個新視窗。換版是否安全由 §11 的升級測試驗證；這一節的步驟也是升級測試的換代步驟。
 
 ## 8. Kill 與恢復（決定 B）：測試 harness，不是產品流程
 
@@ -415,8 +416,8 @@ docker run --rm --name bfx-sim-report --pull=never --read-only \
 每個 criterion 印 `PASS`／`FAIL`／`UNAVAILABLE` 與證據數字；exit code 0＝全部通過，1＝有 FAIL，3＝無 FAIL 但有讀不到的來源
 （永遠不把讀不到當成 0），2＝拒絕執行（資料庫不是 `shadow` 章，或參數不可用）。
 
-- 視窗還沒滿 24 小時、還沒有部署重啟、還沒 kill 時，對應的 criterion 本來就是 FAIL；每日報告看的是趨勢與其他項目。
-- 通過條件（ADR D3 與修訂）：視窗 ≥ 24 小時；≥ 1 次部署重啟（新 revision，且沒有 `unidentified`）；視窗開始後第 6–10 小時內 ≥ 1 次 kill ＋ 恢復後 ≥ 8 小時交易（其間 ≥ 1 筆 ack 的 submit）；
+- 視窗還沒滿 24 小時、還沒 kill 時，對應的 criterion 本來就是 FAIL；每日報告看的是趨勢與其他項目。
+- 通過條件（ADR D3 與修訂）：視窗 ≥ 24 小時；每個 revision 可辨識（沒有 `unidentified`）；視窗開始後第 6–10 小時內 ≥ 1 次 kill ＋ 恢復後 ≥ 8 小時交易（其間 ≥ 1 筆 ack 的 submit）；
   `unexplained_lending` ＝ 0（外加 `foreign_lending` ＝ 0）；非注入的 quarantine／UNKNOWN ＝ 0；
   accepted cycle ≥ 99%（分母不含時間範圍內有 history 注入的 cycle，那些另列）；
   注入的 UNKNOWN 全數自動結案（且至少有一筆）；模擬器內部失敗與 unexpected request ＝ 0（讀 DB 的持久事件）；
@@ -461,3 +462,38 @@ docker run --rm --name bfx-sim-report --pull=never --read-only \
    `docker exec bfx-postgres psql -U <owner> -d bfx -c 'ALTER ROLE bfx_sim NOLOGIN PASSWORD NULL'`。
    role、membership 與 `bfx_sim` 的 CONNECT 隨 database 留著；§2a 的 `bfx` CONNECT 設定是長期設定，不還原。
 4. `bfx_sim` 先保留到報告被接受；`DROP DATABASE bfx_sim` 是破壞性動作，**先問 Will**（也可以留給 S1-7 之後的回歸 soak）。
+
+## 11. 升級測試（N-1→N，每次發版一次）
+
+驗證「prod 正在跑的 release」升級到候選版的那一次換版（ADR 2026-11-06 修訂）。和 24 小時 soak 分開跑，順序不拘，
+兩份結果都 PASS 才發版。
+
+1. **乾淨的 `bfx_sim`**：soak 用過的 database 改名封存（不刪資料；刪除另問 owner），再照 §2 只建 database（role 已存在）、
+   §4.3 蓋章、§4.4 bootstrap：
+   ```sql
+   -- psql -U <owner> -d postgres；先確認 bfx-sim 已停、沒有連線
+   ALTER DATABASE bfx_sim RENAME TO bfx_sim_<日期>_soak;
+   ```
+2. **N-1 起跑**：`FROM=$(docker inspect bfx-bot --format '{{.Config.Image}}')`（prod 正在跑的 release digest），
+   照 §4.1（`shadow.env` 取自它的 revision）、§4.2（用 N-1 image migrate）、§5 啟動。不設 `BFX_SIM_FAULTS`：升級測試的視窗內不能有任何注入的故障（`upgrade.no_injection`）。N-1 的 decision 至少跨 2 小時（`upgrade.n_minus_1_state`），期間要有 N-1 送出且 ack 的 submit 與 accepted basis。
+3. **升級**：照 §7 用候選 image（發版前 soak 的 soak image）存檔、停止、migrate、換代。
+4. **N 至少再跑 2 小時**，一路跑到報告前（`upgrade.n_coverage`：升級後 accepted basis 之間、以及最後一筆到視窗結束，間隔都不超過 10 分鐘，N 卡住就 FAIL），期間要有 accepted basis 與 N 送出且 ack 的 submit。
+5. **報告**（用候選 image 跑；`<from>`／`<to>` 是兩個 image 的 `org.opencontainers.image.revision`；`<soak R>` 是 §9 最終判定
+   那次 soak 的報告目錄，唯讀掛進來）：
+   ```bash
+   ... -e BFX_IMAGE_DIGEST=<候選 image digest> \
+     -v <soak R>/result/soak-result.json:/soak/soak-result.json:ro -v "$R/result":/result \
+     ... -m scripts.sim_soak_report \
+     --exchange-account-id "$SIM_ACCOUNT" --since <N-1 起跑> --until <現在> \
+     --upgrade-from <from> --upgrade-to <to> --soak-result /soak/soak-result.json \
+     --result-out /result/upgrade-result.json
+   ```
+   `<from>`／`<to>` 必須是不同的 40 碼小寫 SHA；`--soak-result` 必填，讀不到、schema 不是 2 或 `mode` 不是 `soak` 都 exit 2；
+   升級模式不收 `--metrics`（exit 2）。
+   通過條件：`upgrade.pairs_with_soak`（soak 結果 PASS、它的 `last_service_version` 等於 `<to>`、它的 `image_digest` 等於
+   這次的 `BFX_IMAGE_DIGEST`，兩者皆非空；所以這兩份結果一定是同一個候選版）、`upgrade.no_injection`、`upgrade.path`（revision 依序恰好是 from、to，換回舊版不算）、`upgrade.n_minus_1_state`（N-1 的 decision 跨 ≥ 2 h、有它送出的 ack submit
+   與它執行期間的 accepted basis）、`upgrade.n_coverage`（N ≥ 2 h，basis 間隔 ≤ 10 分鐘）、`upgrade.basis_after`（每個 symbol `conserved`；
+   `baseline` 只允許作為視窗內升級前沒有 basis 的新 symbol 的第一筆）、`upgrade.acked_submit_after`（N 送出的 submit），以及 conservation、
+   自然發生的 UNKNOWN／quarantine 與模擬器失敗各條。§6 的 abort rule 照樣適用。
+6. 結束照 §10 拆除。
+

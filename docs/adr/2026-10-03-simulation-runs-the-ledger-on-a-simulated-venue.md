@@ -121,6 +121,40 @@ P2c 的 pre-flight（唯讀）發現 D3 草案有三個洞，Will 於 2026-10-04
 - 故障注入：24 小時內至少一筆注入的 UNKNOWN 才過。24 小時的 submit 很少（prod 約 10 筆／7 天），機率規則保證不了，而 draw 的鍵是 bot 的掛鐘微秒 nonce，調 seed 無法預選。維持低 rate（決定 A），新增序數 knob `unknown_5xx_at=1`：每個 process 的第 1 筆 submit 必定注入（未下單的 UNKNOWN，自動結案），每次重啟（ordinal 重數）再注入一次；注入仍是持久的 `fault_injected` 事件，報告歸因不變；
 - 不變：`unexplained_lending` 為 0、非注入的 quarantine／UNKNOWN 為 0、accepted cycle ≥ 99%、注入的 UNKNOWN 全數自動結案。
 
+### Amendment 2026-11-06 (Will)：部署重啟拆成獨立的 N-1→N 升級測試
+
+**Context.** 2026-11-04 起的 R4 發版前 soak 暴露規則本身的矛盾：發版前 soak 要求「發版的 tree＝soak 過的 tree」，
+2026-10-05 修訂的「視窗內 ≥ 1 次部署重啟（新 revision）」卻要求視窗中途換到另一個 revision。runbook 的補法是再推一個
+`dev` commit 換代，結果發出去的程式不是 soak 過的那份，而且每次發版都要重演；它驗的是兩個都不會上線的 revision 之間的切換，
+不是 prod 真正會經歷的「已部署 release → 候選版」。
+
+**業界基準.** 升級測試與長時間 soak 分開，升級測試固定從已部署的版本（N-1）升到候選版（N）：CockroachDB 的 mixed-version／
+upgrade roachtests 與 nightly 長跑分開，Kubernetes 的 upgrade e2e 從上一個 release 升級，Android／Chromium 的 OTA 測試從上一版升級。
+這正好重現部署時 prod 發生的事（含 migration 套在既有資料上）。
+
+**Decision.**
+- 24 小時 soak 只驗候選版：拿掉「≥ 1 次部署重啟」，改為 `d3.revisions`：視窗內恰好一個 revision，且可辨識（沒有 `unidentified`）。
+  kill、同 digest 的 boot-while-halted 重啟與其餘門檻不變。
+- 另跑**升級測試**（`sim_soak_report.py --upgrade-from <已部署 revision> --upgrade-to <候選 revision>`）：新的 `bfx_sim`
+  先用 prod 正在跑的 release image 交易至少 2 小時累積資料，再照 runbook §7 用候選 image migrate 並換代，換代後再跑至少 2 小時。通過條件：
+  `upgrade.path`（revision 依序恰好是 from、to，from 的最後一筆早於 to 的第一筆，A→B→A 不算）、
+  `upgrade.n_minus_1_state`（N-1 的 decision 跨 ≥ 2 h，有它送出的 ack submit 與它執行期間的 accepted basis）、
+  `upgrade.n_coverage`（N ≥ 2 h，升級後 accepted basis 間隔與最後一筆到視窗結束都 ≤ 10 分鐘）、
+  `upgrade.no_injection`（視窗內沒有任何注入的故障）、
+  `upgrade.basis_after`（升級後有 accepted basis，每個 symbol `conserved`；`baseline` 只限視窗內升級前沒有 basis 的 symbol 的第一筆）、
+  `upgrade.acked_submit_after`（N 送出且 ack 的 submit ≥ 1），加上視窗內的 conservation、自然發生的 UNKNOWN／quarantine
+  與模擬器失敗各條。
+- 結果檔 schema 2，帶 `mode`（`soak`／`upgrade`，升級模式另帶 `upgrade.from`／`upgrade.to`）；發版需要兩份都 PASS。
+  升級報告以 `--soak-result` 讀 soak 結果檔，`upgrade.pairs_with_soak` 只在 soak PASS、其 `last_service_version` 等於 `--upgrade-to`
+  且其 `image_digest` 等於這次的 `BFX_IMAGE_DIGEST` 時通過，所以升級 PASS 本身就證明兩份結果是同一個候選版。
+
+**Rationale.** 不選「接受 FAIL」：下一次發版碰到同一個矛盾。不選「再推 commit 換代」：發版 tree 與 soak 不同，且驗錯了版本對。
+不選「整個 24 小時從 N-1 開始、中途升級」：效果同本決定，但每次發版多 1.5 天，而長跑要驗的穩定性與換版無關。
+**代價**：升級測試的資料只有約 2 小時，比 prod 的資料形狀少；migration 在 prod 資料量上的行為不在這個測試的範圍內。
+
+**Revocation.** prod 與 sim 的設定差到 N-1 image 無法以 sim 組裝開機 → 改成從 N-1 的 soak image 起跑；
+出現「多個 release 未部署就連發」→ from 改為實際部署中的 revision，不是上一個 release tag。
+
 ### Revocation Trigger
 
 - 活動下限的數字在前 24 小時的實際速率證明過高或過低 → 修訂本 ADR 並重新計 24 小時（2026-10-05 修訂前為 72 小時），不在視窗中途改報告常數。
