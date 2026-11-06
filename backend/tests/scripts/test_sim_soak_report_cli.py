@@ -68,7 +68,7 @@ def test_the_result_file_names_the_verdict_and_the_last_generation() -> None:
             document["window"]) == ("PASS", "b" * 40, "sha256:" + "3" * 64,
                                     {"since_ms": 1_000, "until_ms": 2_000})
     assert len(document["report_sha256"]) == 64
-    assert (document["schema"], document["mode"]) == (2, "soak")
+    assert (document["schema"], document["mode"]) == (2, "soak") and "upgrade" not in document
     failed = report.result_document(
         [*criteria, report.Criterion("floor.fills", "r", "FAIL")], account=UUID(ACCOUNT),
         window=window, image_digest=None)
@@ -78,12 +78,13 @@ def test_the_result_file_names_the_verdict_and_the_last_generation() -> None:
 
 def test_the_upgrade_result_reads_its_revisions_from_the_path() -> None:
     from uuid import UUID
-    path = report.Criterion("upgrade.path", "r", "PASS", {"revisions": [
-        {"service_version": "a" * 40}, {"service_version": "b" * 40}]})
+    path = report.Criterion("upgrade.path", "r", "PASS", {
+        "from": "a" * 40, "to": "b" * 40,
+        "revisions": [{"service_version": "a" * 40}, {"service_version": "b" * 40}]})
     document = report.result_document([path], account=UUID(ACCOUNT),
-                                      window=report.Window(1_000, 2_000), image_digest=None,
-                                      mode="upgrade")
-    assert (document["mode"], document["last_service_version"]) == ("upgrade", "b" * 40)
+                                      window=report.Window(1_000, 2_000), image_digest=None)
+    assert (document["mode"], document["last_service_version"], document["upgrade"]) == (
+        "upgrade", "b" * 40, {"from": "a" * 40, "to": "b" * 40})
 
 
 @pytest.mark.parametrize("extra", [["--upgrade-from", "a"], ["--upgrade-to", "b"]])
@@ -94,3 +95,22 @@ def test_the_upgrade_revisions_go_together(
                      "--until", "2024-01-05T00:00:00Z", *extra])
     assert exited.value.code == 2
     assert "go together" in capsys.readouterr().err
+
+
+SHA_A, SHA_B = "a" * 40, "b" * 40
+
+
+@pytest.mark.parametrize(("extra", "reason"), [
+    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_A], "upgrade_from_equals_to"),
+    (["--upgrade-from", "rev-a", "--upgrade-to", SHA_B], "upgrade_revision_not_a_sha"),
+    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_B.upper()], "upgrade_revision_not_a_sha"),
+    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_B, "--metrics", "gen1.metrics"],
+     "metrics_not_read_in_upgrade_mode"),
+])
+def test_an_unusable_upgrade_is_refused_before_reading(
+        extra: list[str], reason: str, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str], restore_logging: None) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:secret@127.0.0.1:1/none")
+    code = report.main(["--exchange-account-id", ACCOUNT, "--since", "2024-01-01T00:00:00Z",
+                        "--until", "2024-01-05T00:00:00Z", *extra])
+    assert code == 2 and reason in capsys.readouterr().err

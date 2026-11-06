@@ -13,11 +13,15 @@ Two modes:
 * upgrade (``--upgrade-from REV --upgrade-to REV``, both or neither; REV is the source
   revision, ``execution_decisions.service_version``): the window must hold exactly the
   deployed release ``from`` followed by the candidate ``to`` (``upgrade.path``; A->B->A, one
-  revision, an extra revision or the reverse order fail), and after the first ``to`` decision
-  at least one accepted capital basis, all of it conserved (``upgrade.basis_after``), and at
-  least one acked submit (``upgrade.acked_submit_after``). Conservation, uncertainty and the
-  simulator's own failures are read over the window as in the soak; the window length, the
-  kill, the activity floor and the feed counters are not (``--metrics`` is ignored).
+  revision, an extra revision or the reverse order fail; both must be different 40-hex SHAs).
+  N-1 runs >= 2 h with an acked submit it started and an accepted basis before the switch
+  (``upgrade.n_minus_1_state``); N runs >= 2 h and still decides within 30 min of the window
+  end (``upgrade.n_coverage``); after the first ``to`` decision there is an accepted capital
+  basis, every symbol conserved (``baseline`` only for a symbol with no earlier basis;
+  ``upgrade.basis_after``), and an acked submit that N started (``upgrade.acked_submit_after``).
+  Conservation, organic UNKNOWN / quarantine (no injected fault required) and the simulator's
+  own failures are read over the window as in the soak; the window length, the kill, the
+  activity floor and the feed counters are not (``--metrics`` is refused).
 
 Exit code, both modes: 0 when every criterion passes, 1 when any fails, 3 when none fails but
 one could not be read (an unreadable source is never read as zero), 2 for a refused run (not a
@@ -59,6 +63,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from bisect import bisect_left, bisect_right
 from collections.abc import Mapping, Sequence
@@ -103,6 +108,12 @@ UNKNOWN_FAULT_KINDS = frozenset({
     "unknown_5xx_error", "unknown_placed_lost", "unknown_not_placed_lost"})
 UNIDENTIFIED_VERSIONS = frozenset({"", "unidentified", "unknown"})
 HOUR_MS = 3_600_000
+# The upgrade test (amendment 2026-11-06): N-1 builds state for this long before the switch and
+# N runs this long after it, still deciding at the end.
+MIN_UPGRADE_HOURS_BEFORE = 2
+MIN_UPGRADE_HOURS_AFTER = 2
+MAX_UPGRADE_STALL_MINUTES = 30
+_SHA = re.compile(r"[0-9a-f]{40}")
 
 Status = Literal["PASS", "FAIL", "UNAVAILABLE"]
 
@@ -270,14 +281,38 @@ async def revisions_criterion(session: AsyncSession, scope: Scope, window: Windo
 
 @dataclass(frozen=True, slots=True)
 class Upgrade:
+    """The N-1 -> N pair: two different full source revisions (40 lowercase hex)."""
+
     from_revision: str
     to_revision: str
+
+    def __post_init__(self) -> None:
+        for revision in (self.from_revision, self.to_revision):
+            if not _SHA.fullmatch(revision):
+                raise ReportRefused("upgrade_revision_not_a_sha")
+        if self.from_revision == self.to_revision:
+            raise ReportRefused("upgrade_from_equals_to")
+
+
+async def _acked_submits(
+    session: AsyncSession, scope: Scope, *, after: int, until: int,
+    by: Literal["completed", "started"] = "completed", started_before: int | None = None,
+) -> int:
+    """Acked submits with ``<by>_at_ms > after`` and completed by ``until`` (inclusive)."""
+    column = "a.started_at_ms" if by == "started" else "t.completed_at_ms"
+    before = "" if started_before is None else " AND a.started_at_ms < :started_before"
+    return int(await _scalar(session, f"""
+        SELECT count(*) FROM transport_outcome_journal t
+        JOIN submission_attempt_journal a ON a.attempt_id = t.attempt_id
+        WHERE a.exchange_account_id = :account AND a.deployment_environment = :realm
+          AND t.kind = 'ack' AND {column} > :after AND t.completed_at_ms <= :until{before}""",
+        {**scope.params, "after": after, "until": until, "started_before": started_before}))
 
 
 async def upgrade_criteria(
     session: AsyncSession, scope: Scope, window: Window, upgrade: Upgrade,
 ) -> list[Criterion]:
-    """The N-1 -> N upgrade: the path, then a conserved basis and an acked submit on N."""
+    """The N-1 -> N upgrade: the path, N-1's state before it, N's coverage and work after it."""
     revisions = await _revisions(session, scope, window)
     unidentified = _unidentified(revisions)
     versions = [r["service_version"] for r in revisions]
@@ -290,43 +325,86 @@ async def upgrade_criteria(
         _verdict(ordered and not unidentified),
         {"from": upgrade.from_revision, "to": upgrade.to_revision, "revisions": revisions,
          "unidentified": unidentified})
-    to_first = next((r["first_ms"] for r in revisions
-                     if r["service_version"] == upgrade.to_revision), None)
-    if to_first is None:
-        reason = {"reason": f"no decision on {upgrade.to_revision}"}
-        return [path,
-                Criterion("upgrade.basis_after", "after the upgrade", "FAIL", reason),
-                Criterion("upgrade.acked_submit_after", "after the upgrade", "FAIL", reason)]
-    params = {**scope.params, "after": to_first, "t1": window.until_ms}
+    by_version = {r["service_version"]: r for r in revisions}
+    old, new = by_version.get(upgrade.from_revision), by_version.get(upgrade.to_revision)
+    ids = ("upgrade.n_minus_1_state", "upgrade.n_coverage", "upgrade.basis_after",
+           "upgrade.acked_submit_after")
+    if old is None or new is None:
+        reason = {"reason": "the window lacks a decision on from or on to"}
+        return [path, *(Criterion(i, "needs both revisions", "FAIL", reason) for i in ids)]
+    to_first, to_last = new["first_ms"], new["last_ms"]
+
+    # N-1 must have built real state before the upgrade: time, a submit, a basis.
+    old_hours = (max(old["last_ms"], to_first) - old["first_ms"]) / HOUR_MS
+    old_acked = await _acked_submits(session, scope, after=old["first_ms"] - 1,
+                                     until=window.until_ms, by="started",
+                                     started_before=to_first)
+    bases_before = await _scalar(session, """
+        SELECT count(*) FROM accepted_capital_basis
+        WHERE exchange_account_id = :account AND deployment_environment = :realm
+          AND accepted AND accepted_at_ms >= :t0 AND accepted_at_ms < :to_first""",
+        {**scope.params, "t0": window.since_ms, "to_first": to_first})
+    n_minus_1 = Criterion(
+        "upgrade.n_minus_1_state",
+        f">= {MIN_UPGRADE_HOURS_BEFORE} h on the old revision, >= 1 acked submit it started and "
+        ">= 1 accepted basis before the upgrade",
+        _verdict(old_hours >= MIN_UPGRADE_HOURS_BEFORE and old_acked > 0 and bases_before > 0),
+        {"hours": round(old_hours, 2), "acked_submits": old_acked,
+         "bases_before": bases_before})
+
+    # N must keep running to the end: a stalled N stops writing decisions.
+    new_hours = (window.until_ms - to_first) / HOUR_MS
+    stall_minutes = (window.until_ms - to_last) / 60_000
+    coverage = Criterion(
+        "upgrade.n_coverage",
+        f">= {MIN_UPGRADE_HOURS_AFTER} h on the new revision, its last decision within "
+        f"{MAX_UPGRADE_STALL_MINUTES} min of the window end",
+        _verdict(new_hours >= MIN_UPGRADE_HOURS_AFTER
+                 and stall_minutes <= MAX_UPGRADE_STALL_MINUTES),
+        {"hours": round(new_hours, 2), "minutes_since_last_decision": round(stall_minutes, 2)})
+
+    # After the upgrade every symbol is conserved; ``baseline`` only for a symbol N-1 never
+    # had a basis for (a new symbol's first basis), never to restart a known one.
     rows = await _rows(session, """
-        SELECT s.conservation, count(*) AS symbols
-        FROM accepted_capital_basis b
+        SELECT s.symbol, s.conservation, count(*) AS n FROM accepted_capital_basis b
         JOIN accepted_capital_basis_symbol s ON s.basis_id = b.id
         WHERE b.exchange_account_id = :account AND b.deployment_environment = :realm
           AND b.accepted AND b.accepted_at_ms > :after AND b.accepted_at_ms <= :t1
-        GROUP BY s.conservation""", params)
-    by_verdict = {r.conservation: r.symbols for r in rows}
-    bases = await _scalar(session, """
+        GROUP BY s.symbol, s.conservation""",
+        {**scope.params, "after": to_first, "t1": window.until_ms})
+    known = {r.symbol for r in await _rows(session, """
+        SELECT DISTINCT s.symbol FROM accepted_capital_basis b
+        JOIN accepted_capital_basis_symbol s ON s.basis_id = b.id
+        WHERE b.exchange_account_id = :account AND b.deployment_environment = :realm
+          AND b.accepted AND b.accepted_at_ms < :to_first""",
+        {**scope.params, "to_first": to_first})}
+    by_verdict: dict[str, int] = {}
+    bad: list[str] = []
+    for r in rows:
+        by_verdict[r.conservation] = by_verdict.get(r.conservation, 0) + r.n
+        if r.conservation == "conserved" or (r.conservation == "baseline"
+                                             and r.symbol not in known):
+            continue
+        bad.append(f"{r.symbol}:{r.conservation}")
+    bases_after = await _scalar(session, """
         SELECT count(*) FROM accepted_capital_basis
         WHERE exchange_account_id = :account AND deployment_environment = :realm
-          AND accepted AND accepted_at_ms > :after AND accepted_at_ms <= :t1""", params)
-    acked = await _scalar(session, """
-        SELECT count(*) FROM transport_outcome_journal t
-        JOIN submission_attempt_journal a ON a.attempt_id = t.attempt_id
-        WHERE a.exchange_account_id = :account AND a.deployment_environment = :realm
-          AND t.kind = 'ack' AND t.completed_at_ms > :after AND t.completed_at_ms <= :t1""",
-        params)
-    not_conserved = {k: v for k, v in by_verdict.items() if k != "conserved"}
-    return [
-        path,
-        Criterion("upgrade.basis_after",
-                  ">= 1 accepted basis after the first decision on the new revision, all conserved",
-                  _verdict(bases > 0 and bool(by_verdict) and not not_conserved),
-                  {"bases": bases, "by_verdict": by_verdict, "after_ms": to_first}),
-        Criterion("upgrade.acked_submit_after",
-                  ">= 1 acked submit after the first decision on the new revision",
-                  _verdict(acked > 0), {"acked_submits": acked, "after_ms": to_first}),
-    ]
+          AND accepted AND accepted_at_ms > :after AND accepted_at_ms <= :t1""",
+        {**scope.params, "after": to_first, "t1": window.until_ms})
+    basis_after = Criterion(
+        "upgrade.basis_after",
+        ">= 1 accepted basis after the upgrade; every symbol conserved (baseline only for a "
+        "symbol without an earlier basis)",
+        _verdict(bases_after > 0 and bool(rows) and not bad),
+        {"bases": bases_after, "by_verdict": by_verdict, "not_conserved": sorted(bad),
+         "after_ms": to_first})
+
+    acked = await _acked_submits(session, scope, after=to_first, until=window.until_ms,
+                                 by="started")
+    acked_after = Criterion(
+        "upgrade.acked_submit_after", ">= 1 acked submit started on the new revision",
+        _verdict(acked > 0), {"acked_submits": acked, "after_ms": to_first})
+    return [path, n_minus_1, coverage, basis_after, acked_after]
 
 
 async def kill_and_resume(session: AsyncSession, scope: Scope, window: Window) -> list[Criterion]:
@@ -371,12 +449,7 @@ async def kill_and_resume(session: AsyncSession, scope: Scope, window: Window) -
             f">= {MIN_TRADING_HOURS_AFTER_RESUME} h of trading after the resume",
             "FAIL", {"reason": "HALTED at the end of the window", "kill_id": last_kill.id})]
     resumed_ms = resume[0].created_at_ms
-    submits = await _scalar(session, """
-        SELECT count(*) FROM transport_outcome_journal t
-        JOIN submission_attempt_journal a ON a.attempt_id = t.attempt_id
-        WHERE a.exchange_account_id = :account AND a.deployment_environment = :realm
-          AND t.kind = 'ack' AND t.completed_at_ms > :resumed AND t.completed_at_ms <= :t1""",
-        {**scope.params, "resumed": resumed_ms, "t1": window.until_ms})
+    submits = await _acked_submits(session, scope, after=resumed_ms, until=window.until_ms)
     hours = (window.until_ms - resumed_ms) / HOUR_MS
     return [kill_criterion, Criterion(
         "amendment.trading_after_resume",
@@ -449,7 +522,7 @@ async def accepted_cycles(session: AsyncSession, scope: Scope, window: Window) -
 
 
 async def uncertainty(
-    session: AsyncSession, scope: Scope, window: Window,
+    session: AsyncSession, scope: Scope, window: Window, *, require_injected: bool = True,
 ) -> list[Criterion]:
     """Organic versus injected UNKNOWN / quarantine, and whether the injected ones closed."""
     attempts = [Attempt(r.attempt_id, r.started, r.completed, r.symbol, _decimal(r.amount),
@@ -509,12 +582,15 @@ async def uncertainty(
         closed_q = {r.quarantine_id for r in resolved_q if r.action != "manual"}
         manual += sum(1 for r in resolved_q if r.action == "manual")
         open_quarantines = len({q.quarantine_id for q in injected_quarantines} - closed_q)
-    # No injection at all, or none that became an UNKNOWN attempt, proves nothing: that is
-    # a failure of the criterion, not a vacuous pass.
+    # In the soak, no injection at all, or none that became an UNKNOWN attempt, proves
+    # nothing: that is a failure of the criterion, not a vacuous pass. The upgrade test runs
+    # without faults, so there any injected ones only have to close.
     auto_closed = Criterion(
         "d3.injected_unknown_auto_closed",
-        "every injected UNKNOWN (and its quarantine) closed automatically, at least one injected",
-        _verdict(bool(injected) and open_attempts == 0 and open_quarantines == 0 and manual == 0),
+        "every injected UNKNOWN (and its quarantine) closed automatically"
+        + (", at least one injected" if require_injected else ""),
+        _verdict((bool(injected) or not require_injected)
+                 and open_attempts == 0 and open_quarantines == 0 and manual == 0),
         {"injected_submit_faults": len(submit_injections), "injected_unknown": len(injected),
          "open_attempts": open_attempts, "open_quarantines": open_quarantines,
          "closed_manually": manual, "injections_by_kind": by_kind})
@@ -526,12 +602,9 @@ def text_in(sql: str) -> TextClause:
 
 
 async def activity_floor(session: AsyncSession, scope: Scope, window: Window) -> list[Criterion]:
-    acked = await _scalar(session, """
-        SELECT count(*) FROM transport_outcome_journal t
-        JOIN submission_attempt_journal a ON a.attempt_id = t.attempt_id
-        WHERE a.exchange_account_id = :account AND a.deployment_environment = :realm
-          AND t.kind = 'ack' AND t.completed_at_ms BETWEEN :t0 AND :t1""",
-        {**scope.params, "t0": window.since_ms, "t1": window.until_ms})
+    # BETWEEN since AND until on integer milliseconds
+    acked = await _acked_submits(session, scope, after=window.since_ms - 1,
+                                 until=window.until_ms)
     venue = {r.event_type: r.n for r in await _rows(session, """
         SELECT event_type, count(*) AS n FROM sim_venue_event
         WHERE exchange_account_id = :account_text AND deployment_environment = :realm
@@ -664,7 +737,7 @@ async def build_upgrade_report(
 ) -> list[Criterion]:
     criteria = await upgrade_criteria(session, scope, window, upgrade)
     criteria += await conservation(session, scope, window)
-    criteria += await uncertainty(session, scope, window)
+    criteria += await uncertainty(session, scope, window, require_injected=False)
     criteria += await simulator_failures(session, scope, window)
     return criteria
 
@@ -694,12 +767,11 @@ def render(criteria: Sequence[Criterion], *, event_count: int | None = None) -> 
 
 
 REVISION_CRITERIA = frozenset({"d3.revisions", "upgrade.path"})
-RESULT_SCHEMA_VERSION = 2  # 2: ``mode``; revisions read from d3.revisions / upgrade.path
+RESULT_SCHEMA_VERSION = 2  # 2: ``mode`` (and ``upgrade``); revisions read from d3.revisions / upgrade.path
 
 
 def result_document(
     criteria: Sequence[Criterion], *, account: UUID, window: Window, image_digest: str | None,
-    mode: Literal["soak", "upgrade"] = "soak",
 ) -> dict[str, Any]:
     """The final verdict as a file (the S1-7 authority switch read it before it switched).
 
@@ -715,10 +787,14 @@ def result_document(
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
     revisions = next((c.evidence.get("revisions") for c in criteria
                       if c.id in REVISION_CRITERIA), None) or []
+    path = next((c for c in criteria if c.id == "upgrade.path"), None)
     code = exit_code(criteria)
+    upgrade = ({} if path is None else
+               {"upgrade": {"from": path.evidence.get("from"), "to": path.evidence.get("to")}})
     return {
+        **upgrade,
         "schema": RESULT_SCHEMA_VERSION,
-        "mode": mode,
+        "mode": "soak" if path is None else "upgrade",
         "verdict": {0: "PASS", 1: "FAIL"}.get(code, "UNAVAILABLE"),
         "exit_code": code,
         "exchange_account_id": str(account),
@@ -783,8 +859,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if (args.upgrade_from is None) != (args.upgrade_to is None):
         parser.error("--upgrade-from and --upgrade-to go together")
-    upgrade = (Upgrade(args.upgrade_from, args.upgrade_to)
-               if args.upgrade_from is not None else None)
+    try:
+        upgrade = (Upgrade(args.upgrade_from, args.upgrade_to)
+                   if args.upgrade_from is not None else None)
+        if upgrade is not None and args.metrics:
+            raise ReportRefused("metrics_not_read_in_upgrade_mode")
+    except ReportRefused as exc:
+        print(json.dumps({"status": "refused", "reason": str(exc)}), file=sys.stderr)
+        return 2
     logging.disable(sys.maxsize)
     try:
         criteria, events = asyncio.run(run(
@@ -809,8 +891,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.result_out is not None:
         document = result_document(
             criteria, account=args.exchange_account_id, window=Window(args.since, args.until),
-            image_digest=os.environ.get("BFX_IMAGE_DIGEST"),
-            mode="soak" if upgrade is None else "upgrade")
+            image_digest=os.environ.get("BFX_IMAGE_DIGEST"))
         args.result_out.write_text(json.dumps(document, sort_keys=True, indent=2, default=str)
                                    + "\n")
     return exit_code(criteria)

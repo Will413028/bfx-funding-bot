@@ -86,7 +86,7 @@ class Soak:
     cancels: int = 12
     expired_credits: int = 1
     interest_days: Sequence[int] = (0, 1)
-    conservation: Sequence[tuple[str, int]] = (("baseline", T0 + 2 * HOUR),
+    conservation: Sequence[tuple[str, int] | tuple[str, int, str]] = (("baseline", T0 + 2 * HOUR),
                                                ("conserved", T0 + 3 * HOUR))
     internal_failures: Sequence[int] = ()  # times of durable internal-failure records
     unexpected_requests: Sequence[int] = ()
@@ -217,7 +217,8 @@ async def seed(conn: AsyncConnection, soak: Soak) -> None:
                 VALUES (:id, :q, :a, :r, 1, :at, :at, 0, true, true, true, true, true, true, true,
                     'd', 'd', true, CAST('{}' AS jsonb))""",
                      id=uuid4(), q=query_id, a=ACCOUNT, r=REALM, at=started + 1_000)
-    for verdict, at in soak.conservation:
+    for verdict, at, *named in soak.conservation:
+        symbol = named[0] if named else "fUST"
         basis = uuid4()
         await _x(conn, """
             INSERT INTO accepted_capital_basis (id, exchange_account_id, deployment_environment,
@@ -232,8 +233,8 @@ async def seed(conn: AsyncConnection, soak: Soak) -> None:
             INSERT INTO accepted_capital_basis_symbol (basis_id, symbol, available, offered,
                 credits, unattributed_credits, foreign_offers, conservation, lent_unexplained,
                 foreign_executed, fill_conflicts)
-            VALUES (:id, 'fUST', 10, 0, 0, 0, 0, :verdict, :lent, :foreign, :conflicts)""",
-                 id=basis, verdict=verdict, lent=lent, foreign=foreign, conflicts=conflicts)
+            VALUES (:id, :symbol, 10, 0, 0, 0, 0, :verdict, :lent, :foreign, :conflicts)""",
+                 id=basis, symbol=symbol, verdict=verdict, lent=lent, foreign=foreign, conflicts=conflicts)
     # submits: acked ones, then UNKNOWN ones (injected, or organic when asked)
     for index in range(soak.acked_submits):
         at = T0 + soak.acked_from + index * HOUR // 2
@@ -315,10 +316,12 @@ async def _report(engine, soak: Soak | None = None, *, window: report.Window = W
     return by_id
 
 
-UPGRADE = report.Upgrade("rev-a", "rev-b")
-# the deployed release until +5 h, the candidate after it; a conserved basis on each side
+A, B, C = "a" * 40, "b" * 40, "c" * 40
+UPGRADE = report.Upgrade(A, B)
+END = WINDOW.until_ms
+# N-1 from +1 h to +4 h (acked submits from +3 h, a basis at +3 h), N from +5 h to the end
 UPGRADED: dict[str, Any] = {
-    "revisions": (("rev-a", T0 + HOUR), ("rev-a", T0 + 4 * HOUR), ("rev-b", T0 + 5 * HOUR)),
+    "revisions": ((A, T0 + HOUR), (A, T0 + 4 * HOUR), (B, T0 + 5 * HOUR), (B, END - 60_000)),
     "conservation": (("baseline", T0 + 2 * HOUR), ("conserved", T0 + 3 * HOUR),
                      ("conserved", T0 + 6 * HOUR))}
 
@@ -768,44 +771,90 @@ async def test_an_upgrade_from_the_release_to_the_candidate_passes(engine) -> No
     by_id = await _upgrade_report(engine, Soak(**UPGRADED))
     assert _failing(by_id) == set(), _statuses(by_id)
     assert set(by_id) == {
-        "upgrade.path", "upgrade.basis_after", "upgrade.acked_submit_after",
-        "d3.unexplained_lending", "extra.foreign_lending", "d3.organic_quarantine_unknown",
-        "d3.injected_unknown_auto_closed", "extra.internal_failures",
-        "extra.unexpected_requests"}  # no window length, kill, floor or feed counters
+        "upgrade.path", "upgrade.n_minus_1_state", "upgrade.n_coverage", "upgrade.basis_after",
+        "upgrade.acked_submit_after", "d3.unexplained_lending", "extra.foreign_lending",
+        "d3.organic_quarantine_unknown", "d3.injected_unknown_auto_closed",
+        "extra.internal_failures", "extra.unexpected_requests"}  # no window, kill, floor, feed
     assert by_id["upgrade.basis_after"].evidence["bases"] == 1
     document = report.result_document(list(by_id.values()), account=ACCOUNT, window=WINDOW,
-                                      image_digest=None, mode="upgrade")
-    assert (document["mode"], document["last_service_version"]) == ("upgrade", "rev-b")
+                                      image_digest=None)
+    assert (document["mode"], document["last_service_version"], document["upgrade"]) == (
+        "upgrade", B, {"from": A, "to": B})
+
+
+async def test_the_upgrade_needs_no_injected_fault(engine) -> None:
+    by_id = await _upgrade_report(engine, Soak(**UPGRADED, injected_unknown=0,
+                                               record_injections=False))
+    assert _failing(by_id) == set(), _statuses(by_id)
+
+
+async def test_an_organic_unknown_still_fails_the_upgrade(engine) -> None:
+    by_id = await _upgrade_report(engine, Soak(**UPGRADED, injected_unknown=0, organic_unknown=1))
+    assert _failing(by_id) == {"d3.organic_quarantine_unknown"}, _statuses(by_id)
 
 
 @pytest.mark.parametrize(("revisions", "upgrade"), [
-    ((("rev-a", T0 + HOUR), ("rev-a", T0 + 12 * HOUR)), report.Upgrade("rev-a", "rev-a")),
-    ((("rev-a", T0 + HOUR), ("rev-a", T0 + 12 * HOUR)), UPGRADE),  # never upgraded
-    ((("rev-a", T0 + HOUR), ("rev-b", T0 + 5 * HOUR), ("rev-a", T0 + 8 * HOUR)), UPGRADE),
-    ((("rev-a", T0 + HOUR), ("rev-b", T0 + 5 * HOUR)), report.Upgrade("rev-b", "rev-a")),
-    ((("rev-a", T0 + HOUR), ("rev-b", T0 + 5 * HOUR), ("rev-c", T0 + 8 * HOUR)), UPGRADE),
-    ((("unidentified", T0 + HOUR), ("rev-b", T0 + 5 * HOUR)),
-     report.Upgrade("unidentified", "rev-b")),
-], ids=["same-revision", "single-revision", "a-b-a", "reversed", "extra-revision",
-        "unidentified"])
+    (((A, T0 + HOUR), (A, END)), UPGRADE),  # never upgraded
+    (((A, T0 + HOUR), (B, T0 + 5 * HOUR), (A, END)), UPGRADE),
+    (((A, T0 + HOUR), (B, T0 + 5 * HOUR), (B, END)), report.Upgrade(B, A)),
+    (((A, T0 + HOUR), (B, T0 + 5 * HOUR), (C, END)), UPGRADE),
+    ((("unidentified", T0 + HOUR), (B, T0 + 5 * HOUR), (B, END)), UPGRADE),
+], ids=["single-revision", "a-b-a", "reversed", "extra-revision", "unidentified"])
 async def test_the_upgrade_path_must_be_exactly_from_then_to(engine, revisions, upgrade) -> None:
     by_id = await _upgrade_report(engine, Soak(**{**UPGRADED, "revisions": revisions}), upgrade)
     assert by_id["upgrade.path"].status == "FAIL", by_id["upgrade.path"].evidence
 
 
+@pytest.mark.parametrize(("change", "failing"), [
+    # N-1 decided for only 1.5 h before N's first decision
+    ({"revisions": ((A, T0 + 3 * HOUR + HOUR // 2), (B, T0 + 5 * HOUR), (B, END))},
+     {"upgrade.n_minus_1_state"}),
+    # every acked submit starts after the switch
+    ({"acked_from": 5 * HOUR + 60_000}, {"upgrade.n_minus_1_state"}),
+    # no basis before the switch
+    ({"conservation": (("baseline", T0 + 6 * HOUR), ("conserved", T0 + 7 * HOUR))},
+     {"upgrade.n_minus_1_state"}),
+    # N stopped deciding an hour before the end
+    ({"revisions": ((A, T0 + HOUR), (A, T0 + 4 * HOUR), (B, T0 + 5 * HOUR), (B, END - HOUR))},
+     {"upgrade.n_coverage"}),
+], ids=["n-1-too-short", "n-1-no-submit", "n-1-no-basis", "n-stalled"])
+async def test_both_sides_of_the_upgrade_must_have_run(engine, change, failing) -> None:
+    by_id = await _upgrade_report(engine, Soak(**{**UPGRADED, **change}))
+    assert _failing(by_id) == failing, _statuses(by_id)
+
+
+async def test_n_must_run_two_hours_after_the_switch(engine) -> None:
+    by_id = await _upgrade_report(engine, Soak(**{**UPGRADED, "revisions": (
+        (A, T0 + HOUR), (A, T0 + 4 * HOUR), (B, END - HOUR), (B, END))}))
+    assert by_id["upgrade.n_coverage"].status == "FAIL"
+
+
 async def test_an_upgrade_with_nothing_after_it_fails(engine) -> None:
-    """The candidate's first decision at +20 h: no basis and no acked submit follow it."""
+    """N's first decision at +20 h: no basis and no acked submit follow it."""
     by_id = await _upgrade_report(engine, Soak(**{
-        **UPGRADED, "revisions": (("rev-a", T0 + HOUR), ("rev-b", T0 + 20 * HOUR))}))
+        **UPGRADED, "revisions": ((A, T0 + HOUR), (B, T0 + 20 * HOUR), (B, END))}))
     assert by_id["upgrade.path"].status == "PASS"
     assert _failing(by_id) == {"upgrade.basis_after", "upgrade.acked_submit_after"}, (
         _statuses(by_id))
 
 
-async def test_a_basis_after_the_upgrade_that_is_not_conserved_fails(engine) -> None:
+async def test_a_submit_n_minus_1_started_does_not_count_for_n(engine) -> None:
+    """The last acked submit starts 1 ms before the switch and completes after it."""
+    by_id = await _upgrade_report(engine, Soak(**{
+        **UPGRADED, "acked_submits": 1, "acked_from": 5 * HOUR - 1}))
+    assert by_id["upgrade.acked_submit_after"].evidence["acked_submits"] == 0
+    assert by_id["upgrade.acked_submit_after"].status == "FAIL"
+
+
+@pytest.mark.parametrize(("after", "ok"), [
+    (("conserved", T0 + 6 * HOUR), True),
+    (("baseline", T0 + 6 * HOUR, "fBTC"), True),  # a new symbol's first basis
+    (("baseline", T0 + 6 * HOUR), False),  # fUST had a basis before the upgrade
+    (("foreign_lending", T0 + 6 * HOUR), False),
+    (("unexplained_lending", T0 + 6 * HOUR), False),
+], ids=["conserved", "baseline-new-symbol", "baseline-known-symbol", "foreign", "unexplained"])
+async def test_what_a_basis_after_the_upgrade_may_say(engine, after, ok) -> None:
     by_id = await _upgrade_report(engine, Soak(**{**UPGRADED, "conservation": (
-        ("baseline", T0 + 2 * HOUR), ("conserved", T0 + 6 * HOUR),
-        ("foreign_lending", T0 + 7 * HOUR))}))
-    assert by_id["upgrade.basis_after"].status == "FAIL"
-    assert by_id["upgrade.basis_after"].evidence["by_verdict"] == {
-        "conserved": 1, "foreign_lending": 1}
+        ("baseline", T0 + 2 * HOUR), ("conserved", T0 + 3 * HOUR), after)}))
+    assert by_id["upgrade.basis_after"].status == ("PASS" if ok else "FAIL"), (
+        by_id["upgrade.basis_after"].evidence)
