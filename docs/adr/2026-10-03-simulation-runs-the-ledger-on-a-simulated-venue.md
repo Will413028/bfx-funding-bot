@@ -133,18 +133,20 @@ upgrade roachtests 與 nightly 長跑分開，Kubernetes 的 upgrade e2e 從上�
 這正好重現部署時 prod 發生的事（含 migration 套在既有資料上）。
 
 **Decision.**
-- 24 小時 soak 只驗候選版：拿掉「≥ 1 次部署重啟」，改為 `d3.revisions`：視窗內每個 revision 都可辨識（沒有 `unidentified`）。
+- 24 小時 soak 只驗候選版：拿掉「≥ 1 次部署重啟」，改為 `d3.revisions`：視窗內恰好一個 revision，且可辨識（沒有 `unidentified`）。
   kill、同 digest 的 boot-while-halted 重啟與其餘門檻不變。
 - 另跑**升級測試**（`sim_soak_report.py --upgrade-from <已部署 revision> --upgrade-to <候選 revision>`）：新的 `bfx_sim`
   先用 prod 正在跑的 release image 交易至少 2 小時累積資料，再照 runbook §7 用候選 image migrate 並換代，換代後再跑至少 2 小時。通過條件：
   `upgrade.path`（revision 依序恰好是 from、to，from 的最後一筆早於 to 的第一筆，A→B→A 不算）、
-  `upgrade.n_minus_1_state`（N-1 ≥ 2 h，有它送出的 ack submit 與升級前的 accepted basis）、
-  `upgrade.n_coverage`（N ≥ 2 h，最後一筆 decision 距視窗結束 ≤ 30 分鐘）、
-  `upgrade.basis_after`（升級後有 accepted basis，每個 symbol `conserved`；`baseline` 只限升級前沒有 basis 的 symbol）、
+  `upgrade.n_minus_1_state`（N-1 的 decision 跨 ≥ 2 h，有它送出的 ack submit 與它執行期間的 accepted basis）、
+  `upgrade.n_coverage`（N ≥ 2 h，升級後 accepted basis 間隔與最後一筆到視窗結束都 ≤ 10 分鐘）、
+  `upgrade.no_injection`（視窗內沒有任何注入的故障）、
+  `upgrade.basis_after`（升級後有 accepted basis，每個 symbol `conserved`；`baseline` 只限視窗內升級前沒有 basis 的 symbol 的第一筆）、
   `upgrade.acked_submit_after`（N 送出且 ack 的 submit ≥ 1），加上視窗內的 conservation、自然發生的 UNKNOWN／quarantine
-  （不需要注入故障）與模擬器失敗各條。
-- 結果檔 schema 2，帶 `mode`（`soak`／`upgrade`，升級模式另帶 `upgrade.from`／`upgrade.to`）；發版需要兩份都 PASS，
-  且升級結果的 `upgrade.to` 等於 soak 結果的 `last_service_version`、兩份的 `image_digest` 都是候選 image。
+  與模擬器失敗各條。
+- 結果檔 schema 2，帶 `mode`（`soak`／`upgrade`，升級模式另帶 `upgrade.from`／`upgrade.to`）；發版需要兩份都 PASS。
+  升級報告以 `--soak-result` 讀 soak 結果檔，`upgrade.pairs_with_soak` 只在 soak PASS、其 `last_service_version` 等於 `--upgrade-to`
+  且其 `image_digest` 等於這次的 `BFX_IMAGE_DIGEST` 時通過，所以升級 PASS 本身就證明兩份結果是同一個候選版。
 
 **Rationale.** 不選「接受 FAIL」：下一次發版碰到同一個矛盾。不選「再推 commit 換代」：發版 tree 與 soak 不同，且驗錯了版本對。
 不選「整個 24 小時從 N-1 開始、中途升級」：效果同本決定，但每次發版多 1.5 天，而長跑要驗的穩定性與換版無關。

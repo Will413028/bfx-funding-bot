@@ -3,6 +3,7 @@ tests/integration/test_sim_soak_report.py."""
 from __future__ import annotations
 
 import argparse
+import json
 from decimal import Decimal
 
 import pytest
@@ -98,19 +99,51 @@ def test_the_upgrade_revisions_go_together(
 
 
 SHA_A, SHA_B = "a" * 40, "b" * 40
+ARGS = ["--exchange-account-id", ACCOUNT, "--since", "2024-01-01T00:00:00Z",
+        "--until", "2024-01-05T00:00:00Z"]
 
 
-@pytest.mark.parametrize(("extra", "reason"), [
-    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_A], "upgrade_from_equals_to"),
-    (["--upgrade-from", "rev-a", "--upgrade-to", SHA_B], "upgrade_revision_not_a_sha"),
-    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_B.upper()], "upgrade_revision_not_a_sha"),
-    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_B, "--metrics", "gen1.metrics"],
+@pytest.fixture
+def soak_file(tmp_path):
+    def write(content: object) -> str:
+        path = tmp_path / "soak-result.json"
+        path.write_text(content if isinstance(content, str) else json.dumps(content))
+        return str(path)
+    return write
+
+
+GOOD = {"schema": 2, "mode": "soak", "verdict": "PASS", "last_service_version": SHA_B}
+
+
+@pytest.mark.parametrize(("extra", "soak", "reason"), [
+    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_A], GOOD, "upgrade_from_equals_to"),
+    (["--upgrade-from", "rev-a", "--upgrade-to", SHA_B], GOOD, "upgrade_revision_not_a_sha"),
+    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_B.upper()], GOOD,
+     "upgrade_revision_not_a_sha"),
+    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_B, "--metrics", "gen1.metrics"], GOOD,
      "metrics_not_read_in_upgrade_mode"),
+    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_B], None, "soak_result_required"),
+    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_B], "{not json", "soak_result_unreadable"),
+    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_B], {**GOOD, "schema": 1},
+     "soak_result_schema"),
+    (["--upgrade-from", SHA_A, "--upgrade-to", SHA_B], {**GOOD, "mode": "upgrade"},
+     "soak_result_not_a_soak"),
+    ([], GOOD, "soak_result_only_in_upgrade_mode"),
 ])
 def test_an_unusable_upgrade_is_refused_before_reading(
-        extra: list[str], reason: str, monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str], restore_logging: None) -> None:
+        extra: list[str], soak: object, reason: str, soak_file,
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        restore_logging: None) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:secret@127.0.0.1:1/none")
-    code = report.main(["--exchange-account-id", ACCOUNT, "--since", "2024-01-01T00:00:00Z",
-                        "--until", "2024-01-05T00:00:00Z", *extra])
+    with_soak = [] if soak is None else ["--soak-result", soak_file(soak)]
+    code = report.main([*ARGS, *extra, *with_soak])
     assert code == 2 and reason in capsys.readouterr().err
+
+
+def test_a_missing_soak_result_file_is_refused(
+        tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        restore_logging: None) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:secret@127.0.0.1:1/none")
+    code = report.main([*ARGS, "--upgrade-from", SHA_A, "--upgrade-to", SHA_B,
+                        "--soak-result", str(tmp_path / "absent.json")])
+    assert code == 2 and "soak_result_unreadable" in capsys.readouterr().err

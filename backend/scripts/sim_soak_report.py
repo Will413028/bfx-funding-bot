@@ -7,21 +7,22 @@ prints PASS / FAIL / UNAVAILABLE per criterion with the numbers behind it.
 
 Two modes:
 
-* soak (default): the 24 h bar. One revision may run the whole window; the criterion
-  ``d3.revisions`` only requires every revision in it to be identified. A restart onto a new
-  revision is the upgrade test's job, not the soak's.
-* upgrade (``--upgrade-from REV --upgrade-to REV``, both or neither; REV is the source
-  revision, ``execution_decisions.service_version``): the window must hold exactly the
-  deployed release ``from`` followed by the candidate ``to`` (``upgrade.path``; A->B->A, one
-  revision, an extra revision or the reverse order fail; both must be different 40-hex SHAs).
-  N-1 runs >= 2 h with an acked submit it started and an accepted basis before the switch
-  (``upgrade.n_minus_1_state``); N runs >= 2 h and still decides within 30 min of the window
-  end (``upgrade.n_coverage``); after the first ``to`` decision there is an accepted capital
-  basis, every symbol conserved (``baseline`` only for a symbol with no earlier basis;
-  ``upgrade.basis_after``), and an acked submit that N started (``upgrade.acked_submit_after``).
-  Conservation, organic UNKNOWN / quarantine (no injected fault required) and the simulator's
-  own failures are read over the window as in the soak; the window length, the kill, the
-  activity floor and the feed counters are not (``--metrics`` is refused).
+* soak (default): the 24 h bar on the candidate alone: ``d3.revisions`` requires exactly one
+  identified revision in the window. A restart onto a new revision is the upgrade test's job.
+* upgrade (``--upgrade-from REV --upgrade-to REV --soak-result PATH``; REV is the source
+  revision, ``execution_decisions.service_version``, two different 40-hex SHAs): the window
+  must hold exactly the deployed release ``from`` followed by the candidate ``to``
+  (``upgrade.path``; A->B->A, one revision, an extra revision or the reverse order fail).
+  ``upgrade.pairs_with_soak``: the soak result file PASSed on ``to`` with this run's
+  ``BFX_IMAGE_DIGEST``. ``upgrade.no_injection``: no fault was injected in the window.
+  ``upgrade.n_minus_1_state``: N-1's decisions span >= 2 h, with an acked submit it started
+  and an accepted basis while it ran. ``upgrade.n_coverage``: N runs >= 2 h to the window end
+  and accepts bases no more than 10 min apart (a stalled N fails). ``upgrade.basis_after``:
+  every symbol of every basis after the switch is conserved; ``baseline`` only as the first
+  basis of a symbol with no basis before it. ``upgrade.acked_submit_after``: an acked submit
+  that N started. Conservation, organic UNKNOWN / quarantine and the simulator's own failures
+  are read over the window as in the soak; the window length, the kill, the activity floor
+  and the feed counters are not (``--metrics`` is refused).
 
 Exit code, both modes: 0 when every criterion passes, 1 when any fails, 3 when none fails but
 one could not be read (an unreadable source is never read as zero), 2 for a refused run (not a
@@ -60,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import itertools
 import json
 import logging
 import os
@@ -112,7 +114,10 @@ HOUR_MS = 3_600_000
 # N runs this long after it, still deciding at the end.
 MIN_UPGRADE_HOURS_BEFORE = 2
 MIN_UPGRADE_HOURS_AFTER = 2
-MAX_UPGRADE_STALL_MINUTES = 30
+# Liveness of N: the ledger accepts a basis each periodic reconcile (BFX_RECONCILE_INTERVAL_S,
+# default 90 s, src/bfx_funding_bot/apps/bot.py; core/health.py alarms after 3 missed). A gap
+# of 10 min is ~6 missed cycles: a stalled N, not a slow one.
+MAX_UPGRADE_BASIS_GAP_MINUTES = 10
 _SHA = re.compile(r"[0-9a-f]{40}")
 
 Status = Literal["PASS", "FAIL", "UNAVAILABLE"]
@@ -274,8 +279,8 @@ async def revisions_criterion(session: AsyncSession, scope: Scope, window: Windo
     # An unidentified revision means the container ran without BFX_SOURCE_REVISION: what ran
     # cannot be named, which is a failure and never a free pass.
     return Criterion(
-        "d3.revisions", "every revision identified, at least one",
-        _verdict(bool(revisions) and not unidentified),
+        "d3.revisions", "exactly one revision in the window, identified",
+        _verdict(len(revisions) == 1 and not unidentified),
         {"revisions": revisions, "unidentified": unidentified})
 
 
@@ -285,6 +290,8 @@ class Upgrade:
 
     from_revision: str
     to_revision: str
+    soak_result: Mapping[str, Any] = field(default_factory=dict)  # the paired soak's result file
+    image_digest: str | None = None  # BFX_IMAGE_DIGEST of this run
 
     def __post_init__(self) -> None:
         for revision in (self.from_revision, self.to_revision):
@@ -325,78 +332,99 @@ async def upgrade_criteria(
         _verdict(ordered and not unidentified),
         {"from": upgrade.from_revision, "to": upgrade.to_revision, "revisions": revisions,
          "unidentified": unidentified})
+    # The pair gates a release only when the soak passed on the same revision and image.
+    soak = upgrade.soak_result
+    pairs = Criterion(
+        "upgrade.pairs_with_soak",
+        "the soak result PASSed on the same revision (to) and the same image digest",
+        _verdict(soak.get("verdict") == "PASS"
+                 and soak.get("last_service_version") == upgrade.to_revision
+                 and bool(upgrade.image_digest)
+                 and soak.get("image_digest") == upgrade.image_digest),
+        {"soak_verdict": soak.get("verdict"),
+         "soak_last_service_version": soak.get("last_service_version"),
+         "soak_image_digest": soak.get("image_digest"), "image_digest": upgrade.image_digest})
+    # The upgrade runs without faults: an injection would explain away what it should show.
+    injected = len(await _injections(session, scope, window.since_ms, window.until_ms))
+    no_injection = Criterion("upgrade.no_injection", "== 0 fault_injected in the window",
+                             _verdict(injected == 0), {"fault_injected": injected})
+    head = [path, pairs, no_injection]
     by_version = {r["service_version"]: r for r in revisions}
     old, new = by_version.get(upgrade.from_revision), by_version.get(upgrade.to_revision)
     ids = ("upgrade.n_minus_1_state", "upgrade.n_coverage", "upgrade.basis_after",
            "upgrade.acked_submit_after")
     if old is None or new is None:
         reason = {"reason": "the window lacks a decision on from or on to"}
-        return [path, *(Criterion(i, "needs both revisions", "FAIL", reason) for i in ids)]
-    to_first, to_last = new["first_ms"], new["last_ms"]
+        return [*head, *(Criterion(i, "needs both revisions", "FAIL", reason) for i in ids)]
+    to_first = new["first_ms"]
 
-    # N-1 must have built real state before the upgrade: time, a submit, a basis.
-    old_hours = (max(old["last_ms"], to_first) - old["first_ms"]) / HOUR_MS
+    # N-1 must have built real state before the upgrade, on its own decisions: time, a submit
+    # it started, a basis while it ran.
+    old_hours = (old["last_ms"] - old["first_ms"]) / HOUR_MS
     old_acked = await _acked_submits(session, scope, after=old["first_ms"] - 1,
                                      until=window.until_ms, by="started",
-                                     started_before=to_first)
+                                     started_before=old["last_ms"] + 1)
     bases_before = await _scalar(session, """
         SELECT count(*) FROM accepted_capital_basis
         WHERE exchange_account_id = :account AND deployment_environment = :realm
-          AND accepted AND accepted_at_ms >= :t0 AND accepted_at_ms < :to_first""",
-        {**scope.params, "t0": window.since_ms, "to_first": to_first})
+          AND accepted AND accepted_at_ms >= :from_first AND accepted_at_ms < :to_first""",
+        {**scope.params, "from_first": old["first_ms"], "to_first": to_first})
     n_minus_1 = Criterion(
         "upgrade.n_minus_1_state",
-        f">= {MIN_UPGRADE_HOURS_BEFORE} h on the old revision, >= 1 acked submit it started and "
-        ">= 1 accepted basis before the upgrade",
+        f">= {MIN_UPGRADE_HOURS_BEFORE} h of decisions on the old revision, >= 1 acked submit "
+        "it started and >= 1 accepted basis while it ran",
         _verdict(old_hours >= MIN_UPGRADE_HOURS_BEFORE and old_acked > 0 and bases_before > 0),
         {"hours": round(old_hours, 2), "acked_submits": old_acked,
          "bases_before": bases_before})
 
-    # N must keep running to the end: a stalled N stops writing decisions.
-    new_hours = (window.until_ms - to_first) / HOUR_MS
-    stall_minutes = (window.until_ms - to_last) / 60_000
-    coverage = Criterion(
-        "upgrade.n_coverage",
-        f">= {MIN_UPGRADE_HOURS_AFTER} h on the new revision, its last decision within "
-        f"{MAX_UPGRADE_STALL_MINUTES} min of the window end",
-        _verdict(new_hours >= MIN_UPGRADE_HOURS_AFTER
-                 and stall_minutes <= MAX_UPGRADE_STALL_MINUTES),
-        {"hours": round(new_hours, 2), "minutes_since_last_decision": round(stall_minutes, 2)})
-
-    # After the upgrade every symbol is conserved; ``baseline`` only for a symbol N-1 never
-    # had a basis for (a new symbol's first basis), never to restart a known one.
+    # One row per accepted basis symbol after the upgrade, oldest first.
     rows = await _rows(session, """
-        SELECT s.symbol, s.conservation, count(*) AS n FROM accepted_capital_basis b
+        SELECT b.id, b.accepted_at_ms, s.symbol, s.conservation FROM accepted_capital_basis b
         JOIN accepted_capital_basis_symbol s ON s.basis_id = b.id
         WHERE b.exchange_account_id = :account AND b.deployment_environment = :realm
           AND b.accepted AND b.accepted_at_ms > :after AND b.accepted_at_ms <= :t1
-        GROUP BY s.symbol, s.conservation""",
+        ORDER BY b.accepted_at_ms, b.id""",
         {**scope.params, "after": to_first, "t1": window.until_ms})
+    basis_times = sorted({(r.accepted_at_ms, r.id) for r in rows})
+
+    # N must keep the ledger alive to the end: a stalled N stops accepting bases.
+    new_hours = (window.until_ms - to_first) / HOUR_MS
+    edges = [to_first, *(t for t, _ in basis_times), window.until_ms]
+    gap_minutes = max(b - a for a, b in itertools.pairwise(edges)) / 60_000
+    coverage = Criterion(
+        "upgrade.n_coverage",
+        f">= {MIN_UPGRADE_HOURS_AFTER} h on the new revision, accepted bases no more than "
+        f"{MAX_UPGRADE_BASIS_GAP_MINUTES} min apart to the window end",
+        _verdict(new_hours >= MIN_UPGRADE_HOURS_AFTER and bool(basis_times)
+                 and gap_minutes <= MAX_UPGRADE_BASIS_GAP_MINUTES),
+        {"hours": round(new_hours, 2), "bases": len(basis_times),
+         "max_gap_minutes": round(gap_minutes, 2)})
+
+    # After the upgrade every symbol is conserved; ``baseline`` only as the first basis of a
+    # symbol that had none in the window before the upgrade, never to restart a known one.
     known = {r.symbol for r in await _rows(session, """
         SELECT DISTINCT s.symbol FROM accepted_capital_basis b
         JOIN accepted_capital_basis_symbol s ON s.basis_id = b.id
         WHERE b.exchange_account_id = :account AND b.deployment_environment = :realm
-          AND b.accepted AND b.accepted_at_ms < :to_first""",
-        {**scope.params, "to_first": to_first})}
+          AND b.accepted AND b.accepted_at_ms >= :t0 AND b.accepted_at_ms < :to_first""",
+        {**scope.params, "t0": window.since_ms, "to_first": to_first})}
     by_verdict: dict[str, int] = {}
     bad: list[str] = []
+    seen: set[str] = set()
     for r in rows:
-        by_verdict[r.conservation] = by_verdict.get(r.conservation, 0) + r.n
-        if r.conservation == "conserved" or (r.conservation == "baseline"
-                                             and r.symbol not in known):
+        by_verdict[r.conservation] = by_verdict.get(r.conservation, 0) + 1
+        first = r.symbol not in seen
+        seen.add(r.symbol)
+        if r.conservation == "conserved" or (
+                r.conservation == "baseline" and first and r.symbol not in known):
             continue
-        bad.append(f"{r.symbol}:{r.conservation}")
-    bases_after = await _scalar(session, """
-        SELECT count(*) FROM accepted_capital_basis
-        WHERE exchange_account_id = :account AND deployment_environment = :realm
-          AND accepted AND accepted_at_ms > :after AND accepted_at_ms <= :t1""",
-        {**scope.params, "after": to_first, "t1": window.until_ms})
+        bad.append(f"{r.symbol}:{r.conservation}@{r.accepted_at_ms}")
     basis_after = Criterion(
         "upgrade.basis_after",
-        ">= 1 accepted basis after the upgrade; every symbol conserved (baseline only for a "
-        "symbol without an earlier basis)",
-        _verdict(bases_after > 0 and bool(rows) and not bad),
-        {"bases": bases_after, "by_verdict": by_verdict, "not_conserved": sorted(bad),
+        ">= 1 accepted basis after the upgrade; every symbol conserved (baseline only as the "
+        "first basis of a symbol without an earlier one)",
+        _verdict(bool(rows) and not bad),
+        {"bases": len(basis_times), "by_verdict": by_verdict, "not_conserved": bad,
          "after_ms": to_first})
 
     acked = await _acked_submits(session, scope, after=to_first, until=window.until_ms,
@@ -404,7 +432,7 @@ async def upgrade_criteria(
     acked_after = Criterion(
         "upgrade.acked_submit_after", ">= 1 acked submit started on the new revision",
         _verdict(acked > 0), {"acked_submits": acked, "after_ms": to_first})
-    return [path, n_minus_1, coverage, basis_after, acked_after]
+    return [*head, n_minus_1, coverage, basis_after, acked_after]
 
 
 async def kill_and_resume(session: AsyncSession, scope: Scope, window: Window) -> list[Criterion]:
@@ -841,6 +869,21 @@ def _instant(raw: str) -> int:
     return int(moment.timestamp() * 1000)
 
 
+def _read_soak_result(path: Path | None) -> Mapping[str, Any]:
+    """The paired soak's result file: schema 2, mode soak; anything else is a refusal."""
+    if path is None:
+        raise ReportRefused("soak_result_required_in_upgrade_mode")
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, ValueError, UnicodeDecodeError):
+        raise ReportRefused("soak_result_unreadable") from None
+    if not isinstance(document, dict) or document.get("schema") != RESULT_SCHEMA_VERSION:
+        raise ReportRefused("soak_result_schema")
+    if document.get("mode") != "soak":
+        raise ReportRefused("soak_result_not_a_soak")
+    return document
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -856,14 +899,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="upgrade test: the deployed release's source revision (N-1)")
     parser.add_argument("--upgrade-to", metavar="REV",
                         help="upgrade test: the candidate's source revision (N)")
+    parser.add_argument("--soak-result", type=Path, metavar="PATH",
+                        help="upgrade test: the paired soak's result file (required there)")
     args = parser.parse_args(argv)
     if (args.upgrade_from is None) != (args.upgrade_to is None):
         parser.error("--upgrade-from and --upgrade-to go together")
     try:
-        upgrade = (Upgrade(args.upgrade_from, args.upgrade_to)
-                   if args.upgrade_from is not None else None)
-        if upgrade is not None and args.metrics:
-            raise ReportRefused("metrics_not_read_in_upgrade_mode")
+        upgrade = None
+        if args.upgrade_from is not None:
+            upgrade = Upgrade(args.upgrade_from, args.upgrade_to,
+                              soak_result=_read_soak_result(args.soak_result),
+                              image_digest=os.environ.get("BFX_IMAGE_DIGEST") or None)
+            if args.metrics:
+                raise ReportRefused("metrics_not_read_in_upgrade_mode")
+        elif args.soak_result is not None:
+            raise ReportRefused("soak_result_only_in_upgrade_mode")
     except ReportRefused as exc:
         print(json.dumps({"status": "refused", "reason": str(exc)}), file=sys.stderr)
         return 2

@@ -475,21 +475,25 @@ docker run --rm --name bfx-sim-report --pull=never --read-only \
    ALTER DATABASE bfx_sim RENAME TO bfx_sim_<日期>_soak;
    ```
 2. **N-1 起跑**：`FROM=$(docker inspect bfx-bot --format '{{.Config.Image}}')`（prod 正在跑的 release digest），
-   照 §4.1（`shadow.env` 取自它的 revision）、§4.2（用 N-1 image migrate）、§5 啟動。不設 `BFX_SIM_FAULTS`（升級測試不需要注入故障）。N-1 至少跑 2 小時（`upgrade.n_minus_1_state`），期間要有 N-1 送出且 ack 的 submit 與 accepted basis。
+   照 §4.1（`shadow.env` 取自它的 revision）、§4.2（用 N-1 image migrate）、§5 啟動。不設 `BFX_SIM_FAULTS`：升級測試的視窗內不能有任何注入的故障（`upgrade.no_injection`）。N-1 的 decision 至少跨 2 小時（`upgrade.n_minus_1_state`），期間要有 N-1 送出且 ack 的 submit 與 accepted basis。
 3. **升級**：照 §7 用候選 image（發版前 soak 的 soak image）存檔、停止、migrate、換代。
-4. **N 至少再跑 2 小時**，一路跑到報告前（`upgrade.n_coverage`：N 最後一筆 decision 距視窗結束不超過 30 分鐘，N 卡住就 FAIL），期間要有 accepted basis 與 N 送出且 ack 的 submit。
-5. **報告**（用候選 image 跑；`<from>`／`<to>` 是兩個 image 的 `org.opencontainers.image.revision`）：
+4. **N 至少再跑 2 小時**，一路跑到報告前（`upgrade.n_coverage`：升級後 accepted basis 之間、以及最後一筆到視窗結束，間隔都不超過 10 分鐘，N 卡住就 FAIL），期間要有 accepted basis 與 N 送出且 ack 的 submit。
+5. **報告**（用候選 image 跑；`<from>`／`<to>` 是兩個 image 的 `org.opencontainers.image.revision`；`<soak R>` 是 §9 最終判定
+   那次 soak 的報告目錄，唯讀掛進來）：
    ```bash
-   ... -e BFX_IMAGE_DIGEST=<候選 image digest> ... -m scripts.sim_soak_report \
+   ... -e BFX_IMAGE_DIGEST=<候選 image digest> \
+     -v <soak R>/result/soak-result.json:/soak/soak-result.json:ro -v "$R/result":/result \
+     ... -m scripts.sim_soak_report \
      --exchange-account-id "$SIM_ACCOUNT" --since <N-1 起跑> --until <現在> \
-     --upgrade-from <from> --upgrade-to <to> --result-out /result/upgrade-result.json
+     --upgrade-from <from> --upgrade-to <to> --soak-result /soak/soak-result.json \
+     --result-out /result/upgrade-result.json
    ```
-   `<from>`／`<to>` 必須是不同的 40 碼小寫 SHA，否則 exit 2；升級模式不收 `--metrics`（exit 2）。
-   通過條件：`upgrade.path`（revision 依序恰好是 from、to，換回舊版不算）、`upgrade.n_minus_1_state`（N-1 ≥ 2 h、有它送出的 ack submit
-   與升級前的 accepted basis）、`upgrade.n_coverage`（N ≥ 2 h 且沒有卡住）、`upgrade.basis_after`（每個 symbol `conserved`；
-   `baseline` 只允許升級前沒有 basis 的新 symbol）、`upgrade.acked_submit_after`（N 送出的 submit），以及 conservation、
-   自然發生的 UNKNOWN／quarantine（不需要注入的故障；若有注入的則要自動結案）與模擬器失敗各條。§6 的 abort rule 照樣適用。
-   **配對檢查**：`upgrade-result.json` 的 `upgrade.to` 必須等於 soak 結果檔的 `last_service_version`，且兩份的 `image_digest`
-   都是候選 image 的 digest；不一致時這兩份結果不能放行這次發版。
+   `<from>`／`<to>` 必須是不同的 40 碼小寫 SHA；`--soak-result` 必填，讀不到、schema 不是 2 或 `mode` 不是 `soak` 都 exit 2；
+   升級模式不收 `--metrics`（exit 2）。
+   通過條件：`upgrade.pairs_with_soak`（soak 結果 PASS、它的 `last_service_version` 等於 `<to>`、它的 `image_digest` 等於
+   這次的 `BFX_IMAGE_DIGEST`，兩者皆非空；所以這兩份結果一定是同一個候選版）、`upgrade.no_injection`、`upgrade.path`（revision 依序恰好是 from、to，換回舊版不算）、`upgrade.n_minus_1_state`（N-1 的 decision 跨 ≥ 2 h、有它送出的 ack submit
+   與它執行期間的 accepted basis）、`upgrade.n_coverage`（N ≥ 2 h，basis 間隔 ≤ 10 分鐘）、`upgrade.basis_after`（每個 symbol `conserved`；
+   `baseline` 只允許作為視窗內升級前沒有 basis 的新 symbol 的第一筆）、`upgrade.acked_submit_after`（N 送出的 submit），以及 conservation、
+   自然發生的 UNKNOWN／quarantine 與模擬器失敗各條。§6 的 abort rule 照樣適用。
 6. 結束照 §10 拆除。
 
