@@ -130,3 +130,28 @@ def test_a_nested_begin_end_inside_an_if_branch_keeps_the_else() -> None:
 def test_an_elsif_directly_inside_a_begin_block_is_rejected() -> None:
     with pytest.raises(ValueError, match="ELSIF outside an IF"):
         column_references("BEGIN ELSIF x THEN NULL; END;", ["t"])
+
+
+@pytest.mark.parametrize("kw", ["begin", "end", "case", "if", "else", "elsif", "then"])
+def test_a_field_named_like_a_keyword_is_a_column_not_a_keyword(kw: str) -> None:
+    body = (f"BEGIN IF TG_TABLE_NAME = 'a' THEN PERFORM NEW . {kw}; "
+            "ELSE PERFORM NEW.y; END IF; END;")
+    assert column_references(body, ["a", "b"]) == {"a": {kw}, "b": {"y"}}
+
+
+@pytest.mark.parametrize("ddl", ["DROP TABLE IF EXISTS tmp",
+                                 "CREATE TEMP TABLE IF NOT EXISTS tmp (id int)",
+                                 "ALTER TABLE IF EXISTS tmp ADD COLUMN z int"])
+def test_if_exists_in_ddl_is_not_an_if_statement(ddl: str) -> None:
+    body = (f"BEGIN {ddl}; IF TG_TABLE_NAME = 'a' THEN PERFORM NEW.x; "
+            "ELSE PERFORM NEW.y; END IF; END;")
+    assert column_references(body, ["a", "b"]) == {"a": {"x"}, "b": {"y"}}
+
+
+def test_an_if_at_statement_start_after_each_opener_is_still_an_if() -> None:
+    body = ("BEGIN IF TG_TABLE_NAME = 'a' THEN "
+            "IF NEW.q THEN PERFORM NEW.x; ELSE PERFORM NEW.z; END IF; PERFORM NEW.w; "
+            "ELSE IF TG_TABLE_NAME = 'b' THEN PERFORM NEW.y; END IF; END IF; "
+            "LOOP IF TG_TABLE_NAME = 'a' THEN PERFORM NEW.l; END IF; EXIT; END LOOP; END;")
+    assert column_references(body, ["a", "b", "c"]) == {
+        "a": {"q", "x", "z", "w", "l"}, "b": {"y"}, "c": set()}

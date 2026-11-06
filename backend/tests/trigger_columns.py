@@ -29,6 +29,11 @@ _PIN = re.compile(
     r"TG_TABLE_NAME\s*(?:=\s*'#(\d+)'|IN\s*\(\s*('#\d+'(?:\s*,\s*'#\d+')*)\s*\))",
     re.IGNORECASE)
 _LITERAL_MARK = re.compile(r"'#(\d+)'")
+# What may precede an IF that opens an IF statement: a ``;`` or a keyword that opens
+# a statement list (a body itself starts with DECLARE, BEGIN or a label). Anything else
+# (``DROP TABLE IF EXISTS``, ``CREATE ... IF NOT EXISTS``) makes the IF part of SQL.
+_STATEMENT_START = re.compile(
+    r"(?:;|\b(?:BEGIN|THEN|ELSE|LOOP))\s*$", re.IGNORECASE)
 
 
 def _lex(src: str) -> tuple[str, list[str]]:
@@ -174,7 +179,9 @@ def column_references(prosrc: str, tables: Iterable[str],
     stack: list[list[set[str]]] = []
     scope = set(attached)
     pos = 0
-    tokens = list(_KEYWORD.finditer(code))
+    # A keyword right after ``.`` is a field name (``NEW.begin``, ``NEW . end``).
+    tokens = [m for m in _KEYWORD.finditer(code)
+              if not code[:m.start()].rstrip().endswith(".")]
     k = 0
 
     def collect(upto: int) -> None:
@@ -188,6 +195,8 @@ def column_references(prosrc: str, tables: Iterable[str],
         collect(tok.start())
         pos = tok.end()
         k += 1
+        if word == "IF" and not _STATEMENT_START.search(code, 0, tok.start()):
+            continue
         if word in {"IF", "ELSIF", "ELSEIF"}:
             then = next((j for j in range(k, len(tokens))
                          if tokens[j].group(1).upper() == "THEN"), None)
