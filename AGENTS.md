@@ -25,6 +25,8 @@ Bitfinex 自動放貸 SaaS 平台。
 | Database | 自托 Postgres 18（`bfx-postgres`，volume `bfx_pgdata`；roles：owner、`bfx_bot`、`bfx_webapi`、`bfx_operator`、`bfx_research`；模擬 soak 另有 `bfx_sim`） |
 
 - 備份與 DR 見 `docs/runbooks/offsite-dr.md`，定期與背景工作（含每週報告）見 `docs/runbooks/operations.md` §8；systemd unit 在 `deploy/vm/systemd/`，實際啟用與健康狀態須查目標環境。
+- 在 prod stack 用 `docker compose run bot` 跑長時間的一次性任務時必加 `--label autoheal=false`，否則約 5 分鐘後被 autoheal 砍掉。
+- `pg_stat_activity` 裡長期 idle in transaction、持 advisory lock 的連線是 `core/writer_lock.py` 的 writer lock，不是連線洩漏。
 
 ## 指令執行目錄
 
