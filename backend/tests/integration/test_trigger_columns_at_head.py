@@ -30,8 +30,10 @@ _TRIGGERS = text("""
        AND n.nspname NOT IN ('pg_catalog', 'information_schema')
 """)
 _COLUMNS = text("""
-    SELECT a.attname FROM pg_attribute a
-     WHERE a.attrelid = CAST(:tbl AS regclass) AND a.attnum > 0 AND NOT a.attisdropped
+    SELECT a.attrelid::regclass::text AS tbl, a.attname
+      FROM pg_attribute a
+     WHERE a.attrelid IN (SELECT tgrelid FROM pg_trigger WHERE NOT tgisinternal)
+       AND a.attnum > 0 AND NOT a.attisdropped
 """)
 
 
@@ -40,22 +42,26 @@ def test_every_trigger_reads_only_columns_its_table_has(pg_head_url: str) -> Non
     try:
         with engine.connect() as conn:
             rows = conn.execute(_TRIGGERS).all()
-            bodies: dict[str, str] = {}
-            # TG_TABLE_NAME is the bare relname; key tables by it, keep the qualified name to report.
-            attached: dict[str, dict[str, set[str]]] = defaultdict(dict)
-            qualified: dict[str, str] = {}
-            for function, prosrc, tbl, relname in rows:
-                bodies[function] = prosrc
-                cols = {r[0] for r in conn.execute(_COLUMNS, {"tbl": tbl})}
-                attached[function][relname] = cols
-                qualified[relname] = tbl
+            columns: dict[str, set[str]] = defaultdict(set)
+            for tbl, attname in conn.execute(_COLUMNS):
+                columns[tbl].add(attname)
     finally:
         engine.dispose()
 
+    bodies: dict[str, str] = {}
+    # Key tables by the schema-qualified name (two schemas may share a relname);
+    # TG_TABLE_NAME compares against the bare relname, passed alongside.
+    attached: dict[str, dict[str, set[str]]] = defaultdict(dict)
+    relnames: dict[str, str] = {}
+    for function, prosrc, tbl, relname in rows:
+        bodies[function] = prosrc
+        attached[function][tbl] = columns[tbl]
+        relnames[tbl] = relname
+
     assert rows, "no plpgsql triggers found at head: the catalog query is wrong"
     broken = {
-        f"{function} on {qualified[t]}": sorted(cols)
+        f"{function} on {t}": sorted(cols)
         for function, tables in attached.items()
-        for t, cols in missing_columns(bodies[function], tables).items()
+        for t, cols in missing_columns(bodies[function], tables, relnames).items()
     }
     assert not broken, f"trigger functions read columns their tables do not have: {broken}"

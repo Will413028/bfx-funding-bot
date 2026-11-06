@@ -6,6 +6,8 @@ the CASE frame each turn one of these tests red.
 """
 from __future__ import annotations
 
+import pytest
+
 from tests.trigger_columns import column_references, missing_columns
 
 _SINGLE = """
@@ -86,3 +88,45 @@ def test_a_case_else_inside_a_pinned_branch_stays_in_that_branch() -> None:
 def test_quoted_and_lowercase_references() -> None:
     body = 'BEGIN PERFORM new.Lower, OLD."MixedCase", NEW . spaced; END;'
     assert column_references(body, ["t"]) == {"t": {"lower", "MixedCase", "spaced"}}
+
+
+def test_a_negated_pin_does_not_narrow() -> None:
+    body = """BEGIN IF NOT (TG_TABLE_NAME = 'a') THEN PERFORM NEW.x;
+              ELSE PERFORM NEW.y; END IF; END;"""
+    assert column_references(body, ["a", "b"]) == {"a": {"x", "y"}, "b": {"x", "y"}}
+
+
+def test_a_pin_nested_under_and_or_does_not_narrow() -> None:
+    body = "BEGIN IF y AND (z OR TG_TABLE_NAME = 'a') THEN PERFORM NEW.x; END IF; END;"
+    assert column_references(body, ["a", "b"]) == {"a": {"x"}, "b": {"x"}}
+
+
+def test_a_nested_begin_end_inside_case_does_not_close_the_case() -> None:
+    body = """BEGIN
+      IF TG_TABLE_NAME = 'a' THEN
+        CASE WHEN true THEN BEGIN NULL; END;
+        ELSE PERFORM NEW.z;
+        END CASE;
+      END IF;
+    END;"""
+    assert column_references(body, ["a", "b"]) == {"a": {"z"}, "b": set()}
+
+
+def test_pins_match_the_relname_of_a_schema_qualified_key() -> None:
+    body = "BEGIN IF TG_TABLE_NAME = 'a' THEN PERFORM NEW.x; END IF; END;"
+    tables: dict[str, set[str]] = {"s1.a": set(), "s2.b": set()}
+    assert missing_columns(body, tables, {"s1.a": "a", "s2.b": "b"}) == {"s1.a": {"x"}}
+
+
+def test_a_nested_begin_end_inside_an_if_branch_keeps_the_else() -> None:
+    body = """BEGIN
+      IF TG_TABLE_NAME = 'a' THEN BEGIN NULL; END;
+      ELSE PERFORM NEW.y;
+      END IF;
+    END;"""
+    assert column_references(body, ["a", "b"]) == {"a": set(), "b": {"y"}}
+
+
+def test_an_elsif_directly_inside_a_begin_block_is_rejected() -> None:
+    with pytest.raises(ValueError, match="ELSIF outside an IF"):
+        column_references("BEGIN ELSIF x THEN NULL; END;", ["t"])

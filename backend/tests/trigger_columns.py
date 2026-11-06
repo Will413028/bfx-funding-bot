@@ -6,7 +6,8 @@ is only resolved when it runs, so the trigger breaks on its first fire in produc
 every ``NEW``/``OLD`` field the body names that the table does not have.
 
 A function shared by several tables branches on ``TG_TABLE_NAME``; a reference inside
-``IF TG_TABLE_NAME = 'x'`` (or ``IN ('x', 'y')``) is checked against those tables only,
+``IF TG_TABLE_NAME = 'x'`` (or ``IN ('x', 'y')``) is checked against those tables only
+(only when the pin is a plain top-level term; ``NOT`` or a nested pin narrows nothing),
 and a later ``ELSIF``/``ELSE`` against the attached tables its earlier siblings did not
 pin. Comments and string literals (including dynamic ``EXECUTE`` text) are not read.
 """
@@ -18,9 +19,15 @@ from collections.abc import Iterable, Mapping
 _IDENT = r'(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)'
 _FIELD_REF = re.compile(rf"\b(NEW|OLD)\s*\.\s*({_IDENT})", re.IGNORECASE)
 _KEYWORD = re.compile(
-    r"\b(END\s+IF|END\s+CASE|END\s+LOOP|END|CASE|ELSIF|ELSEIF|ELSE|IF|THEN)\b", re.IGNORECASE)
-_CASE: list[set[str]] = []  # stack marker: a CASE frame, whose ELSE is not an IF's
-_PIN = re.compile(r"\bTG_TABLE_NAME\s*(?:=\s*'#(\d+)'|IN\s*\(([^()]*)\))", re.IGNORECASE)
+    r"\b(END\s+IF|END\s+CASE|END\s+LOOP|END|BEGIN|CASE|ELSIF|ELSEIF|ELSE|IF|THEN)\b",
+    re.IGNORECASE)
+# Stack markers: a CASE frame (its ELSE is not an IF's) and a BEGIN block (its bare END
+# is not a CASE expression's). Distinct objects, compared by identity.
+_CASE: list[set[str]] = []
+_BEGIN: list[set[str]] = []
+_PIN = re.compile(
+    r"TG_TABLE_NAME\s*(?:=\s*'#(\d+)'|IN\s*\(\s*('#\d+'(?:\s*,\s*'#\d+')*)\s*\))",
+    re.IGNORECASE)
 _LITERAL_MARK = re.compile(r"'#(\d+)'")
 
 
@@ -93,9 +100,10 @@ def _column(ident: str) -> str:
     return ident.lower()
 
 
-def _split_or(cond: str) -> list[str]:
+def _split_top(cond: str, op: str) -> list[str]:
+    """``cond`` split on ``op`` (``OR`` / ``AND``) outside parentheses."""
     parts, depth, start = [], 0, 0
-    for m in re.finditer(r"\(|\)|\bOR\b", cond, re.IGNORECASE):
+    for m in re.finditer(rf"\(|\)|\b{op}\b", cond, re.IGNORECASE):
         tok = m.group(0)
         if tok == "(":
             depth += 1
@@ -124,24 +132,42 @@ def _strip_parens(cond: str) -> str:
 def _pinned(cond: str, literals: list[str]) -> set[str] | None:
     """Tables ``cond`` can only be true for, or None when it does not pin ``TG_TABLE_NAME``.
 
-    Every top-level ``OR`` branch must pin a name; ``x OR TG_TABLE_NAME = 'a'`` pins nothing.
+    Conservative: ``cond`` must be an ``OR`` of branches, each branch an ``AND`` with at
+    least one term that is exactly ``TG_TABLE_NAME = '..'`` or ``TG_TABLE_NAME IN (..)``.
+    Anything else (``x OR TG_TABLE_NAME = 'a'``, ``NOT (TG_TABLE_NAME = 'a')``,
+    ``y AND (z OR TG_TABLE_NAME = 'a')``) pins nothing, so every attached table is checked.
     """
     names: set[str] = set()
-    for part in _split_or(_strip_parens(cond)):
-        pins = list(_PIN.finditer(part))
-        if not pins:
-            return None
-        for p in pins:
+    for part in _split_top(_strip_parens(cond), "OR"):
+        branch: set[str] | None = None
+        for term in _split_top(_strip_parens(part), "AND"):
+            p = _PIN.fullmatch(_strip_parens(term))
+            if p is None:
+                continue
             if p.group(1) is not None:
-                names.add(literals[int(p.group(1))])
+                pinned = {literals[int(p.group(1))]}
             else:
-                names.update(literals[int(k)] for k in _LITERAL_MARK.findall(p.group(2)))
+                pinned = {literals[int(k)] for k in _LITERAL_MARK.findall(p.group(2))}
+            branch = pinned if branch is None else branch & pinned
+        if branch is None:
+            return None
+        names |= branch
     return names
 
 
-def column_references(prosrc: str, tables: Iterable[str]) -> dict[str, set[str]]:
-    """For each attached table, the ``NEW``/``OLD`` columns the body reads on it."""
+def _is_if(frame: list[set[str]]) -> bool:
+    return frame is not _CASE and frame is not _BEGIN
+
+
+def column_references(prosrc: str, tables: Iterable[str],
+                      relnames: Mapping[str, str] | None = None) -> dict[str, set[str]]:
+    """For each attached table, the ``NEW``/``OLD`` columns the body reads on it.
+
+    ``relnames`` maps a table key (e.g. a schema-qualified name) to the bare relname
+    ``TG_TABLE_NAME`` compares against; a key missing from it is its own relname.
+    """
     attached = set(tables)
+    relname = dict(relnames or {})
     code, literals = _lex(prosrc)
     refs: dict[str, set[str]] = {t: set() for t in attached}
     # Each open IF: [scope of the whole IF, tables its earlier branches pinned]; or a CASE.
@@ -169,7 +195,7 @@ def column_references(prosrc: str, tables: Iterable[str]) -> dict[str, set[str]]
                 break
             if word == "IF":
                 stack.append([set(scope), set()])
-            elif not stack or stack[-1] is _CASE:
+            elif not stack or not _is_if(stack[-1]):
                 raise ValueError(f"ELSIF outside an IF at offset {tok.start()}")
             frame = stack[-1]
             available = frame[0] - frame[1]
@@ -177,23 +203,28 @@ def column_references(prosrc: str, tables: Iterable[str]) -> dict[str, set[str]]
             collect(tokens[then].start())
             pins = _pinned(code[pos:tokens[then].start()], literals)
             if pins is not None:
-                scope = available & pins
-                frame[1] |= pins
+                hit = {t for t in attached if relname.get(t, t) in pins}
+                scope = available & hit
+                frame[1] |= hit
             pos = tokens[then].end()
             k = then + 1
         elif word == "CASE":
             stack.append(_CASE)
-        elif word in {"END", "END CASE"} and stack and stack[-1] is _CASE:
+        elif word == "BEGIN":
+            stack.append(_BEGIN)
+        elif stack and ((word == "END" and stack[-1] is _BEGIN)
+                        or (word in {"END", "END CASE"} and stack[-1] is _CASE)):
             stack.pop()
-        elif word == "ELSE" and stack and stack[-1] is not _CASE:
+        elif word == "ELSE" and stack and _is_if(stack[-1]):
             scope = stack[-1][0] - stack[-1][1]
-        elif word == "END IF" and stack and stack[-1] is not _CASE:
+        elif word == "END IF" and stack and _is_if(stack[-1]):
             scope = stack.pop()[0]
     collect(len(code))
     return refs
 
 
-def missing_columns(prosrc: str, table_columns: Mapping[str, set[str]]) -> dict[str, set[str]]:
+def missing_columns(prosrc: str, table_columns: Mapping[str, set[str]],
+                    relnames: Mapping[str, str] | None = None) -> dict[str, set[str]]:
     """Per attached table, the referenced ``NEW``/``OLD`` columns it does not have."""
-    refs = column_references(prosrc, table_columns)
+    refs = column_references(prosrc, table_columns, relnames)
     return {t: cols - table_columns[t] for t, cols in refs.items() if cols - table_columns[t]}
