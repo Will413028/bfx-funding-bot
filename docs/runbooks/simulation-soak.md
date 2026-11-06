@@ -358,8 +358,8 @@ docker rm bfx-sim
    - 停機超過 `retention_ms` 時，無法補回的區段不會被悄悄截掉：計入 `source="trades_beyond_retention"` 並寫 ERROR log，
      報告的 `extra.trades_backfill_gaps` 為 FAIL（成交偏悲觀，那段範圍等於沒有 trades）。
 
-視窗內不要求換版（ADR 2026-11-06 修訂）：soak 報告只要求每一代的 revision 可辨識（`d3.revisions`）。
-換版是否安全由 §11 的升級測試驗證；這一節的步驟也是升級測試的換代步驟。
+soak 視窗只能有一個 revision（ADR 2026-11-06 修訂，`d3.revisions`）：視窗中途換到新 revision 等於 soak 重新計時，
+從新 revision 開一個新視窗。換版是否安全由 §11 的升級測試驗證；這一節的步驟也是升級測試的換代步驟。
 
 ## 8. Kill 與恢復（決定 B）：測試 harness，不是產品流程
 
