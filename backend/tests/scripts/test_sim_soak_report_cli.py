@@ -14,8 +14,7 @@ ACCOUNT = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 
 def test_the_bar_and_the_floor_are_the_numbers_fixed_before_the_soak() -> None:
     """ADR 2026-10-03 D3 and its 2026-10-05 amendment; a change here is an ADR amendment."""
-    assert (report.MIN_WINDOW_HOURS, report.MIN_DEPLOY_RESTARTS, report.MIN_OPERATOR_KILLS) == (
-        24, 1, 1)
+    assert (report.MIN_WINDOW_HOURS, report.MIN_OPERATOR_KILLS) == (24, 1)
     assert (report.KILL_WINDOW_START_HOUR, report.KILL_WINDOW_END_HOUR) == (6, 10)
     assert Decimal("0.99") == report.MIN_ACCEPTED_CYCLE_RATIO
     assert report.MIN_TRADING_HOURS_AFTER_RESUME == 8
@@ -60,7 +59,7 @@ def test_exit_codes_rank_fail_over_unavailable_over_pass() -> None:
 def test_the_result_file_names_the_verdict_and_the_last_generation() -> None:
     from uuid import UUID
     revisions = [{"service_version": "a" * 40}, {"service_version": "b" * 40}]
-    criteria = [report.Criterion("d3.deploy_restarts", "r", "PASS", {"revisions": revisions}),
+    criteria = [report.Criterion("d3.revisions", "r", "PASS", {"revisions": revisions}),
                 report.Criterion("d3.window_hours", "r", "PASS")]
     window = report.Window(1_000, 2_000)
     document = report.result_document(criteria, account=UUID(ACCOUNT), window=window,
@@ -69,8 +68,29 @@ def test_the_result_file_names_the_verdict_and_the_last_generation() -> None:
             document["window"]) == ("PASS", "b" * 40, "sha256:" + "3" * 64,
                                     {"since_ms": 1_000, "until_ms": 2_000})
     assert len(document["report_sha256"]) == 64
+    assert (document["schema"], document["mode"]) == (2, "soak")
     failed = report.result_document(
         [*criteria, report.Criterion("floor.fills", "r", "FAIL")], account=UUID(ACCOUNT),
         window=window, image_digest=None)
     assert (failed["verdict"], failed["image_digest"]) == ("FAIL", None)
     assert failed["report_sha256"] != document["report_sha256"]
+
+
+def test_the_upgrade_result_reads_its_revisions_from_the_path() -> None:
+    from uuid import UUID
+    path = report.Criterion("upgrade.path", "r", "PASS", {"revisions": [
+        {"service_version": "a" * 40}, {"service_version": "b" * 40}]})
+    document = report.result_document([path], account=UUID(ACCOUNT),
+                                      window=report.Window(1_000, 2_000), image_digest=None,
+                                      mode="upgrade")
+    assert (document["mode"], document["last_service_version"]) == ("upgrade", "b" * 40)
+
+
+@pytest.mark.parametrize("extra", [["--upgrade-from", "a"], ["--upgrade-to", "b"]])
+def test_the_upgrade_revisions_go_together(
+        extra: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exited:
+        report.main(["--exchange-account-id", ACCOUNT, "--since", "2024-01-01T00:00:00Z",
+                     "--until", "2024-01-05T00:00:00Z", *extra])
+    assert exited.value.code == 2
+    assert "go together" in capsys.readouterr().err

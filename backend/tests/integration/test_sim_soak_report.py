@@ -315,6 +315,26 @@ async def _report(engine, soak: Soak | None = None, *, window: report.Window = W
     return by_id
 
 
+UPGRADE = report.Upgrade("rev-a", "rev-b")
+# the deployed release until +5 h, the candidate after it; a conserved basis on each side
+UPGRADED: dict[str, Any] = {
+    "revisions": (("rev-a", T0 + HOUR), ("rev-a", T0 + 4 * HOUR), ("rev-b", T0 + 5 * HOUR)),
+    "conservation": (("baseline", T0 + 2 * HOUR), ("conserved", T0 + 3 * HOUR),
+                     ("conserved", T0 + 6 * HOUR))}
+
+
+async def _upgrade_report(engine, soak: Soak, upgrade: report.Upgrade = UPGRADE,
+                          ) -> dict[str, report.Criterion]:
+    async with engine.begin() as conn:
+        await seed(conn, soak)
+    async with async_sessionmaker(engine)() as session:
+        criteria = await report.build_upgrade_report(
+            session, report.Scope(ACCOUNT, REALM), WINDOW, upgrade)
+    by_id = {c.id: c for c in criteria}
+    assert len(by_id) == len(criteria)
+    return by_id
+
+
 def _statuses(by_id: dict[str, report.Criterion]) -> dict[str, str]:
     return {k: c.status for k, c in by_id.items()}
 
@@ -327,7 +347,8 @@ async def test_a_soak_that_meets_the_bar_and_the_floor_passes_everything(engine,
     by_id = await _report(engine, tmp_path=tmp_path)
     assert _failing(by_id) == set(), _statuses(by_id)
     assert report.exit_code(list(by_id.values())) == 0
-    assert by_id["d3.deploy_restarts"].evidence["deploy_restarts"] == 1
+    assert [r["service_version"] for r in by_id["d3.revisions"].evidence["revisions"]] == [
+        "rev-a", "rev-b"]
     assert by_id["d3.accepted_cycle_ratio"].evidence["ratio"] == "0.9900"
     assert by_id["d3.injected_unknown_auto_closed"].evidence["injected_unknown"] == 5
     assert by_id["d3.organic_quarantine_unknown"].evidence["organic_unknown"] == 0
@@ -495,19 +516,25 @@ def test_a_window_of_exactly_the_minimum_passes() -> None:
     assert report.window_criterion(exact).status == "PASS"
 
 
-async def test_restarts_need_new_revisions_and_an_identified_one(engine, tmp_path) -> None:
-    none = await _report(engine, Soak(revisions=(("rev-a", T0 + HOUR), ("rev-a", T0 + 12 * HOUR))),
-                         tmp_path=tmp_path)  # restarted, but on the same revision
-    assert none["d3.deploy_restarts"].status == "FAIL"
-    assert none["d3.deploy_restarts"].evidence["deploy_restarts"] == 0
+async def test_one_identified_revision_is_enough_for_the_soak(engine, tmp_path) -> None:
+    """A restart onto a new revision is the upgrade test's criterion, not the soak's."""
+    by_id = await _report(engine, Soak(revisions=(("rev-a", T0 + HOUR), ("rev-a", T0 + 12 * HOUR))),
+                          tmp_path=tmp_path)
+    assert by_id["d3.revisions"].status == "PASS"
+    assert _failing(by_id) == set(), _statuses(by_id)
 
 
-async def test_an_unidentified_revision_fails_the_restart_count(engine, tmp_path) -> None:
+async def test_no_decision_at_all_fails_the_revisions(engine, tmp_path) -> None:
+    by_id = await _report(engine, Soak(revisions=()), tmp_path=tmp_path)
+    assert by_id["d3.revisions"].status == "FAIL"
+
+
+async def test_an_unidentified_revision_fails_the_revisions(engine, tmp_path) -> None:
     by_id = await _report(engine, Soak(revisions=(
         ("rev-a", T0 + HOUR), ("unidentified", T0 + 12 * HOUR), ("rev-c", T0 + 20 * HOUR))),
         tmp_path=tmp_path)
-    restarts = by_id["d3.deploy_restarts"]
-    assert restarts.status == "FAIL" and restarts.evidence["unidentified"] == ["unidentified"]
+    revisions = by_id["d3.revisions"]
+    assert revisions.status == "FAIL" and revisions.evidence["unidentified"] == ["unidentified"]
 
 
 @pytest.mark.parametrize(("change", "failing"), [
@@ -732,3 +759,53 @@ def test_every_field_of_the_content_must_agree(change: dict[str, Any]) -> None:
 def test_decimals_compare_by_value_not_by_spelling() -> None:
     attempt = _att(1_000, 1_500, amount="150.0")
     assert report.match_injected_attempts([attempt], [_inj(1_200, amount="150")])
+
+
+# -- the upgrade test --------------------------------------------------------------------
+
+
+async def test_an_upgrade_from_the_release_to_the_candidate_passes(engine) -> None:
+    by_id = await _upgrade_report(engine, Soak(**UPGRADED))
+    assert _failing(by_id) == set(), _statuses(by_id)
+    assert set(by_id) == {
+        "upgrade.path", "upgrade.basis_after", "upgrade.acked_submit_after",
+        "d3.unexplained_lending", "extra.foreign_lending", "d3.organic_quarantine_unknown",
+        "d3.injected_unknown_auto_closed", "extra.internal_failures",
+        "extra.unexpected_requests"}  # no window length, kill, floor or feed counters
+    assert by_id["upgrade.basis_after"].evidence["bases"] == 1
+    document = report.result_document(list(by_id.values()), account=ACCOUNT, window=WINDOW,
+                                      image_digest=None, mode="upgrade")
+    assert (document["mode"], document["last_service_version"]) == ("upgrade", "rev-b")
+
+
+@pytest.mark.parametrize(("revisions", "upgrade"), [
+    ((("rev-a", T0 + HOUR), ("rev-a", T0 + 12 * HOUR)), report.Upgrade("rev-a", "rev-a")),
+    ((("rev-a", T0 + HOUR), ("rev-a", T0 + 12 * HOUR)), UPGRADE),  # never upgraded
+    ((("rev-a", T0 + HOUR), ("rev-b", T0 + 5 * HOUR), ("rev-a", T0 + 8 * HOUR)), UPGRADE),
+    ((("rev-a", T0 + HOUR), ("rev-b", T0 + 5 * HOUR)), report.Upgrade("rev-b", "rev-a")),
+    ((("rev-a", T0 + HOUR), ("rev-b", T0 + 5 * HOUR), ("rev-c", T0 + 8 * HOUR)), UPGRADE),
+    ((("unidentified", T0 + HOUR), ("rev-b", T0 + 5 * HOUR)),
+     report.Upgrade("unidentified", "rev-b")),
+], ids=["same-revision", "single-revision", "a-b-a", "reversed", "extra-revision",
+        "unidentified"])
+async def test_the_upgrade_path_must_be_exactly_from_then_to(engine, revisions, upgrade) -> None:
+    by_id = await _upgrade_report(engine, Soak(**{**UPGRADED, "revisions": revisions}), upgrade)
+    assert by_id["upgrade.path"].status == "FAIL", by_id["upgrade.path"].evidence
+
+
+async def test_an_upgrade_with_nothing_after_it_fails(engine) -> None:
+    """The candidate's first decision at +20 h: no basis and no acked submit follow it."""
+    by_id = await _upgrade_report(engine, Soak(**{
+        **UPGRADED, "revisions": (("rev-a", T0 + HOUR), ("rev-b", T0 + 20 * HOUR))}))
+    assert by_id["upgrade.path"].status == "PASS"
+    assert _failing(by_id) == {"upgrade.basis_after", "upgrade.acked_submit_after"}, (
+        _statuses(by_id))
+
+
+async def test_a_basis_after_the_upgrade_that_is_not_conserved_fails(engine) -> None:
+    by_id = await _upgrade_report(engine, Soak(**{**UPGRADED, "conservation": (
+        ("baseline", T0 + 2 * HOUR), ("conserved", T0 + 6 * HOUR),
+        ("foreign_lending", T0 + 7 * HOUR))}))
+    assert by_id["upgrade.basis_after"].status == "FAIL"
+    assert by_id["upgrade.basis_after"].evidence["by_verdict"] == {
+        "conserved": 1, "foreign_lending": 1}

@@ -1,14 +1,32 @@
-"""Soak report of the simulated venue: the ADR D3 bar plus the decision-C activity floor.
+"""Soak report of the simulated venue: the ADR D3 bar plus the decision-C activity floor, or
+the N-1 -> N upgrade test.
 
 Reads the simulation database (read-only; run it as a one-shot of the deployed image with
 ``sim.env``, docs/runbooks/simulation-soak.md) over the window ``--since`` .. ``--until`` and
-prints PASS / FAIL / UNAVAILABLE per criterion with the numbers behind it. Exit code 0 when
-every criterion passes, 1 when any fails, 3 when none fails but one could not be read (an
-unreadable source is never read as zero), 2 for a refused run (not a ``shadow`` database,
-unusable arguments).
+prints PASS / FAIL / UNAVAILABLE per criterion with the numbers behind it.
+
+Two modes:
+
+* soak (default): the 24 h bar. One revision may run the whole window; the criterion
+  ``d3.revisions`` only requires every revision in it to be identified. A restart onto a new
+  revision is the upgrade test's job, not the soak's.
+* upgrade (``--upgrade-from REV --upgrade-to REV``, both or neither; REV is the source
+  revision, ``execution_decisions.service_version``): the window must hold exactly the
+  deployed release ``from`` followed by the candidate ``to`` (``upgrade.path``; A->B->A, one
+  revision, an extra revision or the reverse order fail), and after the first ``to`` decision
+  at least one accepted capital basis, all of it conserved (``upgrade.basis_after``), and at
+  least one acked submit (``upgrade.acked_submit_after``). Conservation, uncertainty and the
+  simulator's own failures are read over the window as in the soak; the window length, the
+  kill, the activity floor and the feed counters are not (``--metrics`` is ignored).
+
+Exit code, both modes: 0 when every criterion passes, 1 when any fails, 3 when none fails but
+one could not be read (an unreadable source is never read as zero), 2 for a refused run (not a
+``shadow`` database, unusable arguments).
 
     python -m scripts.sim_soak_report --exchange-account-id UUID \\
       --since 2026-10-05T00:00:00Z --until 2026-10-08T00:00:00Z --metrics gen1.metrics
+    python -m scripts.sim_soak_report --exchange-account-id UUID \\
+      --since ... --until ... --upgrade-from <deployed rev> --upgrade-to <candidate rev>
 
 ``DATABASE_URL`` must be supplied explicitly (this command does not load .env).
 
@@ -62,7 +80,6 @@ from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_fac
 # 2026-10-04 amendment. Fixed before the soak starts; a change is an ADR amendment.
 # 2026-10-05 amendment (Will): the bar is 24 h, the switch is no longer gated on decision C.
 MIN_WINDOW_HOURS = 24
-MIN_DEPLOY_RESTARTS = 1
 MIN_OPERATOR_KILLS = 1
 KILL_WINDOW_START_HOUR = 6  # the kill lands this many hours after the window opens ...
 KILL_WINDOW_END_HOUR = 10  # ... and no later than this, so >= 8 h of trading can follow it
@@ -220,7 +237,8 @@ def window_criterion(window: Window) -> Criterion:
         {"hours": round(window.hours, 2), "since_ms": window.since_ms, "until_ms": window.until_ms})
 
 
-async def deploy_restarts(session: AsyncSession, scope: Scope, window: Window) -> Criterion:
+async def _revisions(session: AsyncSession, scope: Scope, window: Window) -> list[dict[str, Any]]:
+    """The window's revisions, ordered by their first decision."""
     rows = await _rows(session, """
         SELECT service_version, min(occurred_at_ms) AS first_ms, max(occurred_at_ms) AS last_ms,
                count(*) AS decisions
@@ -229,19 +247,86 @@ async def deploy_restarts(session: AsyncSession, scope: Scope, window: Window) -
           AND occurred_at_ms BETWEEN :t0 AND :t1
         GROUP BY service_version ORDER BY min(occurred_at_ms)""",
         {**scope.params, "t0": window.since_ms, "t1": window.until_ms})
-    revisions = [
+    return [
         {"service_version": r.service_version, "first_ms": r.first_ms, "last_ms": r.last_ms,
          "decisions": r.decisions} for r in rows]
-    unidentified = [r["service_version"] for r in revisions
-                    if r["service_version"].strip().lower() in UNIDENTIFIED_VERSIONS]
-    restarts = max(len(revisions) - 1, 0)
-    # An unidentified revision means the container ran without BFX_SOURCE_REVISION: the
-    # restart count cannot be trusted, which is a failure and never a free pass.
-    ok = restarts >= MIN_DEPLOY_RESTARTS and not unidentified
+
+
+def _unidentified(revisions: Sequence[Mapping[str, Any]]) -> list[str]:
+    return [r["service_version"] for r in revisions
+            if r["service_version"].strip().lower() in UNIDENTIFIED_VERSIONS]
+
+
+async def revisions_criterion(session: AsyncSession, scope: Scope, window: Window) -> Criterion:
+    revisions = await _revisions(session, scope, window)
+    unidentified = _unidentified(revisions)
+    # An unidentified revision means the container ran without BFX_SOURCE_REVISION: what ran
+    # cannot be named, which is a failure and never a free pass.
     return Criterion(
-        "d3.deploy_restarts", f">= {MIN_DEPLOY_RESTARTS} on a new revision, none unidentified",
-        _verdict(ok),
-        {"deploy_restarts": restarts, "revisions": revisions, "unidentified": unidentified})
+        "d3.revisions", "every revision identified, at least one",
+        _verdict(bool(revisions) and not unidentified),
+        {"revisions": revisions, "unidentified": unidentified})
+
+
+@dataclass(frozen=True, slots=True)
+class Upgrade:
+    from_revision: str
+    to_revision: str
+
+
+async def upgrade_criteria(
+    session: AsyncSession, scope: Scope, window: Window, upgrade: Upgrade,
+) -> list[Criterion]:
+    """The N-1 -> N upgrade: the path, then a conserved basis and an acked submit on N."""
+    revisions = await _revisions(session, scope, window)
+    unidentified = _unidentified(revisions)
+    versions = [r["service_version"] for r in revisions]
+    # Grouped by revision, so A->B->A shows as [A, B]: the old one must stop before the new
+    # one starts.
+    ordered = (versions == [upgrade.from_revision, upgrade.to_revision]
+               and revisions[0]["last_ms"] < revisions[1]["first_ms"])
+    path = Criterion(
+        "upgrade.path", f"exactly {upgrade.from_revision} then {upgrade.to_revision}, no return",
+        _verdict(ordered and not unidentified),
+        {"from": upgrade.from_revision, "to": upgrade.to_revision, "revisions": revisions,
+         "unidentified": unidentified})
+    to_first = next((r["first_ms"] for r in revisions
+                     if r["service_version"] == upgrade.to_revision), None)
+    if to_first is None:
+        reason = {"reason": f"no decision on {upgrade.to_revision}"}
+        return [path,
+                Criterion("upgrade.basis_after", "after the upgrade", "FAIL", reason),
+                Criterion("upgrade.acked_submit_after", "after the upgrade", "FAIL", reason)]
+    params = {**scope.params, "after": to_first, "t1": window.until_ms}
+    rows = await _rows(session, """
+        SELECT s.conservation, count(*) AS symbols
+        FROM accepted_capital_basis b
+        JOIN accepted_capital_basis_symbol s ON s.basis_id = b.id
+        WHERE b.exchange_account_id = :account AND b.deployment_environment = :realm
+          AND b.accepted AND b.accepted_at_ms > :after AND b.accepted_at_ms <= :t1
+        GROUP BY s.conservation""", params)
+    by_verdict = {r.conservation: r.symbols for r in rows}
+    bases = await _scalar(session, """
+        SELECT count(*) FROM accepted_capital_basis
+        WHERE exchange_account_id = :account AND deployment_environment = :realm
+          AND accepted AND accepted_at_ms > :after AND accepted_at_ms <= :t1""", params)
+    acked = await _scalar(session, """
+        SELECT count(*) FROM transport_outcome_journal t
+        JOIN submission_attempt_journal a ON a.attempt_id = t.attempt_id
+        WHERE a.exchange_account_id = :account AND a.deployment_environment = :realm
+          AND t.kind = 'ack' AND t.completed_at_ms > :after AND t.completed_at_ms <= :t1""",
+        params)
+    not_conserved = {k: v for k, v in by_verdict.items() if k != "conserved"}
+    return [
+        path,
+        Criterion("upgrade.basis_after",
+                  ">= 1 accepted basis after the first decision on the new revision, all conserved",
+                  _verdict(bases > 0 and bool(by_verdict) and not not_conserved),
+                  {"bases": bases, "by_verdict": by_verdict, "after_ms": to_first}),
+        Criterion("upgrade.acked_submit_after",
+                  ">= 1 acked submit after the first decision on the new revision",
+                  _verdict(acked > 0), {"acked_submits": acked, "after_ms": to_first}),
+    ]
 
 
 async def kill_and_resume(session: AsyncSession, scope: Scope, window: Window) -> list[Criterion]:
@@ -563,7 +648,7 @@ async def build_report(
     session: AsyncSession, scope: Scope, window: Window, *,
     metrics_files: Sequence[Path] = (),
 ) -> list[Criterion]:
-    criteria = [window_criterion(window), await deploy_restarts(session, scope, window)]
+    criteria = [window_criterion(window), await revisions_criterion(session, scope, window)]
     criteria += await kill_and_resume(session, scope, window)
     criteria += await conservation(session, scope, window)
     criteria.append(await accepted_cycles(session, scope, window))
@@ -571,6 +656,16 @@ async def build_report(
     criteria += await activity_floor(session, scope, window)
     criteria += await simulator_failures(session, scope, window)
     criteria += feed_counters(metrics_files)
+    return criteria
+
+
+async def build_upgrade_report(
+    session: AsyncSession, scope: Scope, window: Window, upgrade: Upgrade,
+) -> list[Criterion]:
+    criteria = await upgrade_criteria(session, scope, window, upgrade)
+    criteria += await conservation(session, scope, window)
+    criteria += await uncertainty(session, scope, window)
+    criteria += await simulator_failures(session, scope, window)
     return criteria
 
 
@@ -598,16 +693,18 @@ def render(criteria: Sequence[Criterion], *, event_count: int | None = None) -> 
     return "\n".join(lines)
 
 
-RESULT_SCHEMA_VERSION = 1
+REVISION_CRITERIA = frozenset({"d3.revisions", "upgrade.path"})
+RESULT_SCHEMA_VERSION = 2  # 2: ``mode``; revisions read from d3.revisions / upgrade.path
 
 
 def result_document(
     criteria: Sequence[Criterion], *, account: UUID, window: Window, image_digest: str | None,
+    mode: Literal["soak", "upgrade"] = "soak",
 ) -> dict[str, Any]:
     """The final verdict as a file (the S1-7 authority switch read it before it switched).
 
     ``last_service_version`` is the source revision of the window's last generation (the
-    deploy-restart criterion's newest revision); ``image_digest`` is the digest the report ran
+    newest revision of ``d3.revisions`` or ``upgrade.path``); ``image_digest`` is the digest the report ran
     on (``BFX_IMAGE_DIGEST`` of the report container, the soaked image); ``report_sha256``
     hashes the criteria exactly as written here.
     """
@@ -617,10 +714,11 @@ def result_document(
             for c in criteria]
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
     revisions = next((c.evidence.get("revisions") for c in criteria
-                      if c.id == "d3.deploy_restarts"), None) or []
+                      if c.id in REVISION_CRITERIA), None) or []
     code = exit_code(criteria)
     return {
         "schema": RESULT_SCHEMA_VERSION,
+        "mode": mode,
         "verdict": {0: "PASS", 1: "FAIL"}.get(code, "UNAVAILABLE"),
         "exit_code": code,
         "exchange_account_id": str(account),
@@ -634,7 +732,7 @@ def result_document(
 
 async def run(
     *, database_url: str, account: UUID, window: Window, metrics_files: Sequence[Path] = (),
-    realm: str = "shadow",
+    realm: str = "shadow", upgrade: Upgrade | None = None,
 ) -> tuple[list[Criterion], int]:
     engine = make_async_engine_from_url(database_url)
     try:
@@ -642,8 +740,12 @@ async def run(
             stamp = await read_database_realm(session)
             if stamp != realm:
                 raise ReportRefused(f"database_realm_not_simulation stamp={stamp}")
-            criteria = await build_report(
-                session, Scope(account, realm), window, metrics_files=metrics_files)
+            if upgrade is None:
+                criteria = await build_report(
+                    session, Scope(account, realm), window, metrics_files=metrics_files)
+            else:
+                criteria = await build_upgrade_report(
+                    session, Scope(account, realm), window, upgrade)
             events = await _scalar(session, """
                 SELECT count(*) FROM sim_venue_event
                 WHERE exchange_account_id = :account_text AND deployment_environment = :realm""",
@@ -674,12 +776,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="print JSON instead of text")
     parser.add_argument("--result-out", type=Path,
                         help="also write the final verdict file the ledger switch checks")
+    parser.add_argument("--upgrade-from", metavar="REV",
+                        help="upgrade test: the deployed release's source revision (N-1)")
+    parser.add_argument("--upgrade-to", metavar="REV",
+                        help="upgrade test: the candidate's source revision (N)")
     args = parser.parse_args(argv)
+    if (args.upgrade_from is None) != (args.upgrade_to is None):
+        parser.error("--upgrade-from and --upgrade-to go together")
+    upgrade = (Upgrade(args.upgrade_from, args.upgrade_to)
+               if args.upgrade_from is not None else None)
     logging.disable(sys.maxsize)
     try:
         criteria, events = asyncio.run(run(
             database_url=os.environ["DATABASE_URL"], account=args.exchange_account_id,
-            window=Window(args.since, args.until), metrics_files=args.metrics))
+            window=Window(args.since, args.until), metrics_files=args.metrics,
+            upgrade=upgrade))
     except (ReportRefused, DatabaseRealmMismatch) as exc:
         print(json.dumps({"status": "refused", "reason": str(exc)}), file=sys.stderr)
         return 2
@@ -698,7 +809,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.result_out is not None:
         document = result_document(
             criteria, account=args.exchange_account_id, window=Window(args.since, args.until),
-            image_digest=os.environ.get("BFX_IMAGE_DIGEST"))
+            image_digest=os.environ.get("BFX_IMAGE_DIGEST"),
+            mode="soak" if upgrade is None else "upgrade")
         args.result_out.write_text(json.dumps(document, sort_keys=True, indent=2, default=str)
                                    + "\n")
     return exit_code(criteria)
