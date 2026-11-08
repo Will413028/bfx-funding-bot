@@ -65,8 +65,18 @@ soak 的 runbook 已刪除，但 VM 上還留著它建的東西，直到 owner �
 
 移除（`DROP` 不可逆，**要 owner 同意才做**；`<owner>` 見 `AGENTS.local.md`）：
 
-1. 停掉並移除 sim 容器：`docker rm -f bfx-sim`（已不在就略過），並停用 `bfx-sim-*` timer。
+1. 停掉 sim 的排程與容器：
+   - `sudo systemctl disable --now bfx-sim-watch.timer`，再 `sudo systemctl stop bfx-sim-watch.service`（unit 不存在就略過）。
+   - 一次性（transient，`systemd-run` 建的）unit：`systemctl list-units --all --plain --no-legend 'bfx-sim*'` 列出的每個 `<unit>` 執行 `sudo systemctl stop <unit>`，最後 `sudo systemctl reset-failed 'bfx-sim*'`；transient unit 停掉就消失，不需要 disable。
+   - `docker rm -f bfx-sim`（已不在就略過）。
 2. 刪掉密碼檔：`sudo rm /opt/bfx/runtime/sim.env`。
-3. 刪 database：`docker exec bfx-postgres psql -U <owner> -d postgres -c 'DROP DATABASE bfx_sim'`。
-4. 刪 role：`docker exec bfx-postgres psql -U <owner> -d postgres -c 'DROP ROLE bfx_sim'`。
-5. 確認：`docker exec bfx-postgres psql -U <owner> -d postgres -Atc "SELECT count(*) FROM pg_roles WHERE rolname = 'bfx_sim'"` 印 `0`。
+3. 收回 `bfx_sim` 擁有的物件與權限，**在它有權限的每個 database 各跑一次**（`bfx_sim`、`bfx`、`postgres`）：
+   `docker exec bfx-postgres psql -U <owner> -d <db> -v ON_ERROR_STOP=1 -c 'REASSIGN OWNED BY bfx_sim TO <owner>' -c 'DROP OWNED BY bfx_sim'`。
+   `bfx_sim` database 要在步驟 4 刪掉之前先跑；`DROP OWNED` 也會撤銷 grant 與 default privileges，否則 `DROP ROLE` 會因殘留依賴失敗。
+4. 刪 database：`docker exec bfx-postgres psql -U <owner> -d postgres -c 'DROP DATABASE bfx_sim'`。
+5. 刪 role：`docker exec bfx-postgres psql -U <owner> -d postgres -c 'DROP ROLE bfx_sim'`。
+6. 確認（印 `0|0|0`）：
+   `docker exec bfx-postgres psql -U <owner> -d postgres -Atc "SELECT (SELECT count(*) FROM pg_roles WHERE rolname = 'bfx_sim'), (SELECT count(*) FROM pg_database WHERE datname = 'bfx_sim'), (SELECT count(*) FROM pg_shdepend d JOIN pg_authid a ON a.oid = d.refobjid WHERE a.rolname = 'bfx_sim')"`；
+   並確認 `systemctl list-units --all --plain --no-legend 'bfx-sim*'` 沒有輸出、`docker ps -a --filter name=bfx-sim -q` 沒有輸出。
+
+舊的 `sim_venue_event` log 在這次變更後讀不回來（已刪除的事件型別無法重播），也不做 migration：唯一有這種列的是上面要刪掉的 `bfx_sim` database。
