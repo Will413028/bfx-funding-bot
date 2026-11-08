@@ -47,7 +47,7 @@ async def _database(monkeypatch, tmp_path: Path, **env: str) -> AsyncEngine:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("realm", ["ci", "shadow"])
+@pytest.mark.parametrize("realm", ["ci"])
 async def test_a_simulated_boot_on_a_legacy_epoch_is_refused(
     monkeypatch, tmp_path, httpx_mock, realm,
 ) -> None:
@@ -87,7 +87,7 @@ async def test_paper_boot_is_refused_naming_live(monkeypatch, tmp_path, httpx_mo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("realm", ["ci", "shadow"])
+@pytest.mark.parametrize("realm", ["ci"])
 async def test_an_env_only_simulated_boot_is_refused_at_config_load(
     monkeypatch, tmp_path, httpx_mock, realm,
 ) -> None:

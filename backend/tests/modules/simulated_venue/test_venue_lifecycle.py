@@ -10,7 +10,7 @@ from decimal import Decimal
 import pytest
 
 from bfx_funding_bot.modules.simulated_venue import (
-    ALLOWED_REALMS,
+    SIMULATED_REALM,
     ConcurrentAppendError,
     FaultKind,
     FaultPlan,
@@ -47,9 +47,8 @@ D = Decimal
 # -- realm and epoch guards -------------------------------------------------
 
 def test_realm_prod_and_unknown_realms_are_refused_at_construction() -> None:
-    for realm in ALLOWED_REALMS:
-        assert SimAccount("a", realm).deployment_environment == realm
-    for realm in ("prod", "PROD", "paper", ""):
+    assert SimAccount("a", SIMULATED_REALM).deployment_environment == "ci"
+    for realm in ("prod", "PROD", "shadow", "paper", ""):
         with pytest.raises(RealmRefusedError):
             SimAccount("a", realm)
     with pytest.raises(ValueError):
@@ -182,7 +181,7 @@ async def test_a_second_writer_on_the_same_scope_fails_instead_of_overwriting() 
 
 async def test_memory_store_enforces_expected_seq_and_isolates_scopes() -> None:
     store = InMemoryVenueEventStore()
-    a, b = SimAccount("a", "ci"), SimAccount("a", "shadow")
+    a, b = SimAccount("a", "ci"), SimAccount("b", "ci")
     from bfx_funding_bot.modules.simulated_venue.events import WalletFunded
     event = WalletFunded("UST", D("1"), T0)
     await store.append(a, 0, [event])

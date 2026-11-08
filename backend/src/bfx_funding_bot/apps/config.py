@@ -91,7 +91,7 @@ def load_config(
 
     deployment_env_str = os.environ.get("BFX_DEPLOYMENT_ENV", "").strip()
     if not deployment_env_str:
-        raise ValueError("BFX_DEPLOYMENT_ENV required (one of: prod, shadow, ci)")
+        raise ValueError("BFX_DEPLOYMENT_ENV required (one of: prod, ci)")
     try:
         deployment_environment = DeploymentEnvironment(deployment_env_str)
     except ValueError:
@@ -100,25 +100,16 @@ def load_config(
             f"BFX_DEPLOYMENT_ENV must be one of {valid}, got {deployment_env_str!r}"
         ) from None
 
-    # Phase <-> realm fail-fast guard (defense in depth; the deploy env sets
-    # the realm explicitly per phase, but reject obviously-wrong combos in case
-    # an env is set by hand). phase = rollout/real-money dimension;
-    # deployment_environment = data-isolation realm (prod/shadow/ci). live is
-    # real money -> must land in prod (never shadow, which holds the Phase 4.3
-    # calibration dataset). shadow is simulated -> must never land in
-    # prod (fake fills would corrupt real-money analytics). ci is the universal
-    # test/dev realm and is always allowed.
-    if phase_str == "live" and deployment_environment is DeploymentEnvironment.SHADOW:
-        raise ValueError(
-            f"BFX_PHASE={phase_str} (real money) must not run in the shadow realm "
-            "(BFX_DEPLOYMENT_ENV=shadow) -- it would pollute the simulated "
-            "calibration dataset. Use prod (or ci for tests)."
-        )
+    # Phase <-> realm fail-fast guard, before any database work. phase = which
+    # venue (live = Bitfinex, shadow = the simulated venue through a test seam);
+    # deployment_environment = data-isolation realm (prod/ci). The simulated
+    # phase must never land in prod (fake fills would corrupt real-money data);
+    # the sim_venue_event CHECK (realm 'ci') is the database's own authority.
     if phase_str == "shadow" and deployment_environment is DeploymentEnvironment.PROD:
         raise ValueError(
             f"BFX_PHASE={phase_str} (simulated) must not run in the prod realm "
-            "(BFX_DEPLOYMENT_ENV=prod) -- it would corrupt real-money analytics. "
-            "Use shadow (or ci for tests)."
+            "(BFX_DEPLOYMENT_ENV=prod) -- it would corrupt real-money data. "
+            "Use ci."
         )
 
     execution_policy_raw = os.environ.get("BFX_EXECUTION_POLICY", "").strip()

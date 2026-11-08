@@ -120,7 +120,7 @@ async def test_a_legacy_epoch_refuses(database) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("realm", ["prod", "shadow", "ci"])
+@pytest.mark.parametrize("realm", ["prod", "ci"])
 async def test_every_known_realm_reads_the_epoch_against_the_ledger_alone(
     database, monkeypatch, realm: str,
 ) -> None:

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from bfx_funding_bot.core.db import Base
 
 DATABASE_REALM_TABLE: Final = "database_realm"
-KNOWN_REALMS: Final[tuple[str, ...]] = ("prod", "shadow", "ci")
+KNOWN_REALMS: Final[tuple[str, ...]] = ("prod", "ci")
 
 
 class DatabaseRealmRow(Base):
@@ -34,7 +34,7 @@ class DatabaseRealmRow(Base):
     actor: Mapped[str] = mapped_column(Text, nullable=False)
     __table_args__ = (
         CheckConstraint("id", name="ck_database_realm_singleton"),
-        CheckConstraint("realm IN ('prod', 'shadow', 'ci')", name="ck_database_realm_realm"),
+        CheckConstraint("realm IN ('prod', 'ci')", name="ck_database_realm_realm"),
         CheckConstraint("actor <> ''", name="ck_database_realm_actor"),
     )
 

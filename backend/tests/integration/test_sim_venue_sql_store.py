@@ -79,7 +79,6 @@ pytestmark = pytest.mark.integration
 
 D = Decimal
 OTHER = SimAccount("aaaaaaaa-bbbb-4ccc-8ddd-000000000002", "ci")
-SHADOW = SimAccount(ACCOUNT.exchange_account_id, "shadow")
 
 
 def _prepare(url: str) -> None:
@@ -190,20 +189,13 @@ async def test_open_refuses_a_database_stamped_prod(pg_templates: Any, pg_clone:
         await engine.dispose()
 
 
-@pytest.mark.parametrize("realm", ["shadow", "ci"])
-async def test_open_accepts_a_simulation_realm_and_the_trigger_binds_the_account(
-    pg_templates: Any, pg_clone: Any, realm: str
-) -> None:
-    engine = _engine(_database_stamped(pg_templates, pg_clone, realm))
+async def test_open_accepts_the_ci_realm(pg_templates: Any, pg_clone: Any) -> None:
+    engine = _engine(_database_stamped(pg_templates, pg_clone, "ci"))
     try:
         store = await SqlVenueEventStore.open(engine)
-        own = SimAccount(ACCOUNT.exchange_account_id, realm)
-        foreign = SimAccount(ACCOUNT.exchange_account_id, "ci" if realm == "shadow" else "shadow")
+        own = SimAccount(ACCOUNT.exchange_account_id, "ci")
         await store.append(own, 0, _funded(1))
-        with pytest.raises(VenueStoreError, match="refuses a write of realm"):
-            await store.append(foreign, 0, _funded(2))
         assert len(await store.load(own)) == 1
-        assert await store.load(foreign) == ()
     finally:
         await engine.dispose()
 
@@ -336,7 +328,6 @@ async def test_scopes_are_disjoint(store: SqlVenueEventStore) -> None:
     await store.append(OTHER, 0, _funded(2) + _funded(3))
     assert [e.amount for e in await store.load(ACCOUNT)] == [D(1)]  # type: ignore[union-attr]
     assert [e.amount for e in await store.load(OTHER)] == [D(2), D(3)]  # type: ignore[union-attr]
-    assert await store.load(SHADOW) == ()  # the same account id in another realm is another scope
     with pytest.raises(ConcurrentAppendError):
         await store.append(ACCOUNT, 2, _funded(5))  # the other scopes' lengths are not its own
 

@@ -125,7 +125,7 @@ def test_the_venue_is_derived_from_the_phase(tmp_path, monkeypatch, phase, venue
     assert _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml())).venue == venue
 
 
-@pytest.mark.parametrize("realm", ["ci", "shadow"])
+@pytest.mark.parametrize("realm", ["ci", "prod"])
 def test_an_env_alone_cannot_select_the_simulated_venue(tmp_path, monkeypatch, realm):
     """Only a test's VenueSeam selects the simulated venue (``build_daemon`` sets
     ``simulated_venue``); a stray ``BFX_PHASE=shadow`` fails at config load, before the
@@ -138,7 +138,7 @@ def test_an_env_alone_cannot_select_the_simulated_venue(tmp_path, monkeypatch, r
         load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
-@pytest.mark.parametrize("realm", ["ci", "shadow", "prod"])
+@pytest.mark.parametrize("realm", ["ci", "prod"])
 def test_a_seam_under_the_live_phase_is_refused(tmp_path, monkeypatch, realm):
     """The seam alone picks the venue, and the phase must agree in both directions: a seam
     with ``BFX_PHASE=live`` fails before the database URL is read. Mutation: drop the check."""
@@ -156,14 +156,6 @@ def test_the_venue_is_a_computed_property_not_a_field(tmp_path, monkeypatch):
     assert "venue" not in type(config).model_fields
     with pytest.raises(ValueError):  # extra="forbid": nobody can hand one in
         type(config)(**{**config.model_dump(exclude={"venue"}), "venue": "bitfinex"})
-
-
-def test_live_retains_real_money_config_guards(tmp_path, monkeypatch):
-    _set_required_config_env(
-        monkeypatch, phase="live", policy="book_guarded", deployment_environment="shadow",
-    )
-    with pytest.raises(ValueError, match=r"real money"):
-        _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
 def test_book_guarded_requires_all_book_dependencies(
@@ -250,7 +242,7 @@ def test_the_retired_canary_phase_is_refused(tmp_path: Path, monkeypatch: pytest
         _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
-@pytest.mark.parametrize("realm", ["ci", "shadow", "prod"])
+@pytest.mark.parametrize("realm", ["ci", "prod"])
 def test_the_paper_phase_is_refused_and_names_live(
     realm: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
@@ -270,17 +262,20 @@ def test_the_paper_execution_policy_is_refused(tmp_path: Path, monkeypatch: pyte
             _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
-def test_live_phase_rejects_shadow_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Real money must never write to the shadow (simulated) realm — it would
-    pollute the calibration dataset."""
-    monkeypatch.setenv("BFX_PHASE", "live")
+@pytest.mark.parametrize("phase", ["live", "shadow"])
+def test_the_removed_shadow_realm_is_refused(
+    phase: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """The realm ``shadow`` was removed (ADR 2026-11-08 remove the shadow realm); only
+    prod and ci remain. Mutation: add ``SHADOW`` back to ``DeploymentEnvironment``."""
+    monkeypatch.setenv("BFX_PHASE", phase)
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "shadow")
     monkeypatch.delenv("BFX_CELLS", raising=False)
     monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    with pytest.raises(ValueError, match=r"live.*must not.*shadow"):
+    with pytest.raises(ValueError, match=r"BFX_DEPLOYMENT_ENV must be one of prod, ci, got 'shadow'"):
         _load(cells_yaml_path=yaml_path)
 
 
@@ -298,17 +293,17 @@ def test_simulated_phase_rejects_prod_realm(tmp_path: Path, monkeypatch: pytest.
         _load(cells_yaml_path=yaml_path)
 
 
-def test_shadow_phase_accepts_shadow_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_shadow_phase_accepts_ci_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BFX_PHASE", "shadow")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "shadow")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.delenv("BFX_CELLS", raising=False)
     monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     cfg = _load(cells_yaml_path=yaml_path)
 
-    assert cfg.deployment_environment == DeploymentEnvironment.SHADOW
+    assert cfg.deployment_environment == DeploymentEnvironment.CI
 
 
 def test_load_config_rejects_unknown_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -694,13 +689,13 @@ def test_load_config_reads_deployment_environment(
 ) -> None:
     monkeypatch.setenv("BFX_PHASE", "shadow")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "shadow")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.delenv("BFX_CELLS", raising=False)
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     cfg = _load(cells_yaml_path=yaml_path)
 
-    assert cfg.deployment_environment == DeploymentEnvironment.SHADOW
+    assert cfg.deployment_environment == DeploymentEnvironment.CI
 
 
 def test_load_config_missing_deployment_environment_raises(

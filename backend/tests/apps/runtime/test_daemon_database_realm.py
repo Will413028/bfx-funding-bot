@@ -62,7 +62,6 @@ async def _database(monkeypatch, tmp_path, *, phase: str, realm: str | None, pro
 @pytest.mark.parametrize(("stamp", "match"), [
     (None, "database_realm_unstamped"),
     ("prod", "database_realm_mismatch stamp=prod process=ci"),
-    ("shadow", "database_realm_mismatch stamp=shadow process=ci"),
 ])
 async def test_boot_refuses_an_unstamped_or_foreign_database(
     monkeypatch, tmp_path, httpx_mock, phase, stamp, match

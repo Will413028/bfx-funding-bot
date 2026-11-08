@@ -16,7 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from bfx_funding_bot.core.secret_files import read_secret
 
-VALID_DEPLOYMENT_ENVIRONMENTS = frozenset({"prod", "shadow", "ci"})
+VALID_DEPLOYMENT_ENVIRONMENTS = frozenset({"prod", "ci"})
 
 
 def require_deployment_environment() -> str:

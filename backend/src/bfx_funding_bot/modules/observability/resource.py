@@ -22,7 +22,6 @@ ENVELOPE_SCHEMA_VERSION: int = 1
 
 class DeploymentEnvironment(StrEnum):
     PROD = "prod"
-    SHADOW = "shadow"
     CI = "ci"
 
 

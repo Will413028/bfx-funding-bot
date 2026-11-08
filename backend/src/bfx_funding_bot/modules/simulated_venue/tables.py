@@ -47,7 +47,7 @@ class SimVenueEventRow(Base):
         PrimaryKeyConstraint(
             "exchange_account_id", "deployment_environment", "seq", name="pk_sim_venue_event"),
         CheckConstraint(
-            "deployment_environment IN ('shadow', 'ci')", name="ck_sim_venue_event_realm"),
+            "deployment_environment = 'ci'", name="ck_sim_venue_event_realm"),
         CheckConstraint("seq >= 1", name="ck_sim_venue_event_seq"),
         CheckConstraint("exchange_account_id <> ''", name="ck_sim_venue_event_account"),
         CheckConstraint("schema_version >= 1", name="ck_sim_venue_event_version"),

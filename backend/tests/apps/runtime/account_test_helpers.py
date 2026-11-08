@@ -105,7 +105,7 @@ async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool =
         from bfx_funding_bot.modules.ledger import Scope
         from bfx_funding_bot.modules.ledger.wiring import build_policy_store
         from bfx_funding_bot.modules.trading import CapitalPolicy
-        for environment in ("ci", "prod", "shadow"):
+        for environment in ("ci", "prod"):
             store = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID, environment))
             async with factory.begin() as session:
                 for symbol in ("fUST", "fUSD"):
