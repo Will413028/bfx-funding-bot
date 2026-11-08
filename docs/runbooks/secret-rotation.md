@@ -87,7 +87,6 @@ PostgreSQL 每個 role 只有一個密碼。`ALTER ROLE` 之後，已經連上�
 | `bfx_webapi` | `secrets/webapi/DATABASE_URL` | `sudo bfx-deploy --recreate` |
 | `bfx_operator` | `operator.env` 的 `DATABASE_URL` | 不用重建，`bfx-op` 每次都重讀 |
 | `bfx_research` | `research.env` 的 `DATABASE_URL` | 不用重建，下一次每週報告或研究容器就用新值 |
-| `bfx_sim` | `sim.env`（只在 soak 期間存在） | 照 [simulation-soak](simulation-soak.md) 重寫 `sim.env` |
 | owner（`POSTGRES_USER`） | `migrate.env` 的 `DATABASE_URL` | 不用重建。`.env.postgres.runtime` 的 `POSTGRES_PASSWORD` 只在空 PGDATA 第一次 initdb 時使用，改 owner 密碼**不需要**動它 |
 
 以 `bfx_bot` 為例（`<owner>` 見 `AGENTS.local.md`；其他 role 只改第一行的三個值，見下方）：

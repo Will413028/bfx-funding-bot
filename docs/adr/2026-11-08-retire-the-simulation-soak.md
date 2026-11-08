@@ -1,0 +1,58 @@
+---
+title: 撤銷模擬 soak 與 N-1→N 升級測試這兩道發版閘門
+date: 2026-11-08
+status: active
+tags: [bfx-funding-bot, decision, simulation, soak, testing, release]
+---
+
+# 撤銷模擬 soak 與 N-1→N 升級測試
+
+## Context
+
+[2026-10-03 ADR](2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue.md) D3 把模擬 venue 上的長時間 soak 定為閘門，之後的修訂把它改成 24 小時、加上故障注入與 kill／恢復，2026-11-06 再拆出獨立的 N-1→N 升級測試，發版要兩份報告都 PASS。
+
+2026-11-04 起的 R4 發版前 soak 實際跑下來：
+
+- 成本高：視窗重開了三次，每次至少再等 24 小時；VM 上要另外維護 `bfx_sim` database 與 role、`sim.env`、soak image workflow、報告腳本與它的 bootstrap 腳本。
+- 抓到的大多是 harness 自己的問題（例如 bootstrap 腳本漏註冊外鍵目標表、runbook 換代步驟與門檻互相矛盾），不是 ledger、組裝或 runtime 的缺陷。
+
+**約束**：
+
+- `external` 單一使用者的 bot，在全部工作完成前沒有真錢（owner 2026-11-08）。沒有 soak 擋下的缺陷要付的代價只是一次修正與重新部署，不是資金損失。
+- `external` 模擬 venue 不能驗證 Bitfinex 本身的語意（10-03 ADR D3 已寫明的代價），所以 soak 證明的範圍只到 ledger、組裝與 runtime，而這些已經有 CI 覆蓋。
+
+## Options Considered
+
+- **A. 撤銷兩道閘門，刪除只為它們存在的程式與設定**（選用）。
+- **B. 保留 soak，只改成不擋發版的定期回歸。** 主機上的 sim 堆疊與報告腳本照樣要維護，而它抓到的大多是自己的問題。
+- **C. 維持現狀。** 每次發版至少多 1.5 天，加上 harness 修補。
+
+## Decision
+
+- **撤銷**：24 小時模擬 soak 與 N-1→N 升級測試都不再是發版閘門。shadow-p14 的 Gate B（[2026-06-04 ADR](2026-06-04-adaptive-period-strategy-and-deploy-gating.md)）跟著撤回。
+- **刪除**（同一個 PR）：`soak-image.yml`、`scripts/sim_soak_report.py`、`scripts/bootstrap_simulation_db.py`、`apps/sim_faults.py` 與 `BFX_SIM_FAULTS`、模擬 venue 的持久 `fault_injected`／`internal_failure_recorded` 事件、`VenueObserver` 與 `bfx_sim_venue_*` 計數器、讀即時行情的模擬 feed（`LiveMarketFeed`、venue 的 feed task 與 watermark lag 指標）、沒有其他使用者的公開 trades WS client 與公開 trades REST 讀取、`deploy/vm/shadow.env`、`deploy/vm/shadow-p14.env`、`docs/runbooks/simulation-soak.md`，以及 `bfx_sim` role 的文件。
+- **simulated 開機必須帶 `VenueSeam`**：simulated venue 只在測試組裝，feed（與可選的 `FaultPlan`）只能經 seam 注入；沒有 seam 就以 `ConfigurationError` 拒絕開機，只剩一條路徑。
+- **保留**：`simulated_venue` 核心、SQL store 與 `sim_venue_event` 表（schema 不動）、`BFX_SIM_INITIAL_WALLETS`、經 seam 注入的 `FaultPlan`、shadow realm／phase（由後續 PR 另外決定是否移除）。
+
+剩下的保護：
+
+- CI：單元與整合測試，含模擬 venue 的 oracle 與 daemon 測試。
+- 部署前的備份與 restore test（`docs/runbooks/deploy.md`）。
+- 開機時的 schema head 檢查。
+- halt。
+
+## Rationale
+
+soak 要補的是「重啟、長時間漂移、部署互動」這段證據，而實際成本與產出不成比例：三次重開、多數發現屬於 harness。沒有真錢的期間，一個 soak 才抓得到的缺陷在 prod 出現時，修正並重新部署的成本低於每次發版先跑 soak。**不選 B**：不擋發版就沒有人讀它的報告，維護成本卻不變。**不選 C**：理由同上。
+
+**代價**：多行程重啟、長時間漂移與 migration 套在既有資料上的行為，在部署前不再有模擬證據；只有部署時的 restore test 與上線後的觀測。持久的故障注入事件刪除後，已有這兩種事件的舊 venue log（只有 VM 上的 `bfx_sim`）讀不回來；那個 database 也一起退役。
+
+## Revocation Triggers
+
+- 開始放真錢，或有第二個使用者 → 重新評估發版前的長時間驗證。
+- prod 出現 CI 抓不到、而 soak 本來抓得到的缺陷（重啟後狀態不一致、長時間漂移、升級 migration 在既有資料上失敗）→ 先補對應的整合測試；補不了才恢復對應的閘門。
+
+## Related
+
+- 被修訂：[2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue](2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue.md) D3 與它的 soak 修訂（見該檔 Amendment 2026-11-08）；[2026-06-04-adaptive-period-strategy-and-deploy-gating](2026-06-04-adaptive-period-strategy-and-deploy-gating.md) Gate B（見該檔 Amendment 2026-11-08）。
+- 主機端（不在 repo）：停掉並移除 `bfx-sim` 容器、`bfx-sim-*` 腳本與 timer、`sim.env`；`DROP DATABASE bfx_sim`／`DROP ROLE bfx_sim` 由 owner 決定。

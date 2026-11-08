@@ -160,3 +160,7 @@ upgrade roachtests 與 nightly 長跑分開，Kubernetes 的 upgrade e2e 從上�
 - 活動下限的數字在前 24 小時的實際速率證明過高或過低 → 修訂本 ADR 並重新計 24 小時（2026-10-05 修訂前為 72 小時），不在視窗中途改報告常數。
 - `BFX_SIM_FAULTS` 在 prod 映像上可被環境變數打開是這個決定的代價：若出現 simulated 以外的組裝讀到它，或 Bitfinex 組裝不再拒絕它，撤回環境變數，改成只在測試注入。
 - S1-7 之後的回歸 soak 若要常駐（原 D3 的 revocation）→ 此流程改為常駐 service 的一部分。
+
+## Amendment (2026-11-08): D3 與所有 soak 修訂被取代（Superseded）
+
+owner 2026-11-08 撤銷 24 小時模擬 soak 與 N-1→N 升級測試這兩道發版閘門，見 [2026-11-08-retire-the-simulation-soak](2026-11-08-retire-the-simulation-soak.md)。本檔的 D3、2026-10-04／10-05／11-06 的修訂與它們的 Revocation Trigger 只是歷史紀錄；`BFX_SIM_FAULTS`、`sim_soak_report.py`、`bootstrap_simulation_db.py` 與 `bfx_sim` database 都已刪除或退役。D1（simulated venue 的資料庫規則）、D2（httpx 層模擬 venue）與 D4 仍然有效，但 simulated venue 只在測試組裝，開機必須帶 `VenueSeam`。

@@ -248,7 +248,7 @@ bot 與 webapi 的常駐秘密是 compose 的檔案型 secret，不放在 env：
 - 容器以 `BFX_SECRETS_DIR=/run/secrets` 讀檔（`core/secret_files.py`），**完全不看 env 裡同名的 key**：
   - 缺檔或空檔就拒絕開機，exit 1，log 是 `config_fatal secret file ... is missing`。
   - env 檔裡還留著這些 key 時照樣開機，但 log 會印 `secret_env_keys_ignored keys=...`（只印名稱）。
-- one-shot 容器（operator CLI、每週報告、研究、模擬 soak、migration、DR）照舊用各自的 env 檔，不受影響。
+- one-shot 容器（operator CLI、每週報告、研究、migration、DR）照舊用各自的 env 檔，不受影響。
 - 換值與寫入：照 [secret-rotation「通用寫法」](secret-rotation.md#通用寫法)。值不上任何 argv（`sudo` 會把整行指令記進
   auth.log），整步在 `sudo bash -euo pipefail <<'SH'` 的 root shell 裡做；先寫同目錄的暫存檔，非空才 `mv`。
 
