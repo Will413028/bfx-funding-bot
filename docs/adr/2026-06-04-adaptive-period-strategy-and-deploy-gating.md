@@ -120,3 +120,7 @@ OOS 工作（2026-06-02/03）確立 **bot-vs-idle（市場利率捕捉）是耐�
 - caps 依賴：[2026-06-01-per-currency-allocation-phase-2](2026-06-01-per-currency-allocation-phase-2.md)（per-currency cap/balance gate）。
 - divergence 設計同類問題：G2 EMA 累加器 rel-tol 比對（見 [2026-05-31-g2-state-level-divergence-detection](2026-05-31-g2-state-level-divergence-detection.md)）。
 - 2026-09-22 Amendment 來源：研究報告 2026-09-22-strategy-system-review §3（原文不在本 repo；Amendment 自含）；同批裁決 [2026-09-22-frr-baseline-ab-via-sub-account](2026-09-22-frr-baseline-ab-via-sub-account.md)。
+
+## Amendment（2026-11-08）：Gate B 撤回
+
+shadow-p14 的 Gate B（連續 7 天 `divergence=0`）隨模擬 soak 一起撤回（[2026-11-08-retire-the-simulation-soak](2026-11-08-retire-the-simulation-soak.md)）：`deploy/vm/shadow-p14.env` 已刪除，`configs/cells.experimental-p14.yaml` 只留給回測腳本。若之後要推進 p14，改以回測／研究驗證，arm 前另行決定需要哪些證據。

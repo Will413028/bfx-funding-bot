@@ -174,10 +174,7 @@ async def test_a_second_writer_on_the_same_scope_fails_instead_of_overwriting() 
     assert [f.kind for f in other.venue.internal_failures] == ["store"]
     other.venue.internal_failures.clear()
     log = await w.store.load(ACCOUNT)
-    recorded = [e for e in log if type(e).__name__ == "InternalFailureRecorded"]
-    assert [e.kind for e in recorded] == ["store"]  # the loser keeps a durable copy of it
-    noise = {"NonceAdvanced", "InternalFailureRecorded"}
-    assert len([e for e in log if type(e).__name__ not in noise]) == 3
+    assert len([e for e in log if type(e).__name__ != "NonceAdvanced"]) == 3
     # the loser reloaded the durable log, so it converges instead of staying stale forever
     assert other.venue.state == w.venue.state
     assert await other.submit_ok(amount="150")
@@ -375,77 +372,37 @@ async def test_two_processes_funding_an_empty_log_lose_the_race_loudly() -> None
     assert len(await store.load(ACCOUNT)) == 1
 
 
-class _Counting:
-    def __init__(self) -> None:
-        self.failures: list[str] = []
-        self.unexpected = 0
-
-    def internal_failure(self, kind: str) -> None:
-        self.failures.append(kind)
-
-    def unexpected_request(self) -> None:
-        self.unexpected += 1
-
-
-async def test_internal_failures_and_unrouted_requests_reach_the_observer_and_the_totals() -> None:
-    """Mutation: the venue records only in memory (no observer call, no total)."""
-    observer = _Counting()
+async def test_internal_failures_and_unrouted_requests_reach_the_totals() -> None:
+    """Mutation: the venue records only in the bounded log (no total)."""
     store = InMemoryVenueEventStore()
     venue = await build_simulated_venue(
         account=ACCOUNT, config=config(), store=store, feed=FixtureMarketFeed(),
-        clock_ms=Clock(), observer=observer)
+        clock_ms=Clock())
     async with venue.client() as http:
         assert (await http.get("https://api-pub.bitfinex.com/v2/anything")).status_code == 404
     await venue.fund_wallet("UST", Decimal(1000))
     with pytest.raises(NoMarketDataError):
         await _raw_submit(World(venue, FixtureMarketFeed(), Clock(), store))
-    assert observer.unexpected == 1 and venue.unexpected_total == 1
-    assert observer.failures == ["no_market_data"] and venue.internal_failures_total == 1
+    assert venue.unexpected_total == 1
+    assert [f.kind for f in venue.internal_failures] == ["no_market_data"]
+    assert venue.internal_failures_total == 1
     venue.internal_failures.clear()
     venue.unexpected.clear()
-    # ... and both are in the durable log too, so a restart or a crash cannot lose them
-    from bfx_funding_bot.modules.simulated_venue.events import (
-        InternalFailureRecorded,
-        UnexpectedRequestRecorded,
-    )
-    log = await store.load(ACCOUNT)
-    assert [(e.method, e.url) for e in log if isinstance(e, UnexpectedRequestRecorded)] == [
-        ("GET", "https://api-pub.bitfinex.com/v2/anything")]
-    assert [e.kind for e in log if isinstance(e, InternalFailureRecorded)] == ["no_market_data"]
-    reopened = await build_simulated_venue(
-        account=ACCOUNT, config=config(), store=store, feed=FixtureMarketFeed(), clock_ms=Clock())
-    assert reopened.state.wallets["UST"].balance == Decimal(1000)  # the records change nothing
 
 
-async def test_durable_failure_records_are_bounded_and_never_raise() -> None:
-    from bfx_funding_bot.modules.simulated_venue._internal.transport import PERSIST_LIMIT
-    from bfx_funding_bot.modules.simulated_venue.events import (
-        DETAIL_LIMIT,
-        UnexpectedRequestRecorded,
-    )
-
+async def test_an_unrouted_request_is_kept_in_memory_only() -> None:
+    """The venue's durable log holds venue events only: an unrouted request is counted and
+    logged in memory, never appended (the soak report that read a durable copy is gone)."""
     store = InMemoryVenueEventStore()
     venue = await build_simulated_venue(
         account=ACCOUNT, config=config(), store=store, feed=FixtureMarketFeed(), clock_ms=Clock())
+    before = list(await store.load(ACCOUNT))
     async with venue.client() as http:
-        for _ in range(PERSIST_LIMIT + 7):
-            await http.get("https://api-pub.bitfinex.com/v2/" + "x" * 1_000)
-    rows = [e for e in await store.load(ACCOUNT) if isinstance(e, UnexpectedRequestRecorded)]
-    assert len(rows) == PERSIST_LIMIT and venue.unexpected_total == PERSIST_LIMIT + 7
-    assert all(len(e.url) == DETAIL_LIMIT for e in rows)
-    venue.unexpected.clear()
-
-    class _Broken(InMemoryVenueEventStore):
-        async def append(self, account, expected_seq, events):  # type: ignore[no-untyped-def]
-            raise RuntimeError("disk gone")
-
-    broken = await build_simulated_venue(
-        account=ACCOUNT, config=config(), store=_Broken(), feed=FixtureMarketFeed(),
-        clock_ms=Clock())
-    async with broken.client() as http:
         assert (await http.get("https://api-pub.bitfinex.com/v2/anything")).status_code == 404
-    assert broken.unexpected_total == 1  # counted in memory although it could not be kept
-    broken.unexpected.clear()
+    assert list(await store.load(ACCOUNT)) == before
+    assert venue.unexpected == [("GET", "https://api-pub.bitfinex.com/v2/anything")]
+    assert venue.unexpected_total == 1
+    venue.unexpected.clear()
 
 
 async def test_the_in_memory_logs_are_bounded_but_the_totals_are_not() -> None:

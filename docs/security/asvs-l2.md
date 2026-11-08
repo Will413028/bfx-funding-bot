@@ -79,6 +79,7 @@ app 本身沒有登入、密碼、MFA 或 session（見[不存在性證據](#不
   - 這個網路沒有對外開放的 port；營運入口只有 tailnet 內的 Tailscale Serve。
   - webapi 只聽 tailnet 節點 namespace 裡的 loopback。
   - DB role 依服務分開（`fresh-host-setup.md` §1）。
+    主機上另有已退役模擬 soak 留下的 `bfx_sim`（`bfx_bot` 的成員，密碼在 `/opt/bfx/runtime/sim.env`），沒有程式再用它，等 owner 依 [ADR 2026-11-08「主機殘留的 `bfx_sim`」](../adr/2026-11-08-retire-the-simulation-soak.md#主機殘留的-bfx_sim) 移除。
   - webapi 只持有只讀的 bot token，持有 halt token 或 KEK 時拒絕開機（`apps/webapi.py:46-56`）。
 - 共同的重新評估觸發：服務拆到一台以上的主機，或開放第二個使用者。
 
@@ -470,7 +471,7 @@ app 本身沒有登入、密碼、MFA 或 session（見[不存在性證據](#不
 | 編號 | 級別 | 判定 | 依據 |
 |---|---|---|---|
 | V13.1.1 | L2 | 符合 | `ARCHITECTURE.md` §10b 通訊矩陣：每條來源→目的的網路、port／協定、認證與是否加密，含 Bitfinex REST／WS 主機、Telegram、Sentry（含 `/fe-events`）、R2、GHCR、Docker Hub、GitHub 與 GitHub attestation（Sigstore）、Tailscale；並寫明沒有使用者可指定的對外位址。 |
-| V13.2.1 | L2 | 不符合 | 已接受：服務間的憑證是長期憑證，見[單一 VM 的扁平網路與「主機等同 root」](#單一-vm-的扁平網路與主機等同-root)。有做的部分：Postgres 每個服務有自己的 role（`bfx_bot`、`bfx_webapi`、`bfx_operator`、`bfx_research`、`bfx_sim`；PR #244）；webapi→bot 用 webapi 專屬、只能讀的 `BFX_ADMIN_READ_TOKEN`（PR #228；以秘密檔讀入：`modules/api/funding_status.py:120`），常數時間比對（`router.py:42-43`）。 |
+| V13.2.1 | L2 | 不符合 | 已接受：服務間的憑證是長期憑證，見[單一 VM 的扁平網路與「主機等同 root」](#單一-vm-的扁平網路與主機等同-root)。有做的部分：Postgres 每個服務有自己的 role（`bfx_bot`、`bfx_webapi`、`bfx_operator`、`bfx_research`；PR #244）；webapi→bot 用 webapi 專屬、只能讀的 `BFX_ADMIN_READ_TOKEN`（PR #228；以秘密檔讀入：`modules/api/funding_status.py:120`），常數時間比對（`router.py:42-43`）。 |
 | V13.2.2 | L2 | 不符合 | 已接受：網路沒有分段，見[單一 VM 的扁平網路與「主機等同 root」](#單一-vm-的扁平網路與主機等同-root)。最小權限有做的部分：webapi 的只讀 token 不能 halt（`router.py:125`；`tests/modules/admin/test_router_trading_status.py::test_the_read_token_cannot_halt`；`tests/modules/api/test_funding_status_token.py::test_the_halt_token_alone_is_not_enough`）；webapi 帶 halt token 或 KEK 就拒絕開機（`apps/webapi.py:46-56`；`tests/test_health.py::test_startup_refuses_the_daemon_halt_token`、`::test_startup_refuses_the_vault_kek`）；DB role 依服務分開。 |
 | V13.2.3 | L2 | 符合 | 沒有預設憑證：沒有 Redis（`docker-compose.bot.yml:7`）；Postgres role 密碼與 admin／read token 都當場隨機產生（`fresh-host-setup.md:190`；`secret-rotation.md:57,99`）；tailscale 節點第一次登入由管理者核准，換主機時用 tagged、單次使用的 auth key（`fresh-host-setup.md:220,296`；`compose:196` `TS_AUTH_ONCE`）。 |
 | V13.2.4 | L2 | 不符合 | 已接受：沒有網路層的 egress allowlist，見[單一 VM 的扁平網路與「主機等同 root」](#單一-vm-的扁平網路與主機等同-root)。應用層的目的地都寫死：Bitfinex、Telegram、Sentry tunnel 的目標只從設定組出，envelope 決定不了目的地（`ingress.py:184-198`；`test_ingress.py::test_fe_events_refuse_another_dsn`）。 |

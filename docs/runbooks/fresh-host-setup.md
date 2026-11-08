@@ -25,9 +25,6 @@ Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration �
 | `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist（換憑證 outbox 由 `1db83367918c` 加上）：四個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
 | `bfx_research` | 每週報告（`bfx-weekly-report`）、研究用一次性容器 | migration `3c5e7a9b1d2f` 的精確 allowlist：只寫研究表（`funding_stats`、`perp_funding_rates`、`liquidations` 的 upsert，`attribution_weekly`、`fill_rate_stats` 的 delete＋insert，`fill_rate_model_artifacts` 的 insert），只讀每週步驟與研究腳本用到的表（migration `638455da00bb` 另加 `deployments` 的 SELECT，給交付指標）；不能寫 ledger、`trading_state`、outbox，讀不到憑證表 |
 
-模擬 soak 另有第五個 login role `bfx_sim`，只連自己的 database `bfx_sim`、在那裡以 `bfx_bot` 身分執行；
-它的建立與 grants 在 [simulation-soak.md](simulation-soak.md) §2，不屬於新主機的必要步驟。
-
 Migration 對 role 的 grant 都包在 `IF EXISTS (SELECT FROM pg_roles ...)` 裡：role 不存在時
 migration 照樣成功但**不會補 grant**。所以順序是：先建 role，再第一次跑 migration。
 
@@ -65,7 +62,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public
 ```
 
 `bfx` 的 CONNECT 只給上面四個 runtime role（`<owner>` 是 superuser，不受影響）。官方 image 以 `POSTGRES_DB`
-建立的 database 預設對 PUBLIC 開放 CONNECT；收回後，同一 cluster 的其他 login role（例如模擬 soak 的 `bfx_sim`）
+建立的 database 預設對 PUBLIC 開放 CONNECT；收回後，同一 cluster 的其他 login role
 連不進 `bfx`，role membership 也不會帶進來（membership 用 `INHERIT FALSE`）：
 
 ```sql
@@ -102,10 +99,10 @@ docker exec --user postgres bfx-postgres psql -U <owner> -d bfx -Atc "CREATE EXT
 
 - 已有資料的資料庫（例如 prod）：migration 從現有資料推導並蓋章（只有一種 realm 時），不用手動做；
   有多種 realm 時 migration 失敗，schema 維持原狀。
-- 空的資料庫（新主機、模擬用 `bfx_sim`）：migration 後是未蓋章，所有 realm 寫入都被拒絕，owner 蓋章一次：
+- 空的資料庫（新主機）：migration 後是未蓋章，所有 realm 寫入都被拒絕，owner 蓋章一次：
 
 ```sql
--- <realm> 是 prod（新主機）或 shadow（模擬用資料庫，模擬 venue 只接受 shadow／ci）
+-- <realm> 是 prod（新主機）
 INSERT INTO database_realm (realm, stamped_at_ms, actor)
 VALUES ('<realm>', (extract(epoch FROM clock_timestamp()) * 1000)::bigint, 'owner bootstrap');
 ```

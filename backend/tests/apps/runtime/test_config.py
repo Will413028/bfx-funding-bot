@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,6 +12,14 @@ from bfx_funding_bot.apps.config import load_config
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 from bfx_funding_bot.modules.strategy import CellConfig, StrategyName, configured_symbols
+
+
+def _load(*, cells_yaml_path: Path | None = None):
+    """``load_config`` as its one caller composes it: only a shadow boot comes from a test's
+    ``VenueSeam``, so live tests load exactly what the deployed bot loads (no seam)."""
+    return load_config(
+        cells_yaml_path=cells_yaml_path,
+        simulated_venue=os.environ.get("BFX_PHASE") == "shadow")
 
 
 def _write_yaml(tmp_path: Path, content: dict) -> Path:
@@ -75,7 +84,9 @@ def _set_explicit_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
 
 
-def test_missing_execution_policy_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_execution_policy_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("BFX_PHASE", "shadow")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
@@ -83,12 +94,12 @@ def test_missing_execution_policy_fails_closed(tmp_path: Path, monkeypatch: pyte
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     with pytest.raises(ValueError, match="BFX_EXECUTION_POLICY"):
-        load_config(cells_yaml_path=yaml_path)
+        _load(cells_yaml_path=yaml_path)
 
 
 def test_normal_live_accepts_two_cells(tmp_path, monkeypatch):
     _set_required_config_env(monkeypatch, phase="live", policy="book_guarded")
-    config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+    config = _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
     assert config.phase.value == "live"
     assert len(config.cells) == 2
 
@@ -105,39 +116,46 @@ def test_every_phase_rejects_legacy_env(tmp_path, monkeypatch, name, phase):
     _set_required_config_env(monkeypatch, phase=phase, policy="book_guarded")
     monkeypatch.setenv(name, "0")
     with pytest.raises(ValueError, match=r"Remove legacy env .*applied CapitalPolicy"):
-        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+        _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
 @pytest.mark.parametrize(("phase", "venue"), [("live", "bitfinex"), ("shadow", "simulated")])
 def test_the_venue_is_derived_from_the_phase(tmp_path, monkeypatch, phase, venue):
     _set_required_config_env(monkeypatch, phase=phase, policy="book_guarded")
-    assert load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml())).venue == venue
+    assert _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml())).venue == venue
+
+
+@pytest.mark.parametrize("realm", ["ci", "shadow"])
+def test_an_env_alone_cannot_select_the_simulated_venue(tmp_path, monkeypatch, realm):
+    """Only a test's VenueSeam selects the simulated venue (``build_daemon`` sets
+    ``simulated_venue``); a stray ``BFX_PHASE=shadow`` fails at config load, before the
+    database URL is even read. Mutation: drop the refusal in ``load_config``."""
+    _set_required_config_env(
+        monkeypatch, phase="shadow", policy="book_guarded", deployment_environment=realm)
+    monkeypatch.delenv("DATABASE_URL")
+    with pytest.raises(
+            ValueError, match=r"BFX_PHASE=shadow selects the simulated venue.*VenueSeam"):
+        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+
+
+@pytest.mark.parametrize("realm", ["ci", "shadow", "prod"])
+def test_a_seam_under_the_live_phase_is_refused(tmp_path, monkeypatch, realm):
+    """The seam alone picks the venue, and the phase must agree in both directions: a seam
+    with ``BFX_PHASE=live`` fails before the database URL is read. Mutation: drop the check."""
+    _set_required_config_env(
+        monkeypatch, phase="live", policy="book_guarded", deployment_environment=realm)
+    monkeypatch.delenv("DATABASE_URL")
+    with pytest.raises(ValueError, match=r"VenueSeam selects the simulated venue.*shadow"):
+        load_config(simulated_venue=True, cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
 def test_the_venue_is_a_computed_property_not_a_field(tmp_path, monkeypatch):
     """Mutation: store the venue again (a phase-and-venue pair that can disagree)."""
     _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
-    config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+    config = _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
     assert "venue" not in type(config).model_fields
     with pytest.raises(ValueError):  # extra="forbid": nobody can hand one in
         type(config)(**{**config.model_dump(exclude={"venue"}), "venue": "bitfinex"})
-
-
-def test_initial_wallets_are_parsed(tmp_path, monkeypatch):
-    from decimal import Decimal
-
-    _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
-    monkeypatch.setenv("BFX_SIM_INITIAL_WALLETS", "UST:1000, USD:2.5")
-    config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
-    assert config.simulated_initial_wallets == {"UST": Decimal(1000), "USD": Decimal("2.5")}
-
-
-@pytest.mark.parametrize("raw", ["UST", "UST:0", "UST:-1", "UST:abc", ":5", "UST:1,UST:2", "UST:nan"])
-def test_invalid_initial_wallets_are_refused(tmp_path, monkeypatch, raw):
-    _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
-    monkeypatch.setenv("BFX_SIM_INITIAL_WALLETS", raw)
-    with pytest.raises(ValueError, match="BFX_SIM_INITIAL_WALLETS"):
-        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
 def test_live_retains_real_money_config_guards(tmp_path, monkeypatch):
@@ -145,7 +163,7 @@ def test_live_retains_real_money_config_guards(tmp_path, monkeypatch):
         monkeypatch, phase="live", policy="book_guarded", deployment_environment="shadow",
     )
     with pytest.raises(ValueError, match=r"real money"):
-        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+        _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
 def test_book_guarded_requires_all_book_dependencies(
@@ -156,7 +174,7 @@ def test_book_guarded_requires_all_book_dependencies(
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     with pytest.raises(ValueError, match="BFX_BOOK_MAX_DOWN_PCT"):
-        load_config(cells_yaml_path=yaml_path)
+        _load(cells_yaml_path=yaml_path)
 
 
 def test_optimizer_live_requires_fill_model_artifact(
@@ -167,7 +185,7 @@ def test_optimizer_live_requires_fill_model_artifact(
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     with pytest.raises(ValueError, match="BFX_FILL_MODEL_ARTIFACT"):
-        load_config(cells_yaml_path=yaml_path)
+        _load(cells_yaml_path=yaml_path)
 
 
 def test_optimizer_live_requires_optimizer_fee_rate(
@@ -178,7 +196,7 @@ def test_optimizer_live_requires_optimizer_fee_rate(
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     with pytest.raises(ValueError, match="BFX_OPTIMIZER_FEE_RATE"):
-        load_config(cells_yaml_path=yaml_path)
+        _load(cells_yaml_path=yaml_path)
 
 
 def test_optimizer_live_exposes_artifact_and_decimal_fee_rate(
@@ -189,7 +207,7 @@ def test_optimizer_live_exposes_artifact_and_decimal_fee_rate(
     monkeypatch.setenv("BFX_OPTIMIZER_FEE_RATE", "0.15")
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    config = load_config(cells_yaml_path=yaml_path)
+    config = _load(cells_yaml_path=yaml_path)
 
     assert config.fill_model_artifact == "models/fUST-fill.json"
     assert config.optimizer_fee_rate == Decimal("0.15")
@@ -203,7 +221,7 @@ def test_optimizer_shadow_allows_missing_model_and_fee_for_observation_only(
     monkeypatch.delenv("BFX_OPTIMIZER_FEE_RATE", raising=False)
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    config = load_config(cells_yaml_path=yaml_path)
+    config = _load(cells_yaml_path=yaml_path)
 
     assert config.fill_model_artifact is None
     assert config.optimizer_fee_rate is None
@@ -217,7 +235,7 @@ def test_load_config_happy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    cfg = load_config(cells_yaml_path=yaml_path)
+    cfg = _load(cells_yaml_path=yaml_path)
 
     assert cfg.phase == "shadow"
     assert len(cfg.cells) == 2
@@ -229,26 +247,27 @@ def test_the_retired_canary_phase_is_refused(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     with pytest.raises(ValueError, match="BFX_PHASE must be shadow or live"):
-        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+        _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
 @pytest.mark.parametrize("realm", ["ci", "shadow", "prod"])
-def test_the_paper_phase_is_refused_and_names_shadow(
+def test_the_paper_phase_is_refused_and_names_live(
     realm: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     """`paper` ran an echo executor that no longer exists; the error says what replaced it."""
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", realm)
-    with pytest.raises(ValueError, match=r"BFX_PHASE=paper was removed; use BFX_PHASE=shadow"):
-        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+    with pytest.raises(
+            ValueError, match=r"BFX_PHASE=paper was removed; a deployed bot runs BFX_PHASE=live"):
+        _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
 def test_the_paper_execution_policy_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     for phase in ("shadow", "live"):
         _set_required_config_env(monkeypatch, phase=phase, policy="paper")
         with pytest.raises(ValueError, match="BFX_EXECUTION_POLICY must be one of"):
-            load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+            _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
 def test_live_phase_rejects_shadow_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -262,7 +281,7 @@ def test_live_phase_rejects_shadow_realm(tmp_path: Path, monkeypatch: pytest.Mon
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     with pytest.raises(ValueError, match=r"live.*must not.*shadow"):
-        load_config(cells_yaml_path=yaml_path)
+        _load(cells_yaml_path=yaml_path)
 
 
 def test_simulated_phase_rejects_prod_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -276,7 +295,7 @@ def test_simulated_phase_rejects_prod_realm(tmp_path: Path, monkeypatch: pytest.
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     with pytest.raises(ValueError, match=r"simulated.*must not.*prod"):
-        load_config(cells_yaml_path=yaml_path)
+        _load(cells_yaml_path=yaml_path)
 
 
 def test_shadow_phase_accepts_shadow_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -287,7 +306,7 @@ def test_shadow_phase_accepts_shadow_realm(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    cfg = load_config(cells_yaml_path=yaml_path)
+    cfg = _load(cells_yaml_path=yaml_path)
 
     assert cfg.deployment_environment == DeploymentEnvironment.SHADOW
 
@@ -299,7 +318,7 @@ def test_load_config_rejects_unknown_phase(tmp_path: Path, monkeypatch: pytest.M
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     with pytest.raises(ValueError, match="must be shadow or live"):
-        load_config(cells_yaml_path=yaml_path)
+        _load(cells_yaml_path=yaml_path)
 
 
 def test_bfx_cells_filter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -309,7 +328,7 @@ def test_bfx_cells_filter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BFX_CELLS", "mean_reversion:fUSD_a30")
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    cfg = load_config(cells_yaml_path=yaml_path)
+    cfg = _load(cells_yaml_path=yaml_path)
     assert len(cfg.cells) == 1
     assert cfg.cells[0].strategy == "mean_reversion"
 
@@ -322,7 +341,7 @@ def test_bfx_cells_filter_unknown_fails(tmp_path: Path, monkeypatch: pytest.Monk
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     with pytest.raises(ValueError, match=r"not in cells\.yaml"):
-        load_config(cells_yaml_path=yaml_path)
+        _load(cells_yaml_path=yaml_path)
 
 
 def test_invalid_strategy_in_yaml_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -334,7 +353,7 @@ def test_invalid_strategy_in_yaml_fails(tmp_path: Path, monkeypatch: pytest.Monk
     yaml_path = _write_yaml(tmp_path, bad)
 
     with pytest.raises(ValidationError):
-        load_config(cells_yaml_path=yaml_path)
+        _load(cells_yaml_path=yaml_path)
 
 
 def test_mr_fust_p30_warn_but_not_fatal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog):
@@ -352,7 +371,7 @@ def test_mr_fust_p30_warn_but_not_fatal(tmp_path: Path, monkeypatch: pytest.Monk
     })
     yaml_path = _write_yaml(tmp_path, bad)
 
-    cfg = load_config(cells_yaml_path=yaml_path)
+    cfg = _load(cells_yaml_path=yaml_path)
     assert any("unqualified" in r.message.lower() or "fust" in r.message.lower()
                for r in caplog.records)
     assert len(cfg.cells) == 3  # warn but kept
@@ -368,8 +387,7 @@ def test_load_config_uses_env_var_precedence(monkeypatch, tmp_path):
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_CELLS_YAML", str(fake))
 
-    from bfx_funding_bot.apps.config import load_config
-    cfg = load_config()
+    cfg = _load()
     assert cfg.cells == []
 
 
@@ -385,8 +403,7 @@ def test_load_config_uses_cwd_fallback(monkeypatch, tmp_path):
     monkeypatch.delenv("BFX_CELLS_YAML", raising=False)
     monkeypatch.chdir(tmp_path)
 
-    from bfx_funding_bot.apps.config import load_config
-    cfg = load_config()
+    cfg = _load()
     assert cfg.cells == []
 
 
@@ -427,8 +444,7 @@ def test_load_config_uses_importlib_resources_fallback(monkeypatch, tmp_path):
 
     monkeypatch.setattr(importlib.resources, "files", fake_files)
 
-    from bfx_funding_bot.apps.config import load_config
-    cfg = load_config()
+    cfg = _load()
     assert cfg.cells == []
 
 
@@ -444,8 +460,7 @@ def test_load_config_env_var_set_but_path_missing_falls_through_to_cwd(monkeypat
     monkeypatch.setenv("BFX_CELLS_YAML", "/nonexistent/path/cells.yaml")
     monkeypatch.chdir(tmp_path)
 
-    from bfx_funding_bot.apps.config import load_config
-    cfg = load_config()
+    cfg = _load()
     assert cfg.cells == []
 
 
@@ -470,9 +485,8 @@ def test_load_config_raises_with_attempted_paths(monkeypatch, tmp_path):
         return _FakeRoot()
     monkeypatch.setattr(importlib.resources, "files", fake_files)
 
-    from bfx_funding_bot.apps.config import load_config
     with pytest.raises(FileNotFoundError) as exc:
-        load_config()
+        _load()
     msg = str(exc.value).lower()
     assert "bfx_cells_yaml" in msg
     assert "configs/cells.yaml" in msg
@@ -490,7 +504,7 @@ def test_scheduler_buffer_s_defaults_to_30(
     monkeypatch.delenv("BFX_SCHEDULER_BUFFER_S", raising=False)
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    cfg = load_config(cells_yaml_path=yaml_path)
+    cfg = _load(cells_yaml_path=yaml_path)
     assert cfg.scheduler_buffer_s == 30.0
 
 
@@ -503,7 +517,7 @@ def test_scheduler_buffer_s_env_override(
     monkeypatch.setenv("BFX_SCHEDULER_BUFFER_S", "15.5")
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    cfg = load_config(cells_yaml_path=yaml_path)
+    cfg = _load(cells_yaml_path=yaml_path)
     assert cfg.scheduler_buffer_s == 15.5
 
 
@@ -517,7 +531,7 @@ def test_scheduler_buffer_s_env_invalid_raises(
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     with pytest.raises(ValueError, match="BFX_SCHEDULER_BUFFER_S"):
-        load_config(cells_yaml_path=yaml_path)
+        _load(cells_yaml_path=yaml_path)
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +560,7 @@ cells:
     reference_amount_usdt: 150.0
 """
     )
-    cfg = load_config(cells_yaml_path=cells_yaml)
+    cfg = _load(cells_yaml_path=cells_yaml)
 
     assert len(cfg.cells) == 1
     cell = cfg.cells[0]
@@ -581,7 +595,7 @@ cells:
     reference_amount_usdt: 150.0
 """
     )
-    cfg = load_config(cells_yaml_path=cells_yaml)
+    cfg = _load(cells_yaml_path=cells_yaml)
 
     assert cfg.cells[0].staleness_budget_hours == 12  # p30 override
     assert cfg.cells[1].staleness_budget_hours == 2   # fallback to global
@@ -616,7 +630,7 @@ cells:
     staleness_budget_hours: 12
 """
     )
-    cfg = load_config(cells_yaml_path=cells_yaml)
+    cfg = _load(cells_yaml_path=cells_yaml)
 
     assert cfg.staleness_budget_hours_default == 4
     assert cfg.cells[0].staleness_budget_hours == 4   # env default
@@ -645,13 +659,14 @@ cells:
 """
     )
     with pytest.raises(ValidationError, match="staleness_budget_hours"):
-        load_config(cells_yaml_path=cells_yaml)
+        _load(cells_yaml_path=cells_yaml)
 
 
 def test_staleness_budget_hours_env_invalid_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Non-int BFX_STALENESS_BUDGET_HOURS_DEFAULT → descriptive ValueError, not raw int() error."""
+    """Non-int BFX_STALENESS_BUDGET_HOURS_DEFAULT → descriptive ValueError, not a raw int()
+    error."""
     monkeypatch.setenv("BFX_PHASE", "shadow")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
@@ -671,7 +686,7 @@ cells:
     )
 
     with pytest.raises(ValueError, match=r"BFX_STALENESS_BUDGET_HOURS_DEFAULT.*integer.*abc"):
-        load_config(cells_yaml_path=cells_yaml)
+        _load(cells_yaml_path=cells_yaml)
 
 
 def test_load_config_reads_deployment_environment(
@@ -683,7 +698,7 @@ def test_load_config_reads_deployment_environment(
     monkeypatch.delenv("BFX_CELLS", raising=False)
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    cfg = load_config(cells_yaml_path=yaml_path)
+    cfg = _load(cells_yaml_path=yaml_path)
 
     assert cfg.deployment_environment == DeploymentEnvironment.SHADOW
 
@@ -698,7 +713,7 @@ def test_load_config_missing_deployment_environment_raises(
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     with pytest.raises(ValueError, match="BFX_DEPLOYMENT_ENV required"):
-        load_config(cells_yaml_path=yaml_path)
+        _load(cells_yaml_path=yaml_path)
 
 
 def test_load_config_invalid_deployment_environment_raises(
@@ -711,7 +726,7 @@ def test_load_config_invalid_deployment_environment_raises(
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
     with pytest.raises(ValueError, match="BFX_DEPLOYMENT_ENV must be one of"):
-        load_config(cells_yaml_path=yaml_path)
+        _load(cells_yaml_path=yaml_path)
 
 
 # ---------------------------------------------------------------------------
@@ -803,27 +818,6 @@ def test_cellconfig_accepts_p_long_equal_p_mid() -> None:
     assert c.strategy.value == "adaptive_period"
 
 
-def test_sim_faults_are_parsed_into_the_config(tmp_path, monkeypatch):
-    _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
-    monkeypatch.setenv("BFX_SIM_FAULTS", "unknown_5xx=0.01,seed=9")
-    config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
-    assert config.simulated_faults == {"unknown_5xx": 0.01} and config.simulated_fault_seed == 9
-
-
-def test_no_sim_faults_by_default(tmp_path, monkeypatch):
-    _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
-    monkeypatch.delenv("BFX_SIM_FAULTS", raising=False)
-    config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
-    assert config.simulated_faults == {} and config.simulated_fault_seed == 0
-
-
-def test_an_unreadable_sim_faults_refuses_the_boot(tmp_path, monkeypatch):
-    _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
-    monkeypatch.setenv("BFX_SIM_FAULTS", "unknown_5xx=2")
-    with pytest.raises(ValueError, match="BFX_SIM_FAULTS"):
-        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
-
-
 def test_the_database_url_comes_from_its_secret_file_only(tmp_path, monkeypatch):
     """9h: the bot reads DATABASE_URL from /run/secrets when BFX_SECRETS_DIR is set; the env
     value (left in bot.env during the cutover) is ignored, and a missing file is an error."""
@@ -832,8 +826,8 @@ def test_the_database_url_comes_from_its_secret_file_only(tmp_path, monkeypatch)
     secrets.mkdir()
     (secrets / "DATABASE_URL").write_text("postgresql://bfx_bot:p@bfx-postgres:5432/bfx\n")
     monkeypatch.setenv("BFX_SECRETS_DIR", str(secrets))
-    config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+    config = _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
     assert config.database_url == "postgresql://bfx_bot:p@bfx-postgres:5432/bfx"
     (secrets / "DATABASE_URL").unlink()
     with pytest.raises(ValueError, match="DATABASE_URL is missing"):
-        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+        _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))

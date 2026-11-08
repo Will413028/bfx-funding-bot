@@ -1,7 +1,6 @@
 """Fault injection: off by default, deterministic when on."""
 from __future__ import annotations
 
-import contextlib
 from decimal import Decimal
 
 import httpx
@@ -18,7 +17,6 @@ from bfx_funding_bot.modules.simulated_venue import (
     FaultTarget,
 )
 from bfx_funding_bot.modules.simulated_venue._internal.faults import FaultInjector
-from bfx_funding_bot.modules.simulated_venue.events import FaultInjected
 from bfx_funding_bot.modules.simulated_venue.wiring import build_simulated_venue
 from tests.modules.simulated_venue.helpers import ACCOUNT, CTX, DAY, T0, make_world
 
@@ -179,51 +177,11 @@ def test_tick_rules_are_part_of_the_one_plan_and_count_every_request() -> None:
         FaultTarget.ANY_REQUEST, FaultKind.TICK_AFTER, ordinals=frozenset({2, 4})),))  # hook ignored
 
 
-# -- every injection is a durable event ----------------------------------------------------
+# -- a placed-but-lost submit is durable ------------------------------------------------------
 
 
-async def _injections(w) -> list[FaultInjected]:  # type: ignore[no-untyped-def]
-    return [e for e in await w.store.load(ACCOUNT) if isinstance(e, FaultInjected)]
-
-
-@pytest.mark.parametrize(("target", "kind", "name"), [
-    (FaultTarget.SUBMIT, FaultKind.UNKNOWN_PLACED_LOST, "submit"),
-    (FaultTarget.SUBMIT, FaultKind.UNKNOWN_NOT_PLACED_LOST, "submit"),
-    (FaultTarget.SUBMIT, FaultKind.UNKNOWN_5XX_ERROR, "submit"),
-])
-async def test_a_submit_injection_is_recorded_with_kind_target_ordinal_and_time(
-        target: FaultTarget, kind: FaultKind, name: str) -> None:
-    w = await make_world(funds={"UST": "1000"}, faults=once(target, kind, n=2))
-    await w.submit_ok(amount="150")  # the first submit is not faulted
-    assert await _injections(w) == []
-    w.clock.advance(5_000)
-    with contextlib.suppress(httpx.HTTPError):
-        await w.submit(amount="150")  # the second one is
-    [event] = await _injections(w)
-    assert (event.fault_kind, event.target, event.request_ordinal) == (kind.value, name, 2)
-    assert event.mts == w.clock.now and event.nonce > 0
-    # what the request asked for travels with the record (the report matches on it)
-    assert (event.symbol, event.amount, event.rate, event.period) == (
-        "fUST", D("150"), D("0.0002"), 2)
-    await w.submit_ok(amount="150")  # the plan is spent: nothing more is recorded
-    assert len(await _injections(w)) == 1
-
-
-async def test_a_history_injection_is_recorded_as_a_history_target() -> None:
-    w = await make_world(funds={"UST": "1000"},
-                         faults=once(FaultTarget.HISTORY, FaultKind.HISTORY_ERROR))
-    from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
-    with pytest.raises(BitfinexAPIError):
-        await w.rest.fetch_offer_history_observations(
-            ctx=CTX, symbol="fUST", start_ms=T0 - 1, end_ms=T0 + DAY, limit=500)
-    [event] = await _injections(w)
-    assert (event.fault_kind, event.target, event.request_ordinal) == (
-        "history_error", "history", 1)
-
-
-async def test_an_injection_survives_a_restart_and_a_lost_response() -> None:
-    """The event is durable before the effect: a venue rebuilt from the log still has it,
-    including for 'placed but the response never arrived'."""
+async def test_a_placed_but_lost_submit_survives_a_restart() -> None:
+    """'Placed but the response never arrived': a venue rebuilt from the log has the offer."""
     w = await make_world(funds={"UST": "1000"},
                          faults=once(FaultTarget.SUBMIT, FaultKind.UNKNOWN_PLACED_LOST))
     with pytest.raises(httpx.ReadTimeout):
@@ -231,27 +189,6 @@ async def test_an_injection_survives_a_restart_and_a_lost_response() -> None:
     reopened = await build_simulated_venue(
         account=ACCOUNT, config=w.cfg, store=w.store, feed=w.feed, clock_ms=w.clock)
     assert [o.status for o in reopened.state.offers.values()] == ["ACTIVE"]
-    [event] = await _injections(w)
-    assert event.fault_kind == "unknown_placed_lost"
-
-
-async def test_a_venue_without_faults_records_none() -> None:
-    w = await make_world(funds={"UST": "1000"})
-    await w.submit_ok(amount="150")
-    assert await _injections(w) == []
-
-
-async def test_every_firing_of_a_seeded_plan_is_recorded_and_only_firings_are() -> None:
-    plan = FaultPlan(
-        rules=(FaultRule(FaultTarget.SUBMIT, FaultKind.UNKNOWN_5XX_ERROR, probability=0.3),),
-        seed=11)
-    w = await make_world(funds={"UST": "100000"}, faults=plan)
-    failed = 0
-    for _ in range(40):
-        failed += (await w.submit(amount="150")).status_code == 500
-        w.clock.advance(1_000)
-    assert 0 < failed < 40
-    assert len(await _injections(w)) == failed
 
 
 def test_probability_draws_follow_the_nonce_so_a_restart_never_replays_them() -> None:

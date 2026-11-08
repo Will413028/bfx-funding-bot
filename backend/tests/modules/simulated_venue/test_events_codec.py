@@ -27,10 +27,6 @@ SAMPLES = [
     ev.CreditClosed("loan", 3, 13, "expired"),
     ev.InterestPaid(5, "UST", D("0.01"), D("1000.51"), 14),
     ev.NonceAdvanced(99, 15),
-    ev.FaultInjected("unknown_placed_lost", "submit", 3, 99, "fUST", D("150"), D("0.0002"), 2, 16),
-    ev.FaultInjected("history_error", "history", 4, 100, None, None, None, None, 17),
-    ev.InternalFailureRecorded("feed", "feed trades failed", 18),
-    ev.UnexpectedRequestRecorded("GET", "https://example.test/x", 19),
 ]
 
 
@@ -97,31 +93,8 @@ def test_versions_belong_to_the_type_and_every_type_is_still_v1() -> None:
     assert ev._UPCASTERS == {}
 
 
-def test_a_v1_only_log_written_now_decodes_with_the_type_table_of_before_the_new_types(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    """A reader that predates the record types reads every older row and refuses the new ones."""
-    new_types = {"fault_injected", "internal_failure_recorded", "unexpected_request_recorded"}
-    monkeypatch.setattr(ev, "_EVENTS", {k: v for k, v in ev._EVENTS.items() if k not in new_types})
-    for event in SAMPLES:
-        payload = event_to_payload(event)
-        if payload["event_type"] in new_types:
-            with pytest.raises(UnknownEventVersionError):
-                event_from_payload(copy.deepcopy(payload))
-        else:
-            assert payload["schema_version"] == 1
-            assert event_from_payload(copy.deepcopy(payload)) == event
-
-
 def test_a_type_nobody_knows_is_refused_whatever_its_version() -> None:
     for version in (1, 2):
         with pytest.raises(UnknownEventVersionError):
             event_from_payload({"event_type": "from_the_future", "schema_version": version,
                                 "data": {}})
-
-
-def test_a_fault_injection_keeps_its_kind_target_ordinal_content_and_time() -> None:
-    payload = event_to_payload(SAMPLES[10])
-    assert payload["data"] == {
-        "fault_kind": "unknown_placed_lost", "target": "submit", "request_ordinal": 3,
-        "nonce": 99, "symbol": "fUST", "amount": {"$dec": "150"}, "rate": {"$dec": "0.0002"},
-        "period": 2, "mts": 16}

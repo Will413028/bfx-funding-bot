@@ -12,14 +12,13 @@ from bfx_funding_bot.modules.simulated_venue.contracts import (
     SimAccount,
     SimulatedVenueConfig,
     VenueEventStore,
-    VenueObserver,
 )
 
 
 async def build_simulated_venue(
     *, account: SimAccount, config: SimulatedVenueConfig, store: VenueEventStore,
     feed: MarketFeed, clock_ms: Callable[[], int],
-    faults: FaultPlan | None = None, observer: VenueObserver | None = None,
+    faults: FaultPlan | None = None,
 ) -> SimulatedVenue:
     """Open the venue over its store, refusing any database that is not on `ledger`.
 
@@ -35,5 +34,5 @@ async def build_simulated_venue(
         )
     return await SimulatedVenue.open(
         account=account, config=config, store=store, feed=feed, clock_ms=clock_ms,
-        faults=faults, observer=observer,
+        faults=faults,
     )

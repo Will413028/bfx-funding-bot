@@ -45,7 +45,11 @@ related-commits:
 
 - `git log --oneline 3d33daa6^..6a2104fa`（PR #244）。2026-10-21 部署，migration 已套用；VM 建了 `bfx_research` 與 `research.env`，手動跑週報成功、12 份報告。
 - 權限測試：`bfx_research` 寫 ledger 與 `trading_state` 被拒、`bfx_sim` 連 `bfx` 被拒；GRANT 多一張 bot 表的 mutation 讓測試失敗。
-- `bfx_sim` role 等下次跑 sim 前才建（`docs/runbooks/simulation-soak.md` §2b–2c），避免閒置的登入密碼。
+- `bfx_sim` role 等下次跑 sim 前才建（當時的 soak runbook §2b–2c；該 runbook 已刪除，見下方 Amendment），避免閒置的登入密碼。
+
+## Amendment (2026-11-08)：`bfx_sim` 隨模擬 soak 退役
+
+模擬 soak 已撤銷（[2026-11-08-retire-the-simulation-soak](2026-11-08-retire-the-simulation-soak.md)），`docs/runbooks/simulation-soak.md` 已刪除。`bfx_sim` role 與 database 不再有用途，只是主機上的殘留；移除步驟見該 ADR「主機殘留的 `bfx_sim`」（要 owner 同意）。
 
 ## Revocation Triggers
 

@@ -551,7 +551,6 @@ forbidden_modules = [
     "bfx_funding_bot.apps.research",
     "bfx_funding_bot.apps.restore_boot_check",
     "bfx_funding_bot.apps.schema",
-    "bfx_funding_bot.apps.sim_faults",
     "bfx_funding_bot.apps.venue",
     "bfx_funding_bot.apps.webapi",
     "bfx_funding_bot.modules.backtest",
@@ -584,7 +583,6 @@ source_modules = [
 ]
 forbidden_modules = [
     "bfx_funding_bot.external.bitfinex.live_executor",
-    "bfx_funding_bot.external.bitfinex.funding_trades_ws",
     "bfx_funding_bot.modules.admin",
     "bfx_funding_bot.modules.simulated_venue",
     "bfx_funding_bot.modules.execution.trading_status",

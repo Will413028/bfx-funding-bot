@@ -10,7 +10,7 @@ transaction:
 1. schema at the image's single migration head (``assert_schema_head``);
 2. the stamped realm, and every ledger scope in it;
 3. the capital authority is ``ledger`` (``require_ledger_authority``);
-4. the epoch guard a Bitfinex bot boots through (``require_ledger_epoch``: a known writer);
+4. the epoch guard every bot boots through (``require_ledger_epoch``: a known writer);
 5. the ledger capital reader (``read_capital``) for every (symbol, cell) of each scope's newest
    accepted basis, as of that scope's newest query: it must fold a basis, or say the newest
    query is still pending (the restore point fell inside an observation cycle). A basis with
@@ -28,12 +28,9 @@ import asyncio
 import json
 import os
 import sys
-from typing import Any, Final
-
-from bfx_funding_bot.core.venue import Venue
+from typing import Any
 
 EXIT_REFUSED = 3
-VENUE: Final[Venue] = "bitfinex"
 _PENDING = "snapshot_query_pending"
 
 
@@ -150,7 +147,7 @@ async def _check(database_url: str) -> dict[str, object]:
             except AuthorityMismatch:
                 raise RefusedError("boot_authority_not_ledger") from None
             try:
-                await require_ledger_epoch(session, venue=VENUE)
+                await require_ledger_epoch(session)
             except AuthorityMismatch:
                 raise RefusedError("boot_epoch_writer_unknown") from None
             scopes = await _scopes(session)

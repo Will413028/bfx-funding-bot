@@ -293,20 +293,21 @@ async def build_daemon(
     venue_seam: VenueSeam | None = None,
     stop_event: asyncio.Event | None = None,
 ) -> Daemon:
-    """Compose one bot process. ``venue_seam`` is for tests: production passes nothing, so
-    the simulated venue runs on the live market feed and without injected faults.
+    """Compose one bot process. ``venue_seam`` is for tests: the simulated venue's market feed
+    and faults; production passes nothing, and a simulated boot without it is refused.
     ``stop_event`` becomes the daemon's stop event; ``_run`` passes the one its loop
     watchdog already follows."""
     # Created first: the daemon stops on it, and an applied credential rotation sets it.
     stop_event = stop_event if stop_event is not None else asyncio.Event()
-    config = load_config(cells_yaml_path=cells_yaml_path)
+    config = load_config(
+        cells_yaml_path=cells_yaml_path, simulated_venue=venue_seam is not None)
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     # Both venues, in this order, before the credential vault or any client is touched:
     # a database at another schema means this is the wrong build for it (for instance a
     # rollback onto a newer schema); its stamped realm must equal the realm this process
     # runs as (E2); and the capital authority epoch is read once: either venue runs only
-    # on the ledger, and the real venue only on an epoch a known writer appended
+    # on a ``ledger`` epoch a known writer appended, with no venue exemption
     # (``apps/authority_support.py``), before any ledger write. Any refusal stops the boot and
     # alerts (``_refuse_live_boot``: alert routing is configuration, the sink prefixes the realm).
     try:
@@ -316,7 +317,7 @@ async def build_daemon(
         async with session_factory() as boot_session:
             await assert_schema_head(boot_session)
             await assert_database_realm(boot_session, config.deployment_environment.value)
-            await require_ledger_epoch(boot_session, venue=config.venue)
+            await require_ledger_epoch(boot_session)
     except Exception as exc:
         await _refuse_live_boot(exc, config=config, session_factory=session_factory)
         await db_engine.dispose()
@@ -411,7 +412,7 @@ async def build_daemon(
         venue_wiring = await build_venue(
             config, exchange_account_id=account_bootstrap.exchange_account_id,
             session_factory=session_factory, db_engine=db_engine,
-            bitfinex_http=bitfinex_http, bitfinex=bitfinex, clock=now_ms_utc, metrics=metrics,
+            bitfinex_http=bitfinex_http, clock=now_ms_utc, metrics=metrics,
             seam=venue_seam,
         )
     except Exception as exc:
@@ -1148,9 +1149,7 @@ async def build_daemon(
         credential_compliance=credential_compliance,
         writer_lock_watch=WriterLockWatch(lock=writer_lock),
         boot_mts=now_mts,
-        venue_tasks=venue_wiring.tasks,
         venue_aclose=venue_wiring.aclose,
-        venue_diagnostics=venue_wiring.simulated,
         # Credential recovery mode ends when the vault's active key is no longer this one;
         # the simulated venue's throwaway keys are in no vault.
         boot_credential_api_key=(venue_wiring.credentials.api_key

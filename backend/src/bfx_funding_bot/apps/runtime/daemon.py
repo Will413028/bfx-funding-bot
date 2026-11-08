@@ -11,10 +11,10 @@ import asyncio
 import contextlib
 import logging
 import os
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -215,35 +215,6 @@ async def load_account_bootstrap(
     )
 
 
-class VenueTask(Protocol):
-    """A sub-task of the venue wiring (``apps/venue.py``), supervised like any other.
-
-    The daemon starts the venue's tasks first and waits (bounded) for each to be ready
-    before anything that talks to the venue runs."""
-
-    name: str
-
-    async def run(self, stop: asyncio.Event) -> None: ...
-
-    async def wait_ready(self, stop: asyncio.Event, *, timeout_s: float) -> bool: ...
-
-
-class VenueDiagnostics(Protocol):
-    """What the soak report and CI read from the simulated venue: failures of the simulator
-    itself (never venue answers), requests it did not route, and its state."""
-
-    @property
-    def internal_failures(self) -> Sequence[Any]: ...
-
-    @property
-    def unexpected(self) -> Sequence[Any]: ...
-
-    @property
-    def state(self) -> Any: ...
-
-
-_VENUE_TASK_READY_TIMEOUT_S = 30.0
-
 # Credential recovery mode retries the boot observation 1, 2, 4 minutes apart, then every 5
 # (ADR 2026-10-18-venue-credential-rejection-recovery-mode, D2): slow, because the venue's
 # answer only changes once someone fixes or replaces the key at Bitfinex.
@@ -353,11 +324,8 @@ class Daemon:
     # Applies operator rotations of the vault credential (Bitfinex only; an applied one
     # sets the stop event so the process restarts on the new key).
     credential_rotation: CredentialRotationWorker | None = None
-    # What the venue wiring contributes: its tasks, and how to close what it opened
-    # (called by ``apps.bot._run``). Diagnostics exist for the simulated venue only.
-    venue_tasks: tuple[VenueTask, ...] = ()
+    # How to close what the venue wiring opened (called by ``apps.bot._run``).
     venue_aclose: Callable[[], Awaitable[None]] | None = None
-    venue_diagnostics: VenueDiagnostics | None = None
     # Backoff between boot observation attempts while the venue is unreachable.
     boot_retry_delay_s: Callable[[int], float] = boot_retry_delay_s
     # Credential recovery mode (``_run_credential_recovery``). The api key the boot loaded
@@ -740,14 +708,6 @@ class Daemon:
         self.booted = True
 
         async with asyncio.TaskGroup() as tg:
-            # First, and awaited: a submit that reaches the simulated venue before its feed
-            # holds a book would be a simulator-internal failure, not a venue answer.
-            for venue_task in self.venue_tasks:
-                tg.create_task(venue_task.run(self._stop_event), name=venue_task.name)
-                if not await venue_task.wait_ready(
-                    self._stop_event, timeout_s=_VENUE_TASK_READY_TIMEOUT_S,
-                ):
-                    log.warning("venue_task_not_ready_at_start name=%s", venue_task.name)
             if self.protection is not None:
                 tg.create_task(self.protection.run(self._stop_event), name="automatic_protection")
             if self.trading_control is not None:

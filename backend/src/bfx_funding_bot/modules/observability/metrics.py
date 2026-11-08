@@ -178,60 +178,6 @@ class _ProbeCollector(Collector):
             return []
 
 
-class _SimWatermarkCollector(Collector):
-    """Scrape-time watermark lag of the simulated venue's trades feed, per symbol.
-
-    ``lag_fn`` returns ``{symbol: seconds behind now}``; a symbol whose watermark is unknown
-    (no backfill yet, or the stream dropped before the first one) has no sample, which a
-    reader must not mistake for zero. Fail-open like every collector here.
-    """
-
-    def __init__(self, lag_fn: Callable[[], Mapping[str, float | None]]) -> None:
-        self._lag_fn = lag_fn
-
-    def collect(self) -> Iterable[Metric]:
-        try:
-            lag = GaugeMetricFamily(
-                "bfx_sim_venue_feed_watermark_lag_seconds",
-                "Seconds the simulated venue's public-trades watermark trails now, per symbol "
-                "(absent while unknown; a stall shows as a growing value).",
-                labels=["symbol"],
-            )
-            for symbol, seconds in sorted(self._lag_fn().items()):
-                if seconds is not None:
-                    lag.add_metric([symbol], max(float(seconds), 0.0))
-            return [lag]
-        except Exception:
-            log.debug("sim_watermark_collector_failed", exc_info=True)
-            return []
-
-
-class SimVenueObserver:
-    """The simulated venue's ``VenueObserver``, fail-open like every metric here."""
-
-    def __init__(self, metrics: DaemonMetrics) -> None:
-        self._metrics = metrics
-
-    def internal_failure(self, kind: str) -> None:
-        with contextlib.suppress(Exception):
-            self._metrics.sim_venue_internal_failures.labels(kind=kind).inc()
-
-    def unexpected_request(self) -> None:
-        with contextlib.suppress(Exception):
-            self._metrics.sim_venue_unexpected_requests.inc()
-
-    def feed_failure(self, source: str) -> None:
-        with contextlib.suppress(Exception):
-            self._metrics.sim_venue_feed_failures.labels(source=source).inc()
-
-    def feed_stream(self, event: str) -> None:
-        """The public trades WebSocket connected or disconnected (``event`` is bounded)."""
-        if event not in ("connected", "disconnected"):
-            return
-        with contextlib.suppress(Exception):
-            self._metrics.sim_venue_feed_stream.labels(event=event).inc()
-
-
 class DaemonMetrics:
     """All daemon Prometheus metrics behind fail-open observe methods."""
 
@@ -346,33 +292,6 @@ class DaemonMetrics:
             "Operator alerts by event and outcome (sent / failed / deduplicated / "
             "rate_limited / queue_full / log_only); drops never block trading",
             ["event", "outcome"],
-            registry=self.registry,
-        )
-        # Simulated venue only (never incremented on Bitfinex): the soak report reads these.
-        self.sim_venue_internal_failures = Counter(
-            "bfx_sim_venue_internal_failures",
-            "Failures of the simulator itself, never venue answers "
-            "(kind=no_market_data|feed|store|bug).",
-            ["kind"],
-            registry=self.registry,
-        )
-        self.sim_venue_unexpected_requests = Counter(
-            "bfx_sim_venue_unexpected_requests",
-            "Requests the simulated venue does not route (wrong host, method or path).",
-            registry=self.registry,
-        )
-        self.sim_venue_feed_failures = Counter(
-            "bfx_sim_venue_feed_failures",
-            "Failed fetches of the simulated venue's market feed "
-            "(source=book|trades|trades_truncated|trades_beyond_retention).",
-            ["source"],
-            registry=self.registry,
-        )
-        self.sim_venue_feed_stream = Counter(
-            "bfx_sim_venue_feed_stream",
-            "Public trades WebSocket of the simulated venue's feed "
-            "(event=connected|disconnected).",
-            ["event"],
             registry=self.registry,
         )
         self.funding_book_snapshots = Counter(
@@ -506,9 +425,6 @@ class DaemonMetrics:
         except Exception:
             log.debug("metrics_observe_failed metric=execution_decisions", exc_info=True)
 
-    def sim_venue_observer(self) -> SimVenueObserver:
-        return SimVenueObserver(self)
-
     def observe_alert(self, event: str, outcome: str) -> None:
         with contextlib.suppress(Exception):
             self.alerts.labels(event=event, outcome=outcome).inc()
@@ -575,15 +491,6 @@ class DaemonMetrics:
             self.registry.register(_ProbeCollector(probe))
         except Exception:
             log.warning("metrics_register_probe_failed", exc_info=True)
-
-    def bind_sim_watermark_lag(
-        self, lag_fn: Callable[[], Mapping[str, float | None]],
-    ) -> None:
-        """Export the simulated feed's per-symbol watermark lag, read at scrape time."""
-        try:
-            self.registry.register(_SimWatermarkCollector(lag_fn))
-        except Exception:
-            log.warning("metrics_bind_sim_watermark_failed", exc_info=True)
 
     def bind_ws_dispatcher_queue(
         self, *, depth_fn: Callable[[], int], capacity: int,

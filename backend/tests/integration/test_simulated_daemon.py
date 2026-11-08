@@ -130,7 +130,6 @@ async def test_a_simulated_daemon_composes_no_legacy_state(sim: SimEnv) -> None:
     daemon = await sim.build()
     assert legacy_state(daemon, "daemon") == []
     assert daemon.auth_ws is None and daemon.ws_dispatcher is None
-    assert daemon.venue_tasks == ()  # the seam replaced the live feed
     handlers = {
         type(getattr(handler, "__self__", None)).__name__
         for handlers in daemon.bus._handlers.values() for handler in handlers
@@ -209,6 +208,42 @@ async def test_an_injected_unknown_resolves_by_itself(
         await close_sim_env(sim, engine)
 
 
+async def test_the_daemon_fills_a_trade_the_feed_learned_of_late(sim: SimEnv) -> None:
+    """The venue consumes public trades only up to the feed's watermark, never up to `now`: a
+    trade executed between that watermark and the tick's `now`, which the feed learns of only
+    afterwards, is still in a range nobody consumed, so the real daemon sees it filled and the
+    ledger conserves it. Mutation: consume up to `now` in ``SimulatedVenue._sync``."""
+    daemon = await sim.build()
+    venue = sim.venue(daemon)
+    await sim.boot(daemon, T0)
+    await sim.activate()
+    sim.clock.advance(HOUR)
+    sim.quote(daemon)
+    await sim.tick(daemon)
+    (offer,) = venue.state.offers.values()
+    placed_at = sim.clock.now
+
+    # The feed is complete only up to 2 s before each tick's `now`.
+    fifth = offer.amount_original * Decimal("0.2")
+    sim.clock.advance(60_000)
+    sim.trades((placed_at + 5_000, str(offer.queue_ahead + fifth), offer.period, str(offer.rate)))
+    watermark = sim.feed.complete_through_ms = sim.clock.now - 2_000
+    await sim.tick(daemon)  # consumes the first trade up to the watermark, not up to `now`
+    assert venue.state.offers[offer.offer_id].filled == fifth
+    assert venue.state.market_through["fUST"] == watermark
+
+    # This trade executed after that watermark but before that tick's `now`; the feed learns
+    # of it only now. It is still in a range nobody consumed, so it is filled.
+    sim.trades((watermark + 1_000, str(fifth), offer.period, str(offer.rate)))
+    sim.clock.advance(60_000)
+    sim.feed.complete_through_ms = sim.clock.now - 2_000
+    await sim.tick(daemon)
+    await sim.tick(daemon)
+    await sim.assert_sound(daemon)
+    assert venue.state.offers[offer.offer_id].filled == 2 * fifth
+    assert venue.state.offers[offer.offer_id].status == "PARTIAL"
+
+
 async def test_every_time_source_follows_the_composition_clock(sim: SimEnv) -> None:
     """Mutations: the signal engine, the gate's clock, or the executor's clock back on the
     wall (the composition clock sits in 2024; the wall is not)."""
@@ -242,65 +277,3 @@ async def test_an_internal_failure_of_the_simulator_fails_the_harness_check(sim:
     sim.assert_venue_clean(daemon)
 
 
-async def test_the_daemon_fills_a_trade_the_live_feed_learned_of_late(sim: SimEnv) -> None:
-    """F1 end to end: the real daemon on a ``LiveMarketFeed``; a trade executed between two
-    observations that the feed only receives afterwards is still filled, and the ledger
-    conserves it."""
-    from bfx_funding_bot.modules.simulated_venue import (
-        BookSnapshot,
-        LiveFeedConfig,
-        LiveMarketFeed,
-        PublicTrade,
-    )
-
-    async def fetch_book(symbol: str) -> BookSnapshot | None:
-        return BookSnapshot(symbol, sim.clock.now, ((Decimal("0.0003"), 2, Decimal("800")),))
-
-    async def no_trades(symbol: str, since_ms: int) -> list[PublicTrade]:
-        return []
-
-    feed = LiveMarketFeed(config=LiveFeedConfig(symbols=("fUST", "fUSD")), fetch_book=fetch_book,
-                          fetch_trades=no_trades, clock_ms=sim.clock)
-
-    def beat() -> None:
-        for symbol in ("fUST", "fUSD"):
-            feed.alive(symbol, sim.clock.now)
-
-    feed.stream_connected()
-    await feed.backfill_gaps()
-    await feed.refresh_books()
-    daemon = await sim.build(feed=feed)
-    venue = sim.venue(daemon)
-    await sim.boot(daemon, T0)
-    await sim.activate()
-    sim.clock.advance(HOUR)
-    beat()
-    await feed.refresh_books()
-    sim.quote(daemon)
-    await sim.tick(daemon)
-    (offer,) = venue.state.offers.values()
-    placed_at = sim.clock.now
-
-    fifth = offer.amount_original * Decimal("0.2")
-    sim.clock.advance(60_000)
-    feed.ingest("fUST", [PublicTrade(
-        900, placed_at + 5_000, offer.queue_ahead + fifth, offer.rate, offer.period)])
-    beat()
-    await feed.refresh_books()
-    await sim.tick(daemon)  # consumes trade 900 up to the watermark, not up to `now`
-    assert venue.state.offers[offer.offer_id].filled == fifth
-    cursor = venue.state.market_through["fUST"]
-    assert cursor <= sim.clock.now - 2_000
-
-    # Trade 901 executed after that watermark but before that tick's `now`; the feed learns
-    # of it only afterwards. It is still in a range nobody consumed, so it is filled.
-    sim.clock.advance(60_000)
-    feed.ingest("fUST", [PublicTrade(
-        901, cursor + 1_000, fifth, offer.rate, offer.period)])
-    beat()
-    await feed.refresh_books()
-    await sim.tick(daemon)
-    await sim.tick(daemon)
-    await sim.assert_sound(daemon)
-    assert venue.state.offers[offer.offer_id].filled == 2 * fifth
-    assert venue.state.offers[offer.offer_id].status == "PARTIAL"

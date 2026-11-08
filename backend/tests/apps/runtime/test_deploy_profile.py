@@ -3,7 +3,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from bfx_funding_bot.apps.config import load_cells_only, load_config
+from bfx_funding_bot.apps.config import load_config
 
 ROOT = Path(__file__).resolve().parents[4]
 
@@ -17,15 +17,6 @@ def read_env(path: Path) -> dict[str, str]:
     sys.modules[spec.name] = module  # dataclasses resolve their module by name
     spec.loader.exec_module(module)
     return module.parse_env_file(path.read_text(), name=path.name, compose=True)
-
-
-def test_shadow_p14_is_shadow_only():
-    env = read_env(ROOT / "deploy/vm/shadow-p14.env")
-    assert env["BFX_PHASE"] == "shadow"
-    assert env["BFX_DEPLOYMENT_ENV"] == "shadow"
-    assert env["BFX_EXECUTION_POLICY"] == "optimizer_shadow"
-    cells = load_cells_only(ROOT / "backend/configs/cells.experimental-p14.yaml")
-    assert cells
 
 
 def test_live_profile_loads_without_legacy_money_or_canary_scope(monkeypatch):
