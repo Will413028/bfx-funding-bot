@@ -33,7 +33,6 @@ import pytest
 from sqlalchemy import func, select, text
 
 from bfx_funding_bot.apps import bot
-from bfx_funding_bot.apps.venue import VenueSeam
 from bfx_funding_bot.core.errors import EXIT_CODE_AUTH_FAILED
 from bfx_funding_bot.modules.execution.protocols import Credentials
 from bfx_funding_bot.modules.execution.safety.trading_state_store import read_current
@@ -115,9 +114,11 @@ async def test_a_submit_refused_for_the_key_exits_78_and_its_unknown_resolves_on
 
         # -- process 2: the restart on the still-refused key holds in recovery mode ---------
         stop = asyncio.Event()
+        seam, built = sim.seam(client_credentials=REVOKED)
         second = await compose(
             cells_yaml_path=sim.cells_path, skip_ws=True, stop_event=stop,
-            venue_seam=VenueSeam(feed=sim.feed, client_credentials=REVOKED))
+            venue_seam=seam)
+        [sim.venues[id(second)]] = built
         sim.daemons.append(second)
         sim.give_the_bot_a_book(second)
 

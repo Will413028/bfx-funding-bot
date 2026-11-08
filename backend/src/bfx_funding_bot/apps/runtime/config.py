@@ -16,8 +16,6 @@ from bfx_funding_bot.modules.strategy import CellConfig
 class MarketfeedConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     phase: Annotated[Phase, Field(description="shadow / live")]
-    # Simulated venue only: wallet currency -> amount funded when the venue log is empty.
-    simulated_initial_wallets: dict[str, Decimal] = Field(default_factory=dict)
     cells: list[CellConfig]
     database_url: str = Field(repr=False)
     deployment_environment: DeploymentEnvironment

@@ -15,7 +15,7 @@ Mutation checks (one at a time; revert after each):
 * the cycle effects are left off: ``test_the_daemon_observes_through_cycle_effects``.
 * the bot accepts a database whose latest epoch is ``legacy``:
   ``test_a_legacy_epoch_refuses_either_venue``.
-* ``require_ledger_epoch`` is not called in ``build_daemon`` (or with the simulated venue):
+* ``require_ledger_epoch`` is not called in ``build_daemon``:
   ``test_an_epoch_from_an_unknown_writer_refuses_the_real_venue``.
 * a switched database needs a scope's seed observation again:
   ``test_a_switched_database_boots_without_a_seed_for_its_scope``.
@@ -244,6 +244,8 @@ async def test_a_legacy_epoch_refuses_either_venue(monkeypatch, tmp_path, httpx_
     switch) is refused by the bot on the real and on the simulated venue."""
     from bfx_funding_bot.apps import bot
     from bfx_funding_bot.apps.bot import build_daemon
+    from bfx_funding_bot.apps.venue import VenueSeam
+    from bfx_funding_bot.modules.simulated_venue import FixtureMarketFeed
 
     refused: list[str] = []
     monkeypatch.setattr(bot, "_refuse_live_boot", _recording(refused))
@@ -254,8 +256,10 @@ async def test_a_legacy_epoch_refuses_either_venue(monkeypatch, tmp_path, httpx_
             await session.execute(text(
                 "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
                 "VALUES (3, 'legacy', 3, 'test', 'restored')"))
+        # The simulated venue is selected only by a test's VenueSeam.
+        seam = VenueSeam(feed=FixtureMarketFeed()) if phase == "shadow" else None
         with pytest.raises(AuthorityMismatch, match="authority_unsupported value=legacy"):
-            await build_daemon(cells_yaml_path=path, skip_ws=True)
+            await build_daemon(cells_yaml_path=path, skip_ws=True, venue_seam=seam)
         assert refused == ["authority_unsupported value=legacy build=ledger"]
     finally:
         await engine.dispose()

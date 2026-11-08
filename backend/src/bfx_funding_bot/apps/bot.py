@@ -299,7 +299,8 @@ async def build_daemon(
     watchdog already follows."""
     # Created first: the daemon stops on it, and an applied credential rotation sets it.
     stop_event = stop_event if stop_event is not None else asyncio.Event()
-    config = load_config(cells_yaml_path=cells_yaml_path)
+    config = load_config(
+        cells_yaml_path=cells_yaml_path, allow_simulated_venue=venue_seam is not None)
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     # Both venues, in this order, before the credential vault or any client is touched:
@@ -316,7 +317,7 @@ async def build_daemon(
         async with session_factory() as boot_session:
             await assert_schema_head(boot_session)
             await assert_database_realm(boot_session, config.deployment_environment.value)
-            await require_ledger_epoch(boot_session, venue=config.venue)
+            await require_ledger_epoch(boot_session)
     except Exception as exc:
         await _refuse_live_boot(exc, config=config, session_factory=session_factory)
         await db_engine.dispose()
@@ -1149,7 +1150,6 @@ async def build_daemon(
         writer_lock_watch=WriterLockWatch(lock=writer_lock),
         boot_mts=now_mts,
         venue_aclose=venue_wiring.aclose,
-        venue_diagnostics=venue_wiring.simulated,
         # Credential recovery mode ends when the vault's active key is no longer this one;
         # the simulated venue's throwaway keys are in no vault.
         boot_credential_api_key=(venue_wiring.credentials.api_key

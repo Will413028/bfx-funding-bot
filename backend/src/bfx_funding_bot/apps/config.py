@@ -35,7 +35,16 @@ QUALIFIED_PAIRS = {
 }
 
 
-def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
+def load_config(
+    *, cells_yaml_path: Path | None = None, allow_simulated_venue: bool = False,
+) -> MarketfeedConfig:
+    """Read the bot's configuration from the environment.
+
+    ``BFX_PHASE=shadow`` selects the simulated venue, which only tests compose (they pass a
+    ``VenueSeam`` to ``build_daemon``, which sets ``allow_simulated_venue``). No environment
+    alone can build it: a stray ``BFX_PHASE=shadow`` fails here, before the database or
+    alerts are touched (ADR 2026-11-08-retire-the-simulation-soak).
+    """
     phase_str = os.environ.get("BFX_PHASE", "").strip()
     if not phase_str:
         raise ValueError("BFX_PHASE env var required")
@@ -49,6 +58,12 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     if phase_str not in {"shadow", "live"}:
         # canary was retired with the per-build ceremony (ADR 2026-09-25).
         raise ValueError(f"BFX_PHASE must be shadow or live, got {phase_str!r}")
+    if phase_str == "shadow" and not allow_simulated_venue:
+        raise ValueError(
+            "BFX_PHASE=shadow selects the simulated venue, which only tests compose through "
+            "a VenueSeam; a deployed bot runs BFX_PHASE=live (ADR "
+            "2026-11-08-retire-the-simulation-soak)"
+        )
     # A set legacy knob is a configuration error in every phase, never silently ignored:
     # the capital limits are the applied CapitalPolicy's, the executor is not chosen by env,
     # the authenticated WebSocket follows the venue's capabilities, and the REST fill tracker
@@ -250,7 +265,6 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
 
     config_kwargs: dict[str, object] = {
         "phase": phase,
-        "simulated_initial_wallets": _initial_wallets(),
         "cells": cells,
         "database_url": database_url,
         "deployment_environment": deployment_environment,
@@ -270,32 +284,6 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         if cell.staleness_budget_hours is None:
             cell.staleness_budget_hours = config.staleness_budget_hours_default
     return config
-
-
-def _initial_wallets() -> dict[str, Decimal]:
-    """``BFX_SIM_INITIAL_WALLETS=UST:10000,USD:500``, funded on an empty simulated log.
-
-    Only the simulated venue's wiring accepts it (``build_venue`` refuses it elsewhere).
-    """
-    raw = os.environ.get("BFX_SIM_INITIAL_WALLETS", "").strip()
-    if not raw:
-        return {}
-    wallets: dict[str, Decimal] = {}
-    for item in raw.split(","):
-        currency, sep, amount_raw = item.strip().partition(":")
-        try:
-            amount = Decimal(amount_raw)
-        except Exception:
-            amount = Decimal(0)
-        if not sep or not currency or not amount.is_finite() or amount <= 0:
-            raise ValueError(
-                f"BFX_SIM_INITIAL_WALLETS entries are CURRENCY:AMOUNT with a positive amount, "
-                f"got {item!r}"
-            )
-        if currency in wallets:
-            raise ValueError(f"BFX_SIM_INITIAL_WALLETS names {currency} twice")
-        wallets[currency] = amount
-    return wallets
 
 
 def load_cells_only(cells_yaml_path: Path) -> list[CellConfig]:

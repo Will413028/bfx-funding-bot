@@ -41,9 +41,7 @@ from bfx_funding_bot.modules.simulated_venue.contracts import (
     VenueStoreError,
 )
 from bfx_funding_bot.modules.simulated_venue.events import (
-    DETAIL_LIMIT,
     NonceAdvanced,
-    UnexpectedRequestRecorded,
     VenueEvent,
 )
 
@@ -60,9 +58,6 @@ _TARGETS = {
 
 # The in-memory logs keep the newest entries, the counters keep the totals.
 LOG_LIMIT = 1000
-# Durable unrouted-request records per process: a loop that sends one on every request must
-# not turn the event log into its own incident (`unexpected_total` keeps the full count).
-PERSIST_LIMIT = 100
 
 
 class BoundedLog[T](deque[T]):
@@ -124,7 +119,6 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         # teardown, apart from injected venue faults.
         self.internal_failures: BoundedLog[InternalFailure] = BoundedLog()
         self.internal_failures_total = 0
-        self._persisted_unexpected = 0
 
     @classmethod
     async def open(
@@ -190,16 +184,6 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         self.internal_failures.append(InternalFailure(kind, detail))
         self.internal_failures_total += 1
         log.critical("simulated venue internal failure kind=%s detail=%s", kind, detail)
-
-    async def _persist_unexpected(self, event: VenueEvent) -> None:
-        """Best effort, bounded: the record must never turn one failure into another."""
-        if self._persisted_unexpected >= PERSIST_LIMIT:
-            return
-        self._persisted_unexpected += 1
-        try:
-            await self._commit([event])
-        except Exception as exc:
-            log.warning("simulated venue could not persist a failure record: %r", exc)
 
     async def _after_request(self) -> None:
         """TICK_AFTER rules: the world moves between two requests of one caller."""
@@ -286,8 +270,6 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
                 or request.url.host != HOST or routed is None):
             self.unexpected.append((request.method, str(request.url)))
             self.unexpected_total += 1
-            await self._persist_unexpected(UnexpectedRequestRecorded(
-                request.method, str(request.url)[:DETAIL_LIMIT], self._now()))
             return _json(404, wire.error_body(404, "simulated venue: unexpected request"))
         name, params = routed
         body = await request.aread()

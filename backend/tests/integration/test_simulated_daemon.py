@@ -208,6 +208,42 @@ async def test_an_injected_unknown_resolves_by_itself(
         await close_sim_env(sim, engine)
 
 
+async def test_the_daemon_fills_a_trade_the_feed_learned_of_late(sim: SimEnv) -> None:
+    """The venue consumes public trades only up to the feed's watermark, never up to `now`: a
+    trade executed between that watermark and the tick's `now`, which the feed learns of only
+    afterwards, is still in a range nobody consumed, so the real daemon sees it filled and the
+    ledger conserves it. Mutation: consume up to `now` in ``SimulatedVenue._sync``."""
+    daemon = await sim.build()
+    venue = sim.venue(daemon)
+    await sim.boot(daemon, T0)
+    await sim.activate()
+    sim.clock.advance(HOUR)
+    sim.quote(daemon)
+    await sim.tick(daemon)
+    (offer,) = venue.state.offers.values()
+    placed_at = sim.clock.now
+
+    # The feed is complete only up to 2 s before each tick's `now`.
+    fifth = offer.amount_original * Decimal("0.2")
+    sim.clock.advance(60_000)
+    sim.trades((placed_at + 5_000, str(offer.queue_ahead + fifth), offer.period, str(offer.rate)))
+    watermark = sim.feed.complete_through_ms = sim.clock.now - 2_000
+    await sim.tick(daemon)  # consumes the first trade up to the watermark, not up to `now`
+    assert venue.state.offers[offer.offer_id].filled == fifth
+    assert venue.state.market_through["fUST"] == watermark
+
+    # This trade executed after that watermark but before that tick's `now`; the feed learns
+    # of it only now. It is still in a range nobody consumed, so it is filled.
+    sim.trades((watermark + 1_000, str(fifth), offer.period, str(offer.rate)))
+    sim.clock.advance(60_000)
+    sim.feed.complete_through_ms = sim.clock.now - 2_000
+    await sim.tick(daemon)
+    await sim.tick(daemon)
+    await sim.assert_sound(daemon)
+    assert venue.state.offers[offer.offer_id].filled == 2 * fifth
+    assert venue.state.offers[offer.offer_id].status == "PARTIAL"
+
+
 async def test_every_time_source_follows_the_composition_clock(sim: SimEnv) -> None:
     """Mutations: the signal engine, the gate's clock, or the executor's clock back on the
     wall (the composition clock sits in 2024; the wall is not)."""

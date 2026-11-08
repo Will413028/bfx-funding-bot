@@ -9,6 +9,9 @@ Mutations (one at a time; revert after each):
 
 * accept ``BFX_PHASE=paper`` in ``load_config``: ``test_paper_boot_is_refused_naming_shadow`` fails.
 * the simulated venue accepts the ``legacy`` epoch: ``test_a_simulated_boot_on_a_legacy_epoch_is_refused`` fails.
+* an env alone (``BFX_PHASE=shadow``, no ``VenueSeam``) builds the simulated venue, or is refused
+  only after the database or alerts were touched: ``test_an_env_only_simulated_boot_is_refused_at_config_load``
+  fails.
 """
 from __future__ import annotations
 
@@ -17,8 +20,11 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from bfx_funding_bot.apps import bot
 from bfx_funding_bot.apps.bot import build_daemon
+from bfx_funding_bot.apps.venue import VenueSeam
 from bfx_funding_bot.core.authority import AuthorityMismatch
+from bfx_funding_bot.modules.simulated_venue import FixtureMarketFeed
 from tests.apps.runtime.account_test_helpers import (
     live_construction_env,
     seed_exchange_account,
@@ -57,7 +63,8 @@ async def test_a_simulated_boot_on_a_legacy_epoch_is_refused(
             "VALUES (3, 'legacy', 3, 'test', 'restored')"))
     try:
         with pytest.raises(AuthorityMismatch, match=r"authority_unsupported value=legacy build=ledger"):
-            await build_daemon(cells_yaml_path=write_cells_yaml(tmp_path), skip_ws=True)
+            await build_daemon(cells_yaml_path=write_cells_yaml(tmp_path), skip_ws=True,
+                               venue_seam=VenueSeam(feed=FixtureMarketFeed()))
         # Nothing reached any venue, public or authenticated.
         assert httpx_mock.get_requests() == []
     finally:
@@ -70,6 +77,33 @@ async def test_paper_boot_is_refused_naming_shadow(monkeypatch, tmp_path, httpx_
     try:
         with pytest.raises(ValueError, match=r"BFX_PHASE=paper was removed; use BFX_PHASE=shadow"):
             await build_daemon(cells_yaml_path=write_cells_yaml(tmp_path), skip_ws=True)
+        assert httpx_mock.get_requests() == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("realm", ["ci", "shadow"])
+async def test_an_env_only_simulated_boot_is_refused_at_config_load(
+    monkeypatch, tmp_path, httpx_mock, realm,
+) -> None:
+    """Only a test's ``VenueSeam`` selects the simulated venue. A stray ``BFX_PHASE=shadow``
+    without one fails in ``load_config``: no engine, no boot refusal alert, no request."""
+    engine = await _database(monkeypatch, tmp_path, BFX_PHASE="shadow", BFX_DEPLOYMENT_ENV=realm)
+    alerted: list[str] = []
+
+    async def refuse(exc: BaseException, **_: object) -> None:
+        alerted.append(str(exc))
+
+    def no_engine(*args: object, **kwargs: object) -> object:
+        raise AssertionError("refused before any database engine is made")
+
+    monkeypatch.setattr(bot, "_refuse_live_boot", refuse)
+    monkeypatch.setattr(bot, "make_async_engine_from_url", no_engine)
+    try:
+        with pytest.raises(ValueError, match=r"BFX_PHASE=shadow selects the simulated venue"):
+            await build_daemon(cells_yaml_path=write_cells_yaml(tmp_path), skip_ws=True)
+        assert alerted == []
         assert httpx_mock.get_requests() == []
     finally:
         await engine.dispose()

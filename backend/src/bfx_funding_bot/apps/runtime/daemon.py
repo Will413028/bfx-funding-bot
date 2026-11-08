@@ -11,10 +11,10 @@ import asyncio
 import contextlib
 import logging
 import os
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -215,20 +215,6 @@ async def load_account_bootstrap(
     )
 
 
-class VenueDiagnostics(Protocol):
-    """What CI reads from the simulated venue: failures of the simulator
-    itself (never venue answers), requests it did not route, and its state."""
-
-    @property
-    def internal_failures(self) -> Sequence[Any]: ...
-
-    @property
-    def unexpected(self) -> Sequence[Any]: ...
-
-    @property
-    def state(self) -> Any: ...
-
-
 # Credential recovery mode retries the boot observation 1, 2, 4 minutes apart, then every 5
 # (ADR 2026-10-18-venue-credential-rejection-recovery-mode, D2): slow, because the venue's
 # answer only changes once someone fixes or replaces the key at Bitfinex.
@@ -338,10 +324,8 @@ class Daemon:
     # Applies operator rotations of the vault credential (Bitfinex only; an applied one
     # sets the stop event so the process restarts on the new key).
     credential_rotation: CredentialRotationWorker | None = None
-    # What the venue wiring contributes: its tasks, and how to close what it opened
-    # (called by ``apps.bot._run``). Diagnostics exist for the simulated venue only.
+    # How to close what the venue wiring opened (called by ``apps.bot._run``).
     venue_aclose: Callable[[], Awaitable[None]] | None = None
-    venue_diagnostics: VenueDiagnostics | None = None
     # Backoff between boot observation attempts while the venue is unreachable.
     boot_retry_delay_s: Callable[[int], float] = boot_retry_delay_s
     # Credential recovery mode (``_run_credential_recovery``). The api key the boot loaded

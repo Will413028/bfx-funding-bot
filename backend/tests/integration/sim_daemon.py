@@ -32,6 +32,7 @@ from bfx_funding_bot.apps import bot
 from bfx_funding_bot.apps.venue import VenueSeam
 from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuote
+from bfx_funding_bot.modules.execution.protocols import Credentials
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger.tables import ExecutionResolutionJournalRow
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store, build_scope_lock
@@ -40,6 +41,7 @@ from bfx_funding_bot.modules.simulated_venue import (
     FaultPlan,
     FixtureMarketFeed,
     PublicTrade,
+    SimulatedVenue,
 )
 from bfx_funding_bot.modules.strategy import DecisionOutcome
 from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
@@ -68,8 +70,8 @@ ENV = {
     "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
     "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
     "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
-    "BFX_SIM_INITIAL_WALLETS": "UST:1000",
 }
+INITIAL_WALLETS = {"UST": Decimal(1000)}
 LEGACY_ENV = (
     "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
     "BFX_VENUE_FLOOR_USD", "BFX_MIN_OFFER_BUFFER_PCT", "BFX_EXECUTOR", "BFX_VAULT_KEK",
@@ -98,11 +100,22 @@ class SimEnv:
     httpx_mock: Any
     alerts: list[str]
     daemons: list[Any] = field(default_factory=list)
+    # The simulated venue each built daemon trades against, handed over by the seam.
+    venues: dict[int, SimulatedVenue] = field(default_factory=dict)
 
-    async def build(self, *, faults: FaultPlan | None = None, feed: Any = None) -> Any:
+    def seam(self, *, faults: FaultPlan | None = None, feed: Any = None,
+             client_credentials: Credentials | None = None) -> tuple[VenueSeam, list[SimulatedVenue]]:
+        """The only way a test selects the simulated venue; the list receives the built venue."""
+        built: list[SimulatedVenue] = []
+        return VenueSeam(feed=feed or self.feed, faults=faults, initial_wallets=INITIAL_WALLETS,
+                         on_built=built.append, client_credentials=client_credentials), built
+
+    async def build(self, *, faults: FaultPlan | None = None, feed: Any = None,
+                    client_credentials: Credentials | None = None) -> Any:
+        seam, built = self.seam(faults=faults, feed=feed, client_credentials=client_credentials)
         daemon = await bot.build_daemon(
-            cells_yaml_path=self.cells_path, skip_ws=True,
-            venue_seam=VenueSeam(feed=feed or self.feed, faults=faults))
+            cells_yaml_path=self.cells_path, skip_ws=True, venue_seam=seam)
+        [self.venues[id(daemon)]] = built
         self.daemons.append(daemon)
         self.give_the_bot_a_book(daemon)
         return daemon
@@ -161,8 +174,8 @@ class SimEnv:
                      now_ms=self.clock.now)
 
     # -- invariants ------------------------------------------------------------------
-    def venue(self, daemon: Any) -> Any:
-        return daemon.venue_diagnostics
+    def venue(self, daemon: Any) -> SimulatedVenue:
+        return self.venues[id(daemon)]
 
     async def assert_sound(self, daemon: Any, *, allow_unknown: bool = False) -> None:
         """After a cycle: every accepted basis conserved, nothing unexplained or quarantined."""

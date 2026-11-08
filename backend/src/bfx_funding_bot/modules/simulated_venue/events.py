@@ -138,25 +138,9 @@ class NonceAdvanced:
     schema_version: int = field(default=SCHEMA_VERSION, init=False, repr=False, compare=False)
 
 
-@dataclass(frozen=True, slots=True)
-class UnexpectedRequestRecorded:
-    """A request the venue does not route (wrong host, method or path). `url` is cut to
-    `DETAIL_LIMIT` chars."""
-
-    event_type: ClassVar[str] = "unexpected_request_recorded"
-    method: str
-    url: str
-    mts: int
-    schema_version: int = field(default=SCHEMA_VERSION, init=False, repr=False, compare=False)
-
-
-DETAIL_LIMIT = 300
-
-
 type VenueEvent = (
     WalletFunded | BookObserved | OfferPlaced | TradesObserved | OfferFilled
     | LoanDrawn | OfferCanceled | CreditClosed | InterestPaid | NonceAdvanced
-    | UnexpectedRequestRecorded
 )
 
 _EVENTS: dict[str, type] = {
@@ -164,7 +148,6 @@ _EVENTS: dict[str, type] = {
     for cls in (
         WalletFunded, BookObserved, OfferPlaced, TradesObserved, OfferFilled,
         LoanDrawn, OfferCanceled, CreditClosed, InterestPaid, NonceAdvanced,
-        UnexpectedRequestRecorded,
     )
 }
 # The current version of each type: only a type that changes shape moves its own number.

@@ -1,4 +1,4 @@
-"""``require_ledger_epoch`` on clone PostgreSQL: the real venue boots on the latest ``ledger``
+"""``require_ledger_epoch`` on clone PostgreSQL: the bot (either venue) boots on the latest ``ledger``
 epoch only when the genesis migration or the S1-7 switch wrote it; any other writer refuses.
 It reads the epoch only: no scope, no seed observation, never the frozen legacy tables.
 
@@ -9,6 +9,8 @@ Mutation checks (one at a time; revert after each):
 * Require a scope's ``legacy_seed`` observation after a switch epoch again (the guard this one
   replaced): ``test_a_switch_epoch_boots_an_account_the_switch_never_saw`` fails.
 * Exempt the real venue from the authority check: ``test_a_legacy_epoch_refuses`` fails.
+* Exempt a venue from the writer check again (a ``venue`` parameter):
+  ``test_the_guard_takes_no_venue_so_no_venue_is_exempt`` fails.
 """
 from __future__ import annotations
 
@@ -27,7 +29,6 @@ from bfx_funding_bot.apps.authority_support import (
 )
 from bfx_funding_bot.core.authority import AuthorityMismatch
 from bfx_funding_bot.core.schema_head import ALEMBIC_DIR
-from bfx_funding_bot.core.venue import Venue
 
 from .test_ledger_schema_roles import _build, _seed
 
@@ -56,7 +57,7 @@ def _epoch(engine: Engine, authority: str, actor: str) -> None:
             "FROM capital_authority_epoch")
 
 
-def _guard(engine: Engine, *, venue: Venue = "bitfinex") -> str | None:
+def _guard(engine: Engine) -> str | None:
     """Run the guard; the refusal text, or None when it lets the boot through."""
     url = engine.url.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
 
@@ -65,7 +66,7 @@ def _guard(engine: Engine, *, venue: Venue = "bitfinex") -> str | None:
         try:
             async with AsyncSession(async_engine) as session:
                 try:
-                    await require_ledger_epoch(session, venue=venue)
+                    await require_ledger_epoch(session)
                 except AuthorityMismatch as exc:
                     return str(exc)
                 return None
@@ -104,12 +105,14 @@ def test_an_epoch_written_by_anyone_else_refuses(db, actor: str) -> None:
     assert _guard(db) == f"ledger_epoch_writer_unknown actor={actor!r}"
 
 
-@pytest.mark.parametrize("venue", ["bitfinex", "simulated"])
-def test_a_legacy_epoch_refuses(db, venue: Venue) -> None:
+def test_a_legacy_epoch_refuses(db) -> None:
     _epoch(db, "legacy", SWITCH)
-    assert _guard(db, venue=venue) == "authority_unsupported value=legacy build=ledger"
+    assert _guard(db) == "authority_unsupported value=legacy build=ledger"
 
 
-def test_the_simulated_venue_takes_any_writer(db) -> None:
-    _epoch(db, "ledger", "retired_tool")
-    assert _guard(db, venue="simulated") is None
+def test_the_guard_takes_no_venue_so_no_venue_is_exempt() -> None:
+    """Both venues accept only the genesis and switch writers: the guard has no venue to
+    branch on (the simulated venue's fail-open exemption is gone)."""
+    import inspect
+
+    assert list(inspect.signature(require_ledger_epoch).parameters) == ["session"]

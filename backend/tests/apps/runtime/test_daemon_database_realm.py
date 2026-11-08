@@ -68,11 +68,16 @@ async def test_boot_refuses_an_unstamped_or_foreign_database(
     monkeypatch, tmp_path, httpx_mock, phase, stamp, match
 ) -> None:
     from bfx_funding_bot.apps.bot import build_daemon
+    from bfx_funding_bot.apps.venue import VenueSeam
+    from bfx_funding_bot.modules.simulated_venue import FixtureMarketFeed
 
     engine = await _database(monkeypatch, tmp_path, phase=phase, realm=stamp, process_realm="ci")
+    # The simulated venue is selected only by a test's VenueSeam.
+    seam = VenueSeam(feed=FixtureMarketFeed()) if phase == "shadow" else None
     try:
         with pytest.raises(DatabaseRealmMismatch, match=match):
-            await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
+            await build_daemon(
+                cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True, venue_seam=seam)
         assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
     finally:
         await engine.dispose()

@@ -23,8 +23,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from uuid import UUID
 
 import httpx
@@ -62,13 +63,18 @@ SIMULATED_CAPABILITIES = VenueCapabilities(auth_ws="forbidden")
 
 @dataclass(frozen=True, slots=True)
 class VenueSeam:
-    """What a simulated boot runs on (tests only): the venue's market feed, optional venue
-    faults, and optionally ``client_credentials`` for the bot to sign with instead of the
-    keys the simulated venue accepts (the venue then refuses every signed request, as
-    Bitfinex refuses a revoked key). Only the simulated venue reads it."""
+    """What a simulated boot runs on (tests only), and the only way to select that venue:
+    the venue's market feed, optional venue faults, the wallets funded on an empty venue log
+    (``initial_wallets``, currency -> amount), ``on_built`` to hand the built venue to the
+    test (its state, unexpected requests and internal failures), and optionally
+    ``client_credentials`` for the bot to sign with instead of the keys the simulated venue
+    accepts (the venue then refuses every signed request, as Bitfinex refuses a revoked
+    key)."""
 
     feed: MarketFeed
     faults: FaultPlan | None = None
+    initial_wallets: Mapping[str, Decimal] = field(default_factory=dict)
+    on_built: Callable[[SimulatedVenue], None] | None = None
     client_credentials: Credentials | None = field(default=None, repr=False)
 
 
@@ -83,8 +89,6 @@ class VenueWiring:
     auth_gate: AuthRequestGate
     capabilities: VenueCapabilities
     aclose: Callable[[], Awaitable[None]]
-    # Simulated only: the venue itself (tests read its state).
-    simulated: SimulatedVenue | None = None
     # The credentials came from the account vault, so an operator can rotate them
     # (``execution.credential_rotation``); the simulated venue's are throwaway.
     credential_vault: bool = False
@@ -138,9 +142,9 @@ async def build_venue(
 ) -> VenueWiring:
     gate = AuthRequestGate()
     if config.venue == "bitfinex":
-        if config.simulated_initial_wallets:
-            raise ConfigurationError(
-                "BFX_SIM_INITIAL_WALLETS is only valid for the simulated venue")
+        if seam is not None:
+            raise ConfigurationError("a VenueSeam selects the simulated venue; BFX_PHASE=live "
+                                     "trades Bitfinex")
         async with session_factory() as session:
             credentials = await _vault_credentials(session, exchange_account_id)
         return VenueWiring(
@@ -174,9 +178,11 @@ async def _build_simulated(
             api_key=credentials.api_key, api_secret=credentials.api_secret, symbols=symbols),
         store=store, feed=seam.feed, clock_ms=clock, faults=seam.faults,
     )
-    funded = await venue.fund_wallets_if_empty(config.simulated_initial_wallets)
+    funded = await venue.fund_wallets_if_empty(dict(seam.initial_wallets))
     if funded:
-        log.info("simulated_venue_funded wallets=%s", sorted(config.simulated_initial_wallets))
+        log.info("simulated_venue_funded wallets=%s", sorted(seam.initial_wallets))
+    if seam.on_built is not None:
+        seam.on_built(venue)
     client = venue.client()
     attach_httpx_metrics(client, metrics)
     return VenueWiring(
@@ -184,7 +190,7 @@ async def _build_simulated(
         credentials=seam.client_credentials if seam.client_credentials is not None
         else credentials,
         auth_http=client, auth_gate=gate,
-        capabilities=SIMULATED_CAPABILITIES, aclose=_closer(client), simulated=venue,
+        capabilities=SIMULATED_CAPABILITIES, aclose=_closer(client),
     )
 
 

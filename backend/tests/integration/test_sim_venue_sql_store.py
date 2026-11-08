@@ -50,7 +50,6 @@ from bfx_funding_bot.modules.simulated_venue.events import (
     OfferPlaced,
     TradesObserved,
     TradeTick,
-    UnexpectedRequestRecorded,
     VenueEvent,
     WalletFunded,
 )
@@ -283,7 +282,6 @@ def _every_event_type() -> list[VenueEvent]:
         OfferCanceled(40_000_002, T0 + HOUR),
         CreditClosed("credit", 70_000_001, T0 + 3 * HOUR, "expired"),
         InterestPaid(80_000_001, "UST", D("0.12345678"), D("1000.62345678"), T0 + 5 * HOUR),
-        UnexpectedRequestRecorded("GET", "https://example.test/x", T0 + 6 * HOUR),
     ]
 
 

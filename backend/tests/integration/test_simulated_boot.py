@@ -97,7 +97,6 @@ async def test_both_venues_compose_the_same_guard_chain_and_workers(
         await simulated.writer_lock.release()  # same account and realm: one advisory lock
         simulated.writer_lock = None
 
-        monkeypatch.delenv("BFX_SIM_INITIAL_WALLETS")
         monkeypatch.setenv("BFX_PHASE", "live")
         monkeypatch.setenv("BFX_VAULT_KEK", TEST_VAULT_KEK_B64)
 
