@@ -16,10 +16,11 @@ Refusals, each leaving the schema and the revision as they were:
   list), the probe text is built in SQL with ``format()`` quoting, and it runs as one statement,
   a ``UNION ALL`` of one ``EXISTS`` per table, so the answer comes from a single snapshot.
 
-The new CHECKs are added NOT VALID and validated in the same revision because CI's squawk
-lint (rule ``constraint-missing-not-valid``) rejects a plain ``ADD CONSTRAINT ... CHECK``;
-the split buys nothing here, both tables are tiny and bfx-deploy stops the webapi and the bot
-while migrations run.
+The new CHECKs are added with a plain ``ADD CONSTRAINT`` under a ``squawk-ignore`` for
+``constraint-missing-not-valid`` (precedent: c3e7a91d5b20). That rule guards against a long
+validating scan under the lock; NOT VALID plus VALIDATE in one transaction would not avoid it
+either (squawk flags that too), both tables are tiny, and bfx-deploy stops the webapi and the
+bot while migrations run, so nothing waits on the lock.
 
 The downgrade restores the wider CHECKs; widening loses nothing, so it is written
 (docs/adr/2026-10-08-forward-only-migrations.md D1 allows a lossless reverse).
@@ -73,8 +74,8 @@ def _refuse_shadow() -> None:
 
 def _replace(table: str, name: str, check: str) -> None:
     op.execute(f"ALTER TABLE {table} DROP CONSTRAINT {name}")
-    op.execute(f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({check}) NOT VALID")
-    op.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {name}")
+    op.execute("-- squawk-ignore constraint-missing-not-valid\n"
+               f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({check})")
 
 
 def upgrade() -> None:
