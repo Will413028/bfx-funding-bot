@@ -5,7 +5,8 @@ holding a ``shadow`` row, refuses the upgrade and stays where it was; otherwise 
 CHECKs narrow, and the downgrade widens them again.
 
 Mutations: drop the stamp precheck or the row precheck (the refusal tests fail); scan only
-``current_schema()`` (the other-schema refusal test fails); keep
+``current_schema()`` (the guarded other-schema refusal test fails); drop the trigger filter
+(the unguarded-table test fails); keep
 ``'shadow'`` in either new CHECK (the tightening test fails).
 """
 from __future__ import annotations
@@ -93,16 +94,31 @@ def test_a_shadow_row_refuses_the_upgrade(before_url: str) -> None:
 
 
 def test_a_shadow_row_in_another_schema_refuses_the_upgrade(before_url: str) -> None:
-    # Archive schemas (projection_audit, legacy_archive, release_archive) hold realm rows too;
-    # a table of a schema outside the search path stands for all of them.
+    # A realm-guarded table outside the search path (as projection_audit.runs is) is scanned:
+    # the row is planted first, then the realm trigger is attached.
     stamp_realm(before_url, "ci")
     _run(
         before_url,
         "CREATE SCHEMA other_realm_archive",
         "CREATE TABLE other_realm_archive.runs (deployment_environment text NOT NULL)",
         "INSERT INTO other_realm_archive.runs VALUES ('shadow')",
+        "CREATE TRIGGER database_realm_write BEFORE INSERT OR UPDATE OF deployment_environment "
+        "ON other_realm_archive.runs FOR EACH ROW EXECUTE FUNCTION public.guard_database_realm()",
     )
     _refuses(before_url, r"rows of realm 'shadow' in other_realm_archive\.runs")
+
+
+def test_a_shadow_row_in_an_unguarded_table_does_not_block(before_url: str) -> None:
+    # release_archive's frozen copies carry no realm trigger; they are not live realm data.
+    stamp_realm(before_url, "ci")
+    _run(
+        before_url,
+        "CREATE SCHEMA IF NOT EXISTS release_archive",
+        "CREATE TABLE release_archive.frozen_runs (deployment_environment text NOT NULL)",
+        "INSERT INTO release_archive.frozen_runs VALUES ('shadow')",
+    )
+    alembic(before_url, "upgrade", _REVISION)
+    assert _version(before_url) == _REVISION
 
 
 def test_the_upgrade_narrows_both_checks_and_the_downgrade_widens_them(before_url: str) -> None:

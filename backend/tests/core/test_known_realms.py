@@ -16,3 +16,10 @@ def test_the_realm_lists_agree() -> None:
     checks = [c for c in DatabaseRealmRow.__table__.constraints
               if isinstance(c, CheckConstraint) and c.name == "ck_database_realm_realm"]
     assert [str(c.sqltext) for c in checks] == ["realm IN ('prod', 'ci')"]
+
+
+def test_the_ci_member_is_the_simulated_realm() -> None:
+    # Mutation: rename DeploymentEnvironment.CI's value; the simulated venue's realm drifts.
+    from bfx_funding_bot.modules.simulated_venue.contracts import SIMULATED_REALM
+
+    assert DeploymentEnvironment.CI.value == SIMULATED_REALM
