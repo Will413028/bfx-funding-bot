@@ -31,8 +31,8 @@ tags: [bfx-funding-bot, decision, simulation, soak, testing, release]
 
 - **撤銷**：24 小時模擬 soak 與 N-1→N 升級測試都不再是發版閘門。shadow-p14 的 Gate B（[2026-06-04 ADR](2026-06-04-adaptive-period-strategy-and-deploy-gating.md)）跟著撤回。
 - **刪除**（同一個 PR）：`soak-image.yml`、`scripts/sim_soak_report.py`、`scripts/bootstrap_simulation_db.py`、`apps/sim_faults.py` 與 `BFX_SIM_FAULTS`、模擬 venue 的持久 `fault_injected`／`internal_failure_recorded` 事件、`VenueObserver` 與 `bfx_sim_venue_*` 計數器、讀即時行情的模擬 feed（`LiveMarketFeed`、venue 的 feed task 與 watermark lag 指標）、沒有其他使用者的公開 trades WS client 與公開 trades REST 讀取、`deploy/vm/shadow.env`、`deploy/vm/shadow-p14.env`、`docs/runbooks/simulation-soak.md`，以及 `bfx_sim` role 的文件。
-- **simulated 開機必須帶 `VenueSeam`**：simulated venue 只在測試組裝，feed（與可選的 `FaultPlan`）只能經 seam 注入；沒有 seam 就以 `ConfigurationError` 拒絕開機，只剩一條路徑。
-- **保留**：`simulated_venue` 核心、SQL store 與 `sim_venue_event` 表（schema 不動）、`BFX_SIM_INITIAL_WALLETS`、經 seam 注入的 `FaultPlan`、shadow realm／phase（由後續 PR 另外決定是否移除）。
+- **simulated venue 只能由 `VenueSeam` 選上**：它只在測試組裝，feed、可選的 `FaultPlan` 與開場錢包（`VenueSeam.initial_wallets`，取代已刪除的 `BFX_SIM_INITIAL_WALLETS`）只能經 seam 注入，建好的 venue 經 `VenueSeam.on_built` 交給測試（`Daemon` 不再持有它）。單靠 env（`BFX_PHASE=shadow`）在 `load_config` 就拒絕，早於讀 DB 與送告警；沒有 seam 的 simulated 組裝以 `ConfigurationError` 拒絕；Bitfinex 組裝收到 seam 也拒絕。epoch 寫入者檢查兩個 venue 一樣（只收 genesis migration 與 S1-7 switch），simulated 不再豁免。
+- **保留**：`simulated_venue` 核心、SQL store 與 `sim_venue_event` 表（schema 不動）、經 seam 注入的 `FaultPlan`、shadow realm／phase（由後續 PR 另外決定是否移除）。unrouted request 只留在記憶體的 `unexpected` log 與計數，不再寫成持久事件。
 
 剩下的保護：
 
@@ -55,4 +55,18 @@ soak 要補的是「重啟、長時間漂移、部署互動」這段證據，而
 ## Related
 
 - 被修訂：[2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue](2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue.md) D3 與它的 soak 修訂（見該檔 Amendment 2026-11-08）；[2026-06-04-adaptive-period-strategy-and-deploy-gating](2026-06-04-adaptive-period-strategy-and-deploy-gating.md) Gate B（見該檔 Amendment 2026-11-08）。
-- 主機端（不在 repo）：停掉並移除 `bfx-sim` 容器、`bfx-sim-*` 腳本與 timer、`sim.env`；`DROP DATABASE bfx_sim`／`DROP ROLE bfx_sim` 由 owner 決定。
+- 主機端（不在 repo）：見下節「主機殘留的 `bfx_sim`」。
+
+## 主機殘留的 `bfx_sim`
+
+本節是移除步驟的唯一來源，其他文件（`docs/runbooks/secret-rotation.md`、`docs/security/asvs-l2.md`、[2026-10-21 ADR](2026-10-21-single-vm-least-privilege-by-db-role-not-network-segmentation.md)）只連到這裡。
+
+soak 的 runbook 已刪除，但 VM 上還留著它建的東西，直到 owner 移除：`bfx_sim` 登入 role（`bfx_bot` 的成員，只能連 `bfx_sim` database）、`bfx_sim` database，以及 `/opt/bfx/runtime/sim.env`（內含它的 `DATABASE_URL`）。它不是 migration 建的，repo 裡沒有程式再用它。
+
+移除（`DROP` 不可逆，**要 owner 同意才做**；`<owner>` 見 `AGENTS.local.md`）：
+
+1. 停掉並移除 sim 容器：`docker rm -f bfx-sim`（已不在就略過），並停用 `bfx-sim-*` timer。
+2. 刪掉密碼檔：`sudo rm /opt/bfx/runtime/sim.env`。
+3. 刪 database：`docker exec bfx-postgres psql -U <owner> -d postgres -c 'DROP DATABASE bfx_sim'`。
+4. 刪 role：`docker exec bfx-postgres psql -U <owner> -d postgres -c 'DROP ROLE bfx_sim'`。
+5. 確認：`docker exec bfx-postgres psql -U <owner> -d postgres -Atc "SELECT count(*) FROM pg_roles WHERE rolname = 'bfx_sim'"` 印 `0`。

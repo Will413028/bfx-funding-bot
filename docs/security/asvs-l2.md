@@ -79,6 +79,7 @@ app 本身沒有登入、密碼、MFA 或 session（見[不存在性證據](#不
   - 這個網路沒有對外開放的 port；營運入口只有 tailnet 內的 Tailscale Serve。
   - webapi 只聽 tailnet 節點 namespace 裡的 loopback。
   - DB role 依服務分開（`fresh-host-setup.md` §1）。
+    主機上另有已退役模擬 soak 留下的 `bfx_sim`（`bfx_bot` 的成員，密碼在 `/opt/bfx/runtime/sim.env`），沒有程式再用它，等 owner 依 [ADR 2026-11-08「主機殘留的 `bfx_sim`」](../adr/2026-11-08-retire-the-simulation-soak.md#主機殘留的-bfx_sim) 移除。
   - webapi 只持有只讀的 bot token，持有 halt token 或 KEK 時拒絕開機（`apps/webapi.py:46-56`）。
 - 共同的重新評估觸發：服務拆到一台以上的主機，或開放第二個使用者。
 
