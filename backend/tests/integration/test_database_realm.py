@@ -266,7 +266,7 @@ def test_the_migration_stamps_prod_from_prod_data(previous_url: str, sql: str) -
 
 
 @pytest.mark.parametrize(("sql", "realm"), [
-    (_sim_event("ci"), "ci"), (_sim_event("shadow"), "shadow"), (_nav_peak("ci"), "ci"),
+    (_sim_event("ci"), "ci"), (_nav_peak("ci"), "ci"),
 ])
 def test_the_migration_stamps_the_one_realm_it_finds(previous_url: str, sql: str, realm: str) -> None:
     _seed_previous(previous_url, sql)
@@ -275,7 +275,7 @@ def test_the_migration_stamps_the_one_realm_it_finds(previous_url: str, sql: str
 
 
 def test_the_migration_refuses_a_mixed_database_and_changes_nothing(previous_url: str) -> None:
-    _seed_previous(previous_url, _nav_peak("prod"), _sim_event("shadow"))
+    _seed_previous(previous_url, _nav_peak("prod"), _sim_event("ci"))
     with pytest.raises(RuntimeError, match="more than one realm"):
         upgrade_head_after_w3(previous_url)
     engine = create_engine(previous_url)
@@ -313,23 +313,21 @@ def test_an_unstamped_database_refuses_the_bot_and_the_web_api(unstamped: Any) -
         assert conn.scalar(text("SELECT count(*) FROM nav_peak")) == 0
 
 
-@pytest.mark.parametrize("foreign", ["prod", "shadow"])
-def test_the_owner_is_not_exempt_on_insert(ci_db: Any, foreign: str) -> None:
+def test_the_owner_is_not_exempt_on_insert(ci_db: Any) -> None:
     _run(ci_db, _nav_peak("ci"))
-    _refused(ci_db, _nav_peak(foreign, "fUSD"), f"database realm ci refuses a write of realm {foreign} to nav_peak")
+    _refused(ci_db, _nav_peak("prod", "fUSD"), "database realm ci refuses a write of realm prod to nav_peak")
 
 
 def test_the_owner_is_not_exempt_on_the_simulated_venue_table(ci_db: Any) -> None:
     _run(ci_db, _sim_event("ci"))
-    _refused(ci_db, _sim_event("shadow").replace("'sim-1'", "'sim-2'"), "database realm ci refuses a write of realm shadow")
+    _refused(ci_db, _sim_event("prod").replace("'sim-1'", "'sim-2'"), "database realm ci refuses a write of realm prod")
 
 
 def test_updating_the_realm_column_is_checked_but_other_columns_are_not(ci_db: Any) -> None:
     _run(ci_db, _nav_peak("ci"))
     _run(ci_db, "UPDATE nav_peak SET peak = 2")
     _run(ci_db, "UPDATE nav_peak SET deployment_environment = 'ci'")
-    for foreign in ("prod", "shadow"):
-        _refused(ci_db, f"UPDATE nav_peak SET deployment_environment = '{foreign}'", "refuses a write of realm")
+    _refused(ci_db, "UPDATE nav_peak SET deployment_environment = 'prod'", "refuses a write of realm")
     with ci_db.connect() as conn:
         assert conn.scalar(text("SELECT deployment_environment FROM nav_peak")) == "ci"
 
@@ -344,7 +342,7 @@ def test_the_web_api_is_checked_without_any_privilege_on_the_stamp(ci_db: Any) -
     with ci_db.connect() as conn:
         assert not conn.scalar(text("SELECT has_table_privilege('bfx_webapi', 'public.database_realm', 'SELECT')"))
     _run(ci_db, _request("ci"), role="bfx_webapi")
-    _refused(ci_db, _request("shadow"), "database realm ci refuses a write of realm shadow", role="bfx_webapi")
+    _refused(ci_db, _request("prod"), "database realm ci refuses a write of realm prod", role="bfx_webapi")
 
 
 def test_a_deliberate_exception_is_the_visible_disable_trigger(ci_db: Any) -> None:
@@ -371,18 +369,18 @@ def test_the_stamp_is_immutable_even_for_the_owner(ci_db: Any, statement: str) -
 def test_there_is_one_stamp_and_only_a_known_realm(ci_db: Any) -> None:
     insert = "INSERT INTO database_realm(realm, stamped_at_ms, actor) VALUES ('{}', 1, '{}')"
     with pytest.raises(IntegrityError, match="database_realm_pkey"):
-        _run(ci_db, insert.format("shadow", "again"))
+        _run(ci_db, insert.format("prod", "again"))
     with pytest.raises(IntegrityError, match="ck_database_realm_singleton"):
         _run(ci_db, "INSERT INTO database_realm(id, realm, stamped_at_ms, actor) VALUES (false, 'ci', 1, 'x')")
 
 
-@pytest.mark.parametrize("realm", ["live", "PROD", "", "paper"])
+@pytest.mark.parametrize("realm", ["live", "PROD", "", "paper", "shadow"])
 def test_the_stamp_names_only_a_known_realm(unstamped: Any, realm: str) -> None:
     with pytest.raises(IntegrityError, match="ck_database_realm_realm"):
         _run(unstamped, f"INSERT INTO database_realm(realm, stamped_at_ms, actor) VALUES ('{realm}', 1, 'x')")
     with pytest.raises(IntegrityError, match="ck_database_realm_actor"):
         _run(unstamped, "INSERT INTO database_realm(realm, stamped_at_ms, actor) VALUES ('ci', 1, '')")
-    assert set(KNOWN_REALMS) == {"prod", "shadow", "ci"}
+    assert set(KNOWN_REALMS) == {"prod", "ci"}
 
 
 def test_runtime_roles_cannot_write_the_stamp_and_only_the_bot_reads_it(ci_db: Any) -> None:

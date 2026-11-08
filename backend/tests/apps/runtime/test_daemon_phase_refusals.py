@@ -47,18 +47,17 @@ async def _database(monkeypatch, tmp_path: Path, **env: str) -> AsyncEngine:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("realm", ["ci", "shadow"])
 async def test_a_simulated_boot_on_a_legacy_epoch_is_refused(
-    monkeypatch, tmp_path, httpx_mock, realm,
+    monkeypatch, tmp_path, httpx_mock,
 ) -> None:
     engine = await _database(
-        monkeypatch, tmp_path, BFX_PHASE="shadow", BFX_DEPLOYMENT_ENV=realm,
+        monkeypatch, tmp_path, BFX_PHASE="shadow", BFX_DEPLOYMENT_ENV="ci",
     )
     # The database is stamped for the realm this process runs as: the realm check passes
     # and the refusal is the authority one.
     from sqlalchemy import text
     async with engine.begin() as conn:
-        await conn.execute(text("UPDATE database_realm SET realm = :realm"), {"realm": realm})
+        await conn.execute(text("UPDATE database_realm SET realm = :realm"), {"realm": "ci"})
         # A database whose latest epoch is legacy again (restored from before the switch).
         await conn.execute(text(
             "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
@@ -87,13 +86,12 @@ async def test_paper_boot_is_refused_naming_live(monkeypatch, tmp_path, httpx_mo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("realm", ["ci", "shadow"])
 async def test_an_env_only_simulated_boot_is_refused_at_config_load(
-    monkeypatch, tmp_path, httpx_mock, realm,
+    monkeypatch, tmp_path, httpx_mock,
 ) -> None:
     """Only a test's ``VenueSeam`` selects the simulated venue. A stray ``BFX_PHASE=shadow``
     without one fails in ``load_config``: no engine, no boot refusal alert, no request."""
-    engine = await _database(monkeypatch, tmp_path, BFX_PHASE="shadow", BFX_DEPLOYMENT_ENV=realm)
+    engine = await _database(monkeypatch, tmp_path, BFX_PHASE="shadow", BFX_DEPLOYMENT_ENV="ci")
     alerted: list[str] = []
 
     async def refuse(exc: BaseException, **_: object) -> None:

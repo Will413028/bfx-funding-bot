@@ -164,3 +164,7 @@ upgrade roachtests 與 nightly 長跑分開，Kubernetes 的 upgrade e2e 從上�
 ## Amendment (2026-11-08): D3 與所有 soak 修訂被取代（Superseded）
 
 owner 2026-11-08 撤銷 24 小時模擬 soak 與 N-1→N 升級測試這兩道發版閘門，見 [2026-11-08-retire-the-simulation-soak](2026-11-08-retire-the-simulation-soak.md)。本檔的 D3、2026-10-04／10-05／11-06 的修訂與它們的 Revocation Trigger 只是歷史紀錄；`BFX_SIM_FAULTS`、`sim_soak_report.py`、`bootstrap_simulation_db.py` 與 `bfx_sim` database 都已刪除或退役。D1（simulated venue 的資料庫規則）、D2（httpx 層模擬 venue）與 D4 仍然有效，但 simulated venue 只在測試組裝，開機必須帶 `VenueSeam`。
+
+## Amendment (2026-11-08): D1 的 realm `shadow` 被取代
+
+simulated venue 只在 realm `ci` 執行；D1「realm 設為 `shadow`」與「表 CHECK 必須接受 `shadow`」不再成立，`sim_venue_event` 的 CHECK 收窄為 `deployment_environment = 'ci'`，見 [2026-11-08-remove-the-shadow-realm](2026-11-08-remove-the-shadow-realm.md)。D1 其餘規則（epoch 只收 `ledger`、`prod` 由 config 拒絕、每個 database 一列 `database_realm` 加 trigger）仍然有效。

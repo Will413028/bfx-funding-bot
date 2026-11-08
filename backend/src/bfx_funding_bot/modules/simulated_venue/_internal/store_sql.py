@@ -6,7 +6,7 @@ database and refuses unless the latest epoch is `ledger`. Nothing the caller pas
 stand in for that read (finding 5 of the P1a design review; ADR 2026-10-03).
 
 `_check_database_realm` reads the database's `database_realm` stamp on the same connection
-and refuses an unstamped database or one stamped for any realm outside `ALLOWED_REALMS`
+and refuses an unstamped database or one stamped for any realm but `SIMULATED_REALM`
 (decision E2): a simulated venue never opens on the production database. The trigger on
 `sim_venue_event` then rejects every row whose realm differs from the stamp.
 """
@@ -19,8 +19,8 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bfx_funding_bot.modules.simulated_venue.contracts import (
-    ALLOWED_REALMS,
     REQUIRED_AUTHORITY_EPOCH,
+    SIMULATED_REALM,
     ConcurrentAppendError,
     RealmRefusedError,
     SimAccount,
@@ -99,9 +99,9 @@ class SqlVenueEventStore:
             raise VenueStoreError(f"database realm unreadable: {exc!r}") from exc
         if not stamps:
             raise RealmRefusedError("this database is not stamped with a realm")
-        if stamps[0] not in ALLOWED_REALMS:
+        if stamps[0] != SIMULATED_REALM:
             raise RealmRefusedError(
-                f"the simulated venue refuses a database stamped {stamps[0]!r}; allowed: {ALLOWED_REALMS}"
+                f"the simulated venue refuses a database stamped {stamps[0]!r}; allowed: {SIMULATED_REALM!r}"
             )
 
     async def load(self, account: SimAccount) -> Sequence[VenueEvent]:

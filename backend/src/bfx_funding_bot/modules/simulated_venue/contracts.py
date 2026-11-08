@@ -14,9 +14,10 @@ from typing import Literal, Protocol
 
 from bfx_funding_bot.modules.simulated_venue.events import VenueEvent
 
-# The only realms a simulated venue may run in. `prod` is refused here and by the
-# `sim_venue_event` CHECK constraint.
-ALLOWED_REALMS = ("shadow", "ci")
+# The only realm a simulated venue may run in. Every other realm (`prod` above all) is
+# refused here and by the `sim_venue_event` CHECK constraint (ADR 2026-11-08 remove the
+# shadow realm).
+SIMULATED_REALM = "ci"
 REQUIRED_AUTHORITY_EPOCH = "ledger"
 
 _SYMBOL = re.compile(r"^f[A-Z0-9]{2,10}$")
@@ -70,10 +71,10 @@ class SimAccount:
     def __post_init__(self) -> None:
         if not self.exchange_account_id:
             raise ValueError("simulated account needs an exchange_account_id")
-        if self.deployment_environment not in ALLOWED_REALMS:
+        if self.deployment_environment != SIMULATED_REALM:
             raise RealmRefusedError(
                 f"simulated venue refuses realm {self.deployment_environment!r}; "
-                f"allowed: {ALLOWED_REALMS}"
+                f"allowed: {SIMULATED_REALM!r}"
             )
 
 

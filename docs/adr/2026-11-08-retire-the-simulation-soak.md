@@ -32,7 +32,7 @@ tags: [bfx-funding-bot, decision, simulation, soak, testing, release]
 - **撤銷**：24 小時模擬 soak 與 N-1→N 升級測試都不再是發版閘門。shadow-p14 的 Gate B（[2026-06-04 ADR](2026-06-04-adaptive-period-strategy-and-deploy-gating.md)）跟著撤回。
 - **刪除**（同一個 PR）：`soak-image.yml`、`scripts/sim_soak_report.py`、`scripts/bootstrap_simulation_db.py`、`apps/sim_faults.py` 與 `BFX_SIM_FAULTS`、模擬 venue 的持久 `fault_injected`／`internal_failure_recorded` 事件、`VenueObserver` 與 `bfx_sim_venue_*` 計數器、讀即時行情的模擬 feed（`LiveMarketFeed`、venue 的 feed task 與 watermark lag 指標）、沒有其他使用者的公開 trades WS client 與公開 trades REST 讀取、`deploy/vm/shadow.env`、`deploy/vm/shadow-p14.env`、`docs/runbooks/simulation-soak.md`，以及 `bfx_sim` role 的文件。
 - **simulated venue 只能由 `VenueSeam` 選上**：它只在測試組裝，feed、可選的 `FaultPlan` 與開場錢包（`VenueSeam.initial_wallets`，取代已刪除的 `BFX_SIM_INITIAL_WALLETS`）只能經 seam 注入，建好的 venue 經 `VenueSeam.on_built` 交給測試（`Daemon` 不再持有它）。單靠 env（`BFX_PHASE=shadow`）在 `load_config` 就拒絕，早於讀 DB 與送告警；沒有 seam 的 simulated 組裝以 `ConfigurationError` 拒絕；Bitfinex 組裝收到 seam 也拒絕。epoch 寫入者檢查兩個 venue 一樣（只收 genesis migration 與 S1-7 switch），simulated 不再豁免。
-- **保留**：`simulated_venue` 核心、SQL store 與 `sim_venue_event` 表（schema 不動）、經 seam 注入的 `FaultPlan`、shadow realm／phase（由後續 PR 另外決定是否移除）。unrouted request 只留在記憶體的 `unexpected` log 與計數，不再寫成持久事件。
+- **保留**：`simulated_venue` 核心、SQL store 與 `sim_venue_event` 表（schema 不動）、經 seam 注入的 `FaultPlan`、phase `shadow`（由後續 PR 另外決定）；realm `shadow` 已由 [2026-11-08-remove-the-shadow-realm](2026-11-08-remove-the-shadow-realm.md) 移除。unrouted request 只留在記憶體的 `unexpected` log 與計數，不再寫成持久事件。
 
 剩下的保護：
 

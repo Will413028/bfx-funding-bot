@@ -88,3 +88,7 @@ D2 讓 integration `needs` unit，失敗的 unit 不會再花 integration 的時
 ### Revocation Trigger
 
 repo 轉為 private（Actions 分鐘計費）或 unit 失敗率高到並行的 integration 浪費明顯時，恢復 `needs`。
+
+## Amendment (2026-11-08): realm `shadow` 移除
+
+D1 的 `DeploymentEnvironment` 列舉改為 `{prod, ci}`：soak 退役後沒有寫入者，`shadow` 這個值與它的 CHECK、config guard 一起移除，見 [2026-11-08-remove-the-shadow-realm](2026-11-08-remove-the-shadow-realm.md)。本檔提到 `shadow` realm 的段落只是歷史紀錄。

@@ -17,11 +17,11 @@ from bfx_funding_bot.modules.observability.resource import (
 
 class TestDeploymentEnvironment:
     def test_enum_values_exhaustive(self) -> None:
-        assert {e.value for e in DeploymentEnvironment} == {"prod", "shadow", "ci"}
+        assert {e.value for e in DeploymentEnvironment} == {"prod", "ci"}
 
     def test_enum_is_str_subclass(self) -> None:
         assert DeploymentEnvironment.PROD == "prod"
-        assert str(DeploymentEnvironment.SHADOW) == "shadow"
+        assert str(DeploymentEnvironment.CI) == "ci"
 
     def test_invalid_env_raises(self) -> None:
         with pytest.raises(ValueError):

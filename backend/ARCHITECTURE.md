@@ -388,7 +388,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 **Venue hints 邊界**：`execution/ws_dispatcher.py` 把 WS `foc`／`fcc` 交給 ledger 的 `VenueHintSink`（`_internal/venue_hints.py`），scope 在建構時綁定；它不讀寫 DB，只同步呼叫 `request_resync(reason)`（每個 `(kind, venue id)` 本機 monotonic clock 的 5 秒 leading-edge 窗口）並逐筆發布 `VenueHintNotification`。offer 通知以 `venue_offer_id` 為 key，credit close 只帶 `credit_id`。
 
-**Account/環境隔離**：每筆讀寫都帶 `deployment_environment ∈ {prod, shadow, ci}`，所有 money query 以 `(exchange_account_id, deployment_environment)` 複合過濾；ledger 的 scope trigger（`guard_ledger_scope`）拒絕跨 scope 的參照。legacy `account_id` 不再選擇 request/daemon scope；單一 DB 內可並行跑 shadow/prod/CI 而無 cross-account 或 cross-environment 污染。
+**Account/環境隔離**：每筆讀寫都帶 `deployment_environment ∈ {prod, ci}`（`shadow` 已移除，ADR 2026-11-08-remove-the-shadow-realm），所有 money query 以 `(exchange_account_id, deployment_environment)` 複合過濾；ledger 的 scope trigger（`guard_ledger_scope`）拒絕跨 scope 的參照。legacy `account_id` 不再選擇 request/daemon scope；單一 DB 內可並行跑 prod/CI 而無 cross-account 或 cross-environment 污染。
 
 **Typed outcome unions**：pre-trade 結果是 `ReadyToSubmit | BlockedExecution | NoRecommendation`（`execution/contracts.py`）；venue submit 結果是封閉的 `SubmitOutcome = SubmitAcknowledged | SubmitRejected | SubmitOutcomeUnknown | SubmitNotSent`（`external/bitfinex/submit_outcomes.py::classify_submit_response`）。transport 開始前的例外 → `SubmitNotSent`；transport 開始後的任何例外（timeout、network error、cancel）、5xx、缺 response 或無法辨識的 body 一律 `SubmitOutcomeUnknown`；只有明確 2xx 帶 venue offer id 才是 acknowledged、結構化拒絕才是 rejected。5xx 唯一的例外是 HTTP 500 帶 `["error", CODE, MESSAGE]` 且 `(CODE, MESSAGE)` 整組出現在 `VENUE_SUBMIT_REFUSALS_5XX`（只收從真實 venue 原樣錄到的配對；10001 是 Bitfinex 的通用碼，單看 code 不足以判定）→ rejected。其餘帶結構化錯誤的 UNKNOWN 把 code 與限長 message（憑證遮蔽）寫進 `transport_outcome_journal.evidence`，下一條待收的拒絕訊息從這裡讀。`transport_outcome_journal.kind` 的 CHECK 與此詞彙一一對應。
 
@@ -717,14 +717,14 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 
 | Phase | 性質 | Realm | Venue | 備註 |
 |---|---|---|---|---|
-| `shadow` | 模擬校準 | `shadow` | simulated | 跑在 in-process 模擬 venue 上，只收 `ledger` authority，詳見下節「Venue 軸」；`paper` phase 與 echo executor 已刪除，`BFX_PHASE=paper` 在 `load_config` 直接拒絕並指向 `live` |
+| `shadow` | 模擬（只在測試） | `ci` | simulated | 跑在 in-process 模擬 venue 上，只收 `ledger` authority，詳見下節「Venue 軸」；`paper` phase 與 echo executor 已刪除，`BFX_PHASE=paper` 在 `load_config` 直接拒絕並指向 `live` |
 | `live` | **真錢能力** | `prod` | Bitfinex | `live.env`／`book_guarded`；資金只由已套用 CapitalPolicy 決定：fUST all_available、reserve0、max_cell_fraction0.70，fUSD disabled；能否掛新單看 trading state（ACTIVE）、該幣別 policy `enabled` 與包絡 guard（§6）；release flow／change class 已移除，部署不影響能否交易 |
 
 **Venue 軸（`core/venue.py`、`apps/venue.py`）**：venue 只由 `VenueSeam` 決定：`build_daemon` 帶 seam → simulated，沒帶 → bitfinex（`build_venue` 只看 seam）。`load_config(simulated_venue=...)` 在讀 DB、送告警之前檢查 `BFX_PHASE` 與它雙向一致（`shadow` 沒有 seam、有 seam 但不是 `shadow` 都以 `ValueError` 拒絕），所以 `Venue = "bitfinex" | "simulated"` 作為 `MarketfeedConfig.phase` 的計算屬性（`live→bitfinex`、`shadow→simulated`）必然與 seam 相符，不儲存也不能單獨設定；部署環境只有 `live`。`BFX_ALLOCATION_CAP_USDT`、`BFX_BALANCE_BUFFER_USDT`、`BFX_CONCENTRATION_PCT`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`、`BFX_EXECUTOR` 任何 phase 設了都在 `load_config` 拒絕（資金上限是已套用 CapitalPolicy 的，venue 由 phase 決定）。兩個 venue 的開機順序相同：schema head → `database_realm` → ledger epoch（`require_ledger_epoch`：要求 `ledger` 與已知寫入者，與 venue 無關）→ 之後才碰 vault、憑證與任何 client。任何拒絕都 dispose engine 並擲出（不寫、不碰 venue），兩個 venue 都走 `_refuse_live_boot` 告警。
 
 `build_venue(config, ...)`（`apps/venue.py`，唯一 import `simulated_venue.wiring` 的地方，也是唯一決定 venue 差異的地方）對兩個 venue 回傳同形的 `VenueWiring`：憑證（來源也在此：Bitfinex 讀 vault，simulated 每次開機以 `secrets.token_hex` 產生，且 `BFX_VAULT_KEK` 出現在環境中或掛成秘密檔就拒絕開機）、auth REST 與 executor（含 kill switch 的 cancel-all）使用的 `httpx` client、每個 process 一個 `AuthRequestGate`、`VenueCapabilities`（`auth_ws` required／forbidden；`build_executor` 檢查 capabilities，不比對 venue 字串）、venue 的 `aclose`（`Daemon.venue_aclose`）。`load_account_bootstrap` 只讀帳戶列與 config draft，憑證由 wiring 提供。架構測試禁止 `apps/venue.py` 以外的程式比對 venue 名稱。
 - **bitfinex**：process 共用的真 client，requires auth WS（由 `VenueCapabilities.auth_ws` 決定，無 env flag）。
-- **simulated**：`SqlVenueEventStore.open(engine)` 開在同一個資料庫（log 是 `sim_venue_event`），realm 必須是 `shadow`／`ci` 且 epoch 為 `ledger`；auth REST／executor 走 `httpx.AsyncClient(transport=<venue>)`，因此不會有任何 authenticated request 離開 process；公開 client 仍是真的（`FundingRules`、蠟燭、book）。沒有 auth WS（`VenueCapabilities.auth_ws="forbidden"`）；漏掉的 fill 靠週期 reconcile 與 resync 補上。simulated venue 只在測試裡組裝：市場 feed（與可選的 `FaultPlan`）只能經 `VenueSeam`（`build_daemon(venue_seam=...)`）傳入，沒有 seam 就不是 simulated（ADR 2026-11-08-retire-the-simulation-soak）。`VenueSeam.initial_wallets`（例如 `{"UST": 1000}`）只在 venue log 為空時以一次 append（`expected_seq=0`）入帳，重啟不重複入帳，賽跑輸家得 `ConcurrentAppendError`；建好的 venue 經 `VenueSeam.on_built` 交給測試（daemon 不持有它）。`BFX_PHASE=shadow` 只有在 `build_daemon` 帶了 seam 時 `load_config` 才接受（`simulated_venue`），帶了 seam 也只接受 `shadow`；兩個方向都在讀 DB、送告警之前以 `ValueError` 拒絕，是唯一一道關卡。
+- **simulated**：`SqlVenueEventStore.open(engine)` 開在同一個資料庫（log 是 `sim_venue_event`），realm 必須是 `ci`（`SIMULATED_REALM`）且 epoch 為 `ledger`；auth REST／executor 走 `httpx.AsyncClient(transport=<venue>)`，因此不會有任何 authenticated request 離開 process；公開 client 仍是真的（`FundingRules`、蠟燭、book）。沒有 auth WS（`VenueCapabilities.auth_ws="forbidden"`）；漏掉的 fill 靠週期 reconcile 與 resync 補上。simulated venue 只在測試裡組裝：市場 feed（與可選的 `FaultPlan`）只能經 `VenueSeam`（`build_daemon(venue_seam=...)`）傳入，沒有 seam 就不是 simulated（ADR 2026-11-08-retire-the-simulation-soak）。`VenueSeam.initial_wallets`（例如 `{"UST": 1000}`）只在 venue log 為空時以一次 append（`expected_seq=0`）入帳，重啟不重複入帳，賽跑輸家得 `ConcurrentAppendError`；建好的 venue 經 `VenueSeam.on_built` 交給測試（daemon 不持有它）。`BFX_PHASE=shadow` 只有在 `build_daemon` 帶了 seam 時 `load_config` 才接受（`simulated_venue`），帶了 seam 也只接受 `shadow`；兩個方向都在讀 DB、送告警之前以 `ValueError` 拒絕，是唯一一道關卡。
 - **兩者相同**：同一條 safety config（`configs/safety.live.yaml`）、同一條 guard chain（含 `CapitalPolicyGuard`、pre-trade guards、`WriterLockGuard`）、reconciler、`InterestLedgerSync`／`CreditHistorySync`、kill switch（`venue=executor`）；每個 symbol 都必須讀得到已套用的 ledger CapitalPolicy；capital ports 也是同一組（`build_capital_ports`，3e）。兩個 venue 的開機拒絕都走 `_refuse_live_boot` 告警（告警路由是設定，`AlertSink` 已加 realm 前綴）。
 
 模擬 venue 的市場資料是測試注入的 `MarketFeed`（例如 `FixtureMarketFeed`）：venue 在自己的 request lock 內讀 feed，所以 `book()`／`trades()`／`complete_through()` 只讀記憶體 buffer。事件時間 watermark（`MarketFeed.complete_through(symbol)`）：venue 只消費 `(market_through, min(now, watermark)]`，`market_through` 也只推進到那裡（None＝這次不消費、不動）；放單不會把它推過還沒消費的區間，晚到、發生在新 offer 放單之前的 trade 只算給當時就在簿上的 offer（`placed_ms`），而 fill 的時間戳不早於 venue 已經讓外界看過的時間。舊 book 得「no market data」（內部失敗），不會編造資料。
@@ -741,8 +741,8 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 每個 build 的四步 canary ceremony（release sessions、canary permit、halt epoch 續開、
 Halt 2 DR 收據）已由 ADR 2026-09-25 的 release flow 取代並刪除，資料見 `release_archive`。
 
-**Phase ⟷ Realm guard**（`load_config()`）：live 禁止 shadow realm；
-production 使用 prod，ci 僅供測試。shadow 禁止 prod（模擬不可污染真錢分析）。
+**Phase ⟷ Realm guard**（`load_config()`）：realm 只有 `prod` 與 `ci`；
+production 使用 prod，ci 僅供測試。phase shadow（simulated venue）禁止 prod（模擬不可污染真錢資料），`sim_venue_event` 的 CHECK 只收 `ci`。
 違規 `ValueError` fail-fast；webapi 必須明確設定與 daemon 相同的 realm。
 
 **Cells**：`cells.yaml`（shadow，多對跨 fUSD/fUST 與 p2/p30/a30）；本輪

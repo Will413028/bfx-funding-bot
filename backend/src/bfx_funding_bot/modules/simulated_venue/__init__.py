@@ -35,8 +35,8 @@ from bfx_funding_bot.modules.simulated_venue._internal.store_memory import (
 from bfx_funding_bot.modules.simulated_venue._internal.store_sql import SqlVenueEventStore
 from bfx_funding_bot.modules.simulated_venue._internal.transport import SimulatedVenue
 from bfx_funding_bot.modules.simulated_venue.contracts import (
-    ALLOWED_REALMS,
     REQUIRED_AUTHORITY_EPOCH,
+    SIMULATED_REALM,
     BookSnapshot,
     ConcurrentAppendError,
     FaultKind,
@@ -58,8 +58,8 @@ from bfx_funding_bot.modules.simulated_venue.contracts import (
 )
 
 __all__ = [
-    "ALLOWED_REALMS",
     "REQUIRED_AUTHORITY_EPOCH",
+    "SIMULATED_REALM",
     "BookSnapshot",
     "ConcurrentAppendError",
     "FaultKind",

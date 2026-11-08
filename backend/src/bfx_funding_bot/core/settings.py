@@ -14,9 +14,10 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from bfx_funding_bot.core.realms import KNOWN_REALMS
 from bfx_funding_bot.core.secret_files import read_secret
 
-VALID_DEPLOYMENT_ENVIRONMENTS = frozenset({"prod", "shadow", "ci"})
+VALID_DEPLOYMENT_ENVIRONMENTS = frozenset(KNOWN_REALMS)
 
 
 def require_deployment_environment() -> str:

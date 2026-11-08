@@ -132,8 +132,8 @@ def test_alembic_check_reports_no_drift(db: Any) -> None:
     alembic(url, "check")
 
 
-@pytest.mark.parametrize("realm", ["prod", "PROD", "", "paper", "live"])
-def test_realm_check_rejects_every_realm_but_shadow_and_ci(db: Any, realm: str) -> None:
+@pytest.mark.parametrize("realm", ["prod", "PROD", "", "paper", "live", "shadow"])
+def test_realm_check_rejects_every_realm_but_ci(db: Any, realm: str) -> None:
     _, engine = db
     disable_realm_triggers(engine)  # the database stamp refuses these first; this tests the CHECK itself
     with pytest.raises(IntegrityError, match="ck_sim_venue_event_realm"), engine.begin() as conn:
@@ -142,13 +142,11 @@ def test_realm_check_rejects_every_realm_but_shadow_and_ci(db: Any, realm: str) 
         assert conn.scalar(text("SELECT count(*) FROM sim_venue_event")) == 0
 
 
-def test_shadow_and_ci_rows_are_accepted_and_scopes_are_independent(db: Any) -> None:
+def test_ci_rows_are_accepted_and_scopes_are_independent(db: Any) -> None:
     _, engine = db
-    disable_realm_triggers(engine)  # one database holds one realm; the CHECK itself admits both
     with engine.begin() as conn:
-        for realm in ("shadow", "ci"):
-            conn.exec_driver_sql(_row(realm, 1))
-            conn.exec_driver_sql(_row(realm, 2))
+        conn.exec_driver_sql(_row("ci", 1))
+        conn.exec_driver_sql(_row("ci", 2))
         conn.exec_driver_sql(_row("ci", 1, account="sim-account-2"))
     with pytest.raises(IntegrityError, match="pk_sim_venue_event"), engine.begin() as conn:
         conn.exec_driver_sql(_row("ci", 2))  # the same scope and position twice
