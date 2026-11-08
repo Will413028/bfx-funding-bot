@@ -140,23 +140,16 @@ async def build_venue(
     metrics: DaemonMetrics,
     seam: VenueSeam | None = None,
 ) -> VenueWiring:
+    # The seam alone picks the venue; ``load_config`` already refused a phase that disagrees
+    # with it (shadow without a seam, a seam without shadow), before any database work.
     gate = AuthRequestGate()
-    if config.venue == "bitfinex":
-        if seam is not None:
-            raise ConfigurationError("a VenueSeam selects the simulated venue; BFX_PHASE=live "
-                                     "trades Bitfinex")
+    if seam is None:
         async with session_factory() as session:
             credentials = await _vault_credentials(session, exchange_account_id)
         return VenueWiring(
             venue="bitfinex", credentials=credentials, auth_http=bitfinex_http,
             auth_gate=gate, capabilities=BITFINEX_CAPABILITIES, aclose=_noop,
             credential_vault=True)
-    if seam is None:
-        raise ConfigurationError(
-            "the simulated venue runs only under tests, which pass a VenueSeam with its market "
-            "feed; there is no simulated boot without one (ADR "
-            "2026-11-08-retire-the-simulation-soak)"
-        )
     return await _build_simulated(
         config, exchange_account_id=exchange_account_id, db_engine=db_engine,
         clock=clock, metrics=metrics, gate=gate, seam=seam)

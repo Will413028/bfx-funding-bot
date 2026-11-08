@@ -36,33 +36,37 @@ QUALIFIED_PAIRS = {
 
 
 def load_config(
-    *, cells_yaml_path: Path | None = None, allow_simulated_venue: bool = False,
+    *, cells_yaml_path: Path | None = None, simulated_venue: bool = False,
 ) -> MarketfeedConfig:
     """Read the bot's configuration from the environment.
 
-    ``BFX_PHASE=shadow`` selects the simulated venue, which only tests compose (they pass a
-    ``VenueSeam`` to ``build_daemon``, which sets ``allow_simulated_venue``). No environment
-    alone can build it: a stray ``BFX_PHASE=shadow`` fails here, before the database or
-    alerts are touched (ADR 2026-11-08-retire-the-simulation-soak).
+    The venue is chosen by the caller alone: ``simulated_venue`` is true exactly when a test
+    passes a ``VenueSeam`` to ``build_daemon``; production passes nothing and trades Bitfinex.
+    ``BFX_PHASE`` must agree with that choice in both directions (shadow needs the seam, a
+    seam needs shadow), checked here before the database or alerts are touched, so no
+    environment alone can select the simulated venue (ADR
+    2026-11-08-retire-the-simulation-soak).
     """
     phase_str = os.environ.get("BFX_PHASE", "").strip()
     if not phase_str:
         raise ValueError("BFX_PHASE env var required")
     if phase_str == "paper":
-        # The paper phase and its echo executor were removed; simulation is the
-        # shadow phase (ADR 2026-10-03 D4).
-        raise ValueError(
-            "BFX_PHASE=paper was removed; use BFX_PHASE=shadow (simulation runs on the "
-            "simulated venue)"
-        )
+        # The paper phase and its echo executor were removed; a deployed bot runs live
+        # (ADR 2026-10-03 D4, ADR 2026-11-08-retire-the-simulation-soak).
+        raise ValueError("BFX_PHASE=paper was removed; a deployed bot runs BFX_PHASE=live")
     if phase_str not in {"shadow", "live"}:
         # canary was retired with the per-build ceremony (ADR 2026-09-25).
         raise ValueError(f"BFX_PHASE must be shadow or live, got {phase_str!r}")
-    if phase_str == "shadow" and not allow_simulated_venue:
+    if phase_str == "shadow" and not simulated_venue:
         raise ValueError(
             "BFX_PHASE=shadow selects the simulated venue, which only tests compose through "
             "a VenueSeam; a deployed bot runs BFX_PHASE=live (ADR "
             "2026-11-08-retire-the-simulation-soak)"
+        )
+    if phase_str != "shadow" and simulated_venue:
+        raise ValueError(
+            f"a VenueSeam selects the simulated venue, which runs only as BFX_PHASE=shadow; "
+            f"got BFX_PHASE={phase_str}"
         )
     # A set legacy knob is a configuration error in every phase, never silently ignored:
     # the capital limits are the applied CapitalPolicy's, the executor is not chosen by env,

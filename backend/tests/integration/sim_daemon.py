@@ -111,10 +111,14 @@ class SimEnv:
                          on_built=built.append, client_credentials=client_credentials), built
 
     async def build(self, *, faults: FaultPlan | None = None, feed: Any = None,
-                    client_credentials: Credentials | None = None) -> Any:
+                    client_credentials: Credentials | None = None,
+                    stop_event: Any = None) -> Any:
+        """The one place a test composes a simulated daemon: seam, ``bot.build_daemon``, then
+        the built venue and daemon registered and the bot given its book."""
         seam, built = self.seam(faults=faults, feed=feed, client_credentials=client_credentials)
         daemon = await bot.build_daemon(
-            cells_yaml_path=self.cells_path, skip_ws=True, venue_seam=seam)
+            cells_yaml_path=self.cells_path, skip_ws=True, stop_event=stop_event,
+            venue_seam=seam)
         [self.venues[id(daemon)]] = built
         self.daemons.append(daemon)
         self.give_the_bot_a_book(daemon)

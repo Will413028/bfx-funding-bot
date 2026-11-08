@@ -9,8 +9,7 @@ from __future__ import annotations
 import base64
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -22,7 +21,6 @@ from bfx_funding_bot.apps.venue import (
     SIMULATED_CAPABILITIES,
     _throwaway_credentials,
     _vault_credentials,
-    build_venue,
 )
 from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
 from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -104,38 +102,3 @@ async def test_the_bitfinex_wiring_fails_closed_without_a_usable_credential(
     async with factory() as session:
         with pytest.raises(ConfigurationError, match=message):
             await _vault_credentials(session, ACCOUNT)
-
-
-async def test_a_simulated_boot_without_a_seam_is_refused_before_opening_anything(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    """The simulated venue runs only under tests, which bring its feed through a VenueSeam."""
-    monkeypatch.delenv("BFX_VAULT_KEK", raising=False)
-
-    def opened(*args: object, **kwargs: object) -> object:
-        raise AssertionError("a refused simulated boot must not open the venue")
-
-    monkeypatch.setattr(venue_module, "_build_simulated", opened)
-    config = cast(Any, SimpleNamespace(venue="simulated"))
-    with pytest.raises(ConfigurationError, match="VenueSeam"):
-        await build_venue(
-            config, exchange_account_id=ACCOUNT, session_factory=cast(Any, None),
-            db_engine=cast(Any, None), bitfinex_http=cast(Any, None), clock=lambda: 0,
-            metrics=cast(Any, None))
-
-
-async def test_a_seam_never_reaches_the_bitfinex_venue(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The seam is the only selector of the simulated venue: a live (Bitfinex) config with a
-    seam is refused before the vault is read, never silently trading Bitfinex."""
-    from bfx_funding_bot.apps.venue import VenueSeam
-    from bfx_funding_bot.modules.simulated_venue import FixtureMarketFeed
-
-    def vault(*args: object, **kwargs: object) -> object:
-        raise AssertionError("a refused boot must not open the vault")
-
-    monkeypatch.setattr(venue_module, "_vault_credentials", vault)
-    config = cast(Any, SimpleNamespace(venue="bitfinex"))
-    with pytest.raises(ConfigurationError, match="VenueSeam selects the simulated venue"):
-        await build_venue(
-            config, exchange_account_id=ACCOUNT, session_factory=cast(Any, None),
-            db_engine=cast(Any, None), bitfinex_http=cast(Any, None), clock=lambda: 0,
-            metrics=cast(Any, None), seam=VenueSeam(feed=FixtureMarketFeed()))

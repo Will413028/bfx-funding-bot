@@ -72,13 +72,7 @@ async def test_a_refused_key_at_boot_holds_in_recovery_mode_and_a_kill_waits_for
     sim, engine = await make_sim_env(ledger_db, monkeypatch, httpx_mock, tmp_path)
     try:
         stop = asyncio.Event()
-        seam, built = sim.seam(client_credentials=REVOKED)
-        daemon = await bot.build_daemon(
-            cells_yaml_path=sim.cells_path, skip_ws=True, stop_event=stop,
-            venue_seam=seam)
-        [sim.venues[id(daemon)]] = built
-        sim.daemons.append(daemon)
-        sim.give_the_bot_a_book(daemon)
+        daemon = await sim.build(client_credentials=REVOKED, stop_event=stop)
 
         compose = bot.build_daemon
 

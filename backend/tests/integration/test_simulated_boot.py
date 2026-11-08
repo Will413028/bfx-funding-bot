@@ -44,11 +44,27 @@ async def _refused(ledger_db, monkeypatch, httpx_mock, tmp_path, exc: type[BaseE
         await close_sim_env(sim, engine)
 
 
-async def test_a_simulated_boot_on_a_legacy_epoch_is_refused(
-        ledger_db, monkeypatch, httpx_mock, tmp_path) -> None:  # noqa: F811
-    """Mutation: the simulated venue's supported set includes ``legacy``."""
-    await _refused(ledger_db, monkeypatch, httpx_mock, tmp_path, AuthorityMismatch,
-                   "authority_unsupported value=legacy build=ledger", epoch="legacy")
+async def _unknown_writer(engine) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "INSERT INTO capital_authority_epoch "
+            "(epoch_seq, authority, set_at_ms, actor, reason) "
+            "SELECT max(epoch_seq) + 1, 'ledger', max(epoch_seq) + 1, 'retired_tool', 't' "
+            "FROM capital_authority_epoch"))
+
+
+@pytest.mark.parametrize(("match", "options"), [
+    ("authority_unsupported value=legacy build=ledger", {"epoch": "legacy"}),
+    ("ledger_epoch_writer_unknown actor='retired_tool'", {"before": _unknown_writer}),
+], ids=["legacy_epoch", "unknown_writer"])
+async def test_a_simulated_boot_on_an_unsupported_epoch_is_refused(
+        ledger_db, monkeypatch, httpx_mock, tmp_path, match, options) -> None:  # noqa: F811
+    """The epoch rule is venue-independent: a ``legacy`` epoch, or a ``ledger`` epoch appended
+    by a writer that is neither the genesis nor the switch, refuses a seam boot as it refuses
+    Bitfinex. Mutations: the simulated venue's supported set includes ``legacy``; exempt the
+    simulated venue from the writer check (``unknown_writer`` fails)."""
+    await _refused(ledger_db, monkeypatch, httpx_mock, tmp_path, AuthorityMismatch, match,
+                   **options)
 
 
 async def test_a_simulated_boot_refuses_a_vault_key_in_the_environment(

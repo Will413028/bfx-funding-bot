@@ -300,14 +300,14 @@ async def build_daemon(
     # Created first: the daemon stops on it, and an applied credential rotation sets it.
     stop_event = stop_event if stop_event is not None else asyncio.Event()
     config = load_config(
-        cells_yaml_path=cells_yaml_path, allow_simulated_venue=venue_seam is not None)
+        cells_yaml_path=cells_yaml_path, simulated_venue=venue_seam is not None)
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     # Both venues, in this order, before the credential vault or any client is touched:
     # a database at another schema means this is the wrong build for it (for instance a
     # rollback onto a newer schema); its stamped realm must equal the realm this process
     # runs as (E2); and the capital authority epoch is read once: either venue runs only
-    # on the ledger, and the real venue only on an epoch a known writer appended
+    # on a ``ledger`` epoch a known writer appended, with no venue exemption
     # (``apps/authority_support.py``), before any ledger write. Any refusal stops the boot and
     # alerts (``_refuse_live_boot``: alert routing is configuration, the sink prefixes the realm).
     try:
