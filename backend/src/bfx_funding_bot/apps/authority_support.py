@@ -14,9 +14,9 @@ refuses any other writer (fail closed):
 
 No scope is checked: a scope's seed exists only for the scopes the switch saw, and the seed can
 no longer run, so a per-scope check could only refuse an account added after the switch. The
-simulated venue is exempt from the writer check: simulation databases bootstrapped before
-2026-10-06 carry an epoch whose actor is ``bootstrap_simulation_db`` (that script no longer
-writes an epoch), and nothing the simulated venue lends was ever under the legacy authority.
+simulated venue (tests only) is exempt from the writer check: its databases are test fixtures
+whose epoch any test may write, and nothing the simulated venue lends was ever under the
+legacy authority.
 """
 from __future__ import annotations
 

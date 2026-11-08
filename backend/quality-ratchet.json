@@ -1,8 +1,8 @@
 {
   "suppressions": {
-    "noqa": 443,
+    "noqa": 433,
     "ruff: ignore": 2,
-    "type: ignore": 298,
+    "type: ignore": 278,
     "pyright: ignore": 0,
     "biome-ignore": 1,
     "eslint-disable": 0,
@@ -16,5 +16,5 @@
     "it.skip": 0,
     "describe.skip": 0
   },
-  "tests_executed": 6108
+  "tests_executed": 5868
 }

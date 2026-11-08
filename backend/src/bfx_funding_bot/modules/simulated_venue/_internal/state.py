@@ -9,9 +9,7 @@ from bfx_funding_bot.modules.simulated_venue.contracts import BookSnapshot
 from bfx_funding_bot.modules.simulated_venue.events import (
     BookObserved,
     CreditClosed,
-    FaultInjected,
     InterestPaid,
-    InternalFailureRecorded,
     LoanDrawn,
     NonceAdvanced,
     OfferCanceled,
@@ -182,8 +180,8 @@ def apply(state: VenueState, event: VenueEvent) -> None:
             state.deposits[event.currency] = state.deposits.get(event.currency, ZERO) + event.amount
         case NonceAdvanced():
             state.last_nonce = max(state.last_nonce, event.nonce)
-        case FaultInjected() | InternalFailureRecorded() | UnexpectedRequestRecorded():
-            pass  # records for the soak report; they change no venue state
+        case UnexpectedRequestRecorded():
+            pass  # a record of an unrouted request; it changes no venue state
         case BookObserved():
             state.books[event.symbol] = BookSnapshot(event.symbol, event.captured_at_ms, event.asks)
         case OfferPlaced():

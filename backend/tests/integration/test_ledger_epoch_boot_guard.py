@@ -98,7 +98,7 @@ def test_a_switch_epoch_boots_an_account_the_switch_never_saw(db) -> None:
     assert _guard(db) is None
 
 
-@pytest.mark.parametrize("actor", ["bootstrap_simulation_db", "test", "ledger_seed"])
+@pytest.mark.parametrize("actor", ["retired_tool", "test", "ledger_seed"])
 def test_an_epoch_written_by_anyone_else_refuses(db, actor: str) -> None:
     _epoch(db, "ledger", actor)
     assert _guard(db) == f"ledger_epoch_writer_unknown actor={actor!r}"
@@ -111,5 +111,5 @@ def test_a_legacy_epoch_refuses(db, venue: Venue) -> None:
 
 
 def test_the_simulated_venue_takes_any_writer(db) -> None:
-    _epoch(db, "ledger", "bootstrap_simulation_db")
+    _epoch(db, "ledger", "retired_tool")
     assert _guard(db, venue="simulated") is None

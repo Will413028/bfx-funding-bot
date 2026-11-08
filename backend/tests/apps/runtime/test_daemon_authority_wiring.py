@@ -293,10 +293,10 @@ async def test_an_epoch_from_an_unknown_writer_refuses_the_real_venue(
     monkeypatch.setattr(bot, "_refuse_live_boot", _recording(refused))
     engine, factory, path = await _db(monkeypatch, tmp_path, httpx_mock, realm="prod")
     try:
-        await _epoch(factory, "bootstrap_simulation_db")
+        await _epoch(factory, "retired_tool")
         with pytest.raises(AuthorityMismatch, match="ledger_epoch_writer_unknown"):
             await build_daemon(cells_yaml_path=path, skip_ws=True)
-        assert refused == ["ledger_epoch_writer_unknown actor='bootstrap_simulation_db'"]
+        assert refused == ["ledger_epoch_writer_unknown actor='retired_tool'"]
     finally:
         await engine.dispose()
 

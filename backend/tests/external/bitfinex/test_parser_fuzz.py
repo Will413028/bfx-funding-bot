@@ -46,7 +46,7 @@ from bfx_funding_bot.external.bitfinex.observations import (
     parse_wallet_observations,
 )
 from bfx_funding_bot.external.bitfinex.order_port import VenueResponseShapeError
-from bfx_funding_bot.external.bitfinex.rest import ROW_CONVERSION_ERRORS, FundingTrade
+from bfx_funding_bot.external.bitfinex.rest import ROW_CONVERSION_ERRORS
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitAcknowledged,
     SubmitOutcomeUnknown,
@@ -93,7 +93,6 @@ ROW_PARSERS: dict[str, Callable[[Any], object]] = {
     "wallet_observations": parse_wallet_observations,
     "offer_observations": parse_offer_observations,
     "credit_observations": lambda raw: parse_credit_observations(raw, source_kind="credit"),
-    "public_funding_trade": FundingTrade.from_bitfinex,
     "public_funding_book_level": FundingBookLevel.from_bitfinex,
 }
 
@@ -156,8 +155,6 @@ FORMER_DEFECTS = [
                  [[False, False, None, False, False, False, None, None, None, None, None, False, False,
                    None, None]], BitfinexShapeError, id="F40-credit_history"),
     pytest.param(parse_funding_trades, [[False] * 7], BitfinexShapeError, id="F40-funding_trades"),
-    pytest.param(FundingTrade.from_bitfinex, [False, INF, None, None, None], BitfinexShapeError,
-                 id="F41-public_funding_trade"),
     pytest.param(FundingBookLevel.from_bitfinex, [None, None, None, None], BitfinexShapeError,
                  id="F41-public_funding_book_level"),
     pytest.param(_candle, [1, "x", 1, 1, 1, 1], ROW_CONVERSION_ERRORS, id="F42-public_candle"),

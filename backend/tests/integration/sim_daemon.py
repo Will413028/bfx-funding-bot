@@ -5,7 +5,8 @@ gate, safety chain, reconciler, ledger authority and ``BitfinexLiveExecutor`` ta
 simulated venue through its own ``httpx`` client. What a test controls:
 
 * the composition clock (``bot.now_ms_utc`` is patched, and the venue follows it);
-* the venue's market feed and fault plan, through ``VenueSeam`` (production passes neither);
+* the venue's market feed and fault plan, through ``VenueSeam`` (a simulated boot
+  without one is refused);
 * the bot's own funding book, written into its store with the same clock.
 
 The ledger epoch is the migrated database's own (the genesis); a test that wants another latest

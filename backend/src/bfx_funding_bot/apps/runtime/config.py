@@ -18,11 +18,6 @@ class MarketfeedConfig(BaseModel):
     phase: Annotated[Phase, Field(description="shadow / live")]
     # Simulated venue only: wallet currency -> amount funded when the venue log is empty.
     simulated_initial_wallets: dict[str, Decimal] = Field(default_factory=dict)
-    # Simulated venue only: fault name -> per-request probability, and the plan's seed
-    # (``BFX_SIM_FAULTS``, parsed in apps/sim_faults.py). Empty: no fault is injected.
-    simulated_faults: dict[str, float] = Field(default_factory=dict)
-    simulated_fault_seed: int = Field(default=0, ge=0)
-    simulated_fault_ordinals: dict[str, tuple[int, ...]] = Field(default_factory=dict)
     cells: list[CellConfig]
     database_url: str = Field(repr=False)
     deployment_environment: DeploymentEnvironment

@@ -293,8 +293,8 @@ async def build_daemon(
     venue_seam: VenueSeam | None = None,
     stop_event: asyncio.Event | None = None,
 ) -> Daemon:
-    """Compose one bot process. ``venue_seam`` is for tests: production passes nothing, so
-    the simulated venue runs on the live market feed and without injected faults.
+    """Compose one bot process. ``venue_seam`` is for tests: the simulated venue's market feed
+    and faults; production passes nothing, and a simulated boot without it is refused.
     ``stop_event`` becomes the daemon's stop event; ``_run`` passes the one its loop
     watchdog already follows."""
     # Created first: the daemon stops on it, and an applied credential rotation sets it.
@@ -411,7 +411,7 @@ async def build_daemon(
         venue_wiring = await build_venue(
             config, exchange_account_id=account_bootstrap.exchange_account_id,
             session_factory=session_factory, db_engine=db_engine,
-            bitfinex_http=bitfinex_http, bitfinex=bitfinex, clock=now_ms_utc, metrics=metrics,
+            bitfinex_http=bitfinex_http, clock=now_ms_utc, metrics=metrics,
             seam=venue_seam,
         )
     except Exception as exc:
@@ -1148,7 +1148,6 @@ async def build_daemon(
         credential_compliance=credential_compliance,
         writer_lock_watch=WriterLockWatch(lock=writer_lock),
         boot_mts=now_mts,
-        venue_tasks=venue_wiring.tasks,
         venue_aclose=venue_wiring.aclose,
         venue_diagnostics=venue_wiring.simulated,
         # Credential recovery mode ends when the vault's active key is no longer this one;

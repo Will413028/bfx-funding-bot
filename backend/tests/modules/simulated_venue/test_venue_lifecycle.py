@@ -174,10 +174,7 @@ async def test_a_second_writer_on_the_same_scope_fails_instead_of_overwriting() 
     assert [f.kind for f in other.venue.internal_failures] == ["store"]
     other.venue.internal_failures.clear()
     log = await w.store.load(ACCOUNT)
-    recorded = [e for e in log if type(e).__name__ == "InternalFailureRecorded"]
-    assert [e.kind for e in recorded] == ["store"]  # the loser keeps a durable copy of it
-    noise = {"NonceAdvanced", "InternalFailureRecorded"}
-    assert len([e for e in log if type(e).__name__ not in noise]) == 3
+    assert len([e for e in log if type(e).__name__ != "NonceAdvanced"]) == 3
     # the loser reloaded the durable log, so it converges instead of staying stale forever
     assert other.venue.state == w.venue.state
     assert await other.submit_ok(amount="150")
@@ -375,43 +372,27 @@ async def test_two_processes_funding_an_empty_log_lose_the_race_loudly() -> None
     assert len(await store.load(ACCOUNT)) == 1
 
 
-class _Counting:
-    def __init__(self) -> None:
-        self.failures: list[str] = []
-        self.unexpected = 0
-
-    def internal_failure(self, kind: str) -> None:
-        self.failures.append(kind)
-
-    def unexpected_request(self) -> None:
-        self.unexpected += 1
-
-
-async def test_internal_failures_and_unrouted_requests_reach_the_observer_and_the_totals() -> None:
-    """Mutation: the venue records only in memory (no observer call, no total)."""
-    observer = _Counting()
+async def test_internal_failures_and_unrouted_requests_reach_the_totals() -> None:
+    """Mutation: the venue records only in the bounded log (no total)."""
     store = InMemoryVenueEventStore()
     venue = await build_simulated_venue(
         account=ACCOUNT, config=config(), store=store, feed=FixtureMarketFeed(),
-        clock_ms=Clock(), observer=observer)
+        clock_ms=Clock())
     async with venue.client() as http:
         assert (await http.get("https://api-pub.bitfinex.com/v2/anything")).status_code == 404
     await venue.fund_wallet("UST", Decimal(1000))
     with pytest.raises(NoMarketDataError):
         await _raw_submit(World(venue, FixtureMarketFeed(), Clock(), store))
-    assert observer.unexpected == 1 and venue.unexpected_total == 1
-    assert observer.failures == ["no_market_data"] and venue.internal_failures_total == 1
+    assert venue.unexpected_total == 1
+    assert [f.kind for f in venue.internal_failures] == ["no_market_data"]
+    assert venue.internal_failures_total == 1
     venue.internal_failures.clear()
     venue.unexpected.clear()
-    # ... and both are in the durable log too, so a restart or a crash cannot lose them
-    from bfx_funding_bot.modules.simulated_venue.events import (
-        InternalFailureRecorded,
-        UnexpectedRequestRecorded,
-    )
+    # ... and the unrouted request is in the durable log too
+    from bfx_funding_bot.modules.simulated_venue.events import UnexpectedRequestRecorded
     log = await store.load(ACCOUNT)
     assert [(e.method, e.url) for e in log if isinstance(e, UnexpectedRequestRecorded)] == [
         ("GET", "https://api-pub.bitfinex.com/v2/anything")]
-    assert [e.kind for e in log if isinstance(e, InternalFailureRecorded)] == ["no_market_data"]
     reopened = await build_simulated_venue(
         account=ACCOUNT, config=config(), store=store, feed=FixtureMarketFeed(), clock_ms=Clock())
     assert reopened.state.wallets["UST"].balance == Decimal(1000)  # the records change nothing

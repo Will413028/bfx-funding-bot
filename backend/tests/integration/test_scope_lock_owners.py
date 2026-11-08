@@ -7,9 +7,7 @@ lock until the first transaction ends. A writer taking a different key, or none,
 never shows up waiting and the test times out.
 
 Mutations (one at a time; revert after each): make ``OperatorRequestWorker._lock`` a
-no-op (``test_an_operator_request_settles_only_under_the_scope_lock``), drop the lock in
-``bootstrap_simulation_db._ensure_active``
-(``test_the_simulation_bootstrap_activates_only_under_the_scope_lock``), drop
+no-op (``test_an_operator_request_settles_only_under_the_scope_lock``), drop
 ``scope_lock.lock`` in ``amend_capital_policy``
 (``test_an_owner_amendment_waits_for_the_account_writer``).
 The trading-state transition has its own: ``test_halt_writer_waits_for_authorization_lock``.
@@ -33,7 +31,6 @@ from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger.capital_amendment import PolicyChanges, amend_capital_policy
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store, build_scope_lock
 from bfx_funding_bot.modules.trading import CapitalPolicy
-from scripts import bootstrap_simulation_db as bootstrap
 from tests.async_wait import until
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -95,18 +92,6 @@ async def test_an_operator_request_settles_only_under_the_scope_lock(migrated_db
         scope_lock=build_scope_lock(), clock=lambda: 2)
     assert await _waits_behind_the_scope_lock(
         factory, scope, lambda: worker.process(request_id)) == "applied"
-
-
-async def test_the_simulation_bootstrap_activates_only_under_the_scope_lock(migrated_db) -> None:
-    factory, account = migrated_db
-    scope = Scope(account, ENV)
-
-    async def activate() -> str:
-        async with factory.begin() as session:
-            return await bootstrap._ensure_active(
-                session, scope=scope, scope_lock=build_policy_ports(scope).scope_lock, now_ms=1)
-
-    assert await _waits_behind_the_scope_lock(factory, scope, activate) == "activated"
 
 
 async def test_an_owner_amendment_waits_for_the_account_writer(migrated_db) -> None:

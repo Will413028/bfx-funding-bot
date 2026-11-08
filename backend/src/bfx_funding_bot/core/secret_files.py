@@ -8,8 +8,8 @@ is a :class:`SecretFileError`, and the environment's value of the key is ignored
 fallback, so a secret cannot silently come from the wrong place (ADR 2026-08-31, Amendment 2026-10-22).
 
 Every other process has no ``BFX_SECRETS_DIR`` and reads the same keys from its
-environment: the one-shot containers (operator CLI, weekly report, research jobs, the
-simulation soak, migrations), the DR checks, tests and local runs. That split is by
+environment: the one-shot containers (operator CLI, weekly report, research jobs,
+migrations), the DR checks, tests and local runs. That split is by
 process, not a transition: one-shot containers live seconds to an hour and stay on env
 files by decision.
 

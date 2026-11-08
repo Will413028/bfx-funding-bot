@@ -372,30 +372,6 @@ async def test_a_429_is_counted_on_its_own_and_as_a_4xx() -> None:
         "bfx_venue_rest_errors_total", {"kind": "http_4xx"}) == 3.0
 
 
-def test_sim_feed_stream_events_are_counted_and_bounded() -> None:
-    m = DaemonMetrics()
-    observer = m.sim_venue_observer()
-    observer.feed_stream("connected")
-    observer.feed_stream("disconnected")
-    observer.feed_stream("disconnected")
-    observer.feed_stream("anything else")  # unbounded labels are dropped
-    sample = m.registry.get_sample_value
-    assert sample("bfx_sim_venue_feed_stream_total", {"event": "connected"}) == 1.0
-    assert sample("bfx_sim_venue_feed_stream_total", {"event": "disconnected"}) == 2.0
-    assert sample("bfx_sim_venue_feed_stream_total", {"event": "anything else"}) is None
-
-
-def test_sim_watermark_lag_is_read_at_scrape_time_and_unknown_has_no_sample() -> None:
-    m = DaemonMetrics()
-    lag: dict[str, float | None] = {"fUST": 3.0, "fUSD": None}
-    m.bind_sim_watermark_lag(lambda: lag)
-    sample = m.registry.get_sample_value
-    assert sample("bfx_sim_venue_feed_watermark_lag_seconds", {"symbol": "fUST"}) == 3.0
-    assert sample("bfx_sim_venue_feed_watermark_lag_seconds", {"symbol": "fUSD"}) is None
-    lag["fUST"] = 90.0
-    assert sample("bfx_sim_venue_feed_watermark_lag_seconds", {"symbol": "fUST"}) == 90.0
-
-
 @pytest.mark.asyncio
 async def test_httpx_hooks_do_not_break_request_when_metrics_broken() -> None:
     m = DaemonMetrics()
@@ -463,17 +439,3 @@ def test_two_instances_are_isolated() -> None:
     ) is None
 
 
-def test_the_simulated_venue_observer_feeds_the_soak_counters() -> None:
-    """Mutation: the observer stops incrementing (the soak report would read zero)."""
-    from prometheus_client import generate_latest
-
-    metrics = DaemonMetrics()
-    observer = metrics.sim_venue_observer()
-    observer.internal_failure("no_market_data")
-    observer.internal_failure("no_market_data")
-    observer.unexpected_request()
-    observer.feed_failure("trades")
-    text = generate_latest(metrics.registry).decode()
-    assert 'bfx_sim_venue_internal_failures_total{kind="no_market_data"} 2.0' in text
-    assert "bfx_sim_venue_unexpected_requests_total 1.0" in text
-    assert 'bfx_sim_venue_feed_failures_total{source="trades"} 1.0' in text

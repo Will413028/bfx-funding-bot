@@ -139,42 +139,6 @@ class NonceAdvanced:
 
 
 @dataclass(frozen=True, slots=True)
-class FaultInjected:
-    """One injected venue fault (soak only), recorded BEFORE its effect, so a restart or a
-    lost response never hides it: the soak report tells injected from organic UNKNOWN by it.
-
-    `target` is the request kind (`submit`, `history`, ...), `request_ordinal` its 1-based
-    count in this process, `nonce` the request's accepted nonce. A submit also records what the
-    request asked for (`symbol`, `amount`, `rate`, `period`; None for other targets), so the
-    report matches an injection to the attempt that sent it by content, not by time alone.
-    """
-
-    event_type: ClassVar[str] = "fault_injected"
-    fault_kind: str
-    target: str
-    request_ordinal: int
-    nonce: int
-    symbol: str | None
-    amount: Decimal | None
-    rate: Decimal | None
-    period: int | None
-    mts: int
-    schema_version: int = field(default=SCHEMA_VERSION, init=False, repr=False, compare=False)
-
-
-@dataclass(frozen=True, slots=True)
-class InternalFailureRecorded:
-    """The simulator itself failed (never a venue answer): durable, so the soak report reads it
-    from the database across restarts and crashes. `detail` is cut to `DETAIL_LIMIT` chars."""
-
-    event_type: ClassVar[str] = "internal_failure_recorded"
-    kind: str
-    detail: str
-    mts: int
-    schema_version: int = field(default=SCHEMA_VERSION, init=False, repr=False, compare=False)
-
-
-@dataclass(frozen=True, slots=True)
 class UnexpectedRequestRecorded:
     """A request the venue does not route (wrong host, method or path). `url` is cut to
     `DETAIL_LIMIT` chars."""
@@ -191,16 +155,16 @@ DETAIL_LIMIT = 300
 
 type VenueEvent = (
     WalletFunded | BookObserved | OfferPlaced | TradesObserved | OfferFilled
-    | LoanDrawn | OfferCanceled | CreditClosed | InterestPaid | NonceAdvanced | FaultInjected
-    | InternalFailureRecorded | UnexpectedRequestRecorded
+    | LoanDrawn | OfferCanceled | CreditClosed | InterestPaid | NonceAdvanced
+    | UnexpectedRequestRecorded
 )
 
 _EVENTS: dict[str, type] = {
     cls.event_type: cls
     for cls in (
         WalletFunded, BookObserved, OfferPlaced, TradesObserved, OfferFilled,
-        LoanDrawn, OfferCanceled, CreditClosed, InterestPaid, NonceAdvanced, FaultInjected,
-        InternalFailureRecorded, UnexpectedRequestRecorded,
+        LoanDrawn, OfferCanceled, CreditClosed, InterestPaid, NonceAdvanced,
+        UnexpectedRequestRecorded,
     )
 }
 # The current version of each type: only a type that changes shape moves its own number.

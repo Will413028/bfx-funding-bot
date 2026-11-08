@@ -111,7 +111,7 @@ _KNOWN_UNRESOLVED = {
 def test_every_app_entrypoint_resolves_every_foreign_key_it_loads(module: str) -> None:
     """A process that loads a table module alone leaves its foreign keys to other modules'
     tables unresolved, and the first flush touching that table fails with
-    NoReferencedTableError (scripts/bootstrap_simulation_db.py, 2026-11-04 soak). The test
+    NoReferencedTableError (a since-deleted bootstrap script hit it on 2026-11-04). The test
     fixtures import apps/schema.py, so only a fresh interpreter per entrypoint shows it."""
     unresolved, _ = _resolve_alone(module)
     assert unresolved == _KNOWN_UNRESOLVED.get(module, ""), \

@@ -803,27 +803,6 @@ def test_cellconfig_accepts_p_long_equal_p_mid() -> None:
     assert c.strategy.value == "adaptive_period"
 
 
-def test_sim_faults_are_parsed_into_the_config(tmp_path, monkeypatch):
-    _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
-    monkeypatch.setenv("BFX_SIM_FAULTS", "unknown_5xx=0.01,seed=9")
-    config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
-    assert config.simulated_faults == {"unknown_5xx": 0.01} and config.simulated_fault_seed == 9
-
-
-def test_no_sim_faults_by_default(tmp_path, monkeypatch):
-    _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
-    monkeypatch.delenv("BFX_SIM_FAULTS", raising=False)
-    config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
-    assert config.simulated_faults == {} and config.simulated_fault_seed == 0
-
-
-def test_an_unreadable_sim_faults_refuses_the_boot(tmp_path, monkeypatch):
-    _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
-    monkeypatch.setenv("BFX_SIM_FAULTS", "unknown_5xx=2")
-    with pytest.raises(ValueError, match="BFX_SIM_FAULTS"):
-        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
-
-
 def test_the_database_url_comes_from_its_secret_file_only(tmp_path, monkeypatch):
     """9h: the bot reads DATABASE_URL from /run/secrets when BFX_SECRETS_DIR is set; the env
     value (left in bot.env during the cutover) is ignored, and a missing file is an error."""

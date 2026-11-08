@@ -9,7 +9,6 @@ from pathlib import Path
 import yaml
 
 from bfx_funding_bot.apps.runtime.config import MarketfeedConfig
-from bfx_funding_bot.apps.sim_faults import ENV_NAME, parse_sim_faults
 from bfx_funding_bot.core.secret_files import read_secret
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
@@ -249,13 +248,9 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     if not any((c.strategy.value, c.cell_id) in QUALIFIED_PAIRS for c in cells):
         log.warning("cells.yaml has no Phase 3b qualified pair -- all entries are exploratory")
 
-    sim_faults = parse_sim_faults(os.environ.get(ENV_NAME, ""))
     config_kwargs: dict[str, object] = {
         "phase": phase,
         "simulated_initial_wallets": _initial_wallets(),
-        "simulated_faults": dict(sim_faults.rates),
-        "simulated_fault_seed": sim_faults.seed,
-        "simulated_fault_ordinals": dict(sim_faults.ordinals),
         "cells": cells,
         "database_url": database_url,
         "deployment_environment": deployment_environment,
