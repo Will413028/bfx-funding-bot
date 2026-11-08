@@ -10,11 +10,16 @@ shadow realm). Two CHECKs narrow:
 Refusals, each leaving the schema and the revision as they were:
 
 * a database stamped ``shadow``;
-* a ``shadow`` row in any table of the current schema with a ``deployment_environment``
-  column (read from ``information_schema``, not a copied list).
+* a ``shadow`` row in any base table, in any schema but ``pg_catalog`` and
+  ``information_schema``, with a ``deployment_environment`` column (``public`` and also
+  ``projection_audit``, ``legacy_archive``, ``release_archive``). The tables are read from
+  ``pg_catalog`` (not a copied list) and probed in one statement, a ``UNION ALL`` of one
+  ``EXISTS`` per table, so the answer comes from a single snapshot.
 
-The new CHECKs are added NOT VALID and validated in the same revision; both tables are tiny
-and bfx-deploy stops the webapi and the bot while migrations run.
+The new CHECKs are added NOT VALID and validated in the same revision because CI's squawk
+lint (rule ``constraint-missing-not-valid``) rejects a plain ``ADD CONSTRAINT ... CHECK``;
+the split buys nothing here, both tables are tiny and bfx-deploy stops the webapi and the bot
+while migrations run.
 
 The downgrade restores the wider CHECKs; widening loses nothing, so it is written
 (docs/adr/2026-10-08-forward-only-migrations.md D1 allows a lossless reverse).
@@ -36,12 +41,18 @@ depends_on = None
 ledger_contract = "preserved"
 
 _REALM_TABLES = """
-SELECT table_name FROM information_schema.columns
-WHERE table_schema = current_schema() AND column_name = 'deployment_environment'
-  AND table_name IN (SELECT table_name FROM information_schema.tables
-                     WHERE table_schema = current_schema() AND table_type = 'BASE TABLE')
-ORDER BY table_name
+SELECT n.nspname, c.relname FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE a.attname = 'deployment_environment' AND NOT a.attisdropped
+  AND c.relkind IN ('r', 'p')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY 1, 2
 """
+
+
+def _quote(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
 
 
 def _refuse_shadow() -> None:
@@ -50,12 +61,15 @@ def _refuse_shadow() -> None:
         "SELECT count(*) FROM database_realm WHERE realm = 'shadow'")).scalar() or 0)
     if stamped:
         raise RuntimeError("refuse: this database is stamped realm 'shadow', which no longer exists")
-    holding = [
-        table for table in bind.execute(text(_REALM_TABLES)).scalars()
-        if bind.execute(text(
-            f'SELECT EXISTS (SELECT 1 FROM "{table}" WHERE deployment_environment = \'shadow\')'
-        )).scalar()
-    ]
+    tables = [(str(schema), str(table)) for schema, table in bind.execute(text(_REALM_TABLES))]
+    if not tables:
+        return
+    probe = " UNION ALL ".join(
+        f"SELECT '{schema}.{table}' AS t WHERE EXISTS (SELECT 1 FROM {_quote(schema)}.{_quote(table)} "
+        "WHERE deployment_environment = 'shadow')"
+        for schema, table in tables
+    )
+    holding = list(bind.execute(text(probe)).scalars())
     if holding:
         raise RuntimeError(f"refuse: rows of realm 'shadow' in {', '.join(holding)}")
 

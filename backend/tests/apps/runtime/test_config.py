@@ -8,7 +8,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from bfx_funding_bot.apps.config import load_config
+from bfx_funding_bot.apps.config import load_config, require_simulated_realm
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 from bfx_funding_bot.modules.strategy import CellConfig, StrategyName, configured_symbols
@@ -291,6 +291,16 @@ def test_simulated_phase_rejects_prod_realm(tmp_path: Path, monkeypatch: pytest.
 
     with pytest.raises(ValueError, match=r"simulated.*must not.*prod"):
         _load(cells_yaml_path=yaml_path)
+
+
+def test_the_simulated_phase_allows_only_the_simulated_realm() -> None:
+    """An allow-list, not a prod deny-list: any realm but ci is refused for the simulated
+    phase, a realm added later included. Mutation: test ``realm == "prod"`` instead."""
+    require_simulated_realm("shadow", "ci")
+    require_simulated_realm("live", "prod")
+    for realm in ("prod", "staging"):
+        with pytest.raises(ValueError, match=r"simulated.*must not"):
+            require_simulated_realm("shadow", realm)
 
 
 def test_shadow_phase_accepts_ci_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

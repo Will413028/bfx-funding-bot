@@ -4,7 +4,8 @@ On a disposable PostgreSQL, from the previous revision: a database stamped ``sha
 holding a ``shadow`` row, refuses the upgrade and stays where it was; otherwise both realm
 CHECKs narrow, and the downgrade widens them again.
 
-Mutations: drop the stamp precheck or the row precheck (the refusal tests fail); keep
+Mutations: drop the stamp precheck or the row precheck (the refusal tests fail); scan only
+``current_schema()`` (the other-schema refusal test fails); keep
 ``'shadow'`` in either new CHECK (the tightening test fails).
 """
 from __future__ import annotations
@@ -74,7 +75,9 @@ def _refuses(url: str, match: str) -> None:
     with pytest.raises(RuntimeError, match=match):
         alembic(url, "upgrade", _REVISION)
     assert _version(url) == _BEFORE
-    assert "'shadow'" in _checks(url)["ck_database_realm_realm"]
+    checks = _checks(url)
+    assert "'shadow'" in checks["ck_database_realm_realm"]
+    assert "'shadow'" in checks["ck_sim_venue_event_realm"]
 
 
 def test_a_database_stamped_shadow_refuses_the_upgrade(before_url: str) -> None:
@@ -86,7 +89,20 @@ def test_a_shadow_row_refuses_the_upgrade(before_url: str) -> None:
     stamp_realm(before_url, "ci")
     # A ci database whose trigger was switched off, in this visible statement, to plant it.
     _run(before_url, DISABLE_REALM_TRIGGERS_SQL, _sim_event("shadow"))
-    _refuses(before_url, r"rows of realm 'shadow' in sim_venue_event")
+    _refuses(before_url, r"rows of realm 'shadow' in public\.sim_venue_event")
+
+
+def test_a_shadow_row_in_another_schema_refuses_the_upgrade(before_url: str) -> None:
+    # Archive schemas (projection_audit, legacy_archive, release_archive) hold realm rows too;
+    # a table of a schema outside the search path stands for all of them.
+    stamp_realm(before_url, "ci")
+    _run(
+        before_url,
+        "CREATE SCHEMA other_realm_archive",
+        "CREATE TABLE other_realm_archive.runs (deployment_environment text NOT NULL)",
+        "INSERT INTO other_realm_archive.runs VALUES ('shadow')",
+    )
+    _refuses(before_url, r"rows of realm 'shadow' in other_realm_archive\.runs")
 
 
 def test_the_upgrade_narrows_both_checks_and_the_downgrade_widens_them(before_url: str) -> None:
