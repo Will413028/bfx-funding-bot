@@ -83,12 +83,10 @@ def _rotation(**extra: object) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_one_pending_rotation_per_account_and_environment(sqlite_engine: Any,
-                                                                sqlite_session: Any) -> None:
+async def test_one_pending_rotation_per_account(sqlite_engine: Any,
+                                                sqlite_session: Any) -> None:
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all,
                             tables=[CredentialRotationRequestRow.__table__])
     assert await insert_request(sqlite_session, CredentialRotationRequestRow, _rotation())
     assert not await insert_request(sqlite_session, CredentialRotationRequestRow, _rotation())
-    assert await insert_request(sqlite_session, CredentialRotationRequestRow,
-                                _rotation(deployment_environment="prod"))

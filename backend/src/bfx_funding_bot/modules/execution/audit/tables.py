@@ -54,6 +54,8 @@ class ExecutionDecisionRow(Base):
 
     __table_args__ = (
         Index("idx_execution_decisions_env_occurred", "deployment_environment", "occurred_at_ms"),
+        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
+        Index("idx_execution_decisions_env_occurred_narrow", "occurred_at_ms"),
         Index("idx_execution_decisions_symbol_occurred", "symbol", "occurred_at_ms"),
         Index("idx_execution_decisions_outcome_reason", "outcome", "reason_code"),
     )

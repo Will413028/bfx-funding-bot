@@ -50,6 +50,8 @@ class NavPeakRow(Base):
 
     __table_args__ = (
         PrimaryKeyConstraint("exchange_account_id", "deployment_environment", "symbol"),
+        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
+        Index("nav_peak_pkey_narrow", "exchange_account_id", "symbol", unique=True),
     )
 
 
@@ -103,6 +105,8 @@ class TradingStateRow(Base):
         # Unique so that the cancel-all audit's composite foreign key can reference it.
         Index("ix_trading_state_scope_id", "exchange_account_id", "deployment_environment", "id",
               unique=True),
+        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
+        Index("ix_trading_state_scope_id_narrow", "exchange_account_id", "id", unique=True),
         ForeignKeyConstraint(
             ["operator_request_id", "exchange_account_id", "deployment_environment"],
             ["trading_control_requests.request_id", "trading_control_requests.exchange_account_id",
@@ -165,6 +169,8 @@ class FundingCancelAllAuditRow(Base):
         ),
         Index("ix_funding_cancel_all_audit_scope_id",
               "exchange_account_id", "deployment_environment", "id"),
+        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
+        Index("ix_funding_cancel_all_audit_scope_id_narrow", "exchange_account_id", "id"),
         Index("uq_funding_cancel_all_audit_request", "attempt_id", unique=True,
               postgresql_where=text("phase = 'requested'"),
               sqlite_where=text("phase = 'requested'")),
@@ -251,6 +257,18 @@ class TradingControlRequestRow(Base):
         # What an effect's composite foreign key references.
         UniqueConstraint("request_id", "exchange_account_id", "deployment_environment",
                          name="uq_trading_control_requests_scope"),
+        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
+        Index("uq_trading_control_requests_pending_narrow", "exchange_account_id", unique=True,
+              postgresql_where=text("state = 'requested' AND action <> 'kill'"),
+              sqlite_where=text("state = 'requested' AND action <> 'kill'")),
+        Index("uq_trading_control_requests_pending_kill_narrow", "exchange_account_id",
+              unique=True,
+              postgresql_where=text("state = 'requested' AND action = 'kill'"),
+              sqlite_where=text("state = 'requested' AND action = 'kill'")),
+        Index("ix_trading_control_requests_queue_narrow", "exchange_account_id", "state",
+              "created_at_ms"),
+        Index("uq_trading_control_requests_scope_narrow", "request_id", "exchange_account_id",
+              unique=True),
     )
 
 
@@ -282,4 +300,7 @@ class NavWindowSampleRow(Base):
     __table_args__ = (
         Index("ix_nav_window_samples_scope_symbol_time",
               "exchange_account_id", "deployment_environment", "symbol", "occurred_at_ms"),
+        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
+        Index("ix_nav_window_samples_scope_symbol_time_narrow", "exchange_account_id", "symbol",
+              "occurred_at_ms"),
     )

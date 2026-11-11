@@ -15,6 +15,7 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
+    Index,
     Integer,
     PrimaryKeyConstraint,
     Text,
@@ -46,6 +47,8 @@ class SimVenueEventRow(Base):
     __table_args__ = (
         PrimaryKeyConstraint(
             "exchange_account_id", "deployment_environment", "seq", name="pk_sim_venue_event"),
+        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
+        Index("pk_sim_venue_event_narrow", "exchange_account_id", "seq", unique=True),
         CheckConstraint(
             "deployment_environment = 'ci'", name="ck_sim_venue_event_realm"),
         CheckConstraint("seq >= 1", name="ck_sim_venue_event_seq"),

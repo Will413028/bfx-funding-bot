@@ -74,7 +74,6 @@ from bfx_funding_bot.modules.trading import (
     policy_payload,
     policy_schema_version,
 )
-from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL
 
 from .test_ledger_basis import (
     _credit,
@@ -759,11 +758,13 @@ async def test_clock_behind_the_basis_is_an_evidence_conflict(book) -> None:
 
 @pytest.mark.asyncio
 async def test_scopes_are_isolated(book) -> None:
-    # A second realm in one database is exactly what the realm trigger forbids; this test
-    # proves the reader filters by realm, so it plants the foreign rows with the trigger off.
+    # The other scope is another exchange account: one database holds one realm.
+    account = uuid4()
     async with book.factory.begin() as session:
-        await session.execute(text(DISABLE_REALM_TRIGGERS_SQL))
-    other = Book(book.factory, Scope(SCOPE.exchange_account_id, "ci2"))
+        await session.execute(
+            text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
+            {"id": account})
+    other = Book(book.factory, Scope(account, SCOPE.deployment_environment))
     await book.policy("fUST")
     await other.policy("fUST")
     await book.accept()

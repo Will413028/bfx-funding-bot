@@ -56,6 +56,12 @@ class AttributionWeeklyRow(Base):
         DateTime(timezone=True), nullable=False, server_default=_NOW,
     )
 
+    __table_args__ = (
+        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
+        Index("attribution_weekly_pkey_narrow", "exchange_account_id", "cell", "week_start_ms",
+              unique=True),
+    )
+
 
 class ConfigRegimeRow(Base):
     """One row per daemon boot — execution-policy regime boundaries.
@@ -79,6 +85,12 @@ class ConfigRegimeRow(Base):
     clamp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     reprice_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     git_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
+        Index("config_regime_pkey_narrow", "exchange_account_id", "recorded_at_ms",
+              unique=True),
+    )
 
 
 class FundingInterestPaymentRow(Base):
@@ -177,6 +189,9 @@ class FundingTradeRow(Base):
             "ix_funding_trades_scope_symbol_created",
             "exchange_account_id", "deployment_environment", "symbol", "mts_create",
         ),
+        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
+        Index("ix_funding_trades_scope_symbol_created_narrow", "exchange_account_id", "symbol",
+              "mts_create"),
     )
 
 
@@ -204,4 +219,7 @@ class AttributionLegacyOfferCellRow(Base):
             "venue_offer_id <> '' AND cell <> ''",
             name="ck_attribution_legacy_offer_cells_not_empty",
         ),
+        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
+        Index("attribution_legacy_offer_cells_pkey_narrow", "exchange_account_id",
+              "venue_offer_id", "cell", unique=True),
     )

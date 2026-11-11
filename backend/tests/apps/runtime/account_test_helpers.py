@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -20,18 +21,23 @@ TEST_VAULT_KEK = bytes(range(32))
 TEST_VAULT_KEK_B64 = base64.b64encode(TEST_VAULT_KEK).decode()
 
 
+def seeded_realm(realm: str | None = None) -> str:
+    """The one realm a test database holds: ``realm``, else the one this process is configured
+    for, else ``ci``."""
+    return realm or os.environ.get("BFX_DEPLOYMENT_ENV", "").strip() or "ci"
+
+
 async def stamp_schema_head(engine: AsyncEngine, *, realm: str | None = None) -> None:
     """Record this build's schema head, the capital authority epochs a fresh database holds
     at head (the seeded ``legacy`` row and the ``ledger`` genesis, ``b1c2d3e4f5a6``) and the
     database realm (``ci`` unless a test boots as another realm), as ``alembic upgrade``
     plus the owner's one-time stamp would on Postgres."""
-    import os
 
     from sqlalchemy import inspect, text
 
     from bfx_funding_bot.apps.authority_support import GENESIS_ACTOR
     from bfx_funding_bot.core.schema_head import build_head
-    realm = realm or os.environ.get("BFX_DEPLOYMENT_ENV", "").strip() or "ci"
+    realm = seeded_realm(realm)
     async with engine.begin() as conn:
         await conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"))
         await conn.execute(text("DELETE FROM alembic_version"))
@@ -69,12 +75,14 @@ def configure_live_wiring_env(
     monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
 
 
-async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool = True) -> None:
+async def seed_exchange_account(
+    engine: AsyncEngine, *, capital_policies: bool = True, environment: str | None = None,
+) -> None:
     """Provision synthetic identity and explicit applied policies, never an env fallback."""
     envelope = encrypt_secret_with_aad(
         "test_secret", aad=str(TEST_EXCHANGE_ACCOUNT_ID), kek=TEST_VAULT_KEK
     )
-    await stamp_schema_head(engine)
+    await stamp_schema_head(engine, realm=environment)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory.begin() as session:
         session.add(
@@ -105,13 +113,14 @@ async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool =
         from bfx_funding_bot.modules.ledger import Scope
         from bfx_funding_bot.modules.ledger.wiring import build_policy_store
         from bfx_funding_bot.modules.trading import CapitalPolicy
-        for environment in ("ci", "prod"):
-            store = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID, environment))
-            async with factory.begin() as session:
-                for symbol in ("fUST", "fUSD"):
-                    await store.apply_policy(session, symbol=symbol,
-                        policy=CapitalPolicy(enabled=symbol == "fUST"), expected_revision=0,
-                        source={"synthetic_fixture": True})
+        # One database holds one realm, the one ``stamp_schema_head`` stamped above.
+        store = build_policy_store(
+            Scope(TEST_EXCHANGE_ACCOUNT_ID, seeded_realm(environment)))
+        async with factory.begin() as session:
+            for symbol in ("fUST", "fUSD"):
+                await store.apply_policy(session, symbol=symbol,
+                    policy=CapitalPolicy(enabled=symbol == "fUST"), expected_revision=0,
+                    source={"synthetic_fixture": True})
 
 
 _SAFETY_LIVE = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
