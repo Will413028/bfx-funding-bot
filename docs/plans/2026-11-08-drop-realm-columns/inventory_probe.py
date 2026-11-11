@@ -52,6 +52,15 @@ SELECT cols.schema, cols.tbl, 'trigger', t.tgname, pg_get_triggerdef(t.oid)
 FROM cols JOIN pg_trigger t ON t.tgrelid = cols.relid
 WHERE NOT t.tgisinternal AND (t.tgname = 'database_realm_write'
       OR t.tgfoid = 'guard_database_realm'::regproc)
+UNION ALL
+-- other trigger functions whose body reads the column (plpgsql binds late: they fail at run
+-- time once the column is gone)
+SELECT cols.schema, cols.tbl, 'trigger-function', t.tgname,
+       pn.nspname || '.' || p.proname || '() via ' || pg_get_triggerdef(t.oid)
+FROM cols JOIN pg_trigger t ON t.tgrelid = cols.relid
+JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace
+WHERE NOT t.tgisinternal AND p.prosrc ~ 'deployment_environment'
+  AND t.tgfoid <> 'guard_database_realm'::regproc
 ORDER BY 1, 2, 3, 4
 """
 
@@ -60,7 +69,11 @@ def destination(schema: str, kind: str, name: str, definition: str) -> str:
     if schema in ARCHIVE_SCHEMAS:
         if kind == "trigger":
             return "刪除（步驟 3：DROP FUNCTION guard_database_realm 之前先 DROP TRIGGER；不改封存列）"
+        if kind == "trigger-function":
+            return "保留（封存表自己的 guard，只比對該表 NEW／OLD 的本欄；欄位保留所以不動）"
         return "保留（封存表：manifest SHA-256 涵蓋 to_jsonb(row)，欄位與約束不動）"
+    if kind == "trigger-function":
+        return "改寫（步驟 3：DROP COLUMN 之前 CREATE OR REPLACE 這個 function，本體不再讀本欄）"
     if kind == "column":
         return "刪除（步驟 1 起由 guard 補值；步驟 3 DROP COLUMN）"
     if kind == "trigger":

@@ -8,7 +8,7 @@
 - `inventory.tsv`：每個帶本欄的表的欄位、PK、UNIQUE、FK（含被引用側）、索引、CHECK、trigger，與「去向」欄。
 - `inventory_probe.py`：產生 `inventory.tsv` 的探針（把空庫 migrate 到 head 後查 `pg_catalog`）。重跑（在 `backend/`）：
   `PYTHONPATH=. uv run pytest -p tests.conftest --rootdir=. -q -p no:cacheprovider ../docs/plans/2026-11-08-drop-realm-columns/inventory_probe.py`
-- `check_inventory.py`：盤點每列每欄不得空白、每張 live 表都有 column 與 trigger 列。`python3 docs/plans/2026-11-08-drop-realm-columns/check_inventory.py`（2026-11-08：`170 rows, 48 tables (31 live), 0 errors`；把一格「去向」清空的複本會印出 `FAIL row …`，複本放在附件目錄內、用完已刪）。
+- `check_inventory.py`：盤點每列每欄不得空白、每張 live 表都有 column 與 trigger 列。`python3 docs/plans/2026-11-08-drop-realm-columns/check_inventory.py`（2026-11-11，head `db388a84678f`，加入 `trigger-function` 列之後：`189 rows, 48 tables (31 live), 0 errors`；2026-11-08 為 170 列；把一格「去向」清空的複本會印出 `FAIL row …`，複本放在附件目錄內、用完已刪）。
 
 ## 全域約束與完成定義（暫代主計畫）
 
@@ -54,6 +54,7 @@
 | composite FK（含本欄） | 6，指向 4 個目標 | 1／0 | `$3=="FK"` |
 | CHECK | 2（`ck_trading_state_evidence`、`ck_sim_venue_event_realm`） | 0 | `$3=="CHECK"` |
 | realm trigger | 31 | 12／0 | `$3=="trigger"` |
+| 本體讀本欄的其他 trigger function | 9 個 function、16 個 trigger（`public` 8 個＋`projection_audit.guard_run`） | 0／3（只比對封存表自己的 NEW／OLD，保留） | `$3=="trigger-function"`（2026-11-11 補盤，見決定 R1） |
 | 程式消費端 | `backend/src` 82 檔、`backend/scripts` 3 檔、`deploy/` 1 檔、frontend 2 檔（API 欄位，值不變） | — | `rg -l deployment_environment backend/src backend/scripts deploy frontend/src` |
 | 測試 | 118 檔 | — | `rg -l deployment_environment backend/tests \| wc -l` |
 
@@ -75,9 +76,11 @@
     - `backend/alembic/versions/<rev>_narrow_realm_keys.py`（新增）：(a) 斷言每張 live 表 `deployment_environment` 只有 stamp 這一個值（有別的值就 `RAISE`，訊息帶表名不帶資料）；(b) `CREATE OR REPLACE FUNCTION guard_database_realm()`：`NEW.deployment_environment IS NULL` 時填入 stamp，其餘行為不變（stamp 缺→拒、值不等於 stamp→拒）；(c) 照 `inventory.tsv` 去向為「步驟 1 建窄版／窄 unique index」的 29＋9 列，各建去掉本欄的對應 index（PK 與 UNIQUE 建成 unique index，部分 unique 保留同一個 `WHERE`，暫用 `_narrow` 後綴）。新窄 index 若與既有 index 欄位完全相同就不建，在去向裡改記「步驟 3 刪除（與 X 重複）」並重跑 check。
     - ORM 模型宣告這些 index（修改）：`modules/ledger/tables.py`、`modules/execution/safety/tables.py`、`modules/execution/capital_tables.py`、`modules/execution/uncertainty_tables.py`、`modules/accounts/rotation_tables.py`、`modules/live_validation/tables.py`、`modules/observability/tables.py`（實際清單以 `inventory.tsv` 的表對到模型為準）。
     - `tests/integration/test_realm_guard_fills_stamp.py`（新增）。
+    - 在同一個庫替同一個 key 種兩個 realm 的測試 fixture（修改，R2）：窄 unique index 從這一步就存在（模型的 `create_all` 與 migration 都有），這類 fixture 會撞重複，所以隨本步改成單一 realm，不等步驟 4。做法：共用的 `tests/apps/runtime/account_test_helpers.py::seed_exchange_account` 只種受測行程設定的那個 realm；「另一個 scope」改用另一個 exchange account；仍要驗 realm 不一致會被擋的測試，讓另一個 realm 的列在窄 key 上也不同；只剩「另一個 realm 可以另有一筆」這種斷言的直接拿掉。被刪的參數化案例列在 `Removed-Test:` trailer。
+    - migration 的 downgrade 寫出無損反向（刪窄 index、guard 換回不補值的本體）：既有 fixture（例如 `tests/integration/test_candle_revisions_unique_migration.py`）從 head downgrade 造升級前狀態，會經過本 revision。
   - 消費端：`rg -n "guard_database_realm|database_realm_write" backend deploy`；`rg -n "ON CONFLICT|on_conflict_do" backend/src`（此步不改，確認窄 index 不影響現有 conflict target）。
-  - 不能動：既有 PK／UNIQUE／FK／CHECK、欄位 NOT NULL、程式碼行為。
-  - 驗收：單元全過；integration（CI）跑新增測試：(1) INSERT 省略本欄的列被補成 stamp；(2) 明寫錯的 realm 仍被拒；(3) 未 stamp 的庫仍被拒；(4) migration 在植入第二個 realm 的列時失敗。mutation：把 (b) 改回不補值的舊函式，(1) 要失敗；拿掉 (a) 的斷言，(4) 要失敗。`alembic check` 無 drift；`check_inventory.py` 0 errors。
+  - 不能動：既有 PK／UNIQUE／FK／CHECK、欄位 NOT NULL、程式碼行為（`backend/src` 只加模型的 index 宣告）。
+  - 驗收：單元全過；integration（CI）跑新增測試：(1) INSERT 省略本欄的列被補成 stamp；(2) 明寫錯的 realm 仍被拒；(3) 未 stamp 的庫仍被拒；(4) migration 在植入第二個 realm 的列時失敗；(5) 每個含本欄的 key／index 都有一個欄位、順序、唯一性與條件相同、只少本欄的 `_narrow` 版（共 38 個）。mutation：`NARROW_INDEXES` 少一列，(5) 要失敗；把 (b) 改回不補值的舊函式，(1) 要失敗；拿掉 (a) 的斷言，(4) 要失敗。`alembic check` 無 drift；`check_inventory.py` 0 errors。
   - 發版後驗收：見下方「發版後驗收」。
   - 停止條件：(a) 在 CI 或 rehearsal 發現多個 realm；或窄 unique index 在 rehearsal 撞重複——停下回報，不改斷言。
   - 需要人做的事：owner 核准含本步的 `dev`→`main` 發版；發版後驗收。
@@ -110,7 +113,7 @@
 
 - [ ] **3. 縮窄 key、拆 trigger、刪欄（破壞性 migration）**（被擋於：2c 已併入 `dev`；**部署**另被擋於含 2a 的 release 已部署且主機 ops release 已更新——`readlink /usr/local/lib/bfx-ops/current` 指向 2a 以後的 revision，這是只有 owner 能確認的正式環境查詢）
   - 範圍：
-    - `backend/alembic/versions/<rev>_drop_realm_columns.py`（新增），照 `inventory.tsv` 的去向：先 `DROP` 6 個 composite FK；4 個 FK 目標換成窄版（UNIQUE 換成步驟 1 的窄 index；`ix_trading_state_scope_id` 同理）；9 個 PK `DROP CONSTRAINT … ADD CONSTRAINT <原名> PRIMARY KEY USING INDEX <窄 index>`；其餘 UNIQUE／部分 unique／索引刪舊的、窄版 `RENAME` 回原名；`ck_trading_state_evidence` 同名重建去掉本欄條件；`ck_sim_venue_event_realm` 刪除（sim venue 只用 ci 庫，由 `modules/simulated_venue/_internal/store_sql.py` 的 `_check_database_realm` 守住，已存在）；6 個 FK 以原名、窄欄位重建（`NOT VALID` 後 `VALIDATE`）；`DROP TRIGGER database_realm_write` 於 31 張 live 表與 12 張 `legacy_archive` 表（只拆 trigger，不碰列；`archive_frozen` 不動）；`DROP FUNCTION guard_database_realm()`；`DROP COLUMN deployment_environment` 於 31 張 live 表（column 層級的 grant 隨欄消失）。末尾斷言：非封存 schema 的 `information_schema.columns` 找不到本欄、`pg_trigger` 找不到 `database_realm_write`、`to_regprocedure('public.guard_database_realm()')` 為 NULL、封存表 manifest 雜湊重算不變。
+    - `backend/alembic/versions/<rev>_drop_realm_columns.py`（新增），照 `inventory.tsv` 的去向：先 `DROP` 6 個 composite FK；4 個 FK 目標換成窄版（UNIQUE 換成步驟 1 的窄 index；`ix_trading_state_scope_id` 同理）；9 個 PK `DROP CONSTRAINT … ADD CONSTRAINT <原名> PRIMARY KEY USING INDEX <窄 index>`；其餘 UNIQUE／部分 unique／索引刪舊的、窄版 `RENAME` 回原名；`ck_trading_state_evidence` 同名重建去掉本欄條件；`ck_sim_venue_event_realm` 刪除（sim venue 只用 ci 庫，由 `modules/simulated_venue/_internal/store_sql.py` 的 `_check_database_realm` 守住，已存在）；6 個 FK 以原名、窄欄位重建（`NOT VALID` 後 `VALIDATE`）；`DROP TRIGGER database_realm_write` 於 31 張 live 表與 12 張 `legacy_archive` 表（只拆 trigger，不碰列；`archive_frozen` 不動）；`DROP FUNCTION guard_database_realm()`；`inventory.tsv` 裡 `trigger-function` 列的 9 個 live function（`guard_ledger_scope`、`guard_ledger_mirror`、`guard_ledger_observation_accept`、`guard_ledger_quarantine_source`、`guard_runtime_policy_head`、`guard_runtime_policy_revision`、`guard_trading_state_transition`、`guard_credential_rotation_request`、`projection_audit.guard_run`）在 `DROP COLUMN` 之前各以 `CREATE OR REPLACE` 改成本體不讀本欄（plpgsql 執行時才解析欄位，不改寫的話刪欄後第一次寫入才失敗；跨表比對 scope 的改成只比 `exchange_account_id`）；`DROP COLUMN deployment_environment` 於 31 張 live 表（column 層級的 grant 隨欄消失）。末尾斷言：非封存 schema 的 `information_schema.columns` 找不到本欄、`pg_trigger` 找不到 `database_realm_write`、`to_regprocedure('public.guard_database_realm()')` 為 NULL、非封存 schema 的 `pg_proc.prosrc` 沒有任何 function 提到本欄、封存表 manifest 雜湊重算不變。
     - ORM 模型拿掉本欄（修改，同步驟 1 的模型檔清單）。
     - grant 清單（修改，與 `DROP COLUMN` 同一個 PR）：四個 `REQUEST_COLUMNS` 拿掉 `deployment_environment`，2a 允許清單檢查移除這個例外。`rg -ln "COLUMNS.*=|GRANT" backend/src | xargs rg -l deployment_environment` 的完整 10 檔（2026-11-08，`89b06dc4`）：
       - grant 常數（步驟 3 改）：`modules/execution/uncertainty_tables.py`（`REQUEST_COLUMNS`）、`modules/execution/capital_tables.py`（`REQUEST_COLUMNS`）、`modules/execution/safety/tables.py`（`REQUEST_COLUMNS`）、`modules/accounts/rotation_tables.py`（`REQUEST_COLUMNS`）。
@@ -121,7 +124,7 @@
     - `tests/integration/test_drop_realm_columns.py`（新增）。
   - 消費端：`rg -n "deployment_environment" backend/src backend/scripts deploy`（應只剩允許清單）；`rg -n "REQUEST_COLUMNS" backend/src backend/tests backend/alembic`；`rg -n "guard_database_realm|database_realm_write|DISABLE_REALM_TRIGGERS" backend`。
   - 不能動：封存資料列與 manifest；`database_realm` 表與它的不可改 trigger；FK／PK／index 名稱（重建後同名）；開機報告的 `deployment_environment` 鍵（步驟 2 共用的不能動，延後項才拿掉）。
-  - 驗收：單元全過；integration（CI）全過；`alembic check` 無 drift；新增測試：(1) head 上 live 表無本欄、無 realm trigger、函式不存在；(2) 窄 FK 仍擋下指向不存在 request 的列；(3) 封存 manifest 重算等於 migration 前；(4) 窄 PK 擋重複；四個 grant 測試在新欄位集合下通過。mutation：從 migration 拿掉一張表的 `DROP COLUMN`，(1) 要失敗；把一個 FK 改成不重建，(2) 要失敗；在 migration 複本裡對 `legacy_archive` 表做會改列的動作，(3) 要失敗；把一個 `REQUEST_COLUMNS` 改回含本欄，對應 grant 測試要失敗。`check_inventory.py` 0 errors；2a 的跨 release 解析測試 (3) 仍通過。
+  - 驗收：單元全過；integration（CI）全過；`alembic check` 無 drift；新增測試：(1) head 上 live 表無本欄、無 realm trigger、函式不存在；(2) 窄 FK 仍擋下指向不存在 request 的列；(3) 封存 manifest 重算等於 migration 前；(4) 窄 PK 擋重複；(5) 9 個改寫過的 function 各有一條寫入路徑的測試仍擋下原本擋的情況（跨 account 的 scope 不一致、非法狀態轉移），而且合法寫入通過；四個 grant 測試在新欄位集合下通過。mutation：migration 少改寫一個 function，(1) 的 `prosrc` 斷言要失敗；從 migration 拿掉一張表的 `DROP COLUMN`，(1) 要失敗；把一個 FK 改成不重建，(2) 要失敗；在 migration 複本裡對 `legacy_archive` 表做會改列的動作，(3) 要失敗；把一個 `REQUEST_COLUMNS` 改回含本欄，對應 grant 測試要失敗。`check_inventory.py` 0 errors；2a 的跨 release 解析測試 (3) 仍通過。
   - 停止條件：rehearsal 超過 900 s 預算；manifest 雜湊不等；任何 `VALIDATE` 失敗——停下回報。
   - 需要人做的事：owner 核准含本步的 `dev`→`main` 發版，並確認部署前提（主機 ops release 已是 2a 以後的版本）；發版後驗收。
   - 完成後的狀態：備份標籤早於本 migration 的還原 drill，因為 `t.*` 欄位數不同會回報 `ledger_digest_mismatch`，與 `a6c7e8f9b0d1` 的先例相同，屬設計內；replay 越過本 migration 或之後的備份會相符。步驟 4 把這條寫進 `docs/runbooks/offsite-dr.md`。回滾＝往前修。
@@ -156,6 +159,12 @@ migration rehearsal 與還原 drill 只在 owner 核准的 `dev`→`main` 發版
   - B：從 `Scope`、`CapitalScope`、`ResolutionScope`、`OperatorContext`、`AccountContext`、`AuditContext` 與建構參數完全拿掉；需要值的地方（`SealContext` HKDF info、writer／xact lock key、API 欄位、`restore_boot_check` 輸出、metrics／resource 標籤）在該處直接讀 settings。
   - 結論：B；步驟 2 因此拆成 2a、2b、2c。
 
+- **R1 盤點補列：本體讀本欄的其他 trigger function**（2026-11-11，步驟 1 執行時由 head 資料庫的 `pg_proc.prosrc` 查出；不是取捨，沒有替代方案：不改寫就不能刪欄）
+  - 原盤點只列名為 `database_realm_write` 的 trigger；另有 9 個 live trigger function 讀本欄。`inventory_probe.py` 加 `trigger-function` 種類，步驟 3 的範圍、末尾斷言與驗收 (5) 跟著補上。
+
+- **R2 兩個 realm 同庫的測試 fixture 提前到步驟 1 處理**（2026-11-11，步驟 1 執行時量到：模型宣告窄 unique index 後單元測試 46 failed／4 errors、非 e2e 的 integration 15 failed，全部是同一個庫替同一個 key 種兩個 realm）
+  - 原計畫把測試清理全放在步驟 4；但 D1＝A 讓窄 unique 從步驟 1 就存在，撞到的 fixture 必須同一步改。步驟 4 仍處理其餘測試檔裡的本欄。代價：這幾個 reader 在步驟 1 到 2a 之間仍以 realm 過濾，但不再有「同 key 另一個 realm」的測試證明它；2a 拿掉這個過濾。
+
 拍板順序：D0–D2 都已決，沒有待拍板的題目。
 
 ## 進度
@@ -164,7 +173,7 @@ migration rehearsal 與還原 drill 只在 owner 核准的 `dev`→`main` 發版
 
 | 步驟 | 狀態 | 已跑的驗收 | 未跑的驗收與原因 | commit |
 |---|---|---|---|---|
-| 1 加窄 key、guard 補值 | 未開始 | | 發版後驗收：未跑－待發版 | |
+| 1 加窄 key、guard 補值 | 程式完成待驗收 | 本機 2026-11-12：單元 `5360 passed`；非 e2e、非 docker 的 integration `1239 passed, 1 failed`，該 1 個（測試自己的 INSERT 寫錯）修正後所在檔重跑通過；新增測試 6 過；mutation 3 個（guard 不補值、拿掉 realm 斷言、`NARROW_INDEXES` 少一列）都被對應測試抓到；`alembic check` 無 drift；mypy、ruff、`quality_ratchet.py`、`check_inventory.py`（189 列 0 errors）通過 | CI 全套（含 e2e、docker、squawk：本機沒有 squawk）：待 PR；`/code-review`：待跑；發版後驗收：未跑－待發版 | |
 | 2a SQL 與 digest 不再用本欄 | 未開始 | | 發版後驗收：未跑－待發版 | |
 | 2b ledger／capital scope 拿掉 env | 未開始 | | 發版後驗收：未跑－待發版 | |
 | 2c execution／operator／audit context 拿掉 env | 未開始 | | 發版後驗收：未跑－待發版 | |
