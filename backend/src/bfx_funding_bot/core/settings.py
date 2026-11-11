@@ -27,7 +27,8 @@ def require_deployment_environment(environ: Mapping[str, str] | None = None) -> 
     A missing value must never silently select ``prod``. Each assembly point (the bot's
     ``load_config``, the web API's lifespan, the operator CLI's and each script's ``main``)
     calls this once and passes the value down; ``modules`` and the rest of ``core`` never
-    read it themselves (tests/architecture/test_env_read_once.py).
+    read it themselves (tests/architecture/test_env_read_once.py). The only other reader is
+    ``deployment_environment_label`` below.
     """
     value = (os.environ if environ is None else environ).get("BFX_DEPLOYMENT_ENV", "").strip()
     valid = ", ".join(KNOWN_REALMS)
@@ -44,7 +45,7 @@ def deployment_environment_label(environ: Mapping[str, str] | None = None) -> st
     For assembly points only, like the function above: alerts and error tracking start
     before the configuration is validated, so that a refused boot is still reported.
     """
-    return (os.environ if environ is None else environ).get("BFX_DEPLOYMENT_ENV", "")
+    return (os.environ if environ is None else environ).get("BFX_DEPLOYMENT_ENV", "").strip()
 
 
 # libpq's modes that verify the server, plus an explicit plaintext one. ``require``, ``prefer``

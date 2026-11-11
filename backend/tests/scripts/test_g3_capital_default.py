@@ -103,7 +103,6 @@ def _ours(credit_id: int, opened: int) -> list[object]:
 @pytest.mark.asyncio
 async def test_zero_allocation_cap_env_uses_the_ledger_balance(sf, monkeypatch):
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(ACCOUNT))
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "0")
     now = int(datetime.now(UTC).timestamp() * 1000)
     async with sf() as s:
@@ -126,7 +125,6 @@ async def test_zero_allocation_cap_env_uses_the_ledger_balance(sf, monkeypatch):
 @pytest.mark.asyncio
 async def test_without_capital_or_ledger_fails_with_a_clear_message(sf, monkeypatch):
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(ACCOUNT))
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     async with sf() as s:
         now = int(datetime.now(UTC).timestamp() * 1000)
         s.add(_credit(1, now - 2 * DAY, now - DAY))

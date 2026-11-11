@@ -79,8 +79,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # valid value they answer 503 after the membership check, as before.
     try:
         app.state.deployment_environment = require_deployment_environment()
-    except ValueError:
-        logging.error("deployment_environment_not_configured: account routes answer 503")
+    except ValueError as exc:
+        logging.error("deployment_environment_not_configured: %s; account routes answer 503", exc)
         app.state.deployment_environment = None
     try:
         settings = load_settings()

@@ -126,7 +126,7 @@ class Operator:
     exchange_account_id: UUID
     database_url: str
     # None when the environment names no valid one: refused after the membership check.
-    deployment_environment: str | None = None
+    deployment_environment: str | None
 
 
 def resolve_operator(env: Mapping[str, str]) -> Operator:

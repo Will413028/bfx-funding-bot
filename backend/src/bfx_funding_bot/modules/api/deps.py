@@ -63,20 +63,12 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 def configured_deployment_environment(request: Request) -> str | None:
-    """What the app's assembly read at start (``app.state``); None when it had no valid value."""
-    value: str | None = getattr(request.app.state, "deployment_environment", None)
-    return value
+    """What the app's assembly read at start; None when the environment named no valid one.
 
-
-def get_deployment_environment(request: Request) -> str:
-    """The process's deployment environment, or 503 when the app started without one.
-
-    Declare it after the account dependency: a non-member is refused first.
+    A plain attribute read: an app that serves account routes without setting
+    ``app.state.deployment_environment`` is a wiring bug and fails loudly.
     """
-    value = configured_deployment_environment(request)
-    if value is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail="deployment_environment_not_configured")
+    value: str | None = request.app.state.deployment_environment
     return value
 
 

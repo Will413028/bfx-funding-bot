@@ -301,7 +301,7 @@ class AlertSink:
         self._worker: asyncio.Task[None] | None = None
 
     @classmethod
-    def from_environment(cls, environ: Mapping[str, str], *, context: str = "",
+    def from_environment(cls, environ: Mapping[str, str], *, context: str,
                          **options: Any) -> AlertSink:
         """Telegram when both keys are valid; otherwise log-only (said once, at boot).
 

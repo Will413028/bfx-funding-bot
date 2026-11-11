@@ -447,7 +447,6 @@ async def test_build_reads_only_the_cells_own_fust_1h_series(g3_factory, monkeyp
     another symbol / period_agg / timeframe are excluded. Proven via the band
     guard: the target series is frr-scale (~1e-6), every decoy legit (2e-4)."""
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT))
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     now = _real_now()  # candles are final only once in the past
     base = now - 5 * DAY
     target = [_recent_candle("fUST", "1h", "p2", base + i * HOUR, "1.1e-6") for i in range(12)]
@@ -474,7 +473,6 @@ async def test_build_reads_only_the_cells_own_fust_1h_series(g3_factory, monkeyp
 @pytest.mark.asyncio
 async def test_build_loads_one_series_per_bot_cell(g3_factory, monkeypatch):
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT))
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     now = _real_now()
     base = now - 5 * DAY
     candles = ([_recent_candle("fUST", "1h", "p2", base + i * HOUR, "0.0002") for i in range(12)]
@@ -507,7 +505,6 @@ async def test_build_verdict_reads_credits_through_trade_offer_and_decision(g3_f
     offer 5123273052 → execution decision; 466451710 has no trade and is
     reported unattributed. The headline is 842 s of interest."""
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT))
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     now = REPAID + DAY
     async with g3_factory() as s:
         s.add_all([
@@ -546,6 +543,5 @@ async def test_non_uuid_account_fails_instead_of_reading_no_credits(g3_factory, 
     """The venue read models are keyed by UUID; a configured non-UUID account
     must fail (account_id_canonical), never silently read as 'no credits'."""
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", "default")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     with pytest.raises(ValueError, match="must be a UUID"):
         await build_g3_report(capital=C, session_factory=g3_factory, now_ms=REPAID, deployment_environment="prod")
