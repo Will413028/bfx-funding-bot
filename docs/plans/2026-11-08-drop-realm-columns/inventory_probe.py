@@ -91,6 +91,9 @@ def destination(schema: str, kind: str, name: str, definition: str) -> str:
             return "刪除（步驟 3；sim 只寫 ci 庫改由 store_sql._check_database_realm 守住，已存在）"
         return "改寫（步驟 3：同名重建，去掉 deployment_environment 條件）"
     if kind == "index":
+        if name == "ix_ledger_observation_query_scope_revision":
+            return ("刪除（步驟 3；不建窄版：與 uq_ledger_observation_query_scope_revision_narrow "
+                    "欄位相同只差方向，btree 反向掃描即可）")
         if "(deployment_environment)" in definition:
             return "刪除（步驟 3：只索引本欄）"
         return "改寫（步驟 1 建窄版；步驟 3 刪舊的、窄版改回原名）"

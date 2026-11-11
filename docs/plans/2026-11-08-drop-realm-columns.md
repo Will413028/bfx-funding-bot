@@ -73,14 +73,14 @@
 
 - [ ] **1. 加窄 key、讓 guard 補值（只加不刪的 migration）**（被擋於：無；D1＝A 已決）
   - 範圍：
-    - `backend/alembic/versions/<rev>_narrow_realm_keys.py`（新增）：(a) 斷言每張 live 表 `deployment_environment` 只有 stamp 這一個值（有別的值就 `RAISE`，訊息帶表名不帶資料）；(b) `CREATE OR REPLACE FUNCTION guard_database_realm()`：`NEW.deployment_environment IS NULL` 時填入 stamp，其餘行為不變（stamp 缺→拒、值不等於 stamp→拒）；(c) 照 `inventory.tsv` 去向為「步驟 1 建窄版／窄 unique index」的 29＋9 列，各建去掉本欄的對應 index（PK 與 UNIQUE 建成 unique index，部分 unique 保留同一個 `WHERE`，暫用 `_narrow` 後綴）。新窄 index 若與既有 index 欄位完全相同就不建，在去向裡改記「步驟 3 刪除（與 X 重複）」並重跑 check。
+    - `backend/alembic/versions/<rev>_narrow_realm_keys.py`（新增）：(a) 斷言每張掛 realm trigger 的 live 表（沿用 `96535191e443` 的範圍，沒掛 trigger 的暫存表不擋）`deployment_environment` 只有 stamp 這一個值；未 stamp 的庫有任何列另以「未 stamp」訊息拒絕（有別的值就 `RAISE`，訊息帶表名不帶資料）；(b) `CREATE OR REPLACE FUNCTION guard_database_realm()`：`NEW.deployment_environment IS NULL` 時填入 stamp，其餘行為不變（stamp 缺→拒、值不等於 stamp→拒）；(c) 照 `inventory.tsv` 去向為「步驟 1 建窄版／窄 unique index」的 28＋9 列（`ix_ledger_observation_query_scope_revision` 不建窄版：與該表窄 unique index 欄位相同只差方向，去向改為步驟 3 刪除），各建去掉本欄的對應 index（PK 與 UNIQUE 建成 unique index，部分 unique 保留同一個 `WHERE`，暫用 `_narrow` 後綴）。新窄 index 若與既有 index 欄位完全相同就不建，在去向裡改記「步驟 3 刪除（與 X 重複）」並重跑 check。
     - ORM 模型宣告這些 index（修改）：`modules/ledger/tables.py`、`modules/execution/safety/tables.py`、`modules/execution/capital_tables.py`、`modules/execution/uncertainty_tables.py`、`modules/accounts/rotation_tables.py`、`modules/live_validation/tables.py`、`modules/observability/tables.py`（實際清單以 `inventory.tsv` 的表對到模型為準）。
     - `tests/integration/test_realm_guard_fills_stamp.py`（新增）。
     - 在同一個庫替同一個 key 種兩個 realm 的測試 fixture（修改，R2）：窄 unique index 從這一步就存在（模型的 `create_all` 與 migration 都有），這類 fixture 會撞重複，所以隨本步改成單一 realm，不等步驟 4。做法：共用的 `tests/apps/runtime/account_test_helpers.py::seed_exchange_account` 只種受測行程設定的那個 realm；「另一個 scope」改用另一個 exchange account；仍要驗 realm 不一致會被擋的測試，讓另一個 realm 的列在窄 key 上也不同；只剩「另一個 realm 可以另有一筆」這種斷言的直接拿掉。被刪的參數化案例列在 `Removed-Test:` trailer。
     - migration 的 downgrade 寫出無損反向（刪窄 index、guard 換回不補值的本體）：既有 fixture（例如 `tests/integration/test_candle_revisions_unique_migration.py`）從 head downgrade 造升級前狀態，會經過本 revision。
   - 消費端：`rg -n "guard_database_realm|database_realm_write" backend deploy`；`rg -n "ON CONFLICT|on_conflict_do" backend/src`（此步不改，確認窄 index 不影響現有 conflict target）。
   - 不能動：既有 PK／UNIQUE／FK／CHECK、欄位 NOT NULL、程式碼行為（`backend/src` 只加模型的 index 宣告）。
-  - 驗收：單元全過；integration（CI）跑新增測試：(1) INSERT 省略本欄的列被補成 stamp；(2) 明寫錯的 realm 仍被拒；(3) 未 stamp 的庫仍被拒；(4) migration 在植入第二個 realm 的列時失敗；(5) 每個含本欄的 key／index 都有一個欄位、順序、唯一性與條件相同、只少本欄的 `_narrow` 版（共 38 個）。mutation：`NARROW_INDEXES` 少一列，(5) 要失敗；把 (b) 改回不補值的舊函式，(1) 要失敗；拿掉 (a) 的斷言，(4) 要失敗。`alembic check` 無 drift；`check_inventory.py` 0 errors。
+  - 驗收：單元全過；integration（CI）跑新增測試：(1) INSERT 省略本欄的列被補成 stamp；(2) 明寫錯的 realm 仍被拒；(3) 未 stamp 的庫仍被拒；(4) migration 在植入第二個 realm 的列時失敗；(5) 每個含本欄的 key／index 都有一個欄位、順序、唯一性與條件相同、只少本欄的 `_narrow` 版（共 37 個）；(6) head 上每個含本欄的 key／index 都找得到窄版；(7) 每張表上本體讀本欄的 BEFORE INSERT row trigger 名稱都排在 `database_realm_write` 之後（BEFORE ROW trigger 依名稱順序觸發，排在前面的會看到未補值的 NULL）。mutation：`NARROW_INDEXES` 少一列，(5) 要失敗；把 (b) 改回不補值的舊函式，(1) 要失敗；拿掉 (a) 的斷言，(4) 要失敗。`alembic check` 無 drift；`check_inventory.py` 0 errors。
   - 發版後驗收：見下方「發版後驗收」。
   - 停止條件：(a) 在 CI 或 rehearsal 發現多個 realm；或窄 unique index 在 rehearsal 撞重複——停下回報，不改斷言。
   - 需要人做的事：owner 核准含本步的 `dev`→`main` 發版；發版後驗收。
@@ -173,7 +173,7 @@ migration rehearsal 與還原 drill 只在 owner 核准的 `dev`→`main` 發版
 
 | 步驟 | 狀態 | 已跑的驗收 | 未跑的驗收與原因 | commit |
 |---|---|---|---|---|
-| 1 加窄 key、guard 補值 | 程式完成待驗收 | 本機 2026-11-12：單元 `5360 passed`；非 e2e、非 docker 的 integration `1239 passed, 1 failed`，該 1 個（測試自己的 INSERT 寫錯）修正後所在檔重跑通過；新增測試 6 過；mutation 3 個（guard 不補值、拿掉 realm 斷言、`NARROW_INDEXES` 少一列）都被對應測試抓到；`alembic check` 無 drift；mypy、ruff、`quality_ratchet.py`、`check_inventory.py`（189 列 0 errors）通過 | CI 全套（含 e2e、docker、squawk：本機沒有 squawk）：待 PR；`/code-review`：待跑；發版後驗收：未跑－待發版 | |
+| 1 加窄 key、guard 補值 | 程式完成待驗收 | 本機 2026-11-12：單元 `5360 passed`；非 e2e、非 docker 的 integration `1243 passed, 8 skipped`；新增測試 9 過；mutation 5 個（guard 不補值、拿掉 realm 斷言、`NARROW_INDEXES` 少一列、斷言改掃所有含本欄的表、trigger 順序比較反向）都被對應測試抓到；`alembic check` 無 drift；mypy、ruff、`quality_ratchet.py`、`check_inventory.py`（189 列 0 errors）通過；`/code-review` medium：findings 8（blocking 0），修正 7、記錄 1（R2 的測試缺口，待 owner 接受） | CI 全套（含 e2e、docker、squawk：本機沒有 squawk）：待 PR；發版後驗收：未跑－待發版 | `f54226c8`＋審查修正 commit |
 | 2a SQL 與 digest 不再用本欄 | 未開始 | | 發版後驗收：未跑－待發版 | |
 | 2b ledger／capital scope 拿掉 env | 未開始 | | 發版後驗收：未跑－待發版 | |
 | 2c execution／operator／audit context 拿掉 env | 未開始 | | 發版後驗收：未跑－待發版 | |

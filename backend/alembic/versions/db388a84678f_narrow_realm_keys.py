@@ -5,18 +5,22 @@ column repeats the stamp on each row. This is the additive first step of removin
 (docs/plans/2026-11-08-drop-realm-columns.md, step 1); nothing is dropped here and code that
 still writes the column behaves as before.
 
-* Assert it: a live table (any schema but the two archives) holding a row whose realm is not
-  the stamp refuses the upgrade; so does any row at all in an unstamped database. The tables
-  come from ``pg_catalog``, the probe is one statement (a ``UNION ALL`` of one ``EXISTS`` per
-  table), so the answer is from a single snapshot. The message names tables, never data.
+* Assert it: a live realm-guarded table (one carrying the ``guard_database_realm`` trigger, in
+  any schema but the two archives; the scoping 96535191e443 settled on, so an unguarded scratch
+  copy does not block) holding a row whose realm is not the stamp refuses the upgrade; so does
+  any row at all in an unstamped database, with its own message. The tables come from
+  ``pg_catalog``, the probe is one statement (a ``UNION ALL`` of one ``EXISTS`` per table), so
+  the answer is from a single snapshot. The messages name tables, never data.
 * ``guard_database_realm()`` fills a NULL ``deployment_environment`` with the stamp before it
   compares. PostgreSQL checks NOT NULL after the BEFORE ROW triggers, so an INSERT may now
   omit the column. An unstamped database and a realm other than the stamp are refused as
   before. ``CREATE OR REPLACE`` keeps the owner, SECURITY DEFINER and the revoked EXECUTE.
 * For each primary key, unique constraint and index that includes the column, an index over
   the same columns without it (same order, direction, uniqueness and predicate), named
-  ``<original>_narrow``. Step 3 swaps them in under the original names. None of the 38
-  duplicates an existing index.
+  ``<original>_narrow``. Step 3 swaps them in under the original names. One wide index gets
+  no twin: ``ix_ledger_observation_query_scope_revision`` (account, realm, revision DESC)
+  would be the unique twin's columns read backward, which a btree already serves; step 3
+  drops it. None of the 37 twins duplicates an existing index.
 
 The downgrade loses nothing (it drops the twins and restores the guard that does not fill), so
 it is written (docs/adr/2026-10-08-forward-only-migrations.md D1); fixtures that reach an older
@@ -47,18 +51,18 @@ ledger_contract = "preserved"
 
 _ARCHIVE_SCHEMAS = ("legacy_archive", "release_archive")
 
-# One row per live table that holds a row of another realm than the stamp. Without a stamp the
-# scalar subquery is NULL and every row is distinct from it.
+# One row per live realm-guarded table that holds a row of another realm than the stamp. Without
+# a stamp the scalar subquery is NULL and every row is distinct from it.
 _PROBE = """
 SELECT string_agg(
   format('SELECT %L AS t WHERE EXISTS (SELECT 1 FROM %I.%I WHERE deployment_environment '
          'IS DISTINCT FROM (SELECT realm FROM public.database_realm))',
          format('%I.%I', n.nspname, c.relname), n.nspname, c.relname),
   ' UNION ALL ' ORDER BY n.nspname, c.relname)
-FROM pg_catalog.pg_attribute a
-JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+FROM pg_catalog.pg_trigger t
+JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-WHERE a.attname = 'deployment_environment' AND NOT a.attisdropped
+WHERE t.tgfoid = 'public.guard_database_realm'::regproc AND NOT t.tgisinternal
   AND c.relkind IN ('r', 'p') AND NOT c.relispartition
   AND n.nspname <> ALL (:archives)
 """
@@ -122,8 +126,6 @@ NARROW_INDEXES: tuple[tuple[str, str, bool, str, str | None], ...] = (
      "exchange_account_id, query_finished_at_ms DESC, id", None),
     ("ledger_observation_query", "uq_ledger_observation_query_scope_revision", True,
      "exchange_account_id, query_revision", None),
-    ("ledger_observation_query", "ix_ledger_observation_query_scope_revision", False,
-     "exchange_account_id, query_revision DESC", None),
     ("nav_peak", "nav_peak_pkey", True, "exchange_account_id, symbol", None),
     ("nav_window_samples", "ix_nav_window_samples_scope_symbol_time", False,
      "exchange_account_id, symbol, occurred_at_ms", None),
@@ -164,10 +166,15 @@ def _refuse_other_realms() -> None:
     if not probe:
         return
     holding = list(bind.exec_driver_sql(str(probe)).scalars())
-    if holding:
+    if not holding:
+        return
+    if bind.execute(text("SELECT count(*) FROM public.database_realm")).scalar():
         raise RuntimeError(
             "refuse: rows of a realm other than the database_realm stamp in "
             + ", ".join(holding))
+    raise RuntimeError(
+        "refuse: this database is not stamped (database_realm is empty) but holds rows in "
+        + ", ".join(holding))
 
 
 def upgrade() -> None:

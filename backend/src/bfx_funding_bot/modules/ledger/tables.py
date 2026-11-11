@@ -218,9 +218,8 @@ class LedgerObservationQueryRow(Base):
             "deployment_environment",
             text("query_revision DESC"),
         ),
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("ix_ledger_observation_query_scope_revision_narrow", "exchange_account_id",
-              text("query_revision DESC")),
+        # No narrow twin: uq_ledger_observation_query_scope_revision_narrow read backward serves
+        # the same lookups; step 3 drops this index.
     )
 
 

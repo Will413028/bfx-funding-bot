@@ -21,18 +21,23 @@ TEST_VAULT_KEK = bytes(range(32))
 TEST_VAULT_KEK_B64 = base64.b64encode(TEST_VAULT_KEK).decode()
 
 
+def seeded_realm(realm: str | None = None) -> str:
+    """The one realm a test database holds: ``realm``, else the one this process is configured
+    for, else ``ci``."""
+    return realm or os.environ.get("BFX_DEPLOYMENT_ENV", "").strip() or "ci"
+
+
 async def stamp_schema_head(engine: AsyncEngine, *, realm: str | None = None) -> None:
     """Record this build's schema head, the capital authority epochs a fresh database holds
     at head (the seeded ``legacy`` row and the ``ledger`` genesis, ``b1c2d3e4f5a6``) and the
     database realm (``ci`` unless a test boots as another realm), as ``alembic upgrade``
     plus the owner's one-time stamp would on Postgres."""
-    import os
 
     from sqlalchemy import inspect, text
 
     from bfx_funding_bot.apps.authority_support import GENESIS_ACTOR
     from bfx_funding_bot.core.schema_head import build_head
-    realm = realm or os.environ.get("BFX_DEPLOYMENT_ENV", "").strip() or "ci"
+    realm = seeded_realm(realm)
     async with engine.begin() as conn:
         await conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"))
         await conn.execute(text("DELETE FROM alembic_version"))
@@ -77,7 +82,7 @@ async def seed_exchange_account(
     envelope = encrypt_secret_with_aad(
         "test_secret", aad=str(TEST_EXCHANGE_ACCOUNT_ID), kek=TEST_VAULT_KEK
     )
-    await stamp_schema_head(engine)
+    await stamp_schema_head(engine, realm=environment)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory.begin() as session:
         session.add(
@@ -108,10 +113,9 @@ async def seed_exchange_account(
         from bfx_funding_bot.modules.ledger import Scope
         from bfx_funding_bot.modules.ledger.wiring import build_policy_store
         from bfx_funding_bot.modules.trading import CapitalPolicy
-        # One database holds one realm: ``environment``, or the one this process is
-        # configured for (a test that configures only a child process passes it).
+        # One database holds one realm, the one ``stamp_schema_head`` stamped above.
         store = build_policy_store(
-            Scope(TEST_EXCHANGE_ACCOUNT_ID, environment or os.environ["BFX_DEPLOYMENT_ENV"]))
+            Scope(TEST_EXCHANGE_ACCOUNT_ID, seeded_realm(environment)))
         async with factory.begin() as session:
             for symbol in ("fUST", "fUSD"):
                 await store.apply_policy(session, symbol=symbol,
