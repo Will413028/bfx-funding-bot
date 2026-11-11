@@ -60,9 +60,6 @@ class CredentialRotationRecipientRow(Base):
                         name="ck_credential_rotation_recipients_key").ddl_if(dialect="postgresql"),
         Index("ix_credential_rotation_recipients_run", "exchange_account_id",
               "deployment_environment", "run_id", "created_at_ms"),
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("ix_credential_rotation_recipients_run_narrow", "exchange_account_id", "run_id",
-              "created_at_ms"),
     )
 
 
@@ -141,13 +138,6 @@ class CredentialRotationRequestRow(Base):
               sqlite_where=text("state = 'requested'")),
         Index("ix_credential_rotation_requests_queue", "exchange_account_id",
               "deployment_environment", "state", "created_at_ms"),
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("uq_credential_rotation_requests_pending_narrow", "exchange_account_id",
-              unique=True,
-              postgresql_where=text("state = 'requested'"),
-              sqlite_where=text("state = 'requested'")),
-        Index("ix_credential_rotation_requests_queue_narrow", "exchange_account_id", "state",
-              "created_at_ms"),
     )
 
 

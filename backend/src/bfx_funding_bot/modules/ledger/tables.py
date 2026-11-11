@@ -119,9 +119,6 @@ class CapitalPolicyRevisionRow(Base):
             "exchange_account_id", "deployment_environment", "symbol", "revision",
             name="uq_capital_policy_revision_scope",
         ),
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("uq_capital_policy_revision_scope_narrow", "exchange_account_id", "symbol",
-              "revision", unique=True),
         ForeignKeyConstraint(
             ["operator_request_id", "exchange_account_id", "deployment_environment", "symbol"],
             ["capital_policy_requests.request_id", "capital_policy_requests.exchange_account_id",
@@ -147,10 +144,6 @@ class CapitalPolicyHeadRow(Base):
         Uuid, ForeignKey("capital_policy_revisions.id", ondelete="RESTRICT"), nullable=False,
     )
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
-    __table_args__ = (
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("capital_policy_heads_pkey_narrow", "exchange_account_id", "symbol", unique=True),
-    )
 
 
 class CapitalAuthorityEpochRow(Base):
@@ -183,11 +176,7 @@ class CapitalCommandClockRow(Base):
     )
     deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
-    __table_args__ = (
-        CheckConstraint("revision >= 0", name="ck_capital_command_clock_revision"),
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("capital_command_clock_pkey_narrow", "exchange_account_id", unique=True),
-    )
+    __table_args__ = (CheckConstraint("revision >= 0", name="ck_capital_command_clock_revision"),)
 
 
 class LedgerObservationQueryRow(Base):
@@ -205,9 +194,6 @@ class LedgerObservationQueryRow(Base):
             "query_revision",
             name="uq_ledger_observation_query_scope_revision",
         ),
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("uq_ledger_observation_query_scope_revision_narrow", "exchange_account_id",
-              "query_revision", unique=True),
         CheckConstraint(
             "query_revision > 0 AND started_at_ms >= 0 AND start_revision >= 0",
             name="ck_ledger_observation_query_nonnegative",
@@ -218,8 +204,6 @@ class LedgerObservationQueryRow(Base):
             "deployment_environment",
             text("query_revision DESC"),
         ),
-        # No narrow twin: uq_ledger_observation_query_scope_revision_narrow read backward serves
-        # the same lookups; step 3 drops this index.
     )
 
 
@@ -319,9 +303,6 @@ class LedgerObservationRow(Base):
             text("query_finished_at_ms DESC"),
             "id",
         ),
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("ix_ledger_observation_scope_finished_narrow", "exchange_account_id",
-              text("query_finished_at_ms DESC"), "id"),
     )
 
 
@@ -563,11 +544,6 @@ class VenueOfferMirrorRow(Base):
             "symbol",
             postgresql_where=text("present_in_latest_accepted_snapshot"),
         ),
-        # Narrow twins (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("ix_venue_offer_mirror_live_narrow", "exchange_account_id", "symbol",
-              postgresql_where=text("present_in_latest_accepted_snapshot")),
-        Index("venue_offer_mirror_pkey_narrow", "exchange_account_id", "venue_offer_id",
-              unique=True),
     )
 
 
@@ -622,11 +598,6 @@ class VenueCreditMirrorRow(Base):
             "symbol",
             postgresql_where=text("present_in_latest_accepted_snapshot"),
         ),
-        # Narrow twins (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("ix_venue_credit_mirror_live_narrow", "exchange_account_id", "symbol",
-              postgresql_where=text("present_in_latest_accepted_snapshot")),
-        Index("venue_credit_mirror_pkey_narrow", "exchange_account_id", "venue_credit_id", "source_kind",
-              unique=True),
     )
 
 
@@ -687,9 +658,6 @@ class SubmissionAttemptJournalRow(Base):
             "attempt_seq",
             name="uq_submission_attempt_scope_seq",
         ),
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("uq_submission_attempt_scope_seq_narrow", "exchange_account_id", "attempt_seq",
-              unique=True),
         CheckConstraint(
             "attempt_seq >= 0 AND started_at_ms >= 0",
             name="ck_submission_attempt_nonnegative",
@@ -781,9 +749,6 @@ class QuarantineOpeningRow(Base):
             "deployment_environment",
             "opened_revision",
         ),
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("ix_quarantine_opening_scope_revision_narrow", "exchange_account_id",
-              "opened_revision"),
     )
 
 
@@ -900,9 +865,6 @@ class ExecutionResolutionJournalRow(Base):
             text("resolved_at_ms DESC"),
             text("id DESC"),
         ),
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("ix_execution_resolution_scope_resolved_narrow", "exchange_account_id",
-              text("resolved_at_ms DESC"), text("id DESC")),
         Index(
             "ix_execution_resolution_venue_offer",
             "venue_offer_id",
@@ -942,9 +904,6 @@ class AcceptedCapitalBasisRow(Base):
             "deployment_environment",
             text("accepted_at_ms DESC"),
         ),
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("ix_accepted_capital_basis_scope_accepted_narrow", "exchange_account_id",
-              text("accepted_at_ms DESC")),
     )
 
 

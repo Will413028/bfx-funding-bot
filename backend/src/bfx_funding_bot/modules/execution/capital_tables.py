@@ -94,14 +94,5 @@ class CapitalPolicyRequestRow(Base):
         # What a revision's composite foreign key references.
         UniqueConstraint("request_id", "exchange_account_id", "deployment_environment", "symbol",
                          name="uq_capital_policy_requests_scope"),
-        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
-        Index("uq_capital_policy_requests_pending_narrow", "exchange_account_id", "symbol",
-              "action", unique=True,
-              postgresql_where=text("state = 'requested'"),
-              sqlite_where=text("state = 'requested'")),
-        Index("ix_capital_policy_requests_queue_narrow", "exchange_account_id", "state",
-              "created_at_ms"),
-        Index("uq_capital_policy_requests_scope_narrow", "request_id", "exchange_account_id",
-              "symbol", unique=True),
     )
 
