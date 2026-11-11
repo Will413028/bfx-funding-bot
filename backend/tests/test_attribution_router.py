@@ -64,7 +64,8 @@ async def app_client(sqlite_engine, monkeypatch):
         s.add(_row())
         s.add(_row(cell="fUST_a30"))
         # different realm — must never leak into the default-realm response
-        s.add(_row(cell="fUST_p2", env="canary"))
+        # (its own week: the key without the realm is unique too, db388a84678f)
+        s.add(_row(cell="fUST_p2", env="canary", week=1_783_296_000_000))
         await s.commit()
 
     app = FastAPI()

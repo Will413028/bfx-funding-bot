@@ -50,4 +50,6 @@ class BotRunRow(Base):
         ),
         Index("ix_bot_runs_scope_started", "exchange_account_id", "deployment_environment",
               "started_at_ms"),
+        # Narrow twin (drop-realm-columns step 1); step 3 drops the wide one and renames this.
+        Index("ix_bot_runs_scope_started_narrow", "exchange_account_id", "started_at_ms"),
     )

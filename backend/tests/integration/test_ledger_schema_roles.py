@@ -987,7 +987,8 @@ def test_credit_and_loan_members_match_detail_or_history_and_scope(seeded) -> No
         ):
             query_id, observation_id = str(uuid4()), str(uuid4())
             conn.exec_driver_sql(
-                _query_sql(query_id, 2 if environment == "ci" else 1, environment=environment)
+                # Revisions of their own: (account, revision) is unique too (db388a84678f).
+                _query_sql(query_id, 2 if environment == "ci" else 3, environment=environment)
             )
             observation_sql = _observation_sql(observation_id, query_id, accepted=False)
             conn.exec_driver_sql(
@@ -1137,7 +1138,8 @@ def test_observation_query_scope_mismatch_fails(seeded) -> None:
     disable_realm_triggers(seeded)
     query_id = str(uuid4())
     with seeded.begin() as conn:
-        conn.exec_driver_sql(_query_sql(query_id, 1, environment="wrong"))
+        # A revision of its own: the narrow key (account, revision) is unique too (db388a84678f).
+        conn.exec_driver_sql(_query_sql(query_id, 2, environment="wrong"))
     with (
         seeded.begin() as conn,
         pytest.raises(Exception, match="ledger observation query scope mismatch"),

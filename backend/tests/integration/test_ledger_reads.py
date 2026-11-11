@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -44,7 +44,6 @@ from bfx_funding_bot.modules.ledger.wiring import (
     build_ledger_managed_offers,
     build_ledger_uncertainties,
 )
-from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL
 
 from .test_ledger_basis import _ledger_mappers, _observation, _offer
 from .test_ledger_capital_reader import SCOPE, Book
@@ -160,10 +159,13 @@ async def test_symbol_filter(book) -> None:
 
 @pytest.mark.asyncio
 async def test_scopes_are_isolated(ledger) -> None:
-    # The other scope is another realm in this one database; the realm trigger would refuse it.
+    # The other scope is another exchange account: one database holds one realm.
+    account = uuid4()
     async with ledger.factory.begin() as session:
-        await session.execute(text(DISABLE_REALM_TRIGGERS_SQL))
-    other = Book(ledger.factory, Scope(SCOPE.exchange_account_id, "ci2"))
+        await session.execute(
+            text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
+            {"id": account})
+    other = Book(ledger.factory, Scope(account, SCOPE.deployment_environment))
     await other.accept()
     await ledger.attempt("200", outcome="unknown")
     await ledger.quarantine()

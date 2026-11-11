@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -69,7 +70,9 @@ def configure_live_wiring_env(
     monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
 
 
-async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool = True) -> None:
+async def seed_exchange_account(
+    engine: AsyncEngine, *, capital_policies: bool = True, environment: str | None = None,
+) -> None:
     """Provision synthetic identity and explicit applied policies, never an env fallback."""
     envelope = encrypt_secret_with_aad(
         "test_secret", aad=str(TEST_EXCHANGE_ACCOUNT_ID), kek=TEST_VAULT_KEK
@@ -105,13 +108,15 @@ async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool =
         from bfx_funding_bot.modules.ledger import Scope
         from bfx_funding_bot.modules.ledger.wiring import build_policy_store
         from bfx_funding_bot.modules.trading import CapitalPolicy
-        for environment in ("ci", "prod"):
-            store = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID, environment))
-            async with factory.begin() as session:
-                for symbol in ("fUST", "fUSD"):
-                    await store.apply_policy(session, symbol=symbol,
-                        policy=CapitalPolicy(enabled=symbol == "fUST"), expected_revision=0,
-                        source={"synthetic_fixture": True})
+        # One database holds one realm: ``environment``, or the one this process is
+        # configured for (a test that configures only a child process passes it).
+        store = build_policy_store(
+            Scope(TEST_EXCHANGE_ACCOUNT_ID, environment or os.environ["BFX_DEPLOYMENT_ENV"]))
+        async with factory.begin() as session:
+            for symbol in ("fUST", "fUSD"):
+                await store.apply_policy(session, symbol=symbol,
+                    policy=CapitalPolicy(enabled=symbol == "fUST"), expected_revision=0,
+                    source={"synthetic_fixture": True})
 
 
 _SAFETY_LIVE = Path(__file__).parents[3] / "configs" / "safety.live.yaml"

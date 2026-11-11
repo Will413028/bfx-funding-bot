@@ -59,23 +59,18 @@ async def _plant_unknown(stack, scope: str) -> None:
     from tests.integration.contracts.stacks import SCOPE
     from tests.integration.test_ledger_basis import _observation
     from tests.integration.test_ledger_capital_reader import Book
-    from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL
 
     if scope == "same":
         await stack.unknown("10")
     elif scope == "other_symbol":
         await stack.unknown("10", symbol="fUSD")
     else:
-        other = (SCOPE.exchange_account_id, "shadow") if scope == "other_environment" else (
-            UUID("00000000-0000-0000-0000-00000000a002"), "ci")
+        # One database holds one realm: the other scope is another exchange account.
+        other = (UUID("00000000-0000-0000-0000-00000000a002"), SCOPE.deployment_environment)
         async with stack.factory.begin() as session:
-            if scope == "other_environment":
-                # The clone is stamped ``ci``; a write of another realm needs its trigger off.
-                await session.execute(text(DISABLE_REALM_TRIGGERS_SQL))
-            else:
-                await session.execute(text(
-                    "INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
-                    {"id": str(other[0])})
+            await session.execute(text(
+                "INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
+                {"id": str(other[0])})
         book = Book(stack.factory, Scope(*other))
         await book.policy("fUST")
         assert await book.accept(
@@ -87,7 +82,7 @@ async def _plant_unknown(stack, scope: str) -> None:
 @pytest.mark.integration
 @pytest.mark.usefixtures("_no_tenacity_sleep")
 @pytest.mark.parametrize("state", ["ACTIVE", "HALTED"])
-@pytest.mark.parametrize("scope", ["same", "other_symbol", "other_environment", "other_account", "unreadable", "clear"])
+@pytest.mark.parametrize("scope", ["same", "other_symbol", "other_account", "unreadable", "clear"])
 async def test_cancel_retry_checks_current_scoped_uncertainty(ledger_db, monkeypatch, scope, state):
     """Every trading state admits the cancel; a new UNKNOWN or an unreadable uncertainty
     read in the offer's own scope still stops the retry before HTTP, and the other scopes

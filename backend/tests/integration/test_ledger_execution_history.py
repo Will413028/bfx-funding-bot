@@ -290,25 +290,22 @@ async def test_a_seeded_offer_filled_after_the_switch_is_a_fill(book, monkeypatc
 
 
 async def test_another_scopes_observations_and_journal_add_nothing(book, monkeypatch) -> None:
-    """Another exchange account and another deployment environment: their observations hold
-    SCOPE's offer and a closed credit, their journal names an offer SCOPE observed executed."""
+    """Another exchange account (one database holds one realm): its observations hold SCOPE's
+    offer and a closed credit, its journal names an offer SCOPE observed executed."""
     await _scenario(book)
     own = await _history(book, monkeypatch)
     async with book.factory.begin() as session:
-        # Foreign realms in one database: plant them with the realm trigger off.
-        await session.execute(text(DISABLE_REALM_TRIGGERS_SQL))
         account = uuid4()
         await session.execute(
             text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
             {"id": account})
-    for other in (Book(book.factory, Scope(account, SCOPE.deployment_environment)),
-                  Book(book.factory, Scope(SCOPE.exchange_account_id, "ci2"))):
-        await other.accept()
-        await other.attempt("11", outcome="ack", venue_offer_id="theirs", started_at_ms=2_000,
-                            completed_at_ms=2_010)
-        await _observe(other, 3_300, history=(_fill("o-1", 2_900),), credit_history=(
-            CreditHistory(_credit("99", "10", opening=2_000), "closed", 2_900),))
-    # SCOPE's own observation sees the offer only the other scopes' journals name.
+    other = Book(book.factory, Scope(account, SCOPE.deployment_environment))
+    await other.accept()
+    await other.attempt("11", outcome="ack", venue_offer_id="theirs", started_at_ms=2_000,
+                        completed_at_ms=2_010)
+    await _observe(other, 3_300, history=(_fill("o-1", 2_900),), credit_history=(
+        CreditHistory(_credit("99", "10", opening=2_000), "closed", 2_900),))
+    # SCOPE's own observation sees the offer only the other scope's journal names.
     await _observe(book, 3_400, history=(_fill("theirs", 2_950),))
     assert await _history(book, monkeypatch) == own
 

@@ -90,5 +90,3 @@ async def test_one_pending_rotation_per_account_and_environment(sqlite_engine: A
                             tables=[CredentialRotationRequestRow.__table__])
     assert await insert_request(sqlite_session, CredentialRotationRequestRow, _rotation())
     assert not await insert_request(sqlite_session, CredentialRotationRequestRow, _rotation())
-    assert await insert_request(sqlite_session, CredentialRotationRequestRow,
-                                _rotation(deployment_environment="prod"))
