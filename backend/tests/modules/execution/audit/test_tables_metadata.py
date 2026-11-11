@@ -53,7 +53,6 @@ def test_execution_decision_indexes_are_bounded_audit_queries() -> None:
 
     assert indexes == {
         "idx_execution_decisions_env_occurred": ("deployment_environment", "occurred_at_ms"),
-        "idx_execution_decisions_env_occurred_narrow": ("occurred_at_ms",),
         "idx_execution_decisions_outcome_reason": ("outcome", "reason_code"),
         "idx_execution_decisions_symbol_occurred": ("symbol", "occurred_at_ms"),
     }

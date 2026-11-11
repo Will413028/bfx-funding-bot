@@ -68,35 +68,35 @@ ORDER BY 1, 2, 3, 4
 def destination(schema: str, kind: str, name: str, definition: str) -> str:
     if schema in ARCHIVE_SCHEMAS:
         if kind == "trigger":
-            return "刪除（步驟 3：DROP FUNCTION guard_database_realm 之前先 DROP TRIGGER；不改封存列）"
+            return "刪除（步驟 4：DROP FUNCTION guard_database_realm 之前先 DROP TRIGGER；不改封存列）"
         if kind == "trigger-function":
             return "保留（封存表自己的 guard，只比對該表 NEW／OLD 的本欄；欄位保留所以不動）"
         return "保留（封存表：manifest SHA-256 涵蓋 to_jsonb(row)，欄位與約束不動）"
     if kind == "trigger-function":
-        return "改寫（步驟 3：DROP COLUMN 之前 CREATE OR REPLACE 這個 function，本體不再讀本欄）"
+        return "改寫（步驟 4：DROP COLUMN 之前 CREATE OR REPLACE 這個 function，本體不再讀本欄）"
     if kind == "column":
-        return "刪除（步驟 1 起由 guard 補值；步驟 3 DROP COLUMN）"
+        return "刪除（步驟 4：DROP COLUMN）"
     if kind == "trigger":
-        return "刪除（步驟 3 DROP TRIGGER，最後 DROP FUNCTION guard_database_realm）"
+        return "刪除（步驟 4：DROP TRIGGER，最後 DROP FUNCTION guard_database_realm）"
     if kind == "PK":
-        return "改寫（步驟 1 建窄 unique index；步驟 3 以 USING INDEX 換成同名窄 PK）"
+        return "改寫（步驟 4：隨 DROP COLUMN 消失，以原名重建窄版）"
     if kind in ("UNIQUE", "unique-index", "partial-unique-index"):
-        return "改寫（步驟 1 建同條件窄版；步驟 3 刪舊的、窄版改回原名）"
+        return "改寫（步驟 4：隨 DROP COLUMN 消失，以原名重建窄版）"
     if kind == "FK":
-        return "改寫（步驟 3：同名 FK 改指向窄 key，NOT VALID 後 VALIDATE）"
+        return "改寫（步驟 4：先 DROP，刪欄後以原名重建）"
     if kind == "FK-target":
         return "改寫（隨被引用 key，見該 FK 列）"
     if kind == "CHECK":
         if "deployment_environment = 'ci'" in definition:
-            return "刪除（步驟 3；sim 只寫 ci 庫改由 store_sql._check_database_realm 守住，已存在）"
-        return "改寫（步驟 3：同名重建，去掉 deployment_environment 條件）"
+            return "刪除（步驟 4：DROP COLUMN 之前先 DROP，不重建；sim 只寫 ci 庫由 store_sql._check_database_realm 守住，已存在）"
+        return "改寫（步驟 4：DROP COLUMN 之前先 DROP，刪欄後同名重建，去掉 deployment_environment 條件）"
     if kind == "index":
         if name == "ix_ledger_observation_query_scope_revision":
-            return ("刪除（步驟 3；不建窄版：與 uq_ledger_observation_query_scope_revision_narrow "
-                    "欄位相同只差方向，btree 反向掃描即可）")
+            return ("刪除（步驟 4：隨 DROP COLUMN 消失，不重建：與重建後的窄 UNIQUE "
+                    "uq_ledger_observation_query_scope_revision 欄位相同只差方向，btree 反向掃描即可）")
         if "(deployment_environment)" in definition:
-            return "刪除（步驟 3：只索引本欄）"
-        return "改寫（步驟 1 建窄版；步驟 3 刪舊的、窄版改回原名）"
+            return "刪除（步驟 4：只索引本欄，隨 DROP COLUMN 消失）"
+        return "改寫（步驟 4：隨 DROP COLUMN 消失，以原名重建窄版）"
     return ""  # unknown kind -> blank, caught by check_inventory.py
 
 
