@@ -91,19 +91,23 @@
   - 需要人做的事：owner 本機若有資料庫停在 `db388a84678f`，在拉到本步之前先在該庫跑 `cd backend && uv run alembic downgrade 96535191e443`（該 revision 的 downgrade 無損）；CI 與測試用的庫都是拋棄式，不受影響。
   - 完成後的狀態：`dev` 的 schema 與步驟 1 之前相同。
 
-- [ ] **3. env 值改為組裝處注入（純程式，D4）**（被擋於：步驟 2 已併入 `dev`）
+- [ ] **3. env 值改為組裝處注入（純程式，D4）**（被擋於：步驟 2 已併入 `dev`；其中 lock key 的 env 來源另被 D6 擋住，見 3b）
   - 範圍（修改）：env 值只由組裝處讀一次，再以建構參數或函式參數往下傳；`modules`／`core` 不 import `apps`，也不自己讀環境變數。
-    - 讀取點：bot 是 `apps/config.py`（已存在）；webapi 是 `apps/webapi.py`、operator CLI 是 `apps/operator_cli.py`、腳本是各自的 `main`，這三類呼叫 `core/settings.py` 的 `require_deployment_environment()` 一次。該函式留在 `core`，只給組裝處用；`apps/config.py` 改成也呼叫它，讓驗證規則只有一份。
-    - 改為接收注入值：`modules/execution/operator_commands.py` 第 175 行（組 `OperatorContext` 時不再自己呼叫讀取函式）、`modules/live_validation/g3.py` 第 115、117 行、`modules/observability/error_tracking.py` 第 105 行、`modules/observability/alerts.py` 第 309 行、`modules/observability/metrics.py`／`resource.py` 的標籤；`core/xact_lock.py` 的 `derive_transaction_lock_key` 呼叫處與 `ScopeLock` 實作、`core/writer_lock.py` 的呼叫處、`SealContext(` 的建構處（`core/sealed_credential.py` 本身不改，HKDF info 格式不變）、`modules/api/funding_status.py` 的 API 欄位：這幾處的值改取自注入的參數，不取自 `Scope`／context 上的 env 欄位。
+    - 讀取點：bot 是 `apps/config.py`（已存在）；webapi 是 `apps/webapi.py` 的 lifespan（存進 `app.state.deployment_environment`，路由由 `modules/api/deps.py` 的 dependency 取）、operator CLI 是 `apps/operator_cli.py` 的 `resolve_operator`、腳本是各自的 `main`，這三類呼叫 `core/settings.py` 的 `require_deployment_environment()` 一次。該函式留在 `core`，只給組裝處用；`apps/config.py` 改成也呼叫它，讓驗證規則只有一份。webapi 與 CLI 讀不到合法值時存 `None`，`resolve_context` 在成員檢查之後才以 `deployment_environment_not_configured` 拒絕（維持「非成員先 404」的既有行為）。告警與 Sentry 在設定驗證之前就啟動，組裝處用同檔的 `deployment_environment_label()`（不驗證，只當標籤）傳入。
+    - 改為接收注入值：`modules/execution/operator_commands.py` 第 175 行（組 `OperatorContext` 時不再自己呼叫讀取函式）、`modules/live_validation/g3.py` 第 115、117 行、`modules/observability/error_tracking.py` 第 105 行、`modules/observability/alerts.py` 第 309 行、`modules/observability/metrics.py`／`resource.py` 的標籤（原本就由 config 注入）；`core/writer_lock.py` 的呼叫處（`apps/bot.py`，原本就取自 config）、`SealContext(` 的建構處（`core/sealed_credential.py` 本身不改，HKDF info 格式不變）、`modules/api/funding_status.py` 的 API 欄位：這幾處的值改取自注入的參數，不取自 `Scope`／context 上的 env 欄位。
     - `backend/scripts/build_public_site.py` 第 63 行、`backend/scripts/run_weekly_attribution.py` 第 39 行：腳本的 `main` 就是組裝處，保留在那裡讀一次，往下用參數傳。
     - `apps/restore_boot_check.py` 不在本步（drill 裡沒有設定值可注入，見前提）；它在 4d 處理。
   - 這一步**不動**：`Scope`、`CapitalScope`、`ResolutionScope`、`OperatorContext`、`AccountContext`、`AuditContext` 與其他帶 env 欄位的型別（欄名 `deployment_environment` 或 `environment`）以及所有 SQL（欄位還在，INSERT 與 WHERE 仍需要值）；它們在步驟 4 與欄位一起拿掉。開機報告與 `apps/restore_boot_check.py` 不動。
-  - 新增：`tests/core/test_realm_value_golden.py`（HKDF info 與 lock key 對固定輸入的 golden 值，取自 `89b06dc4` 的行為）。
+  - 新增：`tests/core/test_realm_value_golden.py`（HKDF info 對固定輸入的 golden 值；lock key 的 golden 已在既有的 `tests/core/test_lock_keys.py`）。
   - 消費端：`rg -n "derive_transaction_lock_key|xact_lock|writer_lock" backend/src`；`rg -n "SealContext\(" backend/src backend/scripts backend/tests`；`rg -n "BFX_DEPLOYMENT_ENV|require_deployment_environment" backend/src backend/scripts`（結束時只剩 `core/settings.py` 的定義、`apps/` 與腳本 `main` 的呼叫）；`rg -n "\.deployment_environment|\benvironment\b" backend/src backend/scripts deploy`（列出每一處，標明是 SQL 用途留到步驟 4，或本步改為注入）。
   - 不能動：全域約束的值；`git diff --exit-code backend/openapi.json frontend/src/types/api.gen.ts`。
-  - 驗收：單元全過；integration（CI）全過；`mypy`、`ruff`、import-linter 過；golden 測試；用既有密文解封的測試全過（`rg -ln "SealContext" backend/tests` 列出的檔）。新增 `tests/architecture/test_env_read_once.py`：`backend/src/bfx_funding_bot/modules` 與 `core`（`core/settings.py` 除外）不得出現 `BFX_DEPLOYMENT_ENV` 或呼叫 `require_deployment_environment`。mutation：在 `modules/execution/operator_commands.py` 加回對讀取函式的呼叫，該檢查要失敗；lock key 呼叫處把 env 改成固定字串 `"x"`，golden 要失敗；`SealContext` 建構處把 env 改成空字串，golden 與解封測試要失敗；API 的 env 欄改成固定 `"x"`，funding status 測試要失敗。
+  - 驗收：單元全過；integration（CI）全過；`mypy`、`ruff`、import-linter 過；golden 測試；用既有密文解封的測試全過（`rg -ln "SealContext" backend/tests` 列出的檔）。新增 `tests/architecture/test_env_read_once.py`：`backend/src/bfx_funding_bot/modules` 與 `core`（`core/settings.py` 除外）不得出現 `BFX_DEPLOYMENT_ENV` 或呼叫 `require_deployment_environment`。mutation：在 `modules/execution/operator_commands.py` 加回對讀取函式的呼叫，該檢查要失敗；`SealContext` 建構處把 env 改成空字串，解封測試要失敗；API 的 env 欄改成固定 `"x"`，funding status 測試要失敗；lifespan 不存值，lifespan 測試要失敗。（lock key 呼叫處的 mutation 隨 3b。）
   - 停止條件：任何 golden 值變了；需要 env 值的非 SQL 用途比上面列的多出一類（不是多一個呼叫處）——停下回報。
   - 完成後的狀態：純程式，可單獨退版；`dev` 仍不發版（與步驟 4 同批）。
+
+- [ ] **3b. lock key 的 env 來源**（被擋於：D6）
+  - 現況（2026-11-12 讀程式）：`core/xact_lock.py` 的 key 由 `modules/ledger/_internal/clock.py` 的 `lock_scope`／`holds_scope_lock` 取 `scope.deployment_environment` 算出；`lock_scope(session, scope)` 在 ledger 內部有 17 個呼叫處（`rg -c "lock_scope\(" backend/src`：journal 7、quarantine 2、resolver 1、observation 1、ports 2、wiring 2、clock 2），`holds_scope_lock` 1 個（`capital_reader.py`）。4b 拿掉 `Scope` 的 env 欄位後，這些地方沒有值可取；原步驟 3 沒有寫值怎麼送到這裡。
+  - 範圍、驗收與落在哪一步依 D6 的結論定稿：選 H 時併進 4b（key 的變更必須與步驟 4 的 migration 同一次發版），選 A 時是步驟 3 之後、4 之前的一個獨立 PR。
 
 - [ ] **4. 程式與 schema 一起換（D3）**（被擋於：步驟 3 已併入 `dev`）。在分支 `refactor/drop-realm-columns-final` 上做，子步驟各自 commit、各有驗收，**整個分支以一個 PR 併入 `dev`**（中途的 commit 不單獨併入：模型與 SQL 互相依賴）。一個 session 做不完時在子步驟邊界交接；分支上「已完成子步驟涵蓋的模組」的測試要綠，全套要到 4f 才綠。
   - 共用不能動：封存資料列與 manifest；`database_realm` 表與它的不可改 trigger；FK／PK／UNIQUE／index 的名稱（重建後同名）；全域約束的值；`git diff --exit-code backend/openapi.json frontend/src/types/api.gen.ts`。
@@ -190,7 +194,17 @@ migration rehearsal 與還原 drill 只在 owner 核准的 `dev`→`main` 發版
 - **R2 兩個 realm 同庫的測試 fixture 在步驟 1 改成單一 realm**（2026-11-11）
   - 這些修正留著（終態也需要）。原本記下的代價「步驟 1 到 2a 之間 realm 過濾沒有測試」在 D3 之下不再是跨發版的缺口：過濾本身在同一次發版的 4b、4c 拿掉。
 
-拍板順序：D0、D3、D4、D5 都已決，沒有待拍板的題目。
+- **D6 `Scope` 沒有 env 之後，advisory lock key 裡的 env 從哪裡來**（未決；2026-11-12 執行步驟 3 時發現；擋住步驟：3b、4b 對 `lock_scope` 的處理）
+  - 背景：key 含 env 是 2026-05 prod 與 shadow 同庫時為了分開同帳號的兩個 realm；現在一庫一 realm（不變量第一列），advisory lock 本來就以資料庫為界，env 在 key 裡是常數。帶 env 的 key 有三組：`core/xact_lock.py`（scope 交易鎖）、`core/writer_lock.py`（bot 的 session 鎖）、trigger function `guard_trading_state_transition` 的 `'bfx-trading-state:' || account || ':' || NEW.deployment_environment`（`backend/alembic/versions/5b1e7c9d2a40_two_state_trading_control.py` 第 54–55、226–227 行；4a 本來就要把它改成不讀本欄，所以這一組的 key 無論如何會變或要另找來源）。
+  - H：三組 key 都拿掉 env（key＝namespace＋account）。不需要把值送進 ledger 內部。key 的值變一次；`tests/core/test_lock_keys.py` 的 golden、`backend/ARCHITECTURE.md` 的公式、本計畫的 Goal／全域約束／不變量第三列／步驟 3 與 4 的停止條件裡「lock key 值不變」要一起改，等於修訂 D0 的 lock key 部分（HKDF info 與 API 欄位不變）。失效條件：新舊版程式在同一個庫上同時完成寫入（各取不同的 key，互斥失效）。部署只停 compose project `bfx-app` 的容器；operator CLI（project `bfx-operator`，只在開機時比對 schema head）與 `backend/scripts/amend_capital_policy.py`（不比對 schema head）不在其內。擋住它們的是：同一次發版的 migration 拿掉 31 張 live 表的本欄，另一版的 SQL 會失敗，`ALTER TABLE` 也會等進行中的舊交易結束（由計畫與盤點推論，未實測；4a 的 integration 測試可補一條）。所以 key 的變更必須與步驟 4 的 migration 同一次發版。附帶好處：`amend_capital_policy.py` 現在從 argv 的 `--environment` 算 key，打錯就取到不同的鎖，H 之後沒有這個可能。可逆：兩個函式與一支 migration 改回去，同樣要在有 migration、停 writer 的發版裡做。
+  - A：值逐層以參數傳入（各 ledger adapter 的建構參數、17 個內部上鎖函式的參數）。key 值不變、符合 D4 的字面。`rg -c "build_(…ledger factory…)\("` 在 57 個檔有 174 個呼叫可能要多一個參數；為了一個每庫固定的常數，在資金 ledger 的呼叫鏈上做一次大的機械改動。
+  - B：`core/xact_lock` 留一個組裝時設定一次的 process 值（先例：`alerts.install`）。改動小；是 process 全域狀態，入口忘了設定必須 fail closed，測試要 fixture。
+  - C：把 env 綁在 SQLAlchemy session factory 上（`session.info`），`lock_scope` 從 session 取。別的 factory 建的 session 會靜默缺值。
+  - E：`lock_scope` 從 `database_realm` 的 stamp 讀。key 值不變、不用傳值；每次上鎖多一次讀取或要快取，而且違反 D4「不來自資料列」。
+  - 建議：H（業界做法：advisory lock key 由 namespace 與被鎖實體的身分導出，環境隔離靠分庫）。推翻條件：存在不碰任何失去本欄的表、卻能在另一版 schema 上完成資金寫入的路徑；key 的變更沒有跟步驟 4 的 migration 同一次發版；repo 外有告警或 log 解析比對 key 的數值（`deploy/`、`docs/` 內查無；本機個人脈絡檔記的 repo 外告警定義未查）；之後又讓兩個 realm 共用一個庫。
+  - 獨立審查（2026-11-12，唯讀 subagent）：findings 8（blocking 1），同意 H；blocking 的一項（原簡報把 H 的安全性寫成「部署會停掉所有 writer」，實際上有兩個取鎖的程式不在停機範圍）已改寫成上面的失效條件。
+
+拍板順序：D0、D3、D4、D5 已決；D6 未決，擋住 3b 與 4b 對 `lock_scope` 的處理，不擋 4.0、4a。
 
 ## 進度
 
@@ -200,7 +214,8 @@ migration rehearsal 與還原 drill 只在 owner 核准的 `dev`→`main` 發版
 |---|---|---|---|---|
 | 1 加窄 key、guard 補值 | 已取代（D3、D5；由步驟 2 撤掉鷹架） | 本機 2026-11-12：單元 `5360 passed`；integration（非 e2e、非 docker）`1243 passed, 8 skipped`；mutation 5 個都被抓到；CI 全套通過（PR #371，run 43062394775） | 不發版 | `f54226c8`、`cd821b45`，合併 `ce81165d` |
 | 2 撤掉步驟 1 的鷹架 | 完成 | 本機 2026-11-12：`alembic heads` 只有 `96535191e443`；9 個模型檔與 `test_tables_metadata.py` 對 `89b06dc4` 無差異（`git diff --stat 89b06dc4`）；單元 `5360 passed`；受影響的 integration（`test_database_realm.py` 含 `alembic check`、`test_ledger_schema_roles.py`、`test_attribution_router.py`、`test_tables_metadata.py`）`60 passed`；`ruff`、`mypy`、import-linter（26 kept）乾淨；`check_inventory.py` `189 rows, 48 tables (31 live), 0 errors`，盤點的物件欄（前 5 欄）與重新產生前相同；消費端 `rg` 無結果；red proof（副本）：模型加回一個 `_narrow` index，`test_alembic_check_is_clean_and_the_downgrade_round_trips` 轉紅；CI 全套通過，含 integration 與 `Quality ratchet`（`tests_executed` 鎖定值不必調低；PR #372，run 43070624106） | 不發版（與步驟 3、4 同批） | `b379b009`、`8bde5154`，合併 `ad3993a3` |
-| 3 env 值改為組裝處注入 | 未開始 | | | |
+| 3 env 值改為組裝處注入 | 程式完成待驗收（lock key 的部分移到 3b） | 本機 2026-11-12：單元 `5369 passed`；受影響的 integration 與 router 測試 `141 passed, 1 skipped`；`ruff`、`mypy`、import-linter（26 kept）乾淨；`git diff --exit-code backend/openapi.json frontend/src/types/api.gen.ts` 無差異；mutation 4 個都被抓到（模組加回讀取、seal 處 env 改空字串、API env 改固定值、lifespan 不存值） | CI 全套（integration、`Quality ratchet`）：待 PR；`/code-review`：待跑 | |
+| 3b lock key 的 env 來源 | 未開始（被擋於 D6） | | | |
 | 4.0 查證 drill 的兩種組合 | 未開始 | | | |
 | 4a migration 與模型 | 未開始 | | | |
 | 4b ledger 與 capital | 未開始 | | | |
