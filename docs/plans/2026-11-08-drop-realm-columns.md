@@ -71,7 +71,7 @@
 
 路徑慣例：程式路徑相對於 `backend/src/bfx_funding_bot/`；測試路徑相對於 `backend/`；`backend/scripts/`、`deploy/`、`docs/` 開頭的寫全。每個檔案標（新增）（修改）（刪除）。
 
-- [ ] **1. 加窄 key、讓 guard 補值（只加不刪的 migration）**（被擋於：無；D1＝A 已決）
+- [x] **1. 加窄 key、讓 guard 補值（只加不刪的 migration）**（被擋於：無；D1＝A 已決）
   - 範圍：
     - `backend/alembic/versions/<rev>_narrow_realm_keys.py`（新增）：(a) 斷言每張掛 realm trigger 的 live 表（沿用 `96535191e443` 的範圍，沒掛 trigger 的暫存表不擋）`deployment_environment` 只有 stamp 這一個值；未 stamp 的庫有任何列另以「未 stamp」訊息拒絕（有別的值就 `RAISE`，訊息帶表名不帶資料）；(b) `CREATE OR REPLACE FUNCTION guard_database_realm()`：`NEW.deployment_environment IS NULL` 時填入 stamp，其餘行為不變（stamp 缺→拒、值不等於 stamp→拒）；(c) 照 `inventory.tsv` 去向為「步驟 1 建窄版／窄 unique index」的 28＋9 列（`ix_ledger_observation_query_scope_revision` 不建窄版：與該表窄 unique index 欄位相同只差方向，去向改為步驟 3 刪除），各建去掉本欄的對應 index（PK 與 UNIQUE 建成 unique index，部分 unique 保留同一個 `WHERE`，暫用 `_narrow` 後綴）。新窄 index 若與既有 index 欄位完全相同就不建，在去向裡改記「步驟 3 刪除（與 X 重複）」並重跑 check。
     - ORM 模型宣告這些 index（修改）：`modules/ledger/tables.py`、`modules/execution/safety/tables.py`、`modules/execution/capital_tables.py`、`modules/execution/uncertainty_tables.py`、`modules/accounts/rotation_tables.py`、`modules/live_validation/tables.py`、`modules/observability/tables.py`（實際清單以 `inventory.tsv` 的表對到模型為準）。
@@ -173,7 +173,7 @@ migration rehearsal 與還原 drill 只在 owner 核准的 `dev`→`main` 發版
 
 | 步驟 | 狀態 | 已跑的驗收 | 未跑的驗收與原因 | commit |
 |---|---|---|---|---|
-| 1 加窄 key、guard 補值 | 程式完成待驗收 | 本機 2026-11-12：單元 `5360 passed`；非 e2e、非 docker 的 integration `1243 passed, 8 skipped`；新增測試 9 過；mutation 5 個（guard 不補值、拿掉 realm 斷言、`NARROW_INDEXES` 少一列、斷言改掃所有含本欄的表、trigger 順序比較反向）都被對應測試抓到；`alembic check` 無 drift；mypy、ruff、`quality_ratchet.py`、`check_inventory.py`（189 列 0 errors）通過；`/code-review` medium：findings 8（blocking 0），修正 7、記錄 1（R2 的測試缺口，待 owner 接受） | CI 全套（含 e2e、docker、squawk：本機沒有 squawk）：待 PR；發版後驗收：未跑－待發版 | `f54226c8`＋審查修正 commit |
+| 1 加窄 key、guard 補值 | 完成（發版後驗收待發版） | 本機 2026-11-12：單元 `5360 passed`；非 e2e、非 docker 的 integration `1243 passed, 8 skipped`；新增測試 9 過；mutation 5 個（guard 不補值、拿掉 realm 斷言、`NARROW_INDEXES` 少一列、斷言改掃所有含本欄的表、trigger 順序比較反向）都被對應測試抓到；`alembic check` 無 drift；mypy、ruff、`quality_ratchet.py`、`check_inventory.py`（189 列 0 errors）通過；`/code-review` medium：findings 8（blocking 0），修正 7、記錄 1（R2 的測試缺口，待 owner 接受）；CI 全套通過（PR #371，run 43062394775；integration job 第一次在安裝 PostgreSQL 時下載金鑰 TLS 中斷，重跑通過；squawk 通過） | 發版後驗收：未跑－待發版 | `f54226c8`、`cd821b45`，合併 `ce81165d` |
 | 2a SQL 與 digest 不再用本欄 | 未開始 | | 發版後驗收：未跑－待發版 | |
 | 2b ledger／capital scope 拿掉 env | 未開始 | | 發版後驗收：未跑－待發版 | |
 | 2c execution／operator／audit context 拿掉 env | 未開始 | | 發版後驗收：未跑－待發版 | |
