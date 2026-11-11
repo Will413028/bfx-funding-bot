@@ -9,6 +9,7 @@ two SQLAlchemy drivers we use:
 Both read the TLS mode through `database_sslmode`, so the two drivers agree on it.
 """
 import os
+from collections.abc import Mapping
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 from pydantic import Field, model_validator
@@ -20,20 +21,31 @@ from bfx_funding_bot.core.secret_files import read_secret
 VALID_DEPLOYMENT_ENVIRONMENTS = frozenset(KNOWN_REALMS)
 
 
-def require_deployment_environment() -> str:
-    """Return an explicit, known data-isolation environment.
+def require_deployment_environment(environ: Mapping[str, str] | None = None) -> str:
+    """The process's data-isolation environment: explicit and known, or ``ValueError``.
 
-    A missing value must never silently select ``prod``.  This helper is used
-    by web/API and operator scripts, which do not pass through the bot runtime's
-    stricter ``load_config`` startup validator.
+    A missing value must never silently select ``prod``. Each assembly point (the bot's
+    ``load_config``, the web API's lifespan, the operator CLI's and each script's ``main``)
+    calls this once and passes the value down; ``modules`` and the rest of ``core`` never
+    read it themselves (tests/architecture/test_env_read_once.py). The only other reader is
+    ``deployment_environment_label`` below.
     """
-    value = os.environ.get("BFX_DEPLOYMENT_ENV", "").strip()
+    value = (os.environ if environ is None else environ).get("BFX_DEPLOYMENT_ENV", "").strip()
+    valid = ", ".join(KNOWN_REALMS)
+    if not value:
+        raise ValueError(f"BFX_DEPLOYMENT_ENV required (one of: {valid})")
     if value not in VALID_DEPLOYMENT_ENVIRONMENTS:
-        valid = ", ".join(sorted(VALID_DEPLOYMENT_ENVIRONMENTS))
-        raise ValueError(
-            f"BFX_DEPLOYMENT_ENV must be explicitly set to one of {valid}"
-        )
+        raise ValueError(f"BFX_DEPLOYMENT_ENV must be one of {valid}, got {value!r}")
     return value
+
+
+def deployment_environment_label(environ: Mapping[str, str] | None = None) -> str:
+    """The unvalidated value, to label alerts and error reports; "" when unset.
+
+    For assembly points only, like the function above: alerts and error tracking start
+    before the configuration is validated, so that a refused boot is still reported.
+    """
+    return (os.environ if environ is None else environ).get("BFX_DEPLOYMENT_ENV", "").strip()
 
 
 # libpq's modes that verify the server, plus an explicit plaintext one. ``require``, ``prefer``

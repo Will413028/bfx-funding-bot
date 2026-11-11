@@ -279,7 +279,6 @@ async def test_the_router_serves_the_ledger_wire_as_the_web_api_role(
     from bfx_funding_bot.modules.api.deps import get_session
     from bfx_funding_bot.modules.api.projections import build_projections_router
 
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     account = book.scope.exchange_account_id
     async with book.factory.begin() as session:
         await grant_membership(
@@ -291,6 +290,7 @@ async def test_the_router_serves_the_ledger_wire_as_the_web_api_role(
             yield session
 
     app = FastAPI()
+    app.state.deployment_environment = "ci"
     app.include_router(build_projections_router())
     app.state.read_models = build_read_models()
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")

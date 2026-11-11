@@ -10,6 +10,7 @@ import yaml
 
 from bfx_funding_bot.apps.runtime.config import MarketfeedConfig
 from bfx_funding_bot.core.secret_files import read_secret
+from bfx_funding_bot.core.settings import require_deployment_environment
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
@@ -108,16 +109,7 @@ def load_config(
     if database_url is None:
         raise ValueError("DATABASE_URL required")
 
-    deployment_env_str = os.environ.get("BFX_DEPLOYMENT_ENV", "").strip()
-    if not deployment_env_str:
-        raise ValueError("BFX_DEPLOYMENT_ENV required (one of: prod, ci)")
-    try:
-        deployment_environment = DeploymentEnvironment(deployment_env_str)
-    except ValueError:
-        valid = ", ".join(e.value for e in DeploymentEnvironment)
-        raise ValueError(
-            f"BFX_DEPLOYMENT_ENV must be one of {valid}, got {deployment_env_str!r}"
-        ) from None
+    deployment_environment = DeploymentEnvironment(require_deployment_environment())
 
     require_simulated_realm(phase_str, deployment_environment)
 

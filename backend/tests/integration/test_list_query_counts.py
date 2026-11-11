@@ -61,6 +61,7 @@ def _app(book: Book) -> FastAPI:
             yield session
 
     app = FastAPI()
+    app.state.deployment_environment = "ci"
     for router in (
         build_router(), build_api_keys_router(), build_projections_router(),
         build_uncertainties_router(),
@@ -135,8 +136,7 @@ def _rows(body: dict[str, Any]) -> int:
 
 
 @pytest.mark.asyncio
-async def test_list_endpoints_do_not_query_per_row(book, monkeypatch) -> None:
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+async def test_list_endpoints_do_not_query_per_row(book) -> None:
     account = book.scope.exchange_account_id
     async with book.factory.begin() as session:
         await grant_membership(session, exchange_account_id=account, user_id=OPERATOR, role="owner")

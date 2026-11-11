@@ -35,7 +35,6 @@ _VALID = {
 
 @pytest_asyncio.fixture
 async def app_client(sqlite_engine, monkeypatch):
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
@@ -58,6 +57,7 @@ async def app_client(sqlite_engine, monkeypatch):
         await seed.commit()
 
     app = FastAPI()
+    app.state.deployment_environment = "ci"
     app.include_router(build_config_router())
 
     async def _fake_operator():

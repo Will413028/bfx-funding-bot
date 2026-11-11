@@ -98,8 +98,8 @@ async def reads() -> _Reads:
 
 @pytest_asyncio.fixture
 async def app_client(factory, reads, monkeypatch):
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     app = FastAPI()
+    app.state.deployment_environment = "prod"
     app.include_router(build_projections_router())
     app.state.read_models = _models(reads)
 

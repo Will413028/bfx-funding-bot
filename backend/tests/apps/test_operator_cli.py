@@ -197,6 +197,18 @@ def test_the_tailnet_identity_is_who_asks() -> None:
         "4182486213003443", ACCOUNT)
 
 
+@pytest.mark.parametrize(("configured", "resolved"), [("ci", "ci"), ("", None), ("staging", None)])
+def test_the_deployment_environment_is_read_with_the_operator(
+        configured: str, resolved: str | None) -> None:
+    """Read once, from the same environment as the identity; an unset or unknown value is
+    None, which ``resolve_context`` refuses after the membership check."""
+    operator = operator_cli.resolve_operator({
+        "BFX_OPERATOR_TAILNET_IDENTITY": "4182486213003443", "DATABASE_URL": URL,
+        "BFX_EXCHANGE_ACCOUNT_ID": ACCOUNT, "BFX_DEPLOYMENT_ENV": configured,
+    })
+    assert operator.deployment_environment == resolved
+
+
 # --- rotate-credential ------------------------------------------------------------------------
 
 KEY, SECRET = "FAKE-KEY-0123456789", "FAKE-SECRET-not-a-real-one-0123456789"

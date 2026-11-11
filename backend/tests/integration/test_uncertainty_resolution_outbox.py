@@ -301,7 +301,6 @@ def _restricted_engine(url: str, role: str):
 
 
 def _operator_env(monkeypatch) -> None:
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_OPERATOR_USER_ID", "operator-1")
     monkeypatch.setenv("BFX_OPERATOR_ROLE", "admin")
     monkeypatch.delenv("BFX_PHASE", raising=False)
@@ -388,6 +387,7 @@ def test_the_cli_queues_the_web_api_shows_and_only_the_account_writer_applies(
                         raise
 
             app = FastAPI()
+            app.state.deployment_environment = "ci"
             app.include_router(build_uncertainties_router())
             app.state.read_models = build_read_models()
             app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")

@@ -86,9 +86,12 @@ def scrub_event(event: Event, secrets: Sequence[str]) -> Event | None:
         return None
 
 
-def init_error_tracking(service: str, environ: Mapping[str, str], *,
+def init_error_tracking(service: str, environ: Mapping[str, str], *, environment: str,
                         integrations: Sequence[Integration] = ()) -> bool:
-    """Start the SDK for ``service`` when ``SENTRY_DSN`` is set. Returns whether it did."""
+    """Start the SDK for ``service`` when ``SENTRY_DSN`` is set. Returns whether it did.
+
+    ``environment`` is the deployment environment the caller read ("" reports "unknown").
+    """
     dsn = environ.get("SENTRY_DSN", "").strip()
     if not dsn:
         return False
@@ -102,7 +105,7 @@ def init_error_tracking(service: str, environ: Mapping[str, str], *,
         dsn=dsn,
         # An image built without GIT_SHA says "unknown"; None would make the SDK run git.
         release=environ.get("BFX_SERVICE_VERSION", "").strip() or "unknown",
-        environment=environ.get("BFX_DEPLOYMENT_ENV") or "unknown",
+        environment=environment or "unknown",
         send_default_pii=False,
         include_local_variables=False,
         max_request_body_size="never",

@@ -7,7 +7,7 @@ loaders are shared with the weekly attribution (``attribution_loader``).
 
 account_id  = canonical UUID from BFX_EXCHANGE_ACCOUNT_ID (required for the
 production DB path; injected sqlite tests use a synthetic in-memory realm)
-environment = BFX_DEPLOYMENT_ENV env-var (required; "prod" for the live canary)
+environment = the caller's ``deployment_environment`` ("prod" for the live canary)
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
-from bfx_funding_bot.core.settings import load_settings, require_deployment_environment
+from bfx_funding_bot.core.settings import load_settings
 from bfx_funding_bot.external.bitfinex.auth_rest import InterestPayment
 from bfx_funding_bot.modules.live_validation.attribution_loader import (
     MARKET_TIMEFRAME,
@@ -94,6 +94,7 @@ async def build_g3_report(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     now_ms: int | None = None,
     acks: Mapping[int, str] | None = None,
+    deployment_environment: str,
 ) -> G3Report:
     """Query Postgres and run G3 attribution (read-only).
 
@@ -111,11 +112,6 @@ async def build_g3_report(
         from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_canonical
 
         account_id = account_id_canonical(raw_account_id)
-    if session_factory is None:
-        deployment_env = require_deployment_environment()
-    else:
-        deployment_env = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
-
     now = now_ms if now_ms is not None else int(datetime.now(UTC).timestamp() * 1000)
     engine = None
     if session_factory is None:
@@ -125,7 +121,7 @@ async def build_g3_report(
     try:
         async with session_scope(session_factory) as session:
             inputs = await load_credit_inputs(
-                session, account_id=account_id, deployment_environment=deployment_env,
+                session, account_id=account_id, deployment_environment=deployment_environment,
             )
             credits = inputs.credits if inputs is not None else []
             cells = inputs.cells if inputs is not None else CreditCells(

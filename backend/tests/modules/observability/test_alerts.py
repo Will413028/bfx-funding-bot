@@ -384,7 +384,7 @@ def test_missing_telegram_config_degrades_to_log_only_and_says_so_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.INFO):
-        sink = alerts.AlertSink.from_environment({"BFX_DEPLOYMENT_ENV": "prod"})
+        sink = alerts.AlertSink.from_environment({}, context="prod")
         sink.emit(alerts.PROTECTION_TRIPPED, trigger="identity_conflict", detail="x")
         sink.emit(alerts.PROTECTION_TRIPPED, trigger="command_rate_exceeded", detail="y")
     assert not sink.delivers and sink.counts == {"log_only": 2}
@@ -399,13 +399,14 @@ def test_missing_telegram_config_degrades_to_log_only_and_says_so_once(
 ])
 def test_partial_or_malformed_config_is_log_only(environ: dict[str, str],
                                                   caplog: pytest.LogCaptureFixture) -> None:
-    sink = alerts.AlertSink.from_environment(environ)
+    sink = alerts.AlertSink.from_environment(environ, context="")
     assert not sink.delivers
     assert "alerts_telegram_misconfigured" in caplog.text
 
 
 def test_valid_config_delivers_to_telegram() -> None:
-    sink = alerts.AlertSink.from_environment({"TELEGRAM_BOT_TOKEN": TOKEN, "TELEGRAM_CHAT_ID": "-100123"})
+    sink = alerts.AlertSink.from_environment(
+        {"TELEGRAM_BOT_TOKEN": TOKEN, "TELEGRAM_CHAT_ID": "-100123"}, context="")
     assert sink.delivers and isinstance(sink.transport, alerts.TelegramTransport)
 
 
@@ -440,7 +441,7 @@ def test_secret_file_values_never_reach_an_alert(tmp_path: Path) -> None:
         "BFX_VAULT_KEK": "ZmlsZS1rZWstdmFsdWUtMzItYnl0ZXMtbG9uZy4uLi4=",
         "TELEGRAM_BOT_TOKEN": TOKEN})
     environ |= {"TELEGRAM_CHAT_ID": "-100123", "BFX_ADMIN_TOKEN": "stale-env-admin-token"}
-    sink = alerts.AlertSink.from_environment(environ)
+    sink = alerts.AlertSink.from_environment(environ, context="")
     assert sink.delivers and isinstance(sink.transport, alerts.TelegramTransport)
     assert sink.transport._url == f"https://api.telegram.org/bot{TOKEN}/sendMessage"  # no newline
     leaks = ("F1lePassw0rd", "file-admin-token-value", "file-read-token-value",
@@ -456,7 +457,7 @@ def test_a_missing_telegram_token_file_refuses_the_sink(tmp_path: Path) -> None:
     environ = _secret_files(tmp_path / "secrets", {})
     with pytest.raises(SecretFileError, match="TELEGRAM_BOT_TOKEN is missing"):
         alerts.AlertSink.from_environment({**environ, "TELEGRAM_BOT_TOKEN": TOKEN,
-                                           "TELEGRAM_CHAT_ID": "-100123"})
+                                           "TELEGRAM_CHAT_ID": "-100123"}, context="")
 
 
 @pytest.mark.asyncio

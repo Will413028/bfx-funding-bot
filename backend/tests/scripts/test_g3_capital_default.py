@@ -103,7 +103,6 @@ def _ours(credit_id: int, opened: int) -> list[object]:
 @pytest.mark.asyncio
 async def test_zero_allocation_cap_env_uses_the_ledger_balance(sf, monkeypatch):
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(ACCOUNT))
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "0")
     now = int(datetime.now(UTC).timestamp() * 1000)
     async with sf() as s:
@@ -116,7 +115,7 @@ async def test_zero_allocation_cap_env_uses_the_ledger_balance(sf, monkeypatch):
             balance=Decimal("395.55"), description=DESC,
         ) for i in range(1, 12)])
         await s.commit()
-    report = await build_g3_report(capital=_parse_capital(None), session_factory=sf)
+    report = await build_g3_report(capital=_parse_capital(None), session_factory=sf, deployment_environment="prod")
     assert report.capital_source == "ledger"
     assert report.coverage.bot_credits == 2
     assert report.deployment.cap == Decimal("395.50")          # balance before each payout
@@ -126,13 +125,12 @@ async def test_zero_allocation_cap_env_uses_the_ledger_balance(sf, monkeypatch):
 @pytest.mark.asyncio
 async def test_without_capital_or_ledger_fails_with_a_clear_message(sf, monkeypatch):
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(ACCOUNT))
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     async with sf() as s:
         now = int(datetime.now(UTC).timestamp() * 1000)
         s.add(_credit(1, now - 2 * DAY, now - DAY))
         await s.commit()
     with pytest.raises(RuntimeError, match="--capital"):
-        await build_g3_report(capital=None, session_factory=sf)
-    report = await build_g3_report(capital=Decimal("570"), session_factory=sf)
+        await build_g3_report(capital=None, session_factory=sf, deployment_environment="prod")
+    report = await build_g3_report(capital=Decimal("570"), session_factory=sf, deployment_environment="prod")
     assert isinstance(report.verdict.state, VerdictState)
     assert report.capital_source == "--capital 570"

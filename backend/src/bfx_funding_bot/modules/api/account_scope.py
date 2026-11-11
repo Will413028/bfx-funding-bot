@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.security_log import ACCESS_DENIED, security_event
-from bfx_funding_bot.modules.api.deps import get_session
+from bfx_funding_bot.modules.api.deps import configured_deployment_environment, get_session
 from bfx_funding_bot.modules.execution.operator_commands import (
     OperatorCommandError,
     OperatorContext,
@@ -49,6 +49,7 @@ async def require_account_member(
     exchange_account_id: UUID,
     user: Principal = Depends(require_operator),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    deployment_environment: str | None = Depends(configured_deployment_environment),
 ) -> ExchangeAccountContext:
     """Authorize one explicit account path and return its immutable context.
 
@@ -59,7 +60,8 @@ async def require_account_member(
     """
     try:
         return await resolve_context(
-            session, exchange_account_id=exchange_account_id, user_id=user.user_id)
+            session, exchange_account_id=exchange_account_id, user_id=user.user_id,
+            deployment_environment=deployment_environment)
     except OperatorCommandError as exc:
         if exc.kind == "not_found":
             # Absent, retired and foreign accounts look alike to the caller, not here.

@@ -447,7 +447,6 @@ async def test_build_reads_only_the_cells_own_fust_1h_series(g3_factory, monkeyp
     another symbol / period_agg / timeframe are excluded. Proven via the band
     guard: the target series is frr-scale (~1e-6), every decoy legit (2e-4)."""
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT))
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     now = _real_now()  # candles are final only once in the past
     base = now - 5 * DAY
     target = [_recent_candle("fUST", "1h", "p2", base + i * HOUR, "1.1e-6") for i in range(12)]
@@ -462,7 +461,7 @@ async def test_build_reads_only_the_cells_own_fust_1h_series(g3_factory, monkeyp
                    *_ours(1, base - HOUR, "fUST_p2")])
         await s.commit()
 
-    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now)
+    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now, deployment_environment="prod")
     assert [c.cell for c in report.mr_alpha_cells] == ["fUST_p2"]
     assert report.mr_alpha_cells[0].available is False
     assert "plausible per-day band" in (report.mr_alpha_cells[0].reason or "")
@@ -474,7 +473,6 @@ async def test_build_reads_only_the_cells_own_fust_1h_series(g3_factory, monkeyp
 @pytest.mark.asyncio
 async def test_build_loads_one_series_per_bot_cell(g3_factory, monkeypatch):
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT))
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     now = _real_now()
     base = now - 5 * DAY
     candles = ([_recent_candle("fUST", "1h", "p2", base + i * HOUR, "0.0002") for i in range(12)]
@@ -486,7 +484,7 @@ async def test_build_loads_one_series_per_bot_cell(g3_factory, monkeypatch):
                    _history_row(2, base - HOUR, base + DAY, RATE), *_ours(2, base - HOUR, "fUST_a30")])
         await s.commit()
 
-    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now)
+    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now, deployment_environment="prod")
     assert {(c.cell, c.available) for c in report.mr_alpha_cells} == {
         ("fUST_a30", True), ("fUST_p2", True)}
     assert report.mr_alpha_coverage == 1
@@ -495,7 +493,7 @@ async def test_build_loads_one_series_per_bot_cell(g3_factory, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_build_without_bot_credits_is_insufficient_not_crash(g3_factory):
-    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=_real_now())
+    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=_real_now(), deployment_environment="prod")
     assert report.verdict.state is VerdictState.INSUFFICIENT_DATA
     assert report.verdict.mr_alpha_available is False
     assert report.mr_alpha_cells == []
@@ -507,7 +505,6 @@ async def test_build_verdict_reads_credits_through_trade_offer_and_decision(g3_f
     offer 5123273052 → execution decision; 466451710 has no trade and is
     reported unattributed. The headline is 842 s of interest."""
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT))
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     now = REPAID + DAY
     async with g3_factory() as s:
         s.add_all([
@@ -533,7 +530,7 @@ async def test_build_verdict_reads_credits_through_trade_offer_and_decision(g3_f
         ])
         await s.commit()
 
-    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now)
+    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now, deployment_environment="prod")
     fourteen_min = AMOUNT * RATE * Decimal(842_000) / MS_PER_DAY
     assert report.coverage.bot_credits == 1
     assert report.coverage.gross_by_cell == {CELL: fourteen_min}
@@ -546,6 +543,5 @@ async def test_non_uuid_account_fails_instead_of_reading_no_credits(g3_factory, 
     """The venue read models are keyed by UUID; a configured non-UUID account
     must fail (account_id_canonical), never silently read as 'no credits'."""
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", "default")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     with pytest.raises(ValueError, match="must be a UUID"):
-        await build_g3_report(capital=C, session_factory=g3_factory, now_ms=REPAID)
+        await build_g3_report(capital=C, session_factory=g3_factory, now_ms=REPAID, deployment_environment="prod")

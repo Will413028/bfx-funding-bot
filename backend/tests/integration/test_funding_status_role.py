@@ -17,7 +17,6 @@ from tests.modules.api.test_response_contract import funding_dry_run, funding_sn
 @pytest.mark.integration
 async def test_status_membership_uses_only_existing_restricted_webapi_grants(pg_session_factory, monkeypatch):
     factory, account, other = pg_session_factory, uuid4(), uuid4()
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     async with factory.begin() as session:
         await session.execute(text("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='bfx_webapi') THEN CREATE ROLE bfx_webapi; END IF; END $$"))
         await session.execute(text("ALTER ROLE bfx_webapi NOSUPERUSER NOCREATEROLE NOINHERIT"))
@@ -51,6 +50,7 @@ async def test_status_membership_uses_only_existing_restricted_webapi_grants(pg_
             assert not await session.scalar(text("SELECT has_table_privilege(current_user,'capital_policy_heads','SELECT')"))
             yield session
     app = FastAPI()
+    app.state.deployment_environment = "ci"
     app.include_router(build_funding_status_router(reader=reader))
     app.dependency_overrides[require_operator] = lambda: Principal("fixture", None, "admin")
     app.dependency_overrides[get_session] = restricted_session

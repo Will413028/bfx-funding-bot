@@ -24,7 +24,8 @@ async def test_build_g3_report_returns_g3_report():
     from bfx_funding_bot.modules.live_validation.g3 import build_g3_report
     from bfx_funding_bot.modules.live_validation.live_attribution import G3Report, G3Verdict
 
-    report = await build_g3_report(capital=Decimal("570"))
+    report = await build_g3_report(capital=Decimal("570"),
+                                   deployment_environment=os.environ["BFX_DEPLOYMENT_ENV"])
 
     assert isinstance(report, G3Report)
     assert isinstance(report.verdict, G3Verdict)
