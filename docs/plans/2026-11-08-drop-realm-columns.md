@@ -5,7 +5,7 @@
 **上層：** 主清單在 repo 外，見本機個人脈絡檔 `AGENTS.local.md`。本 repo 沒有上層主計畫，下面的「全域約束與完成定義」暫代。
 
 **附件：** `docs/plans/2026-11-08-drop-realm-columns/`。
-- `inventory.tsv`：每個帶本欄的表的欄位、PK、UNIQUE、FK（含被引用側）、索引、CHECK、realm trigger、本體讀本欄的其他 trigger function。目前的檔案產生於 head `db388a84678f`，「去向」欄仍是分步做法的寫法；步驟 2 撤掉該 revision 後重新產生，並把去向改成 D3 的寫法。
+- `inventory.tsv`：每個帶本欄的表的欄位、PK、UNIQUE、FK（含被引用側）、索引、CHECK、realm trigger、本體讀本欄的其他 trigger function。產生於 head `96535191e443`（步驟 2 撤掉 `db388a84678f` 後重新產生），「去向」欄是 D3 的寫法。
 - `inventory_probe.py`：產生 `inventory.tsv` 的探針（把空庫 migrate 到 head 後查 `pg_catalog`）。重跑（在 `backend/`）：
   `PYTHONPATH=. uv run pytest -p tests.conftest --rootdir=. -q -p no:cacheprovider ../docs/plans/2026-11-08-drop-realm-columns/inventory_probe.py`
 - `check_inventory.py`：盤點每列每欄不得空白、每張 live 表都有 column 與 trigger 列。`python3 docs/plans/2026-11-08-drop-realm-columns/check_inventory.py`（2026-11-12：`189 rows, 48 tables (31 live), 0 errors`）。
@@ -199,7 +199,7 @@ migration rehearsal 與還原 drill 只在 owner 核准的 `dev`→`main` 發版
 | 步驟 | 狀態 | 已跑的驗收 | 未跑的驗收與原因 | commit |
 |---|---|---|---|---|
 | 1 加窄 key、guard 補值 | 已取代（D3、D5；由步驟 2 撤掉鷹架） | 本機 2026-11-12：單元 `5360 passed`；integration（非 e2e、非 docker）`1243 passed, 8 skipped`；mutation 5 個都被抓到；CI 全套通過（PR #371，run 43062394775） | 不發版 | `f54226c8`、`cd821b45`，合併 `ce81165d` |
-| 2 撤掉步驟 1 的鷹架 | 未開始 | | | |
+| 2 撤掉步驟 1 的鷹架 | 程式完成待驗收 | 本機 2026-11-12：`alembic heads` 只有 `96535191e443`；9 個模型檔與 `test_tables_metadata.py` 對 `89b06dc4` 無差異（`git diff --stat 89b06dc4`）；單元 `5360 passed`；受影響的 integration（`test_database_realm.py` 含 `alembic check`、`test_ledger_schema_roles.py`、`test_attribution_router.py`、`test_tables_metadata.py`）`60 passed`；`ruff`、`mypy`、import-linter（26 kept）乾淨；`check_inventory.py` `189 rows, 48 tables (31 live), 0 errors`，盤點的物件欄（前 5 欄）與重新產生前相同；消費端 `rg` 無結果；red proof（副本）：模型加回一個 `_narrow` index，`test_alembic_check_is_clean_and_the_downgrade_round_trips` 轉紅 | 完整 integration 與 `Quality ratchet` job：待 CI | |
 | 3 env 值改為組裝處注入 | 未開始 | | | |
 | 4.0 查證 drill 的兩種組合 | 未開始 | | | |
 | 4a migration 與模型 | 未開始 | | | |
