@@ -22,7 +22,12 @@ from bfx_funding_bot.core.secret_files import (
     warn_ignored_env_keys,
 )
 from bfx_funding_bot.core.security_log import BOOT_REFUSED, security_event
-from bfx_funding_bot.core.settings import IngressSettings, load_settings
+from bfx_funding_bot.core.settings import (
+    IngressSettings,
+    deployment_environment_label,
+    load_settings,
+    require_deployment_environment,
+)
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.attribution import build_attribution_router
 from bfx_funding_bot.modules.api.config import build_config_router
@@ -70,6 +75,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         security_event(BOOT_REFUSED, reason="ingress_settings_invalid", level=logging.CRITICAL)
         raise
+    # Read once, here; account routes get it from app.state (modules.api.deps). Without a
+    # valid value they answer 503 after the membership check, as before.
+    try:
+        app.state.deployment_environment = require_deployment_environment()
+    except ValueError:
+        logging.error("deployment_environment_not_configured: account routes answer 503")
+        app.state.deployment_environment = None
     try:
         settings = load_settings()
         configure_logging("webapi", level=settings.log_level)
@@ -117,7 +129,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # the configured level.
 configure_logging("webapi")
 # Before the app exists, so the FastAPI integration sees every request.
-init_error_tracking("webapi", os.environ,
+init_error_tracking("webapi", os.environ, environment=deployment_environment_label(),
                     integrations=(StarletteIntegration(), FastApiIntegration()))
 # No generated docs: the API is the UI's, behind Serve (9d-5).
 app = FastAPI(title="bfx-funding-bot", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)

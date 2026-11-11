@@ -22,6 +22,7 @@ import sys
 
 import sentry_sdk
 
+from bfx_funding_bot.core.settings import deployment_environment_label
 from bfx_funding_bot.modules.observability.error_tracking import init_error_tracking
 
 FLUSH_TIMEOUT_S = 10.0
@@ -34,7 +35,8 @@ class ErrorTrackingTestError(RuntimeError):
 
 
 def send(service: str) -> int:
-    if not init_error_tracking(service, os.environ):
+    if not init_error_tracking(service, os.environ,
+                               environment=deployment_environment_label()):
         print("error tracking NOT configured: SENTRY_DSN is not set", file=sys.stderr)
         return 1
     try:

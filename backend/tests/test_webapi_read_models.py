@@ -74,6 +74,32 @@ async def test_lifespan_stores_the_authority_and_its_read_models(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("configured", "stored"), [("ci", "ci"), (None, None), ("staging", None)])
+async def test_lifespan_reads_the_deployment_environment_once(
+        monkeypatch, configured: str | None, stored: str | None) -> None:
+    """Account routes take the value from ``app.state``; an unset or unknown one is stored
+    as None (they answer 503 after the membership check) and does not stop the boot.
+
+    Mutation: drop the assignment in the lifespan and the "ci" case fails.
+    """
+    async def authority(_session: object) -> str:
+        return "migration b1c2d3e4f5a6 genesis"
+
+    if configured is None:
+        monkeypatch.delenv("BFX_DEPLOYMENT_ENV", raising=False)
+    else:
+        monkeypatch.setenv("BFX_DEPLOYMENT_ENV", configured)
+    monkeypatch.setattr(webapi, "load_settings", lambda: SimpleNamespace(log_level="WARNING"))
+    monkeypatch.setattr(webapi, "make_engine", lambda _settings: _Engine())
+    monkeypatch.setattr(webapi, "make_session_factory", lambda _engine: _Session)
+    monkeypatch.setattr(webapi, "require_ledger_authority", authority)
+    monkeypatch.setattr(webapi, "assert_schema_head", _at_head)
+    app = FastAPI()
+    async with webapi.lifespan(app):
+        assert app.state.deployment_environment == stored
+
+
+@pytest.mark.asyncio
 async def test_lifespan_still_refuses_an_unreadable_authority(monkeypatch) -> None:
     async def require_ledger_authority(_session: object) -> str:
         raise authority_module.AuthorityMismatch("authority_unsupported")

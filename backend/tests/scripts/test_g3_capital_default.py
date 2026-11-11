@@ -116,7 +116,7 @@ async def test_zero_allocation_cap_env_uses_the_ledger_balance(sf, monkeypatch):
             balance=Decimal("395.55"), description=DESC,
         ) for i in range(1, 12)])
         await s.commit()
-    report = await build_g3_report(capital=_parse_capital(None), session_factory=sf)
+    report = await build_g3_report(capital=_parse_capital(None), session_factory=sf, deployment_environment="prod")
     assert report.capital_source == "ledger"
     assert report.coverage.bot_credits == 2
     assert report.deployment.cap == Decimal("395.50")          # balance before each payout
@@ -132,7 +132,7 @@ async def test_without_capital_or_ledger_fails_with_a_clear_message(sf, monkeypa
         s.add(_credit(1, now - 2 * DAY, now - DAY))
         await s.commit()
     with pytest.raises(RuntimeError, match="--capital"):
-        await build_g3_report(capital=None, session_factory=sf)
-    report = await build_g3_report(capital=Decimal("570"), session_factory=sf)
+        await build_g3_report(capital=None, session_factory=sf, deployment_environment="prod")
+    report = await build_g3_report(capital=Decimal("570"), session_factory=sf, deployment_environment="prod")
     assert isinstance(report.verdict.state, VerdictState)
     assert report.capital_source == "--capital 570"

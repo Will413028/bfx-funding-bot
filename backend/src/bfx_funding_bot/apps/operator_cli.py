@@ -49,6 +49,7 @@ import bfx_funding_bot.apps.schema  # noqa: F401
 from bfx_funding_bot.core.authority import AuthorityMismatch, require_ledger_authority
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
 from bfx_funding_bot.core.schema_head import SchemaHeadMismatch, assert_schema_head
+from bfx_funding_bot.core.settings import require_deployment_environment
 from bfx_funding_bot.modules.execution import operator_commands as commands
 from bfx_funding_bot.modules.execution.operator_commands import (
     OperatorCommandError,
@@ -124,6 +125,8 @@ class Operator:
     tailnet_identity: str  # the requests' requested_by
     exchange_account_id: UUID
     database_url: str
+    # None when the environment names no valid one: refused after the membership check.
+    deployment_environment: str | None = None
 
 
 def resolve_operator(env: Mapping[str, str]) -> Operator:
@@ -138,7 +141,11 @@ def resolve_operator(env: Mapping[str, str]) -> Operator:
         account = None
     if not database_url or account is None:
         raise CliExitError("internal", {"error": "operator_env_incomplete"})
-    return Operator(identity, account, database_url)
+    try:
+        deployment_environment: str | None = require_deployment_environment(env)
+    except ValueError:
+        deployment_environment = None
+    return Operator(identity, account, database_url, deployment_environment)
 
 
 # --- rendering ------------------------------------------------------------------------------
@@ -204,15 +211,16 @@ async def _read_request(session: AsyncSession, context: OperatorContext, kind: s
         await commands.get_resolution_request(session, context, request_id))
 
 
-async def _queue(session: AsyncSession, context: OperatorContext,
-                 args: argparse.Namespace, credential: EnteredCredential | None) -> Queued:
+async def _queue(session: AsyncSession, context: OperatorContext, args: argparse.Namespace,
+                 credential: EnteredCredential | None, deployment_environment: str) -> Queued:
     now_ms = int(time.time() * 1000)
     if args.command == "rotate-credential":
         if credential is None:
             raise CliExitError("usage", {"error": "credential_input_missing"})
         request_id = await commands.request_credential_rotation(
             session, context, api_key=credential.api_key, api_secret=credential.api_secret,
-            label=args.label, reason=args.reason, now_ms=now_ms)
+            label=args.label, reason=args.reason, now_ms=now_ms,
+            deployment_environment=deployment_environment)
         return Queued(request_id, "credential", "rotate_credential")
     if args.command in {"resume", "kill"}:
         request_id = await commands.request_trading_control(
@@ -278,7 +286,8 @@ async def run(args: argparse.Namespace, operator: Operator, factory: Session, *,
         try:
             context = await commands.resolve_context(
                 session, exchange_account_id=operator.exchange_account_id,
-                user_id=operator.tailnet_identity)
+                user_id=operator.tailnet_identity,
+                deployment_environment=operator.deployment_environment)
         except OperatorCommandError as exc:
             # Not a member (or no such live account; the two look alike on purpose).
             if exc.kind != "not_found":
@@ -286,7 +295,9 @@ async def run(args: argparse.Namespace, operator: Operator, factory: Session, *,
             raise CliExitError("identity", {"error": "operator_not_member"}) from exc
         if args.command not in WRITES:
             return "ok", await _read(session, context, args)
-        queued = await _queue(session, context, args, credential)
+        assert operator.deployment_environment is not None  # resolve_context refused None
+        queued = await _queue(session, context, args, credential,
+                              operator.deployment_environment)
         await session.commit()
     print(f"operator_request request_id={queued.request_id} action={queued.action} "
           f"tailnet_identity={operator.tailnet_identity}", file=log, flush=True)

@@ -425,7 +425,7 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
                                      role="owner", lifecycle_status="active",
                                      deployment_environment="ci"),
             api_key=NEW_KEY, api_secret=NEW_SECRET, label="rotated", reason="key revoked",
-            now_ms=T0)
+            now_ms=T0, deployment_environment="ci")
     async def settled() -> str | None:
         async with factory() as session:
             state = await session.scalar(text(

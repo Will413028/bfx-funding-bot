@@ -301,12 +301,15 @@ class AlertSink:
         self._worker: asyncio.Task[None] | None = None
 
     @classmethod
-    def from_environment(cls, environ: Mapping[str, str], **options: Any) -> AlertSink:
-        """Telegram when both keys are valid; otherwise log-only (said once, at boot)."""
+    def from_environment(cls, environ: Mapping[str, str], *, context: str = "",
+                         **options: Any) -> AlertSink:
+        """Telegram when both keys are valid; otherwise log-only (said once, at boot).
+
+        ``context`` is the deployment environment the caller read; it heads every alert.
+        """
         # The bot's secret file in production (BFX_SECRETS_DIR), else the env.
         token = read_secret("TELEGRAM_BOT_TOKEN", environ) or ""
         chat_id = environ.get("TELEGRAM_CHAT_ID", "").strip()
-        context = options.pop("context", None) or environ.get("BFX_DEPLOYMENT_ENV", "")
         options.setdefault("secrets", secret_values(environ))
         if not token and not chat_id:
             log.warning("alerts_telegram_not_configured: alerts are logged only "

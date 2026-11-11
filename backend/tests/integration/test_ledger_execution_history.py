@@ -105,7 +105,6 @@ async def _scenario(book: Book) -> dict[str, UUID]:
 async def _client(
     book: Book, monkeypatch: pytest.MonkeyPatch, read_models: ReadModels | None = None
 ) -> httpx.AsyncClient:
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", SCOPE.deployment_environment)
     async with book.factory.begin() as session:
         await grant_membership(session, exchange_account_id=SCOPE.exchange_account_id,
                                user_id="operator-1", role="owner")
@@ -116,6 +115,7 @@ async def _client(
             yield session
 
     app = FastAPI()
+    app.state.deployment_environment = SCOPE.deployment_environment
     app.include_router(build_projections_router())
     app.state.read_models = read_models or build_read_models()
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")

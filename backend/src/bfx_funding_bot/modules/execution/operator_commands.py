@@ -33,7 +33,6 @@ from bfx_funding_bot.core.sealed_credential import (
     seal,
     validate_credential,
 )
-from bfx_funding_bot.core.settings import require_deployment_environment
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     AccountNotFound,
     AccountRetired,
@@ -154,10 +153,12 @@ def _rejected(exc: ResolutionRejected) -> OperatorCommandError:
 
 async def resolve_context(
     session: AsyncSession, *, exchange_account_id: UUID, user_id: str,
+    deployment_environment: str | None,
 ) -> OperatorContext:
     """The account ``user_id`` may act on; absent, retired and foreign accounts look alike.
 
-    The deployment environment is read last: a non-member is refused before
+    ``deployment_environment`` is what the process's assembly point read at start, or
+    None when it had no valid value. It is judged last: a non-member is refused before
     anything about the host is.
     """
     try:
@@ -171,17 +172,14 @@ async def resolve_context(
     # explicit so a new lifecycle state cannot gain a command path without a decision.
     if account.lifecycle_status not in {"active", "halted"}:
         raise _not_found()
-    try:
-        environment = require_deployment_environment()
-    except ValueError as exc:
-        raise OperatorCommandError(
-            "deployment_environment_not_configured", kind="unavailable") from exc
+    if deployment_environment is None:
+        raise OperatorCommandError("deployment_environment_not_configured", kind="unavailable")
     return OperatorContext(
         exchange_account_id=exchange_account_id,
         user_id=user_id,
         role=membership.role,  # type: ignore[arg-type]  # DB check narrows this set
         lifecycle_status=account.lifecycle_status,  # type: ignore[arg-type]
-        deployment_environment=environment,
+        deployment_environment=deployment_environment,
     )
 
 
@@ -422,9 +420,12 @@ async def _current_recipient(session: AsyncSession, context: OperatorContext) ->
 
 async def request_credential_rotation(
     session: AsyncSession, context: OperatorContext, *, api_key: str, api_secret: str,
-    label: str, reason: str, now_ms: int,
+    label: str, reason: str, now_ms: int, deployment_environment: str,
 ) -> UUID:
     """Seal a new Bitfinex key to the running bot and queue its rotation.
+
+    ``deployment_environment`` binds the sealed payload (HKDF info): the value the
+    assembly point read, the same one the bot opens it with.
 
     Refused before anything is queued when there is no active credential to replace (the
     first key is still bootstrapped), or no running bot published a recipient key.
@@ -446,7 +447,7 @@ async def request_credential_rotation(
     request_id = uuid4()
     try:
         sealed = seal(api_key, api_secret, public_key=recipient.public_key, context=SealContext(
-            context.exchange_account_id, context.deployment_environment,
+            context.exchange_account_id, deployment_environment,
             recipient.recipient_id, request_id))
     except SealedPayloadError as exc:
         raise _invalid(exc.code) from None

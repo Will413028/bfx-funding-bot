@@ -22,6 +22,7 @@ from pydantic import ConfigDict, ValidationError
 
 from bfx_funding_bot.core.secret_files import read_secret
 from bfx_funding_bot.modules.api.account_scope import ExchangeAccountContext, require_account_member
+from bfx_funding_bot.modules.api.deps import get_deployment_environment
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.api.schemas import Envelope, ResponseModel, field_paths
 
@@ -138,10 +139,11 @@ def build_funding_status_router(*,
     @router.get("/funding-status", response_model_exclude_unset=True)
     async def funding_status(
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
+        deployment_environment: str = Depends(get_deployment_environment),
     ) -> Envelope[FundingStatus]:
         def require_scope(value: dict[str, Any]) -> None:
             if (value.get("account_id") != str(context.exchange_account_id)
-                    or value.get("deployment_environment") != context.deployment_environment):
+                    or value.get("deployment_environment") != deployment_environment):
                 raise RuntimeError("daemon_scope_mismatch")
 
         try:

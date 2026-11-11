@@ -62,6 +62,24 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
             raise
 
 
+def configured_deployment_environment(request: Request) -> str | None:
+    """What the app's assembly read at start (``app.state``); None when it had no valid value."""
+    value: str | None = getattr(request.app.state, "deployment_environment", None)
+    return value
+
+
+def get_deployment_environment(request: Request) -> str:
+    """The process's deployment environment, or 503 when the app started without one.
+
+    Declare it after the account dependency: a non-member is refused first.
+    """
+    value = configured_deployment_environment(request)
+    if value is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="deployment_environment_not_configured")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ReadModels:
     """The read-side ports of the capital authority this process booted under."""

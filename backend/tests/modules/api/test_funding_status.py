@@ -34,6 +34,7 @@ async def test_funding_status_preserves_decimals_only_for_both_matching_scopes(s
         return value
 
     app = FastAPI()
+    app.state.deployment_environment = "prod"
     app.include_router(build_funding_status_router(reader=read))
     app.dependency_overrides[require_operator] = lambda: Principal("fixture", None, "admin")
     app.dependency_overrides[require_account_member] = lambda: ExchangeAccountContext(

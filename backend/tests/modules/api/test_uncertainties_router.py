@@ -194,7 +194,6 @@ def _apply_queued(app, *, authority: _Authority | None = None) -> bool:
 
 @pytest_asyncio.fixture
 async def uncertainty_app(sqlite_engine, monkeypatch):
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
@@ -207,6 +206,7 @@ async def uncertainty_app(sqlite_engine, monkeypatch):
 
     ledger = _Ledger()
     app = FastAPI()
+    app.state.deployment_environment = "ci"
     app.include_router(build_uncertainties_router())
     app.state.read_models = ReadModels(ledger, ledger, object(), object())  # type: ignore[arg-type]
 

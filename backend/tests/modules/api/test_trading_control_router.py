@@ -34,13 +34,13 @@ AUTH = operator_headers("operator")
 async def _app(migrated_db, monkeypatch, *, role="owner"):
     from bfx_funding_bot.apps.read_models import build_read_models
     from bfx_funding_bot.modules.api.trading_control import build_trading_control_router
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_IMAGE_DIGEST", DIGEST)
     monkeypatch.setenv("BFX_SOURCE_REVISION", "c" * 40)
     factory, account = migrated_db
     async with factory.begin() as session:
         session.add(ExchangeAccountMembership(exchange_account_id=account, user_id="operator", role=role))
     app = attach_ingress(FastAPI(), BFX_OPERATOR_TAILNET_USER_ID="operator")
+    app.state.deployment_environment = "ci"
     app.state.session_factory = factory
     app.state.read_models = build_read_models()
     app.include_router(build_trading_control_router())
@@ -387,7 +387,7 @@ async def test_a_currency_without_an_applied_policy_is_policy_unavailable(migrat
 async def test_membership_is_judged_before_the_deployment_environment(migrated_db, monkeypatch):
     """A non-member learns nothing about the host: 404 even when the environment is unset."""
     app, _factory, account = await _app(migrated_db, monkeypatch)
-    monkeypatch.delenv("BFX_DEPLOYMENT_ENV")
+    app.state.deployment_environment = None  # the lifespan found no valid value
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
         other = await client.post(f"/api/v1/exchange-accounts/{uuid4()}/trading-control/kill",
                                   json={"reason": "x"}, headers=AUTH)

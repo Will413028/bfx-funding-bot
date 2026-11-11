@@ -69,14 +69,14 @@ async def _seed_account(
 
 
 @pytest.mark.asyncio
-async def test_member_context_is_explicit_and_role_scoped(session: AsyncSession, monkeypatch) -> None:
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+async def test_member_context_is_explicit_and_role_scoped(session: AsyncSession) -> None:
     await _seed_account(session, role="viewer")
 
     context = await require_account_member(
         exchange_account_id=_ACCOUNT_ID,
         user=Principal(user_id="operator-1", email="operator@example.com", role="admin"),
         session=session,
+        deployment_environment="ci",
     )
 
     assert isinstance(context, ExchangeAccountContext)
@@ -89,16 +89,16 @@ async def test_member_context_is_explicit_and_role_scoped(session: AsyncSession,
 
 @pytest.mark.asyncio
 async def test_authorized_context_requires_validated_deployment_environment(
-    session: AsyncSession, monkeypatch
+    session: AsyncSession,
 ) -> None:
     await _seed_account(session)
-    monkeypatch.delenv("BFX_DEPLOYMENT_ENV", raising=False)
 
     with pytest.raises(HTTPException) as error:
         await require_account_member(
             exchange_account_id=_ACCOUNT_ID,
             user=Principal(user_id="operator-1", email="operator@example.com", role="admin"),
             session=session,
+            deployment_environment=None,
         )
 
     assert error.value.status_code == 503
@@ -117,6 +117,7 @@ async def test_missing_membership_is_non_enumerating_404(
             exchange_account_id=_ACCOUNT_ID,
             user=Principal(user_id=user_id, email=None, role="admin"),
             session=session,
+            deployment_environment="ci",
         )
 
     assert error.value.status_code == 404
@@ -132,6 +133,7 @@ async def test_unknown_and_retired_accounts_are_non_enumerating_404(
             exchange_account_id=_ACCOUNT_ID,
             user=Principal(user_id="operator-1", email=None, role="admin"),
             session=session,
+            deployment_environment="ci",
         )
     assert unknown.value.status_code == 404
     assert unknown.value.detail == "not_found"
@@ -142,6 +144,7 @@ async def test_unknown_and_retired_accounts_are_non_enumerating_404(
             exchange_account_id=_ACCOUNT_ID,
             user=Principal(user_id="operator-1", email=None, role="admin"),
             session=session,
+            deployment_environment="ci",
         )
     assert retired.value.status_code == 404
     assert retired.value.detail == "not_found"
@@ -157,7 +160,6 @@ def test_implicit_default_account_is_not_a_valid_path() -> None:
 @pytest_asyncio.fixture
 async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
     monkeypatch.setenv("BFX_VAULT_KEK", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
@@ -195,6 +197,7 @@ async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
         await seed.commit()
 
     app = FastAPI()
+    app.state.deployment_environment = "prod"
     app.include_router(build_router())
     app.include_router(build_api_keys_router())
     app.include_router(build_config_router())

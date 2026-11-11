@@ -28,9 +28,10 @@ def test_sends_through_init_error_tracking_and_its_scrubber(
     sent: list[Any] = []
     real_init = send_test_error.init_error_tracking
 
-    def init(service: str, environ: Any) -> bool:
+    def init(service: str, environ: Any, *, environment: str) -> bool:
         started.append(service)
-        return real_init(service, {**environ, "SENTRY_DSN": "https://k3y456@o1.ingest.example/1"})
+        return real_init(service, {**environ, "SENTRY_DSN": "https://k3y456@o1.ingest.example/1"},
+                         environment=environment)
 
     class Capture(sentry_sdk.transport.Transport):
         def capture_envelope(self, envelope: Any) -> None:

@@ -59,6 +59,7 @@ from bfx_funding_bot.core.loop_watchdog import LoopWatchdog, loop_watchdog_timeo
 from bfx_funding_bot.core.schema_head import assert_schema_head
 from bfx_funding_bot.core.secret_files import read_secret, warn_ignored_env_keys
 from bfx_funding_bot.core.security_log import BOOT_REFUSED, security_event
+from bfx_funding_bot.core.settings import deployment_environment_label
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
@@ -1162,7 +1163,7 @@ async def build_daemon(
 def main() -> None:
     configure_logging("bot")
     warn_ignored_env_keys(log)
-    init_error_tracking("bot", os.environ)
+    init_error_tracking("bot", os.environ, environment=deployment_environment_label())
     try:
         asyncio.run(_run())
     except WriterLockUnacquired as exc:
@@ -1183,7 +1184,8 @@ async def _run() -> None:
     # T8: operator alerts. Installed before anything can refuse the boot; hooks in
     # safety/{trading_state_store,protection,kill_switch}.py emit into it. Log-only
     # (said once) when TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set.
-    alerts.install(alerts.AlertSink.from_environment(os.environ))
+    alerts.install(alerts.AlertSink.from_environment(
+        os.environ, context=deployment_environment_label()))
     try:
         watchdog = LoopWatchdog(timeout_s=loop_watchdog_timeout_s(os.environ))
     except Exception as exc:

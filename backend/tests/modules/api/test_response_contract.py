@@ -286,6 +286,7 @@ def build_app(funding_reader: Any = None, *, empty: bool = False) -> FastAPI:
         return funding_snapshot() if path == "/admin/trading-status" else funding_dry_run()
 
     app = FastAPI()
+    app.state.deployment_environment = "prod"
     install_response_shape_handler(app)
     app.include_router(build_router())
     app.include_router(build_api_keys_router())
@@ -351,7 +352,6 @@ async def _seed(engine: AsyncEngine) -> async_sessionmaker[Any]:
 
 @pytest.fixture
 def patched_ports(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     monkeypatch.setenv("BFX_IMAGE_DIGEST", "sha256:" + "c" * 64)
     monkeypatch.setenv("BFX_SOURCE_REVISION", "d" * 40)
 

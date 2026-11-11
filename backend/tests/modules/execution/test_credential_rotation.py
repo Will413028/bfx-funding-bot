@@ -161,7 +161,8 @@ async def _queue(h: Harness, *, key: str = NEW_KEY, secret: str = NEW_SECRET) ->
     async with h.factory.begin() as session:
         return await commands.request_credential_rotation(
             session, CONTEXT, api_key=key, api_secret=secret, label="rotated",
-            reason="scheduled rotation", now_ms=NOW_MS)
+            reason="scheduled rotation", now_ms=NOW_MS,
+            deployment_environment=CONTEXT.deployment_environment)
 
 
 async def _settle(h: Harness, request_id: UUID) -> CredentialRotationRequestRow:
@@ -382,7 +383,8 @@ async def test_a_label_with_a_control_character_is_refused(harness, label: str) 
         with pytest.raises(commands.OperatorCommandError) as refused:
             await commands.request_credential_rotation(
                 session, CONTEXT, api_key=NEW_KEY, api_secret=NEW_SECRET, label=label,
-                reason="scheduled rotation", now_ms=NOW_MS)
+                reason="scheduled rotation", now_ms=NOW_MS,
+                deployment_environment=CONTEXT.deployment_environment)
     assert refused.value.code == "invalid_label"
 
 

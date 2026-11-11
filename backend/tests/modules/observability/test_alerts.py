@@ -384,7 +384,7 @@ def test_missing_telegram_config_degrades_to_log_only_and_says_so_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.INFO):
-        sink = alerts.AlertSink.from_environment({"BFX_DEPLOYMENT_ENV": "prod"})
+        sink = alerts.AlertSink.from_environment({}, context="prod")
         sink.emit(alerts.PROTECTION_TRIPPED, trigger="identity_conflict", detail="x")
         sink.emit(alerts.PROTECTION_TRIPPED, trigger="command_rate_exceeded", detail="y")
     assert not sink.delivers and sink.counts == {"log_only": 2}

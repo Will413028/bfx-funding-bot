@@ -41,7 +41,6 @@ def _environ(dsn: str = "") -> dict[str, str]:
         "TELEGRAM_BOT_TOKEN": TOKEN,
         "BFX_API_SECRET": API_SECRET,
         "DATABASE_URL": f"postgresql://bfx_bot:{DB_PASSWORD}@bfx-postgres:5432/bfx",
-        "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_SERVICE_VERSION": "aaaaaaa",
     }
 
@@ -121,8 +120,8 @@ def test_a_failing_scrub_drops_the_event() -> None:
 
 
 def test_no_dsn_does_not_initialize() -> None:
-    assert init_error_tracking("bot", _environ("")) is False
-    assert init_error_tracking("bot", _environ("   ")) is False
+    assert init_error_tracking("bot", _environ(""), environment="ci") is False
+    assert init_error_tracking("bot", _environ("   "), environment="ci") is False
     assert not sentry_sdk.get_client().is_active()
 
 
@@ -163,7 +162,7 @@ def _fail_with_secrets_in_scope() -> None:
 def test_events_on_the_wire_carry_no_secret_personal_data_or_locals(
         ingest: str, caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.DEBUG)
-    assert init_error_tracking("bot", _environ(ingest)) is True
+    assert init_error_tracking("bot", _environ(ingest), environment="ci") is True
     logger = logging.getLogger("bfx_funding_bot.test_error_tracking")
 
     logger.info("calling https://api.telegram.org/bot%s/sendMessage", TOKEN)  # breadcrumb
@@ -190,7 +189,7 @@ def test_events_on_the_wire_carry_no_secret_personal_data_or_locals(
 
 
 def test_outgoing_requests_get_no_trace_headers(ingest: str) -> None:
-    assert init_error_tracking("bot", _environ(ingest)) is True
+    assert init_error_tracking("bot", _environ(ingest), environment="ci") is True
     assert sentry_sdk.get_client().options["trace_propagation_targets"] == []
     integrations = set(sentry_sdk.get_client().integrations)
     assert "httpx" not in integrations
@@ -201,7 +200,8 @@ def test_bot_main_starts_error_tracking_before_the_daemon(monkeypatch: pytest.Mo
     from bfx_funding_bot.apps import bot
 
     order: list[str] = []
-    monkeypatch.setattr(bot, "init_error_tracking", lambda service, _env: order.append(service))
+    monkeypatch.setattr(bot, "init_error_tracking",
+                        lambda service, _env, **_: order.append(service))
 
     async def run() -> None:
         order.append("daemon")
@@ -217,7 +217,8 @@ def test_webapi_starts_error_tracking_with_the_fastapi_integration(
 
     calls: list[tuple[str, tuple[str, ...]]] = []
 
-    def record(service: str, _environ: object, *, integrations: tuple[Any, ...] = ()) -> bool:
+    def record(service: str, _environ: object, *, environment: str,
+               integrations: tuple[Any, ...] = ()) -> bool:
         calls.append((service, tuple(i.identifier for i in integrations)))
         return False
 
@@ -242,8 +243,8 @@ def test_secret_file_values_are_scrubbed_on_the_wire(ingest: str, tmp_path: Any)
                        }.items():
         (directory / key).write_text(value)
     environ = {"SENTRY_DSN": ingest, "BFX_SECRETS_DIR": str(directory),
-               "BFX_DEPLOYMENT_ENV": "ci", "BFX_SERVICE_VERSION": "aaaaaaa"}
-    assert init_error_tracking("bot", environ) is True
+               "BFX_SERVICE_VERSION": "aaaaaaa"}
+    assert init_error_tracking("bot", environ, environment="ci") is True
     try:
         raise RuntimeError(f"boot failed with {TOKEN} {admin} password={DB_PASSWORD}")
     except RuntimeError:
