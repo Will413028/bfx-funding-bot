@@ -78,7 +78,7 @@
 - [x] **1. 加窄 key、讓 guard 補值（只加不刪的 migration）**
   - 已被 D3、D5 取代（2026-11-12）：這一步的 migration `db388a84678f`、37 個 `_narrow` index 與模型宣告、guard 補值、`tests/integration/test_realm_guard_fills_stamp.py` 由步驟 2 撤掉。留下的是：同庫單一 realm 的測試 fixture 修正、盤點補列（R1）、realm 斷言的寫法（搬進步驟 4 的 migration）。已合併進 `dev`（PR #371，`ce81165d`），沒有發版。
 
-- [ ] **2. 撤掉步驟 1 的鷹架**（被擋於：無）
+- [x] **2. 撤掉步驟 1 的鷹架**（被擋於：無）
   - 範圍：
     - `backend/alembic/versions/db388a84678f_narrow_realm_keys.py`（刪除；head 回到 `96535191e443`）。
     - 9 個模型檔裡的 `_narrow` 宣告與註解（修改）：`modules/ledger/tables.py`、`modules/execution/safety/tables.py`、`modules/execution/capital_tables.py`、`modules/execution/uncertainty_tables.py`、`modules/execution/audit/tables.py`、`modules/accounts/rotation_tables.py`、`modules/live_validation/tables.py`、`modules/observability/tables.py`、`modules/simulated_venue/tables.py`（`rg -n "_narrow|No narrow twin" backend/src` 無結果為止）。
@@ -199,7 +199,7 @@ migration rehearsal 與還原 drill 只在 owner 核准的 `dev`→`main` 發版
 | 步驟 | 狀態 | 已跑的驗收 | 未跑的驗收與原因 | commit |
 |---|---|---|---|---|
 | 1 加窄 key、guard 補值 | 已取代（D3、D5；由步驟 2 撤掉鷹架） | 本機 2026-11-12：單元 `5360 passed`；integration（非 e2e、非 docker）`1243 passed, 8 skipped`；mutation 5 個都被抓到；CI 全套通過（PR #371，run 43062394775） | 不發版 | `f54226c8`、`cd821b45`，合併 `ce81165d` |
-| 2 撤掉步驟 1 的鷹架 | 程式完成待驗收 | 本機 2026-11-12：`alembic heads` 只有 `96535191e443`；9 個模型檔與 `test_tables_metadata.py` 對 `89b06dc4` 無差異（`git diff --stat 89b06dc4`）；單元 `5360 passed`；受影響的 integration（`test_database_realm.py` 含 `alembic check`、`test_ledger_schema_roles.py`、`test_attribution_router.py`、`test_tables_metadata.py`）`60 passed`；`ruff`、`mypy`、import-linter（26 kept）乾淨；`check_inventory.py` `189 rows, 48 tables (31 live), 0 errors`，盤點的物件欄（前 5 欄）與重新產生前相同；消費端 `rg` 無結果；red proof（副本）：模型加回一個 `_narrow` index，`test_alembic_check_is_clean_and_the_downgrade_round_trips` 轉紅 | 完整 integration 與 `Quality ratchet` job：待 CI | |
+| 2 撤掉步驟 1 的鷹架 | 完成 | 本機 2026-11-12：`alembic heads` 只有 `96535191e443`；9 個模型檔與 `test_tables_metadata.py` 對 `89b06dc4` 無差異（`git diff --stat 89b06dc4`）；單元 `5360 passed`；受影響的 integration（`test_database_realm.py` 含 `alembic check`、`test_ledger_schema_roles.py`、`test_attribution_router.py`、`test_tables_metadata.py`）`60 passed`；`ruff`、`mypy`、import-linter（26 kept）乾淨；`check_inventory.py` `189 rows, 48 tables (31 live), 0 errors`，盤點的物件欄（前 5 欄）與重新產生前相同；消費端 `rg` 無結果；red proof（副本）：模型加回一個 `_narrow` index，`test_alembic_check_is_clean_and_the_downgrade_round_trips` 轉紅；CI 全套通過，含 integration 與 `Quality ratchet`（`tests_executed` 鎖定值不必調低；PR #372，run 43070624106） | 不發版（與步驟 3、4 同批） | `b379b009`、`8bde5154`，合併 `ad3993a3` |
 | 3 env 值改為組裝處注入 | 未開始 | | | |
 | 4.0 查證 drill 的兩種組合 | 未開始 | | | |
 | 4a migration 與模型 | 未開始 | | | |
