@@ -1,6 +1,6 @@
 # 拿掉每列的 deployment_environment 欄與每表的 realm trigger
 
-**Goal：** 所有 live 表（`public` 30 張＋`projection_audit.runs`，共 31 張）不再有 `deployment_environment` 欄與 `database_realm_write` trigger，`guard_database_realm()` 函式不存在；realm 只剩 `database_realm` 一列 stamp 與開機時的 `assert_database_realm` 比對。程式裡 env 值只在啟動組裝處（`apps/`）讀一次，注入需要它的幾處。封存 schema（`legacy_archive`、`release_archive`）的欄位與約束原樣保留。HKDF 綁定與對外 API 欄位 `deployment_environment` 的值完全不變；advisory lock key 改成只由 namespace 與 account 導出、不含 env，值在步驟 4 的發版變一次（D6）。程式與 schema 在同一次 `dev`→`main` 發版一起換（D3）。可驗證的終態見步驟 5 的驗收。
+**Goal：** 所有 live 表（`public` 30 張＋`projection_audit.runs`，共 31 張）不再有 `deployment_environment` 欄與 `database_realm_write` trigger，`guard_database_realm()` 函式不存在；realm 只剩 `database_realm` 一列 stamp 與開機時的 `assert_database_realm` 比對。程式裡 env 值只在啟動組裝處（`apps/`）讀一次，注入需要它的幾處。封存 schema（`legacy_archive`、`release_archive`）的欄位與約束原樣保留。2026-11-13 起（D7）env 值只剩兩個用途：bot 開機比對 stamp，以及各行程的遙測標籤（metrics／Sentry／告警）；密封請求的 HKDF info、對外 API 欄位、封存表的讀取過濾與領域型別都不再帶 env（步驟 4e-2）。advisory lock key 改成只由 namespace 與 account 導出、不含 env，值在步驟 4 的發版變一次（D6）。程式與 schema 在同一次 `dev`→`main` 發版一起換（D3）。可驗證的終態見步驟 5 的驗收。
 
 **上層：** 主清單在 repo 外，見本機個人脈絡檔 `AGENTS.local.md`。本 repo 沒有上層主計畫，下面的「全域約束與完成定義」暫代。
 
@@ -12,7 +12,7 @@
 
 ## 全域約束與完成定義（暫代主計畫）
 
-- 值不變：`SealContext.info()`（`core/sealed_credential.py`）、API 的 `deployment_environment`（`modules/api/funding_status.py`、`backend/openapi.json`、`frontend/src/types/api.gen.ts`）的值都來自設定（prod 為 `prod`），不從資料列取。因此不重新加密、不改 API 契約。advisory lock key 不在此列：三組 key 都拿掉 env（D6），只能跟拿掉本欄的 migration 同一次發版。
+- （2026-11-13 被 D7 取代；步驟 2–4d 是照這條做的）值不變：`SealContext.info()`（`core/sealed_credential.py`）、API 的 `deployment_environment`（`modules/api/funding_status.py`、`backend/openapi.json`、`frontend/src/types/api.gen.ts`）的值都來自設定（prod 為 `prod`），不從資料列取。因此不重新加密、不改 API 契約。D7 之後：兩者都拿掉 env；「要重新加密」的前提不成立（見 D7）。advisory lock key 不在此列：三組 key 都拿掉 env（D6），只能跟拿掉本欄的 migration 同一次發版。
 - migration 只往前（ADR `docs/adr/2026-10-08-forward-only-migrations.md`），而且自己斷言資料（ADR `docs/adr/2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them.md`）。例外：`db388a84678f` 只在 `dev`、沒有進過 `main` 與正式環境，步驟 2 直接刪檔（D5）。
 - 封存 schema 的資料列一個 byte 都不改（manifest 的 SHA-256 涵蓋 `to_jsonb(row)`）。
 - import 方向：`core`、`external`、`modules` 不得 import `apps`（`backend/pyproject.toml` 的 import-linter contract `apps-is-top`）。
@@ -156,7 +156,7 @@
     - 執行時的調整（2026-11-12）：
       - 仍需要 env 值、改由組裝處注入的地方比原列的多三處：`TradingStatusService`（`/admin/trading-status`、dry-evaluate 的 `deployment_environment` 欄位與 halt gauge 的標籤）、`CredentialRotationWorker`（解封的 HKDF info）、`modules/api/uncertainties.py` 的 `blockedScope.environment`（對外 API 欄位，`backend/openapi.json` 與前端都有，值不變所以保留）。都是既有類別（API 欄位、HKDF、metrics 標籤），沒有多出一類。
       - `ArchivedExecutionHistory(deployment_environment)`：webapi 的 lifespan 經 `build_read_models` 傳入；值為 None 時帳號路由先以 503 拒絕，仍走到讀取就 raise。
-      - `SimAccount.deployment_environment` 保留：它是組裝處傳入的 realm（非 `ci` 即拒絕），不是列的身分；`sim_venue_event` 的 SQL 不再提本欄。4f 的允許清單要包含它，以及上面三處、`apps/read_models.py`、`modules/api/deps.py`、`account_scope.py`、`operator_commands.py` 的注入參數、`safety/boot_stop.py` 的告警標籤。
+      - （2026-11-13 被 D7 取代，4e-2 拿掉）`SimAccount.deployment_environment` 保留：它是組裝處傳入的 realm（非 `ci` 即拒絕），不是列的身分；`sim_venue_event` 的 SQL 不再提本欄。4f 的允許清單要包含它，以及上面三處、`apps/read_models.py`、`modules/api/deps.py`、`account_scope.py`、`operator_commands.py` 的注入參數、`safety/boot_stop.py` 的告警標籤。
       - `resolve_context` 仍收注入值、None 時回 `deployment_environment_not_configured`（行為不變），只是不再存進 `OperatorContext`。
       - 拿掉的防呆與訊號：`UncertaintyGuard` 的逐列 env 比對（列已無此欄）；`venue_observation.py` 兩個告警與 `kill_switch` log 行的 env 欄位（告警標頭本來就帶組裝處的 env；本機個人脈絡檔記的 repo 外告警定義以 `rg "kill_switch_engaged|deployment_environment|cancel_environment|env="` 查無符合）。
       - `backend/scripts/run_weekly_attribution.py`、`run_g3_live_validation.py` 從 4d 提前：它們呼叫的函式簽名在本步改了，兩支腳本不再讀 env。`build_public_site.py`、`capital_mutation_gate.py` 仍在 4d。
@@ -191,8 +191,25 @@
       - `backend/src/bfx_funding_bot/core/database_realm.py` 的模組 docstring 還在描述逐列 trigger，一併改掉（只動註解）。
       - ADR `docs/adr/2026-11-08-drop-realm-columns.md` 寫明 D0 之後變弱的地方（webapi、operator CLI 與每週腳本不比對 stamp）；`2026-05-23` 與 `2026-11-08-remove-the-shadow-realm` 各加一段 Amendment。
 
-  - [ ] **4f. 全套驗收與併入**
-    - 新增 `tests/architecture/test_no_realm_column_sql.py`：`backend/src`、`backend/scripts`、`deploy` 裡 `deployment_environment` 只能出現在允許清單——`apps/config.py` 與注入點的參數名、API 欄位（`modules/api/funding_status.py` 與 schema）、`core/sealed_credential.py` 的 HKDF info、metrics／resource 標籤、`ledger_digest.py` 對有欄舊 schema 的處理、`modules/execution/archived_execution_history.py`（封存表的欄位與過濾）。型別檢查用 `dataclasses.fields`（或該型別實際的欄位列舉）：`Scope`、`CapitalScope` 與 `modules/trading/capital.py` 的其餘 scope 型別、`ResolutionScope`、`OperatorContext`、`AccountContext`、`AuditContext` 的欄名不得含 `deployment_environment`、`environment`、`env`。
+  - [ ] **4e-2. env 只留給 bot 的 stamp 比對與遙測標籤（D7）**（被擋於：無）
+    - 範圍（修改）：
+      - `core/sealed_credential.py`：`SealContext` 拿掉 `deployment_environment`，`info()` 只綁帳號、recipient 與 request；兩個建構處 `modules/execution/operator_commands.py`（seal）、`modules/execution/credential_rotation.py`（open）與 worker 的建構參數跟著改。`INFO_LABEL` 換一個版本字尾，讓舊格式的密封請求以解不開拒絕，而不是碰巧相容。
+      - `modules/execution/operator_commands.py` 的 `resolve_context`：拿掉注入值與 `deployment_environment_not_configured`；`modules/api/deps.py`、`account_scope.py`、`apps/webapi.py`、`apps/operator_cli.py` 的注入與 `app.state.deployment_environment`、缺值時的 503 一併拿掉。
+      - `modules/execution/archived_execution_history.py`：拿掉 realm 過濾與建構參數；新增一支 migration 斷言它讀的封存表本欄只有 stamp 的值（只讀封存表，不改列；不符就拒絕、schema 留在原 revision）。`apps/read_models.py` 跟著改。
+      - API：`modules/api/funding_status.py` 的 `deployment_environment` 欄位與 `require_scope` 的 env 比對拿掉（只比 `account_id`；bot 端 status 回報的同名鍵一併拿掉）；`modules/api/uncertainties.py` 的 `blockedScope.environment` 拿掉；`backend/openapi.json`、`frontend/src/types/api.gen.ts` 重新產生，`frontend/src/features/dashboard/components/uncertainty-details.tsx` 第 55 行與相關前端測試、`tests/modules/api/golden/responses.json` 跟著改。
+      - `modules/simulated_venue/contracts.py` 的 `SimAccount.deployment_environment` 與 `__post_init__` 的比對拿掉（`apps/venue.py` 第 166 行與測試的 9 個建構處）；留下 `require_simulated_realm`（設定）與 `_check_database_realm`（資料庫的 stamp）。
+      - `backend/scripts/amend_capital_policy.py`：dry-run 報告加上讀到的 stamp（`realm` 鍵，進 digest），operator 在 `--apply-digest` 前看得到自己連的是哪個庫。
+      - 遙測標籤不動：`modules/observability/metrics.py`、`resource.py`、`error_tracking.py`、`alerts.py`、`safety/boot_stop.py`、`TradingStatusService` 的 halt gauge 標籤仍由組裝處注入設定值。
+      - 文件：`docs/adr/2026-11-08-drop-realm-columns.md`（約束段「HKDF 綁 env 要重新加密」是錯的，改掉；D0、D4 的結論與 Rationale 的「變弱的地方」依 D7 重寫）、`backend/ARCHITECTURE.md` 的隔離段、`docs/runbooks/fresh-host-setup.md` 1b-1、`docs/runbooks/operations.md` 與 `secret-rotation.md` 裡提到 webapi 要設 env 的地方。
+    - 消費端：`rg -n "SealContext\(|deployment_environment|blockedScope|\benvironment\b" backend/src backend/scripts frontend/src deploy`；`rg -n "BFX_DEPLOYMENT_ENV" deploy docker-compose*.yml docs/runbooks`（compose policy、`bfx_op.py` 與 `bfx_weekly_report.py` 的 `LIVE_KEYS` 傳給一次性容器的 env：標籤還要用就留，沒有讀者就拿掉）；本機個人脈絡檔記的 repo 外告警定義（2026-11-13 以 `rg "deployment_environment|blockedScope|funding_status"` 查無符合）。
+    - 不能動：bot 開機的 `assert_database_realm`；`database_realm` 表；封存資料列與 manifest；長期保存的憑證（vault 的 AAD 只綁帳號，本步不碰）；遙測標籤的名稱與值。
+    - 驗收：先紅後綠——(1) seal／open 往返不需要 env，舊 `INFO_LABEL` 的密文被拒；(2) 沒設 `BFX_DEPLOYMENT_ENV` 的 webapi 能開機並服務帳號路由（原本 503）；(3) 封存讀取回傳全部封存列，migration 在植入第二個 env 值的封存表上拒絕；(4) `/admin/trading-status` 與 funding status、uncertainty 的回應不含 env 欄位（golden 與 openapi 一起變）；(5) `amend_capital_policy` dry-run 報告含 `realm`。單元全過、受影響的 integration、`alembic check`、`mypy`／`ruff`／import-linter、前端 `biome` 與型別檢查、`quality_ratchet.py`。mutation（複本）：`info()` 加回 env，往返測試或 golden 失敗；封存 migration 拿掉斷言，(3) 失敗；`require_scope` 拿掉 account 比對，既有的 scope mismatch 測試失敗。
+    - 停止條件：封存表實際有兩種 env 值（migration 斷言在演練時拒絕）——停下回報，不放寬斷言；repo 外發現有人讀被拿掉的 API 欄位。
+    - 需要人做的事：無必要項。想在發版前先知道封存表的值，可在 VM 以唯讀查詢確認（2026-11-13 本機連不到 VM，未查）；不查的話由部署演練的 migration 斷言把關。
+    - 完成後的狀態：部署跨越時還在等待的換 key 請求會被拒（bot 重啟後本來就以 `recipient_key_stale` 拒絕，operator 重送）。
+
+  - [ ] **4f. 全套驗收與併入**（被擋於：4e-2）
+    - 新增 `tests/architecture/test_no_realm_column_sql.py`：`backend/src`、`backend/scripts`、`deploy` 裡 `deployment_environment` 只能出現在允許清單（D7 之後）——`apps/config.py`、`core/settings.py` 與 bot 開機的 stamp 比對、遙測標籤的注入參數（metrics／resource／error tracking／alerts／`boot_stop`／halt gauge）、`ledger_digest.py` 的註解、封存表的 ORM 欄位宣告。API schema、`core/sealed_credential.py`、`SimAccount` 與任何 SQL 都不在清單內。型別檢查用 `dataclasses.fields`（或該型別實際的欄位列舉）：`Scope`、`CapitalScope` 與 `modules/trading/capital.py` 的其餘 scope 型別、`ResolutionScope`、`OperatorContext`、`AccountContext`、`AuditContext` 的欄名不得含 `deployment_environment`、`environment`、`env`。
     - 驗收：單元全過；integration（CI）全過；`alembic check`、`mypy`、`ruff`、import-linter、`quality_ratchet.py` 通過；`check_inventory.py` 0 errors；`rg -n "guard_database_realm|database_realm_write" backend/src deploy` 無結果；`rg -n "DISABLE_REALM_TRIGGERS|disable_realm_triggers" backend` 無結果（`backend/tests` 裡斷言 trigger 與函式不存在的測試、舊 revision 的 migration 測試可以提到這兩個名字）；design-review（對整個分支的 diff）與 `/code-review` 跑過。mutation：在某個 store 的 INSERT 加回本欄，允許清單檢查失敗；在 `Scope` 加回 `deployment_environment` 欄位、在 `CapitalScope` 加回 `environment` 欄位，型別檢查各自失敗。
     - PR 內文附 `Size-Justification:`（模型、SQL 與 migration 互相依賴，拆開的中間狀態測試不會綠）。
   - 需要人做的事（步驟 4 整體）：owner 核准含步驟 2、3、4 的 `dev`→`main` 發版；發版後驗收。
@@ -244,7 +261,17 @@ migration rehearsal 與還原 drill 只在 owner 核准的 `dev`→`main` 發版
   - 建議：H（業界做法：advisory lock key 由 namespace 與被鎖實體的身分導出，環境隔離靠分庫）。推翻條件：存在不碰任何失去本欄的表、卻能在另一版 schema 上完成資金寫入的路徑；key 的變更沒有跟步驟 4 的 migration 同一次發版；repo 外有告警或 log 解析比對 key 的數值（`deploy/`、`docs/` 內查無；本機個人脈絡檔記的 repo 外告警定義於 2026-11-12 以 `rg -i "advisory|lock.?key|pg_locks|objid|writer.?lock"` 查過，無符合）；之後又讓兩個 realm 共用一個庫。
   - 獨立審查（2026-11-12，唯讀 subagent）：findings 8（blocking 1），同意 H；blocking 的一項（原簡報把 H 的安全性寫成「部署會停掉所有 writer」，實際上有兩個取鎖的程式不在停機範圍）已改寫成上面的失效條件。
 
-拍板順序：D0、D3、D4、D5、D6 已決。
+- **D7 env 值還留給誰用**（已決 2026-11-13，Will：A；修訂 D0 的「HKDF、API 值保持不變」與 D4 的注入範圍；擋住步驟：4f）
+  - 起因：4e 的 ADR 寫出「webapi、operator CLI 與腳本不比對 stamp」之後，對照業界做法重看剩下的 env 用途；獨立審查（唯讀 subagent，2026-11-13）：findings 11（blocking 3），修入 10、駁回 1。
+  - 查出的事實：D0 的前提「HKDF 綁 env，改值要重新加密」不成立。被綁的是換 key 的密封請求，只活一個 bot run（`core/sealed_credential.py` 第 1–6 行；`modules/execution/credential_rotation.py` 第 355 行先以 `RECIPIENT_KEY_STALE` 拒絕舊請求）；長期保存的憑證只綁帳號（`modules/credentials/vault.py`，審查者所指，未重讀）。API 的 `deployment_environment` 前端沒有顯示處，只用來比對 webapi 與 bot 的設定；`blockedScope.environment` 只有一處顯示。
+  - 業界基準：環境隔離靠各環境自己的資料庫與憑證（12-factor）；資料、API、加密不帶環境；環境名稱只當遙測標籤（Sentry `environment`、OpenTelemetry `deployment.environment`），資料庫裡的環境標記只在有破壞力的入口比對。
+  - A：bot 保留設定對 stamp 的比對；其他行程不再需要 env 設定，只留遙測標籤；密封請求、API、封存過濾、`resolve_context`、`SimAccount` 的 env 全拿掉。失效條件：之後又讓兩個 realm 共用一個庫。
+  - B：每個連資料庫的入口都比對 stamp。要給約 35 支腳本加 env 設定、三個 role 加讀取權限，把要消除的概念擴散出去。
+  - C：維持 4e 結束時的狀態。型別與 API 繼續描述「每個 scope 一個 env」。
+  - 結論：A，在步驟 4e-2 做，與步驟 4 同一次發版。同時定案兩個執行時的選擇：`SimAccount.deployment_environment` 拿掉（4c 的保留作廢）；receipt 的 `digest_version` 與 `schema_version` 都維持 1（`deploy/` 內沒有程式讀這兩個版本號，唯一的 receipt 讀者只數 scope 個數，`deploy/vm/ops/bfx_restore_test.py` 第 79–86 行）。
+  - 約束帳：「HKDF 值不變」「API 契約不變」「分支已經很大」都是自己加的（前後端同一個 image）；真正的外部約束只有封存表一個 byte 都不能改，所以只斷言、不改列。
+
+拍板順序：D0、D3、D4、D5、D6、D7 已決。
 
 ## 進度
 
@@ -262,5 +289,6 @@ migration rehearsal 與還原 drill 只在 owner 核准的 `dev`→`main` 發版
 | 4c execution、accounts、api 等 | 程式完成待驗收（e2e 與全套在 4f 的 PR 上由 CI 跑） | 本機 2026-11-12：單元全套 `5367 passed`；integration（非 e2e、非 docker，扣掉 4d 的 `test_ledger_restore_verification.py`）`1170 passed, 20 failed`，修掉其中 5 條後剩 15 條都不屬本步（`test_database_realm.py` 14 條屬 4e、`test_research_role_behaviour.py` 1 條卡在 4d 的 `build_public_site.py`）；驗收點名的 grant 與請求欄位測試加 4b 留下的 ledger 檔 `104 passed`；`capital_mutation_gate --only M15,M16` 兩個都 killed；`ruff` 乾淨、import-linter 26 kept、`mypy src/` 只剩 `apps/restore_boot_check.py` 4 個錯誤（4d）；`git diff --exit-code backend/openapi.json frontend/src/types/api.gen.ts` 無差異，golden 回應無差異；mutation（red-proof，複本）6 個都被抓到：`REQUEST_COLUMNS` 加回本欄、`_pull_if_stopped` 讀不存在的欄位、封存過濾拿掉、status 的 env 改固定值、解封的 env 改空字串、`blockedScope.environment` 改空字串；`/code-review`（medium）：findings 8（blocking 0），修 4、記錄 3（4d 兩項、4e 一項）、駁回 1（nit）；契約審查（唯讀 subagent）：findings 4（blocking 0），修 2、記錄 1（4e 的 ADR）、駁回 1（nit，與前者同一處） | e2e（`test_ledger_boot_e2e.py` 等 7 個用 `bot_e2e.py`／`sim_daemon.py` 的檔，本機不跑，只確認 collect 得起來）；`tests_executed` 鎖定值是否要調低由 CI 的 `Quality ratchet` 回報決定；CI 在 4f 的 PR 上跑 | `b24a9c67` |
 | 4d drill、開機報告與腳本 | 程式完成待驗收（CI 在 4f 的 PR 上跑） | 本機 2026-11-12：先紅——兩支新測試在改動前 `8 failed`（其中 `bounds_script` 在無欄 schema 上 psql 回 `column "deployment_environment" does not exist`）；改後 `tests/scripts` 全部加 `test_ledger_restore_verification.py`、`test_research_role_behaviour.py`、`test_public_site.py` `1583 passed, 7 skipped`；單元全套 `5374 passed`；`mypy src/` 0 錯誤、`ruff` 乾淨、import-linter 26 kept、`quality_ratchet.py` exit 0；`git diff --exit-code backend/openapi.json frontend/src/types/api.gen.ts` 無差異；mutation（複本）4 個都被抓到：`bounds_script` 的 scope 推導提到本欄、`_BOOT_SCOPE_KEYS` 加回 env、digest 的 `_SCOPE` join 提到本欄、開機檢查的 scope 過濾寫反；消費端重搜：`rg -n deployment_environment deploy backend/scripts` 只剩 `ledger_digest.py` 一行註解與兩支測試告警腳本的 `deployment_environment_label`；`/code-review`（medium）：findings 6（blocking 0），修 5、駁回 1（nit：三處 realm 欄位探測重複）；契約審查（唯讀 subagent）：findings 2（blocking 0，都是 nit），修 2。與範圍的出入：`capital_mutation_gate.py`、`test_offsite_dr_restore.py` 沒有要改的內容（搜不到 env）；`test_offsite_dr_evidence.py` 的 bounds fixture 不在清單但必須跟著改成 8 欄 | 標 `docker` 的測試與 integration 全套（CI，4f 的 PR）；同帳號兩個 realm 的舊庫上 clock 的 scalar subquery 會讓 psql 失敗——由 SQL 推論，未實跑（舊 schema 的 realm trigger 不允許這種資料） | `ba7b5367` |
 | 4e 其餘測試與文件 | 程式完成待驗收（CI 在 4f 的 PR 上跑） | 本機 2026-11-13：改動前 integration（非 e2e、非 docker）`1199 passed, 14 failed, 8 skipped`，14 條都在 `test_database_realm.py`；改後 `test_database_realm.py`、`test_drop_realm_columns.py`、`test_shadow_realm_removal_migration.py`、`test_path_e_subprocess.py` `35 passed`；單元全套 `5375 passed`；`ruff` 乾淨、`mypy src/` 0 錯誤、import-linter 26 kept、`quality_ratchet.py` exit 0；mutation（複本）1 個被抓到：`reject_database_realm_mutation` 拿掉 `SET search_path`；消費端重搜：`rg -n "DISABLE_REALM_TRIGGERS\|disable_realm_triggers" backend` 無結果，`rg -n "database_realm_write\|guard_database_realm" backend/ARCHITECTURE.md docs/runbooks` 無結果；`/code-review`（medium）：findings 10（blocking 0），修 9、駁回 1（「bot 在未蓋章的庫拒絕開機沒有測試」：`tests/apps/runtime/test_daemon_database_realm.py::test_boot_refuses_an_unstamped_or_foreign_database` 已有） | 改動後的 integration 全套、e2e 與標 `docker` 的測試（CI，4f 的 PR）；`tests_executed` 鎖定值要不要調低由 CI 的 `Quality ratchet` 決定（本步淨減 12 條）；`offsite-dr.md` 寫的「早於 migration 的 drill 先被開機檢查拒絕」由程式順序推論，未實跑 | `eca3a61a` |
+| 4e-2 env 只留給 stamp 比對與遙測標籤（D7） | 未開始 | | | |
 | 4f 全套驗收與併入 | 未開始 | | 發版後驗收：未跑－待發版 | |
 | 5 收尾 | 未開始 | | | |
